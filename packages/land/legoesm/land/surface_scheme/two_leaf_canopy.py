@@ -33,15 +33,18 @@ from legoesm.land.canopy.config import (
     VCMAX25_C3_DEFAULT,
     VCMAX25_C4_DEFAULT,
 )
+from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
 )
+from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
 from legoesm.land.canopy.solver import (
-    CanopyForcingBundle, solve_canopy_closure, _canopy_forward,
+    CanopyForcingBundle, solve_canopy_closure, canopy_forward,
 )
+from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
 
 
@@ -71,6 +74,35 @@ _DEFAULT_PICARD_OMEGA = 0.15
 # the state-carried ``TgC`` field; this module exposes the constant so
 # callers can stay consistent.
 TGC_EMA_TAU_S: float = 30.0 * 86400.0
+
+# Virtual-temperature coefficient (1−ε)/ε ≈ 0.608, derived from the repo epsilon
+# (never hardcoded per CLAUDE.md constants hygiene).
+_VIRT_T_COEF = (1.0 - constants.epsilon) / constants.epsilon
+
+# Initial intercellular-CO2 ratio Ci/Ca: chi = _CI_CA_C3 − _CI_CA_C3_MINUS_C4·fC4
+# → 0.7 for C3 (fC4=0), 0.4 for C4 (fC4=1).
+_CI_CA_C3 = 0.7
+_CI_CA_C3_MINUS_C4 = 0.3
+
+# μmol CO2 → gC conversion (molar mass of carbon 12 g/mol × 1e-6 mol/μmol).
+_G_C_PER_UMOL_CO2 = 12.0e-6
+
+# --- Scalar fallback defaults for per-column canopy params (used when no
+#     CanopyLandParams supplied; DifferBESS / Ryu et al. 2011 midranges) ---
+_DEFAULT_LAI = 1.5          # [m2/m2] leaf area index
+_DEFAULT_HC = 5.0           # [m] canopy height
+_DEFAULT_CI = 0.75          # [-] clumping index
+_DEFAULT_KN = 0.3           # [-] nitrogen extinction coefficient
+_DEFAULT_M_C3 = 9.0         # [-] Ball-Berry slope C3
+_DEFAULT_M_C4 = 4.0         # [-] Ball-Berry slope C4
+_DEFAULT_B0_C3 = 0.01       # [mol m-2 s-1] Ball-Berry intercept C3
+_DEFAULT_B0_C4 = 0.04       # [mol m-2 s-1] Ball-Berry intercept C4
+_DEFAULT_ALF = 0.3          # [mol/mol] electron-transport quantum yield
+_DEFAULT_ALB_VIS = 0.1      # [-] visible-band albedo
+_DEFAULT_ALB_NIR = 0.2      # [-] NIR-band albedo
+_DEFAULT_RZ0M = 0.055       # [-] z0m / hc ratio
+_DEFAULT_RD = 0.67          # [-] displacement-height / hc ratio
+_DEFAULT_D_LEAF = 0.025     # [m] characteristic leaf width (Schuepp 1993 midrange)
 
 
 def compute_prognostic_lai(
@@ -103,9 +135,9 @@ def compute_prognostic_lai(
       and the canopy closure is much less sensitive to ``hc`` than
       to ``LAI``.
     - The forward pass is fully differentiable wrt ``C_fol`` (``dLAI /
-      dC_fol = 1 / LCMA``); however ``jax.grad`` through the full
-      ``C_fol → LAI → canopy Newton`` loop currently NaNs in the MOST
-      scan (tracked in the Phase 6 xfail).
+      dC_fol = 1 / LCMA``); ``jax.grad`` through the full
+      ``C_fol → LAI → canopy Newton`` loop is finite + nonzero (guarded by
+      ``test_prognostic_lai_jax_grad_through_feedback``).
     """
     if not getattr(canopy_config, "use_prognostic_lai", False):
         return None
@@ -132,7 +164,7 @@ def advance_TgC_ema(
     T_air_K : instantaneous near-surface air temperature [K]
     dt      : time step [s]
     """
-    T_air_C = T_air_K - 273.15
+    T_air_C = T_air_K - constants.T_freeze
     alpha = dt / TGC_EMA_TAU_S
     return TgC_old + alpha * (T_air_C - TgC_old)
 
@@ -160,6 +192,7 @@ def compute_two_leaf_canopy_fluxes(
     TgC_override: jnp.ndarray | None = None,
     LAI_override: jnp.ndarray | None = None,
     w_frac_soil_evap: jnp.ndarray | None = None,
+    soil_surface_relsat: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -199,7 +232,10 @@ def compute_two_leaf_canopy_fluxes(
     the canopy computes LE from leaf-level humidity gradients directly
     (no ``beta * q_sat`` proxy).
     """
-    cc = canopy_config
+    # Fail-early dispatch check on the static string fields (stomatal_model):
+    # this runs at land-component setup, before any jitted canopy solve, so a
+    # typo aborts here with a clear message rather than deep in the JAX kernel.
+    cc = canopy_config.validate()
     lp = canopy_params
     ncol = T_soil_top.shape[0]
 
@@ -210,46 +246,88 @@ def compute_two_leaf_canopy_fluxes(
     if LAI_override is not None:
         LAI    = LAI_override
     else:
-        LAI    = _get(lp, "LAI",      jnp.full(ncol, 1.5))
-    hc         = _get(lp, "hc",       jnp.full(ncol, 5.0))
+        # ``lp.LAI`` is now a real field on LandSurfaceParams (prescribed spatial
+        # climatology); it is None only for non-CLM setups that never populated it,
+        # in which case fall back to the scalar default (getattr alone would hand
+        # back the None and break the canopy math).
+        _lp_lai = _get(lp, "LAI",     None)
+        LAI    = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
+    hc         = _get(lp, "hc",       jnp.full(ncol, _DEFAULT_HC))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
     FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
-    CI         = _get(lp, "CI",       jnp.full(ncol, 0.75))
-    kn         = _get(lp, "kn",       jnp.full(ncol, 0.3))
+    CI         = _get(lp, "CI",       jnp.full(ncol, _DEFAULT_CI))
+    kn         = _get(lp, "kn",       jnp.full(ncol, _DEFAULT_KN))
+
+    # ---- Below-canopy soil-surface evaporation resistance [s/m] ----
+    # Sellers (1992) r_ss + Sakaguchi-Zeng (2009) litter, added in SERIES with the
+    # below-canopy aerodynamic resistance inside the soil energy balance (see
+    # energy_balance.soil_surface_evap_resistance).  Only the MULTILAYER soil path
+    # supplies ``soil_surface_relsat`` (top-layer theta_1/theta_sat); the slab path
+    # leaves it None -> zero resistance (unchanged legacy behaviour).  The
+    # ``soil_evap_series_resistance`` gate is a static Python bool on the config
+    # (feature gate — not a traced select), and the short-circuit guarantees the
+    # config field is only read when the multilayer caller opted in.
+    # ``getattr`` default False so a slab ``LandConfig`` (which has no
+    # ``soil_evap_series_resistance`` field) resolves to the documented
+    # feature-off semantics instead of raising ``AttributeError`` if a caller
+    # ever supplies ``soil_surface_relsat`` with a non-multilayer config
+    # (matches the ``use_prognostic_lai`` getattr gate above; the multilayer
+    # path always carries the real bool).  Still a static Python bool → the
+    # ``if`` is a compile-time feature gate, not a traced select.
+    if soil_surface_relsat is not None and getattr(
+            land_config, "soil_evap_series_resistance", False):
+        # Litter cover is driven by a persistent STRUCTURAL LAI (a deciduous forest
+        # floor keeps its litter through the leaf-off season); fall back to the live
+        # LAI when the caller does not supply ``litter_LAI``.
+        _litter_LAI = getattr(lp, "litter_LAI", None) if lp is not None else None
+        if _litter_LAI is None:
+            _litter_LAI = LAI
+        r_soil_surface = soil_surface_evap_resistance(
+            soil_surface_relsat, LAI, land_config.soil_evap_litter_resistance_s_m,
+            litter_LAI=_litter_LAI)
+    else:
+        r_soil_surface = jnp.zeros(ncol)
     # No-PFT fallback Vcmax25: DBF-temperate (C3) / mean C4 grass+crop (C4),
     # not a flat 60/40.  A driver should pre-assign per-column Vcmax25 from
     # ``lookup_vcmax25(pft, climate)`` (canopy.config) when PFTs are known.
     Vc3_leaf   = _get(lp, "Vcmax25_C3_leaf", jnp.full(ncol, VCMAX25_C3_DEFAULT))
     Vc4_leaf   = _get(lp, "Vcmax25_C4_leaf", jnp.full(ncol, VCMAX25_C4_DEFAULT))
-    m_C3       = _get(lp, "m_C3",     jnp.full(ncol, 9.0))
-    m_C4       = _get(lp, "m_C4",     jnp.full(ncol, 4.0))
-    b0_C3      = _get(lp, "b0_C3",    jnp.full(ncol, 0.01))
-    b0_C4      = _get(lp, "b0_C4",    jnp.full(ncol, 0.04))
-    alf        = _get(lp, "alf",      jnp.full(ncol, 0.3))
+    m_C3       = _get(lp, "m_C3",     jnp.full(ncol, _DEFAULT_M_C3))
+    m_C4       = _get(lp, "m_C4",     jnp.full(ncol, _DEFAULT_M_C4))
+    b0_C3      = _get(lp, "b0_C3",    jnp.full(ncol, _DEFAULT_B0_C3))
+    b0_C4      = _get(lp, "b0_C4",    jnp.full(ncol, _DEFAULT_B0_C4))
+    alf        = _get(lp, "alf",      jnp.full(ncol, _DEFAULT_ALF))
     # TgC is handled below — the priority order (state EMA > lp > forcing)
     # is set after all the other per-column params are resolved.
-    ALB_VIS    = _get(lp, "ALB_VIS",  jnp.full(ncol, 0.1))
-    ALB_NIR    = _get(lp, "ALB_NIR",  jnp.full(ncol, 0.2))
-    rz0m       = _get(lp, "rz0m",     jnp.full(ncol, 0.055))
-    rd         = _get(lp, "rd",       jnp.full(ncol, 0.67))
+    ALB_VIS    = _get(lp, "ALB_VIS",  jnp.full(ncol, _DEFAULT_ALB_VIS))
+    ALB_NIR    = _get(lp, "ALB_NIR",  jnp.full(ncol, _DEFAULT_ALB_NIR))
+    rz0m       = _get(lp, "rz0m",     jnp.full(ncol, _DEFAULT_RZ0M))
+    rd         = _get(lp, "rd",       jnp.full(ncol, _DEFAULT_RD))
     # Characteristic leaf width [m]; None (field absent or unset) -> 0.025 m
     # (Schuepp 1993 midrange), matching PFT_LEAF_WIDTH's default leaf class.
     _d_leaf_in = _get(lp, "d_leaf", None)
-    d_leaf = jnp.full(ncol, 0.025) if _d_leaf_in is None else _d_leaf_in
-    emissivity_per_col = _get(
-        lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
+    d_leaf = jnp.full(ncol, _DEFAULT_D_LEAF) if _d_leaf_in is None else _d_leaf_in
+    # NB: the two-stream ``canopy_longwave_rt`` resolves longwave from the
+    # SEPARATE leaf and soil emissivities (cc.epsf / cc.epss) and exports the
+    # conservative column ``eps_eff`` used as the surface emissivity below.  The
+    # single broadband ``CanopyLandParams.emissivity`` has no unique mapping to
+    # that leaf/soil pair, so this scheme uses the config-resolved pair and does
+    # NOT consume the broadband field — that field drives the simpler SEB/slab
+    # path instead (``simple_seb.compute_seb_fluxes``).  (Threading an OBSERVED
+    # broadband emissivity into the two-stream RT would be a deliberate mapping
+    # policy — a separate, validated change.)
 
     # ``TgC`` priority:
     #   1. Caller-supplied ``TgC_override`` (state-carried 30-day EMA from
     #      ``advance_TgC_ema``, threaded by ``step_*_land``).
     #   2. Per-column ``CanopyLandParams.TgC`` (externally prescribed).
-    #   3. Instantaneous ``forcing.T_lowest - 273.15`` (degraded fallback;
+    #   3. Instantaneous ``forcing.T_lowest - constants.T_freeze`` (degraded fallback;
     #      not a true 30-day mean — emits sensible but biased Vcmax
     #      acclimation outside any coupled / standalone driver).
     if TgC_override is not None:
         TgC = TgC_override
     else:
-        TgC = _get(lp, "TgC", forcing.T_lowest - 273.15)
+        TgC = _get(lp, "TgC", forcing.T_lowest - constants.T_freeze)
 
     # ---- Soil moisture stress ----
     # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.
@@ -266,9 +344,17 @@ def compute_two_leaf_canopy_fluxes(
     Vc3_leaf_stressed = Vc3_leaf * fStress_vcmax
     Vc4_leaf_stressed = Vc4_leaf * fStress_vcmax
     m_eff  = m_C3  * fStress_vcmax
-    b0_eff = b0_C3 * fStress_vcmax
+    # The Ball-Berry INTERCEPT b0 is the cuticular / residual minimum conductance.
+    # ``cc.stress_b0`` (static Python bool) controls whether soil-moisture stress
+    # down-regulates it too: True = legacy (b0 also stressed); False keeps the
+    # cuticular leak alive under drought (baseline dry-season transpiration; the
+    # photosynthesis-linked SLOPE m is still stressed).  ``_b0_stress`` is the
+    # traced factor (1) or the plain scalar 1.0 — a compile-time branch, not a
+    # traced select.
+    _b0_stress = fStress_vcmax if cc.stress_b0 else 1.0
+    b0_eff = b0_C3 * _b0_stress
     m_mix  = (1.0 - fC4) * m_eff  + fC4 * m_C4  * fStress_vcmax
-    b0_mix = (1.0 - fC4) * b0_eff + fC4 * b0_C4 * fStress_vcmax
+    b0_mix = (1.0 - fC4) * b0_eff + fC4 * b0_C4 * _b0_stress
 
     # ---- Aerodynamics ----
     z0m, displa = compute_aerodynamics(hc, LAI, rz0m, rd)
@@ -278,7 +364,10 @@ def compute_two_leaf_canopy_fluxes(
 
     # ---- SW decomposition ----
     cos_zenith = forcing.cos_zenith
-    SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0)))
+    # Clip strictly below 1 before arccos: d/dx arccos(x) = -1/sqrt(1-x^2)
+    # diverges at x=1 (subsolar point) and clip zeroes the subgradient above 1,
+    # so the reverse-mode VJP would give 0*inf = NaN in the cos_zenith cotangent.
+    SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0 - 1e-7)))
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
 
@@ -292,7 +381,7 @@ def compute_two_leaf_canopy_fluxes(
     Ps    = forcing.p_surface
     q_atm = forcing.q_lowest
     rhoa  = forcing.rho_lowest
-    Tv_atm = Ta * (1.0 + 0.61 * q_atm)
+    Tv_atm = Ta * (1.0 + _VIRT_T_COEF * q_atm)
     lam   = constants.L_v
     Cp    = constants.c_pd
     Ca    = forcing.co2_ppmv
@@ -301,7 +390,7 @@ def compute_two_leaf_canopy_fluxes(
     Ts_old   = T_soil_top
     q_s_init = sat_specific_humidity(Ts_old, Ps)
     q_c_init = 0.5 * (q_s_init + q_atm)
-    chi = 0.7 - 0.3 * fC4
+    chi = _CI_CA_C3 - _CI_CA_C3_MINUS_C4 * fC4
     Ci_init = Ca * chi
 
     initial_state = jnp.stack(
@@ -328,13 +417,14 @@ def compute_two_leaf_canopy_fluxes(
             fC4=fC4, fStress_soil=fStress_soil,
             ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
             cv=_bcast(cc.cv), d_leaf=d_leaf,
+            r_soil_surface=r_soil_surface,
         )
 
     def _solve_one_col(x0, bun):
         return solve_canopy_closure(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
-        return _canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
+        return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
                                cc.le_cap_mode, cc.use_ta_for_photosynthesis)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal ----
@@ -351,7 +441,7 @@ def compute_two_leaf_canopy_fluxes(
         x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
-        G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)
+        G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
         Ts_thermal = soil_thermal_fn(G_k, dt)
         Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
@@ -369,8 +459,10 @@ def compute_two_leaf_canopy_fluxes(
     H_Sun   = fluxes_per_col["H_Sun"]
     H_Sh    = fluxes_per_col["H_Sh"]
     H_Soil  = fluxes_per_col["H_Soil"]
-    An_Sun  = fluxes_per_col["An_Sun"]
+    An_Sun  = fluxes_per_col["An_Sun"]        # NET (drives SIF + leaf coupling)
     An_Sh   = fluxes_per_col["An_Sh"]
+    Agross_Sun = fluxes_per_col["Agross_Sun"]  # GROSS (carbon-model GPP)
+    Agross_Sh  = fluxes_per_col["Agross_Sh"]
     G       = fluxes_per_col["G"]
     gs_Sun  = fluxes_per_col["gs_Sun"]
     gs_Sh   = fluxes_per_col["gs_Sh"]
@@ -381,7 +473,35 @@ def compute_two_leaf_canopy_fluxes(
 
     LE_tot = LE_Sun + LE_Sh + LE_Soil
     H_tot  = H_Sun  + H_Sh  + H_Soil
-    GPP    = (An_Sun + An_Sh) * 12.0e-6    # gC m-2 s-1
+    # GPP is GROSS carbon uptake (BEFORE leaf dark respiration).  The carbon
+    # model (carbon_cycle.step_carbon) re-charges foliar MAINTENANCE
+    # respiration r_maint_fol*C_fol separately, so exporting NET An here would
+    # double-count leaf respiration (once as Rd folded into An, once as
+    # r_maint_fol) and bias carbon-use efficiency (NPP/GPP) low.  This matches
+    # the SimpleSEB path (carbon/stomata.py: gpp = max(A_gross, 0)*_MC).  NET
+    # An_Sun/An_Sh still drive stomatal coupling, the leaf energy/CO2 flux, and
+    # SIF (below); only the carbon-facing GPP is gross.
+    GPP    = (Agross_Sun + Agross_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1 (GROSS)
+
+    # ---- Optional solar-induced fluorescence (passive TOC diagnostic) ----
+    # cc.sif is a static config leaf, so this Python gate does not double-trace.
+    # An_Sun/An_Sh and APAR_Sun/APAR_Sh are canopy-integrated per leaf-class
+    # (per ground area), so the sunlit+shaded sum is the canopy total.
+    # Gamma* MUST use the same temperature the Farquhar An used — the solver
+    # takes T_phot = Ta if use_ta_for_photosynthesis else Tf (solver.py) — else
+    # the je inversion is inconsistent with the assimilation it inverts.
+    # NOTE: the BEPS-SIF je inversion is C3-style (uses Gamma*); for a mixed
+    # canopy (fC4 > 0) it is applied to the blended C3/C4 An as a documented
+    # BEPS-parity approximation (no separate C4 fluorescence path).
+    if cc.sif is not None:
+        T_phot_Sun = Ta if cc.use_ta_for_photosynthesis else Tf_Sun
+        T_phot_Sh  = Ta if cc.use_ta_for_photosynthesis else Tf_Sh
+        sif_out = two_leaf_canopy_sif(
+            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun), sw_rt.APAR_Sun,
+            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh), sw_rt.APAR_Sh,
+            cc.sif)
+    else:
+        sif_out = None
 
     # Per-component canopy fluxes (for offline diagnostic drivers).
     LE_canopy_d = LE_Sun + LE_Sh
@@ -429,7 +549,7 @@ def compute_two_leaf_canopy_fluxes(
     residual_ext_d = Rn_ext_d - (LE_tot + H_tot + G)
 
     # Safety clamp on G: extreme non-converged values corrupt T_soil.
-    G_clamped = jnp.clip(G, -500.0, 700.0)
+    G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
 
     # ---- Wind stress from MOST ustar ----
     tau_mag = rhoa * ustar**2
@@ -458,6 +578,7 @@ def compute_two_leaf_canopy_fluxes(
         emissivity=jnp.broadcast_to(eps_eff, T_soil_top.shape),
         z0=z0m,
         gpp=GPP,
+        sif=sif_out,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,

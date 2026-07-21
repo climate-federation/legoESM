@@ -184,21 +184,12 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        # Fold: last interior row, i-reversed via perm_T.
-        # Handle the wrap column: fields with n_lon+1 columns have a
-        # periodic wrap at column n_lon (== column 0).  Fold the first
-        # n_lon columns, then append the wrap.
-        last_row = interior[-1:]                     # (1, n_cols, ...)
-        n_cols = last_row.shape[1]
-        n_lon = fold.perm_T.shape[0]
-        if n_cols == n_lon:
-            north = last_row[:, fold.perm_T]
-        else:
-            # n_cols == n_lon + 1 (vertex or u-face field with wrap column)
-            core = last_row[:, :n_lon][:, fold.perm_T]
-            north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        # Fold: last interior row, i-reversed via perm_T (scalar sign +1).
+        # fold_row handles the n_lon+1 wrap column (vertex / u-face fields).
+        north = fold_row(interior[-1:], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 
@@ -212,6 +203,52 @@ def fold_row(last_row, perm, sign, n_lon):
         return jnp.concatenate([core, core[:, 0:1]], axis=1)
 
 
+def north_fold_mask(grid):
+    """Traced north-band scalar bool for the tripolar fold under SPMD, else None.
+
+    Companion to :func:`fold_is_local`.  ``fold_is_local`` is the STATIC
+    (serial / MPI) "this rank owns the fold seam" test used in a Python ``if``;
+    under the lat-band SPMD backend ONE ``shard_map`` trace runs on every band,
+    so ``fold_is_local`` is uniformly False (the slicer sets ``fold_j=-1`` on
+    every band) and the seam must instead be selected DATA-dependently on the
+    north band (``axis_index("lat") == N-1``).  This returns that traced mask
+    when the SPMD backend is armed AND ``grid.fold`` is active, else ``None`` so
+    the caller keeps its existing ``if fold_is_local`` path unchanged
+    (serial / MPI / regular grid byte-for-byte identical).
+
+    The band geometry preserves ``grid.fold.perm_T``/``perm_v``/signs (the
+    slicer only zeroes ``fold_j``/``cap_j``), so the caller computes the fold
+    row from ``grid.fold`` exactly as in the serial path."""
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(getattr(fold, "is_active", False)):
+        return None
+    # Function-scope import: core/grids must not import parallel/ at module top.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    pm = spmd_pole_end_masks()
+    return None if pm is None else pm[1]
+
+
+def apply_north_fold(padded, north_row, grid, *, north_mask=None):
+    """Write the tripolar fold-partner row into ``padded``'s north (last) lat-row.
+
+    Serial / MPI northernmost rank (:func:`fold_is_local`): overwrite the row
+    (the historical path).  Lat-band SPMD: select it on the north band only
+    (``north_mask`` from :func:`north_fold_mask`) via ``jnp.where`` — the single
+    shard_map trace runs on every band, so a static overwrite would fold every
+    band's interior cut.  Non-seam (regular grid / interior MPI rank / no mask):
+    ``padded`` unchanged.
+
+    padded    : (n_lat+1, n_cols, ...) wall-padded field (:func:`pad_ns_zero`).
+    north_row : (1, n_cols, ...) fold-partner row (:func:`fold_row`)."""
+    if fold_is_local(grid):
+        return jnp.concatenate([padded[:-1], north_row], axis=0)
+    if north_mask is None:
+        north_mask = north_fold_mask(grid)
+    if north_mask is not None:
+        return padded.at[-1].set(jnp.where(north_mask, north_row[0], padded[-1]))
+    return padded
+
+
 def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """Pad south/north for a v-component at v-face latitudes.
 
@@ -223,10 +260,11 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        n_lon = fold.perm_v.shape[0]
-        north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v,
+                         fold.perm_v.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 
@@ -241,19 +279,28 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     * 2-D pencil (``LatLon2DLayout``) — longitude is split, so the wrap
       becomes an MPI ring exchange with the W/E neighbour
       (:func:`legoesm.parallel.latlon_mpi.exchange_halo_lon`).
+    * 2-D SPMD ``("lat", "lon")`` mesh (M3a) — the wrap becomes the cyclic
+      ring ``ppermute`` over the ``"lon"`` mesh axis
+      (:func:`legoesm.parallel.latlon_spmd.lon_ring_ghosts_spmd`); a
+      degenerate ``p_lon == 1`` axis takes that helper's STATIC local-wrap
+      branch (no collective — bit-identical to the band path).
 
     BIT-IDENTICAL at ``proc_lon == 1`` (``exchange_halo_lon``'s single-member
     ring is the same local wrap), so the cell→face / vertex operators that
     pad-then-stencil through this helper stay byte-for-byte unchanged on the
     serial / band / SPMD paths and only gain the true neighbour columns under
     a genuine longitude split.  AD-safe (the exchange uses the shared
-    sendrecv VJP).  ``f`` may be 2-D ``(n_lat, n_lon[_local], ...)`` or 3-D;
-    the lon axis is axis 1.
+    sendrecv VJP; ``ppermute`` is self-transposing).  ``f`` may be 2-D
+    ``(n_lat, n_lon[_local], ...)`` or 3-D; the lon axis is axis 1 and must
+    be CELL-ALIGNED (never an ``n_lon+1`` u-face field).
     """
     if halo <= 0:
         return f
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
+    from legoesm.grids.halo import (
+        get_halo_backend, get_mpi_topology, get_spmd_mesh,
+    )
+    backend = get_halo_backend()
+    if backend == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
             LatLon2DLayout, exchange_halo_lon,
@@ -263,6 +310,12 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
                 f, topology.west_rank, topology.east_rank,
                 topology.rank, halo=halo,
             )
+    elif backend == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is not None and "lon" in tuple(
+                getattr(mesh, "axis_names", ())):
+            from legoesm.parallel.latlon_spmd import lon_ring_ghosts_spmd
+            return lon_ring_ghosts_spmd(f, mesh, halo=halo)
     # Local periodic wrap (lon = axis 1); single Pad HLO.
     pad = [(0, 0)] * f.ndim
     pad[1] = (halo, halo)
@@ -507,13 +560,14 @@ def interp_u_to_vface_4pt(u: jnp.ndarray, grid) -> jnp.ndarray:
         + u_pad[1:, :-1] + u_pad[1:, 1:]
     )  # (n_lat+1, n_lon, ...)
     u_at_v = zero_polar_lat_ends(u_at_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         north = fold_row(
             u_at_v[-2:-1], fold.perm_T, fold.vector_sign_u,
             fold.perm_T.shape[0],
         )
-        u_at_v = jnp.concatenate([u_at_v[:-1], north], axis=0)
+        u_at_v = apply_north_fold(u_at_v, north, grid, north_mask=nmask)
     return u_at_v
 
 
@@ -540,7 +594,11 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
+    # Route to pad_ns_vector_v on ANY active tripole (not just the fold-local
+    # serial rank): pad_ns_vector_v itself folds only on the fold-local rank /
+    # the SPMD north band, and no-ops to pad_ns_zero elsewhere — so dropping the
+    # fold_j>=0 check is serial/MPI byte-identical AND wires the SPMD north fold.
+    if fold is not None and fold.is_active:
         v_face = pad_ns_vector_v(v_interior, grid)
     else:
         v_face = pad_ns_zero(v_interior)
@@ -682,8 +740,9 @@ def gradient_y_cgrid(
     df_dy = zero_polar_lat_ends(df_dy)
 
     # Tripolar north fold seam: replace the north polar v-face gradient
-    # with the fold-partner gradient on the rank that owns the seam.
-    if fold_is_local(grid):
+    # with the fold-partner gradient on the rank/band that owns the seam.
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         f_partner = f[-1:, fold.perm_T]
         dy_fold = grid.dy_v[-1:]
@@ -691,9 +750,97 @@ def gradient_y_cgrid(
             dy_fold = dy_fold[:, :, jnp.newaxis]
         dy_fold_safe = jnp.maximum(dy_fold, 1.0e-30)
         df_fold = (f_partner - f[-1:]) / dy_fold_safe
-        df_dy = jnp.concatenate([df_dy[:-1], df_fold], axis=0)
+        df_dy = apply_north_fold(df_dy, df_fold, grid, north_mask=nmask)
 
     return df_dy
+
+
+def upwind_cell_to_uface(
+    f: jnp.ndarray,
+    flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at u-faces, selected by the face-normal flux/velocity sign.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_u_points``
+    (verbatim numerics) so non-ocean components (sea-ice C-grid transport) can
+    use it without an ice->ocean layering break; the ocean re-imports this as
+    its canonical implementation.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+        Sign convention: positive = flow in +j (eastward) direction.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, ...) at u-faces.
+    """
+    # Face j is between cell (j-1) mod n_lon and cell j.
+    # Positive flux => flow from cell j-1 to cell j => upwind is cell j-1.
+    # Negative flux => flow from cell j to cell j-1 => upwind is cell j.
+    f_left = jnp.roll(f, 1, axis=1)   # f_left[:, j] = f[:, j-1]
+    f_right = f                        # f_right[:, j] = f[:, j]
+
+    # Build upwind at interior faces (n_lat, n_lon)
+    f_upwind = jnp.where(flux_u[:, :-1] > 0, f_left, f_right)
+
+    # Wrap: face n_lon is the same as face 0 (periodic in longitude)
+    if f.ndim >= 3:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1, :]], axis=1)
+    else:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1]], axis=1)
+
+
+def upwind_cell_to_vface(
+    f: jnp.ndarray,
+    flux_v: jnp.ndarray,
+    grid=None,
+) -> jnp.ndarray:
+    """First-order (donor-cell) upwind reconstruction of a cell-center field
+    at v-faces, wall-zeroed at physical poles and fold-aware on the tripolar
+    north seam.
+
+    PROMOTED from ``ocean.dynamics.ocean_pe_latlon_cgrid.upwind_to_v_points``
+    (verbatim numerics — cell-pad-first through the backend-dispatched
+    ``pad_with_pole_bc_lat``; pole faces zeroed; tripolar fold row = the
+    fold-permuted last interior face row, exactly as ``pad_ns_scalar`` built
+    it) so non-ocean components can use it; the ocean re-imports this.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    flux_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+        Sign convention: positive = flow in +i (northward) direction.
+    grid : optional LatLonGrid or LatLonCGridGeometry (fold handling).
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, ...) at v-faces.
+    """
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+    # Face i sits between cell i-1 and cell i (m_pad rows i and i+1).
+    # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
+    # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
+    f_pad = pad_with_pole_bc_lat(
+        f, halo=1, south_value=0.0, north_value=0.0,
+    )
+    f_south = f_pad[:-1]   # cell i-1 for face i
+    f_north = f_pad[1:]    # cell i   for face i
+    f_v = jnp.where(flux_v > 0, f_south, f_north)
+
+    # Wall BC at the physical pole faces only (backend-aware), then the
+    # tripolar north fold row exactly as pad_ns_scalar produced it.
+    f_v = zero_polar_lat_ends(f_v)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = f_v[-2:-1][:, grid.fold.perm_T]
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
+    return f_v
 
 
 def divergence_cgrid(
@@ -1110,13 +1257,12 @@ def curl_vertex_cgrid(
     # pole row with the fold-permuted sub-polar vertex row (matches the
     # pad_ns_scalar fold convention; vertex fields carry an n_lon+1 wrap
     # column).
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        last = zeta[-2:-1]                              # (1, n_lon+1, ...)
-        n_lon = fold.perm_T.shape[0]
-        core = last[:, :n_lon][:, fold.perm_T]
-        north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        zeta = jnp.concatenate([zeta[:-1], north], axis=0)
+        # fold_row handles the n_lon+1 vertex wrap column (scalar sign +1).
+        north = fold_row(zeta[-2:-1], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        zeta = apply_north_fold(zeta, north, grid, north_mask=nmask)
 
     return zeta
 
@@ -1221,9 +1367,11 @@ def gradient_curl_to_v(
     # column on this stagger).
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     grad = zero_polar_lat_ends(grad)
-    if fold_is_local(grid):
-        north = grad[-2:-1][:, grid.fold.perm_T]
-        grad = jnp.concatenate([grad[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = fold_row(grad[-2:-1], grid.fold.perm_T, 1.0,
+                         grid.fold.perm_T.shape[0])
+        grad = apply_north_fold(grad, north, grid, north_mask=nmask)
     return grad
 
 
@@ -1370,10 +1518,24 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
 
     # Wall BC at the physical pole vertex rows only (backend-aware).
     full = zero_polar_lat_ends(full)
-    if fold_is_local(grid):
+    # Partial-periodic seam wall (NEMO DINO): the two seam vertex columns
+    # (0 and n_lon — the same physical wrap corner) are dry at any vertex
+    # row bounded by a walled seam u-face, so the EEN/PV corner triads see
+    # q=0 there (NEMO fmask behaviour) instead of leaking across the wall.
+    # A vertex row is walled if EITHER adjacent cell row's seam face is
+    # walled: vtx_open[i] = (1-sw[i-1])·(1-sw[i]).  None → fully periodic.
+    seam_wall_rows = getattr(grid, "seam_wall_rows", None)
+    if seam_wall_rows is not None:
+        open_face = (1.0 - jnp.asarray(seam_wall_rows)).astype(full.dtype)  # (n_lat,)
+        vtx_open = jnp.ones((full.shape[0],), dtype=full.dtype)  # (n_lat+1,)
+        vtx_open = vtx_open.at[1:].multiply(open_face)   # cell row j -> vtx j+1
+        vtx_open = vtx_open.at[:-1].multiply(open_face)  # cell row j -> vtx j
+        full = full.at[:, 0].multiply(vtx_open)
+        full = full.at[:, -1].multiply(vtx_open)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        n_lon = fold.perm_T.shape[0]
-        core = full[-2:-1][:, :n_lon][:, fold.perm_T]
-        north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        full = jnp.concatenate([full[:-1], north], axis=0)
+        # fold_row handles the n_lon+1 vertex wrap column (scalar sign +1).
+        north = fold_row(full[-2:-1], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        full = apply_north_fold(full, north, grid, north_mask=nmask)
     return full

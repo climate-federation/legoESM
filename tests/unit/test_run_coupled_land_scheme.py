@@ -55,5 +55,18 @@ def test_unknown_scheme_raises():
         land_scheme_overrides("bucket2")
 
 
+def test_elev_bands_default_off():
+    from legoesm.driver.coupled_config import CoupledConfig
+    assert CoupledConfig().land_elev_bands is False
+
+
+def test_elev_bands_cli_roundtrip():
+    from scripts.run.run_coupled import build_parser
+    p = build_parser()
+    assert p.parse_args([]).land_elev_bands is False          # opt-in: default off
+    assert p.parse_args(["--elev-bands"]).land_elev_bands is True
+    assert p.parse_args(["--no-elev-bands"]).land_elev_bands is False
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

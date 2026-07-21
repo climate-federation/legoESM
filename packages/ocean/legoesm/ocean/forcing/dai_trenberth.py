@@ -347,3 +347,97 @@ def _nearest_ocean_within_box(
     if best is None:
         return None, None
     return best
+
+
+def project_runoff_to_mpas_cells(
+    rivers: RiverRunoffData,
+    *,
+    lat_cell_deg: np.ndarray,
+    lon_cell_deg: np.ndarray,
+    area_cell_m2: np.ndarray,
+    month: Optional[int] = None,
+    ocean_mask: Optional[np.ndarray] = None,
+    max_search_deg: float = 5.0,
+) -> np.ndarray:
+    """Bin river mouths onto an MPAS (unstructured) mesh as a [kg/m²/s] field.
+
+    Unstructured counterpart of :func:`project_runoff_to_grid`. Where the
+    lat-lon version bins onto a tensor-product ``(n_lat, n_lon)`` mesh (nearest
+    lat/lon cell, then relocate within a planar box if that cell is land), this
+    bins onto a flat ``(nCells,)`` cell list and assigns each river to the
+    globally nearest OCEAN cell by great-circle distance
+    (:func:`legoesm.ocean.bathymetry.haversine_km`). The two are ANALOGOUS, not
+    identical: on a coastline the structured "nearest-then-relocate" and the
+    unstructured "nearest ocean" can pick different cells, and the cutoff is
+    measured from the river (here) vs from the selected land cell (lat-lon).
+    Both conserve the flux they accept and drop a river with no ocean cell
+    within ``max_search_deg``.
+
+    Conservation: total mass flux is preserved except for rivers dropped for
+    lack of a nearby ocean cell. ``sum(out * area_cell_m2)`` over ocean cells
+    equals the summed flux of the ASSIGNED rivers, exactly as the lat-lon
+    version conserves ``sum(out * cell_area)``.
+
+    Parameters
+    ----------
+    rivers : RiverRunoffData
+    lat_cell_deg : ndarray ``(nCells,)`` — cell-centre latitude [deg N].
+    lon_cell_deg : ndarray ``(nCells,)`` — cell-centre longitude [deg E].
+    area_cell_m2 : ndarray ``(nCells,)`` — cell area [m²].
+    month : int or None — 1–12 monthly snapshot; None for the annual mean.
+    ocean_mask : ndarray ``(nCells,)`` of {0, 1} or None
+        1 = ocean. Rivers are assigned only to ocean cells; with no mask every
+        cell is a candidate.
+    max_search_deg : float
+        Radial cutoff [deg], converted to km with the SAME Earth radius
+        ``haversine_km`` uses (``R_earth·π/180`` km per degree of arc); a river
+        with no ocean cell within this radius is dropped.
+
+    Returns
+    -------
+    runoff_kg_m2_s : ndarray ``(nCells,)``
+        Freshwater flux into the ocean [kg/m²/s], non-negative.
+    """
+    from legoesm import constants
+    from legoesm.ocean.bathymetry import haversine_km
+
+    lat_c = np.asarray(lat_cell_deg, dtype=np.float64)
+    lon_c = np.asarray(lon_cell_deg, dtype=np.float64) % 360.0
+    area = np.asarray(area_cell_m2, dtype=np.float64)
+    n_cells = lat_c.shape[0]
+    out = np.zeros(n_cells, dtype=np.float64)
+
+    # Candidate cells = ocean cells (or all cells when no mask given).
+    if ocean_mask is None:
+        cand = np.arange(n_cells)
+    else:
+        cand = np.nonzero(np.asarray(ocean_mask).astype(bool).reshape(-1))[0]
+    if cand.size == 0:
+        return out  # no ocean cells -> nothing to receive runoff
+    cand_lat = lat_c[cand]
+    cand_lon = lon_c[cand]
+
+    # Flux per river [kg/s].
+    if month is None:
+        flux_per_river = rivers.monthly_flux_kg_s.mean(axis=0)
+    else:
+        flux_per_river = rivers.monthly_flux_kg_s[(month - 1) % 12]
+
+    # Cutoff in km via the SAME Earth radius haversine_km uses, so the radial
+    # test is exact rather than a ~0.18%-short 111 km/deg approximation that
+    # would open a narrow false-drop band at the boundary (codex).
+    km_per_deg = float(constants.R_earth) * 1.0e-3 * (np.pi / 180.0)
+    max_km = float(max_search_deg) * km_per_deg
+    r_lat = np.asarray(rivers.latitudes, dtype=np.float64)
+    r_lon = np.asarray(rivers.longitudes, dtype=np.float64) % 360.0
+    for k in range(r_lat.shape[0]):
+        d = haversine_km(r_lat[k], r_lon[k], cand_lat, cand_lon)
+        m = int(np.argmin(d))
+        if float(d[m]) > max_km:
+            continue  # no ocean cell within the search radius -> drop
+        cidx = int(cand[m])
+        cell = float(area[cidx])
+        if cell <= 0.0:
+            continue
+        out[cidx] += float(flux_per_river[k]) / cell
+    return out

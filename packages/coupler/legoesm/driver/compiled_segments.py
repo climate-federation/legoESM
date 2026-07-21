@@ -36,6 +36,7 @@ from __future__ import annotations
 import copy
 import math
 import logging
+from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple
 
@@ -70,6 +71,54 @@ def _resolve_checkpoint(gradient_checkpoint: bool | None, n_steps: int) -> bool:
     return gradient_checkpoint
 
 
+# Above this static scan length, checkpointing switches from PER-STEP remat to
+# NESTED (Griewank / sqrt-N) checkpointing: per-step remat recomputes each step's
+# INTERNAL activations but ``lax.scan`` reverse mode STILL stores the per-step
+# CARRY at EVERY step, so reverse-mode memory is O(n_steps) x carry regardless.
+# For a long differentiated rollout (e.g. the WeatherBench scale trainer, where a
+# lat-lon pole-cell CFL clamp forces dt ~3-4 s and roll_steps ~6000) that O(N)
+# trajectory OOMs (~1 TB at 0.7 deg, f64) — see #841.  Nested checkpointing keeps
+# only ~sqrt(N) chunk-boundary carries, recomputing each chunk's forward in the
+# backward pass: O(sqrt(N)) memory, EXACT gradient, ~2x backward compute.  Short
+# production diagnostic segments stay on the per-step path (byte-identical graph).
+_NESTED_CKPT_STEPS = 256
+
+
+def _sqrt_checkpointed_scan(step_fn, carry, n_steps):
+    """Run ``n_steps`` of ``step_fn`` as a scan with O(sqrt(n_steps)) reverse-mode
+    memory via nested (Griewank) checkpointing.
+
+    Split the scan into ``n_outer ~ sqrt(n_steps)`` OUTER chunks of ``inner ~
+    sqrt(n_steps)`` steps.  The INNER chunk scan is ``jax.checkpoint``-wrapped, so
+    reverse mode stores only the ``n_outer`` chunk-boundary carries and RECOMPUTES
+    each chunk's forward before backpropagating through it.  Per-step remat INSIDE
+    a chunk keeps that chunk's own reverse scan at O(inner) carries (its steps'
+    internals are recomputed too).  Peak memory ~ ``(n_outer + inner) x carry`` =
+    O(sqrt(n_steps)) instead of O(n_steps).  A trailing remainder (< inner) runs
+    as a final per-step-remat scan.
+
+    ``n_steps`` is the STATIC scan length (Python int; ``lax.scan`` requires it),
+    so the chunking is decided at trace time.  The result is BIT-IDENTICAL to the
+    plain scan on the forward and the EXACT gradient on the backward — only the
+    reverse-mode memory/compute schedule changes.
+    """
+    inner = max(int(math.isqrt(n_steps)), 1)
+    n_outer = n_steps // inner
+    remainder = n_steps - n_outer * inner
+
+    step_ckpt = jax.checkpoint(step_fn, prevent_cse=False)
+
+    def _chunk(c, _):
+        c, _ = jax.lax.scan(step_ckpt, c, None, length=inner)
+        return c, None
+
+    chunk_ckpt = jax.checkpoint(_chunk, prevent_cse=False)
+    carry, _ = jax.lax.scan(chunk_ckpt, carry, None, length=n_outer)
+    if remainder > 0:
+        carry, _ = jax.lax.scan(step_ckpt, carry, None, length=remainder)
+    return carry
+
+
 # ======================================================================
 # Segment carry — all mutable arrays for the hot loop
 # ======================================================================
@@ -99,6 +148,17 @@ class SegmentCarry(NamedTuple):
         Held radiation tendencies for sub-cycling.
     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa : jax.Array
         Held radiation fluxes for sub-cycling.
+    held_sw_up_toa_clr, held_lw_up_toa_clr : jax.Array
+        Held CLEAR-SKY TOA up-fluxes for sub-cycling (#843), the clear-sky
+        counterpart of ``held_sw_up_toa`` / ``held_lw_up_toa``.  Produced by a
+        SECOND radiation pass with clouds off (``cloud_scheme="none"``, no
+        condensate/number tracers) so CMOR ``rsutcs`` / ``rlutcs`` can be
+        written (SW_CRE = rsut - rsutcs; LW_CRE = rlutcs - rlut).  ALWAYS real
+        arrays — zeros when ``PhysicsPipeline._clear_sky_diag`` is off (the
+        default), so the code path is byte-identical to the no-clear-sky model
+        and the diagnostic collector skips the field.  Refreshed only at the
+        radiation cadence (same ``need_rad`` gating as the all-sky held fields)
+        and held between refreshes.
     step_index : jax.Array
         Scalar int32 — absolute step counter (for radiation cadence).
     target_moisture : jax.Array
@@ -129,6 +189,13 @@ class SegmentCarry(NamedTuple):
         pixel (January rsdt: night hemisphere exactly 0, noon peak
         ~1400 W/m2).  Reset to zero at every segment start, like
         ``precip_accum``.
+    sw_up_toa_clr_accum, lw_up_toa_clr_accum : jax.Array
+        Time-integrated CLEAR-SKY TOA up-fluxes [W/m2 * s] over the segment
+        (#843), same construction as ``sw_up_toa_accum`` — each step adds
+        ``held_*_toa_clr * dt`` so ``accum / segment_duration`` is the
+        segment-mean clear-sky flux written to CMOR ``rsutcs`` / ``rlutcs``.
+        Zeros (never accumulated) when ``PhysicsPipeline._clear_sky_diag`` is
+        off (the default).  Reset to zero at every segment start.
     sw_net_sfc_accum, lw_net_sfc_accum : jax.Array
         Time-integrated net surface radiative fluxes [W/m2 * s] over the
         segment (same construction) so the energy-budget diagnostics see
@@ -181,6 +248,8 @@ class SegmentCarry(NamedTuple):
     held_lw_net_sfc: jax.Array
     held_sw_up_toa: jax.Array
     held_lw_up_toa: jax.Array
+    held_sw_up_toa_clr: jax.Array
+    held_lw_up_toa_clr: jax.Array
     held_sw_down_toa: jax.Array
     step_index: jax.Array
     target_moisture: jax.Array
@@ -191,6 +260,8 @@ class SegmentCarry(NamedTuple):
     lhflx_accum: jax.Array
     sw_up_toa_accum: jax.Array
     lw_up_toa_accum: jax.Array
+    sw_up_toa_clr_accum: jax.Array
+    lw_up_toa_clr_accum: jax.Array
     sw_down_toa_accum: jax.Array
     sw_net_sfc_accum: jax.Array
     lw_net_sfc_accum: jax.Array
@@ -205,6 +276,14 @@ class SegmentCarry(NamedTuple):
     tke: jax.Array = None
     qke: jax.Array = None
     gwd_spectrum: jax.Array = None
+    # Diagnostic CLUBB sub-grid cloud fraction (ncol, nlev) carried one step
+    # (radiation runs before turbulence) so ``compute_radiation_core`` can use it
+    # in the cloud optics instead of the RH grid-scale fraction — the compiled-
+    # rollout twin of the per-step ``_run_per_step`` carry (marine-Sc albedo
+    # lever).  ``None`` (default / feature off, or a non-cf-producing closure) =>
+    # byte-identical legacy carry.  Threaded exactly like ``tke``: fed to
+    # step_unified via ``_dm_in`` and read back from ``phys_out.cloud_fraction``.
+    cloud_fraction: jax.Array = None
     conv_precip_prev: jax.Array = None
     # Lagged (previous-step) total precip [kg/m²/s] driving the opt-in
     # convective cloud-fraction source.  Radiation runs BEFORE convection in
@@ -237,15 +316,18 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                step_index,
+               held_sw_up_toa_clr=None, held_lw_up_toa_clr=None,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None,
                shflx_accum=None, lhflx_accum=None,
                sw_up_toa_accum=None, lw_up_toa_accum=None,
+               sw_up_toa_clr_accum=None, lw_up_toa_clr_accum=None,
                sw_down_toa_accum=None, sw_net_sfc_accum=None,
                lw_net_sfc_accum=None, t_low_accum=None,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
+               cloud_fraction=None,
                conv_precip_prev=None,
                land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None):
@@ -262,6 +344,10 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
     (zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold),
     whose ``conv_prog_profile`` carry must be seeded full-shape before
     entering ``lax.scan``.
+
+    ``held_sw_up_toa_clr`` / ``held_lw_up_toa_clr`` / ``sw_up_toa_clr_accum``
+    / ``lw_up_toa_clr_accum`` (#843) default to zeros (byte-identical to the
+    no-clear-sky carry); pass real arrays only when ``clear_sky_diag`` is on.
     """
     from legoesm.core.precision import resolve_dtype
     storage = resolve_dtype(None, "storage")
@@ -292,6 +378,16 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         sw_up_toa_accum = jnp.zeros_like(state.p_s.data)
     if lw_up_toa_accum is None:
         lw_up_toa_accum = jnp.zeros_like(state.p_s.data)
+    # Clear-sky TOA held fluxes + accumulators (#843): always real arrays
+    # (zeros when clear_sky_diag is off) so the carry pytree stays uniform.
+    if held_sw_up_toa_clr is None:
+        held_sw_up_toa_clr = jnp.zeros_like(state.p_s.data)
+    if held_lw_up_toa_clr is None:
+        held_lw_up_toa_clr = jnp.zeros_like(state.p_s.data)
+    if sw_up_toa_clr_accum is None:
+        sw_up_toa_clr_accum = jnp.zeros_like(state.p_s.data)
+    if lw_up_toa_clr_accum is None:
+        lw_up_toa_clr_accum = jnp.zeros_like(state.p_s.data)
     if sw_down_toa_accum is None:
         sw_down_toa_accum = jnp.zeros_like(state.p_s.data)
     if sw_net_sfc_accum is None:
@@ -333,6 +429,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         held_lw_net_sfc=_promote(held_lw_net_sfc, storage),
         held_sw_up_toa=_promote(held_sw_up_toa, storage),
         held_lw_up_toa=_promote(held_lw_up_toa, storage),
+        held_sw_up_toa_clr=_promote(held_sw_up_toa_clr, storage),
+        held_lw_up_toa_clr=_promote(held_lw_up_toa_clr, storage),
         held_sw_down_toa=_promote(held_sw_down_toa, storage),
         step_index=jnp.int32(step_index),
         target_moisture=_promote(target_moisture, accum),
@@ -343,6 +441,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         lhflx_accum=_promote(lhflx_accum, storage),
         sw_up_toa_accum=_promote(sw_up_toa_accum, storage),
         lw_up_toa_accum=_promote(lw_up_toa_accum, storage),
+        sw_up_toa_clr_accum=_promote(sw_up_toa_clr_accum, storage),
+        lw_up_toa_clr_accum=_promote(lw_up_toa_clr_accum, storage),
         sw_down_toa_accum=_promote(sw_down_toa_accum, storage),
         sw_net_sfc_accum=_promote(sw_net_sfc_accum, storage),
         lw_net_sfc_accum=_promote(lw_net_sfc_accum, storage),
@@ -362,6 +462,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         qke=None if qke is None else _promote(qke, storage),
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
+        cloud_fraction=(None if cloud_fraction is None
+                        else _promote(cloud_fraction, storage)),
         conv_precip_prev=_promote(conv_precip_prev, storage),
         land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
         # Soil-water bucket: None unless the bucket is active (identical
@@ -563,6 +665,19 @@ class SegmentForcing(NamedTuple):
     # pytree carries no spurious empty leaf.
     sfc_shflx_override: jax.Array | None = None
     sfc_lhflx_override: jax.Array | None = None
+    # Transient land-use cover — the per-segment multilayer land surface params
+    # (``LandSurfaceParams`` pytree: per-column albedo_veg / emissivity / LAI /
+    # canopy-structure) a coupled or AMIP driver re-materialises each segment as
+    # the cover map advances in time (interp_annual on the legoesm_surfdata
+    # pft_frac).  Passed as a TRACED arg (SegmentForcing doctrine) so the jitted
+    # production step reads the evolving cover instead of the closure-baked
+    # ``pipeline.land_ml_params`` captured at first trace.  ``None`` (default)
+    # for static-cover / uncoupled runs ⇒ the step falls back to the baked
+    # ``self.land_ml_params`` (byte-identical to the pre-transient behaviour).
+    # A nested pytree, not a plain array; left out of GRID_SHAPED_FORCING_FIELDS
+    # (transient cover is the lat-lon multilayer-land path, not SPMD cube) so it
+    # is pinned replicated by the segment JIT.
+    land_ml_params: object | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -608,6 +723,7 @@ def pack_forcing(
     sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
+    land_ml_params=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -681,6 +797,9 @@ def pack_forcing(
             None if sfc_lhflx_override is None
             else jnp.asarray(sfc_lhflx_override)
         ),
+        # LandSurfaceParams pytree (or None) — passed through as-is; its leaves
+        # are already jax arrays from the provider rebuild, no jnp.asarray coerce.
+        land_ml_params=land_ml_params,
     )
 
 
@@ -690,7 +809,7 @@ def pack_forcing(
 # incidental leading-6 leaf (e.g. ``ghg_vmr`` the day a 6th species joins
 # GHG_SPECIES_ORDER).  Scalars (day_of_year, seconds_of_day, s_0) and small
 # vectors (ghg_vmr) stay uncommitted -> the segment JIT pins them replicated.
-_GRID_SHAPED_FORCING_FIELDS = (
+GRID_SHAPED_FORCING_FIELDS = (
     "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
     "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
     "sfc_shflx_override", "sfc_lhflx_override",
@@ -745,17 +864,525 @@ def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
         _flat_face = NamedSharding(device_config.mesh, PartitionSpec("face"))
 
     updates = {}
-    for name in _GRID_SHAPED_FORCING_FIELDS:
+    for name in GRID_SHAPED_FORCING_FIELDS:
         leaf = getattr(forcing, name)
         if leaf is None or not isinstance(leaf, (jax.Array, jnp.ndarray)):
             continue
         if (_flat_face is not None and leaf.ndim >= 1
                 and leaf.shape[0] != 6 and leaf.shape[0] > 0
                 and leaf.shape[0] % 6 == 0):
-            updates[name] = jax.device_put(leaf, _flat_face)
+            # multiprocess_safe_device_put, NOT jax.device_put: under
+            # multi-controller SPMD the cross-process bit-equality assert
+            # in device_put trips on host-precomputed forcing (#693,
+            # Levante 2-node receipt job 26030677).
+            from legoesm.parallel.mesh import multiprocess_safe_device_put
+            updates[name] = multiprocess_safe_device_put(leaf, _flat_face)
         else:
             updates[name] = shard_pytree(leaf, device_config)
     return forcing._replace(**updates) if updates else forcing
+
+
+@dataclass(frozen=True)
+class _SplitStepStatics:
+    """Closure statics for the operator-split physics body, bundled so the
+    single-rank physics + the shared finalizer live at MODULE SCOPE and can be
+    reused by the lat-band-SPMD lane (which supplies its own sharded dynamics
+    + mass fixer, then calls the SAME post-dynamics physics + tail — no
+    duplication of the ~200-line write-back).  A plain frozen dataclass (NOT a
+    NamedTuple) so it is never treated as a jax pytree: it is a closure constant
+    captured by the scan body, never a scan carry/xs.  ``step_unified``,
+    ``forcing`` and ``ghg_vmr_override`` depend on the per-segment forcing, so
+    the bundle is built inside ``_make_single_step``."""
+    step_unified: object
+    forcing: object
+    lat: object
+    lon: object
+    dt: object
+    tau_equator: object
+    tau_pole: object
+    sbm_tau_c: object
+    sbm_RH_ref: object
+    C_H: object
+    C_E: object
+    albedo_ice: object
+    albedo_ocean: object
+    ghg_vmr_override: object
+    hs_newtonian_relax: object
+    energy_consistent_moisture_clip: bool
+    do_sat_adjust: bool
+    fix_moisture: bool
+    sigma_full: object
+    dsigma: object
+    grid: object
+    owned_mask: object
+    qv_smooth_coeff: object
+    fric_decay: object
+    hyperdiffusion_3d: object
+    # Clear-sky diagnostic (#843): the PhysicsPipeline (for the 2nd,
+    # clouds-off compute_radiation_core pass) and the freshness mode for THIS
+    # step variant — "hold" (no clear-sky compute: feature off OR the no-rad
+    # subcycle variant), "cond" (compute fresh gated on the traced need_rad,
+    # for the legacy data-dependent step_unified), or "always" (compute fresh
+    # every call, for the static rad-every-call step_unified).  Defaults keep
+    # the lat-band-SPMD lane (which does not pass them) byte-identical.
+    pipeline: object = None
+    clear_sky_fresh: str = "hold"
+
+
+def build_operator_split_statics(
+    *, step_unified, forcing, lat, lon, dt,
+    tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref, C_H, C_E,
+    albedo_ice, albedo_ocean, ghg_vmr_override,
+    hs_newtonian_relax, energy_consistent_moisture_clip,
+    do_sat_adjust, fix_moisture, sigma_full, dsigma, grid,
+    owned_mask, qv_smooth_coeff, fric_decay, hyperdiffusion_3d,
+    pipeline=None, clear_sky_fresh="hold",
+):
+    """Bundle the operator-split closure statics (the frozen ``_SplitStepStatics``).
+
+    PUBLIC factory so the lat-band-SPMD driver lane (``model_driver.
+    _run_operator_split_spmd``) builds the SAME statics the serial
+    ``build_segment_fn`` scan bundles, WITHOUT importing the private dataclass
+    (CLAUDE.md: no private cross-module import).  The scalar closure constants
+    (``dt``, ``tau_*``, ``sbm_*``, ``C_*``, ``albedo_*``, ``fric_decay``) are
+    wrapped with ``jnp.asarray`` here — identical to the former inline literal —
+    so both call sites get byte-identical leaves; ``None`` passes through
+    untouched.  ``owned_mask`` / ``sigma_full`` / ``dsigma`` / ``grid`` /
+    ``ghg_vmr_override`` / callables are already array-or-None and pass through.
+    """
+    _a = lambda x: (jnp.asarray(x) if x is not None else None)
+    return _SplitStepStatics(
+        step_unified=step_unified, forcing=forcing,
+        lat=lat, lon=lon, dt=_a(dt),
+        tau_equator=_a(tau_equator), tau_pole=_a(tau_pole),
+        sbm_tau_c=_a(sbm_tau_c), sbm_RH_ref=_a(sbm_RH_ref),
+        C_H=_a(C_H), C_E=_a(C_E),
+        albedo_ice=_a(albedo_ice), albedo_ocean=_a(albedo_ocean),
+        ghg_vmr_override=ghg_vmr_override,
+        hs_newtonian_relax=hs_newtonian_relax,
+        energy_consistent_moisture_clip=energy_consistent_moisture_clip,
+        do_sat_adjust=do_sat_adjust, fix_moisture=fix_moisture,
+        sigma_full=sigma_full, dsigma=dsigma, grid=grid,
+        owned_mask=owned_mask, qv_smooth_coeff=qv_smooth_coeff,
+        fric_decay=_a(fric_decay), hyperdiffusion_3d=hyperdiffusion_3d,
+        pipeline=pipeline, clear_sky_fresh=clear_sky_fresh,
+    )
+
+
+class _SplitStepLocals(NamedTuple):
+    """The exact set of per-step locals BOTH the single-rank and the
+    MPI-owned-face branches produce and the shared finalizer consumes: the
+    Euler-updated fields, the double-moment tracer updates, the accumulators,
+    the land-tile updates, and the prognostic-physics carry values riding
+    ``PhysicsOutput`` (``phys_*``).  ``u_new/v_new/p_s_new`` are the
+    (post-mass-fix) dynamics fields the tail's Rayleigh friction + carry pack
+    read."""
+    u_new: object
+    v_new: object
+    p_s_new: object
+    T_upd: object
+    q_v_upd: object
+    q_c_upd: object
+    q_r_upd: object
+    q_i_upd: object
+    q_s_upd: object
+    q_g_upd: object
+    N_c_upd: object
+    N_r_upd: object
+    N_i_upd: object
+    conv_prog_upd: object
+    held_new: object
+    precip_accum: object
+    conv_precip_prev_new: object
+    shflx_accum: object
+    lhflx_accum: object
+    sw_net_sfc_accum: object
+    lw_net_sfc_accum: object
+    sw_up_toa_accum: object
+    lw_up_toa_accum: object
+    sw_up_toa_clr_accum: object
+    lw_up_toa_clr_accum: object
+    sw_down_toa_accum: object
+    t_low_accum: object
+    T_land_new: object
+    land_ml_new: object
+    w_land_new: object
+    snow_new: object
+    phys_tke: object
+    phys_qke: object
+    phys_gwd: object
+    phys_cloud_fraction: object = None
+
+
+_MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
+
+
+def _clear_sky_toa_pass(clear_sky_fresh, need_rad,
+                        held_sw_up_toa_clr, held_lw_up_toa_clr,
+                        compute_fresh):
+    """Return this step's ``(sw_up_toa_clr, lw_up_toa_clr)`` for the #843
+    clear-sky diagnostic, mirroring how the all-sky held fields are refreshed.
+
+    ``clear_sky_fresh`` (a static Python str selected in ``_make_single_step``):
+      * ``"hold"``   — clear-sky diag off OR the no-rad subcycle variant: hold
+        the carried clear-sky values (zeros when off) and run NO extra RRTMGP,
+        so ``body_no_rad`` HLOs stay rrtmgp-free.  Byte-identical to the
+        no-clear-sky model when off.
+      * ``"cond"``   — legacy data-dependent ``step_unified``: recompute fresh
+        clear-sky only when the traced ``need_rad`` fires, else hold — exactly
+        the all-sky ``lax.cond(need_rad, ...)`` inside ``step_unified``.
+      * ``"always"`` — static rad-every-call ``step_unified``: recompute fresh
+        every step (all-sky is fresh every step too).
+
+    ``compute_fresh`` is a zero-arg callable running the clouds-off second
+    ``compute_radiation_core`` and returning the two TOA up-fluxes already cast
+    to the held dtype.  ``held_*`` are the carried clear-sky held values used on
+    the held (non-refresh) steps.
+    """
+    if clear_sky_fresh == "always":
+        return compute_fresh()
+    if clear_sky_fresh == "cond":
+        return jax.lax.cond(
+            need_rad,
+            compute_fresh,
+            lambda: (held_sw_up_toa_clr, held_lw_up_toa_clr),
+        )
+    # "hold" (and any unrecognised mode): no extra radiation pass.
+    return held_sw_up_toa_clr, held_lw_up_toa_clr
+
+
+def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
+                               need_rad, doy_step, sod_step, statics,
+                               moist=None):
+    """The single-rank (``owned_face_ids is None``) operator-split physics body:
+    ``step_unified`` on the whole column set, then the Euler write-back +
+    accumulators.  Extraction of the former ``_single_step`` ``else`` body
+    (dynamics + mass fixer done by the caller in the prologue) — reads closure
+    statics off ``statics`` and returns the ``_SplitStepLocals`` bundle the
+    shared finalizer consumes.
+
+    ``moist`` (issue #771): the moisture fields the physics acts on — a dict
+    over ``_MOIST_FIELDS`` (q_v/q_c/q_r + the double-moment fields).  ``None``
+    (the lat-band-SPMD lane + the column-locked serial path) reads them straight
+    off the carry, BYTE-IDENTICAL; the ``advect_moisture`` serial path passes the
+    POST-ADVECTION aliases so the physics update acts on the transported
+    moisture.  ``tke/qke/gwd_spectrum`` are physics carries (not advected) and
+    always ride the carry."""
+    from legoesm.core.conservation import energy_consistent_moisture_floor
+    if moist is None:
+        moist = {_nm: getattr(carry, _nm) for _nm in _MOIST_FIELDS}
+    _dm_in = {}
+    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+        if moist[_nm] is not None:
+            _dm_in[_nm] = moist[_nm]
+    for _nm in ("tke", "qke", "gwd_spectrum", "cloud_fraction"):
+        _fld = getattr(carry, _nm)
+        if _fld is not None:
+            _dm_in[_nm] = _fld
+    _ret = statics.step_unified(
+        need_rad,
+        T_new, p_s_new,
+        moist["q_v"], moist["q_c"], moist["q_r"], carry.conv_prog,
+        u_new, v_new,
+        statics.forcing.sst, statics.forcing.sic, statics.lat, statics.lon,
+        doy_step, sod_step, statics.dt,
+        statics.forcing.solar_weights, statics.forcing.s_0,
+        statics.forcing.o3_vmr, statics.forcing.aerosol_od,
+        carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
+        carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+        tau_equator=statics.tau_equator, tau_pole=statics.tau_pole,
+        sbm_tau_c=statics.sbm_tau_c, sbm_RH_ref=statics.sbm_RH_ref,
+        C_H=statics.C_H, C_E=statics.C_E,
+        albedo_ice=statics.albedo_ice, albedo_ocean=statics.albedo_ocean,
+        ghg_vmr_override=statics.ghg_vmr_override,
+        aerosol_lw_od=statics.forcing.aerosol_lw_od,
+        sfc_albedo_override=statics.forcing.sfc_albedo_override,
+        sfc_T_override=statics.forcing.sfc_T_override,
+        sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
+        sfc_shflx_override=statics.forcing.sfc_shflx_override,
+        sfc_lhflx_override=statics.forcing.sfc_lhflx_override,
+        T_land=carry.T_land, land_ml=carry.land_ml,
+        land_ml_params=statics.forcing.land_ml_params,
+        conv_precip=carry.conv_precip_prev,
+        w_land=carry.w_land, snow=carry.snow,
+        **_dm_in,
+    )
+    phys_out, held_new = _ret[0], _ret[1]
+    # ``step_unified`` returns a 3rd value (the slab-land skin temperature,
+    # #325) for the PhysicsPipeline build; legacy 2-tuple wrappers (neural /
+    # SFNO training) leave the land tile inert by carrying ``T_land`` through.
+    T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
+    # optional 4th value: the advanced MULTILAYER land state (when active).
+    land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
+    w_land_new = (phys_out.w_land
+                  if phys_out.w_land is not None
+                  else carry.w_land)
+    snow_new = (phys_out.snow
+                if phys_out.snow is not None
+                else carry.snow)
+
+    # --- Clear-sky TOA second radiation pass (#843) ---
+    # Mirror the all-sky held refresh: feed the SAME post-dynamics state
+    # step_unified's all-sky radiation saw (T_new / p_s_new / moist q_v,
+    # u_new / v_new), but with clouds OFF (cloud_scheme="none", no
+    # condensate/number tracers).  Held between radiation refreshes exactly
+    # like held_sw_up_toa.  "hold" mode (feature off, or the no-rad subcycle
+    # variant) runs NO extra RRTMGP, so it stays byte-identical + keeps
+    # body_no_rad HLOs rrtmgp-free.
+    def _compute_fresh_clr():
+        (_c0, _c1, _c2, _sw_clr, _lw_clr, _c5, _c6, _c7) = \
+            statics.pipeline.compute_radiation_core(
+                T_new, p_s_new, moist["q_v"],
+                statics.forcing.sst, statics.forcing.sic,
+                statics.lat, statics.lon, doy_step, sod_step,
+                statics.forcing.solar_weights, statics.forcing.s_0,
+                statics.forcing.o3_vmr, statics.forcing.aerosol_od,
+                aerosol_lw_od_precomputed=statics.forcing.aerosol_lw_od,
+                tau_equator=statics.tau_equator, tau_pole=statics.tau_pole,
+                albedo_ice=statics.albedo_ice,
+                albedo_ocean=statics.albedo_ocean,
+                ghg_vmr_override=statics.ghg_vmr_override,
+                q_c=None, q_i=None, N_c=None, N_i=None,
+                cloud_scheme="none",
+                u=u_new, v=v_new, dt=statics.dt,
+                T_land=carry.T_land, land_ml=carry.land_ml,
+                land_ml_params=statics.forcing.land_ml_params,
+                sfc_albedo_override=statics.forcing.sfc_albedo_override,
+                sfc_T_override=statics.forcing.sfc_T_override,
+                sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
+                conv_precip=carry.conv_precip_prev,
+                w_land=carry.w_land, snow=carry.snow,
+            )
+        _dt_h = carry.held_sw_up_toa_clr.dtype
+        return _sw_clr.astype(_dt_h), _lw_clr.astype(_dt_h)
+
+    _sw_up_toa_clr, _lw_up_toa_clr = _clear_sky_toa_pass(
+        statics.clear_sky_fresh, need_rad,
+        carry.held_sw_up_toa_clr, carry.held_lw_up_toa_clr,
+        _compute_fresh_clr,
+    )
+    # Extend held_new to the 8-tuple carried by _SplitStepLocals (positions
+    # 6/7 = clear-sky TOA up-fluxes); finalize_split_step writes them into the
+    # held_*_toa_clr carry fields.
+    held_new = tuple(held_new) + (_sw_up_toa_clr, _lw_up_toa_clr)
+
+    # --- State update ---
+    _phys_dT_dt = phys_out.dT_dt
+    if statics.hs_newtonian_relax is not None:
+        _phys_dT_dt = _phys_dT_dt + statics.hs_newtonian_relax(
+            T_new, p_s_new, statics.lat)
+    T_upd = T_new + statics.dt * _phys_dT_dt
+    _qv_raw = moist["q_v"] + statics.dt * phys_out.dq_v_dt
+    if statics.energy_consistent_moisture_clip:
+        # Issue #323: keep the q_v floor moist-static-energy neutral by
+        # removing the latent heat of the clipped (un-removed) vapour sink.
+        q_v_upd, T_upd = energy_consistent_moisture_floor(_qv_raw, T_upd)
+    else:
+        q_v_upd = jnp.maximum(_qv_raw, 0.0)
+    q_c_upd = jnp.maximum(moist["q_c"] + statics.dt * phys_out.dq_c_dt, 0.0)
+    q_r_upd = jnp.maximum(moist["q_r"] + statics.dt * phys_out.dq_r_dt, 0.0)
+    def _dm_upd(fld, tend):
+        return (None if fld is None
+                else jnp.maximum(fld + statics.dt * tend, 0.0))
+    q_i_upd = _dm_upd(moist["q_i"], phys_out.dq_i_dt)
+    q_s_upd = _dm_upd(moist["q_s"], phys_out.dq_s_dt)
+    q_g_upd = _dm_upd(moist["q_g"], phys_out.dq_g_dt)
+    N_c_upd = _dm_upd(moist["N_c"], phys_out.dN_c_dt)
+    N_r_upd = _dm_upd(moist["N_r"], phys_out.dN_r_dt)
+    N_i_upd = _dm_upd(moist["N_i"], phys_out.dN_i_dt)
+    conv_prog_upd = phys_out.conv_prog
+
+    # --- Accumulate precipitation ---
+    precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
+    precip_accum = carry.precip_accum + precip_step * statics.dt
+    # Lag this step's total precip for next step's convective cloud.
+    conv_precip_prev_new = precip_step
+
+    # --- Accumulate surface heat fluxes ---
+    _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new)
+    _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new)
+    shflx_accum = carry.shflx_accum + _sh * statics.dt
+    lhflx_accum = carry.lhflx_accum + _lh * statics.dt
+
+    # --- Time-integrate radiative fluxes + lowest-level T ---
+    # (segment-mean diagnostics; CMOR diurnal-alias fix).  held_new order:
+    # (dT_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa).
+    sw_net_sfc_accum = carry.sw_net_sfc_accum + held_new[1] * statics.dt
+    lw_net_sfc_accum = carry.lw_net_sfc_accum + held_new[2] * statics.dt
+    sw_up_toa_accum = carry.sw_up_toa_accum + held_new[3] * statics.dt
+    lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * statics.dt
+    sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * statics.dt
+    t_low_accum = carry.t_low_accum + T_upd[..., -1] * statics.dt
+    # Clear-sky TOA up-flux time integral (#843): held_new[6]/[7] = the
+    # clear-sky sw/lw held-or-fresh values from the pass above (zeros when
+    # off, so accum stays zero).
+    sw_up_toa_clr_accum = carry.sw_up_toa_clr_accum + held_new[6] * statics.dt
+    lw_up_toa_clr_accum = carry.lw_up_toa_clr_accum + held_new[7] * statics.dt
+
+    return _SplitStepLocals(
+        u_new=u_new, v_new=v_new, p_s_new=p_s_new,
+        T_upd=T_upd, q_v_upd=q_v_upd, q_c_upd=q_c_upd, q_r_upd=q_r_upd,
+        q_i_upd=q_i_upd, q_s_upd=q_s_upd, q_g_upd=q_g_upd,
+        N_c_upd=N_c_upd, N_r_upd=N_r_upd, N_i_upd=N_i_upd,
+        conv_prog_upd=conv_prog_upd, held_new=held_new,
+        precip_accum=precip_accum, conv_precip_prev_new=conv_precip_prev_new,
+        shflx_accum=shflx_accum, lhflx_accum=lhflx_accum,
+        sw_net_sfc_accum=sw_net_sfc_accum, lw_net_sfc_accum=lw_net_sfc_accum,
+        sw_up_toa_accum=sw_up_toa_accum, lw_up_toa_accum=lw_up_toa_accum,
+        sw_up_toa_clr_accum=sw_up_toa_clr_accum,
+        lw_up_toa_clr_accum=lw_up_toa_clr_accum,
+        sw_down_toa_accum=sw_down_toa_accum, t_low_accum=t_low_accum,
+        T_land_new=T_land_new, land_ml_new=land_ml_new,
+        w_land_new=w_land_new, snow_new=snow_new,
+        phys_tke=phys_out.tke, phys_qke=phys_out.qke,
+        phys_gwd=phys_out.gwd_spectrum,
+        phys_cloud_fraction=phys_out.cloud_fraction,
+    )
+
+
+def _apply_qv_smoothing(q_v_upd, statics):
+    """Moisture ∇⁴ smoothing + positivity floor for the operator-split tail.
+
+    Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
+    (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
+    hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
+    grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
+    ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
+    rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
+    path is bit-identical to the former nested ``max(q + dt·∇⁴, 0)``; only the
+    q>=0 floor always applies.  Module-scope (not defined in the scan body) per
+    the repo's hot-loop helper doctrine, and so fix-5 is directly testable.
+    """
+    if statics.qv_smooth_coeff != 0.0:
+        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
+            q_v_upd, statics.grid, statics.qv_smooth_coeff)
+    return jnp.maximum(q_v_upd, 0.0)
+
+
+def finalize_split_step(carry, lz, statics):
+    """The shared operator-split TAIL (saturation adjustment, moisture fixer,
+    moisture smoothing, Rayleigh friction, ``SegmentCarry`` pack) — VERBATIM
+    extraction of the former ``_single_step`` post-``else`` tail, run by BOTH
+    the single-rank and MPI-owned-face branches from ONE source.  Reads the
+    branch outputs off ``lz`` and closure statics off ``statics``."""
+    from legoesm.core.conservation import fix_moisture_hydrostatic
+    T_upd = lz.T_upd
+    q_v_upd = lz.q_v_upd
+    p_s_new = lz.p_s_new
+
+    # --- Saturation adjustment ---
+    if statics.do_sat_adjust:
+        p_full = p_s_new[..., None] * statics.sigma_full
+        q_sat = saturation_mixing_ratio(T_upd, p_full)
+        excess = jnp.maximum(q_v_upd - q_sat, 0.0)
+        q_v_upd = q_v_upd - excess
+        T_upd = T_upd + constants.L_v * excess / constants.c_pd
+
+    # --- Moisture fixer (uses fixed target from initialization) ---
+    if statics.fix_moisture:
+        q_v_upd = fix_moisture_hydrostatic(
+            q_v_upd, carry.target_moisture,
+            p_s_new, statics.dsigma, statics.grid,
+            owned_mask=statics.owned_mask,
+        )
+
+    # --- Moisture smoothing (static-gated ∇⁴ + positivity floor) ---
+    q_v_upd = _apply_qv_smoothing(q_v_upd, statics)
+
+    # --- Rayleigh friction ---
+    u_upd = lz.u_new * statics.fric_decay
+    v_upd = lz.v_new * statics.fric_decay
+
+    # CFL is computed at segment boundary (host-side) from the final carry's
+    # wind fields, not inside the hot loop.
+    max_cfl = carry.max_cfl
+
+    # Cast all arrays back to carry input dtypes to prevent float32→float64
+    # promotion from Python float constants breaking jax.lax.scan.
+    new_carry = SegmentCarry(
+        u=_match_dtype(u_upd, carry.u),
+        v=_match_dtype(v_upd, carry.v),
+        T=_match_dtype(T_upd, carry.T),
+        p_s=_match_dtype(p_s_new, carry.p_s),
+        phis=carry.phis,
+        q_v=_match_dtype(q_v_upd, carry.q_v),
+        q_c=_match_dtype(lz.q_c_upd, carry.q_c),
+        q_r=_match_dtype(lz.q_r_upd, carry.q_r),
+        conv_prog=_match_dtype(lz.conv_prog_upd, carry.conv_prog),
+        held_dT_rad=_match_dtype(lz.held_new[0], carry.held_dT_rad),
+        held_sw_net_sfc=_match_dtype(lz.held_new[1], carry.held_sw_net_sfc),
+        held_lw_net_sfc=_match_dtype(lz.held_new[2], carry.held_lw_net_sfc),
+        held_sw_up_toa=_match_dtype(lz.held_new[3], carry.held_sw_up_toa),
+        held_lw_up_toa=_match_dtype(lz.held_new[4], carry.held_lw_up_toa),
+        held_sw_up_toa_clr=_match_dtype(
+            lz.held_new[6], carry.held_sw_up_toa_clr),
+        held_lw_up_toa_clr=_match_dtype(
+            lz.held_new[7], carry.held_lw_up_toa_clr),
+        held_sw_down_toa=_match_dtype(lz.held_new[5], carry.held_sw_down_toa),
+        step_index=carry.step_index + 1,
+        target_moisture=carry.target_moisture,
+        target_mass=carry.target_mass,
+        max_cfl=max_cfl,
+        precip_accum=_match_dtype(lz.precip_accum, carry.precip_accum),
+        shflx_accum=_match_dtype(lz.shflx_accum, carry.shflx_accum),
+        lhflx_accum=_match_dtype(lz.lhflx_accum, carry.lhflx_accum),
+        sw_up_toa_accum=_match_dtype(
+            lz.sw_up_toa_accum, carry.sw_up_toa_accum),
+        lw_up_toa_accum=_match_dtype(
+            lz.lw_up_toa_accum, carry.lw_up_toa_accum),
+        sw_up_toa_clr_accum=_match_dtype(
+            lz.sw_up_toa_clr_accum, carry.sw_up_toa_clr_accum),
+        lw_up_toa_clr_accum=_match_dtype(
+            lz.lw_up_toa_clr_accum, carry.lw_up_toa_clr_accum),
+        sw_down_toa_accum=_match_dtype(
+            lz.sw_down_toa_accum, carry.sw_down_toa_accum),
+        sw_net_sfc_accum=_match_dtype(
+            lz.sw_net_sfc_accum, carry.sw_net_sfc_accum),
+        lw_net_sfc_accum=_match_dtype(
+            lz.lw_net_sfc_accum, carry.lw_net_sfc_accum),
+        t_low_accum=_match_dtype(lz.t_low_accum, carry.t_low_accum),
+        T_land=(None if carry.T_land is None
+                else _match_dtype(lz.T_land_new, carry.T_land)),
+        q_i=(None if carry.q_i is None
+             else _match_dtype(lz.q_i_upd, carry.q_i)),
+        q_s=(None if carry.q_s is None
+             else _match_dtype(lz.q_s_upd, carry.q_s)),
+        q_g=(None if carry.q_g is None
+             else _match_dtype(lz.q_g_upd, carry.q_g)),
+        N_c=(None if carry.N_c is None
+             else _match_dtype(lz.N_c_upd, carry.N_c)),
+        N_r=(None if carry.N_r is None
+             else _match_dtype(lz.N_r_upd, carry.N_r)),
+        N_i=(None if carry.N_i is None
+             else _match_dtype(lz.N_i_upd, carry.N_i)),
+        tke=(None if carry.tke is None
+             else _match_dtype(
+                 lz.phys_tke if lz.phys_tke is not None
+                 else carry.tke, carry.tke)),
+        qke=(None if carry.qke is None
+             else _match_dtype(
+                 lz.phys_qke if lz.phys_qke is not None
+                 else carry.qke, carry.qke)),
+        gwd_spectrum=(None if carry.gwd_spectrum is None
+                      else _match_dtype(
+                          lz.phys_gwd if lz.phys_gwd is not None
+                          else carry.gwd_spectrum,
+                          carry.gwd_spectrum)),
+        cloud_fraction=(None if carry.cloud_fraction is None
+                        else _match_dtype(
+                            lz.phys_cloud_fraction
+                            if lz.phys_cloud_fraction is not None
+                            else carry.cloud_fraction,
+                            carry.cloud_fraction)),
+        conv_precip_prev=_match_dtype(
+            lz.conv_precip_prev_new, carry.conv_precip_prev),
+        land_ml=lz.land_ml_new,
+        w_land=(None if carry.w_land is None
+                else _match_dtype(lz.w_land_new, carry.w_land)),
+        snow=(None if carry.snow is None
+              else _match_dtype(lz.snow_new, carry.snow)),
+    )
+    return new_carry
 
 
 def build_segment_fn(
@@ -791,6 +1418,8 @@ def build_segment_fn(
     device_config=None,
     energy_consistent_moisture_clip: bool = False,
     pipeline=None,
+    advect_moisture: bool = False,
+    tiled_step_fn=None,
 ):
     """Build a compiled segment function.
 
@@ -895,6 +1524,15 @@ def build_segment_fn(
         organised convection; the existing floor truncates the sink but
         keeps the full latent heating).  Default ``False`` =>
         bit-identical to the legacy path.
+    advect_moisture : bool, optional
+        Issue #771.  When ``True``, the moisture tracers (q_v/q_c/q_r and
+        the double-moment fields when present) are attached to the dycore
+        state each step so the primitive-equation step advects them with
+        the resolved wind (the MPAS Phase B design); the physics update
+        then acts on the post-advection fields.  Requires a tracer-capable
+        dycore (cubed-sphere cdgrid).  Default ``False`` => the legacy
+        column-locked moisture (physics tendencies + hyperdiffusion
+        smoothing only), byte-identical.
     pipeline : PhysicsPipeline or None, optional
         The physics pipeline.  Only consumed by the optional "un-fused
         radiation" host path (``ExperimentConfig.unfused_radiation`` —
@@ -918,6 +1556,20 @@ def build_segment_fn(
         energy_consistent_moisture_floor,
     )
     from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+
+    # Per-step solar clock precision (codex round-11 Low): the in-scan
+    # ``_abs_day``/``day_to_calendar`` arithmetic is TRACED — without x64
+    # it runs in float32, and ``seconds_of_day`` quantizes (~8 s ulp at
+    # day ~1000), silently degrading the solar zenith on long runs.
+    # Production sets JAX_ENABLE_X64; warn loudly when it is off.
+    if not jax.config.jax_enable_x64:
+        logger.warning(
+            "build_segment_fn: JAX x64 is DISABLED — the per-step solar "
+            "clock (diurnal cycle, #720) computes day/seconds-of-day in "
+            "float32 inside the compiled scan; multi-year runs will "
+            "accumulate solar-time quantization (~8 s at day 1000). Set "
+            "JAX_ENABLE_X64=1 (production default) for exact solar time."
+        )
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
@@ -1011,20 +1663,111 @@ def build_segment_fn(
         _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
         _step_unified = step_fn if step_fn is not None else step_unified
 
+        # Clear-sky diagnostic freshness mode for THIS step variant (#843).
+        # Static Python (no HLO cost when off): decide once whether this
+        # ``_single_step`` variant runs the clouds-off 2nd radiation pass.
+        #   * no-rad subcycle variant  -> "hold"  (keep body_no_rad rrtmgp-free)
+        #   * feature off              -> "hold"  (byte-identical)
+        #   * static rad-every-call    -> "always" (all-sky fresh every call)
+        #   * legacy data-dependent    -> "cond"   (fresh only when need_rad)
+        _clr_on = (pipeline is not None
+                   and getattr(pipeline, "_clear_sky_diag", False))
+        _clr_is_no_rad_variant = (
+            step_unified_no_rad is not None
+            and _step_unified is step_unified_no_rad
+        )
+        if not _clr_on or _clr_is_no_rad_variant:
+            _clr_fresh = "hold"
+        elif step_unified_no_rad is not None:
+            _clr_fresh = "always"
+        else:
+            _clr_fresh = "cond"
+
+        # Bundle the operator-split closure statics ONCE so the module-scope
+        # single-rank physics + shared finalizer (reused by the lat-band-SPMD
+        # lane) read them off one object.  ``_step_unified`` / ``forcing`` /
+        # ``_ghg_vmr_override`` depend on this forcing, so the bundle is per
+        # ``_make_single_step`` call.
+        # Byte-identical to the former inline ``_SplitStepStatics(...)`` literal:
+        # the factory wraps the scalar constants with the SAME ``jnp.asarray``
+        # (raw ``dt``/``tau_*``/``C_*``/``fric_decay`` -> the wrapped ``_dt``/
+        # ``_tau_*``/... values).  Shared with the lat-band-SPMD driver lane.
+        _split_statics = build_operator_split_statics(
+            step_unified=_step_unified,
+            forcing=forcing,
+            lat=lat, lon=lon, dt=dt,
+            tau_equator=tau_equator, tau_pole=tau_pole,
+            sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+            C_H=C_H, C_E=C_E,
+            albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
+            ghg_vmr_override=_ghg_vmr_override,
+            hs_newtonian_relax=hs_newtonian_relax,
+            energy_consistent_moisture_clip=energy_consistent_moisture_clip,
+            do_sat_adjust=do_sat_adjust,
+            fix_moisture=fix_moisture,
+            sigma_full=sigma_full, dsigma=dsigma, grid=grid,
+            owned_mask=_owned_mask,
+            qv_smooth_coeff=qv_smooth_coeff,
+            fric_decay=fric_decay,
+            hyperdiffusion_3d=hyperdiffusion_3d,
+            pipeline=pipeline, clear_sky_fresh=_clr_fresh,
+        )
+
         def _single_step(carry: SegmentCarry, _unused) -> tuple:
             """One atmosphere step: dynamics → physics → fixers."""
             step_idx = carry.step_index
 
             # --- Dynamics ---
-            dyn_state = _dynamics_model.step(
-                _rebuild_state(carry, _dynamics_model),
-                _dt,
-            )
+            # P4 increment 1b: ``tiled_step_fn`` (built by the driver via
+            # ``make_tiled_cc_step`` when enable_tiled_dycore + sub-face
+            # tiling) replaces ONLY the dynamics core — same cc
+            # HydrostaticState contract as ``_dynamics_model.step`` (dt is
+            # baked into the tiled stage at build; the driver passes the
+            # SAME dt to both).  Physics / fixers / tracers in this scan
+            # body are untouched (they already run outside the dynamics
+            # call).
+            if tiled_step_fn is not None:
+                dyn_state = tiled_step_fn(
+                    _rebuild_state(carry, _dynamics_model,
+                                   advect_moisture=advect_moisture))
+            else:
+                dyn_state = _dynamics_model.step(
+                    _rebuild_state(carry, _dynamics_model,
+                                   advect_moisture=advect_moisture),
+                    _dt,
+                )
 
             T_new = dyn_state.T.data
             u_new = dyn_state.u.data
             v_new = dyn_state.v.data
             p_s_new = dyn_state.p_s.data
+
+            # --- Advected moisture (issue #771) ---
+            # With advect_moisture the tracers rode ``dyn_state`` through the
+            # PE step (resolved-wind transport, same MPAS Phase B design); the
+            # physics update below then acts on the POST-ADVECTION fields.
+            # With the flag off these aliases are exactly the carry fields, so
+            # every downstream line is byte-identical to the legacy
+            # column-locked behaviour.
+            if advect_moisture:
+                _adv = dyn_state.tracers
+                q_v_dyn = _adv["q_v"].data
+                q_c_dyn = _adv["q_c"].data
+                q_r_dyn = _adv["q_r"].data
+                # Tracers NOT in the advected set (per-volume N_c/N_r are
+                # intentionally excluded, #772 review) fall back to their carry
+                # value — i.e. they stay column-locked — NOT to None, which
+                # would drop the double-moment number fields on an opt-in run.
+                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
+                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
+                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
+                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else carry.N_c
+                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else carry.N_r
+                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else carry.N_i
+            else:
+                q_v_dyn, q_c_dyn, q_r_dyn = carry.q_v, carry.q_c, carry.q_r
+                q_i_dyn, q_s_dyn, q_g_dyn = carry.q_i, carry.q_s, carry.q_g
+                N_c_dyn, N_r_dyn, N_i_dyn = carry.N_c, carry.N_r, carry.N_i
 
             # --- Dry mass fixer (target-anchored) ---
             if fix_mass:
@@ -1078,10 +1821,11 @@ def build_segment_fn(
                 # step_unified wrappers (which parse the positional tail by
                 # length) route them through **kwargs unchanged.
                 _dm_in = {}
-                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                    _fld = getattr(carry, _nm)
-                    if _fld is not None:
-                        _dm_in[_nm] = _fld[_ofi]
+                for _nm, _dyn in (("q_i", q_i_dyn), ("q_s", q_s_dyn),
+                                  ("q_g", q_g_dyn), ("N_c", N_c_dyn),
+                                  ("N_r", N_r_dyn), ("N_i", N_i_dyn)):
+                    if _dyn is not None:
+                        _dm_in[_nm] = _dyn[_ofi]
                 # Stateful-physics carries (issue #413): rank-local
                 # owned-column layout like conv_prog — passed whole,
                 # by keyword (None fields omitted; legacy wrappers
@@ -1093,7 +1837,7 @@ def build_segment_fn(
                 _ret = _step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
-                    carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
+                    q_v_dyn[_ofi], q_c_dyn[_ofi], q_r_dyn[_ofi],
                     carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -1116,6 +1860,7 @@ def build_segment_fn(
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=_T_land_in, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     conv_precip=carry.conv_precip_prev[_ofi],
                     w_land=_w_land_in, snow=_snow_in,
                     **_dm_in,
@@ -1125,6 +1870,43 @@ def build_segment_fn(
                 # wrappers leave the land tile inert.
                 _T_land_local = _ret[2] if len(_ret) > 2 else _T_land_in
 
+                # --- Clear-sky TOA second radiation pass, owned faces (#843) ---
+                # Same owned-face state _step_unified's all-sky radiation saw,
+                # clouds OFF.  "hold" mode (feature off / no-rad variant) runs
+                # no extra RRTMGP -> byte-identical + body_no_rad stays clean.
+                def _compute_fresh_clr_owned():
+                    (_c0, _c1, _c2, _sw_clr, _lw_clr, _c5, _c6, _c7) = \
+                        pipeline.compute_radiation_core(
+                            T_new[_ofi], p_s_new[_ofi], q_v_dyn[_ofi],
+                            forcing.sst, forcing.sic, lat, lon,
+                            _doy_step, _sod_step,
+                            forcing.solar_weights, forcing.s_0,
+                            forcing.o3_vmr, forcing.aerosol_od,
+                            aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                            tau_equator=_tau_equator, tau_pole=_tau_pole,
+                            albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                            ghg_vmr_override=_ghg_vmr_override,
+                            q_c=None, q_i=None, N_c=None, N_i=None,
+                            cloud_scheme="none",
+                            u=u_new[_ofi], v=v_new[_ofi], dt=_dt,
+                            T_land=_T_land_in, land_ml=carry.land_ml,
+                            land_ml_params=forcing.land_ml_params,
+                            sfc_albedo_override=forcing.sfc_albedo_override,
+                            sfc_T_override=forcing.sfc_T_override,
+                            sfc_emissivity_override=forcing.sfc_emissivity_override,
+                            conv_precip=carry.conv_precip_prev[_ofi],
+                            w_land=_w_land_in, snow=_snow_in,
+                        )
+                    _dt_h = carry.held_sw_up_toa_clr.dtype
+                    return _sw_clr.astype(_dt_h), _lw_clr.astype(_dt_h)
+
+                _sw_clr_owned, _lw_clr_owned = _clear_sky_toa_pass(
+                    _clr_fresh, need_rad,
+                    carry.held_sw_up_toa_clr[_ofi],
+                    carry.held_lw_up_toa_clr[_ofi],
+                    _compute_fresh_clr_owned,
+                )
+
                 # Write physics tendencies back at owned indices.
                 # Non-owned faces keep dynamics-only values (no physics).
                 _phys_dT = phys_out.dT_dt
@@ -1132,7 +1914,7 @@ def build_segment_fn(
                     _phys_dT = _phys_dT + hs_newtonian_relax(
                         T_new[_ofi], p_s_new[_ofi], lat[_ofi])
                 _T_owned = T_new[_ofi] + _dt * _phys_dT
-                _qv_raw = carry.q_v[_ofi] + _dt * phys_out.dq_v_dt
+                _qv_raw = q_v_dyn[_ofi] + _dt * phys_out.dq_v_dt
                 if energy_consistent_moisture_clip:
                     # Issue #323: keep the q_v floor moist-static-energy
                     # neutral (remove the latent heat of the clipped vapour
@@ -1144,28 +1926,31 @@ def build_segment_fn(
                 else:
                     _qv_owned = jnp.maximum(_qv_raw, 0.0)
                 T_upd = T_new.at[_ofi].set(_T_owned)
-                q_v_upd = carry.q_v.at[_ofi].set(_qv_owned)
-                q_c_upd = carry.q_c.at[_ofi].set(
-                    jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
+                q_v_upd = q_v_dyn.at[_ofi].set(_qv_owned)
+                q_c_upd = q_c_dyn.at[_ofi].set(
+                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
                 )
-                q_r_upd = carry.q_r.at[_ofi].set(
-                    jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
+                q_r_upd = q_r_dyn.at[_ofi].set(
+                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
                 )
                 # Double-moment tracers (None unless populated): evolve at owned
                 # indices from the matching microphysics tendencies, clipped
-                # non-negative like q_c/q_r.
+                # non-negative like q_c/q_r.  Base = the (possibly advected)
+                # _dyn alias so non-owned faces keep dynamics-only values.
                 def _dm_upd_owned(fld, tend):
                     return (None if fld is None else fld.at[_ofi].set(
                         jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
-                q_i_upd = _dm_upd_owned(carry.q_i, phys_out.dq_i_dt)
-                q_s_upd = _dm_upd_owned(carry.q_s, phys_out.dq_s_dt)
-                q_g_upd = _dm_upd_owned(carry.q_g, phys_out.dq_g_dt)
-                N_c_upd = _dm_upd_owned(carry.N_c, phys_out.dN_c_dt)
-                N_r_upd = _dm_upd_owned(carry.N_r, phys_out.dN_r_dt)
-                N_i_upd = _dm_upd_owned(carry.N_i, phys_out.dN_i_dt)
+                q_i_upd = _dm_upd_owned(q_i_dyn, phys_out.dq_i_dt)
+                q_s_upd = _dm_upd_owned(q_s_dyn, phys_out.dq_s_dt)
+                q_g_upd = _dm_upd_owned(q_g_dyn, phys_out.dq_g_dt)
+                N_c_upd = _dm_upd_owned(N_c_dyn, phys_out.dN_c_dt)
+                N_r_upd = _dm_upd_owned(N_r_dyn, phys_out.dN_r_dt)
+                N_i_upd = _dm_upd_owned(N_i_dyn, phys_out.dN_i_dt)
                 conv_prog_upd = phys_out.conv_prog
 
-                # Held radiation: update at owned indices
+                # Held radiation: update at owned indices.  Positions 6/7 =
+                # clear-sky TOA up-fluxes (#843), scattered like the all-sky
+                # held fields (finalize_split_step writes them into the carry).
                 held_new = (
                     carry.held_dT_rad.at[_ofi].set(held_new_local[0]),
                     carry.held_sw_net_sfc.at[_ofi].set(held_new_local[1]),
@@ -1173,6 +1958,8 @@ def build_segment_fn(
                     carry.held_sw_up_toa.at[_ofi].set(held_new_local[3]),
                     carry.held_lw_up_toa.at[_ofi].set(held_new_local[4]),
                     carry.held_sw_down_toa.at[_ofi].set(held_new_local[5]),
+                    carry.held_sw_up_toa_clr.at[_ofi].set(_sw_clr_owned),
+                    carry.held_lw_up_toa_clr.at[_ofi].set(_lw_clr_owned),
                 )
 
                 # Precip: update at owned indices
@@ -1202,6 +1989,12 @@ def build_segment_fn(
                     held_new_local[4] * _dt)
                 sw_down_toa_accum = carry.sw_down_toa_accum.at[_ofi].add(
                     held_new_local[5] * _dt)
+                # Clear-sky TOA up-flux integral at owned indices (#843):
+                # owned-face-local clear-sky values (zeros when off).
+                sw_up_toa_clr_accum = carry.sw_up_toa_clr_accum.at[_ofi].add(
+                    _sw_clr_owned * _dt)
+                lw_up_toa_clr_accum = carry.lw_up_toa_clr_accum.at[_ofi].add(
+                    _lw_clr_owned * _dt)
                 t_low_accum = carry.t_low_accum.at[_ofi].add(
                     T_upd[_ofi][..., -1] * _dt)
 
@@ -1210,9 +2003,14 @@ def build_segment_fn(
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
                 )
-                # multilayer land tile is single-rank only (calibration) -> carry the
-                # state through unchanged on the MPI/owned-face path.
-                land_ml_new = carry.land_ml
+                # Multilayer land: capture the advanced state (step_unified's
+                # optional 4th return), identical to the single-rank path
+                # (_step_split_physics_and_finalize).  ``carry.land_ml`` is the
+                # rank-local owned-face columns (scattered in
+                # ModelDriver._setup_parallel), so _step_unified advanced THIS
+                # rank's soil columns; capture them instead of discarding.  When
+                # land_ml is None (slab land) the else-branch carries None.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
                 # Soil-water bucket: w_land_new rides PhysicsOutput
                 # (advanced in physics_step_no_rad), scattered at owned
                 # indices.  Carried through unchanged for legacy wrappers
@@ -1231,219 +2029,47 @@ def build_segment_fn(
                         and phys_out.snow is not None)
                     else carry.snow
                 )
+                # Package the owned-face outputs into the shared bundle so the
+                # SINGLE-source finalizer runs the identical tail on both paths.
+                lz = _SplitStepLocals(
+                    u_new=u_new, v_new=v_new, p_s_new=p_s_new,
+                    T_upd=T_upd, q_v_upd=q_v_upd,
+                    q_c_upd=q_c_upd, q_r_upd=q_r_upd,
+                    q_i_upd=q_i_upd, q_s_upd=q_s_upd, q_g_upd=q_g_upd,
+                    N_c_upd=N_c_upd, N_r_upd=N_r_upd, N_i_upd=N_i_upd,
+                    conv_prog_upd=conv_prog_upd, held_new=held_new,
+                    precip_accum=precip_accum,
+                    conv_precip_prev_new=conv_precip_prev_new,
+                    shflx_accum=shflx_accum, lhflx_accum=lhflx_accum,
+                    sw_net_sfc_accum=sw_net_sfc_accum,
+                    lw_net_sfc_accum=lw_net_sfc_accum,
+                    sw_up_toa_accum=sw_up_toa_accum,
+                    lw_up_toa_accum=lw_up_toa_accum,
+                    sw_up_toa_clr_accum=sw_up_toa_clr_accum,
+                    lw_up_toa_clr_accum=lw_up_toa_clr_accum,
+                    sw_down_toa_accum=sw_down_toa_accum,
+                    t_low_accum=t_low_accum,
+                    T_land_new=T_land_new, land_ml_new=land_ml_new,
+                    w_land_new=w_land_new, snow_new=snow_new,
+                    phys_tke=phys_out.tke, phys_qke=phys_out.qke,
+                    phys_gwd=phys_out.gwd_spectrum,
+                    phys_cloud_fraction=phys_out.cloud_fraction,
+                )
             else:
-                _dm_in = {}
-                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
-                            "tke", "qke", "gwd_spectrum"):
-                    _fld = getattr(carry, _nm)
-                    if _fld is not None:
-                        _dm_in[_nm] = _fld
-                _ret = _step_unified(
-                    need_rad,
-                    T_new, p_s_new,
-                    carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
-                    u_new, v_new,
-                    forcing.sst, forcing.sic, lat, lon,
-                    _doy_step, _sod_step, _dt,
-                    forcing.solar_weights, forcing.s_0,
-                    forcing.o3_vmr, forcing.aerosol_od,
-                    carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
-                    carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
-                    tau_equator=_tau_equator, tau_pole=_tau_pole,
-                    sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
-                    C_H=_C_H, C_E=_C_E,
-                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
-                    ghg_vmr_override=_ghg_vmr_override,
-                    aerosol_lw_od=forcing.aerosol_lw_od,
-                    sfc_albedo_override=forcing.sfc_albedo_override,
-                    sfc_T_override=forcing.sfc_T_override,
-                    sfc_emissivity_override=forcing.sfc_emissivity_override,
-                    sfc_shflx_override=forcing.sfc_shflx_override,
-                    sfc_lhflx_override=forcing.sfc_lhflx_override,
-                    T_land=carry.T_land, land_ml=carry.land_ml,
-                    conv_precip=carry.conv_precip_prev,
-                    w_land=carry.w_land, snow=carry.snow,
-                    **_dm_in,
-                )
-                phys_out, held_new = _ret[0], _ret[1]
-                # ``step_unified`` returns a 3rd value (the slab-land skin
-                # temperature, #325) for the PhysicsPipeline build; legacy
-                # 2-tuple wrappers (neural / SFNO training) leave the land
-                # tile inert by carrying ``T_land`` through unchanged.
-                T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
-                # optional 4th value: the advanced MULTILAYER land state (when the
-                # multilayer tile is active); else carry the (None / unused) state on.
-                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
-                # Soil-water bucket rides PhysicsOutput (advanced in
-                # physics_step_no_rad); carried through for legacy wrappers.
-                w_land_new = (phys_out.w_land
-                              if phys_out.w_land is not None
-                              else carry.w_land)
-                snow_new = (phys_out.snow
-                            if phys_out.snow is not None
-                            else carry.snow)
+                # Single-rank (single-controller / lat-band-SPMD) operator-split
+                # physics — the module-scope body the SPMD lane reuses verbatim.
+                # ``moist`` passes the post-advection aliases (issue #771); with
+                # advect_moisture off they ARE carry.q_* -> byte-identical.
+                lz = split_physics_single_rank(
+                    carry, T_new, u_new, v_new, p_s_new,
+                    need_rad, _doy_step, _sod_step, _split_statics,
+                    moist={"q_v": q_v_dyn, "q_c": q_c_dyn, "q_r": q_r_dyn,
+                           "q_i": q_i_dyn, "q_s": q_s_dyn, "q_g": q_g_dyn,
+                           "N_c": N_c_dyn, "N_r": N_r_dyn, "N_i": N_i_dyn})
 
-                # --- State update ---
-                _phys_dT_dt = phys_out.dT_dt
-                if hs_newtonian_relax is not None:
-                    _phys_dT_dt = _phys_dT_dt + hs_newtonian_relax(T_new, p_s_new, lat)
-                T_upd = T_new + _dt * _phys_dT_dt
-                _qv_raw = carry.q_v + _dt * phys_out.dq_v_dt
-                if energy_consistent_moisture_clip:
-                    # Issue #323: see owned-face branch — keep the q_v floor
-                    # moist-static-energy neutral by removing the latent heat
-                    # of the clipped (un-removed) vapour sink.
-                    q_v_upd, T_upd = energy_consistent_moisture_floor(
-                        _qv_raw, T_upd)
-                else:
-                    q_v_upd = jnp.maximum(_qv_raw, 0.0)
-                q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
-                q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
-                def _dm_upd(fld, tend):
-                    return (None if fld is None
-                            else jnp.maximum(fld + _dt * tend, 0.0))
-                q_i_upd = _dm_upd(carry.q_i, phys_out.dq_i_dt)
-                q_s_upd = _dm_upd(carry.q_s, phys_out.dq_s_dt)
-                q_g_upd = _dm_upd(carry.q_g, phys_out.dq_g_dt)
-                N_c_upd = _dm_upd(carry.N_c, phys_out.dN_c_dt)
-                N_r_upd = _dm_upd(carry.N_r, phys_out.dN_r_dt)
-                N_i_upd = _dm_upd(carry.N_i, phys_out.dN_i_dt)
-                conv_prog_upd = phys_out.conv_prog
-
-                # --- Accumulate precipitation ---
-                precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
-                precip_accum = carry.precip_accum + precip_step * _dt
-                # Lag this step's total precip for next step's convective cloud.
-                conv_precip_prev_new = precip_step
-
-                # --- Accumulate surface heat fluxes ---
-                _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new)
-                _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new)
-                shflx_accum = carry.shflx_accum + _sh * _dt
-                lhflx_accum = carry.lhflx_accum + _lh * _dt
-
-                # --- Time-integrate radiative fluxes + lowest-level T ---
-                # (segment-mean diagnostics; CMOR diurnal-alias fix).
-                # held_new order: (dT_rad, sw_net_sfc, lw_net_sfc,
-                # sw_up_toa, lw_up_toa, sw_down_toa) — signs unchanged.
-                sw_net_sfc_accum = carry.sw_net_sfc_accum + held_new[1] * _dt
-                lw_net_sfc_accum = carry.lw_net_sfc_accum + held_new[2] * _dt
-                sw_up_toa_accum = carry.sw_up_toa_accum + held_new[3] * _dt
-                lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * _dt
-                sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * _dt
-                t_low_accum = carry.t_low_accum + T_upd[..., -1] * _dt
-
-            # --- Saturation adjustment ---
-            if do_sat_adjust:
-                p_full = p_s_new[..., None] * sigma_full
-                q_sat = saturation_mixing_ratio(T_upd, p_full)
-                excess = jnp.maximum(q_v_upd - q_sat, 0.0)
-                q_v_upd = q_v_upd - excess
-                T_upd = T_upd + constants.L_v * excess / constants.c_pd
-
-            # --- Moisture fixer (uses fixed target from initialization) ---
-            if fix_moisture:
-                q_v_upd = fix_moisture_hydrostatic(
-                    q_v_upd, carry.target_moisture,
-                    p_s_new, dsigma, grid,
-                    owned_mask=_owned_mask,
-                )
-
-            # --- Moisture smoothing ---
-            q_v_upd = jnp.maximum(
-                q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
-                0.0,
-            )
-
-            # --- Rayleigh friction ---
-            u_upd = u_new * _fric_decay
-            v_upd = v_new * _fric_decay
-
-            # CFL is computed at segment boundary (host-side) from the
-            # final carry's wind fields, not inside the hot loop.
-            max_cfl = carry.max_cfl
-
-            # Cast all arrays back to carry input dtypes to prevent
-            # float32→float64 promotion from Python float constants
-            # (e.g., constants.L_v, constants.c_pd) breaking jax.lax.scan.
-            new_carry = SegmentCarry(
-                u=_match_dtype(u_upd, carry.u),
-                v=_match_dtype(v_upd, carry.v),
-                T=_match_dtype(T_upd, carry.T),
-                p_s=_match_dtype(p_s_new, carry.p_s),
-                phis=carry.phis,
-                q_v=_match_dtype(q_v_upd, carry.q_v),
-                q_c=_match_dtype(q_c_upd, carry.q_c),
-                q_r=_match_dtype(q_r_upd, carry.q_r),
-                conv_prog=_match_dtype(conv_prog_upd, carry.conv_prog),
-                held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
-                held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
-                held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
-                held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
-                held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
-                held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
-                step_index=step_idx + 1,
-                target_moisture=carry.target_moisture,
-                target_mass=carry.target_mass,
-                max_cfl=max_cfl,
-                precip_accum=_match_dtype(precip_accum, carry.precip_accum),
-                shflx_accum=_match_dtype(shflx_accum, carry.shflx_accum),
-                lhflx_accum=_match_dtype(lhflx_accum, carry.lhflx_accum),
-                sw_up_toa_accum=_match_dtype(
-                    sw_up_toa_accum, carry.sw_up_toa_accum),
-                lw_up_toa_accum=_match_dtype(
-                    lw_up_toa_accum, carry.lw_up_toa_accum),
-                sw_down_toa_accum=_match_dtype(
-                    sw_down_toa_accum, carry.sw_down_toa_accum),
-                sw_net_sfc_accum=_match_dtype(
-                    sw_net_sfc_accum, carry.sw_net_sfc_accum),
-                lw_net_sfc_accum=_match_dtype(
-                    lw_net_sfc_accum, carry.lw_net_sfc_accum),
-                t_low_accum=_match_dtype(t_low_accum, carry.t_low_accum),
-                T_land=(None if carry.T_land is None
-                        else _match_dtype(T_land_new, carry.T_land)),
-                q_i=(None if carry.q_i is None
-                     else _match_dtype(q_i_upd, carry.q_i)),
-                q_s=(None if carry.q_s is None
-                     else _match_dtype(q_s_upd, carry.q_s)),
-                q_g=(None if carry.q_g is None
-                     else _match_dtype(q_g_upd, carry.q_g)),
-                N_c=(None if carry.N_c is None
-                     else _match_dtype(N_c_upd, carry.N_c)),
-                N_r=(None if carry.N_r is None
-                     else _match_dtype(N_r_upd, carry.N_r)),
-                N_i=(None if carry.N_i is None
-                     else _match_dtype(N_i_upd, carry.N_i)),
-                # Stateful-physics carries (issue #413): REPLACED by the
-                # updated values riding PhysicsOutput.  A legacy 2-tuple
-                # wrapper (neural / SFNO training) that rebuilds
-                # PhysicsOutput without the carry fields returns None —
-                # carry the input through unchanged rather than break
-                # the scan pytree (those paths only build with
-                # diagnostic turbulence, so the carry is inert there).
-                tke=(None if carry.tke is None
-                     else _match_dtype(
-                         phys_out.tke if phys_out.tke is not None
-                         else carry.tke, carry.tke)),
-                qke=(None if carry.qke is None
-                     else _match_dtype(
-                         phys_out.qke if phys_out.qke is not None
-                         else carry.qke, carry.qke)),
-                gwd_spectrum=(None if carry.gwd_spectrum is None
-                              else _match_dtype(
-                                  phys_out.gwd_spectrum
-                                  if phys_out.gwd_spectrum is not None
-                                  else carry.gwd_spectrum,
-                                  carry.gwd_spectrum)),
-                conv_precip_prev=_match_dtype(
-                    conv_precip_prev_new, carry.conv_precip_prev),
-                land_ml=land_ml_new,
-                w_land=(None if carry.w_land is None
-                        else _match_dtype(w_land_new, carry.w_land)),
-                snow=(None if carry.snow is None
-                      else _match_dtype(snow_new, carry.snow)),
-            )
-            return new_carry, None
+            # Shared operator-split TAIL (sat-adjust, moisture fixer/smoothing,
+            # Rayleigh, carry pack) — ONE source for both branches.
+            return finalize_split_step(carry, lz, _split_statics), None
         return _single_step
 
     # Subcycling is only safe when both step_unified variants are
@@ -1495,6 +2121,11 @@ def build_segment_fn(
         """
         _step_fn = _make_single_step(forcing)
         if _resolve_checkpoint(gradient_checkpoint, n_steps):
+            # Long differentiated rollout -> nested (sqrt-N) checkpointing so the
+            # reverse-mode carry storage is O(sqrt(n_steps)), not O(n_steps) which
+            # OOMs (#841).  Short segments keep the cheap per-step remat + one scan.
+            if n_steps >= _NESTED_CKPT_STEPS:
+                return _sqrt_checkpointed_scan(_step_fn, carry, n_steps)
             _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
@@ -1563,13 +2194,24 @@ def build_segment_fn(
         # values dynamic).
         _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
 
+        # Clear-sky diagnostic (#843): the unfused rad refresh runs once per
+        # radiation cycle, so a static Python gate (no need_rad — this IS the
+        # fresh-rad step) suffices.  Off (default) -> held clear-sky passes
+        # through unchanged and no 2nd RRTMGP pass is compiled.
+        _clr_on_rr = (pipeline is not None
+                      and getattr(pipeline, "_clear_sky_diag", False))
+
         # Per-step solar time (diurnal-cycle fix) — mirror ``_single_step``.
         # The unfused radiation refresh recomputes held fluxes for the upcoming
-        # no-rad cycle; use the current absolute step's wall clock so the
-        # zenith advances across cycles instead of being pinned at the
-        # segment-end time.  ``carry.step_index`` is the absolute step counter
-        # after the preceding no-rad scan.
-        _abs_day = start_day + (carry.step_index + 1) * _dt / 86400.0
+        # no-rad cycle; use the CYCLE-BOUNDARY wall clock so the zenith
+        # advances across cycles instead of being pinned at the segment-end
+        # time.  ``carry.step_index`` here counts COMPLETED steps (the
+        # preceding no-rad scan already incremented it), so the boundary time
+        # is ``step_index * dt`` — matching the fused subcycle, whose fresh
+        # radiation is computed IN the last cycle step at ``(step_idx+1)*dt``
+        # = the same boundary.  ``+1`` would sample one dt into the future
+        # (codex round-11 Medium).
+        _abs_day = start_day + carry.step_index * _dt / 86400.0
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:
@@ -1584,11 +2226,16 @@ def build_segment_fn(
             def _own(fld):
                 return None if fld is None else fld[_ofi]
 
-            # 8th return (multilayer land state) is unused on the MPI owned-face
-            # path: multilayer land is single-rank only, so land_ml_new is carried
-            # separately (= carry.land_ml) above; discard the radiation-core value.
+            # 8th return = the advanced MULTILAYER land state (carry.land_ml is
+            # the rank-local owned columns, scattered in
+            # ModelDriver._setup_parallel).  In the UNFUSED-radiation split the
+            # land tile is advanced ONLY here (radiation/surface core), never in
+            # the norad scan — so capture it; discarding it froze the soil
+            # (serial too).  The clear-sky second pass below discards its 8th
+            # (diagnostic re-run, must not re-advance).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local,
+             land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -1604,11 +2251,40 @@ def build_segment_fn(
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
                     T_land=_T_land_in, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=_own(carry.conv_precip_prev),
                     w_land=_w_land_in, snow=_snow_in,
                 )
+            # Clear-sky second pass (#843): same owned-face state, clouds OFF.
+            if _clr_on_rr:
+                (_c0, _c1, _c2, _sw_clr, _lw_clr, _c5, _c6, _c7) = \
+                    pipeline.compute_radiation_core(
+                        carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
+                        forcing.sst, forcing.sic, lat, lon,
+                        _doy_step, _sod_step,
+                        forcing.solar_weights, forcing.s_0,
+                        forcing.o3_vmr, forcing.aerosol_od,
+                        aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        tau_equator=_tau_equator, tau_pole=_tau_pole,
+                        albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                        ghg_vmr_override=_ghg_vmr_override,
+                        q_c=None, q_i=None, N_c=None, N_i=None,
+                        cloud_scheme="none",
+                        u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
+                        T_land=_T_land_in, land_ml=carry.land_ml,
+                        land_ml_params=forcing.land_ml_params,
+                        sfc_albedo_override=forcing.sfc_albedo_override,
+                        sfc_T_override=forcing.sfc_T_override,
+                        conv_precip=_own(carry.conv_precip_prev),
+                        w_land=_w_land_in, snow=_snow_in,
+                    )
+                _held_sw_clr = carry.held_sw_up_toa_clr.at[_ofi].set(_sw_clr)
+                _held_lw_clr = carry.held_lw_up_toa_clr.at[_ofi].set(_lw_clr)
+            else:
+                _held_sw_clr = carry.held_sw_up_toa_clr
+                _held_lw_clr = carry.held_lw_up_toa_clr
             held_new = (
                 carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
                 carry.held_sw_net_sfc.at[_ofi].set(sw_net_sfc),
@@ -1616,16 +2292,19 @@ def build_segment_fn(
                 carry.held_sw_up_toa.at[_ofi].set(sw_up_toa),
                 carry.held_lw_up_toa.at[_ofi].set(lw_up_toa),
                 carry.held_sw_down_toa.at[_ofi].set(sw_down_toa),
+                _held_sw_clr, _held_lw_clr,
             )
             T_land_new = (
                 carry.T_land.at[_ofi].set(T_land_new_local)
                 if carry.T_land is not None else None
             )
         else:
-            # 8th return (multilayer land state) unused on this MPI path — land_ml
-            # is single-rank only and carried separately (see land_ml_new above).
+            # 8th return = the advanced multilayer land state (see the owned-face
+            # branch above): the unfused-radiation split advances the land tile
+            # ONLY in this radiation/surface core, so capture it — discarding it
+            # froze the soil.  land_ml is None for slab-land runs (else-carry).
             (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, _) = \
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
                 pipeline.compute_radiation_core(
                     carry.T, carry.p_s, carry.q_v,
                     forcing.sst, forcing.sic, lat, lon,
@@ -1641,19 +2320,48 @@ def build_segment_fn(
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u, v=carry.v, dt=_dt,
                     T_land=carry.T_land, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=carry.conv_precip_prev,
                     w_land=carry.w_land, snow=carry.snow,
                 )
+            # Clear-sky second pass (#843): whole grid, clouds OFF.
+            if _clr_on_rr:
+                (_c0, _c1, _c2, _sw_clr, _lw_clr, _c5, _c6, _c7) = \
+                    pipeline.compute_radiation_core(
+                        carry.T, carry.p_s, carry.q_v,
+                        forcing.sst, forcing.sic, lat, lon,
+                        _doy_step, _sod_step,
+                        forcing.solar_weights, forcing.s_0,
+                        forcing.o3_vmr, forcing.aerosol_od,
+                        aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        tau_equator=_tau_equator, tau_pole=_tau_pole,
+                        albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                        ghg_vmr_override=_ghg_vmr_override,
+                        q_c=None, q_i=None, N_c=None, N_i=None,
+                        cloud_scheme="none",
+                        u=carry.u, v=carry.v, dt=_dt,
+                        T_land=carry.T_land, land_ml=carry.land_ml,
+                        land_ml_params=forcing.land_ml_params,
+                        sfc_albedo_override=forcing.sfc_albedo_override,
+                        sfc_T_override=forcing.sfc_T_override,
+                        conv_precip=carry.conv_precip_prev,
+                        w_land=carry.w_land, snow=carry.snow,
+                    )
+                _held_sw_clr, _held_lw_clr = _sw_clr, _lw_clr
+            else:
+                _held_sw_clr = carry.held_sw_up_toa_clr
+                _held_lw_clr = carry.held_lw_up_toa_clr
             held_new = (
                 dT_dt_rad, sw_net_sfc, lw_net_sfc,
                 sw_up_toa, lw_up_toa, sw_down_toa,
+                _held_sw_clr, _held_lw_clr,
             )
 
-        # Write ONLY the 6 held fields + T_land back (matched to the
-        # carry's storage dtype, like the fused write-back); every other
-        # field is the unchanged post-cycle state.
+        # Write ONLY the 6 held fields + 2 clear-sky held fields (#843) +
+        # T_land back (matched to the carry's storage dtype, like the fused
+        # write-back); every other field is the unchanged post-cycle state.
         return carry._replace(
             held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
             held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
@@ -1661,8 +2369,17 @@ def build_segment_fn(
             held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
             held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
             held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
+            held_sw_up_toa_clr=_match_dtype(
+                held_new[6], carry.held_sw_up_toa_clr),
+            held_lw_up_toa_clr=_match_dtype(
+                held_new[7], carry.held_lw_up_toa_clr),
             T_land=(None if carry.T_land is None
                     else _match_dtype(T_land_new, carry.T_land)),
+            # Advanced multilayer land state (rank-local owned columns under
+            # cube-face MPI; None for slab-land runs).  Without this the
+            # unfused-radiation path never wrote the stepped soil back and the
+            # Richards state froze across the whole run.
+            land_ml=land_ml_new,
         )
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
@@ -2112,12 +2829,33 @@ def build_segment_fn(
     return run_segment_jit
 
 
-def _rebuild_state(carry: SegmentCarry, model):
+# Moisture tracers eligible for dycore advection, in carry-field order.
+# q_v/q_c/q_r are always present on moist runs; the double-moment fields
+# are None for warm-rain runs (their None-ness is static pytree structure,
+# so the per-name `is not None` check below is trace-safe).
+# Tracers carried through the resolved-wind advective step (#771).  Mass
+# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
+# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
+# them with the mass-mixing-ratio operator applies the wrong conservation law,
+# so they are intentionally excluded until a density-aware number transport
+# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
+_ADVECTED_TRACER_NAMES = (
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
+)
+
+
+def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
     """Rebuild the model's expected state type from raw carry arrays.
 
     The dynamics model expects a NamedTuple with Field-wrapped arrays.
     Inside lax.scan we store raw arrays, so we reconstruct the state
     type here.  This is cheap — only Python object creation, no data copy.
+
+    With ``advect_moisture=True`` (issue #771) the moisture tracers ride
+    the state as ``state.tracers`` so the primitive-equation step advects
+    them with the resolved wind (mass-consistently, via the shared
+    cubed-sphere tracer kernel — the same MPAS Phase B design).  Default
+    ``False`` keeps the legacy column-locked moisture byte-identical.
     """
     # Detect state type from model
     if hasattr(model, '_state_type'):
@@ -2133,5 +2871,19 @@ def _rebuild_state(carry: SegmentCarry, model):
     T_f = Field(carry.T, name="T", dims=("face", "x", "y", "level"), units="K")
     p_s_f = Field(carry.p_s, name="p_s", dims=("face", "x", "y"), units="Pa")
     phis_f = Field(carry.phis, name="phis", dims=("face", "x", "y"), units="m2/s2")
+
+    if advect_moisture:
+        # Only the tracer-capable dycore states reach this branch (the
+        # driver gates on cubed_sphere+cdgrid); a state type without a
+        # ``tracers`` field fails loudly here rather than silently
+        # dropping the moisture.
+        tracers = {
+            nm: Field(getattr(carry, nm), name=nm,
+                      dims=("face", "x", "y", "level"), units="kg/kg")
+            for nm in _ADVECTED_TRACER_NAMES
+            if getattr(carry, nm) is not None
+        }
+        return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f,
+                         tracers=tracers)
 
     return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f)

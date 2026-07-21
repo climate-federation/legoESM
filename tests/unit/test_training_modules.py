@@ -521,10 +521,41 @@ class TestNeuralPhysics:
         key = jax.random.PRNGKey(0)
         nn = NeuralPhysics(nlev=NLEV, key=key)
         # NeuralPhysics takes a single packed column vector
-        n_input = NLEV * 4 + 2  # T, u, v, q per level + p_s + solar
+        # T, u, v, q per level + p_s + solar + T_sfc + sic
+        n_input = NLEV * 4 + 4
+        assert nn.n_input == n_input
         x = jnp.ones(n_input)
         out = nn(x)
         assert out.shape[0] == NLEV * 4 + 6
+
+    def test_untrained_network_emits_exactly_zero_tendencies(self):
+        """Epoch-0 stability contract (#797 neural_gcm smoke loss=nan).
+
+        An UNTRAINED NeuralPhysics must emit EXACTLY zero output, so the
+        first neural_gcm rollout is the pure dycore (finite by construction).
+        residual_scale=0.01 alone is NOT near-zero in physical tendency
+        units: random O(1) outputs x 0.01 gave dq_v_dt ~ 0.04 kg/kg/s
+        against q_v ~ 1e-3 — the C32/L8 smoke rollout went non-finite
+        within 32 steps (probe job 26081628). Zero-init of the final layer
+        is the standard residual-learning guarantee.
+        """
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+        for seed in (0, 7):
+            nn = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(seed))
+            x = jnp.linspace(-1.0, 1.0, NLEV * 4 + 2)   # O(1) packed features
+            assert bool(jnp.all(nn(x) == 0.0))
+
+    def test_untrained_network_final_layer_is_trainable(self):
+        """Zero-init must not kill learning: the final layer's gradient is
+        nonzero on the first step (hidden activations are nonzero), so the
+        optimizer immediately moves it off zero and gradients then reach
+        the earlier layers."""
+        import equinox as eqx
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+        nn = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(0))
+        x = jnp.linspace(-1.0, 1.0, NLEV * 4 + 2)
+        grads = eqx.filter_grad(lambda m: jnp.mean(m(x)))(nn)
+        assert bool(jnp.any(grads.layers[-1].weight != 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -891,7 +922,7 @@ class TestERA5ToState:
 class TestTrainingDriver:
 
     def test_build_training_segment(self):
-        from legoesm.training.training_driver import _build_training_segment
+        from legoesm.training.training_driver import build_training_segment
         from legoesm.driver.physics_pipeline import PhysicsOutput
 
         class MockModel:
@@ -903,7 +934,7 @@ class TestTrainingDriver:
             p = PhysicsOutput(**_zero_physics_output(T, p_s))
             return p, (a[16], a[17], a[18], a[19], a[20], a[21])
 
-        fn = _build_training_segment(
+        fn = build_training_segment(
             MockModel(), mock_step, _GRID, _SIGMA, 600.0,
         )
         assert callable(fn)
@@ -955,7 +986,7 @@ class TestTrainingDriver:
         )
 
         def make_run_seg(trainable):
-            return td._build_training_segment(
+            return td.build_training_segment(
                 None, None, _GRID, _SIGMA, 600.0,
                 **trainable.to_segment_kwargs(),
             )

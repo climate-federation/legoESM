@@ -19,7 +19,10 @@ _FVARS = ["2m_temperature", "2m_dewpoint_temperature",
           "surface_solar_radiation_downwards", "surface_thermal_radiation_downwards",
           "total_precipitation", "surface_pressure",
           "10m_u_component_of_wind", "10m_v_component_of_wind",
-          "skin_temperature", "forecast_albedo"]
+          "skin_temperature", "forecast_albedo",
+          # soil-moisture validation targets [m3/m3]: layer 1 (0-7cm) + layer 2
+          # (7-28cm) span the offline-evolving root zone (the deep layers are pinned).
+          "volumetric_soil_water_layer_1", "volumetric_soil_water_layer_2"]
 _ARCO = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 
 

@@ -749,8 +749,21 @@ class TestMultilayerLandStep(unittest.TestCase):
             state, forcing, config, U_min=1.0, dt=600.0,
         )
 
+        # Fields WITHOUT a NamedTuple default are mandatory on every tile and
+        # must be populated arrays; the defaulted ones (``T_rad``,
+        # ``ice_concentration_thermo``) are opt-in channels that a land tile
+        # legitimately leaves as None for its consumers to fall back from.
+        # Checked this way rather than by skipping every None, so a mandatory
+        # field silently becoming None still fails.
+        optional = set(type(response)._field_defaults)
         for name in response._fields:
             arr = getattr(response, name)
+            if arr is None:
+                self.assertIn(
+                    name, optional,
+                    f"TileResponse.{name} is mandatory but was None",
+                )
+                continue
             self.assertTrue(
                 jnp.all(jnp.isfinite(arr)),
                 f"TileResponse.{name} has non-finite values",
@@ -863,7 +876,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         )
         from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
 
         # Enable stomata with Jarvis model (simple conductance reduction)
         config = MultiLayerLandConfig(stomata=StomataConfig(enabled=True))
@@ -905,6 +918,72 @@ class TestMultilayerLandStep(unittest.TestCase):
             jnp.all(ratio < 1.0 - 1e-6),
             f"q_surface/q_sat = {float(ratio.mean()):.4f}; stomata should limit"
         )
+
+
+# =========================================================================
+# root_zone_beta_soil — shared moisture-stress helper
+# =========================================================================
+
+
+class TestRootZoneBetaSoil(unittest.TestCase):
+    """Factored root-zone beta_soil helper (single source of truth)."""
+
+    def _root_frac(self, n_layers=4):
+        rf = jnp.ones(n_layers) / n_layers
+        return rf
+
+    def test_saturated_gives_one(self):
+        """theta >= theta_fc everywhere -> beta_soil == 1."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.full((2, 4), 0.4)
+        beta, _ = root_zone_beta_soil(
+            theta, self._root_frac(), 0.1, 0.35, 0.05, spatial=False)
+        npt.assert_allclose(beta, 1.0, rtol=1e-6)
+
+    def test_wilting_gives_floor(self):
+        """theta <= theta_wp everywhere -> beta_soil == beta_min."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.full((2, 4), 0.05)
+        beta, _ = root_zone_beta_soil(
+            theta, self._root_frac(), 0.1, 0.35, 0.05, spatial=False)
+        npt.assert_allclose(beta, 0.05, rtol=1e-6)
+
+    def test_linear_between(self):
+        """Half-way between wp and fc -> beta_min + 0.5*(1-beta_min)."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.full((1, 4), 0.225)  # (0.1+0.35)/2
+        beta, _ = root_zone_beta_soil(
+            theta, self._root_frac(), 0.1, 0.35, 0.05, spatial=False)
+        npt.assert_allclose(beta, 0.05 + 0.5 * 0.95, rtol=1e-4)
+
+    def test_degenerate_range_bounded(self):
+        """theta_fc <= theta_wp must not blow up beta (audit finding #6)."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.full((1, 4), 0.3)
+        beta, _ = root_zone_beta_soil(
+            theta, self._root_frac(), 0.30, 0.30, 0.05, spatial=False)
+        self.assertTrue(jnp.all(beta <= 1.0) and jnp.all(beta >= 0.05))
+
+    def test_spatial_matches_scalar(self):
+        """Per-column (spatial) path equals the scalar path for uniform params."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.array([[0.15, 0.2, 0.25, 0.3]])
+        rf = self._root_frac()
+        b_scalar, br_scalar = root_zone_beta_soil(
+            theta, rf, 0.1, 0.35, 0.05, spatial=False)
+        b_spatial, br_spatial = root_zone_beta_soil(
+            theta, rf, jnp.array([0.1]), jnp.array([0.35]), 0.05, spatial=True)
+        npt.assert_allclose(b_scalar, b_spatial, rtol=1e-9)
+        npt.assert_allclose(br_scalar, br_spatial, rtol=1e-9)
+
+    def test_matches_manual_root_weighting(self):
+        """Non-uniform root_frac: weighted mean of per-layer stress."""
+        from legoesm.land.multilayer_land import root_zone_beta_soil
+        theta = jnp.array([[0.1, 0.35, 0.35, 0.35]])  # top wilting, rest fc
+        rf = jnp.array([0.7, 0.1, 0.1, 0.1])  # top-heavy roots
+        beta, _ = root_zone_beta_soil(theta, rf, 0.1, 0.35, 0.0, spatial=False)
+        # per-layer beta_root = [0, 1, 1, 1]; w = 0.7*0 + 0.3*1 = 0.3
+        npt.assert_allclose(beta, 0.3, rtol=1e-6)
 
 
 if __name__ == "__main__":

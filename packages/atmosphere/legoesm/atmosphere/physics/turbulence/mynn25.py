@@ -15,7 +15,7 @@ must not mix schemes mid-run (which legoESM already forbids via
 
 Master length scale
 -------------------
-``L = (1/L_S + 1/L_T + 1/L_B)^-1`` (NN09 eq. 50), the harmonic mean of
+``L = (1/L_S + 1/L_T + 1/L_B)^-1`` (NN09 eq. 52), the harmonic mean of
 the surface, turbulent, and buoyancy length scales (eqs. 53–55).  A
 1-2-1 vertical smoother is applied to ``L`` (and to the stability
 functions ``SM`` / ``SH``) to damp grid-scale oscillations that the
@@ -32,11 +32,64 @@ that bridges low-turbulence regimes.  Eddy diffusivities are
 
 Boundary conditions
 -------------------
-Surface qke is the MY82 result ``qke_sfc = B1^(2/3) · u*²`` (eq. 54),
-imposed as a Dirichlet condition after diffusion.  Surface heat and
+Surface qke is the MY82/MYNN surface production-dissipation balance
+``qke_sfc = B1^(2/3) · u*²`` (an inherited MY/WRF/jax_scm ground BC, not
+an NN09-specific equation), imposed as a post-step surface reset AFTER the
+diffusion + production + dissipation update.  Surface heat and
 moisture fluxes are taken from :func:`compute_surface_fluxes` so the
 prescribed-flux / prescribed-T_s SCM forcing hooks (Phase B v2) carry
 through unchanged.  Top is zero-flux.
+
+Faithfulness to NN09 / jax_scm
+------------------------------
+Unlike the ``tke`` scheme (a MY-inspired k-l closure with CONSTANT
+diffusivity coefficients), this closure IS the algebraic level-2.5 system:
+the stability functions ``SM``/``SH`` are genuine functions of the shear
+``G_M`` and buoyancy ``G_H`` (so ``Km`` responds to the stratification).
+FAITHFUL to NN09 (forms — equation numbers verified against the NN09 paper):
+  * prognostic ``qke = q² = 2·TKE`` with dissipation ``ε = qke^{3/2}/(B1·L)`` (eq. 12),
+    entering the ``q²`` budget as ``−2ε`` (eq. 5) — the leading ``2`` is the continuum
+    ``q² = 2·TKE`` coefficient, not a numerical artifact;
+  * master length ``L = (1/L_S + 1/L_T + 1/L_B)^-1`` (eq. 52), the harmonic mean of the
+    surface (eq. 53), turbulent (eq. 54), buoyancy (eq. 55) length scales;
+  * ``L_T = 0.23·∫q z dz / ∫q dz`` (eq. 54) — the faithful discrete quadrature of NN09's
+    continuous integral (the dz-weighting IS the integral; a bare point-sum would be the
+    approximation). The half-level / end-point quadrature choice is a minor detail;
+  * algebraic level-2.5 ``SM``/``SH`` (eqs. 27-28) via the level-2 flux-Richardson
+    quadratic (appendix A) and the ``alpha_c`` rescaling (eq. 42);
+  * ``Km = L·q·SM``, ``Kh = L·q·SH``, ``Kq = L·q·(3·SM)`` (``Sq = 3·SM``, eq. 67);
+  * the NN09 closure constants ``A1``/``A2``/``B1``/``B2``/``C1``-``C5``/``gamma1`` (eq. 66;
+    ``gamma1`` in appendix A), matching jax_scm's ``MYNNParams``.
+DEPARTURES from NN09 (physics simplifications):
+  * **dry θ_v / q_v** buoyancy: NN09 is formulated in liquid-water potential temperature
+    ``θ_l`` and total water ``q_w`` with a partial-condensation (cloudy) buoyancy treatment
+    (appendix B); this implementation uses dry virtual-potential-temperature gradients and
+    ordinary water vapor — no cloud-conditional buoyancy flux;
+  * **per-column reference θ**: the buoyancy reference is each column's lowest-height
+    (surface-adjacent) ``θ_v``, a surrogate for NN09's reference state ``Θ_0`` (and for
+    jax_scm's constant-per-case ``th_ref``);
+  * the surface ``qke_sfc = B1^(2/3)·u*²`` is the **MY82/MYNN surface production-dissipation
+    balance** (an inherited MY/WRF/jax_scm ground boundary condition), NOT an NN09-specific
+    equation — imposed as a post-step surface RESET (see NUMERICS).
+NUMERICS (jax_scm-matching or AD-safety — not physics):
+  * a **1-2-1 vertical filter** on ``L``, ``SM``, ``SH`` (reflect-padded; matches jax_scm;
+    damps the grid-scale noise that ``L_B ∝ q/N`` amplifies) — no such term in NN09;
+  * ``Km``/``Kh``/``Kq`` **floored at 0**: a defensive guard on the AD-safe approximations
+    (the floored ``D25`` / discriminant / ``1−Rf`` / ``Rf2−Rf``) — the EXACT NN09 level-2.5
+    ``SM``/``SH`` are analytically nonnegative (it is the level-3 corrections ``S'_M``/``S'_H``
+    that can go negative), so this clamps numerical edge cases, not a stated anti-diffusive
+    NN09 algebra;
+  * **AD-safety**: ``_safe_pow_pos`` (floored fractional powers), the discriminant /
+    ``1−Rf`` / ``Rf2−Rf`` / ``D25`` floors, the Obukhov ``0/0`` double-``where`` guard,
+    and the ``_QKE_FLOOR`` / ``_L_FLOOR`` / ``_SMOOTH_EPS`` floors;
+  * the stability parameter ``ζ = z/L_obukhov`` is **clipped to ``[−100, 100]``** before the
+    eq-53 ``L_S`` formula (bounds L_S in extreme stability / near-zero Obukhov length);
+  * **surface qke handling**: implicit ``Kq`` diffusion, then the surface cell is OVERWRITTEN
+    with ``qke_sfc`` AFTER the diffusion + production + dissipation update (a post-step reset,
+    not a Dirichlet value inside the tridiagonal solve — a small non-conservative surface
+    adjustment that can add or remove qke; Phase-D2 follow-up); and the semi-implicit
+    linearization of the dissipation.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_mynn25_faithful.py``.
 
 References
 ----------
@@ -50,7 +103,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -86,7 +139,8 @@ __physics_contract__ = {
         "stability functions increase mixing when unstable and suppress it "
         "when stable. The column budget is OPEN: the surface flux (shflx > 0 "
         "upward, lhflx > 0 upward/moistening) is the bottom boundary condition "
-        "and a Dirichlet qke_sfc = B1^(2/3)*u*^2 is imposed at the surface; "
+        "and the surface qke is reset to qke_sfc = B1^(2/3)*u*^2 after the qke "
+        "update (a post-step reset, not a Dirichlet in the solve); "
         "top is zero-flux; z increases upward."
     ),
     "conserves": ["none"],
@@ -157,18 +211,20 @@ def _half_to_full(x_half: jax.Array, nlev: int) -> jax.Array:
 def _compute_master_length(
     q_half: jax.Array,       # (ncol, nlev-1)
     z_half_geom: jax.Array,  # (ncol, nlev-1) — geometric height above surface at interior interfaces
+    dz_half: jax.Array,      # (ncol, nlev-1) — spacing between adjacent full levels
     L_obukhov: jax.Array,    # (ncol,)
     dthv_dz_half: jax.Array, # (ncol, nlev-1)
     w_thv_sfc: jax.Array,    # (ncol,)
     th_ref: float,
     config: MYNN25Config,
 ) -> jax.Array:
-    """Master length L (NN09 eq. 50) as harmonic mean of L_S, L_T, L_B.
+    """Master length L (NN09 eq. 52) as harmonic mean of L_S, L_T, L_B.
 
     All arrays are interior half-level ``(ncol, nlev-1)``.  zeta = z/L
     is clipped to a sane range so the surface-layer L_S formula behaves
-    monotonically.  Output is unfiltered — caller applies the 1-2-1
-    smoother.
+    monotonically.  ``dz_half`` weights the L_T vertical integrals
+    (NN09 eq. 54) so the turbulent length scale is correct on stretched
+    grids.  Output is unfiltered — caller applies the 1-2-1 smoother.
     """
     eps = _SMOOTH_EPS
     # L_obukhov can be ±inf in neutral conditions; jnp handles inf safely
@@ -192,11 +248,16 @@ def _compute_master_length(
     )
     L_S = jnp.maximum(L_S, _L_FLOOR)
 
-    # Turbulent length scale L_T = 0.23 * ∫(q·z)/∫(q)  (NN09 eq. 54).
-    # Use a column-wide reduction along the half-level axis; output is a
+    # Turbulent length scale L_T = 0.23 * ∫q·z dz / ∫q dz  (NN09 eq. 54).
+    # The integrals are dz-WEIGHTED sums over the interior interfaces (WRF
+    # module_bl_mynn accumulates ``qkw*zw*dz`` / ``qkw*dz`` the same way);
+    # a bare point-sum ratio Σ(q·z)/Σ(q) equals the integral ratio only on a
+    # uniform grid and under-weights the (thicker) upper layers on the
+    # stretched vertical grids used in SCM/GCM columns.  dz cancels exactly
+    # when constant, so uniform-grid results are unchanged.  Output is a
     # per-column scalar broadcast across the half-level axis.
-    num = jnp.sum(q_half * z_half_geom, axis=-1)
-    den = jnp.sum(q_half, axis=-1)
+    num = jnp.sum(q_half * z_half_geom * dz_half, axis=-1)
+    den = jnp.sum(q_half * dz_half, axis=-1)
     L_T_col = _MYNN_LT_COEFF * num / jnp.maximum(den, eps)
     L_T = jnp.broadcast_to(
         L_T_col[:, None], q_half.shape,
@@ -328,9 +389,10 @@ def mynn25_turbulence(
     w_th_s_kin = shflx / (rho_sfc * constants.c_pd)
     w_qv_s_kin = lhflx / (rho_sfc * constants.L_v)
 
-    # Potential temperature (full levels).
-    exner = (constants.p_ref / jnp.maximum(p_full, 1.0)) ** constants.kappa
-    theta = T * exner
+    # Potential temperature (full levels) via the canonical inverse-Exner
+    # helper (exner_pref = 1/Π = (p_ref/p)^κ; same 1 Pa pressure floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
     # Buoyancy flux (virtual potential temperature) at surface.  Use
@@ -392,6 +454,7 @@ def mynn25_turbulence(
     L = _compute_master_length(
         q_half=q_half,
         z_half_geom=z_above_half,
+        dz_half=dz_half,
         L_obukhov=L_obukhov,
         dthv_dz_half=dthv_dz,
         w_thv_sfc=w_thv_sfc,
@@ -415,12 +478,13 @@ def mynn25_turbulence(
     Kh_half = L * q_half * SH
     Kq_half = L * q_half * (3.0 * SM)        # NN09 eq 67
     # Sign convention: eddy diffusivities are >= 0 (down-gradient mixing).
-    # In strongly stable layers the level-2 rescaled stability functions
-    # ``SM25``/``SH25`` numerators (only the denominator ``D25`` is floored
-    # upstream) can go NEGATIVE, giving Km/Kh<0 -> ANTI-diffusive mixing in
-    # the implicit tridiagonal solve (an upgradient flux / numerical energy
-    # source).  Floor at 0 so mixing only ever diffuses (MYNN intends K->0,
-    # not K<0, in the fully stable limit).
+    # The EXACT NN09 level-2.5 ``SM``/``SH`` are analytically nonnegative (it
+    # is the level-3 corrections ``S'_M``/``S'_H`` that can turn negative).
+    # This floor is therefore a DEFENSIVE guard on the AD-safe approximations
+    # used here (the floored ``D25`` / discriminant / ``1-Rf`` / ``Rf2-Rf``),
+    # which can yield a slightly negative ``SM25``/``SH25`` -> Km/Kh<0 ->
+    # ANTI-diffusive mixing in the implicit tridiagonal solve in numerical edge
+    # cases.  Clamp at 0 so mixing only ever diffuses (never upgradient).
     Km_half = jnp.maximum(Km_half, 0.0)
     Kh_half = jnp.maximum(Kh_half, 0.0)
     Kq_half = jnp.maximum(Kq_half, 0.0)
@@ -464,12 +528,13 @@ def mynn25_turbulence(
     q_full = _safe_pow_pos(qke, 0.5)
     diss_coeff = q_full / (config.B1 * L_full)         # 1/s; ε = qke^(3/2)/(B1·L)
 
-    # Diffuse qke explicitly with no surface flux; apply Dirichlet
-    # ``qke[-1] = B1^(2/3) · u*²`` after the implicit step.  This is
-    # the standard MYNN convention (jax_scm matches).  Approximate:
-    # introduces a small surface-cell mass loss vs a true Dirichlet
-    # tridiag, which is acceptable for SCM benchmark fidelity but a
-    # candidate for a follow-up Phase D2 hardening.
+    # Implicit Kq diffusion with NO surface flux, then OVERWRITE the surface
+    # cell with ``qke[-1] = B1^(2/3) · u*²`` AFTER the diffusion + production +
+    # dissipation update (a post-step reset, not a Dirichlet value inside the
+    # tridiagonal solve).  This is the standard MYNN convention (jax_scm
+    # matches).  Approximate: the post-step reset is non-conservative — it can
+    # add or remove surface qke vs a true in-solve Dirichlet, acceptable for
+    # SCM benchmark fidelity but a candidate for a follow-up Phase D2 hardening.
     qke_diffused = implicit_vertical_diffusion(
         qke, Kq_half, rho, dz_layer, dz_half, dt,
         surface_flux=jnp.zeros(ncol, dtype=qke.dtype),

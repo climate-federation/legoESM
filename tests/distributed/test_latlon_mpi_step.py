@@ -33,12 +33,12 @@ mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_latlon
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate

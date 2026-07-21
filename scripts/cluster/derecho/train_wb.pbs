@@ -1,0 +1,44 @@
+#!/bin/bash
+# WeatherBench scale training on NCAR Derecho (PBS Pro, 4x A100/node, Slingshot-11).
+# Submit (N nodes):  qsub -l select=<N>:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB train_wb.pbs
+# One MPI rank per GPU; ranks average gradients via mpi4jax (data-parallel).
+#PBS -A P08010000
+#PBS -N wb_scale_train
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -k eod
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+# Derecho env: repo root (/glade/work/$USER/legoESM), modules, CXI fabric tuning.
+source scripts/cluster/scaling_derecho/_env.sh
+# craype-accel-nvidia80 dropped (#817 papercut): the module no longer exists
+# on Derecho (aborts the submit under set -e) and was a no-op here anyway
+# (MPICH_GPU_SUPPORT_ENABLED is exported explicitly below).
+module load conda cuda gcc cray-mpich
+export MPICH_GPU_SUPPORT_ENABLED=1
+# Cross-node GPU-direct is broken on Slingshot/CXI -> host-staged (correct, slower).
+export MPI4JAX_USE_CUDA_MPI=0
+export JAX_PLATFORMS=cuda
+export JAX_ENABLE_X64=1
+
+# one rank per GPU; count ranks from the PBS node/gpu selection
+NRANKS=$(wc -l < "${PBS_NODEFILE}")
+echo "[$(date)] Derecho WB scale train: ${NRANKS} ranks (1 GPU each)"
+
+# PALS pins each rank to its local GPU via PALS_LOCAL_RANKID inside a wrapper.
+# WB_CORE selects the training core (#817): latlon (default, explicit C-grid)
+# or spectral (Gaussian semi-implicit — bounded adjoint, no pole dt clamp).
+mpiexec -n "${NRANKS}" --ppn 4 bash -c '
+  export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}
+  python scripts/run/train_weatherbench_scale.py \
+    --config config/wb/scale/train_07deg.yaml \
+    --mode "${WB_MODE:-neural_gcm}" \
+    --training-core "${WB_CORE:-latlon}" \
+    --out "${SCRATCH:-.}/wb_scale_${WB_MODE:-neural_gcm}_${WB_CORE:-latlon}" \
+    --resume --eval-wb2
+'
+echo "[$(date)] done"

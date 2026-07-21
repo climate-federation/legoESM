@@ -25,6 +25,14 @@ Array: TypeAlias = jax.Array
 # Below this |g| the HG inversion is replaced by the isotropic limit to avoid the
 # 1/(2g) singularity; HG -> isotropic as g -> 0 so the switch is continuous.
 _G_ISOTROPIC_EPS = 1.0e-3
+# Strict-interior cap on the asymmetry fed to the HG inverse CDF.  The mixture
+# un-mixing ``g_cloud = g / (1 - rayleigh_frac)`` can reach exactly +1 under an
+# inclusive clip, but ``henyey_greenstein_mu`` has ``s = (1-g^2)/(1-g+2gu) =
+# 0/0`` at (g=+1, u=0) — and u=0 IS attainable from ``jax.random.uniform``'s
+# [0, 1) range — which NaN-poisons the photon direction and (via jnp.where's
+# both-branch evaluation) reverse-mode AD.  Keep g strictly inside (-1, 1);
+# 1e-6 leaves ``1 - g`` well resolved in both float32 and float64.
+_HG_G_MAX = 1.0 - 1.0e-6
 
 
 def henyey_greenstein_mu(key: Array, g: Array) -> Array:
@@ -35,6 +43,11 @@ def henyey_greenstein_mu(key: Array, g: Array) -> Array:
   ``mu = 1 - 2u`` in the ``|g| < eps`` limit.
   """
   u = jax.random.uniform(key, dtype=g.dtype)
+  # Clip g off the forward/backward singularity g=+-1 at the SOURCE so EVERY
+  # caller is protected (the pure-HG ``scatter_direction`` path as well as the
+  # mixed path): at exactly g=+-1 with u=0, s=(1-g^2)/(1-g+2gu)=0/0 -> NaN. At
+  # g=_HG_G_MAX, u=0 the analytic limit is mu=-1 (finite).
+  g = jnp.clip(g, -_HG_G_MAX, _HG_G_MAX)
   # safe_g keeps the |g|<eps branch finite: jnp.where evaluates BOTH branches,
   # so a raw 1/(2g) at g=0 would yield NaN and poison reverse-mode AD even though
   # the isotropic branch is selected. Use 0.5 (NOT +-1: g=+-1 gives s=0/0 at
@@ -113,7 +126,10 @@ def scatter_direction_mixed(
         jax.random.uniform(k_cloud, dtype=dtype), r_eff, mie_cdf, mie_ang)
   else:
     one_m = jnp.clip(1.0 - rayleigh_frac, _G_ISOTROPIC_EPS, 1.0)
-    g_cloud = jnp.clip(g / one_m, -1.0, 1.0)
+    # Clip STRICTLY inside (-1, 1): g/one_m >= 1 (cloud-dominated cell) fed
+    # to the HG sampler at exactly +-1 hits the 0/0 singularity documented
+    # at _HG_G_MAX above.
+    g_cloud = jnp.clip(g / one_m, -_HG_G_MAX, _HG_G_MAX)
     mu_cloud = henyey_greenstein_mu(k_cloud, g_cloud)
   # Distinct sub-keys: jnp.where evaluates BOTH branches, so sharing one key
   # would correlate the two draws.

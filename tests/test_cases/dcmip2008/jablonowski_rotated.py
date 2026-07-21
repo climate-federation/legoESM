@@ -373,7 +373,7 @@ def rotated_baroclinic_init_spectral(
     """Rotated J-W in spectral (Gaussian) space."""
     import numpy as np
 
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
     from legoesm.grids.gaussian import (
         sh_analysis,
         sh_analysis_3d,

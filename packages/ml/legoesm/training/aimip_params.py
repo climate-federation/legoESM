@@ -558,6 +558,27 @@ def _canonical_scheme_defaults() -> dict[str, float]:
 # Spectral-PE physics builder for AIMIP classical
 # ----------------------------------------------------------------------
 
+def spatial_baselines_from_params(d: dict, radiation: str) -> dict:
+    """Map trained-scalar keys onto the spatial-surface FIELD names.
+
+    ``AIMIPSpatialSurfaceParams.evaluate(baselines=...)`` expects the field
+    names (``Cd_neutral``, ``Ch_neutral``, ``z0``, ``sfc_emissivity``,
+    ``sfc_albedo``); the trained scalars live under ``surface_*`` and the
+    radiation-scheme-specific ``{rrtmgp,gray}_sfc_*`` keys. The values are the
+    sigmoid-bounded TRACED leaves, so the scalar knobs receive gradient through
+    the spatial fields — and, because ocean columns fall back to the baseline,
+    they are the only trainable ocean-surface levers.
+    """
+    rad = "rrtmgp" if radiation == "rrtmgp" else "gray"
+    return {
+        "Cd_neutral": d["surface_Cd_neutral"],
+        "Ch_neutral": d["surface_Ch_neutral"],
+        "z0": d["surface_z0"],
+        "sfc_emissivity": d[f"{rad}_sfc_emissivity"],
+        "sfc_albedo": d[f"{rad}_sfc_albedo"],
+    }
+
+
 def make_aimip_classical_spectral_physics(
     params: AIMIPClassicalParams,
     grid,
@@ -572,6 +593,8 @@ def make_aimip_classical_spectral_physics(
     cloud_scheme: str = "xu_randall",
     land_mask: "jax.Array | None" = None,
     split_rad: bool = False,
+    rrtmgp_gpoint_checkpoint: bool = True,
+    rrtmgp_gpoint_batch_size: int = 16,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -635,7 +658,14 @@ def make_aimip_classical_spectral_physics(
     # short-circuits to False, preserving the global-scalar path.
     spatial_fields_col: dict[str, jax.Array] = {}
     if getattr(params, "spatial_surface", None) is not None and land_mask is not None:
-        baselines = params.as_dict()
+        # Alias-map the trained scalar keys onto the SPATIAL FIELD names
+        # (codex review): ``evaluate`` looks up ``Cd_neutral``/``sfc_albedo``
+        # etc. while ``as_dict`` carries ``surface_Cd_neutral`` /
+        # ``{rrtmgp,gray}_sfc_albedo``. Passing the raw dict left every
+        # baseline at the STATIC f_0 -> the trained scalars were DEAD under
+        # ``spatial_surface=True`` and (since ocean columns fall back to the
+        # baseline) the ocean surface exchange/albedo had NO trainable lever.
+        baselines = spatial_baselines_from_params(params.as_dict(), radiation)
         fields_2d = params.spatial_surface.evaluate(
             grid, land_mask=land_mask, baselines=baselines,
         )
@@ -677,8 +707,20 @@ def make_aimip_classical_spectral_physics(
         # make cloud-radiation coupling trainable end-to-end).  Mirrors
         # ``physics_pipeline._build_rrtmgp_radiation_fn`` and is required by
         # the ``make_radiation_physics`` gate-consistency check.
+        # G-point compile/memory tradeoff (exploit g-point sparsity):
+        #  * gpoint_checkpoint=True, batch=0 (legacy): scan+checkpoint per
+        #    g-point — memory-frugal but prevent_cse=True emits a distinct body
+        #    per g-point (~Ng-fold code) => multi-hour GPU compile.
+        #  * gpoint_checkpoint=False, batch=0: one reused body (fast compile)
+        #    but backward holds ALL g-points' activations => OOM (113 GiB).
+        #  * gpoint_batch_size>0 (e.g. 16): vmap g-points in blocks — ONE
+        #    compiled block body (fast compile) holding only block_size
+        #    g-points' activations (bounded memory). The middle ground that
+        #    trains: fast compile AND fits memory.
         rrtmgp_cfg = rrtmgp_cfg._replace(
             include_clouds=(cloud_scheme != "none"),
+            gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
+            gpoint_batch_size=rrtmgp_gpoint_batch_size,
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
@@ -851,11 +893,20 @@ def make_aimip_classical_spectral_physics(
         sfc_emissivity_override=_sfc_emissivity_override,
     )
 
-    def non_rad_fn(state, grid_, sigma_coord):
-        result = non_rad_raw(state, grid_, sigma_coord)
+    def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):
+        # ``phys_state`` carries the prescribed-SST anchor for the
+        # surface-flux / turbulence scheme via ``surface_T_sfc_override``
+        # (the AMIP-inference path threads a per-month ERA5 SST here);
+        # ``forcing`` is forwarded for any non-rad scheme that consumes it.
+        # Both default ``None`` -> the free-running training/eval path
+        # (``spectral_rollout`` calls ``non_rad_fn(state, grid, sigma)``),
+        # which is byte-for-byte unchanged.
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
         return result[0] if isinstance(result, tuple) else result
 
-    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0):
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
         # with signature
         # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
@@ -867,8 +918,17 @@ def make_aimip_classical_spectral_physics(
         # synthesise a zero-tendency tracer dict here when the input
         # state carries tracers, keeping the rad and non-rad
         # tendency pytrees structurally identical.
+        # Always forward BOTH the in-rollout elapsed time and the traced
+        # forcing dict.  The spectral radiation kernel resolves precedence
+        # per key: forcing['day_of_year'/'seconds_of_day'] (AMIP-inference
+        # path) override the sim_time thread ONLY when present, so a
+        # forcing dict carrying just ghg_vmr (the classical-training GHG
+        # pin) keeps the diurnal/seasonal sim_time cycle intact.  The old
+        # either/or branch dropped sim_time_seconds whenever any forcing
+        # arrived, freezing radiation time at the closure default.
         rad_out = rad_only_raw(
-            state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
+            state, grid_, sigma_coord,
+            sim_time_seconds=sim_time_seconds, forcing=forcing,
         )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}

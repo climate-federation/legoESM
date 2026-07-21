@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.ocean.eos import FreezingPointConfig
 
 
 class MPASOceanConfig(NamedTuple):
@@ -176,10 +177,13 @@ class MPASOceanConfig(NamedTuple):
                                          # lateral viscosity at low
                                          # latitudes, applied per-edge as
                                          # ``A_eff = A · (1 + boost ·
-                                         # cos²(lat_edge))``.  Affects
-                                         # BOTH ``A_h`` (3D momentum) and
-                                         # ``barotropic_u_viscosity``
-                                         # (depth-mean).  Targets the
+                                         # exp(-½(lat_edge/σ)²))`` with σ =
+                                         # ``equatorial_visc_sigma_deg``.  Applied
+                                         # to ``A_h`` (3D momentum) and to the
+                                         # IMPLICIT-CN ``barotropic_u_viscosity``
+                                         # (depth-mean); the explicit-substep
+                                         # barotropic solver uses uniform
+                                         # viscosity (no boost).  Targets the
                                          # equatorial f→0 mode that the
                                          # implicit-CN solver's Coriolis
                                          # predictor-corrector cannot
@@ -269,17 +273,20 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
-    # Distributed (MPI) implicit-CN knobs — RESERVED for future MPAS use,
-    # mirroring the lat-lon ``LatLonCGridOceanConfig`` contract.  MPAS
-    # currently runs stock CG (single-rank only): distributing the
-    # Voronoi PCG needs a halo-exchange inside ``A_op`` and owned-cell-
-    # masked reductions that aren't wired yet (see the Step-4
-    # TODO(distributed-mpas-pcg) note in barotropic_implicit_mpas.py and
-    # docs/ocean/experiments/distributed_barotropic_pcg.md).  ``fixed_iters``
-    # would target 1e-10 residual on the diagonally-dominant Voronoi
-    # Helmholtz; kept here so the config schema matches the lat-lon path.
+    # Distributed (MPI) implicit-CN knobs, mirroring the lat-lon
+    # ``LatLonCGridOceanConfig`` contract.  The distributed Voronoi PCG IS
+    # wired (barotropic_implicit_mpas.py dispatches at entry when
+    # ``initialize_voronoi_mpi`` armed a partition layout): a cell-halo
+    # exchange composed into every ``A_op`` + owned-cell-masked
+    # area-weighted dots (docs/ocean_experiments/distributed_barotropic_pcg
+    # .md).  ``fixed_iters`` targets 1e-10 residual on the diagonally-
+    # dominant Voronoi Helmholtz.  ``pcg_variant`` selects the reduction
+    # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
+    # with one batched allreduce per iteration — validated at solver entry,
+    # ValueError on unknown).
     barotropic_implicit_pcg_fixed_iters: int = 60
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    barotropic_implicit_pcg_variant: str = "standard"
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux
@@ -382,6 +389,11 @@ class MPASOceanConfig(NamedTuple):
     # applies).  Off by default so conserving runs are bit-exact unaffected.
     freeze_floor: bool = False
     freeze_floor_temp_c: float = constants.T_freeze_ocean - constants.T_freeze
+    # Seawater freezing-point (liquidus) scheme for the freeze_floor above.
+    # "constant" (default) keeps freeze_floor_temp_c byte-identical; a liquidus
+    # scheme makes the surface floor track the LOCAL surface salinity.  Consumed
+    # by ocean_model_mpas._step_impl freeze block.  MED-1.
+    freezing: FreezingPointConfig = FreezingPointConfig()
     # River-runoff depth spreading (NEMO sbcrnf rn_dep_max): when > 0 the
     # runoff freshwater dilutes the top this-many metres instead of a single
     # surface cell (Amazon plume fidelity).  Column-integral salt tendency
@@ -398,6 +410,17 @@ class MPASOceanConfig(NamedTuple):
     # nonzero runoff_depth_spread_m (resolve_runoff_spread_arg validates).
     # Column-integral salt tendency unchanged; None = legacy top-cell.
     runoff_depth_spread_map: object = None
+    # Positional-stability tail: append new fields here (never mid-class).
+    equatorial_visc_sigma_deg: float = 5.0  # Gaussian half-width [deg lat] of
+    # the equatorial viscosity boost (see ``equatorial_visc_boost``); the
+    # instability is confined to |lat| < ~10°, so the default 5° matches the
+    # lat-lon production config. Only used when ``equatorial_visc_boost > 0``.
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    # "s_ref" (default, bit-identical) = the fixed scalar above; "local" =
+    # the LOCAL top-cell salinity (NEMO tra_sbc: sfx = emp * sss) — removes
+    # the fresh-shelf over-brining of the fixed-35 closure (2026-07-18
+    # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
 
 class MPASSimpleOceanConfig(NamedTuple):
@@ -441,6 +464,14 @@ class MPASSimpleOceanConfig(NamedTuple):
         Deep layer reference temperature [K].
     tau_deep : float
         Deep layer restoring timescale [s].
+    freezing : FreezingPointConfig
+        Seawater freezing-point (liquidus) scheme for the slab/two-layer
+        freeze clamp AND its ``Q_freeze`` diagnostic.  ``"constant"``
+        (default) keeps ``T_freeze`` above byte-identical; a liquidus scheme
+        is evaluated at ``constants.S_ocean_ref`` (the slab carries no
+        prognostic salinity) via the shared owner
+        ``eos.slab_freeze_point_K`` — mirrors
+        ``SimpleOceanConfig.freezing``.  MED-1 follow-up.
     """
     mode: str = "fixed"
     sst_constant: float = 300.0
@@ -459,3 +490,6 @@ class MPASSimpleOceanConfig(NamedTuple):
     restore_deep: bool = False
     T_deep_ref: float = 278.0
     tau_deep: float = 365.25 * 86400.0
+    # Appended at the END to preserve positional construction (same convention
+    # as LatLonCGridOceanConfig field additions).
+    freezing: FreezingPointConfig = FreezingPointConfig()

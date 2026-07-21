@@ -25,7 +25,7 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state with realistic profiles."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)
@@ -217,6 +217,43 @@ class TestMicrophysicsSchemes:
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="kessler"))
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/kessler")
+
+    def test_microphysics_exports_surface_precip(self):
+        """The lean microphysics bridge carries surface precip on the combined
+        tendency (``HydrostaticTendencies.precip``) so the coupled MPAS loop can
+        export the ocean P-E / land precip forcing (the seg_precip keystone
+        residual). A supersaturated column must rain; a no-microphysics run
+        leaves precip=None (byte-identical)."""
+        from legoesm.thermo import saturation_mixing_ratio
+        state, grid, sigma = _make_hydrostatic_setup()
+        p_full = state.p_s.data[..., None] * jnp.asarray(sigma.sigma_full)
+        q_sat = saturation_mixing_ratio(state.T.data, p_full)
+        _dtype = state.T.data.dtype
+        dims4 = ("face", "x", "y", "level")
+        z = jnp.zeros_like(state.T.data)
+        # Seed rain aloft (q_r>0) so kessler sedimentation delivers surface
+        # precip within one step (a q_r=0 IC needs several steps to autoconvert
+        # + fall, so it would spuriously read zero).
+        state = state._replace(tracers={
+            "q_v": Field(data=(1.3 * q_sat).astype(_dtype), name="q_v",
+                         dims=dims4, units="kg/kg"),
+            "q_c": Field(data=(z + 1.0e-3).astype(_dtype), name="q_c",
+                         dims=dims4, units="kg/kg"),
+            "q_r": Field(data=(z + 1.0e-3).astype(_dtype), name="q_r",
+                         dims=dims4, units="kg/kg"),
+        })
+        cfg = _none_config(microphysics=MicrophysicsConfig(scheme="kessler"))
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        assert tend.precip is not None, "microphysics did not export precip"
+        assert jnp.all(jnp.isfinite(tend.precip.data))
+        assert float(jnp.sum(tend.precip.data)) > 0.0, (
+            "supersaturated column produced zero surface precip — the precip "
+            "export tap is not wired")
+        # No microphysics -> no precip channel (None default, byte-identical).
+        tend_dry, _ = make_physics(
+            _none_config(radiation=RadiationConfig(scheme="gray")),
+            "hydrostatic", dt=300.0)(state, grid, sigma)
+        assert tend_dry.precip is None
 
     def test_sundqvist(self):
         state, grid, sigma = _make_hydrostatic_setup()

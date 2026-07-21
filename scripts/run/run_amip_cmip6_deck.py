@@ -49,7 +49,7 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_FORCING = _REPO_ROOT / "forcing_amip"
+_DEFAULT_FORCING = _REPO_ROOT / "data" / "forcing_amip"
 # Public Analysis-Ready Cloud-Optimized (ARCO) ERA5 on GCS — no
 # credentials required.  Used as the default ERA5 IC source so the
 # realistic --ic era5 path works out of the box (load_era5_ic handles
@@ -204,7 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--microphysics", type=str, default="morrison")
     parser.add_argument("--convection", type=str, default="sbm")
     parser.add_argument("--turbulence", type=str, default="louis")
-    parser.add_argument("--gravity-wave-drag", type=str, default="none")
+    # Match run_amip's production default: since the full-physics guard
+    # (_require_full_physics_for_amip) rejects 'none', a deck default of
+    # 'none' made every deck launch (and the all-grids smoke) die at parse
+    # time (drift caught by the 2026-07-17 AMIP audit smoke run).
+    parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
     parser.add_argument("--no-diurnal-cycle", dest="diurnal_cycle",
                         action="store_false")

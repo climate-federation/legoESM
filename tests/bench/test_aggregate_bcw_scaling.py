@@ -170,3 +170,163 @@ def test_unknown_nested_schema_is_skipped_not_atm(tmp_path):
     _write(d, "strong_scaling.json", payload)
     rows, _ = agg.collect(tmp_path)
     assert rows == []                          # skipped, not flattened as atm
+
+
+def _cs_spmd_case(res, n_ranks, sypd, backend="cpu"):
+    """A FLAT cube cs-spmd payload as emitted by
+    run_cpu_mpi_scaling.py --cs-spmd (grid_type='cubed-sphere', device
+    ladder = face divisors, resolution = face-edge N).  Measured shape:
+    job on Ginsburg C24/L10/np1 -> sypd 383.7.
+
+    Models the REAL route-B node-fill: each rung fills a 128-core node with
+    THREADS=128/N per rank, so n_cores ~ 128 for EVERY rung (N in {1,2,3,6} ->
+    {128,128,126,126}) while n_devices varies.  Emitting cpus_per_task/n_cores
+    here (as the real run does) is load-bearing: without n_devices in the dedup
+    key the near-constant n_cores collapses the 4-rung curve to ~2 points."""
+    _node_cores = 128
+    cpt = max(1, _node_cores // n_ranks)
+    return {
+        "n_ranks": n_ranks, "resolution": res, "n_levels": 10,
+        "precision": "float64", "mode": "single", "backend": backend,
+        "grid_type": "cubed-sphere", "physics_level": "none",
+        "dt_seconds": 450.0, "time_per_step_ms": 1000.0 / sypd,
+        "sypd": sypd, "total_cells": 6 * res * res * 10,
+        "mcells_per_s": 10.8, "compile_time_s": 5.0,
+        "cpus_per_task": cpt, "n_cores": n_ranks * cpt,
+        "decomposition": f"cs-spmd np{n_ranks}",
+    }
+
+
+def test_ingests_cube_cs_spmd_face_ladder(tmp_path):
+    """#764 item 1: the cube route-B throughput lane.  The flat cube
+    cs-spmd JSON (face-divisor device ladder) must normalize into cube
+    throughput rows with the right grid, distinct n_devices per rung, and
+    a single resolution_km (the ladder shares one face-edge resolution,
+    UNLIKE the latlon device axis) — so a cube curve can be plotted
+    without being overlaid on the latlon device axis."""
+    # Face-divisor ladder at a fixed face-edge resolution C48.
+    for i, n in enumerate((1, 2, 3, 6)):
+        d = tmp_path / f"cubed-sphere_none_single_r48_n{n}"
+        _write(d, "r.json", _cs_spmd_case(48, n, 40.0 - i))
+    rows, dropped = agg.collect(tmp_path)
+    assert dropped == 0
+    cube = [r for r in rows if r["grid"] == "cubed-sphere"]
+    assert {r["n_devices"] for r in cube} == {1, 2, 3, 6}
+    assert all(r["component"] == "atm" and r["case"] == "dry" for r in cube)
+    # Node-fill: every rung ~fills the 128-core node, so n_cores is nearly
+    # constant ({128,128,126,126}) — the 4 rungs survive ONLY because n_devices
+    # is in the dedup key.  Asserting the collapse condition makes this a real
+    # regression guard: revert n_devices from _key and dropped becomes 2.
+    # Tolerance = the exact node-fill remainder for this ladder (128 - the
+    # smallest N*(128//N)), not a magic 2, so a ladder/node-size change stays
+    # honest.
+    _node_cores = 128
+    _fill_spread = _node_cores - min(n * (_node_cores // n) for n in (1, 2, 3, 6))
+    assert max(r["n_cores"] for r in cube) - min(r["n_cores"] for r in cube) \
+        <= _fill_spread
+    assert len({r["n_resource"] for r in cube}) < len(cube)   # cores alone collapse
+    # One shared face-edge resolution across the whole ladder.
+    assert {r["resolution"] for r in cube} == {48}
+    assert len({r["resolution_km"] for r in cube}) == 1
+    assert all(r["resolution_km"] > 0 for r in cube)
+
+
+def test_cube_and_latlon_lanes_are_distinct_curves(tmp_path):
+    """The cube face-divisor ladder and the latlon lat-band ladder must
+    stay SEPARABLE rows (different grid) at the same device count — they
+    are different curves, not points on one device axis (#764)."""
+    # SAME resolution AND device count for both grids, so ONLY `grid`
+    # distinguishes them — a collector key that dropped `grid` but kept
+    # (resolution, n_devices) would collapse these to one row (codex
+    # round-19 Low: the prior 48-vs-96 version couldn't catch that).
+    dc = tmp_path / "cubed-sphere_none_single_r48_n6"
+    dl = tmp_path / "latlon_none_single_r48_n6"
+    _write(dc, "c.json", _cs_spmd_case(48, 6, 35.0))
+    _write(dl, "l.json", _case("latlon", "none", "single", 48, 6, "float64",
+                               60.0))
+    rows, dropped = agg.collect(tmp_path)
+    same_dev = [r for r in rows if r["n_devices"] == 6]
+    assert dropped == 0 and len(same_dev) == 2      # NOT merged into one
+    assert {r["grid"] for r in same_dev} == {"cubed-sphere", "latlon"}
+
+
+# ---------------------------------------------------------------------------
+# SPMD bench-lane JSONL ingestion (bench_*_spmd_scaling append-per-line recs)
+# ---------------------------------------------------------------------------
+
+def _spmd_rec(**over):
+    """A bench_atm_latlon_spmd_scaling-shaped flat record (one JSONL line)."""
+    rec = {
+        "mode": "strong", "n_devices": 4, "n_lat": 128, "n_lon": 256,
+        "nlev": 30, "physics": "none", "steps": 12, "platform": "gpu",
+        "steady_median_ms": 25.0,
+        "grid_type": "latlon", "resolution": 128, "n_levels": 30,
+        "precision": "float32", "physics_level": "none", "backend": "gpu",
+        "dt_seconds": 60.0, "time_per_step_ms": 25.0,
+        "total_cells": 128 * 256 * 30, "sypd": 5.67,
+        "mcells_per_s": 39.3,
+        "metadata": {"virtual_cpu_devices": False},
+    }
+    rec.update(over)
+    return rec
+
+
+def _write_jsonl(d: Path, name: str, recs: list) -> None:
+    (d / name).parent.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+
+def test_ingests_spmd_jsonl_lane(tmp_path):
+    _write_jsonl(tmp_path / "latlon_gpu_1", "spmd_scaling.jsonl", [
+        _spmd_rec(n_devices=1, sypd=2.0, mcells_per_s=10.0),
+        _spmd_rec(n_devices=4, sypd=5.67, mcells_per_s=39.3),
+    ])
+    rows, dropped = agg.collect(tmp_path)
+    assert dropped == 0
+    assert len(rows) == 2
+    by_n = {r["n_devices"]: r for r in rows}
+    # n_devices (NOT n_ranks/process count) is the ladder axis: a single-
+    # process 4-device SPMD run must land at n=4.
+    assert set(by_n) == {1, 4}
+    assert by_n[4]["backend"] == "GPU"       # from the 'backend'/'platform' key
+    assert by_n[4]["sypd"] == 5.67           # SYPD now present for latlon GPU
+    assert by_n[4]["mcells_per_s"] == 39.3
+    assert by_n[4]["component"] == "atm"
+    assert by_n[4]["grid"] == "latlon"
+
+
+def test_spmd_jsonl_ocean_component_is_kept(tmp_path):
+    _write_jsonl(tmp_path / "ocean_gpu_1", "ocean_spmd.jsonl", [
+        _spmd_rec(component="ocean", grid_type="latlon", sypd=1.5),
+    ])
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["component"] == "ocean"
+    assert rows[0]["case"] == "ocean"
+
+
+def test_spmd_jsonl_virtual_cpu_proxy_rows_are_skipped(tmp_path):
+    # Forced host-platform CPU devices = communication-overhead proxy, not
+    # hardware scaling; the aggregator must never chart it as a CPU curve.
+    _write_jsonl(tmp_path / "latlon_cpu_1", "spmd_scaling.jsonl", [
+        _spmd_rec(platform="cpu", backend="cpu",
+                  metadata={"virtual_cpu_devices": True}),
+    ])
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []
+
+
+def test_spmd_jsonl_skips_ab_and_val_dirs(tmp_path):
+    _write_jsonl(tmp_path / "_ab_fused" / "x", "spmd.jsonl", [_spmd_rec()])
+    _write_jsonl(tmp_path / "val_smoke", "spmd.jsonl", [_spmd_rec()])
+    rows, _ = agg.collect(tmp_path)
+    assert rows == []
+
+
+def test_spmd_jsonl_blank_and_corrupt_lines_are_skipped(tmp_path):
+    p = tmp_path / "latlon_gpu_1"
+    p.mkdir(parents=True)
+    (p / "spmd.jsonl").write_text(
+        json.dumps(_spmd_rec()) + "\n\nnot-json{{{\n")
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1

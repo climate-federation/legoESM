@@ -12,7 +12,6 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.operators import laplacian_compact
 from legoesm.core.operators_3d import laplacian_compact_3d
-from legoesm.core.fv_tp_2d import transport_step
 from legoesm.grids.halo import (
     pad_halo,
     pad_halo_4d,
@@ -66,9 +65,7 @@ def _broadcast_metric(metric, field):
 
 def _ppm_reconstruct_1d(q, *, axis: int,
                         apply_fortran_xppm_boundary: bool = False,
-                        n_interior: int | None = None,
-                        fortran_faithful_ppm_left: bool = False,
-                        fortran_faithful_ppm_right: bool = False):
+                        n_interior: int | None = None):
     """PPM face-value reconstruction along axis (Colella & Woodward 1984).
 
     iter-509 (Codex): axis is REQUIRED kwonly to prevent the iter-505/506/508 axis-default bug.
@@ -117,84 +114,39 @@ def _ppm_reconstruct_1d(q, *, axis: int,
         c3 = 5.0 / 14.0
         n_int = int(n_interior)
 
-        if fortran_faithful_ppm_left:
-            # iter-900 LEFT Fortran-faithful (tp_core.F90:359-362). Hypothesis A:
-            # al(0)=c1*q1(-2)+c2*q1(-1)+c3*q1(0); al(1)=xt clipped to min/max(q1(-1..2));
-            # al(2)=c3*q1(1)+c2*q1(2)+c1*q1(3). q_face[2/3/4] = al(0/1/2).
-            face_al0 = (c1 * q_pad[..., 2] + c2 * q_pad[..., 3]
-                        + c3 * q_pad[..., 4])
-            xt_L = (0.75 * (q_pad[..., 4] + q_pad[..., 5])
-                    - 0.25 * (q_pad[..., 3] + q_pad[..., 6]))
-            q_lo_L = jnp.minimum(
-                jnp.minimum(q_pad[..., 3], q_pad[..., 4]),
-                jnp.minimum(q_pad[..., 5], q_pad[..., 6]))
-            q_hi_L = jnp.maximum(
-                jnp.maximum(q_pad[..., 3], q_pad[..., 4]),
-                jnp.maximum(q_pad[..., 5], q_pad[..., 6]))
-            face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
-            face_al2 = (c3 * q_pad[..., 5] + c2 * q_pad[..., 6]
-                        + c1 * q_pad[..., 7])
+        # iter-892 LEFT (al(1)/al(2)). 1-cell shift bug (iter-899 Hypothesis B vs A) kept as
+        # production default — measured 17% W2 v_ll_Linf reduction (iter-893).
+        xt_L = (0.75 * (q_pad[..., 3] + q_pad[..., 4])
+                - 0.25 * (q_pad[..., 2] + q_pad[..., 5]))
+        q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 2], q_pad[..., 3]),
+                              jnp.minimum(q_pad[..., 4], q_pad[..., 5]))
+        q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 2], q_pad[..., 3]),
+                              jnp.maximum(q_pad[..., 4], q_pad[..., 5]))
+        face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+        face_al2 = (c3 * q_pad[..., 4] + c2 * q_pad[..., 5]
+                    + c1 * q_pad[..., 6])
 
-            q_face = q_face.at[..., 2].set(face_al0)
-            q_face = q_face.at[..., 3].set(face_al1)
-            q_face = q_face.at[..., 4].set(face_al2)
-        else:
-            # iter-892 LEFT (al(1)/al(2)). 1-cell shift bug (iter-899 Hypothesis B vs A) kept as
-            # production default — measured 17% W2 v_ll_Linf reduction (iter-893).
-            xt_L = (0.75 * (q_pad[..., 3] + q_pad[..., 4])
-                    - 0.25 * (q_pad[..., 2] + q_pad[..., 5]))
-            q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 2], q_pad[..., 3]),
-                                  jnp.minimum(q_pad[..., 4], q_pad[..., 5]))
-            q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 2], q_pad[..., 3]),
-                                  jnp.maximum(q_pad[..., 4], q_pad[..., 5]))
-            face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
-            face_al2 = (c3 * q_pad[..., 4] + c2 * q_pad[..., 5]
-                        + c1 * q_pad[..., 6])
+        q_face = q_face.at[..., 2].set(face_al1)
+        q_face = q_face.at[..., 3].set(face_al2)
 
-            q_face = q_face.at[..., 2].set(face_al1)
-            q_face = q_face.at[..., 3].set(face_al2)
+        # iter-892 RIGHT (al(npx-1)/al(npx)). 1-cell shift bug (iter-899) kept as production default.
+        # al(npx-1) = c1*q1(npx-3)+c2*q1(npx-2)+c3*q1(npx-1)
+        face_alnm1 = (c1 * q_pad[..., n_int + 1]
+                      + c2 * q_pad[..., n_int + 2]
+                      + c3 * q_pad[..., n_int + 3])
+        # al(npx) = xt clipped to min/max(q1(npx-2..npx+1)) = q_pad[n+2..n+5]
+        xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
+                - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
+        q_lo_R = jnp.minimum(
+            jnp.minimum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+            jnp.minimum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+        q_hi_R = jnp.maximum(
+            jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+            jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+        face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
 
-        if fortran_faithful_ppm_right:
-            # iter-903 RIGHT Fortran-faithful (tp_core.F90:365-368, symmetric to iter-900 LEFT).
-            # al(npx) uses q_pad[n+6]=q1(n+1) (halo=2 limit; full faithfulness needs halo=3).
-            face_alnm1_faithful = (
-                c1 * q_pad[..., n_int + 2]
-                + c2 * q_pad[..., n_int + 3]
-                + c3 * q_pad[..., n_int + 4])
-            xt_R_faithful = (
-                0.75 * (q_pad[..., n_int + 4] + q_pad[..., n_int + 5])
-                - 0.25 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 6]))
-            q_lo_R_f = jnp.minimum(
-                jnp.minimum(q_pad[..., n_int + 3], q_pad[..., n_int + 4]),
-                jnp.minimum(q_pad[..., n_int + 5], q_pad[..., n_int + 6]))
-            q_hi_R_f = jnp.maximum(
-                jnp.maximum(q_pad[..., n_int + 3], q_pad[..., n_int + 4]),
-                jnp.maximum(q_pad[..., n_int + 5], q_pad[..., n_int + 6]))
-            face_aln_faithful = jnp.clip(
-                xt_R_faithful, q_lo_R_f, q_hi_R_f)
-
-            q_face = q_face.at[..., n_int + 2].set(face_alnm1_faithful)
-            q_face = q_face.at[..., n_int + 3].set(face_aln_faithful)
-            # iter-892 q_face[n+1] override removed — reverts to standard 4th-order interior stencil
-        else:
-            # iter-892 RIGHT (al(npx-1)/al(npx)). 1-cell shift bug (iter-899) kept as production default.
-            # al(npx-1) = c1*q1(npx-3)+c2*q1(npx-2)+c3*q1(npx-1)
-            face_alnm1 = (c1 * q_pad[..., n_int + 1]
-                          + c2 * q_pad[..., n_int + 2]
-                          + c3 * q_pad[..., n_int + 3])
-            # al(npx) = xt clipped to min/max(q1(npx-2..npx+1)) = q_pad[n+2..n+5]
-            xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
-                    - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
-            q_lo_R = jnp.minimum(
-                jnp.minimum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
-                jnp.minimum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
-            q_hi_R = jnp.maximum(
-                jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
-                jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
-            face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
-
-            q_face = q_face.at[..., n_int + 1].set(face_alnm1)
-            q_face = q_face.at[..., n_int + 2].set(face_aln)
+        q_face = q_face.at[..., n_int + 1].set(face_alnm1)
+        q_face = q_face.at[..., n_int + 2].set(face_aln)
 
     # Left and right face values for each cell
     q_L = q_face[..., :-1]  # face at i-1/2 → left face of cell i
@@ -645,6 +597,55 @@ def cgrid_gradient_2d(eta, cdgrid):
     return cgrid_gradient_2d_local(eta_pad, cdgrid.rdxc, cdgrid.rdyc)
 
 
+def cgrid_flux_divergence_sync(h_u, h_v, u_c, v_c, cdgrid):
+    """Flux-form divergence div(h·v) from face-interpolated ``h``, seam-exact.
+
+    Non-duogrid: identical to ``cgrid_divergence(h_u*u_c, h_v*v_c, cdgrid)``
+    (each panel's seam flux uses its own interpolated halo — the seam
+    mismatch is the cross-face interpolation error).  Duogrid (ng>=2): the
+    boundary fluxes of adjacent panels are averaged to a SINGLE shared value
+    via ``synchronize_cgrid_fluxes`` (same gating as
+    :func:`cgrid_mass_flux_divergence`), so the global area integral of the
+    divergence telescopes to machine zero — the PE flux-form continuity
+    relies on this for exact dry-mass conservation.  Returns +div (positive
+    = mass export).
+    """
+    dg = cdgrid.base.duogrid
+    if dg is None or dg.ng < 2:
+        return cgrid_divergence(h_u * u_c, h_v * v_c, cdgrid)
+    # Duogrid: build the raw face fluxes, average the shared panel-boundary
+    # fluxes, then difference — mirrors cgrid_mass_flux_divergence's PPM path.
+    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
+    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
+    flux_x = (h_u * u_c) * dy
+    flux_y = (h_v * v_c) * dx
+    flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, cdgrid.n)
+    net_x = flux_x[:, 1:] - flux_x[:, :-1]
+    net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+    return (net_x + net_y) / _broadcast_metric(cdgrid.base.area, net_x)
+
+
+def cgrid_interp_cc_to_faces_local(f_pad):
+    """Cell-centre → C-grid face 2-point average — leading-axis-agnostic CORE.
+
+    Takes an ALREADY-halo-padded cc field ``f_pad`` (..., A+2, B+2[, nlev])
+    and averages adjacent cells onto the C-grid faces (the same face/index
+    convention as :func:`cgrid_gradient_2d_local`, with the difference
+    replaced by the mean).  Cube analogue of the lat-lon C-grid
+    ``interp_cell_to_uface`` / ``interp_cell_to_vface_halo`` pair — used by
+    the PE flux-form continuity to put the layer thickness dp on the faces
+    the divergence operator consumes.  Shared by the global dycore (padded
+    via ``pad_halo_auto`` / the packed stage halo) and the tiled shard_map
+    stage (padded via the in-stage ``make_tiled_pad_body``), so the stencil
+    lives in ONE place.
+
+    Returns ``(f_u (..., A+1, B[, nlev]), f_v (..., A, B+1[, nlev]))``.
+    """
+    f_u = 0.5 * (f_pad[:, 1:, 1:-1] + f_pad[:, :-1, 1:-1])
+    f_v = 0.5 * (f_pad[:, 1:-1, 1:] + f_pad[:, 1:-1, :-1])
+    return f_u, f_v
+
+
 # ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
@@ -652,8 +653,6 @@ def cgrid_gradient_2d(eta, cdgrid):
 def cgrid_ppm_fluxes_core(
     h_pad, u_c, v_c, dy, dx, n_local, *, halo_in=2,
     effective_xppm_boundary=False,
-    fortran_faithful_ppm_left=False,
-    fortran_faithful_ppm_right=False,
 ):
     """Pure-array PPM upwind C-grid fluxes from an ALREADY-padded ``h``.
 
@@ -698,8 +697,6 @@ def cgrid_ppm_fluxes_core(
         h_x_strips, axis=1,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
     )
     q_R_left = q_R_x[:, h - 1:h - 1 + n + 1, :]
     q_L_right = q_L_x[:, h:h + n + 1, :]
@@ -710,8 +707,6 @@ def cgrid_ppm_fluxes_core(
         h_y_strips, axis=2,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
     )
     q_R_bottom = q_R_y[:, :, h - 1:h - 1 + n + 1]
     q_L_top = q_L_y[:, :, h:h + n + 1]
@@ -725,8 +720,6 @@ def cgrid_ppm_fluxes_core(
 def _cgrid_ppm_fluxes_2d_no_sync(
     h, u_c, v_c, h_pad, cdgrid,
     apply_fortran_xppm_boundary=False,
-    fortran_faithful_ppm_left=False,
-    fortran_faithful_ppm_right=False,
 ):
     """2D PPM flux computation WITHOUT duogrid synchronization.
 
@@ -746,15 +739,11 @@ def _cgrid_ppm_fluxes_2d_no_sync(
         h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, cdgrid.n,
         halo_in=2,
         effective_xppm_boundary=effective_xppm_boundary,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
     )
 
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
                                 apply_fortran_xppm_boundary=False,
-                                fortran_faithful_ppm_left=False,
-                                fortran_faithful_ppm_right=False,
                                 h_pad=None):
     """Conservative mass flux divergence via PPM (Colella & Woodward 1984). Halo=2. 2D/3D.
 
@@ -784,8 +773,6 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
             return _cgrid_ppm_fluxes_2d_no_sync(
                 hk, uk, vk, hk_pad, cdgrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-                fortran_faithful_ppm_right=fortran_faithful_ppm_right,
             )
 
         flux_x_t, flux_y_t = jax.vmap(flux_per_level)(
@@ -827,9 +814,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     flux_x, flux_y = cgrid_ppm_fluxes_core(
         h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, n,
         halo_in=2,
-        effective_xppm_boundary=effective_xppm_boundary,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
+        effective_xppm_boundary=effective_xppm_boundary)
 
     # Duogrid flux sync: avg boundary fluxes for mass conservation (FV3 dyn_core.F90:853-900).
     # NOT for non-duogrid: PPM boundary asymmetry is a feature; sync gives 110x W2 regression.
@@ -1052,7 +1037,7 @@ def arakawa_lamb_gradient_core(B_pad, grad_c00, grad_c01, grad_c10, grad_c11):
     2x2 box 4-pt finite-diff + :func:`_al_grad_matrix`.  ``B_pad[:, :-1, :-1]``
     keeps the trailing axis so this is ndim-agnostic (3D + 4D — bit-identical to
     the old explicit ``B.ndim`` branch).  Shared by the global wrapper
-    (default + a2b branches) and the sub-face tile kernel
+    and the sub-face tile kernel
     (``tiled_production_cdgrid.arakawa_lamb_gradient_tile_2d``)."""
     B_sw = B_pad[:, :-1, :-1]
     B_se = B_pad[:, 1:, :-1]
@@ -1065,51 +1050,13 @@ def arakawa_lamb_gradient_core(B_pad, grad_c00, grad_c01, grad_c10, grad_c11):
 
 
 def arakawa_lamb_gradient(B, cdgrid, padded=None,
-                           fortran_dir_aware_corners=False,
-                           fortran_a2b_corner_avg=False):
+                           fortran_dir_aware_corners=False):
     """4-pt Arakawa-Lamb gradient at D-grid corners via precomputed 3D Cartesian matrix.
 
     Returns (dB/dx, dB/dy_perp) in face-local basis; handles non-orthogonality at cube vertices.
     fortran_dir_aware_corners (iter-765): dir=1 (x-grad) / dir=2 (y-grad) inner fills at cube vertices.
-    fortran_a2b_corner_avg (iter-766): a2b_ord4 3-pt corner avg at 4 cube-vertex halo cells.
     """
     B_pad = padded if padded is not None else pad_halo_auto(B, cdgrid)
-
-    # iter-766: refuse iter-765 + iter-766 combination (iter-765 silently wins by mutating cube corners)
-    if fortran_a2b_corner_avg and fortran_dir_aware_corners:
-        raise ValueError(
-            "`fortran_a2b_corner_avg=True` and "
-            "`fortran_dir_aware_corners=True` both overwrite the 4 "
-            "cube-corner halo cells of the A-L gradient's padded "
-            "field.  Enabling both silently discards the a2b "
-            "mutation (iter-765's dir-aware p1/p2 construction wins).  "
-            "Pick one diagnostic at a time; do not combine.")
-
-    if fortran_a2b_corner_avg:
-        # a2b_ord4 3-pt corner avg at 4 cube vertices (a2b_edge.F90:385-388)
-        # SW: padded[0,0] = (padded[0,1] + padded[1,0] + padded[1,1])/3; symmetric for SE/NE/NW
-        if B.ndim == 3:
-            sw = (B_pad[:, 0, 1] + B_pad[:, 1, 0] + B_pad[:, 1, 1]) / 3.0
-            se = (B_pad[:, -2, 0] + B_pad[:, -1, 1] + B_pad[:, -2, 1]) / 3.0
-            nw = (B_pad[:, 0, -2] + B_pad[:, 1, -1] + B_pad[:, 1, -2]) / 3.0
-            ne = (B_pad[:, -2, -1] + B_pad[:, -1, -2] + B_pad[:, -2, -2]) / 3.0
-            B_pad = B_pad.at[:, 0, 0].set(sw)
-            B_pad = B_pad.at[:, -1, 0].set(se)
-            B_pad = B_pad.at[:, 0, -1].set(nw)
-            B_pad = B_pad.at[:, -1, -1].set(ne)
-        else:
-            sw = (B_pad[:, 0, 1, :] + B_pad[:, 1, 0, :]
-                  + B_pad[:, 1, 1, :]) / 3.0
-            se = (B_pad[:, -2, 0, :] + B_pad[:, -1, 1, :]
-                  + B_pad[:, -2, 1, :]) / 3.0
-            nw = (B_pad[:, 0, -2, :] + B_pad[:, 1, -1, :]
-                  + B_pad[:, 1, -2, :]) / 3.0
-            ne = (B_pad[:, -2, -1, :] + B_pad[:, -1, -2, :]
-                  + B_pad[:, -2, -2, :]) / 3.0
-            B_pad = B_pad.at[:, 0, 0, :].set(sw)
-            B_pad = B_pad.at[:, -1, 0, :].set(se)
-            B_pad = B_pad.at[:, 0, -1, :].set(nw)
-            B_pad = B_pad.at[:, -1, -1, :].set(ne)
 
     if fortran_dir_aware_corners:
         # Two padded variants at 4 cube vertices: dir1 (x-grad: i=0-col, one-j-inward);
@@ -1147,7 +1094,7 @@ def arakawa_lamb_gradient(B, cdgrid, padded=None,
             dB_raw_x, dB_raw_y, cdgrid.grad_c00, cdgrid.grad_c01,
             cdgrid.grad_c10, cdgrid.grad_c11)
 
-    # Default path (no cube-vertex specials; a2b pre-mutated B_pad above).
+    # Default path (no cube-vertex specials).
     return arakawa_lamb_gradient_core(
         B_pad, cdgrid.grad_c00, cdgrid.grad_c01, cdgrid.grad_c10,
         cdgrid.grad_c11)
@@ -1544,60 +1491,36 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     return u_c, v_c
 
 
-def _fortran_agrid_vector_corner_fill(u_pad, v_pad):
-    """Fortran fill_corners_agrid_r8 VECTOR (fv_mp_mod.F90:1433-1457) at 4 cube-vertex halo cells.
-
-    SW: x(0,0) = -y(0,1), y(0,0) = -x(1,0). Cross-component swap + sign flip.
-    Signs {SW: -, SE: +, NW: +, NE: -}.
-    """
-    # SW: x(0,0) = -y(0,1), y(0,0) = -x(1,0)
-    u_new_sw = -v_pad[:, 0, 1]
-    v_new_sw = -u_pad[:, 1, 0]
-    # SE (mySign=+1 for both components):
-    #   x(npx, 0) = y(npx, 1),  y(npx, 0) = x(npx-1, 0)
-    u_new_se = v_pad[:, -1, 1]
-    v_new_se = u_pad[:, -2, 0]
-    # NW (mySign=+1 for both):
-    #   x(0, npy) = y(0, npy-1),  y(0, npy) = x(1, npy)
-    u_new_nw = v_pad[:, 0, -2]
-    v_new_nw = u_pad[:, 1, -1]
-    # NE (mySign=-1 for both):
-    #   x(npx, npy) = -y(npx, npy-1),  y(npx, npy) = -x(npx-1, npy)
-    u_new_ne = -v_pad[:, -1, -2]
-    v_new_ne = -u_pad[:, -2, -1]
-
-    u_pad = u_pad.at[:, 0, 0].set(u_new_sw)
-    u_pad = u_pad.at[:, -1, 0].set(u_new_se)
-    u_pad = u_pad.at[:, 0, -1].set(u_new_nw)
-    u_pad = u_pad.at[:, -1, -1].set(u_new_ne)
-    v_pad = v_pad.at[:, 0, 0].set(v_new_sw)
-    v_pad = v_pad.at[:, -1, 0].set(v_new_se)
-    v_pad = v_pad.at[:, 0, -1].set(v_new_nw)
-    v_pad = v_pad.at[:, -1, -1].set(v_new_ne)
-    return u_pad, v_pad
-
-
 def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=constants.g, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
-    boundary_fix_skip_corners=False,
     zero_mean_correction=False,
     fortran_dir_aware_corners=False,
-    fortran_a2b_corner_avg=False,
-    fortran_vector_corner_fill=False,
     dddmp=0.0,
     apply_fortran_xppm_boundary=False,
-    fortran_faithful_ppm_left=False,
-    fortran_faithful_ppm_right=False,
-    use_fv3_dsw1_mass_transport=False,
-    dt=None,
-    dsw1_nord=2,
-    dsw1_damp_c=0.06,
-    cube_edge_softer_div_damp=False,
-    cube_edge_div_damp_factor=0.5,
-    cube_edge_div_damp_band=2,
+    d4_bg=0.0,
+    d4_nord=1,
 ):
+    # FAIL-LOUD entry guard, independent of every other gate (codex
+    # damping r1 P1-1 / r2: nesting this under div_damp>0 silently
+    # ignored d4_bg when div_damp=0): a tendency-form del-4/del-6
+    # background divergence damping here is KNOWN-INVALID — FV3's
+    # d_sw5 applies dd8 = (da_min_c*d4_bg)^(nord+1) as a POST-STEP
+    # staged index-space operator (certified translation
+    # fv3_native_d_sw.d_sw5), while terms here enter an RK3 TENDENCY
+    # and get dt-multiplied per stage (iter-758c "*dt over-damps");
+    # every enabled probe (nord 1 AND 2, 2026-07-17) went NaN by step
+    # 100.  Only d4_bg == 0.0 is valid until the staged post-step port
+    # lands.  (Damping-sign reference for that port: s = (-1)^nord —
+    # nord=1 MINUS, nord=2 PLUS.)
+    if d4_bg != 0.0:
+        raise NotImplementedError(
+            "fv3_sw_tendencies(d4_bg!=0): the tendency-form del-4/"
+            "del-6 divergence damping is invalid under RK3 (dt-"
+            "multiplied; measured NaN) — implement as the post-step "
+            "staged d_sw5 operator (fv3_native_d_sw.d_sw5 is the "
+            "certified reference) before enabling")
     """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport.
 
     Biharmonic hyperdiffusion (``hyperdiff_coeff``) IS applied at
@@ -1619,29 +1542,10 @@ def fv3_sw_tendencies(
     u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
 
     # (b) Height tendency
-    if use_fv3_dsw1_mass_transport:
-        # iter-904/904b: FV3 d_sw1 mass transport (sw_core.F90:79 → fv_tp_2d).
-        # Uses d2a2c_vect for (ut, vt) and transport_step (Lin-Rood FV + PPM).
-        # dt required; nord/damp_c forwarded per sw_core.F90:886-887.
-        if dt is None:
-            raise ValueError(
-                "`use_fv3_dsw1_mass_transport=True` requires `dt` "
-                "(forwarded automatically by `FV3EdgeShallowWaterModel.step`).")
-        from legoesm.core.fv3_sw_core import d2a2c_vect
-        _, _, _, _, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
-        h_new = transport_step(
-            h, ut, vt, dt, cdgrid,
-            nord=dsw1_nord,
-            damp_c=dsw1_damp_c,
-            apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
-        dh_dt = (h_new - h) / dt
-    else:
-        # iter-889: forward xppm_boundary for tp_core.F90:357-369 iord<7 overrides
-        dh_dt = cgrid_mass_flux_divergence(
-            h, u_c, v_c, cdgrid,
-            apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-            fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-            fortran_faithful_ppm_right=fortran_faithful_ppm_right)
+    # iter-889: forward xppm_boundary for tp_core.F90:357-369 iord<7 overrides
+    dh_dt = cgrid_mass_flux_divergence(
+        h, u_c, v_c, cdgrid,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
@@ -1652,11 +1556,9 @@ def fv3_sw_tendencies(
 
     # (d) Arakawa-Lamb gradient at D-grid corners.
     # iter-765: dir-aware halo=1 corner fill (sw_core.F90:3856-3915)
-    # iter-766: a2b_ord4 3-pt corner avg (a2b_edge.F90:385-388)
     dB_dx, dB_dy_perp = arakawa_lamb_gradient(
         B, cdgrid,
-        fortran_dir_aware_corners=fortran_dir_aware_corners,
-        fortran_a2b_corner_avg=fortran_a2b_corner_avg)
+        fortran_dir_aware_corners=fortran_dir_aware_corners)
 
     # (e) Corner winds from halo-exchanged cc velocities.
     # Same stagger for vorticity + gradient: consistent interp errors cancel in geostrophic balance
@@ -1670,13 +1572,6 @@ def fv3_sw_tendencies(
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=offsets, duogrid=dg,
     )
-    # iter-767: Fortran fill_corners_agrid_r8 VECTOR (fv_mp_mod.F90:1433-1457, mySign=-1)
-    # — cross-component swap+sign at 3-face cube vertex.
-    # iter-865b: gate on `not bounded_domain` (duogrid/regional already cross-face correct via pad_halo_vector)
-    if (fortran_vector_corner_fill
-            and not cdgrid.base.bounded_domain):
-        u_cc_pad, v_cc_pad = _fortran_agrid_vector_corner_fill(
-            u_cc_pad, v_cc_pad)
     u_corner = 0.25 * (u_cc_pad[:, :-1, :-1] + u_cc_pad[:, 1:, :-1]
                         + u_cc_pad[:, :-1, 1:] + u_cc_pad[:, 1:, 1:])
     v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
@@ -1711,24 +1606,10 @@ def fv3_sw_tendencies(
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))
 
-        # iter-909: cube-edge-softer div_damp (factor at boundary cells, 1.0 interior).
-        # iter-907: div_damp dominates (29x boundary_fix) at W2 D-grid hot spots (lat ±33.9°).
-        if cube_edge_softer_div_damp:
-            band = int(cube_edge_div_damp_band)
-            factor = float(cube_edge_div_damp_factor)
-            mask = jnp.ones_like(adaptive_coeff)
-            # Soften the band cells along i and j on each face.
-            mask = mask.at[:, :band, :].set(factor)
-            mask = mask.at[:, n - band:, :].set(factor)
-            mask = mask.at[:, :, :band].set(factor)
-            mask = mask.at[:, :, n - band:].set(factor)
-            adaptive_coeff = adaptive_coeff * mask
-
-        # iter-765b/766: thread dir_aware_corners + a2b_corner_avg to ALL A-L calls
+        # iter-765b: thread dir_aware_corners to ALL A-L calls
         ddiv_dx, ddiv_dy_perp_cc = arakawa_lamb_gradient(
             div_field, cdgrid,
-            fortran_dir_aware_corners=fortran_dir_aware_corners,
-            fortran_a2b_corner_avg=fortran_a2b_corner_avg)
+            fortran_dir_aware_corners=fortran_dir_aware_corners)
         du_cc = du_cc + adaptive_coeff * interp_corner_to_center(ddiv_dx)
         dv_cc = dv_cc + adaptive_coeff * interp_corner_to_center(ddiv_dy_perp_cc)
 
@@ -1752,35 +1633,14 @@ def fv3_sw_tendencies(
     # iter-865b: gate on `not bounded_domain` (FV3 fv_arrays.F90:1512 bounded_domain = regional|nested|duogrid).
     # duogrid required for cross_face flag — pad_halo_vector handles boundaries Fortran-faithfully.
     if boundary_fix and (not cdgrid.base.bounded_domain) and n > 2:
-        # iter-769: optionally skip 4 cube-corner cells [0,0]/[0,n-1]/[n-1,0]/[n-1,n-1].
-        # Cascaded row+col smoothing double-updates corners (4-pt avg of 2x2 block).
-        # Fortran has NO post-tendency smoothing (sw_core.F90 / d_sw routines).
-        if boundary_fix_skip_corners:
-            du_cc = du_cc.at[:, 0, 1:-1].set(
-                0.5 * (du_cc[:, 0, 1:-1] + du_cc[:, 1, 1:-1]))
-            du_cc = du_cc.at[:, n-1, 1:-1].set(
-                0.5 * (du_cc[:, n-1, 1:-1] + du_cc[:, n-2, 1:-1]))
-            du_cc = du_cc.at[:, 1:-1, 0].set(
-                0.5 * (du_cc[:, 1:-1, 0] + du_cc[:, 1:-1, 1]))
-            du_cc = du_cc.at[:, 1:-1, n-1].set(
-                0.5 * (du_cc[:, 1:-1, n-1] + du_cc[:, 1:-1, n-2]))
-            dv_cc = dv_cc.at[:, 0, 1:-1].set(
-                0.5 * (dv_cc[:, 0, 1:-1] + dv_cc[:, 1, 1:-1]))
-            dv_cc = dv_cc.at[:, n-1, 1:-1].set(
-                0.5 * (dv_cc[:, n-1, 1:-1] + dv_cc[:, n-2, 1:-1]))
-            dv_cc = dv_cc.at[:, 1:-1, 0].set(
-                0.5 * (dv_cc[:, 1:-1, 0] + dv_cc[:, 1:-1, 1]))
-            dv_cc = dv_cc.at[:, 1:-1, n-1].set(
-                0.5 * (dv_cc[:, 1:-1, n-1] + dv_cc[:, 1:-1, n-2]))
-        else:
-            du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
-            du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
-            du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
-            du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
-            dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
-            dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
-            dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
-            dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
+        du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
+        du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
+        du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
+        du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
+        dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
+        dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
+        dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
+        dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
 
     # (k) Project cell-centre tendencies to D-grid edge-midpoints via halo exchange
     du_cc_pad, dv_cc_pad = pad_halo_vector(
@@ -1789,11 +1649,6 @@ def fv3_sw_tendencies(
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=offsets, duogrid=dg,
     )
-    # iter-767/865b: same Fortran vector cube-corner fill at tendency projection halo (gate non-bounded_domain)
-    if (fortran_vector_corner_fill
-            and not cdgrid.base.bounded_domain):
-        du_cc_pad, dv_cc_pad = _fortran_agrid_vector_corner_fill(
-            du_cc_pad, dv_cc_pad)
     du_d_dt = 0.5 * (du_cc_pad[:, 1:-1, :-1] + du_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)
     dv_d_dt = 0.5 * (dv_cc_pad[:, :-1, 1:-1] + dv_cc_pad[:, 1:, 1:-1])   # (6, n+1, n)
 

@@ -26,8 +26,11 @@ process rates is the analytic gamma-function integral
 This module provides the mass-weighted snow FALL SPEED and the vapour
 DEPOSITION/sublimation rate built from those exact moment integrals with the
 Thompson-2008 fall-speed (``av_s/bv_s/fv_s``) and ventilation (``Sc``,
-``t1_qs_sd``, ``t2_qs_sd``, capacitance ``C_sqrd``) constants.  All operations
-are smooth / AD-safe.
+``t1_qs_sd``, ``t2_qs_sd``, T-ramped capacitance ``C_sqrd→C_cube``) constants.
+The rates are
+finite and finite-gradient (AD-safe) everywhere, including at q_s→0; they are
+NOT globally smooth — the activation gate, speed cap, and availability clamps
+are non-differentiable ``where``/``clip`` guards by design.
 """
 
 from __future__ import annotations
@@ -50,7 +53,14 @@ _KAP1 = 17.46            # gamma-mode amplitude
 _LAM0 = 20.78            # exponential-mode slope factor
 _LAM1 = 3.29             # gamma-mode slope factor
 _SC = 0.632              # Schmidt number
-_C_SQRD = 0.15           # snow capacitance shape factor (plates/aggregates)
+# Snow capacitance: gSAM/WRF Thompson ramps C from C_sqrd (plates/aggregates)
+# at warm snow T to C_cube (3D crystals) at cold T:
+#   C_snow = clip(C_sqrd + (tc+15)·(C_cube−C_sqrd)/(−30+15), C_sqrd, C_cube)
+# (module_mp_thompson.f90:108-109 ``C_sqrd=0.3, C_cube=0.5`` and :2032-2033).
+_C_SQRD = 0.3            # snow capacitance, warm end tc >= -15 C (oracle C_sqrd)
+_C_CUBE = 0.5            # snow capacitance, cold end tc <= -30 C (oracle C_cube)
+_C_RAMP_TC_HI = -15.0    # ramp warm endpoint [degC] (oracle: tempc+15)
+_C_RAMP_TC_LO = -30.0    # ramp cold endpoint [degC] (oracle: -30+15 denominator)
 # Reference density for the (rho0/rho)^1/2 fall-speed correction.
 # (298 K is the Thompson reference temperature; p and R_d from constants.)
 _RHO_NOT = constants.p_atm_std / (constants.R_d * 298.0)
@@ -149,8 +159,25 @@ def snow_fall_speed(q_s, rho, T):
     the density correction ``ρ_f = √(ρ0/ρ)``.  The ``exp(-fv_s D)`` shifts each
     PSD-mode slope (Λ0→Λ0+fv_s, Λ1→Λ1+fv_s) and is folded into the integral
     analytically.
+
+    FAITHFUL (closed-form algebra): in the active, uncapped, un-floored regime
+    this is a term-for-term transcription of the gSAM/WRF Thompson ``vts`` block
+    (module_mp_thompson.f90:2751-2762) — oracle-pinned at coefficient level
+    (av_s/bv_s/fv_s/mu_s/Kap0/Kap1/Lam0/Lam1 + the cse gamma exponents) by
+    ``tests/unit/test_thompson_snow_fall_speed_faithful.py``.  The surrounding
+    JAX numerical guards are DELIBERATE departures, not the oracle: the
+    q_s>_QS_SMALL activation gate (vs gSAM's R1=1e-18 threshold + next-level
+    inheritance), the [0, _VT_CLIP_SNOW] speed clip, the [-55, -0.1] °C Field-fit
+    tc clamp (gSAM clamps only the −0.1 upper end), and the safe_pow/clip floors.
     """
-    M2, M3, ratio = _snow_moments(q_s, rho, T)
+    # Evaluate the PSD moments on a floored q_s so the zero-snow branch cannot
+    # drive lam0->0: den ~ lam0^-(bm_s+1) then underflows to +inf in float32 and
+    # poisons the VJP (grad -> NaN). The `active` gate below still returns V=0
+    # there, so the active-regime value is unchanged (maximum picks q_s when
+    # q_s>_QS_SMALL). float32 is the default finite-volume dtype, so this matters.
+    q_pos = jnp.clip(q_s, 0.0)
+    active = q_pos > _QS_SMALL
+    M2, M3, ratio = _snow_moments(jnp.maximum(q_pos, _QS_SMALL), rho, T)
     lam0 = _LAM0 * ratio
     lam1 = _LAM1 * ratio
     p_v = _BM_S + _BV_S
@@ -169,8 +196,26 @@ def snow_fall_speed(q_s, rho, T):
     rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, _RHO_FLOOR))
     V_s = _AV_S * rhof * num / jnp.clip(den, 1.0e-30)
     # Gate on actual snow; cap at a realistic aggregate fall speed.
-    V_s = jnp.where(jnp.clip(q_s, 0.0) > _QS_SMALL, V_s, 0.0)
-    return jnp.clip(V_s, 0.0, _VT_CLIP_SNOW)
+    return jnp.where(active, jnp.clip(V_s, 0.0, _VT_CLIP_SNOW), 0.0)
+
+
+def snow_capacitance(T):
+    """Temperature-ramped Thompson snow capacitance ``C_snow`` [-].
+
+    FAITHFUL (oracle-pinned): term-for-term the gSAM/WRF Thompson ramp
+    (module_mp_thompson.f90:2032-2033)::
+
+        C_snow = C_sqrd + (tempc+15)·(C_cube−C_sqrd)/(−30+15)
+        C_snow = MAX(C_sqrd, MIN(C_snow, C_cube))
+
+    i.e. C_sqrd = 0.3 for tc ≥ −15 °C ramping linearly to C_cube = 0.5 for
+    tc ≤ −30 °C (colder snow behaves more like 3D crystals).  Piecewise-linear
+    clip — AD-safe everywhere, C¹ except at the two kink temperatures.
+    """
+    tc = T - constants.T_freeze
+    c_snow = _C_SQRD + (tc - _C_RAMP_TC_HI) * (_C_CUBE - _C_SQRD) / (
+        _C_RAMP_TC_LO - _C_RAMP_TC_HI)
+    return jnp.clip(c_snow, _C_SQRD, _C_CUBE)
 
 
 def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
@@ -179,17 +224,39 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     Ventilated capacitance growth (Pruppacher-Klett) with Thompson's snow
     ventilation constants:
 
-        PRDS = 4π·C_sqrd·(q_v−q_sat_i)/(A+B)
-               · [ t1_qs_sd·I(1) + t2_qs_sd·ρ_f^½·I(c_vent) ],
+        PRDS = 4π·C_snow(T)·(S_i−1)/(A+B)
+               · [ t1_qs_sd·I(1) + t2_qs_sd·ρ_f^¼·I(c_vent) ] / ρ,
 
-    ``t1_qs_sd = 0.86``, ``t2_qs_sd = 0.28·Sc^⅓·√av_s``, ventilation moment
-    order ``c_vent = 1 + (1+bv_s)/2`` (= ``cse(16)`` in WRF), with the
-    half-slope ventilation exp folded into ``I``.  ``A+B`` is the standard
-    thermodynamic resistance to ice vapour diffusion.  Deposition (S_i>0) is
-    capped at the available supersaturation; sublimation (S_i<0) is donor-
-    clamped to the snow mass.
+    driven by the DIMENSIONLESS ice supersaturation ratio ``S_i−1 =
+    q_v/q_sat_i − 1`` (WRF ``ssati``) — the numerator that pairs with the
+    ``A+B`` thermodynamic-resistance denominator (Rogers-Yau 9.4 /
+    Pruppacher-Klett 13-76).  ``t1_qs_sd = 0.86``, ``t2_qs_sd =
+    0.28·Sc^⅓·√av_s``, ventilation moment order ``c_vent = 1 + (1+bv_s)/2``
+    (= ``cse(16)`` in WRF), with the half-slope ventilation exp folded into
+    ``I``; the ventilation density correction is WRF ``rhof2 = √rhof =
+    (ρ0/ρ)^¼`` (ventilation ∝ √Re, Re carries ONE fall-speed factor ρ_f).
+    Dimensional closure to [kg/kg/s]: 4πC(S_i−1)/(A+B) is a per-particle
+    growth rate [kg/s]; the moment sum ``vent`` [1/m²] integrates it over the
+    per-volume PSD (M2 = ρ·q_s/am_s) giving [kg m⁻³ s⁻¹]; the trailing 1/ρ
+    converts to mixing ratio.  WRF's diffusion form carries the same closure
+    implicitly — its prefactor ``rvs = ρ·qvsi`` cancels the 1/ρ.  Deposition
+    (S_i>1) is capped at the available supersaturation EXCESS ``q_v−q_sat_i``
+    [kg/kg]; sublimation (S_i<1) is donor-clamped to the snow mass.
+
+    The capacitance is the FAITHFUL gSAM temperature ramp ``snow_capacitance``
+    (C_sqrd = 0.3 warm → C_cube = 0.5 cold, module_mp_thompson.f90:108-109 and
+    :2032-2033); the former fixed ``_C_SQRD = 0.15`` departure (2-3⅓× weaker
+    than the oracle ramp) was closed 2026-07-17, and the PRDS prefactor is now
+    coefficient-pinned like the fall speed
+    (``tests/unit/test_thompson_snow.py``).
     """
-    M2, M3, ratio = _snow_moments(q_s, rho, T)
+    # Floor q_s for the PSD moments (see snow_fall_speed): at zero snow lam0->0
+    # so _psd_integral's bare lam0^-(p+1) underflows to +inf while norm underflows
+    # to 0, giving 0*inf = NaN in the PRIMAL that poisons the final where's VJP.
+    # The q_s>_QS_SMALL gate below still returns 0, so the active value is intact.
+    q_pos = jnp.clip(q_s, 0.0)
+    active = q_pos > _QS_SMALL
+    M2, M3, ratio = _snow_moments(jnp.maximum(q_pos, _QS_SMALL), rho, T)
     lam0 = _LAM0 * ratio
     lam1 = _LAM1 * ratio
     # Thermodynamic resistance A+B (ice): A = L_s²/(K_a R_v T²),
@@ -201,7 +268,14 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     A = constants.L_s ** 2 / (jnp.clip(ka, 1.0e-6) * constants.R_v * T ** 2)
     B = constants.R_v * T / (jnp.clip(e_si, 1.0) * jnp.clip(dv, 1.0e-12))
     abi = jnp.clip(A + B, 1.0e-6)
-    s_i = q_v - q_sat_i
+    # DIMENSIONLESS ice supersaturation ratio (WRF ``ssati = qv/qvsi − 1``).
+    # The A+B resistances above pair with S_i−1, NOT the mixing-ratio excess
+    # q_v−q_sat_i = q_sat_i·(S_i−1): using the excess made snow deposition
+    # weaker by a factor q_sat_i (~1e3-1e4 at cold upper-tropospheric T),
+    # effectively disabling the stated major upper-tropospheric vapour sink.
+    s_i = q_v / jnp.clip(q_sat_i, 1.0e-12) - 1.0
+    # Mixing-ratio excess [kg/kg] — used only for the deposition availability cap.
+    excess_i = q_v - q_sat_i
     # Ventilation integrals: t1 term ~ ∫ D N dD = I(1); t2 term ~ ventilation
     # moment with the half-slope ventilation exp(-fv_s D/2).
     I1 = _psd_integral(1.0, M2, M3, ratio)
@@ -222,12 +296,21 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     # ``t2_qs_sd·rhof2·vsc2·smof`` (codex/WRF audit). μ via Sutherland.
     mu_air = _MU_PREFACTOR * safe_pow(T, _MU_T_EXP) / (T + _MU_SUTHERLAND_T)
     vsc2 = jnp.sqrt(jnp.clip(rho, _RHO_VISC_FLOOR) / jnp.clip(mu_air, 1.0e-8))
-    vent = t1 * I1 + t2 * rhof * vsc2 * I_vent
-    prds = 4.0 * jnp.pi * _C_SQRD * s_i / abi * vent
-    # Cap deposition at available supersaturation; donor-clamp sublimation to q_s.
+    # WRF ``rhof2(k) = SQRT(rhof(k)) = (ρ0/ρ)^¼`` — the VENTILATION density
+    # correction (ventilation ∝ √Re, Re ∝ fall speed ∝ rhof), distinct from
+    # the fall-speed correction rhof used in ``snow_fall_speed``.
+    rhof2 = jnp.sqrt(rhof)
+    vent = t1 * I1 + t2 * rhof2 * vsc2 * I_vent
+    # Sign convention: prds > 0 = DEPOSITION (q_v sink, snow source, +L_s
+    # heating upstream); prds < 0 = SUBLIMATION (q_v source, snow sink).
+    # 1/ρ closes the per-volume PSD integral to [kg/kg/s] (see docstring).
+    prds = (4.0 * jnp.pi * snow_capacitance(T) * s_i / abi * vent
+            / jnp.clip(rho, _RHO_FLOOR))
+    # Cap deposition at the available supersaturation excess [kg/kg];
+    # donor-clamp sublimation to q_s.
     dep_pos = jnp.minimum(jnp.maximum(prds, 0.0),
-                          jnp.maximum(s_i, 0.0) / jnp.clip(dt, 1.0))
+                          jnp.maximum(excess_i, 0.0) / jnp.clip(dt, 1.0))
     subl_neg = jnp.maximum(jnp.minimum(prds, 0.0),
                            -jnp.clip(q_s, 0.0) / jnp.clip(dt, 1.0))
     out = dep_pos + subl_neg
-    return jnp.where(jnp.clip(q_s, 0.0) > _QS_SMALL, out, 0.0)
+    return jnp.where(active, out, 0.0)

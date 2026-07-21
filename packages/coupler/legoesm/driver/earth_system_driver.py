@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 import jax.numpy as jnp
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.model_driver import ModelDriver
 
@@ -48,6 +49,11 @@ class EarthSystemDriver:
         output_dir=None,
     ):
         self.config = config
+        # setup() materializes `self._coupler_config or CouplerConfig()`, whose
+        # bulk_scheme is "constant" REGARDLESS of the atmosphere -- the same
+        # split-interface bug guarded in CoupledESMDriver.  This driver builds
+        # the same make_coupler ocean tile, so it needs the same guard (codex).
+        validate_air_sea_consistency(config, coupler_config)
         self._atm = ModelDriver(config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._land_config = land_config

@@ -424,6 +424,83 @@ class TestHybridSemiImplicit:
         assert si_data.si_matrices.shape[1:] == (NLEV, NLEV)
 
 
+class TestSemiImplicitReferenceMatrixWellPosed:
+    """Issue #960: the semi-implicit ``Gamma`` reference matrix must be a
+    well-posed vertical structure operator — diagonalizable with REAL,
+    POSITIVE eigenvalues (the gravity-wave "equivalent depths" H = lambda/g).
+
+    Complex eigenvalues mean ``Gamma`` is non-normal, which amplifies the
+    resolved modes independently of the RHS/increment formulation and is the
+    2nd contributor to the T85 NaN.  The fix is a CONSISTENT reference
+    thermodynamic coupling ``tau`` (the linearization of the model's own
+    adiabatic term, ``dT'/dt = -tau @ D``) instead of the diagonal
+    ``tau = T_ref*I`` approximation.
+    """
+
+    @staticmethod
+    def _eig(Gamma):
+        w = np.linalg.eigvals(np.asarray(Gamma, dtype=np.float64))
+        rel_imag = np.max(np.abs(w.imag)) / (np.max(np.abs(w.real)) + 1e-300)
+        return w, rel_imag
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 32, 40])
+    def test_sigma_gamma_eigenvalues_real_positive(self, nlev):
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = create_sigma_coordinate(nlev, sigma_top=0.01)
+        w, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        assert rel_imag < 1e-8, f"sigma L{nlev}: complex eigenvalues rel|Im|={rel_imag:.2e}"
+        assert w.real.min() > 0.0, f"sigma L{nlev}: non-positive eigenvalue {w.real.min():.3e}"
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 32])
+    def test_hybrid_gamma_eigenvalues_real_positive(self, nlev):
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = standard_hybrid_levels(nlev)
+        w, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        assert rel_imag < 1e-8, f"hybrid L{nlev}: complex eigenvalues rel|Im|={rel_imag:.2e}"
+        assert w.real.min() > 0.0, f"hybrid L{nlev}: non-positive eigenvalue {w.real.min():.3e}"
+
+    def test_external_mode_equivalent_depth_physical(self):
+        """Largest eigenvalue = external (Lamb) mode; H = lambda/g ~ 10 km."""
+        from legoesm import constants
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = standard_hybrid_levels(32)
+        w, _ = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        H_max = w.real.max() / constants.g
+        assert 8_000.0 < H_max < 15_000.0, f"external-mode equiv depth {H_max:.0f} m unphysical"
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 40])
+    def test_diagonal_tau_is_non_normal_selftest(self, nlev):
+        """NON-VACUOUS GUARD: feeding the *old* diagonal reference
+        ``tau = T_ref*I`` reproduces the buggy ``Gamma = R_d*T_ref*(S + 1*b^T)``,
+        which IS non-normal with complex eigenvalues at nlev >= 4.  This proves
+        the real-eigenvalue gate above actually discriminates the fix from the
+        regression (it fails on the old form)."""
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = create_sigma_coordinate(nlev, sigma_top=0.01)
+        tau_diag = jnp.asarray(300.0 * np.eye(nlev), dtype=jnp.float64)
+        _, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0, tau=tau_diag))
+        assert rel_imag > 1e-3, (
+            f"diagonal-tau Gamma should be non-normal at nlev={nlev}, "
+            f"got rel|Im|={rel_imag:.2e}"
+        )
+
+    def test_stored_tau_matches_gamma(self):
+        """The temperature correction and the implicit reference must share the
+        SAME linearization: si_data.Gamma == R_d*(S @ si_data.tau + T_ref*1*b^T)."""
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.timestepping.semi_implicit import (
+            precompute_si_matrices, compute_Gamma_matrix,
+        )
+        grid = create_gaussian_grid(21)
+        coord = standard_hybrid_levels(20)
+        si = precompute_si_matrices(grid, coord, T_ref=300.0, dt=1800.0)
+        assert si.tau.shape == (20, 20)
+        G = compute_Gamma_matrix(coord, T_ref=300.0, tau=si.tau)
+        np.testing.assert_allclose(
+            np.asarray(si.Gamma), np.asarray(G), rtol=1e-12, atol=0.0,
+        )
+
+
 class TestHybridDifferentiability:
     """Test JAX differentiability of hybrid coordinate functions."""
 
@@ -594,3 +671,107 @@ class TestStandardLevels:
         p_s = jnp.full((2, 2), P_REF)
         dp = dp_from_hybrid(coord, p_s)
         assert jnp.all(dp > 0)
+
+
+class TestSB81FullLevelLnP:
+    """#1029: SB81 full-level log-pressure — the discrete pair of Phi."""
+
+    @pytest.fixture(autouse=True)
+    def _fp64(self):
+        # The machine-precision invariants below (1e-12 relative) require
+        # fp64; make the class self-contained rather than depending on the
+        # runner's JAX_ENABLE_X64 environment.
+        from legoesm.core.precision import (
+            set_policy, get_policy, PrecisionPolicy)
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            yield
+        finally:
+            set_policy(prev)
+
+    def _coord(self, nlev=20):
+        from legoesm.grids.vertical import standard_hybrid_levels
+        return standard_hybrid_levels(nlev)
+
+    def test_shared_alpha_bit_identical_with_geopotential(self):
+        """sb81_halflevel_construction is THE construction Phi integrates."""
+        from legoesm.grids.vertical import (
+            sb81_halflevel_construction, compute_geopotential_hybrid)
+        from legoesm import constants
+        coord = self._coord()
+        p_s = jnp.asarray([[9.3e4, 1.01e5], [6.5e4, 1.03e5]], dtype=jnp.float64)
+        p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+        # Reconstruct Phi from the triple exactly as compute_geopotential_hybrid
+        T = jnp.full(p_s.shape + (coord.n_levels,), 260.0, dtype=jnp.float64)
+        phis = jnp.zeros_like(p_s)
+        dPhi = constants.R_d * T * ln_ratio
+        cs = jnp.cumsum(dPhi[..., ::-1], axis=-1)[..., ::-1]
+        Phi_above = phis[..., None] + cs
+        Phi_below = jnp.concatenate([Phi_above[..., 1:], phis[..., None]], axis=-1)
+        Phi_rec = Phi_below + alpha * constants.R_d * T
+        Phi = compute_geopotential_hybrid(T, p_s, coord, phis)
+        np.testing.assert_array_equal(np.asarray(Phi_rec), np.asarray(Phi))
+
+    def test_full_level_ln_p_inside_layer(self):
+        """exp(ln p_k) must lie strictly inside (p_{k-1/2}, p_{k+1/2})."""
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, sb81_halflevel_construction)
+        coord = self._coord()
+        p_s = jnp.asarray([8.0e4, 1.0e5], dtype=jnp.float64)
+        lnp = sb81_full_level_ln_p(coord, p_s)
+        p_half_safe, _, _ = sb81_halflevel_construction(coord, p_s)
+        p_sb = np.exp(np.asarray(lnp))
+        assert np.all(p_sb < np.asarray(p_half_safe[..., 1:]))
+        # top layer p_{k-1/2} can be tiny; allow equality only there
+        assert np.all(p_sb[..., 1:] > np.asarray(p_half_safe[..., 1:-1]))
+
+    def test_isothermal_rest_invariant(self):
+        """Phi_k + R_d T0 ln p_k^SB is COLUMN-INDEPENDENT at isothermal rest.
+
+        With phis = -R_d T0 ln(p_s/p0), the sum telescopes to R_d T0 ln p0 at
+        every level, for ANY p_s — so any discrete horizontal gradient of
+        (Phi + R_d T ln p^SB) vanishes, which is exactly the #1029
+        rest-over-terrain balance the momentum PGF needs.
+        """
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, compute_geopotential_hybrid)
+        from legoesm import constants
+        coord = self._coord()
+        T0 = 300.0
+        p0 = 1.0e5
+        p_s = jnp.asarray(
+            [6.0e4, 7.5e4, 9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        phis = -constants.R_d * T0 * jnp.log(p_s / p0)
+        T = jnp.full(p_s.shape + (coord.n_levels,), T0, dtype=jnp.float64)
+        Phi = compute_geopotential_hybrid(T, p_s, coord, phis)
+        lnp = sb81_full_level_ln_p(coord, p_s)
+        inv = np.asarray(Phi + constants.R_d * T0 * lnp)  # (5, nlev)
+        ref = constants.R_d * T0 * np.log(p0)
+        # column-to-column spread per level must vanish (FP cumsum noise only)
+        spread = np.abs(inv - ref).max()
+        assert spread < 1e-12 * abs(ref), (
+            f"isothermal rest invariant violated: spread {spread:.3e} "
+            f"vs |ref| {abs(ref):.3e}")
+
+    def test_a0_reduces_to_sigma_form(self):
+        """A=0: ln p^SB - ln p_s is column-independent per level (to ~1e-12).
+
+        So grad(ln p^SB) matches grad(ln p_s) — the sigma-path correction —
+        up to the top-layer zero-clip artifact documented below; NOT an exact
+        identity in the clipped top layer.
+        """
+        from legoesm.grids.vertical import (
+            sb81_full_level_ln_p, create_hybrid_coordinate,
+            standard_hybrid_levels)
+        std = standard_hybrid_levels(20)
+        coord = create_hybrid_coordinate(
+            20, jnp.zeros_like(std.A_half), std.B_half)
+        p_s = jnp.asarray([7.0e4, 8.5e4, 1.0e5], dtype=jnp.float64)
+        lnp = np.asarray(sb81_full_level_ln_p(coord, p_s))
+        # ln p^SB(ps) - ln(ps) must be the same constant for every column.
+        # Tol 1e-11, not machine-eps: at A=0 the top interface is p=0 clipped
+        # to 1e-10 Pa, which makes alpha_0 column-dependent at ~1e-12 — a clip
+        # artifact confined to the top layer, physically nil.
+        resid = lnp - np.log(np.asarray(p_s))[..., None]
+        assert np.abs(resid - resid[0]).max() < 1e-11

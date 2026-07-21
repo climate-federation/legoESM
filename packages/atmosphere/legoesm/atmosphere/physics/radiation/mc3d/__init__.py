@@ -8,7 +8,6 @@ from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 from legoesm.atmosphere.physics.radiation.mc3d.knull_grid import (
     MajorantGrid,
     build_majorant_grid,
-    global_majorant,
 )
 from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
     PlaneRTGeometry,
@@ -37,7 +36,6 @@ __all__ = [
     "MajorantGrid",
     "PlaneRTGeometry",
     "build_majorant_grid",
-    "global_majorant",
     "pmean_result",
     "shard_keys",
     "solve_lw_monochromatic",

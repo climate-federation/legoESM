@@ -28,6 +28,21 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+# "No surface-T override" sentinel for ``surface_T_sfc_override``.  Formerly
+# ``jnp.nan``, which left the state non-finite EVERY step and poisoned two
+# debug tools (JAX_DEBUG_NANS tripped on step 1; the realism inspector
+# false-positived every checkpoint) — see #911.  ``-1e4`` is unambiguously
+# below any physical surface temperature [K] (coldest Earth surface ~180 K),
+# so the resolver selects the fallback with a simple threshold while the state
+# stays finite.  Kept well within fp16 range (max ~6.5e4) so the sentinel is
+# representable — and stays finite — in every supported storage dtype (a
+# larger magnitude overflowed fp16 to -inf; codex).
+NO_SFC_T_OVERRIDE: float = -1.0e4
+# A real override is a physical surface temperature (> 0 K); anything at or
+# below this threshold means "no override".  Well clear of both the sentinel
+# and any physical value.
+SFC_T_OVERRIDE_VALID_MIN: float = 1.0
+
 
 class PhysicsState(NamedTuple):
     """Prognostic physics state — passed through time loop, checkpointable.
@@ -74,10 +89,12 @@ class PhysicsState(NamedTuple):
         stochastic modules are disabled the key is carried unchanged.
     surface_T_sfc_override : jax.Array, shape (ncol,)
         Per-column override for the surface temperature seen by the
-        turbulence scheme's bulk-flux call.  ``NaN`` (the default) is
-        the sentinel for "no override — fall back to ``T_col[:, -1]``",
-        preserving the legacy ``T_sfc = lowest air temp`` convention
-        for every 3-D run.  The single-column model populates this
+        turbulence scheme's bulk-flux call.  The finite
+        ``NO_SFC_T_OVERRIDE`` value (the default) is the sentinel for
+        "no override — fall back to ``T_col[:, -1]``", preserving the
+        legacy ``T_sfc = lowest air temp`` convention for every 3-D run
+        while keeping the state finite (#911; was ``NaN``).  The
+        single-column model populates this
         from ``SCMForcing.T_s(t)`` when ``prescribe="T_s"`` so that the
         bulk-flux gradient ``T_sfc − T[..., -1]`` is non-zero (without
         this override, anchoring ``T[..., -1]`` to the prescribed value
@@ -136,7 +153,47 @@ class PhysicsState(NamedTuple):
     qke: jnp.ndarray
     clubb_moments: jnp.ndarray
     rad_heating: jnp.ndarray
+    # GLOBAL column ids, shape (ncol,) int32 — the decomposition-invariant
+    # identity for per-column stochastic draws (Bechtold AR1 folds the
+    # per-step sub-key with each column's GLOBAL id).  Sharding-aware by
+    # construction: a lat-band SPMD shard receives its own contiguous
+    # chunk, so a physical column draws the SAME innovation regardless of
+    # the decomposition.  Constant data (never updated by sub-physics);
+    # re-derivable as arange(ncol) — restart loaders may default it.
+    col_index: jnp.ndarray
     aerosol_number: jnp.ndarray = None
+    # Sub-grid LIQUID cloud fraction [-], shape (ncol, nlev), written by a
+    # turbulence scheme that carries its own PDF cloud closure (CLUBB) so the
+    # radiation module can consume it (cloud_scheme="clubb") instead of the
+    # RH-diagnosed grid-scale one.  Always materialised as zeros (uniform
+    # pytree, byte-identical for runs that never read it — radiation ignores it
+    # unless cloud_scheme="clubb"); appended LAST with a default so existing
+    # direct constructors are unaffected.
+    cloud_fraction: jnp.ndarray = None
+    # OPTIONAL per-step DYNAMICS (large-scale advective) tendencies of T [K/s]
+    # and q_v [kg/kg/s], shape (ncol, nlev) — the IFS ``PTENTA``/``PTENQA``
+    # analog consumed by Bechtold's RCAPQADV CAPE-advection correction
+    # (``use_ifs_cape_qadv``; see convection/bechtold.py).  A process-split
+    # driver writes ``(state_after_dyn - state_before_dyn)/dt`` here BEFORE the
+    # convection call, AND passes convection the post-dynamics state — the leaf
+    # forms its reference environment as ``state - dyn_tendency*dt``, so the
+    # two must be staged consistently (the IFS ``ZTENH2 = ZTENH - PTENTA*dt``
+    # convention).  These are a diagnostic INPUT to the closure (they shape
+    # CAPE), NOT applied to the state by convection — the dynamics updates the
+    # state separately, so there is no double count.  ``None``
+    # (default) leaves the RCAPQADV path inert; the convection bridge raises at
+    # trace time if ``use_ifs_cape_qadv`` is on while these are absent.
+    # Appended LAST with a default so existing direct constructors are
+    # unaffected.
+    dyn_tendency_T: jnp.ndarray = None
+    dyn_tendency_qv: jnp.ndarray = None
+
+
+# Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
+# every convection call) — NOT evolving physics memory, so they are neither
+# persisted in a restart checkpoint nor subject to the carry-completeness gate.
+# A checkpoint legitimately lacks them; the fresh seed's ``None`` is correct.
+PHYSSTATE_INPUT_FIELDS = frozenset({"dyn_tendency_T", "dyn_tendency_qv"})
 
 
 def init_physics_state(
@@ -237,8 +294,13 @@ def init_physics_state(
     conv_stoch_state = jnp.zeros((ncol,), dtype=dtype)
 
     # --- GWD wave action spectrum ---
+    # Seeded for prognostic_spectral AND any '+'-composite that contains it
+    # (issue #834) — both thread the wave-action spectrum through the carry.
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
     gwd_cfg = physics_config.gravity_wave_drag
-    if gwd_cfg.scheme == "prognostic_spectral":
+    if gwd_carries_spectrum(gwd_cfg.scheme):
         sc = gwd_cfg.prognostic_spectral
         gwd_spectrum = jnp.full(
             (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
@@ -255,11 +317,13 @@ def init_physics_state(
     prng_key = jax.random.PRNGKey(int(prng_seed))
 
     # --- Surface-temperature override (SCM forcing hook) ---
-    # NaN sentinel = "no override; turbulence falls back to ``T[:, -1]``".
-    # This preserves all existing 3-D behaviour bit-for-bit while letting
-    # the single-column driver inject a separate skin-temperature value
-    # when ``SCMForcing.prescribe == "T_s"``.
-    surface_T_sfc_override = jnp.full((ncol,), jnp.nan, dtype=dtype)
+    # Finite ``NO_SFC_T_OVERRIDE`` sentinel = "no override; turbulence falls
+    # back to ``T[:, -1]``".  Preserves all existing 3-D behaviour (the
+    # resolver still selects the fallback for every unset column) while
+    # keeping the state finite (#911).  The single-column driver overwrites
+    # this with a physical skin temperature when ``SCMForcing.prescribe ==
+    # "T_s"``.
+    surface_T_sfc_override = jnp.full((ncol,), NO_SFC_T_OVERRIDE, dtype=dtype)
 
     # --- Radiation sub-cycle cache (held heating tendency) ---
     # Zero before the first solve; populated on sub-cycle step 0 (which is
@@ -271,6 +335,11 @@ def init_physics_state(
     # are byte-identical; only evolved when the prognostic-aerosol option is on.
     aerosol_number = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- CLUBB sub-grid cloud fraction hand-off (turbulence -> radiation) ---
+    # Zeros before the first turbulence step; a PDF turbulence scheme (CLUBB)
+    # overwrites it each step and radiation reads it when cloud_scheme="clubb".
+    cloud_fraction = jnp.zeros((ncol, nlev), dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -281,7 +350,14 @@ def init_physics_state(
         qke=qke,
         clubb_moments=clubb_moments,
         rad_heating=rad_heating,
+        col_index=jnp.arange(ncol, dtype=jnp.int32),
         aerosol_number=aerosol_number,
+        cloud_fraction=cloud_fraction,
+        # Dynamics-tendency inputs default None (RCAPQADV inert); a
+        # process-split driver / SCM writes them per step (see the field
+        # docstrings).
+        dyn_tendency_T=None,
+        dyn_tendency_qv=None,
     )
 
 
@@ -324,7 +400,19 @@ def update_physics_state(phys_state, updates):
         qke=updates.get("qke", phys_state.qke),
         clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
         rad_heating=updates.get("rad_heating", phys_state.rad_heating),
+        col_index=phys_state.col_index,   # constant identity, never updated
         aerosol_number=updates.get(
             "aerosol_number", phys_state.aerosol_number
         ),
+        cloud_fraction=updates.get(
+            "cloud_fraction", phys_state.cloud_fraction
+        ),
+        # Per-step INPUTS: CONSUMED each call, never carried forward.  Default
+        # to None (NOT the prior value) so a driver that forgets to refresh
+        # them on a later step fails CLOSED — the bridge guard raises on a
+        # None carry rather than silently pairing a STALE dynamics tendency
+        # with a new post-dynamics state (RCAPQADV staging contract, codex
+        # r2).  A driver re-populates them before every convection call.
+        dyn_tendency_T=updates.get("dyn_tendency_T", None),
+        dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
     )

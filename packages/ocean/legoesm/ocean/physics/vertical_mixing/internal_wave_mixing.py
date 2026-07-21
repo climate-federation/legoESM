@@ -120,30 +120,21 @@ __param_spec__ = {
             "nu_molecular": "physical constant (molecular viscosity reference)",
             "k_min": "numerics: bound (molecular diffusivity floor)",
             "k_max": "numerics: bound (NEMO 100 cm²/s cap)",
+            "power_bot_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial abyssal-hill power map); at the "
+            "lower bound of (0, 5e-3), so it has no interior sigmoid seed",
+            "power_cri_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial critical-slope power map); at the "
+            "lower bound of (0, 5e-3), so it has no interior sigmoid seed",
+            "power_sho_wm2": "boundary-default: default 1e-10 = ~zero uniform-fallback "
+            "placeholder (production reads a spatial shoaling power map); at the lower "
+            "bound of (0, 5e-3), so it has no interior sigmoid seed",
         },
         "params": {
-            "power_bot_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 abyssal-hill power (uniform fallback)",
-                "shape": None,
-            },
-            "power_cri_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 critical-slope power (uniform fallback)",
-                "shape": None,
-            },
             "power_nsq_wm2": {
                 "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "vertical_mixing",
                 "reference": "de Lavergne 2020 N²-scaled power (uniform fallback)",
-                "shape": None,
-            },
-            "power_sho_wm2": {
-                "units": "W/m^2", "bounds": (0.0, 5.0e-3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "vertical_mixing",
-                "reference": "de Lavergne 2020 shoaling power (uniform fallback)",
                 "shape": None,
             },
             "scale_bot_m": {
@@ -350,7 +341,13 @@ def compute_iwm_diffusivity(
     k_wave = reb * (1.0 / 6.0) * nu
     if cfg.mevar:
         # Variable-efficiency regimes (F90:219-227).
-        sqrt_reb = jnp.sqrt(jnp.maximum(reb, 0.0))
+        # AD-safe sqrt: ``jnp.sqrt(jnp.maximum(reb, 0.0))`` has a NaN
+        # reverse-mode gradient at reb=0 (land/zero-forcing cells) because the
+        # derivative 1/(2·sqrt(reb)) blows up while ``maximum`` still routes the
+        # cotangent through the sqrt. The double-``where`` keeps the primal
+        # BIT-IDENTICAL for reb>0 and yields a finite 0 (0 gradient) at reb<=0.
+        sqrt_reb = jnp.where(
+            reb > 0.0, jnp.sqrt(jnp.where(reb > 0.0, reb, 1.0)), 0.0)
         k_wave = jnp.where(
             reb > _REB_ENERGETIC, _REB_ENERGETIC_COEF * nu * sqrt_reb, k_wave)
         k_wave = jnp.where(

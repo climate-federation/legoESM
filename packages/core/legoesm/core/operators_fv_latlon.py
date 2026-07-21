@@ -32,12 +32,27 @@ from legoesm.grids.halo_latlon import (
 
 
 def lat_v_interfaces(grid):
-    """Compute v-face latitudes consistent with divergence_cgrid.
+    """v-face latitudes for the PPM meridional flux metric: ``grid.lat_v``.
 
-    Uses midpoints of cell-center latitudes for interior faces,
-    and exact pole values (±π/2) for boundaries.  This matches the
-    convention in ``latlon_cgrid_operators.divergence_cgrid`` and
-    supports non-uniform latitude grids.
+    Returns the grid's OWNED v-face latitudes (interior faces at
+    cell-center midpoints, end faces by half-cell extrapolation —
+    ``grids.latlon.compute_v_face_coords``), which land on ±π/2 only
+    when the grid actually reaches the poles.  Consistent with
+    ``latlon_cgrid_operators.divergence_cgrid`` (which reads
+    ``grid.cos_lat_v``) and with non-uniform / face-defined latitude
+    grids (Mercator, Veros-style), whose true faces are not
+    center-midpoints.
+
+    NEVER fabricate ±π/2 ends here: under the SPMD/MPI decompositions
+    ``grid`` is a lat-band or 2-D tile slice (``slice_latlon_grid_to_band``
+    / ``slice_latlon_grid_to_block_2d`` carry ``lat_v[s:e+1]``), so a
+    local end face is an INTERIOR partition cut.  A hard-coded pole
+    turned every cut face into a near-zero-length wall
+    (``cos(±π/2) -> 1e-10`` clamp) in the flux metric
+    ``hx = R*dlon*cos(lat_v)`` — spuriously blocking PPM meridional
+    transport through the cut (codex M3a findings 2/6; the same
+    regression class ``compute_v_face_coords`` documents from Codex
+    review Stage 3-E round 3).
 
     Parameters
     ----------
@@ -47,14 +62,7 @@ def lat_v_interfaces(grid):
     -------
     lat_v : jax.Array, shape (n_lat+1,)
     """
-    lat = grid.lat  # (n_lat,)
-    # Single Pad HLO op (constant_values=(-π/2, π/2)) replaces alloc-2-
-    # singletons + concatenate-of-three.
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    return jnp.pad(
-        lat_interior, (1, 1),
-        constant_values=(-jnp.pi / 2, jnp.pi / 2),
-    )
+    return grid.lat_v
 
 
 # ==============================================================================
@@ -189,10 +197,12 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
 
     q_face_lat = jnp.where(v_iface >= 0, q_L_lat, q_R_lat)
 
-    # Edge length perpendicular to latitude at interfaces: hx = R * dlon * cos(lat_v)
-    # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Edge length perpendicular to latitude at interfaces:
+    # hx = R * dlon * cos(lat_v).  ``grid.cos_lat_v`` is the band-correct
+    # v-face metric (pre-sliced by slice_latlon_grid_to_band under MPI/SPMD;
+    # clamped to 1e-10 only at the true global poles).  Hard-coding ±π/2
+    # endpoints here would collapse interior band-cut faces to ~zero area.
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
@@ -408,10 +418,9 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
     q_L_lat, q_R_lat = _ppm_reconstruct_lat(q_pad, limiter)  # (n_lat+1, n_lon)
     q_face_lat = jnp.where(v_face >= 0, q_L_lat, q_R_lat)
 
-    # Face length at latitude interfaces: R * dlon * cos(lat_v)
-    # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Face length at latitude interfaces: R * dlon * cos(lat_v).  Uses the
+    # band-correct pre-sliced ``grid.cos_lat_v`` (see fv_flux_divergence_latlon).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
     Phi_lat = v_face * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
     # --- Net flux divergence ---
@@ -434,33 +443,10 @@ def _cgrid_velocity_divergence(u_face, v_face, grid):
     R = grid.radius
     dlon = grid.dlon
     hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
-    lat_v = lat_v_interfaces(grid)
-    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    # Band-correct v-face metric (see fv_flux_divergence_latlon).
+    hx_iface = R * dlon * grid.cos_lat_v[:, None]
 
     net_lon = hy * (u_face[:, 1:] - u_face[:, :-1])
     net_lat = hx_iface[1:, :] * v_face[1:, :] - hx_iface[:-1, :] * v_face[:-1, :]
 
     return (net_lon + net_lat) / grid.area
-
-
-def cgrid_fv_scalar_advection_latlon(q, u_face, v_face, grid, limiter=True):
-    """PPM advection of scalar q by C-grid face velocities (advective form).
-
-    Computes -v·∇q = -div(q v) + q div(v).  The div(v) term uses direct
-    velocity divergence (no PPM needed for q=1), halving transport cost.
-
-    Parameters
-    ----------
-    q : jax.Array, shape (n_lat, n_lon)
-    u_face : jax.Array, shape (n_lat, n_lon+1)
-    v_face : jax.Array, shape (n_lat+1, n_lon)
-    grid : LatLonGrid
-    limiter : bool
-
-    Returns
-    -------
-    jax.Array, shape (n_lat, n_lon)
-    """
-    flux_form = cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter)
-    div_v = _cgrid_velocity_divergence(u_face, v_face, grid)
-    return flux_form + q * div_v

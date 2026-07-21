@@ -1,0 +1,22 @@
+# NeuralGCM-style deterministic training loss (arXiv:2311.07222).
+#
+# Latitude-weighted per-variable MSE with amplitude normalization and
+# pressure-emphasized level weighting; no residual normalization (the
+# hybrid dycore already integrates the state, so full-field scales are the
+# right normalizer), no CRPS at the deterministic stage (the stochastic
+# CRPS variant is a separate final-rung choice per the design doc).
+loss:
+  residual_normalize: false
+  normalize_by_scale: true
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.2
+  w_ps: 0.3
+  w_crps_T: 0.0
+  w_crps_u: 0.0
+  w_crps_v: 0.0
+  w_crps_q: 0.0
+  w_crps_ps: 0.0
+  spectral_weight: 0.0
+  level_weighting: pressure

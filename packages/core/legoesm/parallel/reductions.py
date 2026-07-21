@@ -34,10 +34,12 @@ _TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
 # mpi4jax==0.9.0.post1 (iter 333).  Accept it so the operator is not false-warned off the
 # working HPC stack.  Bounds are capped at the verified versions' next minor (conservative:
 # a future jax 0.11 / mpi4jax 0.10 warns again until re-verified).
-# FOLLOW-UP (CODEX PENDING, Jun 24): fold both generations into a single regime model that
-# also flags the CROSS pairings, mirror it in `mpi_stack_outside_tested_range` (the test
-# xfail condition, left conservative here), and bump the pyproject MPI extra + the
-# `TestConstantsConsistency` baseline.
+# Both generations (and the CROSS-pairing rejection) are now folded into the single
+# `_stack_in_tested_generation` regime predicate, shared by BOTH the runtime preflight and
+# the test xfail gate `mpi_stack_outside_tested_range` — so the two can never disagree
+# (the earlier "conservative" gate xfailed the verified FFI stack the runtime already
+# accepted, which read as a "broken MPI stack"; verified jax 0.10.1 + mpi4jax 0.9.0.post1
+# 2026-07-13: cube 44/44 + voronoi 81 pass on `mpirun -np 2`).
 _FFI_JAX_MIN = (0, 10, 0)
 _FFI_JAX_MAX_EXCL = (0, 11, 0)
 _FFI_MPI4JAX_MIN = (0, 9, 0)
@@ -72,6 +74,35 @@ def _format_range(low: tuple[int, int, int], high_excl: tuple[int, int, int]) ->
         f">={low[0]}.{low[1]}.{low[2]}, "
         f"<{high_excl[0]}.{high_excl[1]}.{high_excl[2]}"
     )
+
+
+def _stack_in_tested_generation(
+    jax_triplet: tuple[int, int, int],
+    mpi4jax_triplet: tuple[int, int, int],
+) -> bool:
+    """``True`` if (jax, mpi4jax) form a VERIFIED-compatible generation.
+
+    Two generations, each of which must be paired WITHIN itself:
+      * legacy custom-call: jax 0.8-0.9 + mpi4jax 0.8.x, and
+      * FFI-based:          jax 0.10.x + mpi4jax 0.9.x (verified-working, iter 333).
+    A CROSS pairing (e.g. jax 0.10 + mpi4jax 0.8, whose custom-call API was
+    removed in jax 0.10; or jax 0.8 + mpi4jax 0.9, whose FFI API needs jax>=0.10)
+    is the genuinely-incompatible case and returns ``False``.
+
+    The single source of truth for BOTH the production preflight
+    (:func:`_validate_mpi_runtime_versions`) and the test xfail gate
+    (:func:`mpi_stack_outside_tested_range`) — so a stack the runtime accepts
+    can never be simultaneously xfailed by the suite.
+    """
+    legacy = (
+        _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
+        and _TESTED_MPI4JAX_MIN <= mpi4jax_triplet < _TESTED_MPI4JAX_MAX_EXCL
+    )
+    ffi = (
+        _FFI_JAX_MIN <= jax_triplet < _FFI_JAX_MAX_EXCL
+        and _FFI_MPI4JAX_MIN <= mpi4jax_triplet < _FFI_MPI4JAX_MAX_EXCL
+    )
+    return legacy or ffi
 
 
 def _env_flag_true(name: str) -> bool:
@@ -160,19 +191,13 @@ def _validate_mpi_runtime_versions(
             f"(jax=={jax_version}, mpi4jax=={mpi4jax_version})"
         )
 
+    # Accept EITHER verified generation (legacy or FFI), paired within itself;
+    # a cross pairing falls through to the warning below.  ``in_tested_*`` (the
+    # LEGACY range membership) is retained only to phrase that warning.
+    if _stack_in_tested_generation(jax_triplet, mpi4jax_triplet):
+        return
     in_tested_jax = _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
     in_tested_mpi4jax = _TESTED_MPI4JAX_MIN <= mpi4jax_triplet < _TESTED_MPI4JAX_MAX_EXCL
-    if in_tested_jax and in_tested_mpi4jax:
-        return
-    # The FFI generation (verified-working, iter 333): jax 0.10.x + mpi4jax 0.9.x must be
-    # paired TOGETHER (the FFI API needs jax>=0.10; the legacy custom-call line needs
-    # jax<0.10). Accept only the consistent pairing — a CROSS pairing (e.g. jax 0.10 +
-    # mpi4jax 0.8, or jax 0.8 + mpi4jax 0.9) is the genuinely-incompatible case and still
-    # falls through to the warning below.
-    in_ffi_jax = _FFI_JAX_MIN <= jax_triplet < _FFI_JAX_MAX_EXCL
-    in_ffi_mpi4jax = _FFI_MPI4JAX_MIN <= mpi4jax_triplet < _FFI_MPI4JAX_MAX_EXCL
-    if in_ffi_jax and in_ffi_mpi4jax:
-        return
 
     parts = []
     if not in_tested_jax:
@@ -219,11 +244,13 @@ def mpi_stack_outside_tested_range() -> bool:
     range, but the global-allreduce path (mass fixer, ``global_sum_mpi``) can
     drift ~1e-9 vs serial under an incompatible custom-call ABI — enough to
     break the tight serial-vs-MPI equivalence pins.  Tests that assert that
-    equivalence use this to ``xfail`` on an incompatible upstream stack (e.g.
-    jax>=0.10.1, for which no mpi4jax release exists yet) while still REQUIRING
-    a pass once a tested stack is installed.  See
-    :func:`_validate_mpi_runtime_versions`.  Returns ``True`` if either package
-    is missing (nothing to run).
+    equivalence use this to ``xfail`` on an incompatible upstream stack (a CROSS
+    pairing, or a jax/mpi4jax beyond the verified generations) while still
+    REQUIRING a pass once a tested stack is installed.  Shares
+    :func:`_stack_in_tested_generation` with :func:`_validate_mpi_runtime_versions`,
+    so a stack the runtime accepts is never simultaneously xfailed here (the FFI
+    generation jax 0.10.x + mpi4jax 0.9.x is accepted).  Returns ``True`` if
+    either package is missing (nothing to run).
 
     Reads the mpi4jax version from package METADATA rather than importing the
     module: this runs at pytest-collection time (an ``xfail`` condition), and
@@ -241,9 +268,7 @@ def mpi_stack_outside_tested_range() -> bool:
         return True
     jt = _parse_version_triplet(jax.__version__)
     mt = _parse_version_triplet(mpi4jax_version)
-    in_jax = _TESTED_JAX_MIN <= jt < _TESTED_JAX_MAX_EXCL
-    in_mpi4jax = _TESTED_MPI4JAX_MIN <= mt < _TESTED_MPI4JAX_MAX_EXCL
-    return not (in_jax and in_mpi4jax)
+    return not _stack_in_tested_generation(jt, mt)
 
 
 # --- mpi4jax GPU transport (device-direct vs host-staged) -------------------
@@ -730,29 +755,3 @@ def batch_psum_spmd(
         offset += size
 
     return results
-
-
-def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
-    """Broadcast an array from one rank to all others.
-
-    **Not differentiable**: ``mpi4jax.bcast`` has no JVP or VJP rules.
-    Use only for initialization and I/O — never inside ``jax.grad``.
-
-    Parameters
-    ----------
-    value : jax.Array
-        Array to broadcast (only meaningful on ``root``).
-    root : int
-        Rank that broadcasts.
-
-    Returns
-    -------
-    jax.Array
-        The broadcast value on all ranks.
-    """
-    mpi4jax, MPI = require_mpi_stack()
-
-    result = mpi4jax_array_result(
-        mpi4jax.bcast(value, root=root, comm=MPI.COMM_WORLD),
-    )
-    return result

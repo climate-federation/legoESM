@@ -7,14 +7,15 @@ One-at-a-time (OAT) variation around the baseline
 ``tiedtke + louis + mcfarlane + sundqvist + rrtmgp + xu_randall`` at
 T21.  For each of the four dimensions (convection, turbulence, gwd,
 microphysics) we run every alternative scheme exactly once while
-holding the other three at the baseline.  Total = 28 runs (the
-baseline itself is run once and shared across dimensions).
+holding the other three at the baseline.  The exact run count = baseline
++ sum(len(SWEEP_SPACE[dim])) (currently 25; the script PRINTS the true
+count and the exact ``--array`` range at the end — always use that, never
+a hardcoded range).
 
 Per-run cost at T21 + RRTMGP + 3-day rollout (4 epochs, 48 samples):
 - ~40k dycore steps total per run
 - ~1-3h on a single RTX 8000 (rough estimate from the existing T21
   multistep smoke runs, scaled for the longer 3-day rollout)
-- 28 runs -> ~28-84 GPU-h total
 
 Outputs
 -------
@@ -27,10 +28,11 @@ This script writes (idempotent):
 
 Launching
 ---------
-After this script runs (writes configs only, no jobs submitted):
+After this script runs (writes configs only, no jobs submitted), use the
+exact ``--array=0-<N>`` line the script prints (N = n_combos-1):
 ::
 
-    sbatch --array=0-27 scripts/run/_aimip_sweep_stage1_runner.sbatch
+    sbatch --array=0-<N> scripts/run/_aimip_sweep_stage1_runner.sbatch
 
 The array job index selects one combo from the manifest and runs
 ``scripts/run/run_aimip.py --suite <combo>/suite.yaml --variants classical``
@@ -45,10 +47,22 @@ sweep.
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 
-import yaml
+# packages/* namespace roots (the sweep planner core lives in
+# legoesm.training.sweep_planner; PYTHONPATH may not carry them when this
+# planner runs bare on a login node).
+_REPO = Path(__file__).resolve().parents[2]
+for _d in sorted((_REPO / "packages").glob("*/")):
+    if (_d / "legoesm").is_dir() and str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+from legoesm.training.sweep_planner import (  # noqa: E402
+    build_oat_combos,
+    validate_sweep_baseline,
+    write_sweep_plan,
+)
 
 
 # Baseline scheme choices (matches the production AIMIP classical recipe).
@@ -66,6 +80,9 @@ BASELINE = {
 # as their own variants.  Excludes "none" on convection because the
 # dynamics-only baseline is a degenerate case for an ESM physics
 # comparison.
+# NO "none" in any category — user directive: always keep ALL 5
+# parameterization categories ACTIVE; the sweep compares real schemes only
+# (radiation is fixed to RRTMGP, not a swept axis).
 SWEEP_SPACE = {
     "aimip_convection": [
         "sbm", "dca", "kuo", "mass_flux", "edmf",
@@ -73,49 +90,23 @@ SWEEP_SPACE = {
     ],  # 9 alternatives + baseline tiedtke
     "aimip_turbulence": [
         "tke", "smagorinsky", "clubb_lite",
-        "holtslag_boville", "ysu", "edmf", "none",
-    ],  # 7 alternatives + baseline louis
+        "holtslag_boville", "ysu", "edmf",
+    ],  # 6 alternatives + baseline louis
     "aimip_gwd": [
-        "lindzen", "rayleigh", "hines", "prognostic_spectral", "none",
-    ],  # 5 alternatives + baseline mcfarlane (skip ml_emulator)
+        "lindzen", "rayleigh", "hines", "prognostic_spectral",
+    ],  # 4 alternatives + baseline mcfarlane (skip ml_emulator)
     "aimip_microphysics": [
-        "kessler", "seifert_beheng", "morrison", "thompson", "none",
-    ],  # 5 alternatives + baseline sundqvist (skip ml_emulator)
+        "kessler", "seifert_beheng", "morrison", "thompson",
+    ],  # 4 alternatives + baseline sundqvist (skip ml_emulator)
+    "aimip_cloud": [
+        "sundqvist",
+    ],  # 1 alternative + baseline xu_randall ('resolved' needs explicit
+        # condensate micro -> invalid with the diagnostic sundqvist micro)
 }
 
 BASELINE_REL = Path("config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml")
 SWEEP_DIR_REL = Path("config/aimip/sweep/stage1")
 RESULTS_DIR_REL = Path("results/aimip_classical_sweep_stage1")
-
-
-def _combo_name(dim: str, scheme: str) -> str:
-    """Per-combo dirname -- short, ASCII, sortable."""
-    short_dim = {
-        "aimip_convection": "conv",
-        "aimip_turbulence": "turb",
-        "aimip_gwd": "gwd",
-        "aimip_microphysics": "micro",
-    }[dim]
-    return f"combo_{short_dim}_{scheme}"
-
-
-def _write_combo(repo_root: Path, combo_name: str, overrides: dict, *,
-                 baseline_rel: Path, results_dir_rel: Path) -> None:
-    """Write the per-combo suite.yaml + variant_classical.yaml pair."""
-    combo_dir = repo_root / SWEEP_DIR_REL / combo_name
-    combo_dir.mkdir(parents=True, exist_ok=True)
-
-    suite_yaml = {
-        "base": str(baseline_rel),
-        "variants": ["classical"],
-        "output_dir": str(results_dir_rel / combo_name),
-    }
-    overlay_yaml = dict(overrides)  # keys are aimip_* scheme literals
-
-    with (combo_dir / "suite.yaml").open("w") as fh:
-        yaml.safe_dump(suite_yaml, fh, sort_keys=False)
-    with (combo_dir / "variant_classical.yaml").open("w") as fh:
-        yaml.safe_dump(overlay_yaml, fh, sort_keys=False)
 
 
 def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
@@ -138,8 +129,8 @@ def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
 #
 # Submit with:
 #     sbatch --array=0-N scripts/run/_aimip_sweep_stage1_runner.sbatch
-# where N+1 = number of combos in the manifest (currently 28; counted
-# at submission time).
+# where N+1 = number of combos in the manifest (the planner prints the
+# exact range; counted at submission time).
 
 set -euo pipefail
 
@@ -158,7 +149,10 @@ print(m['combos'][int(sys.argv[1])]['suite'])
 
 mkdir -p results/aimip_classical_sweep_stage1/slurm_logs
 
-export PYTHONPATH=/burg-archive/glab/users/pg2328/legoESM/src:${{PYTHONPATH:-}}
+# Post-merge layout is packages/* (PEP420 namespace), NOT src/. Source the
+# shared env helper so PYTHONPATH points at packages/* — the old hardcoded
+# src/ path silently broke every array task (ModuleNotFoundError: legoesm).
+source "$REPO_ROOT/scripts/cluster/scaling_ginsburg/_env.sh"
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 
@@ -183,49 +177,20 @@ def main():
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
-    baseline_path = repo_root / BASELINE_REL
-    if not baseline_path.exists():
-        raise FileNotFoundError(f"Missing baseline: {baseline_path}")
+    validate_sweep_baseline(repo_root, BASELINE_REL)
 
-    # Build the combo list.  "combo_baseline" goes first so the
-    # baseline scorecard is index 0; the OAT alternatives follow.
-    combos: list[dict] = []
-    combos.append({
-        "name": "combo_baseline",
-        "dim": "baseline",
-        "scheme": "tiedtke+louis+mcfarlane+sundqvist",
-        "overrides": dict(BASELINE),
-    })
-    for dim, alts in SWEEP_SPACE.items():
-        for alt in alts:
-            overrides = dict(BASELINE)
-            overrides[dim] = alt
-            combos.append({
-                "name": _combo_name(dim, alt),
-                "dim": dim,
-                "scheme": alt,
-                "overrides": overrides,
-            })
-
-    # Write per-combo config pairs.
-    for combo in combos:
-        _write_combo(
-            repo_root, combo["name"], combo["overrides"],
-            baseline_rel=BASELINE_REL,
-            results_dir_rel=RESULTS_DIR_REL,
-        )
-        combo["suite"] = str(SWEEP_DIR_REL / combo["name"] / "suite.yaml")
-
-    manifest = {
-        "stage": 1,
-        "baseline": dict(BASELINE),
-        "baseline_yaml": str(BASELINE_REL),
-        "results_dir": str(RESULTS_DIR_REL),
-        "n_combos": len(combos),
-        "combos": combos,
-    }
-    manifest_path = repo_root / SWEEP_DIR_REL / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    # "combo_baseline" goes first so the baseline scorecard is index 0;
+    # the OAT alternatives follow (shared planner core, D6).
+    combos = build_oat_combos(BASELINE, SWEEP_SPACE)
+    manifest_path = write_sweep_plan(
+        repo_root,
+        campaign="aimip",
+        combos=combos,
+        sweep_dir_rel=SWEEP_DIR_REL,
+        results_dir_rel=RESULTS_DIR_REL,
+        baseline=BASELINE,
+        baseline_rel=BASELINE_REL,
+    )
 
     runner_sbatch = _write_runner_sbatch(
         repo_root,

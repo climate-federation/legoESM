@@ -15,11 +15,9 @@ Run:
     scripts/validate/run_colliding_modons.py --n 48 --days 60 --report-every 5
 """
 import argparse
-import jax
+
 import jax.numpy as jnp
 import numpy as np
-
-jax.config.update("jax_enable_x64", True)
 
 
 def _total_energy(h, u_d, v_d, area, g):
@@ -32,29 +30,71 @@ def _total_energy(h, u_d, v_d, area, g):
     return float(jnp.sum((ke + pe) * area))
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
+    """CLI parser. Defaults reproduce the VALIDATED matrix modon config
+    (``run_atmosphere_test_matrix.py`` ``test_num == 8``): duogrid grid +
+    biharmonic backstop + ``damp_v=0.010``.  #800: the previous defaults
+    (no hyperdiff, ``damp_v=0.030``, non-duogrid grid) let cube-seam noise
+    erupt and blew the run up at ~day 40 for a user running this driver plainly
+    — exactly the reported instability.  Pass ``--hyperdiff-factor 0`` /
+    ``--damp-v`` to probe the un-backstopped behaviour deliberately.
+
+    Defaults are the shared ``MODON_*`` constants (single source of truth with
+    the matrix ``test_num == 8``), so the two paths cannot drift back apart."""
+    # Function-scope import keeps module import light (no heavy SW module at
+    # ``import`` time); the constants are the same ones the matrix consumes.
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        MODON_DAMP_V, MODON_DIV_DAMP_FACTOR, MODON_HYPERDIFF_FACTOR,
+        MODON_HYPERDIFF_SCALING,
+    )
     p = argparse.ArgumentParser()
     p.add_argument("--n", type=int, default=48)
     p.add_argument("--days", type=float, default=60.0)
     p.add_argument("--dt", type=float, default=300.0)
     p.add_argument("--report-every", type=float, default=5.0)
-    p.add_argument("--div-damp", type=float, default=8.0)   # iter1009 default
-    p.add_argument("--damp-v", type=float, default=0.030)
-    p.add_argument("--hyperdiff-factor", type=float, default=0.0)  # x _hyperdiff_cube(n)
-    args = p.parse_args()
+    p.add_argument("--div-damp", type=float, default=MODON_DIV_DAMP_FACTOR)
+    # damp_v + hyperdiff_factor == the #521/#753 validated modon config (matrix
+    # test_num==8); 0.030 / 0.0 was the pre-#800 crashing default.
+    p.add_argument("--damp-v", type=float, default=MODON_DAMP_V)
+    p.add_argument("--hyperdiff-factor", type=float,
+                   default=MODON_HYPERDIFF_FACTOR)  # x cdgrid_hyperdiff_cube(n)
+    # #753: resolution law for the biharmonic backstop. 2 == (ref/n)^2 (default,
+    # FV3 div-damp law; C96 erupts under ^4 but is stable under ^2, validated
+    # 100 days at C36/C48/C96); 4 == (ref/n)^4 grid-scale-damping-time constant
+    # (pre-#753 byte-identical; unchanged at C48 either way).
+    p.add_argument("--hyperdiff-scaling", type=int,
+                   default=MODON_HYPERDIFF_SCALING, choices=(2, 4))
+    # Cube-seam duogrid ON by default: the modon IC's sharp vortex gradients
+    # imprint the face seams without it (#521/#800).  --no-duogrid to disable.
+    p.add_argument("--no-duogrid", dest="use_duogrid",
+                   action="store_false", default=True)
+    return p
+
+
+def main():
+    args = build_arg_parser().parse_args()
+
+    # Set x64 here (not at module scope) so importing this driver — e.g. the
+    # parser test — does not flip the global precision policy for other tests.
+    import jax
+    jax.config.update("jax_enable_x64", True)
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        FV3EdgeShallowWaterModel, iter1009_dual_target_config)
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel, cdgrid_hyperdiff_cube,
+        iter1009_dual_target_config)
     from tests.test_cases.colliding_modons import colliding_modons_cdgrid
 
     n = args.n
-    grid = create_cubed_sphere(n)
-    try:
-        from scripts.matrix.run_atmosphere_test_matrix import _hyperdiff_cube
-        hyperdiff = args.hyperdiff_factor * _hyperdiff_cube(n)
-    except Exception:
-        hyperdiff = 0.0
+    # Mirror the validated matrix modon grid: non-rotating (belt-and-suspenders;
+    # colliding_modons_cdgrid also zeroes the cdgrid Coriolis) + duogrid seams.
+    grid = create_cubed_sphere(n, omega=0.0, use_duogrid=args.use_duogrid)
+    # Import the CANONICAL biharmonic helper directly (the matrix runner's
+    # ``_hyperdiff_cube`` is only a re-export alias).  No try/except-> 0.0
+    # fallback: with the hyperdiff_factor=1.0 default a silent zero would
+    # resurrect the #800 no-backstop crash; a missing helper must fail loud.
+    hyperdiff = args.hyperdiff_factor * cdgrid_hyperdiff_cube(
+        n, scaling_exponent=args.hyperdiff_scaling)
     cfg = iter1009_dual_target_config(
         n, div_damp_factor=args.div_damp, damp_v=args.damp_v,
         hyperdiff_coeff=hyperdiff)

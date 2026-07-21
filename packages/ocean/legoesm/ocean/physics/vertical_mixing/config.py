@@ -9,16 +9,22 @@ from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
     IWMConfig,
 )
+from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+    DoubleDiffusionConfig,
+)
 
 
 __param_spec__ = {
     "ConstantVerticalMixingConfig": {
         "scheme_key": "ocean.vm.constant",
         "excluded": {
+            "N_ref": "Gregg et al. (2003) fixed published reference stratification N_0 (5.24e-3 1/s); the latitude-scaling normalisation, not a trained closure knob",
         },
         "params": {
             "A_v": {"units": "m^2/s", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
             "K_v": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_bg_eq": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — equatorial diffusivity", "shape": None},
+            "K_bg_pole": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — polar diffusivity", "shape": None},
         },
     },
     "RichardsonVerticalMixingConfig": {
@@ -40,10 +46,12 @@ __param_spec__ = {
             "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
             "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
             "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
+            "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -52,7 +60,7 @@ __param_spec__ = {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
-            "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "alpha_tke": {"units": "1", "bounds": (1.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE vertical-diffusion coeff: NEMO avm x1 (zdftke); Veros/Gaspar 30", "shape": None},
             "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
@@ -102,6 +110,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.kpp",
         "excluded": {
             "Cv": "Large 1994 fixed nondim constant",
+            "neg_beta_T": "Large 1994 fixed nondim constant (-beta_T, App. B; V_t^2 prefactor)",
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
@@ -136,9 +145,38 @@ __param_spec__ = {
 
 
 class ConstantVerticalMixingConfig(NamedTuple):
-    """Constant-coefficient vertical mixing."""
+    """Constant-coefficient vertical mixing.
+
+    With ``lat_dependent=False`` (default) the vertical viscosity ``A_v`` and
+    diffusivity ``K_v`` are spatial constants (BIT-IDENTICAL legacy).  With
+    ``lat_dependent=True`` the background is REPLACED, on the IMPLICIT
+    vertical-mixing path (``k_profiles.compute_vertical_K_profiles``), by the
+    Gregg et al. (2003) latitude/stratification-scaled internal-wave background
+    (CVMix ``bkgnd`` / MOM6 ``Henyey_IGW_background``): the diapycnal
+    diffusivity is reduced toward the equator — where the Coriolis parameter
+    vanishes and internal-wave breaking is suppressed — ranging from
+    ``K_bg_eq`` (equator) to ``K_bg_pole`` (poleward); the momentum viscosity is
+    scaled by the SAME factor, preserving the configured Prandtl ratio
+    ``A_v/K_v``.  REPLACED means end-to-end: the model-level fallback floors
+    the dynamics caller passes (``K_v_background``/``A_v_background``, i.e.
+    ``LatLonCGridOceanConfig.K_v``/``A_v``) are suppressed as well, so the
+    constant-BACKGROUND contribution lies exactly in ``[K_bg_eq, K_bg_pole]``
+    with the configured Prandtl ratio (no double-added constant floor).
+    Additive closures configured on top (``enhanced_diffusion`` convection,
+    internal-wave mixing) still stack onto that background, and non-wet
+    (sub-seafloor) interfaces are zeroed — the exact-range guarantee is for
+    the background term at wet interfaces, not the total after other
+    closures.  The EXPLICIT ``constant_vertical_mixing`` tendency path cannot
+    apply a latitude field and RAISES if ``lat_dependent=True`` (no silent
+    no-op).  See ``_shared.latitude_background_diffusivity``.
+    """
     A_v: float = 1e-3   # Vertical viscosity [m^2/s]
     K_v: float = 1e-4   # Vertical diffusivity [m^2/s]
+    # --- Latitude-dependent internal-wave background (Gregg 2003 / CVMix bkgnd) ---
+    lat_dependent: bool = False   # opt-in; False => spatial-constant A_v/K_v (legacy)
+    K_bg_eq: float = 1e-5         # equatorial background diffusivity [m^2/s]
+    K_bg_pole: float = 1e-4       # polar background diffusivity [m^2/s]
+    N_ref: float = 5.24e-3        # Gregg (2003) reference stratification N_0 [1/s]
 
 
 class RichardsonVerticalMixingConfig(NamedTuple):
@@ -149,6 +187,18 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     K_bg: float = 1e-5   # Background diffusivity [m^2/s]
     A_bg: float = 1e-4   # Background viscosity [m^2/s]
     Pr_t: float = 10.0   # Turbulent Prandtl number
+    # ----- Static-stability N^2 mode for the gradient Richardson number -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
+    #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
+    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   clips Ri>=0), which carries the compressibility bias (~too stable).
+    # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
+    #   displacement to the upper cell's pressure
+    #   (``eos.compute_buoyancy_frequency_adiabatic``), SIGNED. Requires the
+    #   caller to thread cell-centre pressure ``p_cell`` (+ the model EOS) to
+    #   ``richardson_vertical_mixing``. Both integration factory and the
+    #   implicit k_profiles path supply it when this is selected.
+    n2_mode: str = "insitu"
 
 
 class TKEConfig(NamedTuple):
@@ -191,7 +241,9 @@ class TKEConfig(NamedTuple):
     c_eps: float = 0.7
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
-    tke_mxl_choice: int = 2
+    tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
+                                     # sweeps + the ln_mxl0 stress anchor)
+    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -204,6 +256,15 @@ class TKEConfig(NamedTuple):
     bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
     bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
+    # Surface TKE boundary condition:
+    #   "veros_flux" (default)  — Neumann wind-work flux injection
+    #                             surface_flux=(|tau|/rho0)^1.5 (Veros tke.py).
+    #   "nemo_dirichlet"        — NEMO nn_bc_surf=1: HOLD the top interface at
+    #                             en(1)=max(rn_emin0, rn_ebb*|tau|/rho0)
+    #                             (zdftke.F90:264-269) as a Dirichlet value in
+    #                             the implicit solve. ~60x larger surface TKE
+    #                             than the flux BC under an ~0.07 Pa wind.
+    surface_bc: str = "veros_flux"
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
@@ -218,6 +279,19 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
+    # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
+    #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S
+    #   (the state the implicit-mixing call acts on).
+    # ``True``: sample it on the BEFORE-advection (start-of-step, Nnow) T/S,
+    #   matching NEMO ``stp``: ``eos → bn2(Nnow)`` at step start, THEN
+    #   ``tra_adv/tra_ldf/tra_zdf`` consume that ``avt``. The single-step
+    #   ``fct2`` tracer drift at the deepest wet cell was flipping the
+    #   marginal bottom interface to N²<0 (spurious deep convection, 2400×
+    #   avt spike; BOTTOM_N2_DIAGNOSIS_FINDINGS.md). Only the diffusivity-
+    #   stage N² source changes (the post-mixing ``taup1`` N² recompute is
+    #   untouched); consulted only for ``n2_mode="adiabatic"``.
+    n2_before_advection: bool = False
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -262,6 +336,14 @@ class TKEConfig(NamedTuple):
     #   point is the topmost interior interface). No ``tke_background`` /
     #   ``tke_surface_min`` floors.
     positivity: str = "floor"
+    # ----- Dissipation time-discretization in the TKE solve -----
+    # "backward_euler" (default, BIT-IDENTICAL legacy): fully-implicit
+    #   linearized dissipation, diagonal += dt*c_eps*sqrt(e)/l_eps.
+    # "nemo_1p5_split": NEMO zdftke's semi-implicit split (zfact2/zfact3,
+    #   zdftke.F90:241-242,414,419): 1.5x on the diagonal + 0.5x explicit on
+    #   the RHS, linearized at the carried sqrt(e)/l_eps. Same first-order
+    #   dissipation; different discrete decay factor at large dt.
+    dissipation_discretization: str = "backward_euler"
     # ----- K-from-TKE amplitude convention -----
     # ``"gaspar_sqrt2e"`` (default, BIT-IDENTICAL legacy):
     #   K_M = c_k·l_k·sqrt(2·max(e, tke_background)) — the Gaspar form.
@@ -431,6 +513,26 @@ class TKEConfig(NamedTuple):
     #   step, like Veros's zero-initialised dtke[taum1]). Requires
     #   ``prognostic=True`` (advecting a diagnostic TKE is a config error).
     advection_scheme: str = "none"
+    # Timestep [s] used to derive the explicit-diffusion CFL ceiling
+    # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path
+    # (make_tke_profiles_mpas caps the diagnostic K_M / K_H; mirrors the KPP
+    # MPAS bridge's KPPConfig.cfl_cap_dt_s exactly — same numerics parameter).
+    # MUST be set to the ocean dynamics dt for the cap to be correct: a
+    # value smaller than the real dt over-damps; larger risks instability.
+    # Default 300.0 preserves the historical hard-coded estimate.
+    cfl_cap_dt_s: float = 300.0
+    # ``eice``: under-ice attenuation of the lc/etau wave-driven TKE sources
+    #   (NEMO nn_eice).  0 (default, BIT-IDENTICAL) = no attenuation — the
+    #   orchestrators do not thread ice concentration, so both kernels inject
+    #   full wave TKE even under compact ice.  Nonzero modes thread
+    #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
+    #   into the kernels' built-in ``(1-ice_frac)`` factor:
+    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
+    #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
+    #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
+    #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
+    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
 
 
 class KPPConfig(NamedTuple):
@@ -461,6 +563,10 @@ class KPPConfig(NamedTuple):
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
     c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
+    # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
+    # Cv keeps its standard standalone value 1.6 (it does NOT absorb sqrt(0.2)).
+    neg_beta_T: float = 0.2   # = -beta_T (LMD94 App. B; V_t^2 prefactor)
     # LMD94 Appendix B separate momentum/scalar velocity scales w_m, w_s.
     # In the code's sign convention zeta = d/L_MO ≥ 0 for unstable, so the
     # weakly-unstable→convective transition is at |zeta| = zeta_{m,s}_abs
@@ -498,6 +604,18 @@ class KPPConfig(NamedTuple):
     enable_langmuir: bool = False    # opt-in Langmuir enhancement
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
+    # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
+    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
+    #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
+    #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
+    #   1 = linear eff=fi (factor 1-fi; NOT NEMO nn_eice=1 = 1-tanh(10fi));
+    #   3 = eff=min(4*fi,1) (max(0,1-4*fi), matches NEMO nn_eice=3, mixing
+    #   killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
+    #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
+    #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
+    #   reached the KPP grids).
+    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
 
 
 class CATKEConfig(NamedTuple):
@@ -571,9 +689,20 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+#: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
+#: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
+#: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
+#: backs ``make_eos_fn`` (so the dispatch and the "valid schemes" message can
+#: never drift). Every member is reachable through the public YAML key
+#: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
+VALID_VERTICAL_MIXING_SCHEMES = frozenset(
+    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+)
+
+
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
+    scheme: str = "constant"  # one of VALID_VERTICAL_MIXING_SCHEMES
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
@@ -600,3 +729,11 @@ class VerticalMixingConfig(NamedTuple):
     # ``iwm.enabled=True`` (the explicit-tendency path cannot honour it),
     # mirroring the tidal guard above.  Default off ⇒ bit-exact legacy.
     iwm: IWMConfig = IWMConfig()
+    # Double-diffusive mixing (NEMO zdfddm; Merryfield 1999) is ADDITIVE like
+    # iwm, but contributes a SEPARATE salt (avs) vs heat (avt) diffusivity, so
+    # it is applied in the implicit vertical-mixing path AFTER the primary
+    # closure and routes the salinity solve through its own diffusivity
+    # (``K_v + (avs - avt)``); momentum (avm) is untouched, matching zdfddm.
+    # Requires ``implicit_vertical_mixing=True`` (the shared-K explicit/pair
+    # path cannot carry avs != avt).  Default off ⇒ bit-exact legacy.
+    ddm: DoubleDiffusionConfig = DoubleDiffusionConfig()

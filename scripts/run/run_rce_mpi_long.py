@@ -47,37 +47,37 @@ import numpy as np
 from mpi4py import MPI
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.cfl_diagnostic import (
+from legoesm.atmosphere.dynamics.shared.cfl_diagnostic import (
     compute_courant_numbers_plane,
 )
-from legoesm.atmosphere.dynamics.compressible_euler import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     HORIZONTAL_ADVECTION_HALO_REQUIREMENT as _ADV_HALO_REQ,
     PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
     make_rest_state,
 )
-from legoesm.atmosphere.dynamics.moist_mass_fixer import (
+from legoesm.atmosphere.dynamics.crm.moist_mass_fixer import (
     compute_total_water_mass_plane, fix_moist_mass_plane,
 )
-from legoesm.atmosphere.dynamics.rce_diagnostics import (
+from legoesm.atmosphere.dynamics.crm.rce_diagnostics import (
     cloud_fraction_profile_plane, column_moist_static_energy_plane,
     column_water_vapor_plane, moist_static_energy_3d_plane,
     precipitation_rate_proxy_plane, temperature_3d_plane,
 )
-from legoesm.atmosphere.dynamics.rce_mpi import (
+from legoesm.atmosphere.dynamics.crm.rce_mpi import (
     compute_dry_mass_plane_mpi,
     compute_total_water_mass_plane_mpi,
     fix_mass_nonhydrostatic_plane_mpi,
     fix_moist_mass_plane_mpi,
     remove_horizontal_mean_wind_plane_mpi,
 )
-from legoesm.atmosphere.dynamics.rce_surface_flux import (
+from legoesm.atmosphere.dynamics.crm.rce_surface_flux import (
     compose_rce_surface_scalar_tendencies,
     wind_speed_at_lowest_level_plane,
 )
-from legoesm.atmosphere.dynamics.tracer_positivity import (
+from legoesm.atmosphere.dynamics.shared.tracer_positivity import (
     apply_positive_filter_state,
 )
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
@@ -106,7 +106,13 @@ from legoesm.parallel.plane_mpi import (
     scatter_plane_field,
 )
 
-jax.config.update("jax_enable_x64", True)
+# PRECISION: x64 is toggled at IMPORT (before argparse), so f32 is selected via
+# an env var (mirrors run_rcemip_plane's LEGOESM_RCEMIP_PLANE_FP32). Set
+# LEGOESM_RCE_MPI_FP32=1 BEFORE launch → x64 stays OFF → float64 array requests
+# canonicalize to float32 (dynamics + mpi4jax halo run in f32). Default = fp64.
+# main() cross-checks --precision against this env var so a mismatch fails loud.
+if os.environ.get("LEGOESM_RCE_MPI_FP32") != "1":
+    jax.config.update("jax_enable_x64", True)
 
 
 T_SFC_K = 300.0
@@ -327,6 +333,23 @@ def parse_args():
                         "dt=20 actually runs SLOWER than upwind1 at dt=10 "
                         "(2x fewer steps but 2.4x cost per step). Use only "
                         "for sharp-front problems where dispersion matters.")
+    p.add_argument("--vertical-tracer-advection",
+                   choices=["centered", "van_leer"],
+                   default="van_leer",
+                   help="VERTICAL tracer advection. van_leer (default) = "
+                        "monotone TVD, positive-definite (matches the serial "
+                        "run_rcemip_plane default + SAM's monotone scalar "
+                        "transport); centered = 2nd-order, can overshoot into "
+                        "negative tracer at sharp convective gradients. Now "
+                        "honored on the MPI halo path (codex CRM-dycore "
+                        "review) — previously the halo silently used centered.")
+    p.add_argument("--precision", choices=["float32", "float64"],
+                   default="float64",
+                   help="Floating-point precision. float32 REQUIRES env "
+                        "LEGOESM_RCE_MPI_FP32=1 set BEFORE launch (x64 is a "
+                        "module-import toggle); main() refuses a mismatch. "
+                        "f32 runs the dynamics + mpi4jax halo in single "
+                        "precision for GPU/accelerator throughput.")
     p.add_argument("--adaptive-dt", action="store_true", default=False,
                    help="iter-228 F11 fix-path-4 STUB: opt-in flag "
                         "for runtime CFL monitoring + dt shrinkage. "
@@ -719,24 +742,40 @@ def save_snapshot(out_dir, day_idx, t_sim, state, hc):
 
 
 def save_snapshot_3d(out_dir, hr_idx, t_sim, state, hc):
-    """Full 3D MSE/q_v/T volumes [float32, compressed].
+    """Full 3D MSE/q_v/T/condensate volumes [float32, compressed].
 
-    Stored at ``snapshots_3d/snap_hr_NNNN.npz`` with arrays:
-    ``mse``, ``qv``, ``T`` each shape (ny, nx, nlev); plus ``z``
-    (nlev,) and scalars ``t_sim``, ``day``, ``hour``.
+    Stored at ``snapshots_3d/snap_hr_NNNN.npz`` with arrays ``mse``, ``qv``,
+    ``T``, ``cond`` each shape (ny, nx, nlev); plus ``z`` (nlev,) and scalars
+    ``t_sim``, ``day``, ``hour``. ``cond`` is the total condensate mixing
+    ratio (all non-vapor tracer mass slots, i.e. q_c + q_r + ... [kg/kg]) so
+    the volume is directly consumable as an SCM-RCE campaign reference (which
+    reads ``z``/``T``/``mse``/``cond``; q_v is inverted from ``mse``).
     """
     mse_3d = np.asarray(
         moist_static_energy_3d_plane(state, hc), dtype=np.float32,
     )
     qv_3d = np.asarray(state.tracers.data[..., 0], dtype=np.float32)
     T_3d = np.asarray(temperature_3d_plane(state, hc), dtype=np.float32)
+    # Total condensate = sum of the non-vapor tracer MASS slots (slot 0 is
+    # q_v). For the warm-rain Kessler CRM these are q_c (slot 1) and q_r
+    # (slot 2); summing all slots >= 1 stays correct if more hydrometeor
+    # mass tracers are added. Clipped to >= 0 (advection can leave tiny
+    # negatives without the mass fixer).
+    n_tracers = state.tracers.data.shape[-1]
+    if n_tracers > 1:
+        cond_3d = np.asarray(
+            jnp.clip(state.tracers.data[..., 1:], 0.0).sum(axis=-1),
+            dtype=np.float32,
+        )
+    else:
+        cond_3d = np.zeros_like(qv_3d)
     z = np.asarray(hc.z_full, dtype=np.float32)
     snap_path = out_dir / "snapshots_3d" / f"snap_hr_{hr_idx:04d}.npz"
     snap_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         snap_path,
         t_sim=t_sim, day=t_sim / SEC_PER_DAY, hour=t_sim / 3600.0,
-        z=z, mse=mse_3d, qv=qv_3d, T=T_3d,
+        z=z, mse=mse_3d, qv=qv_3d, T=T_3d, cond=cond_3d,
     )
 
 
@@ -783,6 +822,21 @@ def write_progress(out_dir, t_sim, total_t, step, total_steps,
 
 def main():
     args = parse_args()
+    # PRECISION cross-check (codex): x64 is a module-IMPORT toggle set by BOTH
+    # JAX_ENABLE_X64 and our LEGOESM_RCE_MPI_FP32, so verify the ACTUAL runtime
+    # x64 state matches --precision — checking our env var alone would miss
+    # JAX_ENABLE_X64=1 + --precision float32 (which would silently run float64)
+    # and the reverse. Fail LOUD on a mismatch.
+    _x64_on = bool(jax.config.jax_enable_x64)
+    _want_x64 = args.precision == "float64"
+    if _x64_on != _want_x64:
+        raise SystemExit(
+            f"error: --precision {args.precision} but jax_enable_x64={_x64_on} "
+            "(float64 needs x64 ON, float32 needs x64 OFF). x64 is set at import "
+            "from JAX_ENABLE_X64 and LEGOESM_RCE_MPI_FP32. For float32 launch "
+            "with LEGOESM_RCE_MPI_FP32=1 and WITHOUT JAX_ENABLE_X64=1; for "
+            "float64 leave LEGOESM_RCE_MPI_FP32 unset."
+        )
     if args.implicit_buoyancy and not args.semi_implicit_acoustic:
         raise SystemExit(
             "error: --implicit-buoyancy rejected: requires "
@@ -1005,6 +1059,7 @@ def main():
         n_acoustic_substeps=args.n_acoustic_substeps,
         vertical_theta_diffusion=args.vertical_theta_diffusion,
         horizontal_advection_scheme=args.advection,
+        vertical_tracer_advection=args.vertical_tracer_advection,
         implicit_buoyancy=args.implicit_buoyancy,
     )
     # Save the GLOBAL state for snapshot dumping (needed on every rank

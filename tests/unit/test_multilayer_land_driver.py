@@ -86,6 +86,26 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
+    """land_surface_scheme dispatches the right surface scheme onto the
+    multilayer land config (issue #730): default -> SimpleSEB, 'two_leaf' ->
+    the DifferBESS two-leaf canopy (Kelvin h_r bare-soil + stomatal transp.)."""
+    from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+    _patch_land_loaders(monkeypatch)
+
+    driver_seb = ModelDriver(_small_cfg(), output_dir=tmp_path / "seb")
+    driver_seb.setup()
+    assert isinstance(
+        driver_seb.physics.land_ml_cfg.surface_scheme, SimpleSEBConfig)
+
+    driver_two_leaf = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="two_leaf"),
+        output_dir=tmp_path / "twoleaf")
+    driver_two_leaf.setup()
+    assert isinstance(
+        driver_two_leaf.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
+
+
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     """A 1-day AMIP run completes and the prognostic soil column advances."""
     _patch_land_loaders(monkeypatch)
@@ -103,6 +123,29 @@ def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     assert np.all(np.isfinite(np.asarray(st.T_soil)))
     assert np.all((np.asarray(st.theta_soil) >= 0.0)
                   & (np.asarray(st.theta_soil) <= 1.0))
+
+
+def test_multilayer_land_evolves_under_unfused_radiation(monkeypatch, tmp_path):
+    """The UNFUSED radiation path (rad_update_steps>1, unfused_radiation=True)
+    must still advance the soil. Before the C4 fix _run_rad discarded
+    compute_radiation_core's advanced land state, so the Richards column FROZE
+    across the whole run (the radiation cadence is the only place the tile is
+    stepped in that mode). Regression: soil must change, not stay at the seed."""
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(rad_update_steps=2, unfused_radiation=True)
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    T_soil_0 = np.asarray(driver._land_ml_state.T_soil).copy()
+
+    status = driver.run()
+
+    assert status == "COMPLETED"
+    st = driver._land_ml_state
+    assert st is not None
+    assert not np.allclose(np.asarray(st.T_soil), T_soil_0), (
+        "unfused-radiation soil column did not advance (frozen — the "
+        "_run_rad land_ml discard regression)")
+    assert np.all(np.isfinite(np.asarray(st.T_soil)))
 
 
 def test_slab_path_leaves_multilayer_inactive(monkeypatch, tmp_path):
@@ -125,7 +168,7 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     van-Genuchten backward inside float32 (real stiff-clay soils need fp64)."""
     import jax
     import jax.numpy as jnp
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
@@ -189,5 +232,314 @@ def test_multilayer_no_mask_still_enables_tiled_surface(monkeypatch, tmp_path):
     assert driver.physics.land_ml_cfg is not None, "multilayer land was set up"
 
 
+def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
+    """#730/#837: the seeded soil column tracks the IC near-surface RH, not the
+    legacy moisture-uniform 0.5*theta_sat.  Verifies the driver wires
+    q_v/p_s -> RH -> aridity_theta_init with the per-column CLM theta_wp/theta_fc."""
+    from legoesm.land import aridity_theta_init
+    from legoesm.thermo import saturation_mixing_ratio
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+
+    ad = driver.physics.adapter
+    T_low = ad.flatten_2d(driver.state.T.data[..., -1]).reshape(-1)
+    _qv = driver.q_v
+    q_v_low = ad.flatten_2d(getattr(_qv, "data", _qv)[..., -1]).reshape(-1)
+    p_s = ad.flatten_2d(
+        getattr(driver.state.p_s, "data", driver.state.p_s)).reshape(-1)
+    rh = np.asarray(q_v_low) / np.maximum(
+        np.asarray(saturation_mixing_ratio(jnp.asarray(T_low), jnp.asarray(p_s))), 1e-12)
+    # Use the SAME per-column thresholds the driver + tile beta read: the
+    # PFT-weighted plant btran theta_wp/theta_fc from clm_multilayer_setup (NOT
+    # the raw soil theta_wp/fc in the fake map -- clm_multilayer_setup overrides
+    # them with the tuned PFT btran values).
+    params = driver.physics.land_ml_params
+    wp = np.asarray(params.theta_wp); fc = np.asarray(params.theta_fc)
+    expected = np.asarray(aridity_theta_init(jnp.asarray(rh), jnp.asarray(wp), jnp.asarray(fc)))
+
+    theta = np.asarray(driver._land_ml_state.theta_soil)   # (ncol, nlayers)
+    # every layer seeded to the per-column aridity value (float32 state -> loose tol)
+    np.testing.assert_allclose(theta[:, 0], expected, rtol=2e-3, atol=2e-3)
+    for k in range(theta.shape[1]):
+        np.testing.assert_allclose(theta[:, k], theta[:, 0], rtol=1e-6)
+    # bounded to the per-column plant-available range, and NOT the legacy uniform
+    # 0.5*theta_sat seed (which is aridity-blind).
+    assert np.all((theta[:, 0] >= wp - 1e-4) & (theta[:, 0] <= fc + 1e-4))
+    assert not np.allclose(theta, 0.5 * np.asarray(driver.physics.land_ml_cfg.hydraulics.theta_sat))
+
+
+# NOTE: multilayer land on the LAT-LON grid is a separate, pre-existing setup
+# limitation (``_setup_multilayer_land`` flattens the 2-D-per-cell ``grid.lat``
+# via the adapter, but lat-lon ``grid.lat`` is 1-D, so the setup crashes BEFORE
+# the aridity seeding runs).  #837's aridity fix is validated on the cubed-sphere
+# path (``test_setup_seeds_aridity_aware_soil_moisture``); enabling multilayer
+# land on lat-lon is an out-of-scope follow-up.
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
+    """#746: a spun-up land restart (land_ic_path) REPLACES the cold-start
+    multilayer soil column at setup — the driver loads the equilibrated state
+    bit-for-bit and skips init_multilayer_land_state.  Regresses the day-0
+    cold-start shock behind the land cloud-albedo cold trap."""
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+
+    # 1) Build a driver, grab its cold-start state, perturb it to a distinct
+    #    "spun-up" column (warmer deep soil, drier top), save as a restart.
+    #    (src/dst use SEPARATE output dirs — the run-manifest guard refuses to
+    #    mix two configs' provenance in one directory.)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    ncol = src.grid.lat.size
+    n_layers = 6
+    seed = src._land_ml_state
+    spun = seed._replace(
+        T_soil=jnp.asarray(np.asarray(seed.T_soil) + 7.5),      # +7.5 K deep soil
+        theta_soil=jnp.asarray(np.asarray(seed.theta_soil) * 0.6),
+    )
+    ic = tmp_path / "land_ic.npz"
+    save_land_restart(ic, spun, land_mode="multilayer",
+                      t_end_s=20 * 365 * 86400.0,
+                      n_steps_completed=1, metadata={})
+
+    # 2) A fresh driver with land_ic_path set must load THAT column, not the
+    #    cold start.
+    cfg = _small_cfg()._replace(land_ic_path=str(ic))
+    dst = ModelDriver(cfg, output_dir=tmp_path / "dst")
+    dst.setup()
+
+    assert dst._land_ml_state.T_soil.shape == (ncol, n_layers)
+    # Bit-identical to the saved spun-up column (modulo the storage-dtype cast),
+    # and DISTINCT from the cold start (proves the override, not a coincidence).
+    np.testing.assert_allclose(
+        np.asarray(dst._land_ml_state.T_soil),
+        np.asarray(spun.T_soil), rtol=1e-6, atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(dst._land_ml_state.theta_soil),
+        np.asarray(spun.theta_soil), rtol=1e-6, atol=1e-6)
+    assert float(np.max(np.abs(
+        np.asarray(dst._land_ml_state.T_soil) - np.asarray(seed.T_soil)))) > 5.0
+
+    # The skin carry T_land must ALSO seed from the spun-up TOP-SOIL (not the
+    # cold-start air temp), so the first step's land turbulent fluxes are
+    # consistent with the spun-up column (codex #746: else the day-0 shock
+    # leaks into the BL at the closure seam).
+    ctx = dst._prepare_run_context(0, cfg.start_day, restore_carry=False)
+    T_land = np.asarray(ctx["T_land"])
+    expected_skin = np.asarray(spun.T_soil[:, 0]).reshape(T_land.shape)
+    np.testing.assert_allclose(T_land, expected_skin, rtol=1e-6, atol=1e-4)
+
+
+def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
+    """A restart whose n_layers/ncol don't match the run's grid must raise on
+    load, not silently reshape (load_land_restart validates shapes)."""
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    ic = tmp_path / "land_ic_6lay.npz"
+    save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0, metadata={})
+
+    # Run config asks for 10 layers; the restart has 6 -> mismatch -> raise
+    # (separate output dir so this is the SHAPE guard, not the manifest guard).
+    cfg = _small_cfg()._replace(land_ic_path=str(ic), multilayer_n_layers=10)
+    dst = ModelDriver(cfg, output_dir=tmp_path / "dst")
+    with pytest.raises((ValueError, AssertionError)):
+        dst.setup()
+
+
+def test_setup_multilayer_land_on_latlon_grid(monkeypatch, tmp_path):
+    """#869/#837 follow-up: the LAT-LON grid stores 1-D lat/lon axes; the land
+    setup's flatten_2d(grid.lat) raised "cannot reshape (n_lat,) into ncol" and
+    killed every latlon use_multilayer_land run at setup (the production
+    latlon24 lane).  The setup must broadcast the axes to the (n_lat, n_lon)
+    cell grid and seed a full-ncol state."""
+    from legoesm.land.state import MultiLayerLandState
+
+    _patch_land_loaders(monkeypatch)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="latlon_cgrid"),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical",
+        radiation="gray",
+        land_mask_path="synthetic.nc",
+        use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+    )
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()          # raised TypeError (reshape) before the fix
+
+    st = driver._land_ml_state
+    assert isinstance(st, MultiLayerLandState)
+    ncol = driver.grid.lat.size * driver.grid.lon.size   # n_lat * n_lon
+    assert st.T_soil.shape == (ncol, 6)
+    assert driver.physics.land_ml_lat.shape == (ncol,)
+    # lat must VARY across columns (a broadcast bug that tiled one row would
+    # leave it constant).
+    import numpy as _np2
+    assert _np2.unique(_np2.asarray(driver.physics.land_ml_lat)).size > 1
+
+
+# ---------------------------------------------------------------------------
+# Transient land-use cover (LULC) — the jitted AMIP dynamic-cover path
+# ---------------------------------------------------------------------------
+
+
+def _write_transient_cover(path, years, pft_by_year):
+    """Minimal transient legoesm_surfdata (only the vars the cover loader reads):
+    lat/lon/year + pft_frac(year, npft, lat, lon) in PERCENT.  Coarse global grid so
+    every driver column nearest-maps into it."""
+    import xarray as xr
+    from legoesm.land.surface_params import N_PFT_CLM5
+    lat = np.array([-60.0, 0.0, 60.0])
+    lon = np.array([0.0, 120.0, 240.0])
+    pft = np.zeros((len(years), N_PFT_CLM5, lat.size, lon.size))
+    for i, idx in enumerate(pft_by_year):
+        pft[i, idx] = 90.0                       # 90% of the cell = that PFT
+    ds = xr.Dataset(
+        {"pft_frac": (("year", "npft", "lat", "lon"), pft)},
+        coords={"year": np.asarray(years, float), "npft": np.arange(N_PFT_CLM5),
+                "lat": lat, "lon": lon},
+    )
+    ds.to_netcdf(path)
+
+
+def _transient_cfg(surfdata_path):
+    return _small_cfg()._replace(
+        transient_land_cover=True, land_cover_surfdata=str(surfdata_path))
+
+
+def test_transient_land_ml_params_none_when_off(monkeypatch, tmp_path):
+    """Transient cover OFF (default) => _transient_land_ml_params is None, so the
+    jitted step falls back to the closure-baked pipeline.land_ml_params (the
+    byte-identical static path)."""
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    assert getattr(driver, "_land_cover_transient", "missing") is None
+    assert driver._transient_land_ml_params(0.0) is None
+    assert driver._transient_land_ml_params(3650.0) is None
+
+
+def test_transient_cover_setup_reweights_by_year(monkeypatch, tmp_path):
+    """Transient cover ON: setup loads the annual series and
+    _transient_land_ml_params(day) re-weights the vegetation params per calendar
+    year — forest at the start year, crop a decade later => different albedo_veg,
+    while the frozen soil map is untouched."""
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
+    idx = {n: i for i, n in enumerate(CLM5_PFT_NAMES)}
+    p = tmp_path / "transient.nc"
+    _write_transient_cover(
+        p, years=[2000.0, 2010.0],
+        pft_by_year=[idx["broadleaf_evergreen_tropical"], idx["crop_c3"]])
+
+    _patch_land_loaders(monkeypatch)
+    cfg = _transient_cfg(p)._replace(start_year=2000)
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    cover, years, rebuild = driver._land_cover_transient
+    assert list(np.asarray(years)) == [2000.0, 2010.0]
+    ncol = driver.grid.lat.size
+    assert cover.shape == (2, ncol, 17)
+
+    lp_2000 = driver._transient_land_ml_params(0.0)          # cover_year 2000
+    lp_2010 = driver._transient_land_ml_params(10 * 365.0)   # cover_year 2010
+    assert lp_2000 is not None and lp_2010 is not None
+    # forest -> crop cover shift re-weights the vegetation albedo
+    assert not np.allclose(np.asarray(lp_2000.albedo_veg),
+                           np.asarray(lp_2010.albedo_veg))
+    # out-of-range years clamp to the series endpoints (interp_annual), so a
+    # pre-2000 / post-2010 day reuses the boundary cover rather than extrapolating
+    np.testing.assert_allclose(
+        np.asarray(driver._transient_land_ml_params(-3650.0).albedo_veg),
+        np.asarray(lp_2000.albedo_veg))
+
+
+def test_transient_cover_amip_run_completes(monkeypatch, tmp_path):
+    """End-to-end: a multi-segment AMIP run with transient cover ON completes
+    through the real jitted _run_compiled path.  Exercises Stages 1-3 together —
+    the per-segment land_ml_params flows as a traced SegmentForcing leaf into the
+    compiled step (stable pytree => no retrace/crash)."""
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
+    idx = {n: i for i, n in enumerate(CLM5_PFT_NAMES)}
+    p = tmp_path / "transient.nc"
+    _write_transient_cover(
+        p, years=[2000.0, 2010.0],
+        pft_by_year=[idx["broadleaf_evergreen_tropical"], idx["crop_c3"]])
+    _patch_land_loaders(monkeypatch)
+    # 2 diagnostic days so the run spans >1 segment (cover advances between them).
+    cfg = _transient_cfg(p)._replace(start_year=2000, days=2)
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    assert driver._land_cover_transient is not None
+
+    status = driver.run()
+
+    assert status == "COMPLETED"
+    st = driver._land_ml_state
+    assert st is not None and np.all(np.isfinite(np.asarray(st.T_soil)))
+
+
+def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
+    """The 5th-issue fix: a JITTED compute_radiation_core reads its per-call
+    (traced) land_ml_params, not the closure-baked self.land_ml_params.  A
+    brightened cover changes the surface net SW under the jit; passing None
+    reproduces the baked-self result byte-for-byte (static path unchanged)."""
+    import jax
+    from legoesm import constants
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    pipe = driver.physics
+    land_ml = driver._land_ml_state
+
+    g2 = tuple(driver.grid.lat.shape)
+    nlev = _small_cfg().grid.nlev
+    T = jnp.full((*g2, nlev), 285.0)
+    p_s = jnp.full(g2, 1.0e5)
+    q_v = jnp.full((*g2, nlev), 0.005)
+    sst = jnp.full(g2, 290.0)
+    sic = jnp.zeros(g2)
+    lat = jnp.asarray(driver.grid.lat)
+    lon = jnp.asarray(driver.grid.lon)
+    u = jnp.full((*g2, nlev), 3.0)
+    v = jnp.zeros((*g2, nlev))
+
+    # The multilayer skin T rides SegmentCarry.T_land alongside land_ml (the tile
+    # writes T_sfc back into it), so production always carries a concrete T_land.
+    T_land = jnp.full(g2, 288.0)
+
+    def _call(land_ml_params):
+        return pipe.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon, 1.0, 0.0,
+            jnp.zeros(0), constants.S_0, None, None,
+            u=u, v=v, dt=600.0, T_land=T_land,
+            land_ml=land_ml, land_ml_params=land_ml_params)
+
+    rad = jax.jit(_call)
+    base = pipe.land_ml_params
+    bright = base._replace(
+        albedo_veg=jnp.clip(jnp.zeros_like(base.albedo_veg) + 0.8, 0.0, 1.0))
+
+    out_none = rad(None)      # traced None -> baked self.land_ml_params
+    out_base = rad(base)      # explicit self
+    out_bright = rad(bright)  # brightened cover
+
+    sw_net_sfc = 1  # compute_radiation_core output index
+    # None path == explicitly passing the baked params (byte-identical static path)
+    np.testing.assert_array_equal(np.asarray(out_none[sw_net_sfc]),
+                                  np.asarray(out_base[sw_net_sfc]))
+    # a brighter land cover reflects more SW -> different surface net SW, proving
+    # the jitted graph consumed the TRACED param (not the closure-baked attribute)
+    assert not np.allclose(np.asarray(out_base[sw_net_sfc]),
+                           np.asarray(out_bright[sw_net_sfc]))

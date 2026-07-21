@@ -746,6 +746,36 @@ def create_voronoi_device_mesh(
 # Pytree sharding utilities
 # ==============================================================================
 
+def multiprocess_safe_device_put(leaf, sharding):
+    """``jax.device_put`` that is safe under multi-controller SPMD.
+
+    ``jax.device_put(x, sharding)`` with a sharding that spans processes
+    ASSERTS the value is bit-identical on every process.  Per-process XLA
+    autotuning can legitimately pick different kernels on different nodes,
+    producing last-bit differences in host-precomputed inputs (first hit:
+    the external-forcing leaves on the 2-node Levante cs_spmd receipt run,
+    #693 job 26030677 — values identical to 8 significant digits, assert
+    still trips).  Under >1 process, build the global array from each
+    process's LOCAL copy via ``jax.make_array_from_callback`` instead —
+    each process materializes only its addressable shards, no cross-process
+    equality requirement, no communication.
+
+    Single-process (and non-array leaves) delegate to plain
+    ``jax.device_put`` — byte-identical behavior to before.
+    Already-global (non-fully-addressable) leaves pass through unchanged.
+    """
+    if not isinstance(leaf, (jax.Array, jnp.ndarray)):
+        return jax.device_put(leaf, sharding)
+    if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
+        return leaf  # already a global sharded array; nothing to place
+    if jax.process_count() > 1:
+        import numpy as np
+        host = np.asarray(leaf)
+        return jax.make_array_from_callback(
+            host.shape, sharding, lambda idx: host[idx])
+    return jax.device_put(leaf, sharding)
+
+
 def shard_pytree(pytree, config: DeviceConfig):
     """Shard a pytree across devices according to the grid type.
 
@@ -788,7 +818,7 @@ def shard_pytree(pytree, config: DeviceConfig):
                 # face-only sharding.
                 if config.tiling != (1, 1) and leaf.ndim < 3:
                     sharding = tiled_face_only or config.face_sharding
-                    return jax.device_put(leaf, sharding)
+                    return multiprocess_safe_device_put(leaf, sharding)
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
                     # STAGGERED face-plane leaves — D-grid winds
                     # (6, n+1, n, ...) / (6, n, n+1, ...) — cannot
@@ -801,9 +831,9 @@ def shard_pytree(pytree, config: DeviceConfig):
                     tx, ty = config.tiling
                     if leaf.shape[1] % tx != 0 or leaf.shape[2] % ty != 0:
                         sharding = tiled_face_only or config.face_sharding
-                        return jax.device_put(leaf, sharding)
-                return jax.device_put(leaf, config.face_sharding)
-            return jax.device_put(leaf, config.replicated_sharding)
+                        return multiprocess_safe_device_put(leaf, sharding)
+                return multiprocess_safe_device_put(leaf, config.face_sharding)
+            return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
         elif config.grid_type == "cubed_sphere_level":
             # Issue #273 follow-up: level-parallel cubed-sphere mesh.
@@ -813,12 +843,12 @@ def shard_pytree(pytree, config: DeviceConfig):
             # builds its own column mesh on the same device set and
             # shards there (see ``build_physics_pipeline`` for the
             # column-mesh construction).
-            return jax.device_put(leaf, config.replicated_sharding)
+            return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
         elif config.grid_type == "latlon":
             if leaf.ndim >= 2:
-                return jax.device_put(leaf, config.face_sharding)
-            return jax.device_put(leaf, config.replicated_sharding)
+                return multiprocess_safe_device_put(leaf, config.face_sharding)
+            return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
         elif config.grid_type == "spectral":
             # Spectral state arrays have shape (n_sh, nlev).
@@ -827,11 +857,11 @@ def shard_pytree(pytree, config: DeviceConfig):
                 level_axis_sharding = NamedSharding(
                     config.mesh, P(None, "level"),
                 )
-                return jax.device_put(leaf, level_axis_sharding)
+                return multiprocess_safe_device_put(leaf, level_axis_sharding)
             if leaf.ndim == 1:
                 # 1D arrays (e.g., lnps_hat): replicate across devices.
-                return jax.device_put(leaf, config.replicated_sharding)
-            return jax.device_put(leaf, config.replicated_sharding)
+                return multiprocess_safe_device_put(leaf, config.replicated_sharding)
+            return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
         elif config.grid_type == "voronoi":
             # Voronoi state arrays: shard cell- and edge-centered arrays
@@ -839,11 +869,11 @@ def shard_pytree(pytree, config: DeviceConfig):
             if config.voronoi_dims is not None and leaf.ndim >= 1:
                 nCells, nEdges, _nVerts = config.voronoi_dims
                 if leaf.shape[0] in (nCells, nEdges):
-                    return jax.device_put(leaf, config.face_sharding)
-            return jax.device_put(leaf, config.replicated_sharding)
+                    return multiprocess_safe_device_put(leaf, config.face_sharding)
+            return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
         # Default: replicate
-        return jax.device_put(leaf, config.replicated_sharding)
+        return multiprocess_safe_device_put(leaf, config.replicated_sharding)
 
     return jax.tree.map(_shard_leaf, pytree)
 

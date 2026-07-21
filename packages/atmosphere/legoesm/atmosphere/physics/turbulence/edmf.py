@@ -5,11 +5,66 @@ Unified turbulence-convection framework that combines an eddy-diffusivity
 model. The ED part handles small-scale mixing while the MF part
 represents coherent updraft transport in the convective boundary layer.
 
+Faithfulness to SST07 (dry-CBL EDMF)
+------------------------------------
+This is an EDMF-STRUCTURED closure in the spirit of Siebesma, Soares & Teixeira (2007,
+"SST07"), NOT a verbatim SST07 or a Tan et al. (2018) plume: it is a STEADY diagnostic
+single-plume marching + a prognostic-TKE ED part, with SST07-inspired forms and several
+simplified coefficients.
+FAITHFUL to the EDMF framework (the DEFINING decomposition):
+  * the total turbulent flux is split ``w'φ' = −K ∂φ/∂z + M_kin (φ_u − φ̄)`` (kinematic mass
+    flux ``M_kin ≈ a_u·w_u``) into a down-gradient ED part and a nonlocal MF part (SST07 Eq. 5,
+    via Eq. 3-4); this code carries a DENSITY-WEIGHTED ``M = a_u·ρ·w_u = ρ·M_kin``, so the
+    conservative flux-form MF tendency carries the ``1/ρ``: ``∂φ/∂t = −(1/ρ) ∂z[M (φ_u − φ̄)]``
+    (dimensionally ``= −∂z[M_kin (φ_u − φ̄)]``);
+  * the updraft entrains environment air, ``d(φ_u)/dz = −ε (φ_u − φ_env)`` (SST07 Eq. 10; here
+    ``φ_env`` is the grid mean ``φ̄`` — SST07's small-area (``a_u ≪ 1``) approximation
+    ``φ_e ≈ φ̄``, not literal environment air; the ``a_u = 0.1`` default is this code's choice,
+    not SST07's stated ~1-5% thermal area).
+DEPARTURES from SST07 (physics / structural simplifications):
+  * **mass flux** ``M = a_u·ρ·w_u`` is a compressible extension of SST07's Boussinesq
+    ``M = a_u(w_u − w̄) ≈ a_u·w_u`` (Eq. 3-5; SST07's dry-CBL closure actually uses
+    ``M = c_m·σ_w``, Eq. 21), and is then further CAPPED at ``M_max`` (see NUMERICS) — so
+    effectively ``M = min(a_u·ρ·w_u, M_max)``;
+  * the **plume vertical velocity** ``d(w²)/dz = 2(B − ε·w²)`` is a SIMPLIFICATION, NOT SST07
+    Eq. 15 ``½(1−2β)·d(w²)/dz = B − b·ε·w²`` with ``β = 0.15``, ``b = 0.5`` — this code takes
+    ``β = 0`` and ``b = 1`` (buoyancy-vs-entrainment-drag form with unit coefficients);
+  * the **ED part is the ``tke`` MY-INSPIRED k-l closure** (``Km = Ck·l·√TKE`` with constant
+    ``Ck = 0.1`` / ``Pr_t = 0.33`` and NO stability functions, so the diagnostic ``Km ⊥ N²``),
+    NOT SST07's ``z/z*``-dependent Holtslag K-profile (Eq. 18-20);
+  * **CONSTANT entrainment** ``ε = 1e-3 /m`` — SST07 Eq. 16 is ``ε ≈ c_ε[1/z + 1/(z*−z)]``
+    (height-dependent, singular at both the surface and the PBL top);
+  * **tuned surface initialization**: ``w_u(0) = max(w_min, 2.5·u*)`` (a FRICTION-velocity
+    proxy, NOT the buoyancy convective scale ``w*``) and a FIXED ``parcel_dT = 0.5 K`` θ-excess;
+    SST07 Eq. 17 sets the surface scalar excess from the surface flux divided by ``σ_w``;
+  * a **single bulk steady plume** (``n_updrafts`` unused; no detrainment term)
+    — faithful to SST07's dry-CBL single-plume scope, but a MAJOR departure from
+    Tan (2018) (prognostic plume velocity/area/thermo, updrafts+downdrafts, and prognostic
+    plume/subdomain second moments — this code carries only grid-mean TKE);
+  * an extra **MF→TKE buoyancy production** term (``max(mf_buoyancy, 0)`` into the TKE budget) —
+    SST07 has no prognostic-TKE budget at all, and this is not Tan's energy-consistent partition.
+NUMERICS (AD-safety / stability / solver structure, not SST07 physics):
+  * **ED and MF are solved SEPARATELY** — ED implicitly, then MF added EXPLICITLY and capped —
+    whereas SST07 solves the combined ED+MF advection-diffusion IMPLICITLY together (App. B);
+  * **backward-Euler** in the w² and entrainment updates (unconditionally stable for any
+    ``ε·dz``; forward Euler NaN'd at T21 where ``ε·dz ~ 3-5``);
+  * **AD-safe sqrt** (floor + outer ``where`` so ``d√w²`` stays finite at ``w² ≤ 0``);
+  * a **sigmoid smooth deactivation** of the updraft below ``w_updraft_min``;
+  * the explicit-CFL cap ``M ≤ 0.5·ρ·dz/dt``;
+  * the flux-form **height-weighted interface interpolation** (exact telescoping conservation
+    on stretched grids); and the density (``ρ ≥ 0.01``) / θ_v (``≥ 1``) floors.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_edmf_faithful.py``.
+
 References
 ----------
 - Siebesma, A. P., Soares, P. M. M., & Teixeira, J. (2007). A combined
   eddy-diffusivity mass-flux approach for the convective boundary layer.
   J. Atmos. Sci., 64, 1230-1248.
+- Tan, Z., et al. (2018). An extended eddy-diffusivity mass-flux scheme for
+  unified representation of subgrid-scale turbulence and convection.
+  J. Adv. Model. Earth Syst., 10, 770-800.  (Cited for CONTRAST only — this
+  module is NOT a Tan plume: it has no prognostic plume velocity/area/thermo,
+  no downdrafts, and no subdomain second moments.)
 """
 
 from __future__ import annotations
@@ -18,7 +73,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import TurbulentEDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -49,7 +109,8 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "ED part is down-gradient (Km >= 0, Kh = Km/Pr_t >= 0); the MF part "
-        "adds -d/dz(M*(phi_u - phi)) so a warm/moist updraft transports heat "
+        "adds -(1/rho) d/dz(M*(phi_u - phi)) with density-weighted M = a_u*rho*w_u, "
+        "so a warm/moist updraft transports heat "
         "and moisture upward. The column budget is OPEN: the surface flux "
         "(shflx > 0 upward, lhflx > 0 upward/moistening) is injected as the "
         "bottom boundary condition and the top is zero-flux; z increases upward."
@@ -57,19 +118,71 @@ __physics_contract__ = {
     "conserves": ["none"],
     "differentiable": True,
     "reference": (
-        "Siebesma, Soares & Teixeira (2007), J. Atmos. Sci. 64, 1230-1248; "
-        "Tan et al. (2018) plume closure"
+        "Siebesma, Soares & Teixeira (2007), J. Atmos. Sci. 64, 1230-1248 "
+        "(EDMF framework; this is an SST07-STRUCTURED dry-CBL single-plume "
+        "simplification, NOT a verbatim SST07 or a Tan et al. 2018 plume)"
     ),
     "idealized_test": (
-        "no surface flux + neutral non-buoyant column -> dead updraft "
-        "(w_u -> 0) and near-zero interior tendency; Km, Kh >= 0; "
-        "tke stays >= tke_min."
+        "no surface flux + neutral non-buoyant column -> zero scalar MF "
+        "transport (phi_u -> phi_env; the anomaly vanishes, M stays nonzero) "
+        "and near-zero interior tendency; Km, Kh >= 0; tke stays >= tke_min."
     ),
 }
 
 
-# Convective velocity-scale coefficient w* ~ 2.5 u* (EDMF default).
+# Surface updraft velocity-scale coefficient: w_u(0) ~ 2.5*u* (a FRICTION-velocity
+# proxy, NOT the buoyancy convective velocity scale w*; SST07 Eq. 17 derives the
+# surface updraft properties from the surface buoyancy flux).
 _EDMF_WSTAR_COEFF = 2.5
+
+
+def _mass_flux_tendency(phi, phi_u, M, dz_layer, rho, z_full, z_half):
+    """Flux-form vertical divergence of the mass-flux transport of ``phi``.
+
+    ``d(phi)/dt = -(1/rho) d/dz[ M (phi_u - phi) ]`` written in FLUX FORM so the
+    column mass-weighted integral telescopes to ``F_top - F_sfc`` exactly.  A
+    non-flux-form centred difference at full levels does NOT telescope (its
+    mass-weighted column sum leaves a spurious O(interior MF flux) heat/moisture
+    source), which is the conservation defect this replaces.
+
+    Index 0 = model top, increasing downward; z increases upward.  The
+    interior interface fluxes are interpolated LINEARLY IN HEIGHT from the
+    adjacent cell-centred fluxes to the actual interface height ``z_half``
+    (weights from ``z_full``/``z_half``).  On a uniform grid the interface is
+    midway between the flanking full levels, so this reduces exactly to the
+    previous 2-point average; on a STRETCHED grid the unweighted average is
+    equivalent to the old centred difference ``(F[k-1]-F[k+1])/(2·dz_layer[k])``
+    whose denominator does not match the full-level spacing
+    ``z_full[k-1]-z_full[k+1]`` — an O(1) local truncation error the height
+    weighting removes (a linear-in-z flux now yields the exact constant
+    divergence in every interior row) while PRESERVING the telescoping
+    conservation property (the divisor stays the layer thickness ``dz_layer``).
+
+    There is no mass-flux transport through the model top (``F_top = 0``); the
+    lowest interface carries the plume's own bottom MF flux ``F_sfc = flux[-1] =
+    M·(φ_u − φ)`` — set by the surface updraft initialization (``parcel_dT`` /
+    ``w_u``), NOT the physical ``shflx`` / ``lhflx`` (those drive the ED solve).
+    Retaining it keeps the surface-driven plume transport; hard-zeroing it broke
+    ``test_mass_flux_active`` (iter-50) and is NOT done here.
+    """
+    flux = M * (phi_u - phi)                       # cell-centred updraft flux, (ncol, nlev)
+    ncol = flux.shape[0]
+    zero_top = jnp.zeros((ncol, 1), dtype=flux.dtype)
+    # Interior interface j (between full levels j-1 and j, top-first) sits at
+    # z_half[:, 1:-1]; interpolate the full-level flux linearly to that height.
+    # w in (0, 1): fractional distance from the UPPER full level (j-1) down to
+    # the interface, w = (z_upper - z_iface)/(z_upper - z_lower).
+    z_upper = z_full[:, :-1]
+    z_lower = z_full[:, 1:]
+    z_iface = z_half[:, 1:-1]
+    w = (z_upper - z_iface) / jnp.clip(z_upper - z_lower, 1.0, None)
+    flux_int = (1.0 - w) * flux[:, :-1] + w * flux[:, 1:]  # (ncol, nlev-1)
+    flux_sfc = flux[:, -1:]                          # surface-coupled MF flux
+    flux_iface = jnp.concatenate([zero_top, flux_int, flux_sfc], axis=1)  # (ncol, nlev+1)
+    # d(phi)/dt|_k = -(F_upper - F_lower)/(rho_k dz_k); upper iface = k, lower = k+1.
+    dflux_dz = (flux_iface[:, :-1] - flux_iface[:, 1:]) / dz_layer
+    return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
+
 
 def edmf_turbulence(
     u: jax.Array,
@@ -147,15 +260,16 @@ def edmf_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    # ``exner_pref`` = (p_ref / p)^κ multiplies T to get θ.
-    # Distinct from ``exner_inv`` = (p / p_ref)^κ used below to invert θ
-    # back to T.  Variable shadowing was a fragility hazard — keep them
-    # distinctly named.
-    exner_pref = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    # ``exner_pref`` = (p_ref / p)^κ = 1/Π multiplies T to get θ (canonical
+    # helper; same 1 Pa pressure floor).  Distinct from ``exner_inv`` =
+    # (p / p_ref)^κ used below to invert θ back to T.  Variable shadowing was
+    # a fragility hazard — keep them distinctly named.
+    exner_pref = 1.0 / exner_function(p_full)
     theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    # N² = (g/θ_v)·∂θ_v/∂z via the shared buoyancy coefficient (clip at call site).
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # Interpolate to full levels: top/bottom take the nearest half-level
     # value, interior is the average of flanking half-levels.  Single
@@ -193,11 +307,12 @@ def edmf_turbulence(
     ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
     # Potential temperature for updraft.
-    # ``exner_inv`` = (p / p_ref)^κ — divides T to give θ, multiplies
-    # dθ to give dT.  Distinct from ``exner_pref`` = (p_ref / p)^κ
-    # above.  Keeping the two names separate avoids the fragility
-    # of reassigning a single ``exner`` to its reciprocal mid-function.
-    exner_inv = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    # ``exner_inv`` = (p / p_ref)^κ = Π (canonical helper) — divides T to
+    # give θ, multiplies dθ to give dT.  Distinct from ``exner_pref`` =
+    # (p_ref / p)^κ above.  Keeping the two names separate avoids the
+    # fragility of reassigning a single ``exner`` to its reciprocal
+    # mid-function.
+    exner_inv = exner_function(p_full)
     theta = T / jnp.clip(exner_inv, 1.0e-8, None)
 
     # Initialize updraft at surface (bottom level = index nlev-1).  Pin
@@ -234,18 +349,21 @@ def edmf_turbulence(
         # Buoyancy [m/s²]
         buoy = constants.g * (theta_v_u - theta_v_env) / jnp.clip(theta_v_env, 1.0, None)
 
-        # Plume vertical velocity equation (Siebesma 2007 / Tan et al. 2018):
+        # Plume vertical velocity — SST07-STRUCTURED simplification (NOT SST07
+        # Eq. 15's ½(1−2β)·d(w²)/dz = B − b·ε·w² with β=0.15, b=0.5; this code
+        # takes β=0, b=1):
         #
         #     w · dw/dz = B − ε · w²       ⇔     d(w²)/dz = 2(B − ε·w²).
         #
         # **Backward-Euler in the linear damping term** so the update is
         # unconditionally stable for any ``ε·dz``:
         #     w²_new = (w²_old + 2·B·dz) / (1 + 2·ε·dz),    clamped ≥ 0.
-        # Forward Euler ``w² + 2(B − ε·w²)·dz`` is only stable when
-        # ``ε·dz < 0.5``; at T21 with 8 sigma levels ``dz`` can reach
-        # ~3-5 km and the default ``ε = 1e-3 /m`` gives ``ε·dz ~ 3-5``,
-        # which flips the sign of the w² coefficient and amplifies it
-        # each layer — the original sample-46 NaN crash.  Backward
+        # Forward Euler ``w² + 2(B − ε·w²)·dz`` has the amplification
+        # factor ``(1 − 2·ε·dz)``: absolutely stable only for ``ε·dz < 1``,
+        # and the w² coefficient goes NEGATIVE (sign flip) for ``ε·dz > 0.5``.
+        # At T21 with 8 sigma levels ``dz`` can reach ~3-5 km and the default
+        # ``ε = 1e-3 /m`` gives ``ε·dz ~ 3-5``, which flips the sign and
+        # amplifies it each layer — the original sample-46 NaN crash.  Backward
         # Euler matches the forward form to O(ε·dz) and is the
         # canonical choice for stiff linear damping.
         eps = config.entrainment_rate
@@ -311,16 +429,16 @@ def edmf_turbulence(
     q_u = q_u_full[::-1].T
 
     # Mass flux: M = a_updraft * rho * w_u.
-    # Note on column conservation: in this simplified-EDMF formulation
-    # the BC is M[surface] = a_updraft·ρ·w_u_init > 0 (with surface
-    # mass-source matched to the bulk-formula shflx/lhflx wired through
-    # the implicit ED solve), and M smoothly decays via the active
-    # gate (line 213) above the PBL top so M[top] ≈ 0 naturally.
-    # Strict MF-only column closure is approximate; the small residual
-    # is folded into the existing ED + bulk-formula surface-flux
-    # accounting (similar to CAM EDMF).  Hard-zeroing M at boundaries
-    # would zero the legitimate surface-coupled MF transport — the
-    # iter-50 audit attempt to do so broke
+    # The MF surface flux is the plume's OWN bottom flux M·(φ_u − φ), set by the
+    # surface updraft initialization (parcel_dT / w_u).  It is not a direct
+    # function of the shflx / lhflx OUTPUTS (those drive the ED implicit solve),
+    # though the surface ``w_u(0) = max(w_min, 2.5·u*)`` (with a floored u*)
+    # shares the same MOST surface forcing when the 2.5·u* branch is active.  M is
+    # NOT hard-zeroed at the boundaries: it EVOLVES aloft — decaying as w_u falls
+    # through the sigmoid gate where buoyancy is weak, though positive buoyancy
+    # can accelerate the plume — and the flux-form divergence (see
+    # _mass_flux_tendency) telescopes EXACTLY to the boundary MF fluxes.
+    # The iter-50 attempt to hard-zero M at the boundaries broke
     # ``test_mass_flux_active`` and was reverted.
     M = config.a_updraft * rho * w_u  # (ncol, nlev)
 
@@ -334,21 +452,13 @@ def edmf_turbulence(
     M_max = 0.5 * rho * dz_layer / jnp.maximum(dt, 1.0e-12)
     M = jnp.minimum(M, M_max)
 
-    # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
-    # Compute vertical derivative of mass flux transport
-    def _mf_tendency(phi, phi_u):
-        flux = M * (phi_u - phi)  # (ncol, nlev)
-        # Centered FD interior + one-sided FD at top/bottom; single
-        # concatenate replaces alloc-zeros + 3 scatter ops.
-        dflux_top = (flux[:, :1] - flux[:, 1:2]) / dz_layer[:, :1]
-        dflux_int = (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
-        dflux_bot = (flux[:, -2:-1] - flux[:, -1:]) / dz_layer[:, -1:]
-        dflux_dz = jnp.concatenate([dflux_top, dflux_int, dflux_bot], axis=1)
-        return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
-
-    dtheta_dt_mf = _mf_tendency(theta, theta_u)
+    # MF tendencies: flux-form vertical divergence of M·(phi_u − phi_env), so
+    # the column mass-weighted integral telescopes to the boundary fluxes
+    # (conservative — a centred full-level difference leaks a spurious column
+    # source).  See module-level ``_mass_flux_tendency``.
+    dtheta_dt_mf = _mass_flux_tendency(theta, theta_u, M, dz_layer, rho, z_full, z_half)
     dT_dt_mf = dtheta_dt_mf * exner_inv
-    dq_dt_mf = _mf_tendency(q_v, q_u)
+    dq_dt_mf = _mass_flux_tendency(q_v, q_u, M, dz_layer, rho, z_full, z_half)
 
     # ===== ED tendencies via implicit diffusion =====
     sflx_u = tau_x

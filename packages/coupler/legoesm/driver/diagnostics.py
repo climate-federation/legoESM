@@ -133,6 +133,68 @@ def _apply_structured_regrid_3d(
     )
 
 
+# --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
+#     outside these is a blow-up, not a bias.  ONE source of truth shared by the
+#     compiled ``check_stability`` and the raw MPAS/spectral daily checks — the
+#     #871 MPAS autopsy found an 8e8 K state that ran 1138 steps under a
+#     finiteness-only guard because those daily checks lacked bounds. ---
+_T_BLOWUP_MIN_K = 100.0
+_T_BLOWUP_MAX_K = 400.0
+_PS_BLOWUP_MIN_PA = 40000.0
+_PS_BLOWUP_MAX_PA = 115000.0
+# Tolerance for "global T_min sits AT the dycore floor": the clip is an exact
+# jnp.maximum, so a pinned column reports T_min == floor up to fp rounding.
+_T_FLOOR_TOL_K = 1e-3
+
+
+def physical_state_blowup_reason(elapsed_day, T_min, T_max,
+                                 ps_min=None, ps_max=None):
+    """BLOWUP reason string if T (and optional p_s) are outside the physical
+    Earth-atmosphere range, else ``None``.  Pure/scalar so every run-time
+    detector shares the SAME bounds — a runaway T aborts at the first daily
+    check instead of running hundreds of steps under a finiteness-only guard."""
+    if T_min < _T_BLOWUP_MIN_K or T_max > _T_BLOWUP_MAX_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical "
+            f"bounds (min={T_min:.1f}K, max={T_max:.1f}K). "
+            "Check dt, hyperdiffusion, and physics configuration."
+        )
+    if ps_min is not None and ps_max is not None:
+        if ps_min < _PS_BLOWUP_MIN_PA or ps_max > _PS_BLOWUP_MAX_PA:
+            return (
+                f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of "
+                f"bounds (min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
+                "Check dt and dynamics configuration."
+            )
+    return None
+
+
+def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
+    """BLOWUP reason string when the global minimum temperature is pinned at
+    the ``T_min`` dycore floor, else ``None``.
+
+    The eager MPAS path silently clips T to ``config.T_min`` each step
+    (``primitive_eq_mpas`` step "Floors").  A column pinned at the floor is an
+    unbudgeted energy source that MASKS a runaway (#930): the clip holds the
+    reported minimum steady even as the instability grows, so a diverging run
+    can look "successful".  This LOUD guard labels that specific failure.
+
+    Pure/scalar and gated on ``T_floor > 0`` (floor disabled ⇒ never fires, to
+    match the ``config.T_min > 0`` gate on the clip itself), so it *composes
+    with* — and is deliberately MORE specific than —
+    :func:`physical_state_blowup_reason`: when a floor of, say, 150 K sits
+    above the 100 K generic lower bound, this catches a masked runaway the
+    generic bounds check would miss entirely.
+    """
+    if T_floor > 0.0 and T_min <= T_floor + _T_FLOOR_TOL_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: T_min floor activated "
+            f"(min T={T_min:.2f}K pinned at the {T_floor:.0f}K dycore floor "
+            "— masked runaway; see #930)."
+        )
+    return None
+
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -1280,6 +1342,129 @@ class DiagnosticCollector:
 
         self._write_cmip_data(data)
 
+    def finalize_cmip_daily(self, current_day: float) -> None:
+        """Write the COMPLETED days of the CMIP6 ``day`` table if a CMIP
+        writer is active.
+
+        Companion to :meth:`finalize_cmip_fixed` for the graceful wallclock
+        exit.  The daily accumulator is otherwise drained only by :meth:`save`
+        at the end of a run, so a restart-chain ``sys.exit(0)`` would drop this
+        SLURM segment's daily means (day/tas, tasmin, tasmax, …).  Mirrors
+        :meth:`flush_cmip_monthly`: only days STRICTLY BEFORE ``current_day``
+        are emitted (and freed).  The in-progress day is deliberately withheld
+        — writing it here and again from the restart segment (which resumes
+        inside the same ``(year, doy)``) would create duplicate ``time``
+        coordinates, since ``CFWriter.write_field`` appends blindly.  The one
+        boundary day straddling the exit is therefore a bounded imperfection
+        (its restart-segment mean omits the pre-exit samples), matching the
+        monthly-boundary limitation; a fully lossless chain would require
+        checkpointing the accumulator state.  Guarded on ``cf_writer`` and the
+        daily accumulator (no-op for non-CMOR / daily-off runs)."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        doy, _ = day_to_calendar(current_day)
+        current_year = int(current_day // 365.0)
+        data = self._spatial_daily.pop_completed_days(current_year, int(doy))
+        if not data.get('days'):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def finalize_cmip_fixed(self) -> None:
+        """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
+        writer is active.
+
+        The time-invariant ``fx`` fields are normally written once by
+        :meth:`save` at the end of a run.  A wallclock-graceful exit
+        (:meth:`ModelDriver._maybe_wallclock_exit`) calls ``sys.exit(0)`` and
+        never reaches :meth:`save`, so without this public entry a
+        restart-chained run — i.e. EVERY multi-hour AMIP run, whose year does
+        not finish in a single SLURM window — writes its incremental monthly
+        ``Amon`` files but never ``areacella``/``sftlf``.  The resulting CMOR
+        output is non-compliant (each variable's ``external_variables``
+        attribute references ``areacella``/``sftlf``) and blocks any
+        area-weighted or land/ocean-split diagnostic.  Idempotent: rewriting
+        the same static fields on a later flush is harmless."""
+        if self.cf_writer is not None:
+            self._write_cmip_fixed_files()
+
+    def save_cmor_accumulators(self, path: str | Path) -> None:
+        """Persist the CMOR accumulator state to an additive sidecar ``.npz``.
+
+        Serializes the spatial-monthly, spatial-daily, and zonal-monthly
+        accumulators — each namespaced with a ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` key prefix — into a single ``np.savez`` file written next
+        to the model checkpoint.  This lets a calendar month split across
+        restart-chain links (each link is only ~10 days; a month is ~30) be
+        completed on resume; without it the monthly accumulator is recreated
+        empty every link and the CMOR ``Amon`` means are never written.
+
+        Additive by design: it does NOT touch the checkpoint ``.npz`` schema.
+        No-op when CMIP output is inactive (no ``cf_writer`` / accumulators).
+
+        The write is ATOMIC (``<name>.tmp`` then ``Path.replace``): a partial
+        write can never leave a corrupt sidecar, and a re-persist that fails
+        never clobbers the previous (e.g. drained) sidecar with a half-file.
+        """
+        if self.cf_writer is None:
+            return
+        merged: dict[str, np.ndarray] = {}
+        for prefix, accum in (
+            ("monthly.", self._spatial_monthly),
+            ("daily.", self._spatial_daily),
+            ("zonal.", self.monthly_accum),
+        ):
+            if accum is None:
+                continue
+            for key, arr in accum.get_state().items():
+                merged[prefix + key] = arr
+        if not merged:
+            return
+        path = Path(path)
+        tmp_path = path.parent / (path.name + ".tmp")
+        try:
+            # Write via a file handle so ``np.savez`` does not append a second
+            # ``.npz`` to the ``.tmp`` name, then atomically move into place.
+            with open(tmp_path, "wb") as fh:
+                np.savez(fh, **merged)
+            tmp_path.replace(path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)  # never leave a partial temp
+            raise
+
+    def load_cmor_accumulators(self, path: str | Path) -> bool:
+        """Restore CMOR accumulator state from a sidecar written by
+        :meth:`save_cmor_accumulators`.
+
+        Splits the merged ``.npz`` back into the ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` namespaces and calls ``set_state`` on each active
+        accumulator.  Returns ``True`` if any state was restored, ``False`` if
+        the sidecar is absent or CMIP output is inactive — an older run with no
+        sidecar simply resumes with empty accumulators (backward-compatible).
+        """
+        path = Path(path)
+        if self.cf_writer is None or not path.exists():
+            return False
+        namespaced = {
+            "monthly.": self._spatial_monthly,
+            "daily.": self._spatial_daily,
+            "zonal.": self.monthly_accum,
+        }
+        substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
+        with np.load(str(path), allow_pickle=False) as npz:
+            for full_key in npz.files:
+                for prefix in namespaced:
+                    if full_key.startswith(prefix):
+                        substates[prefix][full_key[len(prefix):]] = npz[full_key]
+                        break
+        restored = False
+        for prefix, accum in namespaced.items():
+            sub = substates[prefix]
+            if accum is not None and sub:
+                accum.set_state(sub)
+                restored = True
+        return restored
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)
@@ -1528,13 +1713,20 @@ class DiagnosticCollector:
         # integration loop) costs one GPU stall per call instead of
         # 6-7.  The boolean ``isfinite`` checks on u and T are folded
         # into the same stack as 0/1 floats.
+        # Wind finiteness covers BOTH components: a NaN in v makes
+        # wind_term = max(sqrt(u^2+v^2)) NaN, and NaN > 500 is False, so a
+        # v-only blow-up would otherwise pass the max-wind check silently.
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
+            wind_finite = jnp.logical_and(
+                jnp.all(jnp.isfinite(state.u.data)),
+                jnp.all(jnp.isfinite(state.v.data)))
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
+            wind_finite = jnp.all(jnp.isfinite(state.u.data))
         has_p_s = hasattr(state, 'p_s')
         terms = [
-            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            wind_finite.astype(state.T.data.dtype),
             jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
             wind_term.astype(state.T.data.dtype),
             jnp.min(state.T.data).astype(state.T.data.dtype),
@@ -1543,40 +1735,33 @@ class DiagnosticCollector:
         if has_p_s:
             terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
             terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+            # Finiteness of p_s explicitly: a NaN p_s makes BOTH bound
+            # comparisons below False and would otherwise pass the probe (the
+            # min/max are NaN, and NaN < lo / NaN > hi are both False), letting
+            # a garbage state be checkpointed at a wallclock-graceful exit.
+            terms.append(
+                jnp.all(jnp.isfinite(state.p_s.data)).astype(state.T.data.dtype))
         host = np.asarray(jnp.stack(terms))
-        u_finite = bool(host[0] > 0.5)
+        wind_finite = bool(host[0] > 0.5)
         T_finite = bool(host[1] > 0.5)
         max_v = float(host[2])
         T_min_val = float(host[3])
         T_max_val = float(host[4])
 
-        if not u_finite:
+        if not wind_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
         if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
+        if has_p_s and not bool(host[7] > 0.5):
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite surface pressure"
 
-        # Temperature bounds (physical range for Earth atmosphere)
-        if T_min_val < 100.0 or T_max_val > 400.0:
-            return (
-                f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
-                f"(min={T_min_val:.1f}K, max={T_max_val:.1f}K). "
-                f"Check dt, hyperdiffusion, and physics configuration."
-            )
-
-        # Surface pressure bounds
-        if has_p_s:
-            ps_min = float(host[5])
-            ps_max = float(host[6])
-            if ps_min < 40000.0 or ps_max > 115000.0:
-                return (
-                    f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "
-                    f"(min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
-                    f"Check dt and dynamics configuration."
-                )
-
-        return None
+        # Physical-plausibility bounds (shared helper — one source of truth).
+        ps_min = float(host[5]) if has_p_s else None
+        ps_max = float(host[6]) if has_p_s else None
+        return physical_state_blowup_reason(
+            elapsed_day, T_min_val, T_max_val, ps_min=ps_min, ps_max=ps_max)
 
 
 class EnsembleDiagnosticCollector:

@@ -1,0 +1,55 @@
+# WB campaign SMOKE config — tiny spectral T21, real code path, ~minutes on 1 GPU.
+#
+# The trainer's --smoke flag only shrinks the LAT-LON grid (n_lat/n_lon/nlev);
+# it leaves spectral.n_max untouched, so a spectral smoke needs a genuinely small
+# n_max here instead. This exercises the FULL train+eval+plot wiring (grids,
+# ERA5 load, rollout, scorecard, plot) at minimal cost — NOT a science run.
+grid: "gaussian"
+n_lat: 32
+n_lon: 64
+nlev: 8
+spectral:
+  n_max: 21
+  dt: 1800.0
+  semi_implicit: true
+  time_integrator: "ssp_rk3"
+  hyperdiff_coeff: 2.5e15
+  hyperdiff_order: 2
+  spectral_filter_order: 8
+  spectral_filter_strength: 0.01
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/wb_campaign_era5_smoke"
+train_years: [2020]
+eval_years: [2020]
+era5_cadence_hours: 6
+n_train_days: 2
+
+n_epochs: 1
+optimizer: "adamw"
+lr: 3.0e-4
+warmup_steps: 2
+weight_decay: 1.0e-5
+grad_clip_norm: 1.0
+grad_accum: 1
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  multi_step_hours: [6]
+  multi_step_weights: [1.0]
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+neural_gcm:
+  nn_hidden: 64
+  nn_layers: 2
+sfno:
+  sfno_embed_dim: 32
+  sfno_n_blocks: 2

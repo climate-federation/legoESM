@@ -18,6 +18,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.driver.air_sea_consistency import validate_air_sea_consistency
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
@@ -53,6 +54,39 @@ def enable_diurnal_surface_land(land_cfg):
     if cfg.carbon.scheme != "differland":   # Farquhar needs the differland LAI
         cfg = cfg._replace(carbon=CarbonConfig(scheme="differland"))
     return cfg
+
+
+def assert_land_tile_reachable(land_mode, f_land_mode, f_land) -> None:
+    """Raise if a land model is configured but its tile has zero area everywhere.
+
+    The driver-level invariant on the MATERIALIZED land fraction, the residue the
+    CONFIG-level CLI guard (``run_coupled.apply_land_runoff_scheme``) documents it
+    cannot see: ``land_mode != "none"`` builds land physics, yet ``f_land`` comes
+    out identically zero, so the entire land tile is silently dead. ``f_land`` is
+    a fraction in ``[0, 1]``, so ``max(f_land) == 0`` iff there is no land in any
+    cell -- the ``from_ocean`` all-wet-ocean-mask path and the ``analytical``
+    degenerate-grid (no latitude) fall-to-zeros path, neither visible to any
+    config predicate.
+
+    ``f_land_mode == "zero"`` is EXCLUDED: that is the explicit
+    aquaplanet-with-slab-land request (``--preset aquaplanet --land-scheme slab``;
+    ``run_coupled.py``), where a zero land area is intended, not an accident.
+
+    Pure -> unit-testable; the driver calls it once at coupler-init after
+    materialising ``f_land``."""
+    if land_mode == "none" or f_land_mode == "zero":
+        return
+    # f_land >= 0 everywhere by construction, so max <= 0 <=> all cells zero.
+    if float(jnp.max(f_land)) <= 0.0:
+        raise ValueError(
+            f"land_mode={land_mode!r} builds a land model but the materialized "
+            f"land fraction is zero everywhere (f_land_mode={f_land_mode!r}): "
+            f"the land tile is silently dead. This is the from_ocean "
+            f"all-wet-ocean-mask or the analytical degenerate-grid (no latitude) "
+            f"residue that no config-level predicate can see. Set "
+            f"f_land_mode='zero' if you intend an aquaplanet, or supply a grid "
+            f"latitude / an ocean mask that actually contains land."
+        )
 
 
 def _flatten_pytree_to_npz(state, prefix: str) -> dict:
@@ -159,6 +193,7 @@ class CoupledESMDriver:
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
+        validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
@@ -301,6 +336,14 @@ class CoupledESMDriver:
         """Build the prognostic 3D ``LatLonCGridOceanModel`` (ocean_mode=
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
+        # Voronoi/MPAS ocean: a co-located 3-D MPAS ocean on the atmosphere's
+        # Voronoi mesh has its own init recipe + edge/cell TRiSK staggering (NOT
+        # the lat-lon C-grid stack below).  Dispatch early, mirroring the tripole
+        # early-return.
+        from legoesm.grids.voronoi import VoronoiMesh
+        if isinstance(self._ocean_grid, VoronoiMesh):
+            self._init_mpas_dynamic_ocean(T_sfc_mean)
+            return
         from legoesm.grids.latlon import LatLonGrid
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -658,6 +701,86 @@ class CoupledESMDriver:
             f"barotropic={ocfg.barotropic.barotropic_solver}, pgf={ocfg.pgf_scheme}, "
             f"mesh={cfg.tripole_mesh_path}")
 
+    def _init_mpas_dynamic_ocean(self, T_sfc_mean: float):
+        """Build the prognostic 3-D MPAS ocean (``MPASOceanModel``) CO-LOCATED on
+        the atmosphere's Voronoi mesh, from the OMIP-validated NEMO-match dycore
+        recipe (the single source of truth ``nemo_match_mpas_model_config``, the
+        same config scripts/run/run_omip.py steps) + a stratified rest cold
+        start.
+
+        MPAS uses TRiSK C-grid staggering — edge-normal velocity, cell-centred
+        T/S/eta — unlike the lat-lon Arakawa-C ocean, so SST + surface currents
+        are read back through the Perot edge->cell reconstruction in the MPAS
+        branch of :meth:`_ocean_surface_KuvC`.  Surface fluxes are supplied
+        EXTERNALLY by the coupler (``surface_forcing`` scheme='none' — the
+        dynamics-core external tau/q_net block is the sole consumer), exactly as
+        the OMIP JRA55 forcing mode does; the recipe's idealized prescribed-wind
+        + restoring forcing is off."""
+        from legoesm.grids.voronoi import VoronoiMesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            nemo_match_mpas_model_config,
+        )
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm import constants
+
+        cfg = self.coupled_cfg
+        if cfg.ocean_dt_s <= 0.0:
+            raise ValueError(f"ocean_dt_s must be > 0, got {cfg.ocean_dt_s!r}")
+        # Co-located: the ocean mesh IS the atmosphere's Voronoi mesh (identity
+        # remap) — reuse it; never rebuild at a mismatched resolution.
+        mesh = self._ocean_grid
+        if not isinstance(mesh, VoronoiMesh):
+            raise ValueError(
+                "_init_mpas_dynamic_ocean requires a VoronoiMesh (MPAS) ocean "
+                f"grid; got {type(mesh).__name__}.")
+        z_coord = create_ocean_z_star(cfg.ocean_nlev, H_max=cfg.ocean_H_max_m)
+        # Proven OMIP NEMO-match MPAS dycore + coefficients (locked by
+        # tests/ocean/unit/test_recipes.py), with ONLY the two coupled-run
+        # overlays:
+        #   * surface_forcing scheme='none' so the coupler's air-sea tau/q_net
+        #     (assembled in _assemble_ocean_forcing) is the SOLE surface forcing,
+        #     NOT the recipe's idealized prescribed-wind + restoring default;
+        #   * normalize_freshwater=True (the CORE-II net ~+0.65 Sv P-E+R input
+        #     would otherwise accumulate as a global fresh drift) — matching the
+        #     lat-lon/tripole from_flat(normalize_freshwater=True) path.
+        base = nemo_match_mpas_model_config()
+        config = base._replace(
+            physics=base.physics._replace(
+                surface_forcing=base.physics.surface_forcing._replace(
+                    scheme="none")),
+            normalize_freshwater=True,
+        )
+        self._ocean_model = MPASOceanModel(mesh, z_coord, config)
+        # Stratified rest cold start (zero velocity/SSH, exponential T, uniform
+        # S).  land_lat_threshold=90 => all-ocean, matching a co-located
+        # aquaplanet atmosphere (f_land=0) so the wet masks agree — the same
+        # rationale as the lat-lon ocean_ic='rest' branch.  The surface layer
+        # starts near the atmosphere's mean SST (T_sfc_mean [K] -> degC) so the
+        # cold start is not shocked by a large air-sea temperature jump.
+        T_surf_C = float(T_sfc_mean) - float(constants.T_freeze)
+        self._ocean_state = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=T_surf_C, H_max=cfg.ocean_H_max_m,
+            land_lat_threshold=90.0,
+        )
+        self._ocean_step = self._ocean_model.step
+        self._ocean_z_coord = z_coord
+        self._ocean_land_mask = self._ocean_state.land_mask.data
+        self._ocean_is_mpas = True
+        self._is_dynamic_ocean = True
+        # No climatological restoring target on the idealized cold start; the
+        # optional surface relaxation (_apply_ocean_restoring) stays a no-op
+        # unless a target is configured.
+        self._ocean_T_target = None
+        self._ocean_S_target = None
+        _ocean_frac = float(jnp.mean(self._ocean_land_mask))
+        logger.info(
+            "  Ocean: mode=dynamic (3D MPASOceanModel, voronoi), ic=rest, "
+            f"ocean_frac={_ocean_frac:.2f}, nlev={cfg.ocean_nlev}, "
+            f"ocean_dt={cfg.ocean_dt_s}s, surface_forcing=none(coupled), "
+            "normalize_freshwater=True")
+
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.core.precision import get_policy
@@ -706,12 +829,20 @@ class CoupledESMDriver:
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
             import legoesm.land.clm_surface_map as _csm
             if cfg.land_mode == "multilayer":
-                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+                # Multilayer carries the full trainable snow feedback (cover threshold +
+                # fresh/aged brightness + age decay) from the 2026-07 full-grid recalibration.
+                ch = _csm.TUNED_CH_MULTILAYER
+                alb = land_cfg.land_albedo._replace(
+                    alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+                    alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+                    snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+                    tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0,  # days -> s
+                    soil_dry_albedo_boost=_csm.TUNED_SOIL_DRY_BOOST_MULTILAYER)   # deserts
             else:
-                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
+                ch = _csm.TUNED_CH
+                alb = land_cfg.land_albedo._replace(alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX)
             land_cfg = land_cfg._replace(
-                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
-                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True, land_albedo=alb)
             logger.info(f"  Land: ERA5-calibrated Ch/snow params "
                         f"({cfg.land_mode} CLM default path)")
 
@@ -741,6 +872,18 @@ class CoupledESMDriver:
                 Ch_land=ch_cell, Cd_land=ch_cell)
             logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
 
+            # Sub-grid elevation-band snow (opt-in): band elevations from the CLM
+            # STD_ELEV map so warm cells keep bright snow on their cold high fractions.
+            if getattr(cfg, "land_elev_bands", False):
+                from legoesm.land.snow_bands import (
+                    ElevationSnowBandConfig, band_elevation_anomalies)
+                band_dz = band_elevation_anomalies(
+                    jnp.asarray(smap["std_elev"], dtype=_sd))
+                land_cfg = land_cfg._replace(
+                    elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
+                logger.info("  Snow: sub-grid elevation-band scheme (CLM STD_ELEV, "
+                            "5 equal-area bands)")
+
         # Coupled DIURNAL surface model (default ON for the multilayer land): the
         # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,
         # consistent lowest-model-level height, so the surface exchange can be the
@@ -762,12 +905,56 @@ class CoupledESMDriver:
         if cfg.use_pft and cfg.land_mode != "none":
             land_param_provider = self._build_pft_provider(shape_2d)
 
+        # Optional spun-up land carbon IC (the finidat global_carbon_ic.npz):
+        # INGEST the seeded per-cell 8-pool CarbonState + the per-cell permafrost
+        # phi so the coupled run starts carbon at its mapped equilibrium and
+        # MAINTAINS the seeded permafrost SOC (phi -> make_coupler's f_perma
+        # protection), instead of cold-starting carbon and decomposing the seed.
+        # Only meaningful for the multilayer differland carbon column; a carbon IC
+        # with slab / carbon-off land is a caller error (fail loud, never a silent
+        # no-op).  ""/None (default) => cold-start + no protection (byte-identical).
+        carbon_override = None
+        land_soil_frozen_fraction = None
+        carbon_ic_path = getattr(cfg, "carbon_ic_path", "")
+        if carbon_ic_path:
+            import math
+
+            from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+            from legoesm.land.config import MultiLayerLandConfig as _MLLC
+            if not (isinstance(land_cfg, _MLLC)
+                    and land_cfg.carbon.scheme == "differland"):
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} requires multilayer land "
+                    "with the differland carbon scheme (land_mode='multilayer', "
+                    f"carbon active); got land_config {type(land_cfg).__name__} / "
+                    f"carbon scheme {land_cfg.carbon.scheme!r}.")
+            if self._atm._grid_lat is None or self._atm._grid_lon is None:
+                raise ValueError(
+                    "carbon_ic_path needs the atmosphere grid lat/lon to grid-"
+                    "match the finidat; the atmosphere exposes none.")
+            ncol = int(math.prod(shape_2d))
+            lat_deg = np.rad2deg(np.asarray(self._atm._grid_lat)).reshape(-1)
+            lon_deg = np.rad2deg(np.asarray(self._atm._grid_lon)).reshape(-1)
+            carbon_override, land_soil_frozen_fraction = load_finidat_carbon_ic(
+                carbon_ic_path, expect_ncol=ncol,
+                target_lat_deg=lat_deg, target_lon_deg=lon_deg)
+            if carbon_override is None:
+                raise ValueError(
+                    f"carbon_ic_path={carbon_ic_path!r} is not a carbon finidat "
+                    "(missing the 8 CarbonState pool fields); expected a "
+                    "global_carbon_ic.npz from build_global_carbon_ic.py.")
+            logger.info(
+                "  Land carbon IC: seeded %d-column CarbonState from finidat %s "
+                "(permafrost phi %s)", ncol, carbon_ic_path,
+                "threaded" if land_soil_frozen_fraction is not None else "absent")
+
         # Build coupler step function
         self._step_surface = make_coupler(
             coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
             land_param_provider=land_param_provider,
+            land_soil_frozen_fraction=land_soil_frozen_fraction,
         )
 
         # Initialize surface state.  Optionally warm-start the soil at the
@@ -779,7 +966,8 @@ class CoupledESMDriver:
             soil_kwargs["T_soil_init"] = self._atm.state.T.data[..., -1]
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
-            shape_2d, land_config=land_cfg, **soil_kwargs,
+            shape_2d, land_config=land_cfg, carbon_override=carbon_override,
+            **soil_kwargs,
         )
 
         # Tile fractions
@@ -859,6 +1047,12 @@ class CoupledESMDriver:
             f_lake=jnp.zeros(shape_2d, dtype=_sd),
         )
 
+        # Driver-level invariant on the MATERIALIZED land fraction (the residue
+        # the CONFIG-level CLI helper apply_land_runoff_scheme documents it
+        # cannot catch): a land model configured yet f_land identically zero =
+        # a silently dead land tile.
+        assert_land_tile_reachable(cfg.land_mode, cfg.f_land_mode, f_land)
+
         land_frac = float(jnp.mean(f_land))
         pft_str = " (PFT)" if land_param_provider is not None else ""
         logger.info(f"  Land: mode={cfg.land_mode}{pft_str}, "
@@ -881,6 +1075,15 @@ class CoupledESMDriver:
 
         # getattr: optional-config compat gate (land_param_source selector)
         source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        # Transient cover only rides the CLM path (it needs the CLM soil map to
+        # freeze around).  Fail loudly rather than silently ignore the request.
+        if (getattr(self.coupled_cfg, "transient_land_cover", False)
+                and getattr(self.coupled_cfg, "land_cover_surfdata", "")
+                and source != "clm"):
+            raise ValueError(
+                "transient_land_cover with land_cover_surfdata requires "
+                f"land_param_source='clm' (got {source!r}); transient cover overlays "
+                "the CLM reference soil map.")
         if source == "clm":
             from legoesm.land.clm_surface_map import clm_surface_provider
             lon = self._atm._grid_lon
@@ -890,6 +1093,36 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Transient land-use cover (opt-in): the vegetation params re-weight per
+            # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
+            # per-year both go through clm_provider_rebuild so their albedo treatment
+            # is consistent (a normal run without land_cover_surfdata is unchanged).
+            cover_path = getattr(self.coupled_cfg, "land_cover_surfdata", "")
+            if getattr(self.coupled_cfg, "transient_land_cover", False) and cover_path:
+                from legoesm.land.clm_surface_map import (
+                    clm_provider_rebuild, download_clm_surfdata, load_clm_surface,
+                    load_transient_cover_on_columns, TransientCoverProvider)
+                clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
+                    or download_clm_surfdata()
+                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                # Match the non-transient coupled provider (clm_surface_provider omits
+                # the soil-colour albedo) so an unchanged cover slice is a no-op.
+                rebuild = clm_provider_rebuild(m, variant=variant,
+                                               include_soil_albedo=False)
+                cover, years = load_transient_cover_on_columns(
+                    cover_path, lat_deg, lon_deg)
+                if cover.shape[1] != np.asarray(m["pft_fractions"]).shape[0]:
+                    raise ValueError(
+                        f"transient cover has {cover.shape[1]} columns but the CLM "
+                        f"map has {np.asarray(m['pft_fractions']).shape[0]}; mismatch.")
+                provider = TransientCoverProvider(
+                    base=rebuild(m["pft_fractions"]), cover=cover, years=years,
+                    _rebuild=rebuild)
+                logger.info(
+                    f"  Land params: CLM soil + TRANSIENT cover ({cover_path}, "
+                    f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
+                    f"{variant} tuning), {lat_deg.size} columns")
+                return provider
             provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
@@ -1211,12 +1444,43 @@ class CoupledESMDriver:
         )
 
         state = self._atm.state
-        q_v = self._atm.q_v
-        p_s = state.p_s.data
-        T_low = state.T.data[..., -1]
-        u_low = state.u.data[..., -1]
-        v_low = state.v.data[..., -1]
-        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        # Low-level winds/T/q/p_s for the ocean surface stress + bulk turbulent
+        # fluxes.  Three atm-state layouts:
+        #   * cube/latlon  -> cell-centered u/v/T/p_s Fields, read directly.
+        #   * MPAS/voronoi -> edge-normal velocity (state.v is None); Perot-
+        #     reconstruct the cell-centered (zonal, meridional) winds.
+        #   * SPECTRAL     -> the state is spectral COEFFICIENTS, so synthesize
+        #     every field to grid (spectral_pe_to_grid) before extracting the
+        #     lowest level.  Moisture is grid-space in the state's tracers dict
+        #     (NOT in spectral_pe_to_grid); zeros on a dry spectral run.
+        if hasattr(state, "vor_hat"):
+            from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+                spectral_pe_to_grid,
+            )
+            _f = spectral_pe_to_grid(state, self._atm.grid, self._atm.sigma)
+            p_s = _f["p_s"]
+            T_low = _f["T"][..., -1]
+            u_low = _f["u"][..., -1]
+            v_low = _f["v"][..., -1]
+            _tr = getattr(state, "tracers", None)
+            _qg = _tr.get("q_v") if _tr else None
+            _qgd = (_qg.data if hasattr(_qg, "data") else _qg)  # Field -> array
+            q_low = (_qgd[..., -1] if _qgd is not None
+                     else jnp.zeros_like(T_low))
+        else:
+            q_v = self._atm.q_v
+            p_s = state.p_s.data
+            T_low = state.T.data[..., -1]
+            if state.v is not None:
+                u_low = state.u.data[..., -1]
+                v_low = state.v.data[..., -1]
+            else:
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                _u_cell, _v_cell = reconstruct_cell_velocity(
+                    state.u.data, self._atm.grid)
+                u_low = _u_cell[..., -1]
+                v_low = _v_cell[..., -1]
+            q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
@@ -1446,6 +1710,20 @@ class CoupledESMDriver:
             sst = self._ocean_state.T_sfc.data
             z = jnp.zeros_like(sst)
             return sst, z, z
+        if getattr(self, "_ocean_is_mpas", False):
+            # 3-D MPAS ocean: SST = top-level cell T [°C -> K]; surface currents
+            # = Perot area-weighted edge->cell reconstruction of the top-level
+            # edge-normal velocity, returned DIRECTLY in the geographic
+            # (east, north) basis (reconstruct_cell_velocity) — the basis the
+            # o2a coupler expects, so NO rotation is needed (unlike the tripole
+            # cap below).  All returns are shape (nCells,).
+            from legoesm import constants
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            T_mpas = self._ocean_state.T.data            # (nCells, nlev) [°C]
+            sst = T_mpas[..., 0] + constants.T_freeze    # top level -> K
+            u_east, v_north = reconstruct_cell_velocity(
+                self._ocean_state.u.data[..., 0], self._ocean_grid)
+            return sst, u_east, v_north
         from legoesm import constants
         T = self._ocean_state.T.data                 # (n_lat, n_lon, nlev) [°C]
         sst = T[..., 0] + constants.T_freeze         # top level → K
@@ -1482,12 +1760,19 @@ class CoupledESMDriver:
         is the downwelling SW for sub-surface penetration; ``tau`` is in the
         ATMOSPHERIC convention (the ocean core applies ``-tau`` + grid rotation);
         freshwater is passed via the ``freshwater=`` arg (NOT ``sf.freshwater``,
-        which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
-        ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
-        aquaplanet Phase-1 run has no ice tile."""
+        which is the cube-only channel).  Over an ice-covered cell the open-water
+        atmospheric fluxes (q_net, sw, tau, evap, precip) are scaled by the
+        open-water fraction ``f_ocean = f_water*(1 - ice_concentration)`` and the
+        ice→ocean back-reaction (basal heat, brine salt, ice-ocean stress) that
+        the ice model already computed on ``self._last_sfc_response`` is added —
+        so the ocean is NOT forced as ice-free and the melt/freeze freshwater
+        arrives WITH its heat and salt.  The KPP ice-buoyancy ``sf.freshwater``
+        channel stays cube-only (left None; the lat-lon P-E enters via the
+        ``freshwater=`` FreshwaterForcing arg)."""
         from legoesm.coupler.config import CouplerConfig
         from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.grid_remap import remap_field
+        from legoesm.coupler.tile_fractions import compute_tile_fractions
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm.ocean.state import OceanSurfaceForcing
 
@@ -1496,34 +1781,67 @@ class CoupledESMDriver:
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
         tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
-        # Net surface shortwave (positive INTO ocean).  Use the radiation's
-        # ACTUAL net surface SW -- the value the atmosphere SW solver removed
-        # from TOA using the blended surface albedo it was given -- NOT a
-        # second albedo round-trip.  ``_build_atm_forcing`` reconstructs
-        # ``sw_down = sw_net_sfc / (1 - albedo_eff)`` with the BLENDED albedo;
-        # re-netting that gross ``sw_down`` here with the OCEAN-tile albedo
-        # (a DIFFERENT albedo over sea-ice / zenith-dependent ocean) made the
-        # ocean absorb a non-physical amount of SW (energy non-conservation:
-        # the ocean got MORE SW than radiation took out of the column over a
-        # bright ice cell).  Reading the radiation net SW (remapped onto the
-        # ocean grid; identity for the shared-grid Phase-1 ocean) closes the
-        # SW budget: ocean-absorbed SW == radiation surface-net SW, and over an
-        # all-ocean cell albedo_eff == ocean albedo so this is byte-identical to
-        # the old round-trip.  Fall back to the round-trip only if radiation has
-        # not run yet (segment 0 before the first physics step).
-        _atm = getattr(self, "_atm", None)
-        _aux = getattr(_atm, "_carry_aux", {}) if _atm is not None else {}
-        _sw_net_atm = _aux.get("held_sw_net_sfc", None)
+        # Net surface shortwave into the OCEAN tile (positive INTO ocean).  With
+        # the ``f_ocean`` open-water scaling below, the correct per-tile share is
+        # ``f_ocean * sw_down * (1 - alpha_ocean)`` (ocean-tile albedo): the
+        # ocean and ice tile shares sum to ``sw_down * (1 - alpha_blended)`` =
+        # the radiation net SW, so the SW budget closes by construction.  Do NOT
+        # use the radiation aux ``held_sw_net_sfc`` here — that is already the
+        # TILE-BLENDED net SW, and multiplying it by ``f_ocean`` would
+        # double-apply the partition and under-heat the open ocean over
+        # ice-covered cells (codex).  The pre-``f_ocean`` code used the blended
+        # net as a full-cell workaround for the (then) missing ice fraction; the
+        # scaling makes the ocean-tile albedo the right choice.  ``sw_down`` is
+        # the reconstructed gross incident (``_build_atm_forcing``), so over an
+        # all-ocean cell (f_ocean==1) this is byte-identical to the legacy net.
         _remapper = getattr(self, "_grid_remapper", None)
-        if _sw_net_atm is not None and _remapper is not None:
-            sw_net = remap_field(_sw_net_atm, _remapper.a2o)
+        # Open-water net shortwave uses the OCEAN-TILE albedo, ``sw_down*(1 -
+        # alpha_ocean)``, and is scaled by ``f_ocean`` below.  Do NOT use the
+        # radiation aux ``held_sw_net_sfc`` here: that is the TILE-BLENDED net SW
+        # (f_ocean*ocean + f_ice*ice partition already applied), so multiplying
+        # it by ``f_ocean`` again would double-count the partition and under-heat
+        # the open ocean over ice-covered cells (codex).  ``tile`` is the ocean
+        # tile, so ``tile.albedo`` is the open-water albedo; f_ocean==1 (no ice)
+        # recovers the legacy full-cell value byte-identically.
+        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        # --- Open-water fraction: the open-ocean bulk fluxes act ONLY on the
+        #     ice-free part of the cell.  The ice-covered fraction is forced by
+        #     the ICE tile (its own surface energy balance); its back-reaction on
+        #     the ocean (basal heat, brine salt, ice-ocean stress) is ADDED below.
+        #     Without this an ice-covered cell was heated / evaporated / wind-
+        #     stressed as if ICE-FREE — a full-cell energy+moisture leak. ---
+        # f_ocean = f_water*(1 - ice_concentration) from the SHARED tile-fraction
+        # helper (``compute_tile_fractions``) on the ATM grid — the SAME partition
+        # the tile blender used to weight the ice back-reaction channels below —
+        # remapped onto the ocean grid.  No ice tile (aquaplanet Phase-1) ⇒
+        # concentration == 0 and (over a wet ocean cell) f_water == 1 ⇒
+        # f_ocean == 1 ⇒ byte-identical to the legacy full-cell assembly.
+        _sfc = getattr(self, "_sfc_state", None)
+        _tile_cfg = getattr(self, "_tile_config", None)
+        if (_sfc is not None and getattr(_sfc, "ice", None) is not None
+                and _tile_cfg is not None):
+            _sic = jnp.clip(_sfc.ice.concentration.data, 0.0, 1.0)
+            f_ocean_atm = compute_tile_fractions(_tile_cfg, _sic).f_ocean
+            f_ocean = (remap_field(f_ocean_atm, _remapper.a2o)
+                       if _remapper is not None else f_ocean_atm)
         else:
-            # Radiation has not run yet (segment 0 before the first physics step)
-            # -- fall back to the single-albedo net of the gross sw_down.
-            sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
-        q_net = (sw_net + atm_forcing.lw_down
-                 - tile.lw_up - tile.shflx - tile.lhflx)
-        evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
+            f_ocean = 1.0
+        # Open-water fluxes scaled to the ice-free fraction.  Sign conventions
+        # (ocean-consumer frame): q_net +into ocean; sw_pen +into ocean
+        # (penetrating solar, post-albedo); tau_x/y in the ATMOSPHERIC convention
+        # (the ocean core applies -tau); evap +up (removed from ocean; enters
+        # ocean P-E with the -evap sign in FreshwaterForcing); precip +into ocean.
+        q_net = f_ocean * (sw_net + atm_forcing.lw_down
+                           - tile.lw_up - tile.shflx - tile.lhflx)
+        sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
+        tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
+        tau_y = f_ocean * tile.tau_y
+        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # precip over ice is intercepted by the ice tile (snow reservoir) and
+        # returned to the ocean as melt via ``ice_fw`` below, so only the open-
+        # water precip enters the ocean P-E directly (pairs with the scaled evap;
+        # avoids double-counting the ice-routed water).  f_ocean==1 ⇒ full precip.
+        precip = f_ocean * atm_forcing.precip_total  # +into ocean (open water)
         z = jnp.zeros_like(sw_net)
         # Freshwater into the ocean, SPLIT by vertical-injection channel so each
         # term lands where it physically belongs:
@@ -1567,21 +1885,52 @@ class CoupledESMDriver:
                 river = remap_field(river, _remapper.a2o)
                 surface_extra = remap_field(surface_extra, _remapper.a2o)
         fw = FreshwaterForcing(
-            precip=atm_forcing.precip_total, evap=evap, runoff=river,
+            precip=precip, evap=evap, runoff=river,
             ice_fw=surface_extra,
         )
+        # --- Ice → ocean back-reaction: the melt/freeze water in ``ice_fw`` must
+        #     arrive WITH its melt/freeze HEAT + brine SALT + ice-ocean STRESS,
+        #     else the ocean gets freshwater without its energy/salt (a mass↔heat
+        #     inconsistency).  These blended channels are already tile-weighted by
+        #     ``blend_tiles`` on the ATM grid (ocean_heat_extraction / salt_flux =
+        #     f_water·ice, ocean_stress = f_ice·ice), matching
+        #     ``ocean_forcing.ice_ocean_forcing_from_ice_response``; remap to the
+        #     ocean grid and apply with the SAME signs.  prev is None on segment 0
+        #     (fall through: no back-reaction yet); a run with no ice tile carries
+        #     these channels as zeros ⇒ byte-identical to the legacy assembly. ---
+        salt_flux = None
+        if prev is not None:
+            ohe = prev.ocean_heat_extraction        # [W/m², +ocean LOSES heat]
+            salt = prev.salt_flux                   # [kg/m²/s, +INTO ocean]
+            ice_tau_x = prev.ocean_stress_x         # [Pa, +eastward force ON ocean]
+            ice_tau_y = prev.ocean_stress_y         # [Pa, +northward force ON ocean]
+            if _remapper is not None:
+                ohe = remap_field(ohe, _remapper.a2o)
+                salt = remap_field(salt, _remapper.a2o)
+                ice_tau_x = remap_field(ice_tau_x, _remapper.a2o)
+                ice_tau_y = remap_field(ice_tau_y, _remapper.a2o)
+            # ocean_heat_extraction is +ocean-LOSES; q_net is +into ocean ⇒ subtract
+            # (the ocean loses this basal heat to melting ice = pairs with ice_fw).
+            q_net = q_net - ohe
+            # ocean_stress_* is the force ON the ocean, but the ocean consumer
+            # applies external tau as (ocean force = -tau); feed -stress so the NET
+            # applied force equals the on-ocean ice stress (matches the -(f_ice·
+            # stress) sign in ice_ocean_forcing_from_ice_response).
+            tau_x = tau_x - ice_tau_x
+            tau_y = tau_y - ice_tau_y
+            salt_flux = salt                        # real brine salt (+INTO ocean)
         # ``OceanSurfaceForcing.sw_down`` is the NET (post-albedo) surface SW the
         # ocean PENETRATES (``shortwave_penetration``: "net shortwave INTO the
         # ocean (post-albedo)"; the lat-lon core forms q_nonsolar = q_net -
         # 0.94*sw_down).  Passing the GROSS downwelling here treated reflected SW
         # as penetrating solar and compensated it with an artificially reduced
         # non-solar surface flux -- the column total still telescoped to q_net but
-        # the vertical heating profile was wrong.  Use the SAME ``sw_net`` that
-        # built q_net so the solar/non-solar split is consistent (matches the
-        # canonical OMIP-2 applicator, which passes sw_net as sw_down).
+        # the vertical heating profile was wrong.  Use the SAME (f_ocean-scaled)
+        # ``sw_pen`` that built q_net so the solar/non-solar split is consistent
+        # (matches the canonical OMIP-2 applicator, which passes sw_net as sw_down).
         sf = OceanSurfaceForcing(
-            sw_down=sw_net, q_net=q_net,
-            tau_x=tile.tau_x, tau_y=tile.tau_y, freshwater=None,
+            sw_down=sw_pen, q_net=q_net,
+            tau_x=tau_x, tau_y=tau_y, salt_flux=salt_flux, freshwater=None,
         )
         return sf, fw
 
@@ -1638,6 +1987,12 @@ class CoupledESMDriver:
             # step's day-of-year matches the atmosphere's season; offset 0 => identical.
             doy, _ = self._atm._calendar_for_radiation(day)
 
+            # Transient land-use cover: the segment's calendar year (from the atm
+            # sub-driver's start year); a year-varying land provider re-weights its
+            # vegetation params, static providers ignore it (byte-identical).
+            _sy = getattr(self._atm, "_start_year", None)
+            cover_year = None if _sy is None else float(_sy) + day / 365.0
+
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
                 atm_forcing,
@@ -1647,6 +2002,7 @@ class CoupledESMDriver:
                 ocean_v_sfc=v_sfc,
                 dt=sub_dt,
                 doy=float(doy),
+                year=cover_year,
             )
             self._last_sfc_response = sfc_response
 
@@ -1954,9 +2310,18 @@ class CoupledESMDriver:
                 fresh = self._ocean_state
                 restored, _ = _restore_pytree_from_npz(
                     fresh, data, "ocean3d_", coupled_path.name, strict=True)
+                # Reset the static geometry to the deterministic fresh-init
+                # values (config-derived, identical on a clean resume).  The
+                # MPAS/voronoi ocean state carries H_bathy + a cell land_mask
+                # but has NO edge u/v masks (its mesh geometry lives on the
+                # model, not the state), so the latlon C-grid face-mask triple
+                # reset only applies where those fields exist — an unconditional
+                # ``_replace(u_mask=..., v_mask=...)`` crashes MPASOceanState.
                 self._ocean_state = restored._replace(
-                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask,
-                    u_mask=fresh.u_mask, v_mask=fresh.v_mask)
+                    H_bathy=fresh.H_bathy, land_mask=fresh.land_mask)
+                if hasattr(fresh, "u_mask"):
+                    self._ocean_state = self._ocean_state._replace(
+                        u_mask=fresh.u_mask, v_mask=fresh.v_mask)
 
         if "ocean_T_sfc" in data.files and self._ocean_state is not None:
             saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)

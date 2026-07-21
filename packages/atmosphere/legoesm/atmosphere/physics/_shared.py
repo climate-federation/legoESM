@@ -7,6 +7,7 @@ column-physics inputs each scheme expects.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
@@ -302,7 +303,18 @@ def exner_function(p):
         Exner function [-], same shape as ``p``.
     """
     poisson_exponent = constants.kappa
-    return (p / constants.p_ref) ** poisson_exponent
+    # AD-safe pressure floor: Π = (p/p₀)^κ with κ≈0.286<1 has
+    # dΠ/dp ∝ p^(κ−1) → ∞ as p→0, so the REVERSE-mode gradient blows up
+    # (NaN/Inf) at a p=0 top half-level — even though the forward value
+    # (0) is finite.  This silently NaN'd the gradient of any
+    # differentiable rollout that back-propagates through θ/Π (AIMIP
+    # carry-based training: grad wrt p_s was non-finite, job 8533900).
+    # Clip to 1 Pa (well below any real model level, so the forward is
+    # bit-identical everywhere it matters); the clip's zero gradient
+    # below the 1 Pa floor — times the finite (1 Pa)^(κ−1) — yields a
+    # finite (0) gradient there instead of ∞. coeff-ok: 1 Pa AD floor.
+    p_safe = jnp.clip(p, 1.0, None)
+    return (p_safe / constants.p_ref) ** poisson_exponent
 
 
 def exner_to_pressure(exner):
@@ -378,6 +390,41 @@ def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
     return constants.g * dtheta_dz / theta
 
 
+def lilly_buoyancy_factor(Ri, Pr_t):
+    """Lilly (1962) buoyancy stability factor ``√(max(0, 1 − Ri/Pr_t))`` that
+    multiplies a strain-based Smagorinsky eddy viscosity to suppress mixing in
+    stably stratified layers.
+
+    ``f = 1`` at neutral (``Ri = 0``), ``> 1`` when unstable (``Ri < 0``,
+    convective enhancement), and shuts mixing OFF at ``Ri ≥ Pr_t`` (Lilly's
+    equilibrium result, with ``Pr_t`` playing the role of the critical
+    Richardson number ``Ri_c``). Canonical home for the factor shared by the
+    single-column Smagorinsky–Lilly PBL closure and the 3-D plane-LES SGS
+    (CLAUDE.md "shared utilities — never re-derive").
+
+    AD-safety: the ``max(0, ·)`` cutoff is written as a double-``jnp.where`` so
+    the forward is exact AND the reverse-mode cotangent is finite at the
+    ``Ri = Pr_t`` kink (a bare ``√(max(·, 0))`` leaks a ``0·∞`` NaN through the
+    √' → ∞ at zero). The forward is continuous but NON-C¹ at the cutoff.
+
+    Parameters
+    ----------
+    Ri : array
+        Gradient Richardson number ``N²/|S|²`` (floor ``|S|²`` at the call site
+        so ``Ri`` stays finite).
+    Pr_t : float
+        Turbulent Prandtl number, also the stable cutoff ``Ri_c``.
+
+    Returns
+    -------
+    array
+        Buoyancy factor in ``[0, ∞)``, same shape as ``Ri``.
+    """
+    buoy_arg = 1.0 - Ri / Pr_t
+    buoy_safe = jnp.where(buoy_arg > 0.0, buoy_arg, 1.0)
+    return jnp.where(buoy_arg > 0.0, jnp.sqrt(buoy_safe), 0.0)
+
+
 def mixing_length(z, l_mix_max, z_floor=1.0):
     """Asymptotic master mixing length ``l = κz / (1 + κz/l_∞)`` (Blackadar 1962).
 
@@ -405,6 +452,110 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     kappa = constants.kappa_vk
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
+
+
+def louis_stability_functions(
+    Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat=None,
+):
+    """Louis (1979/1982) Richardson-number stability functions, smoothly blended.
+
+    Canonical home for the Louis surface-layer / free-atmosphere stability
+    functions shared by the standalone Louis PBL scheme (``louis.py``) and the
+    free-atmosphere local-Ri branch of YSU (``ysu.py``) — previously verbatim
+    copies (CLAUDE.md "no duplicate numerics"; colocated with the shared
+    Blackadar :func:`mixing_length` the same closures use).
+
+    Branch forms (Louis 1979; Louis, Tiedtke & Geleyn 1982 coefficient split):
+
+    * Unstable (Ri<0): ``f = 1 - 2·b·Ri / (1 + 3·b·c·l²·sqrt(|Ri|) / dz²)``
+    * Stable   (Ri≥0): ``f = 1 / (1 + 2·b·Ri / sqrt(1 + d·Ri))``
+
+    blended with ``sigmoid(blend_sharpness · Ri)`` so the function is CONTINUOUS
+    and AD-safe through neutral (see the differentiability caveat under
+    DEPARTURES — the ``√|Ri|`` floor leaves a small slope kink at exactly Ri=0).
+    The heat function shares BOTH branch
+    denominators with momentum and differs only in the numerator coefficient
+    ``b_heat`` (LTG82: 3b heat vs 2b momentum ⇒ ``b_heat = 1.5·b``);
+    ``b_heat=None`` (default) sets ``b_heat = b`` so ``f_h == f_m`` (the Louis
+    1979 single-function form, used by YSU which consumes only ``f_m``).
+
+    Faithfulness to Louis (1979) / LTG82 (oracle = the published closed forms;
+    pinned in ``tests/atmosphere/hydrostatic/unit/test_louis_faithful.py``)
+    ----------------------------------------------------------------------------
+    FAITHFUL (the UNBLENDED per-branch algebra matches the published equations
+    away from the numerical guards; the RETURNED f additionally applies the
+    sigmoid blend and the 1e-10 floors documented under DEPARTURES):
+      * Stable branch ``f = 1/(1 + 2·b·Ri/√(1+d·Ri))`` is Louis (1979) Eq. (20)
+        (both momentum and heat, with their respective ``b``/``b_heat``).
+      * Unstable branch ``f = 1 - 2·b·Ri/(1 + C·√|Ri|)`` is Louis (1979) Eq. (19)
+        with the ECMWF/GCM *interior* geometry factor ``C = 3·b·c·l²/dz²``
+        (mixing-length form) in place of the surface-layer ``C = 3·b·c·a²·√(z/z0)``.
+      * Momentum/heat split ``b_heat = 1.5·b`` with SHARED branch denominators
+        is the LTG82 "3b heat vs 2b momentum" coefficient split; ``b_heat=b``
+        recovers the Louis (1979) single ``f_h=f_m`` form (K_m is independent of
+        ``b_heat``). For ``b_heat > b`` (the LTG82 default) Pr_t = K_m/K_h < 1
+        unstable and > 1 stable; the inequality reverses for ``b_heat < b``.
+    DEPARTURES (documented; NOT the Louis 1979 originals):
+      * ``c`` default 16.6 is Holtslag & De Bruin (1988), not Louis (1979)'s 5.0;
+        ``b``=5 and ``d``=5 ARE the Louis (1979) values. (See ``LouisConfig``.)
+      * Sigmoid ``blend_sharpness·Ri`` replaces Louis's HARD ``Ri<0`` vs ``Ri≥0``
+        switch by a CONTINUOUS blend of both branches. At large ``blend_sharpness``
+        (default 100) it approximates the hard-switch VALUE to O(exp(-sharpness·|Ri|))
+        for fixed ``Ri≠0``; near neutral both branches → 1 so the value difference
+        → 0, THOUGH the transition gradient differs from the hard switch. AD-safe
+        (autodiff returns a finite, implementation-defined tie-rule derivative at
+        the ``Ri=0`` kink, where the true two-sided derivative does NOT exist: the
+        one-sided slopes of ``f_m`` differ — ``-b`` from above vs
+        ``-b/(1 + 3bc·l²·1e-5/(dz²+1e-10))`` from below, from the ``√|Ri|`` floor;
+        ``f_h`` uses ``b_heat`` in place of ``b``) — the blend is a continuous
+        surrogate, NOT a strictly C¹ function at the single neutral point.
+      * ``1e-10`` floors on ``√|Ri|`` and ``dz²`` are numerical guards.
+
+    Parameters
+    ----------
+    Ri : array
+        Gradient Richardson number at interfaces.
+    l_mix : array
+        Mixing length at the same interfaces [m].
+    dz : array
+        Interface spacing [m] (same shape as ``Ri``).
+    b, c, d : float
+        Louis (1982) coefficients: ``b`` enters both branches, ``c`` is the
+        unstable-branch denominator coefficient, ``d`` the stable-branch
+        sqrt coefficient.
+    blend_sharpness : float
+        Sigmoid sharpness of the stable/unstable blend [1/Ri].
+    b_heat : float or None
+        Heat-function numerator coefficient (default ``b`` ⇒ ``f_h = f_m``).
+
+    Returns
+    -------
+    (f_m, f_h) : tuple of arrays
+        Momentum and heat stability functions (dimensionless, > 0).
+    """
+    if b_heat is None:
+        b_heat = b
+
+    # Unstable branch — denominator shared between momentum and heat.
+    Ri_neg = jnp.minimum(Ri, 0.0)
+    denom_unstable = (
+        1.0 + 3.0 * b * c * l_mix ** 2
+        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
+    )
+    f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
+    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
+
+    # Stable branch — sqrt denominator shared between momentum and heat.
+    Ri_pos = jnp.maximum(Ri, 0.0)
+    sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
+    f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+
+    # Smooth blending: sigmoid transitions from unstable to stable.
+    blend = jax.nn.sigmoid(blend_sharpness * Ri)
+    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
+    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
+    return f_m, f_h
 
 
 # ---------------------------------------------------------------------------

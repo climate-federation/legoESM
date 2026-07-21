@@ -1,0 +1,114 @@
+#!/bin/bash -l
+#PBS -N legoesm_blocker1_xnode
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=2:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Blocker-1 DECISIVE experiment (CROSS-NODE lane): does the GSPMD shard_map
+# cubed-sphere ppermute halo hold strong-scaling efficiency PAST the np6 cliff?
+#
+# This is the leg the single-node lane cannot express: np6 spans 2 Derecho nodes
+# (4 GPU/node). A multi-controller job fixes its device count and holds only its
+# own shard, so the scaling curve is built ACROSS per-N launches:
+#
+#   for N in 1 2 3 6:  mpiexec -n N (1 GPU/rank, jax.distributed/NCCL) runs
+#     bench_cube_shardmap_halo.py --point  -> one timing POINT at N
+#   then aggregate_cube_shardmap_scaling.py combines the points, computes
+#     speed-up + efficiency vs the N=1 baseline, and applies the decisive gate
+#     (efficiency at largest >= PASS_EFF, ppermute proven on every N>1 point).
+#
+# --point federates via initialize_jax_distributed_multiprocess (mpi4py, the
+# cs_spmd SPMD driver's bootstrap; a single rank is a no-op). ppn=3 places N=6 as
+# 3+3 across the 2 nodes (the actual cliff crossing) and keeps N<=3 on one node.
+# Correctness + reverse-mode AD are single-controller gates validated by the
+# emulated-device tests + the single-node lane; they are NOT re-run here.
+#
+# NCCL owns GPU traffic (GPU-aware cray-mpich OFF: mixing it with NCCL risks
+# deadlock). Without the aws-ofi-nccl plugin, NCCL falls back to TCP-over-hsn
+# (works, 2-3x slower comm) — set LEGOESM_NCCL_OFI_LIB for the fast path.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/blocker1_cube_shardmap_xnode.pbs
+#   qsub -v PASS_EFF=0.6,PREC=float32,N_GRID=48 \
+#        scripts/cluster/scaling_derecho/blocker1_cube_shardmap_xnode.pbs
+# The job EXIT CODE is the decisive verdict (nonzero = cliff not cleared).
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# --- Sweep configuration (overridable via qsub -v) ---------------------------
+COUNTS="${COUNTS:-1 2 3 6}"        # face divisors; 6 = 3 GPU/node x 2 nodes
+PPN="${PPN:-3}"                    # ranks/node: keeps N<=3 on 1 node, N=6 on 2
+N_GRID="${N_GRID:-48}"             # C48 per-face resolution
+N_LEV="${N_LEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-50}"
+PREC="${PREC:-float32}"           # GPU-realistic; efficiency gate is precision-agnostic
+PASS_EFF="${PASS_EFF:-0.6}"
+ROOT="${ROOT:-results/blocker1_xnode}"
+
+# NCCL-over-Slingshot (jax.distributed transport for the ppermute halo).
+export MPICH_GPU_SUPPORT_ENABLED=0
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
+    export NCCL_NET="AWS Libfabric"
+    echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
+else
+    export NCCL_IB_DISABLE=1
+    export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+    echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> NCCL on TCP sockets over hsn (2-3x slower comm)"
+fi
+
+# Cray PALS: pin rank k -> its node-local GPU (jax local_device_ids convention #693).
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-${OMPI_COMM_WORLD_LOCAL_RANK:-0}}; exec "$@"'
+
+echo "=== Blocker-1 CROSS-NODE | counts='$COUNTS' ppn=$PPN C$N_GRID L$N_LEV prec=$PREC ==="
+nvidia-smi -L || true
+# Clean stale points from a prior sweep, but never rm an empty/root path.
+if [ -z "$ROOT" ] || [ "$ROOT" = "/" ]; then
+    echo "ERROR: refusing to rm -rf ROOT='$ROOT'" >&2; exit 1
+fi
+rm -rf "$ROOT"; mkdir -p "$ROOT"
+REQUIRE="$(echo "$COUNTS" | tr ' ' ',')"   # the decisive claim names these counts
+
+for N in $COUNTS; do
+    echo "--- point N=$N (mpiexec -n $N -ppn $PPN) ---"
+    mpiexec -n "$N" -ppn "$PPN" bash -c "$PIN" _ \
+        "$PY" -m scripts.bench.bench_cube_shardmap_halo --point \
+        --n-grid "$N_GRID" --n-lev "$N_LEV" \
+        --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
+        --precision "$PREC" --output-dir "$ROOT/n$N" < /dev/null \
+      || { echo "point N=$N FAILED" >&2; exit 2; }
+done
+
+echo "=== aggregate + decisive gate (PASS_EFF=$PASS_EFF) ==="
+"$PY" -m scripts.bench.aggregate_cube_shardmap_scaling \
+    --root "$ROOT" --gate-efficiency --pass-efficiency "$PASS_EFF" \
+    --require-counts "$REQUIRE" \
+    --output-dir "$ROOT/agg" < /dev/null
+RC=$?
+echo "--- verdict ---"; cat "$ROOT/agg/report.md" || true
+echo "=== decisive exit code = $RC (0 = GSPMD cube halo cleared the np6 cliff) ==="
+exit $RC

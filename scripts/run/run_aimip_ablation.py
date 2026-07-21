@@ -69,7 +69,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _build_spectral_config(base_cfg: dict):
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
 
@@ -141,7 +141,7 @@ def _per_var_metrics(pred_grid, target_carry, grid):
 def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     """Train the classical AIMIP pipeline with the given scheme overrides,
     evaluate on the held-out eval windows, return metrics."""
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
         spectral_pe_to_grid,
@@ -163,13 +163,23 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         for w in (base_cfg.get("eval_windows") or ())
     ) or None
 
-    train_ic, train_targ = load_training_data(
+    train_ic, train_targ, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
+        host_resident=True,   # non-chunked full-dataset load (#1155)
     )
 
     dt = spec_cfg.dt
     radiation = str(base_cfg.get("aimip_radiation", "gray"))
     rad_update_interval = int(base_cfg.get("aimip_rad_update_interval", 6))
+    # Classical-mode radiation pin (campaign_driver, D1): ablations are
+    # classical scheme-swap runs, so they hold radiation at rrtmgp unless
+    # the config carries the explicit escape.
+    from legoesm.training.campaign_driver import validate_classical_radiation
+    validate_classical_radiation(
+        radiation,
+        smoke=bool(base_cfg.get("smoke", False)),
+        allow_non_rrtmgp=bool(base_cfg.get("allow_non_rrtmgp", False)),
+    )
 
     def _make_physics_fn(p, grid_):
         return make_aimip_classical_spectral_physics(
@@ -182,6 +192,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     params_trained, loss_history = _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, train_ic, train_targ, spec_cfg,
+        host_staged=True,   # dataset loaded host-resident above (#1155)
     )
 
     # Eval on held-out windows.
@@ -190,7 +201,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         start_year=int(base_cfg.get("eval_year", 2017)),
         windows=eval_windows,
     )
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_windows,
     )
 

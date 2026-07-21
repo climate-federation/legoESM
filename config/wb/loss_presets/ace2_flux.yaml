@@ -1,0 +1,24 @@
+# ACE2 loss WITH radiative-flux supervision (arXiv:2411.11268 gives
+# radiative-flux channels x2 weight relative to the 0.5-weighted state
+# channels, i.e. 1.0 here) plus a global-mean (energy-balance) bias
+# penalty on the TOA terms. Requires the ERA5 loader to populate flux
+# targets (TrainingERA5Config.load_radiation_fluxes=True) — the loss is
+# only active when the target carry holds real fluxes.
+# State part identical to the ace2 preset.
+loss:
+  residual_normalize: true
+  normalize_by_scale: false
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  w_T: 0.5
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.5
+  w_ps: 0.3
+  level_weighting: pressure
+  w_flux_rsut: 1.0
+  w_flux_olr: 1.0
+  w_flux_sfc_sw: 1.0
+  w_flux_sfc_lw: 1.0
+  w_bias_flux_rsut: 1.0
+  w_bias_flux_olr: 1.0

@@ -210,3 +210,33 @@ class TestDistinctFromUniform:
         assert dy_max / dy_min > 2.0, (
             f"Expected dy_max/dy_min > 2 at lat_max=70°, got {dy_max/dy_min:.3f}"
         )
+
+
+def test_equator_on_tpoint_matches_nemo_dino():
+    """NEMO-faithful placement: equator ON a T-point (odd n_lat), the
+    ``usr_def_hgr`` convention.  Reproduces NEMO's DINO R1 grid (195x48,
+    φ = asin(tanh(Δλ·(j-97)))) — verified cell-for-cell against the mesh to
+    3e-6° in the DINO oracle harness.  Contrast the default equator-on-face."""
+    import numpy as np
+    # Default: equator on a FACE, even n_lat.
+    gf = create_mercator_grid(n_lon=48, lat_max_deg=70.0,
+                              lon_west_deg=1.0, lon_east_deg=49.0)
+    assert gf.n_lat % 2 == 0                                  # even
+    assert np.min(np.abs(np.degrees(np.asarray(gf.lat)))) > 0.1  # no cell ON equator
+
+    # NEMO-faithful: equator on a T-POINT, odd n_lat=195.
+    gt = create_mercator_grid(n_lon=48, lat_max_deg=70.0,
+                              lon_west_deg=1.0, lon_east_deg=49.0,
+                              equator_on_tpoint=True, n_lat=195)
+    assert gt.n_lat == 195                                    # odd, NEMO jpjglo
+    lat = np.degrees(np.asarray(gt.lat, dtype=np.float64))
+    assert abs(lat[97]) < 1e-4                                # equator ON T-point j=97
+    # φ(j) = asin(tanh(1°·(j-97))): symmetric, ±69.151 at the ends.
+    assert abs(lat[0] + 69.151) < 1e-2 and abs(lat[-1] - 69.151) < 1e-2
+    assert np.allclose(lat, -lat[::-1], atol=1e-9)            # symmetric about equator
+
+    # Odd n_lat is required for equator_on_tpoint.
+    import pytest
+    with pytest.raises(ValueError, match="ODD n_lat"):
+        create_mercator_grid(n_lon=48, lat_max_deg=70.0, lon_west_deg=1.0,
+                             lon_east_deg=49.0, equator_on_tpoint=True, n_lat=196)

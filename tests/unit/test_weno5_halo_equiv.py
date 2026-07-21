@@ -14,10 +14,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
     _weno5_advection_x, _weno5_advection_y,
 )
-from legoesm.atmosphere.dynamics.plane_operators_halo import (
+from legoesm.atmosphere.dynamics.les.plane_operators_halo import (
     weno5_advection_x_halo, weno5_advection_y_halo,
 )
 

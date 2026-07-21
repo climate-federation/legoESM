@@ -37,6 +37,20 @@ def test_resume_flags_roundtrip():
     assert args.max_wallclock_hours == 11.5
 
 
+def test_bulk_thermo_convention_flag_flows_to_config():
+    """--bulk-thermo-convention (#762) round-trips through the parser: default
+    "legoesm" (constant L_v / dry c_pd, byte-identical), "aerobulk" =
+    NEMO/AeroBulk parity.  main() wires args.bulk_thermo_convention into
+    ExperimentConfig.surface_thermo_convention, SimpleOceanConfig.
+    thermo_convention, and CouplerConfig.thermo_convention (air-sea only)."""
+    args = mod.build_parser().parse_args([])
+    assert args.bulk_thermo_convention == "legoesm"
+    args = mod.build_parser().parse_args(
+        ["--surface-bulk-scheme", "coare3",
+         "--bulk-thermo-convention", "aerobulk"])
+    assert args.bulk_thermo_convention == "aerobulk"
+
+
 def test_surface_stability_scheme_flag_round_trip():
     """--surface-stability-scheme round-trips; default dyer1974 is the
     byte-identical historical stable branch; unknown names are rejected at

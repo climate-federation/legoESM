@@ -1,0 +1,40 @@
+# DINO lat-lon, rigid_lid ACC streamfunction solver, full year (365 d / 5 d).
+# rigid_lid is the proper ACC solver for the re-entrant channel: the southern
+# continent below the channel is a topological island (nisle=2), so the
+# depth-integrated ACC transport is solved DIRECTLY as the island circulation
+# constant instead of riding the free-surface eta null mode (which the
+# implicit_cn / explicit_substep solvers do — they suppress/over-energize +
+# ring the ACC around ~44-50 Sv).
+#
+# Selecting --barotropic-solver rigid_lid auto-applies the Veros-faithful
+# coordinated stack (ab2 outer + explicit_ab2 Coriolis + ab2_scope="advective" +
+# dt_mom_ratio=9). A BARE rigid_lid flip RUNS AWAY immediately (568 Sv -> NaN by
+# day 60): the bottom-drag depth-mean reaches the streamfunction barotropic
+# balance only via the du_diss fold, gated on ab2_scope="advective".
+#
+# With the full stack DINO rigid_lid spins up CLEANLY for ~250 days: ACC
+# 0 -> 52 Sv, climbing PAST the free-surface solvers' premature ~44 Sv plateau
+# (whose eta-solve dissipation caps the ACC artificially low). This demonstrates
+# rigid_lid recovers the true (higher) wind-driven ACC the free surface masks.
+#
+# CAVEAT: beyond ~day 270 the ACC runs away EXPONENTIALLY (106 -> 343 -> 1166 ->
+# NaN by day 360) — a barotropic-mode dynamical instability in the rigid-lid
+# streamfunction solve (the sill form stress / bottom-pressure-torque that should
+# limit the ACC is not engaging). NOT eddy saturation: raising the Visbeck
+# kappa_GM 10x (2000->20000) gives a near-identical runaway, so GM is not the
+# lever, and an exponential instability is not cured by linear drag/GM damping.
+# A stable physical ACC would need a rigid-lid bottom-form-stress fix (dycore
+# work, no config tweak). Use this config for the SPIN-UP DEMONSTRATION
+# (days<=~250, where rigid_lid cleanly recovers the ACC the free surface caps too
+# low); implicit_cn is the practical stable DINO solver. See the ACC figure.
+#
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/rigid_lid_latlon_365d.yaml
+# Then: python scripts/plot/plot_dino_acc.py results/dino_latlon_rigid_lid
+grid: latlon
+barotropic_solver: rigid_lid
+vmix: kpp
+days: 250                 # clean spin-up window (runs away ~day 270 at 1deg)
+snapshot_every_days: 5
+n_lon: 50                 # 1deg R1 (~9900 cells)
+output_dir: results/dino_latlon_rigid_lid

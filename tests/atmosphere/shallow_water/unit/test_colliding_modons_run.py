@@ -23,7 +23,7 @@ if not jax.config.read("jax_enable_x64"):
         allow_module_level=True,
     )
 
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     FV3EdgeShallowWaterModel,
     iter1009_dual_target_config,
 )
@@ -157,7 +157,7 @@ def test_latlon_coriolis_derives_from_grid_omega(fp64_policy):
     grid is f-dominated — a >20x separation the hardcoded version
     collapses to equality.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
     )
     from legoesm.grids.latlon import create_latlon_grid
@@ -187,7 +187,7 @@ def test_latlon_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic latlon C-grid modons run: non-rotating grid (f=0),
     finite fields, area-weighted mass conserved, and the flow stays
     equator-centred (winds do not blow up)."""
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterConfig,
         CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterState,
@@ -241,7 +241,7 @@ def test_mpas_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic MPAS modons run on an omega=0 Voronoi mesh:
     Coriolis identically zero, finite fields, mass conserved, winds
     bounded."""
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterConfig,
         MPASShallowWaterModel,
     )
@@ -290,7 +290,7 @@ def test_spectral_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic spectral modons run on an omega=0 Gaussian grid:
     f = 0, finite spectral state, mean geopotential (mass) conserved,
     physical winds bounded."""
-    from legoesm.atmosphere.dynamics.spectral_sw import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
         SpectralShallowWaterModel,
         SpectralSWConfig,
     )

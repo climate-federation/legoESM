@@ -16,9 +16,8 @@ Ridge transfer function (Hibler 1980 / Lipscomb 2007 eq. 26):
 ridged ice from participating categories is spread uniformly in
 ``h`` between
 
-    H_min = 2 · h_part            (a minimum thickness multiplier)
-    H_max = μ_rdg · √(h_part)     (Hibler scaling on participating
-                                   thickness)
+    H_min = 2 · h_part                     (minimum thickness multiplier)
+    H_max = min(μ_rdg · √(h_part), H_star) (Hibler scaling, capped at H_star)
 
 Snow on participating ice is partly retained in ridges
 (``snow_fraction_retained``); the rest is dropped to the ocean as
@@ -29,6 +28,35 @@ category pair.  The implementation below operates column-wise via
 ``jax.vmap`` and is conservation-exact for ice area and ice
 volume (snow + salt mass conservation: see ``apply_ridging``
 docstring).
+
+Faithfulness
+------------
+``tests/ice/unit/test_ice_ridging_faithful.py`` pins:
+
+  * :func:`participation_weights` to round-off (rel 1e-9) against an independent
+    reimplementation of Lipscomb 2007 eq. 22 (``b_k = a_k exp(-h_k/e*) / sum``),
+    plus its defining properties (normalised to 1 with ice, thin-preferential
+    ``w/a`` strictly decreasing in ``h``, zero when ice-free, the ``e*`` divide
+    floor);
+  * the Hibler 1980 / Lipscomb eq. 26 ridge-thickness range via a single-donor
+    column with analytic ``h_part``: the per-receiver-bin area and volume match
+    the independent uniform-``g`` overlap integral on ``[H_min, H_max] =
+    [2 h_part, min(mu_rdg sqrt(h_part), H_star)]`` (mean thickness ``H_mean``),
+    including the ``H_star`` cap and the two numerical REGULARIZATIONS: when
+    ``mu sqrt(h_part) < 2 h_part`` (i.e. ``h_part > (mu/2)^2``) ``H_max`` is
+    floored to ``H_min + width``, and for an over-thick donor
+    (``H_min > hi[-1]``) the range collapses into the top category — both remain
+    volume-conserving;
+  * the DEFINING conservation invariants of :func:`apply_ridging` (the truth
+    tier): ice volume and bulk salt mass conserved, total area reduced by exactly
+    ``closing_rate*dt`` (CICE aksum) in the un-capped regime, saturating when the
+    total area is exhausted, donor snow deficit reported to the ocean (retained
+    fraction = ``snow_fraction_retained``), ridging pond water fully drained,
+    divergent columns a no-op; the effective production defaults are exercised by
+    a default-vs-explicit equivalence test.
+
+Closure constants (e_star, mu_rdg, H_star, snow_fraction_retained) are canaried
+against :class:`RidgingConfig` defaults (0.36 m, 4.0, 100 m, 0.5).
 """
 
 from __future__ import annotations
@@ -119,11 +147,36 @@ def _ridging_column_kernel(
     # Area available to ridge this step (cap at total area present).
     a_total = jnp.sum(a_cat)
     da_ridged_request = closing_rate * dt
-    da_ridged = jnp.minimum(da_ridged_request, a_total)
 
     # Participation weights (per category) — fraction of total
-    # ridging area drawn from each category.
+    # ridging area drawn from each category (normalised, sum to 1).
     weights = participation_weights(a_cat, h_cat, e_star)
+
+    # aksum normalization (audit): the redistribution compresses the
+    # participating area ``a_part`` into a SMALLER ridge area ``a_ridge =
+    # a_part * h_part / H_mean`` (ridges are thicker than donors), so the NET
+    # area removed is only ``a_part * (1 - h_part/H_mean)``.  Without correcting
+    # for this the net closing under-delivers (50-100% of the requested
+    # ``closing_rate*dt``) and the documented ``ΔA = -closing_rate*dt`` invariant
+    # is false.  Scale the participating draw up by ``1/(1 - h_part/H_mean)`` so
+    # the net closing MATCHES the dynamics-requested value (CICE ``aksum``).
+    # ``h_part`` / ``H_mean`` depend only on the participation weights and
+    # category thicknesses (NOT on the draw magnitude), so the compression
+    # factor is computed here from the weights before the draw; the exact
+    # per-cat-capped ``h_part`` / ``H_mean`` are recomputed below for the ridge
+    # distribution.  ``1 - h_part/H_mean`` is bounded in [0.5, 1] since
+    # ``H_mean >= H_min = 2*h_part`` (clipped for the over-thick collapse case).
+    h_part_est = jnp.sum(weights * h_cat) / jnp.maximum(jnp.sum(weights), 1e-30)
+    H_min_est = 2.0 * h_part_est
+    H_max_est = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part_est, 1e-6)), H_star)
+    H_max_est = jnp.minimum(H_max_est, hi[-1])
+    H_max_est = jnp.maximum(H_max_est, H_min_est + _MIN_RIDGE_WIDTH_M)
+    H_mean_est = 0.5 * (jnp.minimum(H_min_est, hi[-1]) + jnp.minimum(H_max_est, hi[-1]))
+    comp = jnp.clip(
+        1.0 - h_part_est / jnp.maximum(H_mean_est, 1e-6), 0.5, 1.0,
+    )
+    da_ridged = jnp.minimum(da_ridged_request / comp, a_total)
+
     da_per_cat = da_ridged * weights
     # Limit per-cat draw to its available area.
     da_per_cat = jnp.minimum(da_per_cat, a_cat)
@@ -289,7 +342,13 @@ def apply_ridging(
     """Apply Lipscomb 2007 mechanical ridging to a multi-category state.
 
     Conservation invariants (per column):
-        * Total ice area is *reduced* by net convergence: ΔA = −closing_rate·dt.
+        * Total ice area is *reduced* by net convergence: ΔA = −closing_rate·dt
+          (the aksum normalization scales the participating draw so the NET
+          closing matches the requested rate) in the un-capped regime, UNLESS
+          limited by available area — either the total ``a_total`` (all ice
+          ridged) or a participating category's per-cat draw cap ``da <= a_cat``
+          (the compression factor is estimated before per-cat clipping) — where
+          the net closing saturates below the requested rate.
         * Total ice volume is conserved (donor volume = ridge volume).
         * Total snow volume is **not** conserved when
           ``snow_fraction_retained < 1`` — the difference is reported

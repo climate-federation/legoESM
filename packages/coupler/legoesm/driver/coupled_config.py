@@ -100,17 +100,41 @@ class CoupledConfig(NamedTuple):
     # Source of the spatial land parameters when use_pft: "analytical" (latitude
     # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
     land_param_source: str = "analytical"
+    # Transient land-use cover (opt-in; requires land_param_source="clm").  When
+    # True with land_cover_surfdata set, the CLM path's PFT-weighted VEGETATION
+    # params re-weight each segment from the transient legoesm_surfdata cover
+    # (LUH2/HYDE/...); the CLM soil (hydraulics/thermal) stays frozen.  Empty
+    # land_cover_surfdata → static cover (byte-identical to a normal run).
+    transient_land_cover: bool = False
+    land_cover_surfdata: str = ""
     # Coupled DIURNAL surface model for multilayer land (default ON): use the
     # physical Monin-Obukhov surface exchange + Farquhar photosynthesis-stomata
     # coupling (vs a constant bulk coefficient + soil-only beta).  Well-posed in the
     # coupled model because the atmosphere supplies a resolved diurnal cycle.
     land_diurnal_surface: bool = True
+    # Sub-grid elevation-band snow for multilayer land (default OFF): re-partition
+    # precipitation phase and melt over sub-grid elevation bands from the CLM
+    # ``STD_ELEV`` map, so a warm cell keeps bright snow on its cold high fractions
+    # (fixes the high-elevation / perennial-snow warm-albedo bias).  Requires
+    # ``land_mode="multilayer"`` and ``land_param_source="clm"`` (the band elevations
+    # come from the CLM surface map).  See ``legoesm.land.snow_bands``.
+    land_elev_bands: bool = False
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
     carbon_ocean: bool = False
     co2_tracer: bool = False
     co2_ppmv_init: float = 415.0
+    # Spun-up land carbon IC (finidat).  Path to a ``global_carbon_ic.npz`` built
+    # by ``scripts/data/build_global_carbon_ic.py``.  When set (and the land is
+    # multilayer + differland carbon), the coupled run INGESTS the seeded 8-pool
+    # per-cell CarbonState + the per-cell permafrost ``phi`` INSTEAD of cold-
+    # starting carbon: it starts at the mapped equilibrium and MAINTAINS the
+    # seeded permafrost SOC (``phi`` -> ``make_coupler`` permafrost protection).
+    # ``""`` (default) => cold-start (byte-identical).  Requires a run grid
+    # matching the finidat (STRICT grid-match; see
+    # ``legoesm.land.carbon.global_init.load_finidat_carbon_ic``).
+    carbon_ic_path: str = ""
     # Tile fractions.  f_land_mode ∈ {"zero", "analytical", "from_ocean"}.
     #   "from_ocean": f_land = 1 - (dynamic-ocean WOA-derived ocean mask), so
     #   the atmosphere land fraction and the 3D-ocean wet mask come from one

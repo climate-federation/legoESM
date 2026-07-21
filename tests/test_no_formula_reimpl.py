@@ -179,18 +179,38 @@ def detect_exner_potential_temperature(src: str) -> list[int]:
     return sorted(lines)
 
 
+def _is_const(node: ast.AST, values: tuple[float, ...]) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and not isinstance(node.value, bool)
+        and isinstance(node.value, (int, float))
+        and float(node.value) in values
+    )
+
+
 def detect_virtual_temperature(src: str) -> list[int]:
-    """Lines with the virtual-temperature coefficient ``0.608``/``0.61``
-    (= R_v/R_d − 1) — an inline ``T·(1 + 0.608·q)`` instead of the canonical
-    ``physics._shared.virtual_temperature``. Deduplicated by line."""
+    """Lines with an INLINE virtual-temperature coefficient ``0.608``/``0.61``
+    (= R_v/R_d − 1) used as a MULTIPLIER, instead of the canonical
+    ``physics._shared.virtual_temperature``. Deduplicated by line.
+
+    Structural, not a bare-literal scan: the coefficient must be an operand of a
+    multiplication. That catches both the factored form ``T·(1 + 0.608·q)`` AND
+    the algebraically-equivalent distributed form ``T + 0.608·T·q`` (which a
+    ``1 ± (…)``-only shape check would miss — a blind spot). What it does NOT
+    flag — correctly — is a lone coefficient hoisted into a named constant
+    (``_VIRT_T_COEF = 0.61`` — the desired pattern; a bare Assign RHS, not a
+    Mult operand) or an unrelated data-table literal (a soil-albedo ``0.61`` in
+    a tuple). Between the old over-broad ``value in (0.608, 0.61)`` scan (false
+    positives on constants/tables) and a too-narrow shape match (misses the
+    distributed form): flag iff the value multiplies something."""
     tree = ast.parse(src)
     lines: set[int] = set()
     for n in ast.walk(tree):
         if (
-            isinstance(n, ast.Constant)
-            and not isinstance(n.value, bool)
-            and isinstance(n.value, (int, float))
-            and float(n.value) in (0.608, 0.61)
+            isinstance(n, ast.BinOp)
+            and isinstance(n.op, ast.Mult)
+            and (_is_const(n.left, (0.608, 0.61))
+                 or _is_const(n.right, (0.608, 0.61)))
         ):
             lines.add(n.lineno)
     return sorted(lines)
@@ -232,28 +252,25 @@ CANONICAL_FORMULAS = {
         # Per-file count, seeded from the measured baseline (iter 2026-06-09):
         # 33 inline buoyancy/N² re-derivations across 18 modules.
         "budget": {
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler.py": 5,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler.py": 5,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 2,
             # 1 -> 2: main grew a second inline N² site while this branch was
             # in flight (rebase 2026-06-12 baseline re-seed, not branch debt).
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_nh.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/spectral_les_plane.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/spectral_nh.py": 2,
             # GWD hines/lindzen/mcfarlane/prognostic_spectral migrated their
             # inline g/θ·∂θ/∂z N² to physics._shared.brunt_vaisala_n_full
             # (ponytail dedup 2026-06-17) → budget ratcheted to 0 (entries removed).
-            # clubb_lite keeps its single inline g/θ N² term by decision (the
-            # buoyancy_coefficient wrapper was judged superfluous there —
-            # docs/dev-notes/clubb_port_history.md); this restores the pre-CLUBB-port
-            # main baseline value, it is NOT new debt.
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
+            # Turbulence dedup 2026-07-07: the N²/bulk-Ri g/θ sites in
+            # clubb_lite / louis / pbl_height / smagorinsky / tke and edmf's
+            # N²_half migrated to physics._shared.buoyancy_coefficient →
+            # budgets ratcheted (entries removed / edmf 3 → 2).  edmf keeps
+            # its two anelastic parcel-buoyancy g·θ'/θ sites (updraft buoy +
+            # mf_buoyancy), a genuinely different (non-N²) form.
+            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 4,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 3,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
             # ysu.py: 4 inline g/θ buoyancy/N² re-derivations migrated to
             # physics._shared.buoyancy_coefficient (audit item 7) → budget 0
             # (entry removed; was 3, which had already gone stale at 4 actual).
@@ -280,9 +297,9 @@ CANONICAL_FORMULAS = {
         ),
         # 42 inline (p/p0)^κ sites across 29 modules (iter 2026-06-09).
         "budget": {
-            "packages/atmosphere/legoesm/atmosphere/dynamics/_fv3_lin_pgf.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/held_suarez.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/_fv3_lin_pgf.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/forcing/idealized/held_suarez.py": 1,
             "packages/atmosphere/legoesm/atmosphere/idealized/rcemip_initial_conditions.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py": 1,
@@ -297,20 +314,22 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py": 3,
             # New on main while this branch was in flight (rebase 2026-06-12
             # baseline seed, not branch debt): 3 inline (p/p0)^κ sites.
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_moist.py": 3,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/sam_case_forcing.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/scm_forcing.py": 1,
-            "packages/core/legoesm/grids/vertical.py": 4,
+            "packages/atmosphere/legoesm/atmosphere/dynamics/les/spectral_les_moist.py": 3,
+            # Turbulence dedup 2026-07-07: every turbulence-module inline
+            # (p/p0)^κ / (p0/p)^κ site (edmf, holtslag_boville, integration,
+            # louis, mynn25, pbl_height, smagorinsky, tke, vertical_diffusion,
+            # ysu) migrated to physics._shared.exner_function (forward Π or
+            # 1/Π for the inverse direction) → budgets ratcheted to 0
+            # (entries removed).
+            "packages/atmosphere/legoesm/atmosphere/forcing/sam_case_forcing.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/forcing/scm/scm_forcing.py": 1,
+            # 4 -> 5: #930/#962 (θ-form MPAS vertical thermo transport, commit
+            # c1b3a9099) added a 5th inline (max(p,1)/P_0)^κ site (L2332). core/
+            # grids/ sits below the atmosphere layer, so it cannot import
+            # physics._shared.exner_function without an inverted core->atmosphere
+            # dependency — these sites are accepted, un-migratable debt (the four
+            # siblings predate it). Baseline re-seed, not new avoidable debt.
+            "packages/core/legoesm/grids/vertical.py": 5,
         },
     },
     "virtual_temperature": {
@@ -456,6 +475,30 @@ def test_virtual_temperature_detector_flags_coefficient() -> None:
 
 def test_virtual_temperature_detector_ignores_other_floats() -> None:
     assert detect_virtual_temperature("x = 0.6\ny = constants.epsilon * q\n") == []
+
+
+def test_virtual_temperature_detector_flags_0p61_and_reversed_operands() -> None:
+    # 0.61 variant, coefficient on the right of the Mult, sum reversed.
+    assert detect_virtual_temperature("Tv = (q * 0.61 + 1.0) * T\n") == [1]
+
+
+def test_virtual_temperature_detector_flags_distributed_form() -> None:
+    # Algebraically-equivalent distributed form T + 0.608*T*q — must be caught
+    # (a `1 ± (…)`-only shape check would miss this; the coefficient still
+    # multiplies something).
+    assert detect_virtual_temperature("Tv = T + 0.608 * T * q_v\n") == [1]
+
+
+def test_virtual_temperature_detector_ignores_named_constant_def() -> None:
+    # The *desired* pattern — coefficient hoisted to a named constant — is not
+    # a re-derivation and must not be flagged (was a false positive).
+    assert detect_virtual_temperature("_VIRT_T_COEF = 0.61  # R_v/R_d - 1\n") == []
+
+
+def test_virtual_temperature_detector_ignores_data_table_literal() -> None:
+    # A 0.61 inside an unrelated data table (e.g. a soil-albedo tuple) is not a
+    # virtual-temperature formula (was a false positive).
+    assert detect_virtual_temperature("SOIL = ((0.36, 0.61, 0.25, 0.50),)\n") == []
 
 
 def test_brunt_vaisala_tp_detector_flags_g_squared() -> None:

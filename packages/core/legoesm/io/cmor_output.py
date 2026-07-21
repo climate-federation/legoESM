@@ -408,20 +408,6 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean",
         "dimensions": ("time", "plev", "lat", "lon"),
     },
-    "rsutcs": {
-        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
-        "long_name": "TOA Outgoing Clear-Sky Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlutcs": {
-        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
-        "long_name": "TOA Outgoing Clear-Sky Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
     "rsdscs": {
         "standard_name": "surface_downwelling_shortwave_flux_in_air_assuming_clear_sky",
         "long_name": "Surface Downwelling Clear-Sky Shortwave Radiation",

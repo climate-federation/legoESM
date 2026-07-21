@@ -6,7 +6,7 @@ import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
-from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonHydrostaticState,
@@ -14,7 +14,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     hydrostatic_to_cgrid,
     cgrid_to_hydrostatic,
 )
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_init_latlon,
     held_suarez_forcing_latlon,
 )
@@ -1078,3 +1078,88 @@ class TestTracerMassConservation:
             f"Hybrid tracer mass conservation error: {rel_err:.4e} "
             f"(init={mass_init:.6e}, final={mass_final:.6e})"
         )
+
+
+# ==============================================================================
+# #836: top sponge (Rayleigh damping increasing toward the model lid)
+# ==============================================================================
+
+class TestTopSponge:
+    """The hydrostatic lat-lon C-grid dycore gains a config-gated top sponge that
+    damps horizontal momentum toward rest in the upper levels (absorbs
+    gravity-wave energy that would else reflect off the rigid lid — #836)."""
+
+    def _uniform_wind_state(self, grid, sigma, u0=20.0):
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        nlev = sigma.n_levels
+        return CGridLatLonHydrostaticState(
+            u=jnp.full((n_lat, n_lon + 1, nlev), u0),
+            v=jnp.full((n_lat + 1, n_lon, nlev), 5.0),
+            T=jnp.full((n_lat, n_lon, nlev), 300.0),
+            p_s=jnp.full((n_lat, n_lon), 1.0e5),
+            phis=jnp.zeros((n_lat, n_lon)),
+        )
+
+    def test_sponge_off_is_byte_identical(self, grid, sigma):
+        """sponge_coeff=0 (default) is bit-for-bit the no-sponge tendency."""
+        state = self._uniform_wind_state(grid, sigma)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        du0, dv0, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, cfg_off)
+        du_def, dv_def, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        assert jnp.array_equal(du0, du_def)
+        assert jnp.array_equal(dv0, dv_def)
+
+    def test_sponge_damps_top_toward_rest_and_leaves_surface(self, grid, sigma):
+        """The sponge contribution du_on - du_off = -k(z)*u is: negative for u>0
+        (damps toward rest), NONZERO at the top level, ZERO at the surface (below
+        the sponge base), and increasing toward the lid."""
+        state = self._uniform_wind_state(grid, sigma, u0=20.0)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        cfg_on = CGridLatLonPrimitiveEquationConfig(
+            sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0)
+        du_off, dv_off, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, cfg_off)
+        du_on, dv_on, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, cfg_on)
+
+        d_du = du_on - du_off        # == -k(z) * u,  (n_lat, n_lon+1, nlev)
+        # SIGN: u = +20 > 0 -> sponge tendency is <= 0 everywhere (toward rest).
+        assert float(jnp.max(d_du)) <= 1e-12
+        assert float(jnp.min(d_du)) < 0.0
+        # TOP level (index 0 = smallest sigma) is damped; SURFACE (index -1) is not.
+        per_lev = jnp.max(jnp.abs(d_du), axis=(0, 1))   # (nlev,)
+        assert float(per_lev[0]) > 0.0, "top level not damped by the sponge"
+        assert float(per_lev[-1]) == 0.0, "surface level should be below the sponge base"
+        # Ramp increases toward the lid (top >= a mid level >= surface).
+        assert float(per_lev[0]) >= float(per_lev[-1])
+        # v is damped by the SAME profile (momentum, not just u).
+        d_dv = dv_on - dv_off
+        assert float(jnp.min(d_dv)) < 0.0     # v = +5 > 0 -> damped negative
+        assert float(jnp.max(jnp.abs(d_dv[..., -1]))) == 0.0
+
+    def test_sponge_is_differentiable(self, grid):
+        """grad through the ISOLATED sponge (du_on - du_off == -k(z)*u) is finite
+        AND actually driven by the sponge — not by an unrelated term. Loss on the
+        on-minus-off contribution ONLY: its grad must be nonzero at the lid (sponge
+        live) and EXACTLY zero at the surface (below the sponge base). Differencing
+        cancels every term the sponge does not touch, so a deleted/no-op sponge
+        gives an all-zero grad here (a bare grad(loss_on)!=0 would pass via
+        Coriolis even with no sponge — codex R1). Exercises the hybrid-L40 matrix
+        path, not the L10 sigma fixture."""
+        from legoesm.grids.vertical import standard_hybrid_levels
+        hyb = standard_hybrid_levels(40)
+        state = self._uniform_wind_state(grid, hyb, u0=20.0)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        cfg_on = CGridLatLonPrimitiveEquationConfig(
+            sponge_coeff=1.0 / 3600.0, sponge_width_m=10000.0)
+
+        def sponge_only_loss(u):
+            s = state._replace(u=u)
+            du_on, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_on)
+            du_off, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_off)
+            return jnp.sum((du_on - du_off) ** 2)   # == sum((k(z)*u)^2), sponge-only
+
+        g = jax.grad(sponge_only_loss)(state.u)
+        assert jnp.all(jnp.isfinite(g))                 # no NaN-grad trap
+        assert float(jnp.max(jnp.abs(g[..., 0]))) > 0.0   # lid: sponge drives grad
+        assert float(jnp.max(jnp.abs(g[..., -1]))) == 0.0  # surface: sponge absent

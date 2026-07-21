@@ -866,7 +866,7 @@ def slide_ocean_physics():
          "Plume + enhanced diffusion (gradient-safe sigmoid active mask)"),
         ("Shortwave penetration","shortwave_penetration.py",
          "Jerlov optical-water types"),
-        ("Ice-shelf basal melt", "ice_shelf_basal_melt.py",
+        ("Ice-shelf basal melt", "ice_shelf.py",
          "Jenkins 1991 / Holland-Jenkins 1999 three-equation (ISOMIP+)"),
         ("Biogeochemistry",      "biogeochemistry/",
          "Abiotic DIC + ALK carbonate · NPZD · air–sea CO₂ Schmidt-number gas exchange"),
@@ -1123,7 +1123,7 @@ def slide_scm():
                        "applications · scm", 22, TOTAL_SLIDES)
     lx, lw = M, 6.5
     b.add(sp_textbox(idg, lx, 1.70, lw, 0.4,
-        [Para([Run("atmosphere/scm.py · SingleColumnModel",
+        [Para([Run("atmosphere/forcing/scm/scm.py · SingleColumnModel",
                    size=15, bold=True, color=TEAL_DARK, font=HEADER_FONT)])]))
     b.add(sp_textbox(idg, lx, 2.15, lw, 4.55,
         bullets([
@@ -1180,7 +1180,7 @@ def slide_rce():
             "Spectral T21 + Gaussian grid · slab cubed-sphere C36 · multi-month rollouts",
             "Used to validate radiation–convection–boundary-layer closure under a clean global-mean budget",
             "Trainable physics modes plug straight into RCE: ideal sandbox for gradient-based parameter calibration",
-            "Single-column model (atmosphere/scm.py): same physics factory as 3D runs — for fast offline diagnostics and ML-physics training data",
+            "Single-column model (atmosphere/forcing/scm/scm.py): same physics factory as 3D runs — for fast offline diagnostics and ML-physics training data",
         ], size=13, line_spacing=1.22, space_after_pt=4)))
     rx = lx + lw + 0.30
     rw = SLIDE_W_IN - rx - M

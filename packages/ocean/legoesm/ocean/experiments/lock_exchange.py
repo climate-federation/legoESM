@@ -56,7 +56,6 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -81,7 +80,6 @@ class LockExchangeConfig:
     front_longitude: float = 0.0   # Prime meridian [degrees]
 
     # Physical parameters for RPE calculation
-    rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference_C: float = 15.0       # Reference temperature [°C]
 
@@ -208,7 +206,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
 
         # Create temperature front at front_longitude
         T_field = np.where(west_of_front, T_cold, T_warm)
-        
+
         # Apply to all levels with land mask
         nlev = T_grid.shape[-1]
         for k in range(nlev):
@@ -355,7 +353,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
-    
+
     # Check for temperature blowup — fuse min/max into one host pull.
     if hasattr(final_state, 'T'):
         _t = final_state.T.data

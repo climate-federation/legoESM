@@ -18,7 +18,7 @@ os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=6")
 import jax.numpy as jnp
 import numpy as np
 from legoesm.driver.compiled_segments import (
-    _GRID_SHAPED_FORCING_FIELDS,
+    GRID_SHAPED_FORCING_FIELDS,
     pack_forcing,
     shard_forcing,
 )
@@ -141,5 +141,5 @@ def test_field_list_matches_namedtuple():
     """Every name in the grid-shaped list is a real SegmentForcing field
     (a rename must update both)."""
     from legoesm.driver.compiled_segments import SegmentForcing
-    for name in _GRID_SHAPED_FORCING_FIELDS:
+    for name in GRID_SHAPED_FORCING_FIELDS:
         assert name in SegmentForcing._fields

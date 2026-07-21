@@ -37,6 +37,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
+from legoesm import constants
+
 
 # ---------------------------------------------------------------------------
 # Data loading helpers
@@ -153,7 +155,7 @@ def _soil_layer_depths(n_layers: int, total_depth: float = 3.0,
 # ---------------------------------------------------------------------------
 
 def _celsius(T_K: np.ndarray) -> np.ndarray:
-    return T_K - 273.15
+    return T_K - constants.T_freeze
 
 
 def plot_lmip(

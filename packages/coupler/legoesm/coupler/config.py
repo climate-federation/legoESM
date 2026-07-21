@@ -78,6 +78,21 @@ class CouplerConfig(NamedTuple):
     # (Wing 2018) is correct only for PRESCRIBED-SST (SCM/AMIP).  See the CAM
     # surface-energy audit.
     gustiness: float = 1.0
+    # COARE 3.0 free-convection gustiness on the air-sea tile flux: the
+    # boundary-layer depth z_i [m] that sets the convective velocity scale
+    # w* = (g·z_i·<w'θv'>/θv)^(1/3) -> U_eff = sqrt(|U|^2 + (β·w*)^2).
+    # None => SCHEME-NATIVE (bulk_flux.resolve_gustiness_w_zi: 600 m for
+    # coare3, off for every other scheme) — the SAME nullable semantics as
+    # the atmosphere surface layer (SurfaceLayerConfig.gustiness_w_zi) and
+    # the slab ocean (SimpleOceanConfig.gustiness_w_zi), so the DEFAULT
+    # coare3 interface no longer splits (atm 600 m vs tile off — the strict
+    # xfail this closes).  0.0 => explicitly OFF.  Under the default
+    # 'constant' closure the field is never read, so the OMIP / default
+    # coupled run is byte-identical.  See the cmip_air_sea_decoupling fix:
+    # a calm warm tropical ocean barely evaporates without w* (hfls ~45 vs
+    # ~120 W/m²), drying the atmosphere -> weak greenhouse -> the warm SST
+    # radiates to space -> 3D-ocean cold collapse.
+    gustiness_w_zi: float | None = None  # Gustiness BL depth z_i [m]; None=scheme-native
     ocean_albedo: float = 0.06        # Fallback constant ocean albedo
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]
@@ -85,6 +100,12 @@ class CouplerConfig(NamedTuple):
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "most", "coare3", "large_yeager"
+    # Thermodynamic constants set for the ocean-tile most/coare3/large_yeager
+    # fluxes (#762): "legoesm" (default) = constant L_v / dry c_pd;
+    # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
+    # moist cp_air(q_atm)).  Kept consistent with the atmosphere
+    # SurfaceLayerConfig.thermo_convention by run_coupled.
+    thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
     # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default,
     # historical -5*zeta), "beljaars_holtslag1991", "grachev2007_sheba"

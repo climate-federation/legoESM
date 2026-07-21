@@ -13,7 +13,7 @@ from legoesm.atmosphere.idealized.held_suarez_topo import (
     held_suarez_topo_init_mpas,
     held_suarez_topo_init_spectral,
 )
-from legoesm.atmosphere.held_suarez import (
+from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_forcing,
     held_suarez_forcing_mpas,
 )

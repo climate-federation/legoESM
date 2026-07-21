@@ -73,6 +73,8 @@ from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     coriolis_cgrid_energy_conserving,
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -134,9 +136,14 @@ def _depth_average_to_faces(
     h_k_pad = pad_ns_zero(h_k)
     h_v = jnp.minimum(h_k_pad[:-1], h_k_pad[1:])
     h_v = _zero_polar_lat_ends(h_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_row = jnp.minimum(h_k[-1:], fold_vface_row(h_k, grid))
-        h_v = jnp.concatenate([h_v[:-1], north_row], axis=0)
+        # Data-dependent fold application (SPMD-safe: the seam is masked,
+        # not sliced, so non-owner shards are untouched under shard_map).
+        h_v = apply_north_fold(h_v, north_row, grid, north_mask=nmask)
+    # #517 shared helper, fused=True == the fused-stack sum topology
+    # (byte-identical to the open-coded stack/sum this replaces).
     V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
 
     return U_bar, V_bar
@@ -180,9 +187,10 @@ def _h_total_at_faces(
     H_total_pad = pad_ns_zero(H_total)
     H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
     H_v = _zero_polar_lat_ends(H_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_row = jnp.minimum(H_total[-1:], fold_vface_row(H_total, grid))
-        H_v = jnp.concatenate([H_v[:-1], north_row], axis=0)
+        H_v = apply_north_fold(H_v, north_row, grid, north_mask=nmask)
 
     return H_u, H_v
 
@@ -571,7 +579,29 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
     diag = jnp.where(wet, 1.0 / jnp.maximum(inv_diag, 1.0e-30), 0.0)
     gersh = jnp.where(wet, 2.0 * diag - 1.0, -jnp.inf)
     lmax_local = jnp.max(gersh)
-    lmax = global_max_mpi(lmax_local) if is_multi_process() else lmax_local
+    # Global spectral-radius bound: under the single-controller lat-band shard_map
+    # lmax_local is this band's PARTIAL max -> take the max across "lat" with
+    # jax.lax.pmax (the SPMD analogue of global_max_mpi; mpi4jax not even required
+    # on the route-B multi-GPU path).  Checked FIRST (is_multi_process() is False
+    # under one process), and -- like eta_floor._global_sum_pair -- gated on a
+    # "lat" mesh axis so a coupled cube-atm SPMD mesh (NON-lat axes) falls through
+    # to MPI/local instead of crashing (codex).  pmax/global_max are MAX, so NON-
+    # differentiable -- fine because lmax is stop_gradient'd just below (a
+    # preconditioner tuning parameter, not part of the converged answer).
+    from legoesm.grids.halo import (
+        get_halo_backend as _get_halo_backend, get_spmd_mesh as _get_spmd_mesh,
+    )
+    lmax = None
+    if _get_halo_backend() == "spmd":
+        _mesh = _get_spmd_mesh()
+        if _mesh is None:
+            raise RuntimeError(
+                "chebyshev preconditioner: halo backend is 'spmd' but no SPMD "
+                "mesh is set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(_mesh.axis_names):
+            lmax = jax.lax.pmax(lmax_local, "lat")
+    if lmax is None:
+        lmax = global_max_mpi(lmax_local) if is_multi_process() else lmax_local
     # stop_gradient: the preconditioner's spectral window is a tuning
     # parameter (only affects convergence speed, not the converged answer),
     # so the non-differentiable allreduce(MAX) is safe here.
@@ -1471,7 +1501,7 @@ def barotropic_implicit_latlon_cgrid(
                     "jacobi")),
         inv_diag, H_u_old, H_v_old, coeff, grid, mask,
         A_op=A_op,
-        cheby_degree=int(getattr(config, "barotropic_chebyshev_degree", 4)),
+        cheby_degree=int(config.barotropic.barotropic_chebyshev_degree),
         H_cell=_H_cell,
         layout=_pc_layout,
     )
@@ -1503,15 +1533,33 @@ def barotropic_implicit_latlon_cgrid(
     from legoesm.ocean.dynamics.barotropic_common import (
         HelmholtzSolveDiagnostics,
         global_rel_residual as _rel_resid,
+        precision_aware_rel_tol,
         solve_helmholtz_implicit,
     )
     _area_eta = grid.area.astype(eta_dtype)
-    _residual_tol = config.barotropic.barotropic_implicit_pcg_residual_tol
+    # Floor the relative-residual tolerance to what the working dtype can
+    # reach (f64: 1e-10 default unchanged; f32: raised above ~1.2e-4 since a
+    # 1e-10 rel-residual is unreachable below f32 machine epsilon).  Keeps the
+    # converged diagnostic meaningful and the stock-CG while_loop terminating.
+    _residual_tol = precision_aware_rel_tol(
+        config.barotropic.barotropic_implicit_pcg_residual_tol, eta_dtype,
+    )
     # ``force_pcg`` selects the fixed-M PCG body even single-rank
     # (solver-matched parity references + the faster-single-rank
     # option, job 8458701); its global dots reduce locally when not
     # multi-process, so the flag is safe pre-arming.
-    _use_pcg = _is_distributed() or bool(config.barotropic.barotropic_implicit_force_pcg)
+    # The lat-band SPMD backend (single-controller shard_map) is not
+    # multi-PROCESS, so _is_distributed() is False — but the stock-CG branch
+    # (solve_helmholtz_freesurface -> jax.scipy.sparse.linalg.cg) runs its
+    # A_op halo ppermute + CG reductions inside a DATA-DEPENDENT while_loop,
+    # whose collectives have no static schedule under shard_map (SIGABRT).
+    # Route SPMD to the FIXED-iteration distributed PCG (static scan schedule,
+    # SPMD-routed reductions — the same path MPI uses), exactly like the
+    # explicit_substep barotropic loop that is already SPMD-validated.
+    from legoesm.grids.halo import get_halo_backend as _get_halo_backend
+    _spmd_armed = _get_halo_backend() == "spmd"
+    _use_pcg = (_is_distributed() or _spmd_armed
+                or bool(config.barotropic.barotropic_implicit_force_pcg))
     if not _use_pcg:
         # The stock-CG branch solves with its INTERNAL Jacobi (the
         # custom-VJP solver owns inv_diag for its exact adjoint) — a
@@ -1532,8 +1580,11 @@ def barotropic_implicit_latlon_cgrid(
                 "faster single-rank solver, job 8458701) or use "
                 "preconditioner='jacobi'."
             )
-        pcg_tol = jnp.asarray(
-            config.barotropic.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        # f32: a 1e-10 rel-tol is unreachable, so stock CG would run to
+        # maxiter every step — floor it to the f32-reachable value (f64
+        # unchanged).
+        pcg_tol = precision_aware_rel_tol(
+            config.barotropic.barotropic_implicit_pcg_tol, eta_dtype,
         )
         eta_new = solve_helmholtz_freesurface(
             rhs, eta_old, H_u_old, H_v_old, coeff, mask, u_mask, v_mask,
@@ -1603,6 +1654,7 @@ def barotropic_implicit_latlon_cgrid(
     # (mirrors the outer ``fix_eta_drift`` cast in ocean_model_latlon).
     from legoesm.parallel.reductions import (
         batch_allreduce_mpi as _batch_allreduce_mpi,
+        batch_psum_spmd as _batch_psum_spmd,
         is_multi_process as _is_multi_process,
     )
     from legoesm.core.precision import cast as _cast
@@ -1613,7 +1665,34 @@ def barotropic_implicit_latlon_cgrid(
     _ocean_area_l = jnp.sum(_wa)
     _target_mass_l = jnp.sum(_cast(rhs, _M, "accumulate") * _area_acc)
     _actual_mass_l = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_acc)
-    if _is_multi_process():
+    # SPMD-aware batched reduction (SAME dispatch as eta_floor._global_sum_pair /
+    # barotropic_common._global_dot_batch -- check "spmd" backend AND a "lat" mesh
+    # axis, not just the backend): under the single-controller lat-band shard_map
+    # these are PARTIAL sums over this device's latitude band -> sum across "lat"
+    # with jax.lax.psum (NOT mpi4jax, not even required on the route-B multi-GPU
+    # path).  Checked FIRST because is_multi_process() is False under one process;
+    # without it each band would keep its PARTIAL (target_mass, actual_mass, area)
+    # and the global mass-conservation correction would be per-band WRONG (this
+    # fires every implicit_cn step under SPMD).  The "lat"-in-axis_names guard lets
+    # a coupled cube-atm SPMD mesh (backend "spmd", NON-lat axes) fall through to
+    # MPI/local instead of crashing on a missing "lat" axis (codex).  psum is
+    # self-transposing => AD-safe.
+    from legoesm.grids.halo import (
+        get_halo_backend as _get_halo_backend, get_spmd_mesh as _get_spmd_mesh,
+    )
+    _reduced = None
+    if _get_halo_backend() == "spmd":
+        _mesh = _get_spmd_mesh()
+        if _mesh is None:
+            raise RuntimeError(
+                "barotropic_implicit_latlon_cgrid: halo backend is 'spmd' but no "
+                "SPMD mesh is set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(_mesh.axis_names):
+            _reduced = _batch_psum_spmd(
+                [_ocean_area_l, _target_mass_l, _actual_mass_l], "lat")
+    if _reduced is not None:
+        _ocean_area, _target_mass, _actual_mass = _reduced
+    elif _is_multi_process():
         _ocean_area, _target_mass, _actual_mass = _batch_allreduce_mpi(
             [_ocean_area_l, _target_mass_l, _actual_mass_l], op="sum",
         )
@@ -1682,11 +1761,10 @@ def barotropic_implicit_latlon_cgrid(
     h_active_pad = pad_ns_zero(h_active_3d)
     v_active_3d = h_active_pad[:-1] * h_active_pad[1:]
     v_active_3d = _zero_polar_lat_ends(v_active_3d)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north_3d = h_active_3d[-1:] * h_active_3d[-1:, grid.fold.perm_T, :]
-        v_active_3d = jnp.concatenate(
-            [v_active_3d[:-1], north_3d], axis=0,
-        )
+        v_active_3d = apply_north_fold(v_active_3d, north_3d, grid, north_mask=nmask)
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])
         * u_mask[..., jnp.newaxis] * u_active_3d

@@ -363,6 +363,12 @@ class RRTMGP:
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
+          # g-point accumulation strategy changes the compiled RTE solve
+          # (vmap block vs per-g-point scan) and its answer to re-association
+          # tolerance — key on it so a batch_size/checkpoint change rebuilds
+          # the cached solver instead of silently reusing the prior one.
+          getattr(config, "gpoint_batch_size", 0),
+          getattr(config, "gpoint_checkpoint", True),
           getattr(config, "use_optimal_angle", False),
           config.S_0,
           config.aerosol_ssa,
@@ -956,3 +962,151 @@ class RRTMGP:
           lw_heating_rate=lw_hr,
           sw_heating_rate=sw_hr,
       )
+
+  def solve_columns_chunked(
+      self,
+      *,
+      column_chunk_size: int,
+      T: jnp.ndarray,
+      p_full: jnp.ndarray,
+      p_half: jnp.ndarray,
+      sfc_temperature: jnp.ndarray,
+      q_v: jnp.ndarray,
+      cos_zenith: jnp.ndarray,
+      **opt,
+  ):
+      """Column-chunked wrapper over :meth:`solve_columns`.
+
+      Splits the leading column axis into ``ncol // column_chunk_size``
+      fixed-size blocks and maps :meth:`solve_columns` over them with
+      ``jax.lax.map``.  Radiation columns are physically INDEPENDENT (the
+      k-distribution and two-stream solve have no horizontal coupling), so
+      the result is NUMERICALLY EXACT — bit-for-bit identical to the
+      unchunked call, not an approximation.  The point is COMPILE TIME: XLA
+      lowers the per-block body ONCE at ``column_chunk_size`` columns, so the
+      compiled graph size (and the highly super-linear rrtmgp JIT cost) is
+      capped independent of the total ``ncol`` — this lets the higher
+      horizontal resolutions (C24/C48 at L20) compile instead of stalling.
+
+      LEVELS are NOT chunked: the vertical is coupled through the two-stream
+      recurrence, so only the column axis is decomposable.
+
+      ``jax.lax.map`` is scan-based, so the wrapper is fully reverse-mode
+      differentiable (AD-safe) and adds no host/device thrash.
+
+      Parameters
+      ----------
+      column_chunk_size : int
+          Columns per compiled block.  ``0``/non-positive, or ``>= ncol``,
+          disables chunking (a plain :meth:`solve_columns` call).  Must
+          divide ``ncol`` exactly otherwise.
+      T, p_full, p_half, sfc_temperature, q_v, cos_zenith :
+          Required per-column inputs (leading axis ``ncol``); see
+          :meth:`solve_columns`.
+      **opt :
+          Any optional :meth:`solve_columns` keyword.  A leaf whose leading
+          axis equals ``ncol`` is treated as a per-column array and chunked
+          alongside the required inputs; everything else (Python/0-D
+          scalars, ``None``, the ``ghg_vmr_override`` dict, the per-g-point
+          ``solar_spectral_fraction`` whose leading axis is ``n_gpt`` not
+          ``ncol``) is broadcast unchanged to every block.
+
+      Returns
+      -------
+      RadiationOutput
+          Reassembled over ``ncol`` — identical to :meth:`solve_columns`.
+      """
+      ncol = T.shape[0]
+      # Disabled / degenerate → exact plain call.  This precedes every
+      # chunking-specific check so a disabled call is a TRUE passthrough:
+      # it honours any optics-only flags and returns exactly what
+      # solve_columns returns (no reshape overhead, no contract change).
+      if (not column_chunk_size or column_chunk_size <= 0
+              or ncol <= column_chunk_size):
+          return self.solve_columns(
+              T=T, p_full=p_full, p_half=p_half,
+              sfc_temperature=sfc_temperature, q_v=q_v,
+              cos_zenith=cos_zenith, **opt,
+          )
+      # --- chunking is ACTIVE from here down ---
+      # The optics-only short-circuits return a per-g-point TUPLE whose leaf
+      # layout ((n_gpt, ncol, nlev)) carries no leading (n_block, chunk)
+      # column axis, so the reassembly reshape below would corrupt it.
+      # Chunking supports the RadiationOutput path only.
+      if opt.get("sw_optical_field_only") or opt.get("lw_optical_field_only"):
+          raise ValueError(
+              "solve_columns_chunked supports only the RadiationOutput path; "
+              "sw_optical_field_only / lw_optical_field_only return a "
+              "per-g-point tuple incompatible with column chunking — call "
+              "solve_columns directly for the optics-only tracers."
+          )
+      if ncol % column_chunk_size != 0:
+          raise ValueError(
+              f"column_chunk_size {column_chunk_size} must divide ncol "
+              f"{ncol} exactly (radiation columns are independent, but the "
+              "lax.map reshape requires equal-size blocks)."
+          )
+      n_block = ncol // column_chunk_size
+
+      # Per-column CONFIG surface fallbacks (sfc_albedo / sfc_emissivity /
+      # sfc_albedo_direct) are read at GLOBAL ncol inside solve_columns via
+      # ``_resolve_surface_field(override, self._config.<field>)`` whenever the
+      # explicit per-call override is None.  Only EXPLICIT overrides (in opt)
+      # are chunked here, so a per-column ``(ncol, ...)`` config fallback would
+      # be read at global ncol inside each chunk-local solve → size mismatch
+      # and a broken / non-exact result.  Fail loudly and tell the caller to
+      # pass the field explicitly (which IS chunked); the production AMIP path
+      # already passes sfc_albedo / sfc_emissivity as explicit args, so this
+      # never fires there — it protects the direct-call contract + exactness.
+      cfg = getattr(self, "_config", None)
+      for _sfc_name in ("sfc_albedo", "sfc_emissivity", "sfc_albedo_direct"):
+          _fallback = getattr(cfg, _sfc_name, None)
+          if (opt.get(_sfc_name) is None and hasattr(_fallback, "shape")
+                  and getattr(_fallback, "ndim", 0) >= 1
+                  and _fallback.shape[0] == ncol):
+              raise ValueError(
+                  f"solve_columns_chunked: config fallback '{_sfc_name}' is a "
+                  f"per-column ({ncol},...) array but no explicit '{_sfc_name}' "
+                  "override was passed. The config surface field is read at "
+                  "global ncol inside each chunk block (via "
+                  "_resolve_surface_field) → size mismatch under chunking. "
+                  f"Pass '{_sfc_name}' as an explicit per-call argument (it is "
+                  "chunked) instead of relying on the per-column config field."
+              )
+
+      # Split every per-column array on its leading axis into
+      # (n_block, column_chunk_size, ...).  This row-major reshape is
+      # order-preserving and the reassembly reshape below is its exact
+      # inverse, so no column is reordered — the exactness guarantee.
+      def _is_col_array(x):
+          return (hasattr(x, "shape") and getattr(x, "ndim", 0) >= 1
+                  and x.shape[0] == ncol)
+
+      def _split(x):
+          return x.reshape(n_block, column_chunk_size, *x.shape[1:])
+
+      mapped = {
+          "T": _split(T), "p_full": _split(p_full), "p_half": _split(p_half),
+          "sfc_temperature": _split(sfc_temperature), "q_v": _split(q_v),
+          "cos_zenith": _split(cos_zenith),
+      }
+      # ``solar_spectral_fraction`` is a per-g-point vector (leading axis
+      # n_gpt, NOT ncol) that must be broadcast to every block, never split.
+      # Excluded by name so it stays static even in the degenerate
+      # ncol == n_gpt_sw case where the shape heuristic alone would misfire
+      # (splitting it → each block sees a short weight vector → solve_columns
+      # raises on the wrong g-point length).
+      _non_column_opt = ("solar_spectral_fraction",)
+      static = {}
+      for k, v in opt.items():
+          if k not in _non_column_opt and _is_col_array(v):
+              mapped[k] = _split(v)
+          else:
+              static[k] = v
+
+      def _one(chunk):
+          return self.solve_columns(**chunk, **static)
+
+      out = jax.lax.map(_one, mapped)  # leaves: (n_block, chunk, ...)
+      # Merge (n_block, chunk) back to ncol — the exact inverse of _split.
+      return jax.tree.map(lambda a: a.reshape(ncol, *a.shape[2:]), out)

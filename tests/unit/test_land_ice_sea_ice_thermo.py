@@ -72,7 +72,10 @@ class Test8a_Smoke:
         for name in SeaIceState._fields:
             assert jnp.all(jnp.isfinite(getattr(new_state, name).data)), f"{name} non-finite"
         for name in TileResponse._fields:
-            assert jnp.all(jnp.isfinite(getattr(resp, name))), f"TileResponse.{name} non-finite"
+            arr = getattr(resp, name)
+            if arr is None:            # optional fields (e.g. T_rad on non-canopy tiles)
+                continue
+            assert jnp.all(jnp.isfinite(arr)), f"TileResponse.{name} non-finite"
 
 
 class Test8b_IceGrowthCold:

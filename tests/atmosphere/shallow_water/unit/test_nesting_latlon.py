@@ -3,7 +3,7 @@
 Covers the substrate grid construct (:mod:`legoesm.grids.nesting`), the
 capability wiring (``instantiate(..., nesting=True)``), and the shallow-water
 1-way nest stepping driver
-(:mod:`legoesm.atmosphere.dynamics.shallow_water_nesting`).
+(:mod:`legoesm.atmosphere.dynamics.gcm.shallow_water_nesting`).
 
 The LOAD-BEARING numerical check is interior mass conservation through the nest
 boundary on a Williamson-2 (steady geostrophic) flow: with the child boundary
@@ -29,11 +29,11 @@ from legoesm.grids.nesting import (
     apply_boundary_interp,
 )
 from legoesm.grids.capability import instantiate, capability_matrix
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     williamson_test2_cgrid,
     CGridLatLonShallowWaterConfig,
 )
-from legoesm.atmosphere.dynamics.shallow_water_nesting import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_nesting import (
     NestedSWState,
     initial_nested_state,
     make_nested_stepper,
@@ -343,7 +343,7 @@ class TestStepping:
         # We wrap the tendency function the nest stepper calls and assert the
         # hard band of every state it receives matches the BC — this is the
         # "before the next tendency evaluation" invariant the bug violated.
-        import legoesm.atmosphere.dynamics.shallow_water_nesting as swn
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_nesting as swn
 
         parent_ic = williamson_test2_cgrid(nest.parent)
         state = initial_nested_state(nest, parent_ic)
@@ -361,7 +361,7 @@ class TestStepping:
         seen = {"n": 0, "max_err": 0.0}
         real_tend = swn.cgrid_latlon_sw_tendencies
 
-        def recording_tend(s, grid, config):
+        def recording_tend(s, grid, config, dt=None):
             sh, su, sv = np.asarray(s.h), np.asarray(s.u), np.asarray(s.v)
             err = max(
                 float(np.max(np.abs(sh[hb_h] - bc_h[hb_h]))),
@@ -370,7 +370,7 @@ class TestStepping:
             )
             seen["n"] += 1
             seen["max_err"] = max(seen["max_err"], err)
-            return real_tend(s, grid, config)
+            return real_tend(s, grid, config, dt)
 
         monkeypatch.setattr(swn, "cgrid_latlon_sw_tendencies", recording_tend)
         tgt = interior_mass(state.child, nest)
@@ -393,6 +393,30 @@ class TestStepping:
         tgt = interior_mass(state.child, nest)
         with pytest.raises(ValueError, match="SSP-RK3"):
             step_child(state.child, state.parent, nest, 90.0, tgt, cfg)
+
+    def test_rejects_biharmonic_with_thin_halo(self):
+        # nu_del4's L(L(u)) stencil reaches 2 cells: an n_halo=1 nest would
+        # let the first Laplacian read the invalid child global edge and the
+        # second propagate it into the first unpinned row.  Must raise at
+        # trace time — including through the jitted stepper.
+        thin = create_nested_latlon_grid(
+            parent_n_lat=32, refinement_ratio=3,
+            lat_south_deg=10.0, lat_north_deg=50.0,
+            lon_west_deg=40.0, lon_east_deg=120.0,
+            n_halo=1, n_relax=4,
+        )
+        parent_ic = williamson_test2_cgrid(thin.parent)
+        state = initial_nested_state(thin, parent_ic)
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=1.0e15, fix_mass=False)
+        tgt = interior_mass(state.child, thin)
+        # step_child takes the PARENT-grid state and interpolates the child
+        # BC internally; the guard fires in the boundary-aware substage
+        # integrator, before any biharmonic array math.
+        with pytest.raises(ValueError, match="n_halo"):
+            step_child(state.child, state.parent, thin, 90.0, tgt, cfg)
+        stepper = make_nested_stepper(thin, cfg, jit=True)
+        with pytest.raises(ValueError, match="n_halo"):
+            stepper(state, state.parent, 90.0, tgt)
 
     def test_step_child_only_matches_combined_child(self, nest):
         # step_child (child-only, parent integrated separately) must produce the

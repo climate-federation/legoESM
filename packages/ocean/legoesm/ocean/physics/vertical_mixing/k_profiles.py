@@ -18,7 +18,9 @@ contribution is taken on top of the others), bounded above by
 scheme's config are already included in their respective ``K_v`` /
 ``A_v`` output, so a separate ``A_v_floor`` is added by the caller only
 to enforce ``LatLonCGridOceanConfig.A_v`` and ``K_v`` as additional
-floors.
+floors.  Exception: with the ``constant`` scheme in ``lat_dependent``
+mode the Gregg (2003) latitude background REPLACES the constant
+background, so those caller floors are suppressed (not double-added).
 """
 
 from __future__ import annotations
@@ -36,7 +38,13 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
     surface_buoyancy_flux,
+    compute_N2,
+    latitude_background_diffusivity,
 )
+
+# Floor on the constant diffusivity K_v when deriving the background Prandtl
+# ratio A_v/K_v for the latitude-dependent viscosity (avoids /0 if K_v -> 0).
+_KV_PRANDTL_FLOOR = 1e-30
 
 __physics_contract__ = {
     "summary": (
@@ -91,6 +99,7 @@ def compute_vertical_K_profiles(
     return_tke: bool = False,
     lat_deg=None,
     iwm_fields=None,
+    n2_tracers=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -110,7 +119,12 @@ def compute_vertical_K_profiles(
         ``OceanPhysicsConfig`` controlling which schemes contribute.
     A_v_background, K_v_background
         Optional additional floors added uniformly to all interfaces
-        (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).
+        (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).  IGNORED
+        (treated as zero) when the ``constant`` scheme runs with
+        ``lat_dependent=True``: the Gregg (2003) latitude background
+        REPLACES the constant background, so adding the model-level floor
+        on top would shift the documented range ``[K_bg_eq, K_bg_pole]``
+        and break the configured Prandtl ratio ``A_v/K_v``.
     eos_fn
         Optional EOS ``fn(T, S, p) -> rho`` (e.g. the recipe's
         ``veros_nonlin2``). When None, the schemes' density (and the TKE
@@ -165,6 +179,15 @@ def compute_vertical_K_profiles(
         _S_f = extrapolate_below_seafloor(state.S.data, z_coord)
         state = state._replace(T=state.T.replace(data=_T_f),
                                S=state.S.replace(data=_S_f))
+        # The before-advection N² tracers (TKEConfig.n2_before_advection)
+        # get the SAME sub-seafloor extrapolation so the deep interface sees
+        # a neutral fill, not the T=S=0 rock IC (partial cells). Python-static
+        # (n2_tracers is None ⇒ untouched ⇒ BIT-IDENTICAL flat-bottom no-op).
+        if n2_tracers is not None:
+            n2_tracers = (
+                extrapolate_below_seafloor(n2_tracers[0], z_coord),
+                extrapolate_below_seafloor(n2_tracers[1], z_coord),
+            )
         # u/v only when already cell-centred (the lat-lon model passes the
         # centred cc_state; staggered shapes have no cell is_active match).
         if state.u.data.shape[:-1] == state.T.data.shape[:-1]:
@@ -179,17 +202,34 @@ def compute_vertical_K_profiles(
 
     # Start with the configured background floors.  These are scalar
     # floats; broadcast to interface shape.
+    #
+    # EXCEPTION (MED-2, codex batch2): when the ``constant`` scheme runs with
+    # ``lat_dependent=True`` the Gregg (2003) latitude background REPLACES the
+    # constant background ENTIRELY — the scheme branch already substitutes
+    # ``cfg.K_v``/``cfg.A_v``, and the model-level caller floors
+    # (``LatLonCGridOceanConfig.K_v``/``A_v``) must be suppressed here too.
+    # Adding them on top would (a) shift the documented final range
+    # ``[K_bg_eq, K_bg_pole]`` to ``[K_bg_eq + K_v_background, K_bg_pole +
+    # K_v_background]`` (defaults: [1.1e-4, 2e-4] instead of [1e-5, 1e-4])
+    # and (b) break the configured Prandtl ratio ``A_v/K_v`` whenever the
+    # caller's fallback ratio differs.  Static config bool -> Python gate
+    # (feature-gating doctrine, not jnp.where); every other scheme and
+    # ``lat_dependent=False`` keep the additive floors BIT-IDENTICALLY.
+    vmix = physics_config.vertical_mixing
+    if (vmix.scheme == "constant"
+            and getattr(vmix.constant, "lat_dependent", False)):
+        K_v_background = 0.0
+        A_v_background = 0.0
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
     tke_new = None
-    vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
         K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
             tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
-            lat_deg=lat_deg)
+            lat_deg=lat_deg, n2_tracers=n2_tracers)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -211,7 +251,8 @@ def compute_vertical_K_profiles(
                 "vertical_mixing scheme."
             )
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
-                                               eos_fn=eos_fn)
+                                               eos_fn=eos_fn,
+                                               before_tracers=n2_tracers)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -252,7 +293,7 @@ def compute_vertical_K_profiles(
                 "IWMConfig.tsdiff=True (differential T/S wave-driven "
                 "mixing) is not supported on the shared-K implicit tracer "
                 "solve; set tsdiff=False (the ORCA1 oracle value).")
-        K_iwm = _iwm_K_profile(
+        K_iwm = iwm_K_profile(
             state, z_coord, physics_config, iwm_cfg,
             eos_fn=eos_fn, iwm_fields=iwm_fields)
         K_v_total = K_v_total + K_iwm
@@ -321,7 +362,7 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
-                     lat_deg=None):
+                     lat_deg=None, n2_tracers=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -347,6 +388,30 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         nlev = state.T.data.shape[-1]
         shape = state.T.data.shape[:-1] + (nlev - 1,)
         dtype = state.T.data.dtype
+        if getattr(cfg, "lat_dependent", False):
+            # Latitude-dependent internal-wave background (Gregg 2003 / CVMix
+            # bkgnd): REPLACE the spatially-constant K_v/A_v floor with the
+            # latitude/stratification-scaled field.  Needs the column latitude
+            # and N^2, so compute rho + N^2 here (the constant branch otherwise
+            # skips the EOS).  K_v, A_v >= 0; z positive up.
+            if lat_deg is None:
+                raise ValueError(
+                    "ConstantVerticalMixingConfig.lat_dependent=True requires "
+                    "lat_deg (column latitudes in degrees) to be threaded to "
+                    "compute_vertical_K_profiles; got None.")
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            dz_half = z_coord.dz_half_ref * J[..., jnp.newaxis]
+            N2 = compute_N2(
+                rho, dz_half, constants_config.rho_0,
+                g=constants_config.g, n2_mode="insitu")
+            K_v = latitude_background_diffusivity(lat_deg, N2, cfg)
+            # Momentum viscosity carries the SAME latitude scaling, preserving
+            # the configured background Prandtl ratio A_v/K_v (trace-safe floor
+            # on K_v so the ratio is finite even if K_v -> 0).
+            prandtl = cfg.A_v / jnp.maximum(
+                jnp.asarray(cfg.K_v, dtype), _KV_PRANDTL_FLOOR)
+            A_v = K_v * prandtl
+            return K_v, A_v, None
         K_v = jnp.full(shape, cfg.K_v, dtype=dtype)
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
@@ -357,10 +422,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         from legoesm.ocean.physics.vertical_mixing.richardson import (
             richardson_vertical_mixing,
         )
+        # Adiabatic PP81 N² (Veros parcel displacement) needs the cell-centre
+        # hydrostatic pressure + the same EOS as the dynamical core. Only
+        # computed when the config opts in (n2_mode="adiabatic") so the default
+        # in-situ path is unchanged (mirrors the tke branch below).
+        rich_p_cell = None
+        if getattr(vmix_cfg.richardson, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            rich_h_actual = maybe_partial_h_actual(state, z_coord)
+            rich_p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, h_actual=rich_h_actual,
+            )
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, vmix_cfg.richardson,
             apply_diffusion=False,
+            p_cell=rich_p_cell, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 
@@ -377,6 +457,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         if u_data.shape[1] != T_data.shape[1]:
             u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
             v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        # Before-advection (Nnow) T/S for the diffusivity-stage N²
+        # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
+        # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
+        T_n2, S_n2 = (n2_tracers if n2_tracers is not None else (None, None))
         dz_half = jnp.broadcast_to(
             z_coord.dz_half_ref * J[..., jnp.newaxis],
             T_data.shape[:-1] + (z_coord.n_levels - 1,),
@@ -402,6 +486,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 rho, state.eta.data, z_coord.dz_ref, J,
                 constants_config.rho_0, h_actual=h_actual,
             )
+        # NEMO bn2 trigger (n2_mode="nemo_bn2"): the geometric depth ladders
+        # (gdept / interior gdepw); ignored by every other n2_mode.
+        _bn2_t_depth = _bn2_w_depth = None
+        if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "nemo_bn2":
+            from legoesm.ocean.eos import nemo_bn2_depth_ladders
+            _bn2_t_depth, _bn2_w_depth = nemo_bn2_depth_ladders(z_coord)
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
         # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
@@ -432,6 +522,26 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 z_coord.z_half_ref[1:-1], z_coord.dz_half_ref,
                 state.H_bathy.data,
             )
+        # Under-ice attenuation of the wave-driven TKE sources (NEMO nn_eice;
+        # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
+        # internally, so the mode maps onto an EFFECTIVE ice fraction:
+        #   0 (default, bit-identical): no attenuation — ice_frac stays None;
+        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
+        #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
+        # Unknown values raise (dispatch hardening; static config value).
+        _eice = int(getattr(tke_cfg, "eice", 0))
+        if _eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
+                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "on the lc/etau TKE sources.")
+        _tke_ice_fr = None
+        if _eice != 0 and surface_forcing is not None:
+            _fi = getattr(surface_forcing, "ice_concentration", None)
+            if _fi is not None:
+                _tke_ice_fr = (_fi if _eice == 1
+                               else jnp.minimum(4.0 * _fi, 1.0))
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -479,6 +589,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+                    T_n2=T_n2, S_n2=S_n2,
+                    ice_frac=_tke_ice_fr,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -494,6 +606,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 external_source=tke_source,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
+                T_n2=T_n2, S_n2=S_n2,
+                t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+                ice_frac=_tke_ice_fr,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -516,6 +631,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             z_interface=z_coord.z_half_ref[1:-1],
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
+            T_n2=T_n2, S_n2=S_n2,
+            t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+            ice_frac=_tke_ice_fr,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -590,13 +708,24 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # Surface buoyancy flux + kinematic T/S fluxes (shared with CATKE).
         B_f, Q_sfc_T, Q_sfc_S = _surface_buoyancy_flux(
             surface_forcing, state, constants_config, eos_fn=eos_fn)
+        # Under-ice attenuation of the KPP velocity scales (KPPConfig.eice;
+        # NEMO nn_eice) — reads the coupler's ice concentration, gated on the
+        # STATIC config value so eice=0 stays bit-identical (ice_frac=None).
+        # Unknown eice raises inside kpp (dispatch hardening on the static val).
+        _kpp_eice = int(getattr(vmix_cfg.kpp, "eice", 0))
+        if _kpp_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+        _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
+                       if (_kpp_eice != 0 and surface_forcing is not None)
+                       else None)
 
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False, eos_fn=eos_fn,
+            apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
         )
         return out.K_v, out.A_v, None
 
@@ -612,14 +741,17 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
     # masking the error).  ``scheme`` is the static config value, so raising at
     # function entry is jit-safe (this is the same defense used by the sibling
     # factories — see CLAUDE.md "Dispatch").
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VALID_VERTICAL_MIXING_SCHEMES,
+    )
     raise ValueError(
         f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
-        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+        f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
     )
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
-                          eos_fn=None):
+                          eos_fn=None, before_tracers=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -639,16 +771,67 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
     rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    # Adiabatic N² trigger (cfg.n2_mode == "adiabatic") needs the cell-centre
+    # hydrostatic pressure + the model EOS; computed only when opted in so the
+    # default in-situ path is bit-identical (mirrors the richardson/tke branches
+    # in _vmix_K_profiles).
+    ed_p_cell = None
+    if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.eos import (
+            compute_hydrostatic_pressure, maybe_partial_h_actual,
+        )
+        ed_h_actual = maybe_partial_h_actual(state, z_coord)
+        ed_p_cell = compute_hydrostatic_pressure(
+            rho, state.eta.data, z_coord.dz_ref, J,
+            ConstantsConfig().rho_0, h_actual=ed_h_actual,
+        )
+    # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
+    # (gdept / interior gdepw); ignored by every other n2_mode.
+    ed_t_depth = ed_w_depth = None
+    if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        ed_t_depth, ed_w_depth = nemo_bn2_depth_ladders(z_coord)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);
     # summing across schemes here is the *same* operation as the explicit
     # path: ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
-    K, A, _ = convective_K_A_flag(rho, z_coord.dz_ref, J, cfg)
+    K, A, _ = convective_K_A_flag(
+        rho, z_coord.dz_ref, J, cfg,
+        T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
+        t_depth=ed_t_depth, w_depth=ed_w_depth,
+    )
+    if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
+        # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
+        # tracers too and take the elementwise max of the coefficients —
+        # equivalent to the min-N² trigger for the hard-threshold path.
+        # Prevents per-step ON/OFF flicker of the convective coefficient in
+        # marginal columns (a grid-scale noise source; plan §G).
+        T_b, S_b = before_tracers
+        state_b = state._replace(T=state.T.replace(data=T_b),
+                                 S=state.S.replace(data=S_b))
+        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn)
+        ed_p_cell_b = None
+        if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            ed_h_b = maybe_partial_h_actual(state_b, z_coord)
+            ed_p_cell_b = compute_hydrostatic_pressure(
+                rho_b, state_b.eta.data, z_coord.dz_ref, J,
+                ConstantsConfig().rho_0, h_actual=ed_h_b,
+            )
+        K_b, A_b, _ = convective_K_A_flag(
+            rho_b, z_coord.dz_ref, J, cfg,
+            T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+            t_depth=ed_t_depth, w_depth=ed_w_depth,
+        )
+        K = jnp.maximum(K, K_b)
+        A = jnp.maximum(A, A_b)
     return K, A
 
 
-def _iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
+def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
                    eos_fn=None, iwm_fields=None):
     """Internal wave-driven diffusivity at interior interfaces (zdfiwm).
 
@@ -712,3 +895,86 @@ def _iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     # and dry COLUMNS (H = 0) already produce the k_min floor which the
     # land mask removes in the tracer/momentum solves.
     return K_iwm.astype(dtype)
+
+
+def ddm_K_profile(state, z_coord, physics_config, ddm_cfg, *, eos_fn):
+    """Double-diffusive ``(avt_ddm, avs_ddm)`` at interior interfaces (zdfddm).
+
+    Mirrors :func:`iwm_K_profile` geometry, forms the density ratio
+    ``R_rho = (alpha dT/dz)/(beta dS/dz)`` from the SELECTED EOS's locally-
+    referenced derivatives (``eos_density_derivatives`` — alpha=-drho_dT/rho,
+    beta=drho_dS/rho, single-owner α/β; never a re-derived linear pair) and the
+    interface T/S gradients, and delegates the regime physics to
+    :func:`..double_diffusion.compute_ddm_diffusivity` (single-owner numerics).
+    ``N^2`` uses the shared insitu :func:`compute_N2` (clipped >= 0), so
+    statically unstable interfaces return zero (the convection scheme owns
+    them).  Returns the RAW interior-interface contribution; the caller applies
+    the same wet-interface mask it applies to ``K_v``.  ``eos_fn`` is REQUIRED
+    (the model threads its own EOS, same as iwm).
+    """
+    from legoesm.ocean.eos import eos_density_derivatives
+    from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        compute_ddm_diffusivity,
+    )
+    from legoesm.ocean.vertical import (
+        OceanPartialCellCoordinate, extrapolate_below_seafloor,
+    )
+
+    cc = physics_config.constants
+    # Extrapolate T/S into the below-seafloor cells BEFORE any EOS / gradient
+    # math (same guard as compute_vertical_K_profiles): partial-cell dry cells
+    # carry T=S=0, which would give spurious R_rho / poison reverse-mode grads
+    # (0*NaN) even though the caller's wet-interface mask zeroes the RESULT
+    # later — too late for the nonlinear EOS/gradient ops here (codex r2).
+    # No-op (bit-identical) for pure z-star coords (no ``is_active``).
+    if getattr(z_coord, "is_active", None) is not None:
+        state = state._replace(
+            T=state.T.replace(data=extrapolate_below_seafloor(
+                state.T.data, z_coord)),
+            S=state.S.replace(data=extrapolate_below_seafloor(
+                state.S.data, z_coord)),
+        )
+    T = state.T.data
+    S = state.S.data
+    dtype = T.dtype
+    _eps = jnp.asarray(jnp.finfo(jnp.float32).eps, dtype)
+    J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+
+    # Interface spacing dz_w + interface depth (for the local reference
+    # pressure), identical construction to iwm_K_profile.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_act = z_coord.h_partial * J[..., jnp.newaxis]
+        dz_w = 0.5 * (h_act[..., :-1] + h_act[..., 1:])
+        depth_if = jnp.cumsum(h_act, axis=-1)[..., :-1]
+    else:
+        dz_w = z_coord.dz_half_ref * J[..., jnp.newaxis]
+        # Interior interface depths from the REFERENCE half-levels (z up:
+        # z_half_ref[1:-1] are the nlev-1 interior interfaces), stretched by J
+        # — NOT cumsum(dz_half), which drifts from the true depth on a
+        # non-uniform grid (codex r2).  Matches iwm_K_profile's use of the
+        # reference levels rather than a running sum.
+        depth_if = -z_coord.z_half_ref[1:-1] * J[..., jnp.newaxis]
+    dz_w = jnp.maximum(dz_w.astype(dtype), _eps)
+
+    # Local reference pressure at the interface [Pa] (hydrostatic proxy, same
+    # as the EOS pressure path); alpha/beta from the interface-averaged T,S.
+    p_if = (cc.rho_0 * cc.g * depth_if).astype(dtype)
+    T_if = 0.5 * (T[..., :-1] + T[..., 1:])
+    S_if = 0.5 * (S[..., :-1] + S[..., 1:])
+    rho_if = jnp.maximum(0.5 * (rho[..., :-1] + rho[..., 1:]), _eps)
+    drho_dT, drho_dS = eos_density_derivatives(eos_fn, T_if, S_if, p_if)
+    alpha_if = -drho_dT / rho_if       # thermal expansion (>0 typical)
+    beta_if = drho_dS / rho_if         # haline contraction (>0 typical)
+
+    # Interface gradients (z up: upper cell minus lower cell over dz_w).
+    dT_dz = (T[..., :-1] - T[..., 1:]) / dz_w
+    dS_dz = (S[..., :-1] - S[..., 1:]) / dz_w
+    alpha_dTdz = alpha_if * dT_dz
+    beta_dSdz = beta_if * dS_dz
+
+    N2 = compute_N2(rho, dz_w, cc.rho_0, g=cc.g, n2_mode="insitu")
+
+    avt_ddm, avs_ddm = compute_ddm_diffusivity(N2, alpha_dTdz, beta_dSdz, ddm_cfg)
+    return avt_ddm.astype(dtype), avs_ddm.astype(dtype)

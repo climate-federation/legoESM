@@ -1,0 +1,84 @@
+&SGS_TKE
+dosmagor = .true.
+/
+
+&PARAMETERS
+
+ nrestart = 0
+
+ caseid ='144x144x64_2km_10s',
+
+ LAND = .true.,
+ LES_S = .false.
+
+ dosgs		= .true.,
+ dodamping 	= .true.,
+ doupperbound  	= .true.,
+ docloud 	= .true.,
+ doprecip 	= .true., 
+ dolongwave	= .false.,
+ doshortwave	= .false.,
+ dosurface 	= .true.,
+ dolargescale 	= .true.,
+ doradforcing   = .true.,
+ dosfcforcing   = .true.,
+ docoriolis 	= .false.,
+ donudging_uv   = .true.,
+ donudging_tq   = .false.,
+
+ SFC_FLX_FXD    = .true.,
+ SFC_TAU_FXD    = .false.,
+
+ tauls = 7200.,
+
+ dx = 	2000.,
+ dy = 	2000.,
+ dt = 	10.,
+
+ latitude0= 36.5,
+ longitude0=-97.5,
+ nrad = 20,
+
+ day0=170.00,
+
+ nstop 		= 233280,
+! nelapse        = 1000,
+ nprint 	= 180,
+ nstat 		= 1080,
+ nstatfrq 	= 180,
+
+ doSAMconditionals = .false.
+ dosatupdnconditionals = .false.
+
+
+ nsave2D	= 360,
+ nsave2Dstart	= 216099999,
+ nsave2Dend	= 999164000,
+ save2Dsep = .true.
+
+ nsave3D	= 360,
+ nsave3Dstart	= 216009999,
+ nsave3Dend	= 999164000,
+
+
+/ 
+
+
+day0=180.5,
+
+
+case A:
+ day0=177.98,
+ nstop 		= 34188,
+case B:
+ day0=188.98,
+ nstop 		= 42800,
+case C:
+ day0=193.98,
+ nstop 		= 42000,
+case X:
+ day0=169.98,
+ nstop          = 250200,
+
+
+

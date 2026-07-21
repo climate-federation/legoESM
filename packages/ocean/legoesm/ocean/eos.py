@@ -7,10 +7,26 @@ Provides:
 
 Pure JAX functions, compatible with jit/grad/vmap.
 
+Faithfulness
+------------
+``tests/ocean/unit/test_eos_wright_faithful.py`` pins the DEFAULT ``wright_eos``
+(previously only qualitatively checked, while every alternate EOS was value-pinned):
+(1) the density rational polynomial to round-off (rel 1e-12) across a T×S×p grid
+vs an independent scalar reimplementation; (2) an INDEPENDENT physical cross-check
+that ρ_Wright agrees with the separately-pinned UNESCO-80 EOS to < 0.01 kg/m^3 at
+the surface (catches any material coefficient error affecting these points — four
+surface values cannot pin down all 15 coefficients, but a gross error diverges);
+(3) ``thermal_expansion_coeff`` α and ``haline_contraction_coeff`` β (which use
+``jax.grad``) against independent ANALYTIC derivatives of the closed form (rel
+1e-9); (4) the MOM6/Wright coefficients as a canary; (5) physical monotonicity and
+x64/float32 AD-finiteness.  The EOS polynomial runs in the precision policy's
+compute dtype (float32 by default), so the round-off pins set the fp64 policy.
+
 Reference
 ---------
 Wright, D. G. (1997): An Equation of State for Use in Ocean Models:
 Ockham's Razor Revisited. J. Atmos. Oceanic Tech., 14(3), 735-740.
+Coefficients from MOM6 ``MOM_EOS_Wright.F90`` (reduced-range fit).
 """
 
 from __future__ import annotations
@@ -481,6 +497,264 @@ def nemo_seos_eos(
         - cfg.nu * zt * zs
     )
     return cfg.rho0 + zn
+
+
+def nemo_seos_alpha_beta(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    gdept: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""Thermal/haline expansion coefficients ``(alpha, beta)`` — NEMO ``rab``.
+
+    Transcribes NEMO ``eosbn2.F90`` ``rab_3d_t`` (``np_seos`` branch,
+    lines 1161-1173): the analytic ``(T, S)`` derivatives of the S-EOS
+    density anomaly :func:`nemo_seos_eos`, normalised by the constant
+    reference density ``rn_rho0`` (NEMO's ``r1_rho0``, NOT ``1/rho``)::
+
+        alpha = [ a0 (1 + lambda1 zt + mu1 zh) + nu zs ] / rho0     (jp_tem)
+        beta  = [ b0 (1 - lambda2 zs - mu2 zh) - nu zt ] / rho0     (jp_sal)
+
+    with ``zt = T - T0``, ``zs = S - S0`` and ``zh = gdept`` the geometric
+    T-point depth [m, positive down] — each cell's OWN depth (the thermobaric
+    ``mu`` term). Note the ``½ lambda1`` prefactor in the DENSITY polynomial
+    (:func:`nemo_seos_eos`) becomes the FULL ``lambda1`` here because
+    ``d(½ lambda1 zt²)/dzt = lambda1 zt`` — the sign of ``alpha`` follows
+    ``alpha = -(1/rho0) dρ/dT`` so denser-when-warmer never occurs for the
+    DINO set.
+
+    Fully differentiable (arithmetic + the passed ``gdept``); shares the
+    canonical :class:`NemoSEOSConfig` with the density EOS — no re-derivation.
+
+    Parameters
+    ----------
+    T, S : array — Potential temperature [°C] / salinity [PSU] at T-points.
+    gdept : array — Geometric T-point depth [m, positive down], broadcastable
+        against ``T`` on the last (vertical) axis.
+    cfg : NemoSEOSConfig — Coefficients (defaults = the DINO/Kamm set).
+
+    Returns
+    -------
+    (alpha, beta) : arrays [1/°C], [1/PSU], same shape as ``T``.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = T - cfg.T0
+    zs = S - cfg.S0
+    inv_rho0 = 1.0 / cfg.rho0
+    alpha = (cfg.a0 * (1.0 + cfg.lambda1 * zt + cfg.mu1 * gdept)
+             + cfg.nu * zs) * inv_rho0
+    beta = (cfg.b0 * (1.0 - cfg.lambda2 * zs - cfg.mu2 * gdept)
+            - cfg.nu * zt) * inv_rho0
+    return alpha, beta
+
+
+def compute_buoyancy_frequency_nemo_bn2(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    gdept: jnp.ndarray,
+    gdepw_int: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2`` (S-EOS).
+
+    Transcribes NEMO ``eosbn2.F90`` ``bn2_t`` (lines 1453-1462)::
+
+        zrw = (gdepw_k − gdept_k) / (gdept_{k-1} − gdept_k)
+        alpha_w = alpha_k (1 − zrw) + alpha_{k-1} zrw
+        beta_w  = beta_k  (1 − zrw) + beta_{k-1}  zrw
+        N²_k = g ( alpha_w ΔT − beta_w ΔS ) / e3w_k
+
+    where ``alpha``, ``beta`` (:func:`nemo_seos_alpha_beta`) are evaluated at
+    EACH T-cell's OWN geometric depth ``gdept`` and interpolated to the
+    w-interface by the geometric weight ``zrw``; ``ΔT = T_upper − T_lower``.
+    This differs from :func:`compute_buoyancy_frequency_adiabatic`, which
+    displaces both parcels to a single reference pressure and differences the
+    full nonlinear density — near-neutral marginal cells flip between the two.
+
+    Index convention: legoESM interior interface ``i`` sits between the UPPER
+    cell ``i`` (shallower, NEMO ``jk-1``) and the LOWER cell ``i+1`` (NEMO
+    ``jk``); the w-point is NEMO ``jk``. So ``e3w = gdept[i+1] − gdept[i]`` is
+    the (positive) centre-to-centre spacing and ``gdepw_int[i]`` is the
+    interface depth. **Signed** — ``N² < 0`` marks a statically unstable
+    interface (the convection / TKE trigger); NOT clipped.
+
+    Fully ``jax.grad``-safe (arithmetic through the EOS coefficients + T/S).
+
+    Parameters
+    ----------
+    T, S : array — T-point potential temperature [°C] / salinity [PSU],
+        shape ``(..., nlev)``.
+    gdept : array — Geometric T-point depths [m, positive down], shape
+        ``(nlev,)`` or ``(..., nlev)``.
+    gdepw_int : array — Interior w-interface depths [m, positive down], shape
+        ``(nlev-1,)`` or ``(..., nlev-1)`` (== ``|z_half_ref[1:-1]|``).
+    cfg : NemoSEOSConfig — S-EOS coefficients (defaults = the DINO/Kamm set).
+    g : float — Gravitational acceleration [m/s²].
+
+    Returns
+    -------
+    array : signed ``N²`` at interior interfaces [1/s²], shape ``(..., nlev-1)``.
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    alpha, beta = nemo_seos_alpha_beta(T, S, gdept, cfg)      # (..., nlev)
+    gd = jnp.asarray(gdept)
+    gd_up = gd[..., :-1]                                       # cell i  (upper)
+    gd_lo = gd[..., 1:]                                        # cell i+1 (lower)
+    # Geometric w-point weight (NEMO zrw); denominator < 0, numerator < 0 -> (0,1).
+    zrw = (gdepw_int - gd_lo) / (gd_up - gd_lo)               # (..., nlev-1)
+    a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
+    b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
+    e3w = gd_lo - gd_up                                        # centre spacing (>0)
+    dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
+    dS = S[..., :-1] - S[..., 1:]
+    return g * (a_w * dT - b_w * dS) / jnp.maximum(e3w, 1.0e-12)
+
+
+def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``(gdept, gdepw_int)`` geometric depth ladders for the NEMO ``bn2`` N².
+
+    ``gdept`` = ``z_coord.t_depth_ref`` (the exact NEMO ``gdept_1d``) when a
+    fidelity coordinate supplies it, else the interface-midpoint
+    ``|z_full_ref|``; ``gdepw_int`` = ``|z_half_ref[1:-1]|`` (interior
+    w-interface depths). Both positive-down [m], static ``(nlev,)`` /
+    ``(nlev-1,)`` grid quantities.
+
+    Residual (documented): these are the REFERENCE ladders. NEMO's ``bn2``
+    uses the time-level ``gdept(Kmm)``; for the DINO linear-free-surface
+    (``key_linssh``) case that equals ``gdept_1d`` exactly, and for full z*
+    the ``eta``-perturbation on the thermobaric ``mu1·gdept`` term is
+    ``O(eta/H) ≈ 1e-3`` — negligible vs the dominant ``lambda1·zt`` and
+    ``ΔT`` signal (``mu1 = 1.5e-4`` /m). The zrw weight and e3w are grid-fixed.
+    """
+    z_full = jnp.abs(z_coord.z_full_ref)
+    t_depth = getattr(z_coord, "t_depth_ref", None)
+    gdept = z_full if t_depth is None else jnp.asarray(t_depth)
+    gdepw_int = jnp.abs(z_coord.z_half_ref[1:-1])
+    return gdept, gdepw_int
+
+
+# ==============================================================================
+# NEMO polynomial EOS — Roquet et al. (2015, Ocean Modelling 90:29-43) 55-term
+# seawater polynomial, EOS-80 coefficient set.  This is the FULL polynomial NEMO
+# runs under ``ln_eos80`` (potential temperature + practical salinity,
+# ``l_useCT=.FALSE.``) — distinct from the 3-term ``nemo_seos`` simplified EOS
+# above, and from ``veros_gsw`` (a DIFFERENT TEOS-10 fit, the GSW 48-term
+# rational polynomial).  Transcribed verbatim from NEMO 5.0.2
+# ``src/OCE/TRA/eosbn2.F90``: normalization :2117-2120, coefficients :2122-2173,
+# Horner evaluation :260-288.  The TEOS-10 coefficient set (eosbn2.F90:1926-...,
+# Conservative Temperature + Absolute Salinity) is a separate follow-up.
+# ==============================================================================
+_ROQUET_EOS80 = {
+    # normalization
+    "r1_S0": 1.0 / 40.0, "r1_T0": 1.0 / 40.0, "r1_Z0": 1.0e-4, "rdeltaS": 20.0,
+    # zn0 (depth^0)
+    "EOS000": 9.5356891948e+02, "EOS100": 1.7136499189e+02, "EOS200": -3.7501039454e+02,
+    "EOS300": 5.1856810420e+02, "EOS400": -3.7264470465e+02, "EOS500": 1.4302533998e+02,
+    "EOS600": -2.2856621162e+01,
+    "EOS010": 1.0087518651e+01, "EOS110": -1.3647741861e+01, "EOS210": 8.8478359933,
+    "EOS310": -7.2329388377, "EOS410": 1.4774410611, "EOS510": 2.0036720553e-01,
+    "EOS020": -2.5579830599e+01, "EOS120": 2.4043512327e+01, "EOS220": -1.6807503990e+01,
+    "EOS320": 8.3811577084, "EOS420": -1.9771060192,
+    "EOS030": 1.6846451198e+01, "EOS130": -2.1482926901e+01, "EOS230": 1.0108954054e+01,
+    "EOS330": -6.2675951440e-01,
+    "EOS040": -8.0812310102, "EOS140": 1.0102374985e+01, "EOS240": -4.8340368631,
+    "EOS050": 1.2079167803, "EOS150": 1.1515380987e-01, "EOS060": -2.4520288837e-01,
+    # zn1 (depth^1)
+    "EOS001": 1.0748601068e+01, "EOS101": -1.7817043500e+01, "EOS201": 2.2181366768e+01,
+    "EOS301": -1.6750916338e+01, "EOS401": 4.1202230403,
+    "EOS011": -1.5852644587e+01, "EOS111": -7.6639383522e-01, "EOS211": 4.1144627302,
+    "EOS311": -6.6955877448e-01,
+    "EOS021": 9.9994861860, "EOS121": -1.9467067787e-01, "EOS221": -1.2177554330,
+    "EOS031": -3.4866102017, "EOS131": 2.2229155620e-01, "EOS041": 5.9503008642e-01,
+    # zn2 (depth^2)
+    "EOS002": 1.0375676547, "EOS102": -3.4249470629, "EOS202": 2.0542026429,
+    "EOS012": 2.1836324814, "EOS112": -3.4453674320e-01, "EOS022": -1.2548163097,
+    # zn3 (depth^3)
+    "EOS003": 1.8729078427e-02, "EOS103": -5.7238495240e-02, "EOS013": 3.8306136687e-01,
+}
+
+
+def nemo_roquet_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+) -> jnp.ndarray:
+    """In-situ density [kg/m³] from the NEMO Roquet-55 polynomial EOS (EOS-80).
+
+    Reproduces NEMO ``eos_insitu`` (``eosbn2.F90``): the Horner sum ``zn`` in
+    ``(zt, zs, zh)`` IS the in-situ density in kg/m³ (NEMO stores the anomaly
+    ``prd = zn/ρ0 - 1``; we return the density itself).  Inputs are potential
+    temperature and practical salinity, matching the EOS-80 set
+    (``l_useCT=.FALSE.``) — no CT/SA conversion.
+
+    Depth enters as ``zh = (p/(ρ0·g))·r1_Z0`` — the same Boussinesq depth
+    reconstruction ``nemo_seos_eos`` uses (NEMO uses geometric ``gdept``; the two
+    differ by ``O(ρ'/ρ0) ≈ 0.3 %``).  For a tendency certificate that needs
+    NEMO's exact ``gdept``, pass ``p = ρ0·g·gdept`` so ``zh`` recovers ``gdept``
+    to round-off.
+
+    Parameters
+    ----------
+    T : array — Potential temperature [°C].
+    S : array — Practical salinity [PSU].
+    p : array — Pressure [Pa]; depth recovered as ``p/(ρ0·g)``.
+    coeffs : dict — Roquet coefficient set; defaults to :data:`_ROQUET_EOS80`.
+    rho0 : float — Boussinesq reference density [kg/m³] for the depth
+        reconstruction.  Defaults to legoESM ``rho_0`` (1025); NEMO's
+        ``rn_rho0`` default is 1026 — pass ``rho0=1026.0`` for exact NEMO/DINO
+        parity.  Enters ONLY the ``zh`` depth term (a ~0.1 % effect on the
+        thermobaric correction), never the polynomial coefficients.
+
+    Notes
+    -----
+    Like NEMO's ``SQRT(ABS(S+rdeltaS))``, the salinity term is not clipped: for
+    all physical salinity ``S + 20 > 0`` so the gradient is finite, but at the
+    unphysical ``S = -20`` the ``abs`` kink meets the ``sqrt`` singularity and
+    ``drho/dS`` diverges.  Kept unclipped for bit-faithfulness to NEMO.
+
+    Returns
+    -------
+    array : In-situ density [kg/m³].
+    """
+    c = _ROQUET_EOS80 if coeffs is None else coeffs
+    zh = (p / (rho0 * constants.g)) * c["r1_Z0"]
+    zt = T * c["r1_T0"]
+    # S + rdeltaS > 0 for all physical S (rdeltaS = 20), so abs() never kinks
+    # and sqrt of a strictly-positive argument keeps the gradient finite.
+    zs = jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"])
+    # Horner form (NEMO eosbn2.F90:265-286): each zn_k is the coefficient of
+    # zh^k, itself a Horner-in-zt whose zt-coefficients are Horner-in-zs.
+    # Explicit intermediates (a_i = zt^i coeff of zn0; b_i = zt^i coeff of zn1)
+    # keep the nesting balanced and reviewable.
+    zn3 = c["EOS013"] * zt + c["EOS103"] * zs + c["EOS003"]
+    zn2 = ((c["EOS022"] * zt + c["EOS112"] * zs + c["EOS012"]) * zt
+           + (c["EOS202"] * zs + c["EOS102"]) * zs + c["EOS002"])
+    b4 = c["EOS041"]
+    b3 = c["EOS131"] * zs + c["EOS031"]
+    b2 = (c["EOS221"] * zs + c["EOS121"]) * zs + c["EOS021"]
+    b1 = ((c["EOS311"] * zs + c["EOS211"]) * zs + c["EOS111"]) * zs + c["EOS011"]
+    b0 = ((((c["EOS401"] * zs + c["EOS301"]) * zs + c["EOS201"]) * zs
+           + c["EOS101"]) * zs + c["EOS001"])
+    zn1 = (((b4 * zt + b3) * zt + b2) * zt + b1) * zt + b0
+    a6 = c["EOS060"]
+    a5 = c["EOS150"] * zs + c["EOS050"]
+    a4 = (c["EOS240"] * zs + c["EOS140"]) * zs + c["EOS040"]
+    a3 = ((c["EOS330"] * zs + c["EOS230"]) * zs + c["EOS130"]) * zs + c["EOS030"]
+    a2 = ((((c["EOS420"] * zs + c["EOS320"]) * zs + c["EOS220"]) * zs
+           + c["EOS120"]) * zs + c["EOS020"])
+    a1 = (((((c["EOS510"] * zs + c["EOS410"]) * zs + c["EOS310"]) * zs
+            + c["EOS210"]) * zs + c["EOS110"]) * zs + c["EOS010"])
+    a0 = ((((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
+             + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs + c["EOS000"])
+    zn0 = ((((((a6 * zt + a5) * zt + a4) * zt + a3) * zt + a2) * zt + a1) * zt + a0)
+    zn = ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+    return zn   # in-situ density [kg/m³]
 
 
 # ==============================================================================
@@ -1562,8 +1836,8 @@ def veros_gsw_int_drhodTS_dynamic_enthalpy(
 # by both make_eos_fn (unknown-scheme ValueError) and config validators
 # (fail-fast at construction) so the valid set is never duplicated.
 VALID_EOS_SCHEMES = frozenset(
-    {"wright", "linear", "nemo_seos", "unesco80", "veros_nonlin2",
-     "veros_nonlin3", "veros_gsw"}
+    {"wright", "linear", "nemo_seos", "nemo_eos80", "unesco80",
+     "veros_nonlin2", "veros_nonlin3", "veros_gsw"}
 )
 
 
@@ -1589,7 +1863,8 @@ def make_eos_fn(eos="wright", eos_linear=None,
                 eos_nemo_seos: NemoSEOSConfig | None = None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None,
-                eos_veros_gsw: VerosGswConfig | None = None):
+                eos_veros_gsw: VerosGswConfig | None = None,
+                rho0: float = rho_0):
     """Return an EOS callable ``fn(T, S, p) -> rho``.
 
     Parameters
@@ -1612,6 +1887,16 @@ def make_eos_fn(eos="wright", eos_linear=None,
     eos_nemo_seos : NemoSEOSConfig or None
         Coefficients for the NEMO simplified EOS.  Ignored unless *eos*
         is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
+    rho0 : float
+        Boussinesq reference density [kg/m^3] for the depth reconstruction
+        ``zh = (p/(rho0*g))*r1_Z0`` in the ``"nemo_eos80"`` polynomial.
+        Defaults to the module ``rho_0`` (1025) so the default call is
+        BYTE-IDENTICAL; pass the config ``rho_0`` (e.g. NEMO's 1026) so it
+        stays consistent with the pressure fed to the EOS — required for the
+        geometric-depth NEMO-fidelity path where ``zh`` must recover ``gdept``
+        exactly (the value itself cancels when it matches the pressure's
+        rho0; a MISMATCH stretches the recovered depth).  Ignored by every
+        other EOS branch (their depth conversion carries its own rho0).
 
     Returns
     -------
@@ -1641,6 +1926,12 @@ def make_eos_fn(eos="wright", eos_linear=None,
         def _nemo_seos(T, S, p):
             return nemo_seos_eos(T, S, p, cfg=cfg)
         return _eos_compute_dtype_adapter(_nemo_seos)
+    elif eos == "nemo_eos80":
+        # NEMO Roquet-55 EOS-80 polynomial (the full ln_eos80 EOS, distinct from
+        # the 3-term nemo_seos). Fixed published coefficients; no config.
+        def _nemo_eos80(T, S, p):
+            return nemo_roquet_eos(T, S, p, coeffs=_ROQUET_EOS80, rho0=rho0)
+        return _eos_compute_dtype_adapter(_nemo_eos80)
     elif eos == "unesco80":
         return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
@@ -1932,7 +2223,8 @@ def maybe_partial_h_actual(state, z_coord):
     return None
 
 
-def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
+def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
+                      *, eos_depth="insitu", rho0=None):
     """Compute in-situ density from ocean state.
 
     Used by vertical mixing, lateral mixing, and convection integration
@@ -1958,6 +2250,19 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
         to use ``compute_ocean_jacobian`` which dispatches.
     eos_fn : callable or None
         EOS function ``fn(T, S, p) -> rho``.  If None, uses ``wright_eos``.
+    eos_depth : str, default ``"insitu"``
+        Depth the EOS pressure term sees.  ``"insitu"`` (default,
+        BYTE-IDENTICAL): the 2-pass in-situ hydrostatic pressure integral
+        ``p = g*Sum(rho*dz)`` — recovers depth ~(rho_bar/rho0)*gdept.
+        ``"geometric"``: feed ``p = rho0*g*gdept`` from the coordinate's
+        geometric T-depth ladder (``z_coord.t_depth_ref``, NEMO ``gdept_1d``)
+        so the EOS reconstructs geometric depth exactly — matches NEMO's
+        ``eos_insitu`` which uses ``gdept`` directly.  The *eos_fn* MUST have
+        been built with the SAME ``rho0`` (``make_eos_fn(rho0=...)``) so the
+        value cancels; otherwise the recovered depth is stretched.
+    rho0 : float or None
+        Reference density for the geometric ``p = rho0*g*gdept``.  ``None``
+        (default) uses the module ``rho_0``.  Ignored for ``"insitu"``.
 
     Returns
     -------
@@ -1965,6 +2270,18 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
     """
     if eos_fn is None:
         eos_fn = wright_eos
+    if eos_depth not in ("insitu", "geometric"):
+        raise ValueError(
+            f"Unknown eos_depth {eos_depth!r}; expected 'insitu' or 'geometric'")
+    if eos_depth == "geometric":
+        # NEMO eos_insitu: density from the GEOMETRIC gdept, not the in-situ
+        # hydrostatic integral.  p = rho0*g*gdept -> zh recovers gdept exactly.
+        depth = getattr(z_coord, "t_depth_ref", None)
+        if depth is None:
+            depth = jnp.abs(z_coord.z_full_ref)
+        r0 = rho_0 if rho0 is None else rho0
+        p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
+        return eos_fn(state.T.data, state.S.data, p_eos)
     h_actual = maybe_partial_h_actual(state, z_coord)
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
@@ -2031,3 +2348,162 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     if depth_m is not None:
         tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
     return tf
+
+
+# ==============================================================================
+# Seawater freezing point (liquidus)  T_f(S, p)  ->  KELVIN   (MED-1)
+# ==============================================================================
+# Gap this closes: the freeze checks that cap SST / trigger ice formation
+# otherwise use a single FIXED constant ``constants.T_freeze_ocean`` (271.35 K,
+# ~-1.8 C).  Real seawater freezes along a LIQUIDUS that DECREASES with salinity
+# (and, weakly, with pressure): at S = 35 PSU, p = 0 the true value is ~-1.92 C
+# (271.23 K), NOT -1.8 C.  NEMO (``eos_fzp``) and MOM6 (``TFREEZE_FORM``) both
+# carry such a liquidus; this exposes it as a selectable scheme.
+#
+# CONVENTION (stated explicitly per the sign-convention gate):
+#   * S in PSU / (g/kg); p is SEA PRESSURE in Pa (the eos.py API convention),
+#     converted to dbar via ``p_dbar = p / 1e4`` (dbar >= 0, increasing downward).
+#   * The polynomials below give the freezing-point DEPRESSION in degC (a
+#     temperature DIFFERENCE, so its numeric value is the same in K); it is ADDED
+#     to the pure-water freezing point ``T0 = constants.T_freeze`` to return an
+#     ABSOLUTE freezing temperature in KELVIN.  Pure water (S=0, p=0) -> T0 (0 C).
+#   * SIGN: the p-term is negative; the S-terms are MIXED-sign (the S^{3/2}
+#     coefficient +1.710523e-3 is POSITIVE), but the NET slope
+#         dT_f/dS = -0.0575 + 1.5*1.710523e-3*sqrt(S) - 2*2.154996e-4*S
+#     is strictly negative for ALL S >= 0: the two curvature terms together
+#     peak at +3.82e-3 degC/PSU (at S ~ 8.9 PSU), so
+#     dT_f/dS <= -0.0575 + 0.0038 = -0.0537 degC/PSU everywhere (at S=35:
+#     -0.0575 + 0.01518 - 0.01508 = -0.0574).  T_f therefore DECREASES with
+#     both salinity and depth (more saline / deeper water freezes colder).
+#     Enforced by tests/ocean/unit/test_freezing_point.py (monotone-in-S +
+#     pressure-lowers).
+#
+# Distinct from ``nemo_eos_fzp`` above: that is NEMO's TEOS-10 branch
+# (``ln_teos10=.true.``, a polynomial in sqrt(S/S0), returns degC).  The
+# ``"unesco"`` scheme here is NEMO's EOS-80 branch (``ln_teos10=.false.``), which
+# equals MOM6 ``TFREEZE_FORM="MILLERO_78"``; both branches are kept because
+# different oracle recipes select different ones.
+#
+# Provenance of the coefficients: UNESCO 1983 / Millero (1978) freezing-point-of-
+# seawater fit, as coded in NEMO ``eosbn2.F90`` (``eos_fzp``, EOS-80 branch) and
+# MOM6 ``MOM_EOS.F90`` (``calculate_TFreeze_Millero``):
+#       T_f[degC] = a*S + b*S^1.5 + c*S^2 + d*p_dbar
+# The leading slope a = -0.0575 degC/PSU is ALSO the MOM6 linear-liquidus slope
+# (``TFREEZE_FORM="LINEAR"``), so the ``"linear_S"`` scheme REUSES it rather than
+# re-declaring the literal.
+# --- Millero / UNESCO 1983 liquidus coefficients ---
+_TFRZ_S_LINEAR = -0.0575        # [degC/PSU]     linear salinity term (= MOM6 linear slope)
+_TFRZ_S_ONEHALF = 1.710523e-3   # [degC/PSU^1.5] S^{3/2} term
+_TFRZ_S_SQUARE = -2.154996e-4   # [degC/PSU^2]   S^2 term
+_TFRZ_P_DBAR = -7.53e-4         # [degC/dbar]    sea-pressure (depth) lowering
+_PA_PER_DBAR = 1.0e4            # exact unit conversion (1 dbar = 1e4 Pa)
+
+# Single source of truth for the dispatchable liquidus schemes; referenced by
+# both ``freezing_point`` (unknown-scheme ValueError) and the consumer configs.
+VALID_FREEZE_SCHEMES = frozenset({"constant", "linear_S", "unesco"})
+
+
+class FreezingPointConfig(NamedTuple):
+    """Selects the seawater freezing-point (liquidus) scheme for freeze checks.
+
+    ``scheme``
+        * ``"constant"`` (default) — fixed ``constants.T_freeze_ocean``
+          (271.35 K); byte-identical to the historical behaviour, NO S/p
+          dependence.
+        * ``"linear_S"`` — MOM6 linear liquidus ``T_f = T0 - 0.0575*S`` [K]
+          (``T0 = constants.T_freeze``); pressure-independent.
+        * ``"unesco"`` — UNESCO 1983 / Millero 1978 fit (NEMO ``eos_fzp`` EOS-80
+          branch): salinity- AND pressure-dependent.
+
+    This config carries NO float fields — ``scheme`` is a discrete selector, not
+    a tunable coefficient — so it is intentionally not a ``__param_spec__``
+    module and is not registered in ``param_collector.SPEC_MODULES``.
+    """
+    scheme: str = "constant"
+
+
+def freezing_point(S, p=0.0, *, scheme="constant"):
+    """Seawater freezing point ``T_f`` [KELVIN] vs salinity (and pressure).
+
+    Parameters
+    ----------
+    S : array or float
+        Practical salinity [PSU] / (g/kg).  Floored at 0 (a negative-salinity
+        advection overshoot would otherwise put ``sqrt(S)`` in the complex
+        plane); the floor sits at the physical wet-domain edge and leaves
+        gradients intact for the physical ``S > 0`` range.
+    p : array or float, optional
+        Sea pressure [Pa] (default ``0.0`` = surface), converted to dbar via
+        ``p / 1e4``.  Used ONLY by ``"unesco"``; ``"constant"``/``"linear_S"``
+        ignore it (the surface liquidus, matching MOM6's linear form).
+    scheme : {"constant", "linear_S", "unesco"}, keyword-only
+        Liquidus scheme (see :class:`FreezingPointConfig`).
+
+    Returns
+    -------
+    array
+        Freezing temperature [K].  Pure JAX — differentiable and jit/vmap-safe.
+
+    Raises
+    ------
+    ValueError
+        Unknown ``scheme`` (fail-fast dispatch hardening; validated at function
+        entry on the static Python selector, never inside a traced branch).
+    """
+    # Dispatch hardening: reject typos loudly on the static selector rather than
+    # silently running the wrong (or default) physics.
+    if scheme not in VALID_FREEZE_SCHEMES:
+        raise ValueError(
+            f"Unknown freezing-point scheme: {scheme!r}. "
+            f"Valid schemes: {sorted(VALID_FREEZE_SCHEMES)}."
+        )
+
+    S_arr = jnp.asarray(S)
+    if scheme == "constant":
+        # Byte-identical to the historical fixed constant; broadcast so array
+        # callers get a per-cell field and scalar callers get a scalar.
+        return jnp.broadcast_to(jnp.asarray(constants.T_freeze_ocean), S_arr.shape)
+
+    # S >= 0 guard (shared by linear_S and unesco).
+    S_safe = jnp.maximum(S_arr, 0.0)
+
+    if scheme == "linear_S":
+        # MOM6 linear liquidus: T_f[K] = T0 + a*S, a < 0 => T_f decreases with S.
+        depression_c = _TFRZ_S_LINEAR * S_safe
+        return constants.T_freeze + depression_c
+
+    # scheme == "unesco": UNESCO 1983 / Millero 1978 (NEMO eos_fzp EOS-80 branch).
+    # ``S_safe ** 1.5`` (analytic pow-JVP 1.5*S**0.5) is grad-safe at S=0, unlike
+    # ``S_safe * sqrt(S_safe)`` whose sqrt node yields a 0*inf NaN gradient there.
+    p_dbar = jnp.asarray(p) / _PA_PER_DBAR
+    depression_c = (
+        _TFRZ_S_LINEAR * S_safe
+        + _TFRZ_S_ONEHALF * (S_safe ** 1.5)     # S^{3/2}
+        + _TFRZ_S_SQUARE * (S_safe * S_safe)    # S^2
+        + _TFRZ_P_DBAR * p_dbar                 # pressure lowering (<= 0)
+    )
+    return constants.T_freeze + depression_c
+
+
+def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
+    """Effective seawater freezing point [K] for slab-ocean freeze clamps.
+
+    The slab / two-layer mixed-layer oceans (``simple_ocean.py`` on the
+    structured grid, ``simple_ocean_mpas.py`` on the Voronoi mesh) carry no
+    prognostic salinity, so a liquidus scheme is evaluated at the fixed
+    reference ocean salinity ``constants.S_ocean_ref`` (an environmental
+    reference, NOT a tunable).  ``"constant"`` (default) returns the caller's
+    ``T_freeze_const`` unchanged -- byte-identical to the historical clamp.
+    A typo'd scheme can never silently fall back to the constant: anything
+    other than ``"constant"`` is dispatched to :func:`freezing_point`, which
+    raises ``ValueError`` on an unknown scheme.
+
+    SINGLE OWNER (MED-1 follow-up): both slab modules call THIS helper for
+    both the ``jnp.maximum`` clamp and the ``Q_freeze`` diagnostic -- do not
+    re-derive the constant-vs-liquidus branch in a consumer.  ``scheme`` is a
+    static config field in every caller, so the Python ``if`` is
+    feature-gating, not a data-dependent traced select.
+    """
+    if scheme == "constant":
+        return T_freeze_const
+    return freezing_point(constants.S_ocean_ref, 0.0, scheme=scheme)

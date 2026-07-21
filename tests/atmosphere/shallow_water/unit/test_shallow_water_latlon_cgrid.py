@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,
@@ -347,6 +347,31 @@ class TestFallbackTransport:
 # Polar filter
 # ==============================================================================
 
+def _polar_perturbed_state(grid):
+    """Williamson 2 + an UNBALANCED polar perturbation.
+
+    * v: grid-scale (Nyquist zonal wavenumber) noise on the v-face rows
+      just inside each pole — exactly the modes the polar zonal CFL
+      forbids at the relaxed (equatorial-CFL) dt.
+    * u: a uniform (k=0) zonal wind on the polar u rows.  k=0 passes any
+      Fourier mask, and it strengthens the (zeta+f)*u_at_v coupling that
+      feeds the high-k v noise back into dv/dt (Williamson 2 alone has
+      u ~ u0*cos(lat) ~ 0 near the poles, which hides an unfiltered dv).
+
+    The balanced-W2 case used by the original polar-filter test has
+    dv ~ 0 everywhere, which is exactly why the missing dv filtering
+    went unnoticed.
+    """
+    state = williamson_test2_cgrid(grid)
+    n_lon = grid.n_lon
+    pert = 5.0 * jnp.where(jnp.arange(n_lon) % 2 == 0, 1.0, -1.0)
+    v = state.v.at[1, :].add(pert).at[2, :].add(pert)
+    v = v.at[-2, :].add(pert).at[-3, :].add(pert)
+    u = state.u.at[1, :].add(20.0).at[2, :].add(20.0)
+    u = u.at[-2, :].add(20.0).at[-3, :].add(20.0)
+    return state._replace(v=v, u=u)
+
+
 class TestPolarFilter:
 
     def test_polar_filter_stable_at_larger_dt(self, grid):
@@ -363,6 +388,83 @@ class TestPolarFilter:
             state = model.step(state, dt, target_mass=target_mass)
 
         assert jnp.all(jnp.isfinite(state.h))
+
+    def test_polar_filter_builds_v_face_mask(self, grid):
+        """Filter ON builds BOTH masks (cell rows for dh/du, v-face rows
+        for dv); filter OFF builds neither."""
+        dt = 300.0
+        cfg_on = CGridLatLonShallowWaterConfig(use_polar_filter=True)
+        model_on = CGridLatLonShallowWaterModel(grid, cfg_on, dt=dt)
+        n_freq = grid.n_lon // 2 + 1
+        assert model_on._polar_mask is not None
+        assert model_on._polar_mask.shape == (grid.n_lat, n_freq)
+        assert model_on._polar_mask_v is not None
+        assert model_on._polar_mask_v.shape == (grid.n_lat + 1, n_freq)
+        # The v-face mask must actually truncate at the polar rows.
+        assert float(jnp.sum(model_on._polar_mask_v[1] == 0.0)) > 0
+
+        model_off = CGridLatLonShallowWaterModel(
+            grid, CGridLatLonShallowWaterConfig(use_polar_filter=False), dt=dt)
+        assert model_off._polar_mask is None
+        assert model_off._polar_mask_v is None
+
+    def test_polar_filter_damps_v_like_u(self, grid):
+        """The per-step v increment must contain NO energy in the zonal
+        modes the v-face mask forbids at the polar rows — dv is filtered
+        exactly like du/dh.
+
+        Non-vacuous: before the dv filtering fix (dh/du filtered, dv
+        not), this same case leaves ~0.16 of spectral amplitude in the
+        forbidden band (measured by re-running with an all-pass v mask);
+        with the fix it is 0 to float noise.
+        """
+        dt = 300.0
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_polar_filter=True,
+            polar_filter_cutoff_deg=60.0, polar_filter_max_wave_speed=300.0,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = _polar_perturbed_state(grid)
+        target_mass = model.compute_mass(state)
+        new = model.step(state, dt, target_mass=target_mass)
+
+        rows = (1, 2, -3, -2)
+        # v increment: forbidden-band energy per the v-face mask.
+        spec_v = jnp.abs(jnp.fft.rfft(new.v - state.v, axis=-1))
+        mask_v = model._polar_mask_v
+        e_v = sum(
+            float(jnp.sum(spec_v[r] * (mask_v[r] == 0.0))) for r in rows
+        )
+        assert e_v < 1e-8, (
+            f"dv increment leaks {e_v:.3e} spectral amplitude into the "
+            f"polar-forbidden band — v is not being polar-filtered"
+        )
+        # u increment (periodic interior columns): same property with the
+        # cell-row mask — v is damped LIKE u, not differently.
+        spec_u = jnp.abs(jnp.fft.rfft((new.u - state.u)[:, :-1], axis=-1))
+        mask_u = model._polar_mask
+        e_u = sum(
+            float(jnp.sum(spec_u[r] * (mask_u[r] == 0.0))) for r in (1, 2)
+        )
+        assert e_u < 1e-8
+
+    def test_polar_filter_unbalanced_perturbation_stable(self, grid):
+        """6 h at dt=300 (far above the ~80 s pole CFL) from the UNBALANCED
+        polar state stays finite and bounded with the filter on."""
+        dt = 300.0
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_polar_filter=True,
+            polar_filter_cutoff_deg=60.0, polar_filter_max_wave_speed=300.0,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = _polar_perturbed_state(grid)
+        target_mass = model.compute_mass(state)
+        for _ in range(int(6 * 3600 / dt)):
+            state = model.step(state, dt, target_mass=target_mass)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+        assert float(jnp.max(jnp.abs(state.v))) < 100.0
 
 
 # ==============================================================================
@@ -402,3 +504,159 @@ class TestPPMTransport:
         v = jnp.zeros((n_lat + 1, n_lon))
         tend = cgrid_fv_flux_divergence_latlon(q, u, v, grid)
         assert jnp.max(jnp.abs(tend)) < 1e-10
+
+
+# ==============================================================================
+# Biharmonic (del-4) viscosity
+# ==============================================================================
+
+class TestBiharmonicViscosity:
+    """The nu_del4 term must be scale-selective (unlike A_h), damping
+    (sign), pole-capped (stability), and must fail loud without dt."""
+
+    NU4 = 1.0e16  # interior coefficient sized for n_lat=32 (dy ~ 625 km)
+
+    def _isolated_biharmonic_tendency(self, grid, u, v, dt=300.0):
+        """Return the biharmonic contribution alone: tend(nu4>0) - tend(nu4=0).
+
+        Both calls share every other term (PGF, Coriolis, KE gradient),
+        so the difference isolates -nu4*lap^2(u,v) exactly.
+        """
+        h = jnp.full((grid.n_lat, grid.n_lon), 5000.0)
+        h_s = jnp.zeros_like(h)
+        state = CGridLatLonShallowWaterState(h=h, u=u, v=v, h_s=h_s)
+        cfg_on = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        cfg_off = CGridLatLonShallowWaterConfig(nu_del4=0.0)
+        _, du_on, dv_on = cgrid_latlon_sw_tendencies(state, grid, cfg_on, dt)
+        _, du_off, dv_off = cgrid_latlon_sw_tendencies(state, grid, cfg_off, dt)
+        return du_on - du_off, dv_on - dv_off
+
+    def test_scale_selective(self, grid):
+        """Per-unit-amplitude damping of a 2*dx checkerboard must exceed
+        that of a zonal-wavenumber-2 mode by orders of magnitude (k^4)."""
+        lon_f = jnp.concatenate([grid.lon - 0.5 * grid.dlon,
+                                 (grid.lon - 0.5 * grid.dlon)[0:1] + 2 * jnp.pi])
+        amp = 1.0e-3  # keep the quadratic KE-gradient term negligible
+        u_large = amp * jnp.cos(2.0 * lon_f)[None, :] * jnp.ones((grid.n_lat, 1))
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        u_noise = amp * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+
+        du_l, _ = self._isolated_biharmonic_tendency(grid, u_large, v0)
+        du_n, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        # Compare damping rates on interior rows (pole rows are capped).
+        sl = slice(8, 24)
+        rate_large = float(jnp.max(jnp.abs(du_l[sl]))) / amp
+        rate_noise = float(jnp.max(jnp.abs(du_n[sl]))) / amp
+        assert rate_noise > 50.0 * rate_large, (rate_noise, rate_large)
+
+    def test_sign_damps(self, grid):
+        """-nu4*lap^2(u) must anticorrelate with u (energy sink)."""
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        u_noise = 1.0e-3 * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+        du, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        assert float(jnp.sum(u_noise * du)) < 0.0
+
+    def test_requires_dt(self, grid):
+        state = williamson_test2_cgrid(grid)
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        with pytest.raises(ValueError, match="requires the"):
+            cgrid_latlon_sw_tendencies(state, grid, cfg, None)
+
+    def test_pole_cap_profile(self, grid):
+        """Interior rows keep nu_del4; pole-adjacent rows are reduced."""
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+            _nu_del4_row_profiles)
+        big = 1.0e18  # deliberately above every row's stability cap
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=big)
+        nu_u, nu_v = _nu_del4_row_profiles(grid, cfg, dt=300.0)
+        assert nu_u.shape == (grid.n_lat, 1)
+        assert nu_v.shape == (grid.n_lat + 1, 1)
+        # Every row obeys the cap on BOTH staggerings:
+        # nu * dt * lam^2 <= cfl_frac.
+        dy = grid.radius * grid.dlat
+        dx_u = grid.radius * grid.dlon * grid.cos_lat
+        dx_v = grid.radius * grid.dlon * grid.cos_lat_v
+        lam_u = 4.0 / dx_u ** 2 + 4.0 / dy ** 2
+        lam_v = 4.0 / dx_v ** 2 + 4.0 / dy ** 2
+        # fp32-safe tolerance: capped rows sit EXACTLY at the bound, and
+        # the grid/profile arrays are stored fp32 under the default
+        # precision policy, so the recomputed product can exceed the
+        # bound by ~1e-7 relative rounding.
+        assert jnp.all(nu_u[:, 0] * 300.0 * lam_u ** 2
+                       <= cfg.nu_del4_cfl_frac * (1 + 1e-5))
+        assert jnp.all(nu_v[:, 0] * 300.0 * lam_v ** 2
+                       <= cfg.nu_del4_cfl_frac * (1 + 1e-5))
+        # Pole-adjacent rows are strictly below the equatorial rows, and
+        # the exact-pole v rows (cos clamped to 1e-10) are ~zero.
+        assert float(nu_u[0, 0]) < float(nu_u[grid.n_lat // 2, 0])
+        assert float(nu_v[0, 0]) < 1e-6 * float(nu_v[grid.n_lat // 2, 0])
+        assert float(nu_v[-1, 0]) < 1e-6 * float(nu_v[grid.n_lat // 2, 0])
+        # Every value is finite (no inf leaking from the pole clamps).
+        assert jnp.all(jnp.isfinite(nu_u)) and jnp.all(jnp.isfinite(nu_v))
+
+    def test_checkerboard_decay_rate_matches_discrete_eigenvalue(self, grid):
+        """Absolute-rate check (codex review): for the 2-D checkerboard,
+        the isolated biharmonic tendency must equal -nu*lam^2*u with
+        lam = 4/dx^2 + 4/dy^2 on near-equator rows (dx ~ dy there and
+        the metric is locally uniform)."""
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        amp = 1.0e-3
+        u_noise = amp * ((-1.0) ** (i[None, :] + j[:, None]))
+        v0 = jnp.zeros((grid.n_lat + 1, grid.n_lon))
+        du, _ = self._isolated_biharmonic_tendency(grid, u_noise, v0)
+        # Predicted rate on the equator-adjacent rows.
+        dy = float(grid.radius * grid.dlat)
+        row = grid.n_lat // 2
+        dx = float(grid.radius * grid.dlon * grid.cos_lat[row])
+        lam = 4.0 / dx ** 2 + 4.0 / dy ** 2
+        predicted = self.NU4 * lam ** 2
+        measured = float(jnp.abs(du[row, grid.n_lon // 2])) / amp
+        assert 0.5 * predicted < measured < 1.5 * predicted, (
+            measured, predicted)
+
+    def test_tendencies_noarg_falls_back_to_constructor_dt(self, grid):
+        """model.tendencies(state) without dt (DycoreComponent path) must
+        work with nu_del4 > 0 via the constructor-dt fallback (codex
+        iter-3)."""
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)
+        model = CGridLatLonShallowWaterModel(grid, cfg, dt=300.0)
+        state = williamson_test2_cgrid(grid)
+        dh, du, dv = model.tendencies(state)
+        assert jnp.all(jnp.isfinite(dh))
+        assert jnp.all(jnp.isfinite(du))
+        assert jnp.all(jnp.isfinite(dv))
+
+    def test_step_stable_with_polar_grid_noise(self, grid):
+        """Seeded grid-scale noise in the pole-adjacent rows must stay
+        finite under an above-cap coefficient: without the row cap the
+        polar rows violate the del-4 CFL within a few steps."""
+        cfg = CGridLatLonShallowWaterConfig(nu_del4=1.0e18, fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, cfg)
+        state = williamson_test2_cgrid(grid)
+        i = jnp.arange(grid.n_lon + 1)
+        j = jnp.arange(grid.n_lat)
+        noise = 1.0 * ((-1.0) ** (i[None, :] + j[:, None]))
+        band = ((j < 3) | (j >= grid.n_lat - 3)).astype(noise.dtype)
+        state = state._replace(u=state.u + noise * band[:, None])
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+
+    def test_step_stable_with_biharmonic(self, grid):
+        """W2 steps finitely with an above-cap coefficient (pole rows
+        would blow up within a few steps without the row cap)."""
+        cfg = CGridLatLonShallowWaterConfig(
+            nu_del4=1.0e18, fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, cfg)
+        state = williamson_test2_cgrid(grid)
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))

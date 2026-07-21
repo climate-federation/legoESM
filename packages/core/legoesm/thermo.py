@@ -45,7 +45,21 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
-    T_c = T - constants.T_freeze
+    # AD-safe temperature floor.  The Tetens denominator is
+    # ``T_c + 243.5 = T - 29.65 K``; as ``T → 29.65 K`` from below the
+    # exponent → +∞ and ``exp`` OVERFLOWS to inf.  The forward is often
+    # masked downstream (the smooth cap in ``saturation_mixing_ratio``
+    # clamps q_sat to 1), but the REVERSE-mode gradient then hits
+    # ``0 × inf`` and the whole adjoint goes non-finite — this silently
+    # NaN'd carry-based differentiable training whenever a single
+    # pathological surface/atmos cell dipped toward the singularity
+    # (AIMIP, job 8533906: ``inf encountered in exp``).  Clip to 150 K
+    # (far below any real atmospheric/surface temperature, so the forward
+    # is bit-identical everywhere it matters; the clip's zero gradient
+    # below the floor × the finite e_sat'(150 K) gives a finite gradient
+    # there instead of inf).  satcurve-ok: identical Tetens curve for
+    # T ≥ 150 K; this is an AD floor, not a new saturation formula.
+    T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
     return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
 
 
@@ -272,7 +286,17 @@ def saturation_mixing_ratio(
     jax.Array
         Saturation mixing ratio [kg/kg].
     """
-    e_sat = saturation_vapor_pressure(T)
+    return _mixing_ratio_from_esat(saturation_vapor_pressure(T), p)
+
+
+def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
+    """Saturation mixing ratio from a saturation vapour pressure [Pa].
+
+    The shared (differentiable, smooth-floored/capped) ``e_sat -> q_sat``
+    conversion used by every saturation curve (Tetens, Goff), so the curve
+    is the ONLY thing that varies between conventions — no re-derived
+    conversion numerics (#762).
+    """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
     # instead of a hard clip that creates a zero-gradient plateau.
     # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
@@ -282,6 +306,20 @@ def saturation_mixing_ratio(
     # while allowing gradients to flow (unlike hard jnp.minimum).
     # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+
+
+def saturation_mixing_ratio_goff(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation mixing ratio from the WMO Goff (1957) curve [kg/kg].
+
+    The NEMO/AeroBulk air-sea convention for the surface saturation
+    humidity (issue #762): identical smooth ``e_sat -> q_sat`` conversion
+    as :func:`saturation_mixing_ratio`, but over the Goff vapour-pressure
+    curve instead of Tetens — ~0.5-1 % on Δq (hence LH) at warm SST.
+    """
+    return _mixing_ratio_from_esat(saturation_vapor_pressure_goff(T), p)
 
 
 def saturation_mixing_ratio_ice(
@@ -424,6 +462,69 @@ def saturation_specific_humidity(
     return w_sat / (1.0 + w_sat)
 
 
+def vapor_pressure_from_specific_humidity(
+    q: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Vapor pressure [Pa] from specific humidity and total pressure.
+
+    ``e = q · p / (ε + (1 − ε) · q)`` — the inverse of the specific-humidity
+    definition ``q = ε e / (p − (1 − ε) e)`` (NOT the mixing-ratio form
+    ``q p / (ε + q)``, which biases e by ~1% at tropical q).  Centralised here
+    so the canopy stomatal (Jarvis / coupled-Farquhar) and canopy-air
+    energy-balance VPD paths share one derivation.
+
+    Parameters
+    ----------
+    q : jax.Array
+        Specific humidity [kg/kg].
+    p : jax.Array
+        Total pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Vapor pressure [Pa].
+    """
+    return q * p / (constants.epsilon + (1.0 - constants.epsilon) * q)
+
+
+def virtual_temperature(
+    T: jax.Array,
+    q: jax.Array,
+) -> jax.Array:
+    """Virtual temperature [K] from temperature and specific humidity.
+
+    ``T_v = T (1 + (1/ε − 1) q)`` — the specific-humidity form (ε = R_d/R_v so
+    1/ε − 1 = R_v/R_d − 1).  Centralised for the land surface-forcing paths
+    (CRU-JRA assembly, eddy-covariance site loader) that form moist-air density
+    from it; mirrors ``atmosphere.physics._shared.virtual_temperature``.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    q : jax.Array
+        Specific humidity [kg/kg].
+
+    Returns
+    -------
+    jax.Array
+        Virtual temperature [K].
+    """
+    return T * (1.0 + (1.0 / constants.epsilon - 1.0) * q)
+
+
+def moist_air_density(
+    T: jax.Array,
+    p: jax.Array,
+    q: jax.Array,
+) -> jax.Array:
+    """Moist-air density [kg/m3]: ``ρ = p / (R_d T_v)`` with virtual temperature
+    ``T_v`` from :func:`virtual_temperature`."""
+    return p / (constants.R_d * virtual_temperature(T, q))
+
+
 def mixing_ratio_to_specific_humidity(
     mixing_ratio: jax.Array,
 ) -> jax.Array:
@@ -508,3 +609,28 @@ def relative_humidity(
     """
     e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
     return e / saturation_vapor_pressure(T)
+
+
+def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
+    """SST-dependent latent heat of vaporization [J/kg].
+
+    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
+    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
+    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
+    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
+    NEMO-parity path wraps this with its float64 pin.
+    """
+    return constants.L_v - constants.L_v_sst_slope * (
+        T_sfc_K - constants.T_freeze
+    )
+
+
+def moist_air_cp(q_air: jax.Array) -> jax.Array:
+    """Moist-air specific heat [J/(kg K)], NEMO/AeroBulk convention.
+
+    ``cp = rCp_dry + rCp_vap q`` (NEMO sbc_phy ``cp_air``) — the
+    convention set of the transcribed bulk schemes, NOT the
+    mixture-weighted ``c_pd (1-q) + c_pv q`` (issue #762).  ~1-2 % above
+    dry ``c_pd`` in the humid tropics.  Dtype-preserving.
+    """
+    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * q_air

@@ -73,6 +73,11 @@ def _is_voronoi_mesh(grid) -> bool:
     return isinstance(grid, VoronoiMesh)
 
 
+def _is_latlon_cgrid(grid) -> bool:
+    from legoesm.grids.latlon import LatLonCGridGeometry
+    return isinstance(grid, LatLonCGridGeometry)
+
+
 def _cell_velocity_to_edge_normal(
     u_cell: jnp.ndarray,
     v_cell: jnp.ndarray,
@@ -158,14 +163,116 @@ def fv_flux_divergence_voronoi(
     # No-flux closure at boundary edges.
     u_edge_normal = jnp.where(interior_edge, u_edge_normal, 0.0)
 
-    # Boundary-safe edge reconstruction of the transported scalar.
-    q_edge = jnp.where(
-        interior_edge, 0.5 * (q[c1_safe] + q[c2_safe]), q[c1_safe],
-    )
+    # Boundary-safe FIRST-ORDER UPWIND edge reconstruction of the transported
+    # scalar.  The MPAS edge normal points c1 -> c2, so a positive normal
+    # velocity makes c1 the upstream donor.  Centered 0.5*(q1+q2) is dispersive
+    # on unstructured meshes and drives q negative / conc>1, which the
+    # downstream jnp.maximum(vol,0)/clip(conc,0,1) silently turn into a mass
+    # SOURCE (audit finding #1); upwind is monotone and positivity-preserving.
+    # ponytail: first-order upwind; add a slope-limited (van Leer) edge value if
+    # the numerical diffusion is too strong for MPAS sea-ice production.
+    q_upwind = jnp.where(u_edge_normal >= 0.0, q[c1_safe], q[c2_safe])
+    q_edge = jnp.where(interior_edge, q_upwind, q[c1_safe])
     flux_edge = q_edge * u_edge_normal
 
     div = divergence_cell(flux_edge, mesh)
     return -div
+
+
+def fv_flux_divergence_latlon_cgrid(
+    q: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+) -> jnp.ndarray:
+    """Donor-cell (first-order upwind) flux-divergence tendency on the
+    curvilinear lat-lon C-grid (tripole eORCA geometry).
+
+    ``u, v`` are the ice model's CELL-CENTRED **geographic east/north**
+    velocity components (A-grid convention, same as the other dispatch
+    branches).  They are interpolated to the C-grid faces and rotated into
+    grid-relative face-normal components with the LOCAL face angles — the
+    same E-N -> face transform the OMIP wind-stress applicator uses.
+    Geographic components are frame-independent scalars across the tripolar
+    north fold (the partner cell holds the SAME physical vector), so the
+    fold row folds with scalar (+1) parity and the i/j orientation flip
+    across the seam is carried entirely by the local rotation angles; the
+    transported scalar is reconstructed at faces by the fold-aware
+    donor-cell upwind, and :func:`divergence_cgrid` closes the budget —
+    global ``sum(q * area_T)`` is conserved to round-off.
+
+    First-order upwind (monotone, diffusive) rather than PPM: the ice-edge
+    is a moving front where monotonicity matters more than order, and the
+    donor-cell scheme needs no curvilinear PPM machinery.  LAND CAVEAT
+    (parity with the existing LatLonGrid branch, which also carries no
+    mask): free-drift can push ice onto land cells; the OMIP runner masks
+    every ice->ocean flux by the ocean mask, so land-ice never reaches the
+    ocean budget, but it does sit in the ice inventory — same disclosed
+    behavior as the A-grid lat-lon path.
+
+    Sign convention: returns ``dq/dt`` (``q_new = q + dt * tendency``).
+    """
+    from legoesm.grids.operators_latlon_cgrid import (
+        divergence_cgrid,
+        fold_is_local,
+        interp_cell_to_uface,
+        interp_cell_to_vface,
+        north_fold_mask,
+        upwind_cell_to_uface,
+        upwind_cell_to_vface,
+    )
+    u_face = (interp_cell_to_uface(u) * grid.cos_alpha_u
+              + interp_cell_to_uface(v) * grid.sin_alpha_u)
+    v_face = (-interp_cell_to_vface(u, grid) * grid.sin_alpha_v
+              + interp_cell_to_vface(v, grid) * grid.cos_alpha_v)
+    q_u = upwind_cell_to_uface(q, u_face)
+    q_v = upwind_cell_to_vface(q, v_face, grid)
+    flux_u = u_face * q_u
+    flux_v = v_face * q_v
+    # SEAM FLUX: one SHARED upwind flux per fold pair (codex r1+r2).  On the
+    # real eORCA1.2 mesh the fold-paired cells are distinct geographic
+    # locations, so the E-N interp/rotation gives each side of the seam an
+    # independent flux estimate that does not pair-cancel (a global
+    # conservation leak of O(1e-4)); and a bare flux antisymmetrization
+    # F <- (F(i)-F(perm(i)))/2 restores the global sum but breaks the upwind
+    # donor logic (it can extract ice from an EMPTY partner cell — a local
+    # positivity/inventory violation, codex r2 #1).  Instead build the seam
+    # from first principles: antisymmetrize the face VELOCITY (the pair share
+    # ONE physical face, so v_pair(i) = (v(i) - v(perm(i)))/2 with
+    # v(perm(i)) == -v(i) up to the two estimates), then select ONE shared
+    # donor cell for the pair — top-row cell i when the flow leaves cell i
+    # northward, else the partner cell perm(i).  At the partner index the
+    # velocity is exactly negated and the where() selects the SAME donor, so
+    # F(perm(i)) == -F(i) identically: exact pair cancellation AND true
+    # donor-cell upwind (no flux out of an empty cell).  Gating mirrors
+    # upwind_cell_to_vface: serial/MPI seam owner via fold_is_local, lat-band
+    # SPMD via the traced north_fold_mask (fold.is_active alone is True on
+    # EVERY band and would corrupt interior partition-top faces, codex r2 #2).
+    fold = getattr(grid, "fold", None)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        # Build the shared velocity from FIRST PRINCIPLES rather than from
+        # v_face's fold row: pad_ns_scalar writes the PARTNER-side estimate
+        # into the seam row (side-swapped), so differencing v_face rows flips
+        # the sign of the shared velocity.  Instead project the LAST CELL
+        # ROW's geographic (u, v) onto the seam-face normal locally,
+        #     L(j) = -uE[-1,j]*sin(a_v[-1,j]) + vN[-1,j]*cos(a_v[-1,j]),
+        # and fold in the partner's projection with the orientation flip
+        # (vector parity: the same physical face seen from the other side),
+        #     v_pair(j) = (L(j) - L(perm_v(j))) / 2.
+        # Under a uniform geographic flow across a real fold L(perm(j)) is
+        # ~ -L(j), so v_pair recovers the FULL local projection.
+        sin_av = jnp.asarray(grid.sin_alpha_v)[-1]
+        cos_av = jnp.asarray(grid.cos_alpha_v)[-1]
+        L = -u[-1] * sin_av + v[-1] * cos_av
+        v_pair = 0.5 * (L - L[fold.perm_v])
+        q_top = q[-1]
+        q_donor = jnp.where(v_pair > 0, q_top, q_top[fold.perm_T])
+        seam_flux = v_pair * q_donor
+        if nmask is not None and not fold_is_local(grid):
+            seam_flux = jnp.where(nmask, seam_flux, flux_v[-1])
+        flux_v = flux_v.at[-1].set(seam_flux)
+    return -divergence_cgrid(flux_u, flux_v, grid)
 
 
 def _ppm_tendency_2d(
@@ -180,6 +287,8 @@ def _ppm_tendency_2d(
       * ``CubedSphereGrid``: ``fv_flux_divergence`` (shape ``(6, n, n)``).
       * ``LatLonGrid``: ``fv_flux_divergence_latlon`` (shape
         ``(n_lat, n_lon)``).
+      * ``LatLonCGridGeometry`` (tripole): donor-cell upwind
+        ``fv_flux_divergence_latlon_cgrid``.
 
     Sign convention: ``q_new = q + dt · tendency``.
     """
@@ -187,6 +296,8 @@ def _ppm_tendency_2d(
         return fv_flux_divergence_latlon(q, u, v, grid, limiter=True)
     if _is_voronoi_mesh(grid):
         return fv_flux_divergence_voronoi(q, u, v, grid)
+    if _is_latlon_cgrid(grid):
+        return fv_flux_divergence_latlon_cgrid(q, u, v, grid)
     if isinstance(grid, CubedSphereGrid):
         return fv_flux_divergence(q, u, v, grid, limiter=True)
     raise TypeError(
@@ -215,6 +326,10 @@ def _ppm_tendency_per_category(
         def _kernel_v(qk):
             return fv_flux_divergence_voronoi(qk, u, v, grid)
         return jax.vmap(_kernel_v, in_axes=-1, out_axes=-1)(q_cat)
+    if _is_latlon_cgrid(grid):
+        def _kernel_c(qk):
+            return fv_flux_divergence_latlon_cgrid(qk, u, v, grid)
+        return jax.vmap(_kernel_c, in_axes=-1, out_axes=-1)(q_cat)
     if not isinstance(grid, CubedSphereGrid):
         raise TypeError(
             f"unsupported grid {type(grid).__name__} for "
@@ -312,12 +427,12 @@ def advect_ice_tracers(
     conc = concentration
 
     # Multi-category detection: base ndim depends on grid layout.
-    # MPAS Voronoi: ``(nCells,)`` (1D); lat-lon: ``(n_lat, n_lon)`` (2D);
-    # cubed-sphere: ``(6, n, n)`` (3D).  Trailing category axis adds one
-    # rank.
+    # MPAS Voronoi: ``(nCells,)`` (1D); lat-lon / tripole C-grid:
+    # ``(n_lat, n_lon)`` (2D); cubed-sphere: ``(6, n, n)`` (3D).  Trailing
+    # category axis adds one rank.
     if _is_voronoi_mesh(grid):
         base_ndim = 1
-    elif _is_latlon_grid(grid):
+    elif _is_latlon_grid(grid) or _is_latlon_cgrid(grid):
         base_ndim = 2
     else:
         base_ndim = 3

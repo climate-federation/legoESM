@@ -1,0 +1,146 @@
+{
+  "stage": 1,
+  "campaign": "weatherbench",
+  "baseline": {
+    "aimip_convection": "tiedtke",
+    "aimip_turbulence": "louis",
+    "aimip_gwd": "mcfarlane",
+    "aimip_microphysics": "sundqvist",
+    "aimip_cloud": "xu_randall"
+  },
+  "baseline_yaml": "config/wb/sweep/stage1/baseline_classical_t63_rrtmgp.yaml",
+  "results_dir": "results/wb_sweep_stage1",
+  "n_combos": 10,
+  "combos": [
+    {
+      "name": "combo_baseline",
+      "dim": "baseline",
+      "scheme": "tiedtke+louis+mcfarlane+sundqvist+xu_randall",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_baseline/suite.yaml"
+    },
+    {
+      "name": "combo_conv_bechtold",
+      "dim": "aimip_convection",
+      "scheme": "bechtold",
+      "overrides": {
+        "aimip_convection": "bechtold",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_conv_bechtold/suite.yaml"
+    },
+    {
+      "name": "combo_conv_edmf",
+      "dim": "aimip_convection",
+      "scheme": "edmf",
+      "overrides": {
+        "aimip_convection": "edmf",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_conv_edmf/suite.yaml"
+    },
+    {
+      "name": "combo_turb_ysu",
+      "dim": "aimip_turbulence",
+      "scheme": "ysu",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "ysu",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_turb_ysu/suite.yaml"
+    },
+    {
+      "name": "combo_turb_edmf",
+      "dim": "aimip_turbulence",
+      "scheme": "edmf",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "edmf",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_turb_edmf/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_hines",
+      "dim": "aimip_gwd",
+      "scheme": "hines",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "hines",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_gwd_hines/suite.yaml"
+    },
+    {
+      "name": "combo_micro_kessler",
+      "dim": "aimip_microphysics",
+      "scheme": "kessler",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "kessler",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_micro_kessler/suite.yaml"
+    },
+    {
+      "name": "combo_micro_morrison",
+      "dim": "aimip_microphysics",
+      "scheme": "morrison",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "morrison",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_micro_morrison/suite.yaml"
+    },
+    {
+      "name": "combo_micro_thompson",
+      "dim": "aimip_microphysics",
+      "scheme": "thompson",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "thompson",
+        "aimip_cloud": "xu_randall"
+      },
+      "suite": "config/wb/sweep/stage1/combo_micro_thompson/suite.yaml"
+    },
+    {
+      "name": "combo_cloud_sundqvist",
+      "dim": "aimip_cloud",
+      "scheme": "sundqvist",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "sundqvist"
+      },
+      "suite": "config/wb/sweep/stage1/combo_cloud_sundqvist/suite.yaml"
+    }
+  ]
+}

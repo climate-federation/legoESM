@@ -22,7 +22,10 @@ import pytest
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.latlon_spmd import (
-    latlon_band_perms, reconstruct_vface_lower, to_vface_lower)
+    latlon_band_perms, reconstruct_vface_lower, to_vface_lower,
+    cell_to_cgrid_winds_spmd, activate_latlon_spmd_halo,
+    deactivate_latlon_spmd_halo)
+from legoesm.grids.operators_latlon_cgrid import cell_to_cgrid_winds
 from legoesm.parallel.shard_map_compat import shard_map
 
 N_DEV = 4
@@ -90,3 +93,73 @@ def test_vface_round_trip_identity(nlev):
     out = np.asarray(rt(vl_sh))
     assert out.shape == tuple(v_lower.shape)
     assert float(np.max(np.abs(out - np.asarray(v_lower)))) < 1e-12
+
+
+# ==============================================================================
+# cell -> C-grid wind conversion under lat-band sharding. The per-step
+# cell<->C-grid round trip the operator-split SPMD lane reproduces from serial
+# model.step: the v cell->face direction is NOT band-local (a naive band pad
+# zeros every interior cut face as if it were a pole), so it must halo the
+# neighbour band's row via interp_cell_to_vface_halo + re-zero only the PHYSICAL
+# poles. Bit-identical to the serial full-grid cell_to_cgrid_winds.
+# ==============================================================================
+
+@pytest.mark.parametrize("nlev", [None, 5])
+def test_cell_to_cgrid_winds_spmd_matches_serial(nlev):
+    """Band-local cell->C-grid winds, gathered across bands, == serial full-grid
+    cell_to_cgrid_winds BITWISE. Catches the silent decomposition error where a
+    band-local pad zeros the interior-cut v-faces."""
+    mesh = _mesh()
+    rng = np.random.default_rng(101 + (0 if nlev is None else 1))
+    shp = (N_LAT, N_LON) if nlev is None else (N_LAT, N_LON, nlev)
+    u_cell = rng.standard_normal(shp)
+    v_cell = rng.standard_normal(shp)
+    u_s, v_s = cell_to_cgrid_winds(jnp.asarray(u_cell), jnp.asarray(v_cell))
+    u_s, v_s = np.asarray(u_s), np.asarray(v_s)   # (N_LAT,N_LON+1), (N_LAT+1,N_LON)
+
+    isp = P("lat", *((None,) * (u_cell.ndim - 1)))
+    u_sh = jax.device_put(jnp.asarray(u_cell), NamedSharding(mesh, isp))
+    v_sh = jax.device_put(jnp.asarray(v_cell), NamedSharding(mesh, isp))
+
+    activate_latlon_spmd_halo(mesh)   # arm the spmd backend for interp_cell_to_vface_halo
+    try:
+        @partial(shard_map, mesh=mesh, in_specs=(isp, isp),
+                 out_specs=(isp, isp), check_vma=False)
+        def f(u_b, v_b):
+            return cell_to_cgrid_winds_spmd(u_b, v_b)
+        u_out, v_out = f(u_sh, v_sh)
+        u_out = np.asarray(u_out)     # (N_LAT, N_LON+1) — clean gather (NL per band)
+        v_out = np.asarray(v_out)     # (N_DEV*(NL+1), N_LON) — per-band blocks
+    finally:
+        deactivate_latlon_spmd_halo()
+
+    # u-face: clean global gather (NL rows/band), bitwise vs serial.
+    assert u_out.shape == u_s.shape, f"u shape {u_out.shape} vs {u_s.shape}"
+    u_worst = float(np.max(np.abs(u_out - u_s)))
+    assert u_worst < 1e-12, f"u-face vs serial (nlev={nlev}): {u_worst:.3e}"
+
+    # v-face: NL+1 rows/band (overlapping interior interfaces) vs serial slices.
+    blk = NL + 1
+    assert v_out.shape[0] == N_DEV * blk
+    v_worst = 0.0
+    for b in range(N_DEV):
+        band = v_out[b * blk:(b + 1) * blk]
+        ref = v_s[b * NL: b * NL + NL + 1]        # global faces this band owns
+        v_worst = max(v_worst, float(np.max(np.abs(band - ref))))
+    assert v_worst < 1e-12, f"v-face vs serial (nlev={nlev}): {v_worst:.3e}"
+
+
+def test_cell_to_cgrid_winds_spmd_serial_byte_identical():
+    """Without the SPMD backend armed (serial / local), cell_to_cgrid_winds_spmd
+    == cell_to_cgrid_winds — the default path is unchanged (a mesh=None
+    operator-split step reduces to serial)."""
+    deactivate_latlon_spmd_halo()   # ensure NOT armed
+    rng = np.random.default_rng(202)
+    u_cell = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 5)))
+    v_cell = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 5)))
+    u_a, v_a = cell_to_cgrid_winds_spmd(u_cell, v_cell)
+    u_b, v_b = cell_to_cgrid_winds(u_cell, v_cell)
+    # BYTE-identical (not just close): the local-backend path is the SAME
+    # arithmetic (interior 0.5*(v[:-1]+v[1:]) + pole zero) as cell_to_cgrid_winds.
+    assert np.array_equal(np.asarray(u_a), np.asarray(u_b)), "u-face not bit-identical"
+    assert np.array_equal(np.asarray(v_a), np.asarray(v_b)), "v-face not bit-identical"

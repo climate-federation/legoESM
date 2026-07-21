@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.physics.physics_state import (
+    PHYSSTATE_INPUT_FIELDS,
     PhysicsState,
     init_physics_state,
     update_physics_state,
@@ -107,11 +108,11 @@ def test_mpas_step_threads_seeded_carry():
     and step 2 consumes step 1's output (no silent reseed)."""
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
     from legoesm.atmosphere.physics.combined import make_physics
 
     mesh = create_voronoi_mesh(3)
@@ -197,11 +198,11 @@ def _toy_carry_physics_fn():
 def _cdgrid_setup(n=6, nlev=6):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
         CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)
@@ -214,11 +215,11 @@ def _cdgrid_setup(n=6, nlev=6):
 def _mpas_setup(n=3, nlev=8):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
 
     mesh = create_voronoi_mesh(n)
     sigma = create_sigma_coordinate(nlev)
@@ -299,7 +300,7 @@ def test_latlon_step_threads_seeded_carry():
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
@@ -807,7 +808,7 @@ def test_latlon_step_refuses_stateful_physics_without_carry():
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
@@ -1098,7 +1099,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     sigma = create_sigma_coordinate(n_levels=3)
     n_ch = PE3DChannelSpec(nlev=sigma.n_levels).n_channels
 
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
     )
@@ -1109,7 +1110,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         spec.step_with_physics(None, 1.0, physics_fn=fn)
 
-    from legoesm.atmosphere.dynamics.ucast_pe import (
+    from legoesm.atmosphere.dynamics.neural.ucast_pe import (
         UCastPrimitiveEquationModel,
         UCastPrimitiveEquationConfig,
     )
@@ -1125,7 +1126,7 @@ def test_spectral_family_step_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         ucast.step_with_physics(None, 1.0, fn)
 
-    from legoesm.atmosphere.dynamics.sfno_pe import (
+    from legoesm.atmosphere.dynamics.neural.sfno_pe import (
         SFNOPrimitiveEquationModel,
         SFNOPrimitiveEquationConfig,
     )
@@ -1206,7 +1207,7 @@ def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
     from legoesm.grids.vertical import (
         create_height_coordinate, compute_terrain_metric,
     )
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerModel,
         CDGridCompressibleEulerConfig,
     )
@@ -1225,3 +1226,95 @@ def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
         nh.step(None, 1.0, physics_fn=fn)
     with pytest.raises(NotImplementedError, match="405"):
         nh.step_with_physics(None, 1.0, physics_fn=fn)
+
+
+def test_requires_phys_state_gwd_composite():
+    """#834 (codex code-review): a '+'-composite containing prognostic_spectral
+    carries a wave-action spectrum, so it MUST require a threaded PhysicsState;
+    a stateless composite must not.  Regresses the exact-string
+    ``== "prognostic_spectral"`` statefulness check that misclassified
+    ``mcfarlane+prognostic_spectral`` as stateless (dropping the spectrum carry
+    -> per-step reseed / seed shape mismatch)."""
+    from legoesm.atmosphere.physics.combined import (
+        PhysicsConfig, physics_config_requires_phys_state,
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+
+    def _req(scheme):
+        return physics_config_requires_phys_state(
+            PhysicsConfig(
+                gravity_wave_drag=GravityWaveDragConfig(scheme=scheme)))
+
+    assert _req("prognostic_spectral") is True
+    assert _req("mcfarlane+prognostic_spectral") is True
+    assert _req("prognostic_spectral+hines") is True
+    assert _req("hines+mcfarlane") is False
+    assert _req("mcfarlane") is False
+    assert _req("none") is False
+
+
+def test_dyn_tendency_inputs_are_consumed_not_carried_forward():
+    """RCAPQADV staging (codex r2): the per-step dynamics-tendency INPUTS
+    (``PHYSSTATE_INPUT_FIELDS``) must be CONSUMED each call — ``update_physics_
+    state`` clears them to None unless the driver re-supplies them, so a missed
+    refresh fails CLOSED (the bridge guard raises on None) instead of silently
+    pairing a stale tendency with a new state."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.convection.config import (
+        BechtoldConfig, ConvectionConfig,
+    )
+
+    cfg = PhysicsConfig(convection=ConvectionConfig(
+        scheme="bechtold", bechtold=BechtoldConfig()))
+    ps = init_physics_state(ncol=2, nlev=4, physics_config=cfg)
+    assert ps.dyn_tendency_T is None and ps.dyn_tendency_qv is None
+    # A driver populates them for one call.
+    populated = ps._replace(
+        dyn_tendency_T=jnp.ones((2, 4)), dyn_tendency_qv=jnp.ones((2, 4)))
+    # A normal post-physics carry update that does NOT re-supply them must
+    # RESET them to None (not carry the stale values forward).
+    nxt = update_physics_state(populated, {"conv_prog_profile": jnp.zeros((2, 4))})
+    for _f in PHYSSTATE_INPUT_FIELDS:
+        assert getattr(nxt, _f) is None, (
+            f"{_f} was carried forward — a missed driver refresh would run "
+            "RCAPQADV on a stale tendency instead of failing closed"
+        )
+    # An explicit re-supply on the same call IS honoured.
+    nxt2 = update_physics_state(
+        populated, {"dyn_tendency_T": jnp.full((2, 4), 3.0)})
+    assert float(nxt2.dyn_tendency_T[0, 0]) == 3.0
+    assert nxt2.dyn_tendency_qv is None  # the un-supplied one still resets
+
+
+def test_mpas_legacy_dyn_tendency_checkpoint_entry_is_dropped_on_load(tmp_path):
+    """Codex r2 finding-2: a legacy / hand-edited MPAS checkpoint that carries
+    a ``physstate_dyn_tendency_*`` entry — including a None-derived OBJECT array
+    that ``np.load(allow_pickle=False)`` cannot even materialise — must be
+    DROPPED at the load boundary (before any value access / scatter), not fail
+    the load.  The fresh seed's None is correct (these are per-step inputs)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    legacy = tmp_path / "legacy.npz"
+    with np.load(ckpt) as d:
+        kept = {k: np.asarray(d[k]) for k in d.files}
+    # Inject a legacy per-step-input entry as an OBJECT array (what the earlier
+    # None-skip draft would have produced from np.asarray(None)).
+    kept["physstate_dyn_tendency_T"] = np.array(None, dtype=object)
+    # ``allow_pickle=True`` only to WRITE the crafted object array; the loader
+    # under test uses the default allow_pickle=False and must not touch it.
+    np.savez(legacy, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(legacy)  # must NOT raise
+    assert "physstate_dyn_tendency_T" not in driver_b._carry_aux
+    # A real prognostic carry is still restored alongside.
+    assert "physstate_tke" in driver_b._carry_aux

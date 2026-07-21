@@ -111,7 +111,7 @@ class MLEConfig(NamedTuple):
     bolus_cfl_cap: float = 0.0
 
 
-def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
+def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:
     """NEMO nn_mle=1 coefficient ``rc_f = rn_ce / (5 km * 2*Omega*sin(rn_lat))``.
 
     Constant (uses the reference latitude, not local f) so the streamfunction is
@@ -119,16 +119,25 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
     against ``lat_ref_deg`` ~ 0.
     """
     lat = float(lat_ref_deg)
-    if abs(lat) < 1.0:
+    # Guard the f0 = 2*Omega*sin(lat) blow-up at ANY zero-Coriolis reference
+    # latitude (0, +/-180, ...), not just |lat|<1 deg: test |sin(lat)| directly
+    # so an out-of-range lat_ref like 180 deg (sin -> 0) also raises instead of
+    # producing a huge finite rc_f artefact from floating-point sin(pi).
+    if abs(math.sin(math.radians(lat))) < math.sin(math.radians(1.0)):
         raise ValueError(
-            f"MLE lat_ref_deg={lat} too close to the equator: f0 -> 0 makes rc_f "
-            "blow up. Use the NEMO default 20 deg.")
-    # Pure-Python (math, NOT jnp): rc_f is a config-derived CONSTANT computed once
-    # and used as a scalar multiplier inside the jitted step. Using jnp + float()
-    # here triggers ConcretizationTypeError under jit; math.sin keeps it a plain
-    # Python float.
+            f"MLE lat_ref_deg={lat} has |sin(lat)| too small: f0 -> 0 makes rc_f "
+            "blow up. Use a mid-latitude reference (NEMO default 20 deg).")
+    # ``lat_ref_deg`` is a FIXED reference latitude (excluded-tier convention,
+    # never traced), so f0 is built with pure-Python ``math`` and stays a plain
+    # Python float — ``jnp.sin`` of a traced angle would be unnecessary here.
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
-    return float(ce) / (_RC_F_LENGTH_SCALE_M * f0)
+    # Do NOT cast ``ce``: it is the registered tunable (MLEConfig.ce, tier-2,
+    # SPEC_MODULES, transform=sigmoid).  A prior ``float(ce)`` raised
+    # ConcretizationTypeError when a traced override was spliced into the config
+    # during extended-tier training, violating the differentiable=True contract.
+    # A Python-float ``ce`` still yields a Python float (production constant-
+    # folding preserved); a traced ``ce`` yields a differentiable traced scalar.
+    return ce / (_RC_F_LENGTH_SCALE_M * f0)
 
 
 def mle_streamfunction_magnitude(
@@ -170,11 +179,12 @@ def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
 
 
 def mle_mld_and_buoyancy(
-    rho_insitu: jnp.ndarray,
+    rho_pot: jnp.ndarray,
     dz_live: jnp.ndarray,
     wet_cell: jnp.ndarray,
     *,
-    z_centers: jnp.ndarray,
+    z_faces: jnp.ndarray,
+    z_centers_ref: jnp.ndarray | None = None,
     rho_c_mle: float = _RHO_C_MLE_DEFAULT,
     ref_depth_m: float = 10.0,
     rho0: float = constants.rho_ocean,
@@ -182,18 +192,70 @@ def mle_mld_and_buoyancy(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """MLE mixed-layer depth + ML-mean buoyancy (NEMO tramle.F90, integer level).
 
-    Faithful to NEMO: the mixed layer is the levels SHALLOWER than the first level
-    whose in-situ density exceeds the reference-depth density by ``rho_c_mle``
-    (Delta-rho criterion on IN-SITU rho, referenced to ``ref_depth_m``); the ML
-    depth ``zmld`` is the sum of their live thicknesses, and the ML-mean buoyancy
-    is ``bm = grav * sum_ML[(rho0 - rho)/rho0 * dz] / max(dz_top, zmld)``.
+    Faithful to NEMO 5.0.1 ``tra_mle_trp``: the mixed layer is the levels
+    SHALLOWER than the first level whose density exceeds the reference-LEVEL
+    density by ``rho_c_mle``; the ML depth ``zmld`` is the sum of their live
+    thicknesses, and the ML-mean buoyancy is
+    ``bm = grav * sum_ML[(rho0 - rho)/rho0 * dz] / max(dz_top, zmld)``.
+
+    DENSITY FIELD (NEMO ``rhop``): BOTH the Delta-rho criterion and ``zbm``
+    use NEMO's ``rhop`` — the SURFACE-REFERENCED POTENTIAL density (eosbn2
+    ``prhop``, "potential density referenced at the surface": the EOS
+    evaluated at zero pressure, no depth term), verbatim
+    ``IF( rhop(jk) > rhop(nla10) + rn_rho_c_mle )`` and
+    ``zbm = zbm + zc*(rho0 - rhop)*r1_rho0`` (tramle.F90).  Feeding IN-SITU
+    density here is WRONG and catastrophic at fine surface resolution: pure
+    compressibility between adjacent levels (~0.14 kg/m^3 over ~30 m)
+    exceeds the 0.01 kg/m^3 threshold, collapsing the diagnosed ML to the
+    top layer and zeroing the MLE transport (mu vanishes on a one-layer ML)
+    — the regression the potential-density rename of this argument guards.
+
+    Reference level (NEMO ``nla10``, domzgr.F90): the T-level CONTAINING the
+    ~``ref_depth_m`` horizon, selected from the W-INTERFACE depths —
+    ``zrefdep = ref_depth_m - 0.1*min(e3w_1d)`` and ``nla10 = nlb10 - 1`` with
+    ``nlb10`` the first interface deeper than ``zrefdep``.  NOT the nearest
+    level CENTRE: with centres ``[5, 25, 75]`` and interfaces ``[0, 15, 50,
+    100]`` NEMO references the 5 m level (its cell spans 0-15 m and contains
+    10 m), where a centre-based ``searchsorted`` picked 25 m — the wrong
+    ``rho_ref``, hence a wrong Delta-rho threshold and MLD (the off-by-one
+    this routine previously had).  The density scan likewise starts at
+    ``nlb10`` (indices strictly BELOW the reference level), so an exceeding
+    level at or above ``nla10`` never truncates the mixed layer — matching
+    NEMO's ``DO_3DS(..., jpkm1, nlb10, -1)`` window.
+
+    SANCTIONED CONSTANT DEPARTURE: ``grav``/``rho0`` default to legoESM's
+    ``constants.g`` / ``constants.rho_ocean``, not NEMO's slightly different
+    ``grav`` / ``rau0`` (order 5e-5 relative in ``bm``) — the MLE buoyancy
+    stays consistent with every other buoyancy in this model; pass
+    ``grav=constants.g_nemo`` for exact NEMO parity in oracle tests.
+
+    AD note: only the RETURNED ``zmld``/``in_ml`` are stop_gradient'd below;
+    ``bm`` is computed from the un-stopped mask, so ``grad(bm)`` w.r.t.
+    ``dz_live``/``rho_pot`` flows through the ML *contents* (the hard
+    0/1 membership itself has zero gradient everywhere it is defined).
+
+    Assumes wet cells are TOP-CONTIGUOUS (real ocean columns: water above
+    land): the all-mixed fallback uses ``sum(wet)`` as the first-dry index,
+    which mirrors NEMO's ``inml_mle = mbkt + 1`` bottom-plus-one
+    initialization only under that layout.
 
     Parameters
     ----------
-    rho_insitu : array (..., nlev)  in-situ density [kg/m^3].
+    rho_pot : array (..., nlev)  SURFACE-REFERENCED POTENTIAL density
+                                 [kg/m^3] (NEMO ``rhop``; the EOS at
+                                 zero pressure — never in-situ).
     dz_live    : array (..., nlev)  live layer thickness [m] (dry cells -> 0).
     wet_cell   : array (..., nlev)  ocean mask {0,1}.
-    z_centers  : array (nlev,)      level-centre reference depths [m, positive].
+    z_faces    : array (nlev+1,)    reference W-INTERFACE depths [m, positive
+                                    down], ``z_faces[0] = 0`` (surface) —
+                                    NEMO ``gdepw_1d``.
+    z_centers_ref : array (nlev,) or None
+        EXACT reference T-level depths (NEMO ``gdept_1d``, positive down)
+        when the coordinate carries them (``t_depth_ref``): on a
+        full-step/partial-cell NEMO ladder ``gdept`` is NOT the face
+        midpoint, and ``e3w_1d`` (hence the ``zrefdep`` tolerance, hence
+        possibly ``nla10`` itself) depends on it.  ``None`` falls back to
+        the face midpoints — exact for the model's own midpoint grids.
     Returns
     -------
     zmld : array (...)        MLE mixed-layer depth [m].
@@ -201,34 +263,52 @@ def mle_mld_and_buoyancy(
     in_ml : array (..., nlev) mixed-layer membership mask {0,1} (for the
                               ML-integrated convection-gate N^2, NEMO zn2).
     """
-    nlev = z_centers.shape[0]
-    wet = wet_cell.astype(rho_insitu.dtype)
-    # Reference density at ~ref_depth_m: nearest level centre at/above the ref
-    # depth (NEMO uses the level value rhop(nla10), not an interpolation).  The
-    # index is derived from z_centers via jnp ops (NO Python int()) so the whole
-    # routine stays jit-safe when z_centers is a traced coordinate.
+    nlev = z_faces.shape[0] - 1
+    wet = wet_cell.astype(rho_pot.dtype)
+    # NEMO nla10 (domzgr.F90):
+    #   zrefdep = ref_depth - 0.1*MINVAL(e3w_1d)
+    #   nlb10   = MINLOC(gdepw_1d, mask = gdepw_1d > zrefdep)
+    #   nla10   = nlb10 - 1
+    # e3w_1d(jk) = gdept(jk) - gdept(jk-1) with e3w_1d(1) = gdept(1): rebuild it
+    # from the EXACT gdept_1d when the caller has it (z_centers_ref; NEMO
+    # partial-cell ladders have non-midpoint gdept, and the 0.1*min(e3w)
+    # tolerance — hence possibly nla10 itself — depends on it, codex P1), else
+    # from the face midpoints (exact on the model's own midpoint grids).  The
+    # tolerance keeps a face sitting EXACTLY at ref_depth_m on the "above"
+    # side, as in NEMO.  All jnp ops (no Python int()) so the routine stays
+    # jit-safe under traced coords.
+    centers = (jnp.asarray(z_centers_ref) if z_centers_ref is not None
+               else 0.5 * (z_faces[:-1] + z_faces[1:]))             # gdept_1d
+    # e3w_1d(1) = 2*gdept_1d(1) (the surface HALF-cell doubled, NEMO domzgr;
+    # the same reconstruction the PGF uses in ocean_tendency_common, codex),
+    # interior e3w_1d(jk) = gdept(jk) - gdept(jk-1).
+    e3w_ref = jnp.concatenate([2.0 * centers[:1], jnp.diff(centers)])
+    zrefdep = (jnp.asarray(ref_depth_m, dtype=z_faces.dtype)
+               - 0.1 * jnp.min(e3w_ref))  # coeff-ok: 0.1*min(e3w) sub-cell bias so searchsorted matches NEMO strict '>' face mask (nla10)
+    # searchsorted(side='right') = first face index STRICTLY deeper than
+    # zrefdep (faces equal to zrefdep stay on the shallow side, as with NEMO's
+    # strict '>' mask); the T-level above that face is nla10.  z_faces[0] = 0
+    # is never > zrefdep, so the -1 cannot underflow for any ref_depth > 0.
     iref = jnp.clip(
-        jnp.searchsorted(z_centers, jnp.asarray(ref_depth_m, dtype=z_centers.dtype)),
-        0, nlev - 1)                                                 # traced scalar
-    rho_ref = jnp.take(rho_insitu, iref, axis=-1)                    # (...)
-    z_ref = jnp.take(z_centers, iref)                               # scalar depth
-    excess = rho_insitu - (rho_ref[..., jnp.newaxis] + rho_c_mle)    # (..., nlev)
+        jnp.searchsorted(z_faces, zrefdep, side="right") - 1, 0, nlev - 1)
+    rho_ref = jnp.take(rho_pot, iref, axis=-1)                    # (...)
+    excess = rho_pot - (rho_ref[..., jnp.newaxis] + rho_c_mle)    # (..., nlev)
     # First level (from the surface) denser than the threshold, among WET levels
-    # below the reference level; the ML is the levels above it.
-    below_ref = z_centers > z_ref                                    # (nlev,)
-    below_ref = below_ref.reshape((1,) * (rho_insitu.ndim - 1) + (nlev,))
+    # STRICTLY BELOW the reference level (NEMO scans jk = jpkm1..nlb10 only);
+    # the ML is the levels above it.  Index-based, not depth-based.
+    lvl_row = jnp.arange(nlev).reshape(
+        (1,) * (rho_pot.ndim - 1) + (nlev,))
+    below_ref = lvl_row > iref
     exceed = (excess > 0.0) & (wet > 0.5) & jnp.broadcast_to(below_ref, excess.shape)
     has = jnp.any(exceed, axis=-1)
     first = jnp.argmax(exceed.astype(jnp.int32), axis=-1)            # (...)
     # If no level exceeds, the whole wet column is "mixed".
     first = jnp.where(has, first, jnp.sum((wet > 0.5).astype(jnp.int32), axis=-1))
-    lvl = jnp.arange(nlev)
-    in_ml = (lvl.reshape((1,) * (rho_insitu.ndim - 1) + (nlev,)) < first[..., jnp.newaxis]) \
-        & (wet > 0.5)
-    in_ml = in_ml.astype(rho_insitu.dtype)
+    in_ml = (lvl_row < first[..., jnp.newaxis]) & (wet > 0.5)
+    in_ml = in_ml.astype(rho_pot.dtype)
     zmld = jnp.sum(in_ml * dz_live, axis=-1)                          # (...)
     dz_top = dz_live[..., 0]
-    b_int = grav * jnp.sum(in_ml * ((rho0 - rho_insitu) / rho0) * dz_live, axis=-1)
+    b_int = grav * jnp.sum(in_ml * ((rho0 - rho_pot) / rho0) * dz_live, axis=-1)
     bm = b_int / jnp.maximum(jnp.maximum(dz_top, zmld), 1e-10)        # (...)
     # MLD/buoyancy are diagnostic gates -> stop gradient so AD users do not treat
     # threshold motion as a smooth control path (the bolus magnitude through bm/H

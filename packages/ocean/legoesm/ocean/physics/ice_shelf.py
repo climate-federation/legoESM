@@ -124,6 +124,12 @@ class IceShelfConfig(NamedTuple):
     # constant value is used.  Defaults below match Holland-Jenkins
     # 1999 for an ambient current ~ 0.1 m/s + C_d = 2.5e-3.
     gamma_T: float = 1.0e-4          # thermal exchange velocity [m/s]
+    # Provenance: Holland-Jenkins 1999 / ISOMIP+ use gamma_T/gamma_S ~= 35
+    # (gamma_S ~= 2.9e-6 for this gamma_T). This default gives a ratio ~= 198
+    # (gamma_S lower than the H-J reference, so the ratio sits higher); melt is
+    # only weakly sensitive to gamma_S, so it is left as-is (within param_spec
+    # bounds, possibly a deliberate calibration) — a future retune has the
+    # reference ratio here.
     gamma_S: float = 5.05e-7         # salt exchange velocity [m/s]
 
     # --- Freezing-point linear coefficients (Jenkins 1991) ---
@@ -369,12 +375,19 @@ def three_equation_melt(
     C = -alpha * beta * theta
 
     # Standard quadratic root.  The physical root is ``(-B + √Δ) /
-    # (2A)`` — it reduces to ``+α·β·θ / (γ·β) = α·θ / γ`` (i.e.
-    # γ_T·c_w·ρ_w·θ / (ρ_i·L_f)) in the small-melt limit, matching
-    # the Beckmann-Goosse linearisation.
+    # (2A)``; its small-θ asymptote is ``-C/B = α·β·θ / (α·δ·T_minus_bcp
+    # − γ·β)`` — NOT the Beckmann-Goosse ``α·θ/γ`` form, which requires
+    # ``γ·β ≫ α·δ·(T−b−c·p)`` and is false at the default parameters
+    # (pinned in test_ice_shelf_three_equation_faithful, which certifies
+    # the -C/B limit).
     disc = B * B - 4.0 * A * C
-    disc_safe = jnp.maximum(disc, 0.0)
-    m_dot = (-B + jnp.sqrt(disc_safe)) / (2.0 * A)
+    # AD-safe sqrt of the discriminant: ``d/dx sqrt(x) = 1/(2 sqrt(x))`` is
+    # +inf at x=0, so ``sqrt(max(disc, 0))`` produces a NaN GRADIENT whenever
+    # disc <= 0 (physical roots, freeze-on edge cases).  The double-``where``
+    # keeps the primal BIT-IDENTICAL to ``sqrt(max(disc, 0))`` (sqrt(disc) for
+    # disc > 0, exactly 0 for disc <= 0) while making the reverse pass finite.
+    sqrt_disc = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
+    m_dot = (-B + sqrt_disc) / (2.0 * A)
 
     # Salt balance: S_b = β·S_a / (δ·m + β).
     denom = delta * m_dot + beta

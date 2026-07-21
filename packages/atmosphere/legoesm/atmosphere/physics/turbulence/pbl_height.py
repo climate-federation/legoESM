@@ -27,8 +27,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    virtual_temperature,
+)
 
 
 __physics_contract__ = {
@@ -104,6 +107,95 @@ class PBLHeightConfig(NamedTuple):
     method: str = "smooth"
 
 
+def first_crossing_height(
+    values: jax.Array,
+    z_full: jax.Array,
+    threshold: float,
+    sharpness: float,
+    search_ok: jax.Array | None = None,
+    z_top: jax.Array | None = None,
+) -> jax.Array:
+    """Smooth lowest-crossing height where ``values`` first reaches ``threshold``.
+
+    Shared differentiable first-crossing kernel for bulk-Richardson PBL-height
+    diagnosis, factored from the previously-triplicated copies in ``ysu.py``
+    (``_crossing_pbl_height``) and ``holtslag_boville.py`` (``_crossing_height``)
+    — identical numerics, one AD-tested home (CLAUDE.md "no duplicate numerics").
+
+    Levels are top-first (index ``nlev-1`` = surface).  We scan surface-up and
+    select the FIRST pair of adjacent levels whose UPPER member reaches
+    ``threshold`` via a smooth sigmoid indicator, gate later pairs with an
+    exclusive cumulative-product "not yet crossed" weight, and linearly
+    interpolate the crossing height inside the selected pair.  Robust to an
+    arbitrarily sharp inversion because the crossing is detected per-pair, not
+    by sampling a single level at ``values == threshold``.
+
+    Parameters
+    ----------
+    values : jax.Array, shape (ncol, nlev)
+        Profile scanned for the first threshold crossing (e.g. bulk Ri),
+        top-first level ordering.
+    z_full : jax.Array, shape (ncol, nlev)
+        Full-level heights [m], top-first.
+    threshold : float
+        Crossing threshold (e.g. the critical bulk Richardson number).
+    sharpness : float
+        Sigmoid sharpness of the smooth crossing indicator.
+    search_ok : jax.Array or None, shape (ncol, nlev)
+        Optional smooth per-level mask (~1 inside the allowed search region,
+        ~0 outside); a pair contributes only if BOTH its levels are allowed
+        (the Holtslag-Boville ``npbl`` pressure-limited search).  ``None``
+        (default) searches the whole column.
+    z_top : jax.Array or None, shape (ncol,)
+        Fallback height when no in-region crossing exists.  ``None`` (default)
+        falls back to the model-top level ``z_full[:, 0]``.
+
+    Returns
+    -------
+    jax.Array, shape (ncol,)
+        First-crossing height [m] (unclipped — callers apply their own floor).
+    """
+    ncol, nlev = values.shape
+    # Surface-first ordering.
+    v_s = values[:, ::-1]
+    z_s = z_full[:, ::-1]
+    v_lo = v_s[:, :-1]   # lower (closer to surface) member of each pair
+    v_hi = v_s[:, 1:]
+    z_lo = z_s[:, :-1]
+    z_hi = z_s[:, 1:]
+
+    # crossed[k] = P(values >= threshold at the UPPER level of pair k).
+    crossed = jax.nn.sigmoid(sharpness * (v_hi - threshold))
+    if search_ok is not None:
+        # Pair is in the search region only if BOTH levels are allowed.
+        search_s = search_ok[:, ::-1]
+        crossed = crossed * (search_s[:, :-1] * search_s[:, 1:])
+    # Exclusive "not yet crossed below pair k".
+    not_crossed = jnp.cumprod(
+        jnp.concatenate(
+            [jnp.ones((ncol, 1), values.dtype), 1.0 - crossed[:, :-1]], axis=1,
+        ),
+        axis=1,
+    )
+    w = not_crossed * crossed  # first-crossing weight per pair
+
+    # Linear interpolation of the crossing height inside the pair.
+    dv = v_hi - v_lo
+    frac = jnp.clip(
+        (threshold - v_lo) / jnp.where(jnp.abs(dv) > 1.0e-12, dv, 1.0e-12),
+        0.0, 1.0,
+    )
+    z_cross = z_lo + frac * (z_hi - z_lo)
+
+    # Fallback (no in-region crossing) -> z_top (default: model-top height).
+    if z_top is None:
+        z_top = z_full[:, 0]
+    fallback_w = jnp.prod(1.0 - crossed, axis=1)
+    num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top
+    den = jnp.sum(w, axis=1) + fallback_w + 1.0e-30
+    return num / den
+
+
 def compute_bulk_richardson(
     T: jax.Array,
     q_v: jax.Array,
@@ -139,9 +231,10 @@ def compute_bulk_richardson(
     theta_v : jax.Array
         Virtual potential temperature, shape (ncol, nlev).
     """
-    # Virtual potential temperature
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Virtual potential temperature via the canonical inverse-Exner helper
+    # (exner_pref = 1/Π = (p_ref/p)^κ; the helper applies the same 1 Pa floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
 
     # Surface values (bottom level)
     theta_v_sfc = theta_v[:, -1]  # (ncol,)
@@ -159,8 +252,9 @@ def compute_bulk_richardson(
     # A barotropic wind with no shear should not deepen the PBL.
     dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4  # coeff-ok: wind-shear floor [m^2/s^2]
 
-    # Bulk Richardson number
-    Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
+    # Bulk Richardson number; g/θ_v via the shared buoyancy coefficient
+    # (clip kept at the call site per the helper's contract).
+    Ri_bulk = buoyancy_coefficient(jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
         dtheta_v * dz_from_sfc / dV2
     )
 

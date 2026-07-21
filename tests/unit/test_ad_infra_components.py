@@ -45,7 +45,7 @@ def _pack(x0, step_fn, set_leaf, reduce):
 
 
 def _make_atmosphere():
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
         CDGridShallowWaterState,

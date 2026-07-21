@@ -1,0 +1,137 @@
+#!/bin/bash -l
+#PBS -N legoesm_diag
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# BOTTLENECK DIAGNOSIS on a Derecho GPU node (4x A100-40GB, NVLink).
+#
+# Runs scripts/bench/run_scaling_diagnosis.py — the per-phase bottleneck tool
+# (halo bandwidth, reduction latency, roofline, compute/comm overlap, and the
+# STATIC collective census: collective-permute + all-reduce + all-gather per
+# step) — which the throughput jobs (scaling_gpu.sh, ocean_gpu_scaling.pbs)
+# do NOT capture.  This is the lane that answers "WHERE is the strong-scaling
+# loss", not just "what is the SYPD".
+#
+# Why this matters (measured campaign readings, derecho_levante_sota_review):
+#   * f64 and f32 GPU strong-scaling curves COINCIDE => the multi-GPU leg is
+#     LATENCY-bound, not bandwidth-bound.  The lever is the per-step MESSAGE
+#     COUNT, not the byte volume — so the collective census below is the
+#     first-class signal, and it is STATIC (a CPU compile gives the same count,
+#     but we capture it here on the real executable alongside the timings).
+#   * Cube face-shard anti-scales at small tiles because the collective-permute
+#     count grows with the shard count (~12 at 2 dev, ~41 at 6 dev on C24/L8)
+#     while the per-message NCCL p2p latency (~30-80 us) does not amortise.
+#
+# Cube face-sharding requires the device count to DIVIDE 6 (1/2/3/6); a 4-GPU
+# node therefore climbs the 1/2/3 ladder (4 is not face-divisible, and >6 uses
+# the separate sub-face tiled bench, cube_tiled_step.pbs).  The message-count-
+# vs-shard curve across 1->2->3 IS the anti-scaling signal.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/diagnosis.pbs
+# OVERRIDE:
+#   qsub -v N=96,NLEV=40,MODE=full,NDEV_LIST="1 2 3" \
+#        scripts/cluster/scaling_derecho/diagnosis.pbs
+#
+# Knobs (qsub -v NAME=value):
+#   N          per-face resolution        (default 96; >=30k cols/GPU rule)
+#   NLEV       vertical levels            (default 40)
+#   MODE       full | census              (default full; census = counts only)
+#   PRECISION  float32 | float64          (default float64)
+#   NDEV_LIST  cube face-shard ladder     (default "1 2 3"; must divide 6)
+# ===========================================================================
+set -uo pipefail
+
+# PBS spools this script; locate _env.sh from the submit dir (see the sibling
+# jobs for the identical rationale).
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    echo "       qsub from the repo root or from scripts/cluster/scaling_derecho/." >&2
+    exit 1
+fi
+
+# Force the CUDA backend BEFORE sourcing _env.sh (a stale JAX_PLATFORMS=cpu must
+# never silently run this GPU diagnosis on the CPU).  Single-process SPMD lane
+# -> plain legoesm-gpu env; no route-A mpi4jax overlay.
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+N="${N:-96}"
+NLEV="${NLEV:-40}"
+MODE="${MODE:-full}"
+PRECISION="${PRECISION:-float64}"
+NDEV_LIST="${NDEV_LIST:-1 2 3}"
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/diagnosis_${STAMP}}"
+mkdir -p "$OUTDIR"
+
+echo "=== HOST ==="; hostname; date
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -8 || true
+echo "=== CONFIG ==="
+echo "grid=cubed-sphere N=$N NLEV=$NLEV mode=$MODE precision=$PRECISION ndev=[$NDEV_LIST]"
+echo "outdir=$OUTDIR"
+
+case "$MODE" in
+    full|census) : ;;
+    *) echo "ERROR: MODE=$MODE (full|census)"; exit 2 ;;
+esac
+
+# --- 1) Collective-census ladder: message-count vs shard count --------------
+# The anti-scaling signal.  Census is cheap (compile + count), so sweep the
+# whole face-shard ladder even in `full` mode.  Restrict visible GPUs per rung
+# so run_scaling_diagnosis's SPMD path shards over exactly that many devices.
+rc_all=0
+for nd in $NDEV_LIST; do
+    if [ $((6 % nd)) -ne 0 ]; then
+        echo "SKIP nd=$nd (does not divide 6 — not a valid cube face-shard; " \
+             ">6 uses cube_tiled_step.pbs)"; continue
+    fi
+    vis=$(seq -s, 0 $((nd - 1)))
+    echo "--- census: ${nd} device(s) (CUDA_VISIBLE_DEVICES=$vis) ---"
+    CUDA_VISIBLE_DEVICES="$vis" "$PY" scripts/bench/run_scaling_diagnosis.py \
+        --mode census --grid cubed-sphere --n "$N" --nlev "$NLEV" \
+        --precision "$PRECISION" --expect-devices "$nd" \
+        --output-dir "$OUTDIR/census_nd${nd}" --no-timestamp
+    rc=$?
+    [ "$rc" -ne 0 ] && { echo "census nd=$nd FAILED rc=$rc"; rc_all=$rc; }
+done
+
+# --- 2) Full per-phase diagnosis at the top of the ladder -------------------
+# halo BW + reduction latency + roofline + overlap + census, on the largest
+# face-divisible device count available on this node.
+if [ "$MODE" = "full" ]; then
+    top_nd=1
+    for nd in $NDEV_LIST; do
+        [ $((6 % nd)) -eq 0 ] && [ "$nd" -gt "$top_nd" ] && top_nd=$nd
+    done
+    vis=$(seq -s, 0 $((top_nd - 1)))
+    echo "=== FULL per-phase diagnosis: ${top_nd} device(s) ==="
+    CUDA_VISIBLE_DEVICES="$vis" "$PY" scripts/bench/run_scaling_diagnosis.py \
+        --mode full --grid cubed-sphere --n "$N" --nlev "$NLEV" \
+        --precision "$PRECISION" --expect-devices "$top_nd" \
+        --output-dir "$OUTDIR/full_nd${top_nd}" --no-timestamp
+    rc=$?
+    [ "$rc" -ne 0 ] && { echo "full diagnosis FAILED rc=$rc"; rc_all=$rc; }
+fi
+
+echo "=== RESULTS ==="
+find "$OUTDIR" -name "summary.json" -print 2>/dev/null || true
+echo "Pull back + analyze:"
+echo "  scp -r derecho:$OUTDIR ."
+echo "  python scripts/bench/analyze_scaling_results.py $OUTDIR/full_nd*/ --format markdown"
+echo "=== DONE rc=$rc_all ==="
+exit "$rc_all"

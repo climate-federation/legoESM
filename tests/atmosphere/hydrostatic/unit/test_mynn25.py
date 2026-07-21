@@ -38,11 +38,12 @@ from legoesm.atmosphere.physics import (
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.mynn25 import (
     _compute_SM_SH,
+    _compute_master_length,
     _filter_121,
     mynn25_turbulence,
 )
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 
 
 NLEV = 32
@@ -213,7 +214,7 @@ def test_mynn_combined_physics_jits_under_jax_jit():
     import jax
     from legoesm.atmosphere.physics.combined import make_physics
     from legoesm.atmosphere.physics.physics_state import init_physics_state
-    from legoesm.atmosphere.scm import make_column_state, make_scm_grid
+    from legoesm.atmosphere.forcing.scm.scm import make_column_state, make_scm_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
     T0, qv0 = _baseline_profile()
@@ -345,3 +346,78 @@ def test_mynn_obukhov_gradient_finite_at_zero_buoyancy_flux():
     assert bool(jnp.all(jnp.isfinite(grad))), (
         f"MYNN gradient not finite at zero buoyancy flux: {grad}"
     )
+
+
+# ----------------------------------------------------------------------
+# Turbulent length scale L_T: dz-weighted integrals (NN09 eq. 54)
+# ----------------------------------------------------------------------
+
+
+def _master_length(q_half, z_half_geom, dz_half):
+    """Call the module master-length kernel with neutral surroundings so
+    L_T is the only grid-dependent scale under test (L_S depends on z only;
+    L_B is dropped for dthv_dz <= 0)."""
+    ncol = q_half.shape[0]
+    return _compute_master_length(
+        q_half=q_half,
+        z_half_geom=z_half_geom,
+        dz_half=dz_half,
+        L_obukhov=jnp.full((ncol,), 1e30),          # neutral (zeta = 0)
+        dthv_dz_half=jnp.zeros_like(q_half),        # L_B -> inf (dropped)
+        w_thv_sfc=jnp.zeros((ncol,)),
+        th_ref=300.0,
+        config=MYNN25Config(),
+    )
+
+
+def test_master_length_uniform_grid_invariant_to_dz_scale():
+    """On a UNIFORM grid the dz weighting cancels in the L_T ratio
+    (0.23*sum(q z dz)/sum(q dz) == 0.23*sum(q z)/sum(q)), so the master
+    length must be invariant to the (constant) dz magnitude — i.e. the
+    dz-weighted fix leaves uniform-grid results unchanged."""
+    ncol, nhalf = 2, 15
+    z = jnp.linspace(50.0, 2950.0, nhalf)[None, :].repeat(ncol, 0)
+    q = 0.5 + 0.4 * jnp.exp(-z / 800.0)
+    L_a = _master_length(q, z, jnp.full((ncol, nhalf), 100.0))
+    L_b = _master_length(q, z, jnp.full((ncol, nhalf), 700.0))
+    np.testing.assert_allclose(np.asarray(L_a), np.asarray(L_b), rtol=1e-12)
+
+
+def test_master_length_stretched_grid_weighting_matters():
+    """On a STRETCHED grid the dz weighting must change L_T: thicker upper
+    layers carry more of the integral, raising the q-weighted mean height
+    and thus L_T (and, with L_S/L_B held fixed, the harmonic-mean L)."""
+    ncol, nhalf = 1, 15
+    z = jnp.linspace(50.0, 2950.0, nhalf)[None, :].repeat(ncol, 0)
+    q = jnp.full((ncol, nhalf), 1.0)      # uniform q isolates the z-weighting
+    dz_uniform = jnp.full((ncol, nhalf), 200.0)
+    # Top-heavy stretching: dz grows with height (typical SCM/GCM grids).
+    dz_stretched = jnp.linspace(50.0, 800.0, nhalf)[None, :].repeat(ncol, 0)
+
+    L_u = np.asarray(_master_length(q, z, dz_uniform))
+    L_s = np.asarray(_master_length(q, z, dz_stretched))
+    # Same z, same q: only the dz weighting differs -> L must differ ...
+    assert not np.allclose(L_u, L_s, rtol=1e-6)
+    # ... and specifically INCREASE (top-heavy dz raises the weighted mean
+    # height, L_T rises, harmonic-mean L rises where L_T is binding).
+    assert np.all(L_s >= L_u - 1e-10)
+    assert np.max(L_s - L_u) > 1.0
+
+
+def test_master_length_matches_manual_weighted_integral():
+    """The L_T inside the harmonic mean equals 0.23*sum(q z dz)/sum(q dz):
+    verified by inverting the (neutral, L_B-free) harmonic mean
+    1/L = 1/L_S + 1/L_T with L_S = kappa*z/(1 + 2.7*zeta)|_{zeta=0} = kappa*z
+    capped below at the 1 m floor."""
+    from legoesm import constants as c
+
+    ncol, nhalf = 1, 12
+    z = jnp.linspace(100.0, 3000.0, nhalf)[None, :].repeat(ncol, 0)
+    q = 0.3 + 0.7 * jnp.exp(-z / 1000.0)
+    dz = jnp.linspace(80.0, 500.0, nhalf)[None, :].repeat(ncol, 0)
+
+    L = np.asarray(_master_length(q, z, dz))
+    L_S = np.maximum(c.kappa_vk * np.asarray(z), 1.0)
+    L_T = 0.23 * float(jnp.sum(q * z * dz)) / float(jnp.sum(q * dz))
+    L_expected = 1.0 / (1.0 / L_S + 1.0 / L_T + 1.0 / 1e30)
+    np.testing.assert_allclose(L[0], L_expected[0], rtol=1e-10)

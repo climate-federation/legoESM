@@ -142,7 +142,7 @@ def make_les_diagnose_fn(
     ``None`` for a flat model, so passing it is always safe) rather than a separate
     file that could mismatch the run's topography.
     """
-    from legoesm.atmosphere.dynamics.column_les import process_column
+    from legoesm.atmosphere.dynamics.les.column_les import process_column
 
     def diagnose_fn(record: Any, model_ctx: Any) -> Any:
         u_edge = getattr(model_ctx, "u_edge", None)
@@ -202,7 +202,7 @@ def fast_validation_les_regime() -> Any:
     run through ``validate_regime_config`` so a future edit that violates the regime
     invariants (e.g. ``dz_sfc_m * nlev >= domain_top_m``) fails LOUD here, not deep in a run.
     """
-    from legoesm.atmosphere.dynamics.les_regime import (
+    from legoesm.atmosphere.dynamics.les.les_regime import (
         LESRegimeConfig,
         LESResolutionConfig,
         validate_regime_config,
@@ -230,7 +230,7 @@ class _RealismCapture:
         self.breakdowns: list[Any] = []
 
     def __call__(self, setup: Any) -> Any:
-        from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+        from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
             column_les_realism_breakdown,
         )
         final_state = self._run_les_fn(setup)
@@ -248,7 +248,7 @@ def realism_summary(breakdowns: Any):
     if not breakdowns:
         return None
     import jax.numpy as jnp
-    from legoesm.atmosphere.dynamics.column_les_diagnosis import (
+    from legoesm.atmosphere.dynamics.les.column_les_diagnosis import (
         LESRealismBreakdown,
         summarize_realism_breakdowns,
     )
@@ -1160,7 +1160,7 @@ def _build_run_setup(args):
     the OSSE adds the pseudo-truth.
     """
 
-    from legoesm.atmosphere.dynamics.column_les import run_forced_les
+    from legoesm.atmosphere.dynamics.les.column_les import run_forced_les
     from legoesm.driver.model_driver import ModelDriver
 
     base_cfg, grid, sigma = load_base_config_and_grid(args.config)
@@ -1913,18 +1913,20 @@ def _configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     cache key includes the HLO + jaxlib version + backend/platform, so a code change or a
     different node type MISSES (recompiles) rather than serving a stale / wrong-arch binary.
     MUST run before the first JAX compilation — the campaign calls it at the top of main(),
-    before any driver build. Returns the configured dir (or ``None`` when disabled)."""
-    if not cache_dir:
-        return None
-    import jax
+    before any driver build. Returns the configured dir (or ``None`` when disabled).
 
-    jax.config.update("jax_compilation_cache_dir", str(cache_dir))
-    jax.config.update(
-        "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
-    print(f"[campaign] JAX persistent compilation cache: {cache_dir} (caching compiles > "
-          f"{min_compile_secs:g}s) — amortizes the rrtmgp JIT across the self-requeue + "
-          "repeated launches.", flush=True)
-    return str(cache_dir)
+    Thin campaign-specific wrapper over the shared
+    :func:`legoesm.ml.training.configure_jax_compilation_cache` (the ONE
+    implementation of the caching policy + its HLO/jaxlib/backend-keyed safety);
+    this wrapper only adds the campaign's progress log line."""
+    from legoesm.ml.training import configure_jax_compilation_cache
+
+    configured = configure_jax_compilation_cache(cache_dir, min_compile_secs)
+    if configured is not None:
+        print(f"[campaign] JAX persistent compilation cache: {cache_dir} (caching compiles > "
+              f"{min_compile_secs:g}s) — amortizes the rrtmgp JIT across the self-requeue + "
+              "repeated launches.", flush=True)
+    return configured
 
 
 def _print_round_progress(round_idx: int, res: Any, total_rounds: int) -> None:
@@ -2279,7 +2281,7 @@ def _run_multi_main(args, base_cfg, grid, sigma, reference, build_base_driver,
     import json
 
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
 
     coefficients = tuple(c.strip() for c in args.coefficients.split(","))
     # promotion_key -> config field name (the coefficient name IS the field name).
@@ -2649,7 +2651,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     import json
 
     import numpy as np
-    from legoesm.atmosphere.dynamics.column_les import ColumnLESConfig
+    from legoesm.atmosphere.dynamics.les.column_les import ColumnLESConfig
     from legoesm.training.compare_reanalysis import column_state_from_carry
     from legoesm.training.era5_to_state import (
         TrainingERA5Config,

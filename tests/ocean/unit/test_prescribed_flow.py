@@ -256,10 +256,14 @@ def test_positional_construction_unshifted_by_tail_field():
         LateralViscosityConfig,
     )
     f = LatLonCGridOceanConfig._fields
-    # Tail append: the lever is the LAST field; the previous tail
-    # (tidal_forcing) sits directly before it.
+    # Tail append: the lever is the LAST field. Two opt-in fields now sit at
+    # the NamedTuple tail — main's ``backscatter`` (appended just before this
+    # lever during the wave-2 reintegration) directly precedes it, and
+    # ``tidal_forcing`` precedes that. All three are tail defaults, so no head
+    # positional slot is shifted (asserted below).
     assert f[-1] == "prescribed_flow"
-    assert f[-2] == "tidal_forcing"
+    assert f[-2] == "backscatter"
+    assert f[-3] == "tidal_forcing"
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:8] == ("g", "rho_0", "lateral_viscosity", "bottom_drag",
                      "K_h", "K_bih", "A_v", "K_v")

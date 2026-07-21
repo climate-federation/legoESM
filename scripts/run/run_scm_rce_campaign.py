@@ -70,8 +70,8 @@ from legoesm.atmosphere.physics.radiation.config import (
     RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.integration import sam_ocean_albedo
-from legoesm.atmosphere.scm import SingleColumnModel, apply_tendencies
-from legoesm.atmosphere.scm_forcing import (
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel, apply_tendencies
+from legoesm.atmosphere.forcing.scm.scm_forcing import (
     SCMForcing,
     add_tendencies,
     compute_forcing_tendencies,
@@ -1621,10 +1621,35 @@ def _active_subconfig(top_cfg: PhysicsConfig, category: str):
     return component, scheme, subcfg
 
 
+def _tunable_subconfig(subcfg):
+    """The object whose DIRECT NamedTuple fields carry the spec'd tunable params.
+
+    Flat for every scheme except full CLUBB, which nests its closure coefficients
+    in ``.params`` (a ``CLUBBParams``); the ``__param_spec__``/scheme_key live on
+    that nested tuple, so it — not the ``CLUBBConfig`` wrapper — is the override
+    target. ``None`` passes through."""
+    if subcfg is None:
+        return None
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    if isinstance(subcfg, CLUBBConfig):
+        return subcfg.params
+    return subcfg
+
+
+def _rewrap_tunable_subconfig(subcfg, tuned):
+    """Inverse of :func:`_tunable_subconfig`: fold a tuned tunable-object back
+    into the scheme sub-config that ``_set_active_subconfig`` writes."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    if isinstance(subcfg, CLUBBConfig):
+        return subcfg._replace(params=tuned)
+    return tuned
+
+
 def _scheme_key_for_subconfig(subcfg) -> str | None:
     if subcfg is None:
         return None
-    cls_name = type(subcfg).__name__
+    # Descend into CLUBB's nested .params so the spec'd CLUBBParams is found.
+    cls_name = type(_tunable_subconfig(subcfg)).__name__
     for meta in build_registry():
         if meta.config_class == cls_name:
             return meta.scheme_key
@@ -1750,7 +1775,10 @@ def tune_category_winner(
                 raise AssertionError(
                     f"{c.name}={value} escaped bounds [{lo}, {hi}]"
                 )
-        tuned_subcfg = apply_param_overrides(subcfg, field_values)
+        # Apply to the tunable object (CLUBB's nested .params, else subcfg) and
+        # re-wrap so _set_active_subconfig receives the full scheme sub-config.
+        tuned_tunable = apply_param_overrides(_tunable_subconfig(subcfg), field_values)
+        tuned_subcfg = _rewrap_tunable_subconfig(subcfg, tuned_tunable)
         trial_cfg = _set_active_subconfig(base_cfg, category, tuned_subcfg)
         trial_run = run_cached(
             cache,

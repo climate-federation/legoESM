@@ -38,10 +38,11 @@ from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
+from legoesm.atmosphere.dynamics.shared.tracer_positivity import clip_positive
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
@@ -406,6 +407,14 @@ def _make_hydrostatic_microphysics(
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
+            # Surface precip [kg/m^2/s, +into surface] the scheme already
+            # computes (MicrophysicsOutput.precipitation); carried on the
+            # tendency so the lean MPAS coupled loop can export it (the RK
+            # integrator ignores this diagnostic field, so it is inert to
+            # dynamics — byte-identical where unread).
+            precip=Field(
+                data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
+                name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
         )
 
     def reset_state():
@@ -505,8 +514,13 @@ def _make_nonhydrostatic_microphysics(
         # Map tracers -> HydrometeorState
         # [0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, [5]=q_g, [6]=N_c, [7]=N_r, [8]=N_i
         def _get_tracer(idx):
+            # Positivity clip on the READ (codex CRM-dycore review): a
+            # non-positivity-preserving advection (weno5) can leave q<0,
+            # which microphysics reads as a spurious source (negative q_v
+            # injects energy on condensation). Guard here so the physics
+            # never sees it, matching the name-keyed bridges above.
             if n_tracers > idx:
-                return tracers[..., idx].reshape(ncol, nlev)
+                return clip_positive(tracers[..., idx]).reshape(ncol, nlev)
             return jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         q_v_col = _get_tracer(0)
@@ -716,8 +730,11 @@ def _make_plane_microphysics(
         rho_col = rho_total.reshape(ncol, nlev)
 
         def _get_tracer(idx):
+            # Positivity clip on the READ (codex CRM-dycore review) — see
+            # the companion bridge above: microphysics must never read the
+            # q<0 a non-positivity-preserving advection (weno5) can leave.
             if n_tracers > idx:
-                return tracers[..., idx].reshape(ncol, nlev)
+                return clip_positive(tracers[..., idx]).reshape(ncol, nlev)
             return jnp.zeros((ncol, nlev), dtype=_sd)
 
         q_v_col = _get_tracer(0)
@@ -917,8 +934,12 @@ def _make_mpas_nh_microphysics(
         rho_col = rho_total
 
         def _get_tracer(idx):
+            # Positivity clip on the READ (codex CRM-dycore review): MPAS-NH
+            # tracer transport (centered edge averages + vertical advection)
+            # is not positivity-preserving either, so microphysics must never
+            # read a q<0 — matching the plane / NH / spectral bridges.
             if n_tracers > idx:
-                return tracers[..., idx]
+                return clip_positive(tracers[..., idx])
             return jnp.zeros((ncol, nlev), dtype=_sd)
 
         q_v_col = _get_tracer(0)

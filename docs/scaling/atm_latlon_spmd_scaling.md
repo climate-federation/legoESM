@@ -29,8 +29,13 @@ Modest, sub-linear: at this size the per-GPU work is small and the cross-band
 matches the prior Ginsburg 2-GPU practical-limit findings for the ocean / BCW
 campaigns — the lat-band atm SPMD is correct and positive-scaling, but the
 2-GPU PCIe fabric caps strong scaling. Larger per-device grids (more compute per
-halo byte) and >2 devices (multi-node `jax.distributed`, not yet wired) are the
-levers for better efficiency.
+halo byte) and >2 devices are the levers for better efficiency.
+
+> **Update:** the multi-node `jax.distributed` path IS wired now —
+> `bench_atm_latlon_spmd_scaling.py --multicontroller` (route-B, native NCCL
+> ppermute, no mpi4jax). Derecho/Levante job lanes exist; production-scale
+> numbers are the remaining measurement gap. See
+> `docs/performance/scaling/SCALING_STATUS_AUDIT.md`.
 
 ## CPU virtual devices (characterization, NOT speedup) — job 8561216
 

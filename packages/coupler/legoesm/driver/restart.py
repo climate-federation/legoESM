@@ -68,6 +68,11 @@ class RestartMetadata(NamedTuple):
     step: int
     day: float
     git_hash: str               # empty string if not in a git repo
+    # Storage dtype the digest was computed at (e.g. "float32").  Empty for
+    # legacy checkpoints written before this field existed; the validator then
+    # falls back to probing the active policy dtype and its fp32/fp64 sibling
+    # (a cross-precision restart re-hashes losslessly at the SAVED dtype).
+    storage_dtype: str = ""
 
 
 class ReproducibilityReport(NamedTuple):
@@ -731,6 +736,7 @@ def save_restart(
         step=step,
         day=day,
         git_hash=_get_git_hash(),
+        storage_dtype=np.dtype(_sd).name,
     )
 
     # 5. Write companion JSON
@@ -785,7 +791,7 @@ def load_restart(
     if path.is_file() and path.suffix == ".npz":
         with np.load(path) as d:
             if "spectral_layout" in d.files:
-                from legoesm.atmosphere.dynamics.spectral_pe import (
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
                     reconstruct_spectral_state_from_npz,
                 )
                 # strict (default): validate the coefficient shapes against the
@@ -904,20 +910,76 @@ def _validate_metadata(
             f"{metadata.nlev} but loaded state has nlev={loaded_nlev}."
         )
 
-    # State digest verification. Cast to storage_dtype to match save_restart.
+    # State digest verification (cross-precision aware).
     from legoesm.core.precision import get_policy
-    _sd = get_policy().storage
-    state_arrays = {
-        k: np.asarray(v, dtype=_sd)
-        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
-    }
-    current_digest = compute_state_digest(state_arrays)
-    if current_digest != metadata.state_digest:
-        raise ValueError(
-            "State digest mismatch: the loaded arrays do not match the "
-            "SHA-256 digest recorded at save time. The checkpoint may be "
-            "corrupted or was modified after saving."
-        )
+    raw_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    _verify_state_digest(raw_arrays, metadata, np.dtype(get_policy().storage))
+
+
+def _verify_state_digest(raw_arrays, metadata, active_dtype) -> None:
+    """Verify ``metadata.state_digest`` against ``raw_arrays``.
+
+    The digest was computed at SAVE time at the then-active storage dtype.
+    Loading under a different precision policy up-casts the arrays, so hashing
+    at the ACTIVE dtype spuriously failed every cross-precision restart (e.g.
+    an fp32-written checkpoint resumed under ``--precision fp64``).  Re-casting
+    the loaded arrays back to the SAVED dtype is lossless for an up-cast, so
+    the digest can still be verified exactly.
+
+    - ``metadata.storage_dtype`` recorded (new checkpoints): hash at that dtype.
+    - Legacy metadata (field empty): try the active dtype, then its
+      fp32/fp64 sibling; a sibling match is a verified cross-precision restart
+      (warn, accept).
+    - A LOSSY path (saved wider than loaded, e.g. fp64 checkpoint under fp32)
+      cannot be verified — the load itself discarded bits; warn, don't raise.
+    - No candidate matches at the saved/candidate dtypes: corruption -> raise.
+    """
+    def _digest_at(dt) -> str:
+        return compute_state_digest(
+            {k: np.asarray(v, dtype=dt) for k, v in raw_arrays.items()})
+
+    active_dtype = np.dtype(active_dtype)
+    if metadata.storage_dtype:
+        saved_dtype = np.dtype(metadata.storage_dtype)
+        if saved_dtype.itemsize > active_dtype.itemsize:
+            warnings.warn(
+                f"Cross-precision restart: checkpoint saved at "
+                f"{saved_dtype.name} but loaded under {active_dtype.name}; the "
+                "load discarded precision, so the state digest cannot be "
+                "verified.",
+                stacklevel=4,
+            )
+            return
+        if _digest_at(saved_dtype) == metadata.state_digest:
+            if saved_dtype != active_dtype:
+                warnings.warn(
+                    f"Cross-precision restart: digest verified at the saved "
+                    f"dtype {saved_dtype.name}; arrays were up-cast to "
+                    f"{active_dtype.name}.",
+                    stacklevel=4,
+                )
+            return
+    else:
+        # Legacy metadata: dtype unknown.  Probe the active dtype, then its
+        # fp32/fp64 sibling (the only storage dtypes the policy system uses).
+        if _digest_at(active_dtype) == metadata.state_digest:
+            return
+        sibling = np.dtype(
+            np.float64 if active_dtype == np.float32 else np.float32)
+        if sibling.itemsize <= active_dtype.itemsize and \
+                _digest_at(sibling) == metadata.state_digest:
+            warnings.warn(
+                f"Cross-precision restart (legacy metadata): digest verified "
+                f"at {sibling.name}; arrays were up-cast to "
+                f"{active_dtype.name}.",
+                stacklevel=4,
+            )
+            return
+    raise ValueError(
+        "State digest mismatch: the loaded arrays do not match the "
+        "SHA-256 digest recorded at save time. The checkpoint may be "
+        "corrupted or was modified after saving."
+    )
 
 
 # ---------------------------------------------------------------------------

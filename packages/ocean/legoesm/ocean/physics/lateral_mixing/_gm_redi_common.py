@@ -179,6 +179,159 @@ def dm95_taper_scalar(
 
 
 # ---------------------------------------------------------------------------
+# Hallberg (2013) mesoscale-eddy resolution function for kappa_GM
+# ---------------------------------------------------------------------------
+
+# |f| floor [s^-1] for the deformation-radius denominator ``L_d = c/|f|`` near
+# the equator.  1e-5 s^-1 is |f| at ~4 deg latitude, capping ``L_d`` at
+# ``c/1e-5 ~ 2e5 m`` (~200 km for c ~ 2 m/s) -- the equatorial first-baroclinic
+# deformation-radius scale (Chelton et al. 1998, JPO 28, 433) -- so the
+# resolution function stays physical (~coarse limit, f_res -> 1 on a coarse
+# grid) across the equator instead of collapsing to 0 as |f| -> 0.  This is a
+# PHYSICAL cap on the equatorial band width, deliberately far larger than the
+# 1e-10 denominator-safety floors (_TREGUIER_F_MIN / eke._DENOM_FLOOR) used
+# elsewhere in this stack -- a 1e-10 floor would let L_d blow up to ~2e13 m and
+# spuriously switch GM OFF (f_res -> 0) in a wide equatorial band.
+_RESFN_F_FLOOR_S = 1.0e-5
+
+
+def gm_resolution_function(
+    L_d: jnp.ndarray, dx: jnp.ndarray, gamma: float,
+) -> jnp.ndarray:
+    r"""Hallberg (2013) mesoscale-eddy resolution function.
+
+    .. math::
+
+        f_{res} = \frac{1}{1 + \left(L_d / (\gamma\,\Delta)\right)^2}
+
+    with ``L_d`` the first-baroclinic deformation radius [m], ``dx`` = Delta the
+    local grid spacing [m], and ``gamma`` (~2) the number of grid points per
+    deformation radius at which GM is half-suppressed.
+
+    Asymptotics (physically-correct sense; NOTE the MED-3 spec prose swapped the
+    coarse/fine word-labels -- this FORMULA and the 1deg / (1/12)deg test are the
+    authoritative statement):
+
+    - ``Delta >> L_d`` (COARSE grid, eddies unresolved): ``L_d/(gamma*Delta) ->
+      0`` so ``f_res -> 1`` (full GM).
+    - ``Delta << L_d`` (FINE / eddy-resolving grid): ``L_d/(gamma*Delta) ->
+      inf`` so ``f_res -> 0`` (GM off; the resolved eddies do the transport).
+
+    ``f_res`` is bounded in ``(0, 1]`` for any finite ``L_d >= 0``, ``dx > 0``,
+    ``gamma > 0`` — EXACTLY, in floating point.  The denominator
+    ``gamma*Delta`` is floored at ``EPS`` so a degenerate zero-area (land)
+    cell gives ``f_res -> 0+`` rather than a NaN, and the formula is
+    evaluated in the overflow-free form ``s = denom/hypot(denom, L_d)``,
+    ``f_res = s*s`` — mathematically identical to ``1/(1+ratio**2)`` but
+    with no intermediate ``ratio**2`` that can overflow (the naive form
+    returned exactly ``0.0`` for ``ratio > sqrt(float_max)``, and its VJP
+    hit ``0*inf = NaN`` once ``ratio`` itself overflowed; codex MED-3 r2).
+    ``s*s`` can still UNDERFLOW to ``0.0`` for astronomically large ratios,
+    so the result is clamped from below at the dtype's smallest positive
+    normal (``finfo.tiny``): the codomain is exactly ``[tiny, 1] ⊂ (0, 1]``
+    for every finite input.
+
+    Differentiability (codex MED-3 r2): smooth in ``L_d`` away from the
+    clamp; PIECEWISE-smooth in ``dx`` and ``gamma`` — the ``EPS`` floor and
+    the tiny-clamp are hard kinks at ``gamma*dx == EPS`` and ``f_res == tiny``
+    (measure-zero thresholds; the same clip/floor convention as the DM95
+    slope bounds and the Treguier ``clip``/``min`` chain).  Gradients are
+    FINITE for every finite input — including ``dx = 0``, ``L_d`` up to
+    ``float_max``, and at every kink (``hypot`` has bounded partials away
+    from the origin, and ``denom >= EPS`` keeps it off the origin) — but not
+    continuous across the thresholds.  NOT globally C^1; do not claim so.
+    """
+    denom = jnp.maximum(gamma * dx, EPS)
+    # Overflow-free evaluation of 1/(1 + (L_d/denom)^2); see docstring.
+    s = denom / jnp.hypot(denom, L_d)
+    f_res = jnp.asarray(s * s)
+    # Exact float lower bound (see docstring): s*s can underflow to 0.0;
+    # clamp at the dtype's smallest positive normal so the codomain is
+    # exactly [tiny, 1] ⊂ (0, 1] for every finite input.
+    return jnp.maximum(f_res, jnp.finfo(f_res.dtype).tiny)
+
+
+def gm_resolution_factor(
+    f_coriolis: jnp.ndarray,
+    dx: jnp.ndarray,
+    gamma: float,
+    c_bcl_ms: float,
+) -> jnp.ndarray:
+    """The Hallberg (2013) resolution factor ``f_res`` field itself.
+
+    ``f_res = gm_resolution_function(L_d, dx, gamma)`` with the fixed-``c``
+    deformation radius ``L_d = c_bcl_ms / max(|f|, _RESFN_F_FLOOR_S)`` — the
+    SINGLE definition shared by :func:`gm_resolution_scaled_kappa` (the
+    kappa_GM taper applied inside the GM/Redi tracer tendencies) and the
+    lat-lon model step's EKE-budget coupling (which must scale the GM-derived
+    eddy-energy production by the SAME factor the tracer flux sees; codex
+    MED-3 r2 closure-consistency fix).  Never re-derive this composition.
+
+    Piecewise-smooth in ``f_coriolis``: the equatorial floor
+    ``max(|f|, _RESFN_F_FLOOR_S)`` has kinks at ``|f| = _RESFN_F_FLOOR_S``
+    (the ``|f|=0`` kink of ``abs`` sits inside the floored region and is
+    flattened away); gradients are finite everywhere.
+    """
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), _RESFN_F_FLOOR_S)
+    L_d = c_bcl_ms / f_abs
+    return gm_resolution_function(L_d, dx, gamma)
+
+
+def gm_resolution_scaled_kappa(
+    kappa_GM,
+    f_coriolis: jnp.ndarray,
+    dx: jnp.ndarray,
+    gamma: float,
+    c_bcl_ms: float,
+):
+    """Scale the effective GM coefficient by the Hallberg (2013) resolution fn.
+
+    ``kappa_GM_eff = f_res * kappa_GM`` with ``f_res`` from
+    :func:`gm_resolution_function` and the first-baroclinic deformation radius
+
+        ``L_d = c_bcl_ms / max(|f|, _RESFN_F_FLOOR_S)``      [m]
+
+    a FIXED gravity-wave-speed bound (``c_bcl_ms`` [m/s]; Chelton et al. 1998
+    give ``c1 ~ 2 m/s`` in the open ocean).  A fixed ``c`` is used -- rather than
+    the flow-dependent ``int(N dz)/pi`` deformation radius the EKE / GEOMETRIC
+    closures already build via :func:`eke.eke_deformation_radius` -- so the taper
+    applies UNIFORMLY to every closure, INCLUDING the constant-kappa path, which
+    never computes ``int(N dz)``.  The equatorial |f| floor caps ``L_d`` (see
+    ``_RESFN_F_FLOOR_S``).
+
+    Applies to GM ONLY; the caller leaves the Redi isopycnal diffusivity
+    ``kappa_Redi`` unscaled -- NEMO ``ldf_eiv`` / MOM6 resolution-scaled
+    ``KhTh`` scale the eddy-transport (bolus) coefficient, not the
+    along-isopycnal tracer diffusion.  As ``f_res -> 0`` (eddy-resolving) the
+    GM/Redi tensor therefore reduces to pure Redi isopycnal diffusion.
+
+    ``kappa_GM`` may be a Python/JAX scalar, a horizontal field matching
+    ``f_coriolis`` / ``dx``, or a depth-resolved field with one extra trailing
+    (level) axis (the 3-D prognostic-EKE skew coefficient); ``f_res`` is
+    broadcast over that trailing axis.  Returns the same kind (scalar in ->
+    field out, since ``f_res`` is a field).
+
+    Differentiability: piecewise-smooth (kinks at the ``|f|`` floor, the
+    ``EPS`` denominator floor and the tiny-clamp — see
+    :func:`gm_resolution_factor` / :func:`gm_resolution_function`); gradients
+    are finite everywhere.
+    """
+    f_res = gm_resolution_factor(f_coriolis, dx, gamma, c_bcl_ms)
+    # Rank check via jnp.ndim, NOT ``isinstance(kappa_GM, jnp.ndarray)``:
+    # the isinstance test silently SKIPPED this reshape for NumPy arrays and
+    # for tracer types that don't register as jnp.ndarray, so a 3-D kappa
+    # under jit/grad (or from host code) hit ``(lat,lon,lev) * (lat,lon)``
+    # and failed to broadcast (codex MED-3 r2).  jnp.ndim is rank-static and
+    # works for Python scalars (0), NumPy arrays, JAX arrays and tracers.
+    extra_axes = jnp.ndim(kappa_GM) - jnp.ndim(f_res)
+    if extra_axes > 0:
+        # Depth-resolved kappa (..., nlev-1): broadcast f_res over the trailing
+        # (level) axes it lacks.
+        f_res = f_res.reshape(f_res.shape + (1,) * extra_axes)
+    return kappa_GM * f_res
+
+
+# ---------------------------------------------------------------------------
 # Vertical flux divergence with zero-flux BCs
 # ---------------------------------------------------------------------------
 

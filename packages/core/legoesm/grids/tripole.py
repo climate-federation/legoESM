@@ -536,6 +536,130 @@ def create_tripole_grid(
         lon=lon_1d,
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing
         dlat=0.0,
+        omega=float(omega),   # (#521) so grid.omega matches the f_T/f_u/f_v build
+    )
+
+
+def pad_tripole_grid_south(grid: LatLonCGridGeometry,
+                           n_pad: int) -> LatLonCGridGeometry:
+    """Prepend ``n_pad`` LAND rows to the SOUTH of a (tri)polar C-grid geometry.
+
+    The lat-band SPMD ocean step requires ``n_lat % n_devices == 0`` (one uniform
+    ``shard_map`` program per band).  A real mesh (eORCA025 ``n_lat=1207``) is not
+    divisible by an arbitrary device count, so the driver appends land rows.  They
+    go at the SOUTH because the bipolar fold is NORTH-relative
+    (``fold_j = n_lat-1``, ``cap_j`` measured down from the north): padding the
+    south leaves the fold seam at the (new) northernmost row and the bipolar cap
+    band physically unchanged — only its ROW INDEX shifts by ``+n_pad``.
+
+    Staggering (the C-grid convention in ``LatLonCGridGeometry``):
+      * T/u-row arrays lead with ``n_lat``  -> prepend ``n_pad`` rows.
+      * v/q-row arrays lead with ``n_lat+1`` -> prepend ``n_pad`` rows (the south
+        wall row ``[0]`` stays a wall; the new rows are further-south walls).
+      * the 1-D legacy ``lat``/``cos_lat``/``sin_lat`` (``n_lat``) -> prepend.
+
+    Added-row VALUES: the south rows are LAND (the driver pads ``land_mask=0`` /
+    ``H_bathy=0`` to match, so every operator masks them out), so their metric
+    values only need to be FINITE + positive + monotone in latitude.  The metric
+    lengths/areas/rotation copy the current southern EDGE row (positive, dynamics
+    never sees them through the wet mask); ``lat_T`` extends southward by the
+    southern row's meridional spacing (``dy_T / radius``) so latitude stays
+    strictly increasing northward (Coriolis ``f_T = 2Ω sin(lat)`` follows); the
+    rotation angles south of the cap are regular lat-lon (cos=1, sin=0) — and the
+    edge row already is, below ``cap_j``.
+
+    ``total_area`` is PRESERVED exactly (the area-weighted-mean denominator must
+    not pick up the spurious land padding — the same GLOBAL-``total_area``
+    invariant the band slicer keeps).  ``fold_j``/``cap_j`` shift ``+n_pad``;
+    ``perm_T``/``perm_v`` (lon permutations) and the vector signs are unchanged.
+
+    ``n_pad == 0`` returns the grid unchanged.  Requires an ACTIVE fold (the
+    regular lat-lon path does not need this — it is divisor-padded differently /
+    not at all); raises otherwise so a mis-wired caller fails loud.
+    """
+    if n_pad < 0:
+        raise ValueError(f"n_pad must be >= 0, got {n_pad}")
+    if n_pad == 0:
+        return grid
+    fold = grid.fold
+    if fold is None or not bool(fold.is_active):
+        raise ValueError(
+            "pad_tripole_grid_south requires an ACTIVE bipolar fold (the south "
+            "pad keeps the north fold at the new top row); got an inactive fold. "
+            "A regular lat-lon grid does not use this helper.")
+
+    n_lat = int(grid.n_lat)
+    n_lon = int(grid.n_lon)
+    dtype = grid.lat_T.dtype
+
+    def _prepend_rows(arr, rows):
+        return jnp.concatenate([rows.astype(arr.dtype), arr], axis=0)
+
+    def _edge_pad(arr):
+        """Prepend ``n_pad`` copies of the southern edge row ``arr[0]``."""
+        edge = jnp.broadcast_to(arr[0:1], (n_pad,) + arr.shape[1:])
+        return _prepend_rows(arr, edge)
+
+    # The n_pad new south rows are LAND (the driver pads land_mask=0 / H_bathy=0),
+    # so dynamics never sees them through the wet mask.  Two requirements: the
+    # ORIGINAL rows stay BIT-EXACT (so a padded run reproduces the unpadded one on
+    # the wet domain), and the latitude stays STRICTLY INCREASING northward (no
+    # zero/negative dlat at the seam).  => PREPEND the new rows (preserving the
+    # originals) and compute the new rows' latitude-derived fields FROM the new
+    # latitude; do NOT recompute the whole array (recomputing f_T=2Ω·sin(lat) or
+    # the 1-D lat off a rebuilt lat_T perturbs the originals off the build's
+    # values — f_T is O(1e-4), the bit-exactness break the pad test caught).
+    radius = float(grid.radius)
+    dlat_row = (jnp.asarray(grid.dy_T)[0] / radius).astype(dtype)   # (n_lon,) [rad]
+    south_offsets = (jnp.arange(n_pad, 0, -1, dtype=dtype)[:, None]
+                     * dlat_row[None, :])                           # (n_pad, n_lon)
+    lat_new = (grid.lat_T[0:1] - south_offsets).astype(dtype)       # monotone south
+    lat_T_pad = _prepend_rows(grid.lat_T, lat_new)
+    lon_T_pad = _edge_pad(grid.lon_T)                               # lon unchanged
+
+    # Coriolis on the NEW rows from their latitude; ORIGINAL f_T/f_u preserved.
+    f_T_new = (2.0 * constants.Omega * jnp.sin(lat_new)).astype(dtype)
+    f_T_pad = _prepend_rows(grid.f_T, f_T_new)
+    fu_inner_new = 0.5 * (jnp.roll(f_T_new, 1, axis=1) + f_T_new)   # 4-pt zonal avg
+    f_u_new = jnp.concatenate([fu_inner_new, fu_inner_new[:, 0:1]], axis=1)
+    f_u_pad = _prepend_rows(grid.f_u, f_u_new)
+    f_v_pad = _edge_pad(grid.f_v)              # v-row (n_lat+1 leading); wall, unused
+
+    # 1-D legacy fields: prepend the new rows' zonal-mean latitude (originals kept).
+    lat_new_1d = jnp.mean(lat_new, axis=1)                         # (n_pad,)
+    lat_1d_pad = jnp.concatenate([lat_new_1d, jnp.asarray(grid.lat, dtype)])
+    cos_lat_pad = jnp.concatenate(
+        [jnp.maximum(jnp.cos(lat_new_1d), 1e-10),
+         jnp.asarray(grid.cos_lat, dtype)])
+    sin_lat_pad = jnp.concatenate(
+        [jnp.sin(lat_new_1d), jnp.asarray(grid.sin_lat, dtype)])
+
+    return grid._replace(
+        n_lat=n_lat + n_pad,
+        lat_T=lat_T_pad,
+        lon_T=lon_T_pad,
+        dx_T=_edge_pad(grid.dx_T),
+        dy_T=_edge_pad(grid.dy_T),
+        area_T=_edge_pad(grid.area_T),
+        total_area=grid.total_area,            # PRESERVED (no spurious land area)
+        dx_u=_edge_pad(grid.dx_u),
+        dy_u=_edge_pad(grid.dy_u),
+        dx_v=_edge_pad(grid.dx_v),
+        dy_v=_edge_pad(grid.dy_v),
+        area_q=_edge_pad(grid.area_q),
+        f_T=f_T_pad,
+        f_u=f_u_pad,
+        f_v=f_v_pad,
+        cos_alpha_u=_edge_pad(grid.cos_alpha_u),
+        sin_alpha_u=_edge_pad(grid.sin_alpha_u),
+        cos_alpha_v=_edge_pad(grid.cos_alpha_v),
+        sin_alpha_v=_edge_pad(grid.sin_alpha_v),
+        fold=fold._replace(fold_j=int(fold.fold_j) + n_pad,
+                           cap_j=int(fold.cap_j) + n_pad),
+        cos_lat=cos_lat_pad,
+        sin_lat=sin_lat_pad,
+        lat=lat_1d_pad,
+        # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 
 

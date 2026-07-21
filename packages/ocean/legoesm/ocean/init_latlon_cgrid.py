@@ -233,8 +233,9 @@ def rest_state_latlon_cgrid_ocean(
     v_zeros = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=dtype)
     zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
-    # Face masks
-    u_mask, v_mask = compute_face_masks(land_mask)
+    # Face masks — consult ``grid.seam_wall_rows`` for a partial-periodic
+    # seam wall (NEMO DINO); None on ordinary grids → fully periodic.
+    u_mask, v_mask = compute_face_masks(land_mask, grid)
 
     # Initialize vertical velocity with zeros (will be computed during step)
     w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
@@ -326,92 +327,21 @@ def wind_driven_gyre_latlon_cgrid(
     )
 
 
-def regional_rest_state_latlon_cgrid(
-    grid: LatLonGrid,
-    wall_mask: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    H_max: float = 5500.0,
-    T_water_init_C: float = 20.0,
-    T_deep: float = 2.0,
-    S_uniform: float = 35.0,
-) -> LatLonCGridOceanState:
-    """Create a rest-state initial condition on a regional C-grid lat-lon grid.
-
-    Parameters
-    ----------
-    grid : LatLonGrid
-        Regional grid (includes 1-cell wall boundary).
-    wall_mask : jax.Array, shape (n_lat, n_lon)
-        1 = ocean interior, 0 = wall.
-    z_coord : OceanZStarCoordinate
-    H_max : float
-    T_water_init_C, T_deep : float
-    S_uniform : float
-
-    Returns
-    -------
-    LatLonCGridOceanState
-    """
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-    nlev = z_coord.n_levels
-    dtype = get_policy().storage
-
-    H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
-
-    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
-        z_coord.z_full_ref / _SCALE_DEPTH,
-    )
-    T_3d = jnp.broadcast_to(
-        T_profile[jnp.newaxis, jnp.newaxis, :], (n_lat, n_lon, nlev),
-    ).astype(dtype)
-
-    S_3d = jnp.full((n_lat, n_lon, nlev), S_uniform, dtype=dtype)
-
-    u_zeros = jnp.zeros((n_lat, n_lon + 1, nlev), dtype=dtype)
-    v_zeros = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=dtype)
-    zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
-
-    land_mask = wall_mask.astype(dtype)
-    u_mask, v_mask = compute_face_masks(land_mask)
-
-    # Initialize vertical velocity with zeros (will be computed during step)
-    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
-
-    dims_u = ("lat", "lon_u", "level")
-    dims_v = ("lat_v", "lon", "level")
-    dims_3d = ("lat", "lon", "level")
-    dims_2d = ("lat", "lon")
-    dims_u2d = ("lat", "lon_u")
-    dims_v2d = ("lat_v", "lon")
-
-    return LatLonCGridOceanState(
-        u=Field(data=u_zeros, name="u", dims=dims_u, units="m/s",
-                staggering="edge"),
-        v=Field(data=v_zeros, name="v", dims=dims_v, units="m/s",
-                staggering="edge"),
-        T=Field(data=T_3d, name="T", dims=dims_3d, units="degC"),
-        S=Field(data=S_3d, name="S", dims=dims_3d, units="PSU"),
-        eta=Field(data=zeros_2d, name="eta", dims=dims_2d, units="m"),
-        H_bathy=Field(data=H_bathy, name="H_bathy", dims=dims_2d, units="m"),
-        land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
-        u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
-        v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
-        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
-    )
-
-
 def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
+    seam_wall_rows: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
     Use this instead of ``state._replace(land_mask=...)`` to ensure
-    face masks stay consistent with the cell mask.
+    face masks stay consistent with the cell mask.  ``seam_wall_rows``
+    (optional, ``(n_lat,)``, 1 = walled) closes the periodic-seam u-face
+    on those rows for a partial-periodic geometry; ``None`` (default) =
+    fully periodic (byte-identical).
     """
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask)
+    u_mask, v_mask = compute_face_masks(new_land_mask, seam_wall_rows=seam_wall_rows)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),

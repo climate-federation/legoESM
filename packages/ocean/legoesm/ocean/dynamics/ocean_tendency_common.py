@@ -39,6 +39,7 @@ from typing import Callable, Optional, Tuple
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.eos import compute_hydrostatic_pressure
 from legoesm.ocean.freshwater import (
     virtual_salt_flux,
@@ -81,6 +82,8 @@ def iterate_eos_and_pressure_anomaly(
     allow_baroclinic_f32: bool = False,
     quadrature: str = "cell_integral",
     trapezoid_t_depth_1d: jnp.ndarray | None = None,
+    eos_depth: str = "insitu",
+    eos_geometric_depth_1d: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -149,6 +152,21 @@ def iterate_eos_and_pressure_anomaly(
         downstream gradient.  Used by the cubed-sphere C-D path; on
         lat-lon and MPAS the compact 2-cell stencils are well-behaved
         enough that the working precision is sufficient.
+    eos_depth : str, default ``"insitu"``
+        Depth the EOS pressure term sees during the density iteration.
+        ``"insitu"`` (default, BYTE-IDENTICAL): iterate ``rho <- EOS(T, S,
+        p_hydro(rho))`` so the EOS depth is the in-situ hydrostatic integral
+        (recovers ~(rho_bar/rho0)*gdept, a ~0.5% stretch vs geometric).
+        ``"geometric"``: feed ``p_eos = rho_0*g*gdept`` from
+        ``eos_geometric_depth_1d`` ONCE (no iteration — the depth no longer
+        depends on rho), so the EOS reconstructs geometric depth exactly.
+        Matches NEMO ``eos_insitu`` (uses geometric ``gdept`` directly).  The
+        *eos_fn* must be built with the SAME ``rho_0`` (``make_eos_fn(rho0=
+        rho_0)``) so the value cancels.  Only affects the density fed to the
+        EOS; the p' baroclinic anomaly (the PGF) is still the rho' integral.
+    eos_geometric_depth_1d : array or None
+        Geometric T-depth ladder (positive down, shape ``(nlev,)``; NEMO
+        ``gdept_1d``).  Required when ``eos_depth="geometric"``.
 
     Returns
     -------
@@ -160,8 +178,9 @@ def iterate_eos_and_pressure_anomaly(
         Baroclinic pressure anomaly (same shape as ``T``).  Returned in
         whatever precision was used for the cumulative sum.
     """
-    del mask  # currently unused (passed to fill_fn by the caller); kept
-              # in signature for clarity at call sites.
+    # ``mask`` is read only by the legacy dynamic depth-dependent reference
+    # branch below (``is_active_3d is None``); do NOT ``del`` it — deleting it
+    # raised UnboundLocalError whenever that branch was selected.
 
     T_filled = fill_fn(T)
     S_filled = fill_fn(S)
@@ -184,13 +203,33 @@ def iterate_eos_and_pressure_anomaly(
     eos_kw = ({"compute_dtype": jnp.float32}
               if (allow_baroclinic_f32 and _baroclinic_f32_enabled(T.dtype))
               else {})
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T), **eos_kw)
-    for _ in range(n_iter):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, dz_ref, J_ref, rho_0, g,
-            h_actual=h_actual,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
+    if eos_depth not in ("insitu", "geometric"):
+        raise ValueError(
+            f"Unknown eos_depth {eos_depth!r}; expected 'insitu' or 'geometric'")
+    if eos_depth == "geometric":
+        # NEMO eos_insitu: feed p = rho_0*g*gdept so the EOS depth term
+        # reconstructs the GEOMETRIC gdept exactly (no in-situ stretch).  The
+        # depth no longer depends on rho, so a single evaluation suffices.
+        if eos_geometric_depth_1d is None:
+            raise ValueError(
+                "eos_depth='geometric' requires eos_geometric_depth_1d "
+                "(the geometric gdept ladder)")
+        t_depth = jnp.asarray(eos_geometric_depth_1d, dtype=T.dtype)
+        # Use constants.g (NOT the passed config g): the EOS reconstructs depth as
+        # zh = p/(rho0*constants.g), so p_eos MUST use the same constants.g for the
+        # g to cancel and zh to equal gdept exactly (independent of the config g).
+        # This matches compute_ocean_rho's geometric path; using config.g here
+        # would leave a zh = gdept*(config.g/constants.g) stretch when they differ.
+        p_eos = (rho_0 * constants.g) * t_depth
+        rho = eos_fn(T_filled, S_filled, p_eos, **eos_kw)
+    else:
+        rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T), **eos_kw)
+        for _ in range(n_iter):
+            p_hydro = compute_hydrostatic_pressure(
+                rho, eta_ref, dz_ref, J_ref, rho_0, g,
+                h_actual=h_actual,
+            )
+            rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
 
     if rho_ref_z_static is not None:
         # STATIC reference profile (preferred): a frozen-at-init
@@ -656,7 +695,7 @@ def apply_sponge_tracer_relaxation(
 def apply_freshwater_virtual_salt_top(
     dS_dt: jnp.ndarray,
     freshwater,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_top: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,

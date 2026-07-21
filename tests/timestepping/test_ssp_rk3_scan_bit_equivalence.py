@@ -191,3 +191,40 @@ def test_jaxpr_smaller_than_inline():
         "its bite.  The expected ratio is ~3× smaller (the scan body "
         "is one stage, the inline has three stages unrolled)."
     )
+
+
+def test_scan_preserves_state_dtype_under_mixed_tendency():
+    """#835: a float32 state with a float64 tendency leaf must NOT break the
+    scan carry.
+
+    The hydrostatic lat-lon C-grid dycore emits a float64 ``p_s`` tendency
+    against float32 storage.  ``ssp_rk3_step_scan`` wraps the RK stages in
+    ``lax.scan``, which enforces carry-in == carry-out dtype; before the fix
+    ``beta * k_axpy`` upcast the stage to float64 and the scan refused to close:
+    ``carry[0].p_s has type float32[...] but the corresponding output carry
+    component has type float64[...]``.  The ``_comb`` stage now casts the
+    tendency leaf to the STATE leaf dtype, so every output leaf keeps its input
+    (storage) dtype and the scan closes.
+    """
+    rng = np.random.default_rng(7)
+    state = {
+        "u": jnp.asarray(rng.standard_normal((6, 8, 3)), dtype=jnp.float32),
+        "p_s": jnp.asarray(1.0e5 + rng.standard_normal((6, 8)), dtype=jnp.float32),
+    }
+
+    def _mixed_dtype_tendency(s):
+        # Emit a float64 p_s tendency (the #835 dycore behaviour) against the
+        # float32 state; the u tendency stays float32.
+        return {
+            "u": (1e-3 * s["u"]).astype(jnp.float32),
+            "p_s": 1e-4 * (s["p_s"].astype(jnp.float64) - 1.0e5),  # float64
+        }
+
+    # Must not raise — the scan carry-type equality is the #835 crash.
+    out = ssp_rk3_step_scan(state, _mixed_dtype_tendency, 100.0)
+    # Every output leaf keeps its INPUT (storage) dtype.
+    assert out["u"].dtype == jnp.float32
+    assert out["p_s"].dtype == jnp.float32, (
+        f"p_s dtype changed to {out['p_s'].dtype}: the float64 tendency leaked "
+        "into the float32 scan carry (#835)"
+    )

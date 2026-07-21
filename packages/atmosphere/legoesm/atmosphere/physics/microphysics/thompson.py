@@ -5,6 +5,50 @@ gamma distribution shape corrections for autoconversion/accretion.
 
 All operations use smooth (differentiable) approximations.
 
+Faithfulness to Thompson et al. (2008) / WRF ``module_mp_thompson.F`` (oracle)
+----------------------------------------------------------------------------
+FAITHFUL (forms matched to the Thompson-2008 / M2005-lineage algorithm):
+  * **Capacitance ice vapour-diffusion growth** (PRD), ``ice_growth_scheme=
+    "capacitance"`` (default): ``EPSI = (2π/CONS12^⅓)·ρ·DV·N_i^⅔·q_i_eff^⅓`` and
+    ``PRD = η·EPSI·(q_v−q_sat_i)/ABI`` with the published vapour-diffusivity fit
+    ``DV = 8.794e-5·T^1.81/p`` and psychrometric correction
+    ``ABI = 1 + (dq_sat_i/dT)·L_s/c_p`` (Thompson 2008, following Reisner 1998).
+    ``q_i_eff = max(clip(q_i, 0), q_i_min_growth)`` is the growth-floored ice.
+  * **PRCI depositional ice→snow autoconversion**: ``PRCI = (2π·D_cs²/3)·ρ·N0I·
+    exp(−LAMI·D_cs)·DV·(q_v−q_sat_i)₊/ABI``, ``LAMI=(CONS12·N_i/max(q_i_eff,1e-20))^⅓``,
+    ``N0I=N_i·LAMI``; number removal ``NPRCI = PRCI/m(D_cs)``, ``m(D_cs)=π·ρ_ci·
+    D_cs³/6`` (removes D_cs-sized crystals, not the mean mass).
+  * **Thompson-2008 snow** (``snow_scheme="thompson2008"``, in ``_thompson_snow.py``):
+    Field-2005 bimodal-PSD moments → mass-weighted, density-corrected fall speed
+    and ventilated vapour deposition (PRDS) with the oracle's T-ramped
+    capacitance ``C_sqrd=0.3 → C_cube=0.5`` (the former fixed 0.15 departure
+    closed 2026-07-17). Pinned in ``test_thompson_snow.py``.
+  * **Cooper (1986) ice nucleation**: target number ``N_i0·exp(a·max(T_freeze−T,
+    0))`` (exp-argument capped for fp overflow), min'd to ``N_i_nuc_max`` (SAM
+    500 /L) and divided by ρ to per-mass; ``N_i`` relaxes toward it, ``f_ice``-gated.
+  * **Gamma-distribution shape ratio** ``Γ(μ+4)/Γ(μ+1) = (μ+3)(μ+2)(μ+1)`` applied
+    to the autoconversion/accretion rates.
+DEPARTURES / SURROGATES (NOT Thompson closed forms; documented + labeled):
+  * **Warm rain is Seifert-Beheng (2001)** (``autoconversion_sb``/``accretion``/
+    ``self_collection_breakup``/``rain_evaporation`` from ``_warm_rain``, gamma-
+    corrected) — NOT Thompson's warm-rain (Berry-Reinhardt/KK2000) closure.
+  * **Riming, Bergeron, and melting are bulk first-order relaxations**
+    (``rate·q·window``), not the Thompson collection/melting integrals.
+  * **Graupel is a simplified extension**: ``graupel_frac = sigmoid(s·(riming−
+    threshold))`` times a fixed conversion fraction. Thompson-2008 **Part II has
+    NO graupel category** (graupel enters the later full WRF scheme); this is a
+    legoESM deep-convection extension.
+  * **Bulk power-law fall speeds** ``a·q^b`` (capped) for rain/ice/graupel; only
+    SNOW uses the faithful Thompson mass-weighted fall speed.
+  * The ``"heuristic"`` ice-growth (``dep_coeff·max(S_i,0)·q_i_eff·N_i^⅓·f_ice``)
+    and ``"bulk_qpower"`` snow are legacy surrogate fallbacks.
+  * All phase switches are sigmoids (``f_ice``/``melt_frac``/Bergeron window/
+    graupel), and every sink is donor-clamped / cap-limited (single-step
+    relaxation limits, ``V_t`` clips, Cooper-exp cap, ρ floor) for AD-safe
+    positivity — smooth departures from the hard Fortran branches.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_thompson_faithful.py``
+(scheme level) + ``tests/unit/test_thompson_snow.py`` (faithful snow helper).
+
 References
 ----------
 - Thompson, G., Field, P. R., Rasmussen, R. M., & Hall, W. D. (2008).
@@ -152,7 +196,7 @@ def thompson_microphysics(
     # Gamma distribution corrections
     gamma_c = _gamma_ratio(config.mu_c)
     gamma_r = _gamma_ratio(config.mu_r)
-    gamma_c_norm = gamma_c / _gamma_ratio(0.0)  # normalize to mu=0 baseline (=24)
+    gamma_c_norm = gamma_c / _gamma_ratio(0.0)  # normalize to mu=0 baseline (=6)
     gamma_r_norm = gamma_r / _gamma_ratio(0.0)
 
     # Autoconversion (gamma-corrected)
@@ -221,7 +265,8 @@ def thompson_microphysics(
         # FAITHFUL capacitance-based vapour-diffusion growth (replaces the
         # legacy ``dep_coeff·S_i·q_i·N_i^⅓`` heuristic):
         #   PRD = EPSI·(q_v−q_sat_i)/ABI,
-        #   EPSI = 2π·N_i·ρ·DV/LAMI = (2π/CONS12^⅓)·ρ·DV·N_i^⅔·q_i^⅓.
+        #   EPSI = 2π·N_i·ρ·DV/LAMI = (2π/CONS12^⅓)·ρ·DV·N_i^⅔·q_i_eff^⅓
+        #     (q_i_eff = max(clip(q_i,0), q_i_min_growth), the growth-floored ice).
         # ``EPSI ∝ N_i^⅔`` self-gates on ice presence (no f_ice gate needed,
         # so warm mixed-phase ice growth / WBF is not spuriously suppressed —
         # see morrison.py). Sublimation (q_v<q_sat_i) is donor-clamped to q_i.
@@ -277,7 +322,7 @@ def thompson_microphysics(
     # depositional growth carries the PSD ACROSS the snow-size threshold
     # D_cs becomes snow (Thompson 2008 §; M2005 PRCI lineage):
     #   PRCI = (2π·D_cs²/3)·ρ·N0I·exp(−LAMI·D_cs)·DV·(q_v−q_sat_i)₊/ABI,
-    #   LAMI = (CONS12·N_i/q_i)^⅓,  N0I = N_i·LAMI.
+    #   LAMI = (CONS12·N_i/max(q_i_eff, 1e-20))^⅓,  N0I = N_i·LAMI.
     # This is FAR stronger than the legacy ``agg_coeff·q_i`` relaxation in
     # supersaturated convective cores, so cloud ice drains into fast-falling
     # snow instead of accumulating and driving a latent-heating w-runaway

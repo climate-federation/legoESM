@@ -7,11 +7,15 @@ from typing import Callable
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
+    compute_ocean_rho_and_pressure as _compute_rho_and_pressure,
 )
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
-from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.config import (
+    VALID_VERTICAL_MIXING_SCHEMES,
+    VerticalMixingConfig,
+)
 from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
@@ -76,6 +80,16 @@ def make_vertical_mixing_physics(
             "requires implicit_vertical_mixing=True on the host model "
             "config."
         )
+    if (apply_diffusion
+            and getattr(config, "ddm", None) is not None
+            and config.ddm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.ddm.enabled=True is not consumed by the "
+            "EXPLICIT vertical-mixing composition.  Double-diffusive mixing "
+            "is applied inside compute_vertical_K_profiles (separate salt "
+            "diffusivity) and requires implicit_vertical_mixing=True on the "
+            "host model config."
+        )
 
     if scheme == "none":
         return make_none_physics_fn()
@@ -91,7 +105,13 @@ def make_vertical_mixing_physics(
     elif scheme == "catke":
         return _make_catke(config, apply_diffusion=apply_diffusion)
     else:
-        raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
+        # Same canonical source as the implicit K-profile dispatcher, so the
+        # explicit-composition factory and _vmix_K_profiles never drift apart on
+        # which schemes are selectable.
+        raise ValueError(
+            f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
+            f"{sorted(VALID_VERTICAL_MIXING_SCHEMES)}"
+        )
 
 
 def _make_constant(config: VerticalMixingConfig,
@@ -121,11 +141,20 @@ def _make_richardson(config: VerticalMixingConfig,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = _compute_rho(state, z_coord, J)
+        # The adiabatic PP81 N² trigger needs the cell-centre hydrostatic
+        # pressure; compute it (with rho) only when opted in so the default
+        # in-situ path stays bit-identical.  eos_fn is None here (this factory
+        # does not thread a recipe EOS) → Wright, matching the density path.
+        if cfg.n2_mode == "adiabatic":
+            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J)
+        else:
+            rho = _compute_rho(state, z_coord, J)
+            p_cell = None
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
+            p_cell=p_cell,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
                                 K_v=out.K_v if not apply_diffusion else None,
@@ -179,12 +208,23 @@ def _make_kpp(config: VerticalMixingConfig,
             # C-grid: u at lon+1, v at lat+1 faces → cell centers
             u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
             v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        # Under-ice velocity-scale attenuation (KPPConfig.eice; NEMO nn_eice) —
+        # same static-config gate as the implicit k_profiles path so the
+        # explicit pipeline honours eice instead of silently no-oping it
+        # (dispatch discipline).  eice=0 -> ice_frac=None -> bit-identical.
+        _kpp_eice = int(getattr(cfg, "eice", 0))
+        if _kpp_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+        _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
+                       if (_kpp_eice != 0 and surface_forcing is not None)
+                       else None)
         out = kpp_vertical_mixing(
             u_data, v_data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=apply_diffusion,
+            apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).

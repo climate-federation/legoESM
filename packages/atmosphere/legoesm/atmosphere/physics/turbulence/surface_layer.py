@@ -120,7 +120,8 @@ def compute_surface_fluxes(
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
-            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
+            thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
         )
         return tau_x, tau_y, shflx, lhflx, ustar
@@ -225,7 +226,8 @@ def _single_tile_flux(
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
-            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
+            thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
         )
 

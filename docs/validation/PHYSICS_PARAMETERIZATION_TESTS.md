@@ -231,7 +231,7 @@ Quoted at 2026-05-05 with all fixes applied:
 
 | Scheme | Source | Unit tests | Validation | Notes |
 |--------|--------|------------|------------|-------|
-| Stomata (Farquhar + Ball-Berry + Jarvis) | `land/carbon/stomata.py` | `tests/land/unit/test_stomata.py` | none | VPD response uses mixing-ratio form for q (MEDIUM ~1 % bias). |
+| Stomata (Farquhar + Ball-Berry + Jarvis) | `land/stomata.py` | `tests/land/unit/test_stomata.py` | none | VPD response uses mixing-ratio form for q (MEDIUM ~1 % bias). |
 | Carbon cycle (NPP + pools) | `land/carbon/carbon_cycle.py` | `tests/land/unit/test_carbon_cycle.py` | none | Wood/root turnover with `_effective_rate`. |
 | Stomata utils (PFT dispatch) | `land/stomata_utils.py` | `tests/unit/test_land_ice_stomata.py` | none | |
 

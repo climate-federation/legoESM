@@ -188,6 +188,39 @@ class TestThermodynamics:
         cape = compute_cape(T, T_parcel, p_full, p_half)
         assert jnp.allclose(cape, 0.0, atol=1e-10)
 
+    def test_cape_p_source_excludes_below_departure_buoyancy(self):
+        """An elevated-departure parcel contributes NO CAPE below its source
+        level (the parcel does not exist there).
+
+        Root cause of the tier-5 Bechtold quiescence regression: the PBL-MEAN
+        parcel, translated to surface pressure theta-preserving, is +6.3 K
+        warmer than the actual surface air of a STABLE boundary layer (theta
+        increases with height), and the resulting below-departure positive
+        area alone produced CAPE ~53-66 J/kg on a zero-CAPE column — defeating
+        the launch gate and heating the column by 886 W/m² (AMIP C24
+        bechtold+mcfarlane blowup at day 10). ``p_source`` restricts the
+        integral to levels at/above the departure level (textbook mean-layer
+        parcel convention). ``p_source = surface`` must be BYTE-IDENTICAL to
+        omitting it (all surface-parcel callers unchanged).
+        """
+        T, q_v, p_full, p_half = _make_stable_columns(ncol=2, nlev=10)
+        # Parcel buoyant ONLY in the two lowest (highest-pressure) levels —
+        # the artifact pattern: warm below the departure level, cold above.
+        T_parcel = T - 5.0
+        T_parcel = T_parcel.at[:, -2:].set(T[:, -2:] + 5.0)
+        p_src = p_full[:, -3]  # departure ABOVE the buoyant layers
+
+        cape_no_src = compute_cape(T, T_parcel, p_full, p_half)
+        assert jnp.all(cape_no_src > 0)  # artifact present without the mask
+
+        cape_src = compute_cape(T, T_parcel, p_full, p_half, p_source=p_src)
+        assert jnp.allclose(cape_src, 0.0, atol=1e-10)
+
+        # surface departure == legacy behaviour, bit-for-bit
+        cape_sfc = compute_cape(
+            T, T_parcel, p_full, p_half, p_source=p_full[:, -1])
+        assert jnp.array_equal(cape_sfc, cape_no_src)
+
     def test_parcel_profile_and_cape_depends_on_launch_humidity(self):
         """Shared parcel->CAPE helper must respond to boundary-layer humidity.
 
@@ -293,6 +326,54 @@ class TestSBM:
         assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
+
+    def test_never_net_moistens_a_column(self):
+        """Column-water conservation contract (#771): SBM must never ADD net
+        column water.
+
+        SBM relaxes q_v toward q_ref = RH_ref*q_sat. In a TRIGGERED column
+        that is net sub-saturated vs q_ref, the unfixed relaxation net-
+        MOISTENS the column while sbm.py rescales only the CONDENSATE to
+        col-net-drying — the applied vapour tendency then creates water
+        from nothing (+0.53 mm/day global in the 3-day C24 AMIP probe; the
+        CWV drift behind the C48 pilot's day-150 blowup). The drying_gate
+        zeroes the WHOLE adjustment in such columns:
+          (1) every column satisfies col ∫ dq_v dp/g <= 0;
+          (2) gated (would-be-moistening) columns have EXACTLY zero dT_dt
+              too (the dT/dq_v gate is shared, preserving the Newton
+              enthalpy closure — a heat-only residual would be a leak).
+        Non-vacuous: at least one column must be TRIGGERED yet gated, and
+        this test FAILS on the pre-#771-fix sbm.py (verified on main).
+        """
+        ncol, nlev = 4, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        # Dry the columns progressively: column 0 keeps the moist sounding
+        # (net-drying, exercises the gate=1 path); the driest columns stay
+        # conditionally unstable (trigger on) but are net sub-saturated vs
+        # q_ref -> the unfixed scheme would net-moisten them.
+        scale = jnp.array([1.0, 0.5, 0.3, 0.15])[:, None]
+        q_v = q_v * scale
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        col_dqv = jnp.sum(out.dq_v_dt * dp, axis=1) / constants.g
+
+        # (1) no column ever gains net water (tol ~ fp roundoff of the sum)
+        assert bool(jnp.all(col_dqv <= 1e-10))
+
+        # non-vacuity: some column is triggered yet fully gated (the unfixed
+        # scheme would have moistened it), and some column genuinely dries
+        gated = (out.convective_mask > 0) & jnp.all(out.dq_v_dt == 0.0, axis=1)
+        drying = col_dqv < -1e-12
+        assert bool(jnp.any(gated)), (
+            "fixture produced no triggered net-sub-saturated column — the "
+            "conservation contract was not exercised")
+        assert bool(jnp.any(drying))
+
+        # (2) gated columns carry NO heat tendency either (shared gate)
+        dT_gated = jnp.where(gated[:, None], out.dT_dt, 0.0)
+        assert bool(jnp.all(dT_gated == 0.0))
 
     def test_enthalpy_conservation(self):
         """Column enthalpy tendency should be approximately conserved.
@@ -641,7 +722,7 @@ class TestIntegration:
         """Hydrostatic convection tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -661,7 +742,7 @@ class TestIntegration:
         """Hydrostatic convection should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -678,7 +759,7 @@ class TestIntegration:
         """Convection should not produce wind or pressure tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -734,7 +815,17 @@ class TestIntegration:
         assert tendencies.dtracers_dt.data.shape == (6, n, n, nlev, 1)
 
     def test_nonhydrostatic_nonzero_heating(self):
-        """NH convection should produce nonzero theta tendencies."""
+        """NH convection should produce nonzero theta tendencies.
+
+        SBM only heats a convectively ACTIVE column: it relaxes T/q toward a
+        moist-adiabatic reference where CAPE exceeds ``cape_threshold``.  A dry
+        (q_v=0), unperturbed state sits at the dry-neutral ``theta_ref=300 K``
+        reference with CAPE well below threshold, so the trigger is exactly zero
+        and zero heating is PHYSICALLY CORRECT — a ``> 0`` assertion on it is
+        vacuous.  Seed a moist column (q_v ~18 g/kg at the surface, level index
+        -1 per SBM's z-up convention, tapering to ~0 aloft) so the moist adiabat
+        clears the reference and the scheme genuinely heats.
+        """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import (
             create_height_coordinate,
@@ -755,6 +846,13 @@ class TestIntegration:
         dims_2d = ("face", "x", "y")
         dims_tr = ("face", "x", "y", "level", "tracer")
 
+        # Water-vapour tracer: 0 at the model top (level 0) rising to ~18 g/kg at
+        # the surface (level -1).  Against the dry-neutral reference this gives
+        # CAPE > threshold, so the SBM trigger fires.
+        q_surface = 0.018
+        qv_profile = q_surface * jnp.linspace(0.0, 1.0, nlev)
+        qv = jnp.broadcast_to(qv_profile, (6, n, n, nlev))
+
         state = NonHydrostaticState(
             u=Field(data=jnp.zeros((6, n, n, nlev)), name="u", dims=dims_3d, units="m/s"),
             v=Field(data=jnp.zeros((6, n, n, nlev)), name="v", dims=dims_3d, units="m/s"),
@@ -762,7 +860,7 @@ class TestIntegration:
             theta_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="theta_prime", dims=dims_3d, units="K"),
             rho_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="rho_prime", dims=dims_3d, units="kg/m^3"),
             phis=Field(data=jnp.zeros((6, n, n)), name="phis", dims=dims_2d, units="m^2/s^2"),
-            tracers=Field(data=jnp.zeros((6, n, n, nlev, 1)), name="tracers", dims=dims_tr, units="kg/kg"),
+            tracers=Field(data=qv[..., None], name="tracers", dims=dims_tr, units="kg/kg"),
         )
 
         config = ConvectionConfig(scheme="sbm")
@@ -776,7 +874,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic convection physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -803,7 +901,7 @@ class TestIntegration:
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -822,7 +920,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -838,7 +936,7 @@ class TestIntegration:
         """scheme='kuo' should give different results from 'sbm'."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -859,7 +957,7 @@ class TestIntegration:
         """scheme='mass_flux' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -876,7 +974,7 @@ class TestIntegration:
         """scheme='edmf' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -893,7 +991,7 @@ class TestIntegration:
         """jax.grad should work through mass_flux integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -914,7 +1012,7 @@ class TestIntegration:
         """jax.grad should work through edmf integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -1390,11 +1488,18 @@ class TestEDMFPhysics:
         assert float(rms_both) > 1e-10
 
     def test_subsidence_dries_troposphere(self):
-        """Compensating subsidence should dry the mid-troposphere."""
+        """The ADVECTIVE compensating subsidence dries the mid-troposphere.
+
+        #824: EDMF now DEFAULTS to the conservative ``implicit_flux`` solve, whose
+        flux-form transport conserves column water and REDISTRIBUTES it (net
+        mid-trop tendency ~0) rather than leaving the advective form's local
+        drying — so this drying property is specific to the advective term, which
+        we select explicitly here to keep testing it."""
         T, q_v, p_full, p_half = _make_unstable_columns(ncol=4, nlev=20)
         config = ConvectiveEDMFConfig(
             a_u_init=0.1, cape_threshold=0.0,
             delta_0=0.0,  # isolate subsidence
+            subsidence_solve="advective",  # #824: default is now implicit_flux
         )
         ncol = T.shape[0]
         a_u = jnp.full(ncol, 0.1)

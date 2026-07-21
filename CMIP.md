@@ -344,6 +344,163 @@ and a low hfls (51 vs ~80).
    self-correct; check the ice-albedo feedback isn't latching.
 4. Multi-year / restart-chained run for full slab+soil equilibrium.
 
+## Full 3D dynamic ocean from realistic WOA IC (2026-06-24, in progress)
+Goal: run the coupled model with the prognostic 3D ocean
+(`--ocean dynamic --ocean-ic woa`, `LatLonCGridOceanModel` on the atm lat-lon
+grid, WOA18 T/S + WOA continents/bathy) instead of the slab/two_layer used for
+all the work above.
+
+**RUNS STABLY = the deliverable** (10d job 8554291): the OMIP cold-start recipe
+(`barotropic=implicit_cn`, `momentum=rk3`, `pgf=smc03`, partial cells +
+balanced init) is AUTO-applied; no blowup (max current 27→20 m/s settling),
+realistic SST [272–290 K].
+
+**But cold-COLLAPSED** (90d 8557907, KILLED): SST −0.5 K/day, R_TOA −27,
+CWV 17.6 (dry), drift −133 K/yr — a runaway, NOT a self-settling spin-up
+transient like the slab.
+
+**Root cause (fix shipped, commit a232a32ff): air-sea interface energy
+inconsistency.** The 3D-ocean `q_net` is built from `ocean_tile_response`
+(coupler), which called `compute_most_fluxes` WITHOUT the convective-gustiness
+`w*` that the atmosphere surface layer and the slab ocean already use. So the
+atmosphere evaporated with gustiness but the ocean-tile flux driving the
+3D-ocean heat budget did not → a calm warm WOA ocean barely evaporates
+(hfls ~45 vs ~120 W/m²) → dry atmosphere → the warm SST radiates LW the dry
+column can't trap → R_TOA −27 → cold collapse. Same mechanism the slab
+air-sea-decoupling fix solved; the 3D-ocean tile was simply missed.
+
+Fix (opt-in, byte-identical when off):
+- `CouplerConfig.gustiness_w_zi` (BL depth z_i for w*) + ocean_tile_response
+  passes it to `compute_most_fluxes`;
+- `run_coupled` threads `--gustiness-zi` onto the coupler tile (same value the
+  atm surface layer gets) → interface flux is energy-CONSISTENT.
+
+Validation: 15d A/B job 8558650 (vs prior 10d 8554291: R_TOA −27, CWV 17.6,
+drift −133) — expect higher CWV, less-negative R_TOA, arrested drift.
+
+**Gustiness alone CONFIRMED insufficient** (15d job 8558910): R_TOA −54,
+SST drift −92 K/yr, column-T 256.8→250.9 K monotonic, circulation dying. The
+standard complement — WOA surface T/S restoring — was implemented (commit
+b071ba359): canonical Haney kernel `ocean/forcing/surface_relaxation.py`
+(run_omip's `_apply_restoring` refactored onto it; no duplicate numerics),
+`CoupledConfig.ocean_restore_{sst,sss}_tau_days`, `_apply_ocean_restoring` in
+`_step_ocean` (opt-in, byte-identical off), `run_coupled
+--ocean-restore-{sst,sss}-tau-days`.
+
+**Restoring WORKS — measured win** (15d job 8559528, SST τ=15 d / SSS τ=60 d
+vs gustiness-only 8558910):
+
+| metric        | gustiness only | + restoring τ=15d |
+|---------------|----------------|-------------------|
+| SST drift     | −92 K/yr       | **−47 K/yr** (½)  |
+| R_TOA         | −54 W/m²       | **−24 W/m²** (2.3×)|
+| SST mean      | 279.0 K        | **281.4 K** (trop 290.6 ~WOA) |
+| column-T d15  | 250.9 K        | 252.1 K (+1.2)    |
+| CWV           | 15.87          | 15.87 (atm dry)   |
+
+Restoring directly anchors the ocean (drift halved, R_TOA energy-loss more
+than halved, SST realistic). NOT yet equilibrated: the atmosphere is still dry
+(CWV 15.87), so R_TOA stays −24 and SST still drifts at τ=15 d. The atm column
+responds slowly (a free coupled spin-up from a dry IC needs months).
+
+**Stronger restoring τ=5 d (30 d job 8560151) — COLD COLLAPSE SOLVED:**
+
+| config            | SST drift   | R_TOA   | SST mean        | col-T d30 |
+|-------------------|-------------|---------|-----------------|-----------|
+| gustiness only    | −92 K/yr    | −54     | 279.0           | collapse  |
+| + restore τ=15 d  | −47 K/yr    | −24     | 281.4           | —         |
+| **+ restore τ=5 d** | **+25 K/yr** | **−10** | **284.3 (trop 298)** | 252.6 (plateau) |
+
+SST drift flipped **negative → positive** (−92 → +25 K/yr): the collapse is
+arrested, mild warming toward equilibrium. R_TOA −54 → −10 (near balance). SST
+mean 284.3 K with a realistic tropical warm pool (298 K). Column-T plateaued
+(Day 20/25/30 = 252.6/252.4/252.6 K — equilibrated), circulation stable
+(max_v ~19). **The full 3D dynamic ocean from realistic WOA IC now runs stably
+AND realistically** (stable SST near climatology, energy near balance, no
+collapse) — the deliverable.
+
+Residual: CWV 14.9 (atm still dry) ⇒ R_TOA still −10. A longer run lets the warm
+restored SST + gustiness evaporation moisten the column (CWV→greenhouse→R_TOA→0).
+
+**Recommended realistic 3D-ocean coupled config:** `--ocean dynamic --ocean-ic
+woa --ocean-restore-sst-tau-days 5 --ocean-restore-sss-tau-days 30
+--surface-bulk-scheme coare3 --gustiness-zi 300 --q-c-diagnostic 3e-4
+--land-bulk-scheme most --convective-cloud --snow-albedo-feedback --preset
+slab_richards` (land MOST + Richards water-limited ET; ocean COARE air-sea).
+
+**Full-config 60 d validation (job 8561537) — STABLE + RECOVERING:** the
+complete config above. SST drift +19.2 K/yr (decelerating from the 30 d +25 ⇒
+approaching equilibrium), R_TOA −8.9, SST mean 285.4 K with a realistic tropical
+warm pool (299.8 K), column-T recovered +2.3 K from the Day-25 minimum
+(252.4 → 254.7 K, monotonic warming Days 25–60 as the warm restored SST +
+gustiness moisten the atm), circulation strengthening (max_v 18.9 → 20.8).
+**The full 3D-ocean coupled CMIP run from realistic WOA IC runs stably and
+equilibrates toward a realistic climate — cold collapse definitively solved.**
+Residual: CWV ~15 (atm still drier than Earth's ~25) ⇒ R_TOA still −8.9; the
+same slow-moistening residual the slab faced (slab took 180 d to reach R_TOA
+−0.72), so multi-month integration is the remaining lever, not a structural
+bug. Figure: `docs/scaling/cmip_3docean_full_60d.png`.
+
+**120 d continuation (job 8565679) — SST converges but R_TOA worsens (the
+restoring tradeoff):** SST drift +14.2 K/yr (decelerating 25→19→14 ⇒
+converging), SST mean 286.1 K (tropical warm pool 300.8 K), CWV 16.8 (rising
+from 15.1 — atm slowly moistening), column-T 257.6 K (+5.2 K from the Day-25
+min, still rising). BUT R_TOA −18.4 (WORSE than 60 d's −8.9).
+**Read = restoring-strength vs energy-balance tradeoff.** The τ=5 d SST
+restoring forces the surface warm; the column warms ⇒ OLR rises, but the dry
+atm (CWV 16.8 ≪ Earth's ~25) can't trap it ⇒ the planet leaks energy and the
+restoring flux does net work to hold the warm SST. Strong restoring buys
+SST-realism + stability; it PAYS an energy imbalance. NEXT LEVERS (the open
+question): (1) weaker restoring τ=15–30 d — lets SST cool slightly toward an
+energetically self-consistent state (cost: SST a bit below WOA); (2) attack the
+root **dry-atm bias** (CWV caps ≪ Earth across BOTH slab + 3D-ocean runs — the
+fundamental residual) via the moisture budget (evap vs precip efficiency).
+The deliverable (stable, realistic-SST, non-collapsing 3D-ocean coupled run from
+WOA IC) STANDS; full energy closure is the refinement.
+
+**Restoring-strength study CONCLUDED (τ=5d vs τ=15d, both 120d):**
+
+| metric        | τ=5 d (8565679) | τ=15 d (8566931) |
+|---------------|-----------------|------------------|
+| R_TOA         | −18.4           | **−13.6** (better) |
+| SST drift     | **14.2** K/yr   | 18.8 K/yr (more)  |
+| CWV           | **16.8→19.5**   | 11.3 (drier)      |
+| column-T d120 | **257.6**       | 253.0 (colder)    |
+| SST mean      | **286.1 (trop 300.8)** | 284.4 (trop 297.9) |
+| max_v         | **22.1**        | 17.6 (weaker)     |
+
+**τ=5 d is the recommended config.** Weaker restoring (τ=15 d) buys ~5 W/m²
+better R_TOA but pays a colder, drier, weaker-circulation climate that drifts
+MORE from WOA (18.8 vs 14.2 K/yr) — less realistic on every climate metric. The
+R_TOA −18 at τ=5 d is the accepted flux-correction cost of holding realistic
+SST. **The root residual shared by BOTH (and by the slab runs) is the DRY
+ATMOSPHERE** (CWV ≪ Earth's ~25) ⇒ weak greenhouse ⇒ R_TOA<0. That moisture
+deficit — not the restoring strength — is the fundamental next lever (moisture
+budget: evap/precip efficiency; or multi-month integration as the atm moistens,
+CWV already re-rising 16.7→19.5 over Days 60–120 at τ=5 d).
+
+## Per-tile surface-flux schemes (2026-06-24, commit 57979cdbf)
+User policy: **land = MOST, slab ocean = MOST, ocean air-sea = COARE 3.0**
+(COARE is itself a MOST algorithm; the split is generic-MOST for the simple
+surfaces vs ocean-specific Charnock+gustiness COARE for the air-sea flux).
+
+- **Ocean air-sea → COARE**: `--surface-bulk-scheme coare3` drives the atm
+  surface layer + the coupler ocean tile (`ocean_tile_response` →
+  `compute_most_fluxes(scheme="coare3")`, with the gustiness w* fix). Already
+  wired; audit confirmed.
+- **Land → MOST**: NEW `--land-bulk-scheme` (default `most`) wired onto
+  Land/MultiLayerLandConfig.bulk_scheme. Both land models already dispatch
+  `most` with `z0_init=config.z0_land` (land roughness, no ocean Charnock).
+- **Slab ocean → MOST**: added `most` to `SimpleOcean._ocean_turbulent_fluxes`
+  dispatch; NEW `--slab-bulk-scheme` (default `most`), decoupled from
+  `--surface-bulk-scheme`.
+- **Land dynamic water pools + dryness → ALREADY PRESENT** (audit, no code
+  change): slab bucket (β_soil, water-capped evap) + Richards multilayer
+  (θ_soil, β_root, extractable-water limit). `--preset slab_richards` uses the
+  Richards multilayer soil ⇒ water-limited ET (dry soil → reduced LH → sensible
+  warming). The recommended 3D-ocean coupled config uses `slab_richards`.
+- Config-level defaults stay `constant` (non-run_coupled callers byte-identical).
+
 ## Key files
 - `packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py`
   (`convective_cloud_fraction`, thin-cirrus condensate split) + `config.py`.

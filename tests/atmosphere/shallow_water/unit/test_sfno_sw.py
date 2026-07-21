@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 
 from legoesm.grids.gaussian import create_gaussian_grid
-from legoesm.atmosphere.dynamics.spectral_sw import (
+from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
     SpectralSWState,
     SpectralSWConfig,
     williamson_test2_spectral,
 )
-from legoesm.atmosphere.dynamics.sfno_sw import (
+from legoesm.atmosphere.dynamics.neural.sfno_sw import (
     SFNOShallowWaterModel,
     SFNOShallowWaterConfig,
 )

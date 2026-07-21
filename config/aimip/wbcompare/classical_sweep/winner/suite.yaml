@@ -1,0 +1,38 @@
+# Classical-combo sweep -- combo: winner
+#   convection=edmf turbulence=louis gwd=mcfarlane
+#   microphysics=sundqvist cloud=xu_randall radiation=rrtmgp
+#
+# Trains the run_aimip CLASSICAL variant with THIS combo's schemes. The schemes
+# live in the sibling variant_classical.yaml (merged LAST -> wins over
+# cfg_overrides); see ../README.md for the merge-order trap. run_aimip resolves
+# variant_classical.yaml from THIS file's parent dir (run_aimip.py L879-880).
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  aimip_n_epochs: 12
+  eval_years: [2020]
+  # Scheme selection (also set in variant_classical.yaml, which wins the merge;
+  # kept here so the combo is self-documenting even before the overlay merge).
+  aimip_convection: "edmf"
+  aimip_turbulence: "louis"
+  aimip_gwd: "mcfarlane"
+  aimip_microphysics: "sundqvist"
+  aimip_cloud: "xu_randall"
+  aimip_radiation: "rrtmgp"
+  loss:
+    # --- ACE2 loss (copied from config/aimip/wbcompare/suite.yaml) ---
+    residual_normalize: true
+    normalize_by_scale: false
+    multi_step_hours: [6, 12]
+    multi_step_weights: [1.0, 1.0]
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: "pressure"
+
+variants:
+  - classical
+
+output_dir: results/aimip_wbcompare/classical_sweep/winner

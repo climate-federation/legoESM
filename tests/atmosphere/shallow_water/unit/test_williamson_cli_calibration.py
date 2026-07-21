@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
     cdgrid_div_damp_cube,
     cdgrid_hyperdiff_cube,
@@ -59,6 +59,53 @@ class TestResolutionScaling:
             == pytest.approx(1.0 / 16.0)
         )
 
+    def test_hyperdiff_default_exponent_is_four(self):
+        # The scaling_exponent default must reproduce the ^4 law byte-for-byte.
+        for n in (24, 48, 96, 192):
+            assert cdgrid_hyperdiff_cube(n) == cdgrid_hyperdiff_cube(
+                n, scaling_exponent=4)
+
+    def test_hyperdiff_exponent_invariant_at_ref_n(self):
+        # #753: every exponent returns ref_coeff at n == ref_n, so opting into
+        # the ^2 modon law leaves the calibrated C48 run UNCHANGED.
+        for exp in (1, 2, 3, 4, 6):
+            assert cdgrid_hyperdiff_cube(48, scaling_exponent=exp) == (
+                pytest.approx(1.0e16))
+
+    def test_hyperdiff_exponent_two_scales_as_dx_squared(self):
+        # scaling_exponent=2 tracks the (ref/n)^2 div-damp law exactly.
+        assert (
+            cdgrid_hyperdiff_cube(24, scaling_exponent=2)
+            / cdgrid_hyperdiff_cube(48, scaling_exponent=2)
+            == pytest.approx(4.0)
+        )
+        assert (
+            cdgrid_hyperdiff_cube(96, scaling_exponent=2)
+            / cdgrid_hyperdiff_cube(48, scaling_exponent=2)
+            == pytest.approx(1.0 / 4.0)
+        )
+
+    def test_hyperdiff_exponent_two_gives_4x_at_c96(self):
+        # The #753 empirical finding: the modon wants ~4x the ^4 backstop at
+        # C96, and (96/48)^2 == 4 delivers exactly that (while C48 is unchanged
+        # by test_hyperdiff_exponent_invariant_at_ref_n).
+        assert cdgrid_hyperdiff_cube(96, scaling_exponent=2) == pytest.approx(
+            4.0 * cdgrid_hyperdiff_cube(96, scaling_exponent=4))
+        assert cdgrid_hyperdiff_cube(96, scaling_exponent=2) == pytest.approx(
+            2.5e15)
+
+    @pytest.mark.parametrize("bad_exp", [0, -1, -4])
+    def test_hyperdiff_rejects_nonpositive_exponent(self, bad_exp):
+        with pytest.raises(ValueError, match="positive integer"):
+            cdgrid_hyperdiff_cube(96, scaling_exponent=bad_exp)
+
+    @pytest.mark.parametrize("bad_exp", [2.5, 4.0, "2", True, False])
+    def test_hyperdiff_rejects_non_integer_exponent(self, bad_exp):
+        # A fractional/float/bool exponent must not silently give a fractional
+        # resolution law — the public helper's contract is a positive int.
+        with pytest.raises(ValueError, match="positive integer"):
+            cdgrid_hyperdiff_cube(96, scaling_exponent=bad_exp)
+
     def test_div_damp_anchor_at_c48(self):
         assert cdgrid_div_damp_cube(48) == pytest.approx(1.5e7)
 
@@ -67,6 +114,55 @@ class TestResolutionScaling:
             cdgrid_div_damp_cube(24) / cdgrid_div_damp_cube(48)
             == pytest.approx(4.0)
         )
+
+
+class TestModonHyperdiffEnvKnob:
+    """Runtime coverage of the #753 modon env-knob wiring in the matrix runner
+    (``_modon_hyperdiff_coeff``) — the AST parity guard only pins the source
+    text, so this exercises the actual env read + coefficient formula."""
+
+    def _coeff(self):
+        # Imported lazily: pulls the matrix-runner module (heavier than the
+        # atmosphere package alone).
+        from scripts.matrix.run_atmosphere_test_matrix import (
+            _modon_hyperdiff_coeff,
+        )
+        return _modon_hyperdiff_coeff
+
+    def test_unset_env_defaults_to_ref_n_squared_law(self, monkeypatch):
+        # #753 item 1: the modon default is now the (ref/n)^2 law (C96 erupts
+        # under ^4; ^2 is stable, validated 100 days at C36/C48/C96).  Unset env
+        # must reproduce ^2, and C48 stays exponent-invariant (no coarse-case
+        # regression), while C96 receives the 4x face-seam backstop.
+        monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", raising=False)
+        monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", raising=False)
+        coeff = self._coeff()
+        for n in (36, 48, 96, 192):
+            assert coeff(n) == cdgrid_hyperdiff_cube(n, scaling_exponent=2)
+        assert coeff(48) == cdgrid_hyperdiff_cube(48)  # C48 invariant vs ^4
+        assert coeff(96) == pytest.approx(4.0 * cdgrid_hyperdiff_cube(96))
+
+    def test_scaling_env_four_reproduces_pre753_law(self, monkeypatch):
+        # The ^4 law stays selectable (opt-out) and is byte-identical to the
+        # pre-#753 expression at every resolution.
+        monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", raising=False)
+        monkeypatch.setenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "4")
+        coeff = self._coeff()
+        for n in (36, 48, 96, 192):
+            assert coeff(n) == cdgrid_hyperdiff_cube(n)  # 1.0 * ^4 law
+
+    def test_scaling_env_two_gives_4x_at_c96(self, monkeypatch):
+        monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", raising=False)
+        monkeypatch.setenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "2")
+        coeff = self._coeff()
+        assert coeff(96) == pytest.approx(4.0 * cdgrid_hyperdiff_cube(96))
+        assert coeff(48) == pytest.approx(cdgrid_hyperdiff_cube(48))  # C48 unchanged
+
+    def test_factor_env_multiplies(self, monkeypatch):
+        monkeypatch.setenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "2.0")
+        monkeypatch.setenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "4")
+        coeff = self._coeff()
+        assert coeff(96) == pytest.approx(2.0 * cdgrid_hyperdiff_cube(96))
 
 
 class TestWilliamsonCliCalibration:
@@ -114,12 +210,12 @@ class TestCliUsesHelper:
         # and the helper symbol is reachable through the CLI's import
         # path. Guards against accidental removal of the import or a
         # rename without the test runner's awareness.
-        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid as m
+        import legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid as m
         assert hasattr(m, "williamson_cli_calibration")
         # The CLI's cmd_test imports `williamson_cli_calibration` from
         # this module; if the name disappears or moves, this assertion
         # is what fails first.
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             williamson_cli_calibration as imported,
         )
         assert imported is m.williamson_cli_calibration

@@ -44,7 +44,7 @@ class TestSpectralLevelShardEquivalence:
     def _run(self, *, devices: int, n_max: int = 21, n_steps: int = 5):
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
         )
         from legoesm.parallel.mesh import create_level_mesh, shard_pytree

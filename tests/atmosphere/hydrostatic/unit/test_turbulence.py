@@ -641,7 +641,7 @@ class TestIntegration:
         """Hydrostatic turbulence tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -662,7 +662,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero wind tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -689,7 +689,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -764,7 +764,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic turbulence physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -785,7 +785,7 @@ class TestIntegration:
         """Different schemes should produce different tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -833,7 +833,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -1118,21 +1118,26 @@ class TestYSU:
         )
 
     def test_entrainment_near_pbl_top(self):
-        """YSU with entrainment should differ from zero-entrainment."""
+        """YSU with entrainment should differ from zero-entrainment.
+
+        ``entrainment_ratio`` is the Hong06 prescribed entrainment-flux
+        ratio (w'th')_h = -e_ratio*(w'th')_0 (renamed from the old
+        ``entrainment_coeff`` Gaussian-K magnitude — a different quantity).
+        """
         ncol, nlev = 2, 20
         u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
         T_sfc = T[:, -1] + 15.0  # very warm surface for strong convective BL
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
 
         # With strong entrainment
-        config_ent = YSUConfig(entrainment_coeff=1.0)
+        config_ent = YSUConfig(entrainment_ratio=0.3)
         out_ent = ysu_turbulence(
             u, v, T, q_v, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_ent,
         )
 
         # Without entrainment
-        config_no_ent = YSUConfig(entrainment_coeff=0.0)
+        config_no_ent = YSUConfig(entrainment_ratio=0.0)
         out_no_ent = ysu_turbulence(
             u, v, T, q_v, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_no_ent,
@@ -1140,6 +1145,141 @@ class TestYSU:
 
         # Tendencies should differ when entrainment is active
         assert not jnp.allclose(out_ent.dT_dt, out_no_ent.dT_dt, atol=1e-12)
+
+    def test_entrainment_flux_matches_prescribed_ratio(self):
+        """The Hong06 entrainment closure pins the PBL-top heat flux to the
+        surface flux: at the inversion the ADDED entrainment diffusivity
+        satisfies -K_ent*(dtheta_v/dz) = -e_ratio*(w'th')_0*envelope,
+        INDEPENDENT of the gradient magnitude — the defining Hong06 ratio
+        closure the old Gaussian down-gradient K_ent = c*w**h blob did not
+        satisfy.
+
+        h_pbl and shflx are identical between the e_ratio=0.15 and e_ratio=0
+        runs (entrainment K enters after the PBL height and surface fluxes),
+        so the half-level Kh DIFFERENCE is exactly the entrainment K.  We
+        reconstruct half-level Kh from the full-level diagnostic via the
+        endpoint row (Kh_full[:, 0] == Kh_half[:, 0]) plus the interior
+        interpolation recursion.
+        """
+        import numpy as np
+
+        ncol, nlev = 1, 30
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        # Gentle uniform wind; strong surface heating -> convective BL.
+        u = jnp.zeros_like(u) + 3.0
+        v = jnp.zeros_like(v)
+        T_sfc = T[:, -1] + 12.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+
+        cfg0 = YSUConfig(entrainment_ratio=0.0)
+        cfg1 = YSUConfig(entrainment_ratio=0.15)
+        out0 = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=cfg0,
+        )
+        out1 = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=cfg1,
+        )
+        # PBL height and surface flux are entrainment-independent.
+        np.testing.assert_allclose(
+            np.asarray(out1.h_pbl), np.asarray(out0.h_pbl), rtol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(out1.shflx), np.asarray(out0.shflx), rtol=1e-12)
+
+        # Reconstruct the half-level Kh difference (== K_ent_h) from the
+        # full-level diagnostic: dK_full[:, 0] = dK_half[:, 0];
+        # interior dK_full[k] = 0.5*(dK_half[k-1] + dK_half[k]).
+        dK_full = np.asarray(out1.Kh - out0.Kh)  # (ncol, nlev)
+        nhalf = nlev - 1
+        dK_half = np.zeros((ncol, nhalf))
+        dK_half[:, 0] = dK_full[:, 0]
+        for k in range(1, nhalf):
+            dK_half[:, k] = 2.0 * dK_full[:, k] - dK_half[:, k - 1]
+
+        # Rebuild the module's own geometry to locate the inversion interface.
+        from legoesm.atmosphere.physics._shared import (
+            virtual_temperature, exner_function,
+        )
+        exner_pref = 1.0 / exner_function(p_full)
+        theta_v = np.asarray(virtual_temperature(T, q_v) * exner_pref)
+        z_half_inner = np.asarray(0.5 * (z_full[:, :-1] + z_full[:, 1:]))
+        dz_half = np.clip(
+            np.abs(np.asarray(z_full[:, :-1] - z_full[:, 1:])), 1.0, None)
+        dthdz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
+
+        h = float(np.asarray(out1.h_pbl)[0])
+        wth0 = float(np.asarray(out1.shflx)[0]) / (
+            float(np.asarray(rho)[0, -1]) * constants.c_pd
+        )
+        assert wth0 > 0.0, "test column must be unstable (upward surface flux)"
+
+        # Interface nearest the PBL top.
+        j = int(np.argmin(np.abs(z_half_inner[0] - h)))
+        width = float(cfg1.entrainment_width_frac) * h
+        env = float(np.exp(-((z_half_inner[0, j] - h) / max(width, 1.0)) ** 2))
+        # The fixture's theta_v increases with height, so the inversion
+        # gradient must be resolved (above the module's 1e-4 K/m floor) —
+        # this keeps the flux-matching assertion below non-vacuous.
+        assert dthdz[0, j] > 1.0e-4, "fixture must resolve the inversion"
+
+        # Implied entrainment heat flux at that interface (positive-up):
+        # F_ent = -K_ent*(dtheta_v/dz) == -e_ratio*(w'th')_0*envelope when
+        # the flux-matching branch is active and the stability cap does not
+        # bind (K_ent < cap by construction here: modest wth0, strong grad).
+        F_ent = -dK_half[0, j] * dthdz[0, j]
+        expected = -0.15 * wth0 * env
+        np.testing.assert_allclose(F_ent, expected, rtol=5e-2)
+        # The prescribed flux is DOWNWARD (negative) at the inversion and
+        # the added diffusivity is non-negative everywhere.
+        assert F_ent < 0.0
+        assert np.all(dK_half >= -1e-8)
+
+    def test_countergradient_consistent_with_excess_parcel(self):
+        """gamma_c must use the MIXED-LAYER velocity scale w_s0 (= w_s_sfc,
+        the same scale as the excess parcel theta_T), so gamma_c = theta_T/h
+        by construction (Troen-Mahrt 1986 / Hong06 define both through
+        w_s0).  Source-structural assertion (same pattern as
+        test_louis_constants_are_config_driven): the old code divided by the
+        pure convective w_star, which blows up gamma_c in windy
+        weakly-convective columns (u* >> w*).
+        """
+        from tests.legoesm_paths import legoesm_source_path
+        ysu_src = legoesm_source_path(
+            "src/legoesm/atmosphere/physics/turbulence/ysu.py"
+        )
+        ysu_text = ysu_src.read_text()
+        assert "counter_grad = excess_theta / h_pbl" in ysu_text, (
+            "YSU countergradient must be gamma_c = theta_T/h (the excess "
+            "parcel and gamma_c share the SAME mixed-layer velocity scale "
+            "w_s0 per Troen-Mahrt/Hong06); dividing by the pure convective "
+            "w_star overestimates gamma_c when u* >> w*."
+        )
+
+    def test_countergradient_bounded_in_windy_weakly_convective_column(self):
+        """Windy, weakly-convective column (u* >> w*): the nonlocal
+        countergradient must stay bounded (the old pure-w* denominator
+        inflated gamma_c by w_s0/w* ~ u*/w* >> 1 there).  Physical bound:
+        no level warms/cools faster than 100 K/day from boundary-layer
+        mixing in a barely-unstable, strongly-sheared column.
+        """
+        ncol, nlev = 2, 20
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        # Strong wind (large u*), tiny surface heating (tiny w*).
+        u = u + 10.0
+        T_sfc = T[:, -1] + 0.2   # barely unstable
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+
+        out = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=YSUConfig(),
+        )
+        assert bool(jnp.all(jnp.isfinite(out.dT_dt)))
+        max_dT_day = float(jnp.max(jnp.abs(out.dT_dt))) * 86400.0
+        assert max_dT_day < 100.0, (
+            f"windy weakly-convective column: |dT_dt| = {max_dT_day:.1f} "
+            "K/day — countergradient blow-up (w* denominator?)"
+        )
 
 
 # ===========================================================================

@@ -41,8 +41,21 @@ _LW_DIFFUSIVE_FACTOR = 1.66
 _EPSILON = 1e-6
 # Minimum longwave optical depth required for nonzero source.
 _MIN_TAU_FOR_LW_SRC = 1e-4
-# Minimum value of the k parameter used in the transmittance.
-_K_MIN = 1e-2
+# --- two-stream eigenvalue floor (RRTMGP mo_rte_solver_kernels) ---
+# Dtype-aware floor on the sqrt argument k^2 = (gamma1+gamma2)*(gamma1-gamma2)
+# in ``_k_fn``.  Canonical RRTMGP (sw_two_stream / lw_two_stream) floors this
+# argument at 1e-12 in double precision — a bare zero-guard that preserves the
+# k->0 conservative-scattering limit (ssa=1 gives gamma1 == gamma2 exactly),
+# where r_diff -> gamma2*tau/(1+gamma1*tau) and t_diff -> 1/(1+gamma1*tau).
+# A legacy outer floor of k >= 1e-2 was ~1e10x larger than upstream and biased
+# thick-cloud SW reflectance/transmittance by O((k_floor*tau)^2) (~1-5% at
+# tau=50).  The floor value balances that O((k*tau)^2) floor bias against the
+# O(eps_mach/(k*tau)) cancellation noise in 1 - exp(-2*k*tau):
+# (k*tau)_opt ~ eps_mach^(1/3), i.e. k >= 1e-6 (arg 1e-12) for float64 and
+# k >= 1e-3 (arg 1e-6) for float32.  The sqrt VJP stays bounded at
+# 1/(2*k_floor), so reverse-mode AD is safe at the floor.
+_K_SQUARED_MIN_F64 = 1e-12
+_K_SQUARED_MIN_F32 = 1e-6
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -120,8 +133,8 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   # AD-safe floor (restored from commit 59407953): ``maximum(x, 0.0)`` gives
   # ``sqrt(0)`` which has ``1/sqrt(0) = inf`` in the backward VJP; combined
   # with zero cotangents (e.g. from stop_gradient'd spinup carries) this
-  # produces ``0 * inf = NaN`` by mul.  Floor at ``_EPSILON`` (same
-  # convention as ``_k_fn``) so the VJP stays bounded at
+  # produces ``0 * inf = NaN`` by mul.  Floor at ``_EPSILON`` (the module
+  # sqrt-guard convention) so the VJP stays bounded at
   # ``1/(2*sqrt(_EPSILON)) = O(500)``.  Floor is physically negligible:
   # combined Planck source values are O(0.01-10) W/m²/sr, while
   # ``sqrt(_EPSILON) = 1e-3``.
@@ -136,9 +149,18 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
 
 
 def _k_fn(gamma1: Array, gamma2: Array) -> Array:
-  """Compute the k parameter used in the transmittance."""
-  k = jnp.sqrt(jnp.maximum((gamma1 + gamma2) * (gamma1 - gamma2), _EPSILON))
-  return jnp.maximum(k, _K_MIN)
+  """Compute the k parameter used in the transmittance.
+
+  The floor is dtype-aware (see ``_K_SQUARED_MIN_*``): tight enough to
+  preserve the conservative-scattering k->0 limit, large enough that the
+  sqrt VJP and the ``1 - exp(-2*k*tau)`` cancellation stay well conditioned.
+  """
+  k_sq_min = (
+      _K_SQUARED_MIN_F64
+      if jnp.result_type(gamma1, gamma2) == jnp.float64
+      else _K_SQUARED_MIN_F32
+  )
+  return jnp.sqrt(jnp.maximum((gamma1 + gamma2) * (gamma1 - gamma2), k_sq_min))
 
 
 def _rt_denominator_diffuse(gamma1: Array, gamma2: Array, tau: Array) -> Array:

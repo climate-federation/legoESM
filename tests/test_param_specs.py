@@ -88,18 +88,9 @@ _OPTIONAL_CLASS_KEYS = frozenset({"excluded"})
 PARAM_SPEC_TODO: frozenset[str] = frozenset(
     {
         # --- atmosphere ----------------------------------------------------
-        # PARALLEL-MERGE BACKLOG (2026-06-13): the concurrent CLUBB full-closure
-        # port landed CLUBBParams (~40 closure constants) on main via a separate
-        # PR that predates this param-spec gate. Classified here as migration
-        # backlog (author __param_spec__ + delete this entry in the CLUBB owner's
-        # follow-up); the field baseline below pins its current float fields so
-        # no NEW unspecced float can slip into it meanwhile.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
-        # Two-big-leaf canopy config landed via the land/stable merges
-        # (#742/#744) without a __param_spec__ — inherited-from-main gate
-        # red; classified for the land owner to author the spec (bounds/
-        # tiers for the canopy radiation + conductance parameters).
-        "packages/land/legoesm/land/canopy/config.py",
+        # (CLUBB graduated 2026-07-11: clubb.py now ships a complete
+        # __param_spec__ over CLUBBParams + CLUBBConfig — see clubb.py and
+        # param_collector.SPEC_MODULES.)
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }
@@ -334,6 +325,15 @@ def validate_param_spec(
 
 # --- discovery / partition -------------------------------------------------
 def _in_scope(rel: str) -> bool:
+    # `_future/` holds parked, non-production code (CLAUDE.md: NOT wired into any
+    # factory / __init__ / prod driver). Its scheme configs must never enter the
+    # production trainable registry (``param_collector.SPEC_MODULES`` / the
+    # ``build_trainable_params`` collector) — a scheme that no driver runs cannot
+    # be a live trainable. So `_future/` modules are OUT of the param-spec roster;
+    # wire the module into prod (moving it out of `_future/`) in the same PR that
+    # should make it a registered trainable scheme.
+    if "/_future/" in rel:
+        return False
     return any(rel.startswith(p) for p in _ROSTER_PREFIXES)
 
 

@@ -34,14 +34,11 @@ def rmse(
         Area-weighted RMSE.
     """
     sq_err = (pred - target) ** 2
-
+    w = weights[:, None]
     if mask is not None:
-        sq_err = sq_err * mask
-        w = weights[:, None] * mask
-    else:
-        w = weights[:, None] * jnp.ones(pred.shape[-1:])[None, :]
-
-    wmse = jnp.sum(sq_err * weights[:, None]) / jnp.sum(w)
+        w = w * mask
+    # numerator and denominator both broadcast over any leading dims of sq_err
+    wmse = jnp.sum(sq_err * w) / jnp.sum(w * jnp.ones_like(sq_err))
     return jnp.sqrt(wmse)
 
 
@@ -50,6 +47,7 @@ def acc(
     target: jnp.ndarray,
     climatology: jnp.ndarray,
     weights: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Anomaly Correlation Coefficient.
 
@@ -67,6 +65,9 @@ def acc(
         Climatological mean field.
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
+    mask : array, optional, shape (n_lat, n_lon)
+        Spatial mask in [0, 1]; masked-out cells are excluded from the ACC
+        (used for below-ground pressure-level cells).
 
     Returns
     -------
@@ -77,6 +78,8 @@ def acc(
     target_anom = target - climatology
 
     w = weights[:, None]
+    if mask is not None:
+        w = w * mask               # exclude below-ground / invalid cells from the ACC
     numerator = jnp.sum(w * pred_anom * target_anom)
     denom_pred = jnp.sum(w * pred_anom**2)
     denom_target = jnp.sum(w * target_anom**2)
@@ -89,6 +92,7 @@ def bias(
     pred: jnp.ndarray,
     target: jnp.ndarray,
     weights: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Area-weighted mean bias (pred - target).
 
@@ -100,6 +104,9 @@ def bias(
         Target field.
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
+    mask : array, optional, shape (n_lat, n_lon)
+        Spatial mask in [0, 1]; masked-out cells are excluded from the mean
+        (used for below-ground pressure-level cells).
 
     Returns
     -------
@@ -107,6 +114,10 @@ def bias(
         Area-weighted mean bias.
     """
     diff = pred - target
+    if mask is not None:
+        w = weights[:, None] * mask
+        # denominator broadcasts over any leading dims exactly like the numerator
+        return jnp.sum(w * diff) / jnp.sum(w * jnp.ones_like(diff))
     w = weights[:, None]
     return jnp.sum(w * diff) / jnp.sum(w * jnp.ones_like(diff))
 

@@ -26,6 +26,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
+@jax.custom_vjp
 def thomas_solve(
     a: jax.Array,
     b: jax.Array,
@@ -54,7 +55,39 @@ def thomas_solve(
     -----
     The leading dimensions ``...`` are batched over (column-parallel).
     The last dimension is the tridiagonal system size.
+
+    Differentiability: a ``custom_vjp`` supplies the *analytic* adjoint of the
+    linear solve (differentiate the solution, not the algorithm).  The reverse
+    mode of the raw Thomas recursion divides by ``denom**2`` per pivot, so a
+    pivot clamped to ``_TINY`` (a near-singular system — e.g. an implicit
+    soil-thermal matrix whose heat capacity collapses) makes the *forward*
+    finite but the *backward* overflow to NaN.  The adjoint here instead solves
+    the transposed tridiagonal system ``Aᵀ λ = x̄`` with the SAME stable forward
+    Thomas sweep, then forms the band/RHS cotangents from ``λ`` and ``x`` — no
+    ``1/denom**2`` term ever appears, and the forward values are bit-identical.
+
+    Limitations (by design, not bugs):
+      * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
+        clamps a (near-singular) pivot to ``_TINY`` it is a surrogate, not the
+        exact derivative of the clamped map — that is the whole point (the exact
+        derivative is the NaN we are avoiding), and on a well-conditioned system
+        it equals the raw element-wise autodiff to machine precision.
+      * Reverse-only: ``jax.jvp``/``jacfwd`` through ``thomas_solve`` now raise
+        (a ``custom_vjp`` defines no JVP).  No production/test path forward-diffs
+        this solver; the LAPACK ``thomas_solve_batched`` keeps both modes.
+      * Higher-order reverse mode recurses through this same rule (the bwd's
+        ``λ`` solve uses the wrapper), so grad-of-grad stays clamp-protected too.
     """
+    return _thomas_solve_impl(a, b, c, d)
+
+
+def _thomas_solve_impl(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Raw Thomas forward sweep (the primal computation; see ``thomas_solve``)."""
     n = b.shape[-1]
 
     # Promote a/b/c/d to a common working dtype before solving. Under x64 the
@@ -126,6 +159,44 @@ def thomas_solve(
     x = jax.lax.fori_loop(0, n - 1, backward_body, x)
 
     return jax.lax.convert_element_type(x, out_dtype)
+
+
+def _thomas_solve_fwd(a, b, c, d):
+    x = _thomas_solve_impl(a, b, c, d)
+    return x, (a, b, c, x)
+
+
+def _thomas_solve_bwd(res, x_bar):
+    """Adjoint of ``A x = d`` (A tridiagonal): d̄ = A⁻ᵀ x̄ =: λ, and the band
+    cotangents from ``x = A⁻¹ d`` ⇒ Ā = -λ xᵀ restricted to the three bands:
+    ā[k] = -λ[k] x[k-1], b̄[k] = -λ[k] x[k], c̄[k] = -λ[k] x[k+1]."""
+    a, b, c, x = res
+    work = jnp.result_type(a, b, c, x, x_bar)
+    aw = jnp.asarray(a, work); bw = jnp.asarray(b, work); cw = jnp.asarray(c, work)
+    xw = jnp.asarray(x, work); xbar = jnp.asarray(x_bar, work)
+
+    # Transposed system Aᵀ λ = x̄.  Aᵀ has sub-diag aT[k]=c[k-1], super-diag
+    # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep
+    # (custom_vjp wrapper -> stable higher-order too).
+    zc = jnp.zeros_like(cw[..., :1])
+    aT = jnp.concatenate([zc, cw[..., :-1]], axis=-1)
+    cT = jnp.concatenate([aw[..., 1:], jnp.zeros_like(aw[..., :1])], axis=-1)
+    lam = thomas_solve(aT, bw, cT, xbar)
+
+    x_km1 = jnp.concatenate([jnp.zeros_like(xw[..., :1]), xw[..., :-1]], axis=-1)
+    x_kp1 = jnp.concatenate([xw[..., 1:], jnp.zeros_like(xw[..., :1])], axis=-1)
+    a_bar = -lam * x_km1
+    b_bar = -lam * xw
+    c_bar = -lam * x_kp1
+    a_bar = a_bar.at[..., 0].set(0.0)    # a[..., 0] is unused (structurally 0)
+    c_bar = c_bar.at[..., -1].set(0.0)   # c[..., -1] is unused (structurally 0)
+    d_bar = lam
+
+    return (jnp.asarray(a_bar, a.dtype), jnp.asarray(b_bar, b.dtype),
+            jnp.asarray(c_bar, c.dtype), jnp.asarray(d_bar, x.dtype))
+
+
+thomas_solve.defvjp(_thomas_solve_fwd, _thomas_solve_bwd)
 
 
 def pcr_solve_batched(

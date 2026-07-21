@@ -26,7 +26,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragC
 def _make_state(n=8, nlev=10):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)

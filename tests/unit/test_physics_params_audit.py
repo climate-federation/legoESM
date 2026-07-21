@@ -197,21 +197,25 @@ class TestConvectionAudit:
 
     def test_bechtold_tiedtke_no_dead_precip_efficiency(self):
         """``precip_efficiency`` must never be an inert AIMIP sigmoid-training
-        knob.  Bechtold never declares it.  Tiedtke now exposes it as a working
-        CONFIG-ONLY feature (``tiedtke.py`` splits convective condensate into
-        rain when ``> 0``; default ``0.0`` = legacy no-split), so it is gated by
-        config, not sigmoid-trained from the off state."""
+        knob.  BOTH Tiedtke and Bechtold expose it as a working CONFIG-GATED
+        feature (the scheme splits convective condensate into rain when
+        ``> 0``): Tiedtke defaults ``0.0`` (legacy no-split), Bechtold defaults
+        ``0.7`` (ON — the #929 fix so microphysics can drain the polar-night
+        anvil instead of it loading the column to runaway).  It is gated by a
+        static config float (feature-gate exception), not sigmoid-trained from
+        the off state."""
         from legoesm.atmosphere.physics.convection.config import (
             BechtoldConfig, TiedtkeConfig)
-        assert not hasattr(BechtoldConfig(), "precip_efficiency")
-        # Tiedtke's precip_efficiency is a live, used config field (rain/cloud
-        # split) — default 0.0 preserves legacy behaviour.
+        # Both are live, used config fields (rain/cloud split): Bechtold ON by
+        # default (#929), Tiedtke OFF by default (legacy byte-identity).
+        assert BechtoldConfig().precip_efficiency == 0.7
         assert TiedtkeConfig().precip_efficiency == 0.0
         # Guard the AIMIP trainable set: precip_efficiency stays a config knob,
         # never a sigmoid-trained AIMIP parameter re-introduced from off.
         from legoesm.training.aimip_params import AIMIPClassicalParams
         names = set(AIMIPClassicalParams.from_defaults().as_dict())
         assert "tiedtke_precip_efficiency" not in names
+        assert "bechtold_precip_efficiency" not in names
 
 
 class TestAIMIPDefaultsInteriorization:
@@ -388,12 +392,15 @@ class TestTurbulenceAudit:
             HoltslagBovilleConfig()._replace(fakn=x), False), 7.2,
             "holtslag_boville.fakn")
 
-    def test_ysu_entrainment_coeff(self):
+    def test_ysu_entrainment_ratio(self):
+        # entrainment_coeff (Gaussian-K magnitude) was renamed/redefined to
+        # entrainment_ratio (Hong06 prescribed entrainment-flux ratio,
+        # (w'th_v')_h = -e_ratio*(w'th_v')_0); verify grad still flows.
         from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
         from legoesm.atmosphere.physics.turbulence.config import YSUConfig
         assert_grad_ok(lambda x: _turb_call(ysu_turbulence,
-            YSUConfig()._replace(entrainment_coeff=x), False), 0.2,
-            "ysu.entrainment_coeff")
+            YSUConfig()._replace(entrainment_ratio=x), False), 0.15,
+            "ysu.entrainment_ratio")
 
     def test_edmf_turbulence_Ck(self):
         from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence

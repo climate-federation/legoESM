@@ -20,8 +20,53 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
     compute_filter_weights,
+    compute_nemo_boxcar_centred_weights,
     maxvel_clip,
+    precision_aware_rel_tol,
 )
+
+
+# ---------------------------------------------------------------------------
+# compute_nemo_boxcar_centred_weights — MLF substep-scale window
+# ---------------------------------------------------------------------------
+
+class TestNemoBoxcarSubstepScale:
+    """The MLF _barotropic_substep_scale must NOT widen the boxcar window.
+
+    NEMO dynspg_ts CASE(2) with nn_e=23: jic=2*nn_e=46, boxcar half-width
+    = nn_e = 23, icycle (n_loop) = 68.  legoESM passes the SCALED count
+    (nn_e*scale = 46) so the substep length stays CFL-safe; the half-width
+    must stay the UNSCALED nn_e (n_substeps/scale), not the scaled 46.
+    """
+
+    def test_mlf_window_matches_nemo(self):
+        """scale=2, n=46 -> jic=46, half-width 23, n_loop=68, sum=1."""
+        w, w_tot, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            46, jnp.float64, substep_scale=2)
+        assert n_loop == 68                       # NEMO icycle = 2*nn_e
+        assert float(w_tot) == pytest.approx(1.0)
+        assert float(w.sum()) == pytest.approx(1.0)
+        # window: |jn - 46| < 23 -> jn in 24..68 (jn = index+1)
+        nz = jnp.nonzero(w > 0)[0]
+        assert int(nz.min()) == 24 - 1
+        assert int(nz.max()) == 68 - 1
+        assert int((w > 0).sum()) == 45           # 2*nn_e - 1
+
+    def test_scale1_is_prefix_behavior(self):
+        """scale=1 (every FE caller) keeps the wide ±n window, n_loop=2n-1."""
+        w1, t1, tr1, nl1 = compute_nemo_boxcar_centred_weights(46, jnp.float64)
+        w2, t2, tr2, nl2 = compute_nemo_boxcar_centred_weights(
+            46, jnp.float64, substep_scale=1)
+        assert nl1 == nl2 == 2 * 46 - 1           # byte-identical default
+        assert jnp.array_equal(w1, w2)
+        assert jnp.array_equal(tr1, tr2)
+
+    def test_bad_scale_raises(self):
+        """scale must be >=1 and divide n_substeps evenly."""
+        with pytest.raises(ValueError):
+            compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=4)
+        with pytest.raises(ValueError):
+            compute_nemo_boxcar_centred_weights(46, jnp.float64, substep_scale=0)
 
 
 # ---------------------------------------------------------------------------
@@ -385,3 +430,70 @@ class TestTransportWeightsContinuityConsistent:
             _, w_tot, w_tr = compute_filter_weights(1, jnp.float64, use_cosine=use_cosine)
             assert w_tr.shape == (1,)
             assert jnp.isclose(w_tr[0], 1.0, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# precision_aware_rel_tol
+# ---------------------------------------------------------------------------
+
+class TestPrecisionAwareRelTol:
+    """The PCG/CG relative-residual tolerance floor must pass f64 through
+    unchanged but raise an unreachable tolerance to a f32-reachable value."""
+
+    def test_f64_passthrough_default(self):
+        """In float64 the 1e-10 default is above the eps floor -> unchanged."""
+        out = precision_aware_rel_tol(1.0e-10, jnp.float64)
+        assert out.dtype == jnp.float64
+        # f64 floor = 1e3 * eps64 ~= 2.2e-13 < 1e-10, so the request passes.
+        assert float(out) == 1.0e-10
+
+    def test_f64_passthrough_tighter(self):
+        """A still-reasonable f64 tol (1e-12) also passes (above ~2.2e-13)."""
+        out = precision_aware_rel_tol(1.0e-12, jnp.float64)
+        assert float(out) == 1.0e-12
+
+    def test_f64_passthrough_below_eps_floor(self):
+        """f64 is a PURE pass-through: even a tol BELOW 1e3*eps64 (~2.2e-13),
+        e.g. a custom 1e-14, is returned unchanged — the f64 reference path is
+        byte-identical for ANY tolerance, not just the 1e-10 default (codex
+        MAJOR: the floor must never loosen an f64 tolerance)."""
+        out = precision_aware_rel_tol(1.0e-14, jnp.float64)
+        assert float(out) == 1.0e-14
+
+    def test_traced_tol_is_jax_safe(self):
+        """requested_tol may be a TRACED scalar (no float() on a tracer, no
+        host sync): the helper must trace cleanly under jax.jit."""
+        @jax.jit
+        def _floored(t):
+            return precision_aware_rel_tol(t, jnp.float32)
+        out = _floored(jnp.asarray(1.0e-10, dtype=jnp.float32))
+        floor = 1.0e3 * float(jnp.finfo(jnp.float32).eps)
+        assert float(out) == pytest.approx(floor, rel=1e-5)
+
+    def test_f32_floors_unreachable_tol(self):
+        """In float32 the 1e-10 default is BELOW the eps floor -> raised."""
+        out = precision_aware_rel_tol(1.0e-10, jnp.float32)
+        assert out.dtype == jnp.float32
+        floor = 1.0e3 * float(jnp.finfo(jnp.float32).eps)  # ~1.19e-4
+        assert float(out) == pytest.approx(floor, rel=1e-5)
+        # f32 machine eps ~1.19e-7; the floor must be ABOVE it (reachable)
+        # and the original 1e-10 must have been BELOW it (unreachable).
+        assert float(out) > float(jnp.finfo(jnp.float32).eps)
+        assert 1.0e-10 < float(jnp.finfo(jnp.float32).eps)
+
+    def test_f32_keeps_loose_tol(self):
+        """A loose f32 tol already above the floor passes through unchanged."""
+        out = precision_aware_rel_tol(1.0e-3, jnp.float32)
+        assert float(out) == pytest.approx(1.0e-3, rel=1e-6)
+
+    def test_f32_floor_is_dtype_eps_scaled(self):
+        """The f32 floor scales with f32's own machine epsilon (no magic
+        absolute literal). f64 is pure pass-through, so a 0.0 request floors
+        only in f32 (f64 returns 0.0 unchanged)."""
+        f32 = precision_aware_rel_tol(0.0, jnp.float32)
+        f64 = precision_aware_rel_tol(0.0, jnp.float64)
+        assert float(f32) == pytest.approx(
+            1.0e3 * float(jnp.finfo(jnp.float32).eps), rel=1e-5)
+        # f64 is a pure pass-through: 0.0 stays 0.0 (never loosened/raised).
+        assert float(f64) == 0.0
+        assert float(f32) > float(f64)

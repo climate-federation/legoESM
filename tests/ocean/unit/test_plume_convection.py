@@ -209,12 +209,28 @@ def test_plume_conserves_column_heat_and_salt():
     )
 
 
+def _linear_eos(T, S, p):
+    """EOS matching the crude linear ``rho`` built in ``_build_state``.
+
+    ``_build_state`` supplies a pressure-independent ``rho = rho_ocean -
+    0.2*(T-4)``.  The plume module contract requires the ambient ``rho`` and
+    the ``eos_fn`` to be the SAME EOS (the trigger now displaces the surface
+    parcel to level-1 pressure via ``eos_fn``, and the in-plume buoyancy check
+    already did).  Passing this matching EOS keeps the stability comparison
+    self-consistent; the default ``wright_eos`` would disagree with the crude
+    linear ``rho`` at the trigger and spuriously fire.
+    """
+    return constants.rho_ocean - 0.2 * (T - 4.0)
+
+
 def test_plume_zero_when_stable():
     """Stably stratified column: plume should not be active."""
     T, S, rho, p, z, J = _build_state(surface_unstable=False)
     cfg = PlumeConfig()
 
-    out = plume_convection(T, S, rho, p, z, J, cfg)
+    # Consistent EOS (matches the crude linear ``rho`` above): the fixed
+    # same-pressure trigger correctly reads this column as stable.
+    out = plume_convection(T, S, rho, p, z, J, cfg, eos_fn=_linear_eos)
 
     # No surface instability → plume inactive everywhere.
     assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0

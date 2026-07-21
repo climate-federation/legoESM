@@ -10,7 +10,7 @@ of a full benchmark.
 Symbols verified:
 * ``legoesm.grids.latlon.create_latlon_grid``
 * ``tests.test_cases.baroclinic_wave.baroclinic_wave_init_latlon``
-* ``legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid.{
+* ``legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid.{
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
     hydrostatic_to_cgrid,
@@ -30,7 +30,7 @@ def test_bcw_latlon_init_and_one_step():
     """
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
         hydrostatic_to_cgrid,

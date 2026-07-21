@@ -22,7 +22,29 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
 )
 from legoesm.ocean.physics.vertical_mixing.kpp import _kpp_velocity_scales
 
+import pytest
+
 jax.config.update("jax_enable_x64", True)
+
+
+def test_kpp_vt2_prefactor_includes_neg_beta_t():
+    """LMD94 Eq. 23 unresolved-shear variance V_t^2 carries the (-beta_T)^1/2
+    factor explicitly (beta_T = -0.2, ``KPPConfig.neg_beta_T``).  The combined
+    prefactor Cv*(-beta_T)^1/2 / (Ri_c*kappa^2*sqrt(c_s*eps)) is the canonical
+    4.74 — NOT the 2.236x-too-large 10.6 that resulted when (-beta_T)^1/2 was
+    (wrongly) assumed folded into Cv.  (Physics review: ocean/kpp, 2026-06-29.)
+    """
+    cfg = KPPConfig()
+    assert cfg.neg_beta_T == 0.2  # = -beta_T (LMD94 App. B), fixed/excluded const
+    assert cfg.Cv == 1.6          # standalone LMD94 value (does NOT absorb sqrt(0.2))
+    sqrt_factor = cfg.neg_beta_T ** 0.5
+    prefactor = (
+        cfg.Cv * sqrt_factor
+        / (cfg.Ri_crit * cfg.kappa_vk ** 2 * (cfg.c_s * cfg.epsilon_lmd) ** 0.5)
+    )
+    assert prefactor == pytest.approx(4.74, abs=0.02)
+    # Regression guard: dropping the sqrt factor recovers the old buggy 10.6.
+    assert prefactor / sqrt_factor == pytest.approx(10.6, abs=0.1)
 
 
 def test_tke_defaults_match_old_literals():

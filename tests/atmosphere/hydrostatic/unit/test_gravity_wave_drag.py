@@ -525,14 +525,17 @@ class TestMLEmulator:
         assert float(jnp.max(jnp.abs(out.dv_dt))) < 1.0
 
     def test_eps_gwd_sign_convention(self):
-        """Audit cycle iter-26 P1: ml_gwd ``eps_gwd`` must use the
-        ``-(u·du + v·dv)`` form (matching every other GWD scheme),
-        not ``jnp.abs(u·du + v·dv)``.
+        """Audit cycle iter-26 P1: ml_gwd ``eps_gwd`` must use the SIGNED
+        ``-(u·du + v·dv)`` mean-flow-KE-removal form (the same diagnostic the
+        DISSIPATIVE GWD schemes use; prognostic_spectral instead reports a
+        positive wave-dissipation integral), not ``jnp.abs(u·du + v·dv)``.
 
-        This preserves the conservation tie-back
-        ``c_pd · ∫ ρ · dT_dt · dz = eps_gwd`` so that an untrained
-        model that adds (rather than removes) KE shows up as a
-        NEGATIVE eps_gwd diagnostic.
+        The signed form makes an untrained model that ADDS (rather than
+        removes) mean-flow KE show up as a NEGATIVE eps_gwd diagnostic (the
+        ``jnp.abs`` form would mask it). NOTE eps_gwd is decoupled from the
+        SEPARATE unconstrained ``dT_dt`` network channel: there is NO enforced
+        KE->heat tie-back ``c_pd·∫ρ·dT_dt·dz = eps_gwd`` for this learned
+        emulator.
 
         Regression strategy: monkey-patch the model's du_dt and
         dv_dt outputs to be aligned with u and v (positive
@@ -586,7 +589,7 @@ class TestIntegration:
     def test_hydrostatic_shapes(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -650,7 +653,7 @@ class TestIntegration:
     def test_nonzero_momentum_drag(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -673,7 +676,7 @@ class TestIntegration:
     def test_grad_through_hydrostatic(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -710,7 +713,7 @@ class TestIntegration:
     def test_none_scheme_zeros(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -728,7 +731,7 @@ class TestIntegration:
         """PhysicsConfig with GWD produces valid output."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.held_suarez import held_suarez_init
+        from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
         from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig

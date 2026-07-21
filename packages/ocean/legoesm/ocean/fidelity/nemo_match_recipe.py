@@ -178,11 +178,12 @@ class NEMOMatchTripoleRecipeConfig:
 
     # freshwater
     freshwater_closure: str = "virtual_salt_flux"
-    # OMIP global freshwater normalization: remove the area-mean of the
-    # physical P-E+R+ice flux so global salt is conserved under the CORE-II
-    # net-imbalanced forcing (matches the MPAS card + run_omip.py's lat-lon
-    # bathy branch; previously not exposed here, so tripole silently kept the
-    # LatLonCGridOceanConfig default False).
+    # OMIP global freshwater correction (NEMO-faithful): remove the area-mean
+    # of the net freshwater flux from the virtual-salt closure so surface
+    # freshwater conserves GLOBAL SALT.  _create_setup("tripole") sets this
+    # True (run_omip.py); the recipe omitting it silently fell back to the
+    # LatLonCGridOceanConfig default False (codex) — a real drift from the
+    # proven configuration.
     normalize_freshwater: bool = True
 
     # GM/Redi (mesoscale eddy parameterization)

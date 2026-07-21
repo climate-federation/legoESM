@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les_vertical_mapping`.
+"""Unit tests for :mod:`legoesm.atmosphere.dynamics.les.les_vertical_mapping`.
 
 Stage-5 vertical mapping: GCM-column→LES-grid interpolation + Newtonian
 top-relaxation.  Analytic interp checks (node recovery, linear midpoint,
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics.les_vertical_mapping import (
+from legoesm.atmosphere.dynamics.les.les_vertical_mapping import (
     build_top_relaxation,
     interpolate_column_to_les,
     relaxation_tendency,

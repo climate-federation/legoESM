@@ -1,0 +1,83 @@
+# WeatherBench scale-training config — 0.7 deg lat-lon, data-parallel (Derecho/Levante).
+#
+# Competitive (NeuralGCM) tier: 0.7 deg (~256 x 512) fits on one A100-80GB, so the
+# scaling axis is DATA-PARALLEL (replicate the model per rank, shard the ERA5 batch,
+# average gradients across ranks via mpi4jax global_sum_mpi). Multi-step FORECAST
+# loss (RMSE + grid-CRPS + bias; spectral-CRPS OFF -- it explodes the backward-pass
+# compile, per the T63 sweep lesson). Overridable on the CLI.
+
+# --- grid / dycore ---
+grid: "latlon"
+n_lat: 256
+n_lon: 512
+nlev: 32
+dt: 300.0                 # CFL-conservative for 0.7 deg; smoke-tune before scale
+resolution_deg: 0.7
+
+# --- ERA5 ---
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/wb_scale_era5"
+train_years: [2015, 2016, 2017, 2018, 2019]
+eval_years: [2020]        # the WB2 canonical test year
+era5_cadence_hours: 6
+# Optional: scatter training samples across the calendar instead of the first
+# n_training_days of January per train_year (#1047 finding 2 -- consecutive Jan
+# days are ~1 independent synoptic scene per 2-4 days, all winter). Each entry
+# is (year, day_offset, n_days). Uncomment for seasonal coverage; overrides
+# train_years/n_training_days when present. Example: one 2-day window per quarter
+# over 5 years (~40 pairs, all seasons) instead of ~60 autocorrelated Jan pairs.
+# train_windows:
+#   - [2015, 0,   2]   # Jan
+#   - [2015, 91,  2]   # Apr
+#   - [2015, 182, 2]   # Jul
+#   - [2015, 273, 2]   # Oct
+#   - [2016, 0,   2]
+#   # ... (repeat per year)
+
+# --- training ---
+mode: "neural_gcm"        # physics | neural_gcm | sfno  (CLI --mode wins)
+n_epochs: 40
+optimizer: "adamw"
+lr: 3.0e-4
+warmup_steps: 1000
+weight_decay: 1.0e-5
+grad_clip_norm: 1.0
+grad_accum: 1             # effective batch = n_ranks * grad_accum
+
+# --- multi-step forecast loss ---
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  # spectral CRPS OFF (backward-pass compile explosion at scale)
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
+  multi_step_hours: [6, 12]   # truncated-BPTT between segments (lat-lon adjoint)
+  multi_step_weights: [1.0, 1.0]
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+# --- per-mode overlays (merged when --mode selects them) ---
+neural_gcm:
+  nn_hidden: 256
+  nn_layers: 4
+sfno:
+  sfno_embed_dim: 256
+  sfno_n_blocks: 8

@@ -17,7 +17,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import make_gwd_ph
 def _make_state(n=8, nlev=10, wind_speed=10.0):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)
@@ -412,7 +412,7 @@ def _make_sheared_state(n=8, nlev=10):
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)
@@ -734,3 +734,208 @@ class TestBruntVaisalaShared:
             [Nh[:, :1], 0.5 * (Nh[:, :-1] + Nh[:, 1:]), Nh[:, -1:]], axis=1
         )
         assert jnp.array_equal(brunt_vaisala_n_full(T, p, z), ref)
+
+
+# ============================================================================
+# Combined orographic + non-orographic GWD (issue #834)
+# ============================================================================
+#
+# A ``+``-composite ``gravity_wave_drag`` (e.g. ``mcfarlane+prognostic_spectral``)
+# runs several sources and SUMS their du/dv/dT tendencies; the one stateful part
+# (prognostic_spectral) threads its wave-action spectrum through the carry.
+
+def _combined_cols(ncol=4, nlev=12):
+    """Deterministic stratospheric-ish columns: strong jet + stable N^2.
+
+    Returns u, v, T, p_full, p_half, z_full, z_half, rho, lat — the shared
+    GWD backend column signature.
+    """
+    from legoesm import constants
+    p_half = jnp.broadcast_to(
+        jnp.linspace(50.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T = jnp.broadcast_to(jnp.linspace(210.0, 290.0, nlev)[None, :], (ncol, nlev))
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    dz = jnp.abs(constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None)))
+    z_half_cumsum = jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1]
+    z_half = jnp.concatenate([z_half_cumsum, jnp.zeros((ncol, 1))], axis=1)
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    rho = p_full / (constants.R_d * T)
+    # Moderate, uniform westerly (~14 m/s): strong enough surface wind to launch
+    # orographic (McFarlane) stress that saturates aloft as rho decreases
+    # (breaking -> drag) AND to drive prognostic-spectral breaking.  Matches the
+    # activation regime of test_gravity_wave_drag._make_columns (uniform ~10 m/s
+    # is McFarlane-active); avoids a wind-increasing-upward profile that would
+    # let the orographic wave escape to the top without saturating.
+    u = jnp.full((ncol, nlev), 14.0)
+    v = jnp.full((ncol, nlev), 3.0)
+    lat = jnp.full((ncol,), 0.6)
+    return u, v, T, p_full, p_half, z_full, z_half, rho, lat
+
+
+def test_gwd_carries_spectrum_predicate():
+    """The shared predicate is True iff a prognostic_spectral part is present."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
+    assert gwd_carries_spectrum("prognostic_spectral") is True
+    assert gwd_carries_spectrum("mcfarlane+prognostic_spectral") is True
+    assert gwd_carries_spectrum("prognostic_spectral+hines") is True
+    assert gwd_carries_spectrum("mcfarlane") is False
+    assert gwd_carries_spectrum("hines+mcfarlane") is False
+    assert gwd_carries_spectrum("none") is False
+
+
+def test_get_gwd_fn_composite_dispatch_and_invalid_raises():
+    """get_gwd_fn routes a valid '+'-scheme to the combined executor (returning
+    the FULL config) and HARD-RAISES at the factory chokepoint on an invalid
+    composite — independent of ExperimentConfig.validate_strict (codex
+    adversarial finding 2: without this guard a non-composable part hits a
+    low-level TypeError and two spectral parts silently corrupt the carry)."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        get_gwd_fn, _combined_gwd,
+    )
+    name, fn, cfg = get_gwd_fn(
+        GravityWaveDragConfig(scheme="mcfarlane+prognostic_spectral"))
+    assert name == "mcfarlane+prognostic_spectral"
+    assert fn is _combined_gwd
+    # Full config returned (executor needs every part's sub-config).
+    assert isinstance(cfg, GravityWaveDragConfig)
+
+    # Unknown / non-composable parts raise at get_gwd_fn (before returning fn).
+    for bad in ("mcfarlane+nonsense", "mcfarlane+ml_emulator",
+                "mcfarlane+e3sm_cam"):
+        with pytest.raises(ValueError, match="[Nn]on-composable"):
+            get_gwd_fn(GravityWaveDragConfig(scheme=bad))
+    # More than one stateful source shares a single spectrum carry -> raise.
+    with pytest.raises(ValueError, match="at most one stateful"):
+        get_gwd_fn(
+            GravityWaveDragConfig(
+                scheme="prognostic_spectral+prognostic_spectral"))
+
+
+def test_combined_tendency_is_exact_sum():
+    """CORE (#834): the composite du/dv/dT/eps equals the arithmetic sum of the
+    individual McFarlane (orographic) and prognostic_spectral (non-orographic)
+    tendencies computed on the SAME column — no cross-talk, linear body forces."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        get_gwd_fn,
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
+    from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import (
+        prognostic_spectral_gwd,
+    )
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _combined_cols()
+    dt = 300.0
+    cfg = GravityWaveDragConfig(scheme="mcfarlane+prognostic_spectral")
+    ncol = u.shape[0]
+    sc = cfg.prognostic_spectral
+    # Seed the wave-action spectrum ABOVE launch_flux (0.01 Pa) so the
+    # prognostic source actually breaks and deposits momentum — matches the
+    # activation level of test_gravity_wave_drag.TestPrognosticSpectral.
+    # test_acceleration_magnitude_includes_g_factor (drag is ~0 at the 1e-3
+    # default seed on these idealized columns).
+    spec_in = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
+    # Large subgrid-orography stddev (800 m) so the McFarlane launch stress
+    # (tau_0 ~ h_topo^2) is big enough to saturate and break aloft — the drag
+    # is ~0 at the scalar-config h_topo on these smooth idealized columns.
+    # Passing it through combined_fn also exercises h_topo_col threading to the
+    # orographic part inside the composite executor.
+    h_topo = jnp.full((ncol,), 800.0)
+
+    oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                        cfg.mcfarlane, h_topo_col=h_topo)
+    spec_out, spec_new_ref = prognostic_spectral_gwd(
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+        cfg.prognostic_spectral, spec_in)
+
+    _, combined_fn, full_cfg = get_gwd_fn(cfg)
+    combined, spec_new = combined_fn(
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg,
+        spec_in, h_topo_col=h_topo)
+
+    assert jnp.allclose(combined.du_dt, oro.du_dt + spec_out.du_dt, atol=1e-12)
+    assert jnp.allclose(combined.dv_dt, oro.dv_dt + spec_out.dv_dt, atol=1e-12)
+    assert jnp.allclose(combined.dT_dt, oro.dT_dt + spec_out.dT_dt, atol=1e-12)
+    assert jnp.allclose(combined.eps_gwd, oro.eps_gwd + spec_out.eps_gwd, atol=1e-12)
+    # Both sources must actually be active (else the "sum" test is vacuous).
+    assert float(jnp.max(jnp.abs(oro.du_dt))) > 0.0
+    assert float(jnp.max(jnp.abs(spec_out.du_dt))) > 0.0
+    # Spectrum is advanced by the prognostic part and threaded out unchanged
+    # from the combined executor.
+    assert jnp.allclose(spec_new, spec_new_ref)
+
+
+def test_combined_threads_and_evolves_spectrum():
+    """The composite returns the advanced wave-action spectrum (shape preserved,
+    values changed from the launch seed) so the carry can be threaded."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        get_gwd_fn,
+    )
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _combined_cols()
+    cfg = GravityWaveDragConfig(scheme="mcfarlane+prognostic_spectral")
+    ncol = u.shape[0]
+    sc = cfg.prognostic_spectral
+    # Seed above launch_flux so the spectrum both breaks and relaxes -> evolves.
+    spec_in = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
+    _, combined_fn, full_cfg = get_gwd_fn(cfg)
+    _, spec_new = combined_fn(
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in)
+    assert spec_new.shape == spec_in.shape
+    assert not bool(jnp.allclose(spec_new, spec_in))
+
+
+def test_stateless_composite_sums_without_spectrum():
+    """A stateless composite (hines+mcfarlane) sums both sources and passes the
+    spectrum through unchanged (None in / None out)."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        get_gwd_fn,
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
+    from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _combined_cols()
+    dt = 300.0
+    cfg = GravityWaveDragConfig(scheme="hines+mcfarlane")
+    oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                        cfg.mcfarlane)
+    hin = hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                    cfg.hines)
+    _, combined_fn, full_cfg = get_gwd_fn(cfg)
+    combined, spec_out = combined_fn(
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None)
+    assert jnp.allclose(combined.du_dt, oro.du_dt + hin.du_dt, atol=1e-12)
+    assert jnp.allclose(combined.dT_dt, oro.dT_dt + hin.dT_dt, atol=1e-12)
+    assert spec_out is None  # no stateful part -> spectrum passthrough
+
+
+def test_combined_hydrostatic_factory_sums_and_threads_spectrum():
+    """Factory-level (#834): make_gwd_physics('hydrostatic', combined) returns
+    summed HydrostaticTendencies and the advanced spectrum when a phys_state
+    spectrum is supplied — the driver's stateful-carry contract."""
+    from types import SimpleNamespace
+    state, grid, sigma = _make_state(n=4, nlev=10, wind_speed=25.0)
+    ncol = 6 * 4 * 4
+    combined_cfg = GravityWaveDragConfig(scheme="mcfarlane+prognostic_spectral")
+    mcf_cfg = GravityWaveDragConfig(scheme="mcfarlane")
+    fn_comb = make_gwd_physics(combined_cfg, model_type="hydrostatic", dt=300.0)
+    fn_mcf = make_gwd_physics(mcf_cfg, model_type="hydrostatic", dt=300.0)
+    sc = combined_cfg.prognostic_spectral
+    # Seed above launch_flux so the prognostic source is active this step.
+    spec0 = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
+    phys = SimpleNamespace(gwd_spectrum=spec0)
+
+    tend_comb, spec_new = fn_comb(state, grid, sigma, phys_state=phys)
+    tend_mcf, _ = fn_mcf(state, grid, sigma)
+
+    # The non-orographic (spectral) source changes the momentum tendency vs
+    # McFarlane-only — the combined field is not the orographic field (drag
+    # can locally oppose, so magnitude ordering is not guaranteed pointwise;
+    # what must hold is that the field differs, i.e. the second source is wired
+    # in and summed).
+    assert not bool(jnp.allclose(tend_comb.du_dt.data, tend_mcf.du_dt.data))
+    # Spectrum threaded out, advanced from the seed.
+    assert spec_new is not None
+    assert spec_new.shape == spec0.shape
+    assert not bool(jnp.allclose(spec_new, spec0))
+    assert bool(jnp.all(jnp.isfinite(tend_comb.du_dt.data)))

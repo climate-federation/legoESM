@@ -1,0 +1,31 @@
+# ACE2-loss retrain suite (user request: "use the same loss as ACE2-ERA5").
+#
+# Replicates the ACE2 training loss in our spectral framework via
+# cfg_overrides (shallow-merged over aimip_era5.yaml, so the loss block is
+# REPLACED wholesale): RESIDUAL normalization (scale by std of the 6h field
+# change, not full-field std), 2-step autoregressive supervision, flat
+# per-variable weights, and PURE MSE (no bias/CRPS/spectral terms — those
+# default to 0 in LossConfig). T63 + RRTMGP kept (aimip_era5.yaml base).
+#
+# Classical uses the SWEEP-WINNER schemes (edmf convection + louis +
+# mcfarlane + sundqvist + xu_randall) via ace2/variant_classical.yaml;
+# column_nn / sfno_physics use their standard overlays.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  aimip_n_epochs: 12          # 2-step RRTMGP at T63 is ~2x single-step;
+                              # aimip_patience=3 early-stops at convergence.
+  # The ACE2 loss numbers live ONCE in config/wb/loss_presets/ace2.yaml
+  # (D5); this suite's previous inline loss block was byte-identical.
+  # loss: {} REPLACES the base aimip_era5.yaml loss block wholesale
+  # (cfg_overrides shallow-merge), so the preset alone defines the loss —
+  # same effective config as the previous inline block.
+  loss_preset: ace2
+  loss: {}
+
+variants:
+  - classical
+  - column_nn
+  - sfno_physics
+
+output_dir: results/aimip_ace2loss

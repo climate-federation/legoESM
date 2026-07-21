@@ -767,3 +767,26 @@ class TestSingleReducePCG:
 
         assert (LatLonCGridOceanConfig.from_flat().barotropic.barotropic_implicit_pcg_variant
                 == "standard")
+
+    def test_mpas_config_field_plumb(self):
+        """MPASOceanConfig MUST carry every distributed implicit-CN knob the
+        solver's distributed branch dereferences on ``config`` —
+        ``barotropic_implicit_pcg_variant`` was MISSING from the MPAS config
+        while barotropic_implicit_mpas.py read it, so the distributed branch
+        raised AttributeError (codex scaling-audit finding, 2026-06-12)."""
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        cfg = MPASOceanConfig()
+        # The exact attribute chain the distributed branch dereferences.
+        assert cfg.barotropic_implicit_pcg_variant == "standard"
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 60
+        assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
+        assert cfg.barotropic_implicit_pcg_tol == 1.0e-10
+        assert cfg.barotropic_implicit_pcg_maxiter == 200
+        # Default mirrors the lat-lon contract (same variant literal set,
+        # validated at solver entry by solve_helmholtz_implicit).  The lat-lon
+        # side is NESTED post-#501 (config.barotropic.*); MPAS stays flat.
+        assert (cfg.barotropic_implicit_pcg_variant
+                == LatLonCGridOceanConfig()
+                .barotropic.barotropic_implicit_pcg_variant)

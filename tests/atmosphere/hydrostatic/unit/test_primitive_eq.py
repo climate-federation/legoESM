@@ -19,7 +19,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     CDGridPrimitiveEquationModel as PrimitiveEquationModel,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
@@ -703,7 +703,7 @@ class TestTemperatureStability:
 
     def test_held_suarez_temperature_bounds(self, grid, sigma_20):
         """Held-Suarez forcing should keep T within bounds over 100 steps."""
-        from legoesm.atmosphere.held_suarez import (
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
             held_suarez_forcing,
             held_suarez_init,
         )
@@ -805,7 +805,7 @@ class TestHydrostaticToFV3VectorHalo:
         on the JW BCW IC must preserve cell-centre winds to within ~1
         m/s (vector-aware halo); the pre-fix scalar halo distorted u
         by ~20 m/s out of a 28 m/s field at C24."""
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
@@ -841,7 +841,7 @@ class TestHydrostaticToFV3VectorHalo:
         halo produced |div_v|_max = 5.3e-5 s^-1 (146× too high) and
         drove the BCW blow-up at day 0.35.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             hydrostatic_to_fv3,
         )
         from legoesm.core.operators_cdgrid import dgrid_to_cgrid, cgrid_divergence
@@ -872,7 +872,7 @@ class TestHydrostaticToFV3VectorHalo:
         right gate: catches a reversion (which gives 1000+ Pa) without
         false-positives on legitimate gravity-wave adjustment.
         """
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3, fv3_to_hydrostatic,
         )
@@ -901,3 +901,50 @@ class TestHydrostaticToFV3VectorHalo:
             f"Step-1 ps swing on JW IC: {max_swing:.1f} Pa — possible "
             f"reversion to scalar pad_halo (was ~1009 Pa pre-iter-199)"
         )
+
+
+class TestSpongeDefault1028:
+    """#1028: pin the cd-grid top-sponge default at the FV3 Ray_fast-like
+    days scale.
+
+    The old 1-hour default (tau=3600 s) was ~430-860x stronger than FV3's
+    Ray_fast and measured as the dominant global KE sink on a balanced jet
+    (-1.0/day, fp64 budget closed to 4e-16; 99% of all KE loss on an
+    eddying state) — it capped the Held-Suarez jet and drained any
+    ERA5-initialised/AMIP circulation.  A revert to seconds-scale tau
+    silently reintroduces the #1028 dead-jet drain; this pin makes that
+    loud.
+    """
+
+    def test_sponge_tau_default_is_days_scale(self):
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig)
+        cfg = CDGridPrimitiveEquationConfig()
+        assert cfg.sponge_tau_sec == 432000.0, (
+            f"cd-grid sponge_tau_sec default changed to "
+            f"{cfg.sponge_tau_sec!r}; the #1028 decision is 5 d "
+            f"(432000 s, FV3 Ray_fast-like). Re-litigate on the issue, "
+            f"not silently."
+        )
+        # Profile shape/extent unchanged: quadratic below sigma=0.15.
+        assert cfg.sponge_sigma == 0.15
+
+    def test_sponge_rate_at_top_levels_is_sub_1_per_day(self):
+        """With the 5-d tau, the peak per-level rate on a 20-level sigma
+        grid is ~0.12/day (was 14.2/day at tau=1 h) — weaker than the
+        Held-Suarez surface friction (1/day), as an upper sponge should
+        be."""
+        import numpy as np
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig)
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = CDGridPrimitiveEquationConfig()
+        sigma = create_sigma_coordinate(20)
+        frac = np.clip(
+            (cfg.sponge_sigma - np.asarray(sigma.sigma_full, dtype=float))
+            / cfg.sponge_sigma, 0.0, 1.0)
+        rate_per_day = frac ** 2 / cfg.sponge_tau_sec * 86400.0
+        assert 0.0 < rate_per_day.max() < 1.0, (
+            f"peak sponge rate {rate_per_day.max():.3f}/day — must be "
+            f"positive (sponge active) and below the HS boundary-layer "
+            f"friction scale (1/day)")

@@ -19,7 +19,9 @@ aimip_convection: "tiedtke"
 aimip_turbulence: "louis"
 aimip_gwd: "mcfarlane"
 aimip_cloud: "xu_randall"
-aimip_microphysics: "none"
+aimip_microphysics: "sundqvist"  # all 5 categories ON (no "none"): micro=off
+                                 # wrecks radiation (OLR rmse 34->80). Matches
+                                 # the stage1/ace2 sweep baseline.
 radiation: "gray"          # Base scheme tag (informational).  The actual
                            # radiation backend used by AIMIPClassicalParams
                            # is controlled by ``aimip_radiation`` in the

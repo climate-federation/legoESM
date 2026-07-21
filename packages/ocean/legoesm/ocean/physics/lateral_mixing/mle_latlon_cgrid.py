@@ -83,7 +83,7 @@ __physics_contract__ = {
         "unstable (N^2 < 0; nn_conv=1)."
     ),
     "inputs": {
-        "T": "degC", "S": "PSU", "rho_insitu": "kg/m^3", "N2": "1/s^2",
+        "T": "degC", "S": "PSU", "rho_pot": "kg/m^3 (surface-referenced potential density, NEMO rhop)", "N2": "1/s^2",
         "mask": "1", "u_mask": "1", "v_mask": "1", "jacobian": "1",
         "ce": "1", "lat_ref_deg": "deg", "rho_c_mle": "kg/m^3",
         "ref_depth_m": "m",
@@ -146,33 +146,10 @@ def _gdepw_w(dz_live: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([zero, jnp.cumsum(dz_live, axis=-1)], axis=-1)
 
 
-def _column_min_n2(N2: jnp.ndarray, wet3d: jnp.ndarray) -> jnp.ndarray:
-    """Column-min N^2 ``(n_lat, n_lon)`` for the convection gate (NEMO nn_conv=1).
-
-    ``N2`` lives at the ``nlev-1`` interior interfaces.  NEMO accumulates an
-    ML-mean ``zn2`` and zeros the streamfunction where a neighbour column's
-    ``zn2 < 0`` (a statically-unstable column ⇒ convection ⇒ no MLE).  We take
-    the MINIMUM interface N^2 over the wet interfaces of the column: if ANY wet
-    interface is statically unstable the column min is < 0 and MLE is gated off
-    there — a conservative (stricter) reading of NEMO's intent that needs no ML
-    depth to evaluate.  Dry interfaces are excluded by setting them to +inf so
-    they never dominate the min.
-    """
-    # Interface k (0..nlev-2) is wet iff both adjacent cells are wet.
-    iface_wet = (wet3d[:, :, :-1] > 0.5) & (wet3d[:, :, 1:] > 0.5)
-    big = jnp.full_like(N2, jnp.inf)
-    n2_wet = jnp.where(iface_wet, N2, big)
-    col_min = jnp.min(n2_wet, axis=-1)
-    # A fully-dry / single-wet-level column has no wet interface -> min is +inf;
-    # clamp to 0 so the >=0 convection test treats it as neutral (MLE magnitude
-    # there is already ~0 via H/bm, and the cell mask zeroes the flux anyway).
-    return jnp.where(jnp.isfinite(col_min), col_min, 0.0)
-
-
 def mle_tracer_tendency_latlon_cgrid(
     T: jnp.ndarray,
     S: jnp.ndarray,
-    rho_insitu: jnp.ndarray,
+    rho_pot: jnp.ndarray,
     N2: jnp.ndarray,
     mask: jnp.ndarray,
     u_mask: jnp.ndarray,
@@ -189,11 +166,21 @@ def mle_tracer_tendency_latlon_cgrid(
     ----------
     T, S : (n_lat, n_lon, nlev)
         Potential temperature [degC] / salinity [PSU] at cell centres.
-    rho_insitu : (n_lat, n_lon, nlev)
-        In-situ density [kg/m^3] at cell centres (``compute_ocean_rho``).
+    rho_pot : (n_lat, n_lon, nlev)
+        SURFACE-REFERENCED POTENTIAL density [kg/m^3] at cell centres
+        (NEMO ``rhop``: the EOS evaluated at zero pressure — e.g.
+        ``make_eos_fn()(T, S, 0)``).  NOT in-situ density: compressibility
+        alone exceeds the 0.01 kg/m^3 Delta-rho threshold between adjacent
+        levels and collapses the diagnosed mixed layer (see
+        ``mle_mld_and_buoyancy``).
     N2 : (n_lat, n_lon, nlev-1)
-        Brunt-Vaisala frequency squared [1/s^2] at interior interfaces
-        (``compute_buoyancy_frequency``) — drives the convection gate.
+        Brunt-Vaisala frequency squared [1/s^2] at interior interfaces —
+        drives the convection gate.  Use the LOCALLY-REFERENCED
+        adiabatic-parcel form (``compute_buoyancy_frequency_adiabatic``,
+        NEMO's ``rn2`` analogue): the in-situ-difference form carries the
+        compressibility between reference pressures (~6x too stable) and
+        reads deep unstable columns as stable, leaking transport through
+        the nn_conv gate.
     mask : (n_lat, n_lon)
         2-D ocean mask (1 = ocean, 0 = land).
     u_mask : (n_lat, n_lon+1)
@@ -231,15 +218,21 @@ def mle_tracer_tendency_latlon_cgrid(
     else:
         dz_live = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]   # pure z* fallback
     wet3d = _wet_cell_3d(mask, z_coord, nlev)                # (n_lat, n_lon, nlev)
-    # Live level-centre depths [m, positive] for the MLE-MLD criterion.  Use the
-    # reference z-centres; the 0.01 criterion is robust to the small z* stretch.
-    z_centers = jnp.abs(z_coord.z_half_ref[:-1] + z_coord.z_half_ref[1:]) * 0.5
+    # Reference W-INTERFACE depths [m, positive down] for the NEMO nla10
+    # reference-level pick (z_half_ref is 0 at the surface, -H_max at the
+    # bottom); the 0.01 criterion is robust to the small z* stretch.
+    z_faces = jnp.abs(z_coord.z_half_ref)                    # (nlev+1,)
 
     # --- MLE mixed-layer depth + ML-mean buoyancy (shared core) ---
     # SEPARATE 0.01 in-situ criterion (NOT the 0.03 dBM diagnostic), per codex.
+    # Exact NEMO gdept_1d when the coordinate carries it (t_depth_ref, the
+    # same pattern the PGF uses): the nla10 tolerance depends on e3w_1d,
+    # which is NOT the face-midpoint spacing on a partial-cell ladder.
+    _t_ref = getattr(z_coord, "t_depth_ref", None)
     zmld, bm, in_ml = mle_mld_and_buoyancy(
-        rho_insitu, dz_live, wet3d,
-        z_centers=z_centers,
+        rho_pot, dz_live, wet3d,
+        z_faces=z_faces,
+        z_centers_ref=(None if _t_ref is None else jnp.abs(jnp.asarray(_t_ref))),
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
         rho0=constants.rho_ocean,

@@ -35,7 +35,7 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
@@ -108,6 +108,15 @@ def _get_convection_fn(config: ConvectionConfig):
     elif config.scheme == "tiedtke":
         return "tiedtke", tiedtke_convection, config.tiedtke
     elif config.scheme == "bechtold":
+        # NOTE: the RCAPQADV correction (``use_ifs_cape_qadv``) needs the
+        # DYNAMICS T/q tendencies (``PhysicsState.dyn_tendency_T/qv``, the
+        # PTENTA/PTENQA analog).  The hydrostatic bridge threads them from
+        # phys_state and raises at TRACE time if the flag is on while they are
+        # absent (see ``_make_hydrostatic_convection``) — an inert flag can no
+        # longer slip through.  The build-time factory therefore does not
+        # reject the flag here (it cannot see the runtime phys_state).  The
+        # coupler physics pipeline, which still does not populate the
+        # dynamics-tendency carry, keeps its own trace-time reject.
         return "bechtold", bechtold_convection, config.bechtold
     elif config.scheme == "none":
         return "none", None, None
@@ -264,7 +273,7 @@ def make_convection_physics(
     # ``(*shape_2d, nlev)`` to ``(ncol, nlev)`` and never touches grid
     # latitude/longitude — so it is grid-agnostic across cubed-sphere
     # ``(face, n, n)``, lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi
-    # ``(nCells,)``.  Without this branch ``_make_mpas_combined`` (which
+    # ``(nCells,)``.  Without this branch the MPAS combined path (which
     # passes ``model_type="mpas"`` through to all sub-physics factories)
     # crashes the moment convection is enabled on an MPAS run.
     if model_type in ("hydrostatic", "mpas"):
@@ -524,6 +533,40 @@ def _make_hydrostatic_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -533,6 +576,13 @@ def _make_hydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 # Multi-field carry update — return as dict so the
                 # orchestrator can ``update`` both PhysicsState slots.
@@ -630,6 +680,23 @@ def _make_hydrostatic_convection(
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
+            # emit an in-updraft RAIN source ``dq_r_conv_dt`` (the fraction of
+            # detrained condensate diverted to precipitation by
+            # ``precip_efficiency``) alongside the anvil-cloud source
+            # ``dq_c_conv_dt``.  The unified PhysicsPipeline column-integrates
+            # dq_r into same-step surface precip; this standalone bridge has no
+            # surface-precip accumulator, so we CONSERVE it: route it to the
+            # ``q_r`` rain tracer when the state has one (microphysics sediments
+            # it), else fold it back into ``q_c`` so total convective condensate
+            # (dq_c + dq_r) is preserved — byte-identical to the pre-split
+            # all-condensate-to-cloud routing.  SIGN: ``dq_r_conv_dt >= 0`` is a
+            # condensate SOURCE, the SAME sign as ``dq_c_conv_dt``.  Schemes with
+            # no rain split emit ``None`` -> no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            _has_qr = state.tracers is not None and "q_r" in state.tracers
+            if _dq_r_conv is not None and not _has_qr:
+                dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
@@ -640,6 +707,11 @@ def _make_hydrostatic_convection(
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
+            if _dq_r_conv is not None and _has_qr:
+                tracer_tends["q_r"] = Field(
+                    data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
+                    dims=dims_3d, units="kg/kg/s",
+                )
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
@@ -903,6 +975,40 @@ def _make_nonhydrostatic_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -912,6 +1018,13 @@ def _make_nonhydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,
@@ -987,6 +1100,23 @@ def _make_nonhydrostatic_convection(
         # previous instant-fall assumption (Option C). Models with
         # ``n_tracers < 2`` (dry or vapor-only runs) silently omit the
         # ``q_c`` write — there is no slot to receive it.
+        # #929: a mass-flux rain-SPLITTING scheme (bechtold/tiedtke with
+        # precip_efficiency>0) emits a separate in-updraft RAIN source
+        # ``dq_r_conv_dt`` that MUST be booked — bechtold's dq_v is NOT
+        # -(dq_c+dq_r) pointwise (separate compensating-subsidence + rain-evap
+        # terms), so silently dropping dq_r here would leak column water.  A
+        # condensate-less state (n_tracers < 2) has no q_c/q_r slot to receive
+        # it -> unsupported config; raise LOUDLY (static Python on n_tracers +
+        # dq_r-is-None; no silent coerce, no invented re-evaporation).  Only
+        # fires when dq_r is present (sbm/dca/kuo emit None -> no raise).
+        if conv_out.dq_r_conv_dt is not None and n_tracers < 2:
+            raise ValueError(
+                "convection emitted a rain-split source (dq_r_conv_dt) but the "
+                f"non-hydro state has no condensate tracer (n_tracers={n_tracers} < 2) "
+                "to receive it; a mass-flux rain-splitting scheme "
+                "(bechtold/tiedtke, precip_efficiency>0) needs at least a q_c "
+                "tracer. Set precip_efficiency=0 or add a condensate tracer."
+            )
         dtracers = jnp.zeros_like(tracers)
         if n_tracers > 0:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
@@ -998,6 +1128,22 @@ def _make_nonhydrostatic_convection(
             # retains the q_c route (no surface-precip accumulator here — an
             # AMIP/idealized follow-up).
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
+            # also emit an in-updraft RAIN source ``dq_r_conv_dt``.  Slot 2 is
+            # q_rain (state.py tracer ordering), so route the rain there when it
+            # exists (microphysics sediments it — matches the unified pipeline's
+            # precip routing); otherwise fold it into q_c (slot 1) so total
+            # convective condensate (dq_c + dq_r) is CONSERVED, not dropped.
+            # SIGN: ``dq_r_conv_dt >= 0`` is a condensate SOURCE, same sign as
+            # ``dq_c_conv_dt``.  Schemes with no rain split emit ``None`` ->
+            # no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            if _dq_r_conv is not None:
+                _dq_r_conv = _dq_r_conv.reshape(shape_3d)
+                if n_tracers > 2:
+                    dtracers = dtracers.at[..., 2].set(_dq_r_conv)
+                else:
+                    dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv
             dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
         # CMT plumbing — see hydrostatic bridge for rationale.
@@ -1228,6 +1374,40 @@ def _make_spectral_pe_convection(
                 else:
                     bechtold_key = None
                     master_key_new = None
+                # RCAPQADV dynamics-tendency inputs (PTENTA/PTENQA analog):
+                # read the process-split / SCM-forcing tendencies a driver
+                # stashed in PhysicsState before this call.  The leaf builds
+                # the ZCAPE2/ZDQCV correction ONLY when both are present; with
+                # the flag on but the carry absent it would be silently inert,
+                # so guard at TRACE time on the STATIC config value (mirrors
+                # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
+                # Python bool on scheme_config, not a traced array).
+                _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
+                          if phys_state is not None else None)
+                _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
+                           if phys_state is not None else None)
+                if getattr(scheme_config, "use_ifs_cape_qadv", False) and (
+                    _dyn_T is None or _dyn_qv is None
+                ):
+                    raise ValueError(
+                        "use_ifs_cape_qadv=True but PhysicsState carries no "
+                        "dyn_tendency_T/dyn_tendency_qv: the RCAPQADV CAPE "
+                        "correction has no dynamics tendencies to use and "
+                        "would be silently inert.  Populate the dynamics "
+                        "tendencies before the convection call, together with "
+                        "the POST-dynamics state (the leaf forms its reference "
+                        "environment as state - dyn_tendency*dt)"
+                        ", or keep the flag False."
+                    )
+                # Reshape a supplied (ncol, nlev) carry to the leaf's column
+                # layout; None passes through (leaf leaves qadv inert).  omega
+                # is not carried (SCM/process-split have no resolved 500 hPa
+                # vertical velocity) — the leaf's resolved-ascent OR-gate is
+                # then off, faithful where |omega| << 100 Pa/s.
+                _dyn_T_col = (None if _dyn_T is None
+                              else _dyn_T.reshape(ncol, nlev))
+                _dyn_qv_col = (None if _dyn_qv is None
+                               else _dyn_qv.reshape(ncol, nlev))
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1237,6 +1417,13 @@ def _make_spectral_pe_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    dT_dt_dyn=_dyn_T_col,
+                    dq_dt_dyn=_dyn_qv_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,
@@ -1323,6 +1510,24 @@ def _make_spectral_pe_convection(
         # missing the relevant key) we drop the tendency — there is
         # no carry to write into.
         tracers_tend = None
+        # #929: a mass-flux rain split with no tracer carry to receive it must
+        # NOT be silently dropped. The routing+raise below is nested under
+        # ``state.tracers is not None``; a tracer-less spectral state
+        # (``state.tracers is None``) would skip it and lose the rain. Guard
+        # here, consistent with the hydro/nonhydro condensate-less raises.
+        # Static Python — fires only when a scheme actually emits a split
+        # (``dq_r_conv_dt is not None`` => bechtold/tiedtke precip_efficiency>0);
+        # the ``conv_fn is not None`` clause short-circuits before ``conv_out``
+        # is read, so a physics-free spectral step is unaffected.
+        if (conv_fn is not None and state.tracers is None
+                and conv_out.dq_r_conv_dt is not None):
+            raise ValueError(
+                "convection emitted a rain-split source (dq_r_conv_dt) but the "
+                "spectral state has no tracers (state.tracers is None) to "
+                "receive it; a mass-flux rain-splitting scheme (bechtold/"
+                "tiedtke, precip_efficiency>0) needs at least a q_c or q_r "
+                "tracer. Set precip_efficiency=0 or add a condensate tracer."
+            )
         if conv_fn is not None and state.tracers is not None:
             _state_tracers = state.tracers
             tt = {}
@@ -1344,6 +1549,48 @@ def _make_spectral_pe_convection(
                     )
                 else:
                     tt["q_c"] = dq_c_dt_grid.astype(_qc_template.dtype)
+            # #929 in-updraft rain split: route the mass-flux rain source
+            # ``dq_r_conv_dt`` (bechtold/tiedtke).  If the state has a ``q_r``
+            # rain tracer, emit it there (microphysics sediments it — matches
+            # the unified pipeline's precip routing); otherwise fold it into the
+            # ``q_c`` tendency so total convective condensate (dq_c + dq_r) is
+            # CONSERVED, not dropped (no surface-precip path in this bridge).
+            # SIGN: ``dq_r_conv_dt >= 0`` is a condensate SOURCE, same sign as
+            # ``dq_c_conv_dt``.  Schemes with no rain split emit ``None`` ->
+            # no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            if _dq_r_conv is not None:
+                _dq_r_grid = _dq_r_conv.reshape(n_lat, n_lon, nlev)
+                if "q_r" in _state_tracers:
+                    _qr_template = _state_tracers["q_r"]
+                    if hasattr(_qr_template, "data") and hasattr(_qr_template, "replace"):
+                        tt["q_r"] = _qr_template.replace(
+                            data=_dq_r_grid.astype(_qr_template.data.dtype)
+                        )
+                    else:
+                        tt["q_r"] = _dq_r_grid.astype(_qr_template.dtype)
+                elif "q_c" in tt:
+                    _qc_t = tt["q_c"]
+                    if hasattr(_qc_t, "data") and hasattr(_qc_t, "replace"):
+                        tt["q_c"] = _qc_t.replace(
+                            data=(_qc_t.data + _dq_r_grid.astype(_qc_t.data.dtype))
+                        )
+                    else:
+                        tt["q_c"] = _qc_t + _dq_r_grid.astype(_qc_t.dtype)
+                else:
+                    # #929: neither a q_r nor a q_c tracer to hold the convective
+                    # rain split; bechtold's dq_v is NOT -(dq_c+dq_r) pointwise,
+                    # so dropping dq_r would leak column water.  Unsupported
+                    # config -> raise LOUDLY (static Python on the tracer keys +
+                    # dq_r-is-None; no silent coerce, no invented re-evaporation).
+                    raise ValueError(
+                        "convection emitted a rain-split source (dq_r_conv_dt) "
+                        "but the spectral state has neither a q_r nor a q_c "
+                        "tracer to receive the convective rain split; a "
+                        "mass-flux rain-splitting scheme (bechtold/tiedtke, "
+                        "precip_efficiency>0) needs at least a q_c tracer. Set "
+                        "precip_efficiency=0 or add a condensate tracer."
+                    )
             # Mirror untouched tracers as zeros so the dycore RHS sees a
             # complete tracer pytree (the orchestrator's accumulation
             # also requires matching keys across modules).

@@ -55,7 +55,7 @@ halo (multi-tile compare) vs FV3 — the crux. Assets /tmp/fv3_poc{,_a2b,_dsw3}/
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
-`zeta_corner*v_d`; FV3 upwind donor-cell. The faithful staggered c_sw→d_sw port (`fv3_fb_sw_step`, upwind
+`zeta_corner*v_d`; FV3 upwind donor-cell. The staggered c_sw→d_sw port (`fv3_fb_sw_step`, upwind
 `_vorticity_flux`) is EXPERIMENTAL + has a weak edge instability (W2 C36 day2 NaN). Production's co-located
 D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex reviews drove it to ground truth):
 - **TYPE (iter128 genuine Arnoldi, dim 23760):** weakly-UNSTABLE spectrum **ρ(M')≈1.0019>1** (real eigenvalue

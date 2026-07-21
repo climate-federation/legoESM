@@ -21,8 +21,8 @@ precipitation diagnostic.
 Per-scheme settings.  The production defaults in
 ``convection/config.py`` were corrected in the same change set as
 this script (Bechtold ``cape_threshold`` 0→70 and ``delta_deep``
-5e-4→1.75e-3, Emanuel ``sub_cloud_relaxation`` 100→7200, Kuo
-``tau_relax`` 3600→7200, and an ``M_b_max=0.05`` cap added to all
+5e-4→1.75e-3, Kuo ``tau_relax`` 3600→7200, and an
+``M_b_max=0.05`` cap added to all
 mass-flux-based schemes including the shared ``mass_flux`` kernel).
 The shared ``mass_flux.apply_mass_flux_kernel`` was also fixed to
 take ``q_v_u`` and ``q_c_u`` separately so the entraining-diluted
@@ -177,8 +177,8 @@ def _build_convection_call(scheme: str, dt: float):
     # Per-scheme settings.  The production defaults in
     # ``convection/config.py`` were corrected in the same PR that
     # introduced this script (Bechtold ``cape_threshold`` 0→70 and
-    # ``delta_deep`` 5e-4→1.75e-3, Emanuel ``sub_cloud_relaxation``
-    # 100→7200, Kuo ``tau_relax`` 3600→7200, and an ``M_b_max=0.1``
+    # ``delta_deep`` 5e-4→1.75e-3, Kuo ``tau_relax`` 3600→7200, and
+    # an ``M_b_max=0.1``
     # cap added to ZM/KF/Tiedtke/Bechtold/Emanuel) so we no longer
     # need script-side knob overrides.  We still disable CMT and
     # stochasticity here because (a) the lat-lon FV cell-centred wind
@@ -353,7 +353,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
     from legoesm.driver.component_factory import (
         create_atmosphere_dycore, compute_diffusion,
     )
-    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
     from legoesm.atmosphere.physics.radiation.gray import gray_radiation
     from legoesm.atmosphere.physics.radiation.solar import (

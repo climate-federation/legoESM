@@ -1,0 +1,4 @@
+base: config/wb/sweep/stage1/baseline_classical_t63_rrtmgp.yaml
+variants:
+- classical
+output_dir: results/wb_sweep_stage1/combo_gwd_hines

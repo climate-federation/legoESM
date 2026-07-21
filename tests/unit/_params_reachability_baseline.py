@@ -16,15 +16,24 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (13)
+    # atm: BechtoldConfig (14)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
+    # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
+    # exclusion as the rest of the BechtoldConfig family (CLI/ExperimentConfig
+    # scalars, not the --params qualified-name loader).
+    'atm.conv.BechtoldConfig.cape_qadv_weight',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
     'atm.conv.BechtoldConfig.cloud_depth_shallow_max',
     'atm.conv.BechtoldConfig.delta_deep',
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
     'atm.conv.BechtoldConfig.downdraft_alpha',
+    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
+    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
+    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
+    # via the --params qualified-name loader.  Conscious exclusion.
+    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -38,11 +47,63 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBLiteConfig.C_eps',
     'atm.turb.CLUBBLiteConfig.Pr_t',
     'atm.turb.CLUBBLiteConfig.l_mix_max',
-    # atm: CloudConfig (9)
+    # atm: CLUBBParams (48) — like every other turbulence scheme, full CLUBB is
+    # calibrated via the SCM-RCE campaign / LES tuning collector, not the atm
+    # run_amip --params scalar map (build_atm_scalar_param_map exposes 0
+    # atm.turb.* params). Driver-level reachability (nested CLUBBConfig.params
+    # descent in build_atm_scalar_param_map) is tracked as a follow-up.
+    'atm.turb.CLUBBParams.C1',
+    'atm.turb.CLUBBParams.C10',
+    'atm.turb.CLUBBParams.C11',
+    'atm.turb.CLUBBParams.C12',
+    'atm.turb.CLUBBParams.C14',
+    'atm.turb.CLUBBParams.C2rt',
+    'atm.turb.CLUBBParams.C2rtthl',
+    'atm.turb.CLUBBParams.C2thl',
+    'atm.turb.CLUBBParams.C4',
+    'atm.turb.CLUBBParams.C6rt',
+    'atm.turb.CLUBBParams.C6rtb',
+    'atm.turb.CLUBBParams.C6thl',
+    'atm.turb.CLUBBParams.C6thlb',
+    'atm.turb.CLUBBParams.C7',
+    'atm.turb.CLUBBParams.C8',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2_wp2',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2_xp2',
+    'atm.turb.CLUBBParams.C_invrs_tau_bkgnd',
+    'atm.turb.CLUBBParams.C_invrs_tau_sfc',
+    'atm.turb.CLUBBParams.C_invrs_tau_shear',
+    'atm.turb.CLUBBParams.C_uu_buoy',
+    'atm.turb.CLUBBParams.C_uu_shr',
+    'atm.turb.CLUBBParams.C_wp3_pr_turb',
+    'atm.turb.CLUBBParams.Lscale_mu_coef',
+    'atm.turb.CLUBBParams.beta',
+    'atm.turb.CLUBBParams.c_K',
+    'atm.turb.CLUBBParams.c_K1',
+    'atm.turb.CLUBBParams.c_K10',
+    'atm.turb.CLUBBParams.c_K10h',
+    'atm.turb.CLUBBParams.c_K2',
+    'atm.turb.CLUBBParams.c_K6',
+    'atm.turb.CLUBBParams.c_K8',
+    'atm.turb.CLUBBParams.c_K9',
+    'atm.turb.CLUBBParams.coef_spread_DG_means_rt',
+    'atm.turb.CLUBBParams.coef_spread_DG_means_thl',
+    'atm.turb.CLUBBParams.gamma_coef',
+    'atm.turb.CLUBBParams.gamma_coefb',
+    'atm.turb.CLUBBParams.lambda0_stability_coef',
+    'atm.turb.CLUBBParams.lmin_coef',
+    'atm.turb.CLUBBParams.mu',
+    'atm.turb.CLUBBParams.mult_coef',
+    'atm.turb.CLUBBParams.nu1',
+    'atm.turb.CLUBBParams.nu2',
+    'atm.turb.CLUBBParams.nu6',
+    'atm.turb.CLUBBParams.nu8',
+    'atm.turb.CLUBBParams.nu9',
+    'atm.turb.CLUBBParams.slope_coef_spread_DG_means_w',
+    # atm: CloudConfig (8)
     'atm.clouds.CloudConfig.Nc_default',
     'atm.clouds.CloudConfig.T_ice_only',
     'atm.clouds.CloudConfig.conv_cloud_coeff',
-    'atm.clouds.CloudConfig.conv_cloud_condensate',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
@@ -159,7 +220,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KuoConfig.anthes_rh_offset',
     'atm.conv.KuoConfig.entrainment',
     # atm: LindzenConfig (2)
-    'atm.gwd.LindzenConfig.critical_Fr',
+    'atm.gwd.LindzenConfig.fcrit2',
     'atm.gwd.LindzenConfig.h_topo',
     # atm: LouisConfig (6)
     'atm.turb.LouisConfig.Ri_crit',
@@ -226,7 +287,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.P3Config.a_v_r',
     'atm.micro.P3Config.agg_coeff',
     'atm.micro.P3Config.cooper_T_act',
+    # gSAM scheme-1 nucleation-gate params (2026-07-17 Cooper-faithfulness
+    # closure): same conscious exclusion as the rest of the P3Config family —
+    # the whole class is not routed through any driver's --params loader yet.
+    'atm.micro.P3Config.cooper_T_nuc',
     'atm.micro.P3Config.cooper_a',
+    'atm.micro.P3Config.cooper_supi_min',
     'atm.micro.P3Config.dep_coeff',
     'atm.micro.P3Config.evap_coeff',
     'atm.micro.P3Config.k_ac',
@@ -263,8 +329,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.SmagorinskyConfig.C_s',
     'atm.turb.SmagorinskyConfig.Pr_t',
     'atm.turb.SmagorinskyConfig.l_mix_max',
-    # atm: SundqvistConfig (4)
+    # atm: SundqvistConfig (6) — like its siblings above, the microphysics
+    # scheme *Configs are not threaded through ExperimentConfig scalars; the
+    # SBK89 enhancement coefficients join the existing conscious entries.
     'atm.micro.SundqvistConfig.auto_rate',
+    'atm.micro.SundqvistConfig.bergeron_enh_coeff',
+    'atm.micro.SundqvistConfig.coalescence_enh_coeff',
     'atm.micro.SundqvistConfig.evap_coeff',
     'atm.micro.SundqvistConfig.qc_crit',
     'atm.micro.SundqvistConfig.rh_crit',
@@ -327,7 +397,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.YSUConfig.Pr_t',
     'atm.turb.YSUConfig.Ri_crit',
     'atm.turb.YSUConfig.countergrad_coeff',
-    'atm.turb.YSUConfig.entrainment_coeff',
+    # entrainment_coeff renamed -> entrainment_ratio (Hong06 prescribed
+    # entrainment-flux ratio; spec carries legacy_name) — a RENAME in place,
+    # not baseline growth (net count unchanged at 10).
+    'atm.turb.YSUConfig.entrainment_ratio',
     'atm.turb.YSUConfig.entrainment_width_frac',
     'atm.turb.YSUConfig.l_mix_max',
     'atm.turb.YSUConfig.louis_b',
@@ -427,4 +500,31 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
     'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
     'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
+    # land: SIF (8) + elevation snow bands (8) — CONSCIOUS entry (#933).
+    # Both configs landed with the 2026-07 land campaign (FvCB/SIF
+    # consolidation #897, high-elevation snow/ice bands) fully spec'd but
+    # off run_lmip's --params surface: SIFConfig is a fluorescence
+    # DIAGNOSTIC of the big-leaf photosynthesis path (its params calibrate
+    # against satellite SIF, not the water/energy budget); the elevation
+    # snow bands are opt-in (--elev-bands) and run_lmip builds
+    # ElevationSnowBandConfig with defaults + the per-cell band_dz only.
+    # Wiring both onto run_lmip's curated --params surface when their
+    # calibration campaigns need it is the follow-up that shrinks these
+    # sixteen away.
+    'land.canopy.sif.escape_probability',
+    'land.canopy.sif.kd',
+    'land.canopy.sif.kf',
+    'land.canopy.sif.kn0',
+    'land.canopy.sif.kn_beta',
+    'land.canopy.sif.kn_gamma',
+    'land.canopy.sif.kp',
+    'land.canopy.sif.max_electron_yield',
+    'land.snow_bands.alpha_glacier_ice',
+    'land.snow_bands.blow_snow_subl_rate',
+    'land.snow_bands.blow_snow_wind_thresh_ms',
+    'land.snow_bands.lapse_rate_K_m',
+    'land.snow_bands.lw_elev_lapse_W_m2_per_m',
+    'land.snow_bands.refreeze_frac',
+    'land.snow_bands.sky_view_min',
+    'land.snow_bands.sw_elev_grad_per_m',
 })

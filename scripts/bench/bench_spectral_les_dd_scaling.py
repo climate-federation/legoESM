@@ -41,7 +41,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 
-from legoesm.atmosphere.dynamics.spectral_les_plane import (  # noqa: E402
+from legoesm.atmosphere.dynamics.les.spectral_les_plane import (  # noqa: E402
     SpectralLESConfig, SpectralLESLayout, SpectralLESState, make_grid, step)
 
 _DTYPE = jnp.float64 if _X64 else jnp.float32

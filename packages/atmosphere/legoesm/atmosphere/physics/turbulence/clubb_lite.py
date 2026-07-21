@@ -35,8 +35,7 @@ version instead integrates a TKE-scaled magnitude: shear production
 dissipation (linearised rate ``C_eps*sqrt(wp2)/l`` times ``wp2``).  ``wp2`` is
 therefore a TKE-like scale used only to set the
 mixing time scale and the down-gradient diffusivities, NOT a strict second
-moment.  (The ``CLUBBLiteConfig`` C1/C4/C5 fields are legacy and unused by
-this reduced budget.)
+moment.
 
 where tau = l / sqrt(wp2) is the turbulence time scale.
 
@@ -70,8 +69,8 @@ WHAT IT OMITS / SIMPLIFIES (the fidelity gap vs full CLUBB):
   2. wp3 (third moment) is NOT carried -> no skewness-driven nonlocal /
      counter-gradient transport that distinguishes CLUBB from a 2nd-order
      down-gradient scheme.
-  3. Pressure terms / return-to-isotropy use simple linear damping
-     (C1,C4,C5/tau) instead of CLUBB's full pressure-correlation closure
+  3. Pressure terms / return-to-isotropy use the single ``C_eps``
+     dissipation instead of CLUBB's full pressure-correlation closure
      with the C-coefficient hierarchy (C2, C6, C7, C8, C11, C14, ...).
   4. No subgrid cloud-water (rcm) feedback into buoyancy production, no
      SILHS sub-columns, no cloud-top radiative/evaporative entrainment
@@ -107,6 +106,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import (
     broadcast_column_param,
+    buoyancy_coefficient,
     exner_function,
     mixing_length,
     virtual_temperature,
@@ -171,7 +171,7 @@ def clubb_eddy_diffusivity(
     This is the SINGLE definition of the forward eddy-diffusivity closure: the integrator
     (:func:`clubb_lite_turbulence`) builds ``K_m`` from it, and it is the EXACT inverse of the
     LES diagnosis ``C_K = K_m/(ℓ·√wp2)``
-    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.clubb_coefficient_from_diffusivity`).
+    (:func:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis.clubb_coefficient_from_diffusivity`).
     Factored out so the forward/inverse round-trip is pinned against the closure the model
     ACTUALLY integrates (a change to this form is then caught by the round-trip test, not
     silently de-synced from the diagnosis — which would break OSSE parameter recovery).
@@ -193,7 +193,7 @@ def clubb_heat_diffusivity(
 
     The SINGLE forward definition the integrator builds ``K_h`` from; the EXACT inverse of the
     LES diagnosis ``Pr_t = K_m/K_h``
-    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.prandtl_number_from_diffusivities`).
+    (:func:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis.prandtl_number_from_diffusivities`).
     ``Pr_t`` may be a scalar (production) OR a per-column ``(ncol,)`` field (the LES-informed
     correction); ``l_mix`` supplies the column-broadcast shape only.  Pure / differentiable.
     """
@@ -209,7 +209,7 @@ def clubb_wp2_production(
     """Net ``w'²`` production ``P = K_m·S² − K_h·N²`` (down-gradient shear minus buoyancy
     destruction) — the SINGLE forward definition the integrator's ``wp2`` budget balances, and
     the production the LES diagnosis inverts in
-    :func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.c_eps_from_budget`
+    :func:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis.c_eps_from_budget`
     (``C_eps = P·ℓ/wp2^{3/2}``).  Co-located inputs; pure / differentiable.
     """
     return K_m * S2 - K_h * N2
@@ -224,7 +224,7 @@ def clubb_wp2_dissipation_rate(
     ``rate·wp2 = C_eps·wp2^{3/2}/ℓ``).  The SINGLE forward definition the integrator's
     semi-implicit ``wp2`` update uses; at steady state (neglecting transport) it balances the
     production, the relation the LES diagnosis inverts
-    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.c_eps_from_budget`).  ``C_eps``
+    (:func:`legoesm.atmosphere.dynamics.les.les_closure_diagnosis.c_eps_from_budget`).  ``C_eps``
     may be a scalar OR a per-column ``(ncol,)`` field; ``l_mix_safe`` is the floored mixing
     length (the integrator clips ℓ ≥ 1 m before the division).  Pure / differentiable.
     """
@@ -352,7 +352,8 @@ def clubb_lite_turbulence(
     theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    # N² = (g/θ_v)·∂θ_v/∂z via the shared buoyancy coefficient (clip at call site).
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # iter-172 F841: removed ``exner`` / ``theta`` /
     # ``dtheta_dz`` / ``drt_dz`` — only consumed by the dead
@@ -380,7 +381,7 @@ def clubb_lite_turbulence(
     # diagnosis inverts EXACTLY this form (c_eps_from_budget).
     net_prod = clubb_wp2_production(Km_full, Kh_full, S2, N2)
 
-    # Dissipation coefficient: C1/tau (semi-implicit). ``C_eps`` may be a scalar
+    # Dissipation coefficient: ``C_eps``-based (semi-implicit). ``C_eps`` may be a scalar
     # (production, byte-identical) OR a per-column LES-informed correction (it sets
     # the GCM's equilibrium wp2 so it tracks the LES w'² — closing the C_K
     # wp2-identification gap); broadcast it over the vertical like C_K / Pr_t.

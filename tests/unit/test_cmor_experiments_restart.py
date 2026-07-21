@@ -327,6 +327,173 @@ class TestDiagnosticCollector(unittest.TestCase):
             self.assertAlmostEqual(ta_vals[-1], T_ascending[0], delta=1.0)
             ds.close()
 
+    def test_finalize_cmip_fixed_writes_fx_table(self):
+        """finalize_cmip_fixed emits the fx areacella file WITHOUT a normal
+        end-of-run save() — the graceful wallclock-exit path depends on it, so
+        a restart-chained run still produces a CMOR-complete (area-weightable)
+        output tree."""
+        from legoesm.driver.diagnostics import DiagnosticCollector
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DiagnosticCollector(
+                nlev=5,
+                sigma_full=np.linspace(0.9, 0.1, 5),
+                dsigma=np.full(5, 0.2),
+                experiment_id="amip",
+                cmip_output=True,
+                output_dir=tmpdir,
+                cmip_resolution_deg=5.0,
+            )
+            # Mimic a graceful mid-run exit: no monthly data, no save().
+            collector.finalize_cmip_fixed()
+            collector.cf_writer.close()
+
+            fx = [
+                os.path.join(root, f)
+                for root, _, files in os.walk(tmpdir)
+                for f in files
+                if "areacella" in f and f.endswith(".nc")
+            ]
+            self.assertEqual(
+                len(fx), 1, f"expected 1 areacella fx file, got {fx}")
+
+    def test_finalize_cmip_fixed_noop_without_writer(self):
+        """No CMIP writer → finalize_cmip_fixed is a safe no-op (must not raise
+        for the non-CMOR runs whose graceful exit also calls it)."""
+        from legoesm.driver.diagnostics import DiagnosticCollector
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DiagnosticCollector(
+                nlev=5,
+                sigma_full=np.linspace(0.9, 0.1, 5),
+                dsigma=np.full(5, 0.2),
+                cmip_output=False,
+                output_dir=tmpdir,
+            )
+            self.assertIsNone(collector.cf_writer)
+            collector.finalize_cmip_fixed()   # must not raise
+
+    def test_wallclock_exit_writes_cmor_fx_before_exit(self):
+        """The graceful wallclock exit flushes completed months AND writes the
+        fx table before ``sys.exit(0)`` — guarding the restart-chain CMOR-
+        completeness fix (without it every multi-hour AMIP run drops fx)."""
+        import types
+        from legoesm.driver.model_driver import ModelDriver
+
+        calls = []
+
+        class _Diag:
+            def flush_to_disk(self, d):
+                calls.append("flush_to_disk")
+
+            def flush_cmip_monthly(self, day, write=True):
+                calls.append(("flush_cmip_monthly", write))
+
+            def finalize_cmip_daily(self, current_day):
+                calls.append(("finalize_cmip_daily", current_day))
+
+            def finalize_cmip_fixed(self):
+                calls.append("finalize_cmip_fixed")
+
+        fake = types.SimpleNamespace(
+            _mpi_world_size=1,
+            _run_wallclock_start=0.0,       # epoch → budget long exhausted
+            _last_checkpoint_step=0,
+            diagnostics=_Diag(),
+            _output_dir="/tmp/ignore_fx_test",
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(
+                    max_wallclock_seconds=1.0,
+                    restart_buffer_seconds=0.0,
+                ),
+            ),
+        )
+        ckpt = []
+        with self.assertRaises(SystemExit):
+            ModelDriver._maybe_wallclock_exit(
+                fake, lambda s, d: ckpt.append((s, d)), step=5, day=10.0)
+
+        self.assertIn("finalize_cmip_fixed", calls)
+        self.assertIn(("finalize_cmip_daily", 10.0), calls)
+        self.assertIn(("flush_cmip_monthly", True), calls)
+        # save() order: completed-month flush -> daily -> fx, all before exit.
+        self.assertLess(
+            calls.index(("flush_cmip_monthly", True)),
+            calls.index(("finalize_cmip_daily", 10.0)),
+        )
+        self.assertLess(
+            calls.index(("finalize_cmip_daily", 10.0)),
+            calls.index("finalize_cmip_fixed"),
+        )
+
+    def test_finalize_cmip_daily_withholds_partial_day_no_duplicate(self):
+        """Restart-chain daily safety: a graceful exit writes only days
+        strictly before the in-progress day, so a fresh restart segment
+        appending to the same output tree never emits duplicate ``day/tas``
+        time coordinates (the corruption a blind write_daily append causes).
+
+        Two independent collectors (fresh process per SLURM segment) share one
+        output dir.  Days are keyed exactly as production does — via
+        ``day_to_calendar`` — since ``finalize_cmip_daily`` reconstructs the
+        boundary key the same way."""
+        import xarray as xr
+        from legoesm.driver.diagnostics import DiagnosticCollector
+        from legoesm.forcing.time_utils import day_to_calendar
+
+        def _dkey(abs_day):
+            doy, _ = day_to_calendar(abs_day)
+            return (int(abs_day // 365.0), int(doy))
+
+        def _mk(tmpdir):
+            return DiagnosticCollector(
+                nlev=5, sigma_full=np.linspace(0.9, 0.1, 5),
+                dsigma=np.full(5, 0.2), experiment_id="amip",
+                cmip_output=True, output_dir=tmpdir, cmip_resolution_deg=5.0,
+            )
+
+        def _add(collector, abs_day, fld):
+            doy, _ = day_to_calendar(abs_day)
+            collector._spatial_daily.add_2d(doy, int(abs_day // 365.0),
+                                            {"tas": fld})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # --- Segment 1: accumulate two whole days + start a third. ---
+            seg1 = _mk(tmpdir)
+            fld = np.full((seg1._cmip_nlat, seg1._cmip_nlon), 288.0)
+            for d in (1.5, 2.5, 3.3):            # 3.3 = in-progress boundary day
+                _add(seg1, d, fld)
+            seg1.finalize_cmip_daily(current_day=3.3)   # writes _dkey(1.5),_dkey(2.5)
+            seg1.cf_writer.close()
+
+            # --- Segment 2 (fresh process): boundary day's pre-exit samples
+            #     are GONE; resume mid-boundary-day, finish it, start a fourth. ---
+            seg2 = _mk(tmpdir)
+            for d in (3.7, 4.5):                  # 3.7 completes boundary; 4.5 in-progress
+                _add(seg2, d, fld)
+            seg2.finalize_cmip_daily(current_day=4.5)   # writes _dkey(3.7)==_dkey(3.3)
+            seg2.cf_writer.close()
+
+            tas_files = [
+                os.path.join(root, f)
+                for root, _, files in os.walk(tmpdir)
+                for f in files
+                if f.startswith("tas_day_") and f.endswith(".nc")
+            ]
+            self.assertEqual(len(tas_files), 1,
+                             f"expected 1 tas day file, got {tas_files}")
+            ds = xr.open_dataset(tas_files[0], decode_times=False)
+            times = ds["time"].values.tolist()
+            ds.close()
+
+            # Completed days written across both segments — each EXACTLY once.
+            expected = {_dkey(1.5), _dkey(2.5), _dkey(3.7)}
+            self.assertEqual(len(times), len(set(times)),
+                             f"duplicate daily time coords: {times}")
+            self.assertEqual(len(times), len(expected),
+                             f"expected {len(expected)} unique days, got {times}")
+            self.assertTrue(all(t >= 0 for t in times),
+                            f"negative daily time (doy-0 bug): {times}")
+
 
 # ======================================================================
 # Experiment templates
@@ -1203,6 +1370,28 @@ class TestCMIP6Compliance(unittest.TestCase):
         # Setting threshold to 0 keeps the partial day.
         data_all = accum.finalize(min_sample_fraction=0.0)
         self.assertEqual([d for _, d in data_all["days"]], [1, 2, 3])
+
+    def test_pop_completed_days_wraps_year_and_withholds_current(self):
+        """pop_completed_days emits+frees only days strictly before the given
+        (year, doy) and is idempotent — the restart-safety contract used by
+        finalize_cmip_daily.  Lexicographic (year, doy) keys make doy 364 of
+        year 0 complete once the run enters year 1 (noleap wrap)."""
+        from legoesm.diagnostics.monthly_means import SpatialDailyAccumulator
+        accum = SpatialDailyAccumulator(nlat=2, nlon=2, track_extremes={"tas"})
+        f = np.full((2, 2), 288.0)
+        accum.add_2d(364, 0, {"tas": f})    # last day of year 0
+        accum.add_2d(1, 1, {"tas": f})      # first day of year 1 (in-progress)
+
+        # current = (year 1, doy 1): only (0, 364) is strictly before it.
+        out = accum.pop_completed_days(current_year=1, current_doy=1)
+        self.assertEqual(out["days"], [(0, 364)])
+        self.assertIn("field_2d_tas", out)
+        self.assertIn("field_2d_tas_min", out)     # extrema preserved
+        self.assertIn("field_2d_tas_max", out)
+        # Completed day freed; the in-progress day survives for the next seg.
+        self.assertEqual(sorted(accum._data.keys()), [(1, 1)])
+        # Idempotent: a repeat pop at the same boundary emits nothing.
+        self.assertEqual(accum.pop_completed_days(1, 1)["days"], [])
 
     def test_spatial_daily_tracks_min_max(self):
         """``tas`` extremes are tracked correctly per-day."""

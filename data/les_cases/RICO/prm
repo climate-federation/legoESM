@@ -1,0 +1,83 @@
+&MICRO_M2005
+douse_reffc = .true.
+dopredictNc  = .true.
+doicemicro = .false.
+dospecifyaerosol = .false.
+ccnconst = 200.
+/
+&PARAMETERS
+
+ caseid ='128x128x120',
+
+ nrestart = 0,
+
+ OCEAN = .true.,
+
+ ug = -6.0,
+ vg = -4.0, 
+
+ dosgs		= .true.,
+ dodamping 	= .true.,
+ doupperbound  	= .true.,
+ docloud 	= .true.,
+ doprecip 	= .true., 
+ dolongwave	= .false.,
+ doshortwave	= .false.,
+ dosurface 	= .true.,
+ dolargescale 	= .true.,
+ doradforcing   = .false.,
+ dosfcforcing   = .true.,
+ docoriolis 	= .true.,
+ donudging_uv   = .false.,
+ donudging_tq   = .false.,
+
+ tauls = 21600.,
+
+ SFC_FLX_FXD    = .false.,
+ SFC_TAU_FXD    = .false.,
+
+ fcor = 0.451e-4,
+
+ dx = 	100.,
+ dy = 	100.,
+
+ dt = 	2.0,
+ 
+ nrad = 15,
+ longitude0 = 0.,
+ latitude0 = 18.,
+ doseasons = .false.,
+ doisccp = .false.,
+ domodis = .false.,
+ domisr = .false.,
+
+ day0=0.,
+
+nstop 	= 43200,
+nprint 	= 300,
+nstat 	= 300,
+nstatfrq= 60,
+
+doSAMconditionals = .false.
+dosatupdnconditionals = .false.
+
+
+ nsave2D	= 300,
+ nsave2Dstart	= 1800,
+ nsave2Dend	= 86400,
+ save2Dbin      = .false.
+
+ nsave3D	= 300,
+ nsave3Dstart	= 1800,
+ nsave3Dend	= 8640000,
+ save3Dbin      = .false.
+
+ nstatmom       = 120
+ nstatmomstart  = 9936000
+ nstatmomend    = 99960480
+ savemombin = .false.
+
+/ 
+
+
+

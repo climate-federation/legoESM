@@ -15,42 +15,29 @@ Set ``CarbonConfig(scheme="none")`` (the default) to disable.
 
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 from legoesm.land.carbon.carbon_cycle import (
+    annual_frozen_fraction,
     compute_gpp,
     compute_phenology,
     init_carbon_state,
+    perennial_frost_protection,
     seasonal_co2_flux,
     step_carbon,
     step_carbon_differland,
 )
-from legoesm.land.carbon.stomata import (
-    StomataConfig,
-    arrhenius,
-    peaked_arrhenius,
-    farquhar_photosynthesis,
-    ball_berry_gs,
-    medlyn_gs,
-    jarvis_gs,
-    coupled_farquhar_stomata,
-    compute_stomatal_beta,
-)
+
+# Stomatal conductance + plant physiology now live in the neutral
+# ``legoesm.land.stomata`` module (shared by the two-leaf canopy and the
+# big-leaf SimpleSEB paths); import from there, not the carbon package.
 
 __all__ = [
     "CarbonConfig",
     "CarbonState",
+    "annual_frozen_fraction",
     "compute_gpp",
     "compute_phenology",
     "init_carbon_state",
+    "perennial_frost_protection",
     "seasonal_co2_flux",
     "step_carbon",
     "step_carbon_differland",
-    # Stomata / plant physiology
-    "StomataConfig",
-    "arrhenius",
-    "peaked_arrhenius",
-    "farquhar_photosynthesis",
-    "ball_berry_gs",
-    "medlyn_gs",
-    "jarvis_gs",
-    "coupled_farquhar_stomata",
-    "compute_stomatal_beta",
 ]

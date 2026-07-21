@@ -106,6 +106,13 @@ def minimize_lbfgs(
     line_search : str
         "backtracking" (only option currently).
     """
+    if line_search != "backtracking":
+        # Dispatch hardening: the loop calls _backtracking_line_search
+        # unconditionally, so any other value would silently run backtracking.
+        raise ValueError(
+            f"unsupported line_search {line_search!r}; only 'backtracking' "
+            "is implemented."
+        )
     n = x0.shape[0]
     f0, g0 = cost_and_grad_fn(x0)
 

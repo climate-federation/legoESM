@@ -522,6 +522,7 @@ def eke_apply_local_source(
     signed_source: jnp.ndarray | None = None,
     clamp_production: bool = True,
     return_dissipation: bool = False,
+    production_scale: jnp.ndarray | None = None,
 ):
     """One step of the local EKE source/sink with **semi-implicit dissipation** —
     unconditionally positivity-preserving (``E_{n+1} >= 0``) with NO clipping/mask.
@@ -560,6 +561,19 @@ def eke_apply_local_source(
       NOT clamped to ``≥ 0`` but routed through the same negative-part-implicit split
       as ``signed_source`` (the ``gm_source_mode="realized_signed"`` path: the signed
       skew conversion can be locally negative).
+    - ``production_scale`` — optional non-negative multiplier applied to the
+      internally PARAMETERIZED GM production ``kappa_GM·sigma²`` ONLY (the
+      Hallberg resolution-function budget coupling, codex MED-3 r2: the tracer
+      path applies ``kappa_eff = f_res·kappa_GM``, so the eddy-energy budget
+      must receive the SAME ``f_res``-scaled APE→EKE conversion the applied
+      coefficient performs).  Must broadcast against the production; it is
+      clamped ``≥ 0`` internally (like ``extra_source``) so positivity-by-
+      construction holds unconditionally (``f_res ∈ (0, 1]`` passes through
+      untouched).  Ignored when ``production_override`` is supplied — callers
+      building an override fold any scaling into the override themselves
+      (GEOMETRIC scales B_C only, not B_T; realized modes scale via the kappa
+      they hand to the conversion builders).  ``None`` (default) ⇒
+      bit-identical.
 
     When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
     ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
@@ -579,6 +593,15 @@ def eke_apply_local_source(
     extra_sink_rate = None
     if production_override is None:
         production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+        if production_scale is not None:
+            # Resolution-function budget coupling: the SAME f_res ∈ (0, 1]
+            # the GM/Redi tracer flux applies to kappa_GM scales the
+            # parameterized APE→EKE conversion.  Clamped ≥ 0 (the same
+            # hardening as ``extra_source``) so the headline positivity-by-
+            # construction guarantee holds UNCONDITIONALLY even for a rogue
+            # negative scale (codex MED-3 r2 NIT); f_res ∈ (0, 1] is
+            # untouched by the clamp.
+            production = production * jnp.maximum(production_scale, 0.0)
     elif clamp_production:
         production = jnp.maximum(production_override, 0.0)
     else:

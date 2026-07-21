@@ -124,7 +124,7 @@ def test_nh_smag_differentiable_at_rest():
     ON, starting from the EXACT rest state (no IC perturbation).
     This was the iter-180 NH differentiability failure mode that
     iter 181 fixes."""
-    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig,
         CDGridCompressibleEulerModel,
     )

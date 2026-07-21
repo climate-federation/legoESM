@@ -36,8 +36,8 @@ import optax
 from jax import lax
 
 from legoesm.atmosphere.physics import PhysicsConfig
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.training.param_collector import (
     apply_param_overrides,
@@ -314,7 +314,8 @@ def _apply_static_record_values(
     out = cfg
     for scheme_key, field_values in grouped.items():
         component_name, component, subcfg = _active_subconfig_by_scheme_key(out)[scheme_key]
-        tuned_subcfg = apply_param_overrides(subcfg, field_values)
+        tuned_tunable = apply_param_overrides(campaign._tunable_subconfig(subcfg), field_values)
+        tuned_subcfg = campaign._rewrap_tunable_subconfig(subcfg, tuned_tunable)
         out = _replace_active_subconfig(out, component_name, component, tuned_subcfg)
     return out
 
@@ -334,7 +335,10 @@ def _apply_trainable_params(
                 f"the SCM config; active={sorted(by_scheme)}"
             )
         component_name, component, subcfg = by_scheme[scheme_key]
-        new_subcfg = apply_param_overrides(subcfg, field_values)
+        # Descend into CLUBB's nested .params and re-wrap (traced-safe: isinstance
+        # on the static config type, NamedTuple._replace is a pytree op).
+        new_tunable = apply_param_overrides(campaign._tunable_subconfig(subcfg), field_values)
+        new_subcfg = campaign._rewrap_tunable_subconfig(subcfg, new_tunable)
         out = _replace_active_subconfig(out, component_name, component, new_subcfg)
     return out
 

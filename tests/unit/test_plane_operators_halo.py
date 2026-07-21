@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.atmosphere.dynamics import compressible_euler_plane as cep
-from legoesm.atmosphere.dynamics import plane_operators as ops
-from legoesm.atmosphere.dynamics import plane_operators_halo as ops_h
+from legoesm.atmosphere.dynamics.les import compressible_euler_plane as cep
+from legoesm.atmosphere.dynamics.les import plane_operators as ops
+from legoesm.atmosphere.dynamics.les import plane_operators_halo as ops_h
 from legoesm.grids.plane import create_plane_grid
 
 jax.config.update("jax_enable_x64", True)
@@ -165,7 +165,7 @@ def _pad_yxz(arr_yxz, halo=1):
 
 
 def test_upwind_advection_x_halo_equiv():
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _upwind_advection_x,
     )
     grid = create_plane_grid(
@@ -180,7 +180,7 @@ def test_upwind_advection_x_halo_equiv():
 
 
 def test_upwind_advection_y_halo_equiv():
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _upwind_advection_y,
     )
     grid = create_plane_grid(
@@ -195,7 +195,7 @@ def test_upwind_advection_y_halo_equiv():
 
 
 def test_variable_K_diffusion_vlast_halo_equiv():
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
         _variable_K_diffusion_vlast,
     )
     grid = create_plane_grid(

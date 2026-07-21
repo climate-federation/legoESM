@@ -34,7 +34,7 @@ def test_aerk_warm_matches_water_branch():
     """Well above freezing the blend is the AERK over-water Magnus form."""
     Tc = 25.0
     es = float(saturation_vapor_pressure_aerk(jnp.array(Tc + _K)))
-    es_water = 610.94 * jnp.exp(17.625 * Tc / (Tc + 243.04))   # AERK Eq. 21
+    es_water = 610.94 * jnp.exp(17.625 * Tc / (Tc + 243.04))  # satcurve-ok: independent AERK Eq.21 reference (importing the fn under test would be circular)
     assert jnp.allclose(es, es_water, rtol=1e-4)
 
 
@@ -44,7 +44,7 @@ def test_aerk_cold_uses_ice_branch_below_water():
         T = jnp.array(Tc + _K)
         es_ice = float(saturation_vapor_pressure_aerk(T))
         es_water_extrap = float(saturation_vapor_pressure(T))   # Bolton over-water
-        es_ice_ref = 611.21 * jnp.exp(22.587 * Tc / (Tc + 273.86))  # AERKi Eq. 23
+        es_ice_ref = 611.21 * jnp.exp(22.587 * Tc / (Tc + 273.86))  # satcurve-ok: independent AERKi Eq.23 reference validating the ice branch
         # matches the AERKi ice form (the blend is ~pure ice this cold)
         assert jnp.allclose(es_ice, es_ice_ref, rtol=2e-3)
         # and is materially lower than extrapolating over-water

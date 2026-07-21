@@ -19,7 +19,7 @@ _needs_x64 = pytest.mark.skipif(
 
 
 def _sw_model_and_state():
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
         CDGridShallowWaterConfig,
         CDGridShallowWaterModel,
         CDGridShallowWaterState,
@@ -94,7 +94,7 @@ def test_component_tendency_runs_and_is_differentiable() -> None:
 # --- the SAME generic wrapper across other grid families (B4 replication) ---
 
 def _latlon_sw_model_and_state():
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterState,
     )
@@ -118,7 +118,7 @@ def _latlon_sw_model_and_state():
 
 
 def _mpas_sw_model_and_state():
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
         MPASShallowWaterConfig,
         MPASShallowWaterModel,
     )
@@ -191,7 +191,7 @@ def test_wrap_mpas_sw_as_differentiable_component() -> None:
 # --- ForcedDycoreComponent: physics-tendency-coupled cores (B4 forcing variant) ---
 
 def _cdgrid_pe_model_and_state():
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
     )
     from legoesm.core.field import Field
@@ -219,7 +219,7 @@ def _cdgrid_pe_model_and_state():
 
 
 def _mpas_pe_model_and_state():
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationModel,
     )
     from legoesm.core.field import Field

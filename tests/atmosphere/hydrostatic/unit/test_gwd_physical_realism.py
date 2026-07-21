@@ -53,11 +53,19 @@ Scheme classification
   apply.  Its critical-level behavior is amplitude-based (no explicit c), so the
   critical-level test is applied as "remains finite and a sink through a wind
   reversal".
-* ``prognostic_spectral`` -- KNOWN-BROKEN (FIXME F-GWD-1): the deposition is
-  missing the ``sign(c - U)`` factor so it can ACCELERATE the jet.  The
-  ``test_prognostic_spectral_*`` tests below are ``xfail(strict=True)`` and
-  document the precise defect; the scheme is opt-in and the default GWD scheme
-  is ``"none"``.
+* ``prognostic_spectral`` -- directional deposition (F-GWD-1 FIXED): the
+  deposition carries the CONSTANT launch-level sign ``tanh((c - U_launch)/w) ~
+  sign(c - U_launch)`` (fixed with height), which drives the projected wind
+  toward the wave phase speed WHILE the local wind stays on the launch side of
+  ``c`` (deceleration for a slow-launched wave, acceleration for a fast one).
+  A wave launched FASTER than the flow legitimately accelerates
+  it (toward ``c`` while the local wind is below ``c``; QBO-style forcing), so
+  the drag-opposes-flow invariant is
+  asserted on a SLOW spectrum (``c_max < min u``, where launch and local sign
+  agree); the dissipative heating uses the intrinsic MAGNITUDE form
+  ``|c - U_proj| * deposit`` and is non-negative by construction for ANY
+  spectrum.  The scheme remains opt-in (default GWD is ``"none"``) pending a
+  QBO/momentum-deposition benchmark.
 * ``ml_emulator`` -- learned surrogate, NOT physics-faithful.  Only the
   stability / finiteness / differentiability invariants apply (asserted); the
   sign / conservation / breaking invariants are explicitly NOT asserted and the
@@ -423,7 +431,12 @@ def test_mcfarlane_froude_cap_active():
     rho_sfc = float(rho[0, -1])
     U_sfc = float(jnp.abs(u[0, -1]))
     N = _surface_brunt_vaisala(T, pf, zf)
-    tall = McFarlaneConfig(h_topo=5000.0)
+    # Surface-source arm pinned explicitly: the hand-computed cap below
+    # uses SURFACE rho/N/U, and the shipped default is now the E3SM
+    # depth-averaged source (flipped 2026-07-17), whose launch wind is the
+    # deeper-average (larger here, u_jet aloft).  The Froude-cap property
+    # under test is orthogonal to the source-averaging choice.
+    tall = McFarlaneConfig(h_topo=5000.0, use_depth_averaged_source=False)
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, tall)
     mom = abs(_column_momentum(out, rho, zh))
     # Uncapped launch (raw h^2) would be enormous; the Froude cap holds the
@@ -571,57 +584,112 @@ def test_hines_grad_jit_vmap():
 
 
 # ===========================================================================
-# Prognostic spectral -- KNOWN-BROKEN (FIXME F-GWD-1)
+# Prognostic spectral -- directional deposition (F-GWD-1 fixed)
 # ===========================================================================
 #
-# The deposition in prognostic_spectral.py is missing the ``sign(c - U_proj)``
-# factor, so a symmetric launch spectrum produces a force that is independent of
-# the wind sign and can ACCELERATE the jet (column dissipation eps_gwd < 0,
-# du/dt * u > 0).  Restoring the sign factor alone is necessary but not
-# sufficient -- the breaking energetics need a proper spectral-GWD review + a
-# momentum-deposition / QBO benchmark before the scheme can be trusted.  The
-# scheme is opt-in and the default GWD scheme is "none".  These tests pin the
-# defect (xfail strict) so it cannot be silently "fixed" without updating the
-# suite, and assert the one property that DOES hold unconditionally
-# (finiteness).
+# The deposition in prognostic_spectral.py carries the CONSTANT launch-level
+# sign ``tanh((c - U_launch)/w) ~ sign(c - U_launch)`` (fixed with height):
+# momentum deposited by a breaking wave drives the projected wind toward
+# the wave phase speed ``c`` WHILE the local wind stays on the launch side of
+# ``c`` (deceleration for a slow-launched wave, acceleration for a fast one).
+# A wave launched FASTER than the flow legitimately accelerates it
+# (toward ``c`` while the local wind is below ``c``; QBO-style forcing), so
+# "drag opposes flow" is a true invariant only for a
+# spectrum SLOWER than the wind everywhere (launch and local sign agree) --
+# asserted below with a slow-spectrum config.  The dissipative heating uses the
+# intrinsic MAGNITUDE form ``|c - U_proj| * deposit >= 0`` (>= 0 for ANY
+# spectrum/wind).
 
-def _run_prognostic(u_profile="monotone"):
-    u, v, T, pf, ph, zf, zh, rho = _idealized_column(u_profile=u_profile)
-    cfg = PrognosticSpectralConfig()
-    spec = jnp.full((1, cfg.n_azimuths, cfg.n_wavenumbers), cfg.launch_flux)
+def _run_prognostic(u_profile="monotone", cfg=None, launch=None, u=None):
+    col = _idealized_column(u_profile=u_profile)
+    u_col, v, T, pf, ph, zf, zh, rho = col
+    if u is None:
+        u = u_col
+    if cfg is None:
+        cfg = PrognosticSpectralConfig()
+    if launch is None:
+        launch = cfg.launch_flux
+    spec = jnp.full((1, cfg.n_azimuths, cfg.n_wavenumbers), launch)
     out, _ = prognostic_spectral_gwd(u, v, T, pf, ph, zf, zh, rho,
                                      jnp.zeros(1), 1800.0, cfg, spec)
     return out, u, rho, zh
 
 
 def test_prognostic_spectral_finite():
-    """The one invariant that holds: the tendencies are finite (no NaN/Inf)."""
+    """Tendencies are finite (no NaN/Inf)."""
     out, u, rho, zh = _run_prognostic()
     assert jnp.all(jnp.isfinite(out.du_dt))
     assert jnp.all(jnp.isfinite(out.dv_dt))
     assert jnp.all(jnp.isfinite(out.dT_dt))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FIXME F-GWD-1: prognostic_spectral deposition is missing the "
-    "sign(c-U) factor, so the symmetric launch spectrum ACCELERATES the jet "
-    "(du/dt*u > 0). Opt-in scheme; default GWD is 'none'. Needs a spectral-GWD "
-    "review + QBO benchmark, not a bounded diff.",
-)
-def test_prognostic_spectral_drag_opposes_flow_xfail():
-    out, u, rho, zh = _run_prognostic()
+def _slow_spectrum_config():
+    """Spectrum slower than the wind everywhere: c = N/k <= N*3km/(2*pi)
+    ~ 9.4 m/s < u_sfc = 10 m/s (isothermal T0=250 K column,
+    N = sqrt(g^2/(c_pd*T0)) ~ 0.0196 1/s)."""
+    import math
+    return PrognosticSpectralConfig(k_min=2.0 * math.pi / 3.0e3)
+
+
+def test_prognostic_spectral_slow_spectrum_drag_opposes_flow():
+    """F-GWD-1 fix: with every phase speed below the wind (c < U_proj on the
+    along-wind azimuth), sign(c - U_proj) < 0 and each deposit decelerates
+    the flow -- u*du/dt <= 0 everywhere, a true drag."""
+    out, u, rho, zh = _run_prognostic(cfg=_slow_spectrum_config(), launch=0.1)
+    # Non-vacuous: breaking must actually deposit somewhere.
+    assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
     _assert_drag_opposes_flow(out, u)
+    # Net column force opposes the (purely zonal, positive) flow.
+    assert _column_momentum(out, rho, zh) < 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FIXME F-GWD-1: prognostic_spectral can add KE (eps_gwd < 0) because "
-    "the deposition is wind-sign-independent; see the drag-sign xfail.",
-)
-def test_prognostic_spectral_heating_nonneg_xfail():
-    out, u, rho, zh = _run_prognostic()
+def test_prognostic_spectral_heating_nonneg():
+    """Intrinsic-form dissipation: dT_dt >= 0 and eps_gwd >= 0 by
+    construction for the DEFAULT (fast) spectrum -- even where fast waves
+    accelerate the flow, the wave supplies the KE and the heating stays
+    non-negative."""
+    out, u, rho, zh = _run_prognostic(launch=0.1)
     _assert_heating_nonneg(out)
+    assert float(jnp.min(out.eps_gwd)) >= -1e-12
+    # Energy tie-back: c_pd * integral(rho * dT_dt * dz) == eps_gwd.
+    dz = _layer_dz(zh)
+    heating_power = jnp.sum(rho * out.dT_dt * C.c_pd * dz, axis=1)
+    np.testing.assert_allclose(np.asarray(out.eps_gwd),
+                               np.asarray(heating_power),
+                               rtol=1e-10, atol=1e-14)
+
+
+def test_prognostic_spectral_symmetric_two_wave():
+    """F-GWD-1 acceptance test: a symmetric two-wave spectrum (one phase
+    speed c along +x and -x; n_az=2, n_wn=1) with 0 < c < U:
+
+    * mean flow U > 0: both waves deposit AGAINST the flow
+      (+x wave: sign(c - U) < 0; -x wave: sign(c + U) > 0 along the -x
+      azimuth) -> net force opposes U (drag);
+    * U = 0: saturation and deposits are azimuth-symmetric -> zero force;
+    * eps_gwd >= 0 in both cases.
+    """
+    import math
+    # Single wavenumber k0 -> c = N/k0 ~ 6.2 m/s < u everywhere (u in
+    # [10, 40] m/s on the monotone column).
+    cfg = PrognosticSpectralConfig(
+        n_azimuths=2, n_wavenumbers=1,
+        k_min=2.0 * math.pi / 2.0e3, k_max=2.0 * math.pi / 2.0e3,
+    )
+    out, u, rho, zh = _run_prognostic(cfg=cfg, launch=0.5)
+    assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0  # deposits active
+    _assert_drag_opposes_flow(out, u)
+    assert _column_momentum(out, rho, zh) < 0.0  # net drag on +x flow
+    # Purely zonal azimuths -> no meridional force.
+    assert float(jnp.max(jnp.abs(out.dv_dt))) < 1e-12
+    assert float(jnp.min(out.eps_gwd)) >= -1e-12
+
+    # U = 0: exact cancellation of the +-x deposits by symmetry.
+    u0 = jnp.zeros_like(u)
+    out0, _, _, _ = _run_prognostic(cfg=cfg, launch=0.5, u=u0)
+    assert float(jnp.max(jnp.abs(out0.du_dt))) < 1e-10
+    assert float(jnp.max(jnp.abs(out0.dv_dt))) < 1e-10
+    assert float(jnp.min(out0.eps_gwd)) >= -1e-12
 
 
 # ===========================================================================

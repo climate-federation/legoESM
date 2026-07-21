@@ -456,7 +456,9 @@ def test_unknown_literal_raises():
 
 
 def test_explicit_ab2_requires_ab2_outer():
-    with pytest.raises(ValueError, match='requires outer_integrator="ab2"'):
+    with pytest.raises(
+            ValueError,
+            match=r'requires outer_integrator in \("ab2","leapfrog"\)'):
         _construct("explicit_ab2", outer_integrator="forward_euler")
 
 

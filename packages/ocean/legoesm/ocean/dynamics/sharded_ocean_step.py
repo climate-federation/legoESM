@@ -55,6 +55,7 @@ except ImportError:                    # pragma: no cover - JAX < 0.8 fallback
 from legoesm.parallel.latlon_spmd import (
     activate_latlon_spmd_halo,
     latlon_band_perms,
+    reconstruct_vface_lower_multi,
 )
 
 # Per-device band grids: the SPMD wrapper REUSES the tested band slicers from
@@ -109,7 +110,9 @@ def _lat_spec(x):
     return P("lat", *((None,) * (nd - 1)))
 
 
-def _step_body(model, state, dt, *, grid, vertex_mask):
+def _step_body(model, state, dt, *, grid, vertex_mask,
+               freshwater=None, surface_forcing=None, sponge=None,
+               t_seconds=None):
     """Run ONE ocean step via the model's NON-jitted body (``_step_impl`` /
     ``_ab2_step`` + the static-gated post-steps), the un-jitted twin of
     ``LatLonCGridOceanModel._step_jitted``.
@@ -140,10 +143,14 @@ def _step_body(model, state, dt, *, grid, vertex_mask):
                 "outer_integrator='ab2' double-counts with "
                 "tracer_time_integrator='ab2'; set the inner one to 'euler'.")
         new_state = model._ab2_step(
-            state, dt, grid=grid, vertex_mask=vertex_mask)
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
     else:
         new_state = model._step_impl(
-            state, dt, grid=grid, vertex_mask=vertex_mask)
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
     if model.config.polar_filter.use_polar_filter:
         new_state = model._apply_polar_filter(new_state, dt, grid=grid)
     if model.config.freeze_floor:
@@ -242,6 +249,24 @@ def shard_state_latlon(state, mesh):
     expects; the test uses it instead of a uniform ``tree.map(P("lat"))`` (which
     fails on ``v`` because ``n_lat+1`` is not divisible by ``N``).
     """
+    # v-carrier contract (see make_sharded_ocean_step's fold note): the TOP
+    # v-face row (regular pole wall OR tripole seam/cap row) must be
+    # wall-masked — the carrier drops it and reconstructs it as zero, which
+    # would silently delete a LIVE seam row.  Host-side check on the
+    # concrete state (this fn runs outside jit).
+    vm = getattr(state, "v_mask", None)
+    if vm is not None:
+        import numpy as _np
+
+        if _np.asarray(vm.data)[-1].any():
+            raise ValueError(
+                "shard_state_latlon: the state's TOP v-face row is LIVE "
+                "(v_mask[-1] has ocean faces) — the lat-band v-carrier "
+                "drops that row and reconstructs it as the pole/cap wall "
+                "zero, which would silently delete seam velocities. "
+                "Mask the cap row (the tripole cap convention) or extend "
+                "the carrier before sharding this state.")
+
     def _shard_cell(field):
         if field is None:
             return None
@@ -288,6 +313,90 @@ def shard_state_latlon(state, mesh):
     return state._replace(**updates)
 
 
+def shard_forcing_latlon(forcing, mesh):
+    """Lay out a forcing pytree (``FreshwaterForcing`` / ``OceanSurfaceForcing``
+    / ``SpongeForcing`` — or any nesting of them) for the lat-band SPMD step.
+
+    Every OMIP forcing field is CELL-CENTERED ``(n_lat, n_lon[, nlev])`` (the
+    cell->face wind-stress interpolation happens INSIDE the step through the
+    SPMD-aware halo pads), so array leaves shard ``P("lat", None, ...)`` with
+    no ``v_lower`` handling; scalars replicate; ``None`` fields pass through
+    untouched (they vanish from the pytree structure, matching the specs the
+    step derives).  ``forcing=None`` returns ``None``.
+    """
+    if forcing is None or mesh is None:
+        return forcing
+
+    def _put(leaf):
+        if leaf is None:
+            return None
+        arr = jnp.asarray(leaf)
+        return jax.device_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+
+    return jax.tree.map(_put, forcing)
+
+
+def shard_forcing_stack_latlon(stack, mesh):
+    """Lay out a STACKED per-block forcing pytree for the lat-band SPMD
+    block-scan (the ``run_omip`` JRA55 lanes; see
+    ``_build_jra55_block_fn`` / ``_build_jra55_block_fn_interp``).
+
+    Unlike :func:`shard_forcing_latlon` (per-step, lat at axis 0), the
+    block builders stack ``N`` steps / raw records along a LEADING axis,
+    so the lat axis sits at position 1.  A ``(n_rec, n_lat, n_lon[, ...])``
+    leaf therefore shards ``P(None, "lat", ...)`` (records replicated, the
+    time index stays shard-local so the in-scan interpolation needs no
+    cross-band comm); a bare ``(n_lat, n_lon)`` leaf shards ``P("lat", None)``;
+    1-D metadata / scalars replicate; ``None`` and non-array leaves pass
+    through.  ``mesh=None`` returns ``stack`` unchanged (serial lane).
+
+    CONTRACT: rank is the ONLY signal used, so a rank-2 leaf is assumed to
+    be a ``(n_lat, n_lon)`` field and is lat-sharded on axis 0.  Any future
+    metadata that is genuinely rank-2 but NOT lat-major (e.g. a
+    ``(n_rec, n_meta)`` table) would be silently mis-sharded — keep such
+    metadata 1-D (or replicate it explicitly) before it reaches this helper.
+
+    Keeping this next to :func:`shard_state_latlon` means the driver and
+    the parity tests share ONE layout definition — the block-scan forcing
+    stack must be laid out consistently with the state the sharded step
+    carries, and a second copy would drift.
+    """
+    if mesh is None:
+        return stack
+
+    def _put(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        arr = jnp.asarray(leaf)
+        if arr.ndim >= 3:
+            spec = P(None, "lat", *((None,) * (arr.ndim - 2)))
+        elif arr.ndim == 2:
+            spec = P("lat", None)
+        else:
+            spec = P()
+        return jax.device_put(arr, NamedSharding(mesh, spec))
+
+    return jax.tree.map(_put, stack)
+
+
+def append_vface_wall_row(v_lower):
+    """Rebuild the full ``(n_lat+1, ...)`` staggered v-array from the lat-band
+    carrier ``v_lower`` by appending the TOP wall row (zeros).
+
+    This is THE reconstruction of the row the carrier drops: the regular-grid
+    north pole wall / tripole cap row, identically zero under the v-carrier
+    contract (:func:`shard_state_latlon` REFUSES a state whose top v-face row
+    is live), so the result is bit-identical to the original staggered array.
+    Shared by :func:`gather_state_latlon` (full-state gather) and the
+    persistent-lane DEVICE-SIDE staggered reads (the OMIP driver's
+    surface-current consumers, ``run_omip_core2._surface_uv_faces``) so the
+    row reconstruction is written once.  Works on any trailing shape (3-D
+    leaves or 2-D surface slices) and preserves sharding under GSPMD.
+    """
+    wall = jnp.zeros_like(v_lower[:1])
+    return jnp.concatenate([v_lower, wall], axis=0)
+
+
 def gather_state_latlon(state, mesh):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
@@ -318,9 +427,8 @@ def gather_state_latlon(state, mesh):
             updates[name] = None
             continue
         v_lower = _gather_arr(field.data)
-        pole = jnp.zeros_like(v_lower[:1])          # north pole-wall row
-        full = jnp.concatenate([v_lower, pole], axis=0)
-        updates[name] = field.replace(data=full)
+        # north pole-wall / cap row (the shared reconstruction helper)
+        updates[name] = field.replace(data=append_vface_wall_row(v_lower))
     for name in state._fields:
         if name in _V_STAGGERED_STATE_FIELDS:
             continue
@@ -335,7 +443,16 @@ def gather_state_latlon(state, mesh):
 
 
 def make_sharded_ocean_step(model, mesh):
-    """Return ``step(state, dt) -> state`` running ``model.step`` lat-band-SPMD.
+    """Return ``step(state, dt, freshwater=None, surface_forcing=None,
+    sponge=None, t_seconds=None) -> state`` running ``model.step``
+    lat-band-SPMD.
+
+    The forcing channels mirror ``model.step``'s keyword surface: pass
+    pytrees laid out with :func:`shard_forcing_latlon` (cell-centered
+    ``(n_lat, n_lon[, nlev])`` leaves shard on the lat axis; ``t_seconds``
+    is a replicated scalar like ``dt``).  ``None`` forcing keeps the
+    dynamics-only program; each distinct None<->populated combination
+    compiles (and caches) its own executable.
 
     Parameters
     ----------
@@ -365,16 +482,27 @@ def make_sharded_ocean_step(model, mesh):
     converts the result back to the ``v_lower`` representation.
     """
     if mesh is None:                   # single-device: plain step
-        return lambda state, dt: model.step(state, dt)
+        return lambda state, dt, **forcing_kwargs: model.step(
+            state, dt, **forcing_kwargs)
 
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
 
-    # Tripole north-fold is a separate follow-up: the regular grid has the fold
-    # INACTIVE.  Fail loud rather than silently mis-folding the north band.
-    fold = getattr(model.grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
-        raise NotImplementedError("tripole north-fold: follow-up")
+    # Tripole north-fold (scaling-audit item 4): SUPPORTED under the same
+    # v-carrier contract as the regular grid.  Every fold-touching operator
+    # is already uniform-program fold-capable (the data-dependent
+    # ``north_fold_mask``/``apply_north_fold`` selection on
+    # ``axis_index == N-1`` — gated by test_latlon_spmd_northfold), and
+    # ``build_band_grids``' slicer keeps ``is_active`` rank-consistent with
+    # the ``fold_j=-1`` sentinel off the north band.  The one structural
+    # assumption is the v-carrier's: the TOP v-face row (the seam/cap row,
+    # ``v[n_lat]``) must be WALL-MASKED so the in-body reconstruction's
+    # zero row is exact — true for the cap-row convention of
+    # ``create_synthetic_tripole`` and the eORCA masks (``v_mask[-1] == 0``;
+    # the serial step keeps ``v[-1] == 0`` identically).  That contract is
+    # asserted on the CONCRETE state in :func:`shard_state_latlon` — a live
+    # (unmasked) seam v-row refuses loudly there instead of silently
+    # reconstructing zeros here.
 
     # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
     band_grids = build_band_grids(model.grid, n_dev)
@@ -400,7 +528,9 @@ def make_sharded_ocean_step(model, mesh):
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
     perm_north, _perm_south = latlon_band_perms(n_dev)
 
-    def _body(state_local, geom_stacks_local, vmask_stack_local, dt):
+    def _body(state_local, forcing_local, geom_stacks_local,
+              vmask_stack_local, dt):
+        fw_local, sf_local, sponge_local, t_s_local = forcing_local
         r = jax.lax.axis_index(axis)
 
         # Rebuild this band's geometry: index the stacked arrays at r, keep the
@@ -430,12 +560,35 @@ def make_sharded_ocean_step(model, mesh):
                 return None
             return field.replace(data=field.data[:-1])
 
-        v_updates = {name: _reconstruct_v(getattr(state_local, name))
-                     for name in _V_STAGGERED_STATE_FIELDS}
+        # Fused v-carrier reconstruction (scaling-M4): under the SAME
+        # trace-time switch as the pad aggregation, pack the boundary-row
+        # ppermutes of ALL staggered carriers (v + v_mask) into one
+        # collective per dtype group — value-identical (a bit-copy
+        # exchange; the flag flip re-keys the sharded_step cache below so
+        # a reused step object rebuilds).  Default OFF = the historical
+        # per-field ppermutes, byte-identical.
+        import os as _os
+        _fused_v = _os.environ.get(
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+        present = [name for name in _V_STAGGERED_STATE_FIELDS
+                   if getattr(state_local, name) is not None]
+        if _fused_v and len(present) > 1:
+            fulls = reconstruct_vface_lower_multi(
+                tuple(getattr(state_local, n).data for n in present),
+                axis, perm_north)
+            v_updates = {n: getattr(state_local, n).replace(data=f)
+                         for n, f in zip(present, fulls)}
+            for name in _V_STAGGERED_STATE_FIELDS:
+                v_updates.setdefault(name, None)
+        else:
+            v_updates = {name: _reconstruct_v(getattr(state_local, name))
+                         for name in _V_STAGGERED_STATE_FIELDS}
         state_band = state_local._replace(**v_updates)
 
         result = _step_body(model, state_band, dt,
-                            grid=band_geom, vertex_mask=band_vmask)
+                            grid=band_geom, vertex_mask=band_vmask,
+                            freshwater=fw_local, surface_forcing=sf_local,
+                            sponge=sponge_local, t_seconds=t_s_local)
 
         out_updates = {name: _to_v_lower(getattr(result, name))
                        for name in _V_STAGGERED_STATE_FIELDS}
@@ -450,16 +603,70 @@ def make_sharded_ocean_step(model, mesh):
     # which also forced the per-call rebuild) so a changing dt does not
     # retrigger compilation.
     _cache = {}
+    n_lat_global = int(model.grid.n_lat)
 
-    def sharded_step(state, dt):
-        # Cache key = the state's pytree STRUCTURE: in_specs/out_specs are
-        # derived from it, so a later call with a different structure (an
-        # optional field flipping None <-> Field) must rebuild the shard_map
-        # rather than reuse stale specs (codex finding).
-        key = jax.tree.structure(state)
+    def _validate_forcing_layout(forcing):
+        """Loudly refuse forcing leaves the lat-band shard cannot split.
+
+        Every OMIP forcing field is CELL-CENTERED ``(n_lat, n_lon[, nlev])``
+        — there are no v-face ``(n_lat+1, …)`` forcing arrays, so no
+        ``v_lower`` handling.  A wrong-leading-dim leaf would otherwise die
+        inside shard_map with an opaque divisibility error.
+        """
+        leaves, _ = jax.tree_util.tree_flatten_with_path(forcing)
+        for path, leaf in leaves:
+            nd = int(getattr(leaf, "ndim", np.ndim(leaf)))
+            if nd == 1:
+                # No OMIP forcing field is 1-D; _lat_spec would shard a
+                # profile/staggered vector over "lat" silently-wrong
+                # (codex r1 #2).
+                raise ValueError(
+                    f"sharded ocean step: forcing leaf "
+                    f"{jax.tree_util.keystr(path)} is 1-D "
+                    f"(shape {tuple(leaf.shape)}); forcing must be "
+                    f"cell-centered (n_lat, n_lon[, nlev]) arrays or "
+                    f"scalars.")
+            if nd >= 2 and int(leaf.shape[0]) != n_lat_global:
+                raise ValueError(
+                    f"sharded ocean step: forcing leaf {jax.tree_util.keystr(path)} "
+                    f"has leading dim {leaf.shape[0]} != n_lat "
+                    f"({n_lat_global}); forcing must be cell-centered "
+                    f"(n_lat, n_lon[, nlev]) to shard on the lat axis.")
+
+    def sharded_step(state, dt, freshwater=None, surface_forcing=None,
+                     sponge=None, t_seconds=None):
+        # ONE forcing operand: None fields drop out of the pytree structure,
+        # so specs derived by tree.map skip them automatically and the
+        # structure key below distinguishes every None<->array combination.
+        forcing = (freshwater, surface_forcing, sponge, t_seconds)
+        _validate_forcing_layout((freshwater, surface_forcing, sponge))
+        # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
+        # forcing leaves' RANKS: in_specs/out_specs are derived from them,
+        # so a later call with a different structure (an optional field
+        # flipping None <-> Field, a sea-ice lane populating sf.salt_flux,
+        # the restoring lane passing no forcing at all) OR a same-field
+        # rank change (SpongeForcing.gamma is legitimately 2-D horizontal
+        # OR 3-D full-rank — same structure, different _lat_spec; codex r1
+        # #1) must rebuild the shard_map rather than reuse stale specs.
+        forcing_ndims = tuple(
+            int(getattr(leaf, "ndim", np.ndim(leaf)))
+            for leaf in jax.tree.leaves(forcing))
+        # The SPMD fused-halo switch is read at TRACE time inside the pad
+        # dispatch — flipping LEGOESM_LATLON_SPMD_FUSED_HALO on a reused
+        # step object must rebuild the shard_map, not reuse a stale jaxpr
+        # (codex, audit item 7).
+        import os as _os
+
+        _fused_halo = _os.environ.get(
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+        key = (jax.tree.structure(state), jax.tree.structure(forcing),
+               forcing_ndims, _fused_halo)
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, state)
+            # Forcing leaves are cell-centered -> plain lat-band specs;
+            # scalars (t_seconds) replicate, exactly like dt.
+            forcing_spec = jax.tree.map(_lat_spec, forcing)
             geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
             vmask_spec = P()
             # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the
@@ -468,7 +675,7 @@ def make_sharded_ocean_step(model, mesh):
             fn = jax.jit(shard_map(
                 _body,
                 mesh=mesh,
-                in_specs=(in_spec, geom_spec, vmask_spec, P()),
+                in_specs=(in_spec, forcing_spec, geom_spec, vmask_spec, P()),
                 out_specs=in_spec,
                 check_vma=False,
             ))
@@ -494,9 +701,45 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, geom_stacks, vmask_stack, jnp.asarray(dt))
+            return fn(state, forcing, geom_stacks, vmask_stack,
+                      jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_step
+
+
+def make_sharded_ocean_step_global(model, mesh):
+    """Return ``step(state_global, dt, surface_forcing=None, freshwater=None)``
+    that takes a GLOBAL (single-device-layout) state + forcing and returns a
+    GLOBAL state — the minimal-diff driver entry point.
+
+    Wraps :func:`make_sharded_ocean_step`: shards the global state + forcing IN
+    (:func:`shard_state_latlon` + :func:`shard_forcing_latlon`), runs the lat-band
+    SPMD step, then gathers the state OUT (:func:`gather_state_latlon`).  This lets
+    the OMIP host loop keep operating on a normal full-domain state — the per-step
+    host BCs (SSS restore, prognostic ice, geothermal, BBL, nudge) see the
+    gathered global state UNCHANGED — at the cost of a per-step gather/scatter
+    (acceptable for the host-coupled OMIP driver; the pure-dynamics inner loop
+    should use :func:`make_sharded_ocean_step` directly to stay sharded).
+
+    ``mesh is None`` ⇒ the plain single-device ``model.step`` (no scatter/gather).
+    """
+    if mesh is None:                   # single-device: plain step
+        return lambda state, dt, surface_forcing=None, freshwater=None: (
+            model.step(state, dt, freshwater=freshwater,
+                       surface_forcing=surface_forcing))
+
+    inner = make_sharded_ocean_step(model, mesh)
+
+    def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
+        # Scatter the global state to the band layout; the forcing is sharded
+        # INSIDE ``inner`` (make_sharded_ocean_step lays it out), so pass it
+        # through global.
+        ss = shard_state_latlon(state, mesh)
+        ss = inner(ss, dt, surface_forcing=surface_forcing,
+                   freshwater=freshwater)
+        return gather_state_latlon(ss, mesh)
+
+    return sharded_step_global

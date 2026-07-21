@@ -26,6 +26,42 @@ Corresponding output slots:
         from other schemes; integration code applies it correctly as a
         generic tendency regardless of physical units)
 
+Faithfulness
+------------
+This is a P3-STRUCTURED scheme (single free ice category with predicted rime
+mass + volume), but most of its process RATES are simplified surrogates, NOT the
+gSAM P3 oracle (``MICRO_P3/module_mp_p3.f90``):
+
+- Cooper (1986) ice NUCLEATION — ORACLE-FAITHFUL gSAM P3 scheme-1 semantics
+  (module_mp_p3.f90:3084-3095), smoothed for differentiability. Faithful
+  pieces (all pinned by ``tests/.../test_p3_cooper_faithful.py``): base curve
+  ``N_i0·exp(cooper_a·(T_freeze−T))/rho`` (N_i0=5.0=0.005·1000,
+  cooper_a=0.304, per-kg rho-divide), scheme-1 CAP 100/L·SCF at SCF=1 (:3090;
+  this column scheme has no SCPF cloud fraction, and gSAM's scpf_ON=.false.
+  default also runs SCF=1 — scheme 2 would use 150/L at :3136), nucleation
+  GATE ``T<−15 °C AND supi≥0.05`` (:3084), the (target−N_i)/dt relaxation,
+  and the SEED mass ``mi0=4/3π·900·(1e-6)³`` (:233 — gSAM hardcodes
+  900 kg/m³, not ``constants.rho_ice``). The former departures (500/L cap,
+  −8 °C gate with no supersaturation requirement, 917 seed density) were
+  closed 2026-07-17. Remaining structural deltas (documented, deliberate):
+  the hard Fortran gates become SIGMOIDS (``ice_sigmoid_sharpness`` on T,
+  ``cooper_supi_sharpness`` on supi) so the scheme stays differentiable, plus
+  a rho floor, a ``clip(dt,1)`` floor, and an exponent cap absent from the
+  raw Fortran.
+- Ice deposition, cloud/rain RIMING, aggregation, MELTING, and ice/rain FALL
+  SPEED (:264-384) — SURROGATES, NOT amenable to a closed-form coefficient-level
+  pin. gSAM P3 computes each of these by interpolating a LOOKUP TABLE
+  (``f1pr02``..``f1pr14`` / γ-distribution integrals, module_mp_p3.f90:2440-2666);
+  legoESM uses invented algebraic forms (``dep_coeff·q_i·N_i^⅓``,
+  ``rime_coeff·q_i·q_c``, ``agg_coeff·N_i``, ``melt_rate·q_i·sigmoid``,
+  ``a_v_i·(q_i·rho)^b``) with no coefficient-level counterpart (they could only be
+  pinned against compiled gSAM output or frozen lookup-table fixtures).
+- WARM RAIN reuses the SIMPLIFIED ``_warm_rain`` helpers (``autoconversion_sb``
+  q_c²·sigmoid proxy, bilinear ``accretion``, legacy ``self_collection_breakup``,
+  simplified ``rain_evaporation``) — NOT the published SB2001 universal functions
+  (``autoconversion_sb2001``/``accretion_sb2001``, reachable via Morrison's
+  ``warm_rain_scheme="seifert_beheng_sb2001"``).
+
 References
 ----------
 - Morrison, H. & Milbrandt, J. A. (2015). Parameterization of cloud
@@ -35,6 +71,8 @@ References
 """
 
 from __future__ import annotations
+
+import math
 
 import jax
 import jax.numpy as jnp
@@ -65,12 +103,30 @@ _RHO_FLOOR = 0.1
 _COOPER_EXP_CAP = 80.0
 _VT_CLIP_RAIN = 20.0
 
+# --- Initial ice crystal mass at nucleation (gSAM P3 module_mp_p3.f90:233) ---
+# P3 seeds each freshly-nucleated crystal with the ORACLE seed mass
+# ``mi0 = 4/3·π·900·(IceNucleiRadius)³`` ≈ 3.77e-15 kg: gSAM hardcodes a
+# 900 kg/m³ nucleus density (NOT constants.rho_ice = 917 — the former ~1.9 %
+# heavier legoESM seed was a documented departure, closed 2026-07-17) at the
+# default 1-µm radius (micro_params.f90:214).  Removed from vapour so N_i and
+# q_i stay consistent right after nucleation instead of collapsing the
+# diagnosed mean crystal mass q_i/N_i to zero.
+_ICE_NUC_RADIUS_M = 1.0e-6                                     # [m]
+_RHO_ICE_NUC = 900.0   # [kg/m³] gSAM P3 hardcoded seed density (mi0, :233)
+_M_I0 = 4.0 / 3.0 * math.pi * _RHO_ICE_NUC * _ICE_NUC_RADIUS_M ** 3  # [kg]
+
 __physics_contract__ = {
     "summary": (
-        "P3 (Predicted Particle Properties; Morrison & Milbrandt 2015) ice "
-        "microphysics: a single free ice category with prognostic rime mass and "
-        "rime volume (evolving density/fall speed) plus Seifert-Beheng warm "
-        "rain; sedimentation to surface precipitation."
+        "P3-STRUCTURED (Predicted Particle Properties; Morrison & Milbrandt 2015) "
+        "ice microphysics: a single free ice category with prognostic rime mass "
+        "and rime volume (evolving density/fall speed) plus simplified "
+        "SB-style warm rain. The ice process RATES (deposition, riming, "
+        "aggregation, melting, fall speed) are algebraic SURROGATES for P3's "
+        "lookup-table physics, not the P3 oracle; Cooper ice nucleation is "
+        "ORACLE-FAITHFUL gSAM scheme-1 semantics (base curve, 100/L cap, "
+        "T<-15C AND supi>=0.05 gate, 900 kg/m^3 seed), sigmoid-smoothed for "
+        "differentiability — see the module 'Faithfulness' docstring. "
+        "Sedimentation to surface precipitation."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -200,34 +256,50 @@ def p3_microphysics(
     # Smooth mask: ice processes active below cooper_T_act.
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
-    # 1. Ice nucleation (Cooper 1986, smoothed).
+    # Ice supersaturation (used by the nucleation gate and deposition below).
+    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+
+    # 1. Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics, smoothed).
     #
-    # The ``max(T_freeze − T, 0)`` floor inside the exponential leaves
-    # the bare ``N_i0/rho`` target active above freezing; without an
-    # ``f_ice`` gate ``dN_i_nuc`` nucleated ~28 crystals / kg / s at
-    # T = 290 K (probe).  Multiplying by ``f_ice`` (≈ 0 above
-    # cooper_T_act) shuts nucleation off in warm columns and matches
-    # the gating already applied to deposition, riming, rain-riming,
-    # and aggregation — mirrors the same fix landed in
-    # morrison.py / thompson.py.
-    # Cap at ``N_i_nuc_max`` (SAM 500 L⁻¹) BEFORE the ρ-divide: the bare
-    # Cooper exponential overflows fp32 at the very cold tropopause /
-    # sponge temperatures of an RCEMIP column (→ N_i = inf → NaN in
-    # tracer slot 8). ``jnp.minimum`` clamps even an inf exponential to
-    # the finite cap. Mirrors morrison.py / thompson.py.
+    # ORACLE GATE (module_mp_p3.f90:3084): nucleate only where
+    # ``T < 258.15 K (−15 °C) AND supi >= 0.05`` — smoothed to a product of
+    # sigmoids so the scheme stays differentiable (sharpnesses are numerics
+    # params, not tunables).  The supersaturation factor also kills the bare
+    # ``N_i0/rho`` target left active above freezing by the
+    # ``max(T_freeze − T, 0)`` floor inside the exponential (the old
+    # f_ice-only gate at cooper_T_act = −8 °C nucleated warmer AND in
+    # ice-SUBSATURATED air — the documented REALISM gap, closed 2026-07-17).
+    # f_ice (a warmer, general mixed-phase gate) still gates deposition,
+    # riming, rain-riming, aggregation.
+    f_nuc = (
+        jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_nuc - T))
+        * jax.nn.sigmoid(
+            config.cooper_supi_sharpness * (S_i - config.cooper_supi_min))
+    )
+    # Cap at ``N_i_nuc_max`` — ORACLE scheme-1 value 100 L⁻¹·SCF with SCF = 1
+    # (module_mp_p3.f90:3090; this column scheme has no SCPF cloud fraction, and
+    # gSAM's own scpf_ON=.false. default also runs SCF = 1; scheme 2 uses
+    # 150 L⁻¹·SCF at :3136).  Applied BEFORE the ρ-divide: the bare Cooper
+    # exponential overflows fp32 at the very cold tropopause / sponge
+    # temperatures of an RCEMIP column (→ N_i = inf → NaN in tracer slot 8).
+    # ``jnp.minimum`` clamps even an inf exponential to the finite cap.
     N_i_target = jnp.minimum(
         config.N_i0
         * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, _RHO_FLOOR)
-    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
+    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_nuc
+    # Nucleation MASS source: each new crystal carries the seed mass m_i0
+    # (vapour → ice, +L_s), mirroring morrison.py's MNUCCD = NNUCCD·MI0.
+    # Number-only nucleation left q_i/N_i → 0 and skewed the N_i^(1/3)
+    # deposition closure below.  [1/(kg·s)]·[kg] = [kg/kg/s].
+    dq_i_nuc = dN_i_nuc * _M_I0
 
     # 2. Vapour deposition on ice (subsaturated wrt ice: sublimation handled
     # by the jnp.maximum(S_i, 0) gate — only deposition grows q_i here;
     # sublimation is a separate pathway not yet included, consistent with
     # Morrison which also omits explicit sublimation).
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
-    S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     dq_i_dep = (
         config.dep_coeff
@@ -317,13 +389,18 @@ def p3_microphysics(
     )
     dN_r_au        = dN_r_au   * qc_scale
 
-    # --- q_v sinks: condensation + deposition ---
+    # --- q_v sinks: condensation + deposition + nucleation seed mass ---
     cond_pos       = jnp.maximum(condensation, 0.0)
-    qv_sink_total  = cond_pos + jnp.maximum(dq_i_dep, 0.0)
+    qv_sink_total  = cond_pos + jnp.maximum(dq_i_dep, 0.0) + dq_i_nuc
     qv_avail       = jnp.clip(q_v, 0.0)
     qv_scale       = donor_clamp_scale(qv_avail, qv_sink_total, dt)
     condensation   = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
     dq_i_dep       = dq_i_dep  * qv_scale
+    # Scale mass AND number by the same qv_scale so the per-crystal seed
+    # mass m_i0 stays consistent when vapour limits nucleation (mirrors
+    # morrison.py).
+    dq_i_nuc       = dq_i_nuc  * qv_scale
+    dN_i_nuc       = dN_i_nuc  * qv_scale
 
     # =========================================================================
     # SEDIMENTATION
@@ -389,7 +466,8 @@ def p3_microphysics(
     dT_dt = (
         L_v * condensation / c_pd
         - L_v * evaporation / c_pd
-        + L_s * dq_i_dep / c_pd
+        # Vapour → ice (deposition + nucleation seed mass): releases L_s.
+        + L_s * (dq_i_dep + dq_i_nuc) / c_pd
         # Cloud/rain riming: supercooled liquid → ice, releases L_f.
         + L_f * (riming + rain_rime) / c_pd
         # Melting: ice → liquid, absorbs L_f.
@@ -399,29 +477,76 @@ def p3_microphysics(
     # =========================================================================
     # COMBINE TENDENCIES
     # =========================================================================
-    dq_v_dt   = -condensation + evaporation - dq_i_dep
+    dq_v_dt   = -condensation + evaporation - dq_i_dep - dq_i_nuc
     dq_c_dt   = condensation - dq_c_au - dq_c_ac - riming
     dq_r_dt   = dq_c_au + dq_c_ac - evaporation + melt_ice - rain_rime + sed_r
-    dq_i_dt   = dq_i_dep + riming + rain_rime - melt_ice + sed_i
+    dq_i_dt   = dq_i_dep + dq_i_nuc + riming + rain_rime - melt_ice + sed_i
     dq_rim_dt = dq_rim_rime + dq_rim_rr - melt_rim + sed_rim
     dB_rim_dt = dB_rim_rime + dB_rim_rr - melt_B_rim + sed_B_rim
 
     # Number tendencies.
-    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
-    dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
-    # Aggregation reduces N_i (self-collection of ice particles).
-    dN_i_dt = dN_i_nuc - aggregation_N
+    # Cloud-droplet number sinks: autoconversion (mean-mass x_c per drop) PLUS
+    # riming and accretion, which sweep up WHOLE droplets — number removed in
+    # proportion to the cloud mass consumed (SAM NPSACWS/NPRA; mirrors
+    # morrison.py's dN_c_riming).  Without these, riming/accretion shrink the
+    # mean droplet size (lower q_c, same N_c) and spuriously slow
+    # autoconversion in mixed-phase cloud.  riming/dq_c_ac are already
+    # qc_scale-donor-clamped, so the sink is bounded by N_c/dt (plus the
+    # explicit floor below).  [kg/kg/s]·[1/m³]/[kg/kg] = [1/(m³·s)].
+    dN_c_collect = ((riming + dq_c_ac)
+                    * jnp.clip(N_c, 0.0) / jnp.clip(q_c, 1e-15))
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_collect
 
-    # Non-negativity floors on the prognostic number tendencies. The explicit
-    # rain self-collection / droplet-autoconversion / ice-aggregation SINKS are
-    # ∝ the current number; unbounded, one Euler step overshoots the available
-    # number, drives N negative, and self-collection then runs away (RCE
-    # restart: a number slot → −4.4e8 within ~600 steps). Cap each NET sink so
-    # the post-step number stays ≥ 0; positive sources pass through unchanged.
-    dt_floor = jnp.clip(dt, 1.0)
-    dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / dt_floor)
-    dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / dt_floor)
-    dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / dt_floor)
+    # PHYSICAL step for all number caps/floors: use the ACTUAL dt (only floored
+    # by a tiny eps to stay finite at dt=0), NOT clip(dt, 1.0). The over-step
+    # number limit is N/dt; a clip-at-1 would cap subsecond-dt LES steps at
+    # N/1 < N/dt, transferring fewer crystals than the mass melted/rimed and
+    # leaving stale number (codex mass-number-consistency fix).
+    dt_step = jnp.maximum(dt, 1.0e-6)
+    # Rain riming (rain mass collected onto ice: the ``- rain_rime`` term in
+    # dq_r_dt): whole drops leave the rain category, so N_r must drop in
+    # proportion to the rimed rain-mass fraction (mirrors dN_c_collect).
+    # Without this sink, rimed rain keeps its number and the mean rain mass
+    # collapses. [kg/kg/s]·[1/m³]/[kg/kg] = [1/(m³·s)].
+    dN_r_rime = rain_rime * jnp.clip(N_r, 0.0) / jnp.clip(q_r, 1e-15)
+    # Melting transfers NUMBER with the mass (Morrison & Milbrandt 2015): the
+    # melted crystals leave N_i and reappear as rain drops (N_r source,
+    # per-volume ⇒ ×ρ). melt_ice is already donor-clamped to q_i/dt (line ~300),
+    # so dN_i_melt <= N_i/dt; the explicit N_i/dt_step cap is a redundant guard
+    # keyed to the PHYSICAL step so exactly the SAME count is removed from ice
+    # and added to rain. Otherwise the net-N_i floor below would shrink only the
+    # ice sink (not the rain source) when melting and aggregation overlap,
+    # minting spurious rain drops.
+    dN_i_melt = jnp.minimum(
+        melt_ice * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15),
+        jnp.clip(N_i, 0.0) / dt_step,
+    )
+    # Aggregation (ice self-collection, internal to N_i) is bounded to the ice
+    # number remaining AFTER the melt transfer, so aggregation + melting cannot
+    # jointly drive N_i < 0 — keeping the melt↔rain number equality exact
+    # without relying on the blanket floor.
+    agg_eff = jnp.minimum(
+        aggregation_N,
+        jnp.clip(jnp.clip(N_i, 0.0) - dN_i_melt * dt_step, 0.0) / dt_step,
+    )
+    dN_r_dt = dN_r_au + dN_r_sc + dN_r_br + dN_i_melt * rho - dN_r_rime
+    dN_i_dt = dN_i_nuc - agg_eff - dN_i_melt
+
+    # Non-negativity floors on the prognostic number tendencies, keyed to the
+    # PHYSICAL step dt_step (NOT clip(dt, 1.0)): the floor -N/dt_step removes at
+    # most all of N over the step. Using clip(dt, 1.0) would clip a subsecond
+    # (dt < 1) melt/rime sink up to -N/1s, shrinking the ice/rain number removal
+    # while the paired source kept the full transfer — breaking the melt↔rain
+    # and rain-riming number equalities (codex subsecond-dt fix). Ice melt +
+    # aggregation are already bounded to N_i/dt_step above, so the N_i floor is
+    # inactive; the cloud/rain self-collection and droplet-autoconversion SINKS
+    # are ∝ the current number and still need capping so one Euler step cannot
+    # overshoot the available number (RCE restart drove a number slot → −4.4e8
+    # in ~600 steps). Positive sources pass through; the floor bounds only the
+    # net sink, so the positive melt source (dN_i_melt·ρ) survives intact.
+    dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / dt_step)
+    dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / dt_step)
+    dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / dt_step)
 
     precipitation = precip_r + precip_i
 

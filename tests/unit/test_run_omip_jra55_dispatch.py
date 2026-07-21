@@ -115,26 +115,19 @@ def _make_tiny_latlon_setup(n_lat: int = 8, n_lon: int = 16):
 
 
 def _argparse_namespace(**kwargs):
-    """Build an argparse-like Namespace for the helpers."""
-    import types
-    defaults = dict(
-        grid="latlon",
-        forcing_mode="jra55_do_tropical",
-        jra55_cache=None,
-        jra55_co2_ppmv=400.0,
-        jra55_cycle=False,    # RYF mode is opt-in
-        # Day-3 closure-domain defaults (match parse_args defaults).
-        sponge_lat_min=-60.0,
-        sponge_lat_max=60.0,
-        sponge_width_deg=5.0,
-        sponge_tau_days=5.0,
-        sss_piston_velocity=5.0e-7,
-        jra55_no_sponge=False,
-        jra55_no_sss_restoring=False,
-        jra55_no_freeze_cap=False,
-    )
-    defaults.update(kwargs)
-    return types.SimpleNamespace(**defaults)
+    """Argparse-like Namespace seeded from the REAL parser defaults.
+
+    The previous hand-built ``SimpleNamespace`` dict rotted every time a
+    new flag landed (``--surface-stability-scheme`` broke 32 tests with
+    ``AttributeError`` — the setup helpers read ``args.<new_flag>``
+    directly).  Seeding from ``parse_args`` keeps every current AND
+    future flag present at its production default; ``kwargs`` override.
+    """
+    args = run_omip.parse_args(
+        ["--grid", "latlon", "--forcing-mode", "jra55_do_tropical"])
+    for k, v in kwargs.items():
+        setattr(args, k, v)
+    return args
 
 
 # ============================================================================

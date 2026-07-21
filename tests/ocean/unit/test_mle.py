@@ -105,6 +105,23 @@ def test_mle_coefficient_equator_guard() -> None:
         mle_coefficient(ce=0.06, lat_ref_deg=0.5)
 
 
+def test_mle_coefficient_differentiable_wrt_ce() -> None:
+    """``ce`` is the registered tunable (MLEConfig.ce, tier-2, SPEC_MODULES);
+    ``mle_coefficient`` must be differentiable wrt a TRACED ce.  A prior
+    ``float(ce)`` cast raised ConcretizationTypeError under extended-tier
+    training (violating the differentiable=True contract).  Production still
+    gets a Python float in -> Python float out (constant-folding preserved).
+    (Physics review: ocean/mle faithfulness, 2026-06-29.)"""
+    # Production path: Python-float ce -> Python float (no tracer leakage).
+    rc_f = mle_coefficient(ce=0.06, lat_ref_deg=20.0)
+    assert isinstance(rc_f, float)
+    # Training path: traced ce -> finite gradient, no ConcretizationTypeError.
+    g = jax.grad(lambda ce: mle_coefficient(ce, 20.0))(0.06)
+    assert jnp.isfinite(g)
+    # rc_f is linear in ce, so d(rc_f)/d(ce) = rc_f / ce.
+    assert float(g) == pytest.approx(rc_f / 0.06, rel=1e-8)
+
+
 def test_face_mld_modes() -> None:
     """face_mld picks min / avg / max of the two neighbour MLDs; unknown raises."""
     a = jnp.array([10.0, 50.0])
@@ -125,14 +142,14 @@ def test_mld_and_buoyancy_two_layer_column() -> None:
     nlev = 4
     # Uniform 100 m layers; level centres at 50, 150, 250, 350 m.
     dz = jnp.full((1, 1, nlev), 100.0)
-    z_centers = jnp.array([50.0, 150.0, 250.0, 350.0])
+    z_faces = jnp.array([0.0, 100.0, 200.0, 300.0, 400.0])
     wet = jnp.ones((1, 1, nlev))
     # Mixed layer = first two levels (light, rho = 1024); jump of +1 kg/m^3 at
     # level 2 exceeds the 0.01 criterion referenced to the ~10 m level (level 0).
     rho = jnp.array([[[1024.0, 1024.0, 1025.0, 1025.2]]])
     zmld, bm, _in_ml = mle_mld_and_buoyancy(
         rho, dz, wet,
-        z_centers=z_centers, rho_c_mle=0.01, ref_depth_m=10.0,
+        z_faces=z_faces, rho_c_mle=0.01, ref_depth_m=10.0,
         rho0=1025.0, grav=constants.g,
     )
     # zmld / bm are 2-D (n_lat, n_lon) for a (1,1,nlev) column.
@@ -150,11 +167,11 @@ def test_mld_fully_mixed_column() -> None:
     wet-column depth)."""
     nlev = 3
     dz = jnp.full((1, 1, nlev), 50.0)
-    z_centers = jnp.array([25.0, 75.0, 125.0])
+    z_faces = jnp.array([0.0, 50.0, 100.0, 150.0])
     wet = jnp.ones((1, 1, nlev))
     rho = jnp.array([[[1024.0, 1024.0, 1024.0]]])
     zmld, _, _ = mle_mld_and_buoyancy(
-        rho, dz, wet, z_centers=z_centers, rho_c_mle=0.01, ref_depth_m=10.0,
+        rho, dz, wet, z_faces=z_faces, rho_c_mle=0.01, ref_depth_m=10.0,
         rho0=1025.0, grav=constants.g,
     )
     assert float(zmld[0, 0]) == pytest.approx(150.0, rel=1e-6)

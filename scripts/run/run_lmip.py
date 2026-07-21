@@ -53,20 +53,24 @@ import numpy as np
 # legoESM imports
 # ===========================================================================
 
-from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
-from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
-from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.carbon.config import CarbonConfig, som_total
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
 )
+from legoesm.land.soil_grid import make_soil_grid
+from legoesm.land.carbon.spinup import (
+    SlowPoolFluxes,
+    analytic_slow_pool_equilibrium,
+)
+from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
 from legoesm.land.surface_params import (
     CLM5_PFT_NAMES,
     _CLM5_PFT_TABLE_RAW,
@@ -92,9 +96,7 @@ class LMIPRunConfig(NamedTuple):
     seed: int
 
 
-def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
-    """True when the loop should checkpoint and exit before wallclock expiry."""
-    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+from legoesm.driver.checkpoint import wallclock_exhausted as _wallclock_exhausted
 
 
 # ===========================================================================
@@ -112,11 +114,15 @@ from legoesm.land.soil_texture import SOIL_TEXTURE_VG as _SOIL_TEXTURE_PRESETS
 # PFT parameter extraction
 # ===========================================================================
 
-def _get_pft_row(veg_type: str) -> dict:
+def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
     """Look up CLM5 PFT parameters by name.
 
-    Returns a dict with albedo_veg, emissivity, z0, root_depth,
-    theta_wp, theta_fc from the CLM5 PFT table.
+    Returns a dict with albedo_veg, emissivity, z0, root_depth, theta_wp, theta_fc.
+    ``calibrated`` (the DEFAULT) overrides the raw CLM5 values with the 2026-07
+    ERA5-calibrated per-PFT MULTILAYER parameters baked in ``clm_surface_map`` — the
+    SAME land-parameter defaults the AMIP / CMIP multilayer land uses (via
+    ``clm_multilayer_setup``), so an offline LMIP point runs the production land.
+    ``calibrated=False`` returns the untuned CLM5 table (reproduces the old default).
     """
     if veg_type not in CLM5_PFT_NAMES:
         valid = ", ".join(CLM5_PFT_NAMES)
@@ -124,17 +130,43 @@ def _get_pft_row(veg_type: str) -> dict:
             f"Unknown veg_type {veg_type!r}. Valid choices: {valid}"
         )
     idx = CLM5_PFT_NAMES.index(veg_type)
-    row = _CLM5_PFT_TABLE_RAW[idx]
-    return {name: val for name, val in zip(PARAM_NAMES, row)}
+    row = {name: val for name, val in zip(PARAM_NAMES, _CLM5_PFT_TABLE_RAW[idx])}
+    if calibrated:
+        # CLM5_PFT_NAMES is the same 17-PFT order as the baked _MULTILAYER tuples.
+        from legoesm.land import clm_surface_map as _csm
+        row["albedo_veg"] = _csm._TUNED_PFT_ALBEDO_MULTILAYER[idx]
+        row["emissivity"] = _csm._TUNED_PFT_EMISSIVITY_MULTILAYER[idx]
+        row["z0"] = _csm._TUNED_PFT_Z0_MULTILAYER[idx]
+        row["root_depth"] = _csm._TUNED_PFT_ROOT_DEPTH_MULTILAYER[idx]
+        row["theta_wp"] = _csm._TUNED_PFT_WP_MULTILAYER[idx]
+        row["theta_fc"] = _csm._TUNED_PFT_FC_MULTILAYER[idx]
+    return row
 
 
 def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
     """Resolve LMIP CLI arguments into the land config and run controls."""
     texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
-    pft_row = _get_pft_row(args.veg_type)
+    _calibrated = getattr(args, "pft_params", "calibrated") == "calibrated"
+    pft_row = _get_pft_row(args.veg_type, calibrated=_calibrated)
+    # Snow albedo: the calibrated feedback (cover threshold + fresh/aged brightness +
+    # age decay) baked in clm_surface_map, matching the AMIP/CMIP multilayer default;
+    # raw uses the LandAlbedoConfig defaults.
+    if _calibrated:
+        from legoesm.land import clm_surface_map as _csm
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig(
+            alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+            alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+            snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+            tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0,
+            soil_dry_albedo_boost=_csm.TUNED_SOIL_DRY_BOOST_MULTILAYER)
+    else:
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig()
     land = MultiLayerLandConfig(
         albedo_land=pft_row["albedo_veg"],
         emissivity_land=pft_row["emissivity"],
+        land_albedo=_land_albedo,
         z0_land=(
             args.z0_land
             if args.z0_land is not None
@@ -169,127 +201,33 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
         thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
         richards=RichardsConfig(),
-        carbon=CarbonConfig(scheme=args.carbon_scheme),
+        carbon=CarbonConfig(
+            scheme=args.carbon_scheme,
+            woody=args.carbon_woody,
+            cwd_humification_eff=args.cwd_humification_eff,
+            Q10_het_exp=args.carbon_q10_het,
+            nsc_gated_respiration=args.nsc_gated_respiration,
+            nsc_reserve_days=args.nsc_reserve_days,
+            r_maint_floor_frac=args.r_maint_floor_frac,
+            leaf_c_resorption_frac=args.leaf_c_resorption_frac,
+            cold_deciduous_dormancy=args.cold_deciduous_dormancy,
+            cold_deciduous=args.cold_deciduous,
+            freeze_dormancy_threshold_K=args.freeze_dormancy_threshold_k,
+        ),
     )
+    # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
+    # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
+    # it per cell from the CLM STD_ELEV map instead (coupled driver).
+    if getattr(args, "elev_bands", False):
+        from legoesm.land.snow_bands import (
+            ElevationSnowBandConfig, band_elevation_anomalies)
+        band_dz = band_elevation_anomalies(jnp.asarray([float(args.elev_std_m)]))
+        land = land._replace(elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
     return LMIPRunConfig(
         land=land,
         max_wallclock_seconds=args.max_wallclock_seconds,
         restart_buffer_seconds=args.restart_buffer_seconds,
         seed=args.seed,
-    )
-
-
-# ===========================================================================
-# Synthetic atmospheric forcing
-# ===========================================================================
-
-def _make_forcing(
-    lat_rad: float,
-    lon_rad: float,
-    day: float,
-    hour: float,
-    *,
-    dtype=jnp.float64,
-    precip_rate: float = 2e-5,
-) -> AtmToSurface:
-    """Construct synthetic single-column atmospheric forcing.
-
-    Parameters
-    ----------
-    lat_rad : float
-        Latitude in radians.
-    lon_rad : float
-        Longitude in radians (used to compute local solar hour angle).
-    day : float
-        Day of year [0, 365).
-    hour : float
-        UTC hour of day [0, 24).
-    dtype :
-        JAX dtype (default float64).
-    precip_rate : float
-        Constant precipitation rate [kg/m2/s].
-
-    Returns
-    -------
-    AtmToSurface
-        Forcing with shape (1,) for all fields.
-
-    Notes
-    -----
-    Atmospheric temperature includes three components:
-    1. Latitudinal mean: T_base = 288 - 30·|φ|/(π/2)
-    2. Seasonal: amplitude ~15 K × |φ|/(π/2), NH peak at doy≈200 (July)
-    3. Diurnal: ±3 K, peak at local hour 14
-    This produces physically realistic annual mean and seasonal cycle
-    across latitudes. At 45.5°N: T_atm ≈ 265 K (Jan) to 280 K (Jul).
-    """
-    # --- Solar geometry ---
-    # Solar declination (degrees → radians)
-    decl_rad = 23.45 * jnp.pi / 180.0 * jnp.sin(
-        2.0 * jnp.pi * (day - 80.0) / 365.0
-    )
-    # Local hour angle: UTC hour shifted by longitude (15 deg/hour)
-    local_hour = hour + lon_rad * (180.0 / jnp.pi) / 15.0
-    ha = (local_hour - 12.0) * 15.0 * jnp.pi / 180.0
-    cos_sza = (
-        jnp.sin(lat_rad) * jnp.sin(decl_rad)
-        + jnp.cos(lat_rad) * jnp.cos(decl_rad) * jnp.cos(ha)
-    )
-    cos_sza = jnp.maximum(cos_sza, 0.0)
-
-    sw_down = jnp.asarray([constants.S_0 * cos_sza], dtype=dtype)
-
-    # --- Atmospheric temperature: latitudinal baseline + seasonal + diurnal ---
-    # Latitudinal mean (from test forcing, adapted from CLM convention)
-    T_base = 288.0 - 30.0 * abs(lat_rad) / (jnp.pi / 2.0)
-    # Seasonal: amplitude proportional to |latitude|, NH peak at doy≈200 (July).
-    # cos(2π*(day-200)/365)=1 at doy=200 (summer peak),
-    # ≈ -1 at doy=15 (winter minimum).
-    T_seasonal_amp = 15.0 * abs(lat_rad) / (jnp.pi / 2.0)
-    T_season = T_seasonal_amp * jnp.cos(2.0 * jnp.pi * (day - 200.0) / 365.0)
-    # Diurnal: ±3 K, peak at local solar noon + 2 h
-    diurnal_amp = 3.0
-    T_atm = jnp.asarray(
-        [T_base + T_season
-         + diurnal_amp * jnp.cos(2.0 * jnp.pi * (local_hour - 14.0) / 24.0)],
-        dtype=dtype,
-    )
-
-    # --- LW down: effective emissivity ~0.75 of blackbody ---
-    lw_down = jnp.asarray([0.75 * constants.sigma_sb * T_atm[0] ** 4], dtype=dtype)
-
-    # --- Humidity: ~60% RH using model's saturation_mixing_ratio ---
-    # saturation_mixing_ratio requires p [Pa]; use standard surface pressure
-    p_sfc = jnp.asarray([1.0e5], dtype=dtype)
-    q_sat = saturation_mixing_ratio(T_atm, p_sfc)
-    q_atm = (0.6 * q_sat).astype(dtype)
-
-    # --- Precipitation: rain below 275 K threshold becomes snow ---
-    precip_total = jnp.asarray([precip_rate], dtype=dtype)
-    precip_snow = jnp.where(
-        T_atm < 275.0,
-        precip_total,
-        jnp.zeros(1, dtype=dtype),
-    )
-
-    rho = jnp.asarray([1.2], dtype=dtype)
-
-    return AtmToSurface(
-        sw_down=sw_down,
-        lw_down=lw_down,
-        precip_total=precip_total,
-        precip_snow=precip_snow,
-        T_lowest=T_atm,
-        q_lowest=q_atm,
-        u_lowest=jnp.asarray([3.0], dtype=dtype),
-        v_lowest=jnp.asarray([2.0], dtype=dtype),
-        p_lowest=jnp.asarray([9.5e4], dtype=dtype),
-        p_surface=p_sfc,
-        rho_lowest=rho,
-        cos_zenith=jnp.asarray([cos_sza], dtype=dtype),
-        co2_ppmv=jnp.asarray([412.0], dtype=dtype),
-        has_radiation=jnp.ones(1, dtype=dtype),
-        has_precipitation=jnp.ones(1, dtype=dtype),
     )
 
 
@@ -452,6 +390,13 @@ def _save_restart(
             state.surface_water if state.surface_water is not None
             else np.zeros_like(np.asarray(state.snow_depth))),
     }
+    # Elevation-band SWE/age (present iff the band scheme is enabled) round-trip so a
+    # restart keeps the perennial-snow distribution.
+    if state.snow_bands is not None:
+        payload["snow_bands"] = np.asarray(state.snow_bands)
+        payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
+        if state.ice_bands is not None:
+            payload["ice_bands"] = np.asarray(state.ice_bands)
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -476,12 +421,34 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         surface_water=jnp.asarray(data["surface_water"]) if "surface_water" in data
         else jnp.zeros_like(jnp.asarray(data["snow_depth"])),
     )
+    # Elevation-band SWE/age: restore from the checkpoint when present, else (band
+    # scheme newly enabled on an old restart) seed empty bands so the step has state.
+    if config.elev_bands is not None:
+        nb = config.elev_bands.band_dz.shape[-1]
+        ncol = state.snow_depth.shape[0]
+        if "snow_bands" in data:
+            state = state._replace(snow_bands=jnp.asarray(data["snow_bands"]),
+                                   snow_age_bands=jnp.asarray(data["snow_age_bands"]))
+        else:
+            # Bands newly enabled on a legacy restart: seed the bands from the EXISTING
+            # cell snowpack (distribute snow_depth equally across the equal-area bands,
+            # mean_k == snow_depth; broadcast the cell age) so accumulated snow is not
+            # discarded — zero-seeding would silently drop it.
+            state = state._replace(
+                snow_bands=jnp.broadcast_to(state.snow_depth[:, None], (ncol, nb)),
+                snow_age_bands=jnp.broadcast_to(state.snow_age[:, None], (ncol, nb)))
+        # Firn/ice reservoir (gap 4): restore when present, else seed empty (an old
+        # banded restart predating the reservoir starts with no perennial ice).
+        state = state._replace(
+            ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
+            else jnp.zeros((ncol, nb)))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
     if config.carbon.scheme == "differland":
         carbon_fields = [
-            "C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som",
+            "C_lab", "C_fol", "C_root", "C_wood", "C_lit",
+            "C_som_active", "C_som_slow", "C_som_passive",
         ]
         if all(f"carbon_{field}" in data for field in carbon_fields):
             from legoesm.land.carbon.config import CarbonState
@@ -494,6 +461,74 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
                 tuple(state.T_soil.shape[:-1]), config.carbon
             )
     return state, carbon_state, start_step, start_day
+
+
+# ===========================================================================
+# Semi-analytic soil-carbon spin-up (standard practice; Xia et al. 2012)
+# ===========================================================================
+
+def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
+                                lat_jnp, dt, start_doy, precip_rate):
+    """Finish a land-carbon spin-up with the semi-analytic soil-C equilibrium.
+
+    A single soil-C pool (~68-270-yr turnover) needs millennia to equilibrate
+    by brute-force integration.  After the transient spin-up has stationarised
+    the fast pools + wood, run ONE more stationary year to accumulate the mean
+    slow-pool fluxes, then reset wood + SOM to their analytic linear-pool
+    steady state via ``legoesm.land.carbon.spinup`` (Xia et al. 2012, GMD;
+    cf. accelerated decomposition, Thornton & Rosenbloom 2005; Koven 2013).
+
+    ``start_doy`` must be the day-of-year the transient ENDED on (so the
+    diagnostic year is in seasonal phase with the state).
+
+    Returns ``(state_after_diagnostic_year, equilibrated_carbon_state)`` — BOTH
+    must be persisted together: the reset only touches the slow carbon pools
+    (wood/SOM, which do not feed back into the land state within a step), so the
+    advanced land state and the reset carbon are mutually consistent.
+    """
+    import jax
+
+    grid = make_soil_grid(config.soil_grid)
+    root_frac = jnp.exp(-grid.z_node / config.root_depth)
+    root_frac = root_frac / jnp.sum(root_frac)
+    steps_per_year = int(round(_SECS_PER_DAY * 365.0 / dt))
+    dt_days = dt / _SECS_PER_DAY
+
+    @jax.jit
+    def _diag_step(state, carbon, doy, hour):
+        forcing = make_synthetic_lmip_forcing(
+            lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
+        new_state, _resp, carbon_new = step_multilayer_land(
+            state, forcing, config, U_MIN, dt,
+            lat=lat_jnp, carbon_state=carbon, doy=doy)
+        diag = reconstruct_carbon_diagnostics(
+            new_state, forcing, carbon, config, root_frac, config.theta_wp,
+            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
+        return new_state, carbon_new, diag
+
+    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].  The
+    # three ``som_*_loss`` fields are each SOM pool's total decomposition D_X,
+    # the denominators of the forward-substitution cascade equilibrium.
+    zeros = jnp.zeros_like(carbon_state.C_wood)
+    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som",
+                              "som_active_loss", "som_slow_loss",
+                              "som_passive_loss")}
+    for s in range(steps_per_year):
+        doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
+        hour = jnp.asarray((s * dt / 3600.0) % 24.0)
+        state, carbon_state, diag = _diag_step(state, carbon_state, doy, hour)
+        for k in acc:
+            acc[k] = acc[k] + getattr(diag, k) * dt_days
+
+    fluxes = SlowPoolFluxes(
+        a_wood=acc["a_wood"], wood_litter=acc["wood_litter"],
+        lit_to_som=acc["lit_to_som"], som_active_loss=acc["som_active_loss"],
+        som_slow_loss=acc["som_slow_loss"],
+        som_passive_loss=acc["som_passive_loss"])
+    carbon_eq = analytic_slow_pool_equilibrium(
+        carbon_state, fluxes, config.carbon.cwd_humification_eff,
+        config.carbon.f_active_to_slow, config.carbon.f_slow_to_passive)
+    return state, carbon_eq
 
 
 # ===========================================================================
@@ -533,6 +568,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--veg-type", default="c3_grass",
                    choices=list(CLM5_PFT_NAMES),
                    help="CLM5 plant functional type")
+    p.add_argument("--pft-params", choices=("calibrated", "raw"), default="calibrated",
+                   help="per-PFT land parameters: 'calibrated' (default) = the 2026-07 "
+                        "ERA5-tuned MULTILAYER defaults shared with AMIP/CMIP (albedo, "
+                        "z0, root, water-stress + snow albedo); 'raw' = untuned CLM5 table")
     p.add_argument("--t-init", type=float, default=278.0,
                    help="Initial uniform soil temperature [K]. "
                         "Should be close to the local annual-mean atmospheric "
@@ -577,10 +616,78 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--carbon-scheme", default="none",
                    choices=_VALID_CARBON_SCHEMES,
                    help="Land carbon cycle scheme")
+    p.add_argument("--carbon-woody",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().woody,
+                   help="Woody PFT (allocate structural C to wood). Use "
+                        "--no-carbon-woody for herbaceous PFTs (grass/crop): "
+                        "the wood fraction is invested in roots instead.")
+    p.add_argument("--cwd-humification-eff", type=float,
+                   default=CarbonConfig().cwd_humification_eff,
+                   help="Fraction of coarse-woody-debris turnover that "
+                        "humifies to stable SOM (the rest respires).")
+    p.add_argument("--carbon-q10-het", type=float,
+                   default=CarbonConfig().Q10_het_exp,
+                   help="Soil heterotrophic-decomposition temperature "
+                        "sensitivity exp(Q10_het_exp*(T-T_ref)); higher = "
+                        "faster warm-soil SOM turnover (Q10~2.5 at 0.09).")
+    # --- High-latitude productivity rescue (opt-in; carbon_cycle gates) ---
+    p.add_argument("--nsc-gated-respiration",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().nsc_gated_respiration,
+                   help="Throttle maintenance respiration as the labile reserve "
+                        "depletes (Atkin & Tjoelker 2003), breaking the boreal/"
+                        "tundra death spiral. Default off (byte-identical).")
+    p.add_argument("--nsc-reserve-days", type=float,
+                   default=CarbonConfig().nsc_reserve_days,
+                   help="NSC gate: days of maintenance-respiration demand the "
+                        "labile reserve must cover before R_maint throttles "
+                        "(selective; a healthy tree's inert wood does not trigger it).")
+    p.add_argument("--r-maint-floor-frac", type=float,
+                   default=CarbonConfig().r_maint_floor_frac,
+                   help="Basal fraction of R_maint retained at full NSC "
+                        "depletion (the f_nsc floor).")
+    p.add_argument("--leaf-c-resorption-frac", type=float,
+                   default=CarbonConfig().leaf_c_resorption_frac,
+                   help="Fraction of shed foliage carbon resorbed into the "
+                        "labile reserve (C_fol->C_lab) at leaf-fall instead of "
+                        "lost to litter (deciduous leaf-C recovery; refills the "
+                        "reserve whose depletion drives the cold leaf-out lock). "
+                        "Default 0 (off).")
+    p.add_argument("--cold-deciduous-dormancy",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous_dormancy,
+                   help="Enable cold-deciduous freeze dormancy: zero foliar GPP "
+                        "and foliar R_maint below the freeze threshold for "
+                        "cold-deciduous PFTs (larch leaf-drop). Default off.")
+    p.add_argument("--cold-deciduous",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().cold_deciduous,
+                   help="Mark this column's PFT as cold-deciduous (the per-PFT "
+                        "trait the dormancy gate scopes on; set automatically "
+                        "from is_cold_deciduous in the global-IC build).")
+    p.add_argument("--freeze-dormancy-threshold-k", type=float,
+                   default=CarbonConfig().freeze_dormancy_threshold_K,
+                   help="Air temperature [K] below which a cold-deciduous PFT "
+                        "enters winter dormancy (~0 degC).")
+    p.add_argument("--carbon-spinup", default="none",
+                   choices=("none", "semi_analytic"),
+                   help="Soil-carbon spin-up mode after the transient run. "
+                        "semi_analytic: solve the linear slow-pool (wood/SOM) "
+                        "steady state analytically (Xia et al. 2012) instead of "
+                        "the millennia a ~270-yr pool would need by brute force.")
     p.add_argument("--snow-albedo-feedback",
                    action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Enable/disable snow albedo feedback")
+    p.add_argument("--elev-bands", action="store_true",
+                   help="Sub-grid elevation-band snow (banded precip phase / melt / "
+                        "perennial-snow cap): keeps bright snow on cold high fractions "
+                        "of a coarse cell.  Set --elev-std-m for the column's sub-grid "
+                        "relief.")
+    p.add_argument("--elev-std-m", type=float, default=0.0,
+                   help="Sub-grid elevation std [m] for the column when --elev-bands "
+                        "(0 = flat = no-op).")
     # Two-pass parse so a --config file supplies defaults that explicit CLI
     # flags still override (precedence: CLI > config file > parser default).
     # Shared loader (single source of truth) — same mechanism as run_amip /
@@ -736,7 +843,7 @@ def main() -> None:
             doy = (args.start_day + t_sim / _SECS_PER_DAY) % 365.0
             hour = (t_sim / 3600.0) % 24.0
 
-            forcing = _make_forcing(
+            forcing = make_synthetic_lmip_forcing(
                 lat_rad, lon_rad, doy, hour,
                 precip_rate=args.precip_rate,
             )
@@ -847,6 +954,24 @@ def main() -> None:
         status = "FAIL"
         error_msg = traceback.format_exc()
         print(f"\nERROR:\n{error_msg}", file=sys.stderr)
+
+    # --- Semi-analytic soil-carbon equilibrium (standard spin-up practice) ---
+    if (status == "PASS" and args.carbon_spinup == "semi_analytic"
+            and config.carbon.scheme == "differland" and carbon_state is not None):
+        c_wood0 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
+        c_som0 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
+        # Diagnostic year must be in seasonal phase with the state, i.e. start
+        # on the day-of-year the transient ended (state advances through the
+        # diagnostic year, so the returned state is saved with the reset carbon).
+        _final_doy = (args.start_day + args.days) % 365.0
+        state, carbon_state = semi_analytic_carbon_spinup(
+            state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
+            _final_doy, args.precip_rate)
+        c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
+        c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
+        print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
+              f"C_som {c_som0:.0f}->{c_som1:.0f} gC/m2 (analytic slow-pool "
+              f"equilibrium; Xia et al. 2012)", flush=True)
 
     # --- Save final restart ---
     final_restart = out_dir / "restart_final.npz"

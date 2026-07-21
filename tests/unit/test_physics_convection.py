@@ -83,6 +83,41 @@ def _make_saturated_unstable_column(nlev=20, ncol=4):
     return T, q_v, p_full, p_half
 
 
+def _make_dry_unstable_column(nlev=20, ncol=4):
+    """Conditionally-unstable, MODERATELY dry column (RH = 0.5 everywhere).
+
+    Relaxing toward ``q_ref = rh_ref * q_sat(T_moist)`` then NET-MOISTENS the
+    column (the cloud-layer mass-mean ``q_ref - q_v`` > 0), i.e. the Frierson
+    (2007) SHALLOW regime — the case the SBM column-water conservation fix
+    addresses.  ``_make_unstable_column`` (RH up to 0.95) net-DRIES, so it
+    cannot exercise the shallow branch.
+
+    RH = 0.5, NOT lower: the 2026-07-17 shallow-branch A/B showed the regime
+    splits in two.  STRONGLY moistening soundings (RH ~ 0.2, this fixture's
+    old value) are zeroed OUTRIGHT by the #771 drying gate — output
+    identically 0, so the "scheme fired" assertions below can never hold
+    (the fixture predated the gate and the test sat red).  At RH ~ 0.5 the
+    shallow redistribution cancels the column integral and the gate passes
+    the redistributed LOCAL tendencies — the LIVE conserving shallow regime
+    this test exists to pin (see test_sbm_faithful.py::
+    test_shallow_branch_is_live_in_the_moderate_moistening_regime).
+    """
+    p_s = 1.0e5
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
+    p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
+    p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+
+    T_sfc = 300.0
+    T = T_sfc * jnp.clip(sigma_full, 0.01, None) ** 0.19
+    T = jnp.maximum(T, 200.0)
+    T = jnp.broadcast_to(T[None, :], (ncol, nlev))
+
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = 0.5 * q_sat  # moderate dryness -> the LIVE shallow regime (see docstring)
+    return T, q_v, p_full, p_half
+
+
 def _make_stable_column(nlev=20, ncol=4):
     """Build a strongly stable, dry isothermal column."""
     p_s = 1.0e5
@@ -179,6 +214,35 @@ def test_moisture_conservation(scheme):
             assert rel_err < bound, (
                 f"{scheme} col {i}: moisture conservation rel_err = "
                 f"{rel_err:.6e} (bound {bound:.0e})"
+            )
+
+
+def test_sbm_column_water_conserved_in_shallow_moistening_regime():
+    """CONSERVATION (truth tier): in the net-MOISTENING (Frierson 2007 shallow)
+    regime the deep references moisten the column with NO compensating sink —
+    ``col_net_drying`` clips to 0 so ``dq_c_conv_dt`` cannot absorb it — which
+    creates water from nothing.  The shallow branch shifts ``q_ref``/``T_ref``
+    so the column-integrated ``dq_v`` -> 0 (pure redistribution), giving
+    Σ(dq_v + dq_c)·dp/g ~ 0.  (Physics review: conv/sbm conservation, 2026-06-29.)
+    """
+    T, q_v, p_full, p_half = _make_dry_unstable_column()
+    out = _call_scheme("sbm", T, q_v, p_full, p_half)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    col_dqv = jnp.sum(out.dq_v_dt * dp / constants.g, axis=1)
+    col_dqc = jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1)
+    col_total = col_dqv + col_dqc
+    # scheme fired, and it is a redistribution (both moistening AND drying
+    # levels present) — confirming the net-moistening (shallow) regime was hit.
+    assert float(jnp.max(jnp.abs(out.dq_v_dt))) > 0.0
+    assert float(jnp.sum(jnp.maximum(out.dq_v_dt, 0.0))) > 0.0   # moistening levels
+    assert float(jnp.sum(jnp.maximum(-out.dq_v_dt, 0.0))) > 0.0  # drying levels
+    gross = jnp.sum(jnp.abs(out.dq_v_dt) * dp / constants.g, axis=1)
+    for i in range(col_total.shape[0]):
+        if float(gross[i]) > 1e-10:
+            rel = abs(float(col_total[i])) / float(gross[i])
+            assert rel < 1e-4, (
+                f"sbm col {i}: shallow-regime water residual rel = {rel:.3e} "
+                f"(col_total={float(col_total[i]):.3e})"
             )
 
 

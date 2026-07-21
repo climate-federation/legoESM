@@ -1,0 +1,30 @@
+{
+  "generator": "scripts/data/generate_aerobulk_reference.py",
+  "aerobulk_python_version": "0.4.0",
+  "algos": [
+    "ncar",
+    "coare3p0"
+  ],
+  "heights_zt_zu": [
+    [
+      10.0,
+      10.0
+    ],
+    [
+      2.0,
+      10.0
+    ]
+  ],
+  "niter": 5,
+  "n_random": 1024,
+  "n_total": 1032,
+  "seed": 20260703,
+  "skin_correction": false,
+  "conventions": {
+    "ql_qh": "W/m^2, positive downward (ocean gains)",
+    "taux_tauy": "N/m^2, along-wind (atmospheric convention)",
+    "evap": "kg/m^2/s, negative when ocean loses water",
+    "t_air": "ABSOLUTE temperature at zt [K]",
+    "q_air": "specific humidity at zt [kg/kg]"
+  }
+}

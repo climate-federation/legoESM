@@ -1,0 +1,27 @@
+# WB2 forecast-scorecard variant: COLUMN_NN physics.
+#
+# Per-column MLP physics (Rasp, Pritchard & Gentine 2018;
+# atmosphere/physics/neural_physics.NeuralPhysics) on the shared
+# Gaussian-grid spectral PE dycore. The NN is the ENTIRE physics
+# package: radiation is set to "none" so no separate radiation scheme
+# runs and the column MLP alone supplies every physics tendency
+# (radiative + convective + turbulent + microphysical). Any classical
+# scheme flags are inert once physics is replaced by the network; they
+# are pinned to "none" so overlay diffs stay explicit.
+#
+# Skeleton reconstructed by run_aimip_wb2_eval.py as
+#   build_column_physics(nlev=n_levels, hidden_dim=nn_hidden_dim,
+#                        n_layers=nn_n_layers, key=PRNGKey(nn_seed)).
+aimip_variant: "column_nn"
+aimip_radiation: "none"
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+physics_parameterization: "none"
+
+# Column MLP hyperparameters (must match the trained checkpoint).
+nn_hidden_dim: 256
+nn_n_layers: 4
+nn_seed: 0

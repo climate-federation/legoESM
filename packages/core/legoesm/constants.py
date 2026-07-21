@@ -35,6 +35,10 @@ c_pv = 1846.0                   # Specific heat of water vapor [J/(kg*K)]
 c_pw = 4218.0                   # Specific heat of liquid water [J/(kg*K)]
 c_pi = 2106.0                   # Specific heat of ice [J/(kg*K)]
 L_v = 2.501e6                   # Latent heat of vaporization at 0C [J/kg]
+# SST slope of L_v in the NEMO/AeroBulk air-sea convention (sbc_phy
+# L_vap: L = (2.501 - 0.00237 (T - T_freeze)) 1e6) — equals L_v at 0 degC
+# by construction.  Used by thermo.latent_heat_vaporization_sst (#762).
+L_v_sst_slope = 2.370e3         # [J/(kg*K)] dL_v/dT, NEMO sbc_phy / Fairall
 L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
@@ -42,6 +46,7 @@ rho_ice = 917.0                 # Density of ice [kg/m^3]
 rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE default)
 rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
+rho_ocean_nemo = 1026.0         # NEMO rau0 [kg/m^3] (phycst.F90; GYRE/DINO/ORCA all use 1026)
 rho_soil_particle = 2700.0      # Mineral soil particle (quartz) density [kg/m^3] (de Vries 1963)
 c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
 c_snow = 2090.0                 # Specific heat of snow [J/(kg*K)] (≈ c_pi, CICE default)
@@ -72,6 +77,7 @@ rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT�
 # The kg/mol forms ``M_dry`` and ``M_h2o`` (below) are derived from these
 # via ``* 1e-3`` so future drift between g/mol and kg/mol forms is impossible.
 M_air = 28.96546        # [g/mol] dry air (CODATA)
+M_C   = 12.011          # [g/mol] atomic mass of carbon (IUPAC 2021)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 
@@ -118,16 +124,15 @@ orbital_eccentricity = 0.016704         # [-] orbital eccentricity (year ~2000)
 orbital_obliquity_deg = 23.439          # [deg] obliquity of the ecliptic
 orbital_long_perihelion_deg = 282.895   # [deg] longitude of perihelion from VE
 
-# Broadband longwave emissivities (used as defaults when a tile config
-# does not specify its own).  Sea-water and most ice surfaces are
-# near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.
-# Note: ``driver/config.py`` and ``driver/physics_pipeline.py`` carry
-# pre-existing ``emissivity_ice = 0.95`` defaults that predate the
-# centralisation here.  0.97 is the fresh-sea-ice / fresh-snow
-# value used by ``ice/config.py`` and the bare-ice albedo path; 0.95
-# represents a melt-pond / weathered ice surface mix.  Reconciliation
-# is tracked as a follow-up — see slopbuster review of
-# Physical_Consistency PR.
+# Broadband longwave emissivities — the source of truth for the CENTRALIZED
+# surface-tile emissivity defaults: ``driver/config.py`` (ExperimentConfig),
+# ``driver/physics_pipeline.py``, and ``land/config.py`` reference these
+# (enforced by test_constants_consistency.
+# test_surface_emissivity_defaults_reference_constants).  Scheme-specific
+# radiation keeps its own convention (gray uses a black surface eps=1.0);
+# ``ice/config.py`` independently shares the 0.97 fresh-ice value.  Sea-water
+# and fresh ice/snow are near-blackbody in the thermal-IR window; generic
+# land ~0.95.
 emissivity_ocean = 0.97         # [-] open ocean / lake water
 emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
@@ -142,6 +147,13 @@ emissivity_seawater_lw = 0.98   # [-] NEMO sbc_phy emiss_w
 # OMIP-faithful surface-flux path uses it for the precipitation/evaporation
 # heat-content terms of the non-solar flux so they match NEMO bit-for-bit.
 c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
+
+# Seawater specific heat used by the Jenkins (1991) / ISOMIP+ ice-shelf
+# basal-melt intercomparison (Asay-Davis et al. 2016, GMD 9, 2471-2497).
+# Deliberately the ISOMIP+ reference value (distinct from Gill-1982 ``c_sw``
+# and NEMO's ``c_p_seawater``) so the linearised Jenkins melt rate reproduces
+# the ISOMIP+ intercomparison numbers bit-for-bit.
+c_p_seawater_isomip = 3974.0     # [J/(kg*K)] Jenkins 1991 / ISOMIP+
 
 # NEMO/aerobulk moist-air heat-capacity pair (sbc_phy.F90 rCp_dry/rCp_vap),
 # used by the NCAR bulk algorithm's sensible-heat flux
@@ -224,6 +236,14 @@ R_universal = 8.314462618       # [J/(mol·K)] ≈ N_A·k_B (value truncated at
 # its own literal rather than R_universal/N_A because the R_universal literal
 # above is truncated (deriving would be off by ~2e-11 relative).
 k_B = 1.380649e-23              # [J/K] (exact, SI)
+
+# Planck constant and speed of light — exact by the 2019 SI redefinition.
+# Needed to convert a spectral radiance / irradiance [W/m^2] into a photon flux
+# [mol photons / m^2 / s] through the photon energy E = h*c/lambda — e.g. the
+# satellite-SIF radiance -> emitted-photon-flux conversion in
+# scripts/data/build_sif_observations.py (and any PAR / quantum-yield code).
+h_planck = 6.62607015e-34       # [J·s]  Planck constant        (exact, SI 2019)
+c_light = 2.99792458e8          # [m/s]  speed of light in vacuum (exact, SI)
 
 # ==============================================================================
 # Mathematical Constants

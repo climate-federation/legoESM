@@ -11,7 +11,8 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from scripts.run.train_land_params_era5 import _N_PFT
 from scripts.run.train_multilayer_land_era5 import (
-    forward_ml, loss_ml, constrain_ext, init_ext_params, BOUNDS_EXT)
+    forward_ml, loss_ml, constrain_ext, init_ext_params, baked_init_params, BOUNDS_EXT,
+    build_multilayer_cfg, _split_cells, json_init_params)
 
 
 def _synthetic_data(ncol=12):
@@ -34,11 +35,20 @@ def _synthetic_data(ncol=12):
                 pct_clay=jnp.asarray(rng.uniform(5, 40, ncol)),
                 skt=jnp.broadcast_to(jnp.asarray(Tair), (12, ncol)),
                 alb=jnp.full((12, ncol), 0.2), t0=jnp.asarray(Tair),
+                soil_albedo=jnp.asarray(rng.uniform(0.08, 0.30, ncol)),   # CLM soil-colour
                 dom_onehot=jnp.asarray(oh), w=jnp.cos(jnp.asarray(lat)))
     # per-column van-Genuchten soil (loam-ish, physical)
     for k, v in dict(theta_r=0.05, theta_sat=0.43, alpha_vg=3.6, n_vg=1.56,
                      K_sat=2.9e-6).items():
         data["vg_" + k] = c(v)
+    # soil-moisture target (annual-mean 0-28cm) + the model root-zone depth weights
+    import scripts.run.train_multilayer_land_era5 as _M
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+    _gr = make_soil_grid(SoilGridConfig(n_layers=_M._N_LAYERS, total_depth=_M._SOIL_DEPTH_M,
+                                        growth_factor=_M._SOIL_GROWTH))
+    _dz = np.asarray(_gr.dz); _bot = np.cumsum(_dz); _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)
+    data["sm"] = c(0.25)
+    data["rz_w"] = jnp.asarray(_ov[_ov > 1e-9])
     return data
 
 
@@ -49,13 +59,63 @@ def test_constrain_bounds():
         assert np.all(v >= lo - 1e-9) and np.all(v <= hi + 1e-9)
 
 
+def test_baked_warm_start_roundtrips_to_production_params():
+    """--init-from baked must START the tune AT the production baked multilayer params
+    (so the re-tune REFINES them, not climbs from the CLM5 prior).  constrain(baked_init)
+    must reproduce the _TUNED_*_MULTILAYER values and stay in bounds."""
+    from legoesm.land import clm_surface_map as C
+    cp = constrain_ext(baked_init_params())
+    # in-bounds like any param set
+    for k, (lo, hi) in BOUNDS_EXT.items():
+        v = np.asarray(cp[k])
+        assert np.all(v >= lo - 1e-9) and np.all(v <= hi + 1e-9), k
+    # round-trips the baked constrained values (within the _inv_ext clip epsilon)
+    np.testing.assert_allclose(cp["pft_alb"], C._TUNED_PFT_ALBEDO_MULTILAYER, atol=2e-6)
+    np.testing.assert_allclose(cp["pft_z0"], C._TUNED_PFT_Z0_MULTILAYER, atol=2e-6)
+    assert abs(float(cp["glac_alb"]) - C.TUNED_GLACIER_ALBEDO_MULTILAYER) < 2e-6
+    assert abs(float(cp["snow_max"]) - C.TUNED_SNOW_ALBEDO_MAX_MULTILAYER) < 2e-6
+    # differs from the CLM5 prior (it is a genuine warm start, not the default init)
+    assert abs(float(cp["glac_alb"]) - float(constrain_ext(init_ext_params())["glac_alb"])) > 1e-3
+
+
+def test_json_init_params_round_trips_a_saved_checkpoint(tmp_path):
+    """--init-json must START the tune AT a saved CONSTRAINED tuned JSON (inverse of the
+    constrain applied at save time), so a re-tune REFINES the current best.  A key absent
+    from an older checkpoint keeps its baked default (layered), and forward() of the
+    warm-started constrained params reproduces the saved values."""
+    import json
+    raw = baked_init_params()
+    saved = {k: np.asarray(v).tolist() for k, v in constrain_ext(raw).items()}
+    p = tmp_path / "tuned.json"
+    p.write_text(json.dumps(saved))
+    back = json_init_params(str(p))
+    # every baked key present + constrain(json_init) reproduces the saved constrained JSON
+    assert set(back) == set(raw)
+    cp = constrain_ext(back)
+    for k in saved:
+        np.testing.assert_allclose(np.asarray(cp[k]), np.asarray(saved[k]), rtol=1e-4,
+                                   atol=1e-4, err_msg=k)
+    # layering: a JSON with only a subset of keys keeps baked for the rest
+    subset = {k: saved[k] for k in list(saved)[:3]}
+    p2 = tmp_path / "partial.json"
+    p2.write_text(json.dumps(subset))
+    back2 = json_init_params(str(p2))
+    assert set(back2) == set(raw)
+    missing = [k for k in raw if k not in subset]
+    np.testing.assert_allclose(np.asarray(back2[missing[0]]), np.asarray(raw[missing[0]]),
+                               rtol=1e-6, atol=1e-6)
+
+
 def test_forward_finite_and_physical():
     data = _synthetic_data()
-    T, A = forward_ml(constrain_ext(init_ext_params()), data)
+    T, A, W = forward_ml(constrain_ext(init_ext_params()), data)
     assert T.shape == (12, 12) and A.shape == (12, 12)
     assert jnp.all(jnp.isfinite(T)) and jnp.all(jnp.isfinite(A))
     assert 230.0 < float(T.mean()) < 330.0       # no runaway / freeze-out
     assert jnp.all((A > 0.0) & (A < 1.0))
+    # root-zone soil moisture is physical (within [theta_r, theta_sat]) and finite
+    assert W.shape == (12,) and jnp.all(jnp.isfinite(W))
+    assert jnp.all((W > 0.0) & (W < 0.6))
 
 
 def test_loss_is_differentiable():
@@ -69,6 +129,109 @@ def test_loss_is_differentiable():
     # unless --stomata (test_bulk_stomata_toggle_params).
     for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
+    # the soil-moisture target makes the porosity scale (theta_sat) trainable
+    assert float(jnp.max(jnp.abs(g["pft_smscale"]))) > 0.0, "pft_smscale has zero gradient"
+
+
+def test_snow_albedo_params_trainable():
+    """With snow present (cold air + snowfall) the exposed snow-albedo params carry a
+    non-zero gradient -> they actually drive the surface albedo (snow cover fraction +
+    snow brightness), not inert LandAlbedoConfig defaults."""
+    data = dict(_synthetic_data())
+    cold = 250.0                                   # below freezing -> snow accumulates
+    data["skt"] = jnp.full_like(data["skt"], cold)
+    data["t0"] = jnp.full_like(data["t0"], cold)
+    data["forc"] = [f._replace(
+        T_lowest=jnp.full_like(f.T_lowest, cold),
+        precip_snow=jnp.full_like(f.precip_snow, 2e-5),
+        precip_total=jnp.full_like(f.precip_total, 2e-5)) for f in data["forc"]]
+    g = jax.grad(lambda p: loss_ml(p, data)[0])(init_ext_params())
+    for k in ("snow_max", "snow_min", "snow_dcrit", "snow_tau_days"):
+        assert jnp.all(jnp.isfinite(g[k])), f"{k} non-finite gradient"
+    # With continuously-FRESH snow (snow_age~0) the fresh-snow albedo and the snow-cover
+    # threshold drive the loss; snow_min / tau only engage once snow AGES (snow_age>0),
+    # so they are legitimately inert here (both are non-zero on real 24-h data, where
+    # snow ages between events).
+    for k in ("snow_max", "snow_dcrit"):
+        assert float(jnp.abs(g[k])) > 0.0, f"{k} inert (no fresh-snow-albedo gradient)"
+
+
+def test_split_cells_disjoint_and_complete():
+    """The 80/20 train/test split partitions the cells: disjoint and covering."""
+    data = _synthetic_data(ncol=20)
+    train, test = _split_cells(data, 0.2, seed=0)
+    assert int(test["lat"].shape[0]) == 4 and int(train["lat"].shape[0]) == 16
+    orig = set(np.asarray(data["lat"]).round(9).tolist())
+    tr = set(np.asarray(train["lat"]).round(9).tolist())
+    te = set(np.asarray(test["lat"]).round(9).tolist())
+    assert tr.isdisjoint(te), "train/test overlap -> leakage"
+    assert (tr | te) == orig, "split drops or duplicates cells"
+
+
+def test_lam_sm_zero_is_true_noop():
+    """lam_sm=0 must SKIP the soil-moisture term entirely (no 0*NaN poisoning): the
+    aux smse is exactly 0 and the total loss equals the sum of the other terms."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    l, (tm, am, pp, sa, sm, gb) = loss_ml(p, data, lam_sm=0.0)
+    assert float(sm) == 0.0
+    # the SM term contributes nothing: loss == tmse + lam_alb*amse + lam_pft*pp + lam_amp*sa
+    import scripts.run.train_multilayer_land_era5 as _M
+    expect = float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp) + _M._LAM_AMP * float(sa)
+    assert abs(float(l) - expect) < 1e-6
+
+
+def test_lam_tbias_penalizes_global_bias():
+    """--lam-tbias adds an area-weighted global skin-T BIAS penalty on top of the RMSE
+    term: the aux exposes the signed bias (weight-independent), and a positive lam_tbias
+    raises the loss by exactly lam_tbias * gbias**2, differentiably."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    l0, aux0 = loss_ml(p, data, lam_tbias=0.0)
+    l1, aux1 = loss_ml(p, data, lam_tbias=50.0)
+    gbias = float(aux0[-1])                                  # signed global skin-T bias [K]
+    assert float(aux1[-1]) == gbias                          # diagnostic independent of the weight
+    assert abs((float(l1) - float(l0)) - 50.0 * gbias ** 2) < 1e-5
+    g = jax.grad(lambda q: loss_ml(q, data, lam_tbias=50.0)[0])(p)
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
+
+
+def test_soil_moisture_loss_is_nan_safe():
+    """A non-finite soil-moisture target (or model) must NOT poison the loss/gradient —
+    finite-masking drops those cells (codex: a diverged forward must not NaN the run)."""
+    data = _synthetic_data()
+    sm = np.asarray(data["sm"]).copy(); sm[0] = np.nan       # one missing target cell
+    data = dict(data); data["sm"] = jnp.asarray(sm)
+    g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values()), "NaN SM target poisoned the gradient"
+
+
+def test_all_nan_soil_moisture_target_is_fully_masked():
+    """Backward-compat: an OLD npz without soil moisture yields an all-NaN SM target
+    (_pack KeyError fallback).  The finite-mask drops every cell -> smse is exactly 0
+    and the loss/gradient stay finite, so legacy inputs still train."""
+    data = dict(_synthetic_data())
+    data["sm"] = jnp.full_like(data["sm"], jnp.nan)
+    l, aux = loss_ml(init_ext_params(), data)
+    assert float(aux[4]) == 0.0 and jnp.isfinite(l)          # smse (index 4) masked to 0
+    g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
+
+
+def test_porosity_scale_keeps_theta_sat_above_field_capacity():
+    """The pft_smscale clamp must keep the scaled porosity above theta_r AND the plant
+    field capacity for ANY in-bounds scale (incl. the 0.7 minimum) so van-Genuchten +
+    btran stay well-posed (codex)."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    # force the porosity scale to its 0.7 minimum (raw -> -inf-ish sigmoid)
+    p = dict(p); p["pft_smscale"] = jnp.full_like(p["pft_smscale"], -20.0)
+    cp = constrain_ext(p)
+    assert float(jnp.max(cp["pft_smscale"])) < 0.72            # at the 0.7 floor
+    cfg, lp, hyd, _ = build_multilayer_cfg(cp, data)
+    plant_fc = lp.theta_fc                                      # (ncol,) plant field capacity
+    assert jnp.all(hyd.theta_sat[:, 0] >= hyd.theta_r[:, 0]), "theta_sat below theta_r"
+    assert jnp.all(hyd.theta_sat[:, 0] >= plant_fc + 0.0199), "theta_sat below plant FC -> btran breaks"
 
 
 def test_bulk_stomata_toggle_params():

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import fsspec
@@ -37,6 +38,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
+# Repo root on sys.path so `import evaluations` resolves when this plotter is
+# run bare (mirrors the run_weatherbench_* bootstrap).
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from evaluations.aimip_metrics import e2_trend_metrics  # noqa: E402
 
 
 logger = logging.getLogger("aimip-fleet")
@@ -60,8 +69,11 @@ S3_BUCKET = "ai-mip"
 MODELS = {
     "ACE2.1-ERA5": dict(
         path="Ai2/ACE2-1-ERA5",
-        template="aimip/r{i_r}i1p1f1/Amon/tas/gr/v20251130/"
-                 "tas_Amon_ACE2-ERA5_aimip_r{i_r}i1p1f1_gr_197810-202412.nc",
+        # tas is published on the NATIVE grid (gn), NOT gr — the gr path 404s
+        # despite the submissions manifest listing gr (2026-06-30 bucket probe:
+        # only .../Amon/tas/gn/v20251130/...gn_197810-202412.nc exists).
+        template="aimip/r{i_r}i1p1f1/Amon/tas/gn/v20251130/"
+                 "tas_Amon_ACE2-ERA5_aimip_r{i_r}i1p1f1_gn_197810-202412.nc",
     ),
     "ArchesWeather": dict(
         path="ArchesWeather/ArchesWeather-V2",
@@ -139,6 +151,39 @@ def _global_annual(ds: xr.Dataset, varname: str = "tas") -> xr.DataArray:
     return annual
 
 
+# Our variants' overlay colors on the fleet figure.
+LEGOESM_VARIANT_COLORS = {
+    "classical": "#AA3377", "column_nn": "#EE7733", "sfno_physics": "#009988",
+    "column_nn_dense": "#CC3311", "sfno_physics_dense": "#33BBEE",
+}
+
+
+def _legoesm_variant_from_stem(stem: str) -> str:
+    """Parse the variant out of a legoesm_<variant>_amip*.csv stem.
+
+    Prefers the LONGEST matching key so a specific variant
+    (``column_nn_dense``) wins over its prefix (``column_nn``). Falls
+    back to the raw stem for a non-conforming name (still plotted,
+    labelled by filename).
+    """
+    matches = [v for v in LEGOESM_VARIANT_COLORS if f"_{v}_" in f"_{stem}_"]
+    return max(matches, key=len) if matches else stem
+
+
+def _subtract_baseline(arr: xr.DataArray, b0: int, b1: int) -> xr.DataArray:
+    """Return ``arr`` as an anomaly from its mean over calendar years [b0, b1].
+
+    ``arr`` carries a ``year`` coordinate (fleet arrays are (member, year);
+    ERA5 is (year,)).  The baseline mean is reduced over ALL dims, so a single
+    scalar offset is removed and the inter-member envelope is preserved -- the
+    paper Fig-3 convention (anomalies from the 1979-2014 training-period mean).
+    Falls back to the full-series mean if the baseline window is empty.
+    """
+    sub = arr.sel(year=slice(b0, b1))
+    base = float(sub.mean()) if sub.size else float(arr.mean())
+    return arr - base
+
+
 def _load_model(fs, name: str, info: dict) -> xr.DataArray | None:
     """Return (n_ens, n_years) DataArray of annual global-mean tas."""
     series = []
@@ -178,6 +223,33 @@ def main():
         "--csv", type=Path,
         default=Path("results/aimip_001/aimip_fleet_tas_annual.csv"),
     )
+    parser.add_argument(
+        "--anomaly", action="store_true",
+        help="Plot anomalies from the baseline-period mean (paper Fig-3 "
+             "style) rather than absolute tas.",
+    )
+    parser.add_argument(
+        "--anomaly-base-start", type=int, default=1979,
+        help="First calendar year of the anomaly baseline (paper: 1979).",
+    )
+    parser.add_argument(
+        "--anomaly-base-end", type=int, default=2014,
+        help="Last calendar year of the anomaly baseline (paper training "
+             "period ends 2014).",
+    )
+    parser.add_argument(
+        "--legoesm-csv", type=Path, default=None, action="append",
+        dest="legoesm_csvs",
+        help="Annual CSV (year,annual_global_mean_surfT_K) from "
+             "scripts/run/run_aimip_amip_inference.py -> overlays a trained "
+             "legoESM variant's prescribed-SST AMIP run on the fleet figure. "
+             "REPEATABLE (one per variant: classical / column_nn / "
+             "sfno_physics — the variant is parsed from the filename "
+             "legoesm_<variant>_amip*.csv). Plotted as an anomaly from its "
+             "OWN baseline window (so the near-surface-vs-2m absolute offset "
+             "drops out, leaving a like-for-like trend/variability "
+             "comparison); bias/RMSE vs ERA5 join the metrics CSV.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -211,6 +283,18 @@ def main():
         if cb is not None:
             fleet[CBOTTLE["name"]] = cb
 
+    # Paper Fig 3 plots ANOMALIES from the 1979-2014 (training-period) mean:
+    # subtract each series' own baseline-window mean so absolute offsets drop
+    # out and the test-period trend/variability divergence is what shows.
+    # Done before metrics so bias/RMSE are computed on the plotted quantity.
+    if args.anomaly:
+        b0, b1 = args.anomaly_base_start, args.anomaly_base_end
+        if era5_annual is not None:
+            era5_annual = _subtract_baseline(era5_annual, b0, b1)
+        for _name in list(fleet):
+            fleet[_name] = _subtract_baseline(fleet[_name], b0, b1)
+        logger.info(f"Anomaly mode: removed {b0}-{b1} baseline mean per series")
+
     # Compute per-model mean bias + RMSE vs ERA5 reference.
     # ``bias`` = time-mean(ensmedian - era5).
     # ``rmse`` = sqrt(time-mean((ensmedian - era5)^2)).
@@ -238,6 +322,9 @@ def main():
             metrics[name] = {
                 "bias": float(diffs.mean()),
                 "rmse": float(np.sqrt(np.mean(diffs ** 2))),
+                # AIMIP E2: train-era vs holdout-decade trends of the
+                # ensemble-median series (evaluations/aimip_metrics.py).
+                **e2_trend_metrics(years, ens_med),
             }
 
     # Plot.
@@ -273,10 +360,69 @@ def main():
         for y, v in zip(years, vals):
             rows.append(("ERA5", int(y), float("nan"), float(v), float("nan")))
 
+    # legoESM (our trained variants, prescribed-SST AMIP inference) overlays.
+    # Plotted as an anomaly from each model's OWN baseline-window mean: the
+    # near-surface sigma-level T carries a constant offset vs ERA5 2-m tas,
+    # so removing each series' own baseline leaves a like-for-like trend +
+    # variability comparison (the honest way to place a free-of-absolute-bias
+    # model on the fleet figure).  bias/RMSE vs ERA5 (on the plotted anomaly)
+    # join the metrics CSV so our variants rank against the fleet.
+    for lcsv in (args.legoesm_csvs or []):
+        if not lcsv.exists():
+            logger.warning(f"--legoesm-csv not found: {lcsv}")
+            continue
+        _variant = _legoesm_variant_from_stem(lcsv.stem)
+        _d = np.genfromtxt(lcsv, delimiter=",", names=True)
+        ly = np.atleast_1d(_d["year"]).astype(int)
+        lt = np.atleast_1d(_d["annual_global_mean_surfT_K"]).astype(float)
+        if not ly.size:
+            continue
+        if args.anomaly:
+            _m = (ly >= args.anomaly_base_start) & (ly <= args.anomaly_base_end)
+            _base = float(lt[_m].mean()) if _m.any() else float(lt.mean())
+            lt = lt - _base
+        _mname = f"legoESM-{_variant}"
+        if era5_year_map is not None:
+            # finite-only: one NaN year (e.g. a mid-chain partial CSV) must
+            # not turn the whole bias/RMSE into NaN (codex LOW).
+            _diffs = np.asarray([
+                v - era5_year_map[int(y)]
+                for y, v in zip(ly, lt)
+                if int(y) in era5_year_map and np.isfinite(v)
+            ])
+            if _diffs.size:
+                metrics[_mname] = {
+                    "bias": float(_diffs.mean()),
+                    "rmse": float(np.sqrt(np.mean(_diffs ** 2))),
+                    **e2_trend_metrics(ly, lt),
+                }
+        _label = f"{_mname} (AMIP, prescribed ERA5 SST)"
+        if _mname in metrics:
+            _label += (
+                f"  (bias={metrics[_mname]['bias']:+.2f} K, "
+                f"RMSE={metrics[_mname]['rmse']:.2f} K)"
+            )
+        ax.plot(
+            ly, lt, color=LEGOESM_VARIANT_COLORS.get(_variant, "#AA3377"),
+            linewidth=2.5, marker="o", markersize=3, label=_label,
+        )
+        for y, v in zip(ly, lt):
+            rows.append((_mname, int(y), float("nan"), float(v), float("nan")))
+        logger.info(f"Overlaid {_mname}: {ly.size} years from {lcsv}")
+
     ax.set_xlabel("year")
-    ax.set_ylabel("global-mean tas [K]")
+    ax.set_ylabel(
+        "global-mean tas anomaly [K]" if args.anomaly
+        else "global-mean tas [K]"
+    )
+    _kind = (
+        f"annual global-mean 2-m air temperature anomaly "
+        f"(rel. {args.anomaly_base_start}-{args.anomaly_base_end})"
+        if args.anomaly else
+        "annual global-mean surface air temperature"
+    )
     ax.set_title(
-        f"AIMIP-1 fleet — annual global-mean surface air temperature "
+        f"AIMIP-1 fleet — {_kind}\n"
         f"(shaded = ensemble envelope, {YEAR_MIN}-{YEAR_MAX})"
     )
     ax.grid(alpha=0.3)
@@ -293,16 +439,35 @@ def main():
             fh.write(",".join(str(x) for x in r) + "\n")
     logger.info(f"Wrote {args.csv}")
 
-    # Dump metrics table.
+    # ERA5 reference trends (the E2 target values).
+    if era5_annual is not None:
+        metrics["ERA5"] = {
+            "bias": 0.0,
+            "rmse": 0.0,
+            **e2_trend_metrics(
+                np.asarray(era5_annual["year"]), np.asarray(era5_annual.values)
+            ),
+        }
+
+    # Dump metrics table (E1 bias/RMSE + E2 train/holdout trends).
     metrics_path = args.csv.with_name("aimip_fleet_tas_metrics.csv")
     with metrics_path.open("w") as fh:
-        fh.write("model,bias_K,rmse_K\n")
+        fh.write(
+            "model,bias_K,rmse_K,"
+            "trend_train_K_per_decade,trend_holdout_K_per_decade\n"
+        )
         for name, m in metrics.items():
-            fh.write(f"{name},{m['bias']:.4f},{m['rmse']:.4f}\n")
+            fh.write(
+                f"{name},{m['bias']:.4f},{m['rmse']:.4f},"
+                f"{m['trend_train_K_per_decade']:.4f},"
+                f"{m['trend_holdout_K_per_decade']:.4f}\n"
+            )
     logger.info(f"Wrote {metrics_path}")
     for name, m in metrics.items():
         logger.info(
             f"  {name:20}  bias = {m['bias']:+.3f} K   RMSE = {m['rmse']:.3f} K"
+            f"   trend(train) = {m['trend_train_K_per_decade']:+.3f}"
+            f"   trend(2015+) = {m['trend_holdout_K_per_decade']:+.3f} K/dec"
         )
 
 

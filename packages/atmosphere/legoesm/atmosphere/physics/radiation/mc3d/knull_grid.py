@@ -17,19 +17,6 @@ import jax.numpy as jnp
 Array: TypeAlias = jax.Array
 
 
-def global_majorant(k_ext: Array, knull_floor: float) -> Array:
-  """Global scalar majorant extinction for delta tracking.
-
-  Args:
-    k_ext: extinction coefficient field ``(nx, ny, nz)`` [1/m], non-negative.
-    knull_floor: lower bound [1/m] so empty columns still sample finite paths.
-
-  Returns:
-    Scalar majorant ``>= max(k_ext)`` and ``>= knull_floor``.
-  """
-  return jnp.maximum(jnp.max(k_ext), knull_floor).astype(k_ext.dtype)
-
-
 class MajorantGrid(NamedTuple):
   """Coarse null-collision (Woodcock) majorant grid for delta tracking.
 

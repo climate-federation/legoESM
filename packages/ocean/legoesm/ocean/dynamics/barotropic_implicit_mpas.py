@@ -381,6 +381,7 @@ def barotropic_implicit_mpas(
     dt: float,
     F_slow_eta=None,
     F_slow_u=None,
+    halo_refresh=None,
     *,
     return_residual: bool = False,
 ):
@@ -410,11 +411,13 @@ def barotropic_implicit_mpas(
         :func:`barotropic_substeps_mpas` interface).
 
     When ``return_residual=True`` (static; default ``False``) a fourth
-    value ``rel_residual`` is appended — the (rank-local) relative
-    Helmholtz residual diagnostic of the stock-CG solve.  MPAS runs stock
-    CG only (single-rank; the distributed PCG is deferred — see the
-    Step-4 note), so this residual is NOT a global reduction.  Log /
-    assert it OUTSIDE the JIT; never branch the compiled step on it.
+    value ``rel_residual`` is appended — the relative Helmholtz residual
+    diagnostic of the FINAL eta.  Single-rank (stock-CG branch): a
+    rank-local ``jnp.sum`` (exact for one rank).  Distributed (the entry
+    dispatch below, armed by ``initialize_voronoi_mpi``): an owned-cell-
+    masked GLOBAL reduction (one batched allreduce; halo rows excluded so
+    Voronoi ghost cells are not double-counted).  Log / assert it OUTSIDE
+    the JIT; never branch the compiled step on it.
     """
     # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
     # when ``initialize_voronoi_mpi`` has armed a partition layout, the
@@ -488,6 +491,14 @@ def barotropic_implicit_mpas(
     ).astype(eta_dtype)
 
     # ----- Step 2: predictor (Heun on Coriolis, OLD η gradient) ---------
+    # [stage-halo I0] u_bar_old was depth-averaged from the post-Coriolis
+    # u (its ring consumed 2 tangential hops) and F_slow_u's ring carries
+    # the neighbor rank's masked-wrong tendency depth-means; the Heun
+    # predictor consumes 1-2 more tangential hops of both.  One packed
+    # edge message re-arms them (solver-internal matvecs already exchange
+    # per iteration — audit table stage 4').
+    if halo_refresh is not None:
+        u_bar_old, F_slow_u = halo_refresh.edges(u_bar_old, F_slow_u)
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
     f_e = mesh.fEdge.astype(eta_dtype)
@@ -521,7 +532,13 @@ def barotropic_implicit_mpas(
     div_HU_pred = divergence_cell(flux_HU_pred, mesh) * mask
     div_HU_pred = div_HU_pred.astype(eta_dtype)
 
-    flux_eta_old = H_e_old * grad_eta_old * edge_mask
+    # [stage-halo I1] fill+grad already consumed eta's 2-ring budget; the
+    # flux divergence below is a 3rd chained hop, so refresh the gradient
+    # ring first (edge field).
+    grad_eta_for_div = grad_eta_old
+    if halo_refresh is not None:
+        (grad_eta_for_div,) = halo_refresh.edges(grad_eta_for_div)
+    flux_eta_old = H_e_old * grad_eta_for_div * edge_mask
     div_grad_eta_old = divergence_cell(flux_eta_old, mesh) * mask
     div_grad_eta_old = div_grad_eta_old.astype(eta_dtype)
 
@@ -533,38 +550,16 @@ def barotropic_implicit_mpas(
     ) * mask
 
     # ----- Step 4: PCG solve --------------------------------------------
-    # MPAS stays on the stock-CG primal (single-rank only).  The
-    # distributed fixed-iteration PCG that the lat-lon C-grid solver uses
-    # (``barotropic_common.solve_helmholtz_implicit``) is NOT yet wired up
-    # for MPAS because the Voronoi barotropic path lacks the two pieces a
-    # multi-rank iterated solve needs, and adding them is real
-    # infrastructure rather than a shared-helper reuse:
+    # Two dispatch legs, selected at ENTRY (see the distributed-dispatch
+    # block at the top of this function, which resolved the historical
+    # TODO(distributed-mpas-pcg)):
     #
-    #   1. Halo-in-matvec.  ``A_op`` -> ``gradient_edge(phi_cell)`` only
-    #      indexes ``phi_cell[cellsOnEdge]`` locally; it does NOT exchange
-    #      ghost-cell values.  The explicit substep loop has no halo
-    #      exchange either.  In a fixed-iteration PCG ``p``/``eta`` change
-    #      every iteration, so the ghost cells would go stale after the
-    #      first matvec.  A correct distributed MPAS PCG must call a
-    #      Voronoi cell halo-exchange inside ``A_op`` before
-    #      ``fill_land_cells_mpas``/``gradient_edge``.
-    #   2. Owned-cell reductions.  Voronoi local meshes hold owned + halo
-    #      cells (``voronoi_mpi.make_voronoi_partition_layout`` exposes
-    #      ``owned_mask_cells``).  PCG dot products, the residual, and the
-    #      mass projection would double-count ghost cells unless every
-    #      global SUM is masked to owned cells.
-    #
-    # The lat-lon C-grid band decomposition has neither problem (its
-    # ``A_op`` pre-pads through the backend-dispatched halo, and cell rows
-    # partition without overlap so there are no ghost cells in the
-    # reduction).  Distributing the MPAS PCG is therefore deferred —
-    # TODO(distributed-mpas-pcg): thread a Voronoi cell-halo exchange into
-    # ``A_op`` and an ``owned_cell_mask`` into ``solve_helmholtz_implicit``
-    # /``_global_dot_batch``, then mirror the lat-lon dispatch here.  The
-    # MPAS ocean MPI path is currently forward-only for AD
-    # (``voronoi_mpi.py``), so implicit_cn under MPI is unsupported until
-    # then.  (np>1 refusal is at function ENTRY — see top of this
-    # function.)
+    #   - single-rank / no layout: the stock-CG custom-VJP solver below;
+    #   - Voronoi partition layout armed: the shared distributed fixed-M
+    #     PCG (``_vlayout is not None`` branch) with a cell-halo exchange
+    #     composed into every ``A_op`` application and owned-cell-masked
+    #     area-weighted dots — the two pieces (halo-in-matvec,
+    #     owned-cell reductions) a multi-rank iterated solve needs.
     #
     # MERGE COMPOSITION (PR #394 × MPI-scaling refactor): the single-rank
     # solve routes through :func:`solve_helmholtz_freesurface_mpas` —
@@ -599,6 +594,7 @@ def barotropic_implicit_mpas(
             VoronoiHaloExchange,
         )
         from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol,
             solve_helmholtz_implicit,
         )
         _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
@@ -615,7 +611,12 @@ def barotropic_implicit_mpas(
             A_op_dist, rhs, _M_inv_dist, eta_old,
             distributed=True,
             fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
-            residual_tol=config.barotropic_implicit_pcg_residual_tol,
+            # f32-safe acceptance tolerance (f64 unchanged); the fixed-iter
+            # PCG runs a static count, so this only floors the converged
+            # diagnostic.
+            residual_tol=precision_aware_rel_tol(
+                config.barotropic_implicit_pcg_residual_tol, eta_dtype,
+            ),
             stock_cg_tol=config.barotropic_implicit_pcg_tol,
             stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
             pcg_variant=str(config.barotropic_implicit_pcg_variant),
@@ -625,8 +626,13 @@ def barotropic_implicit_mpas(
         # stencils consume it.
         eta_new = _exchanger.exchange_cell_field(eta_new) * mask
     else:
-        pcg_tol = jnp.asarray(
-            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        # f32: floor the 1e-10 rel-tol to the f32-reachable value so stock CG
+        # stops at convergence rather than maxiter (f64 unchanged).
+        from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol as _precision_aware_rel_tol,
+        )
+        pcg_tol = _precision_aware_rel_tol(
+            config.barotropic_implicit_pcg_tol, eta_dtype,
         )
         pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
         # Forward = stock preconditioned CG, bit-identical; reverse mode
@@ -669,14 +675,12 @@ def barotropic_implicit_mpas(
         _actual_mass = _actual_mass_l
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
     eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
-    # Residual diagnostic for the single-rank stock-CG path (uniform
-    # return shape with the lat-lon solver's ``return_residual``).
-    # RANK-LOCAL ON PURPOSE: do NOT route through the lat-lon helper's
-    # ``_global_dot_batch`` (which would fire a bare ``batch_allreduce_mpi``
-    # under MPI and double-count Voronoi halo cells — the exact reason the
-    # MPAS solver is single-rank only here).  Plain ``jnp.sum`` is exact
-    # for the single rank this path runs on.  Computed AFTER the floor
-    # clamp below so it reflects the ACTUAL returned eta.
+    # Residual diagnostic (uniform return shape with the lat-lon solver's
+    # ``return_residual``), computed AFTER the floor clamp below so it
+    # reflects the ACTUAL returned eta.  Single-rank: plain ``jnp.sum``
+    # (exact for one rank).  Distributed: owned-masked sums + ONE batched
+    # allreduce — never the lat-lon helper's ``_global_dot_batch``, whose
+    # bare reduction would double-count Voronoi halo cells.
 
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
@@ -730,18 +734,30 @@ def barotropic_implicit_mpas(
     # (project_mpas_etopo_instability.md).  Mirrors the explicit-substep
     # path (barotropic_mpas.py:272) and the lat-lon Follow-up C
     # recommendation (docs/dev-notes/issues/barotropic_mode_noise.md §"Residual").
-    A_baro_visc = jnp.asarray(
-        getattr(config, "barotropic_u_viscosity", 0.0), dtype=eta_dtype,
-    )
-    # Per-edge equatorial-boost factor — same mechanism as 3D A_h.
-    # Damps the equatorial f→0 u_baro mode that the implicit-CN
-    # solver's Coriolis predictor-corrector cannot catch.  See
+    A_baro_visc = jnp.asarray(config.barotropic_u_viscosity, dtype=eta_dtype)
+    # Per-edge equatorial-boost factor — SAME Gaussian mechanism as the 3D A_h
+    # path (ocean_pe_mpas), guarded identically on the STATIC config float so
+    # boost<=0 keeps _lat_factor==1 (no boost) and never evaluates the Gaussian
+    # (σ=0 would give 0*NaN at an exact-equator edge).  A tight Gaussian in
+    # latitude (σ = equatorial_visc_sigma_deg), NOT the old cos²(lat) which
+    # overdamped real mid-latitude flow.  Damps the equatorial f→0 u_baro mode
+    # the implicit-CN Coriolis predictor-corrector cannot catch.  See
     # project_mpas_etopo_instability.md §"equatorial mode".
-    _eq_boost = jnp.asarray(
-        getattr(config, "equatorial_visc_boost", 0.0), dtype=eta_dtype,
-    )
-    _cos2 = jnp.cos(mesh.latEdge.astype(eta_dtype)) ** 2
-    _lat_factor = 1.0 + _eq_boost * _cos2  # (nEdges,)
+    _eq_boost = config.equatorial_visc_boost
+    if _eq_boost > 0:
+        if config.equatorial_visc_sigma_deg <= 0:
+            raise ValueError(
+                "equatorial_visc_sigma_deg must be > 0 when "
+                "equatorial_visc_boost > 0 (Gaussian width divides latEdge; "
+                f"got {config.equatorial_visc_sigma_deg})."
+            )
+        _sigma_rad = jnp.radians(config.equatorial_visc_sigma_deg)
+        _gauss = jnp.exp(
+            -0.5 * (mesh.latEdge.astype(eta_dtype) / _sigma_rad) ** 2
+        )
+        _lat_factor = 1.0 + _eq_boost * _gauss  # (nEdges,)
+    else:
+        _lat_factor = 1.0
     if config.barotropic_u_viscosity > 0.0:
         lap_u = vector_laplacian_del2(u_bar_new, mesh).astype(eta_dtype)
         u_bar_new = (
@@ -753,9 +769,7 @@ def barotropic_implicit_mpas(
     # Scale-selective: damps grid-scale much harder than mesoscale, so
     # safe to use at production strength.  ``vector_laplacian_del4``
     # returns ``-∇²(∇²u)`` so adding ``+dt·K·del4`` gives stable decay.
-    K_baro_bih = jnp.asarray(
-        getattr(config, "barotropic_u_biharmonic", 0.0), dtype=eta_dtype,
-    )
+    K_baro_bih = jnp.asarray(config.barotropic_u_biharmonic, dtype=eta_dtype)
     if config.barotropic_u_biharmonic > 0.0:
         del4_u = vector_laplacian_del4(u_bar_new, mesh).astype(eta_dtype)
         u_bar_new = (u_bar_new + dt_t * K_baro_bih * del4_u) * edge_mask

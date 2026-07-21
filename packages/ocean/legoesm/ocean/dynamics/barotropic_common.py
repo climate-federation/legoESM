@@ -88,18 +88,32 @@ def compute_power_law_filter_weights(
 def compute_nemo_boxcar_centred_weights(
     n_substeps: int,
     dtype: jnp.dtype,
+    substep_scale: int = 1,
 ):
-    """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=1).
+    """NEMO dynspg_ts centred boxcar averaging (ln_bt_fw=F, nn_bt_flt=2).
 
     NEMO's centred split-explicit runs the barotropic past the
-    baroclinic step and averages η/U over a boxcar of width ``nn_e``
-    CENTRED on the new-time point (ts_wgt: ``zwgt1(jn)=1`` where
-    ``|jn − jic|/nn_e < 0.5``; in the forward frame the centre ``jic``
-    is the substep that lands on t+Δt, i.e. ``jn = n_substeps``).  The
-    window therefore spans τ ∈ (0.5, 1.5) baroclinic steps: substeps
-    before it evolve the state with zero averaging weight, and the loop
-    runs to the last in-window substep (``n_loop ≈ 1.5·n``).  The
-    secondary (transport) weights are the SM2005/ts_wgt tail sums
+    baroclinic step and averages η/U over a boxcar of width ``2·nn_e``
+    CENTRED on the new-time point (ts_wgt CASE(2): ``zwgt1(jn)=1`` where
+    ``|jn − jic|/nn_e < 1``; the centre ``jic = 2·nn_e`` lands on the
+    new-time point of a 2Δt integration, i.e. ``jn = n_substeps``).
+
+    ``substep_scale`` (default 1) is the ``_barotropic_substep_scale`` the
+    MLF caller applies: it feeds the SCALED substep count ``n_substeps =
+    nn_e · substep_scale`` (DINO: 23·2 = 46) so the substep length stays
+    CFL-safe over the 2Δt leap-frog window.  The boxcar HALF-width must
+    remain the UNSCALED ``nn_e = n_substeps / substep_scale`` (NEMO's
+    ``nn_e``), NOT the scaled count — otherwise the window doubles
+    (±2·nn_e) and ``n_loop`` becomes ``2·n_substeps − 1`` (91 for DINO)
+    instead of NEMO's ``icycle = 2·nn_e = 68``.  With ``substep_scale=1``
+    (every forward-Euler caller) ``half_width == n_substeps`` and the
+    weights are byte-identical to the pre-fix path.  The window therefore
+    spans τ ∈ (0, 2) baroclinic steps of length ``nn_e·dt_s``: the loop
+    runs to the last in-window substep ``jn = n_substeps + nn_e − 1``
+    (``n_loop = 68`` for DINO; ``2·n − 1`` when ``substep_scale=1``).
+    This is the DINO namelist value (namdyn_spg nn_bt_flt=2); the older
+    nn_bt_flt=1 (width nn_e, ``<0.5``) is not used by any shipped card.
+    The secondary (transport) weights are the SM2005/ts_wgt tail sums
     ``w_transport[j] = Σ_{i≥j} w_i / n_substeps`` — the unique choice
     that keeps ``div(Hu_avg) == (η_old − η_avg)/dt`` (uniform-tracer
     preservation), exactly as the other filters in this module.
@@ -122,8 +136,18 @@ def compute_nemo_boxcar_centred_weights(
     if n_substeps < 2:
         raise ValueError(
             f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale               # NEMO nn_e
     jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
-    w = (_np.abs(jn - n_substeps) / n_substeps < 0.5).astype(_np.float64)
+    # nn_bt_flt=2: boxcar HALF-width == nn_e (full width 2*nn_e), the DINO
+    # namelist value (ts_wgt CASE(2): |jn-jic|/nn_e < 1).  The centre
+    # jic == n_substeps (== 2*nn_e under the MLF scale); the window spans
+    # jn in (n_substeps - nn_e, n_substeps + nn_e), i.e. tau in (0, 2)
+    # baroclinic steps of length nn_e*dt_s centred at t+dt.
+    w = (_np.abs(jn - n_substeps) / half_width < 1.0).astype(_np.float64)
     m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last in-window substep
     w = w[:m_star]
     w = w / w.sum()
@@ -757,6 +781,57 @@ def global_rel_residual(
     rr, bb = _global_dot_batch([(r, r), (b, b)])
     eps = jnp.asarray(1.0e-30, dtype=b.dtype)
     return jax.lax.stop_gradient(jnp.sqrt(rr / jnp.maximum(bb, eps)))
+
+
+# Relative-residual floor for the PCG/CG, expressed in machine epsilons of the
+# WORKING dtype.  A fixed-iteration (or stock) PCG cannot drive the relative
+# residual sqrt(r·r/b·b) below the rounding-noise floor ~ sqrt(N)·eps; for the
+# diagonally-dominant free-surface Helmholtz this bottoms out a couple of
+# orders above eps.  1e3·eps is a safe practical floor (f64: ~2.2e-13, well
+# below the 1e-10 default, so f64 is unchanged; f32: ~1.2e-4, which the solver
+# CAN reach — a hardcoded 1e-10 is ~3 orders below f32 eps ≈ 1.19e-7 and would
+# be permanently unreachable, leaving ``converged`` always False and the
+# single-rank stock-CG ``while_loop`` grinding to ``maxiter`` every step).
+_PCG_REL_TOL_EPS_FLOOR = 1.0e3
+
+
+def precision_aware_rel_tol(
+    requested_tol: float | jnp.ndarray, dtype: jnp.dtype,
+) -> jnp.ndarray:
+    """Floor a relative-residual tolerance to what *dtype* can actually reach.
+
+    Returns a scalar of *dtype*.
+
+    * **float64 (and any wider) → pure pass-through.**  The full-precision
+      reference path is byte-identical: ANY requested f64 tolerance (the
+      1e-10 default, or a tighter custom 1e-13, …) is returned unchanged.
+    * **float32 (and narrower) → floored** to
+      ``max(requested_tol, _PCG_REL_TOL_EPS_FLOOR · eps(dtype))`` (~1.2e-4 in
+      f32).  This raises an unreachable f64-tuned tolerance (e.g. 1e-10,
+      ~1000× below f32 machine epsilon ≈ 1.19e-7) up to a value the iterative
+      solver can satisfy — so the ``converged`` diagnostic stays meaningful
+      and a residual-gated stock-CG ``while_loop`` terminates instead of
+      running to its iteration cap.  A tolerance already above the floor
+      (a deliberately loose request) passes through unchanged.
+
+    Used by the implicit free-surface solvers (lat-lon C-grid + MPAS) for both
+    the ``converged``-flag acceptance tolerance and the stock-CG ``tol``; the
+    distributed fixed-iteration PCG runs a static iteration count regardless,
+    so this only affects the diagnostic there.
+
+    JAX-safe: ``requested_tol`` may be a Python float OR a traced scalar (no
+    host sync, no ``float()`` on a tracer); the floor is a static value of
+    *dtype* (``jnp.finfo`` reads the static dtype, not a tracer).
+    """
+    dt = jnp.dtype(dtype)
+    requested = jnp.asarray(requested_tol, dtype=dt)
+    # Pass f64 (and any dtype at least as wide) straight through so the
+    # reference path is byte-identical for ANY f64 tolerance, not just the
+    # default — the eps floor only matters for the narrow (fp32) modes.
+    if jnp.finfo(dt).eps <= jnp.finfo(jnp.float64).eps:
+        return requested
+    floor = jnp.asarray(_PCG_REL_TOL_EPS_FLOOR * jnp.finfo(dt).eps, dtype=dt)
+    return jnp.maximum(requested, floor)
 
 
 def solve_helmholtz_implicit(

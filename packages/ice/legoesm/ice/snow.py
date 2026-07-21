@@ -18,12 +18,40 @@ sea-ice column in four ways:
 4. **Snow-ice flooding (white-ice)** — when freeboard goes
    negative (snow load sinks the snow-ice interface below sea
    level), snow at the bottom of the snow column consolidates
-   into white ice.  Leppäranta 1983 / Notz 2002 mass-conserving
-   form with no explicit pore-water exchange.
+   into white ice.  Leppäranta 1983 / Notz 2002 flotation form: the
+   flooded pore space draws ``(rho_ice - rho_snow) d`` of seawater
+   that the caller debits from the ocean (see ``snow_ice_flooding``).
 
 All kernels are pure JAX (differentiable, JIT-friendly) and operate
 on arbitrary leading spatial shape with optional trailing category
 axis.
+
+Faithfulness
+------------
+The two closed forms are pinned by
+``tests/ice/unit/test_ice_snow_faithful.py`` against an independent scalar
+oracle (rel 1e-9):
+
+  * ``combined_conductance`` / ``combined_conductive_flux`` (Semtner 1976 /
+    Maykut-Untersteiner 1971 SERIES thermal resistance): K = 1 / (h_snow/k_snow
+    + h_ice/k_ice) with hard max(h, h_min) thickness floors, F = K (T_base -
+    T_sfc).
+  * ``snow_ice_flooding`` (Leppäranta 1983 / Notz 2002 Archimedes flotation):
+    fb = ((rho_ocean - rho_ice) h_ice - rho_snow h_snow)/rho_ocean, and when
+    fb < 0 the flooded thickness d = -fb rho_ocean/(rho_ocean - rho_ice +
+    rho_snow) (capped at h_snow) with h_ice' = h_ice + d, h_snow' = h_snow - d.
+    The pin includes the DEFINING flotation identity — un-capped flooding drives
+    the new freeboard to EXACTLY zero — and the (rho_ice - rho_snow) d seawater
+    mass draw.
+
+The rho_ice/rho_snow/rho_ocean/k_ice/k_snow coefficients are transcribed as
+independent oracle literals and canaried against ``legoesm.constants`` (CICE
+defaults; constants == literal == value).  DEPARTURES / guards (reproduced by
+the oracle): the max(h, h_min) resistance floors, the max(-fb, 0) flooding gate,
+and the max(h_snow - d, 0) floor.  The d <= h_snow cap is an UNREACHABLE safety
+for physical densities (rho_snow < rho_ice < rho_ocean): an active flood always
+has d = (rho_snow h_snow - (rho_ocean - rho_ice) h_ice)/(rho_ocean - rho_ice +
+rho_snow) < h_snow, so it is retained only as a defensive floor.
 """
 
 from __future__ import annotations
@@ -49,7 +77,7 @@ def combined_conductive_flux(
 
     F_cond = (T_base - T_sfc) / (h_snow/k_snow + h_ice/k_ice)
 
-    Smooth lower bounds prevent ``1/0`` when a layer is absent.
+    Hard ``max(h, h_min)`` floors prevent ``1/0`` when a layer is absent.
     Sign convention: positive = upward energy into the surface
     (from a warm base towards a cold surface).
 
@@ -65,7 +93,7 @@ def combined_conductive_flux(
     k_ice, k_snow : float
         Thermal conductivities [W/(m·K)].
     h_ice_min, h_snow_min : float
-        Smooth lower-floors on layer thickness used inside the
+        Hard max(h, h_min) lower floors on layer thickness used inside the
         resistance sum to avoid divisions by zero in JIT.
     """
     return combined_conductance(
@@ -83,8 +111,8 @@ def combined_conductance(
 ) -> jnp.ndarray:
     """Series snow+ice thermal conductance ``K = 1 / R_total`` [W/(m^2 K)].
 
-    ``R_total = h_snow/k_snow + h_ice/k_ice`` (with smooth thickness
-    floors).  The conductive flux is ``K * (T_base - T_sfc)``.  Exposed
+    ``R_total = h_snow/k_snow + h_ice/k_ice`` (with hard max(h, h_min)
+    thickness floors).  The conductive flux is ``K * (T_base - T_sfc)``.  Exposed
     separately from :func:`combined_conductive_flux` so the surface energy
     balance can treat the conductive term semi-implicitly (evaluate it at
     the *new* surface temperature), which is unconditionally stable for thin
@@ -296,20 +324,31 @@ def snow_ice_flooding(
 
     When ``freeboard < 0`` the bottom of the snow column sinks
     below sea level, seawater wets the basal snow, and the snow
-    consolidates into white ice.  The Leppäranta 1983 / Notz 2002
-    mass-conserving solution leaves the snow + ice mass unchanged
-    (white ice density ≈ rho_ice; the ocean does NOT exchange mass
-    in this simplified form — proper pore-water salinity gain is
-    handled in :mod:`legoesm.ice.brine`).
+    consolidates into white ice.  In the Leppäranta 1983 / Notz 2002
+    flotation solution the snow+ice column GAINS ``(rho_ice - rho_snow) d`` of
+    mass — the seawater drawn into the flooded pore space — which the caller
+    debits from the ocean (see the mass balance below); its salt is handled in
+    :mod:`legoesm.ice.brine`.  (The ice gain ``rho_ice d`` minus the snow loss
+    ``rho_snow d`` equals that seawater draw.)
 
     Freeboard:
         fb = ((rho_ocean - rho_ice) * h_ice - rho_snow * h_snow) / rho_ocean
 
-    When ``fb < 0`` (snow-load sinks the surface):
-        δi = -fb               (positive ice gain [m])
-        δs = (rho_ice / rho_snow) * δi   (snow consumed [m])
-    Mass balance verified by construction:
-        rho_snow * δs = rho_ice * δi
+    When ``fb < 0`` (snow-load sinks the surface), Leppäranta 1983 / Notz 2002:
+    the submerged basal snow is FLOODED by seawater filling its pore space and
+    then freezes, so a snow layer of thickness ``d`` becomes snow-ice of the
+    SAME thickness at ice density.  The flotation solve raises the freeboard to
+    exactly zero (``h_ice' = h_ice + d``, ``h_snow' = h_snow - d``):
+        d = rho_ocean * (-fb) / (rho_ocean - rho_ice + rho_snow)
+    Mass balance (per unit area):
+        rho_ice * d          (new snow-ice)
+      = rho_snow * d         (snow consumed)
+      + (rho_ice - rho_snow) * d   (SEAWATER drawn from the ocean into pores)
+    The ``(rho_ice - rho_snow) * d`` seawater is a real OCEAN mass sink (water +
+    its salt); the caller debits it from the ocean so flooding does not
+    spuriously freshen it (audit: the old ``d_s = (rho_ice/rho_snow)*d_i``
+    snow->ice form exchanged NO ocean mass yet the brine module still charged
+    the ocean the white-ice salt -> salt-without-water freshening).
 
     Parameters
     ----------
@@ -325,23 +364,23 @@ def snow_ice_flooding(
     h_snow_new : array
         Snow thickness after flooding [m].
     h_si_formed : array
-        Snow-ice thickness formed this step [m] — informational
-        diagnostic; subsequent brine module needs this to add the
-        seawater-salt contribution to ``S_ice``.
+        Snow-ice thickness ``d`` formed this step [m].  The caller derives the
+        ocean seawater withdrawal ``(rho_ice - rho_snow) * h_si_formed`` and the
+        brine module the white-ice salt it carries.
     """
     fb_num = (rho_ocean - rho_ice) * h_ice - rho_snow * h_snow
     fb = fb_num / rho_ocean
-    delta_i = jnp.maximum(-fb, 0.0)
-    # Cap snow consumption at the available snow column.
-    delta_s_request = (rho_ice / rho_snow) * delta_i
-    delta_s = jnp.minimum(delta_s_request, h_snow)
-    # When snow runs out, scale delta_i accordingly to preserve mass.
-    delta_i_eff = jnp.where(
-        delta_s_request > 0.0,
-        delta_i * delta_s / jnp.maximum(delta_s_request, 1e-30),
-        delta_i,
-    )
+    # Flotation-to-zero flooding thickness; denom > 0 for physical densities
+    # (rho_snow < rho_ice < rho_ocean).  Floor guards the divide only.
+    denom = jnp.maximum(rho_ocean - rho_ice + rho_snow, 1.0e-30)
+    delta = jnp.maximum(-fb, 0.0) * rho_ocean / denom
+    # Defensive cap: cannot flood more snow than the column holds.  Unreachable
+    # for physical densities (rho_snow < rho_ice < rho_ocean) — an active flood
+    # always has d < h_snow — but kept so a non-physical density set cannot flood
+    # negative snow.  Ice gain, snow loss and seawater draw all scale with the
+    # same d, so mass stays consistent even under the cap.
+    delta = jnp.minimum(delta, h_snow)
 
-    h_ice_new = h_ice + delta_i_eff
-    h_snow_new = jnp.maximum(h_snow - delta_s, 0.0)
-    return h_ice_new, h_snow_new, delta_i_eff
+    h_ice_new = h_ice + delta
+    h_snow_new = jnp.maximum(h_snow - delta, 0.0)
+    return h_ice_new, h_snow_new, delta

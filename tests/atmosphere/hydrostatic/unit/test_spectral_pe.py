@@ -27,7 +27,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
@@ -231,7 +231,7 @@ class TestSpectralPEState:
         RHS must propagate the tracer pytree structure as zeros into
         the tendency state.  Otherwise ``jax.tree.map(state, tendency)``
         in the RK step fails with "Expected dict, got None"."""
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -272,7 +272,7 @@ class TestSpectralPEState:
         with ``AttributeError: DynamicJaxprTracer has no attribute
         replace``.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -307,7 +307,7 @@ class TestSpectralPEState:
         """A ``tracers`` dict mixing ``Field`` and raw-array values
         should round-trip through the dycore step without crashing.
         Each value preserves its original container."""
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -348,7 +348,7 @@ class TestSpectralPEState:
         tendency had ``tracers=None`` which broke any downstream
         tree.map that expected matching pytree structure.
         """
-        from legoesm.atmosphere.dynamics.spectral_pe import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPEConfig,
             SpectralPrimitiveEquationModel,
         )
@@ -728,3 +728,119 @@ class TestSpectralPESolverAxis:
         from legoesm.atmosphere.dynamics import solver_axes
         axes = solver_axes("spectral_primitive_equations")
         assert axes == ("hydrostatic", "spectral")
+
+
+# --------------------------------------------------------------------------- #
+# #405 — prognostic (stateful) physics on the spectral dycore (leapfrog only)  #
+# --------------------------------------------------------------------------- #
+def _mock_stateful_physics():
+    """A PROGNOSTIC physics_fn: zero spectral tendency (isolates the carry) +
+    advances a scalar carry by 1 each call.  Tagged ``_requires_phys_state``."""
+    calls = {"n": 0}
+
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+        calls["n"] += 1
+        return jax.tree.map(jnp.zeros_like, state), phys_state + 1.0
+
+    physics_fn._requires_phys_state = True
+    return physics_fn, calls
+
+
+def test_prognostic_physics_threads_on_leapfrog(rest_state, grid, sigma_coord):
+    """#405: a stateful physics_fn threads its PhysicsState carry across steps on
+    the leapfrog_si path (evaluated ONCE per step, carry advanced not reseeded),
+    and the advanced carry is published on ``model._phys_state``."""
+    config = SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True)
+    model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    physics_fn, calls = _mock_stateful_physics()
+    carry = jnp.array(0.0)
+    st = rest_state
+    for _ in range(3):
+        st = model.step(st, dt=300.0, physics_fn=physics_fn, phys_state=carry)
+        carry = model._phys_state
+    assert float(carry) == 3.0            # advanced once per step, no reseed
+    assert calls["n"] == 3                # ONE physics eval per step (not per-stage)
+    assert bool(jnp.all(jnp.isfinite(st.vor_hat.data)))
+
+
+def test_prognostic_zero_tendency_reduces_to_plain_leapfrog(
+        rest_state, grid, sigma_coord):
+    """The threaded path with a ZERO physics tendency must be numerically
+    identical to a plain (no-physics) leapfrog run — proves the ``physics_tendency``
+    hook adds exactly the physics contribution and nothing else."""
+    config = SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True)
+    physics_fn, _ = _mock_stateful_physics()
+    m1 = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    s1 = rest_state
+    for _ in range(3):
+        s1 = m1.step(s1, dt=300.0, physics_fn=physics_fn, phys_state=jnp.array(0.0))
+    m2 = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+    s2 = rest_state
+    for _ in range(3):
+        s2 = m2.step(s2, dt=300.0)        # no physics
+    assert bool(jnp.allclose(s1.T_hat.data, s2.T_hat.data))
+    assert bool(jnp.allclose(s1.vor_hat.data, s2.vor_hat.data))
+
+
+def test_prognostic_physics_refused_off_leapfrog_or_unthreaded(
+        rest_state, grid, sigma_coord):
+    """A stateful physics_fn still refuses where the carry is ill-defined:
+    on ssp_rk3 (per-RK-stage physics) and on leapfrog WITHOUT a threaded carry."""
+    physics_fn, _ = _mock_stateful_physics()
+    # ssp_rk3 + stateful (even with a carry) -> refused (per-stage eval).
+    m_rk3 = SpectralPrimitiveEquationModel(
+        grid, sigma_coord, SpectralPEConfig(time_integrator="ssp_rk3"))
+    with pytest.raises(NotImplementedError):
+        m_rk3.step(rest_state, dt=300.0, physics_fn=physics_fn,
+                   phys_state=jnp.array(0.0))
+    # leapfrog + stateful but NO carry -> refused (would silently reseed).
+    m_lf = SpectralPrimitiveEquationModel(
+        grid, sigma_coord,
+        SpectralPEConfig(time_integrator="leapfrog_si", semi_implicit=True))
+    with pytest.raises(NotImplementedError):
+        m_lf.step(rest_state, dt=300.0, physics_fn=physics_fn)
+
+
+def test_leapfrog_si_lagged_physics_stable_under_stiff_damping():
+    """Stiff/dissipative physics on the CENTERED leapfrog level excites
+    leapfrog's computational-mode instability; the leapfrog BODY applies the
+    physics LAGGED to n-1 (#405 fix, _make_leapfrog_tendency_fn) to stabilise
+    it.  A strong Rayleigh damping (2*dt/tau = 2) of an active vorticity field
+    grows without bound under centered application but stays finite with the
+    lag.  (End-to-end: sbm convection + louis turbulence + prognostic clubb_lite
+    each NaN'd the spectral T_hat within a day before this fix, stable after.)"""
+    import jax
+    grid = create_gaussian_grid(n_max=21)
+    sigma_coord = create_sigma_coordinate(10)
+    st = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0)
+    # Inject an ACTIVE vorticity field (a real circulation for the damping to act
+    # on — the bare rest state is trivially steady).
+    vor_pert = 1.0e-4 * jax.random.normal(
+        jax.random.PRNGKey(0), st.vor_hat.data.shape)
+    st = st._replace(vor_hat=st.vor_hat.replace(data=st.vor_hat.data + vor_pert))
+    dt = 300.0
+    tau = 4.0 * dt    # stiff but physical: centered leapfrog root |lambda|>1, lagged decays
+
+    def stiff_damp(state, g, s):
+        z = jnp.zeros_like(state.T_hat.data)
+        return state._replace(
+            vor_hat=state.vor_hat.replace(data=-state.vor_hat.data / tau),
+            div_hat=state.div_hat.replace(data=-state.div_hat.data / tau),
+            T_hat=state.T_hat.replace(data=z),
+            lnps_hat=state.lnps_hat.replace(
+                data=jnp.zeros_like(state.lnps_hat.data)),
+        )
+
+    a = grid.radius
+    eig = grid.n_max * (grid.n_max + 1) / (a * a)
+    cfg = SpectralPEConfig(
+        time_integrator="leapfrog_si", semi_implicit=True,
+        hyperdiff_coeff=1.0 / (0.5 * 3600.0 * eig ** 2), hyperdiff_order=2)
+    m = SpectralPrimitiveEquationModel(grid, sigma_coord, cfg)
+    for _ in range(80):
+        st = m.step(st, dt, physics_fn=stiff_damp)
+    assert bool(jnp.isfinite(st.vor_hat.data).all())
+    assert bool(jnp.isfinite(st.T_hat.data).all())
+    # The lagged damping should DECAY the vorticity, not amplify it.
+    assert float(jnp.max(jnp.abs(st.vor_hat.data))) < 1.0e-4

@@ -199,18 +199,22 @@ def latent_heat_vaporization_sst(T_sfc_K):
     """SST-dependent latent heat of vaporization [J/kg] (NEMO ``L_vap``).
 
     ``L = (2.501 - 0.00237 (T - T_freeze)) 1e6``; equals ``constants.L_v``
-    at 0 degC by construction.
+    at 0 degC by construction.  NEMO-parity float64 pin around the shared
+    :func:`legoesm.thermo.latent_heat_vaporization_sst` (#762 — one
+    formula, two dtype contracts).
     """
-    return constants.L_v - 2.370e3 * (
-        jnp.asarray(T_sfc_K, dtype=jnp.float64) - constants.T_freeze
-    )
+    from legoesm.thermo import latent_heat_vaporization_sst as _l_sst
+    return _l_sst(jnp.asarray(T_sfc_K, dtype=jnp.float64))
 
 
 def moist_air_cp(q_air):
-    """Moist-air specific heat [J/(kg K)] (NEMO ``cp_air``)."""
-    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * jnp.asarray(
-        q_air, dtype=jnp.float64
-    )
+    """Moist-air specific heat [J/(kg K)] (NEMO ``cp_air``).
+
+    NEMO-parity float64 pin around the shared
+    :func:`legoesm.thermo.moist_air_cp` (#762).
+    """
+    from legoesm.thermo import moist_air_cp as _cp_moist
+    return _cp_moist(jnp.asarray(q_air, dtype=jnp.float64))
 
 
 def _virt_temp(T_K, q):
@@ -344,7 +348,8 @@ def large_yeager_ch(T_air_K, T_sfc_K):
 
 def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    rho_air=None, *, slp_Pa=None, algo: str = "ncar",
-                   nb_iter: int = _NB_ITER_NCAR, L_latent=None):
+                   nb_iter: int = _NB_ITER_NCAR, L_latent=None,
+                   u_oce=None, v_oce=None, vfac: float = 0.0):
     """Open-ocean bulk fluxes ``(tau_x, tau_y, shflx, lhflx, evap)``.
 
     Sign conventions: ``shflx``/``lhflx`` > 0 add heat to the ocean;
@@ -373,6 +378,18 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     L_latent : float or None
         Override the latent heat (legacy algo only; the NCAR path uses the
         SST-dependent NEMO ``L_vap``).
+    u_oce, v_oce : array or None
+        Ocean surface-current components in the SAME frame as ``u10``/``v10``
+        (the OMIP applicator supplies both as geographic east/north).  NEMO
+        ``ln_crt_dwn`` current feedback: with ``vfac > 0`` these are subtracted
+        (component-wise, scaled by ``vfac``) from the wind BEFORE the wind speed
+        + stress bulk, so the stress uses the RELATIVE vector.  ``None`` (the
+        default) keeps the absolute wind.
+    vfac : float
+        NEMO ``rn_vfac`` current-feedback fraction in [0, 1] (static Python
+        float, resolved at trace time).  ``0.0`` (default) is BYTE-IDENTICAL to
+        the absolute-wind behaviour: the current is never touched (no float op),
+        so an existing caller is unchanged.  ``1.0`` = full feedback.
     """
     if algo not in _VALID_OMIP_BULK_ALGOS:
         raise ValueError(
@@ -384,7 +401,27 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     T_air = jnp.asarray(T_air_K, dtype=jnp.float64)
     q_a = jnp.asarray(q_air, dtype=jnp.float64)
     sst = jnp.asarray(T_sfc_K, dtype=jnp.float64)
-    wind_speed = jnp.sqrt(u_arr ** 2 + v_arr ** 2 + 1e-12)
+    # --- Relative wind / current feedback (NEMO ln_crt_dwn, rn_vfac) --------
+    # Frame convention: u10/v10 are the wind components in THEIR frame (positive
+    # along that frame's axes); u_oce/v_oce are the ocean surface-current
+    # components in the SAME frame (the OMIP applicator supplies both as
+    # geographic east/north).  dU = u10 - vfac*u_oce, dV = v10 - vfac*v_oce, and
+    # the wind speed + BOTH stress branches below use the RELATIVE vector
+    # (dU, dV) -- NOT |dU|*wind_direction.  Newton's 3rd law is untouched: only
+    # the wind VECTOR feeding the bulk changes; the ocean still feels -tau
+    # downstream (the applicator's -tau reaction is unchanged).
+    # STATIC Python guard (vfac is a config float, not traced): with vfac == 0.0
+    # (default) OR no current supplied, u_rel/v_rel ARE u_arr/v_arr (same array,
+    # zero float ops), so every path below is BYTE-IDENTICAL to the absolute-wind
+    # behaviour -- even when u_oce carries NaN/inf on masked cells.  NOT a
+    # jnp.where (which would trace both branches and touch the default path).
+    if vfac != 0.0 and u_oce is not None and v_oce is not None:
+        u_rel = u_arr - vfac * jnp.asarray(u_oce, dtype=jnp.float64)
+        v_rel = v_arr - vfac * jnp.asarray(v_oce, dtype=jnp.float64)
+    else:
+        u_rel = u_arr
+        v_rel = v_arr
+    wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-12)
 
     if algo == "ly09_2coeff":
         if q_sfc is None:
@@ -397,8 +434,8 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
         Cd = large_yeager_cd(wind_speed)
         Ch = large_yeager_ch(T_air, sst)
         L = constants.L_v if L_latent is None else L_latent
-        tau_x = -rho * Cd * wind_speed * u_arr
-        tau_y = -rho * Cd * wind_speed * v_arr
+        tau_x = -rho * Cd * wind_speed * u_rel
+        tau_y = -rho * Cd * wind_speed * v_rel
         shflx = rho * constants.c_pd * Ch * wind_speed * (T_air - sst)
         lhflx = rho * L * Ch * wind_speed * (q_a - q_sfc)
         evap = -lhflx / L
@@ -426,10 +463,12 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     # NEMO BULK_FORMULA: zUrho = Ub * MAX(rho, 1.0)
     Urho = Ub * jnp.maximum(rho, _RHO_FLUX_FLOOR)
 
-    # Stress components: |tau| = Urho*Cd*wind, direction along the wind
-    # vector; atmospheric convention (leading minus) as documented.
-    tau_x = -Urho * Cd * u_arr
-    tau_y = -Urho * Cd * v_arr
+    # Stress components: |tau| = Urho*Cd*wind, direction along the (relative)
+    # wind vector; atmospheric convention (leading minus) as documented.  With
+    # the current feedback on (vfac>0), u_rel/v_rel are dU/dV and Ub (hence Urho)
+    # is |dU| -- so tau = -rho*Cd*|dU|*dU, the NEMO relative-stress form.
+    tau_x = -Urho * Cd * u_rel
+    tau_y = -Urho * Cd * v_rel
 
     L_vap = latent_heat_vaporization_sst(theta_sst)   # NEMO L_vap(pTs=zsspt)
     z_evap = Urho * Ce * (q_a - ssq)          # NEMO zevap (<0 evaporating)

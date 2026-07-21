@@ -70,8 +70,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import compute_rho, virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
+    bolton_lcl_temperature,
     moist_adiabat_lapse_rate,
 )
 
@@ -96,12 +97,29 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 # --- pspec autoblock
-_LCL_T_OFFSET_K = 55.0
-_LCL_BOLTON_DENOM = 2840.0
 _CROSSING_SHARPNESS = 0.001
 _PLUME_GATE_SHARPNESS = 20.0
 _PLUME_C_U = 0.55
 _PLUME_C_D = 0.55
+# Physical cap on the Gregory-1997 convective momentum tendency [m/s^2]. The
+# flux-form du/dt = -g d(flux)/dp divides by the pressure-layer thickness, thin
+# near the model top; a scheme whose updraft mass flux stays near its cap
+# through the sheared upper troposphere (Bechtold, whose plume does not
+# self-detrain) can spike du/dt in a thin top layer -> non-finite winds at fine
+# horizontal resolution (C48). 1e-2 m/s^2 is ~36 m/s per hour, far beyond any
+# physical CMT, so the clamp only removes the thin-layer numerical spike and
+# leaves realistic CMT untouched (Tiedtke/ZM mass flux decays aloft, never
+# approaches it).
+_CMT_DUDT_MAX = 1.0e-2
+# Cloud-base gate sharpness [1/level index] for the plume's
+# ``above_base_weight`` sigmoid on the (integer) level-index difference
+# ``k_rev - k_base_rev``.  4.0 puts the gate at ~0.02 one level below the
+# cloud base and ~3e-4 two levels below, so the reported updraft mass
+# flux effectively vanishes in the sub-cloud layer.  This is a LEVEL-INDEX
+# sharpness — deliberately independent of the Kelvin ``buoyancy_sharpness``
+# taper (same-name/different-units bug class; ``compute_cin`` keeps the
+# analogous separation with ``indicator_sharpness``).
+_ABOVE_BASE_SHARPNESS = 4.0
 
 class LCL(NamedTuple):
     """LCL diagnostics for one column.
@@ -166,18 +184,10 @@ def compute_lcl(
     LCL
         ``p_lcl, T_lcl, k_lcl_smooth``.
     """
-    # Relative humidity at parcel level.  ``q_sat`` is enough — Bolton
-    # Eq. 22 uses RH directly, not the saturation vapor pressure.
-    q_sat = saturation_mixing_ratio(T_parcel, p_parcel)
-    # RH = q / q_sat, clipped to (0, 1] so log is well-defined and
-    # supersaturated parcels produce LCL at parcel level.
-    RH = jnp.clip(q_parcel / jnp.maximum(q_sat, 1e-12), 1e-4, 1.0)  # coeff-ok: RH floor
-
-    # Bolton (1980) Eq. 22.  ``T - 55`` floored to avoid singularity
-    # at very cold parcels (defensively — convective parcels are rarely
-    # below 200 K, but the formula is sensitive in pathological cases).
-    T_minus_55 = jnp.maximum(T_parcel - _LCL_T_OFFSET_K, 1.0)
-    T_lcl = 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
+    # Bolton (1980) Eq. 22 via the canonical shared implementation
+    # (``thermodynamics.bolton_lcl_temperature`` — RH clip, the 55 K
+    # offset and the 2840 K denominator live only there).
+    T_lcl = bolton_lcl_temperature(T_parcel, p_parcel, q_parcel)
 
     # Poisson: dry-adiabatic descent from parcel to LCL.
     p_lcl = p_parcel * (T_lcl / T_parcel) ** (constants.c_pd / constants.R_d)
@@ -202,14 +212,24 @@ def compute_lfc_lnb(
     T_parcel_ma: jax.Array,
     *,
     sharpness: float = 1.0,
+    q_v_env: jax.Array | None = None,
+    q_v_parcel: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Smooth fractional levels of free convection and neutral buoyancy.
 
-    The buoyancy proxy is ``T_parcel_ma - T_env`` (positive where the
-    parcel is warmer than the environment); the LFC is the lowest
-    level where this turns from negative to positive going upward,
-    and the LNB is the lowest level above the LFC where the proxy
-    turns back from positive to negative.
+    The buoyancy proxy is the **virtual-temperature** difference
+    ``T_v_parcel - T_v_env`` (positive where the parcel is lighter than
+    the environment) when both humidity profiles are supplied — the same
+    buoyancy definition as the virtual-T CAPE
+    (:func:`~legoesm.atmosphere.physics.thermodynamics.compute_cape`) and
+    the plume's ``B_u``, via the shared ``_shared.virtual_temperature``
+    helper.  Without humidity the legacy dry-temperature proxy
+    ``T_parcel_ma - T_env`` is used (the virtual-T correction is ~0.6 K
+    for a 10 g/kg moist parcel — schemes gating a virtual-T CAPE should
+    pass humidity so the LFC/LNB use the same buoyancy as the energy
+    they bound).  The LFC is the lowest level where the proxy turns from
+    negative to positive going upward, and the LNB is the lowest level
+    above the LFC where the proxy turns back from positive to negative.
 
     Both are returned as smooth fractional indices in surface-last
     convention (``ncol, nlev`` indexing).  For columns with no clear
@@ -226,13 +246,24 @@ def compute_lfc_lnb(
         :func:`legoesm.atmosphere.physics.thermodynamics.compute_moist_adiabat`.
     sharpness : float
         Sigmoid sharpness in [1/K] on the buoyancy threshold.
+    q_v_env, q_v_parcel : jax.Array, shape (ncol, nlev) or None
+        Optional environment / parcel water-vapor mixing ratios [kg/kg].
+        Pass BOTH for the virtual-temperature buoyancy.
 
     Returns
     -------
     k_lfc_smooth, k_lnb_smooth : jax.Array, shape (ncol,)
         Smooth fractional level indices.
     """
-    buoyancy = T_parcel_ma - T_env
+    # Sign convention (z up, surface-last): buoyancy > 0 where the
+    # (virtual) parcel is warmer/lighter than the environment.
+    if q_v_env is not None and q_v_parcel is not None:
+        buoyancy = (
+            virtual_temperature(T_parcel_ma, q_v_parcel)
+            - virtual_temperature(T_env, q_v_env)
+        )
+    else:
+        buoyancy = T_parcel_ma - T_env
     nlev = buoyancy.shape[-1]
 
     # LFC: lowest UPWARD crossing of buoyancy = 0.
@@ -288,12 +319,23 @@ def compute_cin(
     k_lfc_smooth: jax.Array,
     *,
     indicator_sharpness: float = 1.0,
+    q_v_env: jax.Array | None = None,
+    q_v_parcel: jax.Array | None = None,
 ) -> jax.Array:
     """Convective Inhibition (CIN) [J/kg].
 
     Integrates the negative buoyancy between the LCL and the LFC::
 
-        CIN = R_d * ∫_{LCL}^{LFC} max(0, T_env - T_parcel) * dp/p
+        CIN = R_d * ∫_{LCL}^{LFC} max(0, T_v_env - T_v_parcel) * dp/p
+
+    When ``q_v_env`` and ``q_v_parcel`` are both supplied the deficit is
+    the **virtual-temperature** difference — the same buoyancy
+    definition as the virtual-T CAPE
+    (:func:`~legoesm.atmosphere.physics.thermodynamics.compute_cape`)
+    and the plume's ``B_u`` (shared ``_shared.virtual_temperature``
+    helper), so the inhibition uses the same buoyancy as the energy it
+    gates.  Without humidity the legacy dry-temperature form
+    ``T_env - T_parcel`` is used.
 
     The bounds of integration are encoded as a smooth window in
     surface-last index space: ``window[k] = above_LCL(k) * below_LFC(k)``,
@@ -302,8 +344,9 @@ def compute_cin(
 
     Convention check: for a positively-CAPE column where the parcel
     is warmer than the environment between the LCL and the LFC,
-    ``T_env - T_parcel`` is negative and the ``max(., 0)`` clamp gives
-    zero.  CIN therefore counts only the genuinely-inhibiting layers.
+    ``T_v_env - T_v_parcel`` is negative and the ``max(., 0)`` clamp
+    gives zero.  CIN therefore counts only the genuinely-inhibiting
+    layers.
 
     Parameters
     ----------
@@ -317,6 +360,9 @@ def compute_cin(
         :func:`compute_lfc_lnb` (surface-last convention).
     indicator_sharpness : float
         Sigmoid sharpness on the level-window bounds, in [1/level].
+    q_v_env, q_v_parcel : jax.Array, shape (ncol, nlev) or None
+        Optional environment / parcel water-vapor mixing ratios [kg/kg].
+        Pass BOTH for the virtual-temperature inhibition.
 
     Returns
     -------
@@ -346,7 +392,18 @@ def compute_cin(
     window = window_below_lfc * window_above_lcl
 
     dp = p_half[:, 1:] - p_half[:, :-1]
-    inhibiting_buoyancy = jnp.maximum(0.0, T_env - T_parcel_ma)
+    # Sign convention (z up, surface-last): inhibition where the
+    # ENVIRONMENT is (virtually) warmer than the parcel — the deficit
+    # ``T_v_env - T_v_parcel`` is positive exactly where the parcel is
+    # negatively buoyant, and the ``max(., 0)`` keeps CIN >= 0.
+    if q_v_env is not None and q_v_parcel is not None:
+        buoyancy_deficit = (
+            virtual_temperature(T_env, q_v_env)
+            - virtual_temperature(T_parcel_ma, q_v_parcel)
+        )
+    else:
+        buoyancy_deficit = T_env - T_parcel_ma
+    inhibiting_buoyancy = jnp.maximum(0.0, buoyancy_deficit)
 
     # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
     # approximation (matches ``compute_cape`` after audit cycle iter-39
@@ -405,6 +462,7 @@ def entraining_detraining_plume(
     M_b: jax.Array,
     *,
     buoyancy_sharpness: float = 0.5,
+    above_base_sharpness: float = _ABOVE_BASE_SHARPNESS,
     buoyancy_death_memory: bool = False,
     filter_negative_buoyancy: bool = True,
 ) -> Plume:
@@ -459,6 +517,18 @@ def entraining_detraining_plume(
         [1/K].  Default ``0.5`` per Kelvin of buoyancy means the
         plume is at half mass flux when ``T_u - T_env`` reaches the
         modest negative value of about ``-1.4 K``.
+    above_base_sharpness : float
+        Sharpness of the sub-cloud (below cloud base) mass-flux gate in
+        [1/level index] — applied to the level-index difference
+        ``k_rev - k_base_rev``, NOT to a temperature.  Default
+        ``_ABOVE_BASE_SHARPNESS`` (4.0): the reported mass flux is ~2 %
+        one level below the cloud base and ~3e-4 two levels below.
+        Deliberately a SEPARATE parameter from the Kelvin
+        ``buoyancy_sharpness``: an earlier implementation reused the
+        [1/K] value here, which made the level-space gate ~9 levels
+        wide and leaked 27-38 % of ``M_b`` into the sub-cloud layer for
+        every caller (same-name/different-units defect; mirrors
+        ``compute_cin``'s dedicated ``indicator_sharpness`` [1/level]).
     buoyancy_death_memory : bool
         Whether the buoyancy-tapering filter has carry-state memory.
         Default ``False`` (legacy local filter): each level applies
@@ -529,7 +599,11 @@ def entraining_detraining_plume(
     k_rev = jnp.arange(nlev, dtype=T_env.dtype)
     k_rev = jnp.broadcast_to(k_rev, T_env.shape)
     k_base_rev = (nlev - 1.0) - k_base_smooth
-    above_base_weight = jax.nn.sigmoid(buoyancy_sharpness * (k_rev - k_base_rev[:, None]))
+    # LEVEL-INDEX gate (``above_base_sharpness`` [1/level]), independent
+    # of the Kelvin ``buoyancy_sharpness`` taper — see the kwarg doc.
+    above_base_weight = jax.nn.sigmoid(
+        above_base_sharpness * (k_rev - k_base_rev[:, None])
+    )
 
     # Initial plume state at the surface-first index 0 (which is the
     # actual surface).  We launch with the parcel values; the
@@ -617,7 +691,10 @@ def entraining_detraining_plume(
         # baked into the lapse rate, so the post-hoc condensation
         # step below does NOT add an additional ``L_v/c_pd *
         # condensate`` correction — that would double-count.
-        rho_u_ent = p_e / (constants.R_d * jnp.maximum(T_u_ent, 100.0))
+        # Shared ideal-gas dry density (``_shared.compute_rho``; clips T
+        # at 1 K — the previous inline form floored at 100 K, identical
+        # for any physical plume temperature).
+        rho_u_ent = compute_rho(T_u_ent, p_e)
         # ``moist_adiabat_lapse_rate`` returns dT/dp [K/Pa]; convert
         # to dT/dz [K/m] via dp/dz = -rho*g.
         Gamma_moist_per_pa = moist_adiabat_lapse_rate(T_u_ent, p_e)
@@ -925,4 +1002,7 @@ def cmt_gregory_1997(
     du_dt = -constants.g * dflux_u / dp
     dv_dt = -constants.g * dflux_v / dp
 
+    # Cap the thin-top-layer numerical spike (see _CMT_DUDT_MAX); NaN-safe.
+    du_dt = jnp.clip(jnp.nan_to_num(du_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
+    dv_dt = jnp.clip(jnp.nan_to_num(dv_dt), -_CMT_DUDT_MAX, _CMT_DUDT_MAX)
     return du_dt, dv_dt

@@ -1,4 +1,4 @@
-"""Tests for AIMIP epoch-resume helpers.
+"""Tests for AIMIP epoch-resume + mid-epoch (per-chunk) resume helpers.
 
 Validates ``find_latest_epoch_checkpoint`` and ``maybe_resume_model``
 in ``legoesm.training.neural_gcm_spectral`` -- the two functions that
@@ -10,6 +10,14 @@ behavior used by ``scripts/run_aimip_headtohead_t106_*.sbatch``.  If
 they regress, a 12-hour-walltime job that survives long enough to
 write ``epoch_NNNN.eqx`` would still restart from epoch 0 on its next
 link, wasting compute.
+
+Also validates the mid-epoch (per-chunk) checkpoint (#942):
+``_save_midepoch_checkpoint`` / ``_load_midepoch_checkpoint`` (model +
+optimizer state + resume position round-trip) and the atomic-write
+guarantee of ``save_checkpoint`` (a torn write can never corrupt the
+prior checkpoint).  The end-to-end "resume mid-epoch reproduces the
+uninterrupted run bit-for-bit" proof lives in
+``tests/unit/test_neural_gcm_spectral.py::TestMidEpochResume``.
 """
 
 from __future__ import annotations
@@ -19,11 +27,16 @@ from pathlib import Path
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import optax
+import pytest
 
 from legoesm.ml.training import save_checkpoint
 from legoesm.training.neural_gcm_spectral import (
     find_latest_epoch_checkpoint,
     maybe_resume_model,
+    _save_midepoch_checkpoint,
+    _load_midepoch_checkpoint,
+    MIDEPOCH_CHECKPOINT_NAME,
 )
 
 
@@ -100,3 +113,171 @@ def test_maybe_resume_loads_and_advances_epoch(tmp_path):
     assert jnp.allclose(loaded.w, saved.w)
     assert jnp.allclose(loaded.b, saved.b)
     assert not jnp.allclose(loaded.w, fresh.w)
+
+
+# ===========================================================================
+# Mid-epoch (per-chunk) checkpoint helpers (#942)
+# ===========================================================================
+
+
+def _stepped_opt_state(model, opt):
+    """An optimizer state that has actually taken a step, so its moments
+    and step counter are non-trivial (a fresh ``init`` state would round-
+    trip even if the code dropped everything but structure)."""
+    grads = eqx.filter(model, eqx.is_array)  # reuse weights as fake grads
+    opt_state = opt.init(grads)
+    updates, opt_state = opt.update(grads, opt_state, grads)
+    stepped_model = eqx.apply_updates(model, updates)
+    return stepped_model, opt_state
+
+
+def _leaves_equal(a, b) -> bool:
+    la = jax.tree_util.tree_leaves(a)
+    lb = jax.tree_util.tree_leaves(b)
+    return len(la) == len(lb) and all(
+        jnp.array_equal(x, y) for x, y in zip(la, lb)
+    )
+
+
+def test_load_midepoch_returns_none_when_absent(tmp_path):
+    assert _load_midepoch_checkpoint(None, None, None) is None
+    (tmp_path / "ck").mkdir()
+    tmpl = _TinyModel(jax.random.PRNGKey(0))
+    opt = optax.adam(1e-3)
+    assert _load_midepoch_checkpoint(
+        tmp_path / "ck", tmpl, opt.init(eqx.filter(tmpl, eqx.is_array))
+    ) is None
+
+
+def test_midepoch_roundtrip_preserves_model_optstate_and_position(tmp_path):
+    """The mid-epoch checkpoint must restore EXACTLY: model weights, the
+    full optimizer state (Adam moments + step count), and the resume
+    position (epoch, next_chunk).  Missing optimizer state is precisely
+    what makes the epoch-only resume restart the LR schedule (#942)."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(1)), opt)
+
+    _save_midepoch_checkpoint(ck, model, opt_state, epoch=2, next_chunk=3)
+
+    # File landed; no temp file left behind (atomic os.replace).
+    assert (ck / MIDEPOCH_CHECKPOINT_NAME).exists()
+    assert not list(ck.glob("*.tmp-*"))
+
+    # Deserialise into FRESH templates (different seed) so a pass proves
+    # the bytes came from disk, not the template.
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt_state = opt.init(eqx.filter(tmpl, eqx.is_array))
+    loaded = _load_midepoch_checkpoint(ck, tmpl, tmpl_opt_state)
+    assert loaded is not None
+    lm, lo, epoch, next_chunk = loaded
+
+    assert (epoch, next_chunk) == (2, 3)
+    assert jnp.array_equal(lm.w, model.w) and jnp.array_equal(lm.b, model.b)
+    assert not jnp.array_equal(lm.w, tmpl.w)          # not the template
+    assert _leaves_equal(lo, opt_state)               # moments + count restored
+    assert not _leaves_equal(lo, tmpl_opt_state)      # not the fresh template
+
+
+def test_midepoch_roundtrip_with_ema_is_atomic_5tuple(tmp_path):
+    """With an ema_model the payload is one atomic 5-tuple: model, opt_state,
+    EMA, epoch, next_chunk restore together (no separate EMA file)."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(1)), opt)
+    ema = _TinyModel(jax.random.PRNGKey(7))  # distinct from model
+
+    _save_midepoch_checkpoint(
+        ck, model, opt_state, epoch=4, next_chunk=1, ema_model=ema,
+    )
+    # Single atomic file — no separate chunk_latest_ema.eqx.
+    assert (ck / MIDEPOCH_CHECKPOINT_NAME).exists()
+    assert not (ck / "chunk_latest_ema.eqx").exists()
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    ema_tmpl = _TinyModel(jax.random.PRNGKey(888))
+    loaded = _load_midepoch_checkpoint(
+        ck, tmpl, tmpl_opt, ema_template=ema_tmpl,
+    )
+    assert loaded is not None
+    lm, lo, lema, epoch, next_chunk = loaded
+    assert (epoch, next_chunk) == (4, 1)
+    assert jnp.array_equal(lm.w, model.w)
+    assert jnp.array_equal(lema.w, ema.w)             # EMA restored exactly
+    assert not jnp.array_equal(lema.w, lm.w)          # and distinct from model
+
+
+def test_midepoch_ema_template_on_legacy_4tuple_returns_none_ema(tmp_path):
+    """Enabling EMA on the resume of a run that trained WITHOUT it: the
+    on-disk payload is the legacy 4-tuple, so the loader returns ema=None
+    (caller reseeds) rather than raising."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(2)), opt)
+    _save_midepoch_checkpoint(ck, model, opt_state, epoch=1, next_chunk=0)
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    loaded = _load_midepoch_checkpoint(
+        ck, tmpl, tmpl_opt, ema_template=_TinyModel(jax.random.PRNGKey(5)),
+    )
+    assert loaded is not None
+    lm, lo, lema, epoch, next_chunk = loaded
+    assert lema is None
+    assert (epoch, next_chunk) == (1, 0)
+    assert jnp.array_equal(lm.w, model.w)
+
+
+def test_midepoch_5tuple_loaded_with_ema_disabled_drops_ema(tmp_path):
+    """The reverse layout mismatch: an EMA 5-tuple on disk resumed with EMA
+    DISABLED (ema_template=None) must load the raw 4-tuple state, not abort
+    on the embedded EMA leaves."""
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    opt = optax.adam(1e-3)
+    model, opt_state = _stepped_opt_state(_TinyModel(jax.random.PRNGKey(2)), opt)
+    ema = _TinyModel(jax.random.PRNGKey(7))
+    _save_midepoch_checkpoint(
+        ck, model, opt_state, epoch=3, next_chunk=2, ema_model=ema,
+    )
+
+    tmpl = _TinyModel(jax.random.PRNGKey(999))
+    tmpl_opt = opt.init(eqx.filter(tmpl, eqx.is_array))
+    loaded = _load_midepoch_checkpoint(ck, tmpl, tmpl_opt)  # ema_template=None
+    assert loaded is not None
+    lm, lo, epoch, next_chunk = loaded          # 4-tuple return
+    assert (epoch, next_chunk) == (3, 2)
+    assert jnp.array_equal(lm.w, model.w)
+
+
+def test_save_checkpoint_is_atomic_under_torn_write(tmp_path, monkeypatch):
+    """A walltime kill mid-serialise must never corrupt the prior
+    checkpoint: ``save_checkpoint`` writes a temp file then os.replace,
+    so a crash leaves the old file intact and no partial temp behind."""
+    from legoesm.ml import training as tr
+
+    ck = tmp_path / "ck"
+    ck.mkdir()
+    good = _TinyModel(jax.random.PRNGKey(3))
+    path = ck / "epoch_0000.eqx"
+    save_checkpoint(good, path)
+    before = path.read_bytes()
+
+    def _torn_write(p, tree):
+        # Simulate a kill after a partial temp write.
+        with open(p, "wb") as fh:
+            fh.write(b"partial-garbage")
+        raise RuntimeError("killed during write")
+
+    monkeypatch.setattr(tr.eqx, "tree_serialise_leaves", _torn_write)
+    with pytest.raises(RuntimeError, match="killed during write"):
+        save_checkpoint(_TinyModel(jax.random.PRNGKey(4)), path)
+
+    # The previous complete checkpoint is untouched, and the partial temp
+    # was cleaned up (never left where a reader could mistake it for real).
+    assert path.read_bytes() == before
+    assert not list(ck.glob("*.tmp-*"))

@@ -51,12 +51,12 @@ def _worker(rank: int, port: int) -> int:
     import numpy as np
 
     from legoesm import constants
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonHydrostaticState,
         CGridLatLonPrimitiveEquationConfig,
         CGridLatLonPrimitiveEquationModel,
     )
-    from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         gather_state_atm_latlon,
         make_sharded_atm_latlon_step,
         shard_state_atm_latlon,

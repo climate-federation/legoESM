@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm.atmosphere.column_forcing import ColumnLargeScaleState
-from legoesm.atmosphere.dynamics.column_large_scale_extract import (
+from legoesm.atmosphere.forcing.idealized.column_forcing import ColumnLargeScaleState
+from legoesm.atmosphere.forcing.column_large_scale_extract import (
     _gradient_cubed_geographic_3d,
     advective_tendency,
     extract_column_forcing,

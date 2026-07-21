@@ -11,6 +11,7 @@ __param_spec__ = {
         "excluded": {
             "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
+            "n2_threshold": "convention: NEMO zdfevd static-instability trigger threshold on N^2 [1/s^2] (detection noise floor, hard-threshold path only; not a trainable closure)",
             "nu_bg": "default 0 = disabled/off (enable via config, not training)",
             "nu_conv": "default 0 = disabled/off (enable via config, not training)",
             "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",
@@ -85,6 +86,37 @@ class EnhancedDiffusionConfig(NamedTuple):
     sigmoid_sharpness: float = 1e6
     cfl_dt_estimate: float = 3600.0  # Reference dt for explicit-CFL cap [s]
     cfl_safety: float = 0.45         # Stability margin (≤ 0.5)
+    # ----- Static-stability N^2 mode for the convective trigger -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: the
+    #   convective trigger uses the in-situ density N^2
+    #   (``eos.compute_buoyancy_frequency``). Compressibility can leave a
+    #   statically-unstable column with N^2 > 0, so convection is MISSED.
+    # ``"adiabatic"``: the TRUE static stability via adiabatic parcel
+    #   displacement (``eos.compute_buoyancy_frequency_adiabatic``), SIGNED —
+    #   a compressibility-masked unstable column then gives N^2 < 0 and the
+    #   trigger fires. Requires the caller to thread T, S, cell-centre
+    #   pressure ``p_cell`` (+ the model EOS) to ``convective_K_A_flag`` /
+    #   ``enhanced_diffusion_convection``; both integration factory and the
+    #   implicit k_profiles path supply them when this is selected.
+    n2_mode: str = "insitu"
+    # Static-instability trigger threshold on N² [1/s²]: EVD fires where
+    # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd
+    # (ln_zdfevd) fires where MIN(rn2, rn2b) <= -1e-12 — a small NEGATIVE
+    # threshold that IGNORES marginally-neutral interfaces (N² in [-1e-12, 0)).
+    # Matters during spring restratification: firing on near-zero-negative N²
+    # noise re-mixes the shoaling ML every step and blocks the seasonal
+    # thermocline rebuild (NEMO GYRE fidelity, plan §G). Only consulted on the
+    # hard-threshold path (smooth_transition=False).
+    n2_threshold: float = 0.0
+    # NEMO zdfevd two-time-level trigger: fire where MIN(rn2, rn2b) < thr —
+    # i.e. where EITHER the now or the before N² is unstable (zdfevd.F90:
+    # MIN(rn2,rn2b) <= -1e-12). The hysteresis keeps EVD on one extra step in
+    # marginal columns, preventing per-step ON/OFF FLICKER of the 100 m²/s
+    # coefficient (a grid-scale noise generator in winter convecting regions).
+    # Implemented as max(K_now, K_before) — equivalent for a hard threshold.
+    # Requires the before-advection tracers (n2_tracers) to be threaded (the
+    # TKE n2_before_advection machinery); silently single-level when absent.
+    two_level_trigger: bool = False
 
 
 class PlumeConfig(NamedTuple):

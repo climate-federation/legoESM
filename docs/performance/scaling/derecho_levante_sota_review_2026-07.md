@@ -196,9 +196,12 @@ Readings:
    2-process Gloo federation probe — the cs-spmd precedent generalized); the
    work was wiring + latent-bug surfacing:
    - `bench_atm_latlon_spmd_scaling --multicontroller/--coordinator` and
-     `bench_ocean_mpi_scaling --transport spmd --multicontroller` federate
+     `bench_ocean_latlon_spmd_scaling --multicontroller` federate
      1-proc-per-GPU launches into one JAX program (native ppermute band
-     halos over NCCL — XLA-overlappable, unlike route-A mpi4jax).
+     halos over NCCL — XLA-overlappable, unlike route-A mpi4jax). (The ocean
+     multicontroller lane is on the SPMD full-step bench, NOT a
+     `--transport spmd` flag of `bench_ocean_mpi_scaling`, which is the
+     route-A mpi4jax CPU/PCIe-GPU phase-split bench.)
    - Latent bug fixed: `reductions.is_multi_process()` treated
      `jax.process_count()>1` as "mpi4jax-allreduce needed" — under
      federation that imports the forbidden mixed stack into the ocean

@@ -120,10 +120,72 @@ def conservation_accumulator():
     return _accumulation_dtype()
 
 
+def cube_faces_are_whole_on_shards() -> bool:
+    """True iff the active decomposition keeps each cube face WHOLE on a shard.
+
+    The shard-invariant per-face reduction (:func:`shard_invariant_cube_face_sum`)
+    is only bit-exact when no face is split across devices — i.e. single-device,
+    serial, or a whole-face SPMD mesh (device count divides 6).  A ``(6, kt, kt)``
+    SUB-FACE TILED mesh (``n_devices > 6``) shards the spatial axes too, so a
+    per-face sum would cross tiles and the per-face partial would NOT be
+    decomposition-invariant.  Read only Python module state (the halo backend +
+    SPMD mesh shape) → a static trace-time branch, never traced control flow.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return True  # serial / single-device: whole faces
+    mesh = get_spmd_mesh()
+    if mesh is None:
+        return True
+    sh = tuple(mesh.devices.shape)
+    is_tiled = len(sh) == 3 and sh[0] == 6 and sh[1] == sh[2] and sh[1] >= 2
+    return not is_tiled
+
+
+def shard_invariant_cube_face_sum(prod: jax.Array, reduce_axes=None) -> jax.Array:
+    """Sum a cube ``(6, ...)`` array shard-count-invariantly (issue #852).
+
+    A bare ``jnp.sum`` on a face-sharded array reduces each device's owned faces
+    LOCALLY and then all-reduces the per-shard partials.  float32 addition is
+    NON-ASSOCIATIVE, so that partitioned order differs from the single-device
+    flat sum — and between device counts (1 vs 3-faces/shard vs 2-faces/shard) —
+    by ~1 ulp.  A global conserved integral (mass, energy, tracer) that feeds a
+    fixer's rescale then turns that ulp into a shard-count-DEPENDENT state
+    correction which the chaotic flow amplifies (the symptom reported in #852,
+    wrongly attributed there to the ppermute halo — the halo is bit-exact; this
+    reduction is the real decomposition dependence).
+
+    On a WHOLE-FACE decomposition each shard owns ``k = 6/n_devices`` whole
+    faces, so reducing each face over ``reduce_axes`` first gives per-face
+    partials that are BIT-IDENTICAL at every decomposition; combining the 6
+    partials (axis 0) in a FIXED order (XLA does not reassociate float adds with
+    fast-math off) yields a total identical for single-device and any 1/2/3/6-way
+    face sharding.
+
+    ``reduce_axes`` are the WITHIN-face axes to sum first (default: every axis
+    but the leading face axis).  Pass a subset to keep a trailing axis, e.g. a
+    batched stack ``(6, n, n, n_arrays)`` with ``reduce_axes=(1, 2)`` returns
+    ``(n_arrays,)``.  The face axis (0) is always combined last in fixed order.
+
+    Caller MUST gate on ``prod.shape[0] == 6`` AND
+    :func:`cube_faces_are_whole_on_shards` (a tiled mesh splits faces and breaks
+    the invariance).  AD-safe (a linear sum).
+    """
+    if reduce_axes is None:
+        reduce_axes = tuple(range(1, prod.ndim))
+    per_face = jnp.sum(prod, axis=reduce_axes)  # face axis 0 preserved
+    total = per_face[0]
+    for f in range(1, per_face.shape[0]):
+        total = total + per_face[f]
+    return total
+
+
 def global_area_sum(
     array: jax.Array,
     grid,
     owned_mask: jax.Array | None = None,
+    *,
+    differentiable_broadcast: bool = False,
 ) -> jax.Array:
     """Area-weighted global sum of a raw array, distributed-aware.
 
@@ -143,6 +205,16 @@ def global_area_sum(
         are authoritative.  Non-owned faces are zeroed before local
         summation; ``global_sum_mpi`` then combines owned portions.
         If ``None``, all faces are summed (single-rank or SPMD).
+    differentiable_broadcast : bool, optional
+        VJP semantics of the MPI reduction.  ``False`` (default) uses
+        ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
+        established callers.  ``True`` uses :func:`_broadcast_allreduce_sum`
+        (allreduce forward AND backward), REQUIRED when the reduced value is
+        broadcast back and reused on every rank — e.g. a mass-fixer additive
+        ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
+        cell: the identity VJP silently drops the cross-rank cotangent of the
+        shared correction (a ~1e-6 gradient leak the flux-form moisture path
+        exposes via q→p_s coupling; #811).  Forward is identical either way.
 
     Execution modes:
 
@@ -163,9 +235,33 @@ def global_area_sum(
             mask = mask[..., None]
         prod = prod * mask
     local_sum = jnp.sum(prod)
+    # Lat-band SPMD (single-process shard_map): combine the band-local partial
+    # across the "lat" axis BEFORE is_distributed() — under SPMD there is one
+    # process (is_distributed() is False) yet each band holds only a partial
+    # sum. Inert for serial/MPI/cube (returns None), so the default path is
+    # byte-unchanged. Mirrors batch_global_area_sums (:241) so the SINGLE-array
+    # fixers that reduce via global_area_sum (fix_ps_mass_target,
+    # fix_moisture_hydrostatic) are lat-band-SPMD-correct too, not only the
+    # batched callers.
+    spmd_sums = _spmd_lat_psum_or_none([local_sum])
+    if spmd_sums is not None:
+        return spmd_sums[0]
     if is_distributed():
+        if differentiable_broadcast:
+            return _broadcast_allreduce_sum(local_sum)
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
+    # Cube GSPMD / single-device: use the shard-count-invariant per-face
+    # fixed-order reduction (issue #852) so a face-sharded mass integral is
+    # bit-identical to single-device — a global conserved quantity must not
+    # depend on the device count.  Gated on the cube face axis (leading dim 6)
+    # AND a whole-face decomposition (a (6,kt,kt) tiled mesh splits faces, so
+    # the per-face reduction would not be invariant — fall back to the plain
+    # sum there).  lat-lon/lat-band (rows can split) and MPI keep the plain sum
+    # handled above.
+    if (prod.shape[0] == 6 and prod.ndim >= 3
+            and cube_faces_are_whole_on_shards()):
+        return shard_invariant_cube_face_sum(prod)
     return local_sum
 
 
@@ -199,14 +295,59 @@ def _spmd_lat_psum_or_none(local_sums: list[jax.Array]) -> list[jax.Array] | Non
             "is set; arm it via activate_latlon_spmd_halo(mesh).")
     if "lat" in tuple(mesh.axis_names):
         from legoesm.parallel.reductions import batch_psum_spmd
+        if ("lon" in tuple(mesh.axis_names)
+                and int(mesh.shape["lon"]) > 1):
+            # 2-D ("lat", "lon") tile mesh (M3a): every TILE holds a partial
+            # sum — reduce across BOTH axes, or the "global" mass integral
+            # would silently remain a per-lon-sector partial.  The 1-D band
+            # mesh — and the degenerate (N, 1) tile mesh, whose lon rings
+            # have one member — keep the bare "lat" psum (byte-unchanged /
+            # structurally identical to the band program for the (N, 1)
+            # bit-identity gate).
+            return batch_psum_spmd(local_sums, ("lat", "lon"))
         return batch_psum_spmd(local_sums, "lat")
+    if (tuple(mesh.axis_names) == ("face", "tile_i", "tile_j")
+            and _TILED_REDUCTION_SCOPE):
+        # Sub-face-tiled cube shard_map (the tiled operator-split lane):
+        # each TILE holds a partial sum — combine across all three mesh
+        # axes.  DOUBLE-gated (codex): the exact tiled axis tuple keeps a
+        # face-only ``("face",)`` SPMD mesh on the jit-auto path, and the
+        # explicit :func:`tiled_reduction_scope` context keeps a reduction
+        # that merely RUNS while a tiled mesh is armed — but outside the
+        # tiled shard_map body — from emitting an out-of-scope psum.
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local_sums, ("face", "tile_i", "tile_j"))
     return None
+
+
+# Explicit opt-in scope for the tiled-mesh psum branch above: ONLY the tiled
+# operator-split step's shard_map body runs with tile-partial sums; any other
+# reduction (writers, diagnostics, another module) executing while the tiled
+# mesh happens to be armed must fall through to the serial path.
+_TILED_REDUCTION_SCOPE: list = []
+
+
+class tiled_reduction_scope:
+    """Context manager arming the tiled-mesh psum branch of
+    :func:`_spmd_lat_psum_or_none` — enter ONLY around code that traces
+    INSIDE a ``("face","tile_i","tile_j")`` shard_map body (the tiled
+    operator-split step)."""
+
+    def __enter__(self):
+        _TILED_REDUCTION_SCOPE.append(True)
+        return self
+
+    def __exit__(self, *exc):
+        _TILED_REDUCTION_SCOPE.pop()
+        return False
 
 
 def batch_global_area_sums(
     arrays: list[jax.Array],
     grid,
     owned_mask: jax.Array | None = None,
+    *,
+    differentiable_broadcast: bool = False,
 ) -> list[jax.Array]:
     """Compute multiple area-weighted global sums in a single MPI call.
 
@@ -215,6 +356,13 @@ def batch_global_area_sums(
     when running under MPI, reducing latency from O(N) to O(1).
 
     Falls back to individual ``jnp.sum`` when not distributed.
+
+    ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
+    — ``True`` routes the batched reduction through :func:`_broadcast_allreduce_sum`
+    (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
+    (identity VJP), for reduced values that scale every rank (the non-anchor p_s
+    mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
+    untouched for its other callers.
     """
     acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
@@ -243,9 +391,124 @@ def batch_global_area_sums(
         return spmd_sums
 
     if is_distributed():
+        if differentiable_broadcast:
+            # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
+            # single-message batching as batch_allreduce_mpi, but the correct
+            # transpose for a reused/broadcast reduced value.
+            reduced = _broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
+            return [reduced[i] for i in range(len(local_sums))]
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
+    # Cube whole-face GSPMD / single-device: shard-count-invariant per-array
+    # reduction (issue #852), matching the single-array global_area_sum fix so
+    # the DEFAULT (non-anchor) mass fixer — fix_ps_mass → batch_global_area_sums
+    # — is decomposition-independent too.  ``area_acc.ndim == 3`` selects the
+    # cube (6, n, n) grid; reduce each face over the spatial axes then combine
+    # the 6 faces in fixed order (keeping the trailing per-array axis).
+    if area_acc.ndim == 3 and cube_faces_are_whole_on_shards():
+        inv = shard_invariant_cube_face_sum(
+            stacked * weight[..., None], reduce_axes=(1, 2))
+        return [inv[i] for i in range(len(arrays))]
     return local_sums
+
+
+@jax.custom_vjp
+def _broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
+    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
+    transpose for a reduced value that is BROADCAST and reused on every rank.
+
+    ``global_sum_mpi`` (mpi4jax ``allreduce``) has an IDENTITY VJP: each rank
+    keeps its LOCAL cotangent (``test_grad_nonzero``: "gradient 2*x, no
+    scaling").  That is right for a TOP-LEVEL loss reduction ``L =
+    global_sum_mpi(local)`` (each rank contributes 1:1 to ``L``), but WRONG for
+    an INTERMEDIATE global that is broadcast back and reused multiplicatively on
+    every face/rank — e.g. the flux-form ``scale = mass_in / mass_pos`` that
+    rescales EVERY owned face (#811).  There, ``field_in`` on rank ``r`` affects
+    the output on EVERY rank ``r'`` through the shared ``scale``, so the true
+    ``dL/d(mass)`` is the GLOBAL sum of every rank's local cotangent — i.e. the
+    reduction's transpose is ``allreduce(SUM)``, not identity.  Dropping it left
+    a UNIFORM ~1e-3 absolute cotangent error on every owned face (rel 1.1 on
+    faces far from the transported blob) in the scattered-vs-replicated gradient
+    gate.  Forward is byte-identical to ``global_sum_mpi`` (both are the same
+    ``allreduce(SUM)``); only the backward differs.
+    """
+    from legoesm.parallel.reductions import global_sum_mpi
+    return global_sum_mpi(local_sum)
+
+
+def _broadcast_allreduce_sum_fwd(local_sum):
+    from legoesm.parallel.reductions import global_sum_mpi
+    return global_sum_mpi(local_sum), None
+
+
+def _broadcast_allreduce_sum_bwd(_res, g):
+    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
+    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
+    from legoesm.parallel.reductions import global_sum_mpi
+    return (global_sum_mpi(g),)
+
+
+_broadcast_allreduce_sum.defvjp(
+    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
+
+
+def global_face_sum_if_scattered(
+    local_sum: jax.Array, area, *, differentiable_broadcast: bool = False
+) -> jax.Array:
+    """Allreduce a cubed-sphere per-face partial to the GLOBAL total, but ONLY
+    when the 6 faces are genuinely SCATTERED across MPI ranks.
+
+    A cube "global" reduction ``jnp.sum(area * field)`` over the face axis is the
+    true whole-cube sum ONLY when this rank holds all 6 faces.  Under MPI
+    face-scatter each rank's ``area`` is sliced to its OWNED faces (leading dim
+    ``== n_local < 6``), so the sum is an owned-face PARTIAL that must be
+    ``allreduce(SUM)``-combined across ranks.  ``global_sum_mpi`` is the ONLY
+    AD-safe reduction (MAX/MIN have no meaningful gradient — repo MPI-AD
+    doctrine), so this is safe inside ``jax.grad``.
+
+    Identity (byte-unchanged) for:
+
+    * single-rank / serial (``local`` halo backend);
+    * REPLICATED cube MPI — every rank keeps the full ``(6, ...)`` state, so the
+      local sum already IS the global sum (keyed off ``area.shape[0] == 6``);
+    * SPMD — a top-level ``jnp.sum`` over a sharded face axis is auto-reduced by
+      GSPMD (shard_map cube face-sharding is out of scope / fail-closed upstream);
+    * lat-lon band MPI — the topology carries no ``local_face_ids``.
+
+    ``local_sum`` may be any shape (scalar, ``(nlev,)``, ``(nlev, ntr)``, ...);
+    ``allreduce(SUM)`` combines it element-wise.  The scatter DECISION is keyed on
+    ``area`` (the sliced cube area), not on ``local_sum`` — so a numerator and a
+    denominator reduced through this one predicate always agree on WHEN to reduce.
+    Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
+    cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
+
+    ``differentiable_broadcast`` (default ``False``) selects the VJP semantics of
+    the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
+    ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
+    established mass-fixer callers (kept byte-identical).  ``True`` uses
+    :func:`_broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
+    when the reduced value is broadcast back and reused multiplicatively on every
+    rank, so the cross-rank cotangents are not silently dropped (the flux-form
+    ``scale`` — #811).  Forward is identical either way; only the gradient differs.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+    if get_halo_backend() == "mpi":
+        topo = get_mpi_topology()
+        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
+        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
+        # accessor (no ``local_face_ids``), so guard with hasattr.  The chained
+        # comparison is a static (Python-int) trace-time decision — not traced
+        # control flow.
+        if (topo is not None and area is not None
+                and hasattr(topo, "local_face_ids")
+                and area.shape[0] == len(topo.local_face_ids) < 6):
+            if differentiable_broadcast:
+                return _broadcast_allreduce_sum(local_sum)
+            from legoesm.parallel.reductions import global_sum_mpi
+
+            return global_sum_mpi(local_sum)
+    return local_sum
 
 
 def _total_area(grid) -> jax.Array:
@@ -274,22 +537,7 @@ def _total_area(grid) -> jax.Array:
     """
     acc = conservation_accumulator()
     local = grid.grid_total_area.astype(acc)
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-
-    if get_halo_backend() == "mpi":
-        topo = get_mpi_topology()
-        area = getattr(grid, "area", None)
-        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
-        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
-        # accessor (no ``local_face_ids``), so guard with hasattr to avoid an
-        # AttributeError on non-cube MPI backends.
-        if topo is not None and area is not None and hasattr(topo, "local_face_ids"):
-            n_local = len(topo.local_face_ids)
-            if area.shape[0] == n_local and n_local < 6:
-                from legoesm.parallel.reductions import global_sum_mpi
-
-                local = global_sum_mpi(local)
-    return local
+    return global_face_sum_if_scattered(local, getattr(grid, "area", None))
 
 
 def fix_mass_shallow_water(
@@ -733,8 +981,12 @@ def fix_ps_mass(
     batched allreduce, matching :func:`fix_mass_hydrostatic`'s
     communication pattern.
     """
+    # differentiable_broadcast=True: ``correction`` is added to EVERY cell, so
+    # under face-scatter the reduction's VJP must allreduce the cotangent (else
+    # the cross-rank gradient of the shared correction is dropped — #811).
     mass_old, mass_new = batch_global_area_sums(
         [p_s_old, p_s_new], grid, owned_mask=owned_mask,
+        differentiable_broadcast=True,
     )
     correction = (mass_old - mass_new) / _total_area(grid)
     return p_s_new + correction
@@ -767,7 +1019,11 @@ def fix_ps_mass_target(
     -------
     jax.Array : Corrected p_s with same shape.
     """
-    mass_new = global_area_sum(p_s, grid, owned_mask=owned_mask)
+    # differentiable_broadcast=True: ``correction`` is added to EVERY cell, so
+    # under face-scatter the reduction's VJP must allreduce the cotangent (else
+    # the cross-rank gradient of the shared correction is dropped — #811).
+    mass_new = global_area_sum(
+        p_s, grid, owned_mask=owned_mask, differentiable_broadcast=True)
     correction = (target_mass - mass_new) / _total_area(grid)
     return p_s + correction
 
@@ -1061,7 +1317,13 @@ def fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
             axis=-1,
         ) * area[..., None]
         local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
-        if jax.process_count() > 1:
+        # is_multi_process(), NOT jax.process_count() > 1: mpi4jax reduce
+        # only when each rank holds a LOCAL partition (route-A).  Under
+        # multi-controller SPMD the sum above is already global via GSPMD;
+        # mpi4jax here would arm the forbidden mixed stack and over-count
+        # by the world size (#751 latent-bug class).
+        from legoesm.parallel.reductions import is_multi_process
+        if is_multi_process():
             from legoesm.parallel.reductions import global_sum_mpi
             local = global_sum_mpi(local)
         mass_new, total_area = local[0], local[1]
@@ -1076,7 +1338,8 @@ def fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
             axis=-1,
         ) * area[..., None]
         local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
-        if jax.process_count() > 1:
+        from legoesm.parallel.reductions import is_multi_process
+        if is_multi_process():  # route-A local partitions only (see above)
             from legoesm.parallel.reductions import global_sum_mpi
             local = global_sum_mpi(local)
         mass_old, mass_new, total_area = local[0], local[1], local[2]
@@ -1220,7 +1483,10 @@ def fix_energy_mpas(state_new, state_old, mesh, g=constants.g):
     KE_new, PE_new = _ke_pe_terms(state_new)
 
     local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
-    if jax.process_count() > 1:
+    # Route-A local-partition reduce only — NOT under multi-controller SPMD
+    # (GSPMD already made the sums global; #751 latent-bug class).
+    from legoesm.parallel.reductions import is_multi_process
+    if is_multi_process():
         from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]

@@ -20,7 +20,7 @@ Scheduled for M3:
 - :mod:`klemp_supercell` — Klemp (2015) supercell forcing.
 
 The full Held-Suarez machinery without topography stays in
-:mod:`legoesm.atmosphere.held_suarez` to preserve backwards compatibility
+:mod:`legoesm.atmosphere.forcing.idealized.held_suarez` to preserve backwards compatibility
 with the existing matrix-script wiring.
 """
 

@@ -1117,144 +1117,6 @@ def _fill_corner_region_averaging(
 # D-grid staggered halo exchange
 # ============================================================================
 
-def pad_halo_dgrid(
-    u_d: jax.Array,
-    v_d: jax.Array,
-    cos_angle_edge_x: jax.Array,
-    sin_angle_edge_x: jax.Array,
-    cos_angle_edge_y: jax.Array,
-    sin_angle_edge_y: jax.Array,
-    duogrid: 'DuoGridData | None' = None,
-    halo: int = 1,
-) -> tuple[jax.Array, jax.Array]:
-    """Pad D-grid staggered fields with halo from neighbor faces.
-
-    FV3 exchanges D-grid winds via mpp_update_domains with DGRID_NE
-    gridtype before d2a2c_vect. This provides the boundary D-grid
-    values needed for 4th-order D→A averaging at face edges.
-
-    Uses exact D-grid edge angles from CubedSphereCDGrid (not averaged
-    A-grid angles) for precise geographic rotation at stagger positions.
-
-    Parameters
-    ----------
-    u_d : (6, n, n+1) D-grid x-velocity at j-edges
-    v_d : (6, n+1, n) D-grid y-velocity at i-edges
-    cos_angle_edge_x, sin_angle_edge_x : (6, n, n+1) exact edge angles
-    cos_angle_edge_y, sin_angle_edge_y : (6, n+1, n) exact edge angles
-    halo : int, default 1
-        Halo width.  FV3 uses ``ng=3`` but ``halo=2`` gives enough
-        additional stencil support for 4th-order A→C recomputation
-        directly on D-grid without a separate scalar exchange.
-
-    Returns
-    -------
-    u_d_pad : (6, n, n + 2*halo + 1) D-grid u padded in j direction
-    v_d_pad : (6, n + 2*halo + 1, n) D-grid v padded in i direction
-    """
-    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
-    if halo not in (1, 2):
-        raise NotImplementedError(f"Only halo=1 and halo=2 supported, got {halo}")
-
-    n = u_d.shape[1]
-    h = halo
-
-    # Convert D-grid to geographic using EXACT edge angles.
-    ca_j = cos_angle_edge_x   # (6, n, n+1)
-    sa_j = sin_angle_edge_x
-    u_east_ud = ca_j * u_d
-    v_north_ud = sa_j * u_d
-
-    ca_i = cos_angle_edge_y   # (6, n+1, n)
-    sa_i = sin_angle_edge_y
-    u_east_vd = -sa_i * v_d
-    v_north_vd = ca_i * v_d
-
-    # Pad u_d along j (axis 2): halo on each side → (6, n, n + 2h + 1)
-    u_d_pad = jnp.zeros((6, n, n + 2 * h + 1), dtype=u_d.dtype)
-    u_d_pad = u_d_pad.at[:, :, h:-h].set(u_d)
-
-    # Pad v_d along i (axis 1): halo on each side → (6, n + 2h + 1, n)
-    v_d_pad = jnp.zeros((6, n + 2 * h + 1, n), dtype=v_d.dtype)
-    v_d_pad = v_d_pad.at[:, h:-h, :].set(v_d)
-
-    def _select_src(arr_ud_e, arr_ud_n, arr_vd_e, arr_vd_n,
-                    nbr_f, nbr_e, rev, depth):
-        """Pick neighbor's edge strip at the given halo depth.
-
-        ``depth`` = 1 → edge adjacent to neighbor's boundary (index -2 / 1)
-        ``depth`` = 2 → edge 2 in from neighbor's boundary (index -3 / 2)
-        """
-        if nbr_e == NORTH:
-            src   = arr_ud_e[nbr_f, :, -(depth + 1)]
-            src_v = arr_ud_n[nbr_f, :, -(depth + 1)]
-        elif nbr_e == SOUTH:
-            src   = arr_ud_e[nbr_f, :, depth]
-            src_v = arr_ud_n[nbr_f, :, depth]
-        elif nbr_e == EAST:
-            src   = arr_vd_e[nbr_f, -(depth + 1), :]
-            src_v = arr_vd_n[nbr_f, -(depth + 1), :]
-        else:  # WEST
-            src   = arr_vd_e[nbr_f, depth, :]
-            src_v = arr_vd_n[nbr_f, depth, :]
-        if rev:
-            src = src[::-1]
-            src_v = src_v[::-1]
-        return src, src_v
-
-    # Fill halo from neighbor faces using CONNECTIVITY.
-    # For each face and each of the 4 edges, we fill ``halo`` layers
-    # deep using the neighbor's edges at increasing depth from their
-    # boundary (depth=1 closest, depth=h furthest).
-    for face in range(6):
-        # --- u_d j-halo ---
-        nbr_f_s, nbr_e_s, rev_s = CONNECTIVITY[face][SOUTH]
-        nbr_f_n, nbr_e_n, rev_n = CONNECTIVITY[face][NORTH]
-        # Boundary angles for rotation-back to local frame
-        ca_bdy_s = ca_j[face, :, 0]
-        sa_bdy_s = sa_j[face, :, 0]
-        ca_bdy_n = ca_j[face, :, -1]
-        sa_bdy_n = sa_j[face, :, -1]
-        for d in range(1, h + 1):
-            # South halo layer at padded j = h - d (d=1 → h-1, d=h → 0)
-            src, src_v = _select_src(u_east_ud, v_north_ud,
-                                      u_east_vd, v_north_vd,
-                                      nbr_f_s, nbr_e_s, rev_s, d)
-            u_local = ca_bdy_s * src + sa_bdy_s * src_v
-            u_d_pad = u_d_pad.at[face, :, h - d].set(u_local)
-
-            # North halo layer at padded j = h + n + (d-1) + 1 = h + n + d
-            src, src_v = _select_src(u_east_ud, v_north_ud,
-                                      u_east_vd, v_north_vd,
-                                      nbr_f_n, nbr_e_n, rev_n, d)
-            u_local = ca_bdy_n * src + sa_bdy_n * src_v
-            u_d_pad = u_d_pad.at[face, :, h + n + d].set(u_local)
-
-        # --- v_d i-halo ---
-        nbr_f_w, nbr_e_w, rev_w = CONNECTIVITY[face][WEST]
-        nbr_f_e, nbr_e_e, rev_e = CONNECTIVITY[face][EAST]
-        ca_bdy_w = ca_i[face, 0, :]
-        sa_bdy_w = sa_i[face, 0, :]
-        ca_bdy_e = ca_i[face, -1, :]
-        sa_bdy_e = sa_i[face, -1, :]
-        for d in range(1, h + 1):
-            # West halo layer at padded i = h - d
-            src, src_v = _select_src(u_east_ud, v_north_ud,
-                                      u_east_vd, v_north_vd,
-                                      nbr_f_w, nbr_e_w, rev_w, d)
-            v_local = -sa_bdy_w * src + ca_bdy_w * src_v
-            v_d_pad = v_d_pad.at[face, h - d, :].set(v_local)
-
-            # East halo layer at padded i = h + n + d
-            src, src_v = _select_src(u_east_ud, v_north_ud,
-                                      u_east_vd, v_north_vd,
-                                      nbr_f_e, nbr_e_e, rev_e, d)
-            v_local = -sa_bdy_e * src + ca_bdy_e * src_v
-            v_d_pad = v_d_pad.at[face, h + n + d, :].set(v_local)
-
-    return u_d_pad, v_d_pad
-
 
 # ============================================================================
 # ext_vector: FV3-faithful vector halo exchange
@@ -1267,28 +1129,48 @@ def ext_vector_dgrid(
     cos_angle: jax.Array,
     sin_angle: jax.Array,
     cosa_s: jax.Array,
-    rsin2: jax.Array,
     halo: int = 2,
+    basis: str = "covariant",
 ) -> tuple[jax.Array, jax.Array]:
     """FV3-faithful D-grid vector halo exchange via lat/lon intermediary.
 
     Following FV3 ext_vector for DGRID case (fv_duogrid.F90:741-826).
     The flow is:
-    1. Convert covariant A-grid (utmp, vtmp) to lat/lon using the
-       non-orthogonal decomposition (cosa_s, rsin2) then grid angle
-       rotation — equivalent to FV3's c2l_ord2 (a11/a12/a21/a22)
+    1. Convert A-grid (utmp, vtmp) to lat/lon
     2. Halo-exchange the lat/lon winds as scalars (with cube_rmp + corner fill)
-    3. Convert A-grid lat/lon back to D-grid via cubed_a2d_halo
+    3. Convert A-grid lat/lon back to D-grid at the padded stagger points
     4. Return padded D-grid winds
+
+    Two wind-component conventions are supported via ``basis``:
+
+    - ``"covariant"`` (default, production ``_d2a2c_vect_duogrid`` path):
+      inputs are covariant projections onto the (non-orthogonal) grid-line
+      tangents; step 1 uses the exact cosa_s inversion (≡ FV3 c2l_ord2
+      a11..a22) and step 3 uses ``cubed_a2d_halo`` (FV3 es/ew edge-tangent
+      projections).
+    - ``"orthogonal"`` (FB SW chain): this model's D winds are
+      ``u_d = V·x̂`` (x-line tangent at x-edges, ``angle_edge_x``) and
+      ``v_d = V·x̂⊥`` (rot-90 of the x-tangent at y-edges,
+      ``angle_edge_y`` is the i-tangent angle — see
+      ``cubed_sphere_cdgrid.py`` "i-tangent at y-edge midpoint").  The
+      D→A averages (utmp, vtmp) then form a locally ORTHOGONAL pair, so
+      step 1 is a pure rotation by the A-grid angle, and step 3 must
+      project vd onto rot-90(x-tangent) — NOT FV3's y-line tangent
+      ``ew_ext[...,1]``.  Using the covariant machinery on these inputs
+      puts an O(cosa_s·|V|) convention error in the halo (up to ~15 m/s
+      at C36 panel corners, sign-flipping across the seam) that is a
+      ~100% error in the small v_d projection — the FB SW panel-edge
+      instability root cause (2026-07-10).
 
     Parameters
     ----------
-    utmp, vtmp : (6, n, n) — covariant A-grid winds (from D→A averaging)
+    utmp, vtmp : (6, n, n) — A-grid winds (from D→A averaging)
     duogrid : DuoGridData
     cos_angle, sin_angle : (6, n, n) — grid rotation angle at A-grid
-    cosa_s : (6, n, n) — cos(angle) between grid axes (non-orthogonality)
-    rsin2 : (6, n, n) — 1/sin²(angle) for covariant→contravariant
+    cosa_s : (6, n, n) — cos(angle) between grid axes (non-orthogonality;
+        unused for ``basis="orthogonal"``)
     halo : int — halo width (default 2)
+    basis : str — ``"covariant"`` or ``"orthogonal"`` (see above)
 
     Returns
     -------
@@ -1297,33 +1179,54 @@ def ext_vector_dgrid(
     """
     from legoesm.grids.halo import pad_halo
 
+    if basis not in ("covariant", "orthogonal"):
+        raise ValueError(
+            f"ext_vector_dgrid: unknown basis {basis!r}; "
+            f"expected 'covariant' or 'orthogonal'.")
+
     h = halo
 
-    # Step 1: Convert covariant → geographic (lat/lon).
-    # iter147 FIX (running-FV3 halo audit): the previous code raised the index
-    # to the CONTRAVARIANT coefficients (ua,va) and then applied a SINGLE
-    # (orthogonal) grid-angle rotation — valid only if the grid axes were
-    # perpendicular.  On the cubed sphere the tangents are NON-orthogonal
-    # (e1·e2 = cosa_s ≠ 0) at face edges/corners, so the va·e2 projection
-    # dropped the O(cosa_s) non-orthogonality term, giving a GROSS, resolution-
-    # NON-convergent halo error (~tens of m/s) at the cube edges that seeded the
-    # FB edge instability.  Use the exact non-orthogonal covariant→geographic
-    # conversion (identical to the production `pad_halo_vector`, halo.py): utmp/
-    # vtmp are the covariant projections V·x̂, V·ŷ; cosa_s = cos(θ_between_axes);
-    # st = sin θ.  Reduces to the old orthogonal form when cosa_s→0 (interior).
-    _EPS_NO = float(jnp.finfo(jnp.float32).eps)
-    st = jnp.maximum(jnp.sqrt(jnp.maximum(1.0 - cosa_s ** 2, 0.0)), _EPS_NO)
-    u_east = cos_angle * utmp + sin_angle * (utmp * cosa_s - vtmp) / st
-    v_north = sin_angle * utmp + cos_angle * (vtmp - utmp * cosa_s) / st
+    if basis == "covariant":
+        # Step 1: Convert covariant → geographic (lat/lon).
+        # iter147 FIX (running-FV3 halo audit): the previous code raised the
+        # index to the CONTRAVARIANT coefficients (ua,va) and then applied a
+        # SINGLE (orthogonal) grid-angle rotation — valid only if the grid
+        # axes were perpendicular.  On the cubed sphere the tangents are
+        # NON-orthogonal (e1·e2 = cosa_s ≠ 0) at face edges/corners, so the
+        # va·e2 projection dropped the O(cosa_s) non-orthogonality term,
+        # giving a GROSS, resolution-NON-convergent halo error (~tens of m/s)
+        # at the cube edges.  Use the exact non-orthogonal
+        # covariant→geographic conversion (identical to the production
+        # `pad_halo_vector`, halo.py): utmp/vtmp are the covariant
+        # projections V·x̂, V·ŷ; cosa_s = cos(θ_between_axes); st = sin θ.
+        # Reduces to the orthogonal form when cosa_s→0 (interior).
+        _EPS_NO = float(jnp.finfo(jnp.float32).eps)
+        st = jnp.maximum(
+            jnp.sqrt(jnp.maximum(1.0 - cosa_s ** 2, 0.0)), _EPS_NO)
+        u_east = cos_angle * utmp + sin_angle * (utmp * cosa_s - vtmp) / st
+        v_north = sin_angle * utmp + cos_angle * (vtmp - utmp * cosa_s) / st
+    else:
+        # Step 1 (orthogonal basis): (utmp, vtmp) ≈ (V·x̂, V·x̂⊥) at cell
+        # centres — geographic conversion is a pure rotation by the A-grid
+        # angle.  Applying the covariant cosa_s inversion here would
+        # re-introduce the O(cosa_s·|V|) convention error.
+        u_east = cos_angle * utmp - sin_angle * vtmp
+        v_north = sin_angle * utmp + cos_angle * vtmp
 
     # Step 2: Halo-exchange lat/lon winds as SCALARS with Duo-Grid remap.
     # This applies cube_rmp (kinked→extended) + fill_corner_region.
+    # Geographic components are frame-invariant, so the neighbour-copied
+    # halo ring is exact up to the step-1 conversion residual.
     u_east_pad = pad_halo(u_east, halo=h, duogrid=duogrid)   # (6, n+2h, n+2h)
     v_north_pad = pad_halo(v_north, halo=h, duogrid=duogrid)  # (6, n+2h, n+2h)
 
     # Step 3: Convert A-grid lat/lon back to D-grid via 3D Cartesian.
-    # This is FV3's cubed_a2d_halo (fv_duogrid.F90:2676-2763).
-    ud_pad, vd_pad = cubed_a2d_halo(u_east_pad, v_north_pad, duogrid, h)
+    if basis == "covariant":
+        # FV3's cubed_a2d_halo (fv_duogrid.F90:2676-2763).
+        ud_pad, vd_pad = cubed_a2d_halo(u_east_pad, v_north_pad, duogrid, h)
+    else:
+        ud_pad, vd_pad = cubed_a2d_halo_orthogonal(
+            u_east_pad, v_north_pad, duogrid, h)
 
     return ud_pad, vd_pad
 
@@ -1399,5 +1302,74 @@ def cubed_a2d_halo(
     # vd = ve . ew_ext (B-grid normal variant)
     ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 1]  # (6, n_p-1, n_p, 3)
     vd = jnp.sum(ve * ew_slice, axis=-1)  # (6, n_p-1, n_p)
+
+    return ud, vd
+
+
+def cubed_a2d_halo_orthogonal(
+    ull: jax.Array,
+    vll: jax.Array,
+    duogrid: DuoGridData,
+    halo: int,
+) -> tuple[jax.Array, jax.Array]:
+    """A-grid lat/lon → D-grid in THIS MODEL's orthogonal wind convention.
+
+    Same 2-point Cartesian edge averaging as :func:`cubed_a2d_halo`, but
+    the projection bases match ``CubedSphereCDGrid``'s D-wind convention
+    (see ``ext_vector_dgrid`` basis="orthogonal"):
+
+    - ``ud = ue · es_ext[...,0]`` — the x-edge tangent (corner-to-corner
+      chord along +i), identical to the model's ``angle_edge_x``
+      i-tangent (and to :func:`cubed_a2d_halo`; conventions coincide
+      for u).
+    - ``vd = ve · rot90(x-tangent)`` — the model's ``v_d = V·x̂⊥``,
+      where the x-tangent at v-points is ``ew_ext[...,0]`` (the
+      A-neighbour great-circle tangent) and rot-90 in the local tangent
+      plane is ``cross(radial, x̂)`` (east→north positive).  FV3's
+      ``ew_ext[...,1]`` (y-line tangent) is the covariant convention
+      and differs by O(cosa_s·|V|) near panel corners.
+    """
+    n = duogrid.n
+    h = halo
+    n_p = n + 2 * h
+    offset = duogrid.ng - h
+
+    vlon = duogrid.vlon_ext
+    vlat = duogrid.vlat_ext
+    ew = duogrid.ew_ext
+    es = duogrid.es_ext
+
+    dtype = ull.dtype
+    vlon = vlon.astype(dtype)
+    vlat = vlat.astype(dtype)
+    ew = ew.astype(dtype)
+    es = es.astype(dtype)
+
+    i_slice = slice(offset, offset + n_p)
+    vlon_p = vlon[:, i_slice, i_slice, :]
+    vlat_p = vlat[:, i_slice, i_slice, :]
+    v3 = ull[..., None] * vlon_p + vll[..., None] * vlat_p  # (6, n_p, n_p, 3)
+
+    ue = 0.5 * (v3[:, :, :-1, :] + v3[:, :, 1:, :])  # (6, n_p, n_p-1, 3)
+    ve = 0.5 * (v3[:, :-1, :, :] + v3[:, 1:, :, :])  # (6, n_p-1, n_p, 3)
+
+    # ud: identical to cubed_a2d_halo (x-edge tangent).
+    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :, 0]
+    ud = jnp.sum(ue * es_slice, axis=-1)  # (6, n_p, n_p-1)
+
+    # vd: project onto rot-90 of the x-tangent at the v-point.
+    ew0 = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 0]
+    lon_p = duogrid.ext_lon.astype(dtype)[:, i_slice, i_slice]
+    lat_p = duogrid.ext_lat.astype(dtype)[:, i_slice, i_slice]
+    clat = jnp.cos(lat_p)
+    P = jnp.stack([clat * jnp.cos(lon_p), clat * jnp.sin(lon_p),
+                   jnp.sin(lat_p)], axis=-1)  # (6, n_p, n_p, 3)
+    P_v = 0.5 * (P[:, :-1, :, :] + P[:, 1:, :, :])  # radial at v-points
+    P_v = P_v / jnp.maximum(
+        jnp.linalg.norm(P_v, axis=-1, keepdims=True), 1e-30)
+    yhat = jnp.cross(P_v, ew0)  # +90° rotation of x̂ (east→north)
+    yhat = yhat / jnp.maximum(
+        jnp.linalg.norm(yhat, axis=-1, keepdims=True), 1e-30)
+    vd = jnp.sum(ve * yhat, axis=-1)  # (6, n_p-1, n_p)
 
     return ud, vd

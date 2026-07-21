@@ -38,101 +38,106 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
     SolverEntry(
         "atmosphere", "shallow_water", "cubed_sphere_cdgrid",
         "cdgrid_shallow_water", "CDGridShallowWaterModel",
-        "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid",
     ),
     SolverEntry(
         "atmosphere", "hydrostatic", "cubed_sphere_cdgrid",
         "cdgrid_primitive_equations", "CDGridPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid",
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid",
     ),
     SolverEntry(
         "atmosphere", "nonhydrostatic", "cubed_sphere_cdgrid",
         "cdgrid_compressible_euler", "CDGridCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid",
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid",
     ),
 
     # -- Spectral (Gaussian grid) --
     SolverEntry(
         "atmosphere", "shallow_water", "spectral_gaussian",
         "spectral_shallow_water", "SpectralShallowWaterModel",
-        "legoesm.atmosphere.dynamics.spectral_sw",
+        "legoesm.atmosphere.dynamics.gcm.spectral_sw",
     ),
     SolverEntry(
         "atmosphere", "hydrostatic", "spectral_gaussian",
         "spectral_primitive_equations", "SpectralPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.spectral_pe",
+        "legoesm.atmosphere.dynamics.gcm.spectral_pe",
     ),
     SolverEntry(
         "atmosphere", "nonhydrostatic", "spectral_gaussian",
         "spectral_compressible_euler", "SpectralCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.spectral_nh",
+        "legoesm.atmosphere.dynamics.gcm.spectral_nh",
     ),
 
     # -- SFNO (data-driven) --
     SolverEntry(
         "atmosphere", "shallow_water", "sfno",
         "sfno_shallow_water", "SFNOShallowWaterModel",
-        "legoesm.atmosphere.dynamics.sfno_sw",
+        "legoesm.atmosphere.dynamics.neural.sfno_sw",
     ),
     SolverEntry(
         "atmosphere", "hydrostatic", "sfno",
         "sfno_primitive_equations", "SFNOPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.sfno_pe",
+        "legoesm.atmosphere.dynamics.neural.sfno_pe",
     ),
 
     # -- MPAS / SCVT Voronoi mesh + TRiSK discretization --
     SolverEntry(
         "atmosphere", "hydrostatic", "mpas",
         "mpas_primitive_equations", "MPASPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_mpas",
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas",
     ),
     SolverEntry(
         "atmosphere", "nonhydrostatic", "mpas",
         "mpas_compressible_euler", "MPASCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.compressible_euler_mpas",
+        "legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas",
     ),
 
     # -- U-cast (unstructured-cast hydrostatic primitive equations) --
     SolverEntry(
         "atmosphere", "hydrostatic", "u_cast",
         "ucast_primitive_equations", "UCastPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.ucast_pe",
+        "legoesm.atmosphere.dynamics.neural.ucast_pe",
     ),
 
     # -- Lat-lon C-grid (FV) --
     SolverEntry(
         "atmosphere", "shallow_water", "latlon_cgrid",
         "latlon_cgrid_shallow_water", "CGridLatLonShallowWaterModel",
-        "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid",
+        "legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid",
     ),
     SolverEntry(
         "atmosphere", "hydrostatic", "latlon_cgrid",
         "latlon_cgrid_primitive_equations", "CGridLatLonPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
+        "legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid",
     ),
 
     # -- Doubly-periodic plane (CRM rollout, PR2c) --
     SolverEntry(
         "atmosphere", "nonhydrostatic", "plane",
         "plane_compressible_euler", "PlaneCompressibleEulerModel",
-        "legoesm.atmosphere.dynamics.compressible_euler_plane",
+        "legoesm.atmosphere.dynamics.les.compressible_euler_plane",
     ),
 
     # -- Tracer transport --
     SolverEntry(
         "atmosphere", "tracer_transport", "cubed_sphere_cdgrid",
         "tracer_transport", "TracerTransportModel",
-        "legoesm.atmosphere.dynamics.tracer_transport",
+        "legoesm.atmosphere.dynamics.shared.tracer_transport",
     ),
     SolverEntry(
         "atmosphere", "tracer_transport", "mpas",
         "tracer_transport_mpas", "TracerTransportMPASModel",
-        "legoesm.atmosphere.dynamics.tracer_transport_mpas",
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas",
     ),
     SolverEntry(
         "atmosphere", "tracer_transport", "latlon_cgrid",
         "tracer_transport_latlon", "TracerTransportLatLonModel",
-        "legoesm.atmosphere.dynamics.tracer_transport_latlon",
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon",
+    ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "spectral_gaussian",
+        "tracer_transport_spectral", "SpectralTracerTransportModel",
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral",
     ),
 )
 

@@ -72,7 +72,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
 )
 from legoesm.atmosphere.physics.physics_state import update_physics_state
 from legoesm.atmosphere.physics._shared import zero_like_tracers
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
@@ -189,8 +189,10 @@ def make_physics(
             sfc_emissivity_override=sfc_emissivity_override,
         )
     elif model_type == "mpas":
-        fn = _make_mpas_combined(
-            config, dt, column_mesh=column_mesh, need_rad=need_rad)
+        # MPAS (Voronoi mesh) uses the unified hydrostatic combined path.
+        fn = _make_hydrostatic_combined(
+            config, dt, model_type="mpas", column_mesh=column_mesh,
+            need_rad=need_rad)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -215,18 +217,23 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     from legoesm.atmosphere.physics.convection.integration import (
         convection_scheme_traits,
     )
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
     # Profile-prognostic convection counts as stateful (codex round 5):
     # the bridge reads phys_state.conv_prog_profile for ZM/KF/Emanuel/
     # Tiedtke/Bechtold and falls back to zeros when the carry is absent
     # — Tiedtke concretely relaxes the previous profile into M_u_new,
     # so a dropped carry silently erases that memory every step.
     conv = convection_scheme_traits(config.convection.scheme)
+    # A '+'-composite containing prognostic_spectral carries the wave-action
+    # spectrum too (issue #834), so it also requires a threaded PhysicsState.
     return bool(
         turbulence_scheme_traits(config.turbulence.scheme).carries_energy
         or conv.is_scalar_prognostic
         or conv.is_profile_prognostic
         or conv.is_stochastic
-        or config.gravity_wave_drag.scheme == "prognostic_spectral"
+        or gwd_carries_spectrum(config.gravity_wave_drag.scheme)
     )
 
 
@@ -324,12 +331,39 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # fill.  False (default) keeps both paths byte-identical.
     _nc_from_aerosol = _aerosol_ccn_active(config)
     _activation_cfg = _aerosol_activation_config(config)
+    # CLUBB sub-grid cloud fraction -> radiation routing (marine-Sc albedo lever).
+    # A moist higher-order closure diagnoses a less-overcast cloud fraction than
+    # the RH grid-scale scheme; route it to the cloud optics when the user opts in
+    # AND a cf-producing closure is active.  ONLY diagnostic CLUBB
+    # (turbulence.scheme='clubb', CLUBBConfig.prognostic=False) writes the
+    # ``PhysicsState.cloud_fraction`` carry today (clubb_lite dropped its PDF
+    # moments; prognostic CLUBB carries packed moments, not a diagnosed cf).
+    # Requiring the producer keeps the radiation override off the zero-init carry
+    # (which would spuriously clear clouds).  Misconfiguration is LOUD, never a
+    # silent no-op (dispatch-hardening).
+    _clubb_cfg = config.turbulence.clubb
+    _turb_produces_cf = (
+        config.turbulence.scheme == "clubb"
+        and not (_clubb_cfg is not None and getattr(_clubb_cfg, "prognostic", False))
+    )
+    if config.radiation.use_clubb_cloud_fraction and not _turb_produces_cf:
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure (turbulence.scheme="
+            "'clubb' with diagnostic CLUBBConfig.prognostic=False); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}"
+            + (" with prognostic=True (packed moments, no diagnosed cloud "
+               "fraction)" if config.turbulence.scheme == "clubb" else "")
+            + ".  Enable diagnostic CLUBB or unset use_clubb_cloud_fraction."
+        )
+    _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
                 config.radiation, model_type, column_mesh=column_mesh,
                 nc_from_aerosol=_nc_from_aerosol,
                 activation_config=_activation_cfg,
+                use_clubb_cloud_fraction=_use_clubb_cf,
             ),
             False,
             None,
@@ -412,15 +446,26 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 else:
                     phys_updates[field_name] = field_val
         else:
+            _kw0 = {}
             if getattr(fn0, "_wants_forcing", False):
-                first = fn0(state, grid, sigma_coord, forcing=forcing)
-            else:
-                first = fn0(state, grid, sigma_coord)
+                _kw0["forcing"] = forcing
+            if getattr(fn0, "_wants_phys_state_ro", False):
+                # Read-only phys_state consumer (radiation reading the CLUBB
+                # sub-grid cloud-fraction carry): forward phys_state but keep the
+                # single-return contract — accepts_ps=False, so no carry is
+                # written back.  Byte-identical when unset (empty kwargs).
+                _kw0["phys_state"] = phys_state
+            first = fn0(state, grid, sigma_coord, **_kw0)
         du_dt = first.du_dt.data
         dv_dt = first.dv_dt.data if first.dv_dt is not None else None
         dT_dt = first.dT_dt.data
         dp_s_dt = first.dp_s_dt.data
         dphis_dt = first.dphis_dt.data
+        # Surface precip [kg/m^2/s]: summed across whichever modules produce it
+        # (microphysics does; radiation/turbulence/GWD do not -> None). Kept as a
+        # diagnostic (not a tendency) so the lean MPAS loop can export it.
+        precip_accum = (first.precip.data
+                        if getattr(first, "precip", None) is not None else None)
 
         # Accumulate tracer tendencies from all physics modules
         combined_tracer_tends = {}
@@ -446,10 +491,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         phys_updates[field_name] = field_val
             else:
+                _kw = {}
                 if getattr(fn, "_wants_forcing", False):
-                    t = fn(state, grid, sigma_coord, forcing=forcing)
-                else:
-                    t = fn(state, grid, sigma_coord)
+                    _kw["forcing"] = forcing
+                if getattr(fn, "_wants_phys_state_ro", False):
+                    _kw["phys_state"] = phys_state
+                t = fn(state, grid, sigma_coord, **_kw)
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
                 dv_dt = dv_dt + t.dv_dt.data
@@ -464,8 +511,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         combined_tracer_tends[k] = v.data
 
+            if getattr(t, "precip", None) is not None:
+                precip_accum = (t.precip.data if precip_accum is None
+                                else precip_accum + t.precip.data)
+
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-                combined_tracer_tends, phys_updates, first)
+                combined_tracer_tends, phys_updates, first, precip_accum)
 
     def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                         combined_tracer_tends):
@@ -489,6 +540,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             tracer_tendencies=tracer_tends_out,
         )
 
+    def _attach_sfc_precip(combined, first, precip_accum):
+        """Carry surface precip [kg/m^2/s] on the combined tendency (dropped by
+        _build_combined) so the lean MPAS loop can export it. No-op / byte-
+        identical when microphysics produced no precip (precip_accum is None)."""
+        if precip_accum is None:
+            return combined
+        return combined._replace(precip=Field(
+            data=precip_accum, name="precip",
+            dims=first.dp_s_dt.dims, units="kg/m^2/s"))
+
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
@@ -511,7 +572,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     dT = dT + cached_rad.reshape(dT.shape)
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-             combined_tracer_tends, phys_updates, first) = _accumulate(
+             combined_tracer_tends, phys_updates, first,
+             precip_accum) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
@@ -519,6 +581,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
+            # Held-radiation sub-step: no fresh sw/lw solve, but precip (from
+            # microphysics, which runs every step) is still exported.
+            combined = _attach_sfc_precip(combined, first, precip_accum)
             # rad_heating is carried UNCHANGED (not in phys_updates).
             phys_state_out = update_physics_state(phys_state, phys_updates)
             return combined, phys_state_out
@@ -527,7 +592,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if not tagged_fns:
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-         combined_tracer_tends, phys_updates, first) = _accumulate(
+         combined_tracer_tends, phys_updates, first,
+         precip_accum) = _accumulate(
             tagged_fns, state, grid, sigma_coord, phys_state, forcing)
         # Cache the radiative heating contribution for the held sub-cycle
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
@@ -547,6 +613,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         combined = _build_combined(
             first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
             combined_tracer_tends)
+        if _has_rad:
+            # Carry the surface net radiative fluxes (radiation is tagged_fns[0],
+            # so ``first`` holds them) on the combined tendency, so the lean MPAS
+            # coupled loop can export sw/lw net to the coupler (_build_combined
+            # constructs a fresh tendency that drops these diagnostic fields).
+            combined = combined._replace(
+                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
+        # Same for surface precip (from microphysics; _build_combined drops it).
+        combined = _attach_sfc_precip(combined, first, precip_accum)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
@@ -560,7 +635,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     tagged_fns = []
     if config.radiation.scheme != "none":
-        tagged_fns.append((make_radiation_physics(config.radiation, "nonhydrostatic"), False, None))
+        # CLUBB-cf routing is only wired for hydrostatic today; passing the flag
+        # (rather than dropping it) makes make_radiation_physics raise loudly if a
+        # user set use_clubb_cloud_fraction on the nonhydrostatic path — never a
+        # silent no-op.
+        tagged_fns.append((make_radiation_physics(
+            config.radiation, "nonhydrostatic",
+            use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
+        ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
@@ -673,10 +755,14 @@ def _make_spectral_pe_combined(
 ) -> Callable:
     tagged_fns = []
     if config.radiation.scheme != "none":
+        # CLUBB-cf routing is hydrostatic-only today; pass the flag so a
+        # use_clubb_cloud_fraction request on spectral_pe raises loudly in
+        # make_radiation_physics rather than being silently ignored.
         tagged_fns.append((make_radiation_physics(
             config.radiation, "spectral_pe",
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
+            use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
         ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
@@ -835,15 +921,3 @@ def _make_spectral_pe_combined(
         getattr(fn, "_wants_forcing", False) for fn, _, _ in tagged_fns
     )
     return physics_fn
-
-
-# ======================================================================
-# MPAS (Voronoi mesh) — uses unified hydrostatic combined path
-# ======================================================================
-
-def _make_mpas_combined(config: PhysicsConfig, dt: float,
-                        column_mesh=None, need_rad: bool = True) -> Callable:
-    return _make_hydrostatic_combined(
-        config, dt, model_type="mpas", column_mesh=column_mesh,
-        need_rad=need_rad,
-    )

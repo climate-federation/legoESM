@@ -64,6 +64,198 @@ def test_committed_configs_parse_and_are_valid(monkeypatch):
         assert args.grid in ("latlon", "mpas")
         assert args.days > 0
         assert isinstance(args.output_dir, Path)
+
+
+def test_barotropic_solver_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "rigid_lid"])
+    args = rd._parse_args()
+    assert args.barotropic_solver == "rigid_lid"
+
+
+def test_barotropic_solver_default_none(monkeypatch):
+    """Default None → main() keeps DINOConfig.barotropic_solver (implicit_cn)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.barotropic_solver is None
+
+
+def test_barotropic_coriolis_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "een"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis == "een"
+
+
+def test_barotropic_coriolis_een_metric_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "een_metric"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis == "een_metric"
+
+
+def test_barotropic_coriolis_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_coriolis is None
+
+
+def test_barotropic_coriolis_split_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis-split", "live"])
+    args = rd._parse_args()
+    assert args.barotropic_coriolis_split == "live"
+
+
+def test_barotropic_coriolis_split_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_coriolis_split is None
+
+
+def test_barotropic_coriolis_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-coriolis", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_gm_redi_mld_criterion_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--gm-redi-mld-criterion", "n2_integral"])
+    args = rd._parse_args()
+    assert args.gm_redi_mld_criterion == "n2_integral"
+
+
+def test_gm_redi_mld_criterion_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().gm_redi_mld_criterion is None
+
+
+def test_gm_redi_mld_criterion_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--gm-redi-mld-criterion", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_nemo_faithful_grid_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--grid", "latlon", "--nemo-faithful-grid"])
+    args = rd._parse_args()
+    assert args.nemo_faithful_grid is True
+
+
+def test_nemo_faithful_grid_default_false(monkeypatch):
+    # Opt-in: absent flag keeps the legoESM [-50,0]/198×50 grid.
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().nemo_faithful_grid is False
+
+
+def test_barotropic_solver_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "barotropic_solver: rigid_lid\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.barotropic_solver == "rigid_lid"
+
+
+def test_barotropic_solver_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_momentum_advection_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "weno7"])
+    args = rd._parse_args()
+    assert args.momentum_advection == "weno7"
+
+
+def test_momentum_advection_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().momentum_advection is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_coriolis_scheme_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "matsuno_split"])
+    args = rd._parse_args()
+    assert args.coriolis_scheme == "matsuno_split"
+
+
+def test_outer_integrator_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().outer_integrator is None      # None -> recipe card
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--outer-integrator", "leapfrog"])
+    assert rd._parse_args().outer_integrator == "leapfrog"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--outer-integrator", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_vorticity_scheme_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().vorticity_scheme is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--vorticity-scheme", "een_total"])
+    assert rd._parse_args().vorticity_scheme == "een_total"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--vorticity-scheme", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_asselin_gamma_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().asselin_gamma is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--asselin-gamma", "0.05"])
+    assert rd._parse_args().asselin_gamma == 0.05
+
+
+def test_coriolis_scheme_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().coriolis_scheme is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "leapfrog"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_barotropic_slow_forcing_ab2_flag_parses(monkeypatch):
+    """Tri-state: None (card value) / 'on' / 'off' — the FE-barotropic-Coriolis
+    bisect lever (the 'oceananigans'-card blowup discriminator)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "off"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 == "off"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "1"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_rigid_lid_dt_mom_ratio_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--barotropic-solver", "rigid_lid",
+                         "--rigid-lid-dt-mom-ratio", "6"])
+    args = rd._parse_args()
+    assert args.rigid_lid_dt_mom_ratio == 6.0
+
+
+def test_rigid_lid_dt_mom_ratio_default_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.rigid_lid_dt_mom_ratio is None
+
+
 def test_eos_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_dino", "--eos", "nemo_seos"])
     args = rd._parse_args()
@@ -98,6 +290,43 @@ def test_eos_replaces_dino_config(monkeypatch):
     assert cfg.eos == "wright"          # default
     cfg = dataclasses.replace(cfg, eos="nemo_seos")
     assert cfg.eos == "nemo_seos"
+
+
+def test_recipe_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "mitgcm"])
+    args = rd._parse_args()
+    assert args.recipe == "mitgcm"
+
+
+def test_recipe_default_none(monkeypatch):
+    """Default None → main() leaves DINOConfig untouched (no recipe overlay)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.recipe is None
+
+
+def test_recipe_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "recipe: veros\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.recipe == "veros"
+
+
+def test_recipe_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "bogus_model"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_recipe_overlays_dino_config(monkeypatch):
+    """The --recipe value must reach DINOConfig via dino_config_for_recipe
+    (the cfg-overlay round-trip main() performs)."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, dino_config_for_recipe,
+    )
+    assert DINOConfig().eos == "wright"                 # bare default
+    mit = dino_config_for_recipe("mitgcm")
+    assert mit.eos == "unesco80" and mit.momentum_advection == "flux_form"
 
 
 def test_tke_momentum_visc_bg_flag_parses(monkeypatch):
@@ -174,6 +403,18 @@ def test_bottom_drag_scheme_flag_parses(monkeypatch):
     assert DINOConfig().bottom_drag_scheme == "legacy"
 
 
+def test_vmix_choices_include_richardson_and_catke(monkeypatch):
+    # codex fix: richardson/catke are wired in _dino_vertical_mixing_config, so
+    # --vmix must accept them (else the recipe fallback override is unusable).
+    for scheme in ("kpp", "tke", "constant", "richardson", "catke"):
+        monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", scheme])
+        assert rd._parse_args().vmix == scheme
+
+
+def test_vmix_rejects_unknown(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
 def test_r1_exact_preset(monkeypatch):
     """--preset r1_exact loads the DINO_R1 exactness preset; explicit flags
     still override on top; every already-exact oracle selection asserted."""
@@ -236,3 +477,21 @@ def test_allow_multiyear_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino.py", "--days", "720", "--allow-multiyear"])
     assert rd._parse_args().allow_multiyear is True
+
+
+def test_tke_prandtl_ri_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--vmix", "tke", "--tke-prandtl-ri", "on"])
+    assert rd._parse_args().tke_prandtl_ri == "on"
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--vmix", "tke", "--tke-prandtl-ri", "off"])
+    assert rd._parse_args().tke_prandtl_ri == "off"
+
+
+def test_tke_prandtl_ri_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().tke_prandtl_ri is None      # unset -> recipe/default wins
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--tke-prandtl-ri", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()

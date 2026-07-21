@@ -121,7 +121,7 @@ class TestWilliamsonTC2Convergence:
 
     @staticmethod
     def _run_tc2(n, n_steps=100, dt=300.0):
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterModel,
             CDGridShallowWaterConfig,
             CDGridShallowWaterState,
@@ -409,7 +409,7 @@ class TestWilliamsonTC2ConvergenceMPAS:
 
     @staticmethod
     def _run_tc2_mpas(level, n_steps=50, dt=300.0):
-        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import (
             MPASShallowWaterModel,
             MPASShallowWaterConfig,
             MPASShallowWaterState,
@@ -471,7 +471,7 @@ class TestTimeIntegratorOrder:
     def _run_spectral_sw(n_max, dt, n_steps, H0=1e4):
         """Run spectral SW with Gaussian bump and return final phi_hat."""
         from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis
-        from legoesm.atmosphere.dynamics.spectral_sw import (
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
             SpectralShallowWaterModel,
             SpectralSWConfig,
             SpectralSWState,

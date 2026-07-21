@@ -1,0 +1,41 @@
+# Tiny hermetic smoke: 4x8 latlon, synthetic forcing, 4 steps.
+# Used by the integration tests and as a "does the pipeline run at all" check.
+
+template_name: biophysics/smoke_test
+template_version: 1.0.0
+description: 4-step hermetic pipeline smoke on a 4 x 8 latlon grid (synthetic forcing)
+
+grid:
+  type: latlon
+  resolution: 4
+
+physics:
+  land_mode: multilayer
+  surface_scheme: simple_seb
+  bulk_scheme: constant           # simple_seb + MOST is unstable — schema will reject anyway
+
+forcing:
+  source: synthetic
+  data_dir: ""                    # empty -> synthetic
+  year_start: 2000
+  year_end: 2000
+
+surfdata:
+  path: ""                        # tests inject a synthetic surfdata via override
+
+time:
+  dt: 3600.0
+  n_steps: 4
+  start_doy: 0.0
+
+restart:
+  from: ""
+
+land_frac_min: 0.5
+
+output:
+  tapes:
+    - name: step
+      freq: step
+      average: inst
+      vars: [T_sfc, shflx, lhflx, LAI, T_soil_top, snow_depth]

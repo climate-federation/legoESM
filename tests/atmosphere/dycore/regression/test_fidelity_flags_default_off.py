@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
-    make_fv3_faithful_nh_config,
+    make_fv3_component_fidelity_nh_config,
 )
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig,
-    make_fv3_faithful_pe_config,
+    make_fv3_component_fidelity_pe_config,
 )
 
 pytestmark = pytest.mark.tier1
@@ -59,7 +59,7 @@ def test_default_config_has_all_fidelity_flags_off(cfg_cls):
 
 @pytest.mark.parametrize(
     "factory",
-    [make_fv3_faithful_pe_config, make_fv3_faithful_nh_config],
+    [make_fv3_component_fidelity_pe_config, make_fv3_component_fidelity_nh_config],
     ids=["pe", "nh"],
 )
 def test_faithful_factory_turns_some_flags_on(factory):

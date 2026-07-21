@@ -18,6 +18,7 @@ import collections
 from collections.abc import Sequence
 import dataclasses
 import inspect
+import itertools
 import string
 from typing import Callable, TypeAlias
 
@@ -118,13 +119,92 @@ def _one_hot_weighted(
   )
 
 
+def _axis_endpoints(
+    entry: Interpolant | IndexAndWeight,
+) -> list[IndexAndWeight]:
+  """Return the 1 (IndexAndWeight) or 2 (Interpolant) endpoints for one axis.
+
+  Mirrors the per-axis branching in :func:`combine_linearly`: an
+  ``IndexAndWeight`` contributes a single weighted endpoint; an ``Interpolant``
+  contributes its low and high endpoints (the one-hot path encodes both inside
+  one vector via ``low_endpoint + high_endpoint``).
+  """
+  if isinstance(entry, IndexAndWeight):
+    return [entry]
+  return [entry.interp_low, entry.interp_high]
+
+
+def combine_linearly_gather(
+    vals: Array,
+    weight_idx_list: Sequence[Interpolant | IndexAndWeight],
+) -> Array:
+  """Gather-based equivalent of :func:`combine_linearly` for CPU/GPU.
+
+  Algebraically identical to the one-hot+einsum path: the one-hot einsum
+  evaluates ``sum over the Cartesian product of per-axis endpoints of
+  (product of endpoint weights) * vals[endpoint indices]`` — exactly the
+  multilinear-interpolation corner sum.  This re-expresses that sum directly:
+  one advanced-index gather per corner (reusing
+  :func:`lookup_values_direct_indexing`, so the gather numerics are NOT
+  duplicated) scaled by the product of that corner's endpoint weights.
+
+  Why it helps reverse-mode AD: the integer indices carry no gradient
+  (``stop_gradient`` + ``floor`` is piecewise-constant — identical to the
+  one-hot path, where ``one_hot(idx)`` is also constant in the continuous
+  inputs), so only the float weights backprop.  The VJP is therefore a few
+  ``scatter-add`` corners instead of the DENSE one-hot einsum VJP over the
+  full reference axes (~``n_temperature`` x ``n_pressure`` x
+  ``n_mixing_fraction``), which is what blows up the radiation backward graph.
+
+  Numerics: the corner sum is the SAME products of the SAME weights and the
+  SAME table entries as the einsum; the two differ ONLY in floating-point
+  summation association over the (<= 2**n_interpolant-axis, typically 2-8)
+  corners, i.e. a few ULP — no change to signs, the weights-sum-to-one
+  interpolation invariant, or conservation.
+
+  Out-of-bounds: ``jax.nn.one_hot(idx, n)`` returns an all-zero vector for an
+  index outside ``[0, n)`` — that corner contributes ZERO — whereas an
+  advanced-index gather CLAMPS the index to the edge.  Indices here are almost
+  always in-bounds (``floor_idx`` clips to ``[0, size-1]`` and
+  ``idx_high = min(idx_low+1, size-1)``), but a ``create_linear_interpolant``
+  ``offset`` (the gas_optics troposphere split) can shift an index past the
+  table edge.  Each corner is therefore masked to zero when ANY axis index is
+  out of bounds, so the gather path is bit-identical to the one-hot path even
+  in that case — no reliance on an unverified table-sizing invariant.
+  """
+  per_axis_endpoints = [_axis_endpoints(e) for e in weight_idx_list]
+  result = None
+  for combo in itertools.product(*per_axis_endpoints):
+    # `combo` is one interpolation corner: an IndexAndWeight per axis, in
+    # axis order.  Integer indices are stop_gradient (no continuous grad).
+    idx_list = [jax.lax.stop_gradient(c.idx) for c in combo]
+    gathered = lookup_values_direct_indexing(vals, idx_list)
+    weight = combo[0].weight
+    for c in combo[1:]:
+      weight = weight * c.weight
+    # Zero-on-OOB to match one_hot (clamp-on-OOB gather would diverge).
+    in_bounds = None
+    for axis, idx in enumerate(idx_list):
+      ib = (idx >= 0) & (idx < vals.shape[axis])
+      in_bounds = ib if in_bounds is None else (in_bounds & ib)
+    term = weight * gathered
+    if in_bounds is not None:
+      term = jnp.where(in_bounds, term, jnp.zeros_like(term))
+    result = term if result is None else result + term
+  return result
+
+
 def combine_linearly(
     vals: Array,
     weight_idx_list: Sequence[Interpolant | IndexAndWeight],
 ) -> Array:
   """Perform a linear combination on `vals` according to `weight_idx_list`.
 
-  Used for the optimized matmul-based lookup.
+  Used for the optimized lookup.  On TPU the one-hot + einsum path keeps the
+  contraction on the MXU; on CPU/GPU it dispatches to
+  :func:`combine_linearly_gather`, which is far cheaper to compile and yields a
+  SPARSE reverse-mode VJP (mirrors the existing backend switch in
+  :func:`lookup_values`).
 
   Args:
     vals: The array of coefficients that will be combined.
@@ -136,6 +216,10 @@ def combine_linearly(
     the gathered coefficients scaled by the pointwise product of associated
     weights.
   """
+  if jax.default_backend().lower() != "tpu":
+    # CPU/GPU: gather corner sum — smaller XLA graph + sparse VJP.
+    return combine_linearly_gather(vals, weight_idx_list)
+  # TPU: one-hot + einsum keeps the contraction on the MXU.
   eq = _einsum_expression_from_lookup_table(vals)
   inputs = []
   for i, idx in enumerate(weight_idx_list):

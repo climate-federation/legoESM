@@ -24,10 +24,26 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.forcing.time_utils import (
+    NOLEAP_DAYS_PER_MONTH,
+    NOLEAP_DAYS_PER_YEAR,
+    NOLEAP_MONTH_STARTS,
+)
 
 from legoesm import constants
 
 logger = logging.getLogger(__name__)
+
+# CF calendars whose year length differs from the model's noleap 365-day
+# clock — files dated on these need the by-calendar-date sim-day mapping
+# (see _simday_to_file_day).  ``julian`` and ``all_leap``/``366_day`` carry
+# leap days too (an all-leap axis would drift +1 d/yr under the linear add).
+# ``noleap``/``365_day`` stay linear (already exact); ``360_day`` keeps the
+# legacy linear form (its pinned 360-day epoch arithmetic predates this fix).
+_BY_DATE_MAPPED_CALENDARS = frozenset(
+    {"gregorian", "standard", "proleptic_gregorian", "julian",
+     "all_leap", "366_day"}
+)
 
 
 # ==============================================================================
@@ -867,9 +883,13 @@ def _load_time_gpt(
 def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -> np.ndarray:
     """Interpolate a monthly-cyclic field (12, ...) to a day of year.
 
-    Uses cyclic linear interpolation with period 365.25 days.
+    Uses cyclic linear interpolation with period 365.0 days — the model
+    clock is a strict noleap calendar (``time_utils.day_to_calendar``) and
+    the AMIP SST/SIC climatology wrap (``amip.get_forcing_at_time``) also
+    uses 365.0; the previous 365.25 period drifted the seasonal phase by
+    0.25 d/yr against both (audit F5).
     """
-    period = 365.25
+    period = 365.0
     day_mod = day % period
     n = len(mid_days)
     idx_right = np.searchsorted(mid_days % period, day_mod)
@@ -890,7 +910,7 @@ def _interp_monthly_noncyclic(mid_days: np.ndarray, data: np.ndarray,
     """Linear interpolation along a non-cyclic multi-year monthly axis.
 
     For multi-year forcing files (e.g. CMIP6 ozone 1850–2014, 1980
-    months), ``_interp_monthly_cyclic`` wraps with period 365.25 d and
+    months), ``_interp_monthly_cyclic`` wraps with period 365 d and
     throws away interannual evolution.  This helper treats ``mid_days``
     as a monotonic absolute time axis and uses :func:`numpy.interp`
     semantics per trailing column (clamps at the endpoints when ``day``
@@ -922,30 +942,143 @@ def _interp_monthly_noncyclic(mid_days: np.ndarray, data: np.ndarray,
     return ((1.0 - w) * data[i] + w * data[i + 1]).astype(np.float64, copy=False)
 
 
+def _calendar_date_fields(date) -> tuple[int, int, int, float]:
+    """Return ``(year, month, day_of_month, day_frac)`` for a calendar-aware
+    date object (``cftime.datetime`` / ``datetime.datetime``) or a
+    ``numpy.datetime64``.  ``day_frac`` is the fraction of day in [0, 1)."""
+    if hasattr(date, "year") and hasattr(date, "month"):
+        day_frac = (
+            date.hour * 3600.0
+            + date.minute * 60.0
+            + date.second
+            + getattr(date, "microsecond", 0) / 1e6
+        ) / 86400.0
+        return int(date.year), int(date.month), int(date.day), day_frac
+    d = np.datetime64(date)
+    months_int = int(d.astype("datetime64[M]").astype(np.int64))
+    year = months_int // 12 + 1970
+    month = months_int % 12 + 1
+    days_d = d.astype("datetime64[D]")
+    dom = int(
+        (days_d - d.astype("datetime64[M]").astype("datetime64[D]"))
+        .astype(np.int64)
+    ) + 1
+    day_frac = float((d - days_d) / np.timedelta64(1, "D"))
+    return year, month, dom, day_frac
+
+
+def _model_noleap_date(sim_day: float, start_year: int) -> tuple[int, int, int, float]:
+    """Calendar date ``(year, month, day_of_month, day_frac)`` of a model
+    day count (days since ``start_year-01-01`` on the model's noleap
+    365-day clock).  Handles negative ``sim_day`` (dates before the sim
+    epoch) via floor division."""
+    year_off = int(np.floor(sim_day / NOLEAP_DAYS_PER_YEAR))
+    rem = sim_day - year_off * NOLEAP_DAYS_PER_YEAR
+    doy0 = min(int(np.floor(rem)), NOLEAP_DAYS_PER_YEAR - 1)
+    day_frac = rem - doy0
+    # NOLEAP_MONTH_STARTS is length 13 ([12] == 365), so side="right" gives
+    # the 1-based month directly.
+    month = int(np.searchsorted(
+        np.asarray(NOLEAP_MONTH_STARTS), doy0, side="right",
+    ))
+    dom = doy0 - NOLEAP_MONTH_STARTS[month - 1] + 1
+    return start_year + year_off, month, dom, day_frac
+
+
+def _cyclic_phase_anchor(
+    mid_days: np.ndarray, data: np.ndarray, first_date,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Phase-anchor a <=12-record climatology at the first record's noleap
+    day-of-year (audit F4), returning ``(mid_days, data)`` co-sorted.
+
+    ``_read_time_axis`` returns days since the FIRST RECORD, so a CF-dated
+    monthly climatology has ``mid_days[0] == 0`` and cyclic interpolation
+    would place a mid-January-stamped record at Jan 1 — a ~15-day forward
+    phase shift.  Offsetting by the first record's noleap day-of-year
+    (Feb 29 collapsed onto Feb 28) restores the stamped phase (a mid-Jan
+    record sits at day ~14.5-15.5).  The anchored axis is wrapped into
+    [0, 365) and co-sorted with ``data`` so that a climatology starting
+    mid-year (e.g. a July-first file) still satisfies the ascending-axis
+    contract of :func:`_interp_monthly_cyclic`'s ``searchsorted``.  A
+    units-less axis (``first_date is None``) already carries day-of-year
+    values and is returned unchanged (e.g. the ``15.5 + 30.4375*m`` fallback).
+
+    Residual (audit FL4, ACCEPTED not fixed): only the phase ORIGIN is
+    re-anchored; within-year spacing keeps the file's native elapsed days, so a
+    leap-year-dated climatology's post-February records sit <=1 day late.
+    Exact for the noleap-dated CMIP6 convention (the production case). A
+    per-record date reconstruction was rejected: ``_to_days_float`` collapses
+    ``months since`` / ``years since`` axes to average-length elapsed days, so
+    reconstructing dates from ``first_date + elapsed`` is itself ~1-day wrong
+    for those axes (codex review) — no net improvement, and threading the raw
+    per-record dates through three loaders is disproportionate to a <=1-day
+    residual on a rare leap-year-dated file.
+    """
+    if first_date is None:
+        return mid_days, data
+    try:
+        _, month, dom, day_frac = _calendar_date_fields(first_date)
+    except Exception:
+        return mid_days, data
+    dom = min(dom, NOLEAP_DAYS_PER_MONTH[month - 1])  # Feb 29 -> Feb 28
+    offset = NOLEAP_MONTH_STARTS[month - 1] + (dom - 1) + day_frac
+    anchored = (np.asarray(mid_days, dtype=np.float64) + offset) % 365.0
+    order = np.argsort(anchored, kind="stable")
+    if np.array_equal(order, np.arange(order.size)):
+        return anchored, data
+    return anchored[order], np.asarray(data)[order]
+
+
 def _simday_to_file_day(sim_day: float, start_year: int,
                         first_date) -> float:
-    """Map a simulation day (days since ``start_year-01-01``) onto a
-    forcing file's absolute time axis anchored at ``first_date``.
+    """Map a simulation day (days since ``start_year-01-01`` on the model's
+    noleap clock) onto a forcing file's absolute time axis anchored at
+    ``first_date``.
 
     * ``first_date`` is a :class:`cftime.datetime` / ``numpy.datetime64``
       returned by :func:`_read_time_axis` — the calendar date of the
-      file's first record.  ``file_day = (sim_epoch - first_date)·days
-      + sim_day``.
+      file's first record.
     * ``first_date`` is ``None`` when the file's time axis has no CF
       ``units`` attribute (the test-fixture case).  In that case we
       fall through to ``file_day = sim_day``: the file's raw numeric
       time is assumed to share the simulation reference, which is the
       only consistent interpretation for a units-less axis.
 
-    **Calendar-aware sim epoch**: when ``first_date`` is a
-    ``cftime.datetime`` instance, we construct the simulation epoch
-    using the **same calendar** as the file (``noleap``, ``360_day``,
-    ``gregorian``, …) before subtracting.  Counting Gregorian leap
-    days against a noleap file would shift the file_day by ~30 days
-    by 1979 against a 1850 noleap epoch (Codex iter-5 review).
+    **Calendar-aware mapping**:
+
+    * Noleap-family (and ``360_day``) anchors keep the linear form
+      ``file_day = (sim_epoch - first_date)·days + sim_day`` with the
+      sim epoch built in the file's calendar (Codex iter-5 review) — exact
+      for a noleap file, whose axis advances in step with the model clock.
+    * Leap-bearing anchors (``gregorian`` / ``standard`` /
+      ``proleptic_gregorian`` / ``julian`` / ``all_leap`` cftime, or
+      ``datetime64``) use a BY-CALENDAR-DATE mapping (audit F1): adding the
+      noleap ``sim_day`` linearly onto a Gregorian axis drifts ~1 day per
+      4 years (the file gains leap days the model clock never lives
+      through — ~9 days over 1979-2014; an all-leap axis drifts 1 d/yr).
+      Instead the model day is converted to its noleap calendar date
+      (:func:`_model_noleap_date`) and THAT date is located on the file
+      axis, so the model reads the file at its simulated calendar date
+      exactly.
     """
     if first_date is None:
         return sim_day
+    cal = str(getattr(first_date, "calendar", None) or "standard").lower()
+    if not hasattr(first_date, "calendar") or cal in _BY_DATE_MAPPED_CALENDARS:
+        # Gregorian-dated file: by-calendar-date mapping (see docstring).
+        try:
+            y, m, d, day_frac = _model_noleap_date(sim_day, int(start_year))
+            if hasattr(first_date, "calendar"):
+                ctor = _cftime_constructor_for_calendar(first_date.calendar)
+                delta = ctor(y, m, d) - first_date
+                return delta.days + delta.seconds / 86400.0 + day_frac
+            target = np.datetime64(f"{y:04d}-{m:02d}-{d:02d}")
+            delta_days = float(
+                (target - np.datetime64(first_date)) / np.timedelta64(1, "D"),
+            )
+            return delta_days + day_frac
+        except Exception:
+            pass
     try:
         import cftime
         # Calendar-aware epoch: pick the cftime constructor that
@@ -963,10 +1096,8 @@ def _simday_to_file_day(sim_day: float, start_year: int,
             return delta_days + sim_day
     except Exception:
         pass
-    # numpy.datetime64 path: take scalar difference in days.  This
-    # branch is Gregorian-only (numpy has no calendar concept), so it
-    # is reached only when ``first_date`` is itself a ``datetime64``
-    # — by definition Gregorian.
+    # numpy.datetime64 fallback path: take scalar difference in days
+    # (reached only if the by-calendar-date branch above raised).
     try:
         anchor = np.datetime64(f"{int(start_year):04d}-01-01")
         delta_days = float(
@@ -1486,7 +1617,12 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
         file_day = _simday_to_file_day(day, config.start_year, first_date)
         ozone_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
     else:
-        ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
+        # Phase-anchor a CF-dated climatology at its first record's
+        # day-of-year (audit F4: days-since-first-record put mid-Jan at Jan 1).
+        mid_anchored, data_anchored = _cyclic_phase_anchor(
+            mid_days, data, first_date,
+        )
+        ozone_interp = _interp_monthly_cyclic(mid_anchored, data_anchored, day)
 
     if lat_grid is not None:
         # Interpolate to model grid latitudes
@@ -1605,7 +1741,12 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
             file_day = _simday_to_file_day(day, config.start_year, first_date)
             aod_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
         else:
-            aod_interp = _interp_monthly_cyclic(mid_days, data, day)
+            # Phase-anchor a CF-dated climatology at its first record's
+            # day-of-year (audit F4).
+            mid_anchored, data_anchored = _cyclic_phase_anchor(
+                mid_days, data, first_date,
+            )
+            aod_interp = _interp_monthly_cyclic(mid_anchored, data_anchored, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
             # Kinne aerosol files may have extra dimensions (level, band).
@@ -1656,8 +1797,11 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
                     * config.volcanic_scale
                 )
             else:
+                mid_anchored_v, data_anchored_v = _cyclic_phase_anchor(
+                    mid_days_v, data_v, first_date_v,
+                )
                 aod_v = (
-                    _interp_monthly_cyclic(mid_days_v, data_v, day)
+                    _interp_monthly_cyclic(mid_anchored_v, data_anchored_v, day)
                     * config.volcanic_scale
                 )
             if lat_grid is not None:
@@ -1749,8 +1893,11 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
             * config.volcanic_scale
         )
     else:
+        mid_anchored_v, data_anchored_v = _cyclic_phase_anchor(
+            mid_days_v, data_v, first_date_v,
+        )
         aod_v = (
-            _interp_monthly_cyclic(mid_days_v, data_v, day)
+            _interp_monthly_cyclic(mid_anchored_v, data_anchored_v, day)
             * config.volcanic_scale
         )
 

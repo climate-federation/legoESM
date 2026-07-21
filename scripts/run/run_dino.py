@@ -41,15 +41,19 @@ from legoesm.grids.voronoi import create_regional_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 from legoesm.ocean.experiments.dino import (
+    DINO_L2_RECIPES,
+    DINO_RECIPES,
     DINOConfig,
     apply_dino_lat_lon_surface_forcing,
     apply_dino_mpas_surface_forcing,
     create_dino_z_star,
-    dino_lat_lon_vertical,
+    dino_config_for_recipe,
     dino_lat_lon_grid,
+    dino_lat_lon_vertical,
     dino_lat_lon_model_config,
     dino_lat_lon_state,
     dino_lat_lon_surface_forcing_arrays,
+    nemo_faithful_dino_config,
     dino_mpas_model_config,
     dino_mpas_state,
     dino_mpas_surface_forcing_arrays,
@@ -76,6 +80,19 @@ def _parse_args():
              "Voronoi with periodic_x=True + seam wall).",
     )
     p.add_argument(
+        "--recipe", choices=sorted(DINO_RECIPES), default=None,
+        help="Select a named MODEL RECIPE (pure config overlay of another "
+             "ocean model's DINO numerics — EOS, advection/limiter, vertical "
+             "mixing, momentum/Coriolis/integrator blocks). L1 cards: "
+             "'legoesm_default' (Wright+KPP, the identity), 'nemo_paper' "
+             "(Kamm et al. 2025: nemo_seos + TKE). L2 cards: 'veros' "
+             "(Vallis EOS + TKE + superbee + streamfunction/AB2), 'mitgcm' "
+             "(JMD95-ish EOS + KPP + DST3 + flux-form/AB2/unsplit-FS), "
+             "'oceananigans' (TEOS-10 + CATKE + WENO + AB2). Applied FIRST; "
+             "explicit --eos/--vmix/--barotropic-solver still override it. "
+             "L2 cards are lat-lon-only (the paper R1 comparison grid).",
+    )
+    p.add_argument(
         "--n-lon", type=int, default=50,
         help="Zonal cell count for the Mercator grid (lat-lon only; "
              "50 = 1° R1, default).",
@@ -99,7 +116,8 @@ def _parse_args():
              "away on the implicit-CN MPAS path; ignored on lat-lon.",
     )
     p.add_argument(
-        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        "--vmix", choices=("kpp", "tke", "constant", "richardson", "catke"),
+        default=None,
         help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
              "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
              "default 5e-4 momentum floor fixes the day-39 instability so it "
@@ -115,6 +133,15 @@ def _parse_args():
              "— the oracle EOS for the thermocline comparison). Both grids.",
     )
     p.add_argument(
+        "--nemo-faithful-grid", action="store_true",
+        help="Build the lat-lon grid on NEMO's EXACT DINO R1 mesh "
+             "(DINOConfig.nemo_faithful_grid): 48×195 with the equator on a "
+             "T-point and faces [1,49] (matches our NEMO 5.0.2 build cell-for-"
+             "cell to 3e-6°; 100%% wet/dry-domain agreement), instead of the "
+             "legoESM [-50,0]/198×50 default. Co-sets the bathymetry lon frame "
+             "+ sill anchor via nemo_faithful_dino_config. Lat-lon only.",
+    )
+    p.add_argument(
         "--tke-momentum-visc-bg", type=float, default=None,
         help="TKE-only background vertical viscosity FLOOR [m²/s] "
              "(DINOConfig.tke_momentum_visc_bg, default 5e-4 = 4× the paper "
@@ -122,6 +149,14 @@ def _parse_args():
              "that NaNs our TKE at the paper value; applied (max with A_v_bg) "
              "only when --vmix tke. kpp/constant ignore it. Lower it (e.g. "
              "1.2e-4) to run TKE at the unstable paper viscosity.",
+    )
+    p.add_argument(
+        "--tke-prandtl-ri", choices=("on", "off"), default=None,
+        help="TKE Richardson-dependent Prandtl (DINOConfig.tke_prandtl_ri; "
+             "NEMO zdftke nn_pdl=1). on: interior tracer diffusivity avt drops "
+             "toward 0.1·avm in stratified water (Pr=clamp(Ri/ri_cri,1,10)); "
+             "off (default): constant Pr=10. Effective only for --vmix tke. "
+             "The nemo_dino_kamm recipe sets it on.",
     )
     p.add_argument(
         "--evd-momentum", choices=("on", "off"), default=None,
@@ -137,6 +172,16 @@ def _parse_args():
              "'visbeck' (Visbeck 1997, historical default) or 'treguier' "
              "(Treguier 1997 / NEMO nn_aei_ijk_t=21 — the DINO oracle "
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
+    )
+    p.add_argument(
+        "--gm-redi-mld-criterion", choices=("rho_c", "n2_integral"),
+        default=None,
+        help="Mixed-layer-depth criterion for the NEMO ldfslp slope ramp / "
+             "native slopes (DINOConfig.gm_redi_mld_criterion): 'rho_c' "
+             "(default, potential-density difference) or 'n2_integral' (NEMO "
+             "zdfmxl exact integral(MAX(N^2,0) dz) >= g*rho_c/rho0; the "
+             "nemo_dino_kamm card selects it). Only affects runs with the ML "
+             "ramp / native slopes active.",
     )
     p.add_argument(
         "--allow-multiyear", action="store_true",
@@ -165,6 +210,115 @@ def _parse_args():
         help="Treguier kappa cap aei0 [m2/s] (DINOConfig.treguier_aei0, "
              "default 3000 = the DINO namelist rn_Ue*rn_Le). Ignored unless "
              "--gm-kappa-scheme treguier.",
+    )
+    p.add_argument(
+        "--barotropic-solver",
+        choices=("implicit_cn", "explicit_substep", "rigid_lid",
+                 "implicit_unsplit"),
+        default=None,
+        help="Barotropic (free-surface / rigid-lid) solver "
+             "(DINOConfig.barotropic_solver, default 'implicit_cn'). "
+             "'rigid_lid' is the lat-lon-C-grid island-streamfunction solver — "
+             "the natural ACC solver for the re-entrant channel (the southern "
+             "continent below the channel is a topological island), so the "
+             "depth-integrated transport is solved directly as the island "
+             "circulation instead of riding the free-surface eta solve's null "
+             "mode (which under-/over-shoots + oscillates the ACC). "
+             "LAT-LON ONLY (MPAS supports implicit_cn / explicit_substep).",
+    )
+    p.add_argument(
+        "--barotropic-coriolis",
+        choices=("avg", "een", "een_metric"),
+        default=None,
+        help="In-substep barotropic Coriolis discretization "
+             "(DINOConfig.barotropic_coriolis; explicit_substep only). "
+             "'avg' (legacy 4-pt average) annihilates the 2Δx zonal "
+             "checkerboard — the C-grid barotropic Coriolis null mode that "
+             "drives the spurious deep-equatorial jet. 'een' = NEMO "
+             "dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (ln_dynvor_een), "
+             "which restores the velocity null mode. 'een_metric' = METRIC-"
+             "COMPLETE EEN (folds NEMO's e1v/r1_e1u + e2u/r1_e2v scale factors "
+             "into ffu/ffv exactly, matching NEMO dyn_cor_2D) — the more NEMO-"
+             "faithful choice (node 16; DINO default). NB it is a ~1% high-lat "
+             "correction and does NOT cure the |lat|~68deg 2dx eta runaway.",
+    )
+    p.add_argument(
+        "--barotropic-coriolis-split",
+        choices=("frozen", "live"),
+        default=None,
+        help="Barotropic-Coriolis split (DINOConfig.barotropic_coriolis_split; "
+             "explicit_substep only). 'frozen' (default) holds the planetary "
+             "Coriolis frozen in F_slow across the substep window; 'live' "
+             "removes the pre-step 2D barotropic Coriolis from F_slow and "
+             "re-applies it LIVE each substep on the evolving transport (NEMO "
+             "dyn_spg_ts:296-300 + dyn_cor_2D). Under vorticity_scheme="
+             "'een_total' 'live' requires --barotropic-coriolis een; it is what "
+             "unblocks the nemo_dino_kamm_mlf leapfrog at dt=2700 (node 16).",
+    )
+    p.add_argument(
+        "--momentum-advection",
+        choices=("vector_invariant", "flux_form", "weno5", "weno7", "weno9"),
+        default=None,
+        help="Horizontal momentum-advection scheme "
+             "(DINOConfig.momentum_advection, default 'vector_invariant' = the "
+             "AL81 PV-flux vector-invariant form; 'weno7' = the Oceananigans "
+             "WENOVectorInvariant card block; 'flux_form' = MITgcm). Overrides "
+             "the recipe card — the L2 bisect lever the cards could not "
+             "previously isolate from their time-integration blocks.",
+    )
+    p.add_argument(
+        "--coriolis-scheme",
+        choices=("matsuno_split", "explicit_ab2"),
+        default=None,
+        help="Coriolis time-stepping placement (DINOConfig.coriolis_scheme). "
+             "'matsuno_split' (default): unconditionally-neutral FB rotation "
+             "sub-step. 'explicit_ab2': f×u enters du_dt (requires "
+             "--outer ab2 via the recipe card; model validation rejects "
+             "unsupported pairings loudly).",
+    )
+    p.add_argument(
+        "--outer-integrator",
+        choices=("forward_euler", "ab2", "leapfrog"),
+        default=None,
+        help="Outer (baroclinic) time integrator (DINOConfig.outer_integrator). "
+             "'forward_euler' (default), 'ab2' (Veros/MITgcm), or 'leapfrog' = "
+             "NEMO Modified Leap-Frog (stp_MLF): three time levels + the plain "
+             "Robert-Asselin filter. leapfrog REQUIRES coriolis_scheme="
+             "explicit_ab2 (Coriolis in the RHS) — pair with --vorticity-scheme "
+             "een_total (the nemo_dino_kamm_mlf recipe sets all three).",
+    )
+    p.add_argument(
+        "--vorticity-scheme",
+        choices=("al81", "een_total"),
+        default=None,
+        help="Vector-invariant vorticity flux (DINOConfig.vorticity_scheme). "
+             "'al81' (default): relative-vorticity EEN triad (planetary f in the "
+             "separate face-f path). 'een_total': NEMO ln_dynvor_een — the "
+             "ABSOLUTE vorticity (f+zeta)/e3f rides the EEN triad (Coriolis IN "
+             "the RHS); requires --coriolis-scheme explicit_ab2.",
+    )
+    p.add_argument(
+        "--asselin-gamma", type=float, default=None,
+        help="Robert-Asselin filter coefficient rn_atfp for --outer-integrator "
+             "leapfrog (DINOConfig.asselin_gamma; NEMO default 0.1, plain RA not "
+             "Williams). Ignored for other integrators.",
+    )
+    p.add_argument(
+        "--barotropic-slow-forcing-ab2", choices=("on", "off"), default=None,
+        help="AB2 time-centering of the barotropic slow forcing F_slow "
+             "(DINOConfig.barotropic_slow_forcing_ab2; Oceananigans Gᵁ "
+             "convention). REQUIRED for stability when coriolis_scheme="
+             "explicit_ab2 pairs with barotropic_solver=implicit_cn (without "
+             "it the barotropic-mode Coriolis integrates forward-Euler — the "
+             "diagnosed 'oceananigans'-card barotropic blowup). Default: the "
+             "recipe card's value ('oceananigans' card = on).",
+    )
+    p.add_argument(
+        "--rigid-lid-dt-mom-ratio", type=float, default=None,
+        help="dt_mom under-relaxation ratio for the rigid_lid faithful stack "
+             "(DINOConfig.rigid_lid_dt_mom_ratio, default 9.0 = Veros "
+             "dt_mom=4800/dt_tracer=43200). dt_mom = dt/ratio accelerates the "
+             "ACC spin-up; ignored unless --barotropic-solver rigid_lid.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
@@ -357,11 +511,26 @@ def main():
             "--allow-multiyear inside a SLURM job) — see plan."
         )
 
+    # Base config: the r1_exact preset (NEMO-DINO exact stack) when selected,
+    # else the legoESM defaults.
     if getattr(args, "preset", None) == "r1_exact":
         from legoesm.ocean.experiments.dino import dino_r1_exact_config
         cfg = dino_r1_exact_config()
     else:
         cfg = DINOConfig()
+    # A named model recipe (pure config overlay) is applied FIRST; the explicit
+    # scheme flags below still override it. L2 cards (veros/mitgcm/oceananigans)
+    # select lat-lon-C-grid-only blocks (flux-form/WENO momentum, AB2 outer,
+    # rigid-lid / unsplit free surface), so they are rejected on the MPAS mesh —
+    # the intercomparison runs on the paper's lat-lon R1 grid.
+    if args.recipe is not None:
+        if args.recipe in DINO_L2_RECIPES and args.grid != "latlon":
+            raise SystemExit(
+                f"--recipe {args.recipe} is a lat-lon-only L2 card (it needs "
+                f"dycore blocks the MPAS Voronoi mesh does not provide); rerun "
+                f"with --grid latlon, or select an L1 card "
+                f"({sorted(set(DINO_RECIPES) - DINO_L2_RECIPES)}) on MPAS.")
+        cfg = dino_config_for_recipe(args.recipe, base=cfg)
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
@@ -374,8 +543,20 @@ def main():
     if args.evd_momentum is not None:
         cfg = dataclasses.replace(
             cfg, evd_on_momentum=(args.evd_momentum == "on"))
+    if args.tke_prandtl_ri is not None:
+        cfg = dataclasses.replace(
+            cfg, tke_prandtl_ri=(args.tke_prandtl_ri == "on"))
+    if args.barotropic_coriolis is not None:
+        cfg = dataclasses.replace(
+            cfg, barotropic_coriolis=args.barotropic_coriolis)
+    if args.barotropic_coriolis_split is not None:
+        cfg = dataclasses.replace(
+            cfg, barotropic_coriolis_split=args.barotropic_coriolis_split)
     if args.gm_kappa_scheme is not None:
         cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
+    if args.gm_redi_mld_criterion is not None:
+        cfg = dataclasses.replace(
+            cfg, gm_redi_mld_criterion=args.gm_redi_mld_criterion)
     if args.bottom_drag_scheme is not None:
         cfg = dataclasses.replace(
             cfg, bottom_drag_scheme=args.bottom_drag_scheme)
@@ -384,8 +565,62 @@ def main():
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
+    if args.barotropic_solver is not None:
+        cfg = dataclasses.replace(cfg, barotropic_solver=args.barotropic_solver)
+    if args.momentum_advection is not None:
+        cfg = dataclasses.replace(
+            cfg, momentum_advection=args.momentum_advection)
+    if args.coriolis_scheme is not None:
+        cfg = dataclasses.replace(cfg, coriolis_scheme=args.coriolis_scheme)
+    if args.outer_integrator is not None:
+        cfg = dataclasses.replace(cfg, outer_integrator=args.outer_integrator)
+    if args.vorticity_scheme is not None:
+        cfg = dataclasses.replace(cfg, vorticity_scheme=args.vorticity_scheme)
+    if args.asselin_gamma is not None:
+        cfg = dataclasses.replace(cfg, asselin_gamma=args.asselin_gamma)
+    if args.barotropic_slow_forcing_ab2 is not None:
+        cfg = dataclasses.replace(
+            cfg,
+            barotropic_slow_forcing_ab2=(
+                args.barotropic_slow_forcing_ab2 == "on"),
+        )
+    if args.rigid_lid_dt_mom_ratio is not None:
+        cfg = dataclasses.replace(
+            cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
+    if args.nemo_faithful_grid:
+        if args.grid != "latlon":
+            p.error("--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
+                    "mesh); rerun with --grid latlon.")
+        # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
+        # whatever recipe/overrides preceded it (must not be clobbered after).
+        cfg = nemo_faithful_dino_config(base=cfg)
     dt = cfg.dt
     grid_kind = args.grid
+
+    # The MPAS model validates ONLY {explicit_substep, implicit_cn}; rigid_lid
+    # (lat-lon island streamfunction) and implicit_unsplit have no Voronoi-mesh
+    # implementation.  Reject any unsupported solver up front with a clear
+    # message instead of letting MPASOceanModel raise after building the mesh
+    # (dispatch-hardening: a clearer error, earlier).
+    _MPAS_BAROTROPIC = ("implicit_cn", "explicit_substep")
+    if grid_kind == "mpas" and cfg.barotropic_solver not in _MPAS_BAROTROPIC:
+        raise SystemExit(
+            f"--barotropic-solver {cfg.barotropic_solver} is not supported on "
+            f"the MPAS Voronoi mesh (lat-lon-C-grid-only). On MPAS use one of "
+            f"{_MPAS_BAROTROPIC}; rigid_lid / implicit_unsplit require "
+            f"--grid latlon.")
+    # The MPAS implicit-vertical-mixing path only builds K-profiles for KPP
+    # (ocean_model_mpas.py:251); tke/catke/richardson have no MPAS profile
+    # builder and would NaN after the mesh is built. Fail loud + early
+    # (dispatch-hardening) -- catches e.g. `--recipe nemo_paper --grid mpas`
+    # (nemo_paper sets vmix_scheme="tke") and `--grid mpas --vmix tke`.
+    _MPAS_VMIX = ("kpp", "constant")
+    if grid_kind == "mpas" and cfg.vmix_scheme not in _MPAS_VMIX:
+        raise SystemExit(
+            f"--vmix {cfg.vmix_scheme} (from --recipe {args.recipe!r} / --vmix) "
+            f"is not supported on the MPAS Voronoi mesh: only {_MPAS_VMIX} have "
+            f"an MPAS K-profile builder. Use --grid latlon, or override with "
+            f"--vmix kpp on MPAS.")
 
     # Build grid, state, model — branch on grid type
     if grid_kind == "latlon":
@@ -445,11 +680,26 @@ def main():
           f"snapshot every {snapshot_every_steps} steps "
           f"= {snapshot_every_steps * dt / 86400.0:.2f} days")
     print(f"Forcing: {'OFF (dycore only)' if args.no_forcing else 'wind + T/S restoring (Q_sr split) + Jerlov-I SW penetration'}")
-    print(f"Physics: {'OFF' if args.physics_off else 'KPP + GM/Redi + enhanced-diffusion convection'}")
+    print(f"Physics: "
+          f"{'OFF' if args.physics_off else cfg.vmix_scheme.upper() + ' + GM/Redi + enhanced-diffusion convection'}")
     print(f"Output:  {args.output_dir}")
     print()
     print(f"{'step':>6} {'day':>7} {'|u|':>10} {'|v|':>10} {'|eta|':>10} "
           f"{'T_max':>7} {'T_min':>7} {'KE':>10}")
+
+    # The rigid_lid faithful stack uses the ab2 outer integrator + a
+    # streamfunction (ψ, dψ, dψ_prev, dpsin, dpsin_prev) carry; seed them (and
+    # the rigid-lid island cache + dtype reconciliation) once from the concrete
+    # initial state before the eager step loop, so the first step has a complete
+    # carry. lat-lon only (rigid_lid is rejected on MPAS upstream).
+    # barotropic_slow_forcing_ab2 (the 'oceananigans' card's Gᵁ AB2
+    # time-centering) likewise needs its F_slow_{u,v}_prev carry seeded before
+    # step 1 (_step_impl raises on an unseeded prev); seed_scan_carry now does
+    # that too. Other stacks keep the eager-loop path byte-identical.
+    if grid_kind == "latlon" and (
+            cfg.barotropic_solver == "rigid_lid"
+            or model_cfg.flat_get("barotropic_slow_forcing_ab2")):
+        state = model.seed_scan_carry(state, dt)
 
     t_wall_start = time.time()
     snapshot_idx = 0

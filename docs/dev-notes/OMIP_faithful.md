@@ -388,6 +388,94 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   COREv2 schemas (see facts above). Launched 10yr REFERENCE run 8089712 (burst, RUN_REF,
   nn_itend=87600, nn_stock=8760) + eORCA1.2 mesh dl 8089713. NEMO side de-risked end-to-end.
 
+- **2026-07-13 (ice-partition + KPP-freshwater + normalize + runoff/ISF fixes — codex 4-round loop):**
+  Implemented the adversarial-review spec A–D on `omip-faithful-nemo-comparison`:
+  **A** ONE shared mask-aware partition `coupler.ocean_forcing.blend_ice_ocean_forcing`
+  (open-water stress/EVAP/heat/SW × f_open=1−A at the SINGLE PRE-step ice-conc time level —
+  the state the ice integrated its atm fluxes over, so A+(1−A)=1 conserves the incident flux;
+  ice basal heat/brine salt/melt fw/ice stress added exactly once; `raw_core2` mode reproduces
+  the old `_ice_surface_heat` heat split bit-exactly and adds the missing STRESS+EVAP partition
+  — the old wiring left full open-water τ + evaporation acting under ice, prime deep-polar-MLD/
+  salinification suspects); runner `_route_ice_response_to_ocean` deleted;
+  `omip_sea_ice_surface_forcing` refactored onto the same helper.
+  **B** KPP freshwater buoyancy: `sf.freshwater = net_freshwater_flux(fw, restoring EXCLUDED)`
+  on the non-cube host loop (KPP previously saw ZERO freshwater buoyancy — no halocline defense);
+  consumer-scoped guard `_validate_kpp_freshwater_contract` (latlon/tripole reject 'external'
+  which double-applies as virtual salt; MPAS 'external' is τ/q-only ⇒ safe).
+  **C** `NEMOMatchTripoleRecipeConfig.normalize_freshwater=True` + passthrough + catalog entries
+  (`omip_nemo_match_{tripole,mpas}_v1`) now carry it (recipe silently fell back to False vs the
+  proven `_create_setup` True).
+  **D** `--runoff`+`--isf` ice-shelf double-count fixed: `load_runoff_monthly(exclude_isf=args.isf)`
+  drops `sornfisf` when ISF deposits it at depth; warns when the ISF file ≠ the runoff source.
+  Also: prognostic ice now sees the SAME dm2dc-modulated SW as the ocean (shared `dm2dc_sw_factor`);
+  ice TileResponse passed UNSCALED under the cold-start ramp (conservation with ice_state);
+  NaN-safe `jnp.where` masking; stale runoff cell-sum test fixed to the area-integral contract
+  (verified pre-existing failure at HEAD in a clean worktree).
+  **Validation: 502 focused unit tests pass (incl. new partition/full-ice/ice-free-bit-identity/
+  land-mask/KPP-buoyancy/brine-once/NaN-leak/guard/catalog tests + inline-coeff, private-import,
+  dispatch-hardening ratchets); codex adversarial loop ran 5 rounds (r1: 4 real findings fixed —
+  MPAS-guard abort, ice dm2dc/ramp inconsistency, restoring-in-KPP, ISF-file mismatch; r2: 2 fixed —
+  ramp-scaling broke ice-ocean conservation (reverted), NaN×0 masking; r3: catalog normalize +
+  consumer-scoped guard; r4: post→PRE-step partition conc (flux conservation at melt/freeze
+  margins) fixed; the A·τ_sw·swd under-ice SW dribble is a documented PRE-EXISTING surrogate
+  (~3% SW non-closure over ice, ice model has no penetration channel) — zero it via
+  --ice-thermo-sw-trans 0 for a strict-budget A/B).
+  NOTE: ll2_ri015 (8920073) + trp2_tkeice (8916859) ran WITH the old defects (full τ+evap under ice,
+  KPP fw-blind, runoff+ISF double count) — re-run/re-score after merge before comparing to NEMO.
+  The nemo-gaps-p4p5 worktree needs these fixes ported (its `--runoff-depth-nemo-ini` branch flag
+  is unaffected by D but shares the ice/KPP defects).
+
+- **2026-07-13b (residual-limitation closure + p4p5 merge + all-grid relaunch):**
+  Merged `ocean-nemo-gaps-p4-p5` (42 commits: --ice-init NEMO SI3 IC, --tripole-vmix tke,
+  --nemo-monthly-init/--sss-restore-file, ln_rnf_depth_ini runoff-depth map, --prescribed-flow
+  SCM twins, NEMO centred split-explicit barotropic + DINO r1_exact) into
+  `omip-faithful-nemo-comparison` → ONE tree for every grid. Then closed the three disclosed
+  limitations, 6-round codex loop:
+  **L1** `SeaIceConfig.sw_transmittance_const` (tail field, spec'd tier-2): constant-scheme SW
+  transmittance is debited from the ice EB inside `compute_ice_sw` (reflected+absorbed+
+  penetrated == sw_down EXACTLY) and reaches the ocean via the existing
+  `sw_penetrated → ocean_heat_extraction` channel; runner retires the ocean-side A·τ·swd
+  surrogate (`sw_transmittance_ice=0.0`) — SW budget over ice CLOSED; `--ice-thermo-sw-trans`
+  now feeds the ice model and is validated for the prognostic path.
+  **L2** `TileResponse.ice_concentration_thermo` (trailing None-default): v2 response exposes the
+  post-transport pre-thermo aggregate concentration; the runner partitions open water at that
+  exact flux time level (advective grids included).
+  **L3 (tripole ice TRANSPORT)**: `upwind_to_u/v_points` PROMOTED ocean→core
+  (`upwind_cell_to_uface/vface`; ocean re-imports); new fold-aware donor-cell C-grid advection
+  `transport.fv_flux_divergence_latlon_cgrid` — E-N→face rotation with local angles; SEAM =
+  ONE shared donor-cell upwind flux per fold pair (last-cell-row projection onto the seam
+  normal, partner via vector-parity perm_v flip; `pad_ns_scalar`'s fold row is SIDE-SWAPPED,
+  caught by a positivity test + hand trace) → exact pair cancellation + positivity; REAL
+  eORCA1.2-mesh closure test (was 2.8e-4 leak, now <1e-10); gate split
+  `grid_supports_ice_transport` (tripole YES) vs `grid_supports_ice_dynamics` (mEVP still
+  MPAS/latlon/cube — curvilinear strain-rate ops = future dycore project); `--ew-cyclic-overlap`
+  now slaves ice_state AND ice_resp halo columns; `_surface_currents` returns true geographic
+  E/N on tripole via the canonical `rotate_tpoint_currents_to_geographic` (renormalized).
+  Merge-artifact fixes: canopy param-spec double-classification (graduated), #928 ddm spec
+  format, stale slab-ice heat-bound test (finding-#6 surplus melt-out warming is legitimate,
+  verified pre-existing at the merge commit).
+  **RELAUNCH (all grids, post-fix tree)**: ll3_ri015 (latlon_bathy, ll2 command verbatim),
+  trp3_tke_iceinit (tripole full stack from MAIN checkout; stale trp2 on old code cancelled),
+  mpas7 kppdeep r2 (ico7), DINO pub campaign r2 (latlon 365d wright+seos + MPAS 90d + figures),
+  DINO L2 recipe intercomparison r2. Score day-90 vs NEMO month-3 as before.
+
+- **2026-07-14 (post-fix A/B RESULT — ll3 vs ll2, clean one-variable):** ll3_ri015 (8974876) and
+  ll2_ri015 (8920073) ran the BYTE-IDENTICAL command (latlon_bathy 180×360, --kpp-ri-crit 0.15,
+  full P45, --prognostic-sea-ice, dt150, 0.25yr), day-90 vs NEMO month-3 — the ONLY difference is
+  the code (ll2 @ 1cb0c4464 pre-fix; ll3 @ 4c32e98a2 post-L1-L3). The fixes IMPROVE every metric:
+  SST RMSE 0.975→0.959 / bias 0.392→0.382 / corr 0.9967→0.9968 (both EXCELLENT); SSS RMSE
+  1.451→1.409 / corr 0.768→0.782; Arctic SSS bias +1.44→+1.23 (fresher toward NEMO). **HEADLINE:
+  Arctic MLD bias +78.7 m → +26.6 m (lego 176.9→124.9 vs NEMO 98.2) — a ~52 m shoaling toward
+  NEMO**, the KPP-freshwater-buoyancy channel (fix B) restoring the polar-halocline defense the
+  boundary layer was missing. Global MLD bias +13.1→+8.3 m. SSS still verdict-"poor" (Arctic
+  rmse 3.59, +1.23 residual = the structural Siberian-shelf freshwater retention, NOT the
+  ice-partition bug — see [[omip-cross-grid-arctic-sss]]).
+  mpas7 kppdeep r2 (8974878, post-fix): SST EXCELLENT (RMSE 1.099, bias 0.025, corr 0.995), SSS
+  GOOD (RMSE 0.975, corr 0.925) — strong absolute, but Arctic MLD +177 m too deep (lego 273.7 vs
+  NEMO 96.1; separate MPAS issue, no pre-fix MPAS baseline at this protocol to A/B).
+  trp3 (tripole, the run that exercises the NEW L3 ice transport) still queue-blocked on burst
+  node availability — the headline L3 validation awaits it.
+
 ## Next actions (gated)
 
 DONE iter1: probe, stage, BUILD, smoke-validated, WOA, ref-run 8089712 + mesh 8089713 launched.

@@ -140,10 +140,6 @@ FIELD_RANGES = {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
-    "baroclinic_gyre": {
-        "eta": (None, None),       # meters - adaptive range for circulation patterns
-        "SST": (None, None),       # °C - adaptive range for circulation-driven T patterns
-    },
     "rest_state_stratified_no_land": {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
@@ -5739,7 +5735,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
                 T_ref=run_kw.get("T_ref", 17.5),
                 S_ref=run_kw.get("S_ref", 35.0),
             )
-        config = config._replace(**replace_kwargs)
+        config = config.replace_flat(**replace_kwargs)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)

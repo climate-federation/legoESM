@@ -5,8 +5,7 @@ the override builder (which must leave the production KPPConfig byte-identical
 when no knob is set, reject out-of-range knobs, and thread through
 ``build_mpas_ocean``/``build_latlon_bathy -> _create_setup``) and the dispatch
 guard, which allows the KPP-running grids (mpas, latlon_bathy) and fails loud on
-grids that would silently ignore the flag (tripole = no KPP boundary layer, its
-closure is selected by --tripole-vmix at scheme defaults; cubed_sphere).
+grids that would silently ignore the flag (tripole = no KPP, cubed_sphere).
 """
 
 from __future__ import annotations
@@ -74,12 +73,6 @@ def test_guard_raises_on_non_kpp_grid_when_flag_set():
             _validate_kpp_grid(grid, kpp_ri_crit=0.5, kpp_cv=None)
         with pytest.raises(SystemExit):
             _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=2.5)
-    # Reconciliation with the branch-local --tripole-vmix closure flag: the
-    # rejection message must point tripole users at --tripole-vmix (the tripole
-    # KPP path, which runs scheme DEFAULTS and takes no Ri_crit/Cv knobs).
-    with pytest.raises(SystemExit) as excinfo:
-        _validate_kpp_grid("tripole", kpp_ri_crit=0.5)
-    assert "--tripole-vmix" in str(excinfo.value)
 
 
 def test_guard_noop_on_kpp_grids_or_no_flags():

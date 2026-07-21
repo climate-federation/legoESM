@@ -2,7 +2,10 @@
 
 Walks a results root (default ``results/bcw_scaling``), reads every flat
 per-case JSON written by ``run_cpu_mpi_scaling.py`` (and the equivalent
-single-process ``run_levante_gpu_scaling.py`` rows), and emits one tidy row per
+single-process ``run_levante_gpu_scaling.py`` rows), plus the ``.jsonl``
+records appended by the SPMD bench lanes (``bench_atm_latlon_spmd_scaling``,
+``bench_mpas_spmd_scaling``, ``bench_ocean_latlon_spmd_scaling``,
+``bench_cube_tiled_step_scaling``), and emits one tidy row per
 measured point with the columns the publication plotter consumes:
 
     backend, grid, case, precision, mode, n_devices, resolution,
@@ -14,8 +17,9 @@ measured point with the columns the publication plotter consumes:
 (``..._gpu_...`` / ``..._cpu_...``) because the flat CPU-MPI JSON does not
 record a device field.  ``case`` maps ``physics_level`` ("none"->"dry",
 "moist"->"moist", others kept verbatim).  ``resolution_km`` is the nominal
-horizontal grid spacing for the grid family.  Duplicate keys
-(same backend/grid/case/precision/mode/n_devices/resolution) keep the row with
+horizontal grid spacing for the grid family.  Duplicate keys (the full
+``_key`` tuple: component, backend, grid, case, precision, mode, n_resource,
+n_devices, resolution, n_levels, physics_level, fix_mass) keep the row with
 the highest SYPD (best of repeated measurements); the number dropped is logged.
 
 Pure stdlib + ``legoesm.constants`` (for R_earth) — no JAX — so it runs in a
@@ -86,7 +90,7 @@ def resolve_backend(d: dict, source: Path) -> str:
     Newer runs serialize ``backend`` (cpu/gpu/cuda/tpu); older ones don't, so
     we still infer CPU-vs-GPU from the output-dir name as a fallback.
     """
-    jb = str(d.get("backend", "") or "").lower()
+    jb = str(d.get("backend", "") or d.get("platform", "") or "").lower()
     if jb in ("gpu", "cuda", "rocm"):
         return "GPU"
     if jb == "cpu":
@@ -97,11 +101,22 @@ def resolve_backend(d: dict, source: Path) -> str:
 
 
 def _row_from_json(d: dict, source: Path) -> dict | None:
-    """Build a tidy row from one flat per-case JSON, or None if not a case."""
+    """Build a tidy row from one flat per-case JSON, or None if not a case.
+
+    Serves BOTH the run_cpu_mpi_scaling flat JSONs (n_ranks semantics) and
+    the SPMD bench-lane JSONL records (n_devices semantics; single-process
+    multi-device, so n_ranks would collapse the whole ladder to 1).
+    Virtual-CPU-device proxy rows (forced host-platform devices) are
+    communication-overhead probes, NOT hardware scaling — skipped so they
+    never contaminate a CPU curve.
+    """
     if "sypd" not in d or "grid_type" not in d:
         return None
+    md = d.get("metadata")
+    if isinstance(md, dict) and md.get("virtual_cpu_devices"):
+        return None
     grid = d["grid_type"]
-    n_dev = d.get("n_ranks", d.get("n_gpus"))
+    n_dev = d.get("n_devices", d.get("n_ranks", d.get("n_gpus")))
     if n_dev is None:
         return None
     phys = d.get("physics_level", "none")
@@ -109,11 +124,12 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     backend = resolve_backend(d, source)
     cpt = int(d.get("cpus_per_task") or 1)
     n_cores = int(d.get("n_cores") or (int(n_dev) * cpt))
+    is_ocean = str(d.get("component", "")).lower() == "ocean"
     return {
-        "component": "atm",
+        "component": "ocean" if is_ocean else "atm",
         "backend": backend,
         "grid": grid,
-        "case": _CASE.get(phys, phys),
+        "case": "ocean" if is_ocean else _CASE.get(phys, phys),
         "precision": d.get("precision", ""),
         "mode": d.get("mode", ""),
         "n_devices": int(n_dev),
@@ -228,14 +244,19 @@ def _rows_from_nested(d: dict, source: Path, component: str = "ocean") -> list[d
 
 
 def _key(row: dict) -> tuple:
-    # Key on the RESOURCE count (CPU cores / GPU devices) so a hybrid
-    # 8r x 4c run does not collide with a packed 32r x 1c run, and include
-    # component + n_levels + physics_level + fix_mass so otherwise-identical
-    # rows (atm vs ocean latlon, L26 vs L40, ocean baro solver, or a
-    # NO_MASS_FIX ablation) never collapse to one row (codex review/audit).
+    # Key on BOTH the resource count (CPU cores / GPU devices) AND n_devices
+    # (rank/face count).  n_devices is required for the cube route-B node-fill
+    # lane, where every rung fills the node (n_cores ~ 128 for N in {1,2,3,6}
+    # via THREADS=128/N) so a cores-only key would collapse the 4-rung curve to
+    # ~2 points; it also makes a hybrid 8r x 4c run distinct from a packed
+    # 32r x 1c run at the same 32 cores (the stated intent this code previously
+    # failed to implement).  component + n_levels + physics_level + fix_mass
+    # keep otherwise-identical rows (atm vs ocean latlon, L26 vs L40, ocean
+    # baro solver, NO_MASS_FIX ablation) from collapsing (codex review/audit).
     return (row["component"], row["backend"], row["grid"], row["case"],
-            row["precision"], row["mode"], row["n_resource"], row["resolution"],
-            row["n_levels"], row.get("physics_level", ""), row.get("fix_mass", True))
+            row["precision"], row["mode"], row["n_resource"], row["n_devices"],
+            row["resolution"], row["n_levels"],
+            row.get("physics_level", ""), row.get("fix_mass", True))
 
 
 def collect(roots) -> tuple[list[dict], int]:
@@ -293,6 +314,27 @@ def collect(roots) -> tuple[list[dict], int]:
                         _add(row)
             else:
                 _add(_row_from_json(d, jf))
+        # SPMD bench lanes (bench_atm_latlon_spmd_scaling,
+        # bench_mpas_spmd_scaling, bench_ocean_latlon_spmd_scaling,
+        # bench_cube_tiled_step_scaling) append one flat record per line
+        # to a .jsonl — same row builder, one dict per line.
+        for jf in sorted(rp.rglob("*.jsonl")):
+            if any(part.startswith(("val_", "_ab_")) for part in jf.parts):
+                continue
+            try:
+                lines = jf.read_text().splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(d, dict):
+                    _add(_row_from_json(d, jf))
     rows = sorted(
         best.values(),
         key=lambda r: (r["backend"], r["grid"], r["case"], r["precision"],

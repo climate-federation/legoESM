@@ -37,8 +37,13 @@ def test_resolve_var_bidirectional():
     assert resolve_var({"foo"}, "bar") is None
 
 
-def _synthetic_era5(names="long", *, drop=()):
-    """A tiny in-memory ERA5-like dataset with the requested naming convention."""
+def _synthetic_era5(names="long", *, drop=(), extra2d=None):
+    """A tiny in-memory ERA5-like dataset with the requested naming convention.
+
+    ``extra2d``: {long_name: scalar-or-(nlat,nlon)-array} appended as extra
+    (time, lat, lon) surface variables — used to exercise the sst fallback
+    chain (sea_surface_temperature / 2m_temperature).
+    """
     import xarray as xr
 
     nlat, nlon, nlev = 5, 6, 3
@@ -46,6 +51,7 @@ def _synthetic_era5(names="long", *, drop=()):
         "temperature": "t", "u_component_of_wind": "u",
         "v_component_of_wind": "v", "specific_humidity": "q",
         "surface_pressure": "sp", "skin_temperature": "skt",
+        "sea_surface_temperature": "sst", "2m_temperature": "t2m",
         "geopotential_at_surface": "z_sfc",
     }
     # temperature VARIES by level (300/250/200 K at 1000/500/100 hPa) so the loader's
@@ -87,6 +93,11 @@ def _synthetic_era5(names="long", *, drop=()):
             continue
         data[_key(long)] = (("time", "lat", "lon"),
                             np.full((1, nlat, nlon), val, dtype=np.float32))
+    for long, val in (extra2d or {}).items():
+        arr = np.asarray(val, dtype=np.float32)
+        if arr.ndim == 0:
+            arr = np.full((nlat, nlon), float(arr), dtype=np.float32)
+        data[_key(long)] = (("time", "lat", "lon"), arr[None, :, :])
     return xr.Dataset(data, coords=coords)
 
 
@@ -164,6 +175,133 @@ def test_load_era5_slice_missing_required_raises(monkeypatch):
         lambda store: _synthetic_era5("long", drop=("temperature",)))
     with pytest.raises(ValueError, match="REQUIRED.*temperature.*not found"):
         load_era5_slice(_config(), 0)
+
+
+# --- sst fallback chain (#797 bug 7: WB2 6h zarr has NO skin_temperature; the
+# ---   old unconditional zero-fill silently forced 0 K SST on the WB trainer) ---
+
+def _no_skt(extra2d):
+    return _synthetic_era5("long", drop=("skin_temperature",), extra2d=extra2d)
+
+
+def test_sst_falls_back_to_sea_surface_gap_filled_with_t2m(monkeypatch):
+    """No skin_temperature: sea_surface_temperature (NaN over land) is gap-filled
+    with 2m_temperature — the WB2-store shape that hit the 0 K zero-fill."""
+    sst = np.full((5, 6), 290.0, dtype=np.float32)
+    sst[0, 0] = np.nan                                     # a 'land' cell
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"sea_surface_temperature": sst, "2m_temperature": 280.0}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst[0, 0], 280.0)        # land <- t2m
+    np.testing.assert_allclose(sl.sst[1, 1], 290.0)        # ocean <- sst
+    assert np.all(np.isfinite(sl.sst))
+
+
+def test_sst_sea_surface_only_fills_nan_with_finite_mean(monkeypatch):
+    """sea_surface_temperature without 2m_temperature: NaN cells take the finite
+    mean instead of leaking NaN (or 0 K) into the forcing."""
+    sst = np.full((5, 6), 290.0, dtype=np.float32)
+    sst[0, 0] = np.nan
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"sea_surface_temperature": sst}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst[0, 0], 290.0)
+    assert np.all(np.isfinite(sl.sst))
+
+
+def test_sst_falls_back_to_t2m_alone(monkeypatch):
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"2m_temperature": 281.5}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 281.5)
+
+
+def test_sst_zero_fill_is_last_resort_and_warns(monkeypatch, caplog):
+    """With NO surface-temperature variable at all, the legacy zero-fill remains
+    (idealized ICs must still load) but is no longer silent."""
+    import logging
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(None))
+    with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
+        sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 0.0)
+    assert any("sst zero-filled" in r.message for r in caplog.records)
+
+
+def test_sst_skin_temperature_still_wins_over_fallbacks(monkeypatch):
+    """A store WITH skin_temperature is untouched by the new chain."""
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5(
+        "long", extra2d={"sea_surface_temperature": 250.0, "2m_temperature": 251.0}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 290.0)              # vals2 skin_temperature
+
+
+# --- surface geopotential (phis): loud zero-fill + dimension-checked 'z' alias
+# --- (T1: silent flat-topography fallback — real ERA5 p_s (~600 hPa over Tibet)
+# --- with phis=0 is a grossly non-hydrostatic IC; the zero-fill must warn) ---
+
+
+def test_phis_missing_warns_loudly_and_zero_fills(monkeypatch, caplog):
+    """A store with NO surface geopotential keeps the zero-fill (idealized ICs
+    still load) but warns LOUDLY, same mechanism/level as the sst zero-fill."""
+    import logging
+    monkeypatch.setattr(
+        e2s, "open_era5_zarr",
+        lambda store: _synthetic_era5("long", drop=("geopotential_at_surface",)))
+    with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
+        sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.phis, 0.0)
+    assert any("phis zero-filled" in r.message for r in caplog.records)
+    assert any("non-hydrostatic" in r.message for r in caplog.records)
+
+
+def test_phis_resolves_2d_short_z(monkeypatch, caplog):
+    """An ERA5-style invariant store carrying surface geopotential under the
+    bare short name 'z' (2-D, no level dim) resolves to phis — no zero-fill,
+    no warning."""
+    import logging
+    ds = _synthetic_era5("long", drop=("geopotential_at_surface",))
+    nlat, nlon = 5, 6
+    ds = ds.assign(z=(("time", "lat", "lon"),
+                      np.full((1, nlat, nlon), 123.0, dtype=np.float32)))
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: ds)
+    with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
+        sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.phis, 123.0)
+    assert not any("phis zero-filled" in r.message for r in caplog.records)
+
+
+def test_phis_does_not_resolve_3d_z(monkeypatch, caplog):
+    """A 3-D 'z' (the pressure-level geopotential, same GRIB short name) must
+    NOT be mistaken for phis: zero-fill + loud warning instead."""
+    import logging
+    ds = _synthetic_era5("long", drop=("geopotential_at_surface",))
+    nlat, nlon, nlev = 5, 6, 3
+    ds = ds.assign(z=(("time", "level", "lat", "lon"),
+                      np.full((1, nlev, nlat, nlon), 9.8e4, dtype=np.float32)))
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: ds)
+    with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
+        sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.phis, 0.0)
+    assert any("phis zero-filled" in r.message for r in caplog.records)
+
+
+def test_resolve_var_z_surface_geopotential_dimension_gate():
+    """resolve_var treats 'z' as surface geopotential ONLY when it has no
+    level dimension; a dims-less container (plain set) safely gives None."""
+    import xarray as xr
+    ds2 = xr.Dataset({"z": (("lat", "lon"), np.zeros((2, 3)))},
+                     coords={"lat": [0.0, 1.0], "lon": [0.0, 1.0, 2.0]})
+    assert resolve_var(ds2, "geopotential_at_surface") == "z"
+    assert resolve_var(ds2, "z_sfc") == "z"
+    ds3 = xr.Dataset(
+        {"z": (("level", "lat", "lon"), np.zeros((2, 2, 3)))},
+        coords={"level": [1000.0, 500.0], "lat": [0.0, 1.0],
+                "lon": [0.0, 1.0, 2.0]})
+    assert resolve_var(ds3, "geopotential_at_surface") is None
+    # a plain set has no dims metadata → no false resolution
+    assert resolve_var({"z"}, "geopotential_at_surface") is None
+    # an explicit 'z_sfc' store variable still wins as before
+    assert resolve_var({"z_sfc"}, "geopotential_at_surface") == "z_sfc"
 
 
 def _synthetic_era5_multitime():

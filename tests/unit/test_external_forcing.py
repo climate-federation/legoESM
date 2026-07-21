@@ -538,10 +538,13 @@ class TestInterannualOzoneBug2:
             v = ds.createVariable("ozone", "f8", ("time", "lat"))
             v[:] = data
         cfg = OzoneConfig(enabled=True, path=nc_path, start_year=2000)
-        # day=0.0 and day=365.25 should give nearly the same value (cyclic).
+        # day=0.0 and day=365.0 should give the same value: the cyclic wrap
+        # period is 365.0 d, matching the model's noleap clock and the AMIP
+        # SST climatology wrap (audit F5; the old pin at 365.25 encoded the
+        # inconsistent-period bug).
         lat_rad = jnp.radians(jnp.array(lat))
         v0 = np.asarray(get_ozone_at_time(cfg, day=0.0, lat_grid=lat_rad))
-        v365 = np.asarray(get_ozone_at_time(cfg, day=365.25, lat_grid=lat_rad))
+        v365 = np.asarray(get_ozone_at_time(cfg, day=365.0, lat_grid=lat_rad))
         np.testing.assert_allclose(v0, v365, atol=1e-12)
 
     def test_multiyear_file_interannual_path(self, tmp_path):
@@ -760,3 +763,217 @@ class TestCMIP6VolcanicBug3:
         assert mid_days.shape == (12,)
         np.testing.assert_allclose(out_lat, lat)
         np.testing.assert_allclose(out_data, data)
+
+
+# ==============================================================================
+# Audit F1 (external) — noleap sim day onto a Gregorian-dated file axis
+# ==============================================================================
+
+class TestSimDayGregorianByCalendarDate:
+    """``_simday_to_file_day`` must map a noleap model day onto a
+    Gregorian-dated file BY CALENDAR DATE.  The old form added the noleap
+    ``sim_day`` linearly onto the Gregorian epoch offset, drifting ~1 day
+    per 4 years (leap days the model clock never lives through)."""
+
+    def test_datetime64_anchor_maps_by_calendar_date(self):
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = np.datetime64("1979-01-16")
+        sim_day = 8 * 365 + 196.0          # model 1987-07-16 00:00 (noleap)
+        expected = float(
+            (np.datetime64("1987-07-16") - anchor) / np.timedelta64(1, "D")
+        )
+        got = _simday_to_file_day(sim_day, 1979, anchor)
+        assert got == expected
+        # Old linear mapping: (1979-01-01 - 1979-01-16) + sim_day — 2 days
+        # short of the file's real 1987-07-16 location (leap 1980, 1984).
+        old_linear = -15.0 + sim_day
+        assert expected - old_linear == 2.0
+        assert got != old_linear
+
+    def test_cftime_gregorian_anchor_maps_by_calendar_date(self):
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.DatetimeGregorian(1979, 1, 16)
+        sim_day = 8 * 365 + 196.25          # 06:00 model time carries through
+        got = _simday_to_file_day(sim_day, 1979, anchor)
+        expected = (cftime.DatetimeGregorian(1987, 7, 16) - anchor).days + 0.25
+        assert got == float(expected)
+
+    def test_noleap_anchor_unchanged_for_nonzero_sim_day(self):
+        # Noleap-dated files were already exact — must NOT change.
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.DatetimeNoLeap(1850, 1, 1)
+        sim_day = 8 * 365 + 196.5
+        got = _simday_to_file_day(sim_day, 1979, anchor)
+        assert got == (1979 - 1850) * 365 + sim_day
+
+    def test_360day_anchor_unchanged_for_nonzero_sim_day(self):
+        # 360_day keeps the legacy linear form (out of F1 scope).
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.Datetime360Day(1850, 1, 1)
+        sim_day = 100.5
+        got = _simday_to_file_day(sim_day, 1979, anchor)
+        assert got == (1979 - 1850) * 360 + sim_day
+
+    def test_negative_sim_day_maps_to_prior_year(self):
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = np.datetime64("1979-01-01")
+        # sim_day -1 = model 1978-12-31 (noleap) -> Gregorian 1978-12-31.
+        got = _simday_to_file_day(-1.0, 1979, anchor)
+        assert got == -1.0
+
+    def test_model_noleap_date_roundtrip(self):
+        from legoesm.forcing.external import _model_noleap_date
+        assert _model_noleap_date(0.0, 1979) == (1979, 1, 1, 0.0)
+        y, m, d, frac = _model_noleap_date(8 * 365 + 196.5, 1979)
+        assert (y, m, d) == (1987, 7, 16) and abs(frac - 0.5) < 1e-12
+        # Day 364 of a year = Dec 31; day 365 rolls into the next year.
+        assert _model_noleap_date(364.0, 1979)[:3] == (1979, 12, 31)
+        assert _model_noleap_date(365.0, 1979)[:3] == (1980, 1, 1)
+
+
+# ==============================================================================
+# Audits F4/F5 — cyclic climatology phase + wrap period
+# ==============================================================================
+
+def _write_clim_zonal_nc(path, varname, lat, data_12, dated, calendar="noleap"):
+    """12-record monthly zonal climatology; ``dated`` adds CF units so the
+    axis decodes to real mid-month dates (vs the units-less legacy axis)."""
+    import netCDF4
+    mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    with netCDF4.Dataset(path, "w") as ds:
+        ds.createDimension("time", 12)
+        ds.createDimension("lat", len(lat))
+        t = ds.createVariable("time", "f8", ("time",))
+        t[:] = mid_days
+        if dated:
+            t.units = "days since 2000-01-01"
+            t.calendar = calendar
+        la = ds.createVariable("lat", "f8", ("lat",))
+        la[:] = lat
+        v = ds.createVariable(varname, "f8", ("time", "lat"))
+        v[:] = data_12
+
+
+class TestCyclicClimatologyPhase:
+    """Audit F4: a CF-dated monthly climatology previously lost its
+    mid-month phase — ``_read_time_axis`` returns days since the FIRST
+    RECORD (mid_days[0]==0), so a mid-January-stamped record was placed at
+    Jan 1 (~15-day forward shift).  The cyclic branch now offsets mid_days
+    by the first record's noleap day-of-year."""
+
+    @staticmethod
+    def _make_cfgs(tmp_path, calendar="noleap"):
+        lat = np.linspace(-90, 90, 19)
+        data = np.stack([np.full(19, float(m + 1)) for m in range(12)])
+        p_undated = str(tmp_path / "clim_undated.nc")
+        p_dated = str(tmp_path / f"clim_dated_{calendar}.nc")
+        _write_clim_zonal_nc(p_undated, "ozone", lat, data, dated=False)
+        _write_clim_zonal_nc(p_dated, "ozone", lat, data, dated=True,
+                             calendar=calendar)
+        return (OzoneConfig(enabled=True, path=p_undated),
+                OzoneConfig(enabled=True, path=p_dated))
+
+    def test_dated_and_undated_climatology_agree(self, tmp_path):
+        # The same climatology, once with a CF-dated axis and once with the
+        # legacy units-less day-of-year axis, must interpolate identically.
+        cfg_u, cfg_d = self._make_cfgs(tmp_path)
+        for day in (0.0, 15.5, 100.0, 200.25, 364.9):
+            v_u = np.asarray(get_ozone_at_time(cfg_u, day=day)["ozone"])
+            v_d = np.asarray(get_ozone_at_time(cfg_d, day=day)["ozone"])
+            np.testing.assert_allclose(v_d, v_u, atol=1e-6,
+                                       err_msg=f"day={day}")
+
+    def test_midmonth_record_sampled_at_midmonth(self, tmp_path):
+        # Phase check on the dated file: day 15.5 lands EXACTLY on the
+        # mid-Jan record; day 0 interpolates Dec->Jan (pre-fix it returned
+        # the January record exactly — the 15-day shift).
+        _, cfg_d = self._make_cfgs(tmp_path)
+        v_jan = np.asarray(get_ozone_at_time(cfg_d, day=15.5)["ozone"])
+        np.testing.assert_allclose(v_jan, 1.0, atol=1e-12)
+        v_0 = np.asarray(get_ozone_at_time(cfg_d, day=0.0)["ozone"])
+        assert float(np.max(np.abs(v_0 - 1.0))) > 1.0   # Dec(12)->Jan(1) mix
+
+    def test_wrap_period_is_365(self, tmp_path):
+        # Audit F5: cyclic wrap at 365.0 (the noleap model clock), matching
+        # amip.get_forcing_at_time — not 365.25.
+        cfg_u, cfg_d = self._make_cfgs(tmp_path)
+        for cfg in (cfg_u, cfg_d):
+            v_a = np.asarray(get_ozone_at_time(cfg, day=10.0)["ozone"])
+            v_b = np.asarray(get_ozone_at_time(cfg, day=10.0 + 365.0)["ozone"])
+            np.testing.assert_allclose(v_b, v_a, atol=1e-12)
+
+    def test_dated_aerosol_climatology_phase(self, tmp_path):
+        # Same F4 anchoring on the aerosol cyclic branch.
+        lat = np.linspace(-90, 90, 19)
+        data = np.stack([np.full(19, 0.01 * (m + 1)) for m in range(12)])
+        p = str(tmp_path / "aod_dated.nc")
+        _write_clim_zonal_nc(p, "aod", lat, data, dated=True)
+        cfg = AerosolConfig(enabled=True, path=p)
+        v_jan = np.asarray(get_aerosol_at_time(cfg, day=15.5)["aod"])
+        np.testing.assert_allclose(v_jan, 0.01, atol=1e-12)
+
+    def test_midyear_start_climatology_sorted_and_bounded(self, tmp_path):
+        # Codex review: a climatology whose FIRST record is mid-year pushes
+        # the anchored axis past 365; it must be wrapped and co-sorted with
+        # the data (an unsorted mod-365 axis broke searchsorted and could
+        # extrapolate wildly).
+        import netCDF4
+        lat = np.linspace(-90, 90, 19)
+        data = np.stack([np.full(19, float(m + 1)) for m in range(12)])
+        p = str(tmp_path / "clim_july_start.nc")
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        with netCDF4.Dataset(p, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 19)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = mid_days
+            t.units = "days since 2000-07-01"   # first record = mid-July
+            t.calendar = "noleap"
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            v = ds.createVariable("ozone", "f8", ("time", "lat"))
+            v[:] = data
+        cfg = OzoneConfig(enabled=True, path=p)
+        # Mid-July (noleap doy 197 -> day 196.5) is the FIRST record exactly.
+        v_jul = np.asarray(get_ozone_at_time(cfg, day=196.5)["ozone"])
+        np.testing.assert_allclose(v_jul, 1.0, atol=1e-9)
+        # The 7th record (dated mid-Jan 2001) lands at day ~14.125.
+        v_jan = np.asarray(
+            get_ozone_at_time(cfg, day=(196.5 + 6 * 30.4375) % 365.0)["ozone"]
+        )
+        np.testing.assert_allclose(v_jan, 7.0, atol=1e-9)
+        # No extrapolation blow-ups anywhere in the year: values stay
+        # within the record range [1, 12].
+        for day in np.linspace(0.0, 365.0, 74):
+            v = np.asarray(get_ozone_at_time(cfg, day=float(day))["ozone"])
+            assert 1.0 - 1e-9 <= float(v.min()) and float(v.max()) <= 12.0 + 1e-9
+
+    def test_noleap_dated_climatology_phase_is_exact(self, tmp_path):
+        # Audit FL4 (residual ACCEPTED): the first-record-offset anchoring is
+        # EXACT for the noleap-dated CMIP6 convention — a mid-month record on a
+        # noleap axis samples at its noleap day-of-year with no residual.
+        _, cfg_d = self._make_cfgs(tmp_path, calendar="noleap")
+        # Record 2 (mid-March, noleap doy 15.5 + 2*30.4375 ~ Mar 16) samples at
+        # its own value with no leap-day drift.
+        for rec, day in ((0, 15.5), (1, 45.9), (2, 76.4)):
+            v = np.asarray(get_ozone_at_time(cfg_d, day=day)["ozone"])
+            np.testing.assert_allclose(v, float(rec + 1), atol=0.05,
+                                       err_msg=f"record {rec}")
+
+
+class TestSimDayAllLeapByCalendarDate:
+    """Codex review: an ``all_leap`` (366-day) file axis drifts +1 d/yr
+    under the linear sim-day add — it must use the by-calendar-date map."""
+
+    def test_all_leap_anchor_maps_by_calendar_date(self):
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.DatetimeAllLeap(1850, 1, 1)
+        # Model day 365 = 1851-01-01 (noleap); on the all-leap axis that
+        # date sits 366 days after the anchor.
+        got = _simday_to_file_day(365.0, 1850, anchor)
+        assert got == 366.0
+        # Linear add (the old behavior) would have returned 365.0.

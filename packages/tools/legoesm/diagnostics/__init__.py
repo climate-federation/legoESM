@@ -43,7 +43,6 @@ from legoesm.diagnostics.energy_budget import (
     surface_energy_flux,
     surface_net_radiation,
     toa_net_radiation,
-    toa_net_radiation_from_output,
 )
 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
 from legoesm.diagnostics.precision_drift import (

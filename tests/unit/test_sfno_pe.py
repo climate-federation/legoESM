@@ -1,6 +1,6 @@
 """Unit tests for the SFNO primitive-equation dynamical core.
 
-Exercises :class:`~legoesm.atmosphere.dynamics.sfno_pe.SFNOPrimitiveEquationModel`
+Exercises :class:`~legoesm.atmosphere.dynamics.neural.sfno_pe.SFNOPrimitiveEquationModel`
 directly: instantiation with a tiny randomly-initialised SFNO, both
 operating modes (``state_update`` and ``hybrid_tendencies``), the
 post-hoc dry-air-mass conservation correction, physics coupling, and
@@ -26,11 +26,11 @@ import pytest
 
 from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
 )
-from legoesm.atmosphere.dynamics.sfno_pe import (
+from legoesm.atmosphere.dynamics.neural.sfno_pe import (
     SFNOPrimitiveEquationModel,
     SFNOPrimitiveEquationConfig,
 )
@@ -131,7 +131,7 @@ class TestStateUpdateMode:
             grid=grid_t8, sigma_coord=sigma_coord, config=config,
             key=jax.random.PRNGKey(0),
         )
-        new_state = model.step(pe_state, dt=3600.0)
+        new_state = model.step(pe_state, dt=21600.0)
 
         for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
             old = getattr(pe_state, name).data
@@ -152,7 +152,7 @@ class TestStateUpdateMode:
             grid=grid_t8, sigma_coord=sigma_coord, config=config,
             key=jax.random.PRNGKey(0),
         )
-        new_state = model.step(pe_state, dt=3600.0)
+        new_state = model.step(pe_state, dt=21600.0)
         assert new_state.tracers is not None
         assert "q_v" in new_state.tracers
         q_out = new_state.tracers["q_v"].data
@@ -170,7 +170,7 @@ class TestStateUpdateMode:
             grid=grid_t8, sigma_coord=sigma_coord, config=config,
             key=jax.random.PRNGKey(0),
         )
-        new_state = model.step(pe_state, dt=3600.0)
+        new_state = model.step(pe_state, dt=21600.0)
         np.testing.assert_array_equal(
             new_state.phis_hat.data, pe_state.phis_hat.data,
         )
@@ -265,7 +265,7 @@ class TestMassConservation:
         model = self._identity_model(
             grid_t8, sigma_coord, sfno_config, correct_mass=True,
         )
-        new_state = model.step(pe_state, dt=3600.0)
+        new_state = model.step(pe_state, dt=21600.0)
 
         m_old = _global_mean_ps(grid_t8, pe_state.lnps_hat.data)
         m_new = _global_mean_ps(grid_t8, new_state.lnps_hat.data)
@@ -301,8 +301,8 @@ class TestMassConservation:
             grid=grid_t8, sigma_coord=sigma_coord, config=cfg_on,
             sfno_model=shared,
         )
-        lnps_off = m_off.step(pe_state, dt=3600.0).lnps_hat.data
-        lnps_on = m_on.step(pe_state, dt=3600.0).lnps_hat.data
+        lnps_off = m_off.step(pe_state, dt=21600.0).lnps_hat.data
+        lnps_on = m_on.step(pe_state, dt=21600.0).lnps_hat.data
 
         assert jnp.all(jnp.isfinite(lnps_on))
         # The mean (l=0,m=0) coefficient is what the uniform shift touches.
@@ -362,7 +362,8 @@ class TestPhysicsCoupling:
     def test_step_with_physics_state_update(self, grid_t8, sigma_coord,
                                             pe_state, sfno_config):
         """In state_update mode physics tendencies are applied additively
-        after the SFNO prediction."""
+        after the SFNO prediction.  dt must equal dt_sfno (the network's
+        macro step) — mismatches raise (see TestStateUpdateDtContract)."""
         config = SFNOPrimitiveEquationConfig(
             sfno_config=sfno_config, mode="state_update",
             correct_mass=False, correct_moisture_budget=False,
@@ -372,7 +373,7 @@ class TestPhysicsCoupling:
             key=jax.random.PRNGKey(2),
         )
         new_state = model.step_with_physics(
-            pe_state, dt=600.0, physics_fn=_zero_physics_with_T_heating,
+            pe_state, dt=21600.0, physics_fn=_zero_physics_with_T_heating,
         )
         assert new_state.T_hat.data.shape == pe_state.T_hat.data.shape
         assert jnp.all(jnp.isfinite(new_state.T_hat.data))
@@ -468,3 +469,205 @@ class TestNormalizationGuards:
                 grid=grid_t8, sigma_coord=sigma_coord, config=config,
                 key=jax.random.PRNGKey(0),
             )
+
+
+# =============================================================================
+# state_update dt contract
+# =============================================================================
+
+class TestStateUpdateDtContract:
+    """state_update advances the state by exactly ``dt_sfno`` per call; a
+    caller ``dt`` that disagrees must raise instead of silently
+    desynchronising the caller's clock from the model state (previously
+    ``config.dt_sfno`` was never consumed and ANY dt was accepted while
+    the network jumped its trained macro step)."""
+
+    @staticmethod
+    def _model(grid, sigma_coord, sfno_config):
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update",
+            correct_mass=False, correct_moisture_budget=False,
+        )
+        return SFNOPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma_coord, config=config,
+            key=jax.random.PRNGKey(0),
+        )
+
+    def test_wrong_dt_raises(self, grid_t8, sigma_coord, pe_state,
+                             sfno_config):
+        model = self._model(grid_t8, sigma_coord, sfno_config)
+        with pytest.raises(ValueError, match="dt_sfno"):
+            model.step(pe_state, dt=3600.0)
+
+    def test_wrong_dt_raises_in_step_with_physics(self, grid_t8, sigma_coord,
+                                                  pe_state, sfno_config):
+        model = self._model(grid_t8, sigma_coord, sfno_config)
+        with pytest.raises(ValueError, match="dt_sfno"):
+            model.step_with_physics(
+                pe_state, dt=600.0, physics_fn=_zero_physics_with_T_heating,
+            )
+
+    def test_matching_dt_accepted(self, grid_t8, sigma_coord, pe_state,
+                                  sfno_config):
+        model = self._model(grid_t8, sigma_coord, sfno_config)
+        out = model.step(pe_state, dt=21600.0)
+        assert jnp.all(jnp.isfinite(out.T_hat.data))
+
+    def test_unknown_mode_raises_in_step_with_physics(self, grid_t8,
+                                                      sigma_coord, pe_state,
+                                                      sfno_config):
+        """step_with_physics must mirror step(): unknown mode raises, never
+        silently runs the state_update branch (dispatch hardening)."""
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="not_a_mode",
+            correct_mass=False, correct_moisture_budget=False,
+        )
+        model = SFNOPrimitiveEquationModel(
+            grid=grid_t8, sigma_coord=sigma_coord, config=config,
+            key=jax.random.PRNGKey(0),
+        )
+        with pytest.raises(ValueError, match="Unknown mode"):
+            model.step_with_physics(
+                pe_state, dt=21600.0,
+                physics_fn=_zero_physics_with_T_heating,
+            )
+
+
+# =============================================================================
+# hybrid_tendencies residual-net semantics
+# =============================================================================
+
+class TestHybridResidualSemantics:
+    """hybrid_tendencies reads the (residual) SFNO as a NEXT-STATE predictor
+    and forms the finite-difference tendency ``(output - input)/dt_sfno``.
+
+    Pins the fix for the mode misread: previously the residual net's
+    ~next-state output (``input + delta``) was integrated directly as a
+    per-second tendency — an O(state)-magnitude d/dt, wrong by a factor
+    ~dt_sfno."""
+
+    def test_identity_net_gives_zero_tendency(self, grid_t8, sigma_coord,
+                                              pe_state, sfno_config):
+        """HEADLINE: a residual net with a zeroed decoder is the identity
+        map (output == input), so the hybrid tendency must be EXACTLY zero
+        and one RK step must return the state unchanged.  Under the old
+        (buggy) reading the identity net's output ~= the state itself was
+        integrated as a tendency, changing the state massively."""
+        assert sfno_config.residual_prediction
+        sfno = SFNO(config=sfno_config, grid=grid_t8,
+                    key=jax.random.PRNGKey(0))
+        sfno = eqx.tree_at(
+            lambda m: (m.decoder.weight, m.decoder.bias),
+            sfno,
+            (jnp.zeros_like(sfno.decoder.weight),
+             jnp.zeros_like(sfno.decoder.bias)),
+        )
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="hybrid_tendencies",
+            correct_mass=False, correct_moisture_budget=False,
+        )
+        model = SFNOPrimitiveEquationModel(
+            grid=grid_t8, sigma_coord=sigma_coord, config=config,
+            sfno_model=sfno,
+        )
+        out = model.step(pe_state, dt=600.0)
+        for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(out, name).data),
+                np.asarray(getattr(pe_state, name).data),
+                rtol=1e-12, atol=1e-12,
+                err_msg=f"{name} changed under a zero-tendency identity net",
+            )
+        np.testing.assert_allclose(
+            np.asarray(out.tracers["q_v"].data),
+            np.asarray(pe_state.tracers["q_v"].data),
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_hybrid_rejects_non_residual_net(self, grid_t8, sigma_coord,
+                                             sfno_config):
+        """With residual_prediction=False the raw decoder output has no
+        defined scale, so (output - input)/dt_sfno is ill-defined →
+        constructing the hybrid model must raise."""
+        cfg_nonres = sfno_config._replace(residual_prediction=False)
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=cfg_nonres, mode="hybrid_tendencies",
+            correct_mass=False, correct_moisture_budget=False,
+        )
+        with pytest.raises(ValueError, match="residual_prediction"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_state_update_accepts_non_residual_net(self, grid_t8, sigma_coord,
+                                                   pe_state, sfno_config):
+        """residual_prediction=False + state_update stays valid (the
+        run_aimip sfno_full eval and the neural-GCM full-emulator training
+        both use exactly this combination)."""
+        cfg_nonres = sfno_config._replace(residual_prediction=False)
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=cfg_nonres, mode="state_update",
+            correct_mass=False, correct_moisture_budget=False,
+        )
+        model = SFNOPrimitiveEquationModel(
+            grid=grid_t8, sigma_coord=sigma_coord, config=config,
+            key=jax.random.PRNGKey(0),
+        )
+        out = model.step(pe_state, dt=21600.0)
+        assert jnp.all(jnp.isfinite(out.T_hat.data))
+
+
+class TestCodexRoundGuards:
+    """codex 2026-07-12 round-2 guards."""
+
+    def test_injected_model_config_mismatch_raises(self, grid_t8, sigma_coord,
+                                                   sfno_config):
+        """A supplied network whose config differs from config.sfno_config
+        must be rejected (a non-residual net under a residual hybrid
+        config would feed raw decoder output into (y-x)/dt_sfno)."""
+        from legoesm.ml.sfno import SFNO
+        net = SFNO(
+            config=sfno_config._replace(residual_prediction=False),
+            grid=grid_t8, key=jax.random.PRNGKey(0),
+        )
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config,  # residual_prediction=True
+            mode="hybrid_tendencies", correct_mass=False,
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                sfno_model=net,
+            )
+
+    def test_nonpositive_dt_sfno_raises(self, grid_t8, sigma_coord,
+                                        sfno_config):
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update",
+            correct_mass=False, dt_sfno=0.0,
+        )
+        with pytest.raises(ValueError, match="dt_sfno must be positive"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_traced_dt_gives_clear_contract_error(self, grid_t8, sigma_coord,
+                                                  pe_state, sfno_config):
+        """A traced dt under jit must raise the contract ValueError, not
+        an opaque TracerBoolConversionError."""
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update", correct_mass=False,
+        )
+        model = SFNOPrimitiveEquationModel(
+            grid=grid_t8, sigma_coord=sigma_coord, config=config,
+            key=jax.random.PRNGKey(0),
+        )
+
+        @jax.jit
+        def stepper(s, dt):
+            return model.step(s, dt)
+
+        with pytest.raises(ValueError, match="STATIC Python-float dt"):
+            stepper(pe_state, jnp.float64(21600.0))

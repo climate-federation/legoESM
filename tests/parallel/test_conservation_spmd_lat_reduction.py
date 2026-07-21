@@ -23,7 +23,7 @@ import pytest
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.core.conservation import (
-    batch_global_area_sums, _spmd_lat_psum_or_none)
+    batch_global_area_sums, global_area_sum, _spmd_lat_psum_or_none)
 from legoesm.parallel.latlon_spmd import (
     activate_latlon_spmd_halo, deactivate_latlon_spmd_halo)
 from legoesm.parallel.shard_map_compat import shard_map
@@ -92,5 +92,49 @@ def test_batch_global_area_sums_serial_unchanged():
     area = jnp.asarray(rng.uniform(0.5, 1.5, (N_LAT, N_LON)))
     field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
     got = batch_global_area_sums([field], _StubGrid(area))[0]
+    ref = float(np.sum(np.asarray(field) * np.asarray(area)))
+    assert abs(float(got) - ref) < 1e-9 * max(abs(ref), 1.0)
+
+
+def test_global_area_sum_spmd_lat_matches_serial():
+    """The SINGLE-array global_area_sum must psum band-local partials across the
+    'lat' axis too (the operator-split mass/moisture fixers reduce through it,
+    not the batched variant). Without this the fixer numerator is a band-local
+    partial while the denominator is the global area -> O(N) wrong correction."""
+    mesh = _mesh()
+    rng = np.random.default_rng(17)
+    area = rng.uniform(0.5, 1.5, (N_LAT, N_LON))
+    field = rng.standard_normal((N_LAT, N_LON))
+    ref = float(np.sum(field * area))          # true global area-weighted sum
+
+    isp = P("lat", None)
+    a_sh = jax.device_put(jnp.asarray(area), NamedSharding(mesh, isp))
+    f_sh = jax.device_put(jnp.asarray(field), NamedSharding(mesh, isp))
+
+    activate_latlon_spmd_halo(mesh)
+    try:
+        @partial(shard_map, mesh=mesh,
+                 in_specs=(isp, isp), out_specs=P(), check_vma=False)
+        def f(a_b, f_b):
+            # Each band sees only its rows; global_area_sum must psum "lat".
+            return global_area_sum(f_b, _StubGrid(a_b))
+
+        got = float(np.asarray(f(a_sh, f_sh)))
+    finally:
+        deactivate_latlon_spmd_halo()
+
+    assert abs(got - ref) < 1e-9 * max(abs(ref), 1.0), \
+        f"single-array global sum: {got} vs {ref}"
+
+
+def test_global_area_sum_serial_unchanged():
+    """Without SPMD armed, global_area_sum is the plain local area-weighted sum
+    (default path byte-unchanged: no armed backend -> _spmd_lat_psum returns
+    None)."""
+    deactivate_latlon_spmd_halo()
+    rng = np.random.default_rng(5)
+    area = jnp.asarray(rng.uniform(0.5, 1.5, (N_LAT, N_LON)))
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    got = global_area_sum(field, _StubGrid(area))
     ref = float(np.sum(np.asarray(field) * np.asarray(area)))
     assert abs(float(got) - ref) < 1e-9 * max(abs(ref), 1.0)

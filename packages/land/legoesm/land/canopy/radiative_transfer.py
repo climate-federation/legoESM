@@ -10,6 +10,49 @@ Longwave: Ryu et al. (2011) extinction-based scheme.
 SW decomposition: Liu-Jordan clearness-index direct/diffuse split.
 
 All functions are pure JAX, JIT-compatible, and differentiable.
+
+Faithfulness
+------------
+The shortwave path is pinned term-for-term by
+``tests/land/unit/test_canopy_rt_faithful.py`` against an independent scalar
+oracle (rel 1e-9) that reimplements the published closed forms:
+
+  * Direct/diffuse split (``split_sw_components``): the Erbs et al. (1982)
+    piecewise diffuse-fraction correlation f_d(k_t) — linear ``1 - 0.09 k_t``
+    for k_t <= 0.22, the quartic mid branch for 0.22 < k_t <= 0.80, constant
+    0.165 above — on the clearness index k_t = sw_down / (S_0 cos Z).  The
+    downstream PAR/NIR/UV = 0.48/0.50/0.02 spectral fractions are FIXED MODEL
+    assumptions (broadly after Weiss & Norman 1985 for the visible/NIR split;
+    the 2% UV band is a model choice, NOT a Weiss-Norman published form).
+  * Two-stream absorption (``canopy_shortwave_rt``, Ryu et al. 2011): the beam
+    kb = G / cos Z (spherical leaf-angle G = 0.5), the scattered-beam
+    kk_Pb = 0.46 / cos Z and diffuse kk_Pd = 0.72 PAR extinctions (Ryu 2011
+    Table A1, attributed there to de Pury & Farquhar 1997), the integrated-Beer
+    sunlit fraction fSun = (1 - e^{-kb L_CI}) / (kb LAI) with the foliar-clumping
+    L_CI = LAI CI, the beam+diffuse+scattered sunlit/shaded/soil partition with
+    the k/(k + kb) two-stream weights, and the exponential-nitrogen-profile
+    canopy Vcmax25 integral (sunlit = LAI Vc (1 - e^{-CI(kn + kb LAI)})/(kn +
+    kb LAI)) — all Ryu (2011) forms, with Sellers (1985) the two-stream lineage.
+    MODEL-SPECIFIC choices layered on top: the fixed 2% UV band, the
+    (1 - FNonVeg) soil-reflectance scaling, and the tanh dusk ramp.
+
+The Erbs / spectral-fraction / Sellers-Ryu scheme coefficients are transcribed
+as independent oracle literals and canaried against the module constants
+(module == literal == value), so no scheme coefficient is sourced from the SUT;
+S_0 is the shared ``legoesm.constants`` value.  DEPARTURES / numeric guards
+(documented, not the pure closed form; reproduced by the oracle so the pin
+stays exact): the cos Z > 0.01 and SZA > 89 deg night guards with the
+kb = kk_Pb = 50 night sentinel, the fSun clip to [0, 1] and LAI > 0 zeroing,
+the max(., 0) floors on the scattered-sunlit and shaded down-fluxes, the
+max(kn CI, 1e-6) / max(kn + kb LAI, 1e-6) profile-integral guards, and the
+tanh day-weight ramp (centre 30, half-width 20 W m-2 in beam SW) that fades
+fSun TOWARD zero at dusk (weight ~0.047 at zero beam SW — never exactly zero).
+The SZA > 89 deg sentinel only swaps in the sentinel extinction; it does NOT
+zero fSun (a nonzero-beam night still leaves fSun ~ 0.007).  fSun is exactly
+zero on the LAI <= 0 (bare-soil) where()-branch, or whenever L_CI = LAI CI = 0
+(e.g. CI = 0).  The longwave path
+is covered separately by test_canopy_rt.py (conservation, isothermal-zero,
+clumping, kb == kd smoothness / AD).
 """
 
 from __future__ import annotations
@@ -23,6 +66,39 @@ from legoesm import constants
 
 # Module-local conversion factor (not a physical constant per se).
 _APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
+
+# --- Weiss & Norman (1985) broadband → spectral fractions [-] ---
+_PAR_FRACTION = 0.48
+_NIR_FRACTION = 0.50
+_UV_FRACTION  = 0.02
+
+# --- Erbs et al. (1982) diffuse-fraction correlation in clearness index k_t ---
+_ERBS_KT_LOW    = 0.22     # k_t below which the low-clearness branch applies
+_ERBS_KT_HIGH   = 0.80     # k_t above which f_d saturates to _ERBS_FD_HIGH
+_ERBS_LOW_SLOPE = 0.09     # low branch: f_d = 1 - 0.09 k_t
+_ERBS_MID_C0 = 0.9511      # mid branch: quartic polynomial in k_t
+_ERBS_MID_C1 = 0.1604
+_ERBS_MID_C2 = 4.388
+_ERBS_MID_C3 = 16.638
+_ERBS_MID_C4 = 12.336
+_ERBS_FD_HIGH = 0.165      # diffuse fraction for k_t > _ERBS_KT_HIGH
+
+# --- Sellers (1985) / Ryu et al. (2011) two-stream scattering & extinction [-] ---
+_SIGMA_PAR    = 0.175      # PAR leaf scattering coefficient
+_SIGMA_NIR    = 0.825      # NIR leaf scattering coefficient
+_RHO_PAR_SOIL = 0.15       # PAR soil reflectance factor (× (1 - FNonVeg))
+_RHO_NIR_SOIL = 0.30       # NIR soil reflectance factor (× (1 - FNonVeg))
+_KPB_PAR      = 0.46       # beam + scattered PAR extinction numerator (/cos SZA)
+_KD_PAR       = 0.72       # diffuse PAR extinction
+_KD_NIR_COEF  = 0.35       # diffuse NIR extinction coefficient
+_RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
+_KD_LW        = 0.78       # diffuse longwave extinction
+_KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
+                           # spherical (uniform) leaf-angle distribution (Ryu 2011)
+
+# --- Night ramp for the sunlit fraction (numerics; see canopy_shortwave_rt) ---
+_NIGHT_RAMP_CENTER_WM2    = 30.0   # tanh centre in direct-beam SW [W m-2]
+_NIGHT_RAMP_HALFWIDTH_WM2 = 20.0   # tanh half-width [W m-2]
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +170,10 @@ def split_sw_components(
         and total UV [W m-2].
     """
     # Night guard: avoid division by zero and set all components to zero
-    is_day = cos_zenith > 0.01
+    is_day = cos_zenith > 0.01  # coeff-ok: night guard, cos(zenith) floor to avoid /0
 
     # Extra-terrestrial irradiance (top-of-atmosphere, W m-2)
-    I0 = 1361.0  # solar constant
+    I0 = constants.S_0  # total solar irradiance
     I_ext = I0 * jnp.where(is_day, cos_zenith, 1.0)  # avoid zero denominator
 
     # Clearness index k_t = sw_down / I_ext  (clamped to [0, 1])
@@ -105,11 +181,12 @@ def split_sw_components(
 
     # Diffuse fraction f_d (Erbs et al. 1982, Eq. 1)
     # Piecewise polynomial: valid for k_t in [0, 1]
-    f_d_low  = 1.0 - 0.09 * k_t
-    f_d_mid  = 0.9511 - 0.1604 * k_t + 4.388 * k_t**2 - 16.638 * k_t**3 + 12.336 * k_t**4
-    f_d_high = 0.165
-    f_d = jnp.where(k_t <= 0.22, f_d_low,
-          jnp.where(k_t <= 0.80, f_d_mid, f_d_high))
+    f_d_low  = 1.0 - _ERBS_LOW_SLOPE * k_t
+    f_d_mid  = (_ERBS_MID_C0 - _ERBS_MID_C1 * k_t + _ERBS_MID_C2 * k_t**2
+                - _ERBS_MID_C3 * k_t**3 + _ERBS_MID_C4 * k_t**4)
+    f_d_high = _ERBS_FD_HIGH
+    f_d = jnp.where(k_t <= _ERBS_KT_LOW, f_d_low,
+          jnp.where(k_t <= _ERBS_KT_HIGH, f_d_mid, f_d_high))
     f_d = jnp.clip(f_d, 0.0, 1.0)
 
     # Broadband direct and diffuse
@@ -117,11 +194,11 @@ def split_sw_components(
     sw_dir  = sw_down - sw_diff
 
     # Spectral fractions
-    PAR_dir  = 0.48 * sw_dir
-    PAR_diff = 0.48 * sw_diff
-    NIR_dir  = 0.50 * sw_dir
-    NIR_diff = 0.50 * sw_diff
-    UV       = 0.02 * sw_down
+    PAR_dir  = _PAR_FRACTION * sw_dir
+    PAR_diff = _PAR_FRACTION * sw_diff
+    NIR_dir  = _NIR_FRACTION * sw_dir
+    NIR_diff = _NIR_FRACTION * sw_diff
+    UV       = _UV_FRACTION * sw_down
 
     # Apply night guard
     zero = jnp.zeros_like(sw_down)
@@ -178,25 +255,25 @@ def canopy_shortwave_rt(
     -------
     CanopySWOutput NamedTuple.
     """
-    mskNight = SZA > 89.0
+    mskNight = SZA > 89.0   # coeff-ok: night mask, solar-zenith threshold [deg]
 
     # ---- Scattering/reflectance coefficients (Sellers 1985) ----
-    sigma_P   = 0.175           # PAR leaf scattering coefficient
-    rho_PSoil = 0.15 * (1.0 - FNonVeg)   # PAR soil reflectance
-    sigma_N   = 0.825           # NIR leaf scattering coefficient
-    rho_NSoil = 0.30 * (1.0 - FNonVeg)   # NIR soil reflectance
+    sigma_P   = _SIGMA_PAR                  # PAR leaf scattering coefficient
+    rho_PSoil = _RHO_PAR_SOIL * (1.0 - FNonVeg)   # PAR soil reflectance
+    sigma_N   = _SIGMA_NIR                  # NIR leaf scattering coefficient
+    rho_NSoil = _RHO_NIR_SOIL * (1.0 - FNonVeg)   # NIR soil reflectance
 
     # ---- Extinction coefficients (Ryu et al. 2011 Table A1) ----
     cos_sza = jnp.cos(jnp.radians(SZA))
-    cos_sza_safe = jnp.where(mskNight, 0.01, cos_sza)   # avoid /0
+    cos_sza_safe = jnp.where(mskNight, 0.01, cos_sza)   # coeff-ok: /0 guard on cos(SZA) at night
 
-    kb     = 0.5  / cos_sza_safe    # beam extinction
-    kk_Pb  = 0.46 / cos_sza_safe    # beam + scattered PAR
-    kb     = jnp.where(mskNight, 50.0, kb)
-    kk_Pb  = jnp.where(mskNight, 50.0, kk_Pb)
-    kk_Pd  = 0.72                   # diffuse PAR extinction
-    kk_Nb  = kb * jnp.sqrt(1.0 - sigma_N)    # beam NIR
-    kk_Nd  = 0.35 * jnp.sqrt(1.0 - sigma_N)  # diffuse NIR
+    kb     = _KB_BEAM / cos_sza_safe    # beam extinction
+    kk_Pb  = _KPB_PAR / cos_sza_safe    # beam + scattered PAR
+    kb     = jnp.where(mskNight, 50.0, kb)   # coeff-ok: night sentinel extinction (kills beam)
+    kk_Pb  = jnp.where(mskNight, 50.0, kk_Pb)   # coeff-ok: night sentinel extinction (kills beam)
+    kk_Pd  = _KD_PAR                # diffuse PAR extinction
+    kk_Nb  = kb * jnp.sqrt(1.0 - sigma_N)          # beam NIR
+    kk_Nd  = _KD_NIR_COEF * jnp.sqrt(1.0 - sigma_N)  # diffuse NIR
 
     # ---- Sunlit fraction (integrated Beer's law, Eq. 1 in Ryu 2011) ----
     L_CI = LAI * CI
@@ -262,14 +339,18 @@ def canopy_shortwave_rt(
 
     # ---- UV (treated as narrow PAR-like band) ----
     # Split UV into beam/diffuse proportional to PAR fractions
-    total_PAR = PAR_dir + PAR_diff + 1e-5
+    total_PAR = PAR_dir + PAR_diff + 1e-5   # coeff-ok: /0 guard on UV beam/diffuse split
     UV_dir  = UV * PAR_dir  / total_PAR
     UV_diff = UV - UV_dir
-    Q_U    = ((1.0 - 0.05) * UV_diff * (1.0 - jnp.exp(-kk_Pb * L_CI))
-            + (1.0 - 0.05) * UV_diff * (1.0 - exp_kk_Pd))
+    # Beam component uses beam extinction kk_Pb, diffuse uses diffuse kk_Pd —
+    # mirrors the PAR Q_PDn split above.  (Previously both terms used UV_diff,
+    # applying beam extinction to the diffuse flux and dropping UV_dir, which
+    # mis-partitioned the beam/diffuse and leaf/soil UV split.)
+    Q_U    = ((1.0 - _RHO_UV) * UV_dir  * (1.0 - jnp.exp(-kk_Pb * L_CI))
+            + (1.0 - _RHO_UV) * UV_diff * (1.0 - exp_kk_Pd))
     AUV_Sun  = Q_U * fSun
     AUV_Sh   = Q_U * (1.0 - fSun)
-    AUV_Soil = (1.0 - 0.05) * UV - Q_U
+    AUV_Soil = (1.0 - _RHO_UV) * UV - Q_U
 
     # ---- Total absorbed shortwave ----
     ASW_Sun  = APAR_Sun  + ANIR_Sun  + AUV_Sun
@@ -319,7 +400,8 @@ def canopy_shortwave_rt(
     # first night step.  By the time sw_dir > 60 the day_weight is ~1
     # and the sunlit fraction is fully active.
     sw_dir_total = PAR_dir + NIR_dir
-    day_weight = 0.5 * (1.0 + jnp.tanh((sw_dir_total - 30.0) / 20.0))
+    day_weight = 0.5 * (1.0 + jnp.tanh(
+        (sw_dir_total - _NIGHT_RAMP_CENTER_WM2) / _NIGHT_RAMP_HALFWIDTH_WM2))
     fSun = fSun * day_weight
 
     return CanopySWOutput(
@@ -402,12 +484,12 @@ def canopy_longwave_rt(
     -------
     CanopyLWOutput NamedTuple (fluxes per unit ground area [W m-2 ground]).
     """
-    SZA_clamped = jnp.clip(SZA, 0.0, 89.0)
+    SZA_clamped = jnp.clip(SZA, 0.0, 89.0)   # coeff-ok: clamp SZA < 90 deg to keep cos(SZA) > 0
     cos_sza     = jnp.cos(jnp.radians(SZA_clamped))
 
     # Extinction coefficients (Ryu et al. 2011 Table A1)
-    kb = 0.5 / jnp.maximum(cos_sza, 0.01)   # direct-beam
-    kd = 0.78                                # diffuse
+    kb = _KB_BEAM / jnp.maximum(cos_sza, 0.01)   # coeff-ok: /0 guard on cos(SZA); direct-beam
+    kd = _KD_LW                              # diffuse
 
     # Effective LAI for radiation (clumping correction): clumped canopies
     # have larger gap fractions, so LW transmission uses L_eff, not LAI.

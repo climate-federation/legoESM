@@ -16,8 +16,8 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure
-from legoesm.atmosphere.dynamics import spectral_les_plane as sl
-from legoesm.atmosphere.dynamics.spectral_les_moist import (
+from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.les.spectral_les_moist import (
     LagrangianSDMSegmentDiagnostics,
     make_lagrangian_sdm_les_step,
     make_lagrangian_sdm_step_segment,

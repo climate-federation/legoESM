@@ -247,7 +247,7 @@ def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
     **Convention**: this module internally uses the Seifert-Beheng
     per-volume (`[1/m³]`) convention for cloud droplet number — the
     formulas ``x_c = q_c * rho / N_c`` and ``dN_r_au = dq_c_au * rho
-    / (x_star * 20)`` rely on it (audit Codex cycle 2).  An earlier
+    / x_star`` rely on it (audit Codex cycle 2).  An earlier
     docstring labeled ``N_c`` as `[1/kg]` (per-mass), which conflicts
     with the formulas: a per-mass ``N_c`` would give ``x_c`` in
     `[kg²/m³]` rather than `[kg]`, breaking the comparison against
@@ -311,23 +311,51 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=_DEFAULT_SAT_SH
     # canonical SB 2001 / Seifert 2008 switch behaviour.
     onset = jax.nn.sigmoid(sharpness * (x_c / x_star - 1.0))
     dq_c_au = k_au * q_c_pos ** 2 * onset * gamma_norm * rho
-    dN_r_au = dq_c_au * rho / (x_star * _SB_RAIN_NUMBER_FACTOR)
+    # SB2001/2006 number closure: each newborn rain drop carries the
+    # separation mass x_* (SB2001 Eq. for ∂N_r/∂t|_au = au/x_*), so the
+    # number source is the mass rate divided by x_star ALONE.  The factor
+    # 1/20 in SB2001 belongs to the MASS-rate coefficient k_au = k_cc/(20·x_*)
+    # — here k_au is an independent tunable — and a transplanted ·20 divisor
+    # previously made newborn drops 20× x_* (~215 µm instead of ~79 µm),
+    # biasing rain fall speed fast and rain evaporation low.
+    dN_r_au = dq_c_au * rho / x_star
     return dq_c_au, dN_r_au, x_c
 
 
 def accretion(q_c, q_r, rho, k_ac, gamma_norm=1.0):
-    """Rain collecting cloud water (accretion).
+    """Rain collecting cloud water (accretion) — SIMPLIFIED BILINEAR SURROGATE.
+
+    Rate = ``k_ac · q_c · q_r · rho · gamma_norm``.  This is the accretion
+    form wired into Morrison (non-KK2000 path), Seifert-Beheng, Thompson and
+    THIS repository's P3; it is a tunable-coefficient SURROGATE, NOT faithful
+    to the published Khairoutdinov-Kogan (2000) accretion that gSAM P3 and
+    SAM-M2005 use (``module_mp_p3.f90:3615``, iparam=3 /
+    ``module_mp_graupel.f90:1952``) — this repo's P3 instead calls THIS
+    surrogate.  The gSAM form, in a single column with the sub-grid
+    cloud/precip-fraction scheme off (``iSCF=iSPF=1``, ``dum2=1``), reduces to
+    the mass rate::
+
+        PRA = 67 · (q_c · q_r)^1.15          [kg/kg/s]   (the faithful form)
+
+    available as :func:`accretion_kk2000`.  DEPARTURES of this surrogate from
+    that oracle: (1) coefficient ``k_ac`` (default 5.25) vs the published 67;
+    (2) BILINEAR ``q_c·q_r`` (product exponent 1) vs KK2000's ``(q_c·q_r)^1.15``;
+    (3) a spurious ``rho`` factor — KK2000 is a pure mixing-ratio rate with NO
+    density dependence; (4) an optional ``gamma_norm`` PSD-shape modifier absent
+    from KK2000 (P3 passes the default ``1.0``, so P3 does not incur (4)).
+    Pinned + canaried in
+    ``tests/atmosphere/microphysics/unit/test_p3_accretion_faithful.py``.
 
     Parameters
     ----------
     q_c, q_r : array
-        Cloud water and rain mixing ratios [kg/kg].
+        Cloud water and rain mixing ratios [kg/kg] (negatives clipped to 0).
     rho : array
         Air density [kg/m3].
     k_ac : float
-        Accretion rate constant.
+        Accretion rate constant [m^3/(kg*s)].
     gamma_norm : float
-        Gamma distribution correction.
+        Gamma distribution correction (1.0 = none).
 
     Returns
     -------
@@ -354,11 +382,45 @@ _KK2000_AUTOCONV_NC_EXPONENT = -1.79
 _KK2000_ACCRETION_PREFACTOR = 67.0
 _KK2000_ACCRETION_EXPONENT = 1.15
 
+# --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
+# Faithful transcription of the gSAM M2005 IRAIN=1 path
+# (module_mp_graupel.f90:1835-1844 autoconversion, :1960-1962 accretion).
+# These are the PUBLISHED SB2001 closed forms (phi_au, phi_ac), structurally
+# distinct from the simplified smooth proxies ``autoconversion_sb`` (q_c^2 *
+# mean-mass sigmoid) and ``accretion`` (bilinear k*rho*q_c*q_r) above. All
+# coefficients are fixed published SB2001 / M2005 constants, not tunable here.
+_SB2001_PHI_AU_PREFACTOR = 600.0     # phi_au(tau) leading coeff (gSAM :1836)
+_SB2001_PHI_AU_TAU_EXP = 0.68        # phi_au tau exponent (gSAM :1836)
+_SB2001_KCC = 9.44e9                 # autoconv kernel k_cc [cm^3 g^-2 s^-1] (gSAM :1838)
+_SB2001_X_STAR_CGS = 2.6e-7          # separation mass x_* [g] (gSAM :1838)
+_SB2001_X_STAR_KG = 2.6e-10          # separation mass x_* [kg] (number closure au/x_*)
+# k_cc/(20·x_*) — the SB2001 mass-rate prefactor (gSAM :1838). The 20 relates
+# k_cc to the mass rate in SB2001; folded here to avoid an inline body literal.
+_SB2001_AUTOCONV_MASS_COEFF = _SB2001_KCC / (20.0 * _SB2001_X_STAR_CGS)
+# Cloud-droplet gamma shape nu for the (nu+2)(nu+4)/(nu+1)^2 factor (gSAM :1839).
+# gSAM's DEFAULT (dofix_pgam=.false.) DIAGNOSES pgam per level from N_c
+# (Martin et al. 1994, module_mp_graupel.f90:1670-1680), clamps pgam to [2,10],
+# then interpolates nu from the dnu lookup table (:1685-1687) -> nu in
+# [dnu(2), dnu(10)] = [-0.557, 0.397]. Its FIXED-pgam mode uses pgam_fixed=10.3
+# (Geoffroy et al. 2010; micro_params.f90:41) -> nu = dnu(10)+0.3·(dnu(11)−dnu(10))
+# = 0.397 + 0.3·(0.512−0.397) = 0.4315. This module default is that fixed-pgam
+# value: an EXPLICIT fixed-shape approximation (NOT gSAM's spatially-diagnosed
+# default). Pass ``nu`` explicitly to supply a diagnosed/per-column shape.
+_SB2001_NU_CLOUD = 0.4315
+_SB2001_KCR = 5.78e3                 # accretion kernel k_cr [cm^3 g^-1 s^-1] (gSAM :1962)
+# 5.78e3·rho/1000 = 5.78·rho (gSAM :1962); the /1000 is the CGS mass-density
+# conversion folded into the coefficient.
+_SB2001_ACCRETION_COEFF = _SB2001_KCR / 1000.0
+_SB2001_PHI_AC_KTAU = 5.0e-4         # phi_ac(tau) = (tau/(tau+k_tau))^4 knee (gSAM :1961)
+# Unit conversions for the CGS SB2001 mass rate (gSAM works in g/cm^3, #/cm^3):
+_LWC_KGM3_TO_GCM3 = 1.0e-3           # rho·q_c [kg/m^3] -> LWC [g/cm^3] (gSAM ·/1000)
+_NC_PERM3_TO_PERCM3 = 1.0e-6         # N_c [1/m^3] -> [1/cm^3] (gSAM ·/1e6; per-VOLUME)
+_MASSRATE_GCM3_TO_MIXR = 1.0e3       # g/cm^3/s -> kg/m^3/s (then /rho -> kg/kg/s)
+
 # --- shared PSD / fall-speed / ventilation structural constants (SAM M2005) ---
 _RHO_FLOOR = 0.1                 # air-density floor in PSD/fall-speed divisions [kg/m^3]
 _FALL_RHO_EXPONENT = 0.54        # (rho_su/rho)^0.54 fall-speed density correction
 _VENT_CONS_OFFSET = 2.5          # 5/2 in ventilation gamma argument 5/2 + b/2
-_SB_RAIN_NUMBER_FACTOR = 20.0    # SB autoconversion rain-number divisor (x_star*20)
 _BIGG_MNUCCR_PREFACTOR = 20.0    # Bigg freezing mass prefactor (20 pi^2 rho_w)
 _UMR_FALL_CAP = 9.1              # rain mass-weighted fall-speed cap [m/s]
 _UMG_FALL_CAP = 20.0             # graupel mass-weighted fall-speed cap [m/s]
@@ -427,14 +489,119 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
 
 def accretion_kk2000(q_c, q_r):
     """Khairoutdinov–Kogan (2000) warm-rain accretion — SAM M2005
-    (``module_mp_graupel.f90:1952``):
+    (``module_mp_graupel.f90:1952``; identical to gSAM P3
+    ``module_mp_p3.f90:3615``, iparam=3):
 
         PRA = 67 · (q_c · q_r)^1.15      [kg/kg/s]
 
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
+
+    SCOPE: this is the single-column, fractions-OFF MASS-rate reduction of the
+    Fortran (``iSCF=iSPF=1``, ``dum2=SPF-SPF_clr=1``) — the algebraic iparam=3
+    branch ABOVE its enclosing ``qc>=qsmall`` AND ``qr>=qsmall`` gate
+    (``qsmall=1e-14``).  DEPARTURES vs the full Fortran: (a) this helper omits
+    the ``qsmall`` gate, so for tiny-but-positive inputs below 1e-14 it returns a
+    positive rate where the Fortran returns exactly 0; (b) the number tie
+    ``ncacc = qcacc·nc/qc`` is handled separately by the caller, not here.
+    ``safe_pow`` clips the base to nonnegative and gives a finite AD result for
+    the fractional power (its role is the negative-input extension — at
+    ``q_c·q_r = 0`` the ``^1.15`` branch already has a finite ZERO slope, since
+    ``d/dx x^1.15 = 1.15·x^0.15 -> 0``, so this is NOT replacing a singular slope).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
     return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
+
+
+def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, nu=_SB2001_NU_CLOUD):
+    """Seifert & Beheng (2001) autoconversion — the PUBLISHED universal-function
+    closed form (gSAM M2005 IRAIN=1, module_mp_graupel.f90:1835-1844)::
+
+        tau    = 1 − q_c/(q_c+q_r)   = q_r/(q_c+q_r)      (rain-water fraction)
+        phi_au = 600·tau^0.68·(1 − tau^0.68)^3            (universal function)
+        PRC    = k_cc/(20·x_*)·(nu+2)(nu+4)/(nu+1)^2
+                 ·(rho·q_c/1000)^4 / (N_c/1e6)^2
+                 ·(1 + phi_au/(1−tau)^2)·1000/rho          [kg/kg/s]
+
+    Unlike the simplified :func:`autoconversion_sb` (q_c^2·mean-mass sigmoid),
+    this carries the full SB2001 q_c^4·N_c^-2 dependence and the phi_au
+    universal function. tau = q_r/(q_c+q_r) is the rain-water fraction (= gSAM's
+    ``dum``): tau→0 is CLOUD-dominated, tau→1 is RAIN-dominated. The extra
+    ``phi_au/(1−tau)^2`` enhancement vanishes at both endpoints and is strongest
+    at intermediate rain fraction.
+
+    ``N_c_eff`` is per-VOLUME [1/m^3] (this module's convention); gSAM's nc3d is
+    per-MASS so its ``rho·nc/1e6`` becomes ``N_c/1e6`` here — see
+    :func:`autoconversion_kk2000`. ``nu`` is the cloud-droplet gamma shape
+    (default :data:`_SB2001_NU_CLOUD`; see its provenance).
+
+    FAITHFUL SCOPE: this reproduces the SB2001 MASS rate (PRC) and the rain-
+    NUMBER source (dN_r_au = au/x_*). It does NOT reproduce gSAM's SB2001-SPECIFIC
+    cloud-NUMBER autoconversion sink ``NPRC = 2·PRC·rho/x_*`` (:1843): under
+    ``predict_Nc=True`` Morrison instead applies its GENERIC sink ``-PRC·rho/x_c``
+    (mean-mass x_c, not the x_* separation mass and without the factor 2 — see
+    morrison.py). Moot at the default ``predict_Nc=False`` (N_c not evolved).
+
+    Returns ``(dq_c_au, dN_r_au, x_c)`` matching :func:`autoconversion_sb`'s
+    signature. AD: tau^0.68 (unbounded slope at tau=0) is regularised via
+    ``safe_pow`` (zero surrogate gradient at tau≤0, NOT the divergent one-sided
+    SB derivative); the q_c+q_r, N_c and (1−tau) denominators are floored; the
+    rate is masked to zero where there is no cloud water so ``jax.grad`` is
+    FINITE (a surrogate, not the analytical boundary gradient) at q_c=0.
+    """
+    q_c_pos = jnp.clip(q_c, 0.0)
+    q_r_pos = jnp.clip(q_r, 0.0)
+    q_tot = q_c_pos + q_r_pos
+    # tau = rain fraction in [0,1] (gSAM ``dum``); zero rate where no condensate.
+    tau = jnp.where(q_tot > 1.0e-20, q_r_pos / jnp.maximum(q_tot, 1.0e-20), 0.0)
+    tau_pow = safe_pow(tau, _SB2001_PHI_AU_TAU_EXP)
+    phi_au = _SB2001_PHI_AU_PREFACTOR * tau_pow * (1.0 - tau_pow) ** 3
+    lwc_gcm3 = rho * q_c_pos * _LWC_KGM3_TO_GCM3            # g/cm^3
+    nc_cm3 = jnp.clip(N_c_eff, 1.0) * _NC_PERM3_TO_PERCM3    # #/cm^3
+    shape = (nu + 2.0) * (nu + 4.0) / (nu + 1.0) ** 2
+    # (1−tau) = q_c/(q_c+q_r); floored so the phi_au/(1−tau)^2 enhancement is
+    # AD-finite at q_c=0 (there phi_au→0 as (1−tau)^3, so the ratio →0 anyway).
+    one_minus_tau = jnp.maximum(1.0 - tau, 1.0e-20)
+    enhance = 1.0 + phi_au / one_minus_tau ** 2
+    dq_c_au = (
+        _SB2001_AUTOCONV_MASS_COEFF * shape
+        * lwc_gcm3 ** 4 / nc_cm3 ** 2
+        * enhance * _MASSRATE_GCM3_TO_MIXR / jnp.maximum(rho, _RHO_FLOOR)
+    )
+    dq_c_au = jnp.where(q_c_pos > 0.0, dq_c_au, 0.0)
+    x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
+    # SB2001 number closure: newborn rain drops carry the separation mass x_*
+    # (gSAM nprc1, :1843-1844; per-VOLUME here ⇒ ·rho). Identical form to
+    # :func:`autoconversion_sb`'s ``dq_c_au·rho/x_star``.
+    dN_r_au = dq_c_au * rho / _SB2001_X_STAR_KG
+    return dq_c_au, dN_r_au, x_c
+
+
+def accretion_sb2001(q_c, q_r, rho):
+    """Seifert & Beheng (2001) accretion — the PUBLISHED universal-function form
+    (gSAM M2005 IRAIN=1, module_mp_graupel.f90:1960-1962)::
+
+        tau    = 1 − q_c/(q_c+q_r) = q_r/(q_c+q_r)
+        phi_ac = (tau/(tau + 5e-4))^4                      (universal function)
+        PRA    = 5.78e3·rho/1000·q_c·q_r·phi_ac
+               = 5.78·rho·q_c·q_r·phi_ac                    [kg/kg/s]
+
+    Unlike the simplified :func:`accretion` (bilinear ``k_ac·rho·q_c·q_r``, no
+    tau dependence), this carries the SB2001 phi_ac(tau) universal function that
+    suppresses accretion until rain water is present (tau>0) and the fixed
+    published kernel 5.78 (vs the tunable ``k_ac``). AD-safe: the tau knee
+    denominator is a strictly-positive constant offset.
+
+    FAITHFUL SCOPE: this is the SB2001 MASS accretion rate (PRA). gSAM's
+    cloud-NUMBER accretion sink ``NPRA = PRA·N_c/q_c`` (:1963) is applied by NO
+    Morrison warm-rain path (kk2000 or SB), and is moot at the default
+    ``predict_Nc=False``.
+    """
+    q_c_pos = jnp.clip(q_c, 0.0)
+    q_r_pos = jnp.clip(q_r, 0.0)
+    q_tot = q_c_pos + q_r_pos
+    tau = jnp.where(q_tot > 1.0e-20, q_r_pos / jnp.maximum(q_tot, 1.0e-20), 0.0)
+    phi_ac = (tau / (tau + _SB2001_PHI_AC_KTAU)) ** 4
+    return _SB2001_ACCRETION_COEFF * rho * q_c_pos * q_r_pos * phi_ac
 
 
 def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):

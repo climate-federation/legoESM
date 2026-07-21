@@ -1,13 +1,13 @@
-"""Prognostic TKE / Mellor-Yamada level 2.5 turbulence scheme.
+"""Prognostic TKE, Mellor-Yamada-2.5-INSPIRED k-l turbulence closure.
 
 Carries a prognostic turbulent kinetic energy (TKE) equation and
 derives eddy diffusivities from TKE and a mixing length:
 
-    Km = Ck * l * sqrt(TKE)
+    Km = Ck * l * sqrt(max(TKE, tke_min))
     Kh = Km / Pr_t
 
 TKE budget:
-    de/dt = Km * S^2 - Kh * N^2 - Ce * e^{3/2} / l + d/dz[Km * de/dz]
+    de/dt = Km * S^2 - Kh * N^2 - Ce * e^{3/2} / l + rho^-1 d/dz[rho Km de/dz]
 
 Dissipation is treated semi-implicitly for stability.
 
@@ -15,6 +15,39 @@ References
 ----------
 - Mellor, G. L., & Yamada, T. (1982). Development of a turbulence closure
   model for geophysical fluid problems. Rev. Geophys., 20, 851-875.
+
+Faithfulness to Mellor-Yamada (1982) level 2.5
+----------------------------------------------
+This is a MY2.5-INSPIRED k-l closure, NOT the literal level-2.5 scheme: it carries the
+prognostic TKE budget but REPLACES MY2.5's defining algebraic stability functions with
+constant coefficients.
+MY2.5-STRUCTURED (faithful forms):
+  * the prognostic TKE (``e = q²/2``) budget SKELETON — shear production ``Km·S²``,
+    buoyancy ``−Kh·N²``, and dissipation ``∝ e^{3/2}/l`` — matches the Mellor-Yamada
+    level-2.5 ``q²/2`` budget (the transport term uses ``Km`` not MY's ``Kq``; see below);
+  * the k-l eddy viscosity ``Km ∝ l·√e`` has MY's ``Km = l·q·Sm`` form (``q = √(2e)``, so
+    ``Ck = √2·Sm_eff`` for a constant effective ``Sm``);
+  * the dissipation ``ε = Ce·e^{3/2}/l`` is MY's ``ε = q³/(B1·l)`` (``Ce = 2^{3/2}/B1
+    ≈ 0.17``; default 0.19).
+DEPARTURES from MY2.5 (the defining level-2.5 physics, simplified):
+  * **CONSTANT Ck replaces the algebraic momentum stability function Sm(GM, GH)** — the
+    single defining feature of level 2.5 (``Sm`` depends on BOTH the shear ``GM`` and the
+    buoyancy ``GH = −l²N²/q²``).  ``Km = Ck·l·√e`` therefore scales the SAME way at every
+    Richardson number; at FIXED ``e`` and ``l`` it is INDEPENDENT of the stratification
+    ``N²`` (MY2.5's ``Sm`` decreases with stability).  (Over a prognostic run ``N²`` still
+    changes later ``Km`` INDIRECTLY, through its buoyancy effect on ``e``.)
+  * **CONSTANT Pr_t = 0.33 sets a fixed ``Kh/Km = 1/Pr_t ≈ 3.03``** — MY2.5's ratio
+    ``Sh(GM, GH)/Sm(GM, GH)`` is stability-dependent (and its NEUTRAL value is only
+    ``Sh/Sm = A2 / [A1(1−3C1)] ≈ 0.74/0.70 ≈ 1.06``, not ≈3), so ``Pr_t = 0.33`` is this
+    scheme's own fixed choice, NOT the MY value.
+  * **TKE is diffused with ``Km``, not MY's separate TKE diffusivity ``Kq = l·q·Sq``**
+    (``Sq ≈ 0.20``) — the transport term ``ρ⁻¹∂z(ρ Km ∂z e)`` uses the momentum ``Km``.
+  * **fixed asymptotic mixing length** ``l = κz/(1 + κz/l_max)`` with a CONSTANT
+    ``l_max`` — MY's diagnostic length is likewise Blackadar-like near the wall but with
+    an integral, turbulence-dependent asymptote ``l0 = 0.1·∫q z dz / ∫q dz``.
+  * **numerics** (not MY): the semi-implicit dissipation linearization
+    ``ε ≈ Ce·√e_n·e_{n+1}/l`` (stability + AD-safe) and the ``tke_min`` floor.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_tke_faithful.py``.
 """
 
 from __future__ import annotations
@@ -23,7 +56,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import TKEConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -38,10 +76,12 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 
 __physics_contract__ = {
     "summary": (
-        "Prognostic-TKE (Mellor-Yamada level 2.5) turbulence: advances a "
-        "turbulent-kinetic-energy budget (shear production, buoyancy, "
-        "dissipation, diffusion), sets K_m = Ck l sqrt(TKE), K_h = K_m/Pr_t, "
-        "and applies implicit vertical diffusion with surface-flux BCs."
+        "Prognostic-TKE (Mellor-Yamada-2.5-INSPIRED k-l closure) turbulence: "
+        "advances a turbulent-kinetic-energy budget (shear production, "
+        "buoyancy, dissipation, diffusion), sets K_m = Ck l sqrt(max(TKE, "
+        "tke_min)) with a CONSTANT Ck (in place of MY2.5's algebraic "
+        "Sm(GM, GH) stability function) and K_h = K_m/Pr_t with a constant "
+        "Pr_t, then applies implicit vertical diffusion with surface-flux BCs."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
@@ -68,7 +108,8 @@ __physics_contract__ = {
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_turbulence.py: TKE stays "
         ">= tke_min; a neutral no-shear column has zero production and "
-        "buoyancy so TKE decays by dissipation; Km = Ck l sqrt(TKE) >= 0."
+        "buoyancy so TKE decays by dissipation; Km = Ck l sqrt(max(TKE, "
+        "tke_min)) >= 0."
     ),
 }
 
@@ -151,12 +192,13 @@ def tke_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2  # (ncol, nlev-1)
 
-    # Brunt-Väisälä at half-levels
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Brunt-Väisälä at half-levels (canonical inverse-Exner + shared
+    # buoyancy-coefficient helpers; clips kept at the call sites).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # Interpolate S2 and N2 to full levels.  Single ``concatenate`` of
     # the centered interior with the two endpoint half-values lowers

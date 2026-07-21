@@ -184,26 +184,53 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
     stoch = jnp.zeros((ncol,))
     dp = ph[:, 1:] - ph[:, :-1]
 
-    def _rel(ss):
+    def _rel(ss, use_ifs_cape_closure=True):
         out, _, _ = bechtold_convection(
             T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
             conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
             dt=1800.0,
+            # Sub-cloud evap pinned OFF: this test's object is the mass-flux
+            # SOLVE conservation.  The H+Q+C metric is not evap-invariant BY
+            # CONSTRUCTION (it books +L_v*rain for never-evaporated rain, so
+            # the exactly-conservative form-then-evaporate pair shifts it by
+            # -L_v*e); the evap's own water/enthalpy closure is machine-exact
+            # tested in test_bechtold.py::test_ifs_subcloud_evap_*.
             config=BechtoldConfig(
                 enable_stochastic=False, enable_cmt=False, subsidence_solve=ss,
+                use_ifs_cape_closure=use_ifs_cape_closure,
+                use_ifs_subcloud_evap=False,
+                use_ifs_inplume_precip=False,
             ),
             moisture_convergence=jnp.zeros_like(T),
         )
+        # The latent-heat sink C is the FULL detrained condensate: with the
+        # default #929 rain split (precip_efficiency=0.7) precip_efficiency of
+        # it moves from dq_c_conv_dt into dq_r_conv_dt, but the latent heat of
+        # ALL of it is already booked in dT_dt (H), so the enthalpy budget must
+        # sum dq_c + dq_r (the split re-partitions water downstream; it does
+        # not change the scheme's internal energy balance).
+        _dqr = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else 0.0
         H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
         Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-        C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+        C = float(jnp.sum((out.dq_c_conv_dt + _dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
         return abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
 
+    # DEFAULT scheme (IFS cape closure ON since 2026-07-16): both solves must
+    # meet the hard bar.  The closure changes the M_u magnitude regime, so the
+    # legacy adv>impl ORDERING is not guaranteed here (raw-tendency budget
+    # closure is delegated to the orchestrator rebalance per the contract);
+    # the anti-vacuity ordering claim is asserted on the LEGACY closure below,
+    # where it was established.
     rel_impl = _rel("implicit_flux")
     rel_adv = _rel("advective")
     assert rel_impl < 0.30, f"implicit Bechtold MSE residual {rel_impl*100:.1f}% >= 30%"
-    assert rel_adv > rel_impl, (
-        "advective residual not larger than implicit -- guard would be vacuous"
+    assert rel_adv < 0.30, f"advective Bechtold MSE residual {rel_adv*100:.1f}% >= 30%"
+    rel_impl_legacy = _rel("implicit_flux", use_ifs_cape_closure=False)
+    rel_adv_legacy = _rel("advective", use_ifs_cape_closure=False)
+    assert rel_impl_legacy < 0.30, (
+        f"legacy implicit MSE residual {rel_impl_legacy*100:.1f}% >= 30%")
+    assert rel_adv_legacy > rel_impl_legacy, (
+        "legacy advective residual not larger than implicit -- guard would be vacuous"
     )
 
 
@@ -394,3 +421,40 @@ def test_implicit_theta_blend_conserves():
         C = _col_int(constants.L_v * dqc, dp)
         rel = jnp.abs(H + Q + C) / (jnp.abs(H) + jnp.abs(Q) + jnp.abs(C) + 1e-10)
         assert jnp.all(rel < 1e-9), f"theta={theta} MSE residual {rel}"
+
+
+def test_stochastic_draw_chunk_invariance():
+    """A1 increment 2 leaf gate: the per-GLOBAL-column fold_in draw makes
+    the stochastic AR1 update decomposition-invariant — running the leaf
+    on a contiguous CHUNK of columns (with that chunk's global col_index)
+    must reproduce exactly the corresponding slice of the full-domain
+    run.  The legacy bulk normal(key, (ncol,)) draw fails this."""
+    import jax
+
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    assert ncol >= 2, "need >=2 columns to split"
+    cpp = jnp.zeros((ncol, nlev))
+    stoch0 = jnp.linspace(-0.5, 0.5, ncol)
+    key = jax.random.PRNGKey(7)
+    cfg = BechtoldConfig(enable_stochastic=True, enable_cmt=False)
+    ids = jnp.arange(ncol, dtype=jnp.int32)
+
+    def _run(sl):
+        _, _, stoch_new = bechtold_convection(
+            T=T[sl], q_v=q[sl], p_full=pf[sl], p_half=ph[sl],
+            u=u[sl], v=v[sl],
+            conv_prog_profile=cpp[sl], conv_stoch_state=stoch0[sl],
+            prng_key=key, dt=1800.0, config=cfg,
+            moisture_convergence=jnp.zeros_like(T[sl]),
+            col_index=ids[sl],
+        )
+        return np.asarray(stoch_new)
+
+    full = _run(slice(None))
+    half = ncol // 2
+    np.testing.assert_array_equal(full[:half], _run(slice(0, half)))
+    np.testing.assert_array_equal(full[half:], _run(slice(half, ncol)))
+    # Non-vacuity: the innovation actually moved the AR1 state.
+    assert float(np.max(np.abs(full - np.asarray(
+        jnp.exp(-1800.0 / cfg.stochastic_decorrelation) * stoch0)))) > 1e-8

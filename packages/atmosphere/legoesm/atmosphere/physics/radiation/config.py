@@ -105,28 +105,35 @@ class GrayRadiationConfig(NamedTuple):
     Fields
     ------
     tau_equator : float
-        Equatorial LW optical depth (default 7.2).
+        Equatorial LW optical depth (default 7.2; Isca B_FRIERSON default 6.0).
     tau_pole : float
-        Polar LW optical depth (default 1.8).
+        Polar LW optical depth (default 1.8; Isca B_FRIERSON default 1.5).
     linear_frac : float
-        Fraction f_l of linear sigma weighting vs sigma^4 (default 0.2).
+        Fraction f_l of linear sigma weighting vs sigma^4 (default 0.2;
+        Isca B_FRIERSON ``linear_tau`` default 0.1).
     tau_moist_coeff : float
         Moisture optical depth coefficient [m^2/kg]: dtau_k = coeff * q_v * dp_k / g
-        (default 0.0115, Frierson 2006).
+        (default 0.0115). NOTE: interactive-vapor LW is a Byrne & O'Gorman (2013)-
+        style add-on; Frierson (2006) / Isca B_FRIERSON have NO moisture LW term
+        (their tau is a prescribed dry function of lat & sigma). See the module
+        docstring's Faithfulness section. Set ``q_v=None`` to drop this term
+        (recovers the prescribed-dry LW optical depth, not full Frierson).
     lw_diff_factor : float
-        Diffusivity factor D for hemispheric-mean (default 1.66, ~5/3).
+        Diffusivity factor D applied as exp(-D*dtau) (default 1.66, ~5/3).
+        DEPARTURE: Isca/FHZ06 apply NO separate D (their prescribed tau is already
+        diffusive); set D=1.0 to reproduce the oracle for a given tau.
     sfc_emissivity : float
-        Surface emissivity for LW (default 1.0).
+        Surface emissivity for LW (default 1.0 = Isca's black ``b_surf``).
     sw_tau_0 : float
-        SW optical depth scale (default 0.22). Set to 0.0 for the
-        strict surface-absorbing SW limit often used in Frierson-style
-        gray setups. The SW optical depth profile is:
+        SW optical depth scale (default 0.22). Set to 0.0 for the strict
+        surface-absorbing SW limit; Isca B_FRIERSON's default ``atm_abs=0.0``
+        is a fully transparent SW atmosphere. The SW optical depth profile is:
         tau_sw(sigma) = sw_tau_0 * sigma^sw_exponent.
     sw_exponent : float
-        Exponent for the SW optical-depth profile (default 2.0).
-        Controls how SW absorption is distributed vertically.
-        Only the downward SW beam is absorbed; reflected upward
-        SW escapes directly to TOA (Frierson/Isca convention).
+        Exponent for the SW optical-depth profile (default 2.0; Isca
+        ``solar_exponent`` default 4.0). Controls how SW absorption is
+        distributed vertically. Only the downward SW beam is absorbed;
+        reflected upward SW escapes directly to TOA (Frierson/Isca convention).
     S_0 : float
         Total solar irradiance [W/m^2] (default constants.S_0 = 1361.0).
     sfc_albedo : float
@@ -139,7 +146,7 @@ class GrayRadiationConfig(NamedTuple):
     tau_equator: float = 7.2
     tau_pole: float = 1.8
     linear_frac: float = 0.2
-    tau_moist_coeff: float = 0.0115  # [m²/kg] moisture LW optical depth (Frierson 2006)
+    tau_moist_coeff: float = 0.0115  # [m²/kg] Byrne&O'Gorman(2013)-style moisture LW; NOT in Frierson dry LW
     lw_diff_factor: float = 1.66
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
@@ -235,11 +242,19 @@ class RRTMGPConfig(NamedTuple):
     #   >0 -> process g-points in parallel blocks of this size via ``vmap``
     #         (the g-point axis is embarrassingly parallel; the sequential
     #         scan launches one tiny kernel per g-point and starves the GPU,
-    #         ~26x slower in a microbench).  FORWARD/inference only — it holds
-    #         this many g-points' activations for the backward pass.  A block
-    #         of ~16-32 recovers most of the parallelism while bounding peak
-    #         memory at high resolution.  Default 0 = byte-for-byte legacy.
-    gpoint_batch_size: int = 0
+    #         ~26x slower in a microbench).  It holds this many g-points'
+    #         activations for the backward pass.  A block of ~16-32 recovers
+    #         most of the parallelism while bounding peak memory at high
+    #         resolution.
+    #
+    # DEFAULT 16 (was 0): the scan path (0) with gpoint_checkpoint=True emits a
+    # distinct prevent_cse body per g-point (~Ng-fold code) => multi-HOUR GPU
+    # compile for reverse-mode AD training (rrtmgp+rollout adjoint took ~9 h,
+    # never reaching epoch-0). The 16-wide vmap block compiles ONE reused body
+    # (minutes) and is ~26x faster at runtime, with peak memory bounded to 16
+    # g-points. This is the right default everywhere RRTMGP is used; set 0 only
+    # to reproduce the exact legacy g-point accumulation order.
+    gpoint_batch_size: int = 16
     # Wrap the per-g-point scan step in jax.checkpoint(prevent_cse=True) for
     # reverse-mode AD memory (recompute one g-point per backward step).  True =
     # byte-for-byte legacy (required for high-res rrtmgp training).  Set False
@@ -258,6 +273,16 @@ class RRTMGPConfig(NamedTuple):
     # <0.01 K/day vs fp64).  Default off; the MPAS driver enables it for the
     # long-run rrtmgp path.
     compute_fp32: bool = False
+    # Column-chunking for the rrtmgp XLA compile wall at higher horizontal
+    # resolution.  0 (default) = disabled, byte-identical single-shot solve.
+    #   >0 -> jax.lax.map ``solve_columns`` over fixed-size blocks of this many
+    #         columns.  Radiation columns are INDEPENDENT, so the result is
+    #         numerically EXACT; the per-block body compiles ONCE at this size,
+    #         capping the highly super-linear rrtmgp JIT cost independent of the
+    #         total column count (C24/C48 at L20 compile instead of stalling).
+    #         Must divide ncol.  A pure compile-time NUMERICS knob — NOT a
+    #         tunable/trainable parameter (levels stay coupled, never chunked).
+    column_chunk_size: int = 0
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -378,3 +403,15 @@ class RadiationConfig(NamedTuple):
     # eccentricity-driven perihelion/aphelion asymmetry).  ``None`` (default)
     # ⇒ circular orbit, so idealized/aquaplanet experiments are unchanged.
     orbit: "OrbitalParameters | None" = None
+    # Route a moist higher-order turbulence closure's sub-grid PDF cloud fraction
+    # (CLUBB) into the cloud optics instead of the RH-diagnosed grid-scale one.
+    # A moist closure is physically LESS overcast over a saturated marine
+    # boundary layer, so the ``cf * q_c_diagnostic`` condensate floor — which
+    # sets the marine-Sc liquid water path and hence the planetary albedo — drops
+    # toward the observed value (the marine-Sc over-bright bias lever).  Requires
+    # a cf-producing closure (turbulence.scheme='clubb', diagnostic
+    # CLUBBConfig.prognostic=False); combined.py raises if set without one, and
+    # make_radiation_physics raises on non-hydrostatic dycores (READ side wired
+    # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
+    # fraction (byte-identical).
+    use_clubb_cloud_fraction: bool = False

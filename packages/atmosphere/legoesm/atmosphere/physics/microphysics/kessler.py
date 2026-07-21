@@ -4,8 +4,46 @@ A simple one-moment warm-rain scheme tracking cloud water and rain.
 Processes: saturation adjustment, autoconversion, accretion, evaporation,
 rain sedimentation, and latent heating.
 
-All operations use smooth (differentiable) approximations for
-compatibility with jax.grad.
+Operations use AD-safe approximations (smooth switches + guarded fractional
+powers) for jax.grad compatibility; the scheme is NOT globally smooth — it
+retains max/min/clip kinks (donor clamps, positivity floors).
+
+Faithfulness to Kessler (1969)
+------------------------------
+FAITHFUL (classic Kessler process forms + coefficients):
+  * **Autoconversion** cloud->rain ``A = k1·max(q_c − a, 0)`` with the canonical
+    Kessler / Klemp-Wilhelmson constants ``k1 = 1e-3 s⁻¹`` (``autoconversion_rate``)
+    and threshold ``a = 1e-3 kg/kg`` (``autoconversion_threshold``).
+  * **Accretion** (collection of cloud by rain) ``C = k2·q_c·q_r^0.875`` with
+    ``k2 = 2.2`` (``accretion_coeff``) and the classic 0.875 exponent.
+  * **Sedimentation density correction** ``(ρ_sfc/max(ρ, 0.1))^0.5`` — the classic
+    ``(ρ_0/ρ)^½`` air-density fall-speed factor (ρ floored at 0.1 kg/m³ aloft for
+    AD safety).
+  * **Latent heating** ``dT/dt = L_v·(cond − evap)/c_pd`` — thermodynamically
+    consistent with the vapour<->liquid exchange.
+DEPARTURES / SURROGATES:
+  * **Rain-evaporation SURROGATE rate**:
+    ``E = evap_coeff·((q_sat − q_v)/q_sat)·q_r^0.525``.  Only the Marshall-Palmer
+    ventilation exponent 0.525 and the sub-saturation driver are Kessler-lineage —
+    and here the exponent is applied to ``q_r`` rather than the classic rain CONTENT
+    ``(ρ q_r)``.  The classic Klemp-Wilhelmson evaporation additionally carries a
+    ``1/ρ`` factor, a ventilation polynomial (``≈ 1.6 + 124.9·(ρ q_r)^0.2046``), and
+    a thermodynamic-resistance denominator; all of that is collapsed into the single
+    tunable ``evaporation_coeff``.
+  * **Constant rain fall speed**: ``V_t = rain_fall_speed·(ρ_sfc/max(ρ, 0.1))^0.5``
+    with a configurable DEFAULT ``rain_fall_speed = 5 m/s``.  The classic Kessler mass-
+    weighted terminal velocity is q_r-DEPENDENT (``∝ (ρ q_r)^0.1364``); dropping
+    that dependence makes the sedimentation flux LINEAR in q_r (not ``q_r^1.1364``).
+  * **Smooth saturation adjustment**: a sigmoid switch (``saturation_sharpness``)
+    replaces Kessler's hard/instantaneous saturation adjustment, for
+    differentiability.
+  * **AD-safe / differentiable positivity limiters**: positivity limiting itself is
+    standard in Kessler implementations, but the SPECIFIC differentiable forms here
+    are departures — ``safe_pow`` fractional-power guards, a condensation donor
+    clamp against q_v, a joint q_c-sink donor clamp, an RH-deficit resolution floor,
+    and a dt-limited sedimentation flux.  None alter the classic rates in the
+    unclamped, resolved regime.
+Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_kessler_faithful.py``.
 
 References
 ----------
@@ -19,11 +57,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     rain_evaporation,
     safe_pow,
     donor_clamp_scale,
+    saturation_adjustment,
 )
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -115,37 +153,25 @@ def kessler_microphysics(
     q_r = hydrometeors.q_r
     sharpness = config.saturation_sharpness
 
-    # Saturation mixing ratio
-    q_sat = saturation_mixing_ratio(T, p_full)
-
-    # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s].
-    # Adopts the ``_warm_rain.saturation_adjustment`` psychrometric form and
-    # EXTENDS its donor clamp to both branches:
-    #   (a) PSYCHROMETRIC correction — condensing the full ``q_v - q_sat(T_old)``
-    #       ignores the latent warming that raises ``q_sat``, over-condensing each
-    #       call; divide by ``1 + (L_v/c_pd) dq_sat/dT`` (small-error dry-air
-    #       mixing-ratio approximation, same as the shared helper).
-    #   (b) Donor-clamp BOTH branches: evaporation (negative ``condensation``) by
-    #       the available ``q_c`` (a subsaturated clear-air column cannot drive
-    #       ``q_c`` < 0 — this is the only branch ``_warm_rain`` itself clamps),
-    #       AND — the previously MISSING bound — condensation (positive) by the
-    #       available ``q_v``.  Without the positive clamp the coupled driver
-    #       floors ``q_v`` independently while keeping the full ``q_c`` increment,
-    #       so saturation adjustment created cloud water from vapour that was
-    #       floored away → ``q_c`` accumulated to physically impossible ~1 kg/kg
-    #       (opaque clouds, planetary-albedo runaway, the coupled cold drift /
-    #       OLR collapse).
+    # 1. Saturation adjustment — the SHARED ``_warm_rain.saturation_adjustment``
+    # helper computes ``q_sat`` and the supersaturation residual (in fp64 when
+    # x64 is available — the issue #618 robustness path the fp32 LES/CRM
+    # production config relies on; an inline fp32 copy here re-exposed the
+    # ~65 % LWP deficit #618 fixed), applies the psychrometric correction, and
+    # donor-clamps the evaporation branch against ``q_c``.  Kessler EXTENDS it
+    # with the previously MISSING positive-branch bound: condensation is
+    # donor-clamped by the available ``q_v``.  Without that clamp the coupled
+    # driver floors ``q_v`` independently while keeping the full ``q_c``
+    # increment, so saturation adjustment created cloud water from vapour that
+    # was floored away → ``q_c`` accumulated to physically impossible
+    # ~1 kg/kg (opaque clouds, planetary-albedo runaway, the coupled cold
+    # drift / OLR collapse).
     _dt_safe = jnp.maximum(dt, 1e-10)
-    excess = q_v - q_sat
-    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
-    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
-    cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / (_dt_safe * psychrometric)  # [kg/kg/s]
-    q_c_avail = jnp.clip(q_c, 0.0, None)
-    q_v_avail = jnp.clip(q_v, 0.0, None)
-    condensation = jnp.clip(
-        condensation, -q_c_avail / _dt_safe, q_v_avail / _dt_safe,
+    condensation, q_sat = saturation_adjustment(
+        T, q_v, p_full, _dt_safe, sharpness, q_c=q_c,
     )
+    q_v_avail = jnp.clip(q_v, 0.0, None)
+    condensation = jnp.minimum(condensation, q_v_avail / _dt_safe)
 
     dq_v_sat = -condensation
     dq_c_sat = condensation

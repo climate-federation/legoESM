@@ -53,6 +53,54 @@ def test_default_nlev_is_40_for_climate_fidelity():
     assert parse_args(["--grid", "latlon", "--nlev", "20"]).nlev == 20
 
 
+def test_enable_latlon_spmd_flags_round_trip():
+    """--enable-latlon-spmd / --spmd-n-devices parse and reach OMIPRunConfig
+    (the lat-band SPMD restoring lane, part 2a of the ocean-SPMD promotion)."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.enable_latlon_spmd is False
+    assert args.spmd_n_devices == 0
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is False
+    assert cfg.spmd_n_devices == 0
+
+    args = parse_args(["--grid", "latlon", "--enable-latlon-spmd",
+                       "--spmd-n-devices", "4"])
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is True
+    assert cfg.spmd_n_devices == 4
+
+
+def test_multicontroller_flags_round_trip():
+    """--multicontroller / --coordinator parse and reach OMIPRunConfig
+    (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.multicontroller is False
+    assert args.coordinator is None
+    cfg = build_config_from_args(args)
+    assert cfg.multicontroller is False
+    assert cfg.coordinator is None
+
+    args = parse_args([
+        "--grid", "latlon", "--enable-latlon-spmd", "--multicontroller",
+        "--coordinator", "localhost:12345"])
+    cfg = build_config_from_args(args)
+    assert cfg.multicontroller is True
+    assert cfg.coordinator == "localhost:12345"
+
+
+def test_multicontroller_without_spmd_refused():
+    """--multicontroller alone (no --enable-latlon-spmd) must hard-fail BEFORE
+    any device work: otherwise every rank runs the full serial model and
+    clobbers the same output paths (codex r2 #2).  The guard sits right after
+    build_config_from_args, so this raises without building a model."""
+    from scripts.run.run_omip import run_omip_single
+
+    args = parse_args(["--grid", "latlon", "--multicontroller"])
+    assert args.enable_latlon_spmd is False
+    with pytest.raises(SystemExit, match="requires --enable-latlon-spmd"):
+        run_omip_single("latlon", args)
+
+
 def test_jra55_sea_ice_flag_parses():
     """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
     wired into the JRA55 scan block loop."""
@@ -326,3 +374,224 @@ def test_iwm_override_installs_physics_on_flat_latlon():
     assert config2.A_v == constants.nu_ocean_molecular
     assert config2.K_v == 1.0e-10
     assert model2._iwm_forcing is None            # uniform fallback mode
+
+
+def test_barotropic_wide_halo_flags_round_trip():
+    """--barotropic-wide-halo(-chunk) reach the nested BarotropicConfig via
+    the flat-name mapping and the drag/iwm override hook; default is OFF
+    (bit-identical config)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    off = parse_args(["--grid", "latlon"])
+    assert off.barotropic_wide_halo is False
+    assert off.barotropic_wide_halo_chunk == 0
+
+    args = parse_args(["--grid", "latlon", "--barotropic-wide-halo",
+                       "--barotropic-wide-halo-chunk", "4"])
+    assert args.barotropic_wide_halo is True
+    assert args.barotropic_wide_halo_chunk == 4
+
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _model2 = _apply_drag_iwm_overrides(
+        args, "latlon", grid, z, config, model)
+    assert config2.barotropic.barotropic_wide_halo is True
+    assert config2.barotropic.barotropic_wide_halo_chunk == 4
+    # The flag also sets the (validator-required) explicit local clamp.
+    assert config2.barotropic.barotropic_local_subcycle_clamp is True
+    # No-flag path leaves the config object bit-identical.
+    config3, _ = _apply_drag_iwm_overrides(off, "latlon", grid, z,
+                                           config, model)
+    assert config3.barotropic.barotropic_wide_halo is False
+
+
+def test_barotropic_wide_halo_refused_off_latlon():
+    """Non-latlon grids must refuse the flag loudly, not silently ignore."""
+    import pytest as _pytest
+
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "cubed_sphere", "--barotropic-wide-halo"])
+
+    class _StubCfg:  # cube ocean config: no flat barotropic fields
+        bottom_drag_scheme = "legacy"
+
+    with _pytest.raises(SystemExit, match="wide-halo"):
+        _apply_drag_iwm_overrides(
+            args, "cubed_sphere", None, None, _StubCfg(), object())
+
+
+# ===========================================================================
+# Double-diffusive mixing (zdfddm) reachability
+# ===========================================================================
+
+def test_ddm_flag_flows_to_config():
+    """--ddm round-trips into VerticalMixingConfig.ddm.
+
+    Before this flag existed, DDM was UNREACHABLE: it is implemented and
+    oracle-pinned (PR #1074), defaults OFF, and its only gate --
+    ``DoubleDiffusionConfig.enabled`` -- is a BOOL. Only ``:float`` fields are
+    ``__param_spec__``-eligible, so ``--params`` can set ddm's rn_avts/rn_hsbfr
+    but can NEVER set the switch that makes them do anything.
+
+    NOTE this asserts the HELPER only. That is not sufficient on its own --
+    see test_ddm_reaches_the_model_on_the_flat_latlon_path, which is the load-
+    bearing one.
+    """
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.ddm.enabled is False, "default must stay OFF"
+
+    on = build_config_from_args(parse_args(["--grid", "latlon", "--ddm"]))
+    assert on.vertical_mixing.ddm.enabled is True
+
+
+def test_ddm_reaches_the_model_on_the_flat_latlon_path():
+    """THE load-bearing pin: --ddm must reach config.physics in PRODUCTION.
+
+    The first version of the --ddm tests asserted only that
+    build_vertical_mixing_config_from_args returned ddm.enabled=True -- helper
+    wiring, not reachability. The flag was still INERT on the default flat
+    lat-lon path, because run_omip ships config.physics=None there and
+    _apply_drag_iwm_overrides returned early unless drag or --iwm was set. So
+    the tests were green and the scheme was still unselectable: the exact bug
+    this branch exists to remove, re-created by its own fix (codex).
+
+    The identical trap is already recorded in that function for --iwm ("codex
+    r2 #1"). It was fixed for --iwm only; --ddm was added later and fell in.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--ddm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()   # physics=None (flat path)
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _ = _apply_drag_iwm_overrides(args, "latlon", grid, z, config, model)
+
+    assert config2.physics is not None, "--ddm never reached config.physics"
+    assert config2.physics.vertical_mixing.ddm.enabled is True
+    # DDM contributes only through the implicit solve and RAISES on an explicit
+    # path, so the flag must force it rather than die on an invisible guard.
+    assert config2.implicit_vertical_mixing is True
+
+
+def test_bare_ddm_does_not_steal_the_zdfiwm_molecular_backgrounds():
+    """The molecular-background override is a zdfiwm_init convention (the wave
+    field IS the interior background), not a property of additive mixing. A
+    bare --ddm must NOT silently strip the user's A_v/K_v."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--ddm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    # Pin explicit, non-molecular backgrounds so "unchanged" is observable --
+    # an earlier version of this test compared against whatever the default
+    # happened to be and was tautological (codex).
+    config = LatLonCGridOceanConfig.from_flat(A_v=3.0e-4, K_v=7.0e-5)
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _ = _apply_drag_iwm_overrides(args, "latlon", grid, z, config, model)
+    assert config2.physics.vertical_mixing.ddm.enabled is True   # ddm DID apply
+    assert config2.A_v == 3.0e-4, "bare --ddm stole the user's A_v"
+    assert config2.K_v == 7.0e-5, "bare --ddm stole the user's K_v"
+    assert config2.A_v != constants.nu_ocean_molecular
+
+    # ... and --iwm DOES take them (the zdfiwm_init convention), so the gating
+    # is real rather than vacuous.
+    cfg_i = LatLonCGridOceanConfig.from_flat(A_v=3.0e-4, K_v=7.0e-5)
+    cfg_i2, _ = _apply_drag_iwm_overrides(
+        parse_args(["--grid", "latlon", "--iwm"]), "latlon", grid, z, cfg_i,
+        LatLonCGridOceanModel(grid, z, cfg_i))
+    assert cfg_i2.A_v == constants.nu_ocean_molecular
+    assert cfg_i2.K_v == 1.0e-10
+
+
+def test_ddm_float_knobs_stay_on_params_not_flags():
+    """The float knobs are reachable via --params, per the repo convention that
+    spec'd float tunables need no dedicated flag -- so this PR adds ONLY the
+    bool gate. Pins that they really are reachable that way."""
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        __param_spec__ as ddm_spec,
+    )
+    params = ddm_spec["DoubleDiffusionConfig"]["params"]
+    assert {"rn_avts", "rn_hsbfr"} <= set(params)
+    assert ddm_spec["DoubleDiffusionConfig"]["scheme_key"] == "ocean.vm.ddm"
+    # and `enabled` must NOT be spec'd (it is a bool -- not spec-eligible)
+    assert "enabled" not in params
+
+
+@pytest.mark.parametrize("scheme", [None, "catke", "kpp"])
+@pytest.mark.parametrize("flag,attr", [("--iwm", "iwm"), ("--ddm", "ddm")])
+def test_additive_mixing_flags_reach_every_scheme(scheme, flag, attr):
+    """iwm/ddm are both ADDITIVE riders applied AFTER the primary closure (NEMO
+    zdfphy ordering), so they are independent of which closure ran and must
+    survive every --vertical-mixing-scheme.
+
+    They land in different places: IWM adds onto the tracer AND momentum
+    profiles inside compute_vertical_K_profiles, while DDM contributes
+    heat/salt-only diffusivities (avm untouched) applied later in the lat-lon
+    model's implicit salinity solve (codex corrected an earlier claim here).
+
+    REGRESSION: the catke branch of build_vertical_mixing_config_from_args
+    returned early WITHOUT passing iwm=, so `--iwm --vertical-mixing-scheme
+    catke` parsed fine and then ran with internal-wave mixing silently OFF.
+    Only the KPP-tuning flags are legitimately inapplicable to catke.
+    """
+    argv = ["--grid", "latlon", flag]
+    if scheme is not None:
+        argv += ["--vertical-mixing-scheme", scheme]
+    vm = build_config_from_args(parse_args(argv)).vertical_mixing
+    assert getattr(vm, attr).enabled is True, (
+        f"{flag} was silently dropped for --vertical-mixing-scheme {scheme}"
+    )
+
+
+def test_ddm_forces_implicit_mixing_at_parse_time():
+    """The force must happen in parse_args, not only in the later override hook.
+
+    The bathymetry path builds its config+model from `args` BEFORE
+    _apply_drag_iwm_overrides runs, so a force that lives only in that hook came
+    too late: the LatLonCGridOceanModel constructor guard raised, and the user
+    got an error they could not connect to the flag they passed (codex).
+    """
+    assert parse_args(["--ddm"]).implicit_vertical_mixing is True
+    assert parse_args(["--iwm"]).implicit_vertical_mixing is True
+    # and a run that asked for neither is untouched
+    assert parse_args([]).implicit_vertical_mixing is False
+
+
+@pytest.mark.parametrize("grid", ["cubed_sphere"])
+def test_ddm_rejected_loudly_on_unsupported_grids(grid):
+    """--ddm was silently INERT on cubed_sphere (setup ships physics=None and
+    the non-latlon branch never wired it). A flag that parses and does nothing
+    is the failure this branch removes -- reject it instead, mirroring the
+    existing --iwm grid guard."""
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", grid, "--ddm"])
+    with pytest.raises(SystemExit, match="--ddm is supported on the lat-lon"):
+        _apply_drag_iwm_overrides(args, grid, None, None, object(), object())

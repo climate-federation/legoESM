@@ -350,7 +350,7 @@ def test_spectral_rollout_rad_gating_one_step():
     """
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
@@ -373,7 +373,9 @@ def test_spectral_rollout_rad_gating_one_step():
         q_v=zero_3d, q_c=zero_3d, q_r=zero_3d,
         conv_prog=zero_3d,
         held_dT_rad=zero_3d, held_sw_net_sfc=zero_2d, held_lw_net_sfc=zero_2d,
-        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d, held_sw_down_toa=zero_2d,
+        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d,
+        held_sw_up_toa_clr=zero_2d, held_lw_up_toa_clr=zero_2d,
+        held_sw_down_toa=zero_2d,
         step_index=jnp.array(0),
         target_moisture=jnp.array(0.0),
         target_mass=jnp.array(0.0),
@@ -381,6 +383,17 @@ def test_spectral_rollout_rad_gating_one_step():
         precip_accum=zero_2d,
         shflx_accum=zero_2d,
         lhflx_accum=zero_2d,
+        # TOA/sfc flux + near-surface-T accumulators added to SegmentCarry by
+        # the 2026-07 origin/main merge (CLAUDE.md: every direct SegmentCarry()
+        # construction must gain new fields).
+        sw_up_toa_accum=zero_2d,
+        lw_up_toa_accum=zero_2d,
+        sw_up_toa_clr_accum=zero_2d,   # #843 clear-sky diagnostic accumulators
+        lw_up_toa_clr_accum=zero_2d,
+        sw_down_toa_accum=zero_2d,
+        sw_net_sfc_accum=zero_2d,
+        lw_net_sfc_accum=zero_2d,
+        t_low_accum=zero_2d,
     )
     ic_spectral = carry_to_spectral_state(fake_carry, grid)
     pe_config = SpectralPEConfig(
@@ -436,7 +449,7 @@ def test_rrtmgp_spectral_pe_sfc_albedo_override_consumed_and_differentiable():
     import numpy as np
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
     from legoesm.atmosphere.physics.radiation.config import (
@@ -488,7 +501,7 @@ def test_make_physics_threads_sfc_override_combined_path():
     import numpy as np
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
@@ -542,7 +555,7 @@ def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
     )
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         isothermal_rest_state_spectral,
     )
 
@@ -568,3 +581,26 @@ def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
     g = np.asarray(grads.raw_values["rrtmgp_sfc_albedo"])
     assert np.all(np.isfinite(g)), "non-finite gradient on the scalar rrtmgp_sfc_albedo"
     assert np.any(g != 0.0), "rrtmgp_sfc_albedo is a dead leaf in the non-spatial RRTMGP path"
+
+
+def test_spatial_baselines_from_params_maps_trained_scalars():
+    """Regression (codex): the spatial-field baselines must come from the
+    TRAINED scalar keys, alias-mapped to the field names. A raw ``as_dict``
+    pass-through left every baseline at the static f_0 -> trained scalars dead
+    + no trainable ocean-surface lever under ``spatial_surface=True``."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams,
+        spatial_baselines_from_params,
+    )
+    from legoesm.training.aimip_spatial import _FIELD_SPECS
+
+    d = AIMIPClassicalParams.from_defaults().as_dict()
+    for rad, prefix in (("rrtmgp", "rrtmgp"), ("gray", "gray")):
+        b = spatial_baselines_from_params(d, rad)
+        # keys must EXACTLY match the spatial field names evaluate() looks up
+        assert set(b) == set(_FIELD_SPECS), (set(b), set(_FIELD_SPECS))
+        assert b["Cd_neutral"] is d["surface_Cd_neutral"]
+        assert b["Ch_neutral"] is d["surface_Ch_neutral"]
+        assert b["z0"] is d["surface_z0"]
+        assert b["sfc_albedo"] is d[f"{prefix}_sfc_albedo"]
+        assert b["sfc_emissivity"] is d[f"{prefix}_sfc_emissivity"]

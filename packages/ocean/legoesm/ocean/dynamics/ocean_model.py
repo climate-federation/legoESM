@@ -154,7 +154,7 @@ class OceanModel:
                     "barotropic-core provider is registered.  Import the FV3 SW "
                     "core provider before building a cube ocean with this "
                     "barotropic_staggering, e.g. `import "
-                    "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid`."
+                    "legoesm.atmosphere.dynamics.gcm.shallow_water_fv3_cdgrid`."
                 ) from exc
             self._sw_baro_model = _build_sw(grid, self._cdgrid, self.config)
 

@@ -6,7 +6,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 import jax.numpy as jnp
 from legoesm.grids.gaussian import GaussianGrid, create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.spectral_pe import (
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPrimitiveEquationModel,
     SpectralPEConfig,
     isothermal_rest_state_spectral,

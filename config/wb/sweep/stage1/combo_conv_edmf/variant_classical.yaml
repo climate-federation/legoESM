@@ -1,0 +1,5 @@
+aimip_convection: edmf
+aimip_turbulence: louis
+aimip_gwd: mcfarlane
+aimip_microphysics: sundqvist
+aimip_cloud: xu_randall

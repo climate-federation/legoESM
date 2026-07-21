@@ -89,9 +89,11 @@ dt: 600.0            # 10-minute dycore timestep.  T63 dt=1200 produced
 # AIMIP guideline of "stop training when no improvement after
 # several months" (one epoch = full pass over the windowed train
 # set, ~tens of model-days of physics integration).
-aimip_n_epochs: 8          # v10: reduced from 15 to keep the T127 single-
-                           # GPU budget tractable (one classical epoch at
-                           # T127 L8 is ~10x more expensive than T11).
+aimip_n_epochs: 24         # extended (was 8); aimip_patience=3 early-stops
+                           # converged variants (classical) so the still-
+                           # improving NN variants (column_nn/sfno_physics)
+                           # get the extra epochs. Resume from the epoch_0007
+                           # checkpoints via run_aimip.py --resume.
 aimip_patience: 3          # tightened along with n_epochs.
 aimip_min_delta: 1.0e-3    # minimum loss improvement to reset patience
 aimip_lr: 3.0e-4

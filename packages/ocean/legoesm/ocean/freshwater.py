@@ -93,30 +93,12 @@ def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
     jax.Array, shape (nCells,)
         Net freshwater flux [kg/m²/s], positive into ocean.
     """
-    base = physical_net_freshwater_flux(fw)
+    base = fw.precip - fw.evap + fw.runoff + fw.ice_fw
     # ``restoring is None`` is a Python (trace-time) check — safe
     # under JIT because the field is structural metadata.
     if fw.restoring is None:
         return base
     return base + fw.restoring
-
-
-def physical_net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
-    """PHYSICAL net freshwater flux into the ocean [kg/m²/s]:
-
-        F_phys = P - E + R + M   (precip - evap + runoff + ice melt/freeze)
-
-    EXCLUDING the numerical ``restoring`` channel (the SSS-restoring virtual
-    flux is a relaxation toward climatology, not a physical surface buoyancy
-    flux).  This is the KPP/vmix surface-BUOYANCY contract for the direct
-    OMIP-forced paths: ``OceanSurfaceForcing.freshwater`` carries this signal
-    for the boundary-layer closures (``vertical_mixing/{integration,
-    k_profiles,mpas_integration}.py``) while the freshwater MASS is applied
-    exactly once via ``model.step(freshwater=fw)`` (virtual salt + eta).
-    Also the flux whose area-mean :func:`normalized_virtual_salt_flux`
-    removes (restoring is a local relaxation and must not be globally
-    redistributed)."""
-    return fw.precip - fw.evap + fw.runoff + fw.ice_fw
 
 
 def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
@@ -140,7 +122,7 @@ def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
 
 def virtual_salt_flux(
     fw: FreshwaterForcing,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     dz_0: jnp.ndarray,
     rho_0: float,
 ) -> jnp.ndarray:
@@ -172,7 +154,7 @@ def virtual_salt_flux(
 
 def virtual_salt_flux_from_net(
     F_fw: jnp.ndarray,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     dz_0: jnp.ndarray,
     rho_0: float,
 ) -> jnp.ndarray:
@@ -242,8 +224,27 @@ def normalize_freshwater_net(
     """
     w = area * mask
     if owned_mask is None:
-        # Single-rank / shard-replicated: local sum is the global sum.
-        F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+        num_local = jnp.sum(F_fw * w)
+        den_local = jnp.sum(w)
+        # Lat-band shard_map body (ARMED lat SPMD halo backend): the sums
+        # above are per-band PARTIALS over exact shards (band arrays carry no
+        # halo rows — the halo is exchanged transiently inside the pad ops),
+        # so psum them to the true global mean; a band-local mean would give
+        # every band a different correction, breaking global salt
+        # conservation and cross-band consistency.  Deliberately NOT
+        # ``ocean_global_sum``: its ``is_distributed()`` arm would ALSO
+        # allreduce route-A MPI rank-local sums, double-counting halo rows
+        # (route-A threads ``owned_mask`` instead — the branch below).
+        # Serial / MPI / cube-spmd ("face" mesh): inert -> the legacy
+        # bit-identical local sum.
+        from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+        if get_halo_backend() == "spmd":
+            _mesh = get_spmd_mesh()
+            if _mesh is not None and "lat" in tuple(_mesh.axis_names):
+                import jax
+                num_local, den_local = jax.lax.psum(
+                    jnp.stack([num_local, den_local]), "lat")
+        F_mean = num_local / jnp.maximum(den_local, 1.0e-10)
     else:
         # MPI/SPMD: restrict local accumulators to OWNED cells (no halo
         # double-count) then reduce globally.  Use the MPAS-AWARE reduction
@@ -267,7 +268,7 @@ def normalize_freshwater_net(
 
 def normalized_virtual_salt_flux(
     freshwater,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_top: jnp.ndarray,
     rho_0: float,
     area: jnp.ndarray,
@@ -275,6 +276,17 @@ def normalized_virtual_salt_flux(
     owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Top-layer virtual-salt tendency [PSU/s] with GLOBAL-SALT conservation.
+
+    NOTE (local-S interaction): the zero-global-salt property holds EXACTLY
+    only for a SCALAR ``S_ref`` (``S_ref * \u222bF' dA = 0`` for the zero-mean
+    ``F'``).  With the ``freshwater_salinity="local"`` array the covariance
+    ``\u222bS_local F' dA`` is generally nonzero — the same residual NEMO's own
+    ``sfx = emp*sss`` convention carries; the normalization then removes the
+    global VOLUME imbalance while the salt closure is NEMO-faithful rather
+    than exactly conservative.  The model configs REJECT the
+    ``local`` + ``normalize_freshwater=True`` combination outright
+    (lat-lon ``_validate_config`` / MPAS tendency gate) until a joint
+    volume+salt correction exists.
 
     Shared by the MPAS (``apply_freshwater_virtual_salt_top``) and lat-lon cores
     so the OMIP global-freshwater correction is implemented ONCE.  Removes the
@@ -288,7 +300,8 @@ def normalized_virtual_salt_flux(
     MPI/SPMD-correct over OWNED cells; ``None`` keeps the bit-identical
     single-rank local sum (see :func:`normalize_freshwater_net`).
     """
-    F_phys = physical_net_freshwater_flux(freshwater)
+    F_phys = (freshwater.precip - freshwater.evap
+              + freshwater.runoff + freshwater.ice_fw)
     wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
     F_phys = normalize_freshwater_net(F_phys, area, wet, owned_mask=owned_mask)
     restoring = getattr(freshwater, "restoring", None)
@@ -341,7 +354,7 @@ def resolve_runoff_spread_arg(config):
 
 def runoff_spread_virtual_salt_tendency_3d(
     fw,
-    S_ref: float,
+    S_ref: float | jnp.ndarray,
     h_k: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,

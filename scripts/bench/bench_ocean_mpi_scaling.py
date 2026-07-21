@@ -324,13 +324,24 @@ def _perturb_state(state, grid):
 
 
 def _ensure_precision(precision: str) -> None:
-    """Belt-and-braces in-process x64 confirmation (the env var is
-    already set pre-import by ``_configure_jax_cpu``; same pattern as
-    ``run_cpu_mpi_scaling._build_amip_step``)."""
+    """Apply the requested precision to BOTH layers: the jax x64 flag AND
+    the legoESM precision POLICY.
+
+    The x64 flag alone is NOT enough — the ocean state dtype comes from
+    ``get_policy().storage`` (default fp32), so the previous
+    flag-only version built f32 states under ``--precision float64``:
+    every gate labeled f64 actually gated f32 data (caught by the tripole
+    lane, whose salt drift sat at the f32 floor while the fp64-policy
+    parity is machine-epsilon; the 2026-06-29 full-suite gotcha)."""
     import jax
+
+    from legoesm.core.precision import PrecisionPolicy, set_policy
 
     if precision == "float64":
         jax.config.update("jax_enable_x64", True)
+        set_policy(PrecisionPolicy.fp64())
+    else:
+        set_policy(PrecisionPolicy.fp32())
 
 
 def _build_global_problem(
@@ -338,6 +349,8 @@ def _build_global_problem(
     *, force_pcg: bool = False, pcg_variant: str = "standard",
     preconditioner: str = "jacobi", fixed_iters: int = 60,
     cheby_degree: int = 4,
+    land_mask: str = "none", bathymetry_file: str = "",
+    tripole: bool = False,
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -358,7 +371,12 @@ def _build_global_problem(
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import create_ocean_z_star
 
-    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    if tripole:
+        from legoesm.grids.tripole import create_synthetic_tripole
+
+        grid = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+    else:
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
     import os as _os
     config = LatLonCGridOceanConfig.from_flat(
@@ -372,15 +390,45 @@ def _build_global_problem(
         # global redistribute once/step (cuts ~3*n_substeps subcycle allreduces
         # to 3). Measures the multi-node strong-scaling gain vs the legacy
         # per-substep-redistribute path.
+        # Wide-halo split-explicit barotropic lever (explicit_substep only):
+        # LEGOESM_BARO_WIDE_HALO=1 -> ONE fused wide lat-halo exchange per
+        # chunk of substeps instead of ~4 halo pads per substep (the >=16-rank
+        # latency lever; A/B against the same case with the env unset).
+        # LEGOESM_BARO_WIDE_HALO_CHUNK caps substeps/exchange (0 = auto).
+        # The wide path REQUIRES the local-clamp scheme (config-validated),
+        # so the wide env implies LEGOESM_BARO_LOCAL_CLAMP — pin the local
+        # clamp in the A/B BASELINE too for a controlled comparison.
         barotropic_local_subcycle_clamp=(
-            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"),
+            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"
+            or _os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1"),
+        barotropic_wide_halo=(
+            _os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1"),
+        barotropic_wide_halo_chunk=int(
+            _os.environ.get("LEGOESM_BARO_WIDE_HALO_CHUNK", "0")),
     )
     # chebyshev degree: the config has no degree field (the factory reads
     # getattr(config, "barotropic_chebyshev_degree", 4)); the bench uses the
     # default degree-4 path (no shared-config change). cheby_degree kept in
     # the signature for callers that set the attr explicitly.
     _ = cheby_degree
-    state_global = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    mask_override = None
+    if land_mask == "etopo":
+        # Realistic continents from the shipped ETOPO file: the wet-balance
+        # A/B needs a REAL land distribution (the default rest-state mask is
+        # polar caps only, whose row split is already near-balanced).  Flat
+        # bottom is kept on purpose — wet_band_boundaries keys off the MASK,
+        # so bathymetric depth would only confound the row-vs-wet timing.
+        from legoesm.ocean.bathymetry import (
+            BathymetryConfig,
+            load_bathymetry_latlon_cgrid,
+        )
+        _bcfg = BathymetryConfig(source="file", path=bathymetry_file)
+        _, mask_override = load_bathymetry_latlon_cgrid(grid, _bcfg)
+    elif land_mask != "none":
+        raise SystemExit(
+            f"--land-mask must be 'none' or 'etopo', got {land_mask!r}")
+    state_global = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, land_mask_override=mask_override)
     state_global = _perturb_state(state_global, grid)
     return grid, z_coord, config, state_global
 
@@ -398,13 +446,19 @@ def build_case(
     fixed_iters: int = 60,
     force_pcg: bool = False,
     wet_balance: bool = False,
+    land_mask: str = "none",
+    bathymetry_file: str = "",
+    tripole: bool = False,
 ):
-    """Build (model, state, total_cells, layout) for one benchmark case.
+    """Build (model, state, total_cells, layout, partition_metrics).
 
     Multi-rank: the model is built on the BAND geometry (never on the
     global grid — see module docstring) and the state is the scattered
     band state; ``layout`` is the armed ``LatLonBandLayout``.  Single
     rank: identical to the serial GPU-bench build, ``layout`` is None.
+    ``partition_metrics`` (multi-rank only, else None) records the wet-cell
+    load balance of the ACTUAL band split — for the row-balanced baseline
+    too, so a wet-vs-row A/B is comparable from the JSON records alone.
     """
     from legoesm.grids.latlon import ensure_geometry
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -423,11 +477,14 @@ def build_case(
         n_lat, n_lon, nlev, baro_solver, pcg_variant=pcg_variant,
         preconditioner=preconditioner, fixed_iters=fixed_iters,
         force_pcg=force_pcg,
+        land_mask=land_mask, bathymetry_file=bathymetry_file,
+        tripole=tripole,
     )
 
     total_cells = n_lat * n_lon * nlev
 
     layout = None
+    part_metrics = None
     if n_ranks > 1:
         # (2) Arm the band layout + MPI halo backend.
         from legoesm.parallel.distributed import initialize_distributed_latlon
@@ -453,17 +510,43 @@ def build_case(
         layout = initialize_distributed_latlon(
             global_n_lat=n_lat, global_n_lon=n_lon,
             band_boundaries=band_boundaries,
+            # Fold-aware layout: the north rank applies the ORCA fold at
+            # its north boundary; interior cuts exchange fold-aware.
+            fold=getattr(grid, "fold", None) if tripole else None,
         )
-        if wet_balance and layout.rank == 0:
-            rows = np.diff(band_boundaries)
-            wet_per_band = [
-                float(np.asarray(state_global.land_mask.data)
-                      [band_boundaries[r]:band_boundaries[r + 1]].sum())
-                for r in range(n_ranks)
-            ]
-            print(f"[wet-balance] boundaries={list(band_boundaries)} "
-                  f"rows/band={rows.tolist()} wet-cells/band="
-                  f"{[int(x) for x in wet_per_band]}", flush=True)
+        # Partition-quality record for the ACTUAL split (wet OR the
+        # row-balanced default): wet cells + rows per band, and the
+        # wet-imbalance ratio max/mean — the number the wet-balance A/B is
+        # about.  Computed host-side from the global mask on every rank
+        # (deterministic), recorded on rank 0's JSON row.
+        import numpy as np
+
+        _bounds = (band_boundaries if band_boundaries is not None
+                   else _even_boundaries(n_lat, n_ranks))
+        _mask_np = np.asarray(state_global.land_mask.data)
+        _wet_per_band = np.array([
+            float(_mask_np[_bounds[r]:_bounds[r + 1]].sum())
+            for r in range(n_ranks)
+        ])
+        _rows = np.diff(_bounds)
+        part_metrics = {
+            "decomposition_boundaries": [int(b) for b in _bounds],
+            "rows_per_rank_min": int(_rows.min()),
+            "rows_per_rank_max": int(_rows.max()),
+            "wet_cells_per_rank_min": int(_wet_per_band.min()),
+            "wet_cells_per_rank_max": int(_wet_per_band.max()),
+            "wet_imbalance_max_over_mean": float(
+                _wet_per_band.max() / max(_wet_per_band.mean(), 1.0)),
+            "wet_fraction_global": float(_mask_np.mean()),
+            "wet_balanced": bool(wet_balance),
+        }
+        if layout.rank == 0:
+            print(f"[bands] {'wet' if wet_balance else 'row'}-balanced "
+                  f"boundaries={part_metrics['decomposition_boundaries']} "
+                  f"rows/band={_rows.tolist()} wet-cells/band="
+                  f"{[int(x) for x in _wet_per_band]} "
+                  f"imbalance={part_metrics['wet_imbalance_max_over_mean']:.3f}",
+                  flush=True)
         # (3) Band geometry + band vertical coordinate (z* carries no
         # per-cell arrays -> slice_zcoord_to_band is a pass-through, but
         # keeps this build correct if partial cells are enabled later).
@@ -477,7 +560,18 @@ def build_case(
         model = LatLonCGridOceanModel(grid, z_coord, config)
         state = state_global
 
-    return model, state, total_cells, layout
+    return model, state, total_cells, layout, part_metrics
+
+
+def _even_boundaries(n_lat: int, n_ranks: int) -> tuple[int, ...]:
+    """The default even row split's boundaries (first ``n_lat % n_ranks``
+    bands one row taller) — mirrors ``make_latlon_band_layout``'s split so
+    the row-balanced baseline's partition metrics describe the REAL bands."""
+    import numpy as np
+
+    base, rem = divmod(n_lat, n_ranks)
+    sizes = [base + 1 if r < rem else base for r in range(n_ranks)]
+    return tuple(int(x) for x in np.concatenate([[0], np.cumsum(sizes)]))
 
 
 # ===========================================================================
@@ -494,6 +588,9 @@ def compute_serial_reference(
     dt: float,
     n_steps: int,
     n_ranks: int = 1,
+    land_mask: str = "none",
+    bathymetry_file: str = "",
+    tripole: bool = False,
 ):
     """Serial reference fields after ``n_steps`` — every rank, BEFORE
     the MPI halo backend is armed.
@@ -523,6 +620,8 @@ def compute_serial_reference(
         # Only the MULTI-rank case dispatches to the PCG; an np=1 parity
         # run is stock-CG vs stock-CG and must stay solver-matched too.
         force_pcg=(baro_solver == "implicit_cn" and n_ranks > 1),
+        land_mask=land_mask, bathymetry_file=bathymetry_file,
+        tripole=tripole,
     )
     model = LatLonCGridOceanModel(grid, z_coord, config)
     for _ in range(n_steps):
@@ -2055,13 +2154,25 @@ def build_parser() -> argparse.ArgumentParser:
              "(mpi4jax halos over the PCIe pair). Launch e.g. "
              "`mpirun -np 2 ... --device gpu` on a 2-GPU node.",
     )
+    p.add_argument("--land-mask", choices=["none", "etopo"],
+                   default="none",
+                   help="Land mask for the benchmark problem: none = the rest-state default (polar caps only), etopo = realistic continents from --bathymetry-file (flat bottom kept — the mask is what wet-balance keys off). Use with --wet-balance for the row-vs-wet A/B on a realistic land distribution.")
+    p.add_argument("--bathymetry-file", type=str,
+                   default="data/bathymetry/etopo_1deg.nc",
+                   help="NetCDF bathymetry for --land-mask etopo (shipped 1-degree ETOPO by default).")
     p.add_argument(
         "--wet-balance", action="store_true",
         help="Wet-cell-aware latitude bands: band boundaries equalize OCEAN "
              "cells per rank (wet_band_boundaries on the global land_mask) "
              "instead of row counts, so land-heavy bands stop idling. "
              "MPI-band path only (n_ranks > 1); every rank computes the "
-             "identical boundaries from the identical global mask.",
+             "identical boundaries from the identical global mask. "
+             "MEASURED (np=4 CPU, LL96 etopo, 2026-07-08): the DENSE step "
+             "computes land cells too, so cost scales with ROWS — wet "
+             "bands cut wet imbalance 1.23->1.01 but ran ~3% SLOWER "
+             "(13.7 vs 13.3 ms/step). This flag is groundwork for "
+             "active/wet-cell COMPACTION (audit item 4); do not flip it "
+             "on the dense step expecting a win.",
     )
     p.add_argument(
         "--baro-solver", choices=list(BARO_SOLVER_CHOICES),
@@ -2184,8 +2295,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--tripole", action="store_true",
-        help="Tripolar (ORCA-fold) grid benchmark — NOT YET WIRED; see "
-             "error message for what exists.",
+        help="Tripolar (ORCA-fold) grid lane on the synthetic tripole: "
+             "fold-aware band layout (north rank owns the seam), full-model "
+             "step validated MPI-vs-serial (test_ocean_mpi_tripole_step_"
+             "parity.py). explicit_substep barotropic only; rows are "
+             "tagged grid=tripole.",
     )
     return p
 
@@ -2194,25 +2308,21 @@ def main() -> int:
     args = build_parser().parse_args()
 
     if args.tripole:
-        # Operator-level tripolar band-MPI machinery EXISTS and is
-        # validated (fold-aware exchange_halo_latlon /
-        # slice_cgrid_geometry_to_band + operator parity in
-        # tests/distributed/test_latlon_mpi_tripole.py and
-        # tests/parallel/test_latlon_mpi_tripole_serial.py), and
-        # initialize_distributed_latlon already accepts fold=geom.fold.
-        # What is missing is a validated FULL-MODEL tripolar MPI step
-        # (no test steps LatLonCGridOceanModel on a tripole grid under
-        # MPI) and a tripole IC/bathymetry path in this driver.  Refuse
-        # loudly rather than emit unvalidated timings.
-        raise NotImplementedError(
-            "--tripole: the ocean-side full-model fold step is not wired "
-            "into this benchmark yet. Operator-level tripolar band-MPI "
-            "halo machinery exists (tests/distributed/"
-            "test_latlon_mpi_tripole.py); to wire this flag, build the "
-            "tripole geometry, pass fold=geom.fold to "
-            "initialize_distributed_latlon, and validate a full "
-            "LatLonCGridOceanModel.step MPI-vs-serial parity case first."
-        )
+        # WIRED (audit item 4): the full-model fold step is now validated
+        # MPI-vs-serial (tests/ocean/distributed/
+        # test_ocean_mpi_tripole_step_parity.py, np1/np2 at f64 1e-8) on
+        # the synthetic tripole this lane builds.  Combinations that stay
+        # refused, loudly:
+        if args.baro_solver != "explicit_substep":
+            raise SystemExit(
+                "--tripole currently validates the explicit_substep "
+                "barotropic only (the distributed implicit-CN PCG has no "
+                "tripole parity case); pass --baro-solver "
+                "explicit_substep.")
+        if args.land_mask != "none":
+            raise SystemExit(
+                "--tripole builds the synthetic tripole's own cap/land "
+                "mask; --land-mask etopo is a regular-lat-lon lane.")
 
     # --- Configure JAX BEFORE any JAX import (CPU or per-rank GPU) ---
     if args.device == "gpu":
@@ -2305,9 +2415,12 @@ def main() -> int:
             dt=args.dt,
             n_steps=n_advanced_steps,
             n_ranks=n_ranks,
+            land_mask=args.land_mask,
+            bathymetry_file=args.bathymetry_file,
+            tripole=args.tripole,
         )
 
-    model, state, total_cells, layout = build_case(
+    model, state, total_cells, layout, part_metrics = build_case(
         n_lat=n_lat,
         n_lon=n_lon,
         nlev=args.n_levels,
@@ -2319,8 +2432,23 @@ def main() -> int:
         fixed_iters=int(args.pcg_fixed_iters),
         force_pcg=args.force_pcg,
         wet_balance=args.wet_balance,
+        land_mask=args.land_mask,
+        bathymetry_file=args.bathymetry_file,
+        tripole=args.tripole,
     )
     cells_per_rank = total_cells // n_ranks
+
+    # ETOPO coastlines destabilize the default deep-ocean dt (measured:
+    # LL96 blows up at dt=600, stable at 150).  The post-run finite check
+    # still discards a blown-up timing (exit 3), but warn BEFORE the
+    # expensive compile+timing rather than after (codex).
+    if is_rank0 and args.land_mask == "etopo" and args.dt > 300.0:
+        print(
+            f"  WARNING: --land-mask etopo with --dt {args.dt:g}s: realistic "
+            f"coastlines have blown up at dt=600 (LL96); if the run ends "
+            f"with 'non-finite values', retry with --dt 150.",
+            flush=True,
+        )
 
     if is_rank0:
         print(
@@ -2432,6 +2560,10 @@ def main() -> int:
 
     result = TimingResult(
         n_gpus=n_ranks,  # MPI rank count (CPU run) — keeps plotter schema
+        # grid_type default is the atm dataclass's 'cubed-sphere' — left
+        # defaulted it made write_json's _decomp() label ocean rows
+        # decomposition='mpi' instead of 'band' (codex).
+        grid_type="tripole" if args.tripole else "latlon",
         resolution=n_lat,
         n_levels=args.n_levels,
         precision=args.precision,
@@ -2471,7 +2603,33 @@ def main() -> int:
             backend=jax.default_backend().upper(),
             hostname=os.environ.get("HOSTNAME", "unknown"),
         )
-        write_json(report, out_dir / f"{stem}.json")
+        # component="ocean": without it write_json stamps its atmosphere
+        # default on every row (mislabel); n_ranks_true: jax cannot see the
+        # mpirun world (process_count()==1 per rank), so the real rank count
+        # must be recorded explicitly — it also resolves transport="mpi4jax".
+        # solver_variant records the wide-halo/local-clamp levers so an A/B
+        # pair can never be conflated with the baseline in aggregation.
+        # (The analytic barotropic halo-message census lives in the SPMD
+        # bench's records — model.config is in scope there; here the census is
+        # derivable offline from solver_variant + n_barotropic_substeps, so it
+        # is deliberately not recomputed. Pre-merge codex note.)
+        _grid_label = "tripole" if args.tripole else "latlon"
+        _variant = args.baro_solver
+        if os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1":
+            _variant += "+local_clamp"
+        if os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1":
+            _variant += "+wide_halo"
+        _md_over = {"solver_variant": _variant}
+        if part_metrics is not None:
+            _md_over["partition_metrics"] = part_metrics
+        _md_over["grid"] = _grid_label
+        _md_over["decomposition"] = "band" if n_ranks > 1 else "none"
+        write_json(
+            report, out_dir / f"{stem}.json",
+            n_ranks_true=n_ranks,
+            component="ocean",
+            metadata_overrides=_md_over,
+        )
 
     return 0
 

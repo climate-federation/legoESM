@@ -179,13 +179,27 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
     "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
+    "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
+    "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
+    # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
+    # -> build_cloud_config / _resolve_convection (physics_pipeline)
+    "atm.clouds.CloudConfig.cloud_inhomogeneity_factor": "cloud_inhomogeneity_factor",
+    "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
+    "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
+    "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
+    "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # marine-Sc cloud-top entrainment -> turbulence_config_for (single source of
+    # truth for FV/MPAS/spectral); the flat scalar is the single on/off+strength
+    # knob (0 = off), so --params both sets and activates it.
+    "atm.turb.LouisConfig.cloudtop_entrainment_efficiency": "louis_cloudtop_entrainment_efficiency",
     # NOTE: the idealized GRAY radiation scheme threads a few of its params
     # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
     # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the
@@ -261,7 +275,7 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
 
     Note (soft limitation): a union config that holds ALL of a family's scheme
     sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
-    ``MultiLayerLandConfig`` carries carbon/stomata) is always "present", so an
+    ``MultiLayerLandConfig`` carries carbon + stomata) is always "present", so an
     override for a scheme that is not the *selected* one is applied to that
     (inert) sub-config rather than raising — it simply has no effect on the run.
     The strict absent-raise still catches wrong-component params (e.g. an

@@ -1,0 +1,62 @@
+&SGS_TKE
+dosmagor = .true.
+/
+
+&PARAMETERS
+
+caseid ='2048x2048x256'
+
+nrestart = 0,
+restart_sep = .true.,
+
+
+LAND = .true.,
+
+ dosgs		= .true.,
+ dodamping 	= .true.,
+ doupperbound  	= .true.,
+ docloud 	= .true.,
+ doprecip 	= .true., 
+ dolongwave	= .false.,
+ doshortwave	= .false.,
+ dosurface 	= .true.,
+ dolargescale 	= .false.,
+ doradforcing   = .true.,
+ dosfcforcing   = .true.,
+ docoriolis 	= .false.,
+ donudging_uv   = .true.,
+ donudging_tq   = .false.,
+
+ tauls = 7200.,
+
+ SFC_FLX_FXD    = .true.,
+ SFC_TAU_FXD    = .false.,
+
+ dx = 	100.,
+ dy = 	100.,
+
+ dt = 	3.,
+
+ day0=0.,
+
+ nstop 	= 360,
+ nprint = 120,
+ nstat 	= 120,
+ nstatfrq= 10,
+
+ doSAMconditionals = .true.
+ dosatupdnconditionals = .true.
+
+ nsave2D	= 30,
+ nsave2Dstart	= 9999180,
+ nsave2Dend	= 999164000,
+
+ nsave3D	= 30,
+ nsave3Dstart	= 99999180,
+ nsave3Dend	= 999999999,
+ save3Dbin      = .false.
+
+/ 
+
+
+

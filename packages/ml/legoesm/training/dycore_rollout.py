@@ -142,11 +142,18 @@ def single_day_rollout(
     forcing: SegmentForcing,
     run_segment_fn,
     dt: float = 600.0,
+    hours: float = 24.0,
 ) -> SegmentCarry:
-    """Convenience: run a 1-day rollout and return the final state.
+    """Run a fixed-length rollout and return the final state.
 
-    Useful for Mode 1 (physics param tuning) where only the endpoint
-    matters for loss computation.
+    ``hours`` is the supervision horizon (default 24 h).  SHORTER
+    horizons are strongly preferred for gradient-based training: the
+    adjoint through a long primitive-equation rollout grows with the
+    dynamics' positive Lyapunov exponents, so a 24 h (144-step) rollout
+    explodes the gradient to NaN even when the forward is finite — a
+    6 h horizon (the NeuralGCM / AIMIP convention) keeps the adjoint
+    well-conditioned.  The target must be loaded at the same ``hours``
+    lead.  ``run_segment_fn`` advances one step per ``dt``.
     """
-    steps_per_day = int(86400 / dt)
-    return run_segment_fn(initial_carry, steps_per_day, forcing)
+    n_steps = int(round(hours * 3600.0 / dt))
+    return run_segment_fn(initial_carry, n_steps, forcing)
