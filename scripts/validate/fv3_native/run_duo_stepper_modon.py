@@ -33,6 +33,11 @@ def main():
     ap.add_argument("--days", type=float, default=60.0)
     ap.add_argument("--frame-days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--single-vortex", default=None,
+                    help="'LON,LAT' (deg): replace the two case-8 "
+                         "bursts with ONE burst centred there (vertex-"
+                         "locality discriminator; vertex ~ '45,35.26', "
+                         "face centre ~ '0,0')")
     ap.add_argument("--nord", type=int, default=None,
                     help="override the preset's divergence-damping "
                          "order (codex lattice-r1 rank-2 screen)")
@@ -103,9 +108,21 @@ def main():
     if args.nord is not None and sw_cfg is not None:
         sw_cfg["nord"] = args.nord
 
-    def wind_fn(ll):
-        u_e, v_n = _modon_winds_geo(ll[..., 0], ll[..., 1], FV3_RADIUS_M)
-        return np.asarray(u_e), np.asarray(v_n)
+    if args.single_vortex:
+        lon0, lat0 = (np.deg2rad(float(x))
+                      for x in args.single_vortex.split(","))
+        from legoesm.grids.cubed_sphere import great_circle_distance
+
+        def wind_fn(ll):
+            r = great_circle_distance(ll[..., 0], ll[..., 1], lon0, lat0,
+                                      FV3_RADIUS_M)
+            u_e = _MODON_UMAX * np.exp(-(np.asarray(r) / _MODON_SIZE) ** 2)
+            return u_e, np.zeros_like(u_e)
+    else:
+        def wind_fn(ll):
+            u_e, v_n = _modon_winds_geo(ll[..., 0], ll[..., 1],
+                                        FV3_RADIUS_M)
+            return np.asarray(u_e), np.asarray(v_n)
 
     def scalars_fn(ll):
         delp = np.full(ll.shape[:-1], fv3_grav * _MODON_H0)
