@@ -452,12 +452,19 @@ def _get_grid_lat_lon(grid_or_mesh, shape_2d):
     return lat, lon
 
 
-def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
+def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
+                                 sw_net_sfc=None, lw_net_sfc=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
     Works for cubed-sphere, lat-lon, and MPAS (v fields are zero or None
     depending on whether state.v is present).
+
+    ``sw_net_sfc`` / ``lw_net_sfc`` (both [W/m^2, +into surface], native 2D
+    layout) are optional surface radiative net fluxes attached as diagnostics
+    so the lean MPAS coupled loop can export them to the coupler; ``None`` (the
+    default, e.g. every non-radiation tendency) leaves the fields unset —
+    behaviourally identical to the pre-export packer.
     """
     dims_3d = state.T.dims
     dims_2d = state.p_s.dims
@@ -478,6 +485,12 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
             dims=state.v.dims, units="m/s^2",
         )
 
+    sw_field = None if sw_net_sfc is None else Field(
+        data=sw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="sw_net_sfc_rad", dims=dims_2d, units="W/m^2")
+    lw_field = None if lw_net_sfc is None else Field(
+        data=lw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="lw_net_sfc_rad", dims=dims_2d, units="W/m^2")
     return HydrostaticTendencies(
         du_dt=Field(
             data=jnp.zeros(du_shape, dtype=_u_dtype), name="du_dt_rad",
@@ -493,6 +506,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
             dims=dims_2d, units="m^2/s^3",
         ),
         dv_dt=dv_dt,
+        sw_net_sfc=sw_field,
+        lw_net_sfc=lw_field,
     )
 
 
@@ -1153,7 +1168,17 @@ def _make_hydrostatic_radiation(
         )
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
-        return _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d)
+        # Surface net radiative fluxes [W/m^2, +into surface], carried so the
+        # lean MPAS coupled loop can export them to the coupler. Surface is the
+        # LAST half-level (T_sfc uses T[..., -1]); at the surface the upward SW
+        # is the albedo-reflected downward, so (down - up) equals the compiled
+        # path's sw_down*(1-albedo) (physics_pipeline.py) with no albedo term.
+        # lw net (down - up) matches that path's lw_net_sfc convention exactly.
+        _swn = rad_out.sw_flux_down[:, -1] - rad_out.sw_flux_up[:, -1]
+        _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
+        return _pack_hydrostatic_tendencies(
+            dT_dt, state, shape_3d, shape_2d,
+            sw_net_sfc=_swn, lw_net_sfc=_lwn)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

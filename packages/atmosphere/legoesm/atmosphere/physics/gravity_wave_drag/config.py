@@ -87,7 +87,7 @@ __param_spec__ = {
         "params": {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
-            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-11, 1.0e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Charron & Manzini (2002); CAM frontgfc trigger threshold", "shape": None},
+            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-16, 1.0e-13), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM namelist_defaults_eam.xml frontgfc 1.25e-15 (7.5e-16 at 4x5; 2e-14 at ne120np4 on E3SM master); Charron & Manzini (2002)", "shape": None},
             "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
             # --- launch / trigger levels ---
             "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
@@ -137,7 +137,6 @@ __param_spec__ = {
             "Fr_sharpness": "sigmoid sharpness of the saturation stress-ratio breaking transition (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
-            "N_ref": "declared but never read by lindzen_gwd (N is computed from the local theta gradient); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -233,11 +232,6 @@ class LindzenConfig(NamedTuple):
         Sub-grid topographic height [m] (default 500).
     k_wave : float
         Horizontal wavenumber [1/m] (default 2*pi/100e3).
-    N_ref : float
-        RESERVED / currently unused (default 0.01) — N is diagnosed from the
-        local stratification (theta gradient via ``brunt_vaisala_n_full``), not
-        from this field, so setting it does NOT change the launch/saturation
-        stress.
     fcrit2 : float
         Critical Froude number squared scaling the saturation CAP VALUE
         (``tau_sat_eff = fcrit2*tau_sat`` — the oracle ``effkwv = kwv*fcrit2``
@@ -282,7 +276,6 @@ class LindzenConfig(NamedTuple):
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
-    N_ref: float = 0.01
     fcrit2: float = 1.0
     Fr_sharpness: float = 20.0
     crit_level_sharpness: float = 10.0
@@ -333,23 +326,30 @@ class McFarlaneConfig(NamedTuple):
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
-        ``min(h_disp^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166; ``h_disp = h`` at
-        the default ``use_e3sm_hdsp=False``, E3SM's ``2*sgh`` when set) so the
+        ``min(h_disp^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166; ``h_disp`` per the
+        resolved ``use_e3sm_hdsp``: E3SM's ``2*sgh`` when active, ``h``
+        otherwise) so the
         launched streamline-displacement amplitude saturates at the Fr = 1
         marginal-instability value rather than the raw orographic height.
-    use_e3sm_hdsp : bool
-        When ``True`` form the streamline displacement as E3SM does —
-        ``hdsp = 2*sgh`` (gw_oro.F90:117), i.e. the launch cap becomes
-        ``min((2h)^2, fcrit2*(U/N)^2)`` — closing the declared ~4x
-        launch-amplitude departure (exactly 4x below the Froude cap, equal
-        above it, 1-4x in the band between).  Default ``False`` keeps the
-        legacy direct-``h`` displacement (``h_topo`` effectively a tuned
-        amplitude).  Requires a real per-column ``h_topo_col`` (the wired
-        ``subgrid_topo_stddev``): enabling it on the scalar ``config.h_topo``
-        fallback raises, because quadrupling a uniform 500 m pseudo-mountain
-        would silently quadruple drag over OCEAN (no landfrac factor in this
-        scheme).  Retune ``G_0``/``directional_spread``/``tau_max`` before
-        flipping in production (RCE/AMIP-gated).
+    use_e3sm_hdsp : bool | str
+        Streamline-displacement convention: one of ``False`` | ``True`` |
+        ``"auto"`` (default ``"auto"``; any other value raises at the scheme
+        entry).  ``True`` forms the displacement as E3SM does — ``hdsp =
+        2*sgh`` (gw_oro.F90:117), i.e. the launch cap becomes ``min((2h)^2,
+        fcrit2*(U/N)^2)`` — closing the declared ~4x launch-amplitude
+        departure (exactly 4x below the Froude cap, equal above it, 1-4x in
+        the band between; with ``G_0 = 0.5`` = E3SM ``oroko2`` the launch is
+        then EXACTLY ``gw_oro_src``).  ``False`` keeps the legacy direct-``h``
+        displacement (``h_topo`` effectively a tuned amplitude).  ``"auto"``
+        (the production-faithfulness default since 2026-07-19) resolves per
+        input shape: the E3SM doubling when a real per-column ``h_topo_col``
+        is wired (``grid.subgrid_topo_stddev``), the legacy displacement on
+        the scalar ``config.h_topo`` fallback — because quadrupling a uniform
+        500 m pseudo-mountain would silently quadruple drag over OCEAN (no
+        landfrac factor in this scheme).  ``True`` on the scalar fallback
+        still raises for the same reason.  Skill retune of
+        ``G_0``/``directional_spread``/``tau_max`` against real SSO remains
+        owed (AMIP A/B 2026-07-17: stable, maxΔu ~0.6 m/s, tau_max-capped).
     use_depth_averaged_source : bool
         When ``True`` the source ``rho``/``N``/``U`` and the wave direction
         come from E3SM's dp-weighted low-level averages over the levels the
@@ -407,7 +407,7 @@ class McFarlaneConfig(NamedTuple):
     softmin_sharpness: float = 50.0
     tau_max: float = 10.0
     fcrit2: float = 1.0
-    use_e3sm_hdsp: bool = False
+    use_e3sm_hdsp: bool | str = "auto"
     use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
@@ -527,8 +527,15 @@ class E3SMFrontalConfig(NamedTuple):
     taubgnd : float
         Background source strength [Pa] (default 1.5e-3, CAM ``taubgnd``).
     frontgfc : float
-        Frontogenesis-function critical threshold [K^2/(m^2 s)]
-        (default 1.0e-10, CAM ``frontgfc``).
+        Frontogenesis-function critical threshold [K^2/(m^2 s)] above which
+        the frontal source launches (default 1.25e-15 — the E3SM OPERATIONAL
+        namelist value, namelist_defaults_eam.xml:524; the coarse 4x5 grid
+        uses 7.5e-16).  The earlier default of 1.0e-10 sat ~5 ORDERS OF
+        MAGNITUDE above anything the resolved flow produces (10-day r16 AMIP
+        A/B 2026-07-20: max frontgf 5.4e-15, p99 2.4e-16), so the frontal
+        source could NEVER fire; 1.25e-15 sits at the observed
+        distribution's tail, selecting only the strongest resolved fronts —
+        exactly the CAM design intent.
     c0 : float
         Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
     launch_p : float
@@ -559,7 +566,7 @@ class E3SMFrontalConfig(NamedTuple):
         AMIP-gated.
     """
     taubgnd: float = 1.5e-3
-    frontgfc: float = 1.0e-10
+    frontgfc: float = 1.25e-15
     c0: float = 30.0
     launch_p: float = 5.0e4
     front_p: float = 6.0e4

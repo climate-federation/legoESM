@@ -189,6 +189,12 @@ class OceanSurfaceForcing(NamedTuple):
                                        # DINO usrdef x1.3 westerly boost that
                                        # feeds TKE but NOT the momentum
                                        # stress).  None -> |(tau_x, tau_y)|.
+    ice_concentration: object = None   # jnp.ndarray | None  [0-1] sea-ice areal
+                                       # fraction from the coupler, consumed by
+                                       # the TKE closure's under-ice (1-fi)
+                                       # attenuation of the lc/etau wave-TKE
+                                       # sources (TKEConfig.eice=1; NEMO
+                                       # nn_eice).  None ⇒ no attenuation.
 
 
 class OceanConfig(NamedTuple):
@@ -451,6 +457,19 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # NEMO Modified-Leap-Frog "before" state Nbb (t-dt) for
+    # outer_integrator="leapfrog": the previous-step (Robert-Asselin-filtered)
+    # now-fields, carried so the leapfrog explicit combine X(Naa)=X(Nbb)+2dt·RHS
+    # and the Asselin filter X(Nnn)+=gamma·(X(Nbb)-2X(Nnn)+X(Naa)) have their
+    # third time level. None on the very first step -> a forward-Euler start
+    # (NEMO l_1st_euler) which then POPULATES these with the pre-step now-state.
+    # Default None -> inert (forward-Euler/AB2 paths never read them): zero
+    # behaviour change for existing configs.
+    u_before: object = None
+    v_before: object = None
+    T_before: object = None
+    S_before: object = None
+    eta_before: object = None
     # Previous-step barotropic slow forcing (depth-mean tendency) for the
     # AB2 time-centering of F_slow (matches Oceananigans' AB2-extrapolated Gᵁ).
     # Only used when barotropic_slow_forcing_ab2=True; None otherwise (default).
@@ -767,7 +786,27 @@ class BarotropicConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=1: boxcar width n centred at t+dt, ~1.5n substeps)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=2: boxcar width 2n centred at t+dt, 2n-1 substeps)
+    # In-substep barotropic Coriolis discretization (node 16, DINO deep-eq jet).
+    # "avg" (DEFAULT, bit-identical legacy): plain 4-point V->u / U->v average,
+    #   which ANNIHILATES the 2dx zonal checkerboard (the C-grid barotropic
+    #   Coriolis rotational null mode) -> spurious deep-equatorial jet.
+    # "een": NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN (ln_dynvor_een)
+    #   -- planetary f rides the depth-integrated Arakawa-Lamb 1981 12-point
+    #   triad (pv_flux_al81_partial_cell with f_vtx), which EXERTS a restoring
+    #   on the checkerboard so the null mode cannot grow.  Requires
+    #   add_barotropic_coriolis=True (in-substep Coriolis on).
+    # "een_metric": as "een" but METRIC-COMPLETE -- folds NEMO's e1v/r1_e1u (u)
+    #   and e2u/r1_e2v (v) horizontal scale factors into ffu/ffv exactly
+    #   (dynspg_ts.F90:1349-1379) -- the coefficients NEMO's dyn_cor_2D actually
+    #   uses.  The per-unit-width "een" drops them, leaving an O(dcos phi) work
+    #   residual; retaining them makes discrete enstrophy conservation exact on
+    #   the sphere (strictly more NEMO-faithful).  NB it is a ~1% high-lat
+    #   correction and, twin-verified, does NOT cure the DINO |lat|~68deg 2dx ETA
+    #   runaway (a free-surface mode via the barotropic PGF/continuity coupling,
+    #   not the Coriolis V->u averaging) -- it is a fidelity refinement, not that
+    #   fix.
+    barotropic_coriolis: str = "avg"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
@@ -1299,6 +1338,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
     #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
     vorticity_scheme: str = "al81"
+    # Boundary-q convention for the AL81/EEN PV flux at land-adjacent vertices:
+    # "neumann_fill" (default; smooth fill — WENO-stencil safety) or "nemo_live"
+    # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
+    # triads; select on NEMO-faithful cards). Unknown raises in the operator.
+    een_q_boundary: str = "neumann_fill"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
@@ -1385,7 +1429,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # layer thickness — ``barotropic_solver="rigid_lid"`` (the faithful ACC config) or
     # ``use_conservation_fixer=True``. Under a moving free surface it has a small
     # O(Δη) tracer-content drift; "forward_euler" conserves to machine zero.
+    # "leapfrog" = NEMO Modified-Leap-Frog (stpmlf.F90, key_qco): three time
+    # levels Nbb(t-dt)/Nnn(t)/Naa(t+dt) with the explicit combine
+    #   X(Naa) = X(Nbb) + 2dt·RHS(Nnn),   RHS incl. Coriolis (een_total EEN triad),
+    # implicit vertical friction/diffusion (dyn_zdf) applied backward-Euler over
+    # rDt=2dt on the after-state, and the Robert-Asselin time filter on the now
+    # fields   X(Nnn) <- X(Nnn) + asselin_gamma·(X(Nbb) - 2·X(Nnn) + X(Naa)).
+    # First step is a forward Euler start (dt, no filter) — NEMO l_1st_euler.
+    # Requires coriolis_scheme="explicit_ab2" (Matsuno off; Coriolis in the RHS),
+    # implicit_vertical_mixing=True, ab2_scope="total". The before-state Nbb is
+    # carried on the state's {u,v,T,S,eta}_before fields. Default "forward_euler"
+    # keeps every existing config bit-identical.
     outer_integrator: str = "forward_euler"
+    # Robert-Asselin(-only) time-filter coefficient rn_atfp for
+    # outer_integrator="leapfrog" (NEMO DINO uses the plain RA filter, NOT the
+    # Robert-Asselin-Williams variant — dynatf_qco.F90:144 / traatf_qco.F90:209).
+    # NEMO default rn_atfp=0.1. Ignored unless outer_integrator="leapfrog".
+    asselin_gamma: float = 0.1
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
@@ -1852,6 +1912,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lever (it runs after the final re-pin).  T/S column budgets are
     # unchanged except through the (zeroed/held) advection.
     prescribed_flow: str | None = None
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    #   "s_ref" (default, bit-identical): the fixed scalar ``S_ref`` above.
+    #   "local": the LOCAL top-cell salinity — NEMO's tra_sbc convention
+    #     (sfx = emp * sss).  On fresh shelves (Siberian ~27 PSU) the fixed
+    #     35-PSU closure over-salinifies ice growth by ~(35-4)/(27-4) ≈ 1.35x
+    #     and over-dilutes rivers; "local" removes that bias (2026-07-18
+    #     Arctic halocline-erosion audit).  Column-constant top-cell S is
+    #     used for the runoff-depth-spread channel too.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

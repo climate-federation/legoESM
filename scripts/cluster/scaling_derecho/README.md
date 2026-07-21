@@ -491,6 +491,7 @@ Alongside the cube pair above, three further jobs + a build script:
 | `ocean_cpu_scaling.pbs` | OCEAN weak+strong CPU-MPI rank ladder (`bench_ocean_mpi_scaling.py`, `legoesm-mpi` env), with a 2-rank parity+conservation smoke. |
 | `gpu_multinode_scaling.pbs` | MULTI-NODE GPU lanes over jax.distributed + NCCL: A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU); plus the optional route-A CUDA-aware mpi4jax lane (`RUN_ROUTEA=1`, needs the overlay env) and the comm-tuning A/B ladder (`RUN_TUNE=1`, lane T below). |
 | `build_nccl_ofi.sh` | Login-node build of **aws-ofi-nccl** against Derecho's Cray libfabric (no NCCL build dep — the plugin vendors the net-API headers and is dlopen'd by the jax-wheel NCCL). |
+| `diagnosis.pbs` | BOTTLENECK diagnosis via `scripts/bench/run_scaling_diagnosis.py` — per-phase halo bandwidth, reduction latency, roofline, compute/comm overlap, and the **static collective census** (collective-permute + all-reduce + all-gather per step) that the throughput jobs above do NOT capture. Climbs the cube face-shard `1 2 3` ladder (must divide 6) so the message-count-vs-shard curve — the LATENCY-bound anti-scaling signal — is recorded. `qsub -v MODE=census` for counts only. |
 
 NCCL on Slingshot-11 has NO native CXI support: without the plugin the
 multi-node lanes fall back to TCP sockets over `hsn` (correct, 2-3x slower

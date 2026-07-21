@@ -95,6 +95,36 @@ def main():
     parser.add_argument("--diag-days", type=int, default=5)
     parser.add_argument("--sst-init", type=float, default=300.0,
                         help="Initial SST [K] (ocean) or soil T [K] (land)")
+    parser.add_argument("--radiation", choices=["gray", "rrtmgp"], default="gray",
+                        help="Radiation scheme: 'gray' (Frierson band, cheap) or "
+                             "'rrtmgp' (correlated-k, real gases + cloud optics; the "
+                             "faithful choice). RRTMGP uses the SAM doperpetual "
+                             "fixed-cos-zenith RCE geometry (--rce-cos-zenith).")
+    parser.add_argument("--rce-cos-zenith", type=float, default=0.42,
+                        help="Fixed solar zenith cosine for RRTMGP RCE (SAM "
+                             "doperpetual): TOA insolation held at 409.6 W/m^2 via "
+                             "S_0=409.6/mu0. 0.42 is the RCEMIP value (Wing 2018).")
+    parser.add_argument("--microphysics", choices=["none", "morrison"], default="none",
+                        help="Grid-scale cloud microphysics: 'none' (SBM convection "
+                             "only, no condensate) or 'morrison' (warm M2005 on the "
+                             "columns -> condensate feeds RRTMGP clouds).")
+    parser.add_argument("--convective-detrainment-frac", type=float, default=0.25,
+                        help="Fraction of the SBM convective condensate detrained "
+                             "into grid-scale cloud q_c (the coarse-RCE cloud source "
+                             "morrison then processes; the rest precipitates). A "
+                             "closure knob (tunable) — 0 disables the source.")
+    parser.add_argument("--cloud-fraction-scheme",
+                        choices=["sundqvist", "xu_randall", "resolved"],
+                        default="sundqvist",
+                        help="Subgrid cloud-fraction / saturation scheme feeding the "
+                             "RRTMGP cloud optics (--radiation rrtmgp --microphysics "
+                             "morrison). 'sundqvist' (default) diagnoses cloud from RH "
+                             "and floors the in-cloud condensate, so a coarse "
+                             "subsaturated grid-mean column (where the resolved q_c "
+                             "evaporates to ~0) still carries radiatively-active cloud "
+                             "— unlike a binary q_c>threshold cover. 'xu_randall' also "
+                             "needs resolved condensate; 'resolved' is the CRM "
+                             "convention (cf from explicit q_c only).")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
@@ -168,6 +198,19 @@ def main():
         raise SystemExit(
             f"error: --truncation rejected: must be positive integer "
             f"when set, got {args.truncation!r}"
+        )
+    # RRTMGP RCE geometry / microphysics closure ranges (codex): mu0=0 makes
+    # S_0=409.6/mu0 divide by zero; a detrainment fraction outside [0,1] gives
+    # negative precip (>1) or a negative q_c source (<0).
+    if not (0.0 < args.rce_cos_zenith <= 1.0):
+        raise SystemExit(
+            f"error: --rce-cos-zenith rejected: must be in (0, 1], got "
+            f"{args.rce_cos_zenith!r}"
+        )
+    if not (0.0 <= args.convective_detrainment_frac <= 1.0):
+        raise SystemExit(
+            f"error: --convective-detrainment-frac rejected: must be in "
+            f"[0, 1], got {args.convective_detrainment_frac!r}"
         )
 
     # Translate the legacy ``latlon_fv`` alias to the canonical
@@ -514,6 +557,45 @@ def main():
     from legoesm.atmosphere.physics.convection.sbm import sbm_convection
     from legoesm.diagnostics.column_integrals import column_water_vapor
 
+    USE_RRTMGP = (args.radiation == "rrtmgp")
+    USE_MORRISON = (args.microphysics == "morrison")
+    if USE_RRTMGP:
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation, preload_rrtmgp_optics)
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        # SAM doperpetual / RCEMIP RCE geometry: UNIFORM fixed cos-zenith mu0,
+        # TOA insolation = S_0*mu0 held at the RCEMIP value 409.6 W/m^2 (Wing
+        # 2018) by calibrating S_0 = 409.6/mu0 — so mu0 sets the SW optical path
+        # while the incoming flux stays at the RCE target regardless of mu0.
+        RCE_MU0 = float(args.rce_cos_zenith)
+        _rce_insol = 409.6                              # W/m^2 (RCEMIP)
+        # include_clouds gates the RRTMGP cloud optics (rrtmgp.py: has_clouds =
+        # config.include_clouds and ...); it defaults False, so WITHOUT this the
+        # cloud_path/r_eff kwargs are silently ignored and morrison RCE runs
+        # clear-sky regardless of the cloud fraction.  Turn the cloud tables on
+        # exactly when morrison supplies condensate for the optics.
+        rrtmgp_config = RRTMGPConfig(sfc_albedo=sfc_albedo,
+                                     S_0=_rce_insol / RCE_MU0,
+                                     include_clouds=USE_MORRISON)
+        preload_rrtmgp_optics(rrtmgp_config)   # load gas/cloud optics once (host)
+    if USE_MORRISON:
+        from legoesm.atmosphere.physics.microphysics.morrison import (
+            morrison_microphysics)
+        from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+        from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+        # Warm-phase M2005 on the coarse RCE columns (deep-ice is a follow-up):
+        # condense -> q_c, autoconvert/accrete -> q_r, sediment/evaporate rain.
+        morrison_config = MorrisonConfig()
+        # Subgrid cloud fraction + condensate floor for the RRTMGP optics. The
+        # coarse grid-mean saturation adjustment condenses ~0 in a subsaturated
+        # column, so the resolved q_c alone leaves clouds optically inert and RCE
+        # runs effectively clear. Reuse the SAME diagnostic the AMIP/coupled
+        # radiation path uses (no re-derived cloud optics): Sundqvist diagnoses
+        # cf from RH and floors the in-cloud condensate at cf*q_c_diagnostic.
+        from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+            compute_cloud_properties, CloudConfig)
+        cloud_config = CloudConfig(scheme=args.cloud_fraction_scheme)
+
     # Grid-specific hyperdiffusion (spectral/voronoi handle diffusion in dycore)
     _apply_hyperdiff = None
     if grid_type == "cubed_sphere":
@@ -542,8 +624,11 @@ def main():
     # JIT-compiled physics step
     # ---------------------------------------------------------------
     @jax.jit
-    def physics_step(T, p_s, q_v, u, v, T_sfc, T_deep, W_bkt, lat, dt):
-        """Operator-split physics: radiation + convection + BL + surface."""
+    def physics_step(T, p_s, q_v, q_c, u, v, T_sfc, T_deep, W_bkt, lat, dt):
+        """Operator-split physics: radiation + convection + BL + surface.
+
+        ``q_c`` is the grid-scale cloud liquid [kg/kg] (from morrison; zeros when
+        ``--microphysics none``) — used only for the RRTMGP cloud optics."""
         nlev = T.shape[-1]
         ncol = T[..., 0].size
         p_full = p_s[..., None] * sigma.sigma_full
@@ -553,17 +638,49 @@ def main():
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
         q_v_col = q_v.reshape(ncol, nlev)
+        q_c_col = q_c.reshape(ncol, nlev)
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = lat.reshape(ncol)
 
-        insol = perpetual_equinox_insolation(lat_col, S_0)
-
-        # (a) Gray radiation
-        rad = gray_radiation(
-            T=T_col, p_full=p_full_col, p_half=p_half_col,
-            sfc_temperature=T_sfc_col, lat=lat_col,
-            q_v=q_v_col, insolation=insol, config=gray_config,
-        )
+        # (a) Radiation
+        if USE_RRTMGP:
+            # SAM doperpetual RCE: uniform fixed cos-zenith; clouds (q_c_col) are
+            # supplied by the caller (morrison) as a per-layer liquid path, else
+            # clear-sky. cloud_path_liq [g/m^2] = 1e3 * integral(q_c * dp/g).
+            mu0 = jnp.full(ncol, float(args.rce_cos_zenith), dtype=T_col.dtype)
+            if USE_MORRISON:
+                dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+                # Subgrid cloud fraction + condensate floor from the SHARED
+                # diagnostic (Sundqvist / Xu-Randall).  A binary q_c>threshold
+                # cover left the coarse RCE column clear whenever the grid-mean
+                # saturation adjustment condensed ~0 (q_c evaporates in the
+                # subsaturated grid mean) — so morrison RCE was effectively
+                # clear-sky.  compute_cloud_properties diagnoses cf from RH and
+                # floors the in-cloud liquid/ice at cf*q_c_diagnostic, then
+                # to_rrtmg_kwargs() hands the solver GRID-MEAN paths [kg/m^2]
+                # (the calibrated AMIP/coupled units — the old inline path
+                # passed g/m^2, 1e3x too large, masked only because q_c~=0) and
+                # deliberately omits cloud_fraction (grid-mean LWP already
+                # carries the cf discount; passing both double-counts it).
+                cloud_props = compute_cloud_properties(
+                    T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
+                    config=cloud_config, q_cloud=q_c_col)
+                rad = rrtmgp_radiation(
+                    T=T_col, p_full=p_full_col, p_half=p_half_col,
+                    sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
+                    config=rrtmgp_config, **cloud_props.to_rrtmg_kwargs())
+            else:
+                rad = rrtmgp_radiation(
+                    T=T_col, p_full=p_full_col, p_half=p_half_col,
+                    sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
+                    config=rrtmgp_config)
+        else:
+            insol = perpetual_equinox_insolation(lat_col, S_0)
+            rad = gray_radiation(
+                T=T_col, p_full=p_full_col, p_half=p_half_col,
+                sfc_temperature=T_sfc_col, lat=lat_col,
+                q_v=q_v_col, insolation=insol, config=gray_config,
+            )
         dT_rad = rad.heating_rate.reshape(T.shape)
 
         # (b) SBM convection
@@ -593,7 +710,24 @@ def main():
             0.0,
             None,
         )
-        precip = precip_col.reshape(p_s.shape)
+        # Convective detrainment (morrison path): route a fraction f_det of the
+        # convective condensate into grid-scale cloud q_c — the coarse-RCE cloud
+        # SOURCE morrison then processes — distributed over the convecting levels
+        # in proportion to the local condensation max(-dq_conv, 0). Water
+        # conserving: detrained (-> q_c) + precip = the original convective
+        # condensate, so precip = (1 - f_det)*precip_col.
+        if USE_MORRISON:
+            f_det = float(args.convective_detrainment_frac)
+            c_cond = jnp.maximum(-conv.dq_v_dt, 0.0)          # kg/kg/s (ncol,nlev)
+            w_cond = c_cond * dp_col / constants.g            # kg/m^2/s per level
+            W_col = jnp.sum(w_cond, axis=1, keepdims=True)    # kg/m^2/s column
+            detrain_col = f_det * precip_col[:, None]         # kg/m^2/s to detrain
+            qc_det_mass = detrain_col * w_cond / (W_col + 1e-20)   # kg/m^2/s/level
+            q_c_detrain = (qc_det_mass * constants.g / dp_col).reshape(T.shape)
+            precip = ((1.0 - f_det) * precip_col).reshape(p_s.shape)
+        else:
+            q_c_detrain = jnp.zeros_like(T)
+            precip = precip_col.reshape(p_s.shape)
 
         # (c) Bulk aerodynamic BL coupling
         rho_low = (p_s * sigma.sigma_full[-1]) / (constants.R_d * T[..., -1])
@@ -654,7 +788,47 @@ def main():
         if _apply_hyperdiff is not None:
             dq_dt = dq_dt + _apply_hyperdiff(q_v, HYPERDIFF)
 
-        return dT_dt, dq_dt, T_sfc_new, T_deep, W_new, precip
+        return dT_dt, dq_dt, T_sfc_new, T_deep, W_new, precip, q_c_detrain
+
+    # ---------------------------------------------------------------
+    # Grid-scale Morrison (M2005) microphysics on the columns — the
+    # ``--microphysics morrison`` path.  Prognostic hydrometeors are threaded
+    # through the time loop (physics-only, like q_v — no dycore advection, an
+    # explicit simplification for the coarse RCE) and the cloud liquid feeds the
+    # RRTMGP cloud optics.  This REPLACES the diagnostic saturation-adjustment.
+    # ---------------------------------------------------------------
+    if USE_MORRISON:
+        @jax.jit
+        def micro_step(T, p_s, q_v, hydro, dt):
+            nlev = T.shape[-1]; ncol = T[..., 0].size
+            shp = T.shape
+            pf = (p_s[..., None] * sigma.sigma_full).reshape(ncol, nlev)
+            ph = (p_s[..., None] * sigma.sigma_half).reshape(ncol, nlev + 1)
+            Tc = T.reshape(ncol, nlev)
+            qvc = q_v.reshape(ncol, nlev)
+            rho = pf / (constants.R_d * Tc)
+            dz = (ph[:, 1:] - ph[:, :-1]) / (rho * constants.g)
+            rs = lambda a: a.reshape(ncol, nlev)
+            hc = HydrometeorState(
+                q_c=rs(hydro.q_c), q_r=rs(hydro.q_r), q_i=rs(hydro.q_i),
+                q_s=rs(hydro.q_s), q_g=rs(hydro.q_g), N_c=rs(hydro.N_c),
+                N_r=rs(hydro.N_r), N_i=rs(hydro.N_i))
+            out = morrison_microphysics(Tc, qvc, hc, pf, ph, rho, dz, dt,
+                                        morrison_config)
+            # Non-negativity floor on each species. M2005 process rates are
+            # dt-limited (a sink cannot remove more than the available mass over
+            # dt), so this floor only trims roundoff and does NOT silently create
+            # water against the paired dq_v in practice. A fully mass-conserving
+            # borrow (cf. spectral_les_moist.conserving_positive) is the follow-up
+            # if a stress case ever drives a species negative. (codex 2026-07-18)
+            up = lambda f, t: jnp.maximum(rs(f) + dt * t, 0.0).reshape(shp)
+            new_hydro = HydrometeorState(
+                q_c=up(hydro.q_c, out.dq_c_dt), q_r=up(hydro.q_r, out.dq_r_dt),
+                q_i=up(hydro.q_i, out.dq_i_dt), q_s=up(hydro.q_s, out.dq_s_dt),
+                q_g=up(hydro.q_g, out.dq_g_dt), N_c=up(hydro.N_c, out.dN_c_dt),
+                N_r=up(hydro.N_r, out.dN_r_dt), N_i=up(hydro.N_i, out.dN_i_dt))
+            return (out.dT_dt.reshape(shp), out.dq_v_dt.reshape(shp),
+                    new_hydro, out.precipitation.reshape(p_s.shape))
 
     # ---------------------------------------------------------------
     # Time integration
@@ -675,7 +849,12 @@ def main():
 
     _ocean_label = OCEAN_MODE if not IS_LAND else "slab_soil"
     print("=" * 70)
-    print(f"  Moist RCE: {_ocean_label} {args.mode} + gray radiation + SBM convection")
+    _rad_label = "RRTMGP" if USE_RRTMGP else "gray"
+    _micro_label = "morrison" if USE_MORRISON else "sat-adjust"
+    if USE_RRTMGP and USE_MORRISON:
+        _micro_label += f" (cloud fraction: {args.cloud_fraction_scheme})"
+    print(f"  Moist RCE: {_ocean_label} {args.mode} + {_rad_label} radiation + "
+          f"SBM convection + {_micro_label} microphysics")
     print("=" * 70)
     _grid_labels = {
         "cubed_sphere": f"C{N}", "gaussian": f"T{N}",
@@ -698,6 +877,15 @@ def main():
     diag_log: list[dict[str, float]] = []
     blowup = False
 
+    # Prognostic grid-scale hydrometeors (morrison path) + the cloud liquid the
+    # RRTMGP optics see this step (lagged one microphysics step — standard
+    # operator splitting). ``q_c_rad`` stays zero when microphysics is off.
+    _z3 = jnp.zeros_like(q_v)
+    q_c_rad = _z3
+    if USE_MORRISON:
+        hydro = HydrometeorState(q_c=_z3, q_r=_z3, q_i=_z3, q_s=_z3, q_g=_z3,
+                                 N_c=_z3, N_r=_z3, N_i=_z3)
+
     for step in range(n_steps):
         # (1) Dynamics only (no inline physics)
         state = model.step(state, DT)
@@ -710,34 +898,47 @@ def main():
 
         # (2) Operator-split physics
         _T_deep_in = T_deep if IS_TWO_LAYER else jnp.zeros(shape_2d)
-        dT_dt, dq_dt, T_sfc, _T_deep_out, W_bucket, precip = physics_step(
-            T_grid, p_s_grid, q_v,
-            u_grid, v_grid,
-            T_sfc, _T_deep_in, W_bucket, grid.grid_lat, DT,
-        )
+        dT_dt, dq_dt, T_sfc, _T_deep_out, W_bucket, precip, q_c_detrain = \
+            physics_step(
+                T_grid, p_s_grid, q_v, q_c_rad,
+                u_grid, v_grid,
+                T_sfc, _T_deep_in, W_bucket, grid.grid_lat, DT,
+            )
         if IS_TWO_LAYER:
             T_deep = _T_deep_out
         new_T = T_grid + DT * dT_dt
         q_v = jnp.maximum(q_v + DT * dq_dt, 0.0)
 
-        # (3) Large-scale condensation (saturation adjustment)
-        q_sat = saturation_mixing_ratio(
-            new_T, p_s_grid[..., None] * sigma.sigma_full,
-        )
-        excess = jnp.maximum(q_v - q_sat, 0.0)
-        q_v = q_v - excess
-        new_T = new_T + constants.L_v * excess / constants.c_pd
-
-        # Push the saturation-adjusted temperature back into the
-        # grid-native state representation.
-        state = apply_T_update(state, new_T)
-
-        # Large-scale precipitation: column-integrated condensation [kg/m2/s]
-        ls_precip = jnp.sum(excess * p_s_grid[..., None] * dsigma,
-                            axis=-1) / constants.g / DT
-        precip = precip + ls_precip  # total = convective + large-scale
-        if IS_LAND:
-            W_bucket = jnp.clip(W_bucket + DT * ls_precip, 0.0, W_max)
+        # (3) Grid-scale condensation
+        if USE_MORRISON:
+            # Seed the standing cloud with the convective detrainment, then let
+            # Morrison M2005 process it (autoconvert + accrete + sediment ->
+            # surface precip; the survivor is the cloud feeding RRTMGP optics).
+            hydro = hydro._replace(q_c=hydro.q_c + DT * q_c_detrain)
+            dT_m, dqv_m, hydro, micro_precip = micro_step(
+                new_T, p_s_grid, q_v, hydro, DT)
+            new_T = new_T + DT * dT_m
+            q_v = jnp.maximum(q_v + DT * dqv_m, 0.0)
+            q_c_rad = hydro.q_c
+            state = apply_T_update(state, new_T)
+            precip = precip + micro_precip
+            if IS_LAND:
+                W_bucket = jnp.clip(W_bucket + DT * micro_precip, 0.0, W_max)
+        else:
+            # Diagnostic saturation adjustment (no microphysics): condense the
+            # supersaturation and precipitate it immediately.
+            q_sat = saturation_mixing_ratio(
+                new_T, p_s_grid[..., None] * sigma.sigma_full,
+            )
+            excess = jnp.maximum(q_v - q_sat, 0.0)
+            q_v = q_v - excess
+            new_T = new_T + constants.L_v * excess / constants.c_pd
+            state = apply_T_update(state, new_T)
+            ls_precip = jnp.sum(excess * p_s_grid[..., None] * dsigma,
+                                axis=-1) / constants.g / DT
+            precip = precip + ls_precip  # total = convective + large-scale
+            if IS_LAND:
+                W_bucket = jnp.clip(W_bucket + DT * ls_precip, 0.0, W_max)
 
         # (4) Rayleigh friction
         state = apply_friction(state, fric_decay)
@@ -753,9 +954,16 @@ def main():
             mean_precip = float(jnp.mean(precip)) * 86400.0
             cwv = column_water_vapor(q_v, p_s_diag, dsigma)
             mean_cwv = float(jnp.mean(cwv))
+            # Cloud liquid water path [g/m^2] = 1e3 * integral(q_c dp/g); nonzero
+            # only on the morrison path (confirms grid-scale cloud is forming +
+            # feeding RRTMGP).
+            lwp = 1.0e3 * jnp.sum(q_c_rad * p_s_diag[..., None] * dsigma,
+                                  axis=-1) / constants.g
+            mean_lwp = float(jnp.mean(lwp))
 
             print(f"  {day:6.0f}  {mean_sfc:8.2f}  {mean_T:8.2f}"
-                  f"  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}")
+                  f"  {mean_precip:8.2f}  {mean_cwv:6.1f}  {mean_lwp:7.2f}"
+                  f"  {max_v:8.2f}")
 
             diag_log.append({
                 "step": int(step + 1),
@@ -764,6 +972,7 @@ def main():
                 "mean_T": mean_T,
                 "mean_precip": mean_precip,
                 "mean_cwv": mean_cwv,
+                "mean_lwp": mean_lwp,
                 "max_wind": max_v,
             })
 

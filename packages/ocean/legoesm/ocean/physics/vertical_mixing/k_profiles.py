@@ -486,6 +486,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 rho, state.eta.data, z_coord.dz_ref, J,
                 constants_config.rho_0, h_actual=h_actual,
             )
+        # NEMO bn2 trigger (n2_mode="nemo_bn2"): the geometric depth ladders
+        # (gdept / interior gdepw); ignored by every other n2_mode.
+        _bn2_t_depth = _bn2_w_depth = None
+        if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "nemo_bn2":
+            from legoesm.ocean.eos import nemo_bn2_depth_ladders
+            _bn2_t_depth, _bn2_w_depth = nemo_bn2_depth_ladders(z_coord)
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
         # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
@@ -516,6 +522,26 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 z_coord.z_half_ref[1:-1], z_coord.dz_half_ref,
                 state.H_bathy.data,
             )
+        # Under-ice attenuation of the wave-driven TKE sources (NEMO nn_eice;
+        # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
+        # internally, so the mode maps onto an EFFECTIVE ice fraction:
+        #   0 (default, bit-identical): no attenuation — ice_frac stays None;
+        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
+        #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
+        # Unknown values raise (dispatch hardening; static config value).
+        _eice = int(getattr(tke_cfg, "eice", 0))
+        if _eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
+                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "on the lc/etau TKE sources.")
+        _tke_ice_fr = None
+        if _eice != 0 and surface_forcing is not None:
+            _fi = getattr(surface_forcing, "ice_concentration", None)
+            if _fi is not None:
+                _tke_ice_fr = (_fi if _eice == 1
+                               else jnp.minimum(4.0 * _fi, 1.0))
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -564,6 +590,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
                     dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                     T_n2=T_n2, S_n2=S_n2,
+                    ice_frac=_tke_ice_fr,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -580,6 +607,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 lat_deg=lat_deg,
                 T_n2=T_n2, S_n2=S_n2,
+                t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+                ice_frac=_tke_ice_fr,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -603,6 +632,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             lat_deg=lat_deg,
             T_n2=T_n2, S_n2=S_n2,
+            t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
+            ice_frac=_tke_ice_fr,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -677,13 +708,24 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # Surface buoyancy flux + kinematic T/S fluxes (shared with CATKE).
         B_f, Q_sfc_T, Q_sfc_S = _surface_buoyancy_flux(
             surface_forcing, state, constants_config, eos_fn=eos_fn)
+        # Under-ice attenuation of the KPP velocity scales (KPPConfig.eice;
+        # NEMO nn_eice) — reads the coupler's ice concentration, gated on the
+        # STATIC config value so eice=0 stays bit-identical (ice_frac=None).
+        # Unknown eice raises inside kpp (dispatch hardening on the static val).
+        _kpp_eice = int(getattr(vmix_cfg.kpp, "eice", 0))
+        if _kpp_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+        _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
+                       if (_kpp_eice != 0 and surface_forcing is not None)
+                       else None)
 
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False, eos_fn=eos_fn,
+            apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
         )
         return out.K_v, out.A_v, None
 
@@ -743,6 +785,12 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             rho, state.eta.data, z_coord.dz_ref, J,
             ConstantsConfig().rho_0, h_actual=ed_h_actual,
         )
+    # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
+    # (gdept / interior gdepw); ignored by every other n2_mode.
+    ed_t_depth = ed_w_depth = None
+    if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        ed_t_depth, ed_w_depth = nemo_bn2_depth_ladders(z_coord)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);
@@ -751,6 +799,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     K, A, _ = convective_K_A_flag(
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
+        t_depth=ed_t_depth, w_depth=ed_w_depth,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
         # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
@@ -775,6 +824,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         K_b, A_b, _ = convective_K_A_flag(
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
+            t_depth=ed_t_depth, w_depth=ed_w_depth,
         )
         K = jnp.maximum(K, K_b)
         A = jnp.maximum(A, A_b)

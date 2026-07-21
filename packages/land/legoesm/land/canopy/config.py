@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.land.canopy.sif import SIFConfig
 
@@ -142,6 +141,12 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
 _VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+VALID_LE_MODULES = ("BT", "PM")
+
+# Valid values for the CLM-ML canopy-airspace turbulence dispatch field
+# (``CLMMLCanopyConfig.turbulence_scheme``).  Public so the interface that
+# applies the scheme and the config validator share one source of truth.
+VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 
 
 class CanopyConfig(NamedTuple):
@@ -203,7 +208,6 @@ class CanopyConfig(NamedTuple):
     # Soil moisture stress thresholds (when no Richards state available)
     wilting_point: float = 0.15   # theta_wp [m3/m3]
     field_capacity: float = 0.30  # theta_fc [m3/m3]
-    n_root_layers: int = 5        # number of layers to integrate for root-zone stress
 
     # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
     # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
@@ -237,6 +241,12 @@ class CanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown stomatal_model {self.stomatal_model!r}; the stomatal "
                 f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}")
+        if self.LE_module not in VALID_LE_MODULES:
+            raise ValueError(
+                f"unknown LE_module {self.LE_module!r}; the leaf-energy module "
+                f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
+                f"'PM'=Penman-Monteith). The internal dispatch is a bare "
+                f"'else: # PM', so a typo would silently run PM.")
         return self
 
 
@@ -287,7 +297,14 @@ __param_spec__ = {
     },
     "CLMMLCanopyConfig": {
         "scheme_key": "land.canopy.clm_ml",
-        "excluded": {},
+        "excluded": {
+            "dtime_ml_target_s": (
+                "numerics: the sub-step CLM-ML's canopy air-space budget is "
+                "designed for (upstream MLclm_varctl.dtime_ml = 300 s). A "
+                "discretisation cadence, not a physical parameter — tuning it "
+                "changes the integration error, not the physics."
+            ),
+        },
         "params": {
             "o2ref": {
                 "units": "mmol/mol",
@@ -492,7 +509,53 @@ class CLMMLCanopyConfig(NamedTuple):
     # Sub-cycling / Runge-Kutta integration
     # 10 → Euler (nrk_steps = 0); 2x → RK with x stages
     runge_kutta_type: int = 10
-    num_ml_steps: int = 1       # CLM sub-steps per legoESM timestep
+
+    # CLM-ML sub-steps per legoESM timestep.  The canopy sub-step is
+    # ``dtime_ml = dt / num_ml_steps``, and CLM-ML is designed to run at
+    # ``dtime_ml_target_s`` (upstream ``MLclm_varctl.dtime_ml = 300 s``) — the
+    # canopy AIR-SPACE storage term is stiff on a timescale of minutes, so a
+    # sub-step much longer than that is a numerical, not a physical, choice.
+    #
+    # ``None`` (default) DERIVES the count from ``dtime_ml_target_s``, so the
+    # canopy stays at or below its design sub-step whatever host ``dt`` it is
+    # coupled at.  An explicit int pins the count; one implying a sub-step
+    # COARSER than the design value is rejected unless
+    # ``allow_coarse_ml_substep`` is set.
+    #
+    # Why this is not simply ``1``: at a 1800 s host step, ``num_ml_steps=1``
+    # runs the canopy air budget at 6x its design sub-step.  Measured at
+    # FLUXNET US-MMS, that inflates the storage term to +157 W/m² at midday and
+    # -100 W/m² at night — a 27 m canopy air column holds ~32.6 kJ/m²/K, so
+    # +157 W/m² over 1800 s implies it warming 8.7 K per step, which is not
+    # physical.  The buffered energy is released late: sensible heat peaks ~4 h
+    # after observed, and nighttime latent heat reaches 44 W/m² against an
+    # observed ~2 W/m² (2000-step window; the shorter sweep window below gives
+    # 78.7 vs ~3.9 for the same case — the windows differ, not the finding).
+    # Sub-cycling to 300 s cuts the latent-heat diurnal RMSE by 58%
+    # (60.9 -> 25.3 W/m², matching the two-leaf canopy) and flips nighttime
+    # sensible heat back to the observed downward sign.
+    #
+    # That the storage term is a DISCRETISATION artefact rather than physics is
+    # settled by its scaling.  A sub-step sweep at US-MMS over a 24x range:
+    #
+    #   dtime_ml [s]      1800     300     150      75
+    #   midday storage  +156.8   +27.1   +13.2    +6.5   W/m²
+    #   storage/dtime_ml  0.087   0.090   0.088   0.087  W/m²/s   <- CONSTANT
+    #   nighttime LE       78.7    20.6    13.8    10.2   W/m² (observed ~3.9)
+    #   LE diurnal RMSE   60.87   25.30   23.65   22.34   W/m²
+    #
+    # A storage per unit sub-step that is constant across a 24x range is first
+    # order in dt and vanishes as dt -> 0 — which a physical storage term would
+    # not do.
+    #
+    # CAVEAT — 300 s is a CONVERGENCE TARGET, not a converged value.  The table
+    # is still improving at 75 s, and nighttime latent heat remains ~2.5x
+    # observed there, so absolute canopy fluxes should not be trusted without
+    # re-checking convergence for the configuration at hand.  On the table's LE
+    # RMSE metric 300 s recovers (60.87-25.30)/(60.87-22.34) = 92% of the
+    # improvement available down to 75 s, at 1/6 the cost, and is the sub-step
+    # the scheme was designed for — hence the default rather than the finest.
+    num_ml_steps: int | None = None
 
     # Reference O2 concentration [mmol/mol]
     o2ref: float = 209.0
@@ -609,3 +672,79 @@ class CLMMLCanopyConfig(NamedTuple):
     # looping OUTSIDE ``jax.grad`` and accumulating per-column gradients.  See
     # ``docs/land/clm_ml_differentiable_integration_scope.md``.
     differentiable: bool = False
+
+    # Canopy-airspace turbulence: which similarity theory sets the exchange
+    # between canopy top and the atmospheric reference height.
+    #   "rsl_bonan" (default) — Harman & Finnigan roughness-sublayer theory as
+    #       implemented by Bonan et al. (2018) appendix A2: the Monin-Obukhov
+    #       ψ functions PLUS the roughness-sublayer ψ̂ correction
+    #       (``psi = -psi1 + psi2 + c1*psihat(za) - c1*psihat(hc) [+ vkc/beta]``).
+    #       This is CLM-ML's native formulation and the stand-alone default.
+    #   "most" — the roughness-sublayer correction is switched off (ψ̂ ≡ 0), so
+    #       the ψ stability functions reduce to Monin-Obukhov similarity.  Use
+    #       it to isolate how much of a multilayer-vs-big-leaf difference is due
+    #       to the RSL enhancement, or when a coupled run wants the canopy to
+    #       drop its own RSL in favour of plain surface-layer similarity.
+    #
+    # SCOPE — read before attributing any model difference to this switch:
+    #   * ψ̂ is removed EVERYWHERE it appears, not just above the canopy: the
+    #     canopy-top→reference-height exchange AND the ψ̂ normalisation of the
+    #     within-canopy wind profile (``psim_hat2``).  Removing it from only one
+    #     would leave the two profiles on different theories.
+    #   * "most" is NOT the two-leaf / big-leaf surface layer.  β = u*/u(h), the
+    #     displacement height and the u(hc) = u*/β canopy-top anchor still come
+    #     from Harman & Finnigan canopy-drag theory, and the within-canopy
+    #     mixing-length closure is unchanged (CLM-ML has no alternative).  A
+    #     residual flux difference against the big-leaf scheme therefore is NOT
+    #     evidence about canopy physiology on its own.
+    #
+    # COUPLED-MODEL DIRECTION (not implemented; both options above are
+    # stand-alone constructs).  Once the atmosphere resolves levels down into
+    # the canopy, neither RSL nor MOST is needed as a separate canopy closure:
+    # the canopy airspace is just more atmospheric layers, so it can carry the
+    # ATMOSPHERE's turbulence scheme, with the canopy entering as extra terms
+    # rather than as its own similarity theory —
+    #   (a) form/viscous drag on the MEAN momentum equation,
+    #   (b) heat/moisture/CO2 sources and sinks from the leaves,
+    #   (c) porosity / plant-area weighting of the layer volumes and areas,
+    #   (d) the matching canopy terms in the TURBULENCE budget itself: wake
+    #       production from drag on the resolved flow, the short-circuited
+    #       cascade / enhanced dissipation it feeds, and a mixing length capped
+    #       by the canopy shear scale rather than by distance to the ground.
+    # (d) is not optional book-keeping: drag removes mean kinetic energy, and an
+    # atmospheric closure applied inside the canopy WITHOUT that pathway gets
+    # in-canopy mixing (hence the whole scalar transport) wrong while silently
+    # violating the TKE budget.  RSL and MOST are both surface-layer *similarity*
+    # fits standing in for turbulence a stand-alone canopy cannot resolve; a
+    # coupled run that shares the atmospheric closure replaces the stand-in
+    # rather than choosing between two versions of it, and removes the
+    # RSL-vs-MOST inconsistency between the land and atmosphere sides.
+    turbulence_scheme: str = "rsl_bonan"
+
+    # Canopy sub-step CLM-ML is designed for [s]; the basis for the derived
+    # ``num_ml_steps``.  Matches upstream ``MLclm_varctl.dtime_ml = 300.0``.
+    # Appended (not inserted) to keep the NamedTuple's positional order stable.
+    dtime_ml_target_s: float = 300.0
+
+    # Opt out of the sub-step guard: allow an explicit ``num_ml_steps`` that
+    # runs the canopy COARSER than ``dtime_ml_target_s``.  Exists so a published
+    # or legacy configuration can be reproduced verbatim; it re-enables the
+    # storage-term artefact documented on ``num_ml_steps``, so it warns rather
+    # than passing silently.
+    allow_coarse_ml_substep: bool = False
+
+    def validate(self) -> "CLMMLCanopyConfig":
+        """Fail-early check of the static string-dispatch fields.
+
+        Called at the non-jitted CLM-ML entry (``compute_clm_ml_canopy_
+        fluxes``) so a typo'd ``turbulence_scheme`` aborts at land-component
+        setup instead of silently running the default RSL physics.  Returns
+        ``self`` for chaining.
+        """
+        if self.turbulence_scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
+            raise ValueError(
+                f"unknown turbulence_scheme {self.turbulence_scheme!r}; the "
+                "CLM-ML canopy-airspace turbulence scheme must be one of "
+                f"{VALID_CLM_ML_TURBULENCE_SCHEMES} ('rsl_bonan'=Harman & "
+                "Finnigan roughness sublayer, 'most'=Monin-Obukhov only)")
+        return self

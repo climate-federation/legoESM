@@ -453,22 +453,29 @@ def create_atmosphere_dycore(
         a = grid.radius
         eig_max = n_max * (n_max + 1) / (a * a)
         hyperdiff = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
-        # Spectral hydrostatic PE requires the 5-stage SSP-RK54 (spectral
-        # stability); it does not support the other integrators.  Tolerate the
-        # global default (no deliberate choice) but REJECT any other EXPLICIT
-        # time_integrator with a clear message instead of silently overriding it.
-        if dc.time_integrator not in ("ssp_rk54", "auto",
-                                      type(dc)().time_integrator):
+        # Spectral hydrostatic PE runs the 5-stage SSP-RK54 by default (spectral
+        # stability).  It ALSO supports the semi-implicit LEAPFROG path, which
+        # evaluates physics ONCE per step and is the integrator #405 requires to
+        # thread a prognostic PhysicsState carry (ssp_rk54 evaluates physics
+        # per-RK-stage, where a single-step carry is ill-defined).  Any OTHER
+        # explicit integrator is still rejected with a clear message.
+        _spectral_leapfrog = str(dc.time_integrator).lower() in (
+            "leapfrog", "leapfrog_si")
+        if not _spectral_leapfrog and dc.time_integrator not in (
+                "ssp_rk54", "auto", type(dc)().time_integrator):
             raise ValueError(
-                f"spectral hydrostatic PE supports only time_integrator='ssp_rk54' "
-                f"(spectral stability); got dycore.time_integrator="
-                f"{dc.time_integrator!r} — that integrator is not implemented for "
-                f"the spectral path."
+                f"spectral hydrostatic PE supports time_integrator='ssp_rk54' "
+                f"(default) or 'leapfrog_si' (#405 prognostic-physics path); got "
+                f"dycore.time_integrator={dc.time_integrator!r} — that integrator "
+                f"is not implemented for the spectral path."
             )
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=hyperdiff,
             hyperdiff_order=2,
-            time_integrator="ssp_rk54",
+            time_integrator="leapfrog_si" if _spectral_leapfrog else "ssp_rk54",
+            # The leapfrog path is semi-implicit (needs the SI matrices the
+            # euler/leapfrog SI steps consume); ssp_rk54 stays explicit.
+            semi_implicit=_spectral_leapfrog,
             p_floor=200.0,
             dealiasing_fraction=0.667,
             # Forward the driver-level mass fixer (mirrors the plane / NH
@@ -757,6 +764,9 @@ def create_atmosphere_dycore(
             sponge_width_m=dc.sponge_width_m,
             sponge_shape=dc.sponge_shape,
             sponge_scale_height_m=dc.sponge_scale_height_m,
+            # #1029 ω-side SB81 conversion (opt-in, default OFF —
+            # bit-identical legacy arithmetic form when False).
+            sb81_omega_conversion=dc.sb81_omega_conversion,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
             # "auto" -> this dycore's own default; explicit names verbatim.

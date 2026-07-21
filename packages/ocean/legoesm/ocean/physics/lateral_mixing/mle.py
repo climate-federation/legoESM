@@ -284,7 +284,7 @@ def mle_mld_and_buoyancy(
     # interior e3w_1d(jk) = gdept(jk) - gdept(jk-1).
     e3w_ref = jnp.concatenate([2.0 * centers[:1], jnp.diff(centers)])
     zrefdep = (jnp.asarray(ref_depth_m, dtype=z_faces.dtype)
-               - 0.1 * jnp.min(e3w_ref))
+               - 0.1 * jnp.min(e3w_ref))  # coeff-ok: 0.1*min(e3w) sub-cell bias so searchsorted matches NEMO strict '>' face mask (nla10)
     # searchsorted(side='right') = first face index STRICTLY deeper than
     # zrefdep (faces equal to zrefdep stay on the shallow side, as with NEMO's
     # strict '>' mask); the T-level above that face is nla10.  z_faces[0] = 0

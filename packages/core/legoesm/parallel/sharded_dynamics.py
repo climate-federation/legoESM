@@ -922,63 +922,6 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
     return _exchange
 
 
-def make_ppermute_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange using ``jax.lax.ppermute`` (GPU/TPU only).
-
-    Unlike the standard halo exchange (which relies on XLA's implicit
-    all-gather when data is read across shards), this uses explicit
-    device-to-device permutations that bypass MPI entirely.
-
-    Falls back to :func:`make_face_halo_exchange` when the backend
-    is not GPU/TPU or the mesh is not available.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid.
-    config : DeviceConfig
-        Device configuration with mesh.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state``
-    """
-    backend = jax.default_backend().lower()
-    if config.mesh is None or backend not in ("gpu", "tpu"):
-        return make_face_halo_exchange(grid, config)
-
-    from legoesm.parallel.async_halo import jax_native_halo_exchange
-
-    def _exchange(state):
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-            if leaf.ndim == 3:
-                return jax_native_halo_exchange(leaf, grid, mesh=config.mesh)
-            elif leaf.ndim == 4:
-                # NOTE: jax_native_halo_exchange / _ppermute_halo_exchange
-                # are documented as a 2D-only legacy path.  When the
-                # SPMD backend in cubesphere_exchange.py is active the
-                # production code does not enter this branch — it goes
-                # through the native 4D ``packed_pad_halo_4d``.  Keep
-                # the per-level vmap here as a documented fallback;
-                # extending the legacy ppermute kernel to 4D is tracked
-                # separately.
-                transposed = jnp.moveaxis(leaf, -1, 0)
-                def _ex_level(lev):
-                    return jax_native_halo_exchange(lev, grid, mesh=config.mesh)
-                exchanged = jax.vmap(_ex_level)(transposed)
-                return jnp.moveaxis(exchanged, 0, -1)
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
-
 # ======================================================================
 # Multi-step integration with sharding
 # ======================================================================

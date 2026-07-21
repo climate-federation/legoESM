@@ -10,12 +10,36 @@ import pytest
 from legoesm import constants
 from scripts.run.run_amip import (
     _apply_aimip_classical_overrides,
+    _apply_spectral_scheme_fallback,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
     build_arg_parser,
     build_config_from_args,
 )
+
+
+def test_spectral_scheme_fallback():
+    p = build_arg_parser()
+    base = ["--grid-type", "gaussian", "--discretization", "spectral",
+            "--truncation", "21"]
+
+    # Default (prognostic tiedtke/mcfarlane) on spectral -> auto diagnostic.
+    a = _apply_spectral_scheme_fallback(p.parse_args(base), base)
+    assert a.convection == "sbm", "spectral did not fall back to diagnostic convection"
+    assert "mcfarlane" not in str(a.gravity_wave_drag), \
+        "spectral did not fall back off prognostic GWD"
+    assert a.gravity_wave_drag == "rayleigh"
+
+    # Explicit --convection is honoured verbatim (user's call, even if prognostic).
+    argv = base + ["--convection", "tiedtke"]
+    a2 = _apply_spectral_scheme_fallback(p.parse_args(argv), argv)
+    assert a2.convection == "tiedtke", "explicit --convection was overridden"
+
+    # Non-spectral grid: no-op (keeps the prognostic defaults).
+    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid"]
+    a3 = _apply_spectral_scheme_fallback(p.parse_args(cs), cs)
+    assert a3.convection == "tiedtke", "non-spectral grid wrongly swapped schemes"
 
 
 def test_multilayer_land_flags_flow_to_config():
@@ -2011,6 +2035,21 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_sb81_omega_conversion_flag_flows_to_dycore_config():
+    """#1029 ω-side: --sb81-omega-conversion round-trips into DycoreConfig;
+    default OFF (the SB81 conversion is opt-in until the #1029(b) lid
+    treatment lands)."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sb81_omega_conversion is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sb81-omega-conversion",
+    ]), parser))
+    assert cfg_on.dycore.sb81_omega_conversion is True
 
 
 def test_convective_precip_efficiency_allows_bechtold():

@@ -71,7 +71,7 @@ class LandConfig(NamedTuple):
     infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
     infiltration_excess: bool = True   # Enable Hortonian infiltration-excess runoff
     albedo_land: float = 0.2    # Fallback constant albedo
-    emissivity_land: float = 0.96
+    emissivity_land: float = constants.emissivity_land
     z0_land: float = 0.05       # Roughness length [m]
     Cd_land: float = 3.0e-3     # Land drag coefficient (constant scheme)
     Ch_land: float = 3.0e-3     # Land heat transfer coefficient (constant)
@@ -104,7 +104,7 @@ class MultiLayerLandConfig(NamedTuple):
     """Multi-layer soil model configuration (Task 8)."""
     # Surface properties
     albedo_land: float = 0.2    # Fallback constant albedo
-    emissivity_land: float = 0.96
+    emissivity_land: float = constants.emissivity_land
     z0_land: float = 0.05
     # Bulk flux
     Cd_land: float = 3.0e-3

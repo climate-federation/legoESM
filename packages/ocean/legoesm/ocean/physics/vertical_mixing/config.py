@@ -521,6 +521,18 @@ class TKEConfig(NamedTuple):
     # value smaller than the real dt over-damps; larger risks instability.
     # Default 300.0 preserves the historical hard-coded estimate.
     cfl_cap_dt_s: float = 300.0
+    # ``eice``: under-ice attenuation of the lc/etau wave-driven TKE sources
+    #   (NEMO nn_eice).  0 (default, BIT-IDENTICAL) = no attenuation — the
+    #   orchestrators do not thread ice concentration, so both kernels inject
+    #   full wave TKE even under compact ice.  Nonzero modes thread
+    #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
+    #   into the kernels' built-in ``(1-ice_frac)`` factor:
+    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
+    #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
+    #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
+    #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
+    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
 
 
 class KPPConfig(NamedTuple):
@@ -592,6 +604,18 @@ class KPPConfig(NamedTuple):
     enable_langmuir: bool = False    # opt-in Langmuir enhancement
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
+    # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
+    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
+    #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
+    #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
+    #   1 = linear eff=fi (factor 1-fi; NOT NEMO nn_eice=1 = 1-tanh(10fi));
+    #   3 = eff=min(4*fi,1) (max(0,1-4*fi), matches NEMO nn_eice=3, mixing
+    #   killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
+    #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
+    #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
+    #   reached the KPP grids).
+    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
 
 
 class CATKEConfig(NamedTuple):

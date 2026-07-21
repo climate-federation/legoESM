@@ -85,6 +85,18 @@ class SpectralSWConfig(NamedTuple):
     # so well-resolved fields are unchanged.  See
     # ``grids.gaussian.dealiasing_mask``.
     dealiasing_fraction: float = 0.667
+    # --- New fields APPENDED (codex review: inserting before existing
+    # fields breaks positional NamedTuple construction for callers) ---
+    # Apply the exponential filter after EVERY step (True, historical
+    # default) or only on demand via ``filter_initial_state`` (False).
+    # The per-step application compounds: at T21 with dt=600 s the
+    # order-8 / cutoff-0.65 filter multiplies n=10 by 0.99886 per step,
+    # i.e. e^-16 over a 100-day run — it silently annihilates every
+    # scale above n~7.  Free-evolution cases without persistent Gibbs
+    # sources (e.g. colliding modons: smooth ICs, no topography) should
+    # set False and rely on hyperdiffusion + de-aliasing; forced cases
+    # with non-smooth stationary topography (Williamson 5) keep True.
+    spectral_filter_every_step: bool = True
 
 
 # =============================================================================
@@ -370,8 +382,14 @@ class SpectralShallowWaterModel:
         band (masked tendencies alone would FREEZE, not damp, any
         pre-existing upper-third modes).  Topography ``phis_hat`` is
         static forcing and is never touched here.
+
+        The exponential filter participates only when
+        ``config.spectral_filter_every_step`` is True — otherwise the
+        filter exists solely for ``filter_initial_state`` and this
+        method applies the 2/3-rule truncation alone.
         """
-        sf = self._spectral_filter
+        sf = (self._spectral_filter
+              if self.config.spectral_filter_every_step else None)
         if self._dealias_state is not None:
             sf = (self._dealias_state if sf is None
                   else sf * self._dealias_state)
@@ -384,24 +402,48 @@ class SpectralShallowWaterModel:
             phis_hat=state.phis_hat,  # topography is static — never filter
         )
 
-    def filter_initial_state(self, state: SpectralSWState) -> SpectralSWState:
+    def filter_initial_state(
+        self, state: SpectralSWState, *, include_winds: bool = False,
+    ) -> SpectralSWState:
         """Filter topography and geopotential in the initial state.
 
-        Only filters phi_hat (geopotential) and phis_hat (topography) to
-        suppress Gibbs oscillations from non-smooth topography (e.g. the
-        conical mountain in TC5).  Vorticity and divergence are left
-        unchanged so that the prescribed initial wind field is exact
-        (e.g. v=0 for Williamson 5).
+        By default only filters phi_hat (geopotential) and phis_hat
+        (topography) to suppress Gibbs oscillations from non-smooth
+        topography (e.g. the conical mountain in TC5).  Vorticity and
+        divergence are left unchanged so that the prescribed initial
+        wind field is exact (e.g. v=0 for Williamson 5).
+
+        ``include_winds=True`` additionally filters vor_hat/div_hat —
+        for wind-defined ICs whose truncation ringing lives in the
+        vorticity field (e.g. the near-grid-scale colliding-modon jets
+        at T21), used together with
+        ``spectral_filter_every_step=False`` so the one-time IC cleanup
+        does not become a per-step dissipation.
 
         If no spectral filter is configured, returns the state unchanged.
         """
         if self._spectral_filter is None:
             return state
         sf = self._spectral_filter
+        sf_prog = sf
+        if include_winds and self._dealias_state is not None:
+            # Also enforce the 2/3-rule band limit on the prognostics:
+            # without it, upper-third IC modes (only ATTENUATED by the
+            # exponential filter) contaminate every stage of the first
+            # nonlinear step before the post-step truncation runs
+            # (codex review).  Scoped to include_winds=True (the
+            # wind-defined-IC path) to keep the historical phi-only
+            # semantics byte-identical for W5/W6.
+            sf_prog = sf * self._dealias_state
+        vor_hat = state.vor_hat
+        div_hat = state.div_hat
+        if include_winds:
+            vor_hat = vor_hat.replace(data=vor_hat.data * sf_prog)
+            div_hat = div_hat.replace(data=div_hat.data * sf_prog)
         return SpectralSWState(
-            vor_hat=state.vor_hat,
-            div_hat=state.div_hat,
-            phi_hat=state.phi_hat.replace(data=state.phi_hat.data * sf),
+            vor_hat=vor_hat,
+            div_hat=div_hat,
+            phi_hat=state.phi_hat.replace(data=state.phi_hat.data * sf_prog),
             phis_hat=state.phis_hat.replace(data=state.phis_hat.data * sf),
         )
 

@@ -240,6 +240,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Log-pressure scale height [m] mapping sigma->z for the top "
              f"sponge (default {_DYCORE_DEFAULTS.sponge_scale_height_m}).",
     )
+    # #1029 ω-side: SB81 α-weighted κT·ω/p conversion (hybrid latlon lane).
+    parser.add_argument(
+        "--sb81-omega-conversion", action="store_true",
+        default=_DYCORE_DEFAULTS.sb81_omega_conversion,
+        help="Use the SB81 α-weighted energy conversion (ω/p dynamic part) "
+             "on the hybrid lat-lon C-grid — discretization-consistent with "
+             "the geopotential and ln p^SB gradients (#1029). Default OFF: "
+             "the consistent form unmasks the #1029(b) lid-wave instability "
+             "sooner (held_suarez_topo blowup day ~49 -> ~12); opt-in until "
+             "the lid treatment lands.",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -251,7 +262,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-integrator", type=str, default="auto",
         choices=["auto", "ssp_rk3", "ssp_rk3_scan", "ssp_rk34",
-                 "ssp_rk54", "ssp_rk54_scan", "rk4"],
+                 "ssp_rk54", "ssp_rk54_scan", "rk4",
+                 "leapfrog", "leapfrog_si"],
         help="Time integrator.  'auto' (default) selects each dycore's "
              "own stable default: ssp_rk3 on cube/lat-lon (IEEE-"
              "identical to existing runs) and ssp_rk54_scan on MPAS "
@@ -261,7 +273,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "verbatim to every dycore, including ssp_rk3 on MPAS for "
              "deliberate integrator-sensitivity runs.  ssp_rk3_scan is "
              "the JIT-compile-time optimised variant for production "
-             "lat-lon C-grid AMIP.",
+             "lat-lon C-grid AMIP.  leapfrog / leapfrog_si are the "
+             "SPECTRAL dycore's single-physics-eval path — required to run "
+             "PROGNOSTIC physics (clubb_lite TKE / bechtold / prognostic "
+             "GWD) faithfully on gaussian/spectral (#405); the per-RK-stage "
+             "ssp_rk3 spectral path still diagnostic-swaps prognostic "
+             "schemes.",
     )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
@@ -1426,6 +1443,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
+        # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
+        sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -1644,6 +1663,51 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"rh_init": args.rh_init} if args.rh_init is not None else {}),
     )
+
+
+_SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
+    "tiedtke", "bechtold", "zhang_mcfarlane", "kain_fritsch", "mass_flux",
+    "edmf", "emanuel"})
+
+
+def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.Namespace:
+    """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
+    physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
+    are refused deep in setup. When the user did NOT explicitly pick them, fall
+    back to the diagnostic schemes the spectral loop CAN run — convection ->
+    ``sbm``, GWD -> ``rayleigh`` — with a notice, so gaussian AMIP runs out of the
+    box. Explicit ``--convection`` / ``--gravity-wave-drag`` are honoured verbatim
+    (and still correctly refused by the loop if prognostic — the user's call).
+    The faithful prognostic-on-spectral path is threading PhysicsState through the
+    spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
+    if getattr(args, "discretization", None) != "spectral":
+        return args
+    # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
+    # on the LEAPFROG path (single physics eval per step), so a prognostic
+    # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
+    # applies only to the per-RK-stage ssp_rk3 path, where a single-step carry
+    # is ill-defined.  (Auto-selecting leapfrog_si + its semi-implicit matrices
+    # for an `auto` integrator is a further usability step; today the prognostic
+    # spectral path is reached via an explicit `--time-integrator leapfrog_si`.)
+    _integ = str(getattr(args, "time_integrator", "auto")).lower()
+    if _integ in ("leapfrog", "leapfrog_si"):
+        print("[run_amip] spectral leapfrog path: prognostic physics carry is "
+              "threaded (#405) — schemes run faithfully (no diagnostic swap).",
+              flush=True)
+        return args
+    toks = list(argv or [])
+    has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
+    if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
+        print(f"[run_amip] spectral loop cannot thread prognostic convection "
+              f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
+              f"Pass --convection to override.", flush=True)
+        args.convection = "sbm"
+    if not has("--gravity-wave-drag") and "mcfarlane" in str(args.gravity_wave_drag):
+        print(f"[run_amip] spectral loop cannot thread prognostic GWD "
+              f"'{args.gravity_wave_drag}' yet (issue #405) -> diagnostic "
+              f"'rayleigh'. Pass --gravity-wave-drag to override.", flush=True)
+        args.gravity_wave_drag = "rayleigh"
+    return args
 
 
 def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
@@ -2212,6 +2276,7 @@ def main(argv: list[str] | None = None):
                          "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
+    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
     args = _postprocess_args(args, parser)
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work

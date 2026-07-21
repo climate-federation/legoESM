@@ -57,7 +57,9 @@ from legoesm.land.output_tapes import (
     accumulate_tape_step, build_slot_indices, finalize_tape,
     init_tape_accumulator, load_output_config,
 )
-from legoesm.land.restart import load_land_restart, save_land_restart
+from legoesm.land.restart import (
+    load_land_restart, merge_land_restart_into_template, save_land_restart,
+)
 
 U_MIN = 1.0
 _SEC_PER_DAY = 86400.0
@@ -79,6 +81,9 @@ def make_grid(grid_type: str, resolution: int):
     if gt == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         return create_latlon_grid(resolution)
+    if gt == "mpas":                                  # voronoi / icosahedral
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        return create_voronoi_mesh(resolution)       # N = SCVT subdivision level
     raise ValueError(f"unsupported grid_type {grid_type!r}")
 
 
@@ -330,11 +335,19 @@ def run(args) -> int:
         if args.restart_from:
             # Warm start from a prior end-state — bypass the cold-init T_soil
             # broadcast so the loaded profile survives verbatim.
-            state, restart_meta = load_land_restart(
+            loaded, restart_meta = load_land_restart(
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
                 expected_n_layers=config.soil_grid.n_layers)
+            # A restart round-trips only the prognostic fields, leaving the
+            # optional structural ones (surface_water, snow/ice bands,
+            # canopy_state) as None — but step_multilayer_land returns them as
+            # arrays, so feeding the bare loaded state into the lax.scan below
+            # raises a carry pytree-structure mismatch.  Graft onto a canonical
+            # cold-start template, as model_driver and run_land_spinup do.
+            state = merge_land_restart_into_template(
+                loaded, init_multilayer_land_state(ncol, config, T_init=288.0))
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")

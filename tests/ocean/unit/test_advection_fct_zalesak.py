@@ -119,6 +119,94 @@ class TestMonotonicity:
         assert bool(jnp.all(new_tracer >= q_min - slack))
 
 
+class TestLeapfrogTimeLevel:
+    """FCT under the modified leap-frog: the limited advective increment is
+    applied to the BEFORE level ``T(Naa)=T(Nbb)+2dt·RHS`` (NEMO traadv_fct
+    ``nonosc(Kbb)``, ``fct_up1(pt(Kbb))``, ``p2dt=2dt``).  The monotonicity
+    base must therefore be ``tracer_before`` — with the (Nnn,dt)-based bounds
+    the 2dt update at a sharp front overshoots and manufactures new extrema
+    (the DINO high-lat wall cold-cell crash)."""
+
+    def test_before_is_none_is_byte_identical(self, grid_small, smooth_state):
+        """FE/AB2 path (``tracer_before=None``) must be byte-identical to
+        explicitly passing ``tracer_before=tracer``."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        for hi in ("ppm", "centred2"):
+            a = fct_tracer_advection(
+                tracer, mu, mv, w_half, h_k, grid_small, dt, high_order=hi)
+            b = fct_tracer_advection(
+                tracer, mu, mv, w_half, h_k, grid_small, dt, high_order=hi,
+                tracer_before=tracer)
+            for x, y in zip(a, b):
+                assert jnp.array_equal(x, y)
+
+    def _sharp_front_state(self, grid_small):
+        """A sharp zonal tracer front with a before-level offset by a smooth
+        drift — the leap-frog Nbb differs from Nnn where the front is."""
+        n_lat, n_lon, nlev = grid_small.n_lat, grid_small.n_lon, 4
+        x = jnp.arange(n_lon)
+        front = jnp.where(x < n_lon // 2, 20.0, 2.0)  # step in lon
+        now = jnp.broadcast_to(front[None, :, None], (n_lat, n_lon, nlev))
+        # Before level: front shifted one cell east + a small warm bias, so
+        # Nbb ≠ Nnn precisely at the front (the crash geometry).
+        before = jnp.broadcast_to(
+            jnp.roll(front, 1)[None, :, None], (n_lat, n_lon, nlev)) + 0.5
+        mu = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.5   # strong zonal flow
+        mv = jnp.zeros((n_lat + 1, n_lon, nlev))
+        w_half = jnp.zeros((n_lat, n_lon, nlev + 1))
+        h_k = jnp.ones((n_lat, n_lon, nlev)) * 100.0
+        return now, before, mu, mv, w_half, h_k
+
+    @pytest.mark.parametrize("high_order", ["ppm", "centred2"])
+    def test_no_new_extrema_under_2dt_leapfrog(self, grid_small, high_order):
+        """The 2dt leap-frog after-state ``Nbb + 2dt·RHS`` stays inside the
+        BEFORE-level stencil box — no new extrema at the sharp front."""
+        now, before, mu, mv, w_half, h_k = self._sharp_front_state(grid_small)
+        dt = 100.0
+        rdt = 2.0 * dt
+        div_h, div_w = fct_tracer_advection(
+            now, mu, mv, w_half, h_k, grid_small, rdt,
+            high_order=high_order, tracer_before=before)
+        rhs = -(div_h + div_w) / jnp.maximum(h_k, 1e-30)
+        # Leap-frog combine: increment applied to the BEFORE level.
+        naa = before + rdt * rhs
+
+        # Bounds from the BEFORE stencil (the base the increment lands on).
+        tr_w = jnp.roll(before, 1, axis=1)
+        tr_e = jnp.roll(before, -1, axis=1)
+        tr_s = jnp.concatenate([before[:1], before[:-1]], axis=0)
+        tr_n = jnp.concatenate([before[1:], before[-1:]], axis=0)
+        tr_a = jnp.concatenate([before[..., :1], before[..., :-1]], axis=-1)
+        tr_b = jnp.concatenate([before[..., 1:], before[..., -1:]], axis=-1)
+        q_min = jnp.minimum(jnp.minimum(jnp.minimum(before, tr_w),
+                            jnp.minimum(tr_e, tr_s)),
+                            jnp.minimum(jnp.minimum(tr_n, tr_a), tr_b))
+        q_max = jnp.maximum(jnp.maximum(jnp.maximum(before, tr_w),
+                            jnp.maximum(tr_e, tr_s)),
+                            jnp.maximum(jnp.maximum(tr_n, tr_a), tr_b))
+        slack = 1.0e-9
+        assert bool(jnp.all(naa <= q_max + slack)), (
+            float(jnp.max(naa - q_max)))
+        assert bool(jnp.all(naa >= q_min - slack)), (
+            float(jnp.min(naa - q_min)))
+
+    def test_now_based_bounds_would_overshoot(self, grid_small):
+        """Control: limiting with the NOW base (the FE-certified bug) and
+        applying to the BEFORE level DOES manufacture a new extremum — proving
+        the test front is discriminating, not vacuous."""
+        now, before, mu, mv, w_half, h_k = self._sharp_front_state(grid_small)
+        rdt = 200.0
+        div_h, div_w = fct_tracer_advection(   # WRONG base = now
+            now, mu, mv, w_half, h_k, grid_small, rdt, high_order="ppm")
+        rhs = -(div_h + div_w) / jnp.maximum(h_k, 1e-30)
+        naa = before + rdt * rhs
+        tr_w = jnp.roll(before, 1, axis=1)
+        tr_e = jnp.roll(before, -1, axis=1)
+        q_min = jnp.minimum(jnp.minimum(before, tr_w), tr_e)
+        # New cold extremum below the before-stencil floor (the crash seed).
+        assert bool(jnp.any(naa < q_min - 1.0e-6))
+
+
 # ---------------------------------------------------------------------------
 # Sign-split correctness
 # ---------------------------------------------------------------------------

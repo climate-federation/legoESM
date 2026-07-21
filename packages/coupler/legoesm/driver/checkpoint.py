@@ -15,6 +15,17 @@ import jax
 import numpy as np
 
 
+def wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True if the run should checkpoint and exit to fit the wallclock budget.
+
+    ``max_s <= 0`` disables the check.  Otherwise fire once the elapsed time is
+    within ``buffer_s`` of the budget, leaving time to write the checkpoint
+    before the scheduler kills the job (so a dependency chain can resume).
+    Shared by the OMIP/LMIP run drivers (previously copy-pasted).
+    """
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+
+
 # Lazy imports to avoid circular dependency:
 #   io.checkpoint → driver.config → driver.__init__ → model_driver → io.checkpoint
 _experiment_config_from_dict = None

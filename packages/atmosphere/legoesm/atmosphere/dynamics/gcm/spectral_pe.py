@@ -65,6 +65,7 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import (
+    physics_requires_phys_state,
     refuse_unthreaded_stateful_physics,
 )
 from legoesm.timestepping.semi_implicit import (
@@ -1226,6 +1227,10 @@ class SpectralPrimitiveEquationModel:
         self._sponge_dt = None
         # Leapfrog state management
         self._state_prev = None  # Previous time level for leapfrog
+        # Previous-step prognostic physics tendency, applied LAGGED (n-1) in the
+        # leapfrog body for stability (#405 stiff-physics fix); None until the
+        # first stateful step.
+        self._prev_phys_tend = None
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
@@ -1629,6 +1634,7 @@ class SpectralPrimitiveEquationModel:
         dt: float,
         physics_fn=None,
         forcing_data=None,
+        phys_state=None,
     ) -> SpectralHydrostaticState:
         """Advance one time step, optionally with physics forcing.
 
@@ -1648,22 +1654,31 @@ class SpectralPrimitiveEquationModel:
             3-arg ``physics_fn(state, grid, sigma_coord)`` API for
             backward compatibility.
         """
-        # The spectral PE cannot thread a PhysicsState carry (transform
-        # space has no per-column carry slot — the driver's _run_spectral
-        # refuses stateful physics for the same reason).  Refuse a
-        # ``make_physics`` output tagged _requires_phys_state here too so a
-        # direct ``model.step(physics_fn=...)`` / step_with_physics loop
-        # cannot silently reseed prognostic physics every step (#405/#413).
+        # Prognostic (stateful) physics is threadable on the spectral PE ONLY on
+        # the LEAPFROG path, which evaluates physics ONCE per step (#405).  The
+        # default ssp_rk3 evaluates physics per RK SUB-STAGE, where a per-step
+        # carry (TKE / stochastic convection / PRNG) is ill-defined, so a
+        # stateful physics_fn there still refuses; a stateful physics_fn WITHOUT
+        # a threaded carry always refuses (it would silently reseed each step).
+        # Passing the carry as the second arg on the leapfrog path tells the
+        # guard the carry IS threaded (so it does not refuse there).
+        integrator = self.config.time_integrator.lower()
+        _is_leapfrog = integrator in ("leapfrog", "leapfrog_si")
         refuse_unthreaded_stateful_physics(
-            physics_fn, None, where="Spectral PE step()")
+            physics_fn, phys_state if _is_leapfrog else None,
+            where="Spectral PE step()")
         # Iter-3: anchor mass on first call (outside JIT; the fp64 scalar
         # is then THREADED into the jitted step as a traced arg so a
         # later reset/set_target_mass is honored — codex 2026-07-12).
         self._maybe_snapshot_target_mass(state)
+        # The advanced prognostic carry is published on the model (read by the
+        # driver's _run_spectral loop, mirroring the MPAS self._phys_state).
+        # Passthrough default; the stateful leapfrog branch overwrites it.
+        self._phys_state = phys_state
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("leapfrog", "leapfrog_si"):
-            return self._leapfrog_step(state, dt, physics_fn, forcing_data)
+        if _is_leapfrog:
+            return self._leapfrog_step(
+                state, dt, physics_fn, forcing_data, phys_state)
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
@@ -1675,7 +1690,8 @@ class SpectralPrimitiveEquationModel:
             )
         return self._step_jit(state, dt, physics_fn, self._target_mass)
 
-    def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None):
+    def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None,
+                       phys_state=None):
         """Leapfrog + SI step with Robert-Asselin filter + implicit diffusion.
 
         First call: forward Euler + SI (startup).
@@ -1684,17 +1700,57 @@ class SpectralPrimitiveEquationModel:
         ``forcing_data`` is threaded through to physics_fn as a TRACED
         pytree argument when provided (iter-95 extension to the iter-92
         forcing_data API).
+
+        ``phys_state`` (#405): when ``physics_fn`` is PROGNOSTIC
+        (``_requires_phys_state``) and a carry is threaded, the physics is
+        evaluated ONCE at state_n outside the jitted step so its advanced carry
+        can be captured (a jitted step cannot return a host-side carry); the
+        resulting FIXED spectral physics tendency enters the single-eval SI
+        integrator via the ``physics_tendency`` hook — numerically identical to
+        the inside-jit stateless path.  Stateless physics keeps the inside-jit
+        path unchanged (byte-identical).
         """
         self._ensure_sponge_factor(dt)
         self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
+
+        # Prognostic-physics single eval at state_n (the leapfrog/euler tendency
+        # evaluation point); capture the advanced carry, feed the FIXED tendency
+        # to the SI step.  Stateless -> _phys_tend stays None -> existing path.
+        # Wrapper-aware (matches the refusal gate's check) — a partial/wrapped
+        # stateful physics_fn must take the threaded path, not silently fall
+        # back to the unthreaded inside-jit path (codex).
+        _stateful = (physics_requires_phys_state(physics_fn)
+                     and phys_state is not None)
+        _phys_tend = None
+        if _stateful:
+            # Physics is evaluated at state_n every step so the prognostic carry
+            # (TKE / convection state / PRNG) advances once per step, consistent
+            # with the current state.  BUT in the leapfrog BODY the tendency
+            # APPLIED to the centered dynamics is the PREVIOUS step's — evaluated
+            # at n-1 — the same lagged-physics stabiliser as the diagnostic path
+            # (_make_leapfrog_tendency_fn): a stiff prognostic tendency at the
+            # centered n level excites leapfrog's computational mode (clubb_lite /
+            # bechtold NaN'd otherwise).  The Euler STARTUP applies the current
+            # (n) tendency — a forward step with no computational mode.
+            _phys_tend_now, _phys_state_out = physics_fn(
+                state, self.grid, self.sigma_coord,
+                phys_state=phys_state, forcing=forcing_data)
+            self._phys_state = _phys_state_out
+            if self._state_prev is None or self._prev_phys_tend is None:
+                _phys_tend = _phys_tend_now          # Euler startup: forward (n)
+            else:
+                _phys_tend = self._prev_phys_tend    # leapfrog body: lagged (n-1)
+            self._prev_phys_tend = _phys_tend_now    # store for next step's lag
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
             self._ensure_si_data(dt)  # SI matrices for dt
             # Also precompute leapfrog SI for next step (avoids stale jit)
             self._ensure_si_data_leapfrog(dt)
-            if forcing_data is not None:
+            if _stateful:
+                result = self._euler_si_phys_jit(state, dt, _phys_tend)
+            elif forcing_data is not None:
                 result = self._euler_si_with_forcing_jit(
                     state, dt, physics_fn, forcing_data,
                 )
@@ -1725,7 +1781,11 @@ class SpectralPrimitiveEquationModel:
         else:
             # --- Leapfrog + SI ---
             self._ensure_si_data_leapfrog(dt)
-            if forcing_data is not None:
+            if _stateful:
+                state_np1 = self._leapfrog_si_phys_jit(
+                    state, self._state_prev, dt, _phys_tend,
+                )
+            elif forcing_data is not None:
                 state_np1 = self._leapfrog_si_with_forcing_jit(
                     state, self._state_prev, dt, physics_fn, forcing_data,
                 )
@@ -1812,6 +1872,42 @@ class SpectralPrimitiveEquationModel:
             )
         return tendency_fn
 
+    def _make_leapfrog_tendency_fn(self, physics_fn, state_lag,
+                                   forcing_data=_NO_FORCING):
+        """Leapfrog tendency with the PHYSICS evaluated ONCE at ``state_lag``
+        (the n-1 level) while the DYNAMICS use the passed tendency-eval state (n).
+
+        Leapfrog centers the tendency at X^n and advances X^{n-1} -> X^{n+1}
+        over 2*dt.  Stiff / dissipative physics (convective adjustment,
+        boundary-layer + vertical diffusion) at the CENTERED n level excites
+        leapfrog's computational mode: for dX/dt = -X/tau the centered scheme
+        X^{n+1} = X^{n-1} - 2*dt*X^n/tau has a computational root
+        |lambda| = 1 + O(dt/tau) > 1 (unconditionally unstable).  Evaluating the
+        physics at X^{n-1} instead gives X^{n+1} = X^{n-1}(1 - 2*dt/tau) +
+        dynamics, stable for 2*dt/tau < 2 — the standard leapfrog "lagged
+        (uncentered) physics" treatment.  The one-step (dt) physics lag is O(dt)
+        and negligible for the slow parameterisations.  Empirically: gray
+        radiation was stable centered (smooth heating), but sbm convection AND
+        louis turbulence each NaN'd the spectral T_hat within a day — both are
+        the stiff vertical processes this lag stabilises.  The Euler STARTUP
+        step keeps physics at n (a forward step, which has no computational
+        mode), so only the leapfrog body lags.
+        """
+        phys = None
+        if physics_fn is not None:
+            if forcing_data is _NO_FORCING:
+                _r = physics_fn(state_lag, self.grid, self.sigma_coord)
+            else:
+                _r = physics_fn(
+                    state_lag, self.grid, self.sigma_coord, forcing_data)
+            phys = _r[0] if type(_r) is tuple else _r
+
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return tendency_fn
+
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
         """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics.
@@ -1843,8 +1939,11 @@ class SpectralPrimitiveEquationModel:
 
         ``dt`` static — closure-captures ``self._si_data_lf`` (see
         ``_euler_si_jit``).
+
+        Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
+        :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
+        tendency_fn = self._make_leapfrog_tendency_fn(physics_fn, state_nm1)
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1857,8 +1956,40 @@ class SpectralPrimitiveEquationModel:
 
         ``self``, ``dt``, ``physics_fn`` static (dt keys the cache — see
         ``_euler_si_jit``); ``forcing_data`` traced.
+
+        Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
+        :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
+        tendency_fn = self._make_leapfrog_tendency_fn(
+            physics_fn, state_nm1, forcing_data)
+        return leapfrog_si_step(
+            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
+        )
+
+    @partial(jax.jit, static_argnums=(0, 2))
+    def _euler_si_phys_jit(self, state, dt, phys_tend):
+        """Euler + SI startup with a PRE-COMPUTED spectral physics tendency
+        (#405 prognostic-physics leapfrog path).  ``phys_tend`` (a spectral
+        tendency ``SpectralHydrostaticState``) is the physics contribution
+        evaluated once at state_n OUTSIDE this jit; it enters the explicit SI
+        tendency via the ``physics_tendency`` hook, exactly as the inside-jit
+        stateless path adds ``physics_fn``'s tendency (the SI step evaluates the
+        explicit tendency once at state_n, so a state_n-fixed physics tendency is
+        numerically identical).  ``phys_tend`` is a TRACED pytree arg."""
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys_tend,
+            )
+        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _leapfrog_si_phys_jit(self, state_n, state_nm1, dt, phys_tend):
+        """Leapfrog + SI with a PRE-COMPUTED spectral physics tendency — the
+        leapfrog body companion to :meth:`_euler_si_phys_jit` (#405)."""
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys_tend,
+            )
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1958,12 +2089,20 @@ class SpectralPrimitiveEquationModel:
         dt: float,
         save_every: int = 1,
         physics_fn=None,
+        phys_state=None,
     ) -> tuple[SpectralHydrostaticState, list]:
         """Integrate forward for a given duration (Python loop).
 
         On Metal, batches CPU transfers: transfer state to CPU once,
         run all steps on CPU, then transfer results back to Metal.
         This avoids per-step CPU↔Metal round-trips.
+
+        ``phys_state`` (#405): a PROGNOSTIC (``_requires_phys_state``) physics_fn
+        on the leapfrog path needs its ``PhysicsState`` carry threaded — pass the
+        seed here and it is advanced across the loop (mirrors ``_run_spectral``);
+        the advanced carry is read back from ``self._phys_state``.  ``None``
+        (default) keeps the stateless behaviour unchanged (the carry is a
+        no-op passthrough).
         """
         n_steps = int(duration / dt)
         self._ensure_si_data(dt)
@@ -1981,7 +2120,11 @@ class SpectralPrimitiveEquationModel:
 
         trajectory = [state]
         for i in range(n_steps):
-            state = self.step(state, dt, physics_fn=physics_fn)
+            state = self.step(state, dt, physics_fn=physics_fn,
+                              phys_state=phys_state)
+            # Advance the prognostic carry across the loop (mirrors
+            # _run_spectral); no-op passthrough when phys_state is None.
+            phys_state = self._phys_state
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
         return state, trajectory

@@ -168,10 +168,6 @@ class CGridLatLonCompressibleEulerConfig(NamedTuple):
     # via ``apply_polar_filter`` (TODO: wire in v1).
     use_polar_filter: bool = False
     polar_filter_cutoff_deg: float = 70.0
-    # Theta + density floors / ceilings used by sanitisation (mirror
-    # the cubed-sphere ``compressible_euler_cdgrid`` knobs).
-    theta_min: float = 50.0
-    rho_min: float = 1.0e-3
 
 
 # ==============================================================================

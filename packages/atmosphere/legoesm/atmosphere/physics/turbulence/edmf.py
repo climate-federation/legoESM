@@ -37,8 +37,8 @@ DEPARTURES from SST07 (physics / structural simplifications):
   * **tuned surface initialization**: ``w_u(0) = max(w_min, 2.5·u*)`` (a FRICTION-velocity
     proxy, NOT the buoyancy convective scale ``w*``) and a FIXED ``parcel_dT = 0.5 K`` θ-excess;
     SST07 Eq. 17 sets the surface scalar excess from the surface flux divided by ``σ_w``;
-  * a **single bulk steady plume** (``n_updrafts`` unused; no detrainment — ``detrainment_rate``
-    unused/dead) — faithful to SST07's dry-CBL single-plume scope, but a MAJOR departure from
+  * a **single bulk steady plume** (``n_updrafts`` unused; no detrainment term)
+    — faithful to SST07's dry-CBL single-plume scope, but a MAJOR departure from
     Tan (2018) (prognostic plume velocity/area/thermo, updrafts+downdrafts, and prognostic
     plume/subdomain second moments — this code carries only grid-mean TKE);
   * an extra **MF→TKE buoyancy production** term (``max(mf_buoyancy, 0)`` into the TKE budget) —

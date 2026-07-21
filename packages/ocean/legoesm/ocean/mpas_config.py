@@ -415,6 +415,12 @@ class MPASOceanConfig(NamedTuple):
     # the equatorial viscosity boost (see ``equatorial_visc_boost``); the
     # instability is confined to |lat| < ~10°, so the default 5° matches the
     # lat-lon production config. Only used when ``equatorial_visc_boost > 0``.
+    # Salinity the virtual-salt closure multiplies the freshwater flux by:
+    # "s_ref" (default, bit-identical) = the fixed scalar above; "local" =
+    # the LOCAL top-cell salinity (NEMO tra_sbc: sfx = emp * sss) — removes
+    # the fresh-shelf over-brining of the fixed-35 closure (2026-07-18
+    # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
+    freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
 
 class MPASSimpleOceanConfig(NamedTuple):

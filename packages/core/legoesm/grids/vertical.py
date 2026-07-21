@@ -1440,88 +1440,6 @@ def drymadj(
     return ps, psd, dpd
 
 
-def p_var_core(
-    delp: jax.Array, ptop: float,
-    cappa: float | None = None,
-    ptop_min: float = 1.0e-8,
-    hydrostatic: bool = True,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """FV3_3D iter 644: derive (pe, peln, pk, pkz, ps) from (delp, ptop).
-
-    Faithful JAX port of FV3 ``p_var`` core algorithm
-    (tools/init_hydro.F90:41-145, excluding dry-mass adjust + MPI).
-
-    Algorithm:
-        pe[0]   = ptop
-        pk[0]   = ptop^cappa
-        pe[k]   = pe[k-1] + delp[k-1]      # for k = 1..km
-        peln[k] = log(pe[k])
-        pk[k]   = pe[k]^cappa
-        ps      = pe[km]
-        # Top-edge peln special branch (FV3 lines 116-127):
-        if ptop < ptop_min:
-            peln[0] = peln[1] - (cappa+1)/cappa
-        else:
-            peln[0] = log(ptop)
-        # Hydrostatic pkz (FV3 lines 129-135):
-        if hydrostatic:
-            pkz[k] = (pk[k+1] - pk[k]) / (cappa · (peln[k+1] - peln[k]))
-
-    Parameters
-    ----------
-    delp : jax.Array, shape (..., km)
-        Layer pressure thicknesses (Pa).
-    ptop : float
-        Top-of-model pressure (Pa).
-    cappa : float, optional
-        R_d/c_p (default: legoESM ``constants.kappa``).
-    ptop_min : float, default 1e-8
-        Below this, use peln(top) special branch.
-    hydrostatic : bool, default True
-        If True, compute pkz; else pkz returned as zeros.
-
-    Returns
-    -------
-    pe : jax.Array, shape (..., km+1)
-    peln : jax.Array, shape (..., km+1)
-    pk : jax.Array, shape (..., km+1)
-    pkz : jax.Array, shape (..., km)
-    ps : jax.Array, shape (...,)
-    """
-    if cappa is None:
-        cappa = constants.kappa
-
-    delp.shape[-1]
-    # pe[k] = ptop + Σ_{j<k} delp[j] for k = 0..km; using cumulative sum
-    cumsum = jnp.cumsum(delp, axis=-1)
-    pe = jnp.concatenate(
-        [jnp.full_like(cumsum[..., :1], ptop), ptop + cumsum],
-        axis=-1,
-    )
-    pk = pe ** cappa
-    # peln: log(pe) but with top-edge special branch
-    safe_pe = jnp.where(pe > 0.0, pe, 1.0)
-    peln = jnp.log(safe_pe)
-    # Top-edge: FV3 lines 116-127
-    if ptop < ptop_min:
-        ak1 = (cappa + 1.0) / cappa
-        top_peln = peln[..., 1] - ak1
-    else:
-        top_peln = jnp.log(jnp.asarray(ptop))
-    peln = peln.at[..., 0].set(top_peln)
-
-    ps = pe[..., -1]
-
-    if hydrostatic:
-        dpeln = peln[..., 1:] - peln[..., :-1]
-        safe_dpeln = jnp.where(jnp.abs(dpeln) > 1e-30, dpeln, 1.0)
-        pkz = (pk[..., 1:] - pk[..., :-1]) / (cappa * safe_dpeln)
-    else:
-        pkz = jnp.zeros(delp.shape)
-
-    return pe, peln, pk, pkz, ps
-
-
 def mount_waves(
     km: int, pint: float = 300.0e2,
 ) -> tuple[jax.Array, jax.Array, jax.Array, int, jax.Array]:
@@ -2024,6 +1942,69 @@ def sm1_edge_fv3(
     return ze_new
 
 
+def sb81_halflevel_construction(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Simmons-Burridge (1981) half-level construction for hybrid coordinates.
+
+    Single source for the (p_half_safe, ln_ratio, alpha) triple used by BOTH
+    the hydrostatic geopotential integration and the momentum
+    pressure-gradient correction.  Sharing the bit-identical ``alpha`` is a
+    correctness requirement, not hygiene: the discrete rest-over-terrain
+    cancellation of ``-grad(Phi) - R_d T grad(ln p)`` (#1029) holds only when
+    the two terms difference the SAME floating-point fields.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+
+    Returns
+    -------
+    (p_half_safe, ln_ratio, alpha)
+        Interface pressures clipped away from zero (..., nlev+1), layer log
+        ratios ``ln(p_{k+1/2}/p_{k-1/2})`` (..., nlev), and the exact SB81
+        ``alpha_k = 1 - (p_{k-1/2}/dp_k) ln_ratio_k`` (..., nlev).
+    """
+    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
+    p_half_safe = jnp.clip(p_half, 1e-10, None)
+    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    return p_half_safe, ln_ratio, alpha
+
+
+def sb81_full_level_ln_p(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> jax.Array:
+    """SB81 full-level log-pressure ``ln p_k = ln p_{k+1/2} - alpha_k``.
+
+    This is the discrete field whose horizontal gradient forms the
+    energy-consistent pair with ``-grad(Phi)`` from
+    :func:`compute_geopotential_hybrid`: because
+    ``sum_{j>k} ln_ratio_j = ln p_s - ln p_{k+1/2}`` telescopes, at uniform
+    temperature ``-grad(Phi_k) - R_d T grad(ln p_k)`` reduces to
+    ``-grad(phi_s + R_d T ln p_s)``, which vanishes identically for a
+    hydrostatically balanced rest state over terrain (#1029).  On a pure-sigma
+    or ``A=0`` coordinate it reduces to ``ln p_s`` plus a spatially
+    constant per-level offset, so its gradient equals ``grad(ln p_s)`` — the
+    sigma-path correction — up to a ~1e-12 top-layer artifact of the
+    ``p_half`` zero-clip when the top interface pressure is exactly 0
+    (``alpha_0`` picks up a weak ``p_s`` dependence through the clipped
+    ``ln`` ratio; physically nil, pinned by the A=0 unit test).
+
+    Returns
+    -------
+    jax.Array
+        Full-level log-pressure, shape (..., nlev).
+    """
+    p_half_safe, _, alpha = sb81_halflevel_construction(coord, p_s)
+    return jnp.log(p_half_safe[..., 1:]) - alpha
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,
@@ -2052,17 +2033,8 @@ def compute_geopotential_hybrid(
     """
     R_d = constants.R_d
 
-    # Compute hybrid pressures at interfaces and full levels
-    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
-    p_full = pressure_from_hybrid(coord, p_s, full=True)   # (..., nlev)
-
-    p_half_safe = jnp.clip(p_half, 1e-10, None)
-    jnp.clip(p_full, 1e-10, None)
-
-    # Log ratios and exact Simmons-Burridge alpha — spatially dependent
-    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
-    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
-    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    # Half-level construction shared with the hybrid PGF correction (#1029)
+    _, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
 
     # Geopotential thickness of each full layer
     dPhi = R_d * T * ln_ratio  # (..., nlev)
@@ -2336,6 +2308,104 @@ def vertical_advection_theta_hybrid(
 
     # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
     return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+
+
+def sb81_omega_over_p_dyn(
+    cumsum_mass_div: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array | None = None,
+) -> jax.Array:
+    """SB81 α-weighted DYNAMIC part of the energy conversion ``(ω/p)_k``.
+
+    Simmons & Burridge (1981) / IFS discretization of the non-advective part
+    of the thermodynamic conversion term (#1029 ω-side)::
+
+        (ω/p)_k^dyn = -(1/Δp_k) [ L_k · (Σ_{j<k} C_j - B_top·dp_s/dt)
+                                   + α_k · C_k ]
+
+    with ``C_j = ∇·(v_j Δp_j)`` the flux-form layer mass divergence,
+    ``L_k = ln(p_{k+1/2}/p_{k-1/2})`` and ``α_k`` the exact SB81 alpha from
+    :func:`sb81_halflevel_construction` — the SAME half-level construction
+    the geopotential integration and the momentum/thermo ``ln p`` gradients
+    use (the arithmetic ``ω_full / p_full`` form this replaces was a third,
+    independent discretization of the same continuous operator).  ``Δp_k``
+    is differenced INTERNALLY from the same clipped half-level pressures as
+    ``L_k``/``α_k`` — passing an externally-built ``dA + dB·p_s`` thickness
+    would differ by rounding (and by the clip in a zero-p-top layer),
+    breaking the discrete identities below.
+
+    The caller adds the advective part ``v_k · ∇(ln p_k^SB)`` separately
+    (the shared SB81 full-level field of :func:`sb81_full_level_ln_p`);
+    together they discretize the full ``ω/p``.  The ``∂p/∂t`` and
+    ``η̇ ∂p/∂η`` contributions are CONTAINED in the cumulative-divergence
+    expression (continuity + the ``F = 0`` top closure fold them in) —
+    EXCEPT the top-boundary term when the coordinate's top interface itself
+    moves in pressure (``B_top != 0``, e.g. a sigma-like coordinate with
+    ``p_top = sigma_top·p_s``): there ``(∂p/∂t + η̇ ∂p/∂η)(p̂) =
+    B_top·dp_s/dt - cumsum(p̂)`` and the constant layer-averages against
+    ``dp/p`` to ``+ B_top·dp_s/dt·L_k/Δp_k``.  Pass ``dp_s_dt`` (the RAW
+    continuity diagnosis ``-D_total/B_range``, NOT a globally corrected
+    variant — a zero-mean fixer applied to the prognostic ``dp_s/dt``
+    breaks the continuity identity this derivation rests on) to include
+    it; the term is multiplied by ``coord.B_half[0]`` traced (no Python
+    branch), so ``B_top = 0`` coordinates const-fold it away and the
+    function stays jit/AD-safe for traced coordinates.
+
+    Discrete column identity (unit-tested to fp64 roundoff, not bit
+    exactness — separate ``log``/multiply/reduce roundings)::
+
+        Σ_k Δp_k (ω/p)_k^dyn = -Σ_j C_j (ln p_s - ln p_j^SB)
+                               + B_top·dp_s/dt · ln(p_s / p_top_safe)
+
+    i.e. the column-integrated conversion telescopes onto the SAME discrete
+    ``ln p^SB`` field whose gradient does the momentum PGF work.  This is a
+    VERTICAL-discretization consistency statement only: on the C-grid the
+    horizontal pairing (face-flux ``C`` vs the centre-averaged
+    ``v·∇ln p^SB`` product) is not exact summation-by-parts, so no exact
+    global energy-conservation claim follows (#1029 tracks the residual
+    via the forced ``held_suarez_topo`` A/B, not an algebraic proof).
+
+    Top-layer convention at an exactly-zero-pressure top: the clipped
+    construction gives ``α_0 → 1`` (documented in
+    :func:`sb81_full_level_ln_p`), NOT the IFS ``α_1 = ln 2`` special case
+    — chosen so the conversion, the geopotential and the ``ln p^SB``
+    gradients keep ONE α field; adopting the IFS convention would have to
+    change all three together.
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)`` — INCLUSIVE cumulative flux-form mass
+        divergence, shape (..., nlev) [Pa/s].
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    dp_s_dt : jax.Array or None
+        RAW surface-pressure tendency ``-D_total/B_range``, shape (...,)
+        [Pa/s].  Only consumed through ``B_top`` (moving-top coordinates);
+        ``None`` omits the term.
+
+    Returns
+    -------
+    jax.Array
+        ``(ω/p)_k^dyn``, shape (..., nlev) [1/s].
+    """
+    p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+    # Internal Δp from the SAME clipped half-level pressures as L/α.
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    # C_k from the inclusive cumsum (C_0 = cumsum_0): one Pad HLO, no concat.
+    pad_axes = ((0, 0),) * (cumsum_mass_div.ndim - 1) + ((1, 0),)
+    cumsum_excl = jnp.pad(cumsum_mass_div[..., :-1], pad_axes)  # Σ_{j<k} C_j
+    C = cumsum_mass_div - cumsum_excl                           # C_k
+    if dp_s_dt is not None:
+        # Moving-top term: traced multiply by B_half[0] (jit/AD-safe; a
+        # static B_top = 0 const-folds to the fixed-top expression).
+        cumsum_excl = cumsum_excl - coord.B_half[0] * dp_s_dt[..., jnp.newaxis]
+    num = ln_ratio * cumsum_excl + alpha * C
+    # 1e-10 Pa: division-safety floor only (real layer thicknesses are far
+    # above it; matches the module's other dp floors).
+    return -num / jnp.maximum(dp, 1e-10)
 
 
 def compute_omega_hybrid(

@@ -154,20 +154,3 @@ def unstack_tracers(
         name: stacked[..., i]
         for i, name in enumerate(registry.names)
     }
-
-
-def clip_positive_definite(
-    tracers: dict[str, jnp.ndarray],
-    registry: TracerRegistry,
-) -> dict[str, jnp.ndarray]:
-    """Clip positive-definite tracers to zero floor.
-
-    Preserves non-positive-definite tracers unchanged.
-    """
-    result = {}
-    for info in registry.tracers:
-        q = tracers[info.name]
-        if info.positive_definite:
-            q = jnp.maximum(q, 0.0)
-        result[info.name] = q
-    return result

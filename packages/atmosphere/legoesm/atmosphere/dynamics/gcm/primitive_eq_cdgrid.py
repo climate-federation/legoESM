@@ -116,7 +116,10 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     T_min: float = 50.0            # Temperature floor [K]
     p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic 1/p
     sponge_sigma: float = 0.15     # Rayleigh sponge above this sigma
-    sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
+    sponge_tau_sec: float = 432000.0  # e-folding time at model top [s] (5 d,
+        # FV3 Ray_fast-like; #1028 — the old 3600 s (1 h) default was ~430-860x
+        # stronger than FV3 and was the dominant global KE sink (-1.0/day on a
+        # balanced jet), capping the Held-Suarez jet at ~7 m/s)
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -1191,9 +1194,10 @@ def fv3_hydrostatic_tendencies(
     # * ``config.sponge_implicit = False`` (default) — legacy
     #   explicit-tendency form ``du/dt = -α u``.  Conditionally
     #   stable: forward Euler diverges at ``α · dt > 2`` and
-    #   SSP-RK3 around ``α · dt ≳ 2.5``.  At production parameters
-    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin
-    #   is comfortable, so this path stays bit-exact for legacy
+    #   SSP-RK3 around ``α · dt ≳ 2.5``.  Even at the legacy 1-h τ
+    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin was
+    #   comfortable; at the #1028 default (τ = 5 d, peak α ≈ 2.3e-6 s⁻¹)
+    #   it is ~120x wider, so this path stays bit-exact for legacy
     #   configs and direct callers of ``fv3_hydrostatic_tendencies``.
     #
     # * ``config.sponge_implicit = True`` — operator-split path.
@@ -1327,13 +1331,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # keeps returning the state only (public contract unchanged).
         self._phys_state = None
 
-    def reset_target_mass(self) -> None:
-        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
-        self._target_mass = None
 
-    def set_target_mass(self, target_mass) -> None:
-        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
-        self._target_mass = target_mass
 
     def compute_mass(self, state) -> jax.Array:
         """Compute global ``∫ p_s dA`` in fp64 via ``global_integral``.

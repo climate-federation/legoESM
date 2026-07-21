@@ -271,9 +271,18 @@ def _bc_enforcing_child_step(
             f"SSP-RK3 integrator; got time_integrator={config.time_integrator!r}. "
             f"Supported: {sorted(_SSP_RK3_KEYS)} (the validated nest scheme)."
         )
+    # The biharmonic L(L(u)) stencil reaches 2 cells: with n_halo < 2 the
+    # first Laplacian at the pinned band reads the child's invalid
+    # global-edge neighbor and the second propagates it into the first
+    # unpinned row/column (codex review).  Fail loud rather than corrupt
+    # the relaxation zone silently.
+    if config.nu_del4 > 0.0 and nest.n_halo < 2:
+        raise ValueError(
+            "nu_del4 > 0 on a nested child requires n_halo >= 2 (the del-4 "
+            f"stencil is 2 cells wide); got n_halo={nest.n_halo}.")
 
     def tendency_fn(s):
-        dh, du, dv = cgrid_latlon_sw_tendencies(s, nest.child, config)
+        dh, du, dv = cgrid_latlon_sw_tendencies(s, nest.child, config, dt)
         return CGridLatLonShallowWaterState(
             h=dh, u=du, v=dv, h_s=jnp.zeros_like(s.h_s),
         )
@@ -385,7 +394,7 @@ def nested_sw_step(
     # for pole-sensitive cases (Williamson-5) integrate the parent with the full
     # CGridLatLonShallowWaterModel and drive the child via step_child instead.
     def parent_tendency(s):
-        dh, du, dv = cgrid_latlon_sw_tendencies(s, nest.parent, config)
+        dh, du, dv = cgrid_latlon_sw_tendencies(s, nest.parent, config, dt)
         return CGridLatLonShallowWaterState(
             h=dh, u=du, v=dv, h_s=jnp.zeros_like(s.h_s),
         )

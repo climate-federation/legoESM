@@ -1,0 +1,55 @@
+#!/bin/bash -l
+#PBS -N uni_train
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:ngpus=1:gpu_type=a100:mem=400GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Unified WB+AIMIP training on NCAR Derecho (A100-80GB) — one variant/mode
+# per job, self-chaining on walltime (shared _chain_body.sh, design D7).
+#
+# SUBMIT examples:
+#   qsub -v CAMPAIGN=aimip,SUITE=config/aimip/scale/suite_classical.yaml,VARIANT=classical \
+#     scripts/cluster/unified_training/train_derecho.pbs
+#   qsub -v CAMPAIGN=wb,SUITE=config/wb/campaign/spectral_t106.yaml,VARIANT=sfno \
+#     scripts/cluster/unified_training/train_derecho.pbs
+# Paths + conda env live in scripts/cluster/scaling_derecho/_env.sh.
+# ===========================================================================
+set -uo pipefail
+
+CAMPAIGN="${CAMPAIGN:-aimip}"
+VARIANT="${VARIANT:-classical}"
+SUITE="${SUITE:?set SUITE=<suite yaml>}"
+CHAIN="${CHAIN:-0}"
+CHAIN_MAX="${CHAIN_MAX:-24}"
+
+cd "$PBS_O_WORKDIR"
+source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
+cd "$REPO"
+
+OUT="${OUT:-results/unified_${CAMPAIGN}/$(basename "${SUITE%.*}")}"
+
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cuda,cpu
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+mkdir -p "$OUT"
+# 12 h walltime minus 45 min drain for the chain resubmit.
+LINK_BUDGET_S=$(( 12*3600 - 45*60 ))
+
+resubmit_self() {
+  # Export explicitly + `qsub -V` (pass the whole environment) rather than
+  # `-v k=v,...`: a comma-list cannot carry a comma-bearing value and the
+  # inherited-env form keeps CHAIN advancing. WB modes ride VARIANT as
+  # '+'-separated (never ',') so no value here contains a comma.
+  export CAMPAIGN SUITE VARIANT OUT CHAIN_MAX
+  export CHAIN=$((CHAIN+1))
+  export RESUME=1
+  qsub -V "$PBS_O_WORKDIR/scripts/cluster/unified_training/train_derecho.pbs"
+}
+
+source "$REPO/scripts/cluster/unified_training/_chain_body.sh"

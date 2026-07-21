@@ -73,6 +73,10 @@ def test_guard_raises_on_non_kpp_grid_when_flag_set():
             _validate_kpp_grid(grid, kpp_ri_crit=0.5, kpp_cv=None)
         with pytest.raises(SystemExit):
             _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=2.5)
+    # The rejection must point tripole users at the actionable alternative
+    # (--tripole-vmix selects that lane's opt-in closure).
+    with pytest.raises(SystemExit, match="--tripole-vmix"):
+        _validate_kpp_grid("tripole", kpp_ri_crit=0.5, kpp_cv=None)
 
 
 def test_guard_noop_on_kpp_grids_or_no_flags():

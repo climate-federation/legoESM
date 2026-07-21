@@ -294,9 +294,23 @@ def _build_test_matrix() -> list[TestCase]:
         # at 72x144) would make 100 days ~631k host-loop steps (codex
         # round-12 Medium), and the collision/exchange phase this case
         # gates happens well inside 20 days.
+        # Spectral runs the modons at T42, not the T21 canvas default:
+        # T21's 64-point equatorial spacing is ~625 km — 2.3x coarser
+        # than the other three panels (C36 / 72x144 / ico5, all
+        # ~250-280 km) — and the r0=750 km vortex cores disintegrate
+        # into wave debris at the day-~20 collision (the collision
+        # sharpens gradients past the truncation).  T42 (~312 km) is
+        # the resolution-parity choice; the dt law and hyperdiffusion
+        # need no per-resolution retuning here (modon-scale damping
+        # tau ~ 250 d either way).
+        # All four grids run the full ~100-day return-to-IC so the
+        # cross-grid panels compare the SAME time.  The old latlon
+        # 20-day cap predated the measured cost: 1.4 ms/host-step at
+        # 72x144 -> ~15 min for 100 d (dt ~ 13.7 s pole-CFL).
         matrix.append(TestCase(
-            "shallow_water", "colliding_modons", g, res[g], "none",
-            20 if g == "latlon" else 100, 1,
+            "shallow_water", "colliding_modons", g,
+            "T42" if g == "spectral" else res[g], "none",
+            100, 1,
             {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
@@ -558,10 +572,13 @@ KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
     # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
     # instability. Reproduces only in a full-length run (the 2-day --quick lane
     # never reaches the blow-up step and legitimately passes).
-    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge,
-    # calibrated to the sibling cube PE rest-sponge's on-grid top-level rate so it
-    # is never stronger than the accepted sibling (avoids an over-damped false
-    # PASS). Entry KEPT until a 200-day A100 run confirms the sponge arrests the
+    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge at
+    # its frozen 2026-06 calibration envelope (_TOPO_MIT_REF_*; historically
+    # derived from the then-current cube rest-sponge default, kept at that
+    # strength after #1028 retuned the live cube default — see the mitigation
+    # block), with a tripwire bounding it to that envelope (avoids an
+    # over-damped false PASS; this XPASS alarm is the second guard). Entry KEPT
+    # until a 200-day A100 run confirms the sponge arrests the
     # blow-up WITHOUT over-damping the resolved jet (controlled comparison vs the
     # flat-topo HS climate): if it passes, this reports XPASS (loud) -> remove the
     # entry; if it only delays the blow-up it stays XFAIL and the GENERATOR fix is
@@ -1060,10 +1077,45 @@ def _resolve_dt_cube(
     return dt
 
 
+def _hs_hd_scale_from_env(env_value: str | None) -> float:
+    """Parse the ``LEGOESM_HS_HD_SCALE`` probe knob (#1028).
+
+    Scales the cube Held-Suarez del-4 hyperdiffusion; mirrors the
+    ``LEGOESM_AH_SCALE`` semantics for unset/empty (→ 1.0, unchanged) and
+    rejects non-positive / non-finite values loudly.
+    """
+    import math
+    if env_value is None or env_value.strip() == "":
+        return 1.0
+    scale = float(env_value)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise SystemExit(
+            f"LEGOESM_HS_HD_SCALE must be a finite positive float, "
+            f"got {env_value!r}")
+    return scale
+
+
+# --- #1028: Held-Suarez low-resolution A_h reduction (2026-07-19/20) ---
+# At C36 the un-scaled Laplacian (A_h = 4.08e6 m^2/s) e-folds 2000-km modes
+# in ~0.29 d — faster than baroclinic growth (1-2 d) — and was measured to be
+# the dominant suppressor of the HS jet spin-up (200-d factorial: A_h x1 ->
+# 7.9 m/s, x0.1 -> 13.0, x0.03 -> 13.6, x0.01 -> 13.8 (saturated); del-4
+# x0.1 an exact null).  x0.1 takes most of the recovery at the largest
+# stability margin, and the full HS ladder at x0.1 is 200-d validated at C36
+# (sigma + hybrid + topo, topo PASS, mass ~1e-15).  Applies ONLY to the
+# n < 48 auto bucket of the HELD-SUAREZ path: the C48 (x2, iter-37) and
+# C72+ (x10, iter-33) buckets are STABILITY-driven — C72 NaN'd at the old x1
+# level, so cutting there is not backed by evidence — and the baroclinic
+# path keeps x1.0 (untested at reduced A_h).  Explicit LEGOESM_AH_SCALE
+# still overrides everything.
+_HS_AH_1028_SCALE: float = 0.1
+
+
 def _auto_ah_scale(
     n: int,
     env_value: str | None = None,
     auto_disable: bool = False,
+    low_res_scale: float = 1.0,
 ) -> tuple[float, str | None]:
     """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
 
@@ -1072,7 +1124,9 @@ def _auto_ah_scale(
 
     Auto-apply rules (when ``env_value`` is None or empty string AND
     ``auto_disable`` is False):
-    -   n  <  48  → scale=1.0 (no change, iter-19 default)
+    -   n  <  48  → scale=``low_res_scale`` (1.0 default; the Held-Suarez
+        path passes ``_HS_AH_1028_SCALE`` = 0.1 — see the #1028 block
+        above)
     -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
         from C48 stability data — C60 is inferred, not directly
         validated; codex iter-45 review caveat)
@@ -1118,6 +1172,12 @@ def _auto_ah_scale(
             f"[FV3_3D iter 43 auto] At C{n} auto-applying "
             f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set env var "
             f"to override."
+        )
+    if low_res_scale != 1.0:
+        return low_res_scale, (
+            f"[#1028 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE={low_res_scale:g} (Held-Suarez low-res A_h "
+            f"reduction; 200-d validated at C36).  Set env var to override."
         )
     return 1.0, None
 
@@ -1185,6 +1245,33 @@ def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
     dy = math.pi * constants.R_earth / n_lat
     c_gw = math.sqrt(constants.R_d * 300.0)
     return frac * c_gw * dy
+
+
+def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
+    """Biharmonic viscosity nu4 = dy^4 / (64 * tau) for the lat-lon grid.
+
+    Sized on the DISCRETE operator (codex review): the 2-D checkerboard
+    (the worst grid-noise mode) has 5-point-Laplacian eigenvalue
+    lam = -(4/dx^2 + 4/dy^2) = -8/dy^2 at the equator (dx = dy there,
+    since n_lon = 2*n_lat), so its del-4 damping rate is
+    nu4*lam^2 = 64*nu4/dy^4 and
+
+        nu4 = dy^4 / (64 * efold_hours * 3600)
+
+    gives the checkerboard an ``efold_hours`` e-folding (the continuum
+    symbol k = pi/dy would overstate lam by pi^2/4 per direction).  The
+    ico-style ``dx^4/(48 h)`` law is 12x stronger at equal spacing
+    (64*9/48) — and more in practice, since ``_hyperdiff_ico`` uses the
+    MINIMUM mesh edge — and lands the strong-damping band on the
+    modon/Rossby-wave scales this coefficient must preserve.  At n_lat=72: nu4 ~ 2.9e15 m^4/s ->
+    tau(checkerboard) = 9 h, tau(1-D 2*dy Nyquist) = 36 h,
+    tau(L=3000 km) ~ 0.6 yr, tau(L=4000 km) ~ 2 yr.  Pole rows are
+    further capped inside the model (see ``_nu_del4_row_profiles``).
+    """
+    import math
+    from legoesm import constants
+    dy = math.pi * constants.R_earth / n_lat
+    return dy ** 4 / (64.0 * efold_hours * 3600.0)
 
 
 def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
@@ -2998,11 +3085,26 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _c_grav = _m.sqrt(_consts_grav.g * (5000.0 if test_num == 8
                                             else 3000.0))
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
-        # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
-        _A_h_max = 0.4 * _dx_pole**2 / dt
-        _A_h = min(_laplacian_visc_latlon(n_lat), _A_h_max)
+        # Biharmonic (del-4) viscosity, NOT Laplacian.  The previous
+        # A_h = min(0.1*c_gw*dy, 0.4*dx_pole^2/dt) ~ 1e6 m^2/s damped
+        # PHYSICAL scales: k^2 law -> tau ~ 6 d for Rossby-Haurwitz
+        # wave-4 (W6 decayed to zonal by day 14) and tau < 1 d at the
+        # modon scale (colliding modons erased).  The del-4 law damps
+        # the discrete 2-D checkerboard with tau = 9 h while leaving
+        # the modon scale (L ~ 3000-4000 km) at tau ~ 0.6-2 yr.  Pole
+        # rows are stability-capped inside the model
+        # (``nu_del4_cfl_frac`` row profile), so no dx_pole clamp is
+        # needed here.
         config = CGridLatLonShallowWaterConfig(
-            A_h=_A_h, anchor_mass_to_initial=True,
+            # Modons run 4x weaker del-4 (36 h checkerboard e-fold vs
+            # the 9 h default): at the pole-CFL dt (~13.7 s) the 100-day
+            # run is ~630k steps, and the accumulated explicit+PPM
+            # dissipation weakens the vortices enough to visibly lag
+            # and smear them vs the ico/spectral panels.  The Williamson
+            # cases (<=15 d, forced/steady) keep the 9 h default.
+            nu_del4=_biharmonic_visc_latlon(
+                n_lat, efold_hours=36.0 if test_num == 8 else 9.0),
+            anchor_mass_to_initial=True,
         )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
         # new_test_dycores iter-25: extend SW latlon to W6
@@ -3206,11 +3308,45 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         import math
         _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
+        # Laplacian eigenvalue at truncation, n_max(n_max+1)/a^2.
+        _lap_tr = n_max * (n_max + 1) / float(constants.R_earth) ** 2
         config = SpectralSWConfig(
+            # Modons: del-6 (order 3) with the SAME truncation-scale
+            # damping RATE as the validated T21-tuned del-4 coefficient
+            # at this resolution (coeff6 = 2.338e15/lap_tr, since
+            # rate6(n_max) = coeff6*lap_tr^3 == 2.338e15*lap_tr^2) but
+            # ~10x weaker at the modon scale (n~13 e-fold 250 d -> ~7 yr).
+            # A plain (ref/n)^4-weakened del-4 blew up mid-run at T42
+            # (validated FAIL: insufficient truncation damping with the
+            # de-aliasing mask disabled) — raise the ORDER, not lower
+            # the rate.  Other cases keep the T21-tuned del-4 default.
+            hyperdiff_coeff=(2.338e15 / _lap_tr if test_num == 8
+                             else 2.338e15),
+            hyperdiff_order=3 if test_num == 8 else 2,
             # Modons (8) get the same order-8 filter as W5/W6: the
             # r0 = 750 km Gaussian jets are near the T21 grid scale, so
             # unfiltered Gibbs ringing contaminates the vorticity field.
             spectral_filter_order=8 if test_num in (5, 6, 8) else 0,
+            # ... but applied ONCE to the IC, not per-step: the
+            # compounding per-step filter is a hidden dissipation
+            # (e^-16 at n=10 over the 100-day modon run; e^-2.5 at
+            # n=10 over W5's 15 days — enough to visibly damp the
+            # transient lee-wave train the latlon/MPAS panels keep).
+            # W5's conical-mountain Gibbs ringing is handled by the
+            # one-time IC filter (phi + phis) plus hyperdiffusion.
+            # W6 keeps the per-step filter: its wave-4 lives at n<=9
+            # (per-step loss < 0.1% over 14 d, validated visually
+            # consistent across all four grids).
+            spectral_filter_every_step=test_num == 6,
+            # Modons keep the DEFAULT 2/3-rule mask.  At T42 the cut
+            # (n_cut=28) sits above the r0=750 km core band (n~13-21),
+            # so the mask costs nothing — the over-truncation problem
+            # existed only at T21 (n_cut=14 slicing the cores), which
+            # the T42 resolution-parity choice already solves.  Running
+            # WITHOUT the mask is NOT sound for this formulation: the
+            # cos^-2 factors in the tendencies make the products more
+            # than quadratic, and a maskless T85 probe NaN'd at step
+            # 100 (T42 maskless was only marginally stable).
         )
         model = SpectralShallowWaterModel(grid, config)
         if test_num == 6:
@@ -3222,7 +3358,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.colliding_modons import (
                 colliding_modons_spectral)
             state = colliding_modons_spectral(grid)
-            state = model.filter_initial_state(state)
+            # One-time IC cleanup INCLUDING the wind fields: the modon
+            # IC is wind-defined, so its truncation ringing lives in
+            # vor_hat (the default phi-only filter would miss it).
+            state = model.filter_initial_state(state, include_winds=True)
         elif test_num == 2:
             state = williamson_test2_spectral(grid)
         else:
@@ -3870,9 +4009,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         if mass_drift > 0 or n_mass_samples >= 2:
             notes += f", mass_drift={mass_drift:.2e}"
     if mass_drift > 0.01:
-        logger.warning(
-            "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
-            tc.grid_type, mass_drift)
+        print(
+            f"WARNING: Cosine bell {tc.grid_type}: mass drift "
+            f"{mass_drift:.2e} exceeds 1% threshold")
     # iter-119 (codex iter-118-followup MEDIUM-1): apply
     # the iter-117/118 mass-drift PASS gate.  Pre-iter-119
     # cosine_bell only WARNED.  iter-120: now applies to ALL
@@ -3968,16 +4107,25 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
+        # #1028 probe knob: scale the cube HS del-4 hyperdiffusion (mirrors
+        # LEGOESM_AH_SCALE; default 1.0 = unchanged). At C36 the default hd
+        # e-folds 2000-km modes in ~3.8 d — comparable to baroclinic growth —
+        # so the dead-jet factorial needs this axis too.  (Factorial verdict:
+        # hd x0.1 was an exact null on the 200-d HS jet — the knob stays for
+        # probing, the default stays 1.0.)
+        hd = hd * _hs_hd_scale_from_env(os.environ.get("LEGOESM_HS_HD_SCALE"))
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         # FV3_3D iter 33/34: scale A_h via env var.  matrix default
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
-        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
-        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # A_h but stable at 10x).  Set LEGOESM_AH_SCALE=10.0 at C72.
         # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
         # scale via _auto_ah_scale helper.  Explicit env var overrides;
         # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
         # (iter-46 codex backwards-compat opt-out).
+        # #1028: the n<48 HS bucket auto-applies _HS_AH_1028_SCALE (0.1) —
+        # the old x1 Laplacian was the dominant suppressor of HS jet
+        # spin-up (see the constant's provenance block).
         _ah_auto_disable = (
             os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
             in ("1", "true", "yes", "on")
@@ -3985,6 +4133,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
             auto_disable=_ah_auto_disable,
+            low_res_scale=_HS_AH_1028_SCALE,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
@@ -3995,8 +4144,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # _cfl_safe_dt_cube for the full calibration story.
         dt = _resolve_dt_cube(n, label="HS")
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
-        # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
-        # aggressive than the FV3 Fortran reference
+        # The PRE-#1028 default ``sponge_tau_sec = 3600`` (1 hour) was FAR
+        # more aggressive than the FV3 Fortran reference
         # (``../FV3/atmos_cubed_sphere-symmetryclean/model/dyn_core.F90``,
         # subroutine ``Ray_fast`` line 2922-2985) which uses ``tau``
         # in DAYS — typical production setting is 5-10 days, i.e.
@@ -4009,18 +4158,21 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         #   - τ = 1 h (default): cube-vs-latlon mean_T gap  -5.0 K
         #   - τ = 7 d (FV3-like):                          -10.8 K
         #   - τ = ∞ (sponge OFF, iter-13):                 -11.3 K
-        # The aggressive 1-h sponge produces the BEST cross-grid
-        # agreement on this metric, despite being non-canonical for
-        # HS.  Suspected cause: the cubed-sphere hyperdiffusion +
-        # sponge combination is empirically tuned to roughly match
-        # the effective dissipation that lat-lon's Laplacian
-        # viscosity provides; a weaker sponge under-damps the
-        # cubed-sphere upper troposphere and the climatology drifts
-        # further from the lat-lon / icosahedral / spectral cluster.
-        # NOT yet established for HYBRID coord, RRTMGP radiation,
-        # or 200-day spin-up — those may have different optimal τ.
-        # Keep the 1-h default for this HS test until a more
-        # principled retuning is done.
+        # The aggressive 1-h sponge produced the BEST cross-grid
+        # agreement on that metric — but #1028 (2026-07-19) showed the
+        # mean_T tuning was CONFOUNDED: it was evaluated while no
+        # jet-strength gate existed, and the 1-h sponge is the dominant
+        # global KE sink (-1.0/day on a balanced jet, fp64 budget closed
+        # to 4e-16; 99% of all KE loss on an eddying state).  It capped
+        # the HS jet and drains any ERA5-initialised/AMIP circulation.
+        # The config default is now tau = 5 d (FV3 Ray_fast-like;
+        # primitive_eq_cdgrid.py) — 200-d validated: HS sigma/hybrid
+        # neutral-positive (7.3->7.9 / 6.9->7.3), cube topo PASS, and
+        # the -1/day drain on resolved jets gone (6-d JW decay A/B:
+        # tau=1h leaves 30% KE vs 61% at days-scale/off).  The
+        # cross-grid mean_T calibration is OWED a redo with the #1049
+        # jet floor active (tracked in #1028); expect the -10.8 K-class
+        # gap numbers above until then.
         # FV3_3D iter 13: optional FV3-faithful post-step vorticity
         # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
         # opt in (~17 % mid-level cube-imprint reduction at C36).
@@ -4146,35 +4298,38 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # PGF correction discretely consistent with Phi(p_s) (implicates A_half;
         # #1078), owed with W2 visual validation -- NOT this sponge.
         #
-        # CALIBRATE the sponge to the sibling cube PE rest-sponge so it is never
-        # STRONGER than the accepted sibling on the resolved grid (an over-strong
-        # sponge could turn a 200-day PASS into an over-damped FALSE success --
-        # codex R1). The cube damps u/v with rate ((s0-sigma)/s0)^2 / tau per level
-        # (primitive_eq_cdgrid.py: sponge_sigma s0=0.15, sponge_tau_sec tau=3600),
-        # whose top FULL level only samples a FRACTION of the 1/tau lid peak. The
-        # lat-lon #836 sponge peaks at its own top full level, so pin its coeff to
-        # the cube's on-grid rate AT that level. At THIS case's FIXED resolution
-        # (nlev=DEFAULT_NLEV=40) the lat-lon profile is then <= the cube at every
-        # resolved level -- but that is NOT grid-general (sin2-in-log-p vs cube
-        # quadratic-in-sigma shapes differ). The tripwire below VERIFIES the actual
-        # <=-cube property AND that the sponge is active, on whatever grid is in
-        # use, and fails LOUDLY otherwise (a future DEFAULT_NLEV change could
-        # silently disable it or over-damp at a mid level). Under-damping is the
-        # SAFE failure (stays XFAIL, honest); over-damping is the false-pass we
-        # design out. Flat-topo HS is untouched (sponge_coeff=0 -> byte-identical).
-        _CUBE_SPONGE_SIGMA, _CUBE_SPONGE_TAU_S = 0.15, 3600.0  # primitive_eq_cdgrid.py
+        # MITIGATION STRENGTH: frozen at its 2026-06 calibration envelope —
+        # rate ((s0-sigma)/s0)^2 / tau with s0=0.15, tau=3600 s, evaluated at
+        # the top full level.  That envelope was ORIGINALLY derived from the
+        # then-current cube PE rest-sponge default; #1028 (2026-07-19) showed
+        # that 1-h cube default was itself a jet-killing mis-calibration and
+        # the cube config default is now 5 d — but THIS mitigation's measured
+        # behaviour (holds the topo case to its tracked XFAIL trajectory;
+        # insufficient to prevent the lid-wave blowup, #1029) was established
+        # AT the frozen strength, so the strength is kept and the constants
+        # below now carry their own provenance instead of referencing the
+        # live cube config.  The tripwire below verifies (a) the sponge is
+        # ACTIVE (a DEFAULT_NLEV change could silently disable it) and
+        # (b) the on-grid profile never EXCEEDS the frozen envelope (an
+        # accidentally-strengthened sponge could over-damp the case into a
+        # false 200-day PASS; the KNOWN_FAILURES registry's loud XPASS alarm
+        # is the second line of defence).  Under-damping is the SAFE failure
+        # (stays XFAIL, honest).  Flat-topo HS is untouched (sponge_coeff=0
+        # -> byte-identical).
+        _TOPO_MIT_REF_SIGMA, _TOPO_MIT_REF_TAU_S = 0.15, 3600.0  # frozen 2026-06 envelope (#1029/#1086)
         # #836 lat-lon sponge geometry -- set EXPLICITLY (not left to the config
         # defaults) so the tripwire below verifies the SAME profile the model runs.
         _SPONGE_WIDTH_M, _SPONGE_SCALE_H_M, _SPONGE_SHAPE = 10000.0, 7500.0, "sin2"
-        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: cube ref + reporting
-        _cube_top_frac = max(
-            (_CUBE_SPONGE_SIGMA - float(_sig[0])) / _CUBE_SPONGE_SIGMA, 0.0)
-        _sponge_coeff = _cube_top_frac**2 / _CUBE_SPONGE_TAU_S if _topo else 0.0
+        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: envelope + reporting
+        _mit_top_frac = max(
+            (_TOPO_MIT_REF_SIGMA - float(_sig[0])) / _TOPO_MIT_REF_SIGMA, 0.0)
+        _sponge_coeff = _mit_top_frac**2 / _TOPO_MIT_REF_TAU_S if _topo else 0.0
         if _topo:
-            # Tripwire (dispatch-hardening / mechanical invariant): the calibrated
-            # lat-lon sponge must be (a) ACTIVE and (b) <= the accepted cube
-            # sibling at EVERY resolved level. Verify the real profiles; raise on
-            # violation rather than ship a silently-disabled or over-damping run.
+            # Tripwire (dispatch-hardening / mechanical invariant): the
+            # mitigation sponge must be (a) ACTIVE and (b) <= its frozen
+            # 2026-06 envelope at EVERY resolved level. Verify the real
+            # profiles; raise on violation rather than ship a
+            # silently-disabled or accidentally-strengthened run.
             from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
                 sponge_profile as _sponge_profile)
             # Evaluate the lat-lon profile EXACTLY as the tendency does (codex R4):
@@ -4184,28 +4339,30 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             _ll = np.asarray(_sponge_profile(
                 _z, _z[0], _SPONGE_WIDTH_M, _sponge_coeff, shape=_SPONGE_SHAPE),
                 dtype=np.float64)   # to numpy fp64 ONLY for the comparison
-            _cube = (np.clip((_CUBE_SPONGE_SIGMA - _sig) / _CUBE_SPONGE_SIGMA,
-                             0.0, 1.0) ** 2) / _CUBE_SPONGE_TAU_S
-            if _cube_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
+            _env = (np.clip((_TOPO_MIT_REF_SIGMA - _sig) / _TOPO_MIT_REF_SIGMA,
+                            0.0, 1.0) ** 2) / _TOPO_MIT_REF_TAU_S
+            if _mit_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
                 raise SystemExit(
                     f"#1029 held_suarez_topo top-sponge is DISABLED at "
-                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs cube "
-                    f"sponge_sigma {_CUBE_SPONGE_SIGMA}); re-calibrate before "
+                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs envelope "
+                    f"sigma {_TOPO_MIT_REF_SIGMA}); re-calibrate before "
                     f"running -- never ship the topo case with no mitigation.")
-            # RELATIVE tolerance: the calibrated top level EQUALS the cube rate by
-            # construction, and _ll comes from the jnp sponge_profile (policy dtype
-            # -- often fp32), so an absolute tol would false-fire on ~1e-5 fp32
-            # round-off at the equal top level. 0.1% cleanly separates round-off
-            # from a real crossover (the L20 case is ~271% over).
-            _viol = np.where(_ll > _cube * 1.001 + 1e-15)[0]
+            # RELATIVE tolerance: the calibrated top level EQUALS the envelope
+            # rate by construction, and _ll comes from the jnp sponge_profile
+            # (policy dtype -- often fp32), so an absolute tol would false-fire
+            # on ~1e-5 fp32 round-off at the equal top level. 0.1% cleanly
+            # separates round-off from a real crossover (the L20 case is ~271%
+            # over).
+            _viol = np.where(_ll > _env * 1.001 + 1e-15)[0]
             if _viol.size:
-                _k = int(_viol[int(np.argmax((_ll - _cube)[_viol]))])
+                _k = int(_viol[int(np.argmax((_ll - _env)[_viol]))])
                 raise SystemExit(
-                    f"#1029 held_suarez_topo top-sponge OVER-DAMPS vs the cube "
-                    f"sibling at level {_k} (sigma={float(_sig[_k]):.4f}, "
-                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > cube "
-                    f"{float(_cube[_k]):.3e} 1/s. The sin2/cube shapes only align "
-                    f"at L40; re-calibrate the sponge width/shape for this grid.")
+                    f"#1029 held_suarez_topo top-sponge EXCEEDS its frozen "
+                    f"envelope at level {_k} (sigma={float(_sig[_k]):.4f}, "
+                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > envelope "
+                    f"{float(_env[_k]):.3e} 1/s. The sin2/envelope shapes only "
+                    f"align at L40; re-calibrate the sponge width/shape for "
+                    f"this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),

@@ -14,8 +14,36 @@ import pytest
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _NEMO_AB3_ZA,
     _NEMO_BT_ALPHA,
+    _NEMO_TS_BCK_FLT2,
     nemo_ab3am4_coeff_arrays,
 )
+
+
+def test_flt2_interior_ssh_weights_are_alpha0_literals():
+    """nn_bt_flt=2 (flt2=True): the jn>=3 ssh half-step-back weights are NEMO's
+    hard-coded rn_bt_alpha=0 literals 0.614/0.285/0.088/0.013
+    (dynspg_ts.F90:1698-1701), NOT the Demange formula — and the AB3 velocity
+    weights are unchanged (shared by both filters)."""
+    za, zb = nemo_ab3am4_coeff_arrays(10, flt2=True)
+    np.testing.assert_allclose(np.asarray(zb)[5], _NEMO_TS_BCK_FLT2, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(za)[5], _NEMO_AB3_ZA, atol=1e-12)
+    # rows still sum to 1 (exact on a constant field)
+    np.testing.assert_allclose(np.asarray(zb).sum(axis=1), 1.0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(za).sum(axis=1), 1.0, atol=1e-12)
+    # dissipative and DISTINCT from the nn_bt_flt=3 (alpha=0.07) weights
+    _, zb3 = nemo_ab3am4_coeff_arrays(10, flt2=False)
+    assert not np.allclose(np.asarray(zb)[5], np.asarray(zb3)[5])
+    assert float(_NEMO_TS_BCK_FLT2[0]) > 0.5  # forward-weighted (dissipative)
+
+
+def test_flt2_ll_init_ramp_shared():
+    """flt2 keeps the ll_init ramp (nn_bt_flt=2 re-inits every step)."""
+    za, zb = nemo_ab3am4_coeff_arrays(4, flt2=True)
+    np.testing.assert_allclose(np.asarray(za)[0], [1.0, 0.0, 0.0], atol=0)
+    np.testing.assert_allclose(np.asarray(zb)[0], [1.0, 0.0, 0.0, 0.0], atol=0)
+    np.testing.assert_allclose(
+        np.asarray(zb)[1],
+        [1.0833333333333, -0.1666666666666, 0.0833333333333, 0.0], atol=1e-12)
 
 
 def test_coefficient_rows_sum_to_one():
@@ -124,6 +152,49 @@ def _gyre_solver_setup():
     F_u = jnp.full((n_lat, n_lon + 1), 1.0e-6) * st.u_mask.data
     F_v = jnp.full((n_lat + 1, n_lon), -1.0e-6) * st.v_mask.data
     return r, st, (F_eta, F_u, F_v)
+
+
+def test_before_level_seed_none_vs_now_is_byte_identical():
+    """Backward-compat guard for the MLF Nbb seed: seeding the override with the
+    NOW state (eta_init=state.eta, u_init=state.u, v_init=state.v) must reproduce
+    the None-default result bit-for-bit — the U_bar_corr==U_bar / u_corr==u
+    collapse in the no-override path (barotropic_latlon_cgrid.py)."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+
+    r, st, (F_eta, F_u, F_v) = _gyre_solver_setup()
+    n, dt_e = 12, 100.0
+    kw = dict(grid=r.grid, z_coord=r.z_coord, config=r.model_config,
+              F_slow_eta=F_eta, F_slow_u=F_u, F_slow_v=F_v,
+              add_barotropic_coriolis=False)
+    s_default, (Hu0, Hv0) = barotropic_substeps_latlon_cgrid(st, dt_e, n, **kw)
+    s_nowseed, (Hu1, Hv1) = barotropic_substeps_latlon_cgrid(
+        st, dt_e, n, eta_init=st.eta.data, u_init=st.u.data,
+        v_init=st.v.data, **kw)
+    for a, b in ((s_default.eta.data, s_nowseed.eta.data),
+                 (s_default.u.data, s_nowseed.u.data),
+                 (s_default.v.data, s_nowseed.v.data),
+                 (Hu0, Hu1), (Hv0, Hv1)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_boxcar_ab3_requires_leapfrog():
+    """nemo_boxcar_ab3 (nn_bt_flt=2) is flt=2-faithful only under the MLF
+    leap-frog (×2 substep scale + Nbb seed); pairing it with forward_euler is a
+    non-NEMO hybrid and must raise."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+
+    r = build_nemo_gyre_recipe()
+    mc = r.model_config._replace(
+        outer_integrator="forward_euler",
+        barotropic=r.model_config.barotropic._replace(
+            barotropic_time_filter="nemo_boxcar_ab3"))
+    with pytest.raises(ValueError, match="nemo_boxcar_ab3"):
+        LatLonCGridOceanModel(r.grid, r.z_coord, mc)
 
 
 def test_cross_window_carry_equals_continuous_run():

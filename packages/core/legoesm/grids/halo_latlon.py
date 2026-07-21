@@ -968,6 +968,13 @@ def widen_cgrid_geometry_band(geom, halo: int):
     cell_names = ("lat_T", "lon_T", "dx_T", "dy_T", "area_T", "dx_u",
                   "dy_u", "f_T", "f_u", "cos_alpha_u", "sin_alpha_u",
                   "cos_lat", "sin_lat", "lat")
+    # The partial-periodic seam wall is a per-lat-row (n_lat,) profile —
+    # widen it as a cell-row field so it stays aligned with n_lat under the
+    # wide-halo barotropic path.  Ghost rows are permanently land-masked, so
+    # the pole-clamped ghost value never enters the owned region.  Omitted
+    # when unset (None), keeping non-seam grids byte-identical.
+    if getattr(geom, "seam_wall_rows", None) is not None:
+        cell_names = cell_names + ("seam_wall_rows",)
     vface_names = ("dx_v", "dy_v", "area_q", "f_v", "cos_alpha_v",
                    "sin_alpha_v")
     cell_wide = widen_band_cell_fields(

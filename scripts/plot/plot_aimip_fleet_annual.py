@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import fsspec
@@ -37,6 +38,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
+# Repo root on sys.path so `import evaluations` resolves when this plotter is
+# run bare (mirrors the run_weatherbench_* bootstrap).
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from evaluations.aimip_metrics import e2_trend_metrics  # noqa: E402
 
 
 logger = logging.getLogger("aimip-fleet")
@@ -313,6 +322,9 @@ def main():
             metrics[name] = {
                 "bias": float(diffs.mean()),
                 "rmse": float(np.sqrt(np.mean(diffs ** 2))),
+                # AIMIP E2: train-era vs holdout-decade trends of the
+                # ensemble-median series (evaluations/aimip_metrics.py).
+                **e2_trend_metrics(years, ens_med),
             }
 
     # Plot.
@@ -382,6 +394,7 @@ def main():
                 metrics[_mname] = {
                     "bias": float(_diffs.mean()),
                     "rmse": float(np.sqrt(np.mean(_diffs ** 2))),
+                    **e2_trend_metrics(ly, lt),
                 }
         _label = f"{_mname} (AMIP, prescribed ERA5 SST)"
         if _mname in metrics:
@@ -426,16 +439,35 @@ def main():
             fh.write(",".join(str(x) for x in r) + "\n")
     logger.info(f"Wrote {args.csv}")
 
-    # Dump metrics table.
+    # ERA5 reference trends (the E2 target values).
+    if era5_annual is not None:
+        metrics["ERA5"] = {
+            "bias": 0.0,
+            "rmse": 0.0,
+            **e2_trend_metrics(
+                np.asarray(era5_annual["year"]), np.asarray(era5_annual.values)
+            ),
+        }
+
+    # Dump metrics table (E1 bias/RMSE + E2 train/holdout trends).
     metrics_path = args.csv.with_name("aimip_fleet_tas_metrics.csv")
     with metrics_path.open("w") as fh:
-        fh.write("model,bias_K,rmse_K\n")
+        fh.write(
+            "model,bias_K,rmse_K,"
+            "trend_train_K_per_decade,trend_holdout_K_per_decade\n"
+        )
         for name, m in metrics.items():
-            fh.write(f"{name},{m['bias']:.4f},{m['rmse']:.4f}\n")
+            fh.write(
+                f"{name},{m['bias']:.4f},{m['rmse']:.4f},"
+                f"{m['trend_train_K_per_decade']:.4f},"
+                f"{m['trend_holdout_K_per_decade']:.4f}\n"
+            )
     logger.info(f"Wrote {metrics_path}")
     for name, m in metrics.items():
         logger.info(
             f"  {name:20}  bias = {m['bias']:+.3f} K   RMSE = {m['rmse']:.3f} K"
+            f"   trend(train) = {m['trend_train_K_per_decade']:+.3f}"
+            f"   trend(2015+) = {m['trend_holdout_K_per_decade']:+.3f} K/dec"
         )
 
 

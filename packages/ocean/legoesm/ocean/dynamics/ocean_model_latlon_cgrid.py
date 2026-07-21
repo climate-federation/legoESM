@@ -111,6 +111,63 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
+def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
+                                 u_mask_3d, v_mask_3d, grid, z_coord):
+    """Add the GM eddy-induced (bolus) transport to the TRACER advecting flux.
+
+    NEMO ``traadv``: the eiv velocity is added to the advecting velocity before
+    the (monotone FCT) tracer scheme.  ``bolus = (u_eiv, v_eiv, w_eiv)`` is the
+    curl-of-ψ TRANSPORT [m^3/s] on the NEMO east-/north-face-of-cell staggering
+    (``nemo_eiv_bolus_transport``).  Returns
+    ``(mass_flux_u_tr, mass_flux_v_tr, w_baro_tr)`` — the base momentum/continuity
+    fluxes are left untouched (the bolus is tracer-advection only).
+
+    Conservation: the vertical bolus is re-diagnosed from the bolus-augmented
+    HORIZONTAL flux via the SAME continuity operator that built ``w_baro``, so the
+    augmented advecting field is discretely NON-DIVERGENT in the FCT operators —
+    EXACT global tracer conservation AND constancy preservation, independent of
+    the horizontal metric.  This IS NEMO's ``zww`` eiv (the continuity integral of
+    the horizontal bolus divergence).  The bolus is column-non-divergent (ψ=0 at
+    the surface + floor ⇒ column-integrated transport divergence = 0), so the z*
+    sigma correction contributes nothing (deta/dt_bolus = 0).
+    """
+    from legoesm.grids.latlon import ensure_geometry as _ensure_geometry
+    u_eiv, v_eiv, _w_eiv = bolus              # [m^3/s], cell-indexed E/N faces
+    geom = _ensure_geometry(grid)
+    # u/v-face metrics = the SAME e2u/e1v the ψ streamfunction used, so
+    # transport/metric recovers the mass-flux (h·u) convention divergence_cgrid
+    # consumes (mass_flux · face_width = volume transport).  ψ ∝ metric, so the
+    # transport is exactly 0 where the metric is 0 (degenerate pole/boundary
+    # v-face) — guard the division against 0/0 (→0, the correct no-flux value).
+    e2u = geom.dy_u[:, 1:]                     # (n_lat, n_lon) east face of cell i
+    e1v = geom.dx_v[1:, :]                     # (n_lat, n_lon) north face of cell j
+    bmfu_c = jnp.where(e2u[:, :, jnp.newaxis] > 0.0,
+                       u_eiv / jnp.where(e2u[:, :, jnp.newaxis] > 0.0,
+                                         e2u[:, :, jnp.newaxis], 1.0), 0.0)
+    bmfv_c = jnp.where(e1v[:, :, jnp.newaxis] > 0.0,
+                       v_eiv / jnp.where(e1v[:, :, jnp.newaxis] > 0.0,
+                                         e1v[:, :, jnp.newaxis], 1.0), 0.0)
+    # Map cell-indexed EAST/NORTH faces -> staggered (n_lon+1)/(n_lat+1) face
+    # arrays: face f is the WEST/SOUTH face of cell f, so face f>=1 = east/north
+    # face of cell f-1; the boundary face 0 takes the periodic wrap (identically
+    # the masked wall value on a closed boundary, where the bolus is 0).
+    bolus_mfu = jnp.concatenate([bmfu_c[:, -1:, :], bmfu_c], axis=1)  # (n_lat, n_lon+1, nlev)
+    bolus_mfv = jnp.concatenate([bmfv_c[-1:, :, :], bmfv_c], axis=0)  # (n_lat+1, n_lon, nlev)
+    # Mask the bolus by the SAME 3-D tracer face masks the base mass flux uses
+    # (compute_face_masks_3d) so no bolus flows through a partial-cell wall / dry
+    # level.  Without this a below-bathymetry DRY level (garbage near-zero
+    # thickness) carries a huge spurious bolus velocity (transport / ~0 h) into
+    # the FCT → CFL blow-up; the wet-face masking is byte-identical on a flat
+    # bottom (all levels of a wet column active).
+    bolus_mfu = bolus_mfu * u_mask_3d
+    bolus_mfv = bolus_mfv * v_mask_3d
+    mfu_tr = mass_flux_u + bolus_mfu
+    mfv_tr = mass_flux_v + bolus_mfv
+    flux_div_tr = divergence_cgrid(mfu_tr, mfv_tr, grid)
+    w_tr = diagnose_w_from_flux_div(flux_div_tr, z_coord, thickness_weighted=True)
+    return mfu_tr, mfv_tr, w_tr
+
+
 def _compute_advection_flux_div(
     tr: jnp.ndarray,
     tracer_advection: str,
@@ -124,8 +181,14 @@ def _compute_advection_flux_div(
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
+    tr_before: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute advection flux divergence for a single tracer field.
+
+    ``tr_before`` (leapfrog only): BEFORE-level (Kbb) tracer for the FCT
+    monotonicity base (see ``fct_tracer_advection``).  ``None`` on the FE/AB2
+    path ⇒ base == ``tr`` ⇒ byte-identical.  Only the FCT schemes consume it
+    (the other schemes are single-level and already leapfrog-consistent).
 
     Returns ``(div_hut, vert_flux_div)`` — horizontal and vertical
     components of the total flux divergence.  Units: [tracer · m/s]
@@ -166,12 +229,17 @@ def _compute_advection_flux_div(
             neumann_fill_cgrid,
         )
         tr = neumann_fill_cgrid(tr, recon_fill_mask, grid=grid)
+        # Same wall fill for the BEFORE base so its upwind flux + bounds see the
+        # identical flat wall extension (dead cells only ⇒ wet columns intact).
+        if tr_before is not None:
+            tr_before = neumann_fill_cgrid(tr_before, recon_fill_mask, grid=grid)
 
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
         div_hut, vert_flux_div = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
+            tracer_before=tr_before,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -312,8 +380,16 @@ def _compute_advection_flux_div_pair(
     dt: float,
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
+    tr_a_before: jnp.ndarray | None = None,
+    tr_b_before: jnp.ndarray | None = None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    ``tr_a_before``/``tr_b_before`` (leapfrog only): BEFORE-level (Kbb) tracers
+    forwarded to the FCT monotonicity base (see ``fct_tracer_advection``).  FCT
+    is NOT a ``_LEVEL_SEPARABLE_H_SCHEMES`` member, so it always takes the
+    per-tracer fallback below where the before-levels are threaded through;
+    ``None`` ⇒ byte-identical FE/AB2 behaviour.
 
     The horizontal reconstructions of the production schemes
     (``_LEVEL_SEPARABLE_H_SCHEMES``) are level-independent, so both
@@ -351,12 +427,14 @@ def _compute_advection_flux_div_pair(
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
                 linssh_top_flux=linssh_top_flux,
+                tr_before=tr_a_before,
             ),
             _compute_advection_flux_div(
                 tr_b, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
                 recon_fill_mask=recon_fill_mask,
                 linssh_top_flux=linssh_top_flux,
+                tr_before=tr_b_before,
             ),
         )
 
@@ -724,6 +802,61 @@ def _static_kappa_redi_override(gm_cfg, grid):
     n_lon = int(getattr(grid, "n_lon"))
     return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)
+
+
+def _thickness_weighted_asselin(now, before, after,
+                                e3_now, e3_before, e3_after, e3_f,
+                                gamma, mask):
+    """NEMO thickness-weighted Robert-Asselin tracer filter (``tra_atf_qco_lf``).
+
+    Transcribes NEMO 5.0.2 ``src/OCE/TRA/traatf_qco.F90:295-306`` — the leap-frog
+    Asselin filter for tracers under the z\\* (``key_qco``) moving coordinate.
+    The filter acts on the tracer CONTENT ``(e3t·T)``, NOT the concentration
+    ``T``: the after-filter global content is perturbed only by the exact discrete
+    time-Laplacian of content ``gamma·(C_b − 2·C_n + C_a)`` (zero when the
+    flux-form advection holds the three time-level contents equal), with NO
+    spurious ``e3t``-inconsistency source — unlike the plain concentration form,
+    which adds an extra ``O(gamma·dη)`` content drift under a moving thickness::
+
+        ztc_b = e3t_b·T_b ; ztc_n = e3t_n·T_n ; ztc_a = e3t_a·T_a   (:298-300)
+        ztc_d = ztc_a - 2·ztc_n + ztc_b                            (:302)
+        ztc_f = ztc_n + rn_atfp·ztc_d                              (:304)
+        T_f   = ztc_f / e3t_f                                      (:341)
+
+    ``e3t_f`` (:308 ``ze3t_f = e3t_0·(1 + r3t_f·tmask)``) is the thickness
+    reconstructed from the *Asselin-filtered* ssh ``r3t_f`` — since z\\*
+    thickness is exactly linear in ssh, this equals the thickness-weighted
+    filter of ``e3t`` on wet cells, and here is supplied by
+    ``compute_layer_thickness(eta_f)`` with ``eta_f`` the plain-RA-filtered ssh
+    (the ``ssh_atf`` step), keeping the numerator/denominator consistent.
+
+    Contrast the plain concentration form ``tra_atf_fix_lf`` (:227,
+    ``T_f = T_n + gamma·(T_b - 2·T_n + T_a)``) used only for the linear/fixed
+    free surface (``lk_linssh``), which is O(dη) non-conservative under z\\*.
+
+    OMITTED (documented, not silently dropped): NEMO's surface-flux Asselin
+    correction ``ztc_f -= zfact1·(psbc_tc − psbc_tc_b)`` at the surface level
+    (traatf_qco.F90:309, + the qsr/rnf/isf analogues :313-336) cancels the
+    leap-frog imprint of the EXPLICIT surface tracer flux ``sbc_tsc``.  legoESM
+    applies surface T/S forcing as IMPLICIT restoring (node 20), so there is no
+    explicit ``sbc_tc``/``sbc_tc_b`` content pair to difference — the term has no
+    transcribable analog here and is O(gamma·2dt·Δflux) (second order for a
+    restoring BC).  This routine implements the thickness-weighting (:295-341)
+    only; the surface-flux correction lives with the (different) forcing path.
+
+    ``e3_f`` is floored before the divide (masked / below-seafloor cells have
+    ``e3_f == 0`` for partial-cell coords); ``mask`` re-zeros them so the floor
+    never leaks into a wet result.  Sign convention: symmetric time-Laplacian
+    smoothing, ``gamma = rn_atfp > 0`` (diffusive) — matches the plain-RA sign.
+    """
+    ztc_n = e3_now * now
+    ztc_b = e3_before * before
+    ztc_a = e3_after * after
+    ztc_f = ztc_n + gamma * (ztc_b - 2.0 * ztc_n + ztc_a)
+    e3_f_safe = jnp.maximum(e3_f, 1.0e-30)
+    # Dry/below-seafloor cells CARRY the now concentration (not 0): a zeroed
+    # tracer in a dry cell is stencil poison on 3-D staircase coords (#480).
+    return jnp.where(mask > 0, ztc_f / e3_f_safe, now)
 
 
 class LatLonCGridOceanModel:
@@ -1216,6 +1349,27 @@ class LatLonCGridOceanModel:
                 f"freshwater_closure must be one of {_valid_fw}, "
                 f"got {config.freshwater_closure!r}",
             )
+        _valid_fw_sal = {"s_ref", "local"}
+        if getattr(config, "freshwater_salinity", "s_ref") not in _valid_fw_sal:
+            raise ValueError(
+                f"freshwater_salinity must be one of {_valid_fw_sal}, "
+                f"got {getattr(config, 'freshwater_salinity', 's_ref')!r}",
+            )
+        if (getattr(config, "freshwater_salinity", "s_ref") == "local"
+                and bool(getattr(config, "normalize_freshwater", False))):
+            # normalize_freshwater promises ZERO global salt tendency, which
+            # holds only for a SCALAR S_ref (S_ref*∫F' dA = 0).  With the
+            # local-S field the covariance ∫S_local·F' dA is generally
+            # nonzero, silently breaking the promise (codex HIGH,
+            # 2026-07-18).  Reject the combination until a joint
+            # volume+salt correction exists.
+            raise ValueError(
+                "freshwater_salinity='local' is incompatible with "
+                "normalize_freshwater=True: the zero-mean freshwater "
+                "correction no longer yields zero global salt once "
+                "multiplied by a spatially varying salinity "
+                "(∫S_local·F' dA covariance).  Use s_ref with "
+                "normalization, or local without it.")
 
         # Fail-fast EOS dispatch validation (dispatch discipline: validate the
         # static literal at construction, not lazily at the first step where
@@ -1424,6 +1578,17 @@ class LatLonCGridOceanModel:
             if (getattr(config, "gm_redi", None) is not None
                     and getattr(config.gm_redi, "eke", None) is not None):
                 _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
+            # gm_bolus_advection="through_fct" needs the bolus-transport export
+            # + _add_bolus_to_advecting_flux wiring, which only the split step
+            # carries; without this gate the unsplit step would silently DROP
+            # the entire GM bolus term (the in-operator centred add is gated
+            # off and nothing re-adds it to the advecting flux).
+            if (getattr(config, "gm_redi", None) is not None
+                    and getattr(config.gm_redi, "gm_bolus_advection",
+                                "centred") == "through_fct"):
+                _unsupported.append(
+                    'gm_redi gm_bolus_advection="through_fct" (bolus-through-'
+                    "FCT flux not threaded by the unsplit step)")
             if getattr(config, "ab2_scope", "total") == "advective":
                 _unsupported.append('ab2_scope="advective" (withheld dissipation)')
             if getattr(config, "surface_forcing_implicit", False):
@@ -1445,29 +1610,59 @@ class LatLonCGridOceanModel:
                     "features are threaded by the split implicit_cn path only. Use "
                     'barotropic_solver="implicit_cn", or extend _unsplit_ab2_step.')
         _valid_time_filters = {"box", "cosine", "power_law",
-                               "nemo_boxcar_centred", "nemo_ab3am4"}
+                               "nemo_boxcar_centred", "nemo_ab3am4",
+                               "nemo_boxcar_ab3"}
         if (getattr(config, "surface_stress_implicit", False)
                 and not getattr(config.barotropic,
-                                "nemo_stage_mean_imposition", False)):
+                                "nemo_stage_mean_imposition", False)
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            # Under the split-explicit free surface ("explicit_substep") the
+            # post-solve depth-mean shift is NEMO's OWN MLF arrangement
+            # (stpmlf.F90: dyn_spg THEN dyn_zdf, no post-zdf re-imposition —
+            # the shift feeds the next step's Kbb barotropic seed), and
+            # F_slow carries the wind for the substeps exactly as NEMO's
+            # zu_frc wind term (dynspg_ts.F90 ~L360).  So no stage-mean
+            # imposition is required there; other solvers keep the guard.
             raise ValueError(
                 "surface_stress_implicit=True deposits the wind stress inside "
                 "the implicit vertical solve, which SHIFTS the depth mean "
-                "after the barotropic solve; it requires "
-                "barotropic.nemo_stage_mean_imposition=True (NEMO "
+                "after the barotropic solve; outside "
+                'barotropic_solver="explicit_substep" (NEMO stpmlf order) it '
+                "requires barotropic.nemo_stage_mean_imposition=True (NEMO "
                 "stprk3_stg:440) to re-impose the barotropic mean — "
                 "otherwise the wind's depth-mean is double-counted "
                 "(F_slow + the solve).")
-        if (config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+        if (config.barotropic.barotropic_time_filter
+                in ("nemo_ab3am4", "nemo_boxcar_ab3")
                 and config.barotropic.barotropic_wide_halo):
             raise ValueError(
-                'barotropic_time_filter="nemo_ab3am4" is not yet supported '
-                "with barotropic_wide_halo=True (the AB3/AM4 substep "
+                f"barotropic_time_filter="
+                f"{config.barotropic.barotropic_time_filter!r} is not yet "
+                "supported with barotropic_wide_halo=True (the AB3/AM4 substep "
                 "histories widen the per-substep stencil reach; the wide-halo "
                 "budget has not been re-derived).")
         if config.barotropic.barotropic_time_filter not in _valid_time_filters:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the MLF
+        # leap-frog, which supplies the ×2 substep scale + Nbb before-level seed
+        # that make the boxcar 2*nn_e-wide and centred at Naa (dynspg_ts.F90:1061,
+        # 494-503). Pairing it with forward_euler would give a flt=1-width window
+        # + AB3 + ts_bck_interp — a non-NEMO hybrid — so reject it (only
+        # nemo_dino_kamm_mlf selects it).
+        if (config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
+                and getattr(config, "outer_integrator", "forward_euler")
+                != "leapfrog"):
+            raise ValueError(
+                'barotropic_time_filter="nemo_boxcar_ab3" (NEMO nn_bt_flt=2 AB3 '
+                "+ ts_bck_interp dissipation) requires outer_integrator="
+                '"leapfrog" (the MLF supplies the ×2 substep scale + before-level '
+                "seed that make the boxcar the faithful 2*nn_e window centred at "
+                "Naa); got outer_integrator="
+                f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
+                'barotropic_time_filter="nemo_boxcar_centred" for the '
+                "forward-frame boxcar.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -1494,12 +1689,49 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
                 f"got {config.tracer_advection!r}")
-        _valid_outer_int = {"forward_euler", "ab2"}
+        _valid_outer_int = {"forward_euler", "ab2", "leapfrog"}
         _outer_int = getattr(config, "outer_integrator", "forward_euler")
         if _outer_int not in _valid_outer_int:
             raise ValueError(
                 f"outer_integrator must be one of {sorted(_valid_outer_int)}, "
                 f"got {_outer_int!r}")
+        # NEMO Modified-Leap-Frog (stpmlf.F90) requirements. The leapfrog carries
+        # the Coriolis in the explicit RHS (via vorticity_scheme="een_total") and
+        # applies the vertical friction/mixing implicitly over 2dt (dyn_zdf), so
+        # it needs coriolis_scheme="explicit_ab2" (Matsuno off) + implicit vertical
+        # mixing. Reject silent misconfiguration rather than run a non-NEMO scheme.
+        if _outer_int == "leapfrog":
+            _asg = getattr(config, "asselin_gamma", 0.1)
+            if not (0.0 <= _asg <= 1.0):
+                raise ValueError(
+                    "asselin_gamma (Robert-Asselin filter coefficient rn_atfp) "
+                    f"must be in [0, 1]; got {_asg!r}")
+            if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+                raise ValueError(
+                    'outer_integrator="leapfrog" (NEMO stp_MLF) requires '
+                    'coriolis_scheme="explicit_ab2": the leapfrog carries the '
+                    "Coriolis in the explicit RHS (Matsuno rotation OFF). Use it "
+                    'with vorticity_scheme="een_total" (NEMO ln_dynvor_een, f in '
+                    "the EEN triad). Got coriolis_scheme="
+                    f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
+            if not config.implicit_vertical_mixing:
+                raise ValueError(
+                    'outer_integrator="leapfrog" requires '
+                    "implicit_vertical_mixing=True: NEMO dyn_zdf applies the "
+                    "vertical friction/diffusion as a backward-Euler solve over "
+                    "rDt=2dt on the leapfrog after-state.")
+            if getattr(config, "ab2_scope", "total") != "total":
+                raise ValueError(
+                    'outer_integrator="leapfrog" requires ab2_scope="total" '
+                    "(the leapfrog applies every explicit tendency at the same "
+                    "2dt weight; the advective/dissipative split is AB2-only).")
+            if getattr(config, "prescribed_flow", None) is not None:
+                raise ValueError(
+                    'outer_integrator="leapfrog" does not support the '
+                    "prescribed_flow lever (the _leapfrog_step does not re-pin "
+                    "the flow after the barotropic/implicit solves, unlike "
+                    "_step_impl/_ab2_step). Use forward_euler or ab2 with "
+                    "prescribed_flow.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -1566,25 +1798,44 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
-        if getattr(config, "vorticity_scheme", "al81") == "ene_total":
+        if getattr(config, "vorticity_scheme", "al81") in (
+                "ene_total", "een_total"):
+            _vs = getattr(config, "vorticity_scheme", "al81")
+            # ene_total = NEMO np_CRV (ENE Sadourny 2-point + vertex f);
+            # een_total = NEMO ln_dynvor_een (AL81/EEN 12-point triad + vertex f,
+            # the DINO form). Both carry the planetary Coriolis INSIDE the
+            # vector-invariant vorticity flux, so the same three constraints hold.
             if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
                 raise ValueError(
-                    'vorticity_scheme="ene_total" (NEMO np_CRV: planetary '
-                    "Coriolis inside the ENE vorticity flux) requires "
-                    'coriolis_scheme="explicit_ab2" — under matsuno_split the '
-                    "separate Matsuno rotation would double-apply f. Got "
+                    f'vorticity_scheme="{_vs}" (planetary Coriolis inside the '
+                    "vorticity flux) requires coriolis_scheme=\"explicit_ab2\" — "
+                    "under matsuno_split the separate Matsuno rotation would "
+                    "double-apply f. Got "
                     f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
             if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
-                raise ValueError(
-                    'vorticity_scheme="ene_total" is incompatible with '
-                    'barotropic_coriolis_split="live": the live subtraction '
-                    "removes the face-f velocity-form depth-mean, but "
-                    "ene_total's planetary term is the vertex-f TRANSPORT-form "
-                    "flux — the stencils would not cancel. Use \"frozen\".")
+                # The live pre-step subtraction (NEMO dynspg_ts:296-300) must use
+                # the SAME barotropic-Coriolis stencil as the in-substep dyn_cor_2D
+                # so they cancel at the pre-step state. Under vorticity_scheme=
+                # "{ene,een}_total" the planetary term is the vertex-f TRANSPORT-
+                # form EEN flux, so the subtraction must ALSO be EEN
+                # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
+                # face-f "avg" stencil would leave an O(1) residual Coriolis.
+                if getattr(config.barotropic, "barotropic_coriolis",
+                           "avg") not in ("een", "een_metric"):
+                    raise ValueError(
+                        f'vorticity_scheme="{_vs}" with '
+                        'barotropic_coriolis_split="live" requires '
+                        'barotropic.barotropic_coriolis="een"/"een_metric" (NEMO '
+                        "dyn_spg_ts::dyn_cor_2D EEN): the _total planetary "
+                        "term is the vertex-f EEN transport-form flux, so the "
+                        "live pre-step subtraction must use the SAME EEN "
+                        "stencil to cancel — the 4-pt-avg \"avg\" stencil "
+                        "would not. Got barotropic_coriolis="
+                        f'{getattr(config.barotropic, "barotropic_coriolis", "avg")!r}.')
             if getattr(config, "momentum_advection",
                        "vector_invariant") != "vector_invariant":
                 raise ValueError(
-                    'vorticity_scheme="ene_total" carries the planetary '
+                    f'vorticity_scheme="{_vs}" carries the planetary '
                     "Coriolis inside the VECTOR-INVARIANT vorticity flux; the "
                     "flux-form/WENO momentum branches never receive f_vtx, so "
                     "combining them would silently DROP f x u entirely "
@@ -1615,6 +1866,16 @@ class LatLonCGridOceanModel:
                     "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
                     "single-time pre-step subtraction, leaving a transient "
                     "residual planetary Coriolis in the forcing.")
+            if getattr(config.barotropic, "barotropic_time_filter",
+                       "cosine") == "nemo_ab3am4":
+                raise ValueError(
+                    'barotropic_coriolis_split="live" is incompatible with '
+                    'barotropic_time_filter="nemo_ab3am4": the AB3 substep '
+                    "applies the live Coriolis to the EXTRAPOLATED mid-step "
+                    "velocity U_mid while the pre-step subtraction uses the "
+                    "plain pre-step U_bar, so substep-0 would not cancel "
+                    "bit-exactly. Use the boxcar filter (nn_bt_flt=2, NEMO's "
+                    "DINO selection) with the live split.")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
@@ -1721,17 +1982,19 @@ class LatLonCGridOceanModel:
             # RK3 PGF stages — it keeps PGF and Coriolis COUPLED inside the stages,
             # holding geostrophic balance (the fix for the O(dt^2) split-growth of
             # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
-            if config.outer_integrator != "ab2" and getattr(
+            if config.outer_integrator not in ("ab2", "leapfrog") and getattr(
                     config, "momentum_time_integrator",
                     "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator="ab2" OR momentum_time_integrator in '
-                    '("rk3", "rk3_ws"): '
+                    'outer_integrator in ("ab2","leapfrog") OR '
+                    'momentum_time_integrator in ("rk3", "rk3_ws"): '
                     "an explicit forward-Euler Coriolis at weight 1.0 is "
                     "unconditionally UNSTABLE for pure rotation "
-                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps) or SSP-RK3 have a stable "
-                    "rotation region. Got outer_integrator="
+                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps), leapfrog (neutral, "
+                    "|G|=1 for f·dt<1, computational mode damped by the "
+                    "Robert-Asselin filter) or SSP-RK3 have a stable rotation "
+                    "region. Got outer_integrator="
                     f"{config.outer_integrator!r}, momentum_time_integrator="
                     f"{getattr(config, 'momentum_time_integrator', 'euler')!r}.")
             if config.barotropic.barotropic_solver not in (
@@ -1999,7 +2262,8 @@ class LatLonCGridOceanModel:
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
                    sponge=None, dt=300.0, momentum_only=False,
                    precomputed_geom_density=None, *, grid=None,
-                   vertex_mask=None, skip_lateral_viscosity=False):
+                   vertex_mask=None, skip_lateral_viscosity=False,
+                   ab2_scope_override: str | None = None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -2021,8 +2285,15 @@ class LatLonCGridOceanModel:
         """
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
+        # ``ab2_scope_override`` (leap-frog Nbb-diffusion pass): the du_dt/du_diss
+        # split is keyed off ``config.ab2_scope`` inside the tendency kernel. To
+        # run the split WITHOUT mutating the model's config, overlay just that one
+        # field on a copy (a NamedTuple ``_replace`` — every other field
+        # identical). ``None`` ⇒ pass the model config unchanged ⇒ bit-identical.
+        _cfg = (self.config._replace(ab2_scope=ab2_scope_override)
+                if ab2_scope_override is not None else self.config)
         return latlon_cgrid_ocean_baroclinic_tendencies(
-            state, _grid, self.z_coord, self.config,
+            state, _grid, self.z_coord, _cfg,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
             sponge=sponge,
@@ -2079,8 +2350,30 @@ class LatLonCGridOceanModel:
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
                    sponge=None, *, _apply_implicit_vmix: bool = True,
-                   grid=None, vertex_mask=None, t_seconds=None):
+                   grid=None, vertex_mask=None, t_seconds=None,
+                   _ab2_scope_override: str | None = None,
+                   _barotropic_substep_scale: int = 1,
+                   _barotropic_before_state=None,
+                   _fct_tracer_before=None):
         """Core step logic — no JIT wrapper.
+
+        ``_fct_tracer_before`` (private, MLF): ``(T_before, S_before)`` — the
+        BEFORE-level (Nbb) tracers the leap-frog step passes so the FCT/Zalesak
+        monotonicity base (low-order upwind flux, ``q_td``, ``q_min``/``q_max``
+        bounds) is taken from Kbb, matching where the leap-frog APPLIES the
+        limited advective increment (``T(Naa) = T(Nbb) + 2dt·RHS``).  The base
+        is carried through the SAME pre-advection physics increment as the NOW
+        tracer (``base = T_before + (T_mid − T_now)``), so the guaranteed-monotone
+        after-state is the actual leap-frog after-state.  ``None`` (FE/AB2) ⇒
+        base == NOW ⇒ byte-identical FCT (see ``fct_tracer_advection``).
+
+        ``_barotropic_before_state`` (private, MLF): ``(eta_before, u_before,
+        v_before)`` — the BEFORE-level (Nbb) ssh + 3-D velocity the leap-frog
+        step (``_leapfrog_step``) passes so the split-explicit barotropic
+        INTEGRATION is seeded from n-1 (NEMO ``ln_bt_fw=.FALSE.`` centred
+        barotropic, ``dynspg_ts.F90:494-503``), while the frozen slow forcing
+        stays at NOW.  Only the ``explicit_substep`` standard path consumes it;
+        ``None`` (every other caller) seeds from the NOW state ⇒ bit-identical.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
         ``lax.scan`` block functions) to avoid nested JIT boundaries
@@ -2109,6 +2402,20 @@ class LatLonCGridOceanModel:
         conservation call this method makes that itself reads ``self.grid``.
         """
         state = cast_pytree(state, None, "compute")
+        # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
+        # drives this method in "advective" scope to WITHHOLD the dissipative
+        # tendencies from ``state_expl`` (so they land on the returned
+        # ``diss_incr``) even though ``config.ab2_scope`` stays "total". NEMO
+        # evaluates the explicit lateral diffusion / GM-Redi on the BEFORE level
+        # (``dyn_ldf(Kbb)``/``tra_ldf(Kbb)``, forward-in-time), so the leap-frog
+        # extracts ``diss_incr`` from a SEPARATE Nbb pass and combines it with the
+        # advective Nnn increment. ``None`` (every other caller) ⇒ read the config
+        # value ⇒ bit-identical. The override is threaded to ``self.tendencies``
+        # (which performs the du_dt/du_diss split) AND the two ``_ab2_advective``
+        # gates below.
+        _scope = (_ab2_scope_override
+                  if _ab2_scope_override is not None
+                  else getattr(self.config, "ab2_scope", "total"))
         # SPMD resolve: default None → the model's own grid / vertex mask
         # (bit-identical single-device path).
         _grid = grid if grid is not None else self.grid
@@ -2145,7 +2452,8 @@ class LatLonCGridOceanModel:
             state, _grid, self.z_coord, self.config)
         tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
-                               grid=_grid, vertex_mask=_vmask)
+                               grid=_grid, vertex_mask=_vmask,
+                               ab2_scope_override=_ab2_scope_override)
 
         # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
         # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
@@ -2158,8 +2466,7 @@ class LatLonCGridOceanModel:
         # forward-Euler step() path applies it inline so a non-AB2 outer
         # integrator stays faithful too. ``None`` carry under "total" ⇒
         # bit-identical (the diss fields are None ⇒ this whole block is skipped).
-        _ab2_advective = (getattr(self.config, "ab2_scope", "total")
-                          == "advective")
+        _ab2_advective = (_scope == "advective")
         _diss_dT_incr = None
         _diss_dS_incr = None
         _diss_du_incr = None
@@ -2528,7 +2835,17 @@ class LatLonCGridOceanModel:
                 F_slow_v=F_slow_v,
             )
         else:
-            dt_s = dt_mom / self.config.barotropic.n_barotropic_substeps
+            # ``_barotropic_substep_scale`` (leap-frog): the config's
+            # ``n_barotropic_substeps`` is calibrated for a dt-length baroclinic
+            # window (the forward-Euler path); the leap-frog integrates the
+            # barotropic mode over rDt=2dt, so WITHOUT rescaling the substep length
+            # DOUBLES (30 substeps over 2dt = 180 s vs the CFL-safe 90 s) and the
+            # split-explicit free surface goes unstable in ~4 steps. Scaling the
+            # count by rDt/dt keeps the substep length (and the barotropic CFL)
+            # identical to the FE path. Default 1 ⇒ every other caller unchanged.
+            _nbaro = (self.config.barotropic.n_barotropic_substeps
+                      * _barotropic_substep_scale)
+            dt_s = dt_mom / _nbaro
             # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
             # reaches the barotropic mode via F_slow (its depth-mean came through
             # du_dt), so the substep must NOT add its own f×U_bt — this is the
@@ -2547,33 +2864,69 @@ class LatLonCGridOceanModel:
                 # integrate a LIVE f x U every substep so the barotropic mode
                 # holds geostrophic balance with the evolving eta inside the
                 # window (the frozen form lags Coriolis by dt and cripples the
-                # gyre's U_bar response to grad-eta). SAME face stencils as the
-                # substep loop (4-pt V-to-u; interp_u_to_vface_4pt), so the
-                # subtraction cancels the live term exactly at the pre-step
-                # state (EXACT on a beta-plane with flat full-cell bathymetry,
-                # where the 4-pt average and the depth-mean commute; else an
-                # O(dx^2)/topographic residual remains). Signs mirror the 3D
-                # coriolis_cgrid (+f*v_at_u on u; -f*u_at_v on v).
-                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                    interp_u_to_vface_4pt,
-                )
-                from legoesm.ocean.dynamics.barotropic_common import (
-                    coriolis_at_faces,
-                )
-                _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
-                _u_pre3, _v_pre3 = state.u.data, state.v.data
-                _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
-                          / jnp.maximum(H_u_pre, 1e-10))
-                _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
-                          / jnp.maximum(H_v_pre, 1e-10))
-                _V_w = jnp.roll(_V_pre, 1, axis=1)
-                _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
-                                  + _V_w[:-1] + _V_w[1:])
-                _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
-                _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
-                F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
-                F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
-                _add_bt_cor = True
+                # gyre's U_bar response to grad-eta). The subtraction uses the
+                # SAME stencil the substep loop applies live so it cancels at the
+                # pre-step state: EEN (barotropic_coriolis="een", the DINO/NEMO
+                # ln_dynvor_een form) or the legacy 4-pt V-to-u average
+                # (interp_u_to_vface_4pt). The 4-pt cancellation is EXACT on a
+                # beta-plane with flat full-cell bathymetry (average and
+                # depth-mean commute), else an O(dx^2)/topographic residual
+                # remains; the EEN path cancels exactly (same helper both sides).
+                _bt_cor_split = getattr(
+                    self.config.barotropic, "barotropic_coriolis", "avg")
+                if _bt_cor_split in ("een", "een_metric"):
+                    # NEMO ln_dynvor_een DINO (nemo_dino_kamm_mlf): the _total
+                    # planetary term rides the vertex-f EEN transport-form flux,
+                    # so the pre-step subtraction must use the SAME EEN stencil
+                    # the substep loop applies live (dyn_cor_2D). Built from the
+                    # Nnn thickness (h_k_pre, = state_mid.eta since the barotropic
+                    # solve has not yet updated eta) and the POST-slow-tendency
+                    # barotropic velocity (state_mid.u/v = NOW/Kmm) — matching
+                    # NEMO, which subtracts the Kmm barotropic Coriolis from zu_frc
+                    # (dynspg_ts.F90:359) and re-applies dyn_cor_2D LIVE (:689) on
+                    # the evolving transport.  NB under the leap-frog (residual #1)
+                    # the substep loop is SEEDED from the BEFORE level (Nbb), so at
+                    # substep 0 the live term acts on the Nbb transport while this
+                    # subtraction removed the Nnn/Kmm Coriolis — they do NOT cancel
+                    # bit-exactly; the O(f·(U_Nnn−U_Nbb)) residual IS the leap-frog
+                    # evolution (this is NEMO's design: subtract at Kmm, seed at
+                    # Kbb), not a double-count.  Under forward_euler the seed IS Nnn
+                    # so it cancels exactly.  cor_v already carries the -f*U sign, so
+                    # both are SUBTRACTED (unlike the 4-pt branch's explicit +f*U).
+                    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                        barotropic_coriolis_een_pre_step,
+                    )
+                    _min_wc = jnp.asarray(
+                        self.config.min_water_column_m, dtype=F_slow_u.dtype)
+                    _cor_u_sub, _cor_v_sub = barotropic_coriolis_een_pre_step(
+                        state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
+                        state.land_mask.data, state.u_mask.data,
+                        state.v_mask.data, _min_wc, F_slow_u.dtype,
+                        metric_complete=(_bt_cor_split == "een_metric"))
+                    F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
+                    F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
+                    _add_bt_cor = True
+                else:
+                    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                        interp_u_to_vface_4pt,
+                    )
+                    from legoesm.ocean.dynamics.barotropic_common import (
+                        coriolis_at_faces,
+                    )
+                    _f_u2, _f_v2 = coriolis_at_faces(_grid, F_slow_u.dtype)
+                    _u_pre3, _v_pre3 = state.u.data, state.v.data
+                    _U_pre = (jnp.sum(_u_pre3 * h_u_pre, axis=-1)
+                              / jnp.maximum(H_u_pre, 1e-10))
+                    _V_pre = (jnp.sum(_v_pre3 * h_v_pre, axis=-1)
+                              / jnp.maximum(H_v_pre, 1e-10))
+                    _V_w = jnp.roll(_V_pre, 1, axis=1)
+                    _V_at_u = 0.25 * (_V_pre[:-1] + _V_pre[1:]
+                                      + _V_w[:-1] + _V_w[1:])
+                    _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
+                    _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
+                    F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
+                    F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                    _add_bt_cor = True
             if self.config.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per
                 # chunk of substeps instead of ~4 pads/substep (scaling-
@@ -2583,17 +2936,42 @@ class LatLonCGridOceanModel:
                 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                     barotropic_substeps_wide_halo_latlon_cgrid,
                 )
+                if _barotropic_before_state is not None:
+                    raise NotImplementedError(
+                        "the MLF before-level barotropic seed is not wired into "
+                        "the wide-halo barotropic path (the before eta/u/v would "
+                        "need the extended-band widening); use the standard "
+                        "split-explicit path (barotropic_wide_halo=False) with "
+                        "outer_integrator='leapfrog'.")
                 _baro_fn = barotropic_substeps_wide_halo_latlon_cgrid
+                _baro_seed = {}
             else:
                 _baro_fn = barotropic_substeps_latlon_cgrid
+                # MLF leap-frog: seed the barotropic integration from the
+                # BEFORE level (Nbb) so the fast mode leap-frogs n-1 → n+1
+                # (NEMO dynspg_ts.F90:494-503). Default (None) seeds from NOW.
+                if _barotropic_before_state is not None:
+                    _eta_bef, _u_bef, _v_bef = _barotropic_before_state
+                    _baro_seed = dict(
+                        eta_init=_eta_bef, u_init=_u_bef, v_init=_v_bef)
+                else:
+                    _baro_seed = {}
+            # The MLF scale rescales the substep COUNT but must NOT widen the
+            # NEMO boxcar averaging window: the half-width stays the unscaled
+            # nn_e (= _nbaro / scale).  Only the standard path builds the boxcar
+            # weights; the wide-halo twin refuses the EEN/boxcar MLF config.
+            if _baro_fn is barotropic_substeps_latlon_cgrid:
+                _baro_seed = dict(
+                    _baro_seed, substep_scale=_barotropic_substep_scale)
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
-                state_mid, dt_s, self.config.barotropic.n_barotropic_substeps,
+                state_mid, dt_s, _nbaro,
                 _grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
                 t_seconds=t_seconds,  # traced model time for the equilibrium tide
+                **_baro_seed,
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after
@@ -2828,6 +3206,15 @@ class LatLonCGridOceanModel:
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
 
+        # Advecting mass fluxes for the TRACER scheme.  Default = the base
+        # (momentum/continuity) mass flux; when GM runs with
+        # gm_bolus_advection="through_fct" the eddy-induced (bolus) transport is
+        # added to THESE (only) below, so the bolus passes through the monotone
+        # FCT limiter (NEMO traadv) without touching the momentum/continuity/eta
+        # mass fluxes (which keep using mass_flux_u/v and w_baro).
+        mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
+            mass_flux_u, mass_flux_v, w_baro)
+
         # 7b. Adaptive-implicit vertical momentum advection
         #     (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  The explicit
         #     in-tendency vertical momentum advection has no vertical-CFL
@@ -3049,7 +3436,15 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0,
                     g=self.config.constants.g,
                 )
-            dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
+            # GM bolus THROUGH the FCT limiter (NEMO traadv): when the config
+            # selects it (nemo_iso_lap + gm_bolus_advection="through_fct"), the
+            # bolus transport is exported and added to the tracer advecting mass
+            # flux instead of being applied as an in-operator centred flux.
+            _want_bolus = (
+                getattr(gm_cfg, "gm_bolus_advection", "centred") == "through_fct"
+                and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
+            )
+            _gm_out = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 _grid, self.z_coord, gm_cfg,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
@@ -3060,7 +3455,21 @@ class LatLonCGridOceanModel:
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
                 density_jacobian=_gm_dens_jac,
+                return_bolus_transport=_want_bolus,
+                dt=dt,
             )
+            if _want_bolus:
+                dT_gm, dS_gm, _bolus = _gm_out
+                if _bolus is not None:
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
+                        _add_bolus_to_advecting_flux(
+                            _bolus, mass_flux_u, mass_flux_v,
+                            u_mask_3d_tracer, v_mask_3d_tracer, _grid,
+                            self.z_coord,
+                        )
+                    )
+            else:
+                dT_gm, dS_gm = _gm_out
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
                 # dropped from the explicit F_z above (implicit_K33=True); recompute
@@ -3075,6 +3484,13 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
                     density_jacobian=_gm_dens_jac,
+                    # #1226: the SAME wall masks the tendency dispatcher uses,
+                    # so the nemo_native K33 slopes/masks are bit-identical to
+                    # the explicit operator's (staircase-aware; the K33-side
+                    # 2-D rebuild was flat-bottom-only).
+                    u_mask=state.u_mask.data,
+                    v_mask=state.v_mask.data,
+                    dt=dt,
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
@@ -3128,11 +3544,11 @@ class LatLonCGridOceanModel:
                 )
 
             T_corrected, T_mom_new = som_advect_tracers(
-                T_mid, T_mom, mass_flux_u, mass_flux_v, w_baro,
+                T_mid, T_mom, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                 h_k_old, h_k_new, _grid, dt, mask,
             )
             S_corrected, S_mom_new = som_advect_tracers(
-                S_mid, S_mom, mass_flux_u, mass_flux_v, w_baro,
+                S_mid, S_mom, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                 h_k_old, h_k_new, _grid, dt, mask,
             )
 
@@ -3192,10 +3608,22 @@ class LatLonCGridOceanModel:
             # NEMO key_linssh: top-cell concentration/dilution flux (static
             # coordinate flag; see _compute_advection_flux_div).
             _linssh = getattr(self.z_coord, "linear_free_surface", False)
+            # Leap-frog FCT monotonicity base (Kbb).  The FCT-limited advective
+            # increment is applied to the BEFORE level; carry the before tracer
+            # through the SAME pre-advection physics increment as ``T_mid`` so
+            # the FCT bounds/low-order match the actual after-state base:
+            #   base = T_before + (T_mid − T_now).
+            # ``None`` (FE/AB2) ⇒ byte-identical.  RK3-under-leapfrog is not a
+            # configured path, so it keeps the NOW base (unchanged).
+            if _fct_tracer_before is not None:
+                _T_adv_before = _fct_tracer_before[0] + (T_mid - state.T.data)
+                _S_adv_before = _fct_tracer_before[1] + (S_mid - state.S.data)
+            else:
+                _T_adv_before = _S_adv_before = None
             if _tti == "rk3":
                 T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
                     T_mid, S_mid, _adv,
-                    mass_flux_u, mass_flux_v, w_baro,
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
@@ -3204,10 +3632,11 @@ class LatLonCGridOceanModel:
             else:
                 _pair_divs = _compute_advection_flux_div_pair(
                     T_mid, S_mid, _adv,
-                    mass_flux_u, mass_flux_v, w_baro,
+                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
                     recon_fill_mask=_wall_fill_mask,
                     linssh_top_flux=_linssh,
+                    tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
                 )
 
             for tr_name in ['T', 'S']:
@@ -3341,6 +3770,16 @@ class LatLonCGridOceanModel:
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
             _S_dtype = state_new.S.data.dtype
+            # Salinity entering the virtual-salt closure: the fixed scalar
+            # S_ref (legacy, bit-identical) or the LOCAL top-cell salinity —
+            # NEMO's tra_sbc convention (sfx = emp * sss).  Static config
+            # gate; unknown values raise at model construction.  The local
+            # field is the post-advection (Now) salinity, column-constant
+            # for the runoff-spread channel.
+            if getattr(self.config, "freshwater_salinity", "s_ref") == "local":
+                _S_fw = state_new.S.data[..., 0].astype(_S_dtype)
+            else:
+                _S_fw = self.config.S_ref
             from legoesm.ocean.freshwater import resolve_runoff_spread_arg
             _spread_arg = resolve_runoff_spread_arg(self.config)
             if _spread_arg is not None:
@@ -3357,7 +3796,7 @@ class LatLonCGridOceanModel:
                     runoff_spread_virtual_salt_tendency_3d,
                 )
                 dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
-                    freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
+                    freshwater, _S_fw, h_k_new, self.config.rho_0,
                     mask,
                     runoff_spread_m=_spread_arg,
                     area=_grid.area,
@@ -3372,7 +3811,7 @@ class LatLonCGridOceanModel:
                 # does not drift mean salinity.  Shared with the MPAS path.
                 from legoesm.ocean.freshwater import normalized_virtual_salt_flux
                 dS_fw = normalized_virtual_salt_flux(
-                    freshwater, self.config.S_ref, dz_0, self.config.rho_0,
+                    freshwater, _S_fw, dz_0, self.config.rho_0,
                     _grid.area, mask,
                 )
                 S_fw = state_new.S.data.at[..., 0].add(
@@ -3380,7 +3819,7 @@ class LatLonCGridOceanModel:
                 )
             else:
                 dS_fw = virtual_salt_flux(
-                    freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
+                    freshwater, S_ref=_S_fw, dz_0=dz_0, rho_0=self.config.rho_0,
                 )
                 # Cast the freshwater contribution to S's dtype so the
                 # scatter add does not silently widen on x64 mode (the
@@ -4056,6 +4495,7 @@ class LatLonCGridOceanModel:
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=lm, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                dt=dt,
             )
             if (_scale_w is not None and eke_cfg.source_p_diss_iso
                     and kappa_redi_w is None):
@@ -4872,10 +5312,10 @@ class LatLonCGridOceanModel:
         single-device path) and are threaded into ``_ab2_step`` /
         ``_step_impl`` / ``_apply_polar_filter``."""
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
-        if _oi not in ("forward_euler", "ab2"):
+        if _oi not in ("forward_euler", "ab2", "leapfrog"):
             raise ValueError(
-                "config.outer_integrator must be 'forward_euler' or 'ab2', "
-                f"got {_oi!r}")
+                "config.outer_integrator must be 'forward_euler', 'ab2', or "
+                f"'leapfrog', got {_oi!r}")
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
@@ -4905,6 +5345,11 @@ class LatLonCGridOceanModel:
             # solve_stream.py), so it is unconditionally stable in the vertical
             # and compatible with convective adjustment — no convection guard.
             new_state = self._ab2_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
+        elif _oi == "leapfrog":
+            new_state = self._leapfrog_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
@@ -5549,6 +5994,391 @@ class LatLonCGridOceanModel:
                               dims=state.v.dims, units=state.v.units),
         )
 
+    def _leapfrog_step(self, state: LatLonCGridOceanState, dt: float,
+                       freshwater=None, surface_forcing=None, sponge=None,
+                       *, grid=None, vertex_mask=None,
+                       t_seconds=None) -> LatLonCGridOceanState:
+        """NEMO Modified-Leap-Frog step (``stp_MLF``, ``stpmlf.F90``, key_qco DINO).
+
+        Three time levels — before ``Nbb`` (t-dt, carried on the state's
+        ``{u,v,T,S,eta}_before`` fields), now ``Nnn`` (t, = ``state``), after
+        ``Naa`` (t+dt).  One step is (transcribed file:line from NEMO 5.0.2):
+
+          * Explicit RHS evaluated at ``Nnn`` (advection ``dyn_adv``, vorticity+
+            Coriolis ``dyn_vor`` EEN ``(f+zeta)/e3f`` — here via
+            ``vorticity_scheme="een_total"`` so Coriolis is IN the RHS, NOT a
+            Matsuno rotation — lateral mixing ``dyn_ldf``, HPG ``dyn_hpg``,
+            surface-pressure-gradient ``dyn_spg``; stpmlf.F90:248-256).
+          * Explicit leap-frog combine over ``rDt = 2dt``:
+            ``X(Naa) = X(Nbb) + 2dt·RHS(Nnn)`` (NEMO ``rDt=2·rn_Dt``, stpmlf.F90:468).
+          * Implicit vertical friction+diffusion (``dyn_zdf``/``tra_zdf``) as a
+            backward-Euler solve over ``rDt=2dt`` on the after-state
+            (stpmlf.F90:267,370).
+          * Robert-Asselin time filter on the NOW fields (the PLAIN RA filter, NOT
+            Robert-Asselin-Williams — DINO uses ``rn_atfp`` only; dynatf_qco.F90:144,
+            traatf_qco.F90:209, sshwzv ``ssh_atf``):
+            ``X(Nnn)_f = X(Nnn) + gamma·(X(Nbb) - 2·X(Nnn) + X(Naa))`` with
+            ``gamma = config.asselin_gamma = rn_atfp = 0.1``.
+          * Swap ``Nbb <- X(Nnn)_f``, ``Nnn <- X(Naa)`` (stpmlf.F90:403-406) —
+            realised by returning ``Naa`` with the filtered now-fields stored on
+            the ``_before`` fields.
+          * FIRST step (``Nbb is None``): a forward-Euler start over ``dt`` with NO
+            filter (NEMO ``l_1st_euler``, ``rDt=rn_Dt``; the filter is guarded by
+            ``IF(.NOT. l_1st_euler)``); the pre-step now-state becomes ``Nbb`` for
+            step 2.
+
+        REUSE / STRUCTURE.  This models ``_ab2_step``: it drives ``_step_impl`` at
+        ``_apply_implicit_vmix=False`` to obtain the explicit-only increment over
+        ``rDt=2dt`` (evaluated at ``Nnn``) plus the diffusivity profiles, forms the
+        leap-frog combine ``Naa = Nbb + (X_expl - Nnn)`` at the top level (an affine
+        base-shift from the forward-Euler base ``Nnn`` to the leap-frog base
+        ``Nbb``; ``eta`` then leap-frogs, ``eta(Naa)=eta(Nbb)-2dt·div(Hu_avg)``),
+        applies implicit vertical mixing ONCE over ``rDt=2dt``, then the RA filter.
+
+        FAITHFULNESS RESIDUALS (documented, O(dη) per step; NOT hidden):
+          1. **CLOSED (residual #1, THE dt=2700 blocker).** The split-explicit
+             barotropic INTEGRATION is now seeded from the BEFORE level (Nbb ssh
+             + Nbb depth-mean transport) via
+             ``_barotropic_before_state=(eta_before, u_before, v_before)`` on the
+             advective ``_step_impl`` call, so the fast free-surface mode
+             leap-frogs n-1 → n+1 exactly as NEMO ``dyn_spg_ts`` under
+             ``ln_bt_fw=.FALSE.`` (dynspg_ts.F90:494-503:
+             ``sshn_e=pssh(Kbb)/un_e=puu_b(Kbb)/vn_e=pvv_b(Kbb)``); the frozen
+             slow forcing stays at NOW (NEMO ``zu_frc``), and the 3-D depth-mean
+             replacement keeps the NOW velocity.  Ties the barotropic mode into
+             the SAME leap-frog as the baroclinic deviation so the outer RA
+             filter (step 5) damps the barotropic 2Δt computational mode.  This
+             ALONE moved the dt=2700 blow-up from ~step 26 to ~step 65; the
+             remaining 2Δx equatorial checkerboard is damped by NEMO's
+             ``nn_bt_flt=2`` ``ts_bck_interp`` temporal dissipation
+             (``barotropic_time_filter="nemo_boxcar_ab3"``, set on
+             ``nemo_dino_kamm_mlf``): the AB3 velocity predictor + the α=0 ssh
+             half-step-back interpolation (0.614/0.285/0.088/0.013) — the
+             built-in AM4 dissipation the FE numerical damping was previously
+             supplying.  With both, the full 180-day dt=2700 run on the bridged
+             NEMO mesh is STABLE (eta bounded, no NaN, gridscale eta fraction
+             pinned ~0.05).
+          2. **CLOSED.** The tracer RA filter is now the z* THICKNESS-WEIGHTED
+             content form (NEMO ``tra_atf_qco_lf``, traatf_qco.F90:295-341):
+             filter ``(e3t·T)``/``(e3t·S)`` using the layer thickness at the
+             before/now/after ssh, then divide by the thickness from the
+             Asselin-filtered ssh (``_thickness_weighted_asselin``).  Conserves
+             globally-integrated heat/salt content under the moving z*
+             coordinate (the old concentration form drifted by O(dη)).  Momentum
+             (ln_dynadv_vec) + ssh stay the plain RA form, matching NEMO.
+          3. **CLOSED (this iteration).** The barotropic Coriolis is now the LIVE
+             per-substep enstrophy-conserving EEN form (NEMO ``dyn_cor_2D``):
+             ``barotropic_coriolis_split="live"`` + ``barotropic_coriolis="een"``
+             (set on ``nemo_dino_kamm_mlf``) removes the pre-step 2D barotropic
+             Coriolis from ``F_slow`` (dynspg_ts.F90:296-300) and re-applies the
+             SAME EEN stencil live each substep on the evolving transport (:689).
+             The een-total guard is relaxed for this specific EEN-stencil pairing
+             (the subtraction cancels the live term). NOTE: this did NOT unblock
+             dt=2700 — see the BLOCKER note; the null mode was not the dt=2700
+             driver.
+          4. **CLOSED (this iteration).** NEMO evaluates the EXPLICIT LATERAL
+             DIFFUSION on the BEFORE level Nbb — ``dyn_ldf(Kbb)`` (dynldf.F90:69
+             ``dyn_ldf_lap(...,puu(:,:,:,Kbb),...)``) and ``tra_ldf(Kbb)``
+             (traldf.F90:97-98 / traldf_iso ``pts(...,Kbb)``), i.e.
+             FORWARD-in-time — precisely because a CENTERED (leap-frog) diffusion
+             term is UNCONDITIONALLY UNSTABLE. This step now drives ``_step_impl``
+             in "advective" scope (``_ab2_scope_override="advective"``) on BOTH the
+             Nnn pass (advection/Coriolis-een_total/HPG, diss WITHHELD) and a
+             SECOND Nbb pass whose dissipative increment (lateral viscosity +
+             iso-neutral Redi + GM/eiv) alone is kept and applied forward at 2dt:
+             ``Naa = Nbb + 2dt·adv(Nnn) + 2dt·diss(Nbb)``.  The GM/Redi
+             destabiliser is thus at Nbb; the leap-frog-centred diffusion
+             instability is removed.  MOMENTUM diss is added as its baroclinic
+             deviation only (F_slow under advective scope carries no diss
+             depth-mean; the barotropic lateral friction is handled by the mode's
+             solve + the A2 biharmonic — the ``_ab2_step`` routing).
+          5. **BAROTROPIC SUBSTEP CFL (fixed this iteration).** The barotropic
+             mode integrates over rDt=2dt; the config ``n_barotropic_substeps`` is
+             calibrated for the dt-window forward-Euler path, so without rescaling
+             the substep length DOUBLES (180 s vs 90 s at dt=2700) and the
+             split-explicit free surface blows up in ~4 steps. The two ``_step_impl``
+             passes here pass ``_barotropic_substep_scale=2`` so the substep length
+             (and barotropic CFL) match the FE path exactly.
+        DT=2700 BLOCKER — RESOLVED (residual #1 + #1b). The dt=2700 leap-frog now
+        runs the FULL 180 days on the bridged NEMO DINO mesh with NO NaN, physical
+        T, eta bounded (~0.6 m), gridscale eta fraction pinned ~0.05 — via TWO
+        faithful pieces, no non-NEMO stabiliser:
+          (#1) the split-explicit barotropic INTEGRATION seeded from the BEFORE
+               level (Nbb) — see residual #1 above (dynspg_ts.F90:494-503). Alone
+               this moved the blow-up from ~step 26 to ~step 65 (the equatorial
+               2Δx eta checkerboard, previously suppressed by FORWARD-Euler
+               numerical damping, then grows under the neutral leap-frog).
+          (#1b) NEMO's nn_bt_flt=2 ts_bck_interp TEMPORAL DISSIPATION
+               (``barotropic_time_filter="nemo_boxcar_ab3"``): the AB3 velocity
+               predictor + the α=0 ssh half-step-back interpolation
+               (0.614/0.285/0.088/0.013, dynspg_ts.F90:1698-1701) — the built-in
+               AM4 dissipation that damps the 2Δx barotropic gravity-wave mode the
+               leap-frog does not. With it the gridscale eta fraction stays ~0.05
+               (was climbing to >0.2 then exploding).
+        The 180-day dt=2700 comparison vs NEMO RUN_TRAJ is UNBLOCKED and DONE
+        (controlled, sole variable FE→leap-frog): BSF range ratio 2.65× (leap-frog)
+        vs 2.62× (FE) vs 1.0 (NEMO), SST/T300/SSH corr ≥0.99 both — the leap-frog
+        time integrator (node 19, the last structural difference) is NOT the driver
+        of the residual BSF over-strength (the characterised equatorial f→0
+        core-dynamics amplification). Residual #2 (tracer RA filter) is now
+        CLOSED (thickness-weighted content form, see residual #2 above).
+        """
+        from legoesm.ocean.state import Field
+        _grid = grid if grid is not None else self.grid
+
+        # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
+        #     Populate Nbb with the pre-step now-fields for the next step.
+        if state.u_before is None:
+            naa = self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
+                vertex_mask=vertex_mask, t_seconds=t_seconds)
+            return naa._replace(
+                u_before=state.u, v_before=state.v, T_before=state.T,
+                S_before=state.S, eta_before=state.eta,
+            )
+
+        # --- LEAP-FROG + Asselin.
+        rdt = 2.0 * dt
+        gamma = self.config.asselin_gamma
+        u_mask3 = state.u_mask.data[..., jnp.newaxis]
+        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+        cmask = state.land_mask.data
+        mask3 = cmask[..., jnp.newaxis]
+        # Partial-cell coords: fold the per-level FACE/CELL activity into the
+        # masks (identical to _ab2_step).  _step_impl reconstructs u at EVERY
+        # level as u'·u_mask_2d + U_bar, so a face wet at the surface but CLOSED
+        # at depth carries the barotropic mean U_bar (not the old value) in
+        # ``state_expl``; the leap-frog combine below would then inject a
+        # spurious closed-cell tendency (the recurrence u^{n+1}=u^{n-1}-u^n,
+        # |r|=1.618/step — the same deep-cell blow-up the AB2 3-D mask cures).
+        # Masking the combine AND the Asselin filter pins closed cells at 0.
+        # Pure z-star: masks unchanged ⇒ bit-identical.
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _au3, _av3 = compute_face_masks_3d(self.z_coord.is_active, _grid)
+            u_mask3 = u_mask3 * _au3.astype(u_mask3.dtype)
+            v_mask3 = v_mask3 * _av3.astype(v_mask3.dtype)
+            mask3 = mask3 * self.z_coord.is_active.astype(mask3.dtype)
+
+        # 1. ADVECTIVE Nnn pass over rDt=2dt (skip implicit vmix + fixer).  Run in
+        #    "advective" scope so the DISSIPATIVE tendencies (lateral viscosity,
+        #    iso-neutral Redi, GM/eiv) are WITHHELD from ``state_expl`` and land on
+        #    the returned diss_incr — NEMO evaluates the explicit lateral diffusion
+        #    forward-in-time on the BEFORE level (dyn_ldf/tra_ldf(Kbb),
+        #    dynldf.F90:69 / traldf.F90:97-98), NOT leap-frog-centred (a centred
+        #    diffusion is unconditionally unstable — residual #4).  This pass's own
+        #    diss_incr (the Nnn evaluation) is DISCARDED; we keep only the advective
+        #    increment, the barotropic/eta solve, and the Nnn diffusivity profiles
+        #    (K_v/A_v/K33 for the single implicit vertical solve — NEMO avm/avt are
+        #    the "now" vertical mixing, correctly at Nnn).
+        # The barotropic mode integrates over rDt=2dt, so its substep count is
+        # scaled ×(rDt/dt)=2 to hold the substep length (barotropic CFL) at the
+        # FE-path value — see ``_barotropic_substep_scale`` in ``_step_impl``.
+        _baro_scale = 2
+        # Seed the split-explicit barotropic INTEGRATION from the BEFORE level
+        # (Nbb ssh + transport) so the fast free-surface mode leap-frogs
+        # n-1 → n+1 (NEMO ln_bt_fw=.FALSE. centred barotropic, dynspg_ts.F90:
+        # 494-503 sshn_e=pssh(Kbb)/un_e=puu_b(Kbb)/vn_e=pvv_b(Kbb)); the frozen
+        # slow forcing stays at NOW (NEMO zu_frc). This ties the barotropic mode
+        # into the SAME leap-frog as the baroclinic deviation, so the outer
+        # Robert-Asselin filter (step 5) damps the barotropic 2Δt computational
+        # mode — the FE base-shift-from-Nnn.eta was the dt=2700 CFL blocker
+        # (residual #1). Only the advective (Nnn) pass drives the live barotropic
+        # solve; the Nbb diss pass discards its barotropic result.
+        state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
+                     tke_source, _diss_incr_nn, tracer_source) = self._step_impl(
+            state, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
+            sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
+            vertex_mask=vertex_mask, t_seconds=t_seconds,
+            _ab2_scope_override="advective",
+            _barotropic_substep_scale=_baro_scale,
+            _barotropic_before_state=(
+                state.eta_before.data, state.u_before.data,
+                state.v_before.data),
+            # FCT/Zalesak monotonicity base = BEFORE level (Kbb): the limited
+            # advective increment is applied to Nbb below (T_naa = T_before +
+            # (state_expl.T − state.T)), so the FCT bounds must be Kbb-based
+            # (NEMO nonosc(Kbb), p2dt=2dt) — else the FE-certified (Nnn,dt)
+            # bounds admit cold undershoot at high-lat wall fronts under 2dt.
+            _fct_tracer_before=(
+                state.T_before.data, state.S_before.data))
+        # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
+        #     trend on the BEFORE state and keep ONLY its dissipative increment
+        #     (2dt·diss(Nbb), applied forward-in-time). The GM/Redi destabiliser is
+        #     therefore evaluated at Nbb (residual #4). Reusing the full
+        #     ``_step_impl`` (rather than a bespoke diff-only path) keeps the
+        #     lateral-viscosity + iso-neutral-Redi + GM/eiv numerics in ONE place
+        #     (no duplicated dissipation); the pass's advective state + barotropic
+        #     solve are discarded. The lateral-friction / lateral-tracer diff is
+        #     evaluated on Nbb's raw u/T; GM/Redi on the Nbb-level advected tracer
+        #     (T_mid≈Nbb) + the solved eta. None reads the AB2 momentum/tracer
+        #     carries (u_incr_prev/…, consumed only in _ab2_step), so the stale
+        #     Nnn carries cannot leak into diss_incr_bb.
+        nbb = state._replace(
+            u=state.u_before, v=state.v_before, T=state.T_before,
+            S=state.S_before, eta=state.eta_before)
+        _, (_kbb0, _kbb1, _kbb2, _kbb3, _kbb4, diss_incr_bb,
+            _kbb6) = self._step_impl(
+            nbb, rdt, freshwater=freshwater, surface_forcing=surface_forcing,
+            sponge=sponge, _apply_implicit_vmix=False, grid=_grid,
+            vertex_mask=vertex_mask, t_seconds=t_seconds,
+            _ab2_scope_override="advective",
+            _barotropic_substep_scale=_baro_scale)
+
+        # 2. Explicit combine.  MOMENTUM: leap-frog the BAROCLINIC deviation only
+        #    (u'(Naa) = u'(Nbb) + 2dt·RHS'), and take the BAROTROPIC mode + eta
+        #    DIRECTLY from the forward split-explicit barotropic solve
+        #    (``state_expl``) — the CFL-stiff external gravity wave must NOT be
+        #    leap-frog-extrapolated (that is a |G|~2/step free-surface blow-up).
+        #    This mirrors NEMO ``dyn_spg_ts`` + ``mlf_baro_corr`` (the barotropic
+        #    mode comes from the split-explicit solve, then replaces the 3D
+        #    depth-mean, stpmlf.F90:392/514-524) and legoESM ``_ab2_step`` (which
+        #    keeps the barotropic mode un-AB2'd).  TRACERS leap-frog fully
+        #    (T(Naa)=T(Nbb)+2dt·(flux-form increment); NEMO ``tra_atf``).
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        h_u = min_cell_to_uface(h_k)
+        h_v = min_cell_to_vface(h_k, _grid)
+
+        def _split(field, h_face):
+            bt = depth_mean(field, h_face, 1.0e-10, keepdims=True, fused=False)
+            return field - bt, bt      # (baroclinic deviation, barotropic mean)
+
+        ubc_now, _ = _split(state.u.data, h_u)
+        ubc_bef, _ = _split(state.u_before.data, h_u)
+        ubc_exp, btu_exp = _split(state_expl.u.data, h_u)
+        vbc_now, _ = _split(state.v.data, h_v)
+        vbc_bef, _ = _split(state.v_before.data, h_v)
+        vbc_exp, btv_exp = _split(state_expl.v.data, h_v)
+        # Nbb dissipative increment (2dt·diss(Nbb)) — advective-scope diss_incr:
+        #   (dT_diss, dS_diss, du_diss, dv_diss).  MOMENTUM: BAROCLINIC deviation
+        #   ONLY — the diss depth-mean is intentionally NOT injected into the
+        #   split-explicit barotropic mode (F_slow under advective scope carries no
+        #   diss; the mode's own solve + the A2 biharmonic handle the barotropic
+        #   lateral friction; adding the raw depth-mean double-counts and is
+        #   discarded by the rigid lid next step — the _ab2_step routing).  h_u/h_v
+        #   from Nnn.eta (O(dη) vs NEMO's Nbb geometry, residual #1). TRACERS take
+        #   the full increment.
+        if diss_incr_bb is not None:
+            dT_diss_bb, dS_diss_bb, du_diss_bb, dv_diss_bb = diss_incr_bb
+            du_diss_bc, _ = _split(du_diss_bb, h_u)
+            dv_diss_bc, _ = _split(dv_diss_bb, h_v)
+        else:
+            dT_diss_bb = dS_diss_bb = 0.0
+            du_diss_bc = dv_diss_bc = 0.0
+        # baroclinic leap-frog: u'(Nbb) + (u'_expl - u'(Nnn)) + 2dt·diss'(Nbb)
+        u_naa = ((ubc_bef + (ubc_exp - ubc_now)) + du_diss_bc + btu_exp) * u_mask3
+        u_naa = u_naa.at[:, -1].set(u_naa[:, 0])          # periodic-lon wrap
+        v_naa = ((vbc_bef + (vbc_exp - vbc_now)) + dv_diss_bc + btv_exp) * v_mask3
+        # Tracers: CARRY closed/dry cells (hold the now value) instead of
+        # pinning to 0.  Pinning at 0 is correct for velocities (walls) but
+        # on a 3-D staircase (full_step/partial cells) it writes T=0 into
+        # every below-bottom cell — the #480 masked-cold-cell poison — which
+        # staircase-adjacent stencils then pull into wet bottom cells (rest
+        # state explodes in ~30 steps; homogeneous-T rest test catches it).
+        T_naa = jnp.where(
+            mask3 > 0,
+            state.T_before.data + (state_expl.T.data - state.T.data) + dT_diss_bb,
+            state.T.data)
+        S_naa = jnp.where(
+            mask3 > 0,
+            state.S_before.data + (state_expl.S.data - state.S.data) + dS_diss_bb,
+            state.S.data)
+        eta_naa = state_expl.eta.data * cmask   # from the barotropic solve
+        naa_expl = state_expl._replace(
+            u=state_expl.u.replace(data=u_naa),
+            v=state_expl.v.replace(data=v_naa),
+            T=state_expl.T.replace(data=T_naa),
+            S=state_expl.S.replace(data=S_naa),
+            eta=state_expl.eta.replace(data=eta_naa),
+        )
+
+        # 3. Implicit vertical friction/diffusion ONCE, backward-Euler over
+        #    rDt=2dt on the after-state (NEMO dyn_zdf/tra_zdf, rDt=2dt).
+        dt_mom = rdt / self.config.dt_mom_ratio
+        _tke_prog = self._tke_prognostic_active()
+        _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
+                    else None)
+        tke_new = None
+        if self.config.implicit_vertical_mixing:
+            _res = self._apply_implicit_vertical_mixing(
+                naa_expl, rdt, surface_forcing,
+                K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+                dt_mom=dt_mom,
+                surface_tracer_forcing=surface_tracer_forcing,
+                tracer_source=tracer_source,
+                tke_old=_tke_old, tke_source=tke_source,
+                return_tke=_tke_prog, grid=_grid,
+                n2_tracers=self._n2_before_advection_tracers(state),
+            )
+            if _tke_prog:
+                naa, tke_new = _res
+            else:
+                naa = _res
+        else:
+            naa = naa_expl
+        if tke_new is not None:
+            if self._tke_advection_active():
+                tke_new, _dtke_field = self._apply_tke_advection(
+                    state, tke_new, rdt, grid=_grid)
+                naa = naa._replace(dtke=_dtke_field)
+            naa = naa._replace(
+                tke=Field(data=tke_new, name="tke",
+                          dims=("lat", "lon", "level"), units="m^2/s^2"))
+
+        # 4. Conservation fixer on the final after-state.
+        if self.config.use_conservation_fixer:
+            naa = ocean_conservation_fixer(
+                naa, state, _grid, self.z_coord, self.config)
+
+        # 5. Robert-Asselin filter on the NOW fields (plain RA — DINO, not
+        #    Williams); carried as the NEXT step's before-state Nbb.
+        #    MOMENTUM (u,v): PLAIN velocity filter — DINO runs ln_dynadv_vec=.TRUE.
+        #    (vector-form advection), for which NEMO dynatf_qco.F90:151-155 applies
+        #    the Asselin filter to the raw velocity (NOT thickness-weighted; the
+        #    thickness-weighted momentum branch :158-169 is the flux-form
+        #    nn_dynkeg path, unused by DINO).  SSH (eta): PLAIN filter (ssh_atf).
+        #    TRACERS (T,S): THICKNESS-WEIGHTED content filter (tra_atf_qco_lf,
+        #    key_qco z*) — filter (e3t·T) then divide by the filtered thickness so
+        #    heat/salt content is conserved under the moving z* coordinate
+        #    (residual #2 close).
+        def _asselin(now, before, after, m):
+            return (now + gamma * (before - 2.0 * now + after)) * m
+        u_f = _asselin(state.u.data, state.u_before.data, naa.u.data, u_mask3)
+        u_f = u_f.at[:, -1].set(u_f[:, 0])
+        v_f = _asselin(state.v.data, state.v_before.data, naa.v.data, v_mask3)
+        eta_f = _asselin(state.eta.data, state.eta_before.data,
+                         naa.eta.data, cmask)
+        # Thickness at the three tracer time levels + the Asselin-filtered ssh.
+        # e3t_now == h_k (already computed from state.eta above).  e3t_f is built
+        # from the filtered eta (eta_f == NEMO r3t_f) so numerator & denominator
+        # stay consistent (dynatf/tra_atf use the ssh_atf-filtered scale factor).
+        _mwc = self.config.min_water_column_m
+        e3t_now = h_k
+        e3t_bef = compute_layer_thickness(
+            state.eta_before.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=_mwc)
+        e3t_aft = compute_layer_thickness(
+            naa.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=_mwc)
+        e3t_flt = compute_layer_thickness(
+            eta_f, state.H_bathy.data, self.z_coord, min_water_column_m=_mwc)
+        T_f = _thickness_weighted_asselin(
+            state.T.data, state.T_before.data, naa.T.data,
+            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
+        S_f = _thickness_weighted_asselin(
+            state.S.data, state.S_before.data, naa.S.data,
+            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
+
+        return naa._replace(
+            u_before=state.u.replace(data=u_f),
+            v_before=state.v.replace(data=v_f),
+            T_before=state.T.replace(data=T_f),
+            S_before=state.S.replace(data=S_f),
+            eta_before=state.eta.replace(data=eta_f),
+        )
+
     def _unsplit_ab2_step(self, state: LatLonCGridOceanState, dt: float,
                           freshwater=None, surface_forcing=None, sponge=None,
                           *, grid=None, vertex_mask=None) -> LatLonCGridOceanState:
@@ -5631,7 +6461,7 @@ class LatLonCGridOceanModel:
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_redi_override=_kri_static,
-                density_jacobian=_gm_dj)
+                density_jacobian=_gm_dj, dt=dt)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
             if gm_cfg.implicit_K33:
@@ -5641,7 +6471,9 @@ class LatLonCGridOceanModel:
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=_kri_static,
-                    density_jacobian=_gm_dj)
+                    density_jacobian=_gm_dj,
+                    # #1226: same wall masks as the tendency call above.
+                    u_mask=u_mask, v_mask=v_mask, dt=dt)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
@@ -5721,7 +6553,9 @@ class LatLonCGridOceanModel:
         wet = mask > 0.5
 
         # Face mask consistency: u_mask/v_mask must match land_mask
-        u_expected, v_expected = compute_face_masks(mask)
+        # (thread the geometry so a walled-but-wet partial-periodic seam
+        # state — all cells wet, seam u-face closed — passes).
+        u_expected, v_expected = compute_face_masks(mask, self.grid)
         if not (bool(jnp.all(state.u_mask.data == u_expected))
                 and bool(jnp.all(state.v_mask.data == v_expected))):
             raise ValueError(
@@ -5936,6 +6770,26 @@ class LatLonCGridOceanModel:
                                   dims=state.u.dims, units=state.u.units),
                 v_incr_prev=Field(data=_zv, name="v_incr_prev",
                                   dims=state.v.dims, units=state.v.units),
+            )
+
+        # Leapfrog outer integrator (NEMO stp_MLF): seed the before-state Nbb
+        # Fields (= copies of the now-fields) so the scan carry keeps a CONSTANT
+        # pytree — _leapfrog_step writes {u,v,T,S,eta}_before every step, and the
+        # eager first-step None sentinel (the l_1st_euler Euler-dt start) would be
+        # a None->Field transition that crashes lax.scan.  With Nbb seeded = Nnn,
+        # the scan's first step is a 2dt leapfrog from Nbb=Nnn (a stable forward
+        # start; the eager run_dino loop keeps the exact NEMO Euler-dt start via
+        # the None sentinel).  No-op when leapfrog is off or already seeded.
+        if (getattr(self.config, "outer_integrator", "forward_euler")
+                == "leapfrog" and state.u_before is None):
+            # Seed with the source Fields directly (name 'u'/'v'/…) so the carry
+            # treedef EXACTLY matches what _leapfrog_step writes each step
+            # (u_before=state.u.replace(data=…), i.e. name 'u') — a name mismatch
+            # ('u_before' vs 'u') is custom-node aux data and would fail the scan
+            # constant-pytree reconciliation.
+            state = state._replace(
+                u_before=state.u, v_before=state.v, T_before=state.T,
+                S_before=state.S, eta_before=state.eta,
             )
 
         # Barotropic slow-forcing AB2 carry (Gᵁ time-centering): seed the prev

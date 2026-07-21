@@ -105,6 +105,10 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         # add ~10x compile cost and aren't useful for smoke-level
         # end-to-end verification.
         aimip_radiation="gray",
+        # Mark the merged cfg as a smoke run so downstream gates (the
+        # classical-mode rrtmgp pin in campaign_driver) apply their smoke
+        # exemption — gray here is exactly the debug case the pin allows.
+        smoke=True,
         aimip_spatial_surface=False,
         aimip_rollout_days=1,
         # Drop any window list from the base (the all-years scale base
@@ -151,22 +155,44 @@ def _build_spectral_config(cfg: dict[str, Any]):
     from legoesm.training.losses import LossConfig
 
     loss_kwargs = cfg.get("loss", {}) or {}
+    # Named loss preset (D5): numbers live once in
+    # config/wb/loss_presets/<name>.yaml; the suite's own loss: block wins
+    # key-by-key.
+    _preset = cfg.get("loss_preset")
+    if _preset:
+        from legoesm.training.loss_presets import (
+            load_loss_preset,
+            merge_loss_preset,
+        )
+        loss_kwargs = merge_loss_preset(load_loss_preset(str(_preset)), loss_kwargs)
+    _unknown = set(loss_kwargs) - set(LossConfig._fields)
+    if _unknown:
+        raise ValueError(
+            f"Unknown loss config keys {sorted(_unknown)} (typo?); valid "
+            f"keys are the LossConfig fields in training/losses.py."
+        )
     # YAML lists -> tuples for fields LossConfig declares as tuples.
     # Keeps the NamedTuple hashable for ``filter_jit`` static-arg
     # comparisons and matches the tuple-typed default.
     _tuple_fields = {"multi_step_hours", "multi_step_weights"}
     loss_config = LossConfig(**{
         k: (tuple(v) if k in _tuple_fields and v is not None else v)
-        for k, v in loss_kwargs.items() if k in LossConfig._fields
+        for k, v in loss_kwargs.items()
     })
 
     # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
     # ...]): the loader must build a target at EVERY curriculum lead, so
     # loss.multi_step_hours is forced to the sorted unique leads (equal
     # weights; the curriculum path scores one lead per phase anyway).
+    # parse_curriculum accepts both the legacy [[hours, epochs], ...] form
+    # and the extended dict-stage form ({"stages": [...]}); lr_scale /
+    # pushforward metadata is carried by the stages (schedule wiring is the
+    # documented open item), while the (hours, epochs) pairs drive the
+    # epoch plan exactly as before.
+    from legoesm.training.curriculum import parse_curriculum
+    _stages = parse_curriculum(cfg.get("aimip_rollout_curriculum"))
     curriculum = tuple(
-        (int(h), int(ep))
-        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+        (int(s.rollout_hours), int(s.n_epochs)) for s in _stages
     ) or None
     if curriculum:
         _leads = tuple(sorted({h for h, _ in curriculum}))
@@ -217,6 +243,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
         data_parallel=bool(cfg.get("aimip_data_parallel", False)),
+        ema_decay=float(cfg.get("aimip_ema_decay", 0.0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -246,6 +273,18 @@ def _train_variant(
     )
 
     if variant == "classical":
+        # Classical-mode radiation pin (campaign_driver, design D1): scheme
+        # swaps always run under rrtmgp so convection/turbulence comparisons
+        # are not confounded by the radiation backend. Smoke and an explicit
+        # allow_non_rrtmgp escape are exempt.
+        from legoesm.training.campaign_driver import (
+            validate_classical_radiation,
+        )
+        validate_classical_radiation(
+            str(cfg.get("aimip_radiation", "rrtmgp")),
+            smoke=bool(cfg.get("smoke", False)),
+            allow_non_rrtmgp=bool(cfg.get("allow_non_rrtmgp", False)),
+        )
         return _train_aimip_classical(
             spec_cfg, cache_dir, cfg=cfg, resume_from_dir=resume_from_dir,
         )
@@ -536,6 +575,7 @@ def _train_aimip_classical(
         grid, sigma, ic_states, target_carries, spec_cfg,
         start_epoch=start_epoch,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
     )
 
 
@@ -996,17 +1036,70 @@ def main():
             # the held-out test windows (default 2017).  Both reports use
             # an identical loss / rollout horizon so they are directly
             # comparable in absolute K.
+            # Evaluate-the-EMA doctrine (D3): when EMA is enabled, score and
+            # publish the EMA weights (params_ema.eqx) alongside the raw
+            # params.eqx; the scorecard records which weights were scored.
+            eval_model = model
+            eval_weights = "raw"
+            ema_ckpt_path = None
+            if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
+                import equinox as eqx
+                # The returned ``model`` matches the newest RAW checkpoint.
+                # Standalone EMA files are the per-epoch epoch_NNNN_ema.eqx
+                # (the chunked path folds the EMA into the atomic
+                # chunk_latest.eqx instead — not a file readable here). Eval
+                # the newest epoch EMA only when it is at least as new as the
+                # newest raw checkpoint (incl. chunk_latest.eqx); otherwise
+                # the model is ahead of any standalone EMA (a torn epoch pair
+                # or a chunk-ahead eval-only resume), so fall back to raw
+                # rather than publish a stale EMA.
+                from legoesm.training.neural_gcm_spectral import (
+                    MIDEPOCH_CHECKPOINT_NAME,
+                )
+                _vdir = output_dir / variant
+                _raws = [
+                    p for p in _vdir.glob("epoch_*.eqx")
+                    if not p.stem.endswith("_ema")
+                ] + list(_vdir.glob(MIDEPOCH_CHECKPOINT_NAME))
+                _emas = list(_vdir.glob("epoch_*_ema.eqx"))
+                _newest_raw_mt = (
+                    max(p.stat().st_mtime for p in _raws) if _raws else None
+                )
+                _newest_ema = (
+                    max(_emas, key=lambda p: p.stat().st_mtime)
+                    if _emas else None
+                )
+                if (
+                    _newest_ema is not None
+                    and _newest_raw_mt is not None
+                    and _newest_ema.stat().st_mtime >= _newest_raw_mt
+                ):
+                    eval_model = eqx.tree_deserialise_leaves(_newest_ema, model)
+                    eval_weights = "ema"
+                    logger.info(
+                        f"{variant}: evaluating EMA weights "
+                        f"({_newest_ema.name})"
+                    )
+                else:
+                    logger.warning(
+                        f"{variant}: aimip_ema_decay set but no EMA newer "
+                        "than the latest raw checkpoint (torn/absent) — "
+                        "evaluating raw weights."
+                    )
             eval_metrics_test = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="test",
+                variant, eval_model, cfg, cache_dir, period="test",
             )
             eval_metrics_train = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="train",
+                variant, eval_model, cfg, cache_dir, period="train",
             )
             ckpt_path = output_dir / variant / "params.eqx"
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
             from legoesm.ml.training import save_checkpoint
             save_checkpoint(model, ckpt_path)
+            if eval_weights == "ema":
+                ema_ckpt_path = output_dir / variant / "params_ema.eqx"
+                save_checkpoint(eval_model, ema_ckpt_path)
 
             results["variants"][variant] = {
                 "train_loss_history": [float(x) for x in loss_history],
@@ -1014,6 +1107,11 @@ def main():
                 "eval_metrics": eval_metrics_test,
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
+                "eval_weights": eval_weights,
+                **(
+                    {"checkpoint_ema": str(ema_ckpt_path)}
+                    if ema_ckpt_path is not None else {}
+                ),
             }
             # ``loss_history`` is empty on an eval-only resume (all epochs already
             # done, start_epoch == n_epochs -> zero training iterations); guard the

@@ -407,6 +407,14 @@ def _make_hydrostatic_microphysics(
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
+            # Surface precip [kg/m^2/s, +into surface] the scheme already
+            # computes (MicrophysicsOutput.precipitation); carried on the
+            # tendency so the lean MPAS coupled loop can export it (the RK
+            # integrator ignores this diagnostic field, so it is inert to
+            # dynamics — byte-identical where unread).
+            precip=Field(
+                data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
+                name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
         )
 
     def reset_state():
