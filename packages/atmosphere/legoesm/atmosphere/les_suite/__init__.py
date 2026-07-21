@@ -57,6 +57,12 @@ from .registry import (
     list_regimes,
     register_case,
 )
+from .scm_coupling import (
+    T_from_theta,
+    interp_profile,
+    regrid_truth,
+    theta_from_temperature,
+)
 from .score import (
     DiagnosticScore,
     PrognosticScore,
@@ -82,7 +88,11 @@ __all__ = [
     "REGIMES",
     "RegistryError",
     "SGS_CHOICES",
+    "T_from_theta",
     "artifact_to_scm_forcing",
+    "interp_profile",
+    "regrid_truth",
+    "theta_from_temperature",
     "build_reference_artifact",
     "cbl_diagnostics",
     "centered_dtheta_dz",

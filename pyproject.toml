@@ -218,6 +218,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # emit.py: T_s kwarg matches the bridge artifact's surface-temperature field name.
 "packages/atmosphere/legoesm/atmosphere/les_suite/emit.py" = ["N803"]
 "tests/atmosphere/les_suite/test_emit.py" = ["N806"]
+# scm_coupling tests: T (temperature) symbol in names/locals reads clearer than
+# snake_case for the θ↔T conversion checks (units-in-names rule).
+"tests/atmosphere/les_suite/test_scm_coupling.py" = ["N802", "N806"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).
