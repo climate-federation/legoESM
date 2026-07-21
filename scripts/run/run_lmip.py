@@ -54,6 +54,10 @@ import numpy as np
 # ===========================================================================
 
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.canopy.config import CLMMLCanopyConfig
+# Importing the interface does NOT import clm-ml-jax: the backend is imported
+# lazily inside the call, so run_lmip still runs without it installed.
+from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -143,6 +147,36 @@ def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
     return row
 
 
+def _build_surface_scheme(args: argparse.Namespace):
+    """Resolve ``--land-surface-scheme`` to the scheme config NamedTuple.
+
+    ``step_multilayer_land`` dispatches on the TYPE of ``surface_scheme``, so the
+    CLI string maps to one of the three scheme configs.  Unknown values raise
+    (dispatch-hardening) rather than silently falling back to SimpleSEB —
+    argparse ``choices`` already rejects them, this is the second line.
+    """
+    from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+    name = getattr(args, "land_surface_scheme", "simple_seb")
+    if name == "simple_seb":
+        return SimpleSEBConfig()
+    if name == "two_leaf":
+        return TwoLeafCanopyConfig()
+    if name == "clm_ml":
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        cfg = CLMMLCanopyConfig()
+        overrides = {}
+        if getattr(args, "clm_ml_pft", None) is not None:
+            overrides["pft_clm"] = int(args.clm_ml_pft)
+        if getattr(args, "clm_ml_turbulence_scheme", None) is not None:
+            overrides["turbulence_scheme"] = args.clm_ml_turbulence_scheme
+        if getattr(args, "clm_ml_dtime_target", None) is not None:
+            overrides["dtime_ml_target_s"] = float(args.clm_ml_dtime_target)
+        return cfg._replace(**overrides) if overrides else cfg
+    raise ValueError(
+        f"Unknown --land-surface-scheme {name!r}; "
+        "expected one of 'simple_seb', 'two_leaf', 'clm_ml'.")
+
+
 def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
     """Resolve LMIP CLI arguments into the land config and run controls."""
     texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
@@ -164,6 +198,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         from legoesm.surface_albedo import LandAlbedoConfig
         _land_albedo = LandAlbedoConfig()
     land = MultiLayerLandConfig(
+        surface_scheme=_build_surface_scheme(args),
         albedo_land=pft_row["albedo_veg"],
         emissivity_land=pft_row["emissivity"],
         land_albedo=_land_albedo,
@@ -468,7 +503,8 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
 # ===========================================================================
 
 def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
-                                lat_jnp, dt, start_doy, precip_rate):
+                                lat_jnp, dt, start_doy, precip_rate,
+                                clm_ml_grid_info=None):
     """Finish a land-carbon spin-up with the semi-analytic soil-C equilibrium.
 
     A single soil-C pool (~68-270-yr turnover) needs millennia to equilibrate
@@ -500,7 +536,8 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
             lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
         new_state, _resp, carbon_new = step_multilayer_land(
             state, forcing, config, U_MIN, dt,
-            lat=lat_jnp, carbon_state=carbon, doy=doy)
+            lat=lat_jnp, carbon_state=carbon, doy=doy,
+            clm_ml_grid_info=clm_ml_grid_info)
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, config.theta_wp,
             config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
@@ -587,6 +624,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
+    p.add_argument("--land-surface-scheme", default="simple_seb",
+                   choices=["simple_seb", "two_leaf", "clm_ml"],
+                   dest="land_surface_scheme",
+                   help="Surface energy-balance scheme. 'simple_seb' (default) = "
+                        "bulk SEB with the beta_soil moisture path; 'two_leaf' = "
+                        "DifferBESS two-leaf canopy; 'clm_ml' = the CLM-ML-JAX "
+                        "multilayer canopy (needs the clm-ml-jax backend). "
+                        "Matches run_amip's --land-surface-scheme.")
+    p.add_argument("--clm-ml-pft", type=int, default=None,
+                   dest="clm_ml_pft",
+                   help="CLM PFT index (1-based, 0=bare) for --land-surface-scheme "
+                        "clm_ml; controls Vcmax25, plant hydraulics and the PAD "
+                        "shape. Default = CLMMLCanopyConfig.pft_clm (7, BDT).")
+    p.add_argument("--clm-ml-turbulence-scheme", default=None,
+                   choices=["rsl_bonan", "most"],
+                   dest="clm_ml_turbulence_scheme",
+                   help="Canopy-airspace turbulence for --land-surface-scheme "
+                        "clm_ml. Default = CLMMLCanopyConfig.turbulence_scheme.")
+    p.add_argument("--clm-ml-dtime-target", type=float, default=None,
+                   dest="clm_ml_dtime_target",
+                   help="Target CLM-ML canopy sub-step [s] (default 300 s, the "
+                        "upstream design value). num_ml_steps is derived from it, "
+                        "so the canopy air budget stays at its design sub-step "
+                        "whatever host --dt is used.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
@@ -762,12 +823,40 @@ def main() -> None:
     # --- JIT-compile step function ---
     # Config, lat, dt captured in closure (compile-time constants per CLAUDE.md).
     # doy is a traced argument (changes every step → prevents recompile).
-    @jax.jit
+    def _make_step(grid_info):
+        @jax.jit
+        def _s(state, carbon_state, forcing, doy):
+            return step_multilayer_land(
+                state, forcing, config, U_MIN, dt,
+                lat=lat_jnp, carbon_state=carbon_state, doy=doy,
+                clm_ml_grid_info=grid_info,
+            )
+        return _s
+
+    # The CLM-ML multilayer canopy cannot trace its FIRST (cold) step: that step
+    # builds the canopy vertical structure host-side (ncan/ntop/nbot) and the
+    # traceable path needs those as concrete ints.  So run one EAGER step, read
+    # the structure out of the resulting canopy_state, then jit with that
+    # GridInfo CLOSED OVER — passing it as a jit ARG would trace the ints away.
+    # Every other scheme jits straight away.  A restart whose canopy_state is
+    # cold takes the same one-off eager step.
+    _needs_warm_start = isinstance(config.surface_scheme, CLMMLCanopyConfig) and (
+        state.canopy_state is None or state.canopy_state.mlcanopy is None)
+    _jitted = {"fn": None if _needs_warm_start else _make_step(None),
+               "grid_info": None}
+
     def _step(state, carbon_state, forcing, doy):
-        return step_multilayer_land(
-            state, forcing, config, U_MIN, dt,
-            lat=lat_jnp, carbon_state=carbon_state, doy=doy,
-        )
+        if _jitted["fn"] is None:
+            # CLM-ML cold start: eager, and with a CONCRETE doy (the non-traceable
+            # path writes the CLM time manager from round(doy * 86400 / dt)).
+            out = step_multilayer_land(
+                state, forcing, config, U_MIN, dt,
+                lat=lat_jnp, carbon_state=carbon_state, doy=float(doy),
+            )
+            _jitted["grid_info"] = extract_clm_ml_grid_info(out[0].canopy_state)
+            _jitted["fn"] = _make_step(_jitted["grid_info"])
+            return out
+        return _jitted["fn"](state, carbon_state, forcing, doy)
 
     # --- Diagnostic accumulators (daily means) ---
     T_soil_acc = np.zeros(args.n_layers, dtype=np.float64)
@@ -966,7 +1055,8 @@ def main() -> None:
         _final_doy = (args.start_day + args.days) % 365.0
         state, carbon_state = semi_analytic_carbon_spinup(
             state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
-            _final_doy, args.precip_rate)
+            _final_doy, args.precip_rate,
+            clm_ml_grid_info=_jitted["grid_info"])
         c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
         c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
@@ -995,6 +1085,9 @@ def main() -> None:
         "n_layers": args.n_layers,
         "soil_depth_m": args.soil_depth,
         "bulk_scheme": args.bulk_scheme,
+        # Record the surface scheme next to every number: a flux from clm_ml is
+        # not comparable to one from two_leaf without it.
+        "land_surface_scheme": args.land_surface_scheme,
         "seed": run_config.seed,
         "Cd_land": config.Cd_land,
         "Ch_land": config.Ch_land,
