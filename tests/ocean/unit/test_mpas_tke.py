@@ -5,7 +5,8 @@ wires the grid-agnostic Gaspar (1990) / Burchard (2002) TKE closure
 (``tke.py::tke_vertical_mixing``) onto the MPAS TRiSK C-grid: it reconstructs
 cell-centred (u, v) for the shear (the SAME reconstruction KPP uses), builds
 N^2 from cell T/S/rho, runs the DIAGNOSTIC quasi-steady closure per cell, and
-applies the KPP MPAS CFL cap on the returned (A_v = K_M, K_v = K_H) profiles.
+returns the raw closure (A_v = K_M, K_v = K_H) profiles — NO CFL post-cap
+(implicit-only path; the closure's kappaM_max is the ceiling).
 
 These tests pin the MPAS-TKE *adapter* contract on a small
 ``subdivision_level=1`` Voronoi mesh (42 cells / 120 edges):
@@ -21,7 +22,7 @@ These tests pin the MPAS-TKE *adapter* contract on a small
     reconstructed inputs (no cross-cell leakage, no lat-lon assumption) (c).
 
 The TKE closure numerics themselves are validated by the TKE suite; here we pin
-the MPAS *bridge* contract (dispatch, masking, CFL cap, finiteness, sign,
+the MPAS *bridge* contract (dispatch, masking, no-post-cap, finiteness, sign,
 grid-agnostic equivalence).
 """
 
@@ -236,7 +237,7 @@ class TestTKEGridAgnosticEquivalence:
         # Reconstruct the SAME cell inputs the bridge builds internally, then
         # run the closure on ONE wet column and compare to the bridge at that
         # cell.  On z-star every wet cell is full-depth (no sub-seafloor mask),
-        # so the only bridge post-step is the CFL cap.
+        # so the bridge applies NO post-step (raw closure output).
         u_e, v_n, T_w, S_w, rho, J, mask = _reconstruct_mpas_cell_fields(
             state, mesh, z_coord)
         c = int(jnp.argmax(mask.astype(jnp.int32)))  # first wet cell
@@ -254,14 +255,11 @@ class TestTKEGridAgnosticEquivalence:
             z_interface=z_coord.z_half_ref[1:-1],
         )
 
-        # Replay the bridge's CFL cap for this column (no mask: c is wet+full).
-        dz = z_coord.dz_ref
-        Av_max = 0.25 * jnp.minimum(dz[:-1], dz[1:]) ** 2 / tke_cfg.tke.cfl_cap_dt_s
-        expected_A = jnp.minimum(out_c.K_M[0], Av_max)
-        expected_K = jnp.minimum(out_c.K_H[0], Av_max)
-
-        assert jnp.allclose(A_v[c], expected_A, rtol=1e-9, atol=1e-12)
-        assert jnp.allclose(K_v[c], expected_K, rtol=1e-9, atol=1e-12)
+        # DIRECT closure equivalence — the bridge applies NO post-cap (codex:
+        # replaying the removed CFL cap here would silently re-legitimize it;
+        # the bridge output must equal the raw kernel output exactly).
+        assert jnp.allclose(A_v[c], out_c.K_M[0], rtol=1e-9, atol=1e-12)
+        assert jnp.allclose(K_v[c], out_c.K_H[0], rtol=1e-9, atol=1e-12)
 
     def test_tke_positive_after_diagnostic_solve(
             self, mesh, z_coord, state, tke_cfg):

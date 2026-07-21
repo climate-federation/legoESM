@@ -9,16 +9,16 @@
 #SBATCH --time=16:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas12_tke_%j.out
 # MPAS12 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
-# nn_eice under-ice attenuation of the KPP velocity scales), newly WIRED on the
-# MPAS KPP bridge (_run_mpas_kpp now threads surface_forcing.ice_concentration
-# to the shared _kpp_ice_attenuation).  Controlled A/B: EVERYTHING is identical
-# to mpas9_parity except --kpp-eice 3, so the day-30 Arctic delta is the eice
-# effect alone.  mpas9 Arctic MLD was +62.6 m / Siberian SSS +2.56 (KPP, no
-# eice); this measures how far eice narrows the gap toward the tripole TKE-eice
-# endgame (+6.7 m / +1.10) — expected PARTIAL: eice attenuates the wave/wind
-# w-scale but not the brine B_f convection (ll8 latlon showed ~28% on Siberian).
-# 30-day probe: the halocline signature is fully formed by day 30.  Score vs
-# NEMO m1 AND diff the SAME-protocol mpas9 day-30 snapshot (the eice A/B).
+# NEMO ORCA1 &namzdf_tke card — nn_mxl=2, lc, etau nn_etau=1 w/ nn_htau=1
+# latitude profile, eice=3 card default — through the SAME grid-agnostic
+# kernel the tripole runs; molecular backgrounds + preset convection stripped
+# to the tripole closure environment).  Controlled A/B: EVERYTHING identical
+# to mpas9/mpas10 except the closure, so the day-30 Arctic delta is the
+# TKE-vs-KPP scheme effect on MPAS.  The 2x2 (trp5/trp6/mpas10) put the
+# scheme half at +0.78 Siberian / +36-50 m Arctic MLD — if the card closes
+# it, mpas12 should land near Siberian ~+1.0 and MLD well under +42.9, and
+# mpas12-vs-trp5 becomes the SAME-CARD cross-grid TKE pair (grid effect
+# only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/vfs-tke-fix; cd $WT
 export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
