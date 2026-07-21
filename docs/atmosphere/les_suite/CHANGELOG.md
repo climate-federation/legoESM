@@ -144,7 +144,19 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   0.011 = **1.010** (~1, physically correct); the Q1 `diagnose_truth` counter-gradient
   diagnostic **detects a structural-ceiling layer at 675-758 m** — a real Q1a result.
 - 132 les_suite/core tests green; counter-gradient gradient tests made
-  precision-robust (x32/x64). Codex review of emit/run_les_suite running.
+  precision-robust (x32/x64).
+- **Codex review of emit/run_les_suite: ISSUES FOUND (2), both fixed** (798434caf):
+  (1) emit's SGS flux used a cell-centred `K_h·gradient`, not the core's FACE
+  discretization (`c2f(K_h)·ddz_c2f(θ)`, surface face = Q0, lid = 0) — a plausible
+  approximation, wrong at the surface. Rewrote to replicate `scalar_rhs` exactly;
+  a new test asserts bit-agreement (atol 1e-10) with the core's own c2f/ddz_c2f/f2c
+  ops. (2) the driver stepped once then labelled it t=0 (dropped the true IC) and
+  could drop the final frame — now records the real t=0 IC before stepping and
+  drives every frame target through T; added --frames/--hours/--dt validation.
+  Re-run GPU round-trip: true IC at t=0 (resolved flux exactly 0), surface total
+  1.04·Q0, k=1 = 1.01·Q0. Codex round-2 verification running. 134 tests green.
+  (Codex invocation note: the positional-arg form hung on stdin this session; the
+  working form is `codex exec [flags] < prompt.md` — feed the prompt via stdin.)
 - Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
   run_les_suite (218129efd).
 
