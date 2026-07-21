@@ -154,9 +154,16 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   could drop the final frame — now records the real t=0 IC before stepping and
   drives every frame target through T; added --frames/--hours/--dt validation.
   Re-run GPU round-trip: true IC at t=0 (resolved flux exactly 0), surface total
-  1.04·Q0, k=1 = 1.01·Q0. Codex round-2 verification running. 134 tests green.
+  1.04·Q0, k=1 = 1.01·Q0.
   (Codex invocation note: the positional-arg form hung on stdin this session; the
   working form is `codex exec [flags] < prompt.md` — feed the prompt via stdin.)
+- **Codex round 2**: Fix 1 (SGS face flux) CONFIRMED bit-exact (maxerr=0.0 vs the
+  core's own operators); true-IC recording correct. One remaining issue: the frame
+  loop still dropped/overshot frames when dt was large vs the frame spacing. FIXED
+  (f70a7b46a): step-index sampling via the tested pure helper `frame_step_schedule`
+  — strictly-increasing distinct times, final at n_steps·dt≈T, dt≥T guarded; 3
+  regression tests cover codex's failing cases. GPU re-run: [0,252,504,756,1008,1260].
+  Codex round 3 verifying the schedule.
 - Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
   run_les_suite (218129efd).
 
