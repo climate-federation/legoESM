@@ -212,6 +212,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # (units-in-names rule); same rationale as the clubb / column-LES modules.
 "packages/atmosphere/legoesm/atmosphere/les_suite/intercomparison.py" = ["N803", "N815"]
 "tests/atmosphere/les_suite/test_intercomparison.py" = ["N802", "N803", "N806"]
+# LES-suite emit driver: physical symbols Q0 (surface heat flux) and T (integration
+# length) as locals read clearer than snake_case (units-in-names rule).
+"scripts/run/run_les_suite.py" = ["N806"]
+# emit.py: T_s kwarg matches the bridge artifact's surface-temperature field name.
+"packages/atmosphere/legoesm/atmosphere/les_suite/emit.py" = ["N803"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).

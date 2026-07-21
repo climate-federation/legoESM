@@ -28,6 +28,12 @@ from .counter_gradient import (
     counter_gradient_diagnostic,
     diagnose_truth,
 )
+from .emit import (
+    build_reference_artifact,
+    horizontal_mean,
+    resolved_vertical_flux,
+    sgs_vertical_scalar_flux_mean,
+)
 from .intercomparison import (
     CBL_ENVELOPE,
     CBLDiagnostics,
@@ -77,9 +83,13 @@ __all__ = [
     "RegistryError",
     "SGS_CHOICES",
     "artifact_to_scm_forcing",
+    "build_reference_artifact",
     "cbl_diagnostics",
     "centered_dtheta_dz",
     "clear_registry",
+    "horizontal_mean",
+    "resolved_vertical_flux",
+    "sgs_vertical_scalar_flux_mean",
     "counter_gradient_diagnostic",
     "diagnose_truth",
     "diagnostic_flux_score",

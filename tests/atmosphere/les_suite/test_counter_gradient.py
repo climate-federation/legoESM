@@ -17,14 +17,14 @@ def test_centered_gradient_linear_profile():
     z = jnp.linspace(0.0, 1000.0, 11)
     theta = 300.0 + 0.004 * z
     grad = centered_dtheta_dz(theta, z)
-    assert jnp.allclose(grad, 0.004, atol=1e-9)
+    assert jnp.allclose(grad, 0.004, atol=1e-5)  # precision-robust (x32/x64)
 
 
 def test_centered_gradient_nonuniform_grid():
     z = jnp.array([0.0, 10.0, 30.0, 70.0, 150.0])
     theta = 300.0 + 0.01 * z  # exact linear → gradient 0.01 even on stretched grid
     grad = centered_dtheta_dz(theta, z)
-    assert jnp.allclose(grad, 0.01, atol=1e-9)
+    assert jnp.allclose(grad, 0.01, atol=1e-5)  # precision-robust (x32/x64)
 
 
 def test_pure_downgradient_no_counter_layer():
