@@ -207,3 +207,45 @@ def test_trace_asserts_turbulence_scheme_applied():
     finally:
         ifc._APPLIED_TURBULENCE_SCHEME = saved_applied
         ifc._DIFF_TURBULENCE_SCHEME = saved_lock
+
+
+def test_traced_multicolumn_rejected_s2_pending():
+    """ncol>1 with TRACED forcing (a coupled/global jitted segment) fails LOUDLY.
+
+    The de-hosted traceable path is single-column so far (S1).  A multi-column
+    step inside jax.jit would otherwise fall through to the eager host path and
+    raise a cryptic TracerArrayConversionError deep in the backend.  The S2
+    backstop catches it at the interface with actionable guidance.  This is the
+    single chokepoint covering every driver path (string- and object-config).
+    EAGER multi-column (concrete arrays) is NOT rejected — only traced ncol>1.
+    """
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+
+    n = 2
+    cfg = CLMMLCanopyConfig()
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    Ts = jnp.full((n, 8), 290.0)
+    psi = jnp.full((n, 8), -0.5)
+    th = jnp.full((n, 8), 0.25)
+    lat = jnp.zeros(n)
+
+    def run(Tl):
+        forcing = AtmToSurface(
+            sw_down=jnp.full(n, 400.0), lw_down=jnp.full(n, 350.0),
+            precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
+            T_lowest=Tl, q_lowest=jnp.full(n, 0.010),
+            u_lowest=jnp.full(n, 4.0), v_lowest=jnp.full(n, 1.5),
+            p_lowest=jnp.full(n, 95000.0), p_surface=jnp.full(n, 100000.0),
+            rho_lowest=jnp.full(n, 1.2), cos_zenith=jnp.full(n, 0.7),
+            co2_ppmv=jnp.full(n, 400.0), has_radiation=jnp.ones(n),
+            has_precipitation=jnp.ones(n))
+        return compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=forcing, canopy_config=cfg,
+            land_config=lc, land_params=None, canopy_state=None, dt=1800.0,
+            T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0)[0].shflx
+
+    with pytest.raises(NotImplementedError, match="single-column only"):
+        jax.jit(run)(jnp.full(n, 296.0))

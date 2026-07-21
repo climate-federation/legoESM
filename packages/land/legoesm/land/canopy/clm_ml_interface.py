@@ -1637,6 +1637,47 @@ def compute_clm_ml_canopy_fluxes(
     # multi-column traceable is S2 (per-column GridInfo).
     _traceable = (_diff_mode or (_warm_started and grid_info is not None)) and ncol == 1
 
+    # ---- Multi-column-under-trace backstop (S2 pending) -----------------------
+    # The de-hosted TRACEABLE path is single-column so far (``_traceable`` above
+    # requires ncol==1): the GridInfo carries ONE column's structure and the
+    # backend ``grid=`` kernel processes one patch.  A coupled/global run steps
+    # the land tile over ALL model columns (ncol>1) INSIDE a jitted segment, so
+    # ncol>1 falls through to the EAGER host path below, whose
+    # ``np.array(forcing.*)`` marshalling raises a cryptic
+    # TracerArrayConversionError on the traced forcing deep in the backend.
+    # Detect it here — ncol>1 with ANY traced forcing/soil leaf — and fail with
+    # actionable guidance instead.  This is the single chokepoint every driver
+    # path funnels through (the string-keyed model_driver gate is the friendly
+    # early failure for run_amip; this also covers the object-config paths —
+    # coupled_esm_driver / earth_system_driver — that pass a
+    # MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig()) directly).
+    # EAGER multi-column forward (concrete arrays, offline global) stays valid —
+    # only a TRACED ncol>1 is rejected.
+    if ncol != 1:
+        _traced_ncol_leaf = next(
+            (
+                _n
+                for _n, _v in (
+                    [(f"forcing.{_f}", getattr(forcing, _f)) for _f in forcing._fields]
+                    + [("T_soil_top", T_soil_top), ("T_soil", T_soil),
+                       ("psi_soil", psi_soil), ("theta_soil", theta_soil)]
+                )
+                if _v is not None and isinstance(_v, jax.core.Tracer)
+            ),
+            None,
+        )
+        if _traced_ncol_leaf is not None:
+            raise NotImplementedError(
+                "CLM-ML multilayer canopy under jax.jit/grad is single-column only "
+                f"so far (S1); got ncol={ncol} with a traced leaf "
+                f"({_traced_ncol_leaf}) — i.e. a coupled/global run stepping every "
+                "model column inside a jitted segment. The per-column traceable "
+                "path (S2) is in progress. Today: use scripts/run/run_lmip.py "
+                "--land-surface-scheme clm_ml for single-point CLM-ML, run the "
+                "multi-column forward EAGERLY (concrete arrays, no jit), or select "
+                "the two_leaf canopy for a coupled run."
+            )
+
     # Solar geometry (lat / lon / doy / cos_zenith) is a NON-differentiated
     # static input BY DESIGN: it is consumed by host-side CLM orbital setup
     # (_setup_clm_time / _setup_clm_topology / shr_orb_cosz), not by the traced
