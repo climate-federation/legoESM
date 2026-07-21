@@ -203,6 +203,15 @@ def scm_les_final_loss(
     z_eval = jnp.asarray(artifact.heights_m)
     theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
 
+    # A DIVERGED SCM (NaN/Inf θ) must score as a WORST (non-finite) loss, not a
+    # perfect one. The score's safe_sqrt maps NaN -> 0 (correct for its AD-at-perfect-
+    # fit purpose), so a non-finite SCM output would otherwise be selected as the best
+    # candidate. Guard here: any non-finite output ⇒ +inf loss (the tuner rejects it).
+    if not (bool(jnp.all(jnp.isfinite(theta_eval)))
+            and bool(jnp.all(jnp.isfinite(u_eval)))
+            and bool(jnp.all(jnp.isfinite(v_eval)))):
+        return float("inf")
+
     # LES truth at the final time on the same eval grid.
     truth_series = prognostic_truth(artifact)
     final_truth = LESTruth(

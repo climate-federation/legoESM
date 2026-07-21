@@ -100,3 +100,18 @@ def test_non_cbl_artifact_rejected():
     art = _cbl_artifact(prescribe="T_s", w_theta_s=None, T_s=np.full(NT, 300.0))
     with pytest.raises(ValueError):
         build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ)
+
+
+def test_diverged_scm_scores_infinite_not_zero(monkeypatch):
+    # Regression: a DIVERGED SCM (NaN θ) must score +inf, not 0. The score's
+    # safe_sqrt maps NaN->0 (perfect fit), so without the finiteness guard a
+    # blown-up SCM is selected as the BEST candidate (the 100%-improvement bug seen
+    # on the real 2h CBL tuning). Patch the SCM output to NaN and assert the guard.
+    from legoesm.atmosphere.les_suite import scm_runner
+
+    nan = jnp.full((NZ,), jnp.nan)
+    monkeypatch.setattr(scm_runner, "scm_final_theta_on",
+                        lambda *a, **k: (nan, nan, nan))
+    art = _cbl_artifact()
+    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=20.0)
+    assert not np.isfinite(loss)  # +inf, NOT 0.0
