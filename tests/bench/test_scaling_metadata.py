@@ -377,17 +377,34 @@ def test_count_collective_permutes_matches_hyphen_and_underscore():
     assert md.count_collective_permutes("no collectives here") == 0
 
 
+def _cpu_compile():
+    """Pin the HLO-probe compiles to a CPU device.
+
+    The probes read ``compile().as_text()``, and some backends return None for
+    it (the experimental Apple ``mps`` plugin does) — which would make the
+    "collective-free fn -> all-zero census" assertion vacuously unreachable on
+    a dev laptop.  CPU is also the reproducible-by-construction reference the
+    census docstring names (the DEFAULT schedule, no GPU collective-combining),
+    so this keeps the assertion meaningful on every machine.  Production probes
+    deliberately do NOT pin: cluster jobs must census the REAL on-device
+    executable.
+    """
+    import jax
+    return jax.default_device(jax.devices("cpu")[0])
+
+
 def test_hlo_collective_permutes_lowers_counts_and_is_error_safe():
     """The best-effort probe lowers a fn and counts its collective-permutes: a
     fn with none -> 0; an unlowerable fn -> None (never raises). Real ppermute
     counting is exercised by the MPAS/cube bench gates and
     count_collective_permutes' synthetic HLO test above."""
     import jax.numpy as jnp
-    assert md.hlo_collective_permutes(lambda x: x + 1, jnp.arange(4.0)) == 0
+    with _cpu_compile():
+        assert md.hlo_collective_permutes(lambda x: x + 1, jnp.arange(4.0)) == 0
 
-    def _boom(x):
-        raise RuntimeError("unlowerable")
-    assert md.hlo_collective_permutes(_boom, jnp.arange(4.0)) is None
+        def _boom(x):
+            raise RuntimeError("unlowerable")
+        assert md.hlo_collective_permutes(_boom, jnp.arange(4.0)) is None
 
 
 def test_count_collectives_full_census_all_families():
@@ -447,9 +464,10 @@ def test_hlo_collective_census_lowers_and_is_error_safe():
     """Best-effort full-census probe: a collective-free fn -> all-zero dict;
     an unlowerable fn -> None (never raises)."""
     import jax.numpy as jnp
-    census = md.hlo_collective_census(lambda x: x + 1, jnp.arange(4.0))
-    assert census is not None and census["total"] == 0
+    with _cpu_compile():
+        census = md.hlo_collective_census(lambda x: x + 1, jnp.arange(4.0))
+        assert census is not None and census["total"] == 0
 
-    def _boom(x):
-        raise RuntimeError("unlowerable")
-    assert md.hlo_collective_census(_boom, jnp.arange(4.0)) is None
+        def _boom(x):
+            raise RuntimeError("unlowerable")
+        assert md.hlo_collective_census(_boom, jnp.arange(4.0)) is None
