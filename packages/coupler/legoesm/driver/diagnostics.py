@@ -469,6 +469,24 @@ class DiagnosticCollector:
         """
         self._wind_rotation_angle = np.asarray(angle)
 
+    def _roll_to_cmip_lon(self, arr: np.ndarray) -> np.ndarray:
+        """Reorder regridder output columns to the CMIP [0, 360) lon labels.
+
+        The cube and Voronoi regridders emit columns on lon
+        ``linspace(-180, 180, n_lon, endpoint=False) + 180/n_lon`` (column 0
+        at -180+dlon/2), while ``_cmip_target_latlon`` labels the file
+        ``dlon/2 .. 360-dlon/2`` (column 0 at 0+dlon/2).  Writing one under
+        the other's labels shifts every map by 180 deg (the tuned-year clt
+        vs coastlines bug; same quirk the ocean matrix runner rolls for).
+        A half-turn is an integer column roll only for even n_lon — fail
+        loud rather than write a fractionally-shifted field.
+        """
+        if self._cmip_nlon % 2 != 0:
+            raise ValueError(
+                f"CMIP n_lon={self._cmip_nlon} must be even to map the "
+                "regridder's [-180,180) columns onto [0,360) labels.")
+        return np.roll(arr, self._cmip_nlon // 2, axis=1)
+
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
 
@@ -476,14 +494,14 @@ class DiagnosticCollector:
         """
         if self._cs_regrid_weights is not None:
             from legoesm.grids.regridding import apply_cubedsphere_to_latlon
-            return apply_cubedsphere_to_latlon(
+            return self._roll_to_cmip_lon(apply_cubedsphere_to_latlon(
                 np.asarray(field), self._cs_regrid_weights,
-            )
+            ))
         if self._voronoi_regrid_weights is not None:
             from legoesm.grids.regridding import apply_voronoi_to_latlon
-            return apply_voronoi_to_latlon(
+            return self._roll_to_cmip_lon(apply_voronoi_to_latlon(
                 np.asarray(field).reshape(-1), self._voronoi_regrid_weights,
-            )
+            ))
         # Structured grids (lat-lon / Gaussian)
         arr = np.asarray(field)
         if arr.ndim == 2:
@@ -506,15 +524,17 @@ class DiagnosticCollector:
         """
         if self._cs_regrid_weights is not None:
             from legoesm.grids.regridding import apply_cubedsphere_to_latlon_3d
-            return apply_cubedsphere_to_latlon_3d(
+            # (nlat, nlon, nlev): lon is axis 1, same roll as the 2-D path.
+            return self._roll_to_cmip_lon(apply_cubedsphere_to_latlon_3d(
                 np.asarray(field), self._cs_regrid_weights,
-            )
+            ))
         if self._voronoi_regrid_weights is not None:
             from legoesm.grids.regridding import apply_voronoi_to_latlon_3d
             arr = np.asarray(field)
             # MPAS callers pass an explicit 2-D (nCells, nlev) array;
             # flattened (nCells*nlev,) inputs are not supported here.
-            return apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights)
+            return self._roll_to_cmip_lon(
+                apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights))
         arr = np.asarray(field)
         if arr.ndim == 3:
             regrid = getattr(self, '_structured_regrid', None)
