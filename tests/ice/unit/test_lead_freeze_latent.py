@@ -109,6 +109,43 @@ def test_default_is_legacy_charge():
     assert SeaIceConfig().lead_freeze_latent == "charge"
 
 
+def test_slab_path_honors_the_literal_too():
+    """The SLAB thermodynamics path is also reachable from prognostic-ocean
+    callers (omip_sea_ice_surface_forcing, the coupled dynamic-ocean driver),
+    so it must honor lead_freeze_latent as well (codex latch r1 HIGH: a
+    slab-only always-charge made the credit a silent no-op there).  Same
+    exact-ledger contract as the v2 test: charge − credit ==
+    2·ρ_i·L_f·vlead_freeze, everything else identical."""
+    from legoesm.ice.sea_ice import _step_slab
+    from legoesm.ice.state import SeaIceState
+    from legoesm.core.field import Field
+    s = _SHAPE
+    dims = ("lat", "lon")
+    state = SeaIceState(
+        h_ice=Field(data=jnp.full(s, 0.5), name="h_ice", dims=dims, units="m"),
+        T_ice=Field(data=jnp.full(s, 250.0), name="T_ice", dims=dims,
+                    units="K"),
+        concentration=Field(data=jnp.full(s, 0.5), name="conc", dims=dims,
+                            units="1"),
+    )
+    sst = jnp.full(s, constants.T_freeze_ocean)
+    zeros = jnp.zeros(s)
+    outs = {}
+    for mode in ("charge", "credit"):
+        cfg = SeaIceConfig(lead_freeze_latent=mode)
+        _, resp = _step_slab(state, _freezing_forcing(), sst, zeros, zeros,
+                             cfg, 1.0, _DT)
+        outs[mode] = resp
+    diff = (np.asarray(outs["charge"].ocean_heat_extraction)
+            - np.asarray(outs["credit"].ocean_heat_extraction))
+    assert float(diff.max()) > 0.0          # lead freeze fired (non-vacuous)
+    assert float(diff.min()) >= 0.0         # charge >= credit everywhere
+    # freshwater/salt identical (the sign routes only the latent term)
+    np.testing.assert_array_equal(
+        np.asarray(outs["charge"].freshwater_to_ocean),
+        np.asarray(outs["credit"].freshwater_to_ocean))
+
+
 def test_unknown_literal_raises_at_step_entry():
     cfg = SeaIceConfig(lead_freeze_latent="frazil")   # typo-like value
     with pytest.raises(ValueError, match="lead_freeze_latent"):

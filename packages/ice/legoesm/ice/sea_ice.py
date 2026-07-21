@@ -635,9 +635,16 @@ def _step_slab(
     #      that the old ``~ice_mask`` gate silently skipped.
     # Basal-growth latent heat is released UPWARD through the ice (conduction),
     # not drawn from the ocean, so it is intentionally absent.  Audit F8.
+    # Lead-freeze latent sign (SeaIceConfig.lead_freeze_latent, validated at
+    # step_sea_ice entry) — the SAME conditional as the v2 path (codex latch
+    # r1 HIGH: the slab path is ALSO reachable from prognostic-ocean callers
+    # — omip_sea_ice_surface_forcing / the coupled dynamic-ocean driver — so
+    # a slab-only "always charge" would leave the credit a silent no-op
+    # there).  "charge" (default) keeps every existing caller bit-identical.
+    _lead_latent_sign = 1.0 if config.lead_freeze_latent == "charge" else -1.0
     ocean_heat_extraction = (
         diag["ocean_heat_basal_per_ice_area"] * conc
-        + config.rho_ice * config.L_f * diag["vlead_freeze"]
+        + _lead_latent_sign * config.rho_ice * config.L_f * diag["vlead_freeze"]
         # Surplus surface-melt heat WARMS the ocean (energy closure, finding
         # #6): negative contribution to extraction (+sign = ocean loses heat).
         - diag["surface_melt_ocean_gain_per_ice_area"] * conc

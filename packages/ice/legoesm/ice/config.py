@@ -438,6 +438,12 @@ class SeaIceConfig(NamedTuple):
     #    again) → the ocean supercools without bound → the lead-freeze SST
     #    gate LATCHES open → the Antarctic coastal ice runaway (2026-07-21
     #    bisect: window→sea_ice.py→gate, ll11 gate-revert BOUNDED).  With the
-    #    credit the ledger closes (atm −Q; ice +Q/L_f as volume; ocean −Q+Q)
-    #    and the latch becomes a self-limiting negative feedback.
+    #    credit the latch becomes a self-limiting negative feedback (freezing
+    #    warms the cell back toward freezing).  NB the coupled ledger is NOT
+    #    algebraically exact: the ice-side freeze flux (ice skin/albedo bulk)
+    #    and the driver's open-water q_net (NCAR flux at SST) are different
+    #    estimates of the lead cooling, so a bounded residual remains — but it
+    #    no longer SELF-AMPLIFIES (supercooling now suppresses, not feeds,
+    #    net extraction).  Honored by BOTH the v2 and slab thermodynamics
+    #    paths (both are reachable from prognostic-ocean callers).
     lead_freeze_latent: str = "charge"
