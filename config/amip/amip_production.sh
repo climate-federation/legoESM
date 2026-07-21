@@ -23,11 +23,13 @@
 # OPEN ITEMS — need Pierre/Veronika to finalize (do NOT silently diverge):
 #   * RUNNER: this is the run_amip.py (prescribed-SST) --config path. Pierre's
 #     tuned config is a run_coupled.py --config YAML (cmip_ocean_slab.yaml).
-#   * LAND: this uses our tiled COARE3/MOST + bucket + stomatal tile. Pierre's
-#     config uses slab_richards. The simplified AMIP land tile has NO
-#     snow-albedo feedback (snow tracked thermodynamically but radiatively
-#     invisible); snow_albedo_feedback lives in the full land model, so it
-#     comes bundled with the land-model choice, NOT a standalone flag.
+#   * LAND: since 2026-07-07 the YAML runs the FULL multilayer Richards land
+#     (use_multilayer_land: true — CLM PFT/texture surfdata, prognostic snow,
+#     snow_albedo_feedback: true, stomatal-beta OFF per #741) under tiled
+#     COARE3(ocean)/MOST(land) fluxes. Pierre's coupled config uses
+#     slab_richards — the land-model choice is the remaining divergence to
+#     reconcile, not snow albedo (the old "no snow-albedo feedback" caveat
+#     applied to the retired simplified land tile).
 #   * convective_cloud: the tracked YAML now ships TRUE (mirror the canonical
 #     tuned base config/cmip/cmip_tuned_physics.yaml for parameter-identity with
 #     the coupled CMIP slab). Prescribed-SST AMIP SCIENCE runs OVERRIDE it to
@@ -49,9 +51,16 @@
 : "${SIC:=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sic_1979_2016.nc}"
 : "${SOLAR:=${ICON_ROOT}/common/solar_radiation/swflux_14band_cmip6_1850-2299-v3.2.nc}"
 : "${GHG:=${ICON_ROOT}/independent/greenhouse_gases/greenhouse_historical_plus.nc}"
-: "${OZONE:=${ICON_ROOT}/common/ozone_cmip6_forcing/historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_195001-199912.nc}"
-: "${AEROSOL:=${ICON_ROOT}/common/aerosol_kinne/aeropt_kinne_sw_b14_fin_1979_rast.nc}"
-: "${VOLCANIC:=${ICON_ROOT}/common/aerosol_volcanic_cmip6/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979.nc}"
+# Ozone/aerosol/volcanic default to the merged 1979-2014 transient files (432
+# monthly records each, El Chichon + Pinatubo included) so the DEFAULT run is
+# CMIP6-compliant for the full AMIP period. The old single-year (Kinne 1979,
+# volcanic 1979) and 1950-1999 ozone pool files silently freeze/hold forcing
+# past their coverage — only override back to them for deliberate fixed-forcing
+# sensitivity runs.
+: "${FORCING_1979_2014:=/work/bd1083/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014}"
+: "${OZONE:=${FORCING_1979_2014}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_197901-201412.nc}"
+: "${AEROSOL:=${FORCING_1979_2014}/aeropt_kinne_sw_b14_fin_1979-2014_rast.nc}"
+: "${VOLCANIC:=${FORCING_1979_2014}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014.nc}"
 # CLM surfdata for the multilayer Richards land model (use_multilayer_land): the
 # PFT/texture/glacier surface map. Compute nodes have NO internet, so the auto-
 # download in clm_surface_map.download_clm_surfdata() FAILS (SSL) — this file
@@ -71,3 +80,14 @@ AMIP_PATH_FLAGS=(
   --topography "${ETOPO}"
   --clm-surfdata-path "${CLM_SURFDATA}"
 )
+# Volcanic LONGWAVE absorption (ext_earth band; post-eruption stratospheric
+# heating). ON by default for the campaign (decision 2026-07-21): reader
+# validated against the merged 1979-2014 file (Pinatubo-peak LW AOD 0.020 vs
+# 0.0005 quiet-1979; El Chichon visible). LW AOD ~0 outside 1982-84/1991-93,
+# so quiet years are unaffected; the pilot decade exercises El Chichon before
+# the full 36-yr. No forward run has exercised the LW channel yet — first
+# post-1982 pilot output is the validation gate. Opt OUT (e.g. to reproduce
+# pre-2026-07-21 SW-only runs) with AMIP_VOLCANIC_LW=0.
+if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
+  AMIP_PATH_FLAGS+=( --volcanic-aerosol-lw )
+fi

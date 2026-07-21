@@ -103,6 +103,10 @@ convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain spl
 #   tropical cold bias / SST drift); with SST pinned that lever is inert and only
 #   the radiative cost shows. AMIP thus EXPOSES conv-cloud as a coupled-mode
 #   SST-drift compensator. Kept ON here for parameter-identity with the tuned base.
+#   NOTE: the CMIP6 production science chain (scripts/cluster/amip/
+#   amip_cmip6_chain.sbatch) deliberately OVERRIDES this to false via an
+#   include-YAML (best prescribed-SST TOA, per the A/B above) — production
+#   science runs diverge from the tracked value in exactly this ONE knob.
 convective_cloud: true
 
 # --- Tiled surface + interactive REAL land (multilayer Richards, SOTA) ---------
