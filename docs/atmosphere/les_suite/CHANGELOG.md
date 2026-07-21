@@ -37,6 +37,17 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
    threshold; the skill threshold from the tuned rankings.
 5. D7 σ_LES: the SGS-spread + 2×-resolution runs → the Q3 error bars.
 
+## First real science outputs (dry-convective anchor, 2026-07-21)
+Demonstrating the §7 machinery produces real numbers (full answers need the ensemble):
+- **Q1a (structural ceiling)** on the science-quality 2 h 96³ x64 CBL artifact
+  (`cbl_nieuwstadt__lasd.npz`, 12 frames, model-exact resolved+SGS flux):
+  `counter_gradient.diagnose_truth` finds a **counter-gradient layer at 275–292 m**
+  (24% of levels counter-gradient at the final time). ⇒ in the developed CBL there is
+  an up-gradient transport layer where ANY non-negative eddy-diffusivity (local
+  down-gradient) closure is STRUCTURALLY unable to match the LES flux, regardless of
+  tuning — the tuning-independent ceiling on local closures. The full Q1 threshold
+  needs this across the w'θ'ₛ grid (the unwired dry-grid emission).
+
 ## Conventions locked during the build
 - LES reference artifacts are **self-describing**: each carries both the truth
   profiles AND the exact forcing the LES received, so the SCM bridge reconstructs
