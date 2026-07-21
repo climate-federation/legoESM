@@ -530,18 +530,29 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
     steps_per_year = int(round(_SECS_PER_DAY * 365.0 / dt))
     dt_days = dt / _SECS_PER_DAY
 
-    @jax.jit
-    def _diag_step(state, carbon, doy, hour):
+    def _diag_body(grid_info, state, carbon, doy, hour):
         forcing = make_synthetic_lmip_forcing(
             lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
         new_state, _resp, carbon_new = step_multilayer_land(
             state, forcing, config, U_MIN, dt,
             lat=lat_jnp, carbon_state=carbon, doy=doy,
-            clm_ml_grid_info=clm_ml_grid_info)
+            clm_ml_grid_info=grid_info)
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, config.theta_wp,
             config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
         return new_state, carbon_new, diag
+
+    # CLM-ML needs a concrete GridInfo threaded into the jit (same warm-start
+    # doctrine as the transient loop).  Normally the caller passes the one it
+    # extracted from the transient, but a spin-up requested after ZERO transient
+    # steps (e.g. --days 0) arrives with a cold canopy and grid_info=None: build
+    # it here from one EAGER step (concrete doy/hour) so the jitted body below
+    # never has to trace the non-traceable cold path.  Non-CLM-ML schemes just
+    # jit straight away with grid_info=None.
+    _needs_warm = (isinstance(config.surface_scheme, CLMMLCanopyConfig)
+                   and clm_ml_grid_info is None)
+    _jit_diag = None if _needs_warm else jax.jit(
+        lambda st, cb, d, h: _diag_body(clm_ml_grid_info, st, cb, d, h))
 
     # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].  The
     # three ``som_*_loss`` fields are each SOM pool's total decomposition D_X,
@@ -551,9 +562,19 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
                               "som_active_loss", "som_slow_loss",
                               "som_passive_loss")}
     for s in range(steps_per_year):
-        doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
-        hour = jnp.asarray((s * dt / 3600.0) % 24.0)
-        state, carbon_state, diag = _diag_step(state, carbon_state, doy, hour)
+        if _jit_diag is None:
+            # First CLM-ML step: eager cold start with CONCRETE doy/hour, then
+            # jit the rest closing over the extracted GridInfo.
+            doy = float((start_doy + s * dt_days) % 365.0)
+            hour = float((s * dt / 3600.0) % 24.0)
+            state, carbon_state, diag = _diag_body(
+                None, state, carbon_state, doy, hour)
+            _gi = extract_clm_ml_grid_info(state.canopy_state)
+            _jit_diag = jax.jit(lambda st, cb, d, h: _diag_body(_gi, st, cb, d, h))
+        else:
+            doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
+            hour = jnp.asarray((s * dt / 3600.0) % 24.0)
+            state, carbon_state, diag = _jit_diag(state, carbon_state, doy, hour)
         for k in acc:
             acc[k] = acc[k] + getattr(diag, k) * dt_days
 
@@ -810,6 +831,18 @@ def main() -> None:
             Path(args.restart_from), config
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
+        # The LMIP restart format persists only soil/snow/carbon, not the CLM-ML
+        # canopy's prognostic sub-state (leaf/air temperatures, the 10-day t_a10
+        # running mean).  Resuming clm_ml therefore COLD-starts the canopy: the
+        # run continues correctly (the first resumed step rebuilds the vertical
+        # structure) but the canopy's minutes-to-days memory is lost, so the
+        # first ~10 days after a restart differ from an uninterrupted run.  Warn
+        # rather than silently diverge.  (Full canopy_state serialization is a
+        # separate task — the transient soil spin-up is unaffected beyond ~10 d.)
+        if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+            print("  WARNING: clm_ml canopy sub-state (leaf/air T, t_a10) is not "
+                  "in the restart; the canopy cold-starts and the first ~10 days "
+                  "differ from an uninterrupted run.", file=sys.stderr)
     else:
         state = init_multilayer_land_state(1, config, T_init=args.t_init)
         carbon_state = (
