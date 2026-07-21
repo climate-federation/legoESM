@@ -140,10 +140,12 @@ def test_slab_path_honors_the_literal_too():
             - np.asarray(outs["credit"].ocean_heat_extraction))
     assert float(diff.max()) > 0.0          # lead freeze fired (non-vacuous)
     assert float(diff.min()) >= 0.0         # charge >= credit everywhere
-    # freshwater/salt identical (the sign routes only the latent term)
+    # freshwater identical (the sign routes only the latent term);
+    # TileResponse's field is ``freshwater_flux`` (not the v2 dict's
+    # ``freshwater_to_ocean``).
     np.testing.assert_array_equal(
-        np.asarray(outs["charge"].freshwater_to_ocean),
-        np.asarray(outs["credit"].freshwater_to_ocean))
+        np.asarray(outs["charge"].freshwater_flux),
+        np.asarray(outs["credit"].freshwater_flux))
 
 
 def test_unknown_literal_raises_at_step_entry():
