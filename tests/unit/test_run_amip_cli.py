@@ -357,6 +357,15 @@ def test_land_surface_scheme_flag_flows_to_config():
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
 
+    # clm_ml is a first-class selector (S4-AMIP plumbing); validate_strict must
+    # ACCEPT it (the coupled ncol>1 capability gate lives in the driver setup,
+    # not here — single-point CLM-ML runs today via run_lmip).
+    cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+    ]), parser))
+    assert cfg_clm.land_surface_scheme == "clm_ml"
+    cfg_clm.validate_strict()  # must not raise
+
 
 def test_sponge_flags_flow_to_config():
     """--sponge / --sponge-coeff-per-day / --sponge-sigma-top round-trip (#836

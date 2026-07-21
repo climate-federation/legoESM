@@ -106,6 +106,23 @@ def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
         driver_two_leaf.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
 
 
+def test_setup_clm_ml_coupled_raises_ncol_gt1_pending(monkeypatch, tmp_path):
+    """A coupled clm_ml setup fails LOUDLY (S2 ncol>1 pending) rather than letting
+    the eager host path raise a cryptic tracer error inside the jitted segment.
+
+    S4-AMIP plumbing makes 'clm_ml' a first-class selector (accepted by the CLI +
+    validate_strict), but the coupled land tile steps every model column (ncol>1)
+    and the CLM-ML forward path is jit-traceable only at ncol==1 so far.  The
+    driver setup must reject it with actionable guidance (use run_lmip)."""
+    import pytest
+    _patch_land_loaders(monkeypatch)
+    driver_clm = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="clm_ml"),
+        output_dir=tmp_path / "clmml")
+    with pytest.raises(NotImplementedError, match="ncol>1 traceable CLM-ML"):
+        driver_clm.setup()
+
+
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     """A 1-day AMIP run completes and the prognostic soil column advances."""
     _patch_land_loaders(monkeypatch)

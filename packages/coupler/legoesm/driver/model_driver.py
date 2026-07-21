@@ -1720,10 +1720,27 @@ class ModelDriver:
             _surface_scheme = SimpleSEBConfig()
         elif _scheme_name == "two_leaf":
             _surface_scheme = TwoLeafCanopyConfig()
+        elif _scheme_name == "clm_ml":
+            # CLM-ML-JAX multilayer canopy.  The forward path is jit-traceable
+            # only at ncol==1 today (S1); a coupled/global run steps the land
+            # tile over ALL model columns (ncol>1) inside the jitted segment,
+            # which needs the per-column traceable canopy (S2, in progress).
+            # Fail LOUDLY here rather than let the eager host path raise a cryptic
+            # TracerArrayConversionError deep inside the jitted coupler step.
+            # Single-point CLM-ML runs today via scripts/run/run_lmip.py.
+            raise NotImplementedError(
+                "land_surface_scheme='clm_ml' in the coupled driver requires the "
+                "ncol>1 traceable CLM-ML canopy path (S2), not yet available: the "
+                "coupled land tile steps every model column inside the jitted "
+                "segment, but the CLM-ML forward path is jit-traceable only at "
+                "ncol==1 so far. Use scripts/run/run_lmip.py "
+                "--land-surface-scheme clm_ml for single-point CLM-ML today, or "
+                "select 'two_leaf' for a coupled canopy run."
+            )
         else:
             raise ValueError(
                 f"Unknown land_surface_scheme {_scheme_name!r}; "
-                "expected 'simple_seb' or 'two_leaf'."
+                "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
             )
 
         ad = self.physics.adapter

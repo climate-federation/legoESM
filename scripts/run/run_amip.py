@@ -1115,7 +1115,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
                              "(byte-identical when unchanged).")
     parser.add_argument("--land-surface-scheme",
-                        choices=["simple_seb", "two_leaf"],
+                        choices=["simple_seb", "two_leaf", "clm_ml"],
                         default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
                         dest="land_surface_scheme",
                         help="Multilayer-land surface scheme (issue #730). "
@@ -1123,7 +1123,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
                              "energy balance (Kelvin h_r bare-soil + two-leaf "
                              "stomatal transpiration) that holds land ET below "
-                             "potential and breaks the over-evaporation wet loop. "
+                             "potential and breaks the over-evaporation wet loop; "
+                             "'clm_ml' = the CLM-ML-JAX multilayer canopy (needs the "
+                             "clm-ml-jax backend; coupled/global multi-column support "
+                             "is pending the ncol>1 traceable path — single-point "
+                             "CLM-ML runs today via run_lmip). "
                              "Only affects --use-multilayer-land runs.")
     parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",

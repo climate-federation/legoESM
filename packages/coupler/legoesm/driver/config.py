@@ -1591,7 +1591,7 @@ class ExperimentConfig(NamedTuple):
             )
         # Land surface-scheme membership (mirror the model_driver dispatch so a
         # typo fails here, not at run time).
-        _valid_land_surface = ("simple_seb", "two_leaf")
+        _valid_land_surface = ("simple_seb", "two_leaf", "clm_ml")
         if self.land_surface_scheme not in _valid_land_surface:
             errors.append(
                 f"land_surface_scheme must be one of {_valid_land_surface}, "
