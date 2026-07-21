@@ -87,6 +87,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
+    nemo_lateral_viscosity_coefficients,
+    nemo_ldf_lap_viscosity_cgrid,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -174,7 +176,8 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
-VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
+    {"vector_laplacian", "flux_divergence", "nemo_div_curl"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -1735,6 +1738,7 @@ def _bc_pv_flux(
     enstrophy_metric=False,
     reconstruct_zeta=False,
     vorticity_scheme="al81",
+    een_q_boundary="neumann_fill",
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1742,10 +1746,10 @@ def _bc_pv_flux(
     accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
-    if vorticity_scheme not in ("al81", "ene", "ene_total"):
+    if vorticity_scheme not in ("al81", "ene", "ene_total", "een_total"):
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
-            f"'al81', 'ene', or 'ene_total'"
+            f"'al81', 'ene', 'ene_total', or 'een_total'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1963,10 +1967,28 @@ def _bc_pv_flux(
                        else compute_vertex_mask(mask, grid=grid))
         # Vector-invariant vorticity flux dispatch (membership already
         # validated at function entry — 'al81' or 'ene').
-        if vorticity_scheme == "al81":
+        if vorticity_scheme in ("al81", "een_total"):
+            # "een_total" = NEMO ln_dynvor_een (dyn_vor EEN, kvor=total): the
+            # planetary Coriolis f rides the SAME 12-point Arakawa-Lamb-81 / EEN
+            # triad as the relative vorticity, so the RHS carries the ABSOLUTE
+            # vorticity q = (f + zeta)/e3f through one enstrophy-and-energy-
+            # conserving operator (NEMO's actual DINO form — key_qco, EEN). The
+            # separate face-f planetary add (stage 7b') is gated off for this
+            # scheme (below), and the Matsuno rotation is skipped
+            # (coriolis_scheme="explicit_ab2"), so f is applied exactly once.
+            # "al81" (f_vtx=None) stays relative-only (planetary Coriolis handled
+            # in the matsuno_split / explicit_ab2 face-f path).
+            _f_vtx_al = None
+            if vorticity_scheme == "een_total":
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    vertex_coriolis,
+                )
+                _f_vtx_al = vertex_coriolis(grid)
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
+                f_vtx=_f_vtx_al,
+                q_boundary=een_q_boundary,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -2364,12 +2386,13 @@ def _bc_horizontal_viscosity(
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
     # below (bit-identical to the historical path).
     _visc_op = getattr(config, "lateral_viscosity_operator", "vector_laplacian")
-    if _visc_op not in ("vector_laplacian", "flux_divergence"):
+    if _visc_op not in ("vector_laplacian", "flux_divergence", "nemo_div_curl"):
         raise ValueError(
-            "lateral_viscosity_operator must be 'vector_laplacian' or "
-            f"'flux_divergence', got {_visc_op!r}"
+            "lateral_viscosity_operator must be 'vector_laplacian', "
+            f"'flux_divergence', or 'nemo_div_curl', got {_visc_op!r}"
         )
     _use_flux_div = _visc_op == "flux_divergence"
+    _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
     def _biharmonic_op(uu, vv):
@@ -2387,7 +2410,70 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_flux_div and config.lateral_viscosity.A_h > 0:
+    if _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+        # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
+        # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
+        # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
+        # does its OWN latitude structure via MAX(e1,e2), so A_h_lat_scaling is
+        # DELIBERATELY IGNORED here (NEMO owns the cos φ shape through MAX(e1,e2));
+        # eq-boost / cap-boost / floor / B_h instead RAISE below (they would silently
+        # double-scale or be silently dropped — vector-Laplacian extensions, not NEMO's).
+        if (config.lateral_viscosity.A_h_eq_boost > 1.0
+                or config.lateral_viscosity.A_h_cap_boost > 1.0
+                or config.lateral_viscosity.A_h_floor > 0.0):
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' embeds NEMO's "
+                "ahmt/ahmf = ½·rn_Uv·MAX(e1,e2) coefficient and does not support "
+                "A_h_eq_boost / A_h_cap_boost / A_h_floor (vector-Laplacian "
+                "extensions). Set them to their defaults."
+            )
+        if config.lateral_viscosity.B_h > 0:
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' implements only the "
+                "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
+                "wired for this operator (DINO uses Laplacian only)."
+            )
+        if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+            raise ValueError(
+                "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+                "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+            )
+        _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+        _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
+        # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
+        # submerged staircase side walls, where it is computed against the dry
+        # cells' zero velocities — an accidental NO-SLIP on every slope/sill
+        # face (ahmf·zeta stress) that NEMO's 3-D fmask zeroes (free-slip).
+        # Build per level from is_active; plain z-star coords (no is_active)
+        # keep the 2-D mask bit-identically.
+        _visc_vmask = vertex_mask
+        _act3 = getattr(z_coord, "is_active", None)
+        if _act3 is not None:
+            _cell3 = _act3.astype(u.dtype)
+            if mask is not None:
+                _cell3 = _cell3 * mask[..., jnp.newaxis]
+            _vm3 = jax.vmap(
+                lambda m2: compute_vertex_mask(m2, grid=grid),
+                in_axes=-1, out_axes=-1)(_cell3)
+            if vertex_mask is not None:
+                _vm3 = _vm3 * vertex_mask[..., jnp.newaxis]
+            _visc_vmask = _vm3
+        diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
+            u, v, grid, _ahmt, _ahmf,
+            mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+        diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
+        if _want_kdiss_flux:
+            # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:
+            # ``vector_laplacian_dissipation_cgrid`` credits ahmt·(div²+ζ²) whereas
+            # this operator dissipates ahmt·div² + ahmf·ζ² (distinct T/F coeffs). On
+            # the Mercator grid ahmf≈ahmt (adjacent rows, e1≈e2) so the ζ²-source is
+            # mis-scaled by <~1% at high lat — diagnostic only (never du_dt/dv_dt),
+            # and dormant unless kdiss_h_flux_form is on (NOT the DINO card).
+            _ah_scale_center = _ahmt
+        du_dt = du_dt + diag_Ah_lap_u
+        dv_dt = dv_dt + diag_Ah_lap_v
+    elif _use_flux_div and config.lateral_viscosity.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
@@ -3605,6 +3691,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
@@ -3625,9 +3712,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # the config string ⇒ default ("matsuno_split") is bit-identical: this block
     # is not traced at all.
     if (getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2"
-            and getattr(config, "vorticity_scheme", "al81") != "ene_total"):
-        # (ene_total carries the planetary term inside the vorticity flux —
-        # NEMO np_CRV — so the separate face-f add would double-count.)
+            and getattr(config, "vorticity_scheme", "al81")
+            not in ("ene_total", "een_total")):
+        # (ene_total / een_total carry the planetary term INSIDE the vorticity
+        # flux — NEMO np_CRV (ENE) / ln_dynvor_een (EEN) — so the separate
+        # face-f add would double-count f.)
         from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
         # Pass u_mask=None so the operator does not apply its 2-D mask; we apply
         # the 3-D face mask here (= the partial-cell-aware u_mask_3d/v_mask_3d

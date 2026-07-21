@@ -171,6 +171,15 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     dt = spec_cfg.dt
     radiation = str(base_cfg.get("aimip_radiation", "gray"))
     rad_update_interval = int(base_cfg.get("aimip_rad_update_interval", 6))
+    # Classical-mode radiation pin (campaign_driver, D1): ablations are
+    # classical scheme-swap runs, so they hold radiation at rrtmgp unless
+    # the config carries the explicit escape.
+    from legoesm.training.campaign_driver import validate_classical_radiation
+    validate_classical_radiation(
+        radiation,
+        smoke=bool(base_cfg.get("smoke", False)),
+        allow_non_rrtmgp=bool(base_cfg.get("allow_non_rrtmgp", False)),
+    )
 
     def _make_physics_fn(p, grid_):
         return make_aimip_classical_spectral_physics(

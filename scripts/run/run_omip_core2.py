@@ -1346,7 +1346,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      lloyd_iterations: int = 20, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
-                     pgf_scheme=None, bottom_drag_r=None,
+                     pgf_scheme=None, tracer_advection=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
@@ -1407,6 +1407,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
             "bridge yet (lat-lon / tripole only)")
     _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
                               ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
+                              ("tracer_advection", tracer_advection),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_bbl_thickness", bottom_drag_bbl_thickness),
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
@@ -1626,7 +1627,7 @@ def _resolve_wind_vfac(relative_winds: bool, wind_vfac):
     return vfac
 
 
-def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
+def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """Build a KPP ``VerticalMixingConfig`` overriding ONLY the CLI-set knobs.
 
     Returns ``None`` when neither knob is given so the caller falls through to
@@ -1634,7 +1635,7 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
     byte-for-byte the pre-flag config (no silent re-defaulting of the other
     KPP fields).  ``Ri_crit`` / ``Cv`` must be finite and within their accepted
     range (see ``_KPP_RI_CRIT_RANGE`` / ``_KPP_CV_RANGE``)."""
-    if kpp_ri_crit is None and kpp_cv is None:
+    if kpp_ri_crit is None and kpp_cv is None and kpp_eice is None:
         return None
     from legoesm.ocean.physics.vertical_mixing.config import (
         KPPConfig, VerticalMixingConfig,
@@ -1654,10 +1655,16 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
     if kpp_cv is not None:
         _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
         kpp = kpp._replace(Cv=float(kpp_cv))
+    if kpp_eice is not None:
+        if int(kpp_eice) not in (0, 1, 3):
+            raise ValueError(
+                f"--kpp-eice must be 0 (off), 1 (legoESM linear 1-fi) or 3 "
+                f"(max(0,1-4*fi), matches NEMO nn_eice=3); got {kpp_eice!r}.")
+        kpp = kpp._replace(eice=int(kpp_eice))
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
 
-def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
+def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
     """Reject the KPP override flags on grids whose CORE-II builder does not
     thread ``vertical_mixing`` INTO A LIVE KPP scheme (a flag that silently does
     nothing is the dispatch footgun CLAUDE.md forbids).  ``mpas`` and
@@ -1666,13 +1673,20 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None):
     (the dynamics-core implicit vertical solve, NO KPP boundary layer) so a KPP
     override would be a silent no-op there -> still rejected; ``cubed_sphere``
     is not wired.  Extend this set only when the builder actually runs KPP."""
-    if (kpp_ri_crit is not None or kpp_cv is not None) and grid not in (
+    if (kpp_ri_crit is not None or kpp_cv is not None
+            or kpp_eice is not None) and grid not in (
             "mpas", "latlon_bathy"):
         raise SystemExit(
-            f"--kpp-ri-crit/--kpp-cv are wired for --grid mpas/latlon_bathy "
+            f"--kpp-ri-crit/--kpp-cv/--kpp-eice are wired for --grid mpas/latlon_bathy "
             f"(grids that run the KPP boundary layer), not --grid {grid!r}. "
             f"tripole runs the dynamics-core implicit vertical solve (no KPP) "
             f"so the override would silently do nothing.")
+    if kpp_eice is not None and grid == "mpas":
+        raise SystemExit(
+            "--kpp-eice is wired for --grid latlon_bathy only: the MPAS KPP "
+            "vertical-mixing bridge receives no ice concentration yet "
+            "(mpas_physics passes tau/q only), so the attenuation would "
+            "silently no-op there. Run the under-ice KPP lever on latlon.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -3757,6 +3771,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer, LOWERING it shoals it (same MLD lever "
                         "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
+    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 3],
+                   help="Under-ice attenuation of the KPP turbulent velocity "
+                        "scales (KPP w-scale analogue of ice suppression; "
+                        "mirror of --tke-eice). Compact ice scales w_m/w_s by "
+                        "(1-eff) so BOTH the boundary-layer depth and mixing "
+                        "shrink under ice. None/0 (default) = off; 1 = legoESM "
+                        "linear (1-fi) [NOT NEMO nn_eice=1]; 3 = max(0,1-4*fi) "
+                        "(matches NEMO nn_eice=3, killed at fi>=0.25). The KPP grids' "
+                        "Arctic halocline-erosion lever (over-deep MLD + "
+                        "Siberian salty) that --tke-eice fixed only on the TKE "
+                        "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
+                        "--grid latlon_bathy (MPAS KPP bridge has no ice yet).")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "
@@ -3877,7 +3903,21 @@ def main() -> int:
     args = p.parse_args()
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
-    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
+    _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice)
+    # --kpp-eice needs an ice source to bite: surface_forcing.ice_concentration
+    # is attached only under --prognostic-sea-ice or a prescribed SIC field
+    # (--ice-albedo/--ice-thermo/--sss-restore load it).  Without one, ice_frac
+    # stays None and the attenuation is silently inert (codex MED) — reject
+    # loudly rather than run a no-op lever.
+    if args.kpp_eice not in (None, 0) and not (
+            args.prognostic_sea_ice or args.ice_albedo or args.ice_thermo
+            or args.sss_restore):
+        raise SystemExit(
+            "--kpp-eice needs a sea-ice source to attenuate against: add "
+            "--prognostic-sea-ice (or a prescribed SIC via --ice-albedo/"
+            "--ice-thermo/--sss-restore). Without one the surface ice "
+            "concentration never reaches the KPP closure and the flag is a "
+            "silent no-op.")
     _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant,
                                args.barotropic_solver)
 
@@ -4253,13 +4293,21 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
+            # Cross-grid parity (2026-07-18 manifest audit): these two flags
+            # were silently IGNORED on MPAS — the call site never passed
+            # them, so mpas8_corr ran tvd + adcroft while the tripole ran
+            # superbee + smc03 despite byte-identical sbatch flags.  Both
+            # ARE supported on the Voronoi core (ocean_model_mpas advection
+            # dispatch incl. superbee; ocean_pe_mpas smc03 branch).
+            pgf_scheme=args.pgf_scheme,
+            tracer_advection=args.tracer_advection,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, ddm=_ddm_cfg,
-            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
         app_grid_type = "mpas"
@@ -4321,7 +4369,7 @@ def main() -> int:
             ddm=_ddm_cfg,
             # KPP Ri_crit/Cv override (shoal the too-deep winter ML). None
             # unless --kpp-ri-crit/--kpp-cv given -> default KPPConfig unchanged.
-            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
+            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
         )
@@ -4365,11 +4413,12 @@ def main() -> int:
             # build_latlon_bathy already threaded into live KPP (codex). Fail
             # loud on the conflict rather than let YAML win over the explicit CLI.
             if "physics" in _ovr and (args.kpp_ri_crit is not None
-                                      or args.kpp_cv is not None):
+                                      or args.kpp_cv is not None
+                                      or args.kpp_eice is not None):
                 raise ValueError(
-                    "--kpp-ri-crit/--kpp-cv conflict with a --config ocean.physics "
-                    "block: the YAML physics config would overwrite the CLI KPP "
-                    "override. Set Ri_crit/Cv in the YAML "
+                    "--kpp-ri-crit/--kpp-cv/--kpp-eice conflict with a --config "
+                    "ocean.physics block: the YAML physics config would overwrite "
+                    "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
                     "section and use the CLI flags -- not both.")
             model = LatLonCGridOceanModel(

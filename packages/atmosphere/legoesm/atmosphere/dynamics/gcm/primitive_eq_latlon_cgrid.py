@@ -415,25 +415,51 @@ def cgrid_latlon_hydrostatic_tendencies(
     # the geopotential part of the PGF lives in the cross-product) ---
     B = KE if _lin_pgf else Phi + KE
 
-    # --- 5/6. Bernoulli + ln(p_s) gradients (batched at faces) ---
-    # ``B`` is (n_lat, n_lon, nlev) and ``ln_ps`` is (n_lat, n_lon).
+    # --- 5/6. Bernoulli + log-pressure gradients (batched at faces) ---
     # ``gradient_*_cgrid`` treats any trailing axis as a passive batch
-    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so
-    # we promote ``ln_ps`` to a single-level tensor and concatenate
-    # along the level axis.  Each gradient runs once on the
-    # (n_lat, n_lon, nlev+1) tensor; ``ln_ps`` claims the trailing slot.
-    # 4 gradient calls collapse to 2 (one batched x + one batched y).
-    ln_ps = jnp.log(p_s)
+    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so the
+    # per-lane pressure field is concatenated onto ``B`` along the level
+    # axis and each gradient runs ONCE on the batched tensor:
+    #   sigma:  [B (nlev), ln_ps (1)]        -> (n_lat, n_lon, nlev+1)
+    #   hybrid: [B (nlev), ln p^SB (nlev)]   -> (n_lat, n_lon, 2*nlev)
+    # Multiple gradient calls collapse to 2 (one batched x + one batched y).
+    #
+    # #1029 (hybrid only): the momentum pressure-gradient correction
+    # differences the SB81 full-level log-pressure ``ln p_k =
+    # ln p_{k+1/2} - alpha_k`` — the SAME half-level construction the
+    # geopotential integrates — so ``-grad(Phi) - R_d T grad(ln p)``
+    # cancels discretely at uniform-T rest over terrain.  The analytic
+    # ``hybrid_factor = B p_s / p`` it replaces is the LOCAL derivative
+    # of a DIFFERENT p(p_s) (arithmetic full-level mean), which does not
+    # match the finite-difference secant of the nonlinear SB81 Phi(p_s)
+    # and left an O(slope) spurious force (the #1029 seed).  The SB81
+    # gradients feed BOTH the momentum correction and the thermodynamic
+    # ``v . grad_eta(ln p)`` conversion (one shared discrete field — see
+    # section 11), so the hybrid lane neither carries nor differences a
+    # ``ln p_s`` channel.
     n_lat_g, n_lon_g, nlev_g = B.shape
-    _Bln_stack = jnp.concatenate(
-        [B, ln_ps[..., jnp.newaxis]], axis=-1,
-    )  # (n_lat, n_lon, nlev+1)
-    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, nlev+1)
-    _dBln_dy = gradient_y_cgrid(_Bln_stack, grid)  # (n_lat+1, n_lon, nlev+1)
+    if _hybrid:
+        from legoesm.grids.vertical import sb81_full_level_ln_p
+        lnp_sb = sb81_full_level_ln_p(sigma_coord, p_s)  # (n_lat, n_lon, nlev)
+        _Bln_stack = jnp.concatenate(
+            [B, lnp_sb], axis=-1,
+        )  # (n_lat, n_lon, 2*nlev)
+    else:
+        ln_ps = jnp.log(p_s)
+        _Bln_stack = jnp.concatenate(
+            [B, ln_ps[..., jnp.newaxis]], axis=-1,
+        )  # (n_lat, n_lon, nlev+1)
+    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, ...)
+    _dBln_dy = gradient_y_cgrid(_Bln_stack, grid)  # (n_lat+1, n_lon, ...)
     dB_dx = _dBln_dx[..., :nlev_g]
     dB_dy = _dBln_dy[..., :nlev_g]
-    dln_dx = _dBln_dx[..., nlev_g]   # squeeze trailing-1 → (n_lat, n_lon+1)
-    dln_dy = _dBln_dy[..., nlev_g]
+    if _hybrid:
+        dlnpsb_dx = _dBln_dx[..., nlev_g:]  # (n_lat, n_lon+1, nlev)
+        dlnpsb_dy = _dBln_dy[..., nlev_g:]  # (n_lat+1, n_lon, nlev)
+        dln_dx = dln_dy = None  # hybrid: no ln p_s gradient consumer left
+    else:
+        dln_dx = _dBln_dx[..., -1]   # squeeze trailing-1 → (n_lat, n_lon+1)
+        dln_dy = _dBln_dy[..., -1]
 
     # Cell→face interps: the v-face (latitude) direction uses the
     # halo-aware variant so a band's end faces — which are interior
@@ -449,7 +475,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # rows — T, u (consumed twice: curl circulation + the
     # absolute-vorticity 4-pt u->v-face average), the layer thickness
     # dp (hybrid: dA+dB*p_s from entry; sigma: p_s*dsigma built here),
-    # and on the hybrid lane also hybrid_factor and p_s.  Only the
+    # and on the hybrid lane also p_s.  Only the
     # sigma_dot / mass-flux v-interps stay separate: they depend on
     # div(dp*v), which needs the padded dp first.  Census (np=2 LL32
     # dry): 9 -> 6 per-step exchanges on the sigma path.  Serial/local
@@ -457,14 +483,15 @@ def cgrid_latlon_hydrostatic_tendencies(
     # dead-code-eliminated).
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     if _hybrid:
-        # (B*p_s/p) pressure-gradient correction factor — entry-known.
-        hybrid_factor = (
-            sigma_coord.B_full * p_s[..., jnp.newaxis] / p_full
-        )
+        # #1029: BOTH the momentum correction and the thermodynamic
+        # ``v . grad(ln p)`` conversion difference the SB81 ``ln p_k``
+        # face gradients from section 5/6, so the analytic
+        # ``hybrid_factor`` no longer exists on this lane and nothing of
+        # it rides this pad.
         _ps3 = p_s[..., jnp.newaxis]
-        (_T_lat_pad, _u_lat_pad, _dp_lat_pad, _hf_lat_pad,
+        (_T_lat_pad, _u_lat_pad, _dp_lat_pad,
          _ps_lat_pad) = pad_with_pole_bc_lat_multi(
-            (T, u, dp, hybrid_factor, _ps3), halo=1)
+            (T, u, dp, _ps3), halo=1)
     else:
         # Sigma-coord layer thickness, hoisted from the continuity
         # branch below so its ghost rows ride the entry exchange.
@@ -477,6 +504,24 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
         _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
             (T, u, dp), halo=1)
+
+    T_u = interp_cell_to_uface(T)
+    T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
+
+    # Momentum pressure-gradient correction ``-R_d T grad_eta(ln p)``:
+    # sigma:  grad_eta(ln p) = grad(ln p_s) — exact.
+    # hybrid: grad_eta(ln p) = grad(ln p_{k+1/2} - alpha_k), the discrete
+    #   gradient of the SB81 full-level log-pressure built from the SAME
+    #   half-level construction as Phi (#1029) — replaces the analytic
+    #   ``(B p_s/p) grad(ln p_s)`` factor, which is not the secant derivative
+    #   of the discrete Phi(p_s) and spuriously accelerates a rest state over
+    #   terrain.
+    if _hybrid:
+        pg_corr_x = R_d * T_u * dlnpsb_dx
+        pg_corr_y = R_d * T_v * dlnpsb_dy
+    else:
+        pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
+        pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
 
     # --- 7. Momentum tendencies ---
     if _lin_pgf:
@@ -492,21 +537,6 @@ def cgrid_latlon_hydrostatic_tendencies(
         du_dt = -dB_dx + pgf_x
         dv_dt = -dB_dy + pgf_y
     else:
-        T_u = interp_cell_to_uface(T)
-        T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
-
-        pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
-        pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
-
-        # Hybrid coordinate correction: in sigma coords grad_eta(ln p) =
-        # grad(ln p_s), but in hybrid coords grad_eta(ln p) =
-        # (B*p_s/p) * grad(ln p_s).
-        if _hybrid:
-            hf_u = interp_cell_to_uface(hybrid_factor)
-            hf_v = interp_cell_to_vface_halo(hybrid_factor, f_pad=_hf_lat_pad)
-            pg_corr_x = pg_corr_x * hf_u
-            pg_corr_y = pg_corr_y * hf_v
-
         du_dt = -(dB_dx + pg_corr_x)
         dv_dt = -(dB_dy + pg_corr_y)
 
@@ -622,6 +652,17 @@ def cgrid_latlon_hydrostatic_tendencies(
     adiabatic = kappa * T * omega / (p_full + 1e-10)
 
     # κ T v·∇_η(ln p): the horizontal part of the energy-conversion term.
+    # #1029: the thermodynamic conversion MUST difference the SAME discrete
+    # ln p field as the momentum PGF correction — sigma: grad(ln p_s);
+    # hybrid: grad(ln p_{k+1/2} - alpha_k) (the SB81 full-level field).  A
+    # mixed pairing (SB81 momentum + analytic ``B p_s/p`` thermo) is
+    # rest-neutral but energetically inconsistent under flow over terrain:
+    # the KE<->APE conversion then uses a DIFFERENT effective grad(ln p)
+    # than the momentum work term, and the forced ``held_suarez_topo`` case
+    # blows up by day ~13 (vs day 50+ pre-fix, same environment) — measured
+    # 2026-07-19.  Both branches below consume that shared field: the
+    # face-paired form via ``pg_corr_x/y`` (which carry it directly), the
+    # cell-centre form via ``dlnpsb_dx/dy`` / ``dln_dx/dy``.
     if config.energy_paired_conversion and not _lin_pgf:
         # (#1029 FIX) ENERGY-PAIRED form: the conversion term is computed
         # as the average of the FACE products u·pg_corr — the exact
@@ -644,18 +685,18 @@ def cgrid_latlon_hydrostatic_tendencies(
             + _face_to_cell_v(v * pg_corr_y)
         ) / constants.c_pd
     else:
-        # Legacy: v · grad(ln p_s) at cell centres (average face
-        # gradients to centres, then multiply cell-centre averages).
-        dln_dx_cc = _face_to_cell_u(
-            jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
-        dln_dy_cc = _face_to_cell_v(
-            jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
-        v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
-        # In sigma coords: grad_eta(ln p) = grad(ln p_s).
-        # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+        # Cell-centre form: v · grad_eta(ln p) (average face gradients
+        # to centres, then multiply cell-centre averages) on the shared
+        # discrete field.
         if _hybrid:
-            v_dot_grad_lnps = v_dot_grad_lnps * (
-                sigma_coord.B_full * p_s[..., jnp.newaxis] / (p_full + 1e-10))
+            v_dot_grad_lnps = (u_c * _face_to_cell_u(dlnpsb_dx)
+                               + v_c * _face_to_cell_v(dlnpsb_dy))
+        else:
+            dln_dx_cc = _face_to_cell_u(
+                jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
+            dln_dy_cc = _face_to_cell_v(
+                jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
+            v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
         adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt = horiz_adv_T + vert_adv_T + adiabatic

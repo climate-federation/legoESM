@@ -1234,6 +1234,169 @@ def vector_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def nemo_lateral_viscosity_coefficients(
+    grid: LatLonGrid, half_UM: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO ``ldf_c2d`` viscosity coefficients ``ahmt``/``ahmf`` (nn_ahm_ijk_t=20).
+
+    Faithful transcription of NEMO 5.0.2 ``ldf_c2d`` (``src/OCE/LDF/ldfc1d_c2d.F90``
+    L138-139) for the laplacian ``nn_ahm_ijk_t=20`` case (``ldf_dyn_init``
+    ``zUfac = ½·rn_Uv``, ``inn=1``)::
+
+        ahmt(T) = ½·rn_Uv · MAX(e1t, e2t)
+        ahmf(F) = ½·rn_Uv · MAX(e1f, e2f)
+
+    with ``rn_Uv`` the lateral viscous velocity [m/s] and ``e1``/``e2`` the zonal /
+    meridional grid scales.  ``half_UM = ½·rn_Uv``.  Unlike a single
+    ``A_h·cos(φ)^p`` scalar applied OUTSIDE the vector Laplacian, this coefficient
+    is defined at the T- and F-points so it can be embedded INSIDE the div/curl
+    (see :func:`nemo_ldf_lap_viscosity_cgrid`), matching NEMO's
+    ``grad(ahmt·div) − curl(ahmf·curl)``.
+
+    On a uniform-Δφ lat-lon grid ``e2 = R·Δφ`` is latitude-independent, so
+    ``MAX(e1,e2) = e2`` at high latitude and ``ahmt`` does NOT shrink with cos(φ)
+    (unlike ``A_h·cos φ``).  On a conformal Mercator grid ``e1 ≈ e2`` at every row
+    (isotropic cells in the continuum), so ``MAX(e1,e2) ≈ e1 = R·Δλ·cos φ`` and the
+    two forms agree in magnitude to ``O(Δλ²)`` — the placement (embedded vs outside)
+    is then the dominant difference.  NB the DISCRETE metrics differ slightly:
+    ``e2t = R·(φ_face[j+1]−φ_face[j])`` (a face difference) vs
+    ``e1t = R·Δλ·cos φ_c`` (a centre cosine), so ``MAX`` picks ``e2`` on a fair
+    fraction of rows and the agreement is ``~2e-5`` worst-case on the DINO grid
+    (machine-level only exactly at the equator), not machine-zero everywhere.
+
+    Parameters
+    ----------
+    grid : LatLonGrid or LatLonCGridGeometry
+        Must expose the C-grid metric fields ``dx_u``/``dy_u`` (e1u/e2u at the
+        u-face = cell-centre latitude → e1t/e2t) and ``dx_v``/``dy_v`` (e1v/e2v at
+        the v-face latitude → e1f/e2f).
+    half_UM : float
+        ``½·rn_Uv`` [m/s].
+
+    Returns
+    -------
+    ahmt : (n_lat,)      viscosity at T-points [m²/s].
+    ahmf : (n_lat+1,)    viscosity at F-points [m²/s].
+    """
+    if not (hasattr(grid, "dx_u") and hasattr(grid, "dy_u")
+            and hasattr(grid, "dx_v") and hasattr(grid, "dy_v")):
+        raise ValueError(
+            "nemo_lateral_viscosity_coefficients requires a LatLonCGridGeometry "
+            "with dx_u/dy_u/dx_v/dy_v metric fields (call ensure_geometry first)."
+        )
+    # e1t/e2t at the u-face (cell-centre) latitude; e1f/e2f at the v-face latitude.
+    # dx_* / dy_* are lon-uniform on a (non-tripolar) lat-lon grid, so column 0
+    # carries the full latitudinal metric.
+    e1t = grid.dx_u[:, 0]
+    e2t = grid.dy_u[:, 0]
+    e1f = grid.dx_v[:, 0]
+    e2f = grid.dy_v[:, 0]
+    ahmt = half_UM * jnp.maximum(e1t, e2t)
+    ahmf = half_UM * jnp.maximum(e1f, e2f)
+    return ahmt, ahmf
+
+
+def nemo_ldf_lap_viscosity_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    ahmt: jnp.ndarray,
+    ahmf: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity with the coefficient EMBEDDED
+    inside the div/curl (``grad_h(ahmt·div_h U) − curl_h(ahmf·curl_z U)``).
+
+    Faithful transcription of NEMO 5.0.2 ``dynldf_lev.F90::dynldf_lev_lap`` +
+    ``dynldf_lev_rot_scheme.h90`` (the ``np_typ_rot`` vorticity-divergence
+    operator).  NEMO forms::
+
+        zdiv(T) = ahmt · div_h(U)                      (coeff on the T-point divergence)
+        zcur(F) = ahmf · curl_z(U)                     (coeff on the F-point vorticity)
+        pu += + ∂_x(zdiv) − ∂_y(zcur)/…               (grad of div  −  curl of curl)
+        pv += + ∂_y(zdiv) + ∂_x(zcur)/…
+
+    i.e. ``grad(ahmt·div) − k×grad(ahmf·curl)``.  This DIFFERS from applying a
+    single latitude scalar OUTSIDE the whole vector Laplacian
+    (``A_h(φ)·[grad(div) − k×grad(curl)]``) by the coefficient-gradient cross terms
+    ``∇(ahmt)·div`` and ``∇(ahmf)×curl`` — the node-14 placement fix.
+
+    Reuses the SAME shared C-grid operators (``divergence_cgrid``,
+    ``gradient_x/y_cgrid``, ``curl_vertex_cgrid``, ``gradient_curl_to_u/v``) and the
+    SAME face/vertex masking as :func:`vector_laplacian_cgrid`, so with a CONSTANT
+    ``ahmt = ahmf = A_h`` this returns exactly ``A_h · vector_laplacian_cgrid`` (a
+    truth-tier reduction test).  The coefficient is already embedded, so the caller
+    adds the returned tendency directly (NEMO's ``+`` sign; no outer ``A_h``).
+
+    NOTE (documented deviation, consistent with :func:`vector_laplacian_cgrid`):
+    NEMO weights the div/curl by the layer thickness ``e3`` (``e3t``/``e3f``); the
+    shared 2-D ``divergence_cgrid``/``curl_vertex_cgrid`` used here do not.  This is
+    the SAME thickness treatment the verified legoESM vector Laplacian uses (DINO
+    wiring node 14: div-curl structure + magnitude already certified), so the ONLY
+    change vs the current path is the embedded latitude-varying coefficient.
+
+    Parameters
+    ----------
+    u, v : face velocities (2-D or 3-D).
+    grid : LatLonGrid.
+    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
+    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
+
+    Returns
+    -------
+    visc_u, visc_v : the viscous momentum tendency (coefficient embedded).
+    """
+    is_3d = u.ndim == 3
+
+    def _bm(m):
+        # broadcast a 2-D face/cell/vertex mask over the trailing level axis;
+        # an already-3-D mask (per-level staircase vertex mask — NEMO 3-D
+        # fmask analogue) passes through unchanged.
+        if is_3d:
+            return m if m.ndim == 3 else m[..., jnp.newaxis]
+        return m
+
+    def _bc(c):
+        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
+        return c[:, None, None] if is_3d else c[:, None]
+
+    u_eff = u if u_mask is None else u * _bm(u_mask)
+    v_eff = v if v_mask is None else v * _bm(v_mask)
+
+    # 1. Divergence at T-points, scale by ahmt (NEMO zdiv = ahmt·div)
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * _bm(mask)
+    div_scaled = div * _bc(ahmt)
+    grad_div_u = gradient_x_cgrid(div_scaled, grid)
+    grad_div_v = gradient_y_cgrid(div_scaled, grid)
+
+    # 2. Relative vorticity at F-points (vertices), scale by ahmf (NEMO zcur = ahmf·curl)
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)          # (n_lat+1, n_lon+1[, nlev])
+    if mask is not None:
+        vmask = (vertex_mask if vertex_mask is not None
+                 else compute_vertex_mask(mask, grid=grid))
+        zeta = zeta * _bm(vmask)
+    zeta_scaled = zeta * _bc(ahmf)
+    grad_curl_u = gradient_curl_to_u(zeta_scaled, grid)
+    grad_curl_v = gradient_curl_to_v(zeta_scaled, grid)
+
+    # 3. grad(ahmt·div) − k×grad(ahmf·curl); same signs as vector_laplacian_cgrid.
+    visc_u = grad_div_u - grad_curl_u
+    visc_v = grad_div_v + grad_curl_v
+
+    if u_mask is not None:
+        visc_u = visc_u * _bm(u_mask)
+    if v_mask is not None:
+        visc_v = visc_v * _bm(v_mask)
+    return visc_u, visc_v
+
+
 def flux_divergence_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -3183,8 +3346,10 @@ def compute_face_masks_3d(
         False/0.0 below the seafloor.  Typically
         ``partial_coord.is_active.astype(...)``.
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        Currently unused.  Fold face kept as wall (zero) -- see
-        ``compute_face_masks`` comment.
+        Fold face kept as wall (zero) -- see ``compute_face_masks``
+        comment.  Consulted for an optional ``seam_wall_rows`` attribute
+        (partial-periodic seam wall, NEMO DINO): when present, the seam
+        u-face (cols 0 and n_lon) is closed on walled rows at every level.
 
     Returns
     -------
@@ -3199,6 +3364,9 @@ def compute_face_masks_3d(
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
     )
+    # Partial-periodic seam wall (NEMO DINO): close the seam u-face at
+    # walled latitude rows (all levels).  None → fully periodic.
+    u_mask = _apply_seam_wall_u(u_mask, getattr(grid, "seam_wall_rows", None))
     # v-face i is between cell i-1 (south) and cell i (north).
     # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
@@ -3707,7 +3875,9 @@ def pv_flux_al81_partial_cell(
     u_mask_3d: jnp.ndarray,
     v_mask_3d: jnp.ndarray,
     vtx_mask: jnp.ndarray,
+    f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
+    q_boundary: str = "neumann_fill",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -3875,17 +4045,35 @@ def pv_flux_al81_partial_cell(
       partial cells.  Mon. Wea. Rev. 126, 3248-3270.  (min-rule for
       vertex thickness.)
     """
-    # --- 1. PV at vertices, ``q = ζ / h_vtx`` ----------------------
-    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry
-    # vertices (set by the caller) so q ≈ 0 there; eps_h is a guard
-    # against floating-point edge cases.
-    q = zeta / jnp.maximum(h_vtx, eps_h)
+    # --- 1. PV at vertices ----------------------------------------
+    # ``q = (f + ζ)/h_vtx`` (ABSOLUTE vorticity, NEMO ``np_CRV`` EEN) when
+    # ``f_vtx`` is given, else ``q = ζ/h_vtx`` (relative-only, ``np_RVO``).
+    # f is added BEFORE the /h division (matching NEMO ``vor_een``:
+    # ``zwz = ff_f + ζ`` then ``zwz /= e3f``) so the planetary term rides
+    # the SAME enstrophy-conserving 12-point triad as the relative
+    # vorticity — the two are ONE operator, not two.  This is the
+    # difference between the split ``al81`` (ζ-only EEN + a separate
+    # non-enstrophy-conserving 4-pt Coriolis) and the faithful ``een_total``.
+    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry vertices
+    # (set by the caller) so q ≈ 0 there; eps_h guards floating-point edges.
+    zeta_abs = zeta if f_vtx is None else zeta + f_vtx[..., jnp.newaxis]
+    q = zeta_abs / jnp.maximum(h_vtx, eps_h)
 
-    # Neumann-fill q at land-adjacent vertices so the triad sees a
-    # smooth field across coastlines.  The fill is idempotent at
-    # interior wet vertices (vtx_mask == 1).  Keeps q in the same
-    # 4D shape ``(n_lat+1, n_lon+1, nlev)`` as zeta.
-    q = neumann_fill_vertex(q, vtx_mask)
+    # Boundary-q convention at land-adjacent vertices:
+    #   "neumann_fill" (default, bit-identical legacy): replace q by a smooth
+    #     Neumann fill from wet neighbours — WENO-stencil safety, but it ERASES
+    #     the wall shear-vorticity from the PV flux (free-slip-like PV).
+    #   "nemo_live": keep q live — NEMO vor_een (ln_dynvor_msk=F, DO-NOT-
+    #     ACTIVATE warning) computes zwz from the MASKED velocities and never
+    #     fills/masks it, so the coast shear (−u/e2f) is a real boundary
+    #     vorticity source feeding the triads (dynvor.F90:85-90; fully-dry
+    #     vertices still give q≈0 via the BIG_H h_vtx sentinel = z1_e3f=0).
+    if q_boundary == "neumann_fill":
+        q = neumann_fill_vertex(q, vtx_mask)
+    elif q_boundary != "nemo_live":
+        raise ValueError(
+            f"pv_flux_al81_partial_cell: unknown q_boundary={q_boundary!r} "
+            "(expected 'neumann_fill' or 'nemo_live').")
 
     # --- 2. Mass fluxes at u/v faces -------------------------------
     # ``F_u = h·u`` at u-faces, ``F_v = h·v`` at v-faces.  Multiply
@@ -4065,9 +4253,29 @@ def pv_flux_al81_partial_cell(
     return diag_vortcor_u, diag_vortcor_v
 
 
+def _apply_seam_wall_u(u_mask: jnp.ndarray, seam_wall_rows) -> jnp.ndarray:
+    """Close the periodic-seam u-faces on walled latitude rows.
+
+    The periodic wrap is stored redundantly at BOTH u-face column 0 and
+    the appended column ``n_lon`` (the same physical seam face), so both
+    are zeroed on a walled row.  ``seam_wall_rows`` is ``(n_lat,)`` with
+    ``1.0`` = walled.  ``None`` returns ``u_mask`` unchanged (byte-
+    identical).  Works for 2-D ``(n_lat, n_lon+1)`` and 3-D
+    ``(n_lat, n_lon+1, nlev)`` masks (broadcast over levels).
+    """
+    if seam_wall_rows is None:
+        return u_mask
+    open_rows = (1.0 - jnp.asarray(seam_wall_rows)).astype(u_mask.dtype)
+    gate = open_rows[:, None] if u_mask.ndim == 3 else open_rows  # (n_lat[,1])
+    u_mask = u_mask.at[:, 0].multiply(gate)
+    u_mask = u_mask.at[:, -1].multiply(gate)
+    return u_mask
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
     grid=None,
+    seam_wall_rows=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Derive u-face and v-face masks from cell-center land mask.
 
@@ -4078,8 +4286,14 @@ def compute_face_masks(
     land_mask : array, shape (n_lat, n_lon)
         Cell-center ocean mask (1 = ocean, 0 = land).
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        Currently unused.  Fold face kept as wall (zero) until a
-        proper halo exchange architecture (Option B) is implemented.
+        Fold face kept as wall (zero) until a proper halo exchange
+        architecture (Option B) is implemented.  Consulted for an
+        optional ``seam_wall_rows`` attribute (partial-periodic seam
+        wall) when the explicit ``seam_wall_rows`` argument is ``None``.
+    seam_wall_rows : optional array, shape (n_lat,)
+        ``1.0`` = the periodic-seam u-face is walled at that latitude
+        row, ``0.0`` = open.  ``None`` (default) → fully periodic (byte-
+        identical).  Falls back to ``grid.seam_wall_rows`` when unset.
 
     Returns
     -------
@@ -4088,12 +4302,15 @@ def compute_face_masks(
     v_mask : array, shape (n_lat+1, n_lon)
         Mask at meridional (lat) interfaces.
     """
+    if seam_wall_rows is None and grid is not None:
+        seam_wall_rows = getattr(grid, "seam_wall_rows", None)
     # u-face j is between cell (j-1) mod n_lon and cell j (periodic in lon)
     u_mask_interior = land_mask * jnp.roll(land_mask, 1, axis=1)
     # Append periodic wrap
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1]], axis=1,
     )
+    u_mask = _apply_seam_wall_u(u_mask, seam_wall_rows)
 
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]

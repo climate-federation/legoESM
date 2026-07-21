@@ -1,0 +1,4 @@
+base: config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml
+variants:
+- classical
+output_dir: results/aimip_classical_sweep_stage1/combo_cloud_sundqvist

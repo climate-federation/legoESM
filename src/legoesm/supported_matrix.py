@@ -134,6 +134,11 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "tracer_transport_latlon", "TracerTransportLatLonModel",
         "legoesm.atmosphere.dynamics.gcm.tracer_transport_latlon",
     ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "spectral_gaussian",
+        "tracer_transport_spectral", "SpectralTracerTransportModel",
+        "legoesm.atmosphere.dynamics.gcm.tracer_transport_spectral",
+    ),
 )
 
 

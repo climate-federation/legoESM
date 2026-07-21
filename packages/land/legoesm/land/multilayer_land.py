@@ -281,6 +281,53 @@ def step_multilayer_land(
     return new_state, response, carbon_new
 
 
+def _partition_latent_root_top(soil_evap, has_snow, f_veg, le_canopy, le_soil):
+    """Split the water-limited L_v evaporation stream (mass rate, kg/m^2/s) into a
+    TOP-boundary (bare-soil) part and a ROOT-ZONE (transpiration) part.
+
+    Transpiration is drawn from the root zone; below-canopy soil evaporation leaves
+    the top-soil boundary.  When the canopy scheme reports its ACTUAL split
+    (``le_canopy`` = transpiration, ``le_soil`` = soil evaporation, both W/m^2, not
+    None — the two-leaf canopy AND the CLM-ML multilayer canopy both do), the
+    transpiration fraction of the net stream is ``le_canopy / (le_canopy + le_soil)``.
+    The prior code always used the root-zone-wetness heuristic ``f_veg``, which
+    MIS-SOURCED transpiration whenever ``f_veg`` differed from the true transpiration
+    share — e.g. a deciduous canopy transpiring hard over a drying surface (small
+    ``f_veg``) had its transpiration wrongly charged to bare-soil top-layer water
+    (codex 2026-07-20).
+
+    Scope of the ratio (codex review): a single fraction of the NET stream can only
+    represent SIGN-CONSISTENT components.  We therefore use the ratio ONLY when both
+    components are evaporative (``le_canopy >= 0`` AND ``le_soil >= 0``); for
+    mixed-sign steps (transpiration with soil/leaf dew, and vice-versa — a dawn/dusk
+    edge case the model's storage-free canopy cannot route componentwise anyway) we
+    defer to ``f_veg``, matching the prior net-based behaviour there.  SimpleSEB and
+    any scheme reporting no split also use ``f_veg``.
+
+    Over snow the stream is pure canopy transpiration (the ground component already
+    sublimated from the pack upstream), so it is drawn ENTIRELY from the root zone
+    (``transp_frac = 1``).  Net dew (``soil_evap < 0``) routes entirely to the top
+    boundary (transpiration sink = 0).
+
+    CONSERVATION-NEUTRAL: ``evap_bare + evap_transp == soil_evap`` (to floating-point
+    rounding — the two fractions sum to 1), so only the SPLIT changes, never the
+    total withdrawal.
+    """
+    if le_canopy is not None and le_soil is not None:
+        _tot = le_canopy + le_soil
+        _safe_tot = jnp.where(_tot > 1e-12, _tot, 1.0)    # double-where AD guard
+        _both_evap = (le_canopy >= 0.0) & (le_soil >= 0.0)
+        _ratio = jnp.where(_tot > 1e-12, le_canopy / _safe_tot, f_veg)
+        transp_frac_veg = jnp.where(_both_evap, _ratio, f_veg)
+    else:
+        transp_frac_veg = f_veg
+    transp_frac = jnp.where(has_snow, 1.0, transp_frac_veg)
+    is_dew = soil_evap < 0.0
+    evap_bare = jnp.where(is_dew, soil_evap, soil_evap * (1.0 - transp_frac))
+    evap_transp = jnp.where(is_dew, 0.0, soil_evap * transp_frac)
+    return evap_bare, evap_transp
+
+
 def _step_multilayer_land_impl(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -824,11 +871,9 @@ def _step_multilayer_land_impl(
     # snow).  SimpleSEB over snow leaves soil_flux == 0, so the branch is a no-op
     # for it.
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
-    transp_frac = jnp.where(has_snow, 1.0, f_veg)
-    soil_flux = soil_evap
-    is_dew = soil_flux < 0.0
-    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - transp_frac))
-    evap_transp = jnp.where(is_dew, 0.0, soil_flux * transp_frac)
+    evap_bare, evap_transp = _partition_latent_root_top(
+        soil_evap, has_snow, f_veg,
+        surface_out.LE_canopy, surface_out.LE_soil)
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w

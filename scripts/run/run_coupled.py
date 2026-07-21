@@ -1262,19 +1262,17 @@ def main():
     # deep-layer restoring (a cold reservoir that damps SST drift) — the most
     # ocean physics the coupled slab supports.  Every preset holds a
     # SimpleOceanConfig, so replacing it is type-safe.
-    # Coupled slab/ocean on gaussian(spectral) is not wired yet: the spectral
-    # atmosphere state is spectral COEFFICIENTS, so the coupler's atm->ocean
-    # forcing extractor (_build_atm_forcing) would need a full spectral->grid
-    # synthesis of every field, not just a wind reconstruction. cubed_sphere /
-    # latlon / voronoi(MPAS) are supported (grid-space / cell fields). Fixed-SST
-    # gaussian AMIP works via run_amip.py. (Follow-up: spectral coupling.)
-    if args.grid == "gaussian":
+    # Coupled slab ocean on gaussian(spectral) IS wired (A2): _build_atm_forcing
+    # synthesizes the spectral coefficient state to grid, and _run_spectral
+    # recomputes + stashes the surface net radiation at the daily coupling
+    # boundary. A 3-D DYNAMIC ocean on the spectral grid stays gated (spectral
+    # ocean is idealized). cubed_sphere / latlon / voronoi(MPAS) support both.
+    if args.grid == "gaussian" and args.ocean == "dynamic":
         raise SystemExit(
-            "coupled runs on --grid gaussian are not wired yet: the spectral "
-            "state is spectral coefficients, so the coupler's atm->ocean forcing "
-            "extractor needs a full spectral->grid synthesis (follow-up). Use "
-            "--grid cubed_sphere / latlon / voronoi for coupled ocean, or "
-            "run_amip.py --grid-type gaussian for fixed-SST AMIP.")
+            "coupled --grid gaussian supports the (grid-agnostic) slab ocean "
+            "only: a 3-D DYNAMIC ocean on the spectral grid is idealized / not "
+            "wired. Use --ocean slab (default) on gaussian, or --grid "
+            "cubed_sphere / latlon / voronoi for a dynamic ocean.")
     overrides = {}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     if args.ocean == "dynamic":

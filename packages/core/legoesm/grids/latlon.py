@@ -520,6 +520,9 @@ def create_mercator_grid(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    *,
+    equator_on_tpoint: bool = False,
+    n_lat: int | None = None,
 ) -> LatLonGrid:
     """Mercator (isotropic) latitude-longitude grid.
 
@@ -617,29 +620,48 @@ def create_mercator_grid(
     # cells when dy/dx = 1 ⇒ dφ/dλ = cos(φ)).
     dlon = (lon_east_deg - lon_west_deg) * jnp.pi / 180.0 / n_lon
 
-    # K = max integer face index from the equator. ``n_lat = 2K``.
+    # K = max integer face index from the equator.  ``n_lat_override`` (when
+    # given) sets the count directly — used by the NEMO-faithful DINO grid,
+    # whose ``jpjglo`` is a config value, not the ``lat_max`` floor.
     lat_max_rad = lat_max_deg * jnp.pi / 180.0
-    j_max_cont = float(jnp.arctanh(jnp.sin(lat_max_rad)) / dlon)
-    K = int(jnp.floor(j_max_cont))
+    if n_lat is not None:
+        if n_lat < 2:
+            raise ValueError(f"n_lat must be >= 2, got {n_lat}")
+        if equator_on_tpoint and n_lat % 2 == 0:
+            raise ValueError(
+                f"equator_on_tpoint places the equator on a T-point, which "
+                f"needs an ODD n_lat; got {n_lat}")
+        K = n_lat // 2                       # tpoint: n_lat=2K+1 ; face: n_lat=2K
+    else:
+        j_max_cont = float(jnp.arctanh(jnp.sin(lat_max_rad)) / dlon)
+        K = int(jnp.floor(j_max_cont))
     if K < 1:
         raise ValueError(
             f"lat_max_deg={lat_max_deg} too small for n_lon={n_lon}: "
             f"Mercator placement yields zero cells. Increase lat_max_deg "
             f"or n_lon."
         )
-    n_lat = 2 * K
 
-    # Face and centre indices (k) symmetric about k=0 (equator face).
-    # Compute placement in float64 regardless of the storage policy:
-    # ``arcsin(tanh(·))`` loses precision in float32 near the poles
-    # because ``tanh`` saturates to 1 quickly. The ``_c(...)`` cast at
-    # the end downcasts the resulting fields to the policy dtype.
-    k_face = jnp.arange(-K, K + 1, dtype=jnp.float64)        # (n_lat+1,)
-    k_center = k_face[:-1] + 0.5                              # (n_lat,)
+    # Placement in float64 regardless of the storage policy: ``arcsin(tanh(·))``
+    # loses precision in float32 near the poles.  ``_c(...)`` downcasts at the end.
+    if equator_on_tpoint:
+        # NEMO usrdef_hgr convention: cell CENTRES (T-points) at INTEGER k, so
+        # a T-point sits ON the equator (k=0); faces at half-integer k.
+        # n_lat = 2K+1 (odd).  φ_T(j) = asin(tanh(Δλ·(j-K))) — matches NEMO's
+        # asin(tanh(rn_e1_deg·rad·(jg-nn_jeq_s))) to roundoff.
+        n_lat_out = 2 * K + 1
+        k_center = jnp.arange(-K, K + 1, dtype=jnp.float64)          # (2K+1,)
+        k_face = jnp.arange(-K, K + 2, dtype=jnp.float64) - 0.5      # (2K+2,)
+    else:
+        # Default: equator on a FACE (k=0), n_lat=2K even, centres at half-int k.
+        n_lat_out = 2 * K
+        k_face = jnp.arange(-K, K + 1, dtype=jnp.float64)            # (n_lat+1,)
+        k_center = k_face[:-1] + 0.5                                 # (n_lat,)
+    n_lat = n_lat_out
 
     # Mercator placement: sin(φ) = tanh(Δλ · k).
-    lat_face = jnp.arcsin(jnp.tanh(dlon * k_face))            # (n_lat+1,)
-    lat = jnp.arcsin(jnp.tanh(dlon * k_center))               # (n_lat,)
+    lat_face = jnp.arcsin(jnp.tanh(dlon * k_face))
+    lat = jnp.arcsin(jnp.tanh(dlon * k_center))
 
     # Longitude (cell centres).
     lon_w_rad = lon_west_deg * jnp.pi / 180.0
@@ -1185,6 +1207,24 @@ class LatLonCGridGeometry(NamedTuple):
     # at the NamedTuple end with a default; band slicers use _replace
     # and inherit it.
     omega: float = constants.Omega
+
+    # Optional partial-periodic seam-wall profile, shape ``(n_lat,)``,
+    # ``1.0`` = the periodic-seam zonal (u-) face is WALLED at that
+    # latitude row, ``0.0`` = open/periodic.  Default ``None`` = fully
+    # periodic in longitude (byte-identical: ``None`` is an empty pytree
+    # subtree, so it adds no leaf).  Set only by the NEMO DINO bridge to
+    # reproduce the faithful DINO geometry — ALL interior cells wet, but
+    # the zonal seam u-face closed outside the ACC channel (NEMO's halo
+    # ``tmask`` land columns).  Read by ``compute_face_masks``,
+    # ``compute_face_masks_3d``, ``compute_vertex_mask`` and the
+    # barotropic diffusion-mask derivation via ``getattr(grid,
+    # "seam_wall_rows", None)``.  APPENDED at the NamedTuple end with a
+    # default.  As a per-lat-row (n_lat,) array it is a real pytree leaf
+    # only when set, and the MPI/SPMD band slicers (``slice_cgrid_geometry
+    # _to_band``, ``widen_cgrid_geometry_band``) slice/widen it like the
+    # other T-point cell-row fields so it stays aligned with band-local
+    # ``n_lat`` (``None`` passes through unchanged).
+    seam_wall_rows: jax.Array | None = None
 
     # ------------------------------------------------------------------
     # GridProtocol properties

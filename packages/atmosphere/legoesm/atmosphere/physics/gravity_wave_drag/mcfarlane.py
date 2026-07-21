@@ -14,21 +14,24 @@ displacement ``h_disp`` is ``h`` by default, E3SM's ``2·sgh`` with
 ``use_e3sm_hdsp=True``).  Documented DEPARTURES from
 E3SM ``gw_oro``/``gw_common``:
 
-* **Source amplitude** (flag-selectable, ``config.use_e3sm_hdsp``): the
-  DEFAULT uses ``h_topo`` (a subgrid-orography std dev) DIRECTLY as the
-  displacement, i.e. ``0.5·k·h²``; E3SM forms the displacement
-  ``hdsp = 2·sgh`` (gw_oro.F90:117) and launches ``0.5·k·hdsp² = 2·k·sgh²``
-  — so at equal ``sgh`` the default launches ~4× LESS **below the Froude
-  cap** (above the cap both use the same ``fcrit2·(U/N)²`` limit and agree;
-  1–4× in the band between).  ``use_e3sm_hdsp=True`` applies the E3SM
-  doubling inside ``_mcfarlane_launch_stress`` (the ``h_topo_col`` units
-  contract stays "sgh stddev", shared with ``e3sm_cam``) and REQUIRES the
-  per-column ``h_topo_col`` — on the scalar ``config.h_topo`` fallback it
-  raises, because this scheme has NO landfrac factor (E3SM's driver applies
-  ``utgw *= landfrac``, gw_drag.F90:904-906) and a quadrupled uniform 500 m
-  pseudo-mountain would silently drag over every ocean column.  Flip is
-  behavioral → retune ``G_0``/``directional_spread``/``tau_max``,
-  RCE/AMIP-gated.
+* **Source amplitude** (tri-state ``config.use_e3sm_hdsp``, default
+  ``"auto"`` since 2026-07-19 — CLOSED in production whenever per-column SSO
+  is wired): E3SM forms the displacement ``hdsp = 2·sgh`` (gw_oro.F90:117)
+  and launches ``0.5·k·hdsp² = 2·k·sgh²``; the legacy convention used
+  ``h_topo`` DIRECTLY, ~4× LESS **below the Froude cap** (above the cap both
+  use the same ``fcrit2·(U/N)²`` limit and agree; 1–4× in the band between).
+  ``"auto"`` resolves per input shape: the E3SM doubling (inside
+  ``_mcfarlane_launch_stress``; the ``h_topo_col`` units contract stays "sgh
+  stddev", shared with ``e3sm_cam``) exactly when the per-column
+  ``h_topo_col`` is wired, the legacy displacement on the scalar
+  ``config.h_topo`` fallback — because this scheme has NO landfrac factor
+  (E3SM's driver applies ``utgw *= landfrac``, gw_drag.F90:904-906) and a
+  quadrupled uniform 500 m pseudo-mountain would silently drag over every
+  ocean column (``True`` on the scalar fallback still raises).  With
+  ``G_0 = 0.5`` (= E3SM ``oroko2``) the wired-SSO launch is EXACTLY
+  ``gw_oro_src``.  Skill retune of ``G_0``/``directional_spread``/
+  ``tau_max`` against real SSO remains owed (AMIP A/B 2026-07-17: stable,
+  tau_max-capped).
 * **Surface-only source** (flag-selectable, ``config.use_depth_averaged_source``):
   by DEFAULT the source ``ρ``, ``N``, ``U`` are taken at the bottom level, not
   E3SM's depth-averaged low-level source, and drag may deposit from the bottom
@@ -202,14 +205,21 @@ def _mcfarlane_launch_stress(
     doubling is applied here, INSIDE the cap (the h_topo_col units contract
     stays "sgh stddev", shared with e3sm_cam) — exactly 4x the legacy launch
     below the Froude cap, identical above it (both Froude-limited), 1-4x in
-    the band ``h^2 < fcrit2*(U/N)^2 < 4*h^2``.  Default OFF keeps the legacy
-    direct-``h`` displacement (~4x smaller at equal ``sgh``; ``h_topo``
-    effectively a tuned amplitude — see the module docstring).
+    the band ``h^2 < fcrit2*(U/N)^2 < 4*h^2``.  The tri-state ``"auto"``
+    default is resolved to a plain bool by ``mcfarlane_gwd`` BEFORE this is
+    reached (E3SM doubling iff a per-column ``h_topo_col`` is wired); the
+    legacy direct-``h`` displacement (~4x smaller at equal ``sgh``; ``h_topo``
+    effectively a tuned amplitude — see the module docstring) survives on the
+    scalar fallback.
     """
     froude_h_sq = config.fcrit2 * safe_divide(
         U_activated ** 2, N_sfc ** 2, eps=1e-30,
     )
-    h_disp_sq = 4.0 * h_topo_sq if config.use_e3sm_hdsp else h_topo_sq
+    # ``is True``: mcfarlane_gwd resolves the tri-state flag ("auto" -> bool)
+    # before this is reached; the strict identity test keeps a DIRECT caller
+    # passing an unresolved ``"auto"`` (truthy) config on the legacy branch
+    # instead of silently doubling.
+    h_disp_sq = 4.0 * h_topo_sq if config.use_e3sm_hdsp is True else h_topo_sq
     h_eff_sq = jnp.minimum(h_disp_sq, froude_h_sq)
     return config.G_0 * rho_sfc * N_sfc * config.k_wave * h_eff_sq * U_activated
 
@@ -238,8 +248,11 @@ def mcfarlane_gwd(
         Optional per-column subgrid orographic standard deviation [m]
         overriding the global ``config.h_topo`` (audit 2026-05-12
         MEDIUM #9).  When ``None`` the scalar config value is used
-        everywhere (legacy behaviour).  REQUIRED (not None) when
-        ``config.use_e3sm_hdsp`` is set — see the ValueError below.
+        everywhere (legacy behaviour).  Also SELECTS the displacement
+        convention under the default ``use_e3sm_hdsp="auto"`` (E3SM
+        ``hdsp = 2*sgh`` when wired, legacy ``h`` when ``None``);
+        REQUIRED (not None) when ``config.use_e3sm_hdsp is True`` — see
+        the ValueError below.
 
     Returns
     -------
@@ -251,15 +264,38 @@ def mcfarlane_gwd(
     # every OCEAN column too (this scheme has no landfrac factor, unlike
     # the E3SM driver's ``utgw *= landfrac``), so the flag would silently
     # quadruple ocean drag planet-wide.  Demand the real per-column sgh.
-    if config.use_e3sm_hdsp and h_topo_col is None:
+    #
+    # Tri-state resolution ("auto" = production-faithfulness default since
+    # 2026-07-19): the E3SM ``hdsp = 2*sgh`` displacement activates exactly
+    # when a real per-column ``h_topo_col`` is wired; the scalar fallback
+    # keeps the legacy displacement bit-identically (no ocean pseudo-
+    # mountain).  Resolved ONCE here into a plain bool baked back into the
+    # (static) config, so every downstream read — the launch stress and the
+    # depth-averaged penetration displacement — sees the SAME resolved value
+    # and no ``"auto"`` string ever reaches a truthiness test.
+    _hdsp = config.use_e3sm_hdsp
+    # Identity (not equality) for the bool arms: ``1 == True`` would otherwise
+    # slip through membership and then silently resolve as legacy at the
+    # ``is True`` reads — an int/float "flag" must raise, not downgrade.
+    if not (_hdsp is True or _hdsp is False or _hdsp == "auto"):
+        raise ValueError(
+            f"McFarlaneConfig.use_e3sm_hdsp={_hdsp!r} is not a valid "
+            "displacement convention; expected one of False | True | 'auto'."
+        )
+    if _hdsp is True and h_topo_col is None:
         raise ValueError(
             "McFarlaneConfig.use_e3sm_hdsp=True requires a per-column "
             "h_topo_col (wire grid.subgrid_topo_stddev or pass h_topo_col "
             "explicitly): the E3SM hdsp=2*sgh displacement quadruples the "
             "below-cap launch, and applying it to the uniform scalar "
             "config.h_topo fallback would quadruple drag over ocean "
-            "columns (no landfrac factor in this scheme)."
+            "columns (no landfrac factor in this scheme).  Use 'auto' to "
+            "keep the legacy displacement on the scalar fallback instead."
         )
+    config = config._replace(
+        use_e3sm_hdsp=(_hdsp is True)
+        or (_hdsp == "auto" and h_topo_col is not None),
+    )
     ncol, nlev = u.shape
 
     # Brunt-Väisälä frequency at full levels
@@ -292,7 +328,8 @@ def mcfarlane_gwd(
             h_base = jnp.clip(
                 jnp.asarray(h_topo_col), 0.0, None
             ).astype(u.dtype)
-        h_disp_col = h_base * (2.0 if config.use_e3sm_hdsp else 1.0)
+        # ``is True``: flag already resolved at entry (see tri-state block).
+        h_disp_col = h_base * (2.0 if config.use_e3sm_hdsp is True else 1.0)
         dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
         rsrc, usrc, vsrc, nsrc, src_level = depth_averaged_oro_source(
             u, v, rho, h_disp_col, p_half, dpm, z_full, N_full,

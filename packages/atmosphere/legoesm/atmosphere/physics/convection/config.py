@@ -125,13 +125,8 @@ __param_spec__ = {
     "EmanuelConfig": {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
-            "beta_downdraft": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
-            "cloud_base_index_width": "legacy numerics: superseded by pressure-interpolated PLCL closure",
-            "coeffr": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
-            "coeffs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
-            "cu_momentum": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
@@ -139,14 +134,10 @@ __param_spec__ = {
             "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
-            "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
-            "sigd": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
-            "sigs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy-sort weighting",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
-            "sub_cloud_relaxation": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
@@ -949,9 +940,6 @@ class EmanuelConfig(NamedTuple):
         Precipitation efficiency above LCL (default 1.0).
     precip_efficiency_lcl : float
         Precipitation efficiency below LCL (default 0.0).
-    precip_threshold_qc : float
-        Cloud-water threshold above which precipitation falls
-        [kg/kg] (default 1e-3).
     cape_threshold : float
         CAPE gate [J/kg] (default 70.0).
     cape_sharpness : float
@@ -960,8 +948,6 @@ class EmanuelConfig(NamedTuple):
         Sub-cloud parcel temperature perturbation [K] (default 0.5).
     parcel_perturb_q : float
         Sub-cloud parcel humidity perturbation [kg/kg] (default 1e-3).
-    sub_cloud_relaxation : float
-        Sub-cloud layer mixing timescale [s] (default 100.0).
     enable_unsaturated_downdraft : bool
         Whether to include the unsaturated downdraft branch (rain
         evaporation cooling) (default ``True``).
@@ -983,19 +969,10 @@ class EmanuelConfig(NamedTuple):
     cu_coefficient: float = 0.7
     precip_efficiency_water: float = 1.0
     precip_efficiency_lcl: float = 0.0
-    precip_threshold_qc: float = 1.0e-3
     cape_threshold: float = 70.0
     cape_sharpness: float = 0.1
     parcel_perturb_T: float = 0.5
     parcel_perturb_q: float = 1.0e-3
-    # Emanuel 1991 §3 uses a sub-cloud-layer mixing timescale of
-    # several thousand seconds.  The earlier default of 100 s gave
-    # M_b ~72× larger than published values and produced 28 MW/m²
-    # of column heating from a CAPE-positive sounding.  NOTE: with the
-    # faithful prognostic DTMA closure (``alpha_closure`` / ``damp_*``)
-    # this field is no longer read by ``emanuel_convection``; it is kept
-    # for back-compat with configs/tests that set it.
-    sub_cloud_relaxation: float = 7200.0
     # --- Prognostic cloud-base mass-flux (CBMF) closure ----------------
     # FAITHFUL to oracle convect43c.f (CONVECT v4.3c).  CBMF is a
     # prognostic quantity relaxed each call toward the sub-cloud
@@ -1008,10 +985,6 @@ class EmanuelConfig(NamedTuple):
     alpha_closure: float = 0.2
     damp_coefficient: float = 0.1
     dtmax: float = 0.9
-    # Legacy width [levels] of the old smooth cloud-base selector.  Kept
-    # for config/back-compat; the faithful DTMA closure now pressure-
-    # interpolates exactly to PLCL as in CONVECT v4.3c lines 549-558.
-    cloud_base_index_width: float = 1.0
     # Pressure sharpness [1/Pa] for the differentiable mask that bounds
     # the DTPBL average to levels between the launch level NK and cloud
     # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
@@ -1083,19 +1056,6 @@ class EmanuelConfig(NamedTuple):
     tlcrit: float = -55.0
     # Mixing-rate coefficient ENTP in M(i) (oracle 1.5).
     entp: float = 1.5
-    # SIGD / SIGS — fractional area of unsaturated downdraught / fraction
-    # of precip falling outside cloud (oracle 0.05 / 0.12).  Kept as
-    # config for the downdraught bookkeeping in the orchestrator.
-    sigd: float = 0.05
-    sigs: float = 0.12
-    # Rain / snow evaporation coefficients COEFFR / COEFFS and the CU
-    # momentum-transport coefficient + BETA downdraught velocity scale
-    # (oracle 1.0 / 0.8 / 0.7 / 10.0).  Threaded for completeness of the
-    # precip-downdraught handoff; the model owns precip via q_c.
-    coeffr: float = 1.0
-    coeffs: float = 0.8
-    cu_momentum: float = 0.7
-    beta_downdraft: float = 10.0
     # --- Smoothing sharpnesses for the discrete sort (AD-safety) -------
     # Each replaces a hard Fortran switch with a smooth surrogate; the
     # forward result tracks the discrete sort to a stated tolerance (see

@@ -54,8 +54,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from metadata import (  # noqa: E402
-    annotate_incomplete, count_collective_permutes, scaling_metadata,
-    tidy_throughput_fields)
+    annotate_incomplete, count_collective_permutes, count_collectives,
+    scaling_metadata, tidy_throughput_fields)
 
 #: Parity tolerances vs the serial untiled step — the adapter gate's
 #: f32-honest bounds (exact f32 ulps of the field scales; a real stage
@@ -217,6 +217,10 @@ def main() -> int:
     compile_ms = (time.perf_counter() - _t_compile0) * 1e3
     hlo = compiled.as_text()
     n_ppermute = _count_collective_permutes(hlo)
+    # Full per-family census (superset of the CP count): surfaces the
+    # conservation all-reduce and any operator-introduced resharding on the
+    # SAME audited executable — the message-count = latency-bound lever.
+    hlo_census = count_collectives(hlo)
     allgathers = find_fullcube_allgathers(hlo, n=args.resolution)
     if n_ppermute == 0:
         raise SystemExit(
@@ -366,6 +370,7 @@ def main() -> int:
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": total_cells // n_devices,
             "hlo_collective_permutes": n_ppermute,
+            "hlo_collectives": hlo_census,
             "closed_loop": bool(args.closed_loop),
             "envelope": (
                 "blocked closed loop + in-stage telescoping mass fixer "

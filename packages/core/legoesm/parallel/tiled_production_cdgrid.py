@@ -1739,8 +1739,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         # pre-existing stage gate) is byte-identical to the prior body;
         # the production adapter passes the model config's sponge so the
         # tiled step twins the DEFAULT serial step (sponge is default-ON:
-        # sponge_tau_sec=3600, sponge_sigma=0.15 — measured 6.2e-6 u drift
-        # without it, job 8689100).
+        # sponge_tau_sec=432000 (5 d) since #1028 — was 3600 when the
+        # 6.2e-6 u drift without it was measured, job 8689100).
         if sponge_rate is not None:
             du_d_dt = du_d_dt - sponge_rate * u_d_t
             dv_d_dt = dv_d_dt - sponge_rate * v_d_t
