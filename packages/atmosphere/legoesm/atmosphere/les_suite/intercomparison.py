@@ -19,8 +19,10 @@ inversion):
   * mixed-layer ``∂⟨θ⟩/∂z``      ≈ 0     — a WELL-MIXED bulk layer.
   * surface ``⟨w'θ'⟩ / Q0``       ≈ 1     — the resolved+SGS heat flux recovers the
     prescribed surface flux near the ground.
-  * entrainment ``⟨w'θ'⟩ / Q0`` at ``z_i`` ≈ −0.2 — the negative entrainment flux at
-    the inversion (entrainment ratio ``A_R ≈ 0.2``).
+  * entrainment ``min ⟨w'θ'⟩ / Q0`` ≈ −0.2 — the negative flux MINIMUM at the base
+    of the inversion (entrainment ratio ``A_R = −min⟨w'θ'⟩/Q0 ≈ 0.1–0.2``). NB this
+    minimum sits *below* the max-∂θ/∂z height, so it is taken as the flux minimum
+    through the inversion band, not the flux at the θ-gradient peak.
 
 References: Nieuwstadt et al. (1993) convective-BL LES intercomparison; the ``A_R``
 entrainment-ratio range from the mixed-layer / LES literature (Moeng & Sullivan
@@ -75,7 +77,7 @@ CBL_ENVELOPE: tuple[MetricBand, ...] = (
     ),
     MetricBand(
         "entrainment_flux_ratio", target=-0.20, lo=-0.40, hi=-0.05,
-        units="1", description="⟨w'θ'⟩/Q0 at z_i (entrainment, A_R≈0.2)",
+        units="1", description="min ⟨w'θ'⟩/Q0 through inversion (entrainment, A_R≈0.1-0.2)",
     ),
 )
 
@@ -150,7 +152,16 @@ def cbl_diagnostics(
     # surface flux ratio: use the first interior level (skip the very bottom point,
     # whose resolved flux is near zero by the no-penetration boundary).
     surface_flux_ratio = float(wtheta_flux[1] / Q0)
-    entrainment_flux_ratio = float(wtheta_flux[k_inv] / Q0)
+
+    # Entrainment flux ratio = the MINIMUM of ⟨w'θ'⟩/Q0 through the inversion — the
+    # standard entrainment-ratio definition A_R = -min⟨w'θ'⟩/Q0. This minimum sits
+    # at the *base* of the inversion, which is BELOW the height of maximum ∂θ/∂z
+    # (the flux has already recovered toward 0 in the mid-inversion): evaluating at
+    # the θ-gradient max would spuriously report ~0. Search a band around z_i
+    # (surface layer .. 1.3 z_i) so a far-aloft flux wiggle cannot be picked up.
+    k_top = int(np.searchsorted(z, 1.3 * z_i, side="right"))
+    k_top = min(max(k_top, k_inv + 1), z.shape[0])
+    entrainment_flux_ratio = float(np.min(wtheta_flux[skip:k_top]) / Q0)
 
     # bulk mixed-layer ∂θ/∂z averaged over 0.2 z_i .. 0.8 z_i (mK/m).
     lo, hi = int(0.2 * k_inv), int(0.8 * k_inv)

@@ -19,8 +19,9 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | LES ensemble driver | `scripts/run/run_les_suite.py` | todo |
 | SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo |
 | Scorecard | `scripts/validate/les_suite/build_les_scorecard.py` | todo |
-| Intercomparison gate | `scripts/validate/les_suite/compare_les_intercomparison.py` | todo |
-| Q1/Q2/Q3 science answers | (require GPU LES runs — gate-0 blocked in CPU sessions) | blocked (GPU) |
+| Intercomparison gate (D7/gate-0) | `les_suite/intercomparison.py` + `scripts/validate/les_suite/compare_les_intercomparison.py` | **done** (iter 2) |
+| Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` | **GPU-unblocked** (iter 2, 2×V100S available) — running |
+| Q1/Q2/Q3 science answers | (require the full GPU LES ensemble + tuning) | in progress (GPU now available) |
 
 ## Conventions locked during the build
 - LES reference artifacts are **self-describing**: each carries both the truth
@@ -107,7 +108,26 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 - **Committed** as `feat(les-suite): LES→SCM bridge, Q1 counter-gradient, D6 score,
   matrix wiring` (branch les-suite-optimization).
 
-**NEXT (iter 2, CPU-OK):** `scripts/run/tune_scm_to_les.py` — the per-(closure,
+### Iter 2 (2026-07-21) — GPU unblocked
+- **GPU became available** (2× Tesla V100S-32GB, JAX backend=gpu). This unblocks the
+  D10 gate-0 and the LES ensemble (§8 step 3 was CPU-blocked).
+- **`intercomparison.py` (10 tests) + CLI**: the D7 buoyant-path credibility gate —
+  `cbl_diagnostics` extracts the universal dry-CBL convective scaling (z_i, w_*, peak
+  σ_w/w_*, mixed-layer ∂θ/∂z, surface + entrainment ⟨w'θ'⟩/Q0), banded against the
+  Nieuwstadt-1993 + entrainment-ratio envelope; `gate_from_cbl_profiles`,
+  `evaluate_cbl_gate`; CLI exits non-zero on any band failure. Committed de7672463.
+  (`g` from `legoesm.constants` — the local banned-literal hook caught a hardcoded
+  9.80616 in the test and forced `constants.g`.)
+- **Gate-0 launched** on GPU: `run_spectral_cbl.py` 96³ x64 (D8 production res),
+  Q0=0.06, z_i0=800 m, 2 h (~10 t*), LASD SGS, adaptive CFL. A 48³ smoke test first
+  confirmed the buoyant path develops correctly (σ_w/w_*=0.56, surface flux ratio
+  0.89, well-mixing). Verdict recorded once the production run + validator finish.
+- Codex review of `intercomparison.py` running in parallel with the LES run.
+
+**NEXT:** feed gate-0 output through the validator (the buoyant-path verdict); if it
+passes, build `run_les_suite.py` (registry case → LES → self-describing bridge
+artifact incl. SGS flux) to emit the ensemble, then `tune_scm_to_les.py` — the
+per-(closure,
 regime) AD + derivative-free tuner (D4). Reuse (do NOT fork): `scm.py` +
 `scm_forcing.py` (single-column integration, CPU-cheap), `training/param_collector`
 (`build_trainable_params`/`apply_param_overrides`), `ml/training.create_optimizer`,

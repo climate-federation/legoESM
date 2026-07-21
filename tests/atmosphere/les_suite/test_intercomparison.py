@@ -89,6 +89,37 @@ def test_no_entrainment_fails():
     assert not r.passed
 
 
+def test_entrainment_uses_flux_minimum_not_gradient_max():
+    # Regression (gate-0): in a real CBL the entrainment flux MINIMUM sits at the
+    # base of the inversion, BELOW the max-∂θ/∂z height where the flux has already
+    # recovered toward 0. The metric must report the minimum (~-0.15), not the
+    # near-zero flux at the θ-gradient peak.
+    nz = 64
+    z = np.linspace(1600.0 / nz * 0.5, 1600.0, nz)
+    zi_grad = 1008.0          # θ-gradient max (mid-inversion)
+    z_fluxmin = 942.0         # entrainment flux minimum (inversion base, below)
+    # localized inversion peaking at zi_grad
+    theta = 300.0 + 2.0 * np.tanh((z - zi_grad) / 60.0)
+    theta = np.where(z > zi_grad, theta, 300.0)
+    w_star = (G / THETA0 * Q0 * zi_grad) ** (1.0 / 3.0)
+    zeta = np.clip(z / zi_grad, 0.0, 1.0)
+    ww = (0.6 * w_star) ** 2 * np.clip(4.0 * zeta * (1.0 - zeta), 0.0, 1.0)
+    # flux: linear 1 -> -0.15 down to z_fluxmin, then recovers to ~0 by/above zi_grad
+    r = np.where(
+        z <= z_fluxmin,
+        1.0 - 1.15 * (z / z_fluxmin),
+        -0.15 * np.clip(1.0 - (z - z_fluxmin) / (zi_grad - z_fluxmin), 0.0, 1.0),
+    )
+    wth = Q0 * r
+    diag = cbl_diagnostics(z, theta, ww, wth, Q0=Q0, theta0=THETA0)
+    # z_i diagnosed at the gradient max ...
+    assert abs(diag.z_i_m - zi_grad) < 40.0
+    # ... but the entrainment ratio comes from the flux minimum (~-0.15), NOT the
+    # near-zero flux at the gradient max.
+    assert -0.25 < diag.entrainment_flux_ratio < -0.10
+    assert evaluate_cbl_gate(diag).passed
+
+
 def test_negative_Q0_rejected():
     z, theta, ww, wth = _canonical_cbl()
     with pytest.raises(ValueError):
