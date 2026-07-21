@@ -8452,7 +8452,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
-            shard_forcing,
+            shard_forcing, segment_accum_to_rate,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -8997,7 +8997,23 @@ class ModelDriver:
                 "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
-                "seg_precip": seg_precip,
+                # UNITS: the coupler contract (AtmToSurface.precip_total,
+                # packages/core/legoesm/core/coupling_fields.py:18) is a RATE
+                # [kg/m2/s], positive-downward (into the surface) -- the same
+                # convention as the per-step PhysicsOutput.precip that fed the
+                # accumulator.  ``seg_precip`` off the carry is the segment
+                # ACCUMULATION [kg/m2] (compiled_segments.py:1197, docstring
+                # :174-175), so it must be divided by the segment duration here,
+                # at the producer.  Not at the consumer: the other two writers of
+                # this key (``_sfc_diag[2]`` on the lean MPAS path, :5802, and
+                # ``phys_out.precip`` on the per-step path, :9744) already store
+                # rates, so a consumer-side divide would corrupt them.
+                # ``seg_steps`` is the ACTUAL step count (the final segment is
+                # short) and ``DT`` is still the dt this segment ran with -- the
+                # adaptive-dt halving happens later, at :9173.  Under ensembles
+                # ``seg_precip`` is the ensemble mean of the accumulators, which
+                # is still an accumulation, so the divide is valid there too.
+                "seg_precip": segment_accum_to_rate(seg_precip, seg_steps, DT),
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
@@ -9073,7 +9089,12 @@ class ModelDriver:
             if diag_interval > 0 and current_step % diag_interval == 0:
                 # Convert accumulated quantities to rates over segment duration.
                 _seg_dur = seg_steps * DT
-                seg_precip_rate = seg_precip / _seg_dur
+                # Same conversion the coupler-facing carry_aux entry uses, via
+                # the shared helper (numerically identical to the previous
+                # ``seg_precip / _seg_dur``: _seg_dur IS seg_steps * DT), so the
+                # diagnostic precip rate and the coupled precip rate cannot
+                # silently diverge.
+                seg_precip_rate = segment_accum_to_rate(seg_precip, seg_steps, DT)
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
                 # Segment-MEAN radiative fluxes / T_low (time integrals from
