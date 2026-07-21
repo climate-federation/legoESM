@@ -1439,6 +1439,36 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         shortwave_penetration=None,
     )
     config = config._replace(physics=phys)
+    if vertical_mixing is not None and vertical_mixing.scheme == "tke":
+        # NEMO zdftke card on MPAS: mirror the TRIPOLE closure environment
+        # exactly (codex HIGH x2), or the "same closure across grids" A/B is
+        # confounded:
+        #  * Backgrounds -> molecular.  NEMO composes avm=max(closure, avmb)
+        #    with the closure-internal rn_avm0/rn_avt0 floors (which the card
+        #    carries as kappaM_min/kappaH_min); the MPAS model-level A_v/K_v
+        #    (1e-4/1e-5) are ADDED on top of the closure profiles
+        #    (ocean_model_mpas K_v_cell = background + K_v_tke), so keeping
+        #    them double-counts the background — force molecular exactly as
+        #    the tripole build does (zdfiwm_init values: rnu=1.4e-6, 1e-10).
+        #  * Convection -> none.  The "full" preset ships enhanced-diffusion
+        #    convection (K_conv up to 1) that the tripole card does NOT run;
+        #    under TKE the closure itself convects (kappaM_max ceiling), so
+        #    the preset EVD would be a second, tripole-absent mixer.
+        from legoesm import constants as _const
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig,
+        )
+        phys_tke = config.physics._replace(
+            convection=OceanConvectionConfig(scheme="none"),
+        )
+        config = config._replace(
+            physics=phys_tke,
+            A_v=_const.nu_ocean_molecular,   # same pair the tripole forces
+            K_v=1.0e-10)                     # NEMO avtb
+
+        print("[setup] mpas TKE card: molecular backgrounds "
+              "(A_v=1.4e-6, K_v=1e-10) + preset convection stripped "
+              "(tripole-equivalent closure environment)")
     if iwm is not None and iwm.enabled:
         raise SystemExit(
             "--iwm is not wired on the MPAS vertical-mixing bridge yet "
@@ -1707,7 +1737,7 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
 
 
 def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
-                       tripole_vmix=None):
+                       tripole_vmix=None, mpas_vmix="kpp"):
     """Reject the KPP override flags on grids whose CORE-II builder does not
     thread ``vertical_mixing`` INTO A LIVE KPP scheme (a flag that silently does
     nothing is the dispatch footgun CLAUDE.md forbids).  ``mpas`` and
@@ -1730,6 +1760,12 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
             f"(configurations that run the KPP boundary layer), not --grid "
             f"{grid!r} (tripole-vmix={tripole_vmix!r}). Without a live KPP "
             f"the override would silently do nothing.")
+    if _wants_kpp_override and grid == "mpas" and mpas_vmix == "tke":
+        raise SystemExit(
+            "--kpp-ri-crit/--kpp-cv/--kpp-eice configure the KPP closure, but "
+            "--mpas-vmix tke runs the NEMO zdftke card on MPAS — the KPP "
+            "overrides would silently do nothing there. Drop them (TKE's "
+            "under-ice lever is --tke-eice).")
     # --kpp-eice IS wired on --grid mpas: _run_mpas_kpp threads
     # surface_forcing.ice_concentration to the shared KPP under-ice
     # attenuation (the earlier "tau/q only" MPAS restriction is removed —
@@ -3901,6 +3937,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
                         "--grid latlon_bathy / mpas (the MPAS bridge threads "
                         "ice_concentration), or tripole WITH --tripole-vmix kpp.")
+    p.add_argument("--mpas-vmix", type=str, default="kpp",
+                   choices=["kpp", "tke"],
+                   help="Vertical-mixing CLOSURE on the MPAS Voronoi grid. "
+                        "'kpp' (default) = the historical MPAS KPP boundary "
+                        "layer (with --kpp-ri-crit/--kpp-cv/--kpp-eice). "
+                        "'tke' = the NEMO ORCA1 &namzdf_tke card "
+                        "(orca1_zdftke_config: nn_mxl=2, lc, etau nn_htau=1 "
+                        "latitude profile, eice via --tke-eice) through the "
+                        "SAME grid-agnostic kernel the tripole runs — the "
+                        "scheme-matching lever for the cross-grid Arctic gap "
+                        "(2x2: TKE-vs-KPP = +0.78 Siberian / +36-50 m MLD of "
+                        "the tripole<->MPAS disagreement).")
     p.add_argument("--tripole-vmix", type=str, default="none",
                    choices=["none", "tke", "kpp"],
                    help="Vertical-mixing CLOSURE on the tripole grid (the "
@@ -4023,21 +4071,44 @@ def main() -> int:
     # KPP MLD-deepening sensitivity flags need a LIVE KPP (fail loud, never
     # silent): mpas / latlon_bathy, or tripole under --tripole-vmix kpp.
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice,
-                       tripole_vmix=args.tripole_vmix)
-    # --kpp-eice needs an ice source to bite: surface_forcing.ice_concentration
-    # is attached only under --prognostic-sea-ice or a prescribed SIC field
-    # (--ice-albedo/--ice-thermo/--sss-restore load it).  Without one, ice_frac
-    # stays None and the attenuation is silently inert (codex MED) — reject
-    # loudly rather than run a no-op lever.
-    if args.kpp_eice not in (None, 0) and not (
+                       tripole_vmix=args.tripole_vmix,
+                       mpas_vmix=args.mpas_vmix)
+    # --mpas-vmix is an MPAS selector: a non-default value on another grid
+    # would be silently ignored (dispatch footgun) — reject.
+    if args.mpas_vmix != "kpp" and args.grid != "mpas":
+        raise SystemExit(
+            f"--mpas-vmix {args.mpas_vmix!r} selects the MPAS vertical-mixing "
+            f"closure and requires --grid mpas (got --grid {args.grid!r}); "
+            "for the tripole use --tripole-vmix.")
+    # --tke-eice reachability: consumed by the tripole builder (any
+    # --tripole-vmix, which validates closure-match itself) or by MPAS under
+    # --mpas-vmix tke.  Anywhere else it would be accepted-then-ignored.
+    if args.tke_eice is not None and not (
+            args.grid == "tripole"
+            or (args.grid == "mpas" and args.mpas_vmix == "tke")):
+        raise SystemExit(
+            "--tke-eice configures the NEMO zdftke closure: use it with "
+            "--grid tripole (--tripole-vmix tke) or --grid mpas --mpas-vmix "
+            "tke. On this configuration it would be silently ignored.")
+    # --kpp-eice / --tke-eice (MPAS) need an ice source to bite:
+    # surface_forcing.ice_concentration is attached only under
+    # --prognostic-sea-ice or a prescribed SIC field (--ice-albedo/
+    # --ice-thermo/--sss-restore load it).  Without one, ice_frac stays None:
+    # KPP-eice would be silently inert (codex MED), and the MPAS TKE bridge
+    # FAIL-FASTS at the first step — reject loudly up front in both cases.
+    # NB: the ORCA1 zdftke card DEFAULTS eice=3, so MPAS+tke wants ice unless
+    # --tke-eice 0 explicitly opts out (None -> the card default 3).
+    _wants_eice = (args.kpp_eice not in (None, 0)
+                   or (args.grid == "mpas" and args.mpas_vmix == "tke"
+                       and args.tke_eice != 0))
+    if _wants_eice and not (
             args.prognostic_sea_ice or args.ice_albedo or args.ice_thermo
             or args.sss_restore):
         raise SystemExit(
-            "--kpp-eice needs a sea-ice source to attenuate against: add "
-            "--prognostic-sea-ice (or a prescribed SIC via --ice-albedo/"
-            "--ice-thermo/--sss-restore). Without one the surface ice "
-            "concentration never reaches the KPP closure and the flag is a "
-            "silent no-op.")
+            "--kpp-eice/--tke-eice need a sea-ice source to attenuate "
+            "against: add --prognostic-sea-ice (or a prescribed SIC via "
+            "--ice-albedo/--ice-thermo/--sss-restore). Without one the "
+            "surface ice concentration never reaches the closure.")
     _validate_pcg_variant_grid(args.grid, args.barotropic_pcg_variant,
                                args.barotropic_solver)
 
@@ -4437,7 +4508,17 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, ddm=_ddm_cfg,
-            vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
+            # --mpas-vmix: 'tke' runs the NEMO ORCA1 zdftke card through the
+            # SAME builder the tripole uses (the "tripole_" prefix is
+            # historical — pure grid-agnostic config construction; its
+            # closure-mismatch rejects also fire here); 'kpp' (default) keeps
+            # the historical KPP + --kpp-* overrides.
+            vertical_mixing=(
+                build_tripole_vmix_config("tke", iwm=None,
+                                          tke_eice=args.tke_eice)
+                if args.mpas_vmix == "tke"
+                else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
+                                        args.kpp_eice)),
             ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
         app_grid_type = "mpas"
