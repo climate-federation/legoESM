@@ -17,7 +17,8 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | Matrix-spec wiring | `les_suite/matrix.py` + `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
 | Matrix spec wiring | `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
 | LES ensemble driver | `scripts/run/run_les_suite.py` | **done** (iter 2, dry CBL) |
-| SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo (NEXT) |
+| SCM↔LES coupling primitives | `les_suite/scm_coupling.py` | **done** (iter 2, regrid + θ↔T) |
+| SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo (NEXT — composes coupling + SCM run + score) |
 | Scorecard | `scripts/validate/les_suite/build_les_scorecard.py` | todo |
 | Intercomparison gate (D7/gate-0) | `les_suite/intercomparison.py` + `scripts/validate/les_suite/compare_les_intercomparison.py` | **done** (iter 2) |
 | Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` + `docs/.../gate0_nieuwstadt_result.json` | **PASS** (iter 2, buoyant path validated) |
@@ -171,7 +172,23 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 - Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
   run_les_suite (218129efd).
 
-**NEXT:** `tune_scm_to_les.py` — the per-(closure,
+- **`scm_coupling.py` (12 tests)**: the tuner's grid bridge — `interp_profile`
+  (linear height regrid, surface-first, clamps out-of-range), `regrid_truth` (LES
+  truth onto a fixed eval grid held identical across closures), and the θ↔T pair
+  (added the missing `potential_temperature_from_temperature` inverse to
+  `thermodynamics.py`, reusing the canonical Exner constants). Physics guardrails
+  green (3807). This de-risks the hardest tuner sub-problem (SCM sigma/T ↔ LES
+  height/θ). Committed 0e9095433.
+
+**NEXT:** `tune_scm_to_les.py` composes coupling + SCM run + score: init the SCM from
+LES(t=0) (θ→T via `T_from_theta` on the SCM pressure; `interp_profile` LES→SCM
+heights), drive it with `artifact_to_scm_forcing`, score with `regrid_truth` +
+`score.*`, then tune each closure's `__param_spec__` via AD (`eqx.filter_value_and_grad`
++ `param_collector.apply_param_overrides` in the loss) AND derivative-free (D4). Then
+`build_les_scorecard.py`, the full GPU ensemble, and the Q1/Q2/Q3 answers.
+
+--- earlier NEXT (superseded) ---
+`tune_scm_to_les.py` — the per-(closure,
 regime) AD + derivative-free tuner (D4). Reuse (do NOT fork): `scm.py` +
 `scm_forcing.py` (single-column integration, CPU-cheap), `training/param_collector`
 (`build_trainable_params`/`apply_param_overrides`), `ml/training.create_optimizer`,
