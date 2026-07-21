@@ -6,24 +6,36 @@ insufficient. Newest entries at the bottom of each section.
 
 Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 
+**§5 INFRASTRUCTURE: COMPLETE** (168 tests green; physics modules codex-reviewed CLEAN).
+
 | Component | Path | Status |
 |---|---|---|
-| LESCase registry | `les_suite/registry.py` | **done** (commit 49959ec94) |
-| Default catalog | `les_suite/catalog.py` | **done** (commit 49959ec94) |
-| LES→SCM bridge | `les_suite/bridge.py` | **done** (iter 1, codex CLEAN) |
-| Counter-gradient diagnostic (Q1) | `les_suite/counter_gradient.py` | **done** (iter 1, codex CLEAN) |
-| Score assembly | `les_suite/score.py` | **done** (iter 1, codex CLEAN) |
-| Shared profile primitives | `core/profile_metrics.py` | **done** (iter 1) |
-| Matrix-spec wiring | `les_suite/matrix.py` + `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
-| Matrix spec wiring | `scripts/matrix/run_les_suite_matrix.py` | **done** (iter 1) |
-| LES ensemble driver | `scripts/run/run_les_suite.py` | **done** (iter 2, dry CBL) |
-| SCM↔LES coupling primitives | `les_suite/scm_coupling.py` | **done** (iter 2, regrid + θ↔T) |
-| SCM→LES tuner | `scripts/run/tune_scm_to_les.py` | todo (NEXT — composes coupling + SCM run + score) |
-| Scorecard | `scripts/validate/les_suite/build_les_scorecard.py` | todo |
-| Intercomparison gate (D7/gate-0) | `les_suite/intercomparison.py` + `scripts/validate/les_suite/compare_les_intercomparison.py` | **done** (iter 2) |
-| Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` + `docs/.../gate0_nieuwstadt_result.json` | **PASS** (iter 2, buoyant path validated) |
-| LES ensemble driver | `scripts/run/run_les_suite.py` + `les_suite/emit.py` | **done** (iter 2, dry CBL wired; pipeline validated) |
-| Q1/Q2/Q3 science answers | (require the full GPU LES ensemble + tuning) | in progress (GPU now available) |
+| LESCase registry + catalog | `les_suite/{registry,catalog}.py` | **done** (49959ec94) |
+| LES→SCM bridge | `les_suite/bridge.py` | **done** (codex CLEAN) |
+| Counter-gradient diagnostic (Q1) | `les_suite/counter_gradient.py` | **done** (codex CLEAN) |
+| Score assembly (D6) | `les_suite/score.py` | **done** (codex CLEAN) |
+| Shared profile primitives | `core/profile_metrics.py` | **done** |
+| Matrix wiring | `les_suite/matrix.py` + `scripts/matrix/run_les_suite_matrix.py` | **done** |
+| Intercomparison gate (D7) | `les_suite/intercomparison.py` + `scripts/validate/les_suite/compare_les_intercomparison.py` | **done** |
+| LES ensemble driver | `les_suite/emit.py` + `scripts/run/run_les_suite.py` | **done** (dry CBL; codex CLEAN) |
+| SCM↔LES coupling | `les_suite/scm_coupling.py` | **done** (regrid + θ↔T; codex CLEAN) |
+| SCM forward eval | `les_suite/scm_runner.py` | **done** (codex CLEAN) |
+| SCM→LES tuner (D4) | `scripts/run/tune_scm_to_les.py` | **done** (derivative-free; codex CLEAN) |
+| Scorecard (Q2/Q3) | `les_suite/scorecard.py` + `scripts/validate/les_suite/build_les_scorecard.py` | **done** |
+| Gate-0 Nieuwstadt CBL run | `results/les_suite/gate0_nieuwstadt/` + `docs/.../gate0_nieuwstadt_result.json` | **PASS** (buoyant path validated) |
+| **Q1/Q2/Q3 science answers** | (need the full GPU ensemble + tuning campaign) | **pending compute** |
+
+**Remaining for the §7 science deliverables** (all machinery built; this is a compute
++ coverage campaign, not new infrastructure):
+1. Emit the full LES ensemble on GPU — the dry (w'θ'ₛ×U_g) grid + anchors across
+   regimes (§6). Needs: the stable/moist regime IC builders in `run_les_suite.py`
+   (only dry-convective CBL is wired), + the sheared-CBL driver (`--Ug`).
+2. Wire the remaining closures' base configs in `tune_scm_to_les._base_turbulence`
+   (only mynn25 today) + the AD path (D4 comparison).
+3. Run the tuning campaign (all closures × regimes) → scorecard = Q2/Q3 answers.
+4. Q1: run `counter_gradient.diagnose_truth` across the flux grid → the structural
+   threshold; the skill threshold from the tuned rankings.
+5. D7 σ_LES: the SGS-spread + 2×-resolution runs → the Q3 error bars.
 
 ## Conventions locked during the build
 - LES reference artifacts are **self-describing**: each carries both the truth

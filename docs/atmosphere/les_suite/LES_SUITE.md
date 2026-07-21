@@ -279,14 +279,21 @@ config next to every number.
    into the nested `CLUBBConfig.params` and re-wrap. Tests: `test_clubb_param_spec.py`,
    `test_scm_rce_clubb_nesting.py`. Merged 2026-07-11 (branch `clubb-param-spec`); driver-level
    `--params` reachability is baselined as a follow-up like every other turbulence scheme.
-5. **[in progress — CPU-OK] Build** the library 4-tuple + drivers. Done so far
-   (2026-07-21): `registry.py` + `catalog.py` (merged 49959ec94); `bridge.py`
-   (artifact schema + LES→SCMForcing + truth extraction), `counter_gradient.py`
-   (Q1 structural diagnostic), `score.py` (D6 diagnostic + prognostic assemblies),
-   `core/profile_metrics.py` (shared primitives). Remaining: matrix-spec wiring
-   (`run_les_suite_matrix.py`), the `run_les_suite.py` / `tune_scm_to_les.py`
-   drivers, and the `build_les_scorecard.py` / `compare_les_intercomparison.py`
-   validators. See `CHANGELOG.md` for the detailed per-module log.
+5. **[DONE — 2026-07-21] §5 infrastructure complete.** All library modules +
+   drivers + validators built, tested (168 tests), and physics-modules
+   codex-reviewed CLEAN: `registry`/`catalog`, `bridge`, `counter_gradient` (Q1),
+   `score` (D6), `core/profile_metrics`, `matrix` + `run_les_suite_matrix`,
+   `intercomparison` (D7) + `compare_les_intercomparison`, `emit` + `run_les_suite`
+   (dry CBL emission), `scm_coupling` + `scm_runner` + `tune_scm_to_les` (D4
+   derivative-free), `scorecard` + `build_les_scorecard` (Q2/Q3). **Gate-0
+   Nieuwstadt CBL PASSED** on GPU (buoyant path validated). The full chain runs
+   end-to-end: LES → self-describing artifact → SCM tuning → Q2/Q3 scorecard.
+6. **[pending compute] The Q1/Q2/Q3 science answers (§7).** The machinery is done;
+   what remains is a GPU ensemble + tuning campaign: wire the stable/moist regime IC
+   builders + the sheared-CBL `--Ug` in `run_les_suite.py` (only dry-convective is
+   wired), the remaining closures' base configs + the AD path in `tune_scm_to_les.py`
+   (only mynn25 today), then run the ensemble (14 production + SGS-spread +
+   convergence, ~1.5–2 GPU-days) and assemble. See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
 the CLUBB spec, the bridge, and the score assembly (physics/numerics-touching) — the mandatory
