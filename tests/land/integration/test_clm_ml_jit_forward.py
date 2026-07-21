@@ -368,3 +368,16 @@ def test_multicolumn_matches_independent_single_columns():
             f"{name}[col0] multi {got[0]} vs single {r0[0]}")
         assert jnp.allclose(got[1], r1[0], atol=1e-6, rtol=1e-6), (
             f"{name}[col1] multi {got[1]} vs single {r1[0]}")
+
+    # Per-column GridInfo is realigned by .p, so the tuple must cover exactly
+    # patches 1..ncol.  A tuple missing a patch (here {1,1}) is a loud error — the
+    # coverage guard fires BEFORE the expensive per-column loop.  (Reordering with
+    # varying per-column structure is exercised implicitly by the by-.p realign;
+    # here both columns share a PFT so a reorder value-test would be vacuous.)
+    bad_gi = (gi2[0], gi2[0])  # patches {1, 1}: column 2 (patch 2) missing
+    with pytest.raises(ValueError, match="patches"):
+        jax.jit(lambda: compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts2[:, 0], forcing=_forcing2(Tl, sw, q, cosf),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=st2,
+            dt=1800.0, T_soil=Ts2, psi_soil=psi2, theta_soil=th2, lat=lat2,
+            doy=180.0, grid_info=bad_gi)[0])()

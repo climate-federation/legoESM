@@ -2078,9 +2078,22 @@ def compute_clm_ml_canopy_fluxes(
                     "those belong to the single-column jax.grad training path. "
                     "Differentiate one column at a time."
                 )
+            # Realign by each GridInfo's OWN patch index (``.p``), NOT tuple
+            # position: the loop below drives column c -> patch c+1, so a tuple
+            # built in any order must still supply patch (c+1)'s structure.  Keying
+            # off position and overwriting p would silently apply another column's
+            # ncan/ntop/nbot to the wrong patch (codex).  Require exactly patches
+            # 1..ncol, one per column.
+            _by_p = {int(_g.p): _g for _g in _gi_list}
+            if set(_by_p) != set(range(1, ncol + 1)):
+                raise ValueError(
+                    f"CLM-ML multi-column grid_info covers patches {sorted(_by_p)}, "
+                    f"but exactly 1..{ncol} are required (one GridInfo per column, "
+                    "patch index c+1). Build it with extract_clm_ml_grid_info(warm_state)."
+                )
             _grids = []
             for _c in range(ncol):
-                _g = _gi_list[_c]
+                _g = _by_p[_c + 1]
                 _ncan_c = int(_g.ncan)
                 if not (1 <= _ncan_c <= _ncan_max):
                     raise ValueError(
