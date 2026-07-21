@@ -55,33 +55,46 @@ def resolved_vertical_flux(w_center: Array, phi: Array) -> Array:
 
 
 def sgs_vertical_scalar_flux_mean(
-    phi: Array, nu_t: Array, z: Array, *, pr_sgs: float = 1.0
+    phi: Array, nu_t: Array, dz: float, *, pr_sgs: float = 1.0,
+    surface_flux: float = 0.0,
 ) -> Array:
-    """SGS horizontal-mean vertical scalar flux ``<w'φ'>_sgs = -<K_h ∂φ/∂z>``.
+    """SGS horizontal-mean vertical scalar flux, matching the core's discretization.
 
-    ``phi`` and ``nu_t`` are ``(ny, nx, nz)`` cell-centre fields (``nu_t`` from
-    ``spectral_les_plane.eddy_viscosity``); ``z`` is the ``(nz,)`` centre height.
-    ``K_h = ν_t / Pr``. The vertical gradient is centred (one-sided at the ends) on
-    the possibly-stretched grid. Returns ``(nz,)``, positive upward.
+    Reproduces EXACTLY the vertical SGS flux ``spectral_les_plane.scalar_rhs``
+    integrates (not a centred approximation), so the emitted ``<w'φ'>_sgs`` equals
+    the flux the model actually applied. ``phi`` and ``nu_t`` are ``(ny, nx, nz)``
+    cell-centre fields (``nu_t`` from ``eddy_viscosity``); ``dz`` is the uniform
+    layer thickness; ``surface_flux`` is the prescribed surface kinematic flux
+    ``<w'φ'>_0`` (``Q0`` for θ, ``0`` for a scalar with no surface source).
 
-    Down-gradient sign check: ``K_h >= 0`` ⇒ the flux is opposite in sign to
-    ``∂φ/∂z``. Stable (``∂θ/∂z>0``) ⇒ negative (downward) SGS heat flux; a
-    super-adiabatic surface layer (``∂θ/∂z<0``) ⇒ positive (upward) — the correct
-    near-surface contribution the resolved field under-represents.
+    The core forms the DIFFUSIVE flux ``J = K_h ∂φ/∂z`` on interior faces
+    (``K_h = ν_t/Pr``, ``K_h`` averaged centre→face by ``c2f``, gradient by
+    ``ddz_c2f``), imposes ``J = -surface_flux`` on the surface face and ``J = 0`` on
+    the lid, then takes ``∂J/∂z`` at centres. The turbulent flux is ``<w'φ'> = -J``;
+    this returns the horizontal mean of ``-J`` mapped to centres (``f2c``), positive
+    upward. Sign check: stable (``∂θ/∂z>0``) ⇒ negative (downward) interior SGS heat
+    flux; the surface carries exactly ``+surface_flux`` (upward for CBL heating).
     """
     phi = np.asarray(phi)
     nu_t = np.asarray(nu_t)
-    z = np.asarray(z)
     if phi.shape != nu_t.shape or phi.ndim != 3:
         raise ValueError("phi and nu_t must be matching (ny,nx,nz) fields")
-    if z.ndim != 1 or z.shape[0] != phi.shape[-1]:
-        raise ValueError("z must be (nz,) matching the field's vertical axis")
     if not (pr_sgs > 0):
         raise ValueError(f"pr_sgs must be > 0, got {pr_sgs}")
+    if not (dz > 0):
+        raise ValueError(f"dz must be > 0, got {dz}")
     k_h = nu_t / pr_sgs
-    dphi_dz = np.gradient(phi, z, axis=-1)          # (ny,nx,nz), positive-up
-    sgs_flux = -k_h * dphi_dz                        # local down-gradient flux
-    return sgs_flux.mean(axis=_HORIZ)
+    # interior faces (nz-1): K_h centre→face (c2f), gradient centre→face (ddz_c2f)
+    k_h_face = 0.5 * (k_h[..., :-1] + k_h[..., 1:])
+    dphi_dz_face = (phi[..., 1:] - phi[..., :-1]) / dz
+    # TURBULENT flux <w'φ'> = -J on interior faces (down-gradient), surface = the
+    # prescribed +surface_flux (upward), lid = 0 (no-flux).
+    turb_int = -k_h_face * dphi_dz_face                              # (ny,nx,nz-1)
+    surf = np.full(phi[..., :1].shape, float(surface_flux), dtype=phi.dtype)
+    lid = np.zeros(phi[..., :1].shape, dtype=phi.dtype)
+    turb_face = np.concatenate([surf, turb_int, lid], axis=-1)      # (ny,nx,nz+1)
+    turb_center = 0.5 * (turb_face[..., :-1] + turb_face[..., 1:])  # f2c -> (nz)
+    return turb_center.mean(axis=_HORIZ)
 
 
 def build_reference_artifact(

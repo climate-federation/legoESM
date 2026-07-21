@@ -93,8 +93,13 @@ def _build_cbl(case, args, dtype):
     return g, st, float(Q0)
 
 
-def _mean_profiles(st, g, pr_sgs):
-    """Horizontal-mean (θ, u, v) + resolved & SGS heat flux for one snapshot."""
+def _mean_profiles(st, g, pr_sgs, Q0):
+    """Horizontal-mean (θ, u, v) + resolved & SGS heat flux for one snapshot.
+
+    The SGS heat flux uses the core's exact face discretization (via emit) with the
+    prescribed surface kinematic flux ``Q0`` on the surface face — so the emitted
+    ``<w'θ'>_sgs`` equals the flux ``scalar_rhs`` integrated.
+    """
     u = np.asarray(st.u)
     v = np.asarray(st.v)
     wc = np.asarray(sl.f2c(st.w))
@@ -105,7 +110,8 @@ def _mean_profiles(st, g, pr_sgs):
     u_m = horizontal_mean(u)
     v_m = horizontal_mean(v)
     wth_res = resolved_vertical_flux(wc, th)
-    wth_sgs = sgs_vertical_scalar_flux_mean(th, nu_t, z, pr_sgs=pr_sgs)
+    wth_sgs = sgs_vertical_scalar_flux_mean(
+        th, nu_t, float(g.dz), pr_sgs=pr_sgs, surface_flux=Q0)
     return z, theta_m, u_m, v_m, wth_res, wth_sgs
 
 
@@ -131,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output", type=Path, default=Path("results/les_suite/artifacts"))
     args = p.parse_args(argv)
 
+    if args.frames < 2:
+        raise SystemExit("--frames must be >= 2 (an initial condition + >=1 later)")
+    if args.hours is not None and not (args.hours > 0):
+        raise SystemExit("--hours must be > 0")
+    if args.dt is not None and not (args.dt > 0):
+        raise SystemExit("--dt must be > 0")
     if not list_cases():  # idempotent: only populate an empty registry
         register_default_catalog()
     case = get_case(args.case)
@@ -158,13 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[les-suite emit] case={case.name} regime={case.regime} "
           f"grid={case.grid.label} Q0={Q0} hours={hours} dt={dt0:.3f} sgs={sgs_name}")
 
-    # record t=0, then integrate, snapshotting nearest each frame time.
     recs_z = None
     theta_s, u_s, v_s, wthr_s, wths_s, times = [], [], [], [], [], []
 
     def _record(t):
         nonlocal recs_z
-        z, thm, um, vm, wr, ws = _mean_profiles(st, g, args.pr_sgs)
+        z, thm, um, vm, wr, ws = _mean_profiles(st, g, args.pr_sgs, Q0)
         recs_z = z
         theta_s.append(thm)
         u_s.append(um)
@@ -173,22 +184,25 @@ def main(argv: list[str] | None = None) -> int:
         wths_s.append(ws)
         times.append(float(t))
 
-    st, _ = step(st, dt=dt, first=True)
+    # Record the TRUE initial condition at t=0 (before any step) — the prognostic
+    # score initialises the SCM to LES(t=0), so the IC must be the real t=0 state,
+    # not a once-stepped state mislabeled t=0.
     _record(0.0)
-    t = float(dt)
-    fi = 1
+    t = 0.0
+    first = True
     t0 = time.time()
-    while t < T and fi < len(frame_times):
-        target = frame_times[fi]
-        while t < target:
-            st, _ = step(st, dt=dt, first=False)
+    # Integrate; snapshot at each frame target AT OR AFTER it. frame_times[0]=0 is
+    # already recorded, so drive the remaining targets (through the final one = T).
+    for target in frame_times[1:]:
+        while t < target - 1e-9:
+            st, _ = step(st, dt=dt, first=first)
+            first = False
             t += float(dt)
         mw = float(jnp.max(jnp.abs(st.w)))
         if not np.isfinite(mw) or mw > 1e3:
             print(f"[BLOWUP] t={t:.0f}s max|w|={mw}")
             return 1
         _record(t)
-        fi += 1
     print(f"[DONE] wall={time.time()-t0:.1f}s  {len(times)} frames")
 
     # de-duplicate strictly-increasing times (the t=0 + first-frame may coincide)
