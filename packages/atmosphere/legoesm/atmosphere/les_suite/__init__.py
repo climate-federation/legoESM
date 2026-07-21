@@ -63,6 +63,11 @@ from .scm_coupling import (
     regrid_truth,
     theta_from_temperature,
 )
+from .scm_runner import (
+    build_cbl_scm_from_artifact,
+    scm_final_theta_on,
+    scm_les_final_loss,
+)
 from .score import (
     DiagnosticScore,
     PrognosticScore,
@@ -93,12 +98,15 @@ __all__ = [
     "interp_profile",
     "regrid_truth",
     "theta_from_temperature",
+    "build_cbl_scm_from_artifact",
     "build_reference_artifact",
     "cbl_diagnostics",
     "centered_dtheta_dz",
     "clear_registry",
     "horizontal_mean",
     "resolved_vertical_flux",
+    "scm_final_theta_on",
+    "scm_les_final_loss",
     "sgs_vertical_scalar_flux_mean",
     "counter_gradient_diagnostic",
     "diagnose_truth",
