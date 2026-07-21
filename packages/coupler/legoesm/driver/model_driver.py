@@ -4980,6 +4980,13 @@ class ModelDriver:
                 # segment loop over the validated run_atm_latlon_spmd, distinct
                 # from the jitted compiled_segments scan (zero surgical risk to
                 # the shared hot loop).
+                self._reject_coupled_lane(
+                    "enable_latlon_spmd (lat-band SPMD)",
+                    "a dynamics-only / Held-Suarez or operator-split SPMD "
+                    "envelope",
+                    "Run the coupled case single-device "
+                    "(enable_latlon_spmd=False) so the compiled lane -- which "
+                    "does stash the held fields -- is selected.")
                 status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif (self.config.grid.grid_type == "cubed_sphere"
                     and self._device_config is not None
@@ -4997,6 +5004,12 @@ class ModelDriver:
                 # falls through to the compiled lane below, which routes
                 # dynamics through make_tiled_cc_step
                 # (_maybe_build_tiled_step) instead of this blocked loop.
+                self._reject_coupled_lane(
+                    "sub-face-tiled cube SPMD (6*kt^2 > 6 devices)",
+                    "a blocked tiled / tiled operator-split envelope",
+                    "Run the coupled case on <=6 devices (n_devices<=6, so "
+                    "tiling==(1,1)) -- the compiled lane stashes the held "
+                    "fields; this one does not.")
                 status = self._run_tiled_cube_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
@@ -6878,6 +6891,38 @@ class ModelDriver:
             f"{active} is not yet SPMD-routed — its PhysicsState carry needs the "
             "lat-major reshape-aware shard (see run_atm_latlon_spmd_segment). "
             "Set those schemes to 'none' or use held_suarez_forcing=True.")
+
+    def _reject_coupled_lane(self, lane: str, envelope: str,
+                             remedy: str) -> None:
+        """Refuse a COUPLED run on an atmosphere lane that never stashes the
+        surface radiation / precipitation the coupler consumes.
+
+        The coupled drivers read ``held_sw_net_sfc`` / ``held_lw_net_sfc`` /
+        ``seg_precip`` out of ``self._carry_aux``.  The lat-lon SPMD and
+        sub-face-tiled cube lanes never write them, so the coupled
+        ocean/land/ice tiles would be forced with ``sw_down=0`` and
+        ``precip=0`` -- perpetual polar night plus an evaporation-only
+        freshwater budget, and SILENTLY: no NaN, no exception, and the
+        reconstructed ``lw_down`` collapses to a plausible ``sigma*T_sfc**4``
+        (the emissivity cancels exactly), so it reads as a spin-up transient
+        rather than a broken boundary condition.  Per dispatch-hardening
+        doctrine this refuses rather than defaulting to zeros.
+
+        Gated on ``_requires_surface_flux_export`` -- the marker a coupled
+        driver sets on its atmosphere -- and NOT on ``_segment_callback``.
+        ``run(segment_callback=...)`` is a GENERAL per-segment hook used by
+        uncoupled diagnostic samplers (the operator-split fold-back parity
+        tests, ``training/run_to_column_mean``, ``ml/physics/data``); refusing
+        those would be a pure regression.  Only a consumer that actually reads
+        ``_carry_aux`` sets the marker.
+        """
+        if not getattr(self, "_requires_surface_flux_export", False):
+            return
+        raise NotImplementedError(
+            f"{lane} runs {envelope} and never stashes held_sw_net_sfc / "
+            "held_lw_net_sfc / seg_precip into _carry_aux, so a coupled run "
+            "would force the ocean/land/ice tiles with sw_down=0 and "
+            f"precip=0 (silent: no NaN, plausible lw_down). {remedy}")
 
     def _run_compiled_latlon_spmd(self, start_step: int = 0,
                                   start_day: float | None = None) -> str:

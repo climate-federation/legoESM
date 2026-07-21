@@ -37,6 +37,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 T_UNITS=tests/unit/test_seg_precip_units.py
 T_AD=tests/ice/unit/test_ice_float32_grad_safety.py
+T_C2=tests/coupler/unit/test_coupled_lane_carry_aux.py
 
 mkdir -p "$FIXED/logs"
 export JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
@@ -98,6 +99,14 @@ else echo "ok: FIX-1 units test correctly RED on unpatched main"; fi
 # FIX-3's tests DO collect on main, so each is checked individually.
 vacuity_check "$T_AD" 0 "FIX-3 AD"
 
+# C2's module imports a helper that does not exist on main, so it fails to
+# collect there (a coarse but legitimate red); check per-test anyway so that
+# once the helper lands, any individually-vacuous case is still caught.
+mkdir -p "$PREFIX/$(dirname "$T_C2")"
+cp "$FIXED/$T_C2" "$PREFIX/$T_C2"
+vacuity_check "$T_C2" 1 "C2 carry_aux"
+rm -f "$PREFIX/$T_C2"
+
 rm -f "$PREFIX/$T_UNITS" "$PREFIX/$T_AD"
 
 # Control for the one known-fragile regression test: it asserts
@@ -123,6 +132,19 @@ echo "--- [x64] FIX-1 precip units ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_UNITS";      RC=$((RC + $?))
 echo "--- [fp32] FIX-3 sea-ice reverse-mode AD (MUST be float32) ---"
 JAX_ENABLE_X64=0 "$PY" -u -m pytest -q "$T_AD";         RC=$((RC + $?))
+echo "--- [x64] C2 coupled-lane _carry_aux guard ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_C2";         RC=$((RC + $?))
+
+# The C2 guard fires on a marker set by the coupled drivers, NOT on the presence
+# of a segment_callback -- that hook is a GENERAL per-segment diagnostic with
+# several non-coupled users, and gating on it would turn these two SPMD/tiled
+# parity tests red.  They go through the exact dispatch branches being guarded,
+# so they are the direct regression control for that design choice.
+echo "--- [x64] control: non-coupled segment_callback users must STILL pass ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q \
+  tests/parallel/test_operator_split_spmd_driver_parity.py \
+  tests/parallel/test_operator_split_tiled_cube_driver_parity.py
+RC=$((RC + $?))
 
 # ---------------------------------------------------------------- REGRESS ----
 echo

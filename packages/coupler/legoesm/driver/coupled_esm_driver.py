@@ -195,6 +195,14 @@ class CoupledESMDriver:
         self.coupled_cfg = coupled_config or CoupledConfig()
         validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
+        # This driver's _build_atm_forcing READS held_sw_net_sfc /
+        # held_lw_net_sfc / seg_precip out of the atmosphere's _carry_aux, so
+        # atmosphere lanes that never write them must refuse to run rather
+        # than silently force the surface with zeros.  The marker (not the
+        # presence of a segment_callback, which is also used by uncoupled
+        # diagnostic samplers) is what ModelDriver._reject_coupled_lane gates
+        # on.
+        self._atm._requires_surface_flux_export = True
         self._coupler_config = coupler_config
         self._ice_config = ice_config
         self._lake_config = lake_config
@@ -1492,8 +1500,29 @@ class CoupledESMDriver:
         T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
         rho_low = p_low / (constants.R_d * T_v_low)
 
-        # Radiation and precipitation from last atmosphere physics
+        # Radiation and precipitation from last atmosphere physics.  STRICT:
+        # a lane that advanced a segment with an ACTIVE radiation /
+        # precipitation source MUST have stashed these.  Silently defaulting a
+        # missing key to zeros forces the surface with sw_down=0 / precip=0
+        # while has_radiation=1 below asserts the forcing is valid -- the
+        # silent wrong-physics fallback dispatch-hardening doctrine forbids.
+        # Gated on the atmosphere config, NOT on bare key presence: zero is the
+        # CORRECT value for a dry run or radiation="none".  Safe to raise
+        # unconditionally here -- _build_atm_forcing has exactly one caller,
+        # _segment_hook (the segment callback itself), so it never runs before
+        # an atmosphere segment has advanced.
+        from legoesm.core.coupling_fields import require_surface_radiation_aux
         aux = getattr(self._atm, '_carry_aux', {})
+        _acfg = self.atm_config
+        require_surface_radiation_aux(
+            aux,
+            radiation_active=(
+                getattr(_acfg, "radiation", "none") not in (None, "none")),
+            precip_active=(
+                getattr(_acfg, "microphysics", "none") not in (None, "none")
+                or getattr(_acfg, "convection", "none") not in (None, "none")),
+            lane=type(self._atm).__name__,
+        )
         sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
         lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
         seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))

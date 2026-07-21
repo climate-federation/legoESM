@@ -7,8 +7,56 @@ These NamedTuples define the strict interface between atmosphere and surface.
 from __future__ import annotations
 
 from typing import NamedTuple
-
 import jax
+
+
+def require_surface_radiation_aux(aux, *, radiation_active: bool,
+                                  precip_active: bool, lane: str) -> None:
+    """Raise when a coupled atmosphere lane advanced a segment but stashed no
+    surface radiation / precipitation for the coupler to consume.
+
+    Both coupled drivers (``CoupledESMDriver._build_atm_forcing`` and
+    ``EarthSystemDriver._build_atm_forcing``) read ``held_sw_net_sfc`` /
+    ``held_lw_net_sfc`` / ``seg_precip`` out of ``ModelDriver._carry_aux`` and
+    historically fell back to ``zeros`` for anything absent.  Lanes that never
+    write them therefore forced the ocean/land/ice tiles with ``sw_down=0`` and
+    ``precip=0``: perpetual polar night (~-240 W/m^2 global-mean, ice-albedo
+    runaway) plus an evaporation-only freshwater budget (unbounded
+    salinification).  The failure is SILENT -- no NaN, no exception, and the
+    reconstructed ``lw_down`` collapses to a plausible ``sigma*T_sfc**4``
+    because the emissivity cancels exactly.  Per dispatch-hardening doctrine a
+    silent wrong-physics fallback is worse than a hard failure.
+
+    Gated on the atmosphere CONFIG, not on bare key presence: zero IS the
+    physically correct forcing for a dry run or ``radiation="none"``, and
+    ``_run_mpas`` stashes each key only when its source produced one
+    (model_driver.py:5795-5802).  An unconditional "require all three keys"
+    check would raise on those legitimate coupled runs.
+
+    Tests ``aux.get(k) is None`` rather than ``k not in aux`` because
+    ``_run_per_step`` writes the key unconditionally with a ``None`` value when
+    its source is inactive (model_driver.py:9762); a present-but-None entry is
+    just as unusable to the consumer as a missing one.
+
+    Pure and JAX-free (dict lookups only) so it is directly unit testable with
+    no driver construction and no model run.
+    """
+    missing = []
+    if radiation_active:
+        missing += [k for k in ("held_sw_net_sfc", "held_lw_net_sfc")
+                    if aux.get(k) is None]
+    if precip_active and aux.get("seg_precip") is None:
+        missing.append("seg_precip")
+    if not missing:
+        return
+    raise RuntimeError(
+        f"coupled atmosphere lane {lane!r} advanced a segment but did not "
+        f"stash {missing} into _carry_aux, while the atmosphere config has an "
+        "active radiation / precipitation source. The surface would be forced "
+        "with zero shortwave and/or zero precipitation (silent: no NaN, and "
+        "the reconstructed lw_down is a plausible sigma*T_sfc**4). Populate "
+        "the held fields in that lane, or run a lane that does (the compiled "
+        "single-device lane).")
 
 
 class AtmToSurface(NamedTuple):
