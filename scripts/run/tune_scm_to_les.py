@@ -128,6 +128,15 @@ def tune_closure_derivative_free(
         if np.isfinite(loss) and loss < best_loss:
             best_loss = loss
             best_overrides = cand
+    if not np.isfinite(best_loss):
+        # every candidate diverged (non-finite SCM/loss) — a search failure, NOT a
+        # tuned result. Raise rather than return inf/NaN (which would also serialise
+        # to invalid JSON and silently poison the scorecard).
+        n_finite = sum(1 for loss, _ in history if np.isfinite(loss))
+        raise RuntimeError(
+            f"{scheme}: no candidate produced a finite loss "
+            f"({n_finite}/{len(history)} finite); SCM likely diverged — check "
+            "nlev/dt/sigma_top or the artifact.")
     return TuneResult(
         scheme=scheme,
         best_overrides=best_overrides,
@@ -185,13 +194,18 @@ def main(argv: list[str] | None = None) -> int:
         tiers=tuple(args.tiers), n_random=args.n_random,
         nlev=args.nlev, dt=args.dt, seed=args.seed,
     )
+    default_finite = bool(np.isfinite(result.default_loss))
     print(f"[tune] case={artifact.case_name} scheme={result.scheme} "
           f"evaluated={result.n_evaluated}")
-    print(f"  default loss = {result.default_loss:.4f}")
+    print(f"  default loss = "
+          f"{result.default_loss:.4f}" if default_finite else "  default loss = diverged")
     print(f"  best    loss = {result.best_loss:.4f}")
-    improvement = result.default_loss - result.best_loss
-    print(f"  improvement  = {improvement:+.4f} "
-          f"({100 * improvement / result.default_loss:+.1f}%)")
+    if default_finite:
+        improvement = result.default_loss - result.best_loss
+        print(f"  improvement  = {improvement:+.4f} "
+              f"({100 * improvement / result.default_loss:+.1f}%)")
+    else:
+        print("  improvement  = n/a (default config diverged; tuning recovered it)")
     rounded = {k: round(v, 4) for k, v in result.best_overrides.items()}
     print(f"  best overrides: {json.dumps(rounded)}")
 
@@ -199,12 +213,14 @@ def main(argv: list[str] | None = None) -> int:
         f"{artifact.case_name}__{result.scheme}__df.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
+        # JSON has no Inf/NaN literal — write null for a non-finite default loss so
+        # the scorecard reader (which falls back to best_loss) stays valid.
         json.dump({
             "case": artifact.case_name,
             "scheme": result.scheme,
             "method": "derivative_free",
             "tiers": list(args.tiers),
-            "default_loss": result.default_loss,
+            "default_loss": result.default_loss if default_finite else None,
             "best_loss": result.best_loss,
             "best_overrides": result.best_overrides,
             "n_evaluated": result.n_evaluated,

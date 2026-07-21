@@ -74,6 +74,14 @@ from .score import (
     diagnostic_flux_score,
     prognostic_profile_score,
 )
+from .scorecard import (
+    Scorecard,
+    ScorecardError,
+    assemble_scorecard,
+    coefficient_spreads,
+    rank_closures_per_regime,
+    render_markdown,
+)
 
 __all__ = [
     "ANCHOR_CASES",
@@ -93,7 +101,13 @@ __all__ = [
     "REGIMES",
     "RegistryError",
     "SGS_CHOICES",
+    "Scorecard",
+    "ScorecardError",
     "T_from_theta",
+    "assemble_scorecard",
+    "coefficient_spreads",
+    "rank_closures_per_regime",
+    "render_markdown",
     "artifact_to_scm_forcing",
     "interp_profile",
     "regrid_truth",
