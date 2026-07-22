@@ -814,11 +814,12 @@ def build_parser():
     parser.add_argument("--grid", default="cubed_sphere",
                         choices=["cubed_sphere", "latlon", "voronoi", "gaussian"],
                         help="Atmosphere grid (default cubed_sphere). "
-                             "latlon + voronoi(MPAS) support --ocean dynamic (3D "
-                             "ocean); cubed_sphere couples to the grid-agnostic "
-                             "slab (fixed/slab/two_layer, its 3D ocean is dycore-"
-                             "blocked); gaussian(spectral) is fixed-SST AMIP only "
-                             "for now (coupled synthesis is a follow-up).")
+                             "latlon + voronoi(MPAS) drive --ocean dynamic (3D "
+                             "ocean) co-located; cubed_sphere and gaussian"
+                             "(spectral) drive --ocean dynamic on a DISTINCT "
+                             "lat-lon ocean grid (--ocean-grid latlon:<res>, "
+                             "conservative cross-grid remap) and also couple to "
+                             "the grid-agnostic slab (fixed/slab/two_layer).")
     parser.add_argument("--couple-surface-radiation",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Feed the coupler's tile-blended (land+ocean) skin "
@@ -1378,32 +1379,27 @@ def main():
     # Coupled slab ocean on gaussian(spectral) IS wired (A2): _build_atm_forcing
     # synthesizes the spectral coefficient state to grid, and _run_spectral
     # recomputes + stashes the surface net radiation at the daily coupling
-    # boundary. A 3-D DYNAMIC ocean on the spectral grid stays gated (spectral
-    # ocean is idealized). cubed_sphere / latlon / voronoi(MPAS) support both.
-    # Spectral (gaussian) atmosphere: a 3-D DYNAMIC ocean stays deferred (a
-    # gaussian<->latlon conservative remap is not yet wired; the co-located
-    # spectral 3-D ocean is idealized).  The cubed-sphere cross-grid path below
-    # is validated.
-    if args.grid == "gaussian" and args.ocean == "dynamic":
-        raise SystemExit(
-            "coupled --grid gaussian supports the slab ocean only: a 3-D "
-            "DYNAMIC ocean on the spectral grid is not wired (the "
-            "gaussian<->latlon cross-grid remap is a follow-up). Use --ocean "
-            "slab on gaussian, or --grid cubed_sphere / latlon / voronoi for a "
-            "dynamic ocean.")
+    # boundary.  A 3-D DYNAMIC ocean on the spectral grid is ALSO wired now, on
+    # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled through
+    # the SAME conservative cross-grid remap the cube atm uses: the Gaussian
+    # grid exposes quadrature-consistent latitude cell edges (GaussianGrid.lat_v)
+    # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
+    # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
+    # voronoi(MPAS) support the dynamic ocean too.
     overrides = {}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
-    # A cubed-sphere atmosphere can drive a 3-D ocean ONLY on a DISTINCT lat-lon
-    # ocean grid (--ocean-grid latlon:<res>), coupled via the conservative
-    # cross-grid remap (a co-located cube 3-D ocean dycore does not exist).
-    _xgrid_ocean = args.ocean == "dynamic" and args.grid == "cubed_sphere"
+    # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
+    # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the
+    # conservative cross-grid remap (neither has a co-located 3-D ocean dycore).
+    _xgrid_ocean = args.ocean == "dynamic" and args.grid in (
+        "cubed_sphere", "gaussian")
     if _xgrid_ocean and not args.ocean_grid:
         raise SystemExit(
-            "--ocean dynamic on --grid cubed_sphere requires a distinct lat-lon "
+            f"--ocean dynamic on --grid {args.grid} requires a distinct lat-lon "
             "ocean grid: pass --ocean-grid latlon:<resolution> (e.g. "
-            "latlon:48). The cube atmosphere couples to the lat-lon 3-D ocean "
-            "via the conservative cross-grid remap; a co-located cube 3-D ocean "
-            "dycore does not exist.")
+            f"latlon:48). The {args.grid} atmosphere couples to the lat-lon 3-D "
+            "ocean via the conservative cross-grid remap; a co-located 3-D "
+            f"ocean dycore for --grid {args.grid} does not exist.")
     if args.ocean == "dynamic":
         # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's

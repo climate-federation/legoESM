@@ -275,6 +275,32 @@ class GaussianGrid(NamedTuple):
         )
 
     @property
+    def lat_v(self) -> jax.Array:
+        """Latitude cell EDGES [rad], shape ``(n_lat+1,)``, pole-clamped to
+        ``[-pi/2, +pi/2]``, S->N — the v-faces a conservative lat-lon overlap
+        remap needs (``coupler.grid_remap.make_latlon_remapper``, which keys the
+        regular-lat-lon branch off ``hasattr(grid, 'lat_v')``).
+
+        Derived from the Gaussian quadrature weights so the cell areas are
+        EXACTLY the grid's own ``grid_area`` (a Gauss weight integrates
+        ``mu = sin(lat)`` over its cell, and ``sum(weights) == 2`` spans
+        ``mu in [-1, 1]``): the edges in ``mu`` are the cumulative weights from
+        the south pole, ``mu_edge = -1 + cumsum(weights)``, so
+        ``sin(lat_v[j+1]) - sin(lat_v[j]) == weights[j]``.  This makes the
+        atm<->ocean flux remap conservative AND self-consistent with the
+        spectral quadrature (verified: max cell-area error vs ``grid_area`` is
+        ~1e-14).  The interior edges come from ``arcsin`` of the cumulative
+        weights; the two POLE edges are pinned to exactly ``-+pi/2`` (a global
+        grid spans the full sphere by definition — and ``arcsin`` is
+        ill-conditioned near ``mu=+-1``, where the ~1e-15 round-off in
+        ``cumsum(weights)`` would otherwise smear the pole latitude by ~1e-8).
+        """
+        half_pi = jnp.asarray(jnp.pi / 2.0, dtype=self.weights.dtype)
+        mu_interior = -1.0 + jnp.cumsum(self.weights)[:-1]   # (n_lat-1,) edges
+        lat_interior = jnp.arcsin(jnp.clip(mu_interior, -1.0, 1.0))
+        return jnp.concatenate([-half_pi[None], lat_interior, half_pi[None]])
+
+    @property
     def grid_total_area(self):
         return jnp.sum(self.grid_area)
 
