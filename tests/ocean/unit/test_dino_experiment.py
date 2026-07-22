@@ -299,6 +299,11 @@ class TestDINORecipes:
             "barotropic_time_filter": "nemo_boxcar_centred",  # nn_bt_flt=2
             "forcing_annual_cycle": True, "wind_through_step": True,  # ln_ann_cyc
             "use_gm_redi": True,                          # ln_ldfeiv
+            # namdyn_hpg ln_hpg_sco (dynhpg.F90 hpg_sco: qco stretch + zuap
+            # slope term — the staircase form stress, #1226) + its trapezoid
+            # p' quadrature on the exact gdept ladder.
+            "pgf_scheme": "nemo_sco",
+            "pgf_quadrature": "nemo_trapezoid",
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"

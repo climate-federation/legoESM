@@ -1777,11 +1777,23 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_implicit_pcg_maxiter must be >= 1, "
                 f"got {config.barotropic.barotropic_implicit_pcg_maxiter!r}")
-        _valid_pgf = {"adcroft", "smc03"}
+        _valid_pgf = {"adcroft", "smc03", "nemo_sco"}
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme not in _valid_pgf:
             raise ValueError(
                 f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
+        if (pgf_scheme == "nemo_sco"
+                and getattr(config, "pgf_quadrature", "cell_integral")
+                != "nemo_trapezoid"):
+            # NEMO hpg_sco's zuap/stretch terms telescope against the dynhpg
+            # trapezoid p' on the SAME gdept ladder; pairing them with the
+            # midpoint cell_integral rule would leave a spurious rest-η PGF at
+            # staircase steps (fn-entry guard duplicated in
+            # _bc_ke_and_pressure_gradients for direct callers).
+            raise ValueError(
+                'pgf_scheme="nemo_sco" requires pgf_quadrature='
+                '"nemo_trapezoid" (NEMO dynhpg pairs the hpg_sco stencil '
+                "with its trapezoid vertical quadrature).")
         _rdsm = getattr(config, "runoff_depth_spread_map", None)
         if _rdsm is not None:
             import numpy as _np

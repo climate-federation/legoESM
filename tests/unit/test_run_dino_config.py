@@ -430,6 +430,7 @@ def test_r1_exact_preset(monkeypatch):
     assert cfg.tracer_advection == "fct2"
     assert cfg.vertical_coordinate == "masked_zco"
     assert cfg.pgf_quadrature == "nemo_trapezoid"
+    assert cfg.pgf_scheme == "nemo_sco"                 # namdyn_hpg ln_hpg_sco (#1226)
     assert cfg.forcing_annual_cycle is True          # ln_ann_cyc
     # stabilizer TKE viscosity floor OFF -> effective A_v == avm0 exactly
     assert cfg.tke_momentum_visc_bg == cfg.A_v_bg

@@ -92,6 +92,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
+    interp_cell_to_vface,
     is_tripolar,
     lat_ends_are_poles,
     min_cell_to_uface,
@@ -1568,8 +1569,10 @@ def _bc_ke_and_pressure_gradients(
     # dp_dx, dp_dy.  For pure z\\* coord (legacy adcroft), all centroids align
     # within a column so the correction is identically zero — bit-exact
     # backwards-compat preserved; ``pgf_scheme="smc03"`` instead applies the
-    # density-Jacobian PGF (the elif branch below).  ``pgf_scheme`` is validated
-    # against {"adcroft","smc03"} at model construction (_validate_config).
+    # density-Jacobian PGF and ``pgf_scheme="nemo_sco"`` the NEMO dynhpg
+    # hpg_sco transcription (elif branches below).  ``pgf_scheme`` is validated
+    # against {"adcroft","smc03","nemo_sco"} at model construction
+    # (_validate_config).
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
@@ -1590,6 +1593,73 @@ def _bc_ke_and_pressure_gradients(
             # from p_prime — float32 in the standard config).
             dp_dx = dp_dx_smc.astype(dp_dx.dtype)
             dp_dy = dp_dy_smc.astype(dp_dy.dtype)
+        elif pgf_scheme == "nemo_sco":
+            # NEMO ``hpg_sco`` (dynhpg.F90 5.0.1:340-390, the DINO namdyn_hpg
+            # selection) transcribed for the full-step staircase under qco.
+            # Conventions: depth positive DOWN, ``p' = +g·∫ρ' dz``; the u-trend
+            # applied downstream is ``-(1/ρ0)·dp_dx`` (KE_PGF assembly), so
+            # NEMO's trend = zhpi + zuap maps to
+            #   dp_dx = δ_i[(1+r3t)·p'] − (g/2)·(ρ'_W+ρ'_E)·δ_i[gdept_z0]
+            # (each δ carries the metric 1/e1u via gradient_*_cgrid):
+            #   * zhpi (dynhpg.F90:345-347, 370-375): the along-level integral
+            #     uses the qco-stretched ``e3w = E3w_0·(1+r3t)`` (domzgr_
+            #     substitute.h90:131).  r3t is depth-independent per column, so
+            #     the stretched integral is EXACTLY ``(1+r3t)·p'`` with ``p'``
+            #     the η=0 nemo_trapezoid recurrence computed upstream.
+            #   * zuap (dynhpg.F90:352-355, 377-380): the s-coordinate slope
+            #     correction ``+g/2·(rhd_W+rhd_E)·δ[gdept_z0]/e1u`` with
+            #     ``gdept_z0 = gdept_0·(1+r3t) − ssh`` (domzgr_substitute.h90:
+            #     139,145) and ``r3t = ssh/ht_0`` (domqco.F90:160), ht_0 the
+            #     staircase column depth.  Sign: the −(g/2)(…)δ[gdept_z0] here
+            #     becomes +zuap after the −1/ρ0 (NEMO rhd = ρ'/ρ0).
+            # Both terms vanish IDENTICALLY at η=0 (stretch ≡ 1, δ[gdept_z0] ≡
+            # δ of a 1-D ladder ≡ 0), so the staircase rest state is untouched.
+            # For uniform ρ' + tilted η the two terms telescope (e3w(1)=
+            # 2·gdept(1), e3w(k)=gdept(k)−gdept(k−1) ⇒ ½e3w(1)+Σe3w = gdept(k))
+            # to the exact −g·(ρ'/ρ0)·∂η/∂x at EVERY wet face of a step of any
+            # depth — the discrete topographic form stress the η=0 gradient
+            # alone cannot transmit (issue #1226 wall-face sign flip).
+            if getattr(config, "pgf_quadrature", "cell_integral") != \
+                    "nemo_trapezoid":
+                raise ValueError(
+                    'pgf_scheme="nemo_sco" requires pgf_quadrature='
+                    '"nemo_trapezoid": the zuap/stretch terms telescope '
+                    "against the dynhpg trapezoid p' on the SAME gdept "
+                    "ladder; the cell_integral midpoint rule would leave an "
+                    "O(gdept−z_mid) spurious rest-η PGF at steps.")
+            # Same ladder selection as the p' quadrature in
+            # _bc_geometry_and_density (exact NEMO gdept_1d when carried).
+            t_depth = (
+                jnp.abs(z_coord.z_full_ref)
+                if getattr(z_coord, "t_depth_ref", None) is None
+                else jnp.asarray(z_coord.t_depth_ref)
+            )
+            # r3t = ssh/ht_0 with ht_0 = Σ_k e3t_0·tmask (the staircase
+            # depth).  Land columns (ht_0 = 0): eta_safe is already masked
+            # to 0 there; the floor only guards the division (faces touching
+            # land are zeroed by u_mask_3d downstream).
+            ht_0 = jnp.sum(z_coord.h_partial, axis=-1)
+            r3t = jnp.where(ht_0 > 0.0, eta_safe / jnp.maximum(ht_0, 1.0), 0.0)
+            stretch = (1.0 + r3t)[..., jnp.newaxis]
+            gdept_z0 = (t_depth[jnp.newaxis, jnp.newaxis, :] * stretch
+                        - eta_safe[..., jnp.newaxis])
+            # NEMO's rhd is masked below the seafloor (eosbn2 tmask); wet
+            # faces never read those cells, dry faces are masked downstream.
+            rho_m = jnp.where(z_coord.is_active, rho_prime,
+                              jnp.zeros_like(rho_prime))
+            p_hat = p_prime_filled * stretch
+            dp_dx_sco = (
+                gradient_x_cgrid(p_hat, grid)
+                - g_val * interp_cell_to_uface(rho_m)
+                * gradient_x_cgrid(gdept_z0, grid)
+            )
+            dp_dy_sco = (
+                gradient_y_cgrid(p_hat, grid)
+                - g_val * interp_cell_to_vface(rho_m, grid)
+                * gradient_y_cgrid(gdept_z0, grid)
+            )
+            dp_dx = dp_dx_sco.astype(dp_dx.dtype)
+            dp_dy = dp_dy_sco.astype(dp_dy.dtype)
         else:
             # Use eta=0 reference for centroid: rho_prime / p_prime above
             # are computed at the J=1, eta=0 reference (line 802 comment).
@@ -1621,6 +1691,16 @@ def _bc_ke_and_pressure_gradients(
         # are active (no below-seafloor cells).  Opt-in: the default
         # ``pgf_scheme="adcroft"`` keeps the raw gradient → BIT-IDENTICAL
         # (this branch is not entered).
+        if getattr(config, "pgf_scheme", "adcroft") == "nemo_sco":
+            # The hpg_sco transcription is defined on the masked/partial-cell
+            # staircase (r3t = η/ht_0 with ht_0 the staircase depth, gdept_z0
+            # from the fixed gdept ladder).  On the pure z* terrain-following
+            # coordinate those geometry identities do not hold — falling
+            # through to the raw gradient would silently drop the scheme.
+            raise ValueError(
+                'pgf_scheme="nemo_sco" requires a partial-cell/masked-zco '
+                "coordinate (OceanPartialCellCoordinate); got a pure z* "
+                "OceanZStarCoordinate.")
         if getattr(config, "pgf_scheme", "adcroft") == "smc03":
             # ``min_water_column_m`` intentionally omitted (mirrors the partial-
             # cell smc03 branch, which uses the unfloored static ``h_partial``):
