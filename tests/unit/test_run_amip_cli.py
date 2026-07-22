@@ -352,8 +352,11 @@ def test_land_surface_scheme_flag_flows_to_config():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.land_surface_scheme == "simple_seb"
 
+    # Canopy schemes require --use-multilayer-land (they run inside the multilayer
+    # land tile); the flag round-trips with it set.
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+        "--use-multilayer-land",
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
 
@@ -362,9 +365,25 @@ def test_land_surface_scheme_flag_flows_to_config():
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
+
+
+def test_canopy_scheme_requires_multilayer_land():
+    """A canopy surface scheme without --use-multilayer-land is a hard CLI error,
+    not a silent drop to the slab land (dispatch-hardening)."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical", "--land-surface-scheme", scheme,
+            ]), parser)
+    # simple_seb (the default) is a no-op on the slab and is NOT gated.
+    _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
+    ]), parser)
 
 
 def test_sponge_flags_flow_to_config():

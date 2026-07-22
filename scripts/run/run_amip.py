@@ -1810,6 +1810,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "crashes on the unstructured mesh: VoronoiMesh has no "
                      "lat/lat2d). Pass --no-use-multilayer-land to override "
                      "a --config YAML that enables it.")
+    # Canopy surface schemes run INSIDE the multilayer land tile; without
+    # --use-multilayer-land the slab land runs and the scheme is silently dropped
+    # (the user asked for a canopy, got the slab).  Fail early rather than degrade
+    # silently.  simple_seb is the default and is a no-op on the slab, so it is not
+    # gated.
+    if (args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and not args.use_multilayer_land):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is a canopy scheme "
+            "that runs inside the multilayer land tile and has NO effect on the "
+            "slab land — it would be silently dropped. Pass --use-multilayer-land, "
+            "or use --land-surface-scheme simple_seb.")
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(
