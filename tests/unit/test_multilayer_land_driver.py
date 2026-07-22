@@ -115,9 +115,9 @@ def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
     stores the concrete per-column GridInfo tuple on the pipeline so the jitted run
     steps run the ncol>1 traceable canopy.  Requires the clm-ml-jax backend."""
     import pytest
-    pytest.importorskip("multilayer_canopy")
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
     import inspect as _inspect
-    from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
     if "cos_zenith_device" not in _inspect.signature(
             _mlmod.MLCanopyFluxes).parameters:
         pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
@@ -151,10 +151,10 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
     A crash would surface here (trace or first exec); a finite, advanced land state
     with a still-warm canopy proves the jitted ncol>1 coupled canopy works."""
     import pytest
-    pytest.importorskip("multilayer_canopy")
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
     import inspect as _inspect
     import jax
-    from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
     if "cos_zenith_device" not in _inspect.signature(
             _mlmod.MLCanopyFluxes).parameters:
         pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")

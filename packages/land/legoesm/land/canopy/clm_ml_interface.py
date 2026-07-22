@@ -114,17 +114,17 @@ def _ensure_clm_initialized() -> None:
     global _CLM_INITIALIZED
     if _CLM_INITIALIZED:
         return
-    from clm_src_main.clm_varpar import clm_varpar_init
-    from offline_driver import clmSoilOptionMod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import clm_varpar_init
+    from legoesm.land.canopy.clm_ml_backend.offline_driver import clmSoilOptionMod
 
     # Use CLM4.5 physics so nlevsoi=10 matches legoESM's default 10-layer soil.
     clmSoilOptionMod.clm_phys = "CLM4_5"
     clm_varpar_init()
 
     # Initialize MLpftcon and psihat look-up tables.
-    from multilayer_canopy.MLCanopyTurbulenceMod import LookupPsihatINI
-    from clm_src_main import pftconMod
-    from multilayer_canopy import MLpftconMod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyTurbulenceMod import LookupPsihatINI
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import pftconMod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod
 
     pftconMod.pftcon = pftconMod.Init()
     MLpftconMod.MLpftcon = MLpftconMod.Init()
@@ -134,8 +134,8 @@ def _ensure_clm_initialized() -> None:
     # Must match the start_date_ymd=20010101 epoch used in _setup_clm_time so
     # that CLM's shr_orb_cosz gets consistent orbital geometry (year 2000 is
     # a leap year and shifts caldays after Feb 28 by one day).
-    from clm_share.shr_orb_mod import shr_orb_params
-    import clm_src_utils.clm_varorb as _varorb
+    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_params
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
 
     # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
     eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)  # coeff-ok: non-leap reference year 2001 for CLM orbital parameters epoch
@@ -224,7 +224,7 @@ def _psihat_probe() -> dict[str, float]:
     versa), the run is an inconsistent hybrid — worse than either scheme — and
     the caller must be told exactly which path disagreed.
     """
-    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyTurbulenceMod as _turb
     return {
         name: float(getattr(_turb, name)(_PSIHAT_PROBE_ZDT, _PSIHAT_PROBE_DTL))
         for name in ("_LookupPsihatM", "_LookupPsihatH",
@@ -259,8 +259,8 @@ def _apply_canopy_layering(canopy_config: CLMMLCanopyConfig) -> None:
     step, and the counts do not change within a run).  Concurrent runs with
     different layerings in one process are unsafe unless externally serialised.
     """
-    import multilayer_canopy.MLclm_varctl as _ml_ctl
-    import multilayer_canopy.MLinitVerticalMod as _init_vert
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLinitVerticalMod as _init_vert
 
     n_above = int(canopy_config.nlayer_above)
     n_within = int(canopy_config.nlevmlcan) - n_above
@@ -291,8 +291,8 @@ def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
             f"unknown CLM-ML stomatal_model {scheme!r}; must be one of "
             f"{tuple(CLM_ML_STOMATAL_GS_TYPE)}")
     gs = CLM_ML_STOMATAL_GS_TYPE[scheme]
-    import multilayer_canopy.MLclm_varctl as _ml_ctl
-    import multilayer_canopy.MLLeafPhotosynthesisMod as _photo
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLLeafPhotosynthesisMod as _photo
     _ml_ctl.gs_type = gs
     _photo.gs_type = gs
     # The backend's leaf-kernel factories are ``functools.lru_cache``d on their
@@ -352,7 +352,7 @@ def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> No
     # MLCanopyTurbulenceMod allocates psigrid* as ZEROS, so snapshotting a
     # pre-init module would pin "rsl_bonan" to a MOST table forever.
     _ensure_clm_initialized()
-    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyTurbulenceMod as _turb
 
     if _PSIHAT_RSL is None:
         snapshot: dict[str, Any] = {}
@@ -604,12 +604,12 @@ def _setup_clm_topology(
         CLM PFT index (1-based) applied to all columns.  Controls Vcmax25
         and plant hydraulic parameters via the MLpftcon lookup table.
     """
-    from clm_src_main import ColumnType as _col_mod
-    from clm_src_main import GridcellType as _grc_mod
-    from clm_src_main.ColumnType import column_type
-    from clm_src_main.PatchType import patch
-    from clm_src_main.clm_varpar import nlevsno, nlevgrnd, nlevsoi
-    from clm_src_main.clm_varcon import ispval
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import ColumnType as _col_mod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import GridcellType as _grc_mod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.ColumnType import column_type
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import patch
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import nlevsno, nlevgrnd, nlevsoi
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import ispval
 
     n_layers = len(dz_soil)
 
@@ -676,7 +676,7 @@ def _setup_clm_topology(
     )
 
     # ---- grc ----
-    from clm_src_main.GridcellType import GridcellType as gridcell_type
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.GridcellType import GridcellType as gridcell_type
     latdeg_np = np.full(ncol + 1, 0.0, dtype=np.float64)
     londeg_np = np.full(ncol + 1, 0.0, dtype=np.float64)
     for i in range(ncol):
@@ -707,7 +707,7 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     actual simulation date, producing wrong solar zenith angles and hence
     wrong sun/shade fractions and per-layer radiation profiles.
     """
-    import clm_src_utils.clm_time_manager as _tm
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_time_manager as _tm
 
     _tm.dtstep = int(dt)
     # Encode actual day-of-year into itim so that get_curr_calday returns
@@ -818,8 +818,8 @@ def _compute_virtual_lon_deg(
     -------
     lon_deg : np.ndarray  shape (ncol,), virtual longitude [°, −180..180]
     """
-    from clm_share.shr_orb_mod import shr_orb_decl
-    import clm_src_utils.clm_varorb as _varorb
+    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_decl
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
 
     lat_r = np.deg2rad(lat_deg)
 
@@ -975,7 +975,7 @@ def _build_stubs(
                     waterstatebulk, temperature, frictionvel, canopystate,
                     energyflux, waterfluxbulk, solarabs, waterdiagnosticbulk
     """
-    from clm_src_main.clm_varpar import nlevsoi, ivis, inir, nlevgrnd, nlevsno
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import nlevsoi, ivis, inir, nlevgrnd, nlevsno
     # NOTE: ivis=1, inir=2 in CLM
 
     np_ = ncol + 1  # 1-based patch dimension
@@ -1288,9 +1288,9 @@ def _init_mlcanopy(ncol: int, stubs: dict, canopy_config: CLMMLCanopyConfig) -> 
     vertical PAD profile, then calls ``init_cold`` for leaf water potential
     and intercepted water initialisation.
     """
-    from multilayer_canopy.MLCanopyFluxesType import create_mlcanopy, init_cold
-    from multilayer_canopy.MLclm_varpar import nlevmlcan
-    from clm_src_main.clm_varcon import spval
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType import create_mlcanopy, init_cold
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varpar import nlevmlcan
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import spval
 
     mlcanopy = create_mlcanopy(1, ncol)
 
@@ -1418,7 +1418,7 @@ def _extract_surface_fluxes(
     - ``lwup_canopy``:  upwelling LW [W/m²]
     - ``gppveg_canopy``: GPP [µmol CO₂/m²/s]
     """
-    from clm_src_main.clm_varpar import ivis, inir
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import ivis, inir
 
     # Per-column arrays → (ncol,)
     shflx = jnp.stack([mlcanopy.shflx_canopy[i + 1] for i in range(ncol)])
@@ -1594,7 +1594,7 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
         tuple (ncol>1).  ``multilayer_canopy.MLclm_varctl.GridInfo`` fields are
         concrete Python ints.
     """
-    from multilayer_canopy.MLclm_varctl import GridInfo
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
     if canopy_state is None or canopy_state.mlcanopy is None:
         raise ValueError(
             "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
@@ -1722,8 +1722,8 @@ def compute_clm_ml_canopy_fluxes(
     _ensure_clm_initialized()
 
     # Lazy imports of CLM-ML-JAX entry point
-    from multilayer_canopy.MLCanopyFluxesMod import MLCanopyFluxes
-    from clm_src_main.decompMod import bounds_type
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesMod import MLCanopyFluxes
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.decompMod import bounds_type
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
@@ -2011,8 +2011,8 @@ def compute_clm_ml_canopy_fluxes(
             # Use CLM's own Kepler shr_orb_cosz at caldaym1 — same declination and
             # phase as CLM's internal solar_zen_forcing, so SW partitioning is
             # consistent with beam extinction kb=0.5/coszen in MLCanopyFluxes.
-            from clm_share.shr_orb_mod import shr_orb_cosz as _clm_cosz, shr_orb_decl as _clm_decl
-            import clm_src_utils.clm_varorb as _varorb_loc
+            from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_cosz as _clm_cosz, shr_orb_decl as _clm_decl
+            import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb_loc
             _declinm1, _ = _clm_decl(_caldaym1, _varorb_loc.eccen, _varorb_loc.mvelpp,
                                       _varorb_loc.lambm0, _varorb_loc.obliqr)
             _pi = np.pi
@@ -2113,7 +2113,7 @@ def compute_clm_ml_canopy_fluxes(
     num_exposedvegp = ncol
 
     # ---- Set MLclm_varctl global settings ----
-    import multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
     _ml_ctl.runge_kutta_type = canopy_config.runge_kutta_type
     _ml_ctl.met_type = canopy_config.met_type
     # dtime_ml: sub-step length. Must divide dt evenly.  Count resolved (and
@@ -2152,7 +2152,7 @@ def compute_clm_ml_canopy_fluxes(
     # caller MUST thread ``grid_info`` (extract once from the warm state).  Mirrors
     # make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
     if _traceable:
-        from multilayer_canopy.MLclm_varctl import GridInfo
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
         # Capability guard: the differentiable path is only CORRECT with a
         # clm-ml-jax build whose ``_CanopyFluxesDiagnostics`` runs in diff mode
         # (``grid=`` parameter).  Older builds return from ``MLCanopyFluxes``
@@ -2161,7 +2161,7 @@ def compute_clm_ml_canopy_fluxes(
         # not on PyPI (local install), so we cannot pin a version; probe the
         # capability directly and fail LOUDLY instead.
         import inspect as _inspect
-        from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
         if "grid" not in _inspect.signature(_mlmod._CanopyFluxesDiagnostics).parameters:
             raise RuntimeError(
                 "CLM-ML traceable mode requires a clm-ml-jax build "
@@ -2277,7 +2277,7 @@ def compute_clm_ml_canopy_fluxes(
     # FIXED value goes here; a TRAINABLE Vcmax25 is supplied as the traced
     # ``vcmaxpft_jax`` argument (from a training loop), which takes precedence.
     if canopy_config.vcmax25_override is not None and vcmaxpft_jax is None:
-        from multilayer_canopy import MLpftconMod as _pftmod
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod as _pftmod
         _pft = int(canopy_config.pft_clm)
         _vlen = int(_pftmod.MLpftcon.vcmaxpft.shape[0])
         if not (0 <= _pft < _vlen):

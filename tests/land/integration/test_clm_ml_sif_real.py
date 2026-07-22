@@ -18,7 +18,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-mlt = pytest.importorskip("multilayer_canopy.MLCanopyFluxesType")
+mlt = pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType")
 
 from legoesm.land.canopy.sif import (  # noqa: E402
     SIFConfig, actual_electron_transport, leaf_sif,

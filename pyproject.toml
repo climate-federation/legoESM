@@ -161,6 +161,9 @@ legoesm-tools = { workspace = true }
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored 3rd-party CLM-ML-JAX backend (BSD-3) — not written to legoESM's lint
+# conventions; audited upstream, excluded from ruff/audits here.
+extend-exclude = ["packages/land/legoesm/land/canopy/clm_ml_backend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
@@ -294,6 +297,9 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
+# Vendored 3rd-party CLM-ML-JAX backend (BSD-3) — not type-annotated to legoESM's
+# standard; excluded from type-checking here (audited upstream).
+exclude = ['packages/land/legoesm/land/canopy/clm_ml_backend/']
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

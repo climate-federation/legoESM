@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("multilayer_canopy")
+pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
 
 import inspect  # noqa: E402
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
-from multilayer_canopy import MLCanopyFluxesMod as _mlmod  # noqa: E402
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod  # noqa: E402
 
 # Gate on the device-solar-zenith capability (the S1 backend change).
 _HAS_DEVICE_ZENITH = (
