@@ -184,3 +184,47 @@ INCREMENTAL, VALIDATED ORDER (S2 loop stays default behind a `scan_columns` flag
 Each of (a)-(d) is independently parity-checkable against the current per-column path —
 so the radiation-boundary risk is caught before the scan flip. Focused single-session
 effort; do NOT rush (an nbot-boundary bug "would corrupt all global runs").
+
+## SHIPPED (2026-07-22) — Phase 1: uniform-structure lax.scan achieves the S3 goal
+
+**S3's compile goal is DONE for the current interface via a uniform-structure scan —
+the delicate nbot-masking radiation rewrite of (a)/(c) turned out to be UNNECESSARY
+for anything the interface can currently produce.** Two measured facts collapsed the
+scope:
+
+1. **The interface is single-PFT.** `compute_clm_ml_canopy_fluxes`'s topology setup
+   sets `itype_arr[p] = pft_clm` for EVERY column (one `CLMMLCanopyConfig.pft_clm`),
+   so all columns share a PFT. Per-column PFT is not plumbed.
+2. **`nbot` is invariant to LAI for a fixed PFT.** Warm-starting ncol=3 with
+   `lai_override` spanning `[0.05, 0.15, 12.0]` (desert→rainforest) gave the SAME
+   `(ncan,ntop,nbot,pft) = (9,8,2,7)` for every column — the dpai_min zeroing +
+   redistribution leaves the active-layer bottom fixed across the whole realistic LAI
+   range.
+
+⇒ Every current multi-column CLM-ML run has UNIFORM `(ncan,ntop,nbot,pft)`, so the
+**single lax.scan over columns** (Phase 1) — carry = shared mlcanopy, only the patch
+index `p` traced, structure closed-over CONCRETE — traces ONCE and gives **O(1)
+compile in ncol** with NO per-layer masking and NO dynamic pft-gather. Validated
+(`tests/land/integration/test_clm_ml_jit_forward.py`): device==host single-column
+no-op, ncol=2 column-parity vs independent single-column runs, and an ncol=4
+O(1)-compile + scan==loop no-op test. Codex-clean (3 rounds). Behind
+`CLMMLCanopyConfig.scan_columns` (default True); heterogeneous structure (should it
+ever arise) falls back to the proven S2 per-column loop — correct, only O(ncol) there.
+
+### Remaining ONLY when per-column PFT is plumbed (not today)
+Heterogeneous structure becomes reachable only if a future interface assigns
+per-column PFT (different biomes) — then `nbot`/`pft` vary across columns and the
+single concrete-structure scan would be wrong (it falls back to the O(ncol) loop).
+The PREFERRED extension is **NOT** the nbot-masking radiation rewrite of (a)/(c)
+above (HIGH risk — coupled two-stream tridiagonal solve) but **GROUP-BY-STRUCTURE**:
+partition columns into groups sharing `(ncan,ntop,nbot,pft)`, run ONE Phase-1 uniform
+scan per group (body closed over that group's concrete structure, `jax.lax.scan` over
+the group's patch-index array). Compile is O(#distinct structures) — bounded by
+~(PFTs × nbot values), independent of ncol — reusing the VALIDATED uniform-scan
+machinery with ZERO radiation risk. (Prototyped 2026-07-22 and reverted UNSHIPPED:
+its multi-group path is currently unreachable/untestable with the single-PFT interface,
+so shipping it would be untested speculative code — implement + test it in the same PR
+that plumbs per-column PFT.) The nbot-masking approach (a)/(c) remains a theoretical
+alternative only if a single O(1) scan over ALL heterogeneous columns is ever needed
+(vs O(#structures) groups), and only with the mixed-structure parity oracle that
+per-column PFT would make constructible.
