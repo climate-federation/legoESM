@@ -101,7 +101,10 @@ def _build_cbl(case, args, dtype):
     st = sl.SpectralLESState(
         u=u, v=v, w=w, rhs_u_prev=jnp.zeros_like(u), rhs_v_prev=jnp.zeros_like(v),
         rhs_w_prev=jnp.zeros_like(w), theta=th3, rhs_theta_prev=jnp.zeros_like(th3))
-    Q0 = case.surface_theta_flux_K_m_s
+    # --q0 overrides the case's surface flux (the Q1 buoyancy-axis sweep); else the
+    # case default. The artifact records the flux actually applied, so the tuner's
+    # controlled comparison stays consistent.
+    Q0 = args.q0 if args.q0 is not None else case.surface_theta_flux_K_m_s
     if Q0 is None:
         raise SystemExit(f"{case.name}: dry CBL requires surface_theta_flux_K_m_s")
     return g, st, float(Q0)
@@ -146,6 +149,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--theta0", type=float, default=300.0)
     p.add_argument("--gamma", type=float, default=0.008, help="inversion dθ/dz [K/m]")
     p.add_argument("--zi0", type=float, default=800.0, help="initial inversion height [m]")
+    p.add_argument("--q0", type=float, default=None,
+                   help="override the case surface kinematic heat flux [K m/s] "
+                        "(the Q1 buoyancy-axis sweep); default = the case value")
+    p.add_argument("--label", type=str, default=None,
+                   help="extra tag in the artifact filename (e.g. q0 value) to keep "
+                        "a flux sweep from overwriting")
     p.add_argument("--z0", type=float, default=0.1)
     p.add_argument("--f32", action="store_true")
     p.add_argument("--output", type=Path, default=Path("results/les_suite/artifacts"))
@@ -249,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         w_theta_s=np.full(times_arr.shape[0], Q0),
         f_c=0.0,
     )
-    out = args.output / f"{case.name}__{sgs_name}.npz"
+    tag = f"__{args.label}" if args.label else ""
+    out = args.output / f"{case.name}__{sgs_name}{tag}.npz"
     save_artifact(artifact, out)
     print(f"  artifact -> {out}  (nt={artifact.nt}, nz={artifact.nz})")
     return 0
