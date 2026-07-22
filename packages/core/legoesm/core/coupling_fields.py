@@ -7,6 +7,7 @@ These NamedTuples define the strict interface between atmosphere and surface.
 from __future__ import annotations
 
 from typing import NamedTuple
+
 import jax
 
 

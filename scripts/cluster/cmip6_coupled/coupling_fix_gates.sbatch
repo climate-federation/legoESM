@@ -38,6 +38,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 T_UNITS=tests/unit/test_seg_precip_units.py
 T_AD=tests/ice/unit/test_ice_float32_grad_safety.py
 T_C2=tests/coupler/unit/test_coupled_lane_carry_aux.py
+T_XG=tests/coupler/unit/test_grid_remap_wet_mask.py
 
 mkdir -p "$FIXED/logs"
 export JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
@@ -63,29 +64,44 @@ cd "$PREFIX"
 # genuinely-red test masks a sibling that passes on the broken code, which is
 # exactly how a vacuous step_sea_ice case slipped through earlier.  Collect
 # every test id and require EACH to be individually RED here.
-vacuity_check () {   # $1 = test file, $2 = JAX_ENABLE_X64 value, $3 = label
-  local f="$1" x64="$2" label="$3" names ids id rc
-  # Derive test names from the SOURCE, not from pytest's --collect-only output:
-  # that output format is not stable across pytest versions, and when the grep
-  # silently matched nothing this gate reported success while checking NOTHING.
-  # Read the names from the FIXED tree (the file may not exist on main).
-  names=$(grep -oE '^def (test_[A-Za-z0-9_]+)' "$FIXED/$f" | awk '{print $2}')
-  if [ -z "$names" ]; then
-    echo "!!! $label: could not parse any test names out of $FIXED/$f -- the"
-    echo "    vacuity gate cannot run, treating as FAILURE rather than pass"
+vacuity_check () {   # $1 = test file  $2 = X64 value  $3 = label  $4 = optional
+                     # space-separated substrings of tests ALLOWED to be green
+                     # on main (invariant guards, not regression tests).
+  local f="$1" x64="$2" label="$3" allow="${4:-}" ids id rc short base
+  # Build node ids from the FIXED source by grep, NOT pytest --collect-only:
+  # collection depends on the sourced env / conftest / pytest version and once
+  # returned nothing under a mismatched PYTHONPATH, spuriously failing the gate.
+  # Grep is deterministic. Handle BOTH layouts: a module-level `def test_` (no
+  # class -> id = file::method) and a single unittest `class Test...: def test_`
+  # (id = file::Class::method). None of these files use >1 test class.
+  local cls methods m
+  cls=$(grep -oE '^class (Test[A-Za-z0-9_]+)' "$FIXED/$f" | head -1 | awk '{print $2}')
+  methods=$(grep -oE 'def (test_[A-Za-z0-9_]+)' "$FIXED/$f" | awk '{print $2}' | sort -u)
+  if [ -z "$methods" ]; then
+    echo "!!! $label: no test methods parsed from $FIXED/$f -- gate cannot run;"
+    echo "    treating as FAILURE (never a silent pass)."
     RC=$((RC+1)); return 0
   fi
   ids=""
-  for id in $names; do ids="$ids $f::$id"; done
-  echo "$label: checking $(echo $names | wc -w) test(s) individually"
+  for m in $methods; do
+    if [ -n "$cls" ]; then ids="$ids $f::$cls::$m"; else ids="$ids $f::$m"; fi
+  done
+  echo "$label: checking $(echo "$ids" | wc -l) test(s) individually"
   for id in $ids; do
+    short="${id##*::}"
     JAX_ENABLE_X64="$x64" "$PY" -m pytest -q --tb=no "$id" >/dev/null 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then
+      # Green on main. Allowed only for declared invariant guards.
+      for base in $allow; do
+        if [ "$short" = "$base" ]; then
+          echo "ok(invariant-guard, green both sides): $short"; continue 2
+        fi
+      done
       echo "!!! VACUOUS: $id PASSES on unpatched main -- it proves nothing"
       RC=$((RC+1))
     else
-      echo "ok(red-on-main): $id"
+      echo "ok(red-on-main): $short"
     fi
   done
 }
@@ -106,6 +122,19 @@ mkdir -p "$PREFIX/$(dirname "$T_C2")"
 cp "$FIXED/$T_C2" "$PREFIX/$T_C2"
 vacuity_check "$T_C2" 1 "C2 carry_aux"
 rm -f "$PREFIX/$T_C2"
+
+# H3/H4 cross-grid: the o2a land-exclusion / open-water-fraction / driver-wiring
+# cases are red on main; the a2o conservation + identity cases are INVARIANT
+# GUARDS (green both sides by design), so this is not a pure red-on-main set --
+# per-test check surfaces exactly which are which.
+mkdir -p "$PREFIX/$(dirname "$T_XG")"
+cp "$FIXED/$T_XG" "$PREFIX/$T_XG"
+# test_a2o_uniform_flux_conserved_over_wet_domain uses only pre-existing symbols
+# (the a2o remap is unmasked in this design) -- it is an INVARIANT guard that
+# must hold on both trees, so it is expected-green, not vacuous.
+vacuity_check "$T_XG" 1 "H3/H4 cross-grid" \
+  "test_a2o_uniform_flux_conserved_over_wet_domain"
+rm -f "$PREFIX/$T_XG"
 
 rm -f "$PREFIX/$T_UNITS" "$PREFIX/$T_AD"
 
@@ -134,6 +163,8 @@ echo "--- [fp32] FIX-3 sea-ice reverse-mode AD (MUST be float32) ---"
 JAX_ENABLE_X64=0 "$PY" -u -m pytest -q "$T_AD";         RC=$((RC + $?))
 echo "--- [x64] C2 coupled-lane _carry_aux guard ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_C2";         RC=$((RC + $?))
+echo "--- [x64] H3/H4 cross-grid coastal wet-mask ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_XG";         RC=$((RC + $?))
 
 # The C2 guard fires on a marker set by the coupled drivers, NOT on the presence
 # of a segment_callback -- that hook is a GENERAL per-segment diagnostic with
