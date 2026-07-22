@@ -62,6 +62,15 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   losses). The tuned Q2 ranking is the next campaign step.
   NOTE: single-column tuning runs on CPU (`JAX_PLATFORMS=cpu`) — trivial there and
   avoids GPU contention (the GPU is for the LES ensemble emission).
+- **Perf limitation identified (tuner recompiles per candidate).** The derivative-free
+  tuner rebuilds the `TurbulenceConfig` for each candidate, and the SCM's jitted step
+  bakes the config in → each candidate pays a full XLA COMPILE (~40–60 s), so a
+  single closure's tier-1 search is ~10 min on CPU and a full 5-closure ranking is
+  ~50 min. The RIGHT fix (CLAUDE.md SegmentForcing doctrine): drive the tuned params
+  as TRACED leaves via `apply_param_overrides` INSIDE a jitted/AD loss, so ONE
+  compilation serves every param value — i.e. build the AD path (D4's other half),
+  which also gives the AD-vs-derivative-free comparison. Until then the tuned ranking
+  is run with reduced candidates / a persistent background batch.
 - **BUG found + fixed (CLAUDE.md precision rule — instrument, don't infer)**: the FIRST
   Q2 run reported "100% improvement, best_loss=0.0". Instrumenting it (not trusting it)
   showed the "best" candidate's SCM had DIVERGED to NaN θ, yet `scm_les_final_loss`
