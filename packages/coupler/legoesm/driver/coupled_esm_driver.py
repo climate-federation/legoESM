@@ -376,6 +376,20 @@ class CoupledESMDriver:
                 ),
             )
             self._ocean_step = make_ocean(cfg.ocean_config)
+            # Optional spatially+seasonally varying q-flux climatology: load
+            # once here (regridded to the ocean grid), interpolated per
+            # coupling interval in _step_ocean and threaded into the slab step.
+            # ``None`` (no path) => the scalar config.Q_flux, byte-identical.
+            self._qflux_forcing = None
+            _qfp = getattr(cfg.ocean_config, "q_flux_path", "")
+            if _qfp:
+                from legoesm.ocean.forcing.qflux import load_qflux_climatology
+                self._qflux_forcing = load_qflux_climatology(
+                    _qfp, self._ocean_grid)
+                logger.info(
+                    "  Ocean q-flux climatology: %s (%d records, regridded to "
+                    "the ocean grid; +into mixed layer)",
+                    _qfp, int(self._qflux_forcing.times.shape[0]))
             logger.info(f"  Ocean: mode={cfg.ocean_mode}, "
                         f"h_mix={cfg.ocean_config.h_mix}m, "
                         f"T_sfc_init={T_sfc_mean:.1f}K")
@@ -1695,8 +1709,13 @@ class CoupledESMDriver:
             has_precipitation=jnp.where(precip_total > 0, 1.0, 0.0),
         )
 
-    def _step_ocean(self, atm_forcing, dt):
+    def _step_ocean(self, atm_forcing, dt, q_flux=None):
         """Advance the slab ocean one coupling step.
+
+        ``q_flux`` (optional, [W/m2], +INTO the mixed layer, on the ocean grid)
+        is the calendar-month-interpolated q-flux climatology map for this
+        step; ``None`` falls back to the scalar ``config.Q_flux`` in the slab
+        step (byte-identical when no climatology is loaded).
 
         **One-way ice -> ocean coupling (intentional for the slab ocean).**
         ``step_sea_ice`` populates ice -> ocean back-reaction channels on
@@ -1722,7 +1741,7 @@ class CoupledESMDriver:
             return
         if not getattr(self, "_is_dynamic_ocean", False):
             self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
-                self._ocean_state, atm_forcing, dt,
+                self._ocean_state, atm_forcing, dt, q_flux=q_flux,
             )
             self._ocean_u_sfc = u_sfc
             self._ocean_v_sfc = v_sfc
@@ -2071,9 +2090,19 @@ class CoupledESMDriver:
         # standard single-grid run is byte-identical).
         ocean_forcing = remap_surface_fields(atm_forcing, self._grid_remapper.a2o)
 
+        # Spatially+seasonally varying q-flux for this coupling segment: the
+        # monthly climatology (already on the ocean grid) interpolated to the
+        # current model day.  ``None`` when no climatology is loaded => the slab
+        # uses the scalar config.Q_flux (byte-identical).  Interpolated once per
+        # segment (it varies on a monthly scale, far slower than sub_dt).
+        q_flux_now = None
+        if getattr(self, "_qflux_forcing", None) is not None:
+            from legoesm.ocean.forcing.qflux import qflux_at_time
+            q_flux_now = qflux_at_time(self._qflux_forcing, day)
+
         for _ in range(n_sub):
             # Step slab ocean (on the ocean grid)
-            self._step_ocean(ocean_forcing, sub_dt)
+            self._step_ocean(ocean_forcing, sub_dt, q_flux=q_flux_now)
 
             # Ocean state is on the ocean grid; remap SST / surface currents onto
             # the atmosphere grid for the coupler / surface step (identity =>
