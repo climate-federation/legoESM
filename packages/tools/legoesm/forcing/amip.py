@@ -20,6 +20,7 @@ References
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -354,6 +355,36 @@ def _validate_sst_sic_units(
         "k", "kelvin", "degk", "deg k", "degrees kelvin",
         "degree kelvin",
     )
+    # When the units ATTRIBUTE and the raw VALUES conflict decisively, the
+    # values win: ocean SST is ~-2..40 in Celsius and ~230..320 in Kelvin,
+    # so raw min > 150 K cannot be a Celsius field (and raw max < 150
+    # cannot be Kelvin).  The ICON pool AMIP file bc_sst_1979_2016.nc is
+    # the motivating case: tosbcs carries units='degC' but stores Kelvin
+    # (265-304 K) — trusting the attribute would demand +T_freeze and cook
+    # the converted SST to ~563 K (caught only by the bounds below, after
+    # rejecting the CORRECT offset=0 config first).  Mislabels warn loudly
+    # and are then held to the rule for what the data actually is.
+    _raw_min = float(np.nanmin(sst_data.astype(np.float64)))
+    _raw_max = float(np.nanmax(sst_data.astype(np.float64)))
+    if _sst_is_celsius and _raw_min > 150.0:
+        warnings.warn(
+            f"SST file {config.sst_var!r} has units={_sst_units!r} "
+            f"(Celsius) but raw values span [{_raw_min:.1f}, "
+            f"{_raw_max:.1f}] — unambiguously Kelvin. Treating the "
+            "units attribute as mislabeled; sst_offset must be 0.",
+            stacklevel=2,
+        )
+        _sst_is_celsius, _sst_is_kelvin = False, True
+    elif _sst_is_kelvin and _raw_max < 150.0:
+        warnings.warn(
+            f"SST file {config.sst_var!r} has units={_sst_units!r} "
+            f"(Kelvin) but raw values span [{_raw_min:.1f}, "
+            f"{_raw_max:.1f}] — unambiguously Celsius. Treating the "
+            f"units attribute as mislabeled; sst_offset must be "
+            f"+{constants.T_freeze}.",
+            stacklevel=2,
+        )
+        _sst_is_celsius, _sst_is_kelvin = True, False
     # A Celsius file needs the +T_freeze offset (tight tolerance,
     # correct sign); anything else (wrong sign, 100, 150) is a
     # misconfiguration, not a C->K conversion (codex review).
