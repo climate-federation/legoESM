@@ -151,9 +151,10 @@ FORCINGS: dict[str, ForcingSpec] = {
         # Loader wants ONE file with vars named CO2/CH4/N2O/CFC_11/CFC_12 on a
         # fractional-year axis; the raw input4MIPs 'gm' files are one-gas-per-
         # file with CF-long variable names.
-        adapter_note="merge the five per-gas input4MIPs files into one, rename "
+        adapter_note="run scripts/data/adapt_cmip6_ghg.py --in-dir <ghg dir> "
+                     "--out ghg.nc (merges the five per-gas files, renames "
                      "mole_fraction_of_<gas>_in_air -> CO2/CH4/N2O/CFC_11/"
-                     "CFC_12, on a fractional-year time axis.",
+                     "CFC_12 on a fractional-year axis).",
     ),
     "solar": ForcingSpec(
         channel="solar",
