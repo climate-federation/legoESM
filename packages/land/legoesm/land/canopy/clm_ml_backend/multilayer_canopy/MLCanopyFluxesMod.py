@@ -318,6 +318,18 @@ def MLCanopyFluxes(
 
     _diff_mode = grid is not None
 
+    # grid/diff mode (esp. the S3 column scan, where grid.p is TRACED) MUST use the
+    # DEVICE solar zenith (cos_zenith_device): the host fallback in _GetCLMVar
+    # recomputes zenith from per-step orbital globals via shr_orb_cosz and scatters
+    # it at the (dummy) filter index — which under a traced grid.p writes patch 1 for
+    # EVERY scanned column (silent wrong numerics).  Require it up front, loudly.
+    if _diff_mode and cos_zenith_device is None:
+        raise ValueError(
+            "CLM-ML grid/diff mode requires cos_zenith_device (the per-column device "
+            "solar zenith): the host shr_orb_cosz path cannot run under a traced patch "
+            "index and would silently write the wrong column. Supply cos_zenith_device "
+            "(the interface does this on the traceable path).")
+
     # Declare module-level RK coefficient cache as global so assignments
     # inside the if-block persist across calls.
     global _rk_ark, _rk_brk, _rk_crk
@@ -578,8 +590,14 @@ def MLCanopyFluxes(
         if _o2ref_py is not None:
             _o2ref_py_val: float = _o2ref_py
         else:
-            # Fallback for callers that don't pass _o2ref_py (eager/non-grad context).
-            _o2ref_py_val = float(mlcanopy_inst.o2ref_forcing[grid.p])
+            # grid.p may be TRACED (S3 column scan), so float(o2ref[grid.p]) would
+            # fail at trace time — fail loud instead of a cryptic tracer error. The
+            # interface always supplies _o2ref_py; a direct grid-mode caller must too.
+            raise ValueError(
+                "CLM-ML grid/diff mode requires a concrete _o2ref_py float: under the "
+                "column scan grid.p is a tracer, so float(mlcanopy_inst.o2ref_forcing"
+                "[grid.p]) cannot be evaluated at trace time. "
+                "Pass _o2ref_py=float(canopy_config.o2ref).")
     else:
         _o2ref_py_val = None  # non-diff mode: LeafPhotosynthesis reads it directly
 

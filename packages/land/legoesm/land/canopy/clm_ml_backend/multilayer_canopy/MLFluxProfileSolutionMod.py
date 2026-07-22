@@ -613,7 +613,10 @@ def ImplicitFluxProfileSolution(
     if n is None:
         n = int(mlcanopy_inst.ncan_canopy[p])  # concrete before JIT boundary
     mlcanopy_inst, aux = _implicit_fps_jit(p, n, mlcanopy_inst)
-    if DEBUG_FPS_CHECKS:
+    # The ErrorCheck0{1,2} routines do host-side int()/np.asarray() reads keyed off
+    # p — invalid when p is a TRACED S3 column-scan index.  They are a debug aid, so
+    # skip them under trace (still active for a concrete p / eager path).
+    if DEBUG_FPS_CHECKS and not isinstance(p, jax.core.Tracer):
         (
             lambda_,
             shsrc,

@@ -2359,7 +2359,15 @@ def compute_clm_ml_canopy_fluxes(
              and _g.nbot == _g0.nbot and _g.pft == _g0.pft)
             for _g in _grids
         )
-        if _uniform_structure and bool(getattr(canopy_config, "scan_columns", True)):
+        # The scan needs a CONCRETE per-column PFT (grid.pft, closed into the scan
+        # body): under a traced grid.p the Solar/Longwave host fallback
+        # int(patch.itype[grid.p]) would fail.  extract_clm_ml_grid_info always
+        # supplies pft>=0; a hand-built grid_info with the pft=-1 sentinel falls back
+        # to the S2 loop (concrete p, so its host itype read is valid) — never wrong,
+        # only slower.
+        _pft_ok = _g0.pft >= 0
+        if (_uniform_structure and _pft_ok
+                and bool(getattr(canopy_config, "scan_columns", True))):
             # xs: per-column patch index (1..ncol — TRACED under the scan) paired
             # with that column's cos(zenith).  filter=[1] is a STATIC dummy — under
             # grid= the kernel indexes the column by grid.p (the traced xs), NOT the
