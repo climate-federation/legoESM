@@ -43,6 +43,9 @@ def parse_table(path: str) -> dict:
     out: dict = {}
     for line in Path(path).read_text().splitlines():
         p = line.split()
+        # Fortran '(a,i2,...)' splits "t" and the tile number: 6 tokens
+        if len(p) == 6 and p[1] == "t":
+            p = [p[0], p[1] + p[2], p[3], p[4], p[5]]
         if len(p) != 5 or p[0] not in ("BG", "CG"):
             continue
         tile = int(p[1].lstrip("t"))

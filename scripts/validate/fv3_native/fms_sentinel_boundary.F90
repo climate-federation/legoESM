@@ -20,9 +20,10 @@
 ! mpirun -np 6.  n=12 per face, layout 1x1 per tile, halo 3.
 program fms_sentinel_boundary
   use mpp_mod,         only: mpp_init, mpp_exit, mpp_pe, mpp_npes, &
-                             mpp_error, FATAL, stdout
+                             mpp_error, FATAL
   use mpp_domains_mod, only: mpp_domains_init, mpp_define_mosaic, &
                              mpp_get_boundary, mpp_get_compute_domain, &
+                             mpp_get_data_domain, &
                              domain2d, BGRID_NE, CGRID_NE, &
                              mpp_domains_exit
   implicit none
@@ -31,6 +32,7 @@ program fms_sentinel_boundary
   type(domain2d) :: domain
   integer :: pe, npes, tile
   integer :: isc, iec, jsc, jec
+  integer :: isd, ied, jsd, jed
   integer :: i, j
   real(8), allocatable :: fbx(:,:), fby(:,:)      ! BGRID (n+1, n+1)
   real(8), allocatable :: fcx(:,:), fcy(:,:)      ! CGRID x:(n+1,n) y:(n,n+1)
@@ -45,10 +47,22 @@ program fms_sentinel_boundary
   call build_cube(domain)
   tile = pe + 1
   call mpp_get_compute_domain(domain, isc, iec, jsc, jec)
-  out = stdout()
+  call mpp_get_data_domain(domain, isd, ied, jsd, jed)
+  ! per-PE file: FMS swallows non-root stdout(), so each rank writes
+  ! its own table shard (sentinel_tN.txt), concatenated by the sbatch
+  block
+    character(len=32) :: fn
+    write (fn, '(a,i1,a)') 'sentinel_t', tile, '.txt'
+    out = 90 + tile
+    open (unit=out, file=trim(fn), status='replace', action='write')
+  end block
 
   ! ---------------- BGRID_NE (dyn_core ubb/vbbtemp shape) -------------
-  allocate (fbx(isc:iec+1, jsc:jec+1), fby(isc:iec+1, jsc:jec+1))
+  ! FMS requires MEMORY(=data)-domain arrays (mpp_get_boundary.h
+  ! "field is not on memory domain"); dyn_core passes data-sized
+  ! tempfx1/tempfy1, not the compute-sized ubb.  Halo slots hold 0.
+  allocate (fbx(isd:ied+1, jsd:jed+1), fby(isd:ied+1, jsd:jed+1))
+  fbx = 0.0d0; fby = 0.0d0
   do j = jsc, jec + 1
      do i = isc, iec + 1
         fbx(i, j) = code(tile, 0, i, j)
@@ -72,7 +86,8 @@ program fms_sentinel_boundary
   deallocate (wbx, ebx, sby, nby)
 
   ! ---------------- CGRID_NE (dyn_core allflux shape) -----------------
-  allocate (fcx(isc:iec+1, jsc:jec), fcy(isc:iec, jsc:jec+1))
+  allocate (fcx(isd:ied+1, jsd:jed), fcy(isd:ied, jsd:jed+1))
+  fcx = 0.0d0; fcy = 0.0d0
   do j = jsc, jec
      do i = isc, iec + 1
         fcx(i, j) = code(tile, 0, i, j)
@@ -99,6 +114,7 @@ program fms_sentinel_boundary
   end do
 
   write (out, '(a,i2)') 'SENTINEL_DONE t', tile
+  close (out)
   call mpp_domains_exit()
   call mpp_exit()
 
