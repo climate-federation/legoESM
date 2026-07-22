@@ -40,3 +40,6 @@ legoesm-core = { workspace = true }
 # legoesm/land into the shared `legoesm` namespace, so it imports as legoesm.land.
 [tool.hatch.build.targets.wheel]
 packages = ["legoesm"]
+# Ship the vendored CLM-ML-JAX RSL psihat look-up table (importlib.resources reads
+# it at runtime) in the built wheel — .py-only packaging would drop the .nc.
+artifacts = ["legoesm/land/canopy/clm_ml_backend/multilayer_canopy/data/*.nc"]

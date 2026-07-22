@@ -31,7 +31,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-turb = pytest.importorskip("multilayer_canopy.MLCanopyTurbulenceMod")
+turb = pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyTurbulenceMod")
 
 from legoesm.land.canopy.clm_ml_interface import (  # noqa: E402
     _PSIHAT_TABLE_ATTRS,
