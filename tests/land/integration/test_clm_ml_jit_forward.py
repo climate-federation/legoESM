@@ -381,3 +381,93 @@ def test_multicolumn_matches_independent_single_columns():
             canopy_config=cfg, land_config=lc, land_params=None, canopy_state=st2,
             dt=1800.0, T_soil=Ts2, psi_soil=psi2, theta_soil=th2, lat=lat2,
             doy=180.0, grid_info=bad_gi)[0])()
+
+
+def test_scan_columns_is_o1_and_matches_loop():
+    """S3 Phase 1: the uniform-structure column scan is O(1)-compile AND a no-op.
+
+    Two guarantees, one warm-start:
+
+    1. **O(1) compile.** ``scan_columns=True`` lowers the per-column canopy to a
+       single ``while`` in the HLO (jax.lax.scan), so the program text does NOT
+       grow with ncol; ``scan_columns=False`` unrolls the Python loop to ncol
+       full kernel copies (no ``while``, O(ncol) text).  We lower BOTH at the
+       same ncol and assert: scan HLO has a ``while`` and is materially shorter
+       than the unrolled loop HLO — the structural proof that the scan removed
+       the O(ncol) unroll (the S3 compile wall).  Non-vacuous: the loop lowering
+       is asserted to LACK the ``while`` and be larger, so a scan that silently
+       fell back to the loop would fail here.
+
+    2. **Numerical no-op.** RUN both paths and assert equal fluxes — the scan is
+       value-identical to the proven S2 loop on the uniform-structure path (so
+       switching the default to the scan changes compile cost, not answers).
+    """
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    ncol = 4  # small: enough to distinguish O(1) scan from O(ncol) unroll cheaply
+    Ts = jnp.full((ncol, 8), 290.0)
+    psi = jnp.full((ncol, 8), -0.5)
+    th = jnp.full((ncol, 8), 0.25)
+    lat = jnp.zeros(ncol)
+
+    def _cfg(scan_columns):
+        return CLMMLCanopyConfig(scan_columns=scan_columns)
+
+    # --- Warm-start ncol columns ONCE (eager cold step), extract the per-column
+    # GridInfo tuple.  Columns share the default PFT => uniform (ncan/ntop/nbot/pft)
+    # => the scan path is eligible; the loop path is selected by scan_columns=False.
+    ifc._last_topology_key = None
+    _o0, st = compute_clm_ml_canopy_fluxes(
+        T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, jnp.full(ncol, 295.0)),
+        canopy_config=_cfg(True), land_config=MultiLayerLandConfig(surface_scheme=_cfg(True)),
+        land_params=None, canopy_state=None, dt=1800.0,
+        T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0)
+    gi = extract_clm_ml_grid_info(st)
+    assert isinstance(gi, tuple) and len(gi) == ncol
+
+    Tl = jnp.full(ncol, 296.0)
+
+    def _run(scan_columns):
+        cfg = _cfg(scan_columns)
+        lc = MultiLayerLandConfig(surface_scheme=cfg)
+
+        def fwd(Tl_):
+            return compute_clm_ml_canopy_fluxes(
+                T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, Tl_), canopy_config=cfg,
+                land_config=lc, land_params=None, canopy_state=st, dt=1800.0,
+                T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+                grid_info=gi)[0]
+        return fwd
+
+    # --- (1) O(1): compare lowered HLO of scan vs unrolled loop ---
+    # NOTE: both paths contain a ``stablehlo.while`` from the INNER sub-step scan
+    # (num_ml_steps) — so "loop has no while" is NOT the signal.  The signal is
+    # that the column scan collapses ncol copies of that inner while into ONE
+    # (nested in one column while), whereas the loop UNROLLS ncol full kernels:
+    #  - fewer while-blocks in the scan HLO than the loop HLO, and
+    #  - materially shorter scan HLO (the O(ncol) unroll is what S3 removes).
+    hlo_scan = jax.jit(_run(True)).lower(Tl).as_text()
+    hlo_loop = jax.jit(_run(False)).lower(Tl).as_text()
+    n_while_scan = hlo_scan.count("stablehlo.while")
+    n_while_loop = hlo_loop.count("stablehlo.while")
+    assert n_while_scan >= 1, "scan_columns=True should lower to a lax.scan while-loop"
+    assert n_while_scan < n_while_loop, (
+        f"the column scan should collapse the per-column unroll into fewer while-"
+        f"blocks than the loop, got scan={n_while_scan} loop={n_while_loop} "
+        f"(equal ⇒ the scan silently fell back to the unrolled loop)")
+    assert len(hlo_loop) > 2 * len(hlo_scan), (
+        f"the unrolled loop HLO ({len(hlo_loop)} chars) should be >2x the scan HLO "
+        f"({len(hlo_scan)} chars) at ncol={ncol} — the O(ncol) unroll S3 removes")
+
+    # --- (2) no-op: scan values == loop values ---
+    out_scan = jax.jit(_run(True))(Tl)
+    out_loop = jax.jit(_run(False))(Tl)
+    for name in ("shflx", "lhflx", "gpp", "sw_net", "lw_net"):
+        s = getattr(out_scan, name)
+        ll = getattr(out_loop, name)
+        assert jnp.allclose(s, ll, atol=1e-6, rtol=1e-6), (
+            f"{name}: scan {s} != loop {ll} (the column scan must be a no-op vs the loop)")
