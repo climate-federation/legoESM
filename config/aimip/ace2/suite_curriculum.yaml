@@ -1,0 +1,36 @@
+# ACE2-loss + rollout-length CURRICULUM retrain (improvement over the fixed
+# 2-step ace2 suite, which trained to 12 h and drifted at long WB2 leads).
+#
+# Lives in the ace2/ dir so it reuses the existing variant_<name>.yaml
+# overlays (run_aimip resolves overlays from the suite's parent dir).
+#
+# The curriculum trains progressively longer AUTOREGRESSIVE rollouts THROUGH
+# the differentiable dycore (NeuralGCM/GraphCast-style): each phase supervises
+# a rollout to lead_hours (n dycore steps = lead*3600/dt grows with the lead),
+# so the model sees its own compounding error and learns to stay stable out to
+# 120 h instead of only 12 h. Schedule matches the validated T106 scale suite.
+# run_aimip forces loss.multi_step_hours to the sorted curriculum leads
+# (targets loaded per lead), so the preset's multi_step_hours is ignored here.
+#
+# CONTROLLED COMPARISON: identical base/grid/eval-protocol to the ace2
+# baseline (config/aimip/ace2/suite.yaml); the training variables under test
+# are (1) the rollout curriculum and (2) light bias penalties (ace2_curriculum
+# preset). Re-bench on the SAME WB2 protocol to attribute the delta.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}                       # REPLACE the base loss block wholesale
+  # Short-lead-first ladder through the dycore (dt=600 s: 12h=72, 24h=144,
+  # 72h=432, 120h=720 steps). Total epochs = sum of phase epochs = 7.
+  aimip_rollout_curriculum:
+    - [12, 2]
+    - [24, 2]
+    - [72, 2]
+    - [120, 1]
+
+variants:
+  - classical
+  - column_nn
+
+output_dir: results/aimip_ace2curr
