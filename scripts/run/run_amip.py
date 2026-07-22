@@ -780,6 +780,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-subsidence-solve", type=str,
+                        choices=["implicit_flux", "advective"],
+                        default=_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve,
+                        dest="bechtold_subsidence_solve",
+                        help="Bechtold compensating-subsidence vertical solve: "
+                             "implicit_flux (conservative, default) or advective "
+                             "(legacy; truncation-order conservation only — the "
+                             "stability escape hatch of the 2026-07-22 day-65 "
+                             "blowup bisect). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -1734,6 +1744,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         mpas_rrtmgp_fp32=args.mpas_rrtmgp_fp32,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,

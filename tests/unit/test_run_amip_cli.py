@@ -938,6 +938,31 @@ def test_bechtold_cape_threshold_flows_to_config():
     assert cfg.validate_strict() is None
 
 
+def test_bechtold_subsidence_solve_flows_to_config():
+    """--bechtold-subsidence-solve round-trips into ExperimentConfig (the
+    day-65 blowup-bisect stability escape hatch); unset matches the
+    BechtoldConfig default (byte-identical); unknown value rejected at
+    the parser (choices) and by validate_strict membership."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--bechtold-subsidence-solve", "advective",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "advective"
+    assert cfg.validate_strict() is None
+
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "implicit_flux"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--bechtold-subsidence-solve", "bogus"])
+    with pytest.raises(ValueError, match="bechtold_subsidence_solve"):
+        cfg._replace(bechtold_subsidence_solve="bogus").validate_strict()
+
+
 def test_bechtold_cape_threshold_defaults_to_scheme_default():
     """Unset → matches BechtoldConfig.cape_threshold (byte-identical)."""
     parser = build_arg_parser()

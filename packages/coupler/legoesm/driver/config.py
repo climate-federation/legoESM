@@ -1004,6 +1004,13 @@ class ExperimentConfig(NamedTuple):
     bechtold_m_b_max: float = 0.02
     bechtold_cmt_c_u: float = 0.7
     bechtold_cmt_c_d: float = 0.7
+    # Bechtold compensating-subsidence vertical solve (BechtoldConfig.
+    # subsidence_solve): "implicit_flux" (conservative, the 2026-07-22
+    # default) or "advective" (legacy, truncation-order conservation only,
+    # kept selectable for byte-exact reproduction and as a stability
+    # escape hatch while the implicit bottom-boundary behaviour is under
+    # investigation — day-65 pilot blowup bisect, 2026-07-22).
+    bechtold_subsidence_solve: str = "implicit_flux"
     # Quasi-equilibrium heating-ceiling ratio (BechtoldConfig.
     # cape_sink_heating_ratio; the C12 warm-runaway sink lever).
     bechtold_cape_sink_heating_ratio: float = 5.0
@@ -1248,6 +1255,11 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
                 f"got {d.discretization!r}"
             )
+        if d.pgf_scheme not in ("two_term", "lin1997"):
+            errors.append(
+                f"dycore.pgf_scheme must be one of ('two_term', 'lin1997'), "
+                f"got {d.pgf_scheme!r}"
+            )
         _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
         if self.precision not in _valid_precisions:
             errors.append(
@@ -1346,6 +1358,12 @@ class ExperimentConfig(NamedTuple):
         if self.bechtold_m_b_max <= 0:
             errors.append(
                 f"bechtold_m_b_max must be > 0, got {self.bechtold_m_b_max}"
+            )
+        if self.bechtold_subsidence_solve not in ("implicit_flux", "advective"):
+            errors.append(
+                f"bechtold_subsidence_solve must be one of "
+                f"('implicit_flux', 'advective'), got "
+                f"{self.bechtold_subsidence_solve!r}"
             )
         if self.bechtold_cmt_c_u < 0:
             errors.append(
