@@ -60,6 +60,19 @@ def _is_voronoi(grid) -> bool:
     )
 
 
+def _is_cube(grid) -> bool:
+    """True if ``grid`` is a cubed-sphere grid (duck-typed: a ``(6, n, n)``
+    ``grid_shape_2d`` with stored Cartesian cell centres)."""
+    shp = getattr(grid, "grid_shape_2d", None)
+    return (
+        shp is not None
+        and len(tuple(shp)) == 3
+        and int(tuple(shp)[0]) == 6
+        and hasattr(grid, "x_cart")
+        and not _is_voronoi(grid)
+    )
+
+
 def _is_tripole(grid) -> bool:
     """True if ``grid`` is a curvilinear tripole C-grid with an ACTIVE bipolar
     fold (duck-typed: a :class:`LatLonCGridGeometry` whose ``fold.is_active``).
@@ -265,6 +278,32 @@ def make_grid_remapper(atm_grid, ocean_grid, *, ocean_wet=None) -> GridRemapper:
         return GridRemapper(
             a2o=make_curvilinear_latlon_remapper(atm_grid, ocean_grid),
             o2a=make_curvilinear_latlon_remapper(ocean_grid, atm_grid),
+            identity=False,
+        )
+    # Cross-family cubed-sphere ATM <-> regular lat-lon OCEAN (a cube/spectral
+    # atmosphere driving a lat-lon 3-D ocean).  First-order conservative
+    # spherical-overlap remap (legoesm.grids.conservative_regrid_cubedsphere),
+    # constant-preserving + global-integral conserving to quadrature order —
+    # the deferred cross-family coupling.  The cube ocean dycore does not exist,
+    # so only cube-atm x latlon-ocean (and the symmetric spelling) is wired.
+    if _is_cube(atm_grid) and _is_regular_latlon(ocean_grid):
+        from legoesm.grids.conservative_regrid_cubedsphere import (
+            make_cube_to_latlon_weights,
+            make_latlon_to_cube_weights,
+        )
+        return GridRemapper(
+            a2o=make_cube_to_latlon_weights(atm_grid, ocean_grid),
+            o2a=make_latlon_to_cube_weights(ocean_grid, atm_grid),
+            identity=False,
+        )
+    if _is_regular_latlon(atm_grid) and _is_cube(ocean_grid):
+        from legoesm.grids.conservative_regrid_cubedsphere import (
+            make_cube_to_latlon_weights,
+            make_latlon_to_cube_weights,
+        )
+        return GridRemapper(
+            a2o=make_latlon_to_cube_weights(atm_grid, ocean_grid),
+            o2a=make_cube_to_latlon_weights(ocean_grid, atm_grid),
             identity=False,
         )
     same_family = type(atm_grid) is type(ocean_grid)

@@ -6672,6 +6672,24 @@ class ModelDriver:
                         self._carry_aux = {}
                     self._carry_aux["held_sw_net_sfc"] = _sw_net
                     self._carry_aux["held_lw_net_sfc"] = _lw_net
+                    # Surface precipitation export: the spectral lane recomputes
+                    # only the surface RADIATION at the coupling boundary (above),
+                    # not an accumulated precip rate.  Stash an EXPLICIT zero
+                    # seg_precip (not a silent absence — the coupler's
+                    # require_surface_radiation_aux guard forbids the SILENT
+                    # zero-fill that would go unnoticed).  This is EXACT for the
+                    # slab / two-layer ocean (no prognostic salinity, so P-E is
+                    # unused); a 3-D dynamic ocean on the spectral grid is gated
+                    # off (run_coupled), so no freshwater budget depends on it.
+                    # Accumulating the true segment precip through the spectral
+                    # step is the follow-up for a coupled spectral dynamic ocean.
+                    self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
+                    if not getattr(self, "_logged_spectral_precip", False):
+                        logger.info(
+                            "  Coupled spectral lane: surface precip export is "
+                            "0 (exact for the slab ocean; the spectral 3-D ocean "
+                            "is gated). Radiation is exported.")
+                        self._logged_spectral_precip = True
                     self._segment_callback(self, self._current_day, 86400.0)
                 _last_coupling_day = _cd_int
 
