@@ -520,11 +520,31 @@ UNREACHABLE_PARAMS = frozenset({
     'land.canopy.sif.kp',
     'land.canopy.sif.max_electron_yield',
     'land.snow_bands.alpha_glacier_ice',
-    'land.snow_bands.blow_snow_subl_rate',
     'land.snow_bands.blow_snow_wind_thresh_ms',
     'land.snow_bands.lapse_rate_K_m',
     'land.snow_bands.lw_elev_lapse_W_m2_per_m',
-    'land.snow_bands.refreeze_frac',
-    'land.snow_bands.sky_view_min',
     'land.snow_bands.sw_elev_grad_per_m',
+    # --- Land closures spec'd but not routed by any run_lmip land-surface
+    # scheme's config tree (#691). apply_params_to_config(driver="run_lmip")
+    # does not carry these nested *Config NamedTuples under simple_seb/two_leaf/
+    # clm_ml, so they are not settable from a calibration file yet. Conscious
+    # baseline entries (shrink as each config is wired through the router). The
+    # land_use_change family surfaced when the module was registered in
+    # param_collector.SPEC_MODULES (its spec is in-scope, so the drift guard
+    # requires registration); interception / d13c are pre-existing #691 debt.
+    # (clm_ml / two_leaf_canopy params ARE reachable under their
+    # --land-surface-scheme and are deliberately NOT baselined.)
+    'land.canopy.interception.dewmx',
+    'land.canopy.interception.fwet_exponent',
+    'land.canopy.interception.maximum_leaf_wetted_fraction',
+    'land.d13c.phi_c4_leakiness',
+    'land.land_use_change.clear_burn_frac',
+    'land.land_use_change.clear_slash_frac',
+    'land.land_use_change.prod_frac_100yr',
+    'land.land_use_change.prod_frac_10yr',
+    'land.land_use_change.prod_frac_1yr',
+    'land.land_use_change.tau_100yr_years',
+    'land.land_use_change.tau_10yr_years',
+    'land.land_use_change.tau_1yr_years',
+    'land.land_use_change.tau_regrow_years',
 })

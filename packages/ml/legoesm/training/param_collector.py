@@ -56,6 +56,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.stomata",
     "legoesm.land.config",
     "legoesm.land.global_surface_data",
+    "legoesm.land.land_use_change",
     "legoesm.land.pedotransfer",
     "legoesm.land.richards",
     "legoesm.land.soil_albedo",

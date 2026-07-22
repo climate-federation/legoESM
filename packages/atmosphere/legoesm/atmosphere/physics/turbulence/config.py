@@ -97,6 +97,7 @@ __param_spec__ = {
         "scheme_key": "atm.turb.LouisConfig",
         "excluded": {
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "cloudtop_entrainment_efficiency": "opt-in marine-Sc cloud-top entrainment lever, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Louis (1979) bulk-Ri PBL-height criterion", "shape": None},
@@ -105,7 +106,7 @@ __param_spec__ = {
             "c_louis": {"units": "1", "bounds": (5.0, 49.8), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) unstable-branch coefficient c (Holtslag & De Bruin 1988)", "shape": None},
             "d_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stable-branch sqrt coefficient d", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
-            "cloudtop_entrainment_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "marine-Sc cloud-top entrainment efficiency A (flux-matched K_ent = A·W_REF·dz·(drying·inverted·cloudy_below), W_REF=0.02 m/s); 0 = off", "shape": None},
+            # (cloudtop_entrainment_efficiency: excluded — default 0.0 (off) on the bound.)
         },
     },
     "MYNN25Config": {

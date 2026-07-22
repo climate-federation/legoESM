@@ -107,6 +107,7 @@ __param_spec__ = {
             "alpha_mevp": "numerics: mEVP stress relaxation (stability-coupled to N_mevp)",
             "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
             "T_evp": "numerics: EVP damping ratio coupled to the N_evp subcycle count (E_factor = 1/(2*T_evp*N_evp))",
+            "sw_transmittance_const": "constant-scheme SW transmittance, default 0.0 (off — delta_eddington computes its own) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             "albedo_ice": {
@@ -124,13 +125,7 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "radiation",
                 "reference": "sea-ice longwave emissivity", "shape": None,
             },
-            "sw_transmittance_const": {
-                "units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "radiation",
-                "reference": "constant-scheme SW transmittance through ice+snow "
-                             "to the ocean (Grenfell & Maykut 1977 order; "
-                             "delta_eddington computes its own)", "shape": None,
-            },
+            # (sw_transmittance_const: excluded — default 0.0 (off) on the bound.)
             "z0_ice": {
                 "units": "m", "bounds": (1.0e-4, 5.0e-3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "surface",
