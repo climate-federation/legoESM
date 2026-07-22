@@ -175,6 +175,11 @@ def build_sea_ice_config(args):
         v = getattr(args, flag, None)
         if v is not None and v != getattr(base, field):
             changed[field] = v
+    # Multi-category ITD thermodynamics: n_categories > 1 builds the coupled
+    # DynamicSeaIceState (dynamics stays the default "none").
+    _ncat = int(getattr(args, "ice_categories", 1))
+    if _ncat != base.n_categories:
+        changed["n_categories"] = _ncat
     _reject_unreachable_sea_ice_options(args, changed, base)
     if not changed:
         return None
@@ -220,6 +225,15 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
             f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
             f"consults stability functions. Use one of {_ICE_MOST_SCHEMES}."
         )
+    # Multi-category ITD THERMODYNAMICS is now wired into the coupled tile
+    # (n_categories > 1 -> DynamicSeaIceState, dynamics="none").  What remains
+    # OMIP-only is anything needing the ice VELOCITY / grid-global momentum
+    # solve: EVP/mEVP dynamics and mechanical RIDGING (its convergence term
+    # reads the strain rate).  n_categories must be a positive int.
+    ncat = int(getattr(args, "ice_categories", 1))
+    if ncat < 1:
+        raise SystemExit(
+            f"--ice-categories must be a positive integer; got {ncat}.")
 
 
 def build_coupler_config(args):
@@ -830,13 +844,21 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
-    # NO --ice-ridging HERE: it needs multi-category ice, and this driver's
-    # coupler tile is a scalar-slab SeaIceState, so a flag could only ever
-    # exit. SUPPRESS would keep a hidden always-failing CLI contract for no
-    # benefit -- the flag never shipped, so there is nothing to stay
-    # compatible with (codex). Multi-category ITD + ridging ARE reachable
-    # from run_omip_core2 (--ice-categories/--ice-ridging, which builds the
-    # DynamicSeaIceState); see _reject_unreachable_sea_ice_options.
+    # Multi-category ITD THERMODYNAMICS (2026-07-22): the coupler tile now
+    # builds a DynamicSeaIceState when --ice-categories > 1, running the
+    # ice-thickness-distribution thermodynamics + inter-category remap in place
+    # of a single slab category (step_sea_ice returns an AGGREGATE TileResponse,
+    # so the tile-fraction/blend path is transparent).  DYNAMICS (velocity: EVP/
+    # mEVP need a grid-global C-grid momentum solve; free_drift needs the
+    # diagnostic-velocity + strain-rate plumbing) and RIDGING (needs that
+    # velocity) stay OMIP-only (run_omip_core2) — rejected by
+    # _reject_unreachable_sea_ice_options.
+    parser.add_argument("--ice-categories", type=int, default=1,
+                        help="Number of ice-thickness-distribution (ITD) "
+                             "categories for the coupled sea-ice tile (default "
+                             "1 = single-category slab). >1 runs multi-category "
+                             "ITD THERMODYNAMICS (dynamics stays 'none'; EVP/"
+                             "mEVP + ridging remain OMIP-only).")
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",
