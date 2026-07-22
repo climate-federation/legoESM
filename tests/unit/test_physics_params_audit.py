@@ -125,17 +125,23 @@ class TestConvectionAudit:
     def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
         from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass
-        # flux ``M_b = rho_BL * CAPE / (g * TIMEC)``.  In a very high-CAPE
-        # column ``M_b`` saturates at the literature cap ``M_b_max`` (clip),
-        # which makes the *applied* mass flux — and hence ``dT_dt`` —
-        # TIMEC-independent (gradient exactly zero).  The default ``_column``
-        # is past that cap, so audit reachability on a moderate-CAPE column
-        # (stabilised + slightly dried) where the closure is below the cap
-        # and TIMEC genuinely flows into the tendency.
+        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass flux
+        # ``M_b = rho_BL * CAPE / (g * TIMEC)``, clipped at the literature
+        # stability cap ``M_b_max``.  A SHORT TIMEC gives a LARGE M_b; the
+        # default ``_column``
+        # (and even the stabilised/dried one below at TIMEC=1800 s) is deep
+        # enough that M_b saturates at ``M_b_max`` there, which makes the applied
+        # mass flux — and ``dT_dt`` — TIMEC-independent (grad zero) in the CAP
+        # regime (a documented trainability limitation, NOT dead AD plumbing).
+        # This is the M_b_max CAP, not the timec clamp: the operative timec is
+        # ``clip(cape_consumption_time, 1800, 3600)`` whose subgradient at the
+        # 1800 s boundary is 0.5 (nonzero), so the clamp does NOT zero it — the
+        # sibling tier-4 sub-cap test even audits TIMEC=1800 s successfully.
+        # Probe a LONGER, sub-cap TIMEC (2400 s) where M_b is below the cap and
+        # TIMEC genuinely flows into the tendency.
         T, q_v, p_full, p_half = _column()
         T = T.at[:, -1].add(-2.0)   # gentler boundary-layer instability
-        q_v = q_v * 0.85            # below the M_b_max saturation regime
+        q_v = q_v * 0.85            # nearer the sub-cap regime
         A = _aux()
 
         def loss(x):
@@ -143,13 +149,6 @@ class TestConvectionAudit:
             out = kain_fritsch_convection(T, q_v, p_full, p_half, A["w"],
                 A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        # Probe at an INTERIOR TIMEC (2400 s), not the default 1800 s: the
-        # operative timec is clip(cape_consumption_time, timec_min_s=1800,
-        # timec_max_s=3600), and the default 1800 s sits EXACTLY on the clamp
-        # FLOOR (== timec_min_s), where d(clip)/dx is zero.  The parameter is
-        # genuinely AD-reachable — the gradient flows for any value strictly
-        # inside (1800, 3600) (verified nonzero at 2000/2400/3000 s); the
-        # zero at 1800 is the degenerate clamp boundary, not a dead param.
         assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
 
     def test_tiedtke_epsilon_deep(self):
