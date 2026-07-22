@@ -1140,7 +1140,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
                              "(byte-identical when unchanged).")
     parser.add_argument("--land-surface-scheme",
-                        choices=["simple_seb", "two_leaf"],
+                        choices=["simple_seb", "two_leaf", "clm_ml"],
                         default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
                         dest="land_surface_scheme",
                         help="Multilayer-land surface scheme (issue #730). "
@@ -1148,7 +1148,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
                              "energy balance (Kelvin h_r bare-soil + two-leaf "
                              "stomatal transpiration) that holds land ET below "
-                             "potential and breaks the over-evaporation wet loop. "
+                             "potential and breaks the over-evaporation wet loop; "
+                             "'clm_ml' = the CLM-ML-JAX multilayer canopy (needs the "
+                             "clm-ml-jax backend; coupled/global multi-column support "
+                             "is pending the ncol>1 traceable path — single-point "
+                             "CLM-ML runs today via run_lmip). "
                              "Only affects --use-multilayer-land runs.")
     parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",
@@ -1870,6 +1874,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "crashes on the unstructured mesh: VoronoiMesh has no "
                      "lat/lat2d). Pass --no-use-multilayer-land to override "
                      "a --config YAML that enables it.")
+    # Canopy surface schemes run INSIDE the multilayer land tile; without
+    # --use-multilayer-land the slab land runs and the scheme is silently dropped
+    # (the user asked for a canopy, got the slab).  Fail early rather than degrade
+    # silently.  simple_seb is the default and is a no-op on the slab, so it is not
+    # gated.
+    if (args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and not args.use_multilayer_land):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is a canopy scheme "
+            "that runs inside the multilayer land tile and has NO effect on the "
+            "slab land — it would be silently dropped. Pass --use-multilayer-land, "
+            "or use --land-surface-scheme simple_seb.")
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(

@@ -65,6 +65,36 @@ def _scatter_flat_columns(flat_arr, layout, n_tile):
     return local.reshape((n_local * n_tile * n_tile,) + trailing)
 
 
+def _scatter_1based_columns(arr, layout, n_tile):
+    """Scatter a CLM 1-based per-column array ``(ncol+1, ...)`` (index 0 unused,
+    ``begp=1``) to this rank's owned columns, returning ``(n_local+1, ...)``.
+
+    The CLM ``mlcanopy`` pytree stores every patch field 1-based, so strip index 0,
+    scatter the ``(ncol, ...)`` body with the SAME face-major column ownership the
+    soil / lat / params use (:func:`_scatter_flat_columns`), then re-prepend the
+    original index-0 sentinel row.  The body path IS the (MPI-validated) 0-based
+    column scatter, so this 1-based variant is correct by composition — only the
+    strip/prepend wrapping is new.
+    """
+    body = arr[1:]                                            # (ncol, ...)
+    local_body = _scatter_flat_columns(body, layout, n_tile)  # (n_local*n*n, ...)
+    return jnp.concatenate([arr[:1], local_body], axis=0)     # (n_local+1, ...)
+
+
+def _slice_grid_info_to_rank(grid_info, layout, n_tile, global_ncol):
+    """Slice a GLOBAL per-column CLM-ML ``grid_info`` tuple to this rank's owned
+    columns and renumber each entry's patch index ``.p`` to LOCAL 1-based.
+
+    Scatters a global-index array to learn which global columns this rank owns, in
+    the SAME face-major local order the scattered canopy fields use, picks those
+    ``GridInfo`` entries, and sets ``.p = k+1`` for local position ``k`` — the
+    interface realigns by ``.p`` and requires patches ``1..n_local``.
+    """
+    lidx = np.asarray(_scatter_flat_columns(
+        jnp.arange(global_ncol, dtype=jnp.int32), layout, n_tile)).astype(int)
+    return tuple(grid_info[int(g)]._replace(p=k + 1) for k, g in enumerate(lidx))
+
+
 def _gather_flat_columns(local_arr, layout, n_tile, root_only=False):
     """Inverse of :func:`_scatter_flat_columns` — gather a rank-local
     flattened-column array ``(n_local*n*n, ...)`` back to the global
@@ -1720,10 +1750,25 @@ class ModelDriver:
             _surface_scheme = SimpleSEBConfig()
         elif _scheme_name == "two_leaf":
             _surface_scheme = TwoLeafCanopyConfig()
+        elif _scheme_name == "clm_ml":
+            # CLM-ML-JAX multilayer canopy.  The ncol>1 traceable path (S2) makes
+            # the coupled land tile steppable over all model columns inside the
+            # jitted segment: the canopy is warm-started once (eager) at setup and
+            # a concrete per-column ``grid_info`` is threaded into the jitted step
+            # (see the warm-start block at the end of this method + the pipeline's
+            # clm_ml_grid_info).  NOTE the two current limitations: (a) the land
+            # tile's cos_zenith is the same 0.5 placeholder the two_leaf canopy
+            # uses here (faithful diurnal zenith is a shared follow-up), and (b)
+            # the per-column Python loop unrolls O(ncol) in the trace, so this is
+            # for MODEST column counts, not full-AMIP resolution (the masked-vmap
+            # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
+            # (the 1-based mlcanopy array does not match the per-column remap).
+            from legoesm.land.canopy.config import CLMMLCanopyConfig
+            _surface_scheme = CLMMLCanopyConfig()
         else:
             raise ValueError(
                 f"Unknown land_surface_scheme {_scheme_name!r}; "
-                "expected 'simple_seb' or 'two_leaf'."
+                "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
             )
 
         ad = self.physics.adapter
@@ -1793,6 +1838,13 @@ class ModelDriver:
         self.physics.land_ml_params = params
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
+        # CONCRETE dynamics timestep [s].  The jitted segment passes ``dt`` as a
+        # TRACER, but the CLM-ML canopy needs a concrete dt to resolve its static
+        # ML sub-step count (num_ml_steps = ceil(dt/dtime_ml)).  The timestep is
+        # fixed, so the concrete config dt is numerically identical to the traced
+        # one; the pipeline uses it only on the clm_ml path (byte-identical for
+        # simple_seb / two_leaf, which keep the traced dt).
+        self.physics.land_ml_dt = float(self.config.dycore.dt)
 
         # Transient land-use cover (LULC): load the annual cover series onto the SAME
         # model columns (identical _nearest_regrid targets => cell-for-cell aligned
@@ -1895,6 +1947,50 @@ class ModelDriver:
             logger.info(
                 "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
                 cfg.soil_grid.n_layers, ncol,
+            )
+
+        # CLM-ML canopy: warm-start ONCE (eager) so the jitted run steps can thread
+        # a concrete per-column ``grid_info`` (S2) and start from a warm
+        # ``canopy_state``.  The jitted forward path is single-column unless the
+        # caller supplies one GridInfo per column; the first (cold) canopy step
+        # builds the vertical structure host-side and cannot run on the jax.jit
+        # tape, so we run it HERE, eagerly, at setup.  The structure
+        # (ncan/ntop/nbot) is a function of canopy height / PFT only (forcing-
+        # INDEPENDENT), so a nominal concrete forcing suffices to build it; the
+        # returned soil step is DISCARDED (only ``canopy_state`` is grafted onto
+        # the cold-start template — the cold soil IC is preserved).  t_a10
+        # cold-starts to T_lowest (converges in ~10 days).
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        if isinstance(cfg.surface_scheme, CLMMLCanopyConfig):
+            from legoesm.core.coupling_fields import AtmToSurface
+            from legoesm.land.multilayer_land import step_multilayer_land
+            from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+            _o = jnp.ones(ncol, dtype=storage_dtype)
+            _warm_forcing = AtmToSurface(
+                sw_down=400.0 * _o, lw_down=350.0 * _o,
+                precip_total=0.0 * _o, precip_snow=0.0 * _o,
+                T_lowest=T_init, q_lowest=0.008 * _o,
+                u_lowest=3.0 * _o, v_lowest=0.0 * _o,
+                p_lowest=0.99e5 * _o, p_surface=1.0e5 * _o, rho_lowest=1.2 * _o,
+                cos_zenith=0.5 * _o, co2_ppmv=400.0 * _o,
+                has_radiation=_o, has_precipitation=_o)
+            # Eager cold canopy step (grid_info=None, ncol>1 eager path): builds the
+            # per-column vertical structure and a warm canopy_state.
+            _warm_state, _, _ = step_multilayer_land(
+                self._land_ml_state, _warm_forcing, cfg,
+                self.physics.land_ml_u_min, float(self.config.dycore.dt),
+                lat=self.physics.land_ml_lat,
+                carbon_state=self.physics.land_ml_carbon, doy=0.0,
+                land_params=params, clm_ml_grid_info=None)
+            self._land_ml_state = self._land_ml_state._replace(
+                canopy_state=_warm_state.canopy_state)
+            self.physics.clm_ml_grid_info = extract_clm_ml_grid_info(
+                _warm_state.canopy_state)
+            _gi = self.physics.clm_ml_grid_info
+            logger.info(
+                "  Land tile: CLM-ML canopy warm-started (%d columns; per-column "
+                "grid_info threaded into the jitted step)",
+                (len(_gi) if isinstance(_gi, tuple) else 1),
             )
 
     def _transient_land_ml_params(self, day: float):
@@ -3162,6 +3258,10 @@ class ModelDriver:
                             "rebuild is global); run single-rank, or use "
                             "static land cover for distributed multilayer runs."
                         )
+                    # The 0-based per-column leaves (soil state, t_a10_arr) scatter
+                    # normally.  The CLM-ML canopy_state's ``mlcanopy`` pytree is
+                    # 1-based (ncol+1) so tree_map here SKIPS it (its leading axis is
+                    # ncol+1, not global_ncol) — it is scattered separately below.
                     self._land_ml_state = _map_flat_column_leaves(
                         self._land_ml_state, n_tile, global_ncol,
                         lambda x, n: _scatter_flat_columns(x, layout, n))
@@ -3176,6 +3276,31 @@ class ModelDriver:
                         self.physics.land_ml_carbon = _map_flat_column_leaves(
                             self.physics.land_ml_carbon, n_tile, global_ncol,
                             lambda x, n: _scatter_flat_columns(x, layout, n))
+                    # CLM-ML canopy: scatter the 1-based ``mlcanopy`` (ncol+1) leaves
+                    # with the 1-based helper, then slice + renumber the per-column
+                    # ``grid_info`` to this rank's owned columns.  Columns are
+                    # embarrassingly parallel (no lateral canopy coupling), so the
+                    # gathered N-rank canopy is bit-identical to the single-rank run
+                    # (same invariant as the soil scatter).  This makes MPI a partial
+                    # scale path even before S3: each rank compiles an O(ncol/ranks)
+                    # canopy loop.
+                    _cs = self._land_ml_state.canopy_state
+                    if _cs is not None and getattr(_cs, "mlcanopy", None) is not None:
+                        _cs = _map_flat_column_leaves(
+                            _cs, n_tile, global_ncol + 1,
+                            lambda x, n: _scatter_1based_columns(x, layout, n))
+                        self._land_ml_state = self._land_ml_state._replace(
+                            canopy_state=_cs)
+                        # Per-rank grid_info: scatter a global-index array to learn
+                        # which global columns this rank owns (in local order), slice
+                        # the global grid_info tuple to them, and renumber ``.p`` to
+                        # local 1-based (the interface realigns by ``.p`` and requires
+                        # patches 1..n_local).
+                        _gi = getattr(self.physics, "clm_ml_grid_info", None)
+                        if isinstance(_gi, tuple):
+                            self.physics.clm_ml_grid_info = (
+                                _slice_grid_info_to_rank(
+                                    _gi, layout, n_tile, global_ncol))
                     self._land_ml_scattered = True
                     self._land_ml_n_tile = n_tile
 
@@ -9284,6 +9409,13 @@ class ModelDriver:
                         f"  CFL={_seg_max_cfl:.2f} > 1.0 at day {elapsed_day:.0f}. "
                         f"Halving dt to {DT:.0f}s."
                     )
+                    # Keep the CLM-ML canopy's CONCRETE dt in step with the halved
+                    # DT: the canopy resolves its static ML sub-step count from
+                    # this value, and the segment is rebuilt below (retraces), so a
+                    # new count is fine.  A stale land_ml_dt would advance the
+                    # canopy at the old timestep while the dynamics use the new one.
+                    if getattr(self.physics, "land_ml_dt", None) is not None:
+                        self.physics.land_ml_dt = DT
                     n_steps_total = int(cfg.days * 86400 / DT)
                     diag_interval = int(cfg.output.diag_days * 86400 / DT)
                     checkpoint_interval = (
