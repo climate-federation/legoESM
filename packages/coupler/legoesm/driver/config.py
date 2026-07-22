@@ -969,6 +969,13 @@ class ExperimentConfig(NamedTuple):
     # the lever for the AMIP convective-precipitation deficit.  Default matches
     # BechtoldConfig.cape_threshold (byte-identical when unset).
     bechtold_cape_threshold: float = 70.0
+    # Bechtold compensating-subsidence vertical solve (BechtoldConfig.
+    # subsidence_solve): "implicit_flux" (conservative, the 2026-07-22
+    # default) or "advective" (legacy, truncation-order conservation only,
+    # kept selectable for byte-exact reproduction and as a stability
+    # escape hatch while the implicit bottom-boundary behaviour is under
+    # investigation — day-65 pilot blowup bisect, 2026-07-22).
+    bechtold_subsidence_solve: str = "implicit_flux"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1205,6 +1212,11 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
                 f"got {d.discretization!r}"
             )
+        if d.pgf_scheme not in ("two_term", "lin1997"):
+            errors.append(
+                f"dycore.pgf_scheme must be one of ('two_term', 'lin1997'), "
+                f"got {d.pgf_scheme!r}"
+            )
         _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
         if self.precision not in _valid_precisions:
             errors.append(
@@ -1299,6 +1311,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"bechtold_cape_threshold must be >= 0, got "
                 f"{self.bechtold_cape_threshold}"
+            )
+        if self.bechtold_subsidence_solve not in ("implicit_flux", "advective"):
+            errors.append(
+                f"bechtold_subsidence_solve must be one of "
+                f"('implicit_flux', 'advective'), got "
+                f"{self.bechtold_subsidence_solve!r}"
             )
         if (self.convective_precip_efficiency is not None
                 and not (0.0 <= self.convective_precip_efficiency <= 1.0)):

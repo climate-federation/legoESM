@@ -2915,6 +2915,10 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # Vertical subsidence solve selector (day-65 blowup bisect,
+            # 2026-07-22): fallback matches the BechtoldConfig default.
+            subsidence_solve=getattr(
+                config, 'bechtold_subsidence_solve', 'implicit_flux'),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
