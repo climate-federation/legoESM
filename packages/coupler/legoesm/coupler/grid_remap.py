@@ -112,24 +112,37 @@ def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     # Destination longitude: full periodic circle.
     dst_lon_e = cell_edges_1d(np.asarray(dst_grid.lon), periodic_lon=True)
 
-    # Source longitude: pad with one wrapped ghost column on each side so a
-    # destination cell straddling the 0/2pi seam sees full source coverage.
+    # Source longitude: pad with ceil(dst_width / src_width) wrapped ghost
+    # columns on EACH side so a destination cell straddling the 0/2pi seam sees
+    # full source coverage even when the destination is much coarser than the
+    # source (dd/ds > ~3, e.g. 0.25deg -> 1deg).  ONE ghost (the old code) spans
+    # only one source cell ds and under-covers once dd exceeds ~3 ds.
+    n_dst_lon = int(dst_grid.n_lon)
+    n_ghost = max(1, int(np.ceil(n_src_lon / n_dst_lon)))
     src_lon = np.asarray(src_grid.lon, dtype=np.float64)
     src_lon_padded = np.concatenate(
-        ([src_lon[-1] - 2.0 * np.pi], src_lon, [src_lon[0] + 2.0 * np.pi])
+        (src_lon[-n_ghost:] - 2.0 * np.pi, src_lon, src_lon[:n_ghost] + 2.0 * np.pi)
     )
     src_lon_e_padded = cell_edges_1d(src_lon_padded, periodic_lon=False)
 
-    w = compute_overlap_weights(src_lat_e, src_lon_e_padded, dst_lat_e, dst_lon_e)
+    # require_full_coverage=True: this global lat-lon path guarantees full
+    # coverage (pole-clamped v-faces span [-pi/2, pi/2]; the ghost columns close
+    # the lon seam), so any residual coverage deficit is a BUG -> raise loudly.
+    # Host-side check on the static weights; no AD/JIT impact.
+    w = compute_overlap_weights(
+        src_lat_e, src_lon_e_padded, dst_lat_e, dst_lon_e,
+        require_full_coverage=True,
+    )
 
     # Fold padded-source longitude indices back onto the real (unpadded) columns:
-    # padded col 0 -> real (n_src_lon-1); cols 1..n_src_lon -> 0..n_src_lon-1;
-    # col n_src_lon+1 -> 0.  i.e. real = (padded - 1) mod n_src_lon.
-    n_pad_lon = n_src_lon + 2
+    # the n_ghost left ghosts -> real cols (n_src_lon-n_ghost)..(n_src_lon-1);
+    # the n_src_lon middle cols -> 0..n_src_lon-1; the n_ghost right ghosts -> 0..
+    # i.e. real = (padded - n_ghost) mod n_src_lon.
+    n_pad_lon = n_src_lon + 2 * n_ghost
     src_flat = np.asarray(w.src_idx_flat)
     j_src = src_flat // n_pad_lon
     i_src_padded = src_flat % n_pad_lon
-    i_src_real = (i_src_padded - 1) % n_src_lon
+    i_src_real = (i_src_padded - n_ghost) % n_src_lon
     src_idx_real = (j_src * n_src_lon + i_src_real).astype(np.int32)
 
     return ConservativeRegridWeights(
