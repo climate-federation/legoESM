@@ -32,6 +32,17 @@ logger = logging.getLogger("legoesm.driver.coupled_esm")
 _SECONDS_PER_DAY = 86400.0
 
 
+def _total_ice_sic(ice_state):
+    """Total sea-ice concentration [0-1] on the grid, from either a scalar
+    :class:`SeaIceState` (``concentration`` is grid-shaped) or a multi-category
+    :class:`DynamicSeaIceState` (``concentration`` carries a trailing
+    ``category`` axis, summed to the aggregate areal fraction)."""
+    conc = ice_state.concentration.data
+    if "category" in tuple(ice_state.concentration.dims):
+        conc = conc.sum(axis=-1)
+    return conc
+
+
 def enable_diurnal_surface_land(land_cfg):
     """Switch a ``MultiLayerLandConfig`` to the coupled DIURNAL surface model:
     Monin-Obukhov (MOST) surface exchange + Farquhar photosynthesis-stomata coupling.
@@ -1038,7 +1049,7 @@ class CoupledESMDriver:
             logger.info("  Soil warm-start: T_soil init = atm near-surface air T")
         self._sfc_state = init_surface_state(
             shape_2d, land_config=land_cfg, carbon_override=carbon_override,
-            **soil_kwargs,
+            ice_config=ice_cfg, **soil_kwargs,
         )
 
         # Tile fractions
@@ -1287,7 +1298,7 @@ class CoupledESMDriver:
             if (self._sfc_state is not None
                     and hasattr(self._sfc_state, 'ice')
                     and self._sfc_state.ice is not None):
-                sic = self._sfc_state.ice.concentration.data
+                sic = _total_ice_sic(self._sfc_state.ice)
             else:
                 _, sic = self._original_get_sst_sic(day)
             return sst, sic
@@ -1917,7 +1928,7 @@ class CoupledESMDriver:
         _tile_cfg = getattr(self, "_tile_config", None)
         if (_sfc is not None and getattr(_sfc, "ice", None) is not None
                 and _tile_cfg is not None):
-            _sic = jnp.clip(_sfc.ice.concentration.data, 0.0, 1.0)
+            _sic = jnp.clip(_total_ice_sic(_sfc.ice), 0.0, 1.0)
             _cross = (_remapper is not None
                       and getattr(_remapper, "a2o", None) is not None)
             if _cross:
