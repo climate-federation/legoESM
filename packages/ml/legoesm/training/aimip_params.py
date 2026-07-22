@@ -96,6 +96,11 @@ _SURFACE_TRAINABLE: list[ParamConstraint] = [
     # __param_spec__ (most_unstable_gamma / most_stable_beta).
     ParamConstraint("surface_most_unstable_gamma", 8.0, 28.0, "sigmoid"),
     ParamConstraint("surface_most_stable_beta", 2.0, 10.0, "sigmoid"),
+    # Thermal/momentum roughness ratio z0h/z0 (Garratt 1992). Only bites on a
+    # stability-dependent bulk_scheme's fixed-roughness log-law (constant/most)
+    # branch; the constant-Cd default path ignores it. Bounds match
+    # SurfaceLayerConfig's __param_spec__ (z0h_z0_ratio).
+    ParamConstraint("surface_z0h_z0_ratio", 0.01, 1.0, "sigmoid"),
 ]
 
 _MCFARLANE_TRAINABLE: list[ParamConstraint] = [
@@ -360,6 +365,7 @@ class AIMIPClassicalParams(eqx.Module):
             z0=d["surface_z0"],
             most_unstable_gamma=d["surface_most_unstable_gamma"],
             most_stable_beta=d["surface_most_stable_beta"],
+            z0h_z0_ratio=d["surface_z0h_z0_ratio"],
         )
 
     def to_louis_config(self) -> LouisConfig:
@@ -521,6 +527,7 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "surface_z0": float(su.z0),
         "surface_most_unstable_gamma": float(su.most_unstable_gamma),
         "surface_most_stable_beta": float(su.most_stable_beta),
+        "surface_z0h_z0_ratio": float(su.z0h_z0_ratio),
         # McFarlane
         "mcfarlane_h_topo": float(mc.h_topo),
         "mcfarlane_G_0": float(mc.G_0),
