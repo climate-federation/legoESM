@@ -92,11 +92,13 @@ _rk_crk = None
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnums=(0, 1))
+@partial(jax.jit, static_argnums=(0, 1, 4))
 def _copy_bef_state(
     filter_mlcan: tuple,
     ncan_vals: tuple,
     mlcanopy_inst: mlcanopy_type,
+    grid_p: "int | jnp.ndarray | None" = None,
+    grid_ncan: "int | None" = None,
 ) -> mlcanopy_type:
     """Copy current-state arrays to their ``*_bef`` counterparts.
 
@@ -105,10 +107,22 @@ def _copy_bef_state(
     static so slice bounds are concrete at trace time; recompilation only
     occurs when the canopy structure changes (never for a fixed site).
 
+    S3 single-patch grid path: pass ``grid_p`` (the patch index — a DYNAMIC
+    scalar that may be a TRACED lax.scan-over-columns index, so it is NOT a
+    static arg) and ``grid_ncan`` (the concrete canopy-layer count — STATIC,
+    arg 4, so the ``1:ncan+1`` slice bound stays concrete at trace time).  The
+    ``.at[grid_p].set`` scatters take the dynamic index.  ``filter_mlcan`` /
+    ``ncan_vals`` are then dummy statics.  Value-identical to the filter loop
+    when ``grid_p`` is concrete (the per-column-call path).  A NamedTuple
+    ``GridInfo`` cannot be used here: a non-static pytree arg would trace its
+    ``ncan`` leaf too, breaking the static slice — hence the split scalars.
+
     Mirrors Fortran lines 272-285 of ``MLCanopyFluxes``.
     """
     inst = mlcanopy_inst
-    for p, ncan in zip(filter_mlcan, ncan_vals):
+    _patch_iter = ([(grid_p, grid_ncan)] if grid_p is not None
+                   else zip(filter_mlcan, ncan_vals))
+    for p, ncan in _patch_iter:
         _sl = slice(1, ncan + 1)
         inst = inst._replace(
             tg_bef_soil=inst.tg_bef_soil.at[p].set(inst.tg_soil[p]),
@@ -131,6 +145,7 @@ def _copy_bef_state(
 def _save_bef_forcing(
     filter_mlcan: tuple,
     mlcanopy_inst: mlcanopy_type,
+    grid_p: "int | jnp.ndarray | None" = None,
 ) -> mlcanopy_type:
     """Copy ``*_cur_forcing`` fields to their ``*_bef_forcing`` counterparts.
 
@@ -140,12 +155,15 @@ def _save_bef_forcing(
 
     ``filter_mlcan`` is static so the patch-index loop is unrolled at trace
     time; recompilation only occurs when the active-patch set changes
-    (never for a fixed site).
+    (never for a fixed site).  S3 single-patch grid path: pass ``grid_p`` (the
+    patch index — a DYNAMIC scalar that may be a TRACED scan-over-columns
+    index) and this fuses to a single dynamic scatter.  No slice bounds here,
+    so only the index is needed (no static ``ncan``).
 
     Mirrors Fortran lines 332-343 of ``MLCanopyFluxes``.
     """
     inst = mlcanopy_inst
-    for p in filter_mlcan:
+    for p in ([grid_p] if grid_p is not None else filter_mlcan):
         inst = inst._replace(
             uref_bef_forcing=inst.uref_bef_forcing.at[p].set(inst.uref_cur_forcing[p]),
             tref_bef_forcing=inst.tref_bef_forcing.at[p].set(inst.tref_cur_forcing[p]),
@@ -593,7 +611,11 @@ def MLCanopyFluxes(
     def _physics_step_fn(inst, calday_ml):
         """Pure (inst, calday_ml) → inst for one ML sub-step."""
         # Save previous-step state — Fortran lines 272-285
-        inst = _copy_bef_state(filter_mlcan, ncan_vals, inst)
+        inst = _copy_bef_state(
+            filter_mlcan, ncan_vals, inst,
+            grid_p=(grid.p if grid is not None else None),
+            grid_ncan=(grid.ncan if grid is not None else None),
+        )
         # Atmospheric forcing — Fortran line 287
         # calday_ml may be a JAX traced array in lax.scan diff mode;
         # TimeInterpolation3 uses jnp.where so this is safe.
@@ -704,7 +726,7 @@ def MLCanopyFluxes(
             inst, fa, fap, fal = carry
             inst = _physics_step_fn(inst, calday_ml_x)
             fa, fap, fal = _MLAccumulateFluxes(
-                num_mlcan, filter_mlcan, ncan_vals, fa, fap, fal, inst)
+                num_mlcan, filter_mlcan, ncan_vals, fa, fap, fal, inst, grid=grid)
             return (inst, fa, fap, fal), None
 
         # jax.checkpoint on the scan body: recomputes activations during
@@ -725,7 +747,7 @@ def MLCanopyFluxes(
          mlcanopy_inst) = _MLScaleAndWriteBack(
             num_ml_steps, num_mlcan, filter_mlcan, ncan_vals,
             flux_accumulator, flux_accumulator_profile, flux_accumulator_leaf,
-            mlcanopy_inst)
+            mlcanopy_inst, grid=grid)
 
     else:
         # ------------------------------------------------------------------
@@ -759,6 +781,7 @@ def MLCanopyFluxes(
                 flux_accumulator_profile,
                 flux_accumulator_leaf,
                 mlcanopy_inst,
+                grid=grid,
             )
 
         # Scale accumulated sums by 1/num_ml_steps and write back to inst
@@ -772,6 +795,7 @@ def MLCanopyFluxes(
                 flux_accumulator_profile,
                 flux_accumulator_leaf,
                 mlcanopy_inst,
+                grid=grid,
             )
         )
 
@@ -782,7 +806,10 @@ def MLCanopyFluxes(
     # Save current forcing as *_bef for next CLM timestep — Fortran lines 332-343
     # JIT-compiled helper fuses 8 scatter ops into one XLA dispatch.
     # ------------------------------------------------------------------
-    mlcanopy_inst = _save_bef_forcing(filter_mlcan, mlcanopy_inst)
+    mlcanopy_inst = _save_bef_forcing(
+        filter_mlcan, mlcanopy_inst,
+        grid_p=(grid.p if grid is not None else None),
+    )
 
     # ------------------------------------------------------------------
     # Canopy-level diagnostics — Fortran line 346
@@ -1192,6 +1219,7 @@ def _MLAccumulateFluxes(
     flux_accumulator_profile: jnp.ndarray,
     flux_accumulator_leaf: jnp.ndarray,
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Accumulate ML-step fluxes into running-sum accumulators.
@@ -1227,9 +1255,13 @@ def _MLAccumulateFluxes(
     nvar2d = 14
     nvar3d = 12
 
-    for fp in range(num_filter):
-        p = int(filter[fp])
-        _ncan = ncan_vals[fp]  # pre-computed; avoids int(arr[p]) D→H sync
+    for fp in range(1 if grid is not None else num_filter):
+        if grid is not None:
+            p = grid.p            # possibly a TRACED scan-over-columns index (S3)
+            _ncan = grid.ncan
+        else:
+            p = int(filter[fp])
+            _ncan = ncan_vals[fp]  # pre-computed; avoids int(arr[p]) D→H sync
 
         # ------------------------------------------------------------------
         # Accumulate single-level (1-D) fluxes — Fortran lines 65-87
@@ -1340,6 +1372,7 @@ def _MLScaleAndWriteBack(
     flux_accumulator_profile: jnp.ndarray,
     flux_accumulator_leaf: jnp.ndarray,
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, mlcanopy_type]:
     """
     Scale accumulated flux sums by ``1/num_ml_steps`` and write the
@@ -1373,8 +1406,8 @@ def _MLScaleAndWriteBack(
 
     scale = 1.0 / float(num_ml_steps)
 
-    for fp in range(num_filter):
-        p = int(filter[fp])
+    for fp in range(1 if grid is not None else num_filter):
+        p = grid.p if grid is not None else int(filter[fp])  # grid.p may be TRACED (S3)
         flux_accumulator = flux_accumulator.at[p, :].mul(scale)
         flux_accumulator_profile = flux_accumulator_profile.at[p, :, :].mul(scale)
         flux_accumulator_leaf = flux_accumulator_leaf.at[p, :, :, :].mul(scale)
@@ -1423,9 +1456,13 @@ def _MLScaleAndWriteBack(
     agross = mlcanopy_inst.agross_leaf
     gs = mlcanopy_inst.gs_leaf
 
-    for fp in range(num_filter):
-        p = int(filter[fp])
-        _ncan = ncan_vals[fp]  # pre-computed; avoids int(arr[p]) D→H sync
+    for fp in range(1 if grid is not None else num_filter):
+        if grid is not None:
+            p = grid.p            # possibly a TRACED scan-over-columns index (S3)
+            _ncan = grid.ncan
+        else:
+            p = int(filter[fp])
+            _ncan = ncan_vals[fp]  # pre-computed; avoids int(arr[p]) D→H sync
 
         i = -1
 
