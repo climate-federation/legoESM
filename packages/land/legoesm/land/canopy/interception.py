@@ -127,7 +127,11 @@ def wetted_fraction(W_canopy: jnp.ndarray, pai: jnp.ndarray,
                      _EPS_POW)
     fwet = jnp.minimum(base ** cfg.fwet_exponent,
                        cfg.maximum_leaf_wetted_fraction)
-    return jnp.where(has_pai, fwet, 0.0)
+    # A DRY store is exactly dry (fwet == 0), so an interception-enabled but
+    # empty canopy is bit-identical to interception-off — the base floor is only
+    # to keep the gradient finite for W > 0, not to nucleate a spurious wet
+    # fraction at W = 0.
+    return jnp.where(has_pai & (W_canopy > 0.0), fwet, 0.0)
 
 
 def intercept_rain(W_canopy: jnp.ndarray, precip: jnp.ndarray,
