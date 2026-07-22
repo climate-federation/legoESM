@@ -130,7 +130,8 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
                        root_depth: float = 1.0,
                        z_ref: float = 10.0,
                        texture: tuple[float, float] | None = None,
-                       interception: bool = False
+                       interception: bool = False,
+                       plant_wilting_point: float | None = None
                        ) -> MultiLayerLandConfig:
     """Assemble the multilayer land config for the offline EC-site run.
 
@@ -148,6 +149,10 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     if interception:
         from legoesm.land.canopy.interception import InterceptionConfig
         kw["interception"] = InterceptionConfig()
+    if plant_wilting_point is not None:
+        # Separate PLANT wilting point (transpiration extraction) from the soil
+        # wilting point — deep-rooted vegetation extracts below the soil cutoff.
+        kw["theta_wp_plant"] = float(plant_wilting_point)
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
@@ -601,7 +606,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
              clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
              interception: bool = False, clmml_stomatal: str = "wue",
-             clmml_vcmax25: float | None = None) -> dict:
+             clmml_vcmax25: float | None = None,
+             plant_wilting_point: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -678,7 +684,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         k_sat_decay_m=k_sat_decay_m,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
         root_depth=root_depth, z_ref=z_ref, texture=texture,
-        interception=interception)
+        interception=interception, plant_wilting_point=plant_wilting_point)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -854,6 +860,10 @@ def main() -> int:
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
                          "than the full multi-decade record")
+    ap.add_argument("--plant-wilting-point", type=float, default=None,
+                    help="PLANT wilting point [m3/m3] for root-zone transpiration, "
+                         "SEPARATE from the soil wilting point; below the soil "
+                         "value = deep-rooted extraction (e.g. phreatophytes)")
     ap.add_argument("--canopy-interception", dest="interception",
                     action="store_true", default=False,
                     help="enable the shared canopy-water interception scheme "
@@ -883,6 +893,7 @@ def main() -> int:
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,
+                 plant_wilting_point=args.plant_wilting_point,
                  spinup_steps=args.spinup_steps,
                  interception=args.interception)
     return 0

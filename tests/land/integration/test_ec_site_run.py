@@ -332,3 +332,29 @@ def test_stomatal_m_scale_raises_transpiration(tmp_path):
     # more stomatal opening => more latent, less sensible heat
     assert hi["LE"]["bias"] > base["LE"]["bias"]
     assert hi["H"]["bias"] < base["H"]["bias"]
+
+
+def test_plant_wilting_point_separate_from_soil(tmp_path):
+    """A PLANT wilting point below the soil moisture lets transpiration (and its
+    GPP) continue where a single soil wilting point would shut it off — the
+    separate soil/plant wilting knobs (phreatophyte deep extraction)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    # dry the synthetic soil below the default wilting point
+    d = xr.open_dataset(driver_nc)
+    d = d.assign(SWC=("time", np.full(d.sizes["time"], 8.0)))   # 0.08 vol
+    d.to_netcdf(driver_nc + ".dry"); import os; os.replace(driver_nc + ".dry", driver_nc)
+    mod = _load_driver_module()
+    hi_wp = mod.run_site(driver_nc, "prognostic", str(tmp_path / "hi"), chunk=96,
+                         canopy="two_leaf")                       # soil wp = plant wp
+    lo_wp = mod.run_site(driver_nc, "prognostic", str(tmp_path / "lo"), chunk=96,
+                         canopy="two_leaf", plant_wilting_point=0.04)
+    # lower plant wilting point => more root-zone availability => more GPP
+    assert lo_wp["GPP"]["bias"] > hi_wp["GPP"]["bias"]
+
+
+def test_config_separates_soil_and_plant_wilting():
+    from legoesm.land.config import MultiLayerLandConfig
+    c = MultiLayerLandConfig(theta_wp=0.15, theta_wp_plant=0.06)
+    assert c.theta_wp == 0.15 and c.theta_wp_plant == 0.06
+    assert MultiLayerLandConfig(theta_wp=0.15).theta_wp_plant is None   # default

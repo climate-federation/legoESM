@@ -153,7 +153,16 @@ class MultiLayerLandConfig(NamedTuple):
     elev_bands: ElevationSnowBandConfig | None = None
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
-    theta_wp: float = 0.15        # Wilting point volumetric water content
+    # ``theta_wp`` is the SOIL wilting point [m3/m3] — the moisture reference for
+    # the soil column (initial-condition seeding, bare-soil references).  The
+    # PLANT wilting point (the θ below which ROOT-ZONE transpiration and its
+    # GPP/stomatal stress shut off) is ``theta_wp_plant``; ``None`` (default)
+    # makes it equal to ``theta_wp`` so behaviour is unchanged, but the two can
+    # be set separately — e.g. a phreatophyte (deep-rooted oak) extracts water to
+    # a LOWER θ than the soil-evaporation cutoff, so ``theta_wp_plant <
+    # theta_wp`` lets transpiration continue where the soil is otherwise "dry".
+    theta_wp: float = 0.15        # SOIL wilting point volumetric water content
+    theta_wp_plant: float | None = None  # PLANT wilting point (None => theta_wp)
     theta_fc: float = 0.30        # Field capacity volumetric water content
     # Sub-configs
     soil_grid: SoilGridConfig = SoilGridConfig()
