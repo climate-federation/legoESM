@@ -42,6 +42,10 @@ T_XG=tests/coupler/unit/test_grid_remap_wet_mask.py
 T_F4=tests/coupler/unit/test_segment_callback_elapsed_dt.py
 T_H5=tests/grids/test_tripole_internals.py::TestRotationAngleSignAndSeam
 T_F5=tests/unit/test_coupled_ocean_ice_forcing.py
+T_F2=tests/unit/test_diagnostics_water_budget.py
+T_OMIP=tests/unit/test_omip_sea_ice_coupling.py
+T_M8=tests/unit/test_conservative_regrid.py
+T_M8B=tests/coupler/unit/test_grid_remap_coupling.py
 
 mkdir -p "$FIXED/logs"
 export JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
@@ -187,6 +191,37 @@ if [ $? -eq 0 ]; then
 else echo "ok(red-on-main): F5 test_ice_cell_gets_open_water_flux_scaled_by_f_ocean"; fi
 (cd "$PREFIX" && git checkout -- "$_f5f" 2>/dev/null) || rm -f "$PREFIX/$_f5f"
 
+# F2: the test imports legoesm.diagnostics.water_budget, which does not exist on
+# main -> module fails to collect (coarse ImportError red, like FIX-1). The
+# individual behavioral asserts (balanced~0, inflated-precip fires, land-storage
+# no-false-flag) are then exercised on the patched branch in the fixed stage.
+mkdir -p "$PREFIX/$(dirname "$T_F2")"
+cp "$FIXED/$T_F2" "$PREFIX/$T_F2"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q --tb=line "$T_F2" >/dev/null 2>&1
+if [ $? -eq 0 ]; then echo "!!! VACUOUS: F2 water-budget test PASSES on unpatched main"; RC=$((RC+1));
+else echo "ok: F2 water-budget test correctly RED on unpatched main"; fi
+rm -f "$PREFIX/$T_F2"
+
+# OMIP+v2: new function appended to an existing file -> run the specific NEW test
+# on main (blend_ice_ocean_forcing has no ice_owns_snow_reservoir kwarg -> RED).
+_omipf="tests/unit/test_omip_sea_ice_coupling.py"
+cp "$FIXED/$_omipf" "$PREFIX/$_omipf"
+JAX_ENABLE_X64=1 "$PY" -m pytest -q --tb=no \
+  "${_omipf}::test_blend_gates_direct_precip_by_ice_model_snow_reservoir" >/dev/null 2>&1
+if [ $? -eq 0 ]; then echo "!!! VACUOUS: OMIP+v2 test PASSES on unpatched main"; RC=$((RC+1));
+else echo "ok(red-on-main): OMIP+v2 test_blend_gates_direct_precip_by_ice_model_snow_reservoir"; fi
+(cd "$PREFIX" && git checkout -- "$_omipf" 2>/dev/null) || rm -f "$PREFIX/$_omipf"
+
+# M8: the require_full_coverage kwarg does not exist on main -> the new tests RED.
+_m8f="tests/unit/test_conservative_regrid.py"
+cp "$FIXED/$_m8f" "$PREFIX/$_m8f"
+for _m in test_partial_coverage_raises_when_required test_full_coverage_passes_when_required; do
+  JAX_ENABLE_X64=1 "$PY" -m pytest -q --tb=no "${_m8f}::${_m}" >/dev/null 2>&1
+  if [ $? -eq 0 ]; then echo "!!! VACUOUS: M8 ${_m} PASSES on unpatched main"; RC=$((RC+1));
+  else echo "ok(red-on-main): M8 ${_m}"; fi
+done
+(cd "$PREFIX" && git checkout -- "$_m8f" 2>/dev/null) || rm -f "$PREFIX/$_m8f"
+
 rm -f "$PREFIX/$T_UNITS" "$PREFIX/$T_AD"
 
 # Control for the one known-fragile regression test: it asserts
@@ -222,6 +257,12 @@ echo "--- [x64] H5/H6 tripole rotation sign + branch-cut unwrap ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_H5";         RC=$((RC + $?))
 echo "--- [x64] F5 precip-over-ice (no double-count on OMIP) ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_F5";         RC=$((RC + $?))
+echo "--- [x64] F2 water-conservation tripwires (A: atm, B: runoff, C: inventory/H2) ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_F2";         RC=$((RC + $?))
+echo "--- [x64] OMIP+v2 precip double-count guard ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_OMIP";       RC=$((RC + $?))
+echo "--- [x64] M8 remap coverage validator + ghost padding ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_M8" "$T_M8B"; RC=$((RC + $?))
 
 # The C2 guard fires on a marker set by the coupled drivers, NOT on the presence
 # of a segment_callback -- that hook is a GENERAL per-segment diagnostic with

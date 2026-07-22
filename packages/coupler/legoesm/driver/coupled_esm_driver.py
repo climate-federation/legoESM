@@ -234,6 +234,27 @@ class CoupledESMDriver:
         self._last_sfc_response = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
+        # F2 water-conservation tripwire state (diagnostics-only, host-side).
+        # ``_cwv_prev``: previous-segment column-water-vapour field, for the
+        # global atmospheric moisture-budget tendency (catches a mis-scaled
+        # coupler-DELIVERED precip, C1).  ``_last_atm_precip``: the precip RATE
+        # handed to the coupler this segment.  Runoff export/applied integrals
+        # (catch runoff discarded by the ocean wet mask, M2) are stashed in
+        # ``_assemble_ocean_forcing`` (dynamic ocean only).  All rank-local.
+        self._cwv_prev = None
+        self._last_atm_precip = None
+        self._last_runoff_export_integral_ranklocal = None
+        self._last_runoff_applied_integral_ranklocal = None
+        # F2 closed water-INVENTORY residual (tripwire C, catches the H2 class:
+        # ice-fraction precip destroyed).  ``_water_store_prev_integral_ranklocal``
+        # mirrors ``_cwv_prev``/``_sst_mean_init`` first-call seeding: the
+        # segment-boundary area integral of W_atm[+condensate]+W_land+W_ice on
+        # the atm grid [kg], stored between segments so the residual first
+        # appears on the SECOND diag.  ``_last_f_ocean_applied_integral_ranklocal``
+        # is the ocean-grid freshwater-applied integral [kg/s], stashed in
+        # ``_assemble_ocean_forcing`` (dynamic ocean only).  All rank-local.
+        self._water_store_prev_integral_ranklocal = None
+        self._last_f_ocean_applied_integral_ranklocal = None
 
     @property
     def output_dir(self) -> Path:
@@ -1948,6 +1969,20 @@ class CoupledESMDriver:
                     raise ValueError(
                         "cross-grid coupling requires the ocean wet mask "
                         "(self._ocean_land_mask) for the open-water fraction.")
+                # M13 (DEFERRED): the DYNAMIC sea-ice cross term below drops
+                # sub-cell covariance -- remap(sic)*remap(F) != remap(sic*F).
+                # The STATIC land/sea factor is already the ocean's OWN wet mask
+                # (H3/H4, b6366d2ef), so ONLY the remap(sic) x remap(flux) term
+                # remains.  Residual is nonzero ONLY in the marginal ice zone
+                # (a few % of ocean area), EXACTLY zero for the identity/
+                # aquaplanet path (sic=0, byte-identical), near-zero global mean,
+                # and for coarse-atm -> fine-ocean production coupling a small
+                # FIRST-ORDER local redistribution, NOT a global-budget leak.
+                # Partition-before-remap is architecturally blocked: the
+                # turbulent tile fluxes are computed on the OCEAN grid (they need
+                # ocean SST/currents), so sic*F_bulk cannot be formed on the atm
+                # grid without remapping SST back.  Revisit only if a MIZ-
+                # sensitive coupled diagnostic shows a real bias.
                 sic_ocean = remap_field(_sic, _remapper.a2o)
                 f_ocean = cross_grid_open_water_fraction(_owet, sic_ocean)
                 # f_water = the ocean's OWN wet fraction (open water + ice);
@@ -2056,6 +2091,63 @@ class CoupledESMDriver:
             precip=precip, evap=evap, runoff=river,
             ice_fw=surface_extra,
         )
+        # F2 closed water-INVENTORY residual (tripwire C, H2 class): stash the
+        # freshwater the OCEAN MODEL applies POST wet-mask as ONE rank-local
+        # integral [kg/s], +into ocean = water LEAVING the tracked atm+land+ice
+        # inventory.  Sign convention (ocean-consumer frame, +into ocean):
+        #   F_ocean_applied = INT(precip) - INT(evap) + INT(runoff_applied)
+        #                     + INT(ice_fw)
+        # precip/evap already carry the f_ocean open-water gate (0 on dry
+        # cells); runoff_applied reconstructs the ocean wet-mask gating
+        # (river*clip(owet)) exactly as the M2 runoff tripwire below (river is
+        # the a2o-remapped runoff, identity on the shared grid where owet is
+        # None).  precip/runoff/ice_fw are +into ocean; evap is +up (removed
+        # from ocean) -> enters with -evap.  Dynamic-ocean only (this assembly
+        # never runs on the storage-free slab -- _step_ocean returns at the slab
+        # branch before calling this).  RANK-LOCAL sums (diagnostics-only; a
+        # sharded run must route the SUM through global_sum_mpi).
+        _oa_fw = getattr(self, "_ocean_area_w", None)
+        if _oa_fw is not None:
+            from legoesm.diagnostics.water_budget import area_integral_ranklocal
+            _owet_fw = getattr(self, "_ocean_land_mask", None)
+            _runoff_applied = (river if _owet_fw is None
+                               else river * jnp.clip(_owet_fw, 0.0, 1.0))
+            self._last_f_ocean_applied_integral_ranklocal = (
+                area_integral_ranklocal(precip, _oa_fw)
+                - area_integral_ranklocal(evap, _oa_fw)
+                + area_integral_ranklocal(_runoff_applied, _oa_fw)
+                + area_integral_ranklocal(surface_extra, _oa_fw)
+            )
+        # F2 (M2) runoff-conservation tripwire: the conservative a2o remap
+        # preserves the river-runoff INTEGRAL; the ocean wet mask then drops
+        # interior-land runoff at fully-dry ocean cells (a silent freshwater
+        # leak).  We RECONSTRUCT the horizontal wet-mask gating here as
+        # ``river * clip(_owet,0,1)`` -- ``self._ocean_land_mask`` is the ocean's
+        # OWN wet mask (1 = ocean; see cross_grid_open_water_fraction) so this
+        # matches the gating the ocean applies for a binary interior-land
+        # discard.  Stash the exported (atm-grid) vs reconstructed-applied
+        # (ocean-grid) area integrals so the segment diagnostic can difference
+        # them.  This is a TRIPWIRE (a small cross-grid conservative-remap
+        # residual + fractional-coast wet fraction sit at its floor; the
+        # balanced all-wet case is exactly 0, test-pinned), NOT a machine-zero
+        # identity.  RANK-LOCAL sums (diagnostics-only; a sharded run must use
+        # global_sum_mpi).  Dynamic-ocean only -> no leak on the storage-free
+        # slab.  No-op for the shared-grid identity aquaplanet (no wet mask).
+        _owet = getattr(self, "_ocean_land_mask", None)
+        _oa = getattr(self, "_ocean_area_w", None)
+        # Guard the whole chain: a minimal caller (unit-test stub, or a driver
+        # built without the atmosphere wired) may lack ``_atm``; ``self._atm.grid``
+        # would then AttributeError before the ``_aa is not None`` guard below.
+        _aa = getattr(getattr(getattr(self, "_atm", None), "grid", None),
+                      "grid_area", None)
+        if (prev is not None and _owet is not None
+                and _oa is not None and _aa is not None):
+            from legoesm.diagnostics.water_budget import area_integral_ranklocal
+            _applied = river * jnp.clip(_owet, 0.0, 1.0)  # kept on wet cells
+            self._last_runoff_export_integral_ranklocal = (
+                area_integral_ranklocal(prev.river_runoff_flux, _aa))
+            self._last_runoff_applied_integral_ranklocal = (
+                area_integral_ranklocal(_applied, _oa))
         # --- Ice → ocean back-reaction: the melt/freeze water in ``ice_fw`` must
         #     arrive WITH its melt/freeze HEAT + brine SALT + ice-ocean STRESS,
         #     else the ocean gets freshwater without its energy/salt (a mass↔heat
@@ -2134,6 +2226,11 @@ class CoupledESMDriver:
         from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
 
         atm_forcing = self._build_atm_forcing(day)
+        # F2 (C1) tripwire: stash the precip RATE the coupler is about to
+        # deliver so the segment-boundary moisture-budget residual can compare
+        # it against the atmosphere's OWN column-water-vapour drain (an
+        # independent witness that flags a mis-scaled coupler-delivered precip).
+        self._last_atm_precip = atm_forcing.precip_total
         # Surface forcing for the ocean step lives on the OCEAN grid; remap the
         # atm-grid forcing fields onto it (identity remapper => unchanged, so the
         # standard single-grid run is byte-identical).
@@ -2198,9 +2295,9 @@ class CoupledESMDriver:
             self._atm._co2_vmr_override = co2_vmr
 
         # Diagnostics (once per segment, not per sub-step)
-        self._log_coupled_diag(day)
+        self._log_coupled_diag(day, dt_segment)
 
-    def _log_coupled_diag(self, day):
+    def _log_coupled_diag(self, day, dt_segment=0.0):
         """Record coupled diagnostics for this segment.
 
         Stacks all reductions into one ``jnp.stack`` and pulls them in
@@ -2247,6 +2344,134 @@ class CoupledESMDriver:
             idx += 1
         if has_T_sfc:
             diag["T_sfc_mean"] = float(host[idx])
+
+        # --- F2 water-conservation tripwires (diagnostics-only, RANK-LOCAL) ---
+        # Independent witnesses built from the ACTUAL per-tile conserved-water
+        # flows, so a coupler water-routing bug surfaces early instead of as a
+        # silent multi-year drift.  These reductions are RANK-LOCAL, matching
+        # the sst_mean reduction above; a SHARDED coupled run MUST route the SUM
+        # through global_sum_mpi (see legoesm.diagnostics.water_budget) — the
+        # keys carry an explicit ``_ranklocal`` suffix so a global conservation
+        # residual is never read off a per-rank sum.  Host-side float() off the
+        # differentiated segment loss => no VJP/donation concern.  NOTE: the atm
+        # residual needs a PREVIOUS-segment CWV, so it first appears on the
+        # SECOND diagnostic segment (mirrors the sst_drift first-call seeding).
+        # Catches C1 (atm moisture budget) and M2 (runoff wet-mask); H2 (frozen
+        # precip destroyed on the ice fraction) needs the ice-storage inventory
+        # term — see the F2 fork in the design note — and is NOT wired here.
+        if (self._last_sfc_response is not None
+                and self._last_atm_precip is not None
+                and dt_segment > 0.0):
+            from legoesm.diagnostics.column_integrals import column_water_vapor
+            from legoesm.diagnostics.water_budget import atm_moisture_residual
+            atm_area = getattr(self._atm.grid, "grid_area", None)
+            cwv_now = column_water_vapor(
+                self._atm.q_v,
+                self._atm.state.p_s.data,
+                jnp.asarray(self._atm.sigma.dsigma),
+            )
+            if self._cwv_prev is not None:
+                diag["water_atm_residual_kg_m2_s_ranklocal"] = float(
+                    atm_moisture_residual(
+                        cwv_now, self._cwv_prev,
+                        self._last_sfc_response.surface_mass_flux,
+                        self._last_atm_precip,
+                        atm_area, float(dt_segment),
+                    )
+                )
+            self._cwv_prev = cwv_now
+        _rexp = getattr(self, "_last_runoff_export_integral_ranklocal", None)
+        _rapp = getattr(self, "_last_runoff_applied_integral_ranklocal", None)
+        if _rexp is not None and _rapp is not None:
+            diag["water_runoff_residual_kg_s_ranklocal"] = (
+                float(_rexp) - float(_rapp))
+
+        # --- F2 closed water-INVENTORY residual (tripwire C: ice-fraction
+        #     precip destroyed, H2).  DIAGNOSTIC-ONLY, host-side float() off the
+        #     differentiated loss, RANK-LOCAL (a sharded run must route the SUMs
+        #     through global_sum_mpi -- advective moisture divergence crosses
+        #     rank boundaries).  DYNAMIC-OCEAN ONLY (F_ocean_applied is built
+        #     only on the dynamic path).  W_prev is seeded on the first diag
+        #     (mirrors _cwv_prev / _sst_mean_init) so the residual first appears
+        #     on the SECOND diagnostic segment.  Wrapped in try/except so a
+        #     diagnostic can NEVER abort the model trajectory (byte-identical
+        #     doctrine): any shape/attr surprise on an untested tile layout
+        #     (e.g. subset-column multilayer land) just omits the key for that
+        #     segment. ---
+        _foa = getattr(self, "_last_f_ocean_applied_integral_ranklocal", None)
+        if (getattr(self, "_is_dynamic_ocean", False)
+                and self._sfc_state is not None
+                and _foa is not None
+                and dt_segment > 0.0):
+            try:
+                from legoesm.diagnostics.column_integrals import (
+                    column_water_vapor,
+                )
+                from legoesm.diagnostics.water_budget import (
+                    area_integral_ranklocal,
+                    ice_water_content,
+                    land_water_content_multilayer,
+                    land_water_content_slab,
+                    water_inventory_residual,
+                )
+                from legoesm.ice.state import DynamicSeaIceState
+                from legoesm.land.state import MultiLayerLandState
+                atm_area = getattr(self._atm.grid, "grid_area", None)
+                if atm_area is not None and self._tile_config is not None:
+                    p_s = self._atm.state.p_s.data
+                    dsig = jnp.asarray(self._atm.sigma.dsigma)
+                    # W_atm = column vapour + any CARRIED condensate tracers
+                    # (same (1/g) INT q dp mass weighting); each accessor is
+                    # None when that species is not carried (dry/kessler).
+                    w_atm = column_water_vapor(self._atm.q_v, p_s, dsig)
+                    for _qn in ("q_c", "q_r", "q_i", "q_s", "q_g"):
+                        _qx = getattr(self._atm, _qn, None)
+                        if _qx is not None:
+                            w_atm = w_atm + column_water_vapor(_qx, p_s, dsig)
+                    # Whole-cell tile weights on the ATM grid: the ice-tile
+                    # concentration is fraction-OF-WATER so W_ice weights by
+                    # f_water = 1 - f_land - f_lake; per-land-area land storage
+                    # weights by f_land (matches compute_tile_fractions:
+                    # f_ice = f_water*conc).
+                    f_land = jnp.clip(self._tile_config.f_land, 0.0, 1.0)
+                    f_lake = jnp.clip(self._tile_config.f_lake, 0.0, 1.0)
+                    f_water = jnp.clip(1.0 - f_land - f_lake, 0.0, 1.0)
+                    ice = self._sfc_state.ice
+                    _hsnow = (ice.h_snow.data
+                              if isinstance(ice, DynamicSeaIceState) else None)
+                    w_ice = ice_water_content(
+                        ice.h_ice.data, ice.concentration.data, f_water,
+                        h_snow=_hsnow)
+                    land = self._sfc_state.land
+                    if isinstance(land, MultiLayerLandState):
+                        from legoesm.land.soil_grid import make_soil_grid
+                        dz = make_soil_grid(self._land_cfg.soil_grid).dz
+                        w_land = land_water_content_multilayer(
+                            land.theta_soil, dz, land.snow_depth,
+                            f_land.reshape(-1),
+                            surface_water=land.surface_water)
+                    else:
+                        w_land = land_water_content_slab(
+                            land.W_bucket.data, land.snow_depth.data, f_land)
+                    # W_lake = 0 (fixed-depth two-layer lake stores no water).
+                    # Flatten every per-cell term so a multilayer land (ncol,)
+                    # and the spatial atm/ice terms integrate uniformly on the
+                    # atm grid.
+                    w_cell = (w_atm.reshape(-1) + w_ice.reshape(-1)
+                              + w_land.reshape(-1))
+                    store_int = area_integral_ranklocal(
+                        w_cell, atm_area.reshape(-1))
+                    if self._water_store_prev_integral_ranklocal is not None:
+                        diag["water_inventory_residual_kg_s_ranklocal"] = float(
+                            water_inventory_residual(
+                                store_int,
+                                self._water_store_prev_integral_ranklocal,
+                                _foa, float(dt_segment)))
+                    self._water_store_prev_integral_ranklocal = store_int
+            except Exception:
+                # A diagnostic must NEVER break the run (byte-identical
+                # trajectory); omit the key for this segment on any surprise.
+                pass
 
         self._coupled_diag.append(diag)
 
