@@ -31,6 +31,7 @@ from legoesm.ice.sea_ice import (
     step_sea_ice,
     grid_supports_ice_dynamics,
     grid_supports_ice_transport,
+    uses_new_physics,
 )
 from legoesm.ice.rheology import (
     ice_strength,
@@ -91,6 +92,7 @@ __all__ = [
     "step_sea_ice",
     "grid_supports_ice_dynamics",
     "grid_supports_ice_transport",
+    "uses_new_physics",
     # Rheology
     "ice_strength",
     "strain_rates",

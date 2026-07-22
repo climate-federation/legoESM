@@ -54,7 +54,7 @@ def _prev(shape, *, ice_lake=0.0, ohe=0.0, salt=0.0, stress_x=0.0, stress_y=0.0)
     )
 
 
-def _assemble(conc, prev, *, precip=2.0e-5, lhflx=50.0, tau_x=0.0):
+def _assemble(conc, prev, *, precip=2.0e-5, lhflx=50.0, tau_x=0.0, ice_config=None, f_land=0.0):
     """Call the real ``_assemble_ocean_forcing`` against a light stub self.
 
     ``conc`` is the prognostic ice concentration (shape (1, 2): an ice-free and
@@ -76,7 +76,9 @@ def _assemble(conc, prev, *, precip=2.0e-5, lhflx=50.0, tau_x=0.0):
         _sfc_state=types.SimpleNamespace(
             ice=types.SimpleNamespace(
                 concentration=types.SimpleNamespace(data=conc))),
-        _tile_config=types.SimpleNamespace(f_land=z, f_lake=z),
+        _tile_config=types.SimpleNamespace(
+            f_land=jnp.full(shape, f_land), f_lake=z),
+        _ice_config=ice_config,   # None => driver defaults to slab SeaIceConfig
     )
     atm_forcing = types.SimpleNamespace(
         sw_down=jnp.full(shape, 300.0),
@@ -105,12 +107,16 @@ class TestOceanIceForcing(unittest.TestCase):
         self.assertAlmostEqual(
             float(fw.evap[0, 1]), 0.2 * float(fw.evap[0, 0]), places=10
         )
-        # Penetrating SW and precip carry the same open-water scaling.
+        # Penetrating SW carries the open-water scaling.
         self.assertAlmostEqual(
             float(sf.sw_down[0, 1]), 0.2 * float(sf.sw_down[0, 0]), places=8
         )
+        # Precip is delivered on the WATER fraction over the ice cell: the stub
+        # uses the default (slab) ice model with no snow reservoir and f_land=0
+        # (f_water=1), so both cells get the full water-fraction precip (H2 fix)
+        # -- NOT f_ocean-scaled.
         self.assertAlmostEqual(
-            float(fw.precip[0, 1]), 0.2 * float(fw.precip[0, 0]), places=12
+            float(fw.precip[0, 1]), float(fw.precip[0, 0]), places=12
         )
 
     def test_ice_free_cell_byte_identical_to_full_cell(self):
@@ -151,6 +157,43 @@ class TestOceanIceForcing(unittest.TestCase):
         # Ice stress applied in the ocean's -tau convention (force ON ocean = +T_s
         # => feed -T_s so the ocean core's -tau yields +T_s); open-water tau is 0.
         self.assertAlmostEqual(float(sf.tau_x[ice]), -T_s, places=10)
+
+    def test_precip_over_slab_ice_excludes_land_fraction(self):
+        # THE discriminating case (F5): with f_land > 0 the three candidate
+        # policies give DIFFERENT ocean direct-precip, so this separates the
+        # correct fix from both the pre-fix bug AND the naive over-fix.  Slab
+        # ice (default, no snow reservoir) over a cell that is part land,
+        # part open water, part ice:
+        #   f_land = 0.3, f_lake = 0, conc = 0.5  =>
+        #   f_water = 1 - f_land - f_lake = 0.7 ; f_ocean = f_water*(1-conc) = 0.35
+        # Correct (f_water*P):   precip = 0.7 * P      <- ships this
+        # Pre-fix bug (f_ocean*P): precip = 0.35 * P   (drops the f_ice=0.35 share)
+        # Over-fix (full-cell P):  precip = 1.0 * P     (double-counts land 0.3*P,
+        #                                                already returned via runoff)
+        P = 2.0e-5
+        conc = jnp.array([[0.5, 0.5]])
+        _, fw = _assemble(conc, _prev(conc.shape), precip=P, f_land=0.3)
+        # Both cells identical (same f_land, conc), so check cell 0.
+        self.assertAlmostEqual(float(fw.precip[0, 0]), 0.7 * P, places=12,
+                               msg="slab ice must deliver f_water*P (open water "
+                                   "+ ice), not f_ocean*P (drops ice share) or "
+                                   "full-cell P (double-counts land runoff)")
+
+    def test_precip_over_v2_ice_keeps_open_water_scaling(self):
+        # v2 / new-physics ice OWNS a snow reservoir and routes the ice-fraction
+        # precip to the ocean via freshwater_flux, so the DIRECT channel must
+        # keep the open-water share f_ocean*P -- delivering f_water*P here would
+        # double-count the ice-routed water.  Enable a new-physics gate (brine).
+        from legoesm.ice.config import BrineConfig, SeaIceConfig
+        v2 = SeaIceConfig(brine=BrineConfig(enabled=True))
+        P = 2.0e-5
+        conc = jnp.array([[0.5, 0.5]])
+        _, fw = _assemble(conc, _prev(conc.shape), precip=P, f_land=0.3,
+                          ice_config=v2)
+        # f_ocean = f_water*(1-conc) = 0.7*0.5 = 0.35
+        self.assertAlmostEqual(float(fw.precip[0, 0]), 0.35 * P, places=12,
+                               msg="v2 ice must keep f_ocean*P; the ice tile "
+                                   "returns the ice-fraction precip separately")
 
     def test_no_ice_tile_is_full_cell(self):
         # Missing _sfc_state (no ice tile) => f_ocean falls back to 1.0.

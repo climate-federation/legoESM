@@ -1950,12 +1950,25 @@ class CoupledESMDriver:
                         "(self._ocean_land_mask) for the open-water fraction.")
                 sic_ocean = remap_field(_sic, _remapper.a2o)
                 f_ocean = cross_grid_open_water_fraction(_owet, sic_ocean)
+                # f_water = the ocean's OWN wet fraction (open water + ice);
+                # land -> 0.  Needed below to deliver the WATER-fraction precip
+                # (open water + ice) for the no-snow-reservoir ice path without
+                # injecting precip on dry (land) ocean-grid cells.
+                f_water = jnp.asarray(_owet, dtype=f_ocean.dtype)
             else:
                 # Shared-grid identity: the atm f_water IS the ocean wet fraction
                 # (same grid) -- keep the legacy assembly byte-identical.
-                f_ocean = compute_tile_fractions(_tile_cfg, _sic).f_ocean
+                _fracs = compute_tile_fractions(_tile_cfg, _sic)
+                f_ocean = _fracs.f_ocean
+                # f_water = open water + ice fraction = 1 - f_land - f_lake
+                # (EXCLUDES land/lake).  Used below to route the ice-fraction
+                # precip to the ocean on the no-snow-reservoir path WITHOUT
+                # re-adding the land/lake precip (already handled by the river-
+                # runoff / lake channels -- adding it here would double-count).
+                f_water = _fracs.f_ocean + _fracs.f_ice
         else:
             f_ocean = 1.0
+            f_water = 1.0
         # Open-water fluxes scaled to the ice-free fraction.  Sign conventions
         # (ocean-consumer frame): q_net +into ocean; sw_pen +into ocean
         # (penetrating solar, post-albedo); tau_x/y in the ATMOSPHERIC convention
@@ -1967,11 +1980,36 @@ class CoupledESMDriver:
         tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
         tau_y = f_ocean * tile.tau_y
         evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
-        # precip over ice is intercepted by the ice tile (snow reservoir) and
-        # returned to the ocean as melt via ``ice_fw`` below, so only the open-
-        # water precip enters the ocean P-E directly (pairs with the scaled evap;
-        # avoids double-counting the ice-routed water).  f_ocean==1 ⇒ full precip.
-        precip = f_ocean * atm_forcing.precip_total  # +into ocean (open water)
+        # Precip over the ice fraction: WHERE it is counted depends on whether
+        # the active ice model owns a snow reservoir.  Sign: +into ocean.  The
+        # LAND and LAKE fractions are ALWAYS excluded here -- their precip is the
+        # land/lake tile's water, returned to the ocean via the river-runoff and
+        # ice_lake channels -- so the ocean direct-precip is AT MOST the WATER
+        # fraction f_water = f_ocean + f_ice, NEVER the full cell (which would
+        # double-count the land/lake precip against runoff, and on the cross-grid
+        # path inject precip into dry land cells).
+        #   * v2 / new-physics ice (``uses_new_physics``) accumulates snow in
+        #     ``h_snow`` and runs the ice-fraction rain off to the ocean via
+        #     ``freshwater_flux`` (returned here as ``ice_fw``); the ice tile
+        #     ALREADY carries the ice-fraction (f_ice) precip, so the DIRECT
+        #     channel takes only the OPEN-water share ``f_ocean`` (f_ocean==1 =>
+        #     full precip) to avoid double-counting the ice-routed water.
+        #   * slab / legacy ice has NO snow reservoir and its ``freshwater_flux``
+        #     carries NO precip (melt/freeze only), so the ice-fraction precip
+        #     ``f_ice*P`` has nowhere to be stored -- without delivery it is
+        #     DROPPED (atmosphere loses it, no reservoir gains it: the H2 leak).
+        #     Deliver the WATER-fraction precip ``f_water*P`` (open water + ice)
+        #     to the ocean top cell, matching OMIP ``blend_ice_ocean_forcing``'s
+        #     no-snow-reservoir policy on an ocean-only (f_water==1) cell, so
+        #     precip is counted exactly ONCE and the land/lake fractions are
+        #     never double-counted.
+        from legoesm.ice import uses_new_physics
+        from legoesm.ice.config import SeaIceConfig
+        _ice_cfg = getattr(self, "_ice_config", None) or SeaIceConfig()
+        if uses_new_physics(_ice_cfg):
+            precip = f_ocean * atm_forcing.precip_total  # open-water share only
+        else:
+            precip = f_water * atm_forcing.precip_total  # water frac (no reservoir)
         z = jnp.zeros_like(sw_net)
         # Freshwater into the ocean, SPLIT by vertical-injection channel so each
         # term lands where it physically belongs:

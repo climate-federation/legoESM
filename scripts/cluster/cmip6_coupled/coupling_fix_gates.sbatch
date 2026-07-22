@@ -39,6 +39,9 @@ T_UNITS=tests/unit/test_seg_precip_units.py
 T_AD=tests/ice/unit/test_ice_float32_grad_safety.py
 T_C2=tests/coupler/unit/test_coupled_lane_carry_aux.py
 T_XG=tests/coupler/unit/test_grid_remap_wet_mask.py
+T_F4=tests/coupler/unit/test_segment_callback_elapsed_dt.py
+T_H5=tests/grids/test_tripole_internals.py::TestRotationAngleSignAndSeam
+T_F5=tests/unit/test_coupled_ocean_ice_forcing.py
 
 mkdir -p "$FIXED/logs"
 export JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
@@ -136,6 +139,54 @@ vacuity_check "$T_XG" 1 "H3/H4 cross-grid" \
   "test_a2o_uniform_flux_conserved_over_wet_domain"
 rm -f "$PREFIX/$T_XG"
 
+# F4: module-level function test that runs a tiny ModelDriver and asserts the
+# coupler callback fires every SEGMENT with elapsed dt. On unpatched main the
+# callback is diag-gated -> wrong firing/dt -> red.
+mkdir -p "$PREFIX/$(dirname "$T_F4")"
+cp "$FIXED/$T_F4" "$PREFIX/$T_F4"
+vacuity_check "$T_F4" 1 "F4 elapsed-dt"
+rm -f "$PREFIX/$T_F4"
+
+# H5/H6: the new TestRotationAngleSignAndSeam class is inserted into an existing
+# multi-class file. Copy the FIXED file into prefix and run ONLY that class on
+# unpatched main -- sin_alpha_v is sign-flipped and dlon is not unwrapped there,
+# so every case is red. (Generic vacuity_check picks head -1 class, wrong for a
+# 4-class file, so this is targeted.)
+_h5f="tests/grids/test_tripole_internals.py"
+mkdir -p "$PREFIX/$(dirname "$_h5f")"
+cp "$FIXED/$_h5f" "$PREFIX/$_h5f"
+for _m in test_h5_vpoint_sin_matches_uface_convention \
+          test_h5_consumer_matrix_is_orthonormal_roundtrip \
+          test_h6_seam_cell_matches_interior_neighbor; do
+  JAX_ENABLE_X64=1 "$PY" -m pytest -q --tb=no \
+    "${_h5f}::TestRotationAngleSignAndSeam::${_m}" >/dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "!!! VACUOUS: H5/H6 ${_m} PASSES on unpatched main"; RC=$((RC+1))
+  else echo "ok(red-on-main): ${_m}"; fi
+done
+# restore the pristine main copy of this shared file
+(cd "$PREFIX" && git checkout -- "$_h5f" 2>/dev/null) || rm -f "$PREFIX/$_h5f"
+
+# F5: the ocean-ice-forcing test file pre-exists on main with different content;
+# copy the FIXED version and check the DISCRIMINATING slab case is red on main.
+# The v2 case is an invariant guard (v2 keeps f_ocean*P unchanged -> green both
+# sides), so it is expected-green and not counted vacuous.
+_f5f="tests/unit/test_coupled_ocean_ice_forcing.py"
+cp "$FIXED/$_f5f" "$PREFIX/$_f5f"
+JAX_ENABLE_X64=1 "$PY" -m pytest -q --tb=no \
+  "${_f5f}::TestOceanIceForcing::test_precip_over_slab_ice_excludes_land_fraction" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "!!! VACUOUS: F5 slab-precip test PASSES on unpatched main"; RC=$((RC+1))
+else echo "ok(red-on-main): F5 test_precip_over_slab_ice_excludes_land_fraction"; fi
+# test_ice_cell_gets_open_water_flux_scaled_by_f_ocean also changed its precip
+# assertion (0.2x -> equal); confirm it too is red on main.
+JAX_ENABLE_X64=1 "$PY" -m pytest -q --tb=no \
+  "${_f5f}::TestOceanIceForcing::test_ice_cell_gets_open_water_flux_scaled_by_f_ocean" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "!!! VACUOUS: F5 open-water-scaling test PASSES on unpatched main"; RC=$((RC+1))
+else echo "ok(red-on-main): F5 test_ice_cell_gets_open_water_flux_scaled_by_f_ocean"; fi
+(cd "$PREFIX" && git checkout -- "$_f5f" 2>/dev/null) || rm -f "$PREFIX/$_f5f"
+
 rm -f "$PREFIX/$T_UNITS" "$PREFIX/$T_AD"
 
 # Control for the one known-fragile regression test: it asserts
@@ -165,6 +216,12 @@ echo "--- [x64] C2 coupled-lane _carry_aux guard ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_C2";         RC=$((RC + $?))
 echo "--- [x64] H3/H4 cross-grid coastal wet-mask ---"
 JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_XG";         RC=$((RC + $?))
+echo "--- [x64] F4 coupler elapsed-dt (per-segment callback) ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_F4";         RC=$((RC + $?))
+echo "--- [x64] H5/H6 tripole rotation sign + branch-cut unwrap ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_H5";         RC=$((RC + $?))
+echo "--- [x64] F5 precip-over-ice (no double-count on OMIP) ---"
+JAX_ENABLE_X64=1 "$PY" -u -m pytest -q "$T_F5";         RC=$((RC + $?))
 
 # The C2 guard fires on a marker set by the coupled drivers, NOT on the presence
 # of a segment_callback -- that hook is a GENERAL per-segment diagnostic with
