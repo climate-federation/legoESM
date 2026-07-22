@@ -65,6 +65,36 @@ def _scatter_flat_columns(flat_arr, layout, n_tile):
     return local.reshape((n_local * n_tile * n_tile,) + trailing)
 
 
+def _scatter_1based_columns(arr, layout, n_tile):
+    """Scatter a CLM 1-based per-column array ``(ncol+1, ...)`` (index 0 unused,
+    ``begp=1``) to this rank's owned columns, returning ``(n_local+1, ...)``.
+
+    The CLM ``mlcanopy`` pytree stores every patch field 1-based, so strip index 0,
+    scatter the ``(ncol, ...)`` body with the SAME face-major column ownership the
+    soil / lat / params use (:func:`_scatter_flat_columns`), then re-prepend the
+    original index-0 sentinel row.  The body path IS the (MPI-validated) 0-based
+    column scatter, so this 1-based variant is correct by composition — only the
+    strip/prepend wrapping is new.
+    """
+    body = arr[1:]                                            # (ncol, ...)
+    local_body = _scatter_flat_columns(body, layout, n_tile)  # (n_local*n*n, ...)
+    return jnp.concatenate([arr[:1], local_body], axis=0)     # (n_local+1, ...)
+
+
+def _slice_grid_info_to_rank(grid_info, layout, n_tile, global_ncol):
+    """Slice a GLOBAL per-column CLM-ML ``grid_info`` tuple to this rank's owned
+    columns and renumber each entry's patch index ``.p`` to LOCAL 1-based.
+
+    Scatters a global-index array to learn which global columns this rank owns, in
+    the SAME face-major local order the scattered canopy fields use, picks those
+    ``GridInfo`` entries, and sets ``.p = k+1`` for local position ``k`` — the
+    interface realigns by ``.p`` and requires patches ``1..n_local``.
+    """
+    lidx = np.asarray(_scatter_flat_columns(
+        jnp.arange(global_ncol, dtype=jnp.int32), layout, n_tile)).astype(int)
+    return tuple(grid_info[int(g)]._replace(p=k + 1) for k, g in enumerate(lidx))
+
+
 def _gather_flat_columns(local_arr, layout, n_tile, root_only=False):
     """Inverse of :func:`_scatter_flat_columns` — gather a rank-local
     flattened-column array ``(n_local*n*n, ...)`` back to the global
@@ -3195,21 +3225,6 @@ class ModelDriver:
                 if self._land_ml_state is not None:
                     # (Sub-face tiled layouts were already refused above, before
                     # any scatter.)
-                    # CLM-ML canopy under MPI/SPMD is not yet supported: the
-                    # canopy_state carries the CLM ``mlcanopy`` pytree whose arrays
-                    # are 1-based (shape (ncol+1, ...), index 0 unused), so the
-                    # per-column scatter below (which assumes (ncol, ...)) would
-                    # misalign every canopy field.  Refuse rather than silently
-                    # corrupt the canopy across ranks; single-rank coupled CLM-ML
-                    # works.  (A 1-based-aware scatter is a follow-up.)
-                    from legoesm.land.canopy.config import CLMMLCanopyConfig as _CLMML
-                    if (self.physics.land_ml_cfg is not None and isinstance(
-                            self.physics.land_ml_cfg.surface_scheme, _CLMML)):
-                        raise NotImplementedError(
-                            "land_surface_scheme='clm_ml' under MPI/SPMD is not yet "
-                            "supported: the CLM-ML canopy_state (1-based mlcanopy "
-                            "arrays) does not match the per-column scatter. Run "
-                            "single-rank for coupled CLM-ML, or use 'two_leaf'.")
                     n_tile = int(self.state.T.data.shape[1])
                     global_ncol = 6 * n_tile * n_tile
                     if self._land_cover_transient is not None:
@@ -3223,6 +3238,10 @@ class ModelDriver:
                             "rebuild is global); run single-rank, or use "
                             "static land cover for distributed multilayer runs."
                         )
+                    # The 0-based per-column leaves (soil state, t_a10_arr) scatter
+                    # normally.  The CLM-ML canopy_state's ``mlcanopy`` pytree is
+                    # 1-based (ncol+1) so tree_map here SKIPS it (its leading axis is
+                    # ncol+1, not global_ncol) — it is scattered separately below.
                     self._land_ml_state = _map_flat_column_leaves(
                         self._land_ml_state, n_tile, global_ncol,
                         lambda x, n: _scatter_flat_columns(x, layout, n))
@@ -3237,6 +3256,31 @@ class ModelDriver:
                         self.physics.land_ml_carbon = _map_flat_column_leaves(
                             self.physics.land_ml_carbon, n_tile, global_ncol,
                             lambda x, n: _scatter_flat_columns(x, layout, n))
+                    # CLM-ML canopy: scatter the 1-based ``mlcanopy`` (ncol+1) leaves
+                    # with the 1-based helper, then slice + renumber the per-column
+                    # ``grid_info`` to this rank's owned columns.  Columns are
+                    # embarrassingly parallel (no lateral canopy coupling), so the
+                    # gathered N-rank canopy is bit-identical to the single-rank run
+                    # (same invariant as the soil scatter).  This makes MPI a partial
+                    # scale path even before S3: each rank compiles an O(ncol/ranks)
+                    # canopy loop.
+                    _cs = self._land_ml_state.canopy_state
+                    if _cs is not None and getattr(_cs, "mlcanopy", None) is not None:
+                        _cs = _map_flat_column_leaves(
+                            _cs, n_tile, global_ncol + 1,
+                            lambda x, n: _scatter_1based_columns(x, layout, n))
+                        self._land_ml_state = self._land_ml_state._replace(
+                            canopy_state=_cs)
+                        # Per-rank grid_info: scatter a global-index array to learn
+                        # which global columns this rank owns (in local order), slice
+                        # the global grid_info tuple to them, and renumber ``.p`` to
+                        # local 1-based (the interface realigns by ``.p`` and requires
+                        # patches 1..n_local).
+                        _gi = getattr(self.physics, "clm_ml_grid_info", None)
+                        if isinstance(_gi, tuple):
+                            self.physics.clm_ml_grid_info = (
+                                _slice_grid_info_to_rank(
+                                    _gi, layout, n_tile, global_ncol))
                     self._land_ml_scattered = True
                     self._land_ml_n_tile = n_tile
 
