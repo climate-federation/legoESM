@@ -88,6 +88,15 @@ _VALID_STABILITY_SCHEMES = (
 # psi_m(zeta) = psi_h(zeta) = -beta*zeta (the historical default). Dyer (1974).
 _DYER_STABLE_BETA = 5.0
 
+# --- Businger-Dyer (1971) / Dyer (1974) UNSTABLE-branch coefficient ---
+# The universal gamma in the unstable dimensionless gradient functions
+# phi_m = (1 - gamma*zeta)^{-1/4}, phi_h = (1 - gamma*zeta)^{-1/2} that
+# integrate to the Businger-Dyer psi_m/psi_h; the historical value is 16.
+# Businger et al. (1971) J. Atmos. Sci. 28, 181-189; Dyer (1974) BLM 7, 363-372.
+# UNSTABLE branch only (zeta < 0); the beljaars/grachev/gryanik schemes carry
+# their OWN published fits and are NOT reparameterised by this coefficient.
+_DYER_UNSTABLE_GAMMA = 16.0
+
 # --- Beljaars & Holtslag (1991) stable functions ---
 #   psi_m(zeta) = -(a*zeta + b*(zeta - c/d)*exp(-d*zeta) + b*c/d)
 #   psi_h(zeta) = -((1 + 2a*zeta/3)^{3/2} + b*(zeta - c/d)*exp(-d*zeta) + b*c/d - 1)
@@ -324,19 +333,30 @@ def _grachev_psi_h(zeta_pos):
     return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
 
 
-def psi_m(zeta, stability_scheme="dyer1974"):
+def psi_m(zeta, stability_scheme="dyer1974", *,
+          unstable_gamma=_DYER_UNSTABLE_GAMMA,
+          stable_beta=_DYER_STABLE_BETA):
     """MOST momentum stability function psi_m(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
     every scheme:
         psi_m = 2 ln((1+x)/2) + ln((1+x^2)/2) - 2 arctan(x) + pi/2,
-        with x = (1 - 16 zeta)^{1/4}.
+        with x = (1 - gamma zeta)^{1/4}, gamma = ``unstable_gamma`` (default 16).
     Stable (zeta > 0) is selected by ``stability_scheme``:
 
-    - ``"dyer1974"``             : psi_m = -5 zeta (default; historical linear form)
+    - ``"dyer1974"``             : psi_m = -beta zeta (default; historical linear
+      form with beta = ``stable_beta``, default 5)
     - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
     - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
     - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
+
+    ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
+    coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when
+    ``stability_scheme="dyer1974"`` (unstable gamma for zeta < 0, stable beta for
+    zeta > 0). For the beljaars/grachev/gryanik schemes BOTH the stable form
+    (their own published fit) AND the unstable branch (kept at the historical
+    gamma = 16) are UNAFFECTED. Both default to the module constants so every
+    existing caller is byte-identical.
 
     Safe double-branch construction: the unstable expression is evaluated on
     ``zeta_neg <= -1e-10`` and the stable expression on ``zeta_pos >= 1e-10`` so
@@ -348,7 +368,14 @@ def psi_m(zeta, stability_scheme="dyer1974"):
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
 
-    x = jnp.power(1.0 - 16.0 * zeta_neg, 0.25)
+    # The trainable ``unstable_gamma`` reparameterises the Businger-Dyer UNSTABLE
+    # branch ONLY for ``dyer1974`` (the scheme whose stable branch it is paired
+    # with).  The beljaars/grachev/gryanik schemes keep the historical
+    # gamma = 16 unstable branch (their PUBLISHED fits assume it), so a tuned
+    # gamma does not silently perturb their unstable side.  Static Python select
+    # on the (compile-time) scheme string -> no traced branch.
+    _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
+    x = jnp.power(1.0 - _gamma * zeta_neg, 0.25)
     unstable = (
         2.0 * jnp.log((1.0 + x) / 2.0)
         + jnp.log((1.0 + x ** 2) / 2.0)
@@ -359,7 +386,7 @@ def psi_m(zeta, stability_scheme="dyer1974"):
     # Stable branch: static ``stability_scheme`` -> Python dispatch (only the
     # selected expression is traced), not ``jnp.where`` (which would trace all).
     if stability_scheme == "dyer1974":
-        stable = -_DYER_STABLE_BETA * zeta_pos
+        stable = -stable_beta * zeta_pos
     elif stability_scheme == "beljaars_holtslag1991":
         stable = _beljaars_holtslag_psi_m(zeta_pos)
     elif stability_scheme == "grachev2007_sheba":
@@ -375,25 +402,36 @@ def psi_m(zeta, stability_scheme="dyer1974"):
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
-def psi_h(zeta, stability_scheme="dyer1974"):
+def psi_h(zeta, stability_scheme="dyer1974", *,
+          unstable_gamma=_DYER_UNSTABLE_GAMMA,
+          stable_beta=_DYER_STABLE_BETA):
     """MOST heat/moisture stability function psi_h(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
     every scheme:
-        psi_h = 2 ln((1+y)/2),  y = (1 - 16 zeta)^{1/2}.
+        psi_h = 2 ln((1+y)/2),  y = (1 - gamma zeta)^{1/2},
+        gamma = ``unstable_gamma`` (default 16).
     Stable (zeta > 0) is selected by ``stability_scheme`` (same options as
-    :func:`psi_m`; ``"dyer1974"`` default reproduces the historical -5 zeta).
+    :func:`psi_m`; ``"dyer1974"`` default reproduces the historical
+    -``stable_beta`` zeta with beta = 5). ``unstable_gamma`` / ``stable_beta``
+    (Businger-Dyer / Dyer 1974 coefficients) act ONLY when
+    ``stability_scheme="dyer1974"`` (both branches); the beljaars/grachev/gryanik
+    schemes keep their own published stable fits AND the historical gamma = 16
+    unstable branch. Both default to the module constants (byte-identical).
     """
     validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
 
-    y = jnp.sqrt(1.0 - 16.0 * zeta_neg)
+    # See psi_m: the trainable unstable gamma applies ONLY to dyer1974; the
+    # non-linear stable schemes keep the historical gamma = 16 unstable branch.
+    _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
+    y = jnp.sqrt(1.0 - _gamma * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
 
     if stability_scheme == "dyer1974":
-        stable = -_DYER_STABLE_BETA * zeta_pos
+        stable = -stable_beta * zeta_pos
     elif stability_scheme == "beljaars_holtslag1991":
         stable = _beljaars_holtslag_psi_h(zeta_pos)
     elif stability_scheme == "grachev2007_sheba":
@@ -544,6 +582,9 @@ def compute_most_fluxes(
     max_exchange_coeff=None,
     stability_scheme="dyer1974",
     return_convergence=False,
+    *,
+    unstable_gamma=_DYER_UNSTABLE_GAMMA,
+    stable_beta=_DYER_STABLE_BETA,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -618,6 +659,25 @@ def compute_most_fluxes(
         to zero under strong stability (Arctic sea-ice / nocturnal SBL). The
         unstable branch (zeta < 0) stays Businger-Dyer regardless. Validated at
         function entry (a typo raises ``ValueError``).
+    unstable_gamma : float
+        Businger-Dyer / Dyer (1974) UNSTABLE-branch coefficient gamma in
+        ``x = (1 - gamma zeta)^{1/4}`` (psi_m) / ``y = (1 - gamma zeta)^{1/2}``
+        (psi_h) for zeta < 0.  Default 16 (byte-identical to the prior
+        behaviour).  A LARGER gamma makes psi more positive under instability =>
+        smaller log-law denominator => larger exchange coefficient => stronger
+        fluxes.  Applies to the Businger-Dyer unstable branch used by the
+        ``constant``/``most``/``large_yeager`` (non-COARE) path ONLY when
+        ``stability_scheme="dyer1974"``; the non-linear stable schemes keep the
+        historical gamma = 16 unstable branch and COARE 3.0 keeps its own Fairall
+        (1996/2003) unstable coefficients.
+    stable_beta : float
+        Dyer (1974) STABLE-branch linear coefficient beta in
+        ``psi = -beta zeta`` for zeta > 0, used ONLY when
+        ``stability_scheme="dyer1974"``.  Default 5 (byte-identical).  A LARGER
+        beta makes psi more negative under stability => larger log-law
+        denominator => smaller exchange coefficient => weaker fluxes.  Ignored by
+        the non-linear ``beljaars_holtslag1991``/``grachev2007_sheba``/
+        ``gryanik2020`` stable forms (their own published fits) and by COARE 3.0.
     return_convergence : bool
         When True, additionally return the MOST fixed-point convergence
         residual (the relative change in ``u*`` over the FINAL iteration).
@@ -827,9 +887,12 @@ def compute_most_fluxes(
             psi_h_t = psi_h_coare(zeta_t)
             psi_h_q = psi_h_coare(zeta_q)
         else:
-            psi_m_u = psi_m(zeta_u, stability_scheme)
-            psi_h_t = psi_h(zeta_t, stability_scheme)
-            psi_h_q = psi_h(zeta_q, stability_scheme)
+            psi_m_u = psi_m(zeta_u, stability_scheme,
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+            psi_h_t = psi_h(zeta_t, stability_scheme,
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+            psi_h_q = psi_h(zeta_q, stability_scheme,
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
 
         # --- Roughness update (Python if resolved at trace time) ---
         if scheme == "coare3":
@@ -1023,7 +1086,9 @@ def compute_most_fluxes(
         # the non-COARE psi_h here for coare3 made the 2 m T inconsistent with
         # the converged coare3 profile.
         _psi_h_d = (psi_h_coare(zeta_d) if scheme == "coare3"
-                    else psi_h(zeta_d, stability_scheme))
+                    else psi_h(zeta_d, stability_scheme,
+                               unstable_gamma=unstable_gamma,
+                               stable_beta=stable_beta))
         denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
         T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         # Guard against profile extrapolation outside [T_atm, T_sfc].

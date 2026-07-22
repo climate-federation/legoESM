@@ -148,6 +148,8 @@ __param_spec__ = {
             "Cd_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral drag coefficient (Large & Yeager 2004 range)", "shape": None},
             "Ch_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral heat-transfer coefficient (Large & Yeager 2004 range)", "shape": None},
             "z0": {"units": "m", "bounds": (1e-05, 1e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "surface-layer aerodynamic roughness length", "shape": None},  # 2-decade range (default 1e-4); wider spans lose float32 sigmoid precision near the floor
+            "most_unstable_gamma": {"units": "1", "bounds": (8.0, 28.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Businger-Dyer (1971) / Dyer (1974) MOST unstable-branch stability-function coefficient gamma (phi=(1-gamma*zeta)^-1/4); only used by a stability-dependent bulk_scheme", "shape": None},
+            "most_stable_beta": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Dyer (1974) MOST stable-branch linear stability-function coefficient beta (psi=-beta*zeta); only used by the dyer1974 stability_scheme of a stability-dependent bulk_scheme", "shape": None},
             "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
         },
     },
@@ -229,6 +231,20 @@ class SurfaceLayerConfig(NamedTuple):
         Reference height for MOST bulk formulas [m] (default 10.0).
     bulk_n_iter : int
         Number of MOST iterations (default 5).
+    most_unstable_gamma : float
+        Businger-Dyer / Dyer (1974) UNSTABLE-branch MOST stability-function
+        coefficient gamma (phi_m = (1 - gamma*zeta)^{-1/4}); default 16.  ONLY
+        consumed on the stability-dependent MOST path (``compute_surface_fluxes``
+        with ``bulk_scheme`` in {``coare3``, ``large_yeager``}, or the tiled
+        ``_single_tile_flux`` land ``most`` path) AND when
+        ``stability_scheme="dyer1974"``; the constant-coefficient default path,
+        the non-linear stable schemes, and COARE 3.0's own unstable form ignore
+        it.  A larger gamma => stronger unstable fluxes.
+    most_stable_beta : float
+        Dyer (1974) STABLE-branch linear MOST coefficient beta
+        (psi = -beta*zeta); default 5.  ONLY consumed on the stability-dependent
+        MOST path AND when ``stability_scheme="dyer1974"``.  A larger beta =>
+        weaker fluxes under stable stratification.
     """
     z0: float = 1e-4
     Cd_neutral: float = 1.5e-3
@@ -253,6 +269,16 @@ class SurfaceLayerConfig(NamedTuple):
     # Threaded together with the coupler ocean tile by run_coupled so the
     # interface cannot split; unknown -> ValueError at dispatch.
     stability_scheme: str = "dyer1974"
+    # Businger-Dyer / Dyer (1974) MOST stability-function coefficients, trainable
+    # for the AIMIP classical curriculum. Defaults reproduce the historical
+    # values (gamma=16 unstable, beta=5 dyer1974 stable) so a config with these
+    # omitted is byte-identical. Only read on a stability-dependent bulk_scheme
+    # AND (for beta / the unstable gamma) stability_scheme="dyer1974"; the
+    # constant path and the non-linear stable schemes never touch them.
+    # APPENDED LAST so existing positional SurfaceLayerConfig(...) calls and
+    # tree_deserialise_leaves field ordering are unchanged.
+    most_unstable_gamma: float = 16.0
+    most_stable_beta: float = 5.0
 
 
 class SmagorinskyConfig(NamedTuple):
