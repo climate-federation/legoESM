@@ -318,17 +318,19 @@ def MLCanopyFluxes(
 
     _diff_mode = grid is not None
 
-    # grid/diff mode (esp. the S3 column scan, where grid.p is TRACED) MUST use the
-    # DEVICE solar zenith (cos_zenith_device): the host fallback in _GetCLMVar
-    # recomputes zenith from per-step orbital globals via shr_orb_cosz and scatters
-    # it at the (dummy) filter index — which under a traced grid.p writes patch 1 for
-    # EVERY scanned column (silent wrong numerics).  Require it up front, loudly.
-    if _diff_mode and cos_zenith_device is None:
+    # The S3 column scan (grid.p TRACED) MUST use the DEVICE solar zenith
+    # (cos_zenith_device): the host fallback in _GetCLMVar recomputes zenith from
+    # per-step orbital globals via shr_orb_cosz and scatters it at the (dummy) filter
+    # index — which under a traced grid.p writes patch 1 for EVERY scanned column
+    # (silent wrong numerics).  Guard ONLY the traced-p case: a CONCRETE grid.p
+    # (the single-column make_clm_ml_forward grad factory) runs the host solar path
+    # correctly (p==filter[0]), so it must NOT be rejected.
+    if _diff_mode and cos_zenith_device is None and isinstance(grid.p, jax.core.Tracer):
         raise ValueError(
-            "CLM-ML grid/diff mode requires cos_zenith_device (the per-column device "
-            "solar zenith): the host shr_orb_cosz path cannot run under a traced patch "
-            "index and would silently write the wrong column. Supply cos_zenith_device "
-            "(the interface does this on the traceable path).")
+            "CLM-ML column-scan mode (traced grid.p) requires cos_zenith_device (the "
+            "per-column device solar zenith): the host shr_orb_cosz path cannot run "
+            "under a traced patch index and would silently write the wrong column. "
+            "Supply cos_zenith_device (the interface does this on the traceable path).")
 
     # Declare module-level RK coefficient cache as global so assignments
     # inside the if-block persist across calls.
