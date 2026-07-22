@@ -203,6 +203,9 @@ _PSIHAT_RSL: dict[str, Any] | None = None
 # bakes the psihat table into the jaxpr as a trace-time constant, so a compiled
 # or differentiated function cannot follow a later switch.
 _DIFF_TURBULENCE_SCHEME: str | None = None
+# Backend gs_type in force from the last ``_apply_stomatal_model``; used to clear
+# the leaf-kernel lru_caches only on an actual stomatal-model switch.
+_APPLIED_GS_TYPE: int | None = None
 
 # Last turbulence scheme concretely APPLIED + VERIFIED to the process-global ψ̂
 # tables by an eager (non-traced) _apply_turbulence_scheme call.  A traced step
@@ -264,6 +267,50 @@ def _apply_canopy_layering(canopy_config: CLMMLCanopyConfig) -> None:
     for _mod in (_ml_ctl, _init_vert):
         _mod.nlayer_within = n_within
         _mod.nlayer_above = n_above
+
+
+def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the leaf stomatal-conductance model (``gs_type``) into the backend.
+
+    Maps ``CLMMLCanopyConfig.stomatal_model`` -> backend ``gs_type``
+    {medlyn:0, ball_berry:1, wue:2}.  Patches BOTH ``MLclm_varctl.gs_type`` AND
+    ``MLLeafPhotosynthesisMod.gs_type`` because the photosynthesis module does
+    ``from MLclm_varctl import gs_type`` BY VALUE — a module-level copy the leaf
+    kernel branches on — so setting only ``MLclm_varctl.gs_type`` is a silent
+    no-op (the same by-value trap as the layering counts).
+
+    Re-applied every step (process-global CLM state shared by every column and
+    config).  Under ``"medlyn"`` the traced per-site ``vcmaxpft_jax`` injection
+    is live (the backend threads it only through the Medlyn path); the default
+    ``"wue"`` keeps the water-use-efficiency optimisation.
+    """
+    from legoesm.land.canopy.config import CLM_ML_STOMATAL_GS_TYPE
+    scheme = canopy_config.stomatal_model
+    if scheme not in CLM_ML_STOMATAL_GS_TYPE:
+        raise ValueError(
+            f"unknown CLM-ML stomatal_model {scheme!r}; must be one of "
+            f"{tuple(CLM_ML_STOMATAL_GS_TYPE)}")
+    gs = CLM_ML_STOMATAL_GS_TYPE[scheme]
+    import multilayer_canopy.MLclm_varctl as _ml_ctl
+    import multilayer_canopy.MLLeafPhotosynthesisMod as _photo
+    _ml_ctl.gs_type = gs
+    _photo.gs_type = gs
+    # The backend's leaf-kernel factories are ``functools.lru_cache``d on their
+    # parameter tuple but NOT on ``gs_type`` (the returned kernel closes over it
+    # as a static Python branch).  So SWITCHING stomatal model in one process
+    # could otherwise reuse a kernel compiled for the previous model with the new
+    # model's parameters.  Clear those caches whenever the applied gs_type
+    # actually changes (tracked in ``_APPLIED_GS_TYPE`` so the common no-switch
+    # case pays nothing).  This is a serial-process guard; concurrent mixed-model
+    # calls remain unsupported (the state is process-global) — one stomatal model
+    # per process is the contract.  Upstream fix: key the caches on gs_type.
+    global _APPLIED_GS_TYPE
+    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != gs:
+        for _name in dir(_photo):
+            _fn = getattr(_photo, _name, None)
+            if hasattr(_fn, "cache_clear"):
+                _fn.cache_clear()
+    _APPLIED_GS_TYPE = gs
 
 
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
@@ -2092,6 +2139,11 @@ def compute_clm_ml_canopy_fluxes(
         _apply_turbulence_scheme(
             canopy_config.turbulence_scheme, differentiable=False)
 
+    # ---- Select the leaf stomatal-conductance model (gs_type) ----
+    # Process-global like the turbulence tables; "medlyn" activates the traced
+    # vcmaxpft_jax injection path below.
+    _apply_stomatal_model(canopy_config)
+
     # ---- Build GridInfo for the traceable (jax.jit / jax.grad) path ----
     # Structural ints must be concrete Python ints extracted BEFORE tracing (int()
     # on a tracer raises ConcretizationTypeError).  The warm-start template
@@ -2216,6 +2268,25 @@ def compute_clm_ml_canopy_fluxes(
     # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
     # including production forward-only runs).  Diff mode is already gated by the
     # capability guard above.
+    # Per-site Vcmax25 override (config) — the "beyond the global PFT table"
+    # value.  Build ``vcmaxpft_jax`` from the module lookup with this PFT's entry
+    # replaced by the site value; the backend's nitrogen-profile routine
+    # (``CanopyNitrogenProfile``) selects the supplied array over the global
+    # table BEFORE leaf photosynthesis, regardless of stomatal model, so this
+    # feeds photosynthesis under WUE, Medlyn and Ball-Berry alike.  A per-site
+    # FIXED value goes here; a TRAINABLE Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument (from a training loop), which takes precedence.
+    if canopy_config.vcmax25_override is not None and vcmaxpft_jax is None:
+        from multilayer_canopy import MLpftconMod as _pftmod
+        _pft = int(canopy_config.pft_clm)
+        _vlen = int(_pftmod.MLpftcon.vcmaxpft.shape[0])
+        if not (0 <= _pft < _vlen):
+            raise ValueError(
+                f"CLMMLCanopyConfig.pft_clm={_pft} out of range for the MLpftcon "
+                f"vcmaxpft table (0..{_vlen - 1}); cannot apply vcmax25_override")
+        vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[_pft].set(
+            float(canopy_config.vcmax25_override))
+
     def _call_mlcanopy(mlc, flt, num, gridobj, cosz):
         _opt_kwargs: dict[str, Any] = {}
         if gridobj is not None:

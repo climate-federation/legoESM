@@ -148,6 +148,14 @@ VALID_LE_MODULES = ("BT", "PM")
 # applies the scheme and the config validator share one source of truth.
 VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 
+# CLM-ML leaf stomatal-conductance model (``CLMMLCanopyConfig.stomatal_model``)
+# → backend ``gs_type`` integer.  "wue" (default) is the backend default; only
+# "medlyn" wires the traced per-site ``vcmaxpft_jax`` injection path (used for
+# gradient-based Vcmax25 training).  Public so the interface applier and the
+# validator share one source of truth.
+CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
+VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
+
 
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
@@ -581,6 +589,23 @@ class CLMMLCanopyConfig(NamedTuple):
     # When in doubt, choose the PFT whose Vcmax25 and htop match the site.
     pft_clm: int = 7
 
+    # Leaf stomatal-conductance model → backend ``gs_type``.  "wue" (default)
+    # is the CLM-ML water-use-efficiency optimization; "medlyn"/"ball_berry" are
+    # the Medlyn (2011) / Ball-Berry closures.  Selecting "medlyn" activates the
+    # traced ``vcmaxpft_jax`` injection path, so a per-site / trainable Vcmax25
+    # (``vcmax25_override``) can flow gradients — under "wue" that injection is
+    # inert and Vcmax25 is applied through the module-global lookup instead.
+    stomatal_model: str = "wue"
+
+    # Per-site Vcmax25 override [µmol m-2 s-1].  ``None`` (default) keeps the
+    # MLpftcon per-PFT lookup value.  A float replaces the global lookup for THIS
+    # column's PFT — the "go beyond the global table" per-site value — by feeding
+    # the traced ``vcmaxpft_jax`` array to the backend nitrogen-profile routine,
+    # which selects it before leaf photosynthesis under ANY stomatal model (WUE,
+    # Medlyn, Ball-Berry).  A trainable Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument from the training loop instead.
+    vcmax25_override: float | None = None
+
     # SW band partitioning.
     # f_vis: fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
     #   Observation-based climatological mean is ~0.46 (not 0.5).
@@ -770,4 +795,12 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"one above-canopy layer; got nlevmlcan={self.nlevmlcan}, "
                 f"nlayer_above={self.nlayer_above} "
                 f"(within = {self.nlevmlcan - self.nlayer_above})")
+        # Stomatal model → gs_type dispatch (a typo must abort, not silently run
+        # the default WUE closure).
+        if self.stomatal_model not in VALID_CLM_ML_STOMATAL_MODELS:
+            raise ValueError(
+                f"unknown CLM-ML stomatal_model {self.stomatal_model!r}; must be "
+                f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
+                "('wue'=water-use-efficiency optimization (default), "
+                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
         return self

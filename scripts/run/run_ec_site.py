@@ -47,6 +47,7 @@ from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
 from legoesm.land.canopy.config import (
     CLMMLCanopyConfig,
+    VALID_CLM_ML_STOMATAL_MODELS,
     VALID_CLM_ML_TURBULENCE_SCHEMES,
 )
 
@@ -128,7 +129,8 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
                        soil_evap_resistance_exp: float = 2.0,
                        root_depth: float = 1.0,
                        z_ref: float = 10.0,
-                       texture: tuple[float, float] | None = None
+                       texture: tuple[float, float] | None = None,
+                       interception: bool = False
                        ) -> MultiLayerLandConfig:
     """Assemble the multilayer land config for the offline EC-site run.
 
@@ -143,6 +145,9 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     kw = dict(surface_scheme=canopy_config,
               soil_evap_resistance_exp=soil_evap_resistance_exp,
               root_depth=root_depth, z_ref=z_ref)
+    if interception:
+        from legoesm.land.canopy.interception import InterceptionConfig
+        kw["interception"] = InterceptionConfig()
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
@@ -594,7 +599,9 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              canopy: str = "two_leaf", clm_pft: int = 7,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
-             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0) -> dict:
+             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
+             interception: bool = False, clmml_stomatal: str = "wue",
+             clmml_vcmax25: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -661,14 +668,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # which goes to a math-domain error for a very tall canopy where a layer
         # height drops below the displacement height — "most" avoids that.
         canopy_config = CLMMLCanopyConfig(
-            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence).validate()
+            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence,
+            stomatal_model=clmml_stomatal,
+            vcmax25_override=clmml_vcmax25).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
         canopy_config, soil, bottom_bc, soil_depth_m,
         k_sat_decay_m=k_sat_decay_m,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
-        root_depth=root_depth, z_ref=z_ref, texture=texture)
+        root_depth=root_depth, z_ref=z_ref, texture=texture,
+        interception=interception)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -819,6 +829,14 @@ def main() -> int:
                          "(roughness sublayer, default) or most (Monin-Obukhov; "
                          "avoids the RSL wind-profile domain error on very tall "
                          "canopies)")
+    ap.add_argument("--clmml-stomatal", default="wue",
+                    choices=list(VALID_CLM_ML_STOMATAL_MODELS),
+                    help="CLM-ML leaf stomatal model: wue (default), medlyn, or "
+                         "ball_berry. medlyn activates the per-site Vcmax "
+                         "injection path (--clmml-vcmax25)")
+    ap.add_argument("--clmml-vcmax25", type=float, default=None,
+                    help="per-site CLM-ML Vcmax25 [umol/m2/s], beyond the global "
+                         "PFT table; requires --clmml-stomatal medlyn")
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
@@ -836,6 +854,11 @@ def main() -> int:
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
                          "than the full multi-decade record")
+    ap.add_argument("--canopy-interception", dest="interception",
+                    action="store_true", default=False,
+                    help="enable the shared canopy-water interception scheme "
+                         "(two-leaf path): rain is intercepted, drips as "
+                         "throughfall, and the wet leaf evaporates from the store")
     ap.add_argument("--spinup-steps", type=int, default=0,
                     help="prognostic soil spin-up: run this many steps before the "
                          "evaluation window (trimmed from scoring) so the soil "
@@ -858,7 +881,10 @@ def main() -> int:
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
                  clmml_turbulence=args.clmml_turbulence,
-                 spinup_steps=args.spinup_steps)
+                 clmml_stomatal=args.clmml_stomatal,
+                 clmml_vcmax25=args.clmml_vcmax25,
+                 spinup_steps=args.spinup_steps,
+                 interception=args.interception)
     return 0
 
 

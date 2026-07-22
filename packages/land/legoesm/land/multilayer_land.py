@@ -46,6 +46,10 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.interception import (
+    evaporate_wet_leaf,
+    intercept_rain,
+)
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
     TwoLeafCanopyConfig,
@@ -808,6 +812,40 @@ def _step_multilayer_land_impl(
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
+
+    # --- Canopy interception, phase 1: intercept rain into the store ----------
+    # Only the THROUGHFALL (direct + drip) infiltrates, so the water-availability
+    # limiter below and the Richards top flux both see ``infil_rain`` (not raw
+    # precip).  The wet-leaf evaporation (phase 2) runs after the transpiration
+    # partition so it can be capped by the transpiration demand (closure).  Two-
+    # leaf path only (CLM-ML has its own internal store; SimpleSEB has no canopy
+    # latent stream).  See land/canopy/interception.py.
+    # Gated ALSO on ``state.W_canopy is not None`` so the step never changes the
+    # carry pytree structure (``None`` -> array would break a ``lax.scan``) and
+    # never intercepts water it cannot store (which would leak): the store is
+    # allocated at init / restored from restart when interception is configured,
+    # so a genuine run always carries it (codex).
+    _do_intercept = (config.interception is not None
+                     and isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                     and state.W_canopy is not None)
+    infil_rain = precip_rain
+    _W_int = None
+    _pai = None
+    if _do_intercept:
+        _lai = jnp.broadcast_to(_get(lp, "LAI", jnp.zeros_like(precip_rain)),
+                                precip_rain.shape)
+        _sai = _get(lp, "SAI", None)
+        _pai = _lai + (0.0 if _sai is None
+                       else jnp.broadcast_to(_sai, precip_rain.shape))
+        _W_int, _throughfall = intercept_rain(
+            state.W_canopy, jnp.maximum(precip_rain, 0.0), _pai, dt,
+            config.interception)
+        # ``_throughfall`` already carries the canopy DRIP (which is nonzero even
+        # at zero rain when the plant area — hence storage capacity — shrinks, so
+        # it must NOT be discarded, else that water leaks; codex).  Add back any
+        # negative "rain" (numerical / refreeze deficit) so the column budget is
+        # unchanged in that edge case.
+        infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / constants.L_v
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
@@ -838,8 +876,10 @@ def _step_multilayer_land_impl(
             soil_evap_demand.dtype)
         soil_evap_demand = jnp.where(
             soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
+    # Water available to bare-soil evaporation uses the THROUGHFALL (infil_rain),
+    # not raw precip, since interception removed the intercepted part upstream.
     max_soil_evap = jnp.maximum(
-        extractable_water / dt + precip_rain + melt_rate, 0.0)
+        extractable_water / dt + infil_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
     # --- Combine the two phase streams ---
@@ -874,7 +914,26 @@ def _step_multilayer_land_impl(
     evap_bare, evap_transp = _partition_latent_root_top(
         soil_evap, has_snow, f_veg,
         surface_out.LE_canopy, surface_out.LE_soil)
-    flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
+
+    # --- Canopy interception, phase 2: evaporate the wet leaf from the store --
+    # The wet leaf substitutes STORED water for transpiration: draw from the
+    # store instead of the root zone, CAPPED by the transpiration ``evap_transp``
+    # the caller is about to take, so shifting it onto the store never removes
+    # more surface water than the atmosphere is taking (closure).  The reported
+    # surface latent flux is unchanged (a water re-sourcing, not a new energy
+    # term — a full wet-leaf energy balance is a documented follow-up; see
+    # interception.py).  Dew stays in the existing surface-dew path.
+    W_canopy_new = state.W_canopy
+    if _do_intercept:
+        _transp_mass = jnp.maximum(evap_transp, 0.0)   # kg m-2 s-1 available
+        W_canopy_new, _wet_evap, _fwet = evaporate_wet_leaf(
+            _W_int, surface_out.LE_canopy, _pai, dt,
+            config.interception, constants.L_v, transp_avail=_transp_mass)
+        # wet_evap <= evap_transp by construction, so this stays >= 0 and the
+        # total soil+canopy water budget closes against precip - ET - runoff.
+        evap_transp = evap_transp - _wet_evap
+
+    flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
     weight = root_frac * beta_root  # both are (ncol, n_layers)
@@ -951,6 +1010,13 @@ def _step_multilayer_land_impl(
         # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
         # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
         canopy_state=canopy_state_new,
+        # Intercepted-water store: structure-preserving — an array in, an array
+        # out (updated on the two-leaf interception path, else carried), a
+        # ``None`` in stays ``None``.  ``_do_intercept`` already requires the
+        # store to exist, so an active interception step never introduces the
+        # store (no ``None`` -> array carry-structure change under a scan).
+        W_canopy=(_match(W_canopy_new, state.W_canopy)
+                  if state.W_canopy is not None else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1213,6 +1279,8 @@ def init_multilayer_land_state(
         snow_age_bands=snow_age_bands,
         ice_bands=ice_bands,
         canopy_state=canopy_state,
+        # Dry canopy at start; carried only when interception is configured.
+        W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
     )
 
 

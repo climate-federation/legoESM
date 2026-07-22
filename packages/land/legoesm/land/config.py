@@ -168,6 +168,13 @@ class MultiLayerLandConfig(NamedTuple):
     # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
     # ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
+    # Canopy-water interception (shared CLM-ML formulation, land/canopy/
+    # interception.py).  ``None`` (default) = off (rain infiltrates directly).
+    # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
+    # ``W_canopy`` store, drips the excess as throughfall, and evaporates the wet
+    # leaf — reducing soil infiltration and re-partitioning the canopy latent
+    # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
+    interception: Any | None = None
 
 
 def resolve_land_config(land_mode: str, land_config=None):

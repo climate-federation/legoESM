@@ -49,6 +49,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.coupler.config",
     "legoesm.coupler.lake.config",
     "legoesm.land.canopy.config",
+    "legoesm.land.canopy.interception",
     "legoesm.land.canopy.sif",
     "legoesm.land.carbon.config",
     "legoesm.land.stomata",
