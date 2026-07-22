@@ -45,8 +45,12 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   (24% of levels counter-gradient at the final time). ⇒ in the developed CBL there is
   an up-gradient transport layer where ANY non-negative eddy-diffusivity (local
   down-gradient) closure is STRUCTURALLY unable to match the LES flux, regardless of
-  tuning — the tuning-independent ceiling on local closures. The full Q1 threshold
-  needs this across the w'θ'ₛ grid (the unwired dry-grid emission).
+  tuning — the tuning-independent ceiling on local closures.
+  **Flux sweep (campaign 9157232):** `run_les_suite --q0` verified end-to-end; the
+  CG layer is present at every emitted flux and moves DOWN + grows with the surface
+  flux (stronger heating → more/lower up-gradient transport): Q0=0.02 → 308–325 m,
+  frac 0.22; Q0=0.06 → 275–292 m, frac 0.24. The campaign fills {0.04,0.08,0.12} →
+  `results/les_suite/q1_counter_gradient_sweep.json` (see CAMPAIGN.md).
 - **Q2 (per-regime closure skill)** — mynn25 tier-1 derivative-free tuning on the 2 h
   CBL (17 candidates, dt=5, nlev=32): default loss **0.397**, best **0.397** (A1/A2
   mixing coefficients have negligible leverage on the dry-CBL θ fit → the default is
