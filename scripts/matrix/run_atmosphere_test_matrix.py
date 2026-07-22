@@ -8352,7 +8352,7 @@ def main():
                 "(0 < vmr <= 1); for 8 ppmv use 8e-6.  Got "
                 f"{args.ozone_max_vmr}"
             )
-    if args.ozone_source in ("standard", "none") and (
+    if args.ozone_source in ("standard", "mls", "none") and (
         args.ozone_peak_hpa is not None or args.ozone_max_vmr is not None
     ):
         parser.error(
