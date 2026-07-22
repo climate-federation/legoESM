@@ -2162,6 +2162,21 @@ def test_topo_diffusive_smoothing_flows_to_config():
     assert cfg_on.topo_diffusive_smoothing == 4
 
 
+def test_sb81_omega_conversion_flag_flows_to_dycore_config():
+    """#1029 ω-side: --sb81-omega-conversion round-trips into DycoreConfig;
+    default OFF (the SB81 conversion is opt-in until the #1029(b) lid
+    treatment lands)."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sb81_omega_conversion is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sb81-omega-conversion",
+    ]), parser))
+    assert cfg_on.dycore.sb81_omega_conversion is True
+
+
 def test_convective_precip_efficiency_allows_bechtold():
     """--convective-precip-efficiency now round-trips for bechtold (shared
     split_convective_rain), not just tiedtke; a non-supporting scheme still

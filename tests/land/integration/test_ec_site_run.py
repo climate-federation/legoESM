@@ -228,3 +228,36 @@ def test_stress_b0_flag_reaches_canopy_config():
     mod = _load_driver_module()
     assert mod.TwoLeafCanopyConfig(stress_b0=False).stress_b0 is False
     assert mod.TwoLeafCanopyConfig(stress_b0=True).stress_b0 is True
+
+
+def test_run_site_rejects_unknown_canopy(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError, match="canopy"):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "o"), chunk=8,
+                     canopy="bogus")
+
+
+def test_clmml_requires_prognostic_mode(tmp_path):
+    """CLM-ML cannot be vmapped over timesteps -> diagnostic mode is rejected."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError, match="clmml requires .*prognostic"):
+        mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o"), chunk=8,
+                     canopy="clmml")
+
+
+def test_stomatal_m_scale_raises_transpiration(tmp_path):
+    """Scaling the Ball-Berry slope up moves latent heat up / sensible heat down
+    (the Bowen-ratio lever) at fixed forcing; m_scale=1 is a no-op."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96)
+    hi = mod.run_site(driver_nc, "prognostic", str(tmp_path / "h"), chunk=96,
+                      stomatal_m_scale=2.0)
+    # more stomatal opening => more latent, less sensible heat
+    assert hi["LE"]["bias"] > base["LE"]["bias"]
+    assert hi["H"]["bias"] < base["H"]["bias"]

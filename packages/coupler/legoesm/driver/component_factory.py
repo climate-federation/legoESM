@@ -771,6 +771,9 @@ def create_atmosphere_dycore(
             # no getattr-literal fallback that would mask a rename).
             energy_paired_conversion=dc.energy_paired_conversion,
             pgf_scheme=dc.pgf_scheme,
+            # #1029 ω-side SB81 conversion (opt-in, default OFF —
+            # bit-identical legacy arithmetic form when False).
+            sb81_omega_conversion=dc.sb81_omega_conversion,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
             # "auto" -> this dycore's own default; explicit names verbatim.

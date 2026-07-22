@@ -257,6 +257,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Log-pressure scale height [m] mapping sigma->z for the top "
              f"sponge (default {_DYCORE_DEFAULTS.sponge_scale_height_m}).",
     )
+    # #1029 ω-side: SB81 α-weighted κT·ω/p conversion (hybrid latlon lane).
+    parser.add_argument(
+        "--sb81-omega-conversion", action="store_true",
+        default=_DYCORE_DEFAULTS.sb81_omega_conversion,
+        help="Use the SB81 α-weighted energy conversion (ω/p dynamic part) "
+             "on the hybrid lat-lon C-grid — discretization-consistent with "
+             "the geopotential and ln p^SB gradients (#1029). Default OFF: "
+             "the consistent form unmasks the #1029(b) lid-wave instability "
+             "sooner (held_suarez_topo blowup day ~49 -> ~12); opt-in until "
+             "the lid treatment lands.",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -1501,6 +1512,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # #1029 energy-consistency options (lat-lon C-grid PE).
         energy_paired_conversion=args.energy_paired_conversion,
         pgf_scheme=args.pgf_scheme,
+        # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
+        sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )

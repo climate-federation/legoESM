@@ -6,7 +6,7 @@ two worker processes and drives the FULL production bench
 (``bench_mpas_spmd_scaling.py --multicontroller``) end-to-end with the
 parity + conservation gates armed — pinning the multi-controller pieces a
 Derecho/Levante multi-node NCCL icosahedral run exercises:
-``shard_pytree`` onto a ("device",) mesh spanning non-addressable devices,
+partition-local state construction (``build_sharded_baroclinic_wave_state_mpas``) onto a ("device",) mesh spanning non-addressable devices,
 the cell-partition reorder computed independently per process (+ the
 cross-process partition checksum), cross-process ppermute halo rounds and
 the mass-fix psum inside the jitted step, the

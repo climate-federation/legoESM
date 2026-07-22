@@ -221,6 +221,43 @@ def _psihat_probe() -> dict[str, float]:
     }
 
 
+def _apply_canopy_layering(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the canopy layer counts CLM-ML builds its vertical structure from.
+
+    ``CLMMLCanopyConfig.nlevmlcan`` / ``nlayer_above`` select the backend's
+    EXPLICIT-COUNT mode: ``nlayer_within = nlevmlcan - nlayer_above`` layers
+    spanning ``0..htop`` plus ``nlayer_above`` layers from ``htop`` to the
+    reference height.  Without this the backend falls back to its
+    height-increment mode (``dz_tall = 0.5 m``), which for a real forest canopy
+    (htop ~ 27 m) makes ~54 layers whose beta-distribution LAI tails fall below
+    ``dpai_min`` — those layers are zeroed and the run dies with
+    ``initVerticalStructure: canopy layer has zero plant area index``.
+
+    Both module namespaces are written because ``MLinitVerticalMod`` does
+    ``from MLclm_varctl import nlayer_within, nlayer_above`` — a BY-VALUE import,
+    so setting only the ``MLclm_varctl`` attribute is a silent no-op and the
+    layering would stay at the backend default.
+
+    Re-applied on every eager interface call (like the turbulence tables):
+    these are process-global CLM module state shared by every column and
+    config, so setting them once would leak the first caller's layering into a
+    later differently-configured run in the same process.  The mutation is a
+    host-side Python write — under ``jax.jit`` it happens at trace time, not per
+    compiled execution, so a jitted rollout that never re-traces will not
+    re-apply it (fine: the vertical structure is built once, at the cold-start
+    step, and the counts do not change within a run).  Concurrent runs with
+    different layerings in one process are unsafe unless externally serialised.
+    """
+    import multilayer_canopy.MLclm_varctl as _ml_ctl
+    import multilayer_canopy.MLinitVerticalMod as _init_vert
+
+    n_above = int(canopy_config.nlayer_above)
+    n_within = int(canopy_config.nlevmlcan) - n_above
+    for _mod in (_ml_ctl, _init_vert):
+        _mod.nlayer_within = n_within
+        _mod.nlayer_above = n_above
+
+
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
     """Point CLM-ML's ψ̂ lookup tables at the selected turbulence scheme.
 
@@ -1751,6 +1788,11 @@ def compute_clm_ml_canopy_fluxes(
         t_a10_prior=t_a10_prior,
         lai_override=lai_override,
     )
+
+    # ---- Install the canopy layer counts ----
+    # Must precede _init_mlcanopy: the cold-start call builds the vertical
+    # structure and reads these process-global counts.
+    _apply_canopy_layering(canopy_config)
 
     # ---- Allocate / retrieve mlcanopy_type ----
     if canopy_state is None or canopy_state.mlcanopy is None:

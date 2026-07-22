@@ -2433,11 +2433,14 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # Prognostic slab sea ice: advance the ice tile and partition the
             # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
             # tile's basal heat / melt-freeze freshwater / brine salt / stress).
+            # ocean_mask: land cells receive no ice->ocean forcing (mask-aware
+            # blend contract; land_mask is scan-carry state, traced-safe).
             if enable_sea_ice:
                 new_ice, fw, sf = omip_sea_ice_surface_forcing(
                     ice_state=ice_in, ice_config=ice_cfg, atm=atm,
                     ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
                     dt=dt, grid=None,
+                    ocean_mask=state_in.land_mask.data,
                 )
             # Ramp sponge strength alongside wind stress.
             if enable_ramp and enable_sponge:
@@ -2702,12 +2705,15 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                 )
 
                 # Prognostic slab sea ice: partition surface forcing between
-                # open ocean (f_ocean=1-A) and the ice tile.
+                # open ocean (f_ocean=1-A) and the ice tile.  ocean_mask: land
+                # cells receive no ice->ocean forcing (mask-aware blend
+                # contract; land_mask is scan-carry state, traced-safe).
                 if enable_sea_ice:
                     new_ice, fw, sf = omip_sea_ice_surface_forcing(
                         ice_state=ice_in, ice_config=ice_cfg, atm=atm,
                         ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
                         dt=dt, grid=None,
+                        ocean_mask=state_in.land_mask.data,
                     )
 
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
