@@ -2013,3 +2013,39 @@ def test_finidat_carbon_ic_e2e_seeds_and_preserves_high_lat_soc(tmp_path):
     #   - and the seeded+protected SOC stays FAR above the cold-start run (the IC
     #     is honoured, not decomposed back toward the cold equilibrium).
     assert float(np.mean(som_seeded_phi)) > 3.0 * float(np.mean(som_cold))
+
+
+def test_coupled_multicategory_itd_ice_state_and_aggregation():
+    """2026-07-22: the coupled tile builds a multi-category DynamicSeaIceState
+    for n_categories>1 (ITD thermodynamics), and the driver's total-SIC helper
+    aggregates the per-category concentration to the (grid-shaped) areal
+    fraction the coupling consumes.  The default (n_categories=1) stays the
+    scalar SeaIceState (byte-identical)."""
+    from legoesm.coupler.coupler import init_surface_state
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.ice.state import SeaIceState, DynamicSeaIceState
+    from legoesm.driver.coupled_esm_driver import _total_ice_sic
+
+    sh = (6, 8, 8)
+    # default -> scalar slab, byte-identical path
+    s0 = init_surface_state(sh)
+    assert isinstance(s0.ice, SeaIceState)
+    assert _total_ice_sic(s0.ice).shape == sh
+
+    # multi-category -> DynamicSeaIceState, dynamics stays "none"
+    s5 = init_surface_state(sh, ice_config=SeaIceConfig(n_categories=5))
+    assert isinstance(s5.ice, DynamicSeaIceState)
+    assert s5.ice.concentration.data.shape == (6, 8, 8, 5)
+    # total SIC aggregates the category axis to the grid shape, in [0, 1]
+    total = _total_ice_sic(s5.ice)
+    assert total.shape == sh
+    # seed a known per-category concentration and check the sum
+    ice2 = s5.ice._replace(
+        concentration=s5.ice.concentration.replace(
+            data=jnp.full((6, 8, 8, 5), 0.1)))
+    assert bool(jnp.allclose(_total_ice_sic(ice2), 0.5))
+
+    # single-category DynamicSeaIceState has no category axis -> pass-through
+    s1 = init_surface_state(sh, ice_config=SeaIceConfig(dynamics="free_drift"))
+    assert isinstance(s1.ice, DynamicSeaIceState)
+    assert _total_ice_sic(s1.ice).shape == sh

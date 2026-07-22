@@ -71,6 +71,7 @@ def init_dynamic_ice_state(
     *,
     n_categories: int = 1,
     S_ice_init: float = constants.S_ice_bulk_default,
+    T_ice_init: float = 260.0,  # coeff-ok: initial ice temperature [K]
 ) -> DynamicSeaIceState:
     """Create a zero-initialized DynamicSeaIceState.
 
@@ -127,7 +128,7 @@ def init_dynamic_ice_state(
     dims = spatial_dims + cat_dim
     return DynamicSeaIceState(
         h_ice=Field(data=jnp.zeros(shape), name="h_ice", dims=dims, units="m"),
-        T_ice=Field(data=jnp.full(shape, 260.0), name="T_ice", dims=dims, units="K"),  # coeff-ok: initial ice temperature [K]
+        T_ice=Field(data=jnp.full(shape, T_ice_init), name="T_ice", dims=dims, units="K"),
         concentration=Field(data=jnp.zeros(shape), name="ice_concentration", dims=dims, units="1"),
         u_ice=Field(data=jnp.zeros(spatial_shape), name="u_ice", dims=spatial_dims, units="m/s"),
         v_ice=Field(data=jnp.zeros(spatial_shape), name="v_ice", dims=spatial_dims, units="m/s"),
