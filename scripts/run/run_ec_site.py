@@ -45,7 +45,10 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
-from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.config import (
+    CLMMLCanopyConfig,
+    VALID_CLM_ML_TURBULENCE_SCHEMES,
+)
 
 # Stem area index supplied to the CLM-ML multilayer canopy [m2/m2].  The EC
 # driver carries LAI only (the two-leaf canopy has no stem-area term), so the
@@ -98,6 +101,7 @@ _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 # far deeper.  These are the per-site values validated against the FLUXNET fluxes.
 EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
     "US-MMS": {"z_ref": 46.0, "root_depth": 2.0},                     # deep loam, DBF
+    "DE-Hai": {"z_ref": 43.5, "root_depth": 1.5},                     # tall DBF (hc~33 m)
     "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
     "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte oak
     "US-Var": {"z_ref": 2.0,  "root_depth": 1.0},                     # shallow annual grass
@@ -294,7 +298,8 @@ def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
                        nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
-                       stomatal_m_scale: float = 1.0):
+                       stomatal_m_scale: float = 1.0,
+                       vcmax_scale: float = 1.0):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
@@ -333,6 +338,19 @@ def _prognostic_fluxes(d: ECSiteDriver,
         d = d._replace(canopy_params=d.canopy_params._replace(
             m_C3=d.canopy_params.m_C3 * stomatal_m_scale,
             m_C4=d.canopy_params.m_C4 * stomatal_m_scale))
+
+    # Vcmax25 sensitivity (the GPP knob): scale the two-leaf maximum carboxylation
+    # rate (C3+C4), which sets the Rubisco-limited assimilation and hence GPP.
+    # Higher Vcmax => more GPP (and, via the Ball-Berry coupling A->gs, some extra
+    # transpiration).  This is the primary photosynthetic-capacity lever, tuned
+    # separately from gs (--stomatal-m-scale) and ET (--soil-evap-resistance-exp).
+    # Two-leaf only: CLM-ML's Vcmax lives in MLpftcon and its jax injection is
+    # gated behind the Medlyn stomatal model (default is WUE), so it is not a
+    # clean single-flag knob here.
+    if vcmax_scale != 1.0 and not is_clmml:
+        d = d._replace(canopy_params=d.canopy_params._replace(
+            Vcmax25_C3_leaf=d.canopy_params.Vcmax25_C3_leaf * vcmax_scale,
+            Vcmax25_C4_leaf=d.canopy_params.Vcmax25_C4_leaf * vcmax_scale))
 
     # --- initial soil state from the driver's first finite soil obs ---
     # Initialise from the OBSERVED volumetric soil moisture directly (theta_soil
@@ -575,7 +593,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              texture_csv: str = _DEFAULT_TEXTURE_CSV,
              canopy: str = "two_leaf", clm_pft: int = 7,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
-             stomatal_m_scale: float = 1.0) -> dict:
+             stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
+             clmml_turbulence: str = "rsl_bonan") -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -619,7 +638,13 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # sub-step from dtime_ml_target_s (300 s), so an hourly EC driver
         # sub-cycles instead of running the stiff canopy-air storage term at
         # the host step (PR #1240).
-        canopy_config = CLMMLCanopyConfig(pft_clm=clm_pft).validate()
+        # turbulence_scheme selects the canopy-airspace scheme: "rsl_bonan"
+        # (Harman-Finnigan roughness sublayer, default) or "most" (Monin-Obukhov
+        # only).  RSL's within-canopy wind profile takes log((z-d)/(ztop-d)),
+        # which goes to a math-domain error for a very tall canopy where a layer
+        # height drops below the displacement height — "most" avoids that.
+        canopy_config = CLMMLCanopyConfig(
+            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
@@ -635,7 +660,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale)
+            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale,
+            vcmax_scale=vcmax_scale)
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
@@ -677,6 +703,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     extra_attrs = {"canopy": canopy}
     if canopy == "clmml":
         extra_attrs.update(clm_pft=clm_pft, clmml_sai=float(clmml_sai),
+                           clmml_turbulence=clmml_turbulence,
                            nlevmlcan=canopy_config.nlevmlcan,
                            nlayer_above=canopy_config.nlayer_above)
     path = _write_output(out_dir, d, model,
@@ -758,12 +785,21 @@ def main() -> int:
     ap.add_argument("--clm-pft", type=int, default=7,
                     help="CLM PFT index for --canopy clmml (7 = broadleaf "
                          "deciduous temperate tree; 13 = C3 grass)")
+    ap.add_argument("--clmml-turbulence", default="rsl_bonan",
+                    choices=list(VALID_CLM_ML_TURBULENCE_SCHEMES),
+                    help="CLM-ML canopy-airspace turbulence scheme: rsl_bonan "
+                         "(roughness sublayer, default) or most (Monin-Obukhov; "
+                         "avoids the RSL wind-profile domain error on very tall "
+                         "canopies)")
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
     ap.add_argument("--stomatal-m-scale", type=float, default=1.0,
                     help="scale the two-leaf Ball-Berry slope m (transpiration "
                          "per assimilation); >1 => more LE, less H at fixed GPP")
+    ap.add_argument("--vcmax-scale", type=float, default=1.0,
+                    help="scale the two-leaf Vcmax25 (photosynthetic capacity); "
+                         ">1 => more GPP. The GPP knob, tuned separately from gs")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -785,7 +821,9 @@ def main() -> int:
                  texture_csv=args.texture_csv,
                  canopy=args.canopy, clm_pft=args.clm_pft,
                  clmml_sai=args.clmml_sai, u_min=args.u_min,
-                 stomatal_m_scale=args.stomatal_m_scale)
+                 stomatal_m_scale=args.stomatal_m_scale,
+                 vcmax_scale=args.vcmax_scale,
+                 clmml_turbulence=args.clmml_turbulence)
     return 0
 
 

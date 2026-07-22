@@ -249,6 +249,34 @@ def test_clmml_requires_prognostic_mode(tmp_path):
                      canopy="clmml")
 
 
+def test_vcmax_scale_raises_gpp(tmp_path):
+    """Scaling Vcmax25 up raises GPP — the photosynthetic-capacity knob."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96)
+    hi = mod.run_site(driver_nc, "prognostic", str(tmp_path / "h"), chunk=96,
+                      vcmax_scale=1.5)
+    assert hi["GPP"]["bias"] > base["GPP"]["bias"]
+
+
+def test_clmml_turbulence_rejects_unknown(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "o"), chunk=8,
+                     canopy="clmml", clmml_turbulence="bogus")
+
+
+def test_de_hai_has_reference_height():
+    """DE-Hai (canopy ~34 m) must have a tower z_ref above its canopy, else the
+    CLM-ML within-canopy wind profile hits a math-domain error."""
+    mod = _load_driver_module()
+    phys = mod.ec_site_physics("DE-Hai")
+    assert phys["z_ref"] > 34.0
+
+
 def test_stomatal_m_scale_raises_transpiration(tmp_path):
     """Scaling the Ball-Berry slope up moves latent heat up / sensible heat down
     (the Bowen-ratio lever) at fixed forcing; m_scale=1 is a no-op."""
