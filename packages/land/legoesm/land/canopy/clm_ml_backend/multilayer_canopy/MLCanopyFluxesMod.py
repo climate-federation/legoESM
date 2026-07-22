@@ -2187,6 +2187,7 @@ def make_clm_ml_forward(
         ncan=int(mlcanopy_inst_template.ncan_canopy[_p]),
         ntop=int(mlcanopy_inst_template.ntop_canopy[_p]),
         nbot=int(mlcanopy_inst_template.nbot_canopy[_p]),
+        pft=int(patch.itype[_p]),
     )
     # Pre-extract o2ref as a concrete Python float from the template instance.
     # mlcanopy_inst inside forward() is abstract under jax.grad tracing.

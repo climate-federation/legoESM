@@ -161,7 +161,9 @@ def SolarRadiation(
 
     for fp in range(1, num_filter + 1):
         p = int(filter_patch[fp - 1]) if grid is None else grid.p
-        pft = int(_itype_np[p])
+        # PFT from GridInfo when supplied (traced-p-safe under the S3 scan);
+        # else read patch.itype[p] (concrete-p eager path).
+        pft = grid.pft if (grid is not None and grid.pft >= 0) else int(_itype_np[p])
         zen = solar_zen[p]
         cos_zen = jnp.cos(zen)
         _ncan = int(_ncan_np[p]) if grid is None else grid.ncan

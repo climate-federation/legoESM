@@ -1595,6 +1595,7 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
         concrete Python ints.
     """
     from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import patch as _patch
     if canopy_state is None or canopy_state.mlcanopy is None:
         raise ValueError(
             "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
@@ -1603,6 +1604,9 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
     m = canopy_state.mlcanopy
     # 1-based patch dim: arrays are (ncol+1,) with index 0 unused (begp=1).
     ncol = int(m.ncan_canopy.shape[0]) - 1
+    # PFT per patch (patch.itype installed by _setup_clm_topology at the cold step)
+    # — threaded so the physics need no int(patch.itype[p]) under a traced scan p.
+    _itype = np.asarray(_patch.itype)
 
     def _gi(p: int):
         return GridInfo(
@@ -1610,6 +1614,7 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
             ncan=int(m.ncan_canopy[p]),
             ntop=int(m.ntop_canopy[p]),
             nbot=int(m.nbot_canopy[p]),
+            pft=int(_itype[p]),
         )
 
     try:
@@ -2222,7 +2227,8 @@ def compute_clm_ml_canopy_fluxes(
                         "warm forward step via extract_clm_ml_grid_info(state0)."
                     )
                 _grids.append(GridInfo(p=_c + 1, ncan=_ncan_c,
-                                       ntop=int(_g.ntop), nbot=int(_g.nbot)))
+                                       ntop=int(_g.ntop), nbot=int(_g.nbot),
+                                       pft=int(_g.pft)))
         else:
             # Single column.  Structural ints (ncan/ntop/nbot) must be CONCRETE
             # Python ints — the diff path reads them at trace time.  Two sources:
@@ -2236,7 +2242,11 @@ def compute_clm_ml_canopy_fluxes(
                 _ncan_p = int(_g0.ncan)
                 _ntop_p = int(_g0.ntop)
                 _nbot_p = int(_g0.nbot)
+                _pft_p = int(_g0.pft)
             else:
+                from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import (
+                    patch as _patch_s)
+                _pft_p = int(np.asarray(_patch_s.itype)[_p])
                 try:
                     _ncan_p = int(mlcanopy.ncan_canopy[_p])
                     _ntop_p = int(mlcanopy.ntop_canopy[_p])
@@ -2256,7 +2266,8 @@ def compute_clm_ml_canopy_fluxes(
                     f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
                     "Run one forward (differentiable=False or cold-start) step first."
                 )
-            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)]
+            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p,
+                               pft=_pft_p)]
     else:
         _grids = None
 
