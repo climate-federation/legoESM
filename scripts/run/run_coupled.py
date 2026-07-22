@@ -997,6 +997,16 @@ def build_parser():
                         help="3D ocean (--ocean dynamic --ocean-ic woa): Newtonian "
                              "relaxation timescale [days] for the surface salinity "
                              "toward the WOA initial state. 0 = off.")
+    parser.add_argument("--ocean-grid", default="",
+                        help="Give the 3-D dynamic ocean a DISTINCT lat-lon grid "
+                             "as 'latlon:<resolution>' (e.g. latlon:48), coupled "
+                             "to the atmosphere via the conservative cross-grid "
+                             "remap. REQUIRED to run --ocean dynamic on a "
+                             "cubed_sphere or gaussian atmosphere (the cube/"
+                             "spectral 3-D ocean dycore does not exist, so the "
+                             "ocean lives on a lat-lon grid). Empty (default) "
+                             "keeps the ocean co-located on the atmosphere grid "
+                             "(latlon/voronoi).")
     parser.add_argument("--tripole-mesh", default=None,
                         help="NEMO eORCA mesh_mask file (e.g. "
                              "data/grids/eORCA1.2_mesh_mask.nc).  When set with "
@@ -1348,30 +1358,63 @@ def main():
     # recomputes + stashes the surface net radiation at the daily coupling
     # boundary. A 3-D DYNAMIC ocean on the spectral grid stays gated (spectral
     # ocean is idealized). cubed_sphere / latlon / voronoi(MPAS) support both.
+    # Spectral (gaussian) atmosphere: a 3-D DYNAMIC ocean stays deferred (a
+    # gaussian<->latlon conservative remap is not yet wired; the co-located
+    # spectral 3-D ocean is idealized).  The cubed-sphere cross-grid path below
+    # is validated.
     if args.grid == "gaussian" and args.ocean == "dynamic":
         raise SystemExit(
-            "coupled --grid gaussian supports the (grid-agnostic) slab ocean "
-            "only: a 3-D DYNAMIC ocean on the spectral grid is idealized / not "
-            "wired. Use --ocean slab (default) on gaussian, or --grid "
-            "cubed_sphere / latlon / voronoi for a dynamic ocean.")
+            "coupled --grid gaussian supports the slab ocean only: a 3-D "
+            "DYNAMIC ocean on the spectral grid is not wired (the "
+            "gaussian<->latlon cross-grid remap is a follow-up). Use --ocean "
+            "slab on gaussian, or --grid cubed_sphere / latlon / voronoi for a "
+            "dynamic ocean.")
     overrides = {}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
+    # A cubed-sphere atmosphere can drive a 3-D ocean ONLY on a DISTINCT lat-lon
+    # ocean grid (--ocean-grid latlon:<res>), coupled via the conservative
+    # cross-grid remap (a co-located cube 3-D ocean dycore does not exist).
+    _xgrid_ocean = args.ocean == "dynamic" and args.grid == "cubed_sphere"
+    if _xgrid_ocean and not args.ocean_grid:
+        raise SystemExit(
+            "--ocean dynamic on --grid cubed_sphere requires a distinct lat-lon "
+            "ocean grid: pass --ocean-grid latlon:<resolution> (e.g. "
+            "latlon:48). The cube atmosphere couples to the lat-lon 3-D ocean "
+            "via the conservative cross-grid remap; a co-located cube 3-D ocean "
+            "dycore does not exist.")
     if args.ocean == "dynamic":
-        # Prognostic 3D LatLonCGridOceanModel.  Two grid configurations:
+        # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
-        #     lat-lon grid (no remap).  Requires --grid latlon.
-        #   * TRIPOLE (--tripole-mesh): the ocean runs on the eORCA tripole grid
-        #     (a DIFFERENT grid from the lat-lon atm), coupled via the Phase-2
-        #     cross-grid conservative remap (coupler.grid_remap).
-        if args.grid not in ("latlon", "voronoi"):
+        #     lat-lon grid (no remap).  --grid latlon.
+        #   * DISTINCT lat-lon (--ocean-grid latlon:<res>): the ocean runs on a
+        #     separate lat-lon grid, coupled via the cross-grid conservative
+        #     remap — REQUIRED for a cube/spectral atmosphere.
+        #   * TRIPOLE (--tripole-mesh): the eORCA tripole ocean grid.
+        if args.grid not in ("latlon", "voronoi") and not _xgrid_ocean:
             raise SystemExit(
-                "--ocean dynamic requires --grid latlon (the 3D lat-lon C-grid "
-                "ocean — co-located, or the tripole grid via --tripole-mesh) or "
-                "--grid voronoi (the 3D MPAS ocean co-located on the atmosphere's "
-                f"Voronoi mesh); got --grid {args.grid}.  The cube 3D ocean is "
-                "blocked by the cube-ocean dycore instability and the gaussian "
-                "ocean is idealized-only (both deferred).")
+                "--ocean dynamic requires --grid latlon / voronoi (co-located "
+                "ocean), or a cube/gaussian atmosphere with an explicit "
+                "--ocean-grid latlon:<res>; got --grid "
+                f"{args.grid} with --ocean-grid {args.ocean_grid!r}.")
         overrides["ocean_mode"] = "dynamic"
+        if args.ocean_grid:
+            # Build the distinct lat-lon ocean grid (cross-grid coupling).
+            if not args.ocean_grid.startswith("latlon:"):
+                raise SystemExit(
+                    "--ocean-grid must be 'latlon:<resolution>' (the only "
+                    f"distinct 3-D ocean grid); got {args.ocean_grid!r}.")
+            try:
+                _ocean_res = int(args.ocean_grid.split(":", 1)[1])
+            except ValueError:
+                raise SystemExit(
+                    f"--ocean-grid resolution must be an int; got "
+                    f"{args.ocean_grid!r}.")
+            from legoesm.grids.latlon import create_latlon_grid
+            ocean_grid_obj = create_latlon_grid(_ocean_res)
+            logger.info(
+                "  Ocean grid: DISTINCT lat-lon %dx%d; %s atm -> lat-lon ocean "
+                "conservative cross-grid remap",
+                ocean_grid_obj.n_lat, ocean_grid_obj.n_lon, args.grid)
         if args.tripole_mesh and args.grid != "latlon":
             # --tripole-mesh is a lat-lon-atm option (the eORCA tripole ocean
             # couples to a lat-lon atmosphere via the cross-grid remap); reject
