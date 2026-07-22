@@ -149,6 +149,108 @@ def test_builder_iwm_composes_with_closure():
     assert vm1.tke == r.orca1_zdftke_config(iwm_enabled=False)
 
 
+def test_orca1_zdftke_surface_bc_override():
+    """--tke-surface-bc: None keeps the TKEConfig default (veros_flux, the
+    flagged gap); 'nemo_dirichlet' selects NEMO's en(1)=rn_ebb|tau|/rho0
+    Dirichlet BC; an unknown value raises (not a silent fallthrough)."""
+    r = _runner()
+    assert r.orca1_zdftke_config().surface_bc == "veros_flux"          # default
+    assert r.orca1_zdftke_config(surface_bc=None).surface_bc == "veros_flux"
+    nd = r.orca1_zdftke_config(surface_bc="nemo_dirichlet")
+    assert nd.surface_bc == "nemo_dirichlet"
+    # ONLY the surface BC changes — every other leaf is byte-identical.
+    assert nd._replace(surface_bc="veros_flux") == r.orca1_zdftke_config()
+    with pytest.raises(ValueError, match="surface_bc"):
+        r.orca1_zdftke_config(surface_bc="dirichlet")     # typo must raise
+
+
+def test_builder_tke_surface_bc_threads():
+    """build_tripole_vmix_config threads --tke-surface-bc onto the closure and
+    it composes additively with --iwm (the surface BC rides the same config)."""
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_surface_bc="nemo_dirichlet")
+    assert vm.scheme == "tke"
+    assert vm.tke.surface_bc == "nemo_dirichlet"
+    assert vm.tke == r.orca1_zdftke_config(surface_bc="nemo_dirichlet")
+    # default (None) leaves the closure byte-identical to the plain mapping
+    assert r.build_tripole_vmix_config("tke").tke == r.orca1_zdftke_config()
+    # composes with iwm (floors flip to molecular, surface BC still applied)
+    vmi = r.build_tripole_vmix_config(
+        "tke", iwm=IWMConfig(enabled=True), tke_surface_bc="nemo_dirichlet")
+    assert vmi.tke == r.orca1_zdftke_config(
+        iwm_enabled=True, surface_bc="nemo_dirichlet")
+
+
+def test_tke_surface_bc_requires_tke_closure():
+    """--tke-surface-bc with a non-TKE closure raises (dispatch hardening):
+    the surface-TKE BC does not exist for 'none'/'kpp', so silently ignoring
+    it would run a different config than the flag implies."""
+    r = _runner()
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="requires --tripole-vmix tke"):
+            r.build_tripole_vmix_config(vmix, tke_surface_bc="nemo_dirichlet")
+
+
+def test_build_tripole_keyword_surface_bc_defaults_none():
+    """The build_tripole pass-through exists and defaults to None (unset =
+    no behaviour change for existing runs)."""
+    r = _runner()
+    params = inspect.signature(r.build_tripole).parameters
+    assert "tke_surface_bc" in params
+    assert params["tke_surface_bc"].default is None
+
+
+def test_tke_card_knobs_require_tripole_tke():
+    """--tke-eice / --tke-surface-bc are applied ONLY in the tke branch of
+    build_tripole_vmix_config; they are silently discarded on every other
+    (grid, tripole_vmix) context.  The guard must raise on ALL THREE discard
+    paths and NOT fire when the full tripole+tke context holds or the knobs
+    are unset (no false positive)."""
+    r = _runner()
+    # the ONLY valid context: tripole + tke closure -> no raise
+    r._validate_tke_card_grid("tripole", "tke", tke_eice=3,
+                              tke_surface_bc="nemo_dirichlet")
+    # unset knobs: allowed on any (grid, vmix) -> no regression
+    r._validate_tke_card_grid("mpas", "none")
+    r._validate_tke_card_grid("tripole", "none")
+    r._validate_tke_card_grid("latlon_bathy", "kpp")
+    # discard path 1: wrong grid (build_tripole never runs)
+    for grid in ("mpas", "latlon_bathy", "cubed_sphere"):
+        with pytest.raises(SystemExit, match="tke-surface-bc"):
+            r._validate_tke_card_grid(grid, "tke", tke_surface_bc="nemo_dirichlet")
+        with pytest.raises(SystemExit, match="tke-eice"):
+            r._validate_tke_card_grid(grid, "tke", tke_eice=1)
+    # discard path 2: tripole but vmix none (attach block skipped) — codex HIGH
+    with pytest.raises(SystemExit, match="tke-surface-bc"):
+        r._validate_tke_card_grid("tripole", "none",
+                                  tke_surface_bc="nemo_dirichlet")
+    # discard path 3: tripole but vmix kpp (knob not applied in kpp branch)
+    with pytest.raises(SystemExit, match="tke-eice"):
+        r._validate_tke_card_grid("tripole", "kpp", tke_eice=1)
+
+
+def test_main_wires_tke_card_guard_before_builders(monkeypatch):
+    """main() must CALL the guard, and BEFORE the grid builders run — proving
+    the wiring + ordering the helper test alone cannot (codex MED).  A tripwire
+    on build_mpas_ocean fires only if the guard were removed/misordered."""
+    import sys
+    r = _runner()
+
+    def _boom(*a, **k):                    # must never be reached
+        raise AssertionError("build_mpas_ocean ran before the guard rejected")
+
+    monkeypatch.setattr(r, "build_mpas_ocean", _boom, raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_omip_core2.py", "--grid", "mpas", "--mesh", "/nonexistent.nc",
+         "--tke-surface-bc", "nemo_dirichlet"])
+    with pytest.raises(SystemExit, match="tke-surface-bc"):
+        r.main()
+
+
 def test_build_tripole_rejects_unknown_vmix_at_entry():
     """''/None/typos must not silently run as 'none' at the programmatic
     surface (argparse choices only guard the CLI).  The guard fires before
