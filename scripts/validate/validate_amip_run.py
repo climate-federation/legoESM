@@ -28,6 +28,35 @@ from pathlib import Path
 import numpy as np
 
 
+# Tripwire ceiling for the per-cell TIME-MEAN surface latent heat flux.
+# Earth's strongest climatological cell means (western boundary currents,
+# warm-pool) are ~250 W/m²; 500 leaves generous model headroom while still
+# catching the misclassified-inland-sea potential-evaporation pathology
+# (2-yr AMIP pilot: 2034 W/m² over the Caspian, 2026-07-22).
+HFLS_CELL_MAX_W_M2 = 500.0
+
+
+def hfls_cell_max(run_dir: Path) -> float:
+    """Max over cells of the time-mean CMOR ``hfls`` [W/m²]; NaN if absent.
+
+    Cell-resolved on purpose: a global/zonal mean dilutes a few-cell
+    hotspot below any threshold (the pilot's 2034 W/m² Caspian cells left
+    the global mean at a plausible 57 W/m²).
+    """
+    import glob
+
+    files = sorted(glob.glob(str(run_dir / "cmor" / "Amon" / "hfls_*.nc")))
+    if not files:
+        return float("nan")
+    try:
+        import netCDF4 as nc
+    except ImportError:
+        return float("nan")
+    with nc.Dataset(files[0]) as ds:
+        hfls = np.asarray(ds.variables["hfls"][:], dtype=np.float64)
+    return float(np.nanmax(hfls.mean(axis=0)))
+
+
 def _check(name: str, value, predicate, *, fatal: bool = False,
            skip_if_nan: bool = False) -> bool:
     """Record a check; print PASS/SKIP/WARN/FAIL line.
@@ -182,6 +211,18 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
         if not _check("|moisture residual| max [mm/day]", mr_max,
                       lambda x: x < 5.0, fatal=False, skip_if_nan=True):
             warns.append("moisture_residual")
+
+    # Per-cell hfls sanity tripwire (FATAL).  A time-mean surface latent
+    # heat flux above HFLS_CELL_MAX_W_M2 in any cell is unphysical for
+    # Earth (observed maxima ~250 W/m²; the 2-yr AMIP pilot's misclassified
+    # Caspian/Aral ocean cells reached 2034 W/m²).  Reads the CMOR Amon
+    # hfls when present (cell-resolved), else skips (the global-mean
+    # timeseries cannot see a localized hotspot).
+    hfls_max = hfls_cell_max(run_dir)
+    if not _check("time-mean hfls cell max [W/m2]", hfls_max,
+                  lambda x: x < HFLS_CELL_MAX_W_M2, fatal=True,
+                  skip_if_nan=True):
+        failures.append("hfls_cell_max")
 
     print()
     print(f"  Failures: {failures}")
