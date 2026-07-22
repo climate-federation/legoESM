@@ -45,6 +45,8 @@ The internal geographic lattice uses ``_NG_P1 = 4`` rings exactly like
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     exchange_agrid_scalar_halos,
@@ -53,6 +55,12 @@ from legoesm.grids.fv3_native_gridstruct import (
     exchange_dgrid_vector_halos,
     k2e_remap_halo_rings,
 )
+
+# Vertex-instability diagnostic mode (codex vertex-kill C2), frozen at
+# import: the hot _CornerLagrange.fill must not re-read the environment
+# per call, and a mid-run env change must not alter a running
+# experiment (codex screens-r1 F6).  Default OFF = faithful.
+_CORNER_NEAREST = os.environ.get("LEGOESM_DUO_CORNER_MODE", "") == "nearest"
 
 # upstream constants (fv_duogrid.F90)
 _NG_P1 = 4          # set_bd_ext_duo: dg%bd%ng = 4        (line 146)
@@ -344,8 +352,7 @@ class _CornerLagrange:
         je = n + self.jstag
         is_, js_ = 1, 1
 
-        corner_nearest = (os.environ.get("LEGOESM_DUO_CORNER_MODE", "")
-                          == "nearest")
+        corner_nearest = _CORNER_NEAREST
 
         def diag(i_t, j_t, d1, d2):
             fa, fb = f.copy(), f.copy()

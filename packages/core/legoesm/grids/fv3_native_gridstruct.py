@@ -42,6 +42,8 @@ Fortran-indexed access for the verbatim patch loops.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_halos import (
     ed_supergrid_lonlat_ref,
@@ -59,6 +61,12 @@ from legoesm.grids.fv3_native_metrics import (
 )
 
 from legoesm import constants
+
+# Vertex-instability diagnostic mode (codex vertex-kill C1-B), frozen
+# at import — no per-call env reads, no mid-run env mutation of a
+# running experiment (codex screens-r1 F6).  Default OFF = faithful.
+_AVG_B_ENDPOINTS_LOCAL = (
+    os.environ.get("LEGOESM_DUO_AVG_B_ENDPOINTS", "") == "local")
 
 # --- upstream fill/sentinel constants (fv_grid_utils.F90) ---
 BIG_NUMBER = 1.0e8       # fv_grid_utils big_number
@@ -1531,8 +1539,7 @@ def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
     # rows at fi in {1, npx}; xb W/E cols at fj in {1, npx}) — if the
     # vertex instability collapses, the local endpoint mapping is
     # implicated.
-    skip_endpoints = (os.environ.get("LEGOESM_DUO_AVG_B_ENDPOINTS", "")
-                      == "local")
+    skip_endpoints = _AVG_B_ENDPOINTS_LOCAL
     npx = n + 1
     updates = []
     for tile in range(1, 7):

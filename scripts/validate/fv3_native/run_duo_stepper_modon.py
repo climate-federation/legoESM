@@ -35,12 +35,16 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--single-vortex", default=None,
                     help="'LON,LAT' (deg): replace the two case-8 "
-                         "bursts with ONE burst centred there (vertex-"
+                         "bursts with ONE burst centred there — an "
+                         "eastward Gaussian u-burst (v=0), i.e. exactly "
+                         "one case-8 modon half, NOT an azimuthal "
+                         "vortex (codex screens-r1 F3).  Vertex-"
                          "locality discriminator; vertex ~ '45,35.26', "
-                         "face centre ~ '0,0')")
-    ap.add_argument("--nord", type=int, default=None,
-                    help="override the preset's divergence-damping "
-                         "order (codex lattice-r1 rank-2 screen)")
+                         "face centre ~ '0,0'")
+    ap.add_argument("--nord", type=int, default=None, choices=(1, 2),
+                    help="override the divergence-damping order for "
+                         "EITHER preset (merged onto the stepper "
+                         "defaults; codex lattice-r1 rank-2 screen)")
     ap.add_argument("--d-ext", type=float, default=None,
                     help="override the preset's external-mode filter "
                          "coefficient (seam-ringing discriminator)")
@@ -105,8 +109,20 @@ def main():
         d_ext = 0.02
     if args.d_ext is not None:
         d_ext = args.d_ext
-    if args.nord is not None and sw_cfg is not None:
-        sw_cfg["nord"] = args.nord
+    if args.nord is not None:
+        # merge onto stepper defaults — works for BOTH presets (the
+        # stepper does dict(_SW_CFG_DEFAULT).update(sw_cfg); a bare
+        # {"nord": N} overrides just that key).  Was a silent no-op
+        # for w2tuned (codex screens-r1 F2).
+        sw_cfg = {**(sw_cfg or {}), "nord": args.nord}
+    nord_effective = (sw_cfg or {}).get("nord", 1)
+
+    # diagnostic env modes active this run (provenance — screens-r1 F5)
+    import os
+    diag_env = {k: os.environ[k] for k in
+                ("LEGOESM_DUO_CORNER_MODE",
+                 "LEGOESM_DUO_AVG_B_ENDPOINTS",
+                 "LEGOESM_DUO_PG_BVERTEX") if os.environ.get(k)}
 
     if args.single_vortex:
         lon0, lat0 = (np.deg2rad(float(x))
@@ -161,7 +177,12 @@ def main():
     times = [0.0]
     u0f, v0f = sample_uv(states)
     uf, vf = [u0f], [v0f]
-    print(f"day 0: max|u| {np.nanmax(np.abs(u0f)):.3f} "
+    # finite gate at day 0 too — nanmax would hide a localized IC NaN
+    # and then poison w0/every A/A0 (codex screens-r1 F7)
+    if not (np.all(np.isfinite(u0f)) and np.all(np.isfinite(v0f))):
+        print("day 0: NaN in IC — aborting", flush=True)
+        sys.exit(2)
+    print(f"day 0: max|u| {np.max(np.abs(u0f)):.3f} "
           f"(IC Umax {_MODON_UMAX}, r0 {_MODON_SIZE/1e3:.0f} km)",
           flush=True)
     w0 = float(np.max(np.hypot(u0f, v0f)))
@@ -188,20 +209,26 @@ def main():
         p_e = float(np.max(w[:, 180:]))
         print(f"day {day:g}: max|V| {wmax:.3f} A/A0 {wmax / w0:.3f} "
               f"peakW {p_w:.3f} peakE {p_e:.3f}", flush=True)
+    ic_desc = (f"single case-8 Gaussian u-burst at {args.single_vortex}"
+               if args.single_vortex else
+               "FV3 case-8 two-burst IC")
     np.savez_compressed(
         args.out, times_days=np.array(times),
         u=np.stack(uf), v=np.stack(vf),
         lat=np.linspace(-90, 90, 181), lon=np.arange(360, dtype=float),
         oracle_conventions=np.array(oc),
         preset=np.array(args.preset),
+        single_vortex=np.array(args.single_vortex or ""),
+        nord_effective=np.array(nord_effective),
+        d_ext_effective=np.array(d_ext),
+        diag_env=np.array(repr(diag_env)),
         dt=args.dt, n=args.n,
-        protocol="six-face duo stepper, FV3 case-8 IC "
+        protocol="six-face duo stepper, " + ic_desc + " "
                  "(tests.test_cases.colliding_modons formulas, certified "
                  "edge-midpoint D projection), omega=0; c2l_ord2 lens + "
                  "nearest-cell 1deg sampling; preset=" + args.preset
-                 + (" (Zenodo case-8 damping block; ported nord=1/del-4 "
-                    "stands in for their nord=2/del-6 — disclosed)"
-                    if args.preset == "case8" else " (W2-tuned)"))
+                 + f", nord={nord_effective}, d_ext={d_ext}"
+                 + (f", diag_env={diag_env}" if diag_env else ""))
     print("saved", args.out, flush=True)
 
 

@@ -24,6 +24,8 @@ Williamson-2 duo-target gate is the arbiter.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     analytic_swcore_state,
@@ -31,6 +33,11 @@ from legoesm.grids.fv3_native_gridstruct import (
     exchange_bgrid_scalar_halos,
     exchange_cgrid_vector_halos,
 )
+
+# Vertex-instability diagnostic mode (codex vertex-kill C3), frozen at
+# import — no per-call env reads, no mid-run env mutation (codex
+# screens-r1 F6).  Default OFF = faithful.
+_PG_BVERTEX_MEAN2 = os.environ.get("LEGOESM_DUO_PG_BVERTEX", "") == "mean2"
 
 
 def build_six_face_duo_context(n: int, ng: int = 3,
@@ -645,9 +652,7 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         for i in range(is_, ie + 1 + 1):
             pk1[i - lo, j - lo] = 0.0
     wkb = np.zeros_like(pk2)
-    import os
-    pg_bvertex_mean2 = (os.environ.get("LEGOESM_DUO_PG_BVERTEX", "")
-                        == "mean2")
+    pg_bvertex_mean2 = _PG_BVERTEX_MEAN2
     for arr in (pk2, gz1, gz2):
         fq = fort(arr, isd, jsd)
         fwk = fort(wkb, isd, jsd)

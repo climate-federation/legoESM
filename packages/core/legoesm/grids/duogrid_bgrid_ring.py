@@ -349,6 +349,19 @@ def _run_certified_dvector(u6c: np.ndarray, v6c: np.ndarray,
     and returns the FULL-lattice create-layout arrays
     u_full (6, n+2ng, n+2ng+1), v_full (6, n+2ng+1, n+2ng) — compute
     block + all halos as the certified exchange leaves them.
+
+    .. warning:: SIGN CONVENTION UNCERTIFIED (codex screens-r1 F1).
+       The round-trip zero gate below is CIRCULAR — it applies the same
+       ``(u,v)->(v,-u)`` CCW rule to both the input and the expected
+       output, so it proves only self-inversion, not that the rule
+       matches the lattice geometry (codex's independent construction
+       disagrees by O(field) on rotated faces, but it too hand-derives
+       the rule — same trap class as the two failed averaging probes).
+       Before port stage S2 consumes these maps, the pair rule MUST be
+       certified LAYOUT-FREE: analytic wind field evaluated directly on
+       the create-layout lattice geometry (edge tangents from the
+       face's own dx/dy), compared against this conjugation of the
+       reference-layout init.  Never hand-derive seam conventions.
     """
     from legoesm.grids.cubed_sphere import (
         _GNOMONIC_ED_FACE_PERM as PERM,
