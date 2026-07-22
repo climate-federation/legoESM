@@ -74,3 +74,15 @@ def test_gaussian_slab_coupled_runs(tmp_path):
     assert hi - lo > 5.0, (
         f"SST spread {hi - lo:.1f}K too small — ocean under-forced (zero-SW "
         f"regression?)")
+
+
+def test_ocean_mode_label_mapping():
+    """GAP-5 guard companion: the public accessor maps every SimpleOceanConfig
+    mode onto its CoupledConfig.ocean_mode value, None on unknown."""
+    from legoesm.driver.coupled_config import ocean_mode_label
+
+    assert ocean_mode_label("fixed") == "slab"
+    assert ocean_mode_label("slab") == "slab"
+    assert ocean_mode_label("two_layer") == "two_layer"
+    assert ocean_mode_label("dynamic") is None
+    assert ocean_mode_label("typo") is None

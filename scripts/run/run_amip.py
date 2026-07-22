@@ -73,13 +73,27 @@ def _print_forcing_activity(args) -> None:
     solar_file_active = getattr(args, "solar_source", "constant") in (
         "file", "spectral_file"
     )
+    # The gaussian/spectral and voronoi/mpas standalone radiation paths
+    # integrate with the configured constant S_0 — the solar FILE (TSI +
+    # 14-band spectral) is not threaded there (same gap the CMIP6 deck
+    # labels; keep the two tables telling the same truth).
+    _grid = getattr(args, "grid_type", None) or "cubed_sphere"
+    _disc = getattr(args, "discretization", None) or ""
+    solar_file_unthreaded = (
+        (_grid == "gaussian" and _disc == "spectral")
+        or (_grid in ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
+            and _disc == "mpas")
+    )
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
 
     print("[run_amip] Forcing-channel activity for this run:")
     print("  SST/SIC                              ACTIVE        (radiation-independent)")
-    if solar_file_active:
+    if solar_file_active and solar_file_unthreaded:
+        print("  Solar TSI                            inert         "
+              f"({_disc or _grid} path uses constant S_0; solar file not threaded)")
+    elif solar_file_active:
         print("  Solar TSI                            ACTIVE        (time-varying from file)")
     else:
         print("  Solar TSI                            constant S_0  (--solar-source constant)")

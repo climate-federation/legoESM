@@ -1360,6 +1360,78 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
                 f"got {self.cloud_optics_inhomogeneity!r}"
             )
+        # External-forcing source selectors.  The driver activates each channel
+        # with a ``cfg.<field> == "external"``-style equality gate
+        # (model_driver._setup_external_forcing), so a typo'd value is NOT an
+        # unknown-scheme error at the loader — it silently deactivates the
+        # channel (an AMIP run with ``ozone_forcing="externl"`` runs the static
+        # fallback profile).  Membership-check them here so the failure is
+        # fail-early and loud (dispatch-hardening).
+        _valid_ozone_forcing = ("inline", "external", "off")
+        if self.ozone_forcing not in _valid_ozone_forcing:
+            errors.append(
+                f"ozone_forcing must be one of {_valid_ozone_forcing}, "
+                f"got {self.ozone_forcing!r}"
+            )
+        _valid_ozone_source = ("standard", "analytical", "none")
+        if self.ozone_source not in _valid_ozone_source:
+            errors.append(
+                f"ozone_source must be one of {_valid_ozone_source}, "
+                f"got {self.ozone_source!r}"
+            )
+        _valid_ghg_forcing = ("constant", "external")
+        if self.ghg_forcing not in _valid_ghg_forcing:
+            errors.append(
+                f"ghg_forcing must be one of {_valid_ghg_forcing}, "
+                f"got {self.ghg_forcing!r}"
+            )
+        _valid_aerosol_forcing = ("off", "external")
+        if self.aerosol_forcing not in _valid_aerosol_forcing:
+            errors.append(
+                f"aerosol_forcing must be one of {_valid_aerosol_forcing}, "
+                f"got {self.aerosol_forcing!r}"
+            )
+        _valid_solar_source = ("constant", "file", "spectral_file")
+        if self.solar_source not in _valid_solar_source:
+            errors.append(
+                f"solar_source must be one of {_valid_solar_source}, "
+                f"got {self.solar_source!r}"
+            )
+        _valid_band_order = ("auto", "as_is", "rrtmg_sw")
+        if self.solar_spectral_band_order not in _valid_band_order:
+            errors.append(
+                f"solar_spectral_band_order must be one of {_valid_band_order}, "
+                f"got {self.solar_spectral_band_order!r}"
+            )
+        _valid_datasets = ("cobe", "hadisst", "custom", "analytical")
+        if self.dataset not in _valid_datasets:
+            errors.append(
+                f"dataset must be one of {_valid_datasets}, "
+                f"got {self.dataset!r}"
+            )
+        # CMIP experiment id: consumed by ghg_at_year at driver setup; reject
+        # unknown ids (and the fixed-forcing x external-file contradiction)
+        # before a run spends JIT time.  ``""`` = no experiment override.
+        if self.experiment:
+            from legoesm.forcing.experiments import EXPERIMENT_TEMPLATES
+            if self.experiment not in EXPERIMENT_TEMPLATES:
+                errors.append(
+                    f"experiment must be one of "
+                    f"{tuple(sorted(EXPERIMENT_TEMPLATES))} (or ''), "
+                    f"got {self.experiment!r}"
+                )
+            elif (EXPERIMENT_TEMPLATES[self.experiment].forcing_type == "fixed"
+                    and self.ghg_forcing == "external"):
+                # The external annual GHG file takes precedence over the
+                # experiment scalars in _precompute_external_forcing, so e.g.
+                # abrupt-4xCO2 + ghg_forcing="external" would silently run the
+                # file's (historical) trajectory instead of 4xCO2.
+                errors.append(
+                    f"experiment {self.experiment!r} prescribes FIXED GHG "
+                    "concentrations, but ghg_forcing='external' overrides "
+                    "them with the annual file trajectory; use "
+                    "ghg_forcing='constant' for fixed-forcing experiments"
+                )
         # The adiabatic in-cloud floor reaches radiation through the SHARED
         # physics pipeline (build_physics_pipeline -> build_cloud_config), which
         # serves the cd-grid family (cdgrid + aliases 'centered'/'finite_volume'),

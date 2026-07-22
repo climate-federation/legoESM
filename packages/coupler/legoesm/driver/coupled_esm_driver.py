@@ -304,6 +304,25 @@ class CoupledESMDriver:
         # Dispatch on ocean_mode (explicit; ValueError on unknown — no silent
         # else->slab, per the CLAUDE.md dispatch-hardening rule).
         if cfg.ocean_mode in ("slab", "two_layer", "fixed"):
+            # ocean_mode selects THIS thermodynamic branch, but the physics
+            # actually run is make_ocean(cfg.ocean_config) — two mode fields.
+            # Their agreed mapping is _OCEAN_MODE_LABEL (fixed/slab -> "slab",
+            # two_layer -> "two_layer"; run_coupled + preset_complexity both
+            # build through it).  Reject any other pairing loudly
+            # (ocean_mode="two_layer" + SimpleOceanConfig(mode="fixed")
+            # logged "two_layer" while running fixed-SST physics; 2026-07-21
+            # audit GAP-5).
+            from legoesm.driver.coupled_config import ocean_mode_label
+            _sub_mode = getattr(cfg.ocean_config, "mode", None)
+            if (_sub_mode is not None
+                    and ocean_mode_label(_sub_mode) != cfg.ocean_mode):
+                raise ValueError(
+                    f"CoupledConfig.ocean_mode={cfg.ocean_mode!r} is "
+                    f"inconsistent with ocean_config.mode={_sub_mode!r} "
+                    f"(expected ocean_mode={ocean_mode_label(_sub_mode)!r}); "
+                    "the coupler dispatches on ocean_mode while make_ocean "
+                    "runs ocean_config.mode — keep them consistent."
+                )
             self._is_dynamic_ocean = False
             self._ocean_state = init_slab_state(
                 shape_2d, T_sfc_init=T_sfc_mean,
