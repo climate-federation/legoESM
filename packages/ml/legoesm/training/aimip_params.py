@@ -89,6 +89,13 @@ _SURFACE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("surface_Cd_neutral", 5.0e-4, 3.0e-3, "sigmoid"),
     ParamConstraint("surface_Ch_neutral", 5.0e-4, 3.0e-3, "sigmoid"),
     ParamConstraint("surface_z0", 1.0e-5, 1.0e-3, "sigmoid"),
+    # Global Monin-Obukhov (MOST) stability-function coefficients (Businger-Dyer
+    # / Dyer 1974). Only bite when the classical curriculum runs a
+    # stability-dependent bulk_scheme (large_yeager); the constant-coefficient
+    # default surface path ignores them. Bounds match SurfaceLayerConfig's
+    # __param_spec__ (most_unstable_gamma / most_stable_beta).
+    ParamConstraint("surface_most_unstable_gamma", 8.0, 28.0, "sigmoid"),
+    ParamConstraint("surface_most_stable_beta", 2.0, 10.0, "sigmoid"),
 ]
 
 _MCFARLANE_TRAINABLE: list[ParamConstraint] = [
@@ -351,6 +358,8 @@ class AIMIPClassicalParams(eqx.Module):
             Cd_neutral=d["surface_Cd_neutral"],
             Ch_neutral=d["surface_Ch_neutral"],
             z0=d["surface_z0"],
+            most_unstable_gamma=d["surface_most_unstable_gamma"],
+            most_stable_beta=d["surface_most_stable_beta"],
         )
 
     def to_louis_config(self) -> LouisConfig:
@@ -510,6 +519,8 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "surface_Cd_neutral": float(su.Cd_neutral),
         "surface_Ch_neutral": float(su.Ch_neutral),
         "surface_z0": float(su.z0),
+        "surface_most_unstable_gamma": float(su.most_unstable_gamma),
+        "surface_most_stable_beta": float(su.most_stable_beta),
         # McFarlane
         "mcfarlane_h_topo": float(mc.h_topo),
         "mcfarlane_G_0": float(mc.G_0),

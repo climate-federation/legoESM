@@ -338,9 +338,15 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.SundqvistConfig.evap_coeff',
     'atm.micro.SundqvistConfig.qc_crit',
     'atm.micro.SundqvistConfig.rh_crit',
-    # atm: SurfaceLayerConfig (3)
+    # atm: SurfaceLayerConfig (5) — conscious exclusion: like Cd_neutral /
+    # Ch_neutral / z0, the two MOST stability-function coefficients are trained
+    # via the AIMIP classical bundle (aimip_params.surface_most_*), not the
+    # ExperimentConfig --params scalar map. Same reachability status as their
+    # SurfaceLayerConfig siblings.
     'atm.turb.SurfaceLayerConfig.Cd_neutral',
     'atm.turb.SurfaceLayerConfig.Ch_neutral',
+    'atm.turb.SurfaceLayerConfig.most_stable_beta',
+    'atm.turb.SurfaceLayerConfig.most_unstable_gamma',
     'atm.turb.SurfaceLayerConfig.z0',
     # atm: TKEConfig (4)
     'atm.turb.TKEConfig.Ce',
