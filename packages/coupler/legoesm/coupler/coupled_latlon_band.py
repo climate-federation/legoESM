@@ -42,9 +42,17 @@ import jax.numpy as jnp
 from legoesm import constants
 
 # Machine-checked parameter spec (see tests/test_param_specs.py).  The two heat
-# capacities and the bulk exchange coefficient are per-site tunable closures
-# (tier 2, literature-bounded); the ocean freezing floor is a physical constant
-# (constants.T_freeze_ocean), not a free parameter.
+# This is a SCALING-LANE INFRA module (the minimal coupled MPI step for the
+# C10 bench), NOT a production coupler config: the production driver is
+# CoupledESMDriver, and run_coupled's --params bundle never routes THIS config,
+# so its fields are not reachable calibration targets (the ice/coupler
+# reachability audit requires every tunable coupler.* param be settable via
+# run_coupled --params).  They are therefore FIXED (tier 0, excluded) at the
+# infra defaults rather than exposed as unreachable "tunables": the two heat
+# capacities are structural (c_pd*dp/g, rho*c*h_mix) and k_exchange is the
+# bench's bulk sensible-heat coefficient; the freezing floor is a physical
+# constant.  (A production slab-coupling closure lives in the real coupler
+# config, which IS reachable.)
 __param_spec__ = {
     "CoupledSlabConfig": {
         "scheme_key": "coupler.slab_band",
@@ -52,12 +60,11 @@ __param_spec__ = {
             "t_freeze_ocean_K": "ocean freezing point is a physical constant "
                                 "(constants.T_freeze_ocean), a measurement "
                                 "convention, not a tunable closure",
+            "k_exchange": "scaling-lane bench coefficient; coupled_latlon_band is infra not routed by run_coupled --params, so not a reachable calibration target",
+            "c_atm_area": "structural atm surface-layer heat capacity (c_pd*dp/g); scaling-lane infra, not a reachable calibration target",
+            "c_ocean_area": "structural slab mixed-layer heat capacity (rho*c*h_mix); scaling-lane infra, not a reachable calibration target",
         },
-        "params": {
-            "k_exchange": {"units": "W m-2 K-1", "bounds": (5.0, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "bulk sensible-heat transfer coefficient (slab-band coupling)", "shape": None},
-            "c_atm_area": {"units": "J m-2 K-1", "bounds": (5.0e5, 2.0e6), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "atmospheric surface-layer heat capacity per area, order c_pd*dp/g", "shape": None},
-            "c_ocean_area": {"units": "J m-2 K-1", "bounds": (1.0e7, 8.0e7), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "slab mixed-layer heat capacity per area, order rho_ocean*c_ocean*h_mix", "shape": None},
-        },
+        "params": {},
     },
 }
 
