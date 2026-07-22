@@ -168,7 +168,7 @@ def _validate_dynamic_state_shape(h_dyn_shape, config, grid) -> None:
             )
 
 
-def _uses_new_physics(config: SeaIceConfig) -> bool:
+def uses_new_physics(config: SeaIceConfig) -> bool:
     """True when any Tier-1/Tier-2 new physics gate is enabled."""
     return (
         config.snow.enabled
@@ -359,13 +359,13 @@ def step_sea_ice(
                 "use n_categories=1."
             )
 
-    if config.dynamics == "none" and config.n_categories == 1 and not _uses_new_physics(config):
+    if config.dynamics == "none" and config.n_categories == 1 and not uses_new_physics(config):
         # Original slab path — fully backward compatible
         if isinstance(state, DynamicSeaIceState):
             state = dynamic_to_slab(state)
         return _step_slab(state, forcing, ocean_sst, ocean_u, ocean_v,
                           config, U_min, dt)
-    elif _uses_new_physics(config):
+    elif uses_new_physics(config):
         # Extended physics path: snow / brine / ridging / ponds /
         # delta-Eddington / Lipscomb 2001 remap.  Requires
         # DynamicSeaIceState carrier so the new state fields are
@@ -965,7 +965,7 @@ def _step_dynamic(
     )
 
     # Legacy path: snow / brine / pond fields are pass-through (zero-
-    # initialised in the input state when ``_uses_new_physics`` is False).
+    # initialised in the input state when ``uses_new_physics`` is False).
     new_state = DynamicSeaIceState(
         h_ice=state.h_ice.replace(data=h),
         T_ice=state.T_ice.replace(data=T_ice),
