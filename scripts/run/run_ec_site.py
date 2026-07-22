@@ -128,7 +128,8 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
                        soil_evap_resistance_exp: float = 2.0,
                        root_depth: float = 1.0,
                        z_ref: float = 10.0,
-                       texture: tuple[float, float] | None = None
+                       texture: tuple[float, float] | None = None,
+                       interception: bool = False
                        ) -> MultiLayerLandConfig:
     """Assemble the multilayer land config for the offline EC-site run.
 
@@ -143,6 +144,9 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     kw = dict(surface_scheme=canopy_config,
               soil_evap_resistance_exp=soil_evap_resistance_exp,
               root_depth=root_depth, z_ref=z_ref)
+    if interception:
+        from legoesm.land.canopy.interception import InterceptionConfig
+        kw["interception"] = InterceptionConfig()
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
@@ -594,7 +598,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              canopy: str = "two_leaf", clm_pft: int = 7,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
-             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0) -> dict:
+             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
+             interception: bool = False) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -668,7 +673,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         canopy_config, soil, bottom_bc, soil_depth_m,
         k_sat_decay_m=k_sat_decay_m,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
-        root_depth=root_depth, z_ref=z_ref, texture=texture)
+        root_depth=root_depth, z_ref=z_ref, texture=texture,
+        interception=interception)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -836,6 +842,11 @@ def main() -> int:
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
                          "than the full multi-decade record")
+    ap.add_argument("--canopy-interception", dest="interception",
+                    action="store_true", default=False,
+                    help="enable the shared canopy-water interception scheme "
+                         "(two-leaf path): rain is intercepted, drips as "
+                         "throughfall, and the wet leaf evaporates from the store")
     ap.add_argument("--spinup-steps", type=int, default=0,
                     help="prognostic soil spin-up: run this many steps before the "
                          "evaluation window (trimmed from scoring) so the soil "
@@ -858,7 +869,8 @@ def main() -> int:
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
                  clmml_turbulence=args.clmml_turbulence,
-                 spinup_steps=args.spinup_steps)
+                 spinup_steps=args.spinup_steps,
+                 interception=args.interception)
     return 0
 
 

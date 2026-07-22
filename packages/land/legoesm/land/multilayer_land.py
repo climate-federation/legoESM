@@ -46,6 +46,7 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.interception import update_canopy_water
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
     TwoLeafCanopyConfig,
@@ -874,7 +875,43 @@ def _step_multilayer_land_impl(
     evap_bare, evap_transp = _partition_latent_root_top(
         soil_evap, has_snow, f_veg,
         surface_out.LE_canopy, surface_out.LE_soil)
-    flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
+
+    # --- Canopy-water interception (shared CLM-ML formulation) ---------------
+    # Rain is intercepted into the prognostic ``W_canopy`` store; only the
+    # THROUGHFALL (direct + drip once saturated) infiltrates, so interception
+    # loss reduces soil-water input.  The wet leaf evaporates from the store at
+    # the potential rate scaled by the wetted fraction; because that
+    # wet-leaf evaporation is part of the ALREADY-COMPUTED canopy latent flux
+    # (``surface_out.LE_canopy``), it is SOURCED FROM THE STORE INSTEAD OF THE
+    # ROOT ZONE — the transpiration sink shrinks by that mass while the reported
+    # surface latent flux is unchanged (energy-neutral, water-conserving).
+    # Only the two-leaf path (which splits LE into canopy vs soil) uses this;
+    # the CLM-ML canopy carries its own internal ``h2ocan`` store, and SimpleSEB
+    # has no canopy latent stream to draw a wet-leaf flux from.
+    _do_intercept = (config.interception is not None
+                     and isinstance(config.surface_scheme, TwoLeafCanopyConfig))
+    W_canopy_new = state.W_canopy
+    infil_rain = precip_rain
+    if _do_intercept:
+        _lai = jnp.broadcast_to(_get(lp, "LAI", jnp.zeros_like(precip_rain)),
+                                precip_rain.shape)
+        _sai = _get(lp, "SAI", None)
+        _pai = _lai + (0.0 if _sai is None
+                       else jnp.broadcast_to(_sai, precip_rain.shape))
+        _W0 = (state.W_canopy if state.W_canopy is not None
+               else jnp.zeros_like(precip_rain))
+        W_canopy_new, infil_rain, _wet_evap, _fwet = update_canopy_water(
+            _W0, precip_rain, surface_out.LE_canopy, _pai, dt,
+            config.interception, constants.L_v)
+        # The wet leaf substitutes STORED water for transpiration at the same
+        # (LE_canopy) rate: shrink the root-zone transpiration mass by the ACTUAL
+        # wet-leaf evaporation, so the reported surface latent flux is unchanged
+        # (energy-neutral) while less soil water is drawn.  Only POSITIVE
+        # evaporation substitutes; dew (``_wet_evap < 0``) merely grows the store
+        # and must NOT inflate the transpiration sink.
+        evap_transp = jnp.maximum(evap_transp - jnp.maximum(_wet_evap, 0.0), 0.0)
+
+    flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
     weight = root_frac * beta_root  # both are (ncol, n_layers)
@@ -951,6 +988,10 @@ def _step_multilayer_land_impl(
         # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
         # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
         canopy_state=canopy_state_new,
+        # Intercepted-water store: updated on the two-leaf interception path,
+        # else carried through unchanged (``None`` when interception is off).
+        W_canopy=(_match(W_canopy_new, state.W_canopy)
+                  if state.W_canopy is not None else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1213,6 +1254,8 @@ def init_multilayer_land_state(
         snow_age_bands=snow_age_bands,
         ice_bands=ice_bands,
         canopy_state=canopy_state,
+        # Dry canopy at start; carried only when interception is configured.
+        W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
     )
 
 

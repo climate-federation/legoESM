@@ -269,6 +269,30 @@ def test_clmml_turbulence_rejects_unknown(tmp_path):
                      canopy="clmml", clmml_turbulence="bogus")
 
 
+def test_canopy_interception_changes_water_partition(tmp_path):
+    """Enabling the shared interception scheme carries a canopy-water store and
+    re-routes rain (interception loss), so the fluxes differ from the no-
+    interception run and the run stays finite (water-conserving path)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    # the base synthetic driver is rain-free (P=0); interception only acts on
+    # rain, so inject a wet spell (2 mm/step over the first 24 h).
+    d = xr.open_dataset(driver_nc)
+    P = np.zeros(d.sizes["time"]); P[:48] = 2.0
+    d = d.assign(P=("time", P))
+    d.to_netcdf(driver_nc + ".rain"); import os; os.replace(driver_nc + ".rain", driver_nc)
+    mod = _load_driver_module()
+    off = mod.run_site(driver_nc, "prognostic", str(tmp_path / "off"), chunk=96,
+                       canopy="two_leaf")
+    on = mod.run_site(driver_nc, "prognostic", str(tmp_path / "on"), chunk=96,
+                      canopy="two_leaf", interception=True)
+    for flux in ("GPP", "LE", "H"):
+        assert np.isfinite(on[flux]["rmse"])
+    # the synthetic driver has rain, so interception must move at least one flux
+    assert (off["LE"]["bias"] != on["LE"]["bias"]
+            or off["H"]["bias"] != on["H"]["bias"])
+
+
 def test_spinup_steps_trims_to_eval_window(tmp_path):
     """--spinup-steps runs extra steps before the window but scores only the
     evaluation window: the output length and metric count match a no-spinup run
