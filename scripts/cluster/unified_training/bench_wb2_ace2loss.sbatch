@@ -29,9 +29,14 @@ mkdir -p "$OUT_ROOT"
 # The ace2loss campaign trained sfno_PHYSICS (SFNO physics, dycore kept),
 # which the WB2 spectral-state eval harness does not score — so it is not
 # listed here (a separate sfno_full run would be the SFNO WB2 entry).
+# Canonical ace2 suite output_dir (results/aimip_ace2loss/<variant>). The
+# older results/aimip_ace2loss_column_nn/ checkpoint is a STALE pre-c6d810ac9
+# architecture (column MLP input nlev*4+2=34 vs the current nlev*4+4=36 after
+# the prescribed-SST forcing inputs landed) and no longer deserialises — it is
+# retrained into the canonical dir under the current arch.
 declare -A CKPT=(
   [classical]=results/aimip_ace2loss/classical/params.eqx
-  [column_nn]=results/aimip_ace2loss_column_nn/column_nn/params.eqx
+  [column_nn]=results/aimip_ace2loss/column_nn/params.eqx
 )
 # Prefer the EMA-evaluated weights when present (D3).
 for v in "${!CKPT[@]}"; do
