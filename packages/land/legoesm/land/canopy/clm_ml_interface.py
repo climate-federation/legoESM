@@ -2333,18 +2333,56 @@ def compute_clm_ml_canopy_fluxes(
         )
 
     if _traceable_multi:
-        # Per-column loop (S2): canopy columns are physically independent, so the
-        # proven single-patch kernel runs once per column with ``filter=[c+1]`` and
-        # that column's GridInfo + cos(zenith) slice; the ``grid=`` kernel writes
-        # ONLY patch c+1, so chaining the returned mlcanopy accumulates every
-        # column.  NOTE (perf ceiling): the Python loop UNROLLS in the trace, so the
-        # HLO grows O(ncol) — fine for a modest coupled test, not for a full-AMIP
-        # column count (thousands).  The masked-vmap rewrite (S3) removes the loop.
-        mlcanopy_new = mlcanopy
-        for _c in range(ncol):
-            mlcanopy_new = _call_mlcanopy(
-                mlcanopy_new, [_c + 1], 1, _grids[_c],
-                cos_zen[_c:_c + 1] if _traceable else None)
+        # Canopy columns are physically INDEPENDENT (no horizontal coupling), so the
+        # proven single-patch kernel runs once per column with ``grid.p`` = that
+        # column's patch index, the ``grid=`` kernel writing ONLY that patch.
+        #
+        # S3 fast path — jax.lax.scan over columns (O(1) compile in ncol): when the
+        # columns share vertical structure (ncan/ntop/nbot/pft uniform — the common
+        # explicit-count-layering case, MLinitVerticalMod's _ntop=nlayer_within /
+        # _ncan=_ntop+nlayer_above being htop-INDEPENDENT), the scan carry is the
+        # shared mlcanopy and the ONLY traced input is the column index p.  The body
+        # traces ONCE, so the HLO is O(1) in ncol (vs the S2 Python loop's O(ncol)
+        # unroll — the AMIP-scale compile wall).  ncan/ntop/nbot/pft stay CONCRETE
+        # (closed-over ``_g0``), so NO per-layer masking or dynamic pft-gather is
+        # needed here.  Numerically a NO-OP vs the loop (validated column-for-column
+        # against independent single-column runs).
+        #
+        # S2 fallback — when structure VARIES across columns (heterogeneous
+        # PFT/nbot), the concrete-structure scan would be wrong, so fall back to the
+        # per-column Python loop: correct, only O(ncol) compile there.  Letting the
+        # scan handle that case needs traced-nbot radiation masking + dynamic pft
+        # gathers (deferred — see docs/land/clm_ml_s3_masked_vmap_plan.md).
+        _g0 = _grids[0]
+        _uniform_structure = all(
+            (_g.ncan == _g0.ncan and _g.ntop == _g0.ntop
+             and _g.nbot == _g0.nbot and _g.pft == _g0.pft)
+            for _g in _grids
+        )
+        if _uniform_structure and bool(getattr(canopy_config, "scan_columns", True)):
+            # xs: per-column patch index (1..ncol — TRACED under the scan) paired
+            # with that column's cos(zenith).  filter=[1] is a STATIC dummy — under
+            # grid= the kernel indexes the column by grid.p (the traced xs), NOT the
+            # filter; cos is reshaped to the length-1 slice the kernel's
+            # cos_zenith_device contract expects.
+            _p_xs = jnp.arange(1, ncol + 1)
+
+            def _col_scan_body(_mlc, _xs):
+                _p_c, _cosz_c = _xs
+                _g_c = GridInfo(p=_p_c, ncan=_g0.ncan, ntop=_g0.ntop,
+                                nbot=_g0.nbot, pft=_g0.pft)
+                _mlc = _call_mlcanopy(_mlc, [1], 1, _g_c,
+                                      jnp.reshape(_cosz_c, (1,)))
+                return _mlc, None
+
+            mlcanopy_new, _ = jax.lax.scan(
+                _col_scan_body, mlcanopy, (_p_xs, cos_zen))
+        else:
+            mlcanopy_new = mlcanopy
+            for _c in range(ncol):
+                mlcanopy_new = _call_mlcanopy(
+                    mlcanopy_new, [_c + 1], 1, _grids[_c],
+                    cos_zen[_c:_c + 1] if _traceable else None)
     else:
         _grid0 = _grids[0] if _grids is not None else None
         mlcanopy_new = _call_mlcanopy(

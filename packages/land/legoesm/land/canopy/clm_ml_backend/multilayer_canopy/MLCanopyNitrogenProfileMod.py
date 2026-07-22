@@ -48,6 +48,7 @@ def CanopyNitrogenProfile(
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
     vcmaxpft_jax=None,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate the canopy profile of nitrogen and photosynthetic capacity.
@@ -147,9 +148,9 @@ def CanopyNitrogenProfile(
     rd25_profile = mlcanopy_inst.rd25_profile
     kp25_profile = mlcanopy_inst.kp25_profile
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
-        pft = patch.itype[p]  # JAX int — dynamic index
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
+        pft = patch.itype[p]  # JAX int — dynamic index (traced-p safe; ncan masked below)
 
         # is_c3: JAX boolean scalar; used with jnp.where for differentiable branching
         is_c3 = jnp.round(c3psn[pft]) == 1  # Fortran implicit round of 0/1 flag

@@ -69,6 +69,7 @@ def LeafHeatCapacity(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate leaf heat capacity for each canopy layer.
@@ -104,9 +105,9 @@ def LeafHeatCapacity(
     dpai = mlcanopy_inst.dpai_profile  # shape (num_patch, nlevmlcan+1)
     cpleaf = mlcanopy_inst.cpleaf_profile  # shape (num_patch, nlevmlcan+1)
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
-        pft = patch.itype[p]  # JAX int — dynamic index, differentiable
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
+        pft = patch.itype[p]  # JAX int — dynamic index, differentiable (traced-p safe)
 
         # vmap over all layers (index 1..nlevmlcan); dpai==0 layers yield 0
         layers = _cpleaf_layers(dpai[p, 1:], slatop[pft])  # shape (nlevmlcan,)

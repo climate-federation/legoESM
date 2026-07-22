@@ -98,24 +98,29 @@ def LongwaveRadiation(
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnums=(0, 1, 2))
+@partial(jax.jit, static_argnums=(1, 2, 3))
 def _Norman_patch(
-    p: int,
+    p: "int | jnp.ndarray",
     ntop: int,
     nbot: int,
+    pft: int,
     mlcanopy_inst: mlcanopy_type,
 ) -> mlcanopy_type:
     """JIT-compiled Norman longwave solver for a single patch.
 
-    p, ntop, nbot are static Python ints — they are used as Python loop
-    bounds and slice indices (e.g. ``jnp.arange(nbot, ntop+1)``) which
-    must be concrete under ``jax.jit``.  Recompilation only happens when
-    the canopy structure changes (rare for a fixed site).
+    ntop, nbot, pft are static Python ints — ntop/nbot are Python loop bounds
+    and slice indices (e.g. ``jnp.arange(nbot, ntop+1)``) which must be concrete
+    under ``jax.jit``, and pft is a static table index (``emleaf[pft]``).  ``p``
+    is DYNAMIC (arg 0, NOT static): it may be a TRACED lax.scan-over-columns
+    index (S3), so it is used only for dynamic gather/scatter (``arr[p]`` /
+    ``.at[p]``).  The per-column PFT is passed in (concrete, from ``grid.pft``)
+    rather than read host-side as ``patch.itype[p]`` — that host read breaks when
+    ``p`` is traced.  Recompilation only happens when the canopy structure
+    (ntop/nbot/pft) changes (rare for a fixed site).
     """
     neq: int = (nlevmlcan + 1) * 2
     emleaf = MLpftcon.emleaf
 
-    pft = patch.itype[p]  # dynamic gather — valid in JIT
     em_leaf = emleaf[pft]
     rho = 1.0 - em_leaf
     tau = 0.0
@@ -335,5 +340,8 @@ def _Norman(
         p = grid.p if grid is not None else filter_patch[fp]
         ntop = grid.ntop if grid is not None else int(mlcanopy_inst.ntop_canopy[p])
         nbot = grid.nbot if grid is not None else int(mlcanopy_inst.nbot_canopy[p])
-        mlcanopy_inst = _Norman_patch(p, ntop, nbot, mlcanopy_inst)
+        # Per-column PFT: concrete from grid (S3, so the kernel need not read the
+        # host patch.itype[p] under a TRACED grid.p); host fallback for eager mode.
+        pft = grid.pft if (grid is not None and grid.pft >= 0) else int(patch.itype[p])
+        mlcanopy_inst = _Norman_patch(p, ntop, nbot, pft, mlcanopy_inst)
     return mlcanopy_inst

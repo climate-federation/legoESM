@@ -258,6 +258,7 @@ def LeafBoundaryLayerBoth(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """Compute leaf boundary layer conductance for both sun and shade in one
     fused GPU kernel dispatch.
@@ -285,9 +286,9 @@ def LeafBoundaryLayerBoth(
     gbv = mlcanopy_inst.gbv_leaf
     gbc = mlcanopy_inst.gbc_leaf
 
-    for fp in range(num_filter):
-        p = filter_patch[fp]
-        pft = patch.itype[p]
+    for fp in range(1 if grid is not None else num_filter):
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
+        pft = patch.itype[p]  # patch.itype is jnp → dynamic gather is traced-p safe
 
         # Diffusivity correction (same for sun and shade) — Fortran lines 72-76
         pref_p = mlcanopy_inst.pref_forcing[p]

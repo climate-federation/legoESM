@@ -416,6 +416,7 @@ def MLCanopyFluxes(
         wateratm2lndbulk_inst,
         mlcanopy_inst,
         cos_zenith_device=cos_zenith_device,
+        grid=grid,
     )
     # ------------------------------------------------------------------
     # Seed *_bef forcing on first timestep — Fortran lines 204-218
@@ -461,7 +462,10 @@ def MLCanopyFluxes(
     dsai = mlcanopy_inst.dsai_profile
     dpai = mlcanopy_inst.dpai_profile
 
-    for p in filter_mlcan:
+    # grid.p may be a TRACED lax.scan-over-columns index (S3): iterate the single
+    # patch grid.p under the map, else the concrete filter.  grid.ncan is concrete
+    # (uniform structure) so the 1:ncan+1 slice bound below stays static.
+    for p in ([grid.p] if _diff_mode else filter_mlcan):
         lai_val = canopystate_inst.elai_patch[p]
         sai_val = canopystate_inst.esai_patch[p]
         lai = lai.at[p].set(lai_val)
@@ -496,10 +500,11 @@ def MLCanopyFluxes(
     # Plant hydraulics and leaf heat capacity — Fortran lines 245-257
     # ------------------------------------------------------------------
     mlcanopy_inst = SoilResistance(
-        num_mlcan, filter_mlcan, soilstate_inst, waterstatebulk_inst, mlcanopy_inst
+        num_mlcan, filter_mlcan, soilstate_inst, waterstatebulk_inst, mlcanopy_inst,
+        grid=grid,
     )
-    mlcanopy_inst = PlantResistance(num_mlcan, filter_mlcan, mlcanopy_inst)
-    mlcanopy_inst = LeafHeatCapacity(num_mlcan, filter_mlcan, mlcanopy_inst)
+    mlcanopy_inst = PlantResistance(num_mlcan, filter_mlcan, mlcanopy_inst, grid=grid)
+    mlcanopy_inst = LeafHeatCapacity(num_mlcan, filter_mlcan, mlcanopy_inst, grid=grid)
 
     # Soil surface relative humidity — Fortran lines 259-262
     # patch.column as a DEVICE (jnp) array indexed by dynamic gather — valid for a
@@ -507,7 +512,7 @@ def MLCanopyFluxes(
     # index (S3).  (Was np.asarray + int(), which breaks on a traced p.)
     _patch_col_rhg = jnp.asarray(patch.column)
     rhg = mlcanopy_inst.rhg_soil
-    for p in filter_mlcan:
+    for p in ([grid.p] if _diff_mode else filter_mlcan):  # grid.p may be TRACED (S3)
         c = _patch_col_rhg[p]
         smp1 = soilstate_inst.smp_l_col[c, 1]  # mm
         tsoi1 = temperature_inst.t_soisno_col[c, 1]  # K
@@ -632,10 +637,10 @@ def MLCanopyFluxes(
         # Solar radiation — Fortran line 290
         inst = SolarRadiation(bounds, num_mlcan, filter_mlcan, inst, grid=grid)
         # Nitrogen profile — Fortran line 293
-        inst = CanopyNitrogenProfile(num_mlcan, filter_mlcan, inst, vcmaxpft_jax)
+        inst = CanopyNitrogenProfile(num_mlcan, filter_mlcan, inst, vcmaxpft_jax, grid=grid)
         # Runge-Kutta inner loop — Fortran lines 310-328
         for _irk in range(1, nrk_steps + 2):
-            inst = CanopyWettedFraction(num_mlcan, filter_mlcan, inst)
+            inst = CanopyWettedFraction(num_mlcan, filter_mlcan, inst, grid=grid)
             inst = LongwaveRadiation(bounds, num_mlcan, filter_mlcan, inst, grid=grid)
             inst = inst._replace(
                 rnleaf_leaf=(
@@ -647,7 +652,7 @@ def MLCanopyFluxes(
             # In non-diff mode it carries the current sub-step index (warning only).
             inst = CanopyTurbulence(nstep_ml, num_mlcan, filter_mlcan, inst, grid=grid)
             # Both sun and shade in one fused GPU dispatch (2× fewer round-trips)
-            inst = LeafBoundaryLayerBoth(num_mlcan, filter_mlcan, inst)
+            inst = LeafBoundaryLayerBoth(num_mlcan, filter_mlcan, inst, grid=grid)
             inst = LeafPhotosynthesis(
                 num_mlcan,
                 filter_mlcan,
@@ -667,10 +672,10 @@ def MLCanopyFluxes(
                 g1_MED_jax=g1_MED_jax,
             )
             inst = FluxProfileSolution(num_mlcan, filter_mlcan, inst, grid=grid)
-            inst = LeafWaterPotential(num_mlcan, filter_mlcan, isun, inst)
-            inst = LeafWaterPotential(num_mlcan, filter_mlcan, isha, inst)
-            inst = CanopyInterception(num_mlcan, filter_mlcan, inst)
-            inst = CanopyEvaporation(num_mlcan, filter_mlcan, inst)
+            inst = LeafWaterPotential(num_mlcan, filter_mlcan, isun, inst, grid=grid)
+            inst = LeafWaterPotential(num_mlcan, filter_mlcan, isha, inst, grid=grid)
+            inst = CanopyInterception(num_mlcan, filter_mlcan, inst, grid=grid)
+            inst = CanopyEvaporation(num_mlcan, filter_mlcan, inst, grid=grid)
             if nrk_steps > 0 and _irk <= nrk_steps:
                 inst = RungeKuttaUpdate(
                     _irk,
@@ -836,8 +841,10 @@ def MLCanopyFluxes(
     lwp_hist = mlcanopy_inst.lwp_hist_leaf
 
     # ncan_vals is pre-computed above as a tuple of concrete ints
-    # (one per active patch), avoiding int() D->H syncs here.
-    for p, _ncan in zip(filter_mlcan, ncan_vals):
+    # (one per active patch), avoiding int() D->H syncs here.  Under S3 the patch
+    # index grid.p may be TRACED (lax.scan over columns); grid.ncan stays concrete
+    # (uniform structure) so the 1:ncan+1 slice bound is static.
+    for p, _ncan in ([(grid.p, grid.ncan)] if _diff_mode else zip(filter_mlcan, ncan_vals)):
         _sl = slice(1, _ncan + 1)
 
         # Save sun/shade values for history files (bulk copy, uses JAX .at[])
@@ -915,6 +922,7 @@ def _GetCLMVar(
     wateratm2lndbulk_inst: Any,
     mlcanopy_inst: mlcanopy_type,
     cos_zenith_device: Any = None,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Copy CLM variables into the multilayer canopy container.
@@ -1078,8 +1086,8 @@ def _GetCLMVar(
     # ------------------------------------------------------------------
     # Copy CLM variables to multilayer canopy — Fortran lines 63-90
     # ------------------------------------------------------------------
-    for fp in range(1, num_filter + 1):  # Fortran: do fp = 1, num_filter
-        p = int(filter[fp - 1])
+    for fp in range(1, 2 if grid is not None else num_filter + 1):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else int(filter[fp - 1])  # grid.p may be TRACED (S3)
         # Dynamic gather (traced-p-safe): identity maps in single-site mode
         # (c == p, g == p) so the values are unchanged for a concrete p.
         c = _patch_column_j[p]
@@ -1147,8 +1155,11 @@ def _GetCLMVar(
         # host recompute cannot be hoisted to trace time).  ``filter`` values are
         # concrete 1-based patch indices, so the scatter indices stay static while
         # the cos(zenith) values flow as tracers.  Same 0.01 floor as the host path.
-        _fidx = jnp.asarray(
-            [int(filter[k]) for k in range(num_filter)], dtype=jnp.int32)
+        # Scatter cos(zenith) to the patch(es) under compute.  Under S3 the single
+        # column is grid.p (possibly TRACED); else the concrete 1-based filter.
+        _fidx = (jnp.asarray([grid.p], dtype=jnp.int32) if grid is not None
+                 else jnp.asarray([int(filter[k]) for k in range(num_filter)],
+                                  dtype=jnp.int32))
         # Clip to [0.01, 1.0]: the 0.01 floor matches the host path (avoid acos(<=0)
         # at the horizon), and the 1.0 CEIL guards against a forcing producer that
         # emits cos(zenith) slightly above 1 (float round-off / f32->f64 overshoot),
@@ -1768,8 +1779,8 @@ def _CanopyFluxesDiagnostics(
     # ==================================================================
     # Main patch loop — Fortran: do fp = 1, num_filter
     # ==================================================================
-    for fp in range(1, num_filter + 1):
-        p = int(filter[fp - 1])
+    for fp in range(1, 2 if _diff_mode else num_filter + 1):
+        p = grid.p if _diff_mode else int(filter[fp - 1])  # grid.p may be TRACED (S3)
         # Structural ints: from grid (concrete, pre-traced) in diff mode; from a
         # host read otherwise. Single-site diff mode uses one shared (ncan, ntop).
         _ncan = grid.ncan if _diff_mode else int(mlcanopy_inst.ncan_canopy[p])

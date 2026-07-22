@@ -53,6 +53,7 @@ def CanopyWettedFraction(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate the wetted fraction and the green-dry fraction of each
@@ -83,8 +84,11 @@ def CanopyWettedFraction(
     fwet = mlcanopy_inst.fwet_profile
     fdry = mlcanopy_inst.fdry_profile
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
+    # grid.p may be a TRACED lax.scan-over-columns index (S3); it is used only as a
+    # gather/scatter index here (full 1: layer slices, dpai==0 masks inactive rows),
+    # so no concrete ncan is needed and grid can be a plain dynamic arg.
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]
 
         # Use full layer slices — dpai==0 on inactive layers acts as mask
         dpai_v = mlcanopy_inst.dpai_profile[p, 1:]  # (nlevmlcan,)
@@ -131,6 +135,7 @@ def CanopyInterception(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate canopy interception and throughfall.
@@ -184,8 +189,8 @@ def CanopyInterception(
     qflx_tflrain = mlcanopy_inst.qflx_tflrain_canopy
     qflx_tflsnow = mlcanopy_inst.qflx_tflsnow_canopy
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
 
         rain_p = mlcanopy_inst.qflx_rain_forcing[p]
         snow_p = mlcanopy_inst.qflx_snow_forcing[p]
@@ -256,6 +261,7 @@ def CanopyEvaporation(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Update canopy intercepted water for evaporation and dew deposition.
@@ -296,8 +302,8 @@ def CanopyEvaporation(
     dtime = dtime_ml  # Python float constant
     h2ocan = mlcanopy_inst.h2ocan_profile
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
 
         dpai_v = mlcanopy_inst.dpai_profile[p, 1:]
         fracsun_v = mlcanopy_inst.fracsun_profile[p, 1:]

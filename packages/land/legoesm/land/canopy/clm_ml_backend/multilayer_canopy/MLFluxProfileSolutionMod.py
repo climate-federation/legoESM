@@ -102,18 +102,21 @@ def FluxProfileSolution(
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnums=(0, 1))
+@partial(jax.jit, static_argnums=(1,))
 def _implicit_fps_jit(
-    p: int,
+    p: "int | jnp.ndarray",
     n: int,
     mlcanopy_inst: mlcanopy_type,
 ):
     """JIT-compiled core of ImplicitFluxProfileSolution.
 
-    ``p`` and ``n`` are static Python ints so all Python ``range(1, n+1)``
-    loops and ``slice(1, n+1)`` index expressions are concrete at trace
-    time.  Recompilation occurs only when the canopy layer count changes
-    (rare for a fixed site).
+    ``n`` is a static Python int so all Python ``range(1, n+1)`` loops and
+    ``slice(1, n+1)`` index expressions are concrete at trace time.  ``p`` is
+    DYNAMIC (arg 0, NOT static): it may be a TRACED lax.scan-over-columns index
+    (S3), and it is used ONLY for gather/scatter (``field[p]`` / ``.at[p]``,
+    incl. the ``SoilFluxes(p, ...)`` plain helper) — never as a slice bound or
+    Python range limit.  Recompilation occurs only when the canopy layer count
+    ``n`` changes (rare for a fixed site).
 
     Returns ``(mlcanopy_inst, aux)`` where ``aux`` is a tuple of arrays
     needed by ``ErrorCheck01`` / ``ErrorCheck02`` which run outside JIT
