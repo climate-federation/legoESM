@@ -173,8 +173,11 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
 
     @jax.jit
     def _step(land_ml, T, p_s, q_v, u, v):
+        # Pass a real per-column cos_zenith (as compute_radiation_core threads for
+        # clm_ml) to exercise the faithful-zenith param end to end.
         return tile(land_ml, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
-                    T, p_s, q_v, u, v, None, 600.0)
+                    T, p_s, q_v, u, v, None, 600.0,
+                    cos_zenith_col=jnp.full(ncol, 0.7))
 
     land_new, T_sfc_col, _ = _step(
         driver._land_ml_state, driver.state.T.data, driver.state.p_s.data,
@@ -186,6 +189,24 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
     # the traced mlcanopy did not need a host int()).
     assert land_new.canopy_state is not None
     assert land_new.canopy_state.mlcanopy is not None
+
+
+def test_effective_cos_zenith_physical(monkeypatch, tmp_path):
+    """The land-tile solar-zenith helper returns cos in [0,1], finite, on both the
+    diurnal (instantaneous) and non-diurnal (daily-mean-effective) branches — the
+    value threaded into the CLM-ML canopy radiation.  No backend needed."""
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    pipe = driver.physics
+    lat = jnp.linspace(-1.4, 1.4, 8)   # radians
+    lon = jnp.linspace(0.0, 6.0, 8)
+    for diurnal in (True, False):
+        pipe.diurnal_cycle = diurnal
+        cz = np.asarray(pipe._effective_cos_zenith(lat, lon, 172.0, 43200.0, 1361.0))
+        assert np.all(np.isfinite(cz)), f"non-finite cos_zenith (diurnal={diurnal})"
+        assert np.all(cz >= 0.0) and np.all(cz <= 1.0), (
+            f"cos_zenith outside [0,1] (diurnal={diurnal}): {cz}")
 
 
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):

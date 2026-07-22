@@ -527,7 +527,7 @@ class PhysicsPipeline:
 
     def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
                                    T, p_s, q_v, u, v, precip_col, dt,
-                                   land_ml_params=None):
+                                   land_ml_params=None, cos_zenith_col=None):
         """Advance the MULTILAYER (Richards) land tile one radiation step and return
         ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
 
@@ -546,12 +546,18 @@ class PhysicsPipeline:
         rho = p_s_col / (constants.R_d * T_air)
         precip = precip_col if precip_col is not None else jnp.zeros_like(p_s_col)
         ones = jnp.ones_like(p_s_col)
+        # Solar zenith: CLM-ML consumes cos_zenith as its beam-extinction geometry
+        # (kb = 0.5/cosz), so it needs the REAL diurnal / latitudinal value threaded
+        # from the radiation core (``cos_zenith_col``).  The two_leaf / simple_seb
+        # tiles pass None here and keep the historical 0.5 placeholder (unchanged —
+        # a shared faithful-zenith upgrade for those is a separate follow-up).
+        _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
         forcing = AtmToSurface(
             sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
             p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
-            cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
+            cos_zenith=_cosz, co2_ppmv=412.0 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
         # CLM-ML needs a CONCRETE dt to resolve its static ML sub-step count
@@ -1766,6 +1772,32 @@ class PhysicsPipeline:
             return s_0 * eccf * jnp.maximum(cos_sza, 0.0)
         return daily_mean_insolation(lat, day_of_year, s_0, orbit=orbit)
 
+    def _effective_cos_zenith(self, lat, lon, day_of_year, seconds_of_day, s_0):
+        """Effective cos(solar zenith) in [0, 1] per grid cell for a surface canopy.
+
+        The SAME value the radiation solar path uses (mirrors the ``_mu`` block in
+        ``compute_radiation_core``'s dynamic-albedo branch): the INSTANTANEOUS
+        cos(SZA) under a diurnal cycle, else the daytime-effective daily-mean cosine
+        ``mu = Q_day / (S_0 * f_day)``.  The CLM-ML canopy consumes this as its solar
+        zenith (beam extinction ``kb = 0.5/cosz``), so it sees the real diurnal /
+        latitudinal sun instead of the fixed 0.5 placeholder.  Returned on the native
+        grid (lat/lon shape); the caller flattens to column space.
+        """
+        from legoesm.atmosphere.physics.radiation.solar import (
+            cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+            earth_sun_distance_factor,
+        )
+        _orbit = getattr(self, "orbit", None)
+        if self.diurnal_cycle:
+            _hour = seconds_of_day / 3600.0
+            return jnp.maximum(
+                cos_zenith_angle(lat, lon, day_of_year, _hour, orbit=_orbit), 0.0)
+        _eccf = (earth_sun_distance_factor(day_of_year, _orbit)
+                 if _orbit is not None else 1.0)
+        _q_day = daily_mean_insolation(lat, day_of_year, s_0, orbit=_orbit) / _eccf
+        _f_day = daylight_fraction(lat, day_of_year, orbit=_orbit)
+        return jnp.clip(_q_day / (s_0 * jnp.maximum(_f_day, 1.0e-6)), 0.0, 1.0)
+
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
@@ -2124,9 +2156,18 @@ class PhysicsPipeline:
             # (column space) + the lagged precip; the slab T_land rides through.
             precip_col = (ad.flatten_2d(conv_precip)
                           if conv_precip is not None else None)
+            # CLM-ML: thread the REAL per-column solar zenith (same value the
+            # radiation solar path uses) so the canopy radiation sees the diurnal /
+            # latitudinal sun, not the 0.5 placeholder.  Only for clm_ml — two_leaf
+            # / simple_seb keep 0.5 (unchanged).  lat/lon/day/s_0 are in scope here.
+            _cosz_col = None
+            if self.clm_ml_grid_info is not None:
+                _cosz_col = ad.flatten_2d(self._effective_cos_zenith(
+                    lat, lon, day_of_year, seconds_of_day, s_0)).reshape(-1)
             land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
-                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad)
+                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad,
+                cos_zenith_col=_cosz_col)
             # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
             # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
             # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
