@@ -79,12 +79,22 @@ _EPS_POW = 1.0e-6
 __param_spec__ = {
     "InterceptionConfig": {
         "scheme_key": "land.canopy.interception",
+        "excluded": {
+            # CLM5 interception efficiency defaults to 1.0 — the physical
+            # fraction CEILING. A sigmoid tunable needs its default STRICTLY
+            # interior to (lo, hi<=1) to round-trip through the collector's
+            # logit inverse, which a default of exactly 1.0 cannot satisfy (and
+            # hi>1 is an invalid fraction domain). So it is fixed (tier 0) at the
+            # CLM5 reference rather than made a downward-only sigmoid knob.
+            "interception_fraction": "CLM5 interception efficiency = 1.0, the "
+                                     "physical fraction ceiling; not a well-posed "
+                                     "sigmoid tunable (default on the bound).",
+        },
         "params": {
-            # CLM5 canopy hydrology closures — all per-site tunable (tier 2),
-            # bounds interior to the physical range so they round-trip through
-            # the trainable collector's transform inverse.
+            # CLM5 canopy hydrology closures — per-site tunable (tier 2), bounds
+            # interior to the physical range so they round-trip through the
+            # trainable collector's transform inverse.
             "dewmx": {"units": "kg m-2", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 max leaf water per unit plant area (0.1)", "shape": None},
-            "interception_fraction": {"units": "1", "bounds": (0.1, 1.05), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 interception efficiency (1.0)", "shape": None},
             "fwet_exponent": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 wetted-fraction exponent (0.667)", "shape": None},
             "maximum_leaf_wetted_fraction": {"units": "1", "bounds": (0.01, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "canopy_hydrology", "reference": "CLM5 cap on the wet leaf fraction (0.05)", "shape": None},
         },
@@ -95,8 +105,10 @@ __param_spec__ = {
 class InterceptionConfig(NamedTuple):
     """Canopy-water interception parameters (CLM-ML / CLM5 defaults).
 
-    Shared by both canopy schemes so a tuned value applies consistently.  All
-    four are per-site tunable closures (``__param_spec__`` tier 2).
+    Shared by both canopy schemes so a tuned value applies consistently.  Three
+    are per-site tunable closures (``__param_spec__`` tier 2); ``interception_
+    fraction`` is fixed at the CLM5 reference 1.0 (the physical fraction ceiling,
+    not a well-posed sigmoid knob — see ``__param_spec__`` excluded).
     """
     # --- canopy hydrology (CLM5 / Bonan MLCanopyWaterMod) ---
     dewmx: float = 0.1                          # max leaf water [kg m-2 / plant-area]
