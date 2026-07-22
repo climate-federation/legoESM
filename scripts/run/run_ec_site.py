@@ -45,7 +45,11 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
-from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.config import (
+    CLMMLCanopyConfig,
+    VALID_CLM_ML_STOMATAL_MODELS,
+    VALID_CLM_ML_TURBULENCE_SCHEMES,
+)
 
 # Stem area index supplied to the CLM-ML multilayer canopy [m2/m2].  The EC
 # driver carries LAI only (the two-leaf canopy has no stem-area term), so the
@@ -98,6 +102,7 @@ _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 # far deeper.  These are the per-site values validated against the FLUXNET fluxes.
 EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
     "US-MMS": {"z_ref": 46.0, "root_depth": 2.0},                     # deep loam, DBF
+    "DE-Hai": {"z_ref": 43.5, "root_depth": 1.5},                     # tall DBF (hc~33 m)
     "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
     "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte oak
     "US-Var": {"z_ref": 2.0,  "root_depth": 1.0},                     # shallow annual grass
@@ -124,7 +129,9 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
                        soil_evap_resistance_exp: float = 2.0,
                        root_depth: float = 1.0,
                        z_ref: float = 10.0,
-                       texture: tuple[float, float] | None = None
+                       texture: tuple[float, float] | None = None,
+                       interception: bool = False,
+                       plant_wilting_point: float | None = None
                        ) -> MultiLayerLandConfig:
     """Assemble the multilayer land config for the offline EC-site run.
 
@@ -139,6 +146,13 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     kw = dict(surface_scheme=canopy_config,
               soil_evap_resistance_exp=soil_evap_resistance_exp,
               root_depth=root_depth, z_ref=z_ref)
+    if interception:
+        from legoesm.land.canopy.interception import InterceptionConfig
+        kw["interception"] = InterceptionConfig()
+    if plant_wilting_point is not None:
+        # Separate PLANT wilting point (transpiration extraction) from the soil
+        # wilting point — deep-rooted vegetation extracts below the soil cutoff.
+        kw["theta_wp_plant"] = float(plant_wilting_point)
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
@@ -294,7 +308,8 @@ def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
                        nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
-                       stomatal_m_scale: float = 1.0):
+                       stomatal_m_scale: float = 1.0,
+                       vcmax_scale: float = 1.0):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
@@ -333,6 +348,19 @@ def _prognostic_fluxes(d: ECSiteDriver,
         d = d._replace(canopy_params=d.canopy_params._replace(
             m_C3=d.canopy_params.m_C3 * stomatal_m_scale,
             m_C4=d.canopy_params.m_C4 * stomatal_m_scale))
+
+    # Vcmax25 sensitivity (the GPP knob): scale the two-leaf maximum carboxylation
+    # rate (C3+C4), which sets the Rubisco-limited assimilation and hence GPP.
+    # Higher Vcmax => more GPP (and, via the Ball-Berry coupling A->gs, some extra
+    # transpiration).  This is the primary photosynthetic-capacity lever, tuned
+    # separately from gs (--stomatal-m-scale) and ET (--soil-evap-resistance-exp).
+    # Two-leaf only: CLM-ML's Vcmax lives in MLpftcon and its jax injection is
+    # gated behind the Medlyn stomatal model (default is WUE), so it is not a
+    # clean single-flag knob here.
+    if vcmax_scale != 1.0 and not is_clmml:
+        d = d._replace(canopy_params=d.canopy_params._replace(
+            Vcmax25_C3_leaf=d.canopy_params.Vcmax25_C3_leaf * vcmax_scale,
+            Vcmax25_C4_leaf=d.canopy_params.Vcmax25_C4_leaf * vcmax_scale))
 
     # --- initial soil state from the driver's first finite soil obs ---
     # Initialise from the OBSERVED volumetric soil moisture directly (theta_soil
@@ -575,7 +603,11 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              texture_csv: str = _DEFAULT_TEXTURE_CSV,
              canopy: str = "two_leaf", clm_pft: int = 7,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
-             stomatal_m_scale: float = 1.0) -> dict:
+             stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
+             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
+             interception: bool = False, clmml_stomatal: str = "wue",
+             clmml_vcmax25: float | None = None,
+             plant_wilting_point: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -596,6 +628,23 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         start_step, max_steps, _yr = _best_year_slice(driver_nc, d)
         print(f"  select-best-year: {_yr} (steps {start_step}..{start_step + max_steps}, "
               f"{max_steps} of {int(d.forcing.T_lowest.shape[0])})")
+    # Soil-moisture spin-up: prepend ``spinup_steps`` before the evaluation window
+    # so the prognostic soil column reaches a realistic state before scoring.
+    # Essential at seasonally-dry (Mediterranean) sites: a mid-summer cold start
+    # initialises the whole column at the dry observed surface moisture, which for
+    # a phreatophyte (US-Ton oaks tapping deep winter-recharged water) is at/below
+    # wilting -> root-zone stress w_frac_rz = 0 -> Vcmax * 0 -> GPP identically
+    # zero.  Starting earlier fills the deep root zone from the wet season and the
+    # summer GPP recovers.  The spin-up steps run but are trimmed from the scored
+    # output (prognostic only; diagnostic mode has no carried soil state).
+    n_spinup = 0
+    if spinup_steps > 0 and mode == "prognostic":
+        n_spinup = min(spinup_steps, start_step)
+        start_step -= n_spinup
+        if max_steps is not None:
+            max_steps += n_spinup
+        print(f"  spin-up: {n_spinup} steps before the evaluation window "
+              f"(trimmed from scoring)")
     if max_steps is not None or start_step:
         n = int(d.forcing.T_lowest.shape[0])
         k = (n - start_step) if max_steps is None else max_steps
@@ -619,14 +668,23 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # sub-step from dtime_ml_target_s (300 s), so an hourly EC driver
         # sub-cycles instead of running the stiff canopy-air storage term at
         # the host step (PR #1240).
-        canopy_config = CLMMLCanopyConfig(pft_clm=clm_pft).validate()
+        # turbulence_scheme selects the canopy-airspace scheme: "rsl_bonan"
+        # (Harman-Finnigan roughness sublayer, default) or "most" (Monin-Obukhov
+        # only).  RSL's within-canopy wind profile takes log((z-d)/(ztop-d)),
+        # which goes to a math-domain error for a very tall canopy where a layer
+        # height drops below the displacement height — "most" avoids that.
+        canopy_config = CLMMLCanopyConfig(
+            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence,
+            stomatal_model=clmml_stomatal,
+            vcmax25_override=clmml_vcmax25).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
         canopy_config, soil, bottom_bc, soil_depth_m,
         k_sat_decay_m=k_sat_decay_m,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
-        root_depth=root_depth, z_ref=z_ref, texture=texture)
+        root_depth=root_depth, z_ref=z_ref, texture=texture,
+        interception=interception, plant_wilting_point=plant_wilting_point)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -635,7 +693,19 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale)
+            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale,
+            vcmax_scale=vcmax_scale)
+    # Trim the spin-up window from BOTH the model arrays and the driver ``d``
+    # (obs/valid/provenance) so scoring, output and provenance all cover the
+    # evaluation window only, while the carried soil state that reaches it was
+    # spun up.  Keep the two in lock-step so score_valid still aligns.
+    if n_spinup > 0:
+        _tr = lambda a: None if a is None else a[n_spinup:]
+        gpp_gC, le, h = _tr(gpp_gC), _tr(le), _tr(h)
+        reverted, ts_soil = _tr(reverted), _tr(ts_soil)
+        swc_soil, ustar = _tr(swc_soil), _tr(ustar)
+        d = _slice_driver(d, n_spinup, int(d.forcing.T_lowest.shape[0]) - n_spinup)
+
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
@@ -677,6 +747,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     extra_attrs = {"canopy": canopy}
     if canopy == "clmml":
         extra_attrs.update(clm_pft=clm_pft, clmml_sai=float(clmml_sai),
+                           clmml_turbulence=clmml_turbulence,
                            nlevmlcan=canopy_config.nlevmlcan,
                            nlayer_above=canopy_config.nlayer_above)
     path = _write_output(out_dir, d, model,
@@ -758,12 +829,29 @@ def main() -> int:
     ap.add_argument("--clm-pft", type=int, default=7,
                     help="CLM PFT index for --canopy clmml (7 = broadleaf "
                          "deciduous temperate tree; 13 = C3 grass)")
+    ap.add_argument("--clmml-turbulence", default="rsl_bonan",
+                    choices=list(VALID_CLM_ML_TURBULENCE_SCHEMES),
+                    help="CLM-ML canopy-airspace turbulence scheme: rsl_bonan "
+                         "(roughness sublayer, default) or most (Monin-Obukhov; "
+                         "avoids the RSL wind-profile domain error on very tall "
+                         "canopies)")
+    ap.add_argument("--clmml-stomatal", default="wue",
+                    choices=list(VALID_CLM_ML_STOMATAL_MODELS),
+                    help="CLM-ML leaf stomatal model: wue (default), medlyn, or "
+                         "ball_berry. medlyn activates the per-site Vcmax "
+                         "injection path (--clmml-vcmax25)")
+    ap.add_argument("--clmml-vcmax25", type=float, default=None,
+                    help="per-site CLM-ML Vcmax25 [umol/m2/s], beyond the global "
+                         "PFT table; requires --clmml-stomatal medlyn")
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
     ap.add_argument("--stomatal-m-scale", type=float, default=1.0,
                     help="scale the two-leaf Ball-Berry slope m (transpiration "
                          "per assimilation); >1 => more LE, less H at fixed GPP")
+    ap.add_argument("--vcmax-scale", type=float, default=1.0,
+                    help="scale the two-leaf Vcmax25 (photosynthetic capacity); "
+                         ">1 => more GPP. The GPP knob, tuned separately from gs")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -772,6 +860,21 @@ def main() -> int:
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
                          "than the full multi-decade record")
+    ap.add_argument("--plant-wilting-point", type=float, default=None,
+                    help="PLANT wilting point [m3/m3] for root-zone transpiration, "
+                         "SEPARATE from the soil wilting point; below the soil "
+                         "value = deep-rooted extraction (e.g. phreatophytes)")
+    ap.add_argument("--canopy-interception", dest="interception",
+                    action="store_true", default=False,
+                    help="enable the shared canopy-water interception scheme "
+                         "(two-leaf path): rain is intercepted, drips as "
+                         "throughfall, and the wet leaf evaporates from the store")
+    ap.add_argument("--spinup-steps", type=int, default=0,
+                    help="prognostic soil spin-up: run this many steps before the "
+                         "evaluation window (trimmed from scoring) so the soil "
+                         "column reaches a realistic state. Needed at seasonally-"
+                         "dry sites (e.g. US-Ton) where a mid-summer cold start "
+                         "puts the root zone below wilting and zeros GPP")
     args = ap.parse_args()
     for nc in args.driver_nc:
         run_site(nc, args.mode, args.out, args.chunk,
@@ -785,7 +888,14 @@ def main() -> int:
                  texture_csv=args.texture_csv,
                  canopy=args.canopy, clm_pft=args.clm_pft,
                  clmml_sai=args.clmml_sai, u_min=args.u_min,
-                 stomatal_m_scale=args.stomatal_m_scale)
+                 stomatal_m_scale=args.stomatal_m_scale,
+                 vcmax_scale=args.vcmax_scale,
+                 clmml_turbulence=args.clmml_turbulence,
+                 clmml_stomatal=args.clmml_stomatal,
+                 clmml_vcmax25=args.clmml_vcmax25,
+                 plant_wilting_point=args.plant_wilting_point,
+                 spinup_steps=args.spinup_steps,
+                 interception=args.interception)
     return 0
 
 

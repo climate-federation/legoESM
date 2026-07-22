@@ -110,6 +110,85 @@ class TestDifferentiableGridRemap(unittest.TestCase):
         self.assertTrue(make_grid_remapper(a, b).identity)
 
 
+class TestGaussianAtmToLatlonOceanRemap(unittest.TestCase):
+    """A spectral (Gaussian) atmosphere drives a distinct lat-lon 3-D ocean.
+
+    The enabling geometry is ``GaussianGrid.lat_v``: quadrature-consistent
+    latitude cell edges derived from the Gauss weights, so the SAME conservative
+    regular-lat-lon overlap remap the cube atm uses handles the (non-uniform in
+    latitude) Gaussian grid.  Proves the edges are exact and the resulting remap
+    conserves the global flux integral + preserves a constant.
+    """
+
+    def setUp(self):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.latlon import create_latlon_grid
+        self.atm = create_gaussian_grid(n_max=21)          # n_lat=34, n_lon=68
+        self.ocean = create_latlon_grid(n_lat=24, n_lon=48)
+
+    def test_lat_v_is_exact_quadrature_edges(self):
+        """lat_v: (n_lat+1,), pole-clamped, monotone, cell areas == grid_area."""
+        g = self.atm
+        latv = np.asarray(g.lat_v, dtype=np.float64)
+        self.assertEqual(latv.shape, (int(g.n_lat) + 1,))
+        self.assertAlmostEqual(latv[0], -np.pi / 2, places=12)
+        self.assertAlmostEqual(latv[-1], np.pi / 2, places=12)
+        self.assertTrue(np.all(np.diff(latv) > 0))              # strictly S->N
+        lat_c = np.asarray(g.lat, dtype=np.float64)
+        self.assertTrue(np.all(latv[:-1] < lat_c) and np.all(lat_c < latv[1:]))
+        # Cell area from the edges == the grid's own Gaussian-weight area.
+        dlon = 2.0 * np.pi / int(g.n_lon)
+        area_edges = float(g.radius) ** 2 * dlon * (
+            np.sin(latv[1:]) - np.sin(latv[:-1]))
+        grid_area_col = np.asarray(g.grid_area, dtype=np.float64)[:, 0]
+        self.assertTrue(np.allclose(area_edges, grid_area_col, rtol=1e-12))
+
+    def test_gaussian_atm_is_regular_latlon_remap(self):
+        """make_grid_remapper hits the regular-lat-lon branch (not the error)."""
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        gr = make_grid_remapper(self.atm, self.ocean)
+        self.assertFalse(gr.identity)
+        flux_atm = jnp.asarray(
+            np.random.RandomState(0).rand(int(self.atm.n_lat), int(self.atm.n_lon)))
+        flux_ocean = remap_field(flux_atm, gr.a2o)
+        self.assertEqual(
+            flux_ocean.shape, (int(self.ocean.n_lat), int(self.ocean.n_lon)))
+
+    def test_flux_conservation_gaussian_to_latlon(self):
+        """Global area-integral of a flux is preserved by the atm->ocean remap."""
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        gr = make_grid_remapper(self.atm, self.ocean)
+        flux_atm = jnp.asarray(
+            np.random.RandomState(1).rand(int(self.atm.n_lat), int(self.atm.n_lon)))
+        flux_ocean = remap_field(flux_atm, gr.a2o)
+        int_atm = float(jnp.sum(flux_atm * jnp.asarray(_kernel_cell_area(self.atm))))
+        int_ocean = float(
+            jnp.sum(flux_ocean * jnp.asarray(_kernel_cell_area(self.ocean))))
+        self.assertAlmostEqual(int_atm, int_ocean, delta=abs(int_atm) * 1e-10)
+
+    def test_constant_field_preserved_gaussian_to_latlon(self):
+        """A constant flux maps to the same constant (partition of unity)."""
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        gr = make_grid_remapper(self.atm, self.ocean)
+        const = jnp.full((int(self.atm.n_lat), int(self.atm.n_lon)), 3.5)
+        out = remap_field(const, gr.a2o)
+        self.assertTrue(jnp.allclose(out, 3.5, atol=1e-10))
+
+    def test_differentiable_ocean_to_gaussian_atm(self):
+        """jax.grad of a Gaussian-atm-grid loss flows back to the ocean field."""
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        gr = make_grid_remapper(self.atm, self.ocean)
+        sst_ocean = jnp.asarray(
+            np.random.RandomState(2).rand(int(self.ocean.n_lat), int(self.ocean.n_lon)))
+
+        def loss(sst):
+            return jnp.sum(remap_field(sst, gr.o2a) ** 2)
+
+        g = jax.grad(loss)(sst_ocean)
+        self.assertEqual(g.shape, sst_ocean.shape)
+        self.assertTrue(jnp.all(jnp.isfinite(g)) and not jnp.allclose(g, 0.0))
+
+
 class _FakeNonLatLonGrid:
     """Duck-typed grid lacking lat-lon geometry (stands in for cube/MPAS)."""
     def __init__(self, shape):
@@ -139,6 +218,82 @@ class TestGridRemapperDispatch(unittest.TestCase):
         msg = str(cm.exception).lower()
         self.assertIn("direct", msg)
         self.assertIn("lat-lon", msg)  # message warns NOT to route through lat-lon
+
+    def test_cube_latlon_cross_grid_conservative(self):
+        """A REAL cubed-sphere atm x lat-lon ocean is now coupled by a
+        conservative cross-grid remap (no NotImplementedError): the remapper is
+        non-identity, constant-preserving both directions, and cube->latlon
+        conserves the global area integral (heat/freshwater budgets)."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+
+        cube = create_cubed_sphere(24)
+        ocean = create_latlon_grid(48)
+        gr = make_grid_remapper(cube, ocean)
+        self.assertFalse(gr.identity)
+        self.assertEqual(tuple(gr.a2o.dst_shape), (ocean.n_lat, ocean.n_lon))
+        self.assertEqual(tuple(gr.o2a.dst_shape), tuple(cube.grid_shape_2d))
+
+        # Constant preservation (partition of unity), both directions.
+        on_ll = remap_field(jnp.ones(cube.grid_shape_2d), gr.a2o)   # cube->latlon
+        self.assertTrue(np.allclose(np.asarray(on_ll), 1.0, atol=1e-9))
+        on_cube = remap_field(jnp.ones((ocean.n_lat, ocean.n_lon)), gr.o2a)  # latlon->cube
+        self.assertTrue(np.allclose(np.asarray(on_cube), 1.0, atol=1e-6))
+
+        # Global heat-integral conservation cube->latlon (first-order, w.r.t. the
+        # grids' own areas — matches the tripole/MPAS coupling tolerance).
+        rng = np.random.default_rng(0)
+        f_cube = jnp.asarray(rng.uniform(0.0, 300.0, cube.grid_shape_2d))
+        f_ll = np.asarray(remap_field(f_cube, gr.a2o))
+        int_cube = float((np.asarray(f_cube) * np.asarray(cube.grid_area)).sum())
+        int_ll = float((f_ll * np.asarray(ocean.area)).sum())
+        self.assertLess(abs(int_ll - int_cube) / abs(int_cube), 1e-3)
+
+    def test_cube_latlon_conservative_when_cube_finer(self):
+        """The coverage fallback (cube FINER than the lat-lon ocean) must stay
+        latlon->cube-ONLY: it must not pollute the cube->latlon normalisation
+        (codex — the fallback's synthetic entry would corrupt the destination
+        area otherwise).  Constant-preserving both ways + first-order heat
+        conservation with a fine cube over a coarse lat-lon ocean."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+
+        cube = create_cubed_sphere(48)     # fine cube
+        ocean = create_latlon_grid(24)     # coarse lat-lon ocean (fallback fires)
+        gr = make_grid_remapper(cube, ocean)
+        on_ll = remap_field(jnp.ones(cube.grid_shape_2d), gr.a2o)
+        on_cube = remap_field(jnp.ones((ocean.n_lat, ocean.n_lon)), gr.o2a)
+        self.assertTrue(np.allclose(np.asarray(on_ll), 1.0, atol=1e-9))
+        self.assertTrue(np.allclose(np.asarray(on_cube), 1.0, atol=1e-6))
+        rng = np.random.default_rng(1)
+        f_cube = jnp.asarray(rng.uniform(0.0, 300.0, cube.grid_shape_2d))
+        f_ll = np.asarray(remap_field(f_cube, gr.a2o))
+        int_cube = float((np.asarray(f_cube) * np.asarray(cube.grid_area)).sum())
+        int_ll = float((f_ll * np.asarray(ocean.area)).sum())
+        # First-order tolerance w.r.t. the grids' OWN areas (which carry the
+        # ~79 ppm cube metric correction) at coarse resolution — a few 1e-3,
+        # matching the tripole/MPAS coupling.  The key fix under test is that
+        # the coverage fallback no longer POLLUTES this (it was ~1e-1 before).
+        self.assertLess(abs(int_ll - int_cube) / abs(int_cube), 3e-3)
+
+    def test_cube_latlon_remap_differentiable(self):
+        """jax.grad flows through the cube<->latlon remap (coupled AD)."""
+        import jax
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+
+        gr = make_grid_remapper(create_cubed_sphere(12), create_latlon_grid(24))
+
+        def loss(f_cube):
+            return jnp.sum(remap_field(f_cube, gr.a2o) ** 2)
+
+        g = jax.grad(loss)(jnp.ones((6, 12, 12)))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
 
 
 class TestRemapSurfaceFields(unittest.TestCase):

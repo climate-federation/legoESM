@@ -29,15 +29,14 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
-    compute_overlap_weights,
     apply_conservative_regrid,
     cell_edges_1d,
+    compute_overlap_weights,
 )
 
 
@@ -58,6 +57,19 @@ def _is_voronoi(grid) -> bool:
         and hasattr(grid, "nEdgesOnCell")
         and hasattr(grid, "xCell")
         and hasattr(grid, "nCells")
+    )
+
+
+def _is_cube(grid) -> bool:
+    """True if ``grid`` is a cubed-sphere grid (duck-typed: a ``(6, n, n)``
+    ``grid_shape_2d`` with stored Cartesian cell centres)."""
+    shp = getattr(grid, "grid_shape_2d", None)
+    return (
+        shp is not None
+        and len(tuple(shp)) == 3
+        and int(tuple(shp)[0]) == 6
+        and hasattr(grid, "x_cart")
+        and not _is_voronoi(grid)
     )
 
 
@@ -143,7 +155,8 @@ def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     )
 
 
-def make_curvilinear_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
+def make_curvilinear_latlon_remapper(
+        src_grid, dst_grid, *, wet_tripole=None) -> ConservativeRegridWeights:
     """Conservative, differentiable remap weights ``src_grid -> dst_grid`` where
     EXACTLY ONE of the two grids is a curvilinear tripole C-grid and the other
     is a regular lat-lon grid.
@@ -155,13 +168,21 @@ def make_curvilinear_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWe
     separable lat-lon path, applied unchanged by ``apply_conservative_regrid``.
     """
     from legoesm.grids.conservative_regrid_curvilinear import (
-        make_regular_to_curvilinear_weights,
         make_curvilinear_to_regular_weights,
+        make_regular_to_curvilinear_weights,
     )
     if _is_regular_latlon(src_grid) and _is_tripole(dst_grid):
+        # a2o (atm FLUX -> tripole ocean): UNMASKED conservative partition-of-unity
+        # weights.  The flux is gated to the wet ocean domain by the open-water
+        # fraction (cross_grid_open_water_fraction) in the driver, which conserves
+        # the flux integral there WITHOUT masking the weights (masking a2o would be
+        # equivalent for the wet cells and would corrupt fraction remaps).
         return make_regular_to_curvilinear_weights(src_grid, dst_grid)
     if _is_tripole(src_grid) and _is_regular_latlon(dst_grid):
-        return make_curvilinear_to_regular_weights(src_grid, dst_grid)
+        # o2a (ocean STATE -> atm): EXCLUDE ocean-grid LAND source cells (H4) so a
+        # coastal atm SST/current never averages the ocean land fill value.
+        return make_curvilinear_to_regular_weights(
+            src_grid, dst_grid, src_wet=wet_tripole)
     raise NotImplementedError(
         "make_curvilinear_latlon_remapper requires exactly one regular lat-lon "
         "grid and one tripole (active-fold) curvilinear grid; got "
@@ -207,7 +228,7 @@ def _grids_equivalent(a, b) -> bool:
     return False
 
 
-def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
+def make_grid_remapper(atm_grid, ocean_grid, *, ocean_wet=None) -> GridRemapper:
     """Construct an atm<->ocean :class:`GridRemapper`, dispatching on grid type.
 
     - Same grid  -> identity (no weights); the default single-grid coupled
@@ -246,7 +267,8 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
     if _is_regular_latlon(atm_grid) and _is_tripole(ocean_grid):
         return GridRemapper(
             a2o=make_curvilinear_latlon_remapper(atm_grid, ocean_grid),
-            o2a=make_curvilinear_latlon_remapper(ocean_grid, atm_grid),
+            o2a=make_curvilinear_latlon_remapper(
+                ocean_grid, atm_grid, wet_tripole=ocean_wet),
             identity=False,
         )
     if _is_tripole(atm_grid) and _is_regular_latlon(ocean_grid):
@@ -256,6 +278,32 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
         return GridRemapper(
             a2o=make_curvilinear_latlon_remapper(atm_grid, ocean_grid),
             o2a=make_curvilinear_latlon_remapper(ocean_grid, atm_grid),
+            identity=False,
+        )
+    # Cross-family cubed-sphere ATM <-> regular lat-lon OCEAN (a cube/spectral
+    # atmosphere driving a lat-lon 3-D ocean).  First-order conservative
+    # spherical-overlap remap (legoesm.grids.conservative_regrid_cubedsphere),
+    # constant-preserving + global-integral conserving to quadrature order —
+    # the deferred cross-family coupling.  The cube ocean dycore does not exist,
+    # so only cube-atm x latlon-ocean (and the symmetric spelling) is wired.
+    if _is_cube(atm_grid) and _is_regular_latlon(ocean_grid):
+        from legoesm.grids.conservative_regrid_cubedsphere import (
+            make_cube_to_latlon_weights,
+            make_latlon_to_cube_weights,
+        )
+        return GridRemapper(
+            a2o=make_cube_to_latlon_weights(atm_grid, ocean_grid),
+            o2a=make_latlon_to_cube_weights(ocean_grid, atm_grid),
+            identity=False,
+        )
+    if _is_regular_latlon(atm_grid) and _is_cube(ocean_grid):
+        from legoesm.grids.conservative_regrid_cubedsphere import (
+            make_cube_to_latlon_weights,
+            make_latlon_to_cube_weights,
+        )
+        return GridRemapper(
+            a2o=make_latlon_to_cube_weights(atm_grid, ocean_grid),
+            o2a=make_cube_to_latlon_weights(ocean_grid, atm_grid),
             identity=False,
         )
     same_family = type(atm_grid) is type(ocean_grid)
@@ -272,6 +320,48 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
             "required (the deferred any-to-any grid-coupling work)."
         )
     )
+
+
+def attach_wet_masks(remapper, atm_grid, ocean_grid, ocean_wet):
+    """Re-bake the cross-grid remap weights with the OCEAN's static wet mask.
+
+    Returns a NEW :class:`GridRemapper` whose ``o2a`` (ocean STATE -> atm) weights
+    EXCLUDE ocean-grid LAND source cells, so a coastal atm SST/current average
+    never ingests the ocean land fill value (H4).  The ``a2o`` (atm FLUX -> ocean)
+    weights are the UNCHANGED conservative partition-of-unity remap: the a2o flux
+    is gated to the ocean's own wet domain by the open-water fraction
+    (``cross_grid_open_water_fraction``) in the driver, which conserves the flux
+    integral over the wet ocean WITHOUT masking the weights (masking a2o would be
+    equivalent for the wet cells and would corrupt fraction remaps).
+
+    ``ocean_wet`` is the ocean-grid wet mask (1 = ocean, 0 = land), STATIC and
+    host-known.  MUST be called AFTER the ocean (and its mask) are initialised --
+    the mask does not exist at the first ``make_grid_remapper`` call.  Identity
+    (shared-grid) remapper -> returned UNCHANGED (byte-identical single-grid run;
+    the traced apply stays a pure ``segment_sum`` in every case).
+    """
+    if remapper is None or remapper.identity:
+        return remapper
+    if ocean_wet is None:
+        return remapper
+    return make_grid_remapper(
+        atm_grid, ocean_grid, ocean_wet=np.asarray(ocean_wet))
+
+
+def cross_grid_open_water_fraction(ocean_wet, sic_on_ocean):
+    """Open-water fraction on the OCEAN grid = ocean's OWN wet mask x ice-free.
+
+    ``f_ocean = ocean_wet * (1 - sic_on_ocean)``.  The STATIC land/sea split is
+    the ocean's OWN wet mask (1 = ocean) -- NOT a remapped ATM open-water fraction
+    (which would impose the atmosphere coastline on the ocean grid and leak /
+    starve coastal ocean cells; H3).  Only the DYNAMIC sea-ice concentration is
+    remapped from the atmosphere.  Multiplying every conservative a2o flux by this
+    factor also GATES the flux to the wet ocean domain (land cells -> 0), so the
+    energy / freshwater integral is conserved there.  Differentiable: an
+    elementwise multiply of traced fields by the static wet mask.
+    """
+    sic = jnp.clip(sic_on_ocean, 0.0, 1.0)
+    return jnp.asarray(ocean_wet, dtype=sic.dtype) * (1.0 - sic)
 
 
 def remap_field(field, weights: ConservativeRegridWeights | None):

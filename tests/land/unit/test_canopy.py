@@ -26,7 +26,7 @@ except ImportError:
 
 clm_ml_available = True
 try:
-    import multilayer_canopy  # noqa: F401 – just test import
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy  # noqa: F401 – just test import
 except ImportError:
     clm_ml_available = False
 
@@ -867,8 +867,8 @@ class TestSolarGeometry(unittest.TestCase):
             _compute_virtual_lon_deg,
             _ensure_clm_initialized,
         )
-        from clm_share.shr_orb_mod import shr_orb_cosz, shr_orb_decl
-        import clm_src_utils.clm_varorb as _varorb
+        from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_cosz, shr_orb_decl
+        import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
         from math import pi
 
         _ensure_clm_initialized()  # sets _varorb.*

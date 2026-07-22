@@ -249,6 +249,77 @@ def test_clmml_requires_prognostic_mode(tmp_path):
                      canopy="clmml")
 
 
+def test_vcmax_scale_raises_gpp(tmp_path):
+    """Scaling Vcmax25 up raises GPP — the photosynthetic-capacity knob."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96)
+    hi = mod.run_site(driver_nc, "prognostic", str(tmp_path / "h"), chunk=96,
+                      vcmax_scale=1.5)
+    assert hi["GPP"]["bias"] > base["GPP"]["bias"]
+
+
+def test_clmml_turbulence_rejects_unknown(tmp_path):
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "o"), chunk=8,
+                     canopy="clmml", clmml_turbulence="bogus")
+
+
+def test_canopy_interception_changes_water_partition(tmp_path):
+    """Enabling the shared interception scheme carries a canopy-water store and
+    re-routes rain (interception loss), so the fluxes differ from the no-
+    interception run and the run stays finite (water-conserving path)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    # the base synthetic driver is rain-free (P=0); interception only acts on
+    # rain, so inject a wet spell (2 mm/step over the first 24 h).
+    d = xr.open_dataset(driver_nc)
+    P = np.zeros(d.sizes["time"]); P[:48] = 2.0
+    d = d.assign(P=("time", P))
+    d.to_netcdf(driver_nc + ".rain"); import os; os.replace(driver_nc + ".rain", driver_nc)
+    mod = _load_driver_module()
+    off = mod.run_site(driver_nc, "prognostic", str(tmp_path / "off"), chunk=96,
+                       canopy="two_leaf")
+    on = mod.run_site(driver_nc, "prognostic", str(tmp_path / "on"), chunk=96,
+                      canopy="two_leaf", interception=True)
+    for flux in ("GPP", "LE", "H"):
+        assert np.isfinite(on[flux]["rmse"])
+    # the synthetic driver has rain, so interception must move at least one flux
+    assert (off["LE"]["bias"] != on["LE"]["bias"]
+            or off["H"]["bias"] != on["H"]["bias"])
+
+
+def test_spinup_steps_trims_to_eval_window(tmp_path):
+    """--spinup-steps runs extra steps before the window but scores only the
+    evaluation window: the output length and metric count match a no-spinup run
+    of the same window, and the spin-up soil state carries into it."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=96)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96,
+                        start_step=48, max_steps=48)
+    spun = mod.run_site(driver_nc, "prognostic", str(tmp_path / "s"), chunk=96,
+                        start_step=48, max_steps=48, spinup_steps=48)
+    # same evaluation window => same scored sample count
+    assert base["GPP"]["n"] == spun["GPP"]["n"]
+    out = xr.open_dataset(pathlib.Path(tmp_path / "s") / "SYN-Test_ec_prognostic.nc")
+    assert out.sizes["time"] == 48          # scored window only, spin-up trimmed
+    # the spun-up soil state differs from the cold start => fluxes are not identical
+    assert base["LE"]["bias"] != spun["LE"]["bias"]
+
+
+def test_de_hai_has_reference_height():
+    """DE-Hai (canopy ~34 m) must have a tower z_ref above its canopy, else the
+    CLM-ML within-canopy wind profile hits a math-domain error."""
+    mod = _load_driver_module()
+    phys = mod.ec_site_physics("DE-Hai")
+    assert phys["z_ref"] > 34.0
+
+
 def test_stomatal_m_scale_raises_transpiration(tmp_path):
     """Scaling the Ball-Berry slope up moves latent heat up / sensible heat down
     (the Bowen-ratio lever) at fixed forcing; m_scale=1 is a no-op."""
@@ -261,3 +332,29 @@ def test_stomatal_m_scale_raises_transpiration(tmp_path):
     # more stomatal opening => more latent, less sensible heat
     assert hi["LE"]["bias"] > base["LE"]["bias"]
     assert hi["H"]["bias"] < base["H"]["bias"]
+
+
+def test_plant_wilting_point_separate_from_soil(tmp_path):
+    """A PLANT wilting point below the soil moisture lets transpiration (and its
+    GPP) continue where a single soil wilting point would shut it off — the
+    separate soil/plant wilting knobs (phreatophyte deep extraction)."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    # dry the synthetic soil below the default wilting point
+    d = xr.open_dataset(driver_nc)
+    d = d.assign(SWC=("time", np.full(d.sizes["time"], 8.0)))   # 0.08 vol
+    d.to_netcdf(driver_nc + ".dry"); import os; os.replace(driver_nc + ".dry", driver_nc)
+    mod = _load_driver_module()
+    hi_wp = mod.run_site(driver_nc, "prognostic", str(tmp_path / "hi"), chunk=96,
+                         canopy="two_leaf")                       # soil wp = plant wp
+    lo_wp = mod.run_site(driver_nc, "prognostic", str(tmp_path / "lo"), chunk=96,
+                         canopy="two_leaf", plant_wilting_point=0.04)
+    # lower plant wilting point => more root-zone availability => more GPP
+    assert lo_wp["GPP"]["bias"] > hi_wp["GPP"]["bias"]
+
+
+def test_config_separates_soil_and_plant_wilting():
+    from legoesm.land.config import MultiLayerLandConfig
+    c = MultiLayerLandConfig(theta_wp=0.15, theta_wp_plant=0.06)
+    assert c.theta_wp == 0.15 and c.theta_wp_plant == 0.06
+    assert MultiLayerLandConfig(theta_wp=0.15).theta_wp_plant is None   # default

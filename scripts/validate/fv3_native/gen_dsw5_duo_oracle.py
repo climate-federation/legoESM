@@ -28,6 +28,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.join(HERE, "..", "..", "..")
 OUT_NPZ = os.path.join(REPO, "tests", "grids", "fixtures",
                        "dsw5_duo_oracle_c12.npz")
+OUT_NPZ_N2 = os.path.join(REPO, "tests", "grids", "fixtures",
+                          "dsw5_duo_oracle_c12_n2.npz")
+# case-8 damping-lane variant: nord=2 (del-6), hord_vt=8, vort damping
+# irrelevant here (d_sw5 has none) — headers consumed by the driver
+N2_HEADERS = b"# nord 2\n# hordvt 8\n# dddmp 0.0\n"
 EXTRACT = os.path.join(HERE, "fv3_dsw5_duo_extract.F90")
 
 _spec = importlib.util.spec_from_file_location(
@@ -43,16 +48,20 @@ _TOKEN2KEY = {"DELPC2": "delpc", "PTC2": "ptc", "WK2": "wk",
               "UB2": "ub", "VB2": "vb"}
 
 
-def _gen(work: str) -> None:
+def _gen(work: str, n2: bool = False) -> None:
     blob, res, ng, dt = serialize_inputs()
+    if n2:
+        blob = N2_HEADERS + blob
     with open(f"{work}/dswcore_input.txt", "wb") as f:
         f.write(blob)
-    print(f"gen: dswcore_input.txt written (res={res} ng={ng} dt={dt}); "
-          f"sha256 {hashlib.sha256(blob).hexdigest()}")
+    print(f"gen: dswcore_input.txt written (res={res} ng={ng} dt={dt} "
+          f"n2={n2}); sha256 {hashlib.sha256(blob).hexdigest()}")
 
 
-def _pack(work: str) -> None:
+def _pack(work: str, n2: bool = False) -> None:
     blob, res, ng, _dt = serialize_inputs()
+    if n2:
+        blob = N2_HEADERS + blob
     on_disk = open(f"{work}/dswcore_input.txt", "rb").read()
     if blob != on_disk:
         raise SystemExit("dswcore_input.txt disagrees with the committed "
@@ -94,7 +103,9 @@ def _pack(work: str) -> None:
         "smag_corner:2451-2537:"
         "5af7d0414112e6fe4f6ec8fefeb16ca888fa06e20b0d1f910e3b2b8120982711")
     np.savez_compressed(
-        OUT_NPZ, **outs, res=res, ng=ng, input_sha256=inp_hash,
+        OUT_NPZ_N2 if n2 else OUT_NPZ,
+        **outs, res=res, ng=ng, input_sha256=inp_hash,
+        nord=(2 if n2 else 1), hord_vt=(8 if n2 else 6),
         dsw5_extract_sha256=ext_hash, auth_block_sha256=auth_shas,
         input_lineage="COMMITTED dswcore_input.npz serialised (no "
         "regeneration); TRANSLATION CERTIFICATE, single-face: "
@@ -113,7 +124,9 @@ if __name__ == "__main__":
     import sys
 
     work = sys.argv[1]
-    if len(sys.argv) > 2 and sys.argv[2] == "--pack":
-        _pack(work)
+    flags = set(sys.argv[2:])
+    n2 = "--n2" in flags
+    if "--pack" in flags:
+        _pack(work, n2=n2)
     else:
-        _gen(work)
+        _gen(work, n2=n2)

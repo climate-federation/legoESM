@@ -167,12 +167,13 @@ class TestGHG:
         assert abs(r0["cfc11_pptv"] - 160.0) < 1e-4
         assert abs(r0["cfc12_pptv"] - 300.0) < 1e-4
 
-        # At day 365.25 → year 1980.0
-        r1 = get_ghg_at_time(cfg, day=365.25)
+        # At day 365 → year 1980.0 (noleap model clock, day/365.0 —
+        # matches the experiment-transient override; 2026-07-21 audit)
+        r1 = get_ghg_at_time(cfg, day=365.0)
         assert abs(r1["co2_ppmv"] - 338.7) < 1e-4
 
-        # Interpolated at day 365.25/2 → year 1979.5
-        r_mid = get_ghg_at_time(cfg, day=365.25 / 2)
+        # Interpolated at day 365/2 → year 1979.5
+        r_mid = get_ghg_at_time(cfg, day=365.0 / 2)
         expected_co2_mid = (336.8 + 338.7) / 2
         assert abs(r_mid["co2_ppmv"] - expected_co2_mid) < 0.1
 

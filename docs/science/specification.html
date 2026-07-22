@@ -2181,7 +2181,7 @@ class MultiLayerLandState(NamedTuple):
 <p>Each supports <code>source="constant"</code> (default) or <code>source="file"</code> (time-varying from NetCDF). Combined via <code>ExternalForcingConfig</code>.</p>
 <p><strong>File-based interpolation</strong> (v3.4):
 - <code>_load_nc_timeseries(path, varnames)</code>: LRU-cached NetCDF loading for 1-D time series (GHG, TSI). Linear interpolation with edge clamping.
-- <code>_load_nc_monthly_zonal(path, varname)</code>: LRU-cached loading for monthly zonal-mean fields (ozone, aerosol). Cyclic interpolation with period 365.25 days.
+- <code>_load_nc_monthly_zonal(path, varname)</code>: LRU-cached loading for monthly zonal-mean fields (ozone, aerosol). Cyclic interpolation with period 365.0 days (noleap model clock; 2026-07-21).
 - GHG file format: <code>time</code> dimension + <code>co2_ppmv</code>, <code>ch4_ppbv</code>, <code>n2o_ppbv</code> variables.
 - TSI file format: <code>time</code> dimension + <code>tsi</code> variable.
 - Ozone/aerosol file format: <code>time</code> (12 months) × <code>lat</code> dimensions + <code>ozone</code>/<code>aod</code> variable.</p>

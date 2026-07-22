@@ -76,6 +76,10 @@ ifs-source/
 # Exception: SCM jax_scm-oracle benchmark NetCDFs (committed asset; see
 # scripts/run_jax_scm_oracle.py + scripts/setup_jax_scm_oracle.sh).
 !tests/validation/scm_oracle/*.nc
+# Exception: the vendored CLM-ML-JAX RSL psihat look-up table — committed MODEL
+# DATA (~187 KB), a required input the canopy turbulence reads, not a runtime
+# output.  Ships with the land package so legoESM needs no external clm-ml-jax.
+!packages/land/legoesm/land/canopy/clm_ml_backend/multilayer_canopy/data/*.nc
 # `!src/legoesm/ml/data/` is the minimum un-ignore needed for git to
 # descend into the directory (since `data/` above ignores it).  That
 # ALONE would allow arbitrary non-`.py` files in.  Re-ignore

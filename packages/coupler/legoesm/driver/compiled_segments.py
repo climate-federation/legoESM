@@ -525,6 +525,41 @@ def unpack_carry(carry, state_template):
             carry.shflx_accum, carry.lhflx_accum)
 
 
+def segment_accum_to_rate(accum, seg_steps: int, dt: float):
+    """Convert a segment accumulator to a segment-MEAN rate.
+
+    The ``SegmentCarry`` accumulators (``precip_accum`` [kg/m2],
+    ``shflx_accum``/``lhflx_accum``/``*_toa_accum`` [W/m2 * s]) are built as
+    ``accum += instantaneous_rate * dt`` over exactly *seg_steps* steps, from a
+    zero reseed at every segment start (the ``precip_accum=jnp.zeros(...)``
+    argument in the driver's per-segment ``pack_carry`` call,
+    model_driver.py:8809).  Dividing by the segment duration therefore recovers
+    the time-mean of the instantaneous rate, in the SAME units and with the
+    SAME sign convention as the per-step quantity (precip positive-downward,
+    i.e. INTO the surface, kg/m2/s).
+
+    Budget: ``rate * (seg_steps * dt) == accum`` to round-off, so a consumer
+    integrating this rate over the SAME segment duration re-integrates the
+    quantity the atmosphere produced.  NOTE this closes the interface budget
+    only when the consumer's integration window equals the segment; see the
+    cadence caveat on ``ModelDriver._run_compiled`` (the coupler callback fires
+    on the DIAG cadence, which is a multiple of the segment length whenever
+    ``compute_segment_length`` returns a GCD smaller than ``diag_interval``).
+
+    *seg_steps* and *dt* are static Python scalars (never traced), so the
+    divisor is a weak-typed Python float: dtype-preserving, JIT-invisible and
+    transparent to ``jax.grad``.  The guard below is therefore a Python-level
+    check on static values and never runs under a trace.
+    """
+    duration = seg_steps * dt
+    if not duration > 0:
+        raise ValueError(
+            f"segment duration must be positive, got seg_steps={seg_steps} "
+            f"dt={dt} (duration={duration})"
+        )
+    return accum / duration
+
+
 # ======================================================================
 # Segment boundary computation
 # ======================================================================

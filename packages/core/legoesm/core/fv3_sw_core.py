@@ -1832,17 +1832,21 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     return fx2, fy2
 
 
-def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
+def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid, *,
+                           dxc=None, dyc=None, rarea_c=None):
     """FV3 divergence_corner_duo (sw_core.F90:2345-2447). Corner divergence for nord>0 hyperviscosity.
 
     Cross-velocity correction via cos_sg/sin_sg. Face-boundary zeroing + 0.25 attenuation.
+    ``dxc``/``dyc``/``rarea_c`` overrides: the faithful-ring D5 bundle
+    (bounded-gridstruct geometry) — default None keeps cdgrid's fields
+    byte-identical for every existing caller.
     """
     n = cdgrid.n
     sg = cdgrid.sin_sg
     cg = cdgrid.cos_sg
-    dxc = cdgrid.dxc   # (6, n+1, n) centre-to-centre in x
-    dyc = cdgrid.dyc   # (6, n, n+1) centre-to-centre in y
-    rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
+    dxc = cdgrid.dxc if dxc is None else dxc   # (6, n+1, n)
+    dyc = cdgrid.dyc if dyc is None else dyc   # (6, n, n+1)
+    rarea_c = cdgrid.rarea_c if rarea_c is None else rarea_c
 
     # iter-657/949: mode='edge' here is a numerical no-op (face-boundary zeroing kills the diff)
     ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
@@ -2062,10 +2066,26 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     # built from duogrid tables — silently no-opping on a non-duogrid grid
     # would run different physics than requested.  Static config → fn-entry
     # raise (repo dispatch doctrine).
+    if cross_face_halo not in (False, True, "faithful"):
+        raise ValueError(
+            "d_sw5_corner_divergence: cross_face_halo must be False "
+            "(zero-ring), True (nearest-row attenuated ghost) or "
+            f"'faithful' (certified k2e ring map); got {cross_face_halo!r}")
     if cross_face_halo and cdgrid.base.duogrid is None:
         raise ValueError(
             "d_sw5_corner_divergence: cross_face_halo=True requires a "
             "duogrid grid (create_cubed_sphere(..., use_duogrid=True)).")
+    if (cross_face_halo == "faithful"
+            and getattr(cdgrid.base, "gnomonic_form", "") != "ed"):
+        # codex bgring-r1 P0-2: the certified ring map's k2e/corner
+        # tables are ED-lattice-specific (equiangular tables differ by
+        # up to 0.96 at C12) — a non-ED grid would silently run wrong
+        # weights.
+        raise ValueError(
+            "d_sw5_corner_divergence: cross_face_halo='faithful' is "
+            "certified for the ED gnomonic duogrid only "
+            "(create_fv3_native_cubed_sphere); got gnomonic_form="
+            f"{getattr(cdgrid.base, 'gnomonic_form', None)!r}")
 
     n = cdgrid.n
     cosa_u = cdgrid.cosa_u
@@ -2077,6 +2097,22 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     dyc = cdgrid.dyc          # (6, n, n+1)
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
     da_min_c = jnp.min(1.0 / rarea_c)  # minimum corner area
+    d5_bundle = None
+    if cross_face_halo == "faithful":
+        # codex converge-r1 rank-1: a real ghost ring activates the D5
+        # metric-halo coefficients that are inert under the zero ring —
+        # ring + metrics must be consistent TOGETHER.  The bundle is
+        # the BOUNDED gridstruct's D5 geometry (real native halo
+        # strips) in create layout, built once per n (trace-time
+        # numpy, jnp constants under jit).
+        from legoesm.grids.duogrid_bgrid_ring import build_d5_metric_bundle
+
+        d5_bundle = build_d5_metric_bundle(n)
+        dxc = jnp.asarray(d5_bundle["dxc"], dtype=dxc.dtype)
+        dyc = jnp.asarray(d5_bundle["dyc"], dtype=dyc.dtype)
+        rarea_c = jnp.asarray(d5_bundle["rarea_c"], dtype=rarea_c.dtype)
+        da_min_c = jnp.asarray(d5_bundle["da_min_c"],
+                               dtype=jnp.result_type(rarea_c))
 
     # iter-656: ua/va padding inside nord==0 branch only (not module scope)
     if nord == 0:
@@ -2131,7 +2167,12 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # (truth tier) outranks oracle-matching -> default stays False.
         # (non-duogrid + cross_face_halo=True raises at fn entry.)
         use_cross_face_halo = cross_face_halo
-        divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
+        if d5_bundle is not None:
+            divg_d = _divergence_corner_duo(
+                u_d, v_d, ua, va, cdgrid,
+                dxc=dxc, dyc=dyc, rarea_c=rarea_c)
+        else:
+            divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
         delpc = divg_d
 
         # dd8 (FV3:1811)
@@ -2176,6 +2217,16 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                              mode='edge')  # (6, n+2, n+1)
         divg_v_pad = jnp.pad(divg_v_met, [(0, 0), (0, 0), (1, 1)],
                              mode='edge')  # (6, n+1, n+2)
+        if d5_bundle is not None:
+            # faithful lane: the BOUNDED gridstruct's real divg_u/divg_v
+            # incl the native halo rows (replaces both the edge-pad AND
+            # the cdgrid-interior approximation — codex converge-r1:
+            # these coefficients multiply the ring-activated gradients
+            # directly, so they must be geometry-consistent with it)
+            divg_u_pad = jnp.asarray(d5_bundle["divg_u_pad"],
+                                     dtype=divg_u_pad.dtype)
+            divg_v_pad = jnp.asarray(d5_bundle["divg_v_pad"],
+                                     dtype=divg_v_pad.dtype)
 
         # codex 2026-07-10 (HIGH): the opt-in one-ring re-copy is NOT
         # equivalent to Fortran's shrinking wider-halo in-place evolution for
@@ -2190,7 +2241,23 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                 "zero-ring for nord>=2.")
 
         for _it in range(nord):
-            if use_cross_face_halo:
+            if use_cross_face_halo == "faithful":
+                # 2026-07-20: the FAITHFUL exchange (dyn_core.F90:652
+                # ext_scalar B-grid ghost = mpp copy + k2e cube_rmp
+                # Lagrange ring + corner Lagrange) as a static linear
+                # map extracted by impulse-probing the certified numpy
+                # ext_scalar_sixface(·,"B") — weights ARE the certified
+                # code's output (duogrid_bgrid_ring).  Map is
+                # grid-static: built once per n (disk-cached), applied
+                # as a jit-safe gather/segment-sum.
+                from legoesm.grids.duogrid_bgrid_ring import (
+                    apply_bgrid_ring1,
+                    build_bgrid_ring1_map,
+                )
+
+                ring_map = build_bgrid_ring1_map(n)   # cached, trace-time
+                divg_d_pad = apply_bgrid_ring1(divg_d, ring_map, n)
+            elif use_cross_face_halo:
                 # 2026-07-10 opt-in port (dyn_core.F90:652 ext_scalar B-grid
                 # ghost exchange + sw_core.F90:1737-1787 duogrid nord loop):
                 # the ghost ring holds the neighbour's ATTENUATED divg_d via
@@ -2989,7 +3056,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  damp_v=0.0, nord_v=0,
                  apply_legacy_d_sw4_corner_ke_fix=False,
                  apply_legacy_d_sw5_corner_corrections=False,
-                 apply_fortran_xppm_boundary=False):
+                 apply_fortran_xppm_boundary=False,
+                 cross_face_halo=False):
     """FV3 d_sw1..d_sw6 D-grid full-step (dyn_core.F90).
 
     d_sw1: transport velocity + PPM mass transport. d_sw3: B-grid KE transport.
@@ -3060,7 +3128,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
             u_d, v_d, ua, va, cdgrid, dt,
             d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
             apply_legacy_corner_corrections=(
-                apply_legacy_d_sw5_corner_corrections))
+                apply_legacy_d_sw5_corner_corrections),
+            cross_face_halo=cross_face_halo)
         ke_corner = ke_corner + ke_damping
 
     # iter-944b: REVERTED iter-942 ke_corner sync (FV3 reference has it commented out)
@@ -3195,7 +3264,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
                    damp_v=0.0, nord_v=0,
                    apply_legacy_d_sw4_corner_ke_fix=False,
                    apply_legacy_d_sw5_corner_corrections=False,
-                   apply_fortran_xppm_boundary=False):
+                   apply_fortran_xppm_boundary=False,
+                   cross_face_halo=False):
     """EXPERIMENTAL FV3 forward-backward SW step (unstable at C16; use fv3_sw_tendencies+RK3 for prod).
 
     Phase 1: c_sw (dt/2). Phase 2: p_grad_c (dt/2). Phase 3: _d_sw_native d_sw1-6 chain.
@@ -3237,7 +3307,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
         apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
         apply_legacy_d_sw5_corner_corrections=(
             apply_legacy_d_sw5_corner_corrections),
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        cross_face_halo=cross_face_halo)
 
     # Phase 4: one_grad_p — D-grid BACKWARD pressure-gradient update on the
     # prognostic winds (FV3 dyn_core.F90:2347 one_grad_p / 1529 grad1_p_update).

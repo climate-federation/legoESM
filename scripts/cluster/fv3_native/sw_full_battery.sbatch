@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24G
-#SBATCH --exclude=g161
+#SBATCH --exclude=g161,g203
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_recon/sw_full_%j.log
 
 # Phase-4c campaign EXIT battery: the FULL SW matrix (Williamson 2/5/6,

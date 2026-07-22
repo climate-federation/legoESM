@@ -477,7 +477,7 @@ class TestClmMlGroundLatentWiring(unittest.TestCase):
 
     def test_extract_populates_le_soil_from_lhsoi_soil(self):
         try:
-            import clm_src_main  # noqa: F401
+            import legoesm.land.canopy.clm_ml_backend.clm_src_main  # noqa: F401
         except Exception:
             self.skipTest("clm-ml-jax not importable")
         import types
@@ -520,7 +520,7 @@ class TestClmMlGroundLatentWiring(unittest.TestCase):
         or drops it, this fails loudly instead of the driver reverting to the pre-
         F13 all-L_v-soil routing."""
         try:
-            from multilayer_canopy.MLCanopyFluxesType import create_mlcanopy
+            from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType import create_mlcanopy
         except Exception:
             self.skipTest("clm-ml-jax not importable")
         mlcanopy = create_mlcanopy(1, 1)  # begp=1, ncol=1

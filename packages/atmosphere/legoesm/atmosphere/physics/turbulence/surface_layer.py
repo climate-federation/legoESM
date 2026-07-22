@@ -123,6 +123,8 @@ def compute_surface_fluxes(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_gamma=config.most_unstable_gamma,
+            stable_beta=config.most_stable_beta,
         )
         return tau_x, tau_y, shflx, lhflx, ustar
 
@@ -229,6 +231,8 @@ def _single_tile_flux(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_gamma=config.most_unstable_gamma,
+            stable_beta=config.most_stable_beta,
         )
 
     # Constant neutral coefficients.

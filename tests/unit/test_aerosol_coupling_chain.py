@@ -109,3 +109,86 @@ def test_aerosol_od_to_sw_flux_direct_effect():
     assert jnp.all(sw_sfc_aer < sw_sfc_clear), (
         f"aerosol direct effect missing: {float(sw_sfc_aer[0]):.2f} "
         f"!< {float(sw_sfc_clear[0]):.2f}")
+
+
+def _aerosol_sw_column_kw():
+    """Small 2-column atmosphere with a fixed aerosol OD (per-band SW tests)."""
+    ncol, nlev = 2, 8
+    T = jnp.broadcast_to(jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev))
+    p_half = jnp.broadcast_to(
+        jnp.linspace(1.0e3, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1))
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    return dict(
+        T=T, p_full=p_full, p_half=p_half,
+        sfc_temperature=jnp.full((ncol,), 295.0),
+        q_v=jnp.full((ncol, nlev), 2.0e-3), cos_zenith=jnp.full((ncol,), 0.6),
+        aerosol_optical_depth=jnp.full((ncol, nlev), 0.05),
+    )
+
+
+def test_per_band_aerosol_grey_matches_scalar():
+    """A per-band ssa/g vector of the scalar value == the scalar (grey) path."""
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    base = RRTMGPConfig()
+    scalar = RRTMGP.from_legoesm_config(base)
+    n_bnd = int(scalar.optics_lib.gas_optics_sw.n_bnd)
+    grey = RRTMGP.from_legoesm_config(base._replace(
+        aerosol_ssa_bands=(base.aerosol_ssa,) * n_bnd,
+        aerosol_g_bands=(base.aerosol_g,) * n_bnd))
+    kw = _aerosol_sw_column_kw()
+    f_scalar = scalar.solve_columns(**kw).sw_flux_down[:, -1]
+    f_grey = grey.solve_columns(**kw).sw_flux_down[:, -1]
+    assert jnp.allclose(f_scalar, f_grey, rtol=1e-5, atol=1e-3), (
+        f"grey per-band != scalar: {f_scalar} vs {f_grey}")
+
+
+def test_per_band_more_absorbing_reduces_surface_sw():
+    """A lower per-band ssa (more absorbing aerosol) => less SW at the surface
+    than the (more scattering) scalar default, holding AOD fixed."""
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    base = RRTMGPConfig()
+    default = RRTMGP.from_legoesm_config(base)
+    n_bnd = int(default.optics_lib.gas_optics_sw.n_bnd)
+    absorbing = RRTMGP.from_legoesm_config(
+        base._replace(aerosol_ssa_bands=(0.55,) * n_bnd))  # << 0.93 default
+    kw = _aerosol_sw_column_kw()
+    f_default = default.solve_columns(**kw).sw_flux_down[:, -1]
+    f_absorbing = absorbing.solve_columns(**kw).sw_flux_down[:, -1]
+    assert jnp.all(f_absorbing < f_default), (
+        f"more-absorbing per-band ssa did not reduce surface SW: "
+        f"{f_absorbing} !< {f_default}")
+
+
+def test_per_band_spectral_distribution_matters():
+    """Two per-band ssa vectors with the SAME mean but different spectral
+    distribution give DIFFERENT surface SW (the solar spectrum is unevenly
+    distributed over bands) — proving the selection is genuinely per-band."""
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    base = RRTMGPConfig()
+    n_bnd = int(
+        RRTMGP.from_legoesm_config(base).optics_lib.gas_optics_sw.n_bnd)
+    half = n_bnd // 2
+    # Same mean (0.6/0.9 swapped between the two spectral halves), opposite order.
+    lo_then_hi = (0.6,) * half + (0.9,) * (n_bnd - half)
+    hi_then_lo = (0.9,) * half + (0.6,) * (n_bnd - half)
+    a = RRTMGP.from_legoesm_config(base._replace(aerosol_ssa_bands=lo_then_hi))
+    b = RRTMGP.from_legoesm_config(base._replace(aerosol_ssa_bands=hi_then_lo))
+    kw = _aerosol_sw_column_kw()
+    fa = a.solve_columns(**kw).sw_flux_down[:, -1]
+    fb = b.solve_columns(**kw).sw_flux_down[:, -1]
+    assert not jnp.allclose(fa, fb, rtol=1e-4), (
+        f"per-band ssa reordering had no effect (grey-like): {fa} vs {fb}")
+
+
+def test_per_band_wrong_length_raises():
+    """A per-band vector whose length != the SW band count is a config error."""
+    import pytest
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    solver = RRTMGP.from_legoesm_config(
+        RRTMGPConfig()._replace(aerosol_ssa_bands=(0.9,) * 3))  # not 14
+    with pytest.raises(ValueError, match="aerosol_ssa_bands has length 3"):
+        solver.solve_columns(**_aerosol_sw_column_kw())

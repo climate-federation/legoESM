@@ -45,6 +45,8 @@ The internal geographic lattice uses ``_NG_P1 = 4`` rings exactly like
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     exchange_agrid_scalar_halos,
@@ -53,6 +55,12 @@ from legoesm.grids.fv3_native_gridstruct import (
     exchange_dgrid_vector_halos,
     k2e_remap_halo_rings,
 )
+
+# Vertex-instability diagnostic mode (codex vertex-kill C2), frozen at
+# import: the hot _CornerLagrange.fill must not re-read the environment
+# per call, and a mid-run env change must not alter a running
+# experiment (codex screens-r1 F6).  Default OFF = faithful.
+_CORNER_NEAREST = os.environ.get("LEGOESM_DUO_CORNER_MODE", "") == "nearest"
 
 # upstream constants (fv_duogrid.F90)
 _NG_P1 = 4          # set_bd_ext_duo: dg%bd%ng = 4        (line 146)
@@ -203,7 +211,7 @@ def ext_parity_lonlat_ref(n: int, ng: int, parity: str):
     parity "A": (2i, 2j) nodes, (6, n+2ng, n+2ng);
     parity "B": (2i-1, 2j-1) nodes, (6, n+2ng+1, n+2ng+1).
     """
-    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+    from legoesm.grids.fv3_native_halos import ED_CARTS as _ED_CARTS, ed_line as _ed_line
 
     line = _ed_line(n, 2 * (ng + 2))
     if parity == "A":
@@ -243,7 +251,7 @@ def _row_arc_coords(lon_row, lat_row):
 
 
 def _lagrange_w(xt: float, xs: np.ndarray) -> np.ndarray:
-    from legoesm.grids.fv3_native_halos import _lagrange_coef
+    from legoesm.grids.fv3_native_halos import lagrange_coef as _lagrange_coef
 
     return _lagrange_coef(xt, xs)
 
@@ -336,11 +344,15 @@ class _CornerLagrange:
 
     def fill(self, f: np.ndarray):
         """The nine-slot per-corner sequence [fv_duogrid.F90:1743-1901]."""
+        import os
+
         n = self.n
         lo = self.flo
         ie = n + self.istag                       # last compute slot
         je = n + self.jstag
         is_, js_ = 1, 1
+
+        corner_nearest = _CORNER_NEAREST
 
         def diag(i_t, j_t, d1, d2):
             fa, fb = f.copy(), f.copy()
@@ -382,6 +394,25 @@ class _CornerLagrange:
         diag(is_ - 3, js_ - 3, "X-", "Y-")
         diag(is_ - 2, js_ - 2, "X-", "Y-")
 
+        if corner_nearest:
+            # DIAGNOSTIC (codex vertex-kill C2 screen, NON-FAITHFUL):
+            # after the standard sequence, overwrite ONLY the 3x3
+            # diagonal wedges with the nearest compute-corner value
+            # (upstream fv_duogrid.F90:1715 warns Lagrange
+            # extrapolation is "not highly recommended"; weights reach
+            # ~35 -> overshoot on sharp fields).  Directional strips
+            # keep their standard fills.
+            for (ci, cj, si, sj) in ((ie + 1, je + 1, ie, je),
+                                     (is_ - 1, je + 1, is_, je),
+                                     (ie + 1, js_ - 1, ie, js_),
+                                     (is_ - 1, js_ - 1, is_, js_)):
+                di = 1 if ci > ie else -1
+                dj = 1 if cj > je else -1
+                for a in range(3):
+                    for b in range(3):
+                        f[ci + di * a - lo, cj + dj * b - lo] = \
+                            f[si - lo, sj - lo]
+
 
 # ---------------------------------------------------------------------------
 # context: per-resolution precomputed tables/bases
@@ -403,7 +434,7 @@ def build_ext_context(n: int, ng: int, gs6: list, *,
     - per-stagger corner Lagrange operators on the stepper lattice.
     """
     from legoesm.grids.fv3_native_halos import (
-        _compute_ext_vectors_native,
+        compute_ext_vectors_native as _compute_ext_vectors_native,
     )
 
     amat6 = [center_a_matrix(gs) for gs in gs6]

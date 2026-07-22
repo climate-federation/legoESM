@@ -818,3 +818,10 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
         "uc": UC.a, "vc": VC.a, "ua": UA.a, "va": VA.a,
         "ut": UT.a, "vt": VT.a, "divg_d": divg_a,
     }
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+fa_flux = _fa
