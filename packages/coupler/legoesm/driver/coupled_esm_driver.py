@@ -195,6 +195,14 @@ class CoupledESMDriver:
         self.coupled_cfg = coupled_config or CoupledConfig()
         validate_air_sea_consistency(atm_config, coupler_config)
         self._atm = ModelDriver(atm_config, output_dir=output_dir)
+        # This driver's _build_atm_forcing READS held_sw_net_sfc /
+        # held_lw_net_sfc / seg_precip out of the atmosphere's _carry_aux, so
+        # atmosphere lanes that never write them must refuse to run rather
+        # than silently force the surface with zeros.  The marker (not the
+        # presence of a segment_callback, which is also used by uncoupled
+        # diagnostic samplers) is what ModelDriver._reject_coupled_lane gates
+        # on.
+        self._atm._requires_surface_flux_export = True
         self._coupler_config = coupler_config
         self._ice_config = ice_config
         self._lake_config = lake_config
@@ -256,6 +264,12 @@ class CoupledESMDriver:
         # 3. Coupler (land + ice + lake + ocean tile blending)
         self._init_coupler()
 
+        # 3b. Bake the ocean wet mask into the cross-grid remap weights (H3/H4).
+        #     AFTER _init_coupler so the setup-time from_ocean ocean-fraction remap
+        #     (which area-averages the 0/1 mask and needs the UNMASKED weights)
+        #     already ran; identity (shared-grid) remapper -> no-op.
+        self._attach_ocean_wet_masks()
+
         # 4. Carbon / CO2 tracer (if active)
         self._init_carbon()
 
@@ -275,6 +289,30 @@ class CoupledESMDriver:
         logger.info(f"  ocean_mode={self.coupled_cfg.ocean_mode}, "
                     f"land_mode={self.coupled_cfg.land_mode}, "
                     f"carbon_active={self.coupled_cfg.carbon_active}")
+
+    def _attach_ocean_wet_masks(self):
+        """Bake the ocean wet mask into the cross-grid remap weights (H3/H4).
+
+        Rebuilds the o2a (ocean->atm STATE) weights to EXCLUDE ocean-grid land
+        source cells from every coastal atm SST/current average (H4) -- the land
+        fill value must not bleed into coastal atm cells.  The a2o (atm->ocean
+        FLUX) weights stay the conservative partition-of-unity remap; the
+        open-water fraction that multiplies every a2o flux GATES them to the
+        ocean's own wet domain (H3, _assemble_ocean_forcing), which conserves the
+        flux integral over the wet ocean without delivering to inert land cells.
+
+        No-op for the identity (shared-grid) remapper -> byte-identical
+        single-grid run.  The traced apply stays a pure segment_sum in all cases.
+        """
+        from legoesm.coupler.grid_remap import attach_wet_masks
+        rem = getattr(self, "_grid_remapper", None)
+        if rem is None or rem.identity:
+            return
+        owet = getattr(self, "_ocean_land_mask", None)
+        if owet is None:
+            return
+        self._grid_remapper = attach_wet_masks(
+            rem, self._atm.grid, self._ocean_grid, owet)
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
@@ -1511,8 +1549,29 @@ class CoupledESMDriver:
         T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
         rho_low = p_low / (constants.R_d * T_v_low)
 
-        # Radiation and precipitation from last atmosphere physics
+        # Radiation and precipitation from last atmosphere physics.  STRICT:
+        # a lane that advanced a segment with an ACTIVE radiation /
+        # precipitation source MUST have stashed these.  Silently defaulting a
+        # missing key to zeros forces the surface with sw_down=0 / precip=0
+        # while has_radiation=1 below asserts the forcing is valid -- the
+        # silent wrong-physics fallback dispatch-hardening doctrine forbids.
+        # Gated on the atmosphere config, NOT on bare key presence: zero is the
+        # CORRECT value for a dry run or radiation="none".  Safe to raise
+        # unconditionally here -- _build_atm_forcing has exactly one caller,
+        # _segment_hook (the segment callback itself), so it never runs before
+        # an atmosphere segment has advanced.
+        from legoesm.core.coupling_fields import require_surface_radiation_aux
         aux = getattr(self._atm, '_carry_aux', {})
+        _acfg = self.atm_config
+        require_surface_radiation_aux(
+            aux,
+            radiation_active=(
+                getattr(_acfg, "radiation", "none") not in (None, "none")),
+            precip_active=(
+                getattr(_acfg, "microphysics", "none") not in (None, "none")
+                or getattr(_acfg, "convection", "none") not in (None, "none")),
+            lane=type(self._atm).__name__,
+        )
         sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
         lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
         seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))
@@ -1840,9 +1899,31 @@ class CoupledESMDriver:
         if (_sfc is not None and getattr(_sfc, "ice", None) is not None
                 and _tile_cfg is not None):
             _sic = jnp.clip(_sfc.ice.concentration.data, 0.0, 1.0)
-            f_ocean_atm = compute_tile_fractions(_tile_cfg, _sic).f_ocean
-            f_ocean = (remap_field(f_ocean_atm, _remapper.a2o)
-                       if _remapper is not None else f_ocean_atm)
+            _cross = (_remapper is not None
+                      and getattr(_remapper, "a2o", None) is not None)
+            if _cross:
+                # CROSS-GRID (H3): the STATIC open-water (land/sea) fraction is the
+                # OCEAN's OWN wet mask -- NOT the remapped atm f_water, which would
+                # impose the ATM coastline on the ocean grid and leak / starve
+                # coastal ocean cells.  Only the DYNAMIC sea-ice concentration is
+                # remapped.  Multiplying every a2o flux by f_ocean also GATES the
+                # conservative partition-of-unity flux to the wet ocean domain
+                # (land cells -> 0), so the energy/freshwater integral is conserved
+                # there (sum_d out[d]*area_T[d] ~ sum_s F[s]*A_wet[s]).
+                from legoesm.coupler.grid_remap import (
+                    cross_grid_open_water_fraction,
+                )
+                _owet = getattr(self, "_ocean_land_mask", None)
+                if _owet is None:
+                    raise ValueError(
+                        "cross-grid coupling requires the ocean wet mask "
+                        "(self._ocean_land_mask) for the open-water fraction.")
+                sic_ocean = remap_field(_sic, _remapper.a2o)
+                f_ocean = cross_grid_open_water_fraction(_owet, sic_ocean)
+            else:
+                # Shared-grid identity: the atm f_water IS the ocean wet fraction
+                # (same grid) -- keep the legacy assembly byte-identical.
+                f_ocean = compute_tile_fractions(_tile_cfg, _sic).f_ocean
         else:
             f_ocean = 1.0
         # Open-water fluxes scaled to the ice-free fraction.  Sign conventions

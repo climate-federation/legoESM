@@ -4917,8 +4917,12 @@ class ModelDriver:
             Python loop (useful for debugging or when the compiled path
             is not applicable).
         segment_callback : callable, optional
-            Called at each diagnostic interval boundary with
-            ``(driver, day, dt_segment)`` for coupled-model integration.
+            Called at each SEGMENT boundary with ``(driver, day,
+            dt_segment)`` for coupled-model integration, where
+            ``dt_segment`` (= ``seg_steps * dt``) is the elapsed time since
+            the previous call.  In the compiled lane the segment length is
+            a divisor of the diagnostic interval, so this fires at least as
+            often as diagnostics -- never less (issue F4).
 
         Returns
         -------
@@ -5000,6 +5004,13 @@ class ModelDriver:
                 # segment loop over the validated run_atm_latlon_spmd, distinct
                 # from the jitted compiled_segments scan (zero surgical risk to
                 # the shared hot loop).
+                self._reject_coupled_lane(
+                    "enable_latlon_spmd (lat-band SPMD)",
+                    "a dynamics-only / Held-Suarez or operator-split SPMD "
+                    "envelope",
+                    "Run the coupled case single-device "
+                    "(enable_latlon_spmd=False) so the compiled lane -- which "
+                    "does stash the held fields -- is selected.")
                 status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif (self.config.grid.grid_type == "cubed_sphere"
                     and self._device_config is not None
@@ -5017,6 +5028,12 @@ class ModelDriver:
                 # falls through to the compiled lane below, which routes
                 # dynamics through make_tiled_cc_step
                 # (_maybe_build_tiled_step) instead of this blocked loop.
+                self._reject_coupled_lane(
+                    "sub-face-tiled cube SPMD (6*kt^2 > 6 devices)",
+                    "a blocked tiled / tiled operator-split envelope",
+                    "Run the coupled case on <=6 devices (n_devices<=6, so "
+                    "tiling==(1,1)) -- the compiled lane stashes the held "
+                    "fields; this one does not.")
                 status = self._run_tiled_cube_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
@@ -6899,6 +6916,38 @@ class ModelDriver:
             "lat-major reshape-aware shard (see run_atm_latlon_spmd_segment). "
             "Set those schemes to 'none' or use held_suarez_forcing=True.")
 
+    def _reject_coupled_lane(self, lane: str, envelope: str,
+                             remedy: str) -> None:
+        """Refuse a COUPLED run on an atmosphere lane that never stashes the
+        surface radiation / precipitation the coupler consumes.
+
+        The coupled drivers read ``held_sw_net_sfc`` / ``held_lw_net_sfc`` /
+        ``seg_precip`` out of ``self._carry_aux``.  The lat-lon SPMD and
+        sub-face-tiled cube lanes never write them, so the coupled
+        ocean/land/ice tiles would be forced with ``sw_down=0`` and
+        ``precip=0`` -- perpetual polar night plus an evaporation-only
+        freshwater budget, and SILENTLY: no NaN, no exception, and the
+        reconstructed ``lw_down`` collapses to a plausible ``sigma*T_sfc**4``
+        (the emissivity cancels exactly), so it reads as a spin-up transient
+        rather than a broken boundary condition.  Per dispatch-hardening
+        doctrine this refuses rather than defaulting to zeros.
+
+        Gated on ``_requires_surface_flux_export`` -- the marker a coupled
+        driver sets on its atmosphere -- and NOT on ``_segment_callback``.
+        ``run(segment_callback=...)`` is a GENERAL per-segment hook used by
+        uncoupled diagnostic samplers (the operator-split fold-back parity
+        tests, ``training/run_to_column_mean``, ``ml/physics/data``); refusing
+        those would be a pure regression.  Only a consumer that actually reads
+        ``_carry_aux`` sets the marker.
+        """
+        if not getattr(self, "_requires_surface_flux_export", False):
+            return
+        raise NotImplementedError(
+            f"{lane} runs {envelope} and never stashes held_sw_net_sfc / "
+            "held_lw_net_sfc / seg_precip into _carry_aux, so a coupled run "
+            "would force the ocean/land/ice tiles with sw_down=0 and "
+            f"precip=0 (silent: no NaN, plausible lw_down). {remedy}")
+
     def _run_compiled_latlon_spmd(self, start_step: int = 0,
                                   start_day: float | None = None) -> str:
         """Single-process multi-device lat-band SPMD run for the lat-lon C-grid
@@ -8472,7 +8521,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
-            shard_forcing,
+            shard_forcing, segment_accum_to_rate,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -9017,7 +9066,23 @@ class ModelDriver:
                 "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
-                "seg_precip": seg_precip,
+                # UNITS: the coupler contract (AtmToSurface.precip_total,
+                # packages/core/legoesm/core/coupling_fields.py:18) is a RATE
+                # [kg/m2/s], positive-downward (into the surface) -- the same
+                # convention as the per-step PhysicsOutput.precip that fed the
+                # accumulator.  ``seg_precip`` off the carry is the segment
+                # ACCUMULATION [kg/m2] (compiled_segments.py:1197, docstring
+                # :174-175), so it must be divided by the segment duration here,
+                # at the producer.  Not at the consumer: the other two writers of
+                # this key (``_sfc_diag[2]`` on the lean MPAS path, :5802, and
+                # ``phys_out.precip`` on the per-step path, :9744) already store
+                # rates, so a consumer-side divide would corrupt them.
+                # ``seg_steps`` is the ACTUAL step count (the final segment is
+                # short) and ``DT`` is still the dt this segment ran with -- the
+                # adaptive-dt halving happens later, at :9173.  Under ensembles
+                # ``seg_precip`` is the ensemble mean of the accumulators, which
+                # is still an accumulation, so the divide is valid there too.
+                "seg_precip": segment_accum_to_rate(seg_precip, seg_steps, DT),
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
@@ -9089,11 +9154,40 @@ class ModelDriver:
                 self._write_blowup_state(current_step, day)
                 break
 
+            # Segment callback for coupled integration (e.g. the coupler
+            # step).  Hoisted OUT of the diagnostics block (issue F4): it
+            # must fire on EVERY segment so the coupler is handed the TRUE
+            # elapsed time since the previous coupling call (seg_steps *
+            # DT), not once per diagnostic interval.  When a checkpoint
+            # cadence makes segment_length = GCD(diag, checkpoint) a PROPER
+            # divisor of diag_interval the old diag-gated placement fired
+            # only once per diag interval yet reported a single segment's
+            # duration -- under-integrating the ocean/land/ice by
+            # diag_interval / segment_length and silently dropping the
+            # intervening segments' fluxes.  The coupler-facing carry_aux
+            # (seg_precip RATE, seg_shflx, seg_lhflx, held_* fields) is
+            # rebuilt every segment (see the dict above), so per-segment
+            # firing reads fresh per-segment fluxes.  Stateless +
+            # restart-safe: each segment self-reports its own duration;
+            # coupling runs BEFORE the checkpoint write below, and
+            # segment_length divides checkpoint_interval, so a checkpoint
+            # boundary is always a segment boundary and the post-couple
+            # coupled state is captured.  Placed AFTER the stability check so
+            # the coupler never observes an unstable state.
+            if self._segment_callback is not None:
+                dt_seg = float(seg_steps * DT)
+                self._segment_callback(self, day, dt_seg)
+
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
                 # Convert accumulated quantities to rates over segment duration.
                 _seg_dur = seg_steps * DT
-                seg_precip_rate = seg_precip / _seg_dur
+                # Same conversion the coupler-facing carry_aux entry uses, via
+                # the shared helper (numerically identical to the previous
+                # ``seg_precip / _seg_dur``: _seg_dur IS seg_steps * DT), so the
+                # diagnostic precip rate and the coupled precip rate cannot
+                # silently diverge.
+                seg_precip_rate = segment_accum_to_rate(seg_precip, seg_steps, DT)
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
                 # Segment-MEAN radiative fluxes / T_low (time integrals from
@@ -9182,11 +9276,6 @@ class ModelDriver:
                     )
                     if _seg_max_cfl > 0:
                         logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
-
-                # Segment callback for coupled integration (e.g., coupler step)
-                if self._segment_callback is not None:
-                    dt_seg = float(seg_steps * DT)
-                    self._segment_callback(self, day, dt_seg)
 
                 # Adaptive dt: if CFL exceeds threshold, halve dt and rebuild
                 if _seg_max_cfl > 1.0:
@@ -9764,9 +9853,18 @@ class ModelDriver:
                     "seg_precip": phys_out.precip,
                 })
 
-                # Segment callback for coupled integration
+                # Segment callback for coupled integration.  This lane is a
+                # PER-STEP loop (no segments); the callback fires exactly on
+                # diagnostic boundaries, so the elapsed time since the
+                # previous call is ``diag_interval * DT`` -- NOT a single
+                # step ``DT`` (issue F4: passing DT under-reported the
+                # elapsed coupling interval by the full diag_interval
+                # factor).  This legacy/debug lane (run(compiled=False)) is
+                # not a production coupled path -- CoupledESMDriver uses the
+                # compiled lane -- but the elapsed dt is corrected here for
+                # consistency with the hoisted compiled-lane callback.
                 if self._segment_callback is not None:
-                    self._segment_callback(self, day, DT)
+                    self._segment_callback(self, day, float(diag_interval * DT))
 
             # Checkpoint
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
