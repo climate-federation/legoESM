@@ -485,10 +485,25 @@ def _apply_mps_rev_workaround() -> None:
     touching call sites.  No-op when the plugin lowers ``rev`` correctly
     (future jax-mps releases), so upgrading removes the cost automatically.
     """
+    # Probe OUTSIDE the registration try (codex r2): a probe/import/JAX-init
+    # failure must NOT masquerade as "rev is broken" and fail the run closed.
+    # If the probe itself cannot run, we cannot claim the platform is broken —
+    # let it through (any real breakage still surfaces downstream), and only
+    # fail closed when the probe POSITIVELY reports broken rev but the fix
+    # cannot be installed.
     try:
-        if not _mps_rev_is_broken():
-            return
-        import jax
+        broken = _mps_rev_is_broken()
+    except Exception as exc:  # pragma: no cover - probe is a 2-op jit
+        logger.warning(
+            "jax-mps: could not probe the lax.rev fusion bug (%r); "
+            "assuming the platform is healthy. If cubed-sphere runs blow up "
+            "on mps, set JAX_PLATFORMS=cpu.", exc,
+        )
+        return
+    if not broken:
+        return
+
+    try:
         from jax._src import dispatch as _dispatch  # noqa: F401 (force init)
         from jax._src.interpreters import mlir as _mlir
         from jax import lax as _lax
@@ -515,9 +530,9 @@ def _apply_mps_rev_workaround() -> None:
             "this workaround deactivates itself."
         )
     except Exception as exc:
-        # Fail CLOSED (codex r1 HIGH): the probe said the platform mis-fuses
-        # rev, and the fix could not be installed — continuing would produce
-        # the exact garbage-momentum blowup the workaround exists to prevent.
+        # Fail CLOSED: the probe POSITIVELY proved the platform mis-fuses rev,
+        # and the fix could not be installed — continuing would produce the
+        # exact garbage-momentum blowup the workaround exists to prevent.
         raise RuntimeError(
             "jax-mps native lax.rev is broken on this platform (reversed "
             "operands are silently un-reversed when fused) and the gather-"

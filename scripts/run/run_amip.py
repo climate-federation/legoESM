@@ -1407,6 +1407,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _default_discretization_for_grid(grid_type: str) -> str:
+    """The dycore discretization to use when the user gave a grid but no
+    ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
+    other grid defaults to 'centered'.  Shared by ``_postprocess_args`` and
+    ``build_config_from_args`` so a caller that skips postprocess still resolves
+    a supported (model_type, discretization, grid_type) triple (codex r2)."""
+    if grid_type in ("voronoi", "mpas", "mpas_voronoi", "icosahedral"):
+        return "mpas"
+    return "centered"
+
+
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
@@ -1415,7 +1426,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     if args.grid_type is None:
         args.grid_type = "cubed_sphere"
     if args.discretization is None:
-        args.discretization = "centered"
+        args.discretization = _default_discretization_for_grid(args.grid_type)
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -1671,7 +1682,9 @@ _SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
     "edmf", "emanuel"})
 
 
-def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.Namespace:
+def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
+                                    parser: argparse.ArgumentParser | None = None
+                                    ) -> argparse.Namespace:
     """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
     physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
     are refused deep in setup. When the user did NOT explicitly pick them, fall
@@ -1699,6 +1712,30 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.
     toks = list(argv or [])
     has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
     if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
+        # Reject a silent-no-op: the user did not pick --convection (so we
+        # downgrade to diagnostic sbm), but they DID pass an option that only
+        # the mass-flux convection honors — after the swap it would be
+        # silently ignored (codex r2).  Make them choose explicitly.
+        _convection_dependent_flags = [
+            f for f in ("--convective-precip-efficiency",
+                        "--convective-precip-split", "--autoconv-q-c-crit",
+                        "--autoconv-pe-max", "--convective-buoyancy-death-memory")
+            if has(f)
+        ]
+        if _convection_dependent_flags:
+            _msg = (
+                f"the spectral/gaussian loop cannot thread prognostic "
+                f"convection '{args.convection}' yet (issue #405) and would "
+                f"downgrade to diagnostic 'sbm', but you passed "
+                f"{_convection_dependent_flags}, which only a mass-flux "
+                f"convection honors — it would be silently ignored. Either "
+                f"drop those flags or pass an explicit --convection that "
+                f"supports them (and a --time-integrator leapfrog_si spectral "
+                f"path that threads the prognostic carry)."
+            )
+            if parser is not None:
+                parser.error(_msg)
+            raise SystemExit(f"run_amip: error: {_msg}")
         print(f"[run_amip] spectral loop cannot thread prognostic convection "
               f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
               f"Pass --convection to override.", flush=True)
@@ -1876,11 +1913,7 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         # default made bare ``--grid-type voronoi`` die at the dycore
         # factory with an unsupported (hydrostatic, centered, mpas) triple
         # (2026-07-21 audit — cross-grid smoke).
-        if args.grid_type in ("voronoi", "mpas", "mpas_voronoi",
-                              "icosahedral"):
-            args.discretization = "mpas"
-        else:
-            args.discretization = "centered"
+        args.discretization = _default_discretization_for_grid(args.grid_type)
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
@@ -2293,7 +2326,8 @@ def main(argv: list[str] | None = None):
     # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser)
-    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
+    _apply_spectral_scheme_fallback(
+        args, argv if argv is not None else sys.argv[1:], parser)
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work
     # (ModelDriver/setup query devices; a jax op before init makes

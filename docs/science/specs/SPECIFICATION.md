@@ -1557,7 +1557,7 @@ Each supports `source="constant"` (default) or `source="file"` (time-varying fro
 
 **File-based interpolation** (v3.4):
 - `_load_nc_timeseries(path, varnames)`: LRU-cached NetCDF loading for 1-D time series (GHG, TSI). Linear interpolation with edge clamping.
-- `_load_nc_monthly_zonal(path, varname)`: LRU-cached loading for monthly zonal-mean fields (ozone, aerosol). Cyclic interpolation with period 365.25 days.
+- `_load_nc_monthly_zonal(path, varname)`: LRU-cached loading for monthly zonal-mean fields (ozone, aerosol). Cyclic interpolation with period 365.0 days (noleap model clock; 2026-07-21).
 - GHG file format: `time` dimension + `co2_ppmv`, `ch4_ppbv`, `n2o_ppbv` variables.
 - TSI file format: `time` dimension + `tsi` variable.
 - Ozone/aerosol file format: `time` (12 months) × `lat` dimensions + `ozone`/`aod` variable.

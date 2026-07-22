@@ -2887,3 +2887,48 @@ def test_restart_still_requires_forcing_path_for_real_data():
         "--forcing-path", "/tmp/sst.nc",
     ]), parser)
     assert args.forcing_path == "/tmp/sst.nc"
+
+
+def test_voronoi_default_discretization_is_mpas():
+    """2026-07-21 audit: bare --grid-type voronoi must resolve the only
+    supported discretization ('mpas'), not the generic 'centered' default that
+    dies at the dycore factory on (hydrostatic, centered, mpas)."""
+    p = build_arg_parser()
+    for grid in ("voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        args = _postprocess_args(p.parse_args(["--grid-type", grid]), p)
+        assert args.discretization == "mpas", (
+            f"--grid-type {grid} resolved discretization "
+            f"{args.discretization!r}, expected 'mpas'")
+
+
+def test_build_config_resolves_voronoi_discretization_without_postprocess():
+    """A caller that builds a config WITHOUT _postprocess_args (codex r2)
+    must still get the per-grid default, not the None-sentinel 'centered'."""
+    p = build_arg_parser()
+    args = p.parse_args(["--grid-type", "voronoi"])
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "mpas"
+
+
+def test_truncation_only_triggers_spectral_fallback():
+    """--truncation N without --discretization spectral must still fall back
+    off prognostic schemes (postprocess resolves discretization='spectral'
+    BEFORE the fallback runs; the old order made this a silent no-op)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    assert args.discretization == "spectral"
+    args = _apply_spectral_scheme_fallback(args, argv, p)
+    assert args.convection == "sbm"
+    assert args.gravity_wave_drag == "rayleigh"
+
+
+def test_spectral_fallback_rejects_dependent_option_silent_noop():
+    """--truncation 21 --convective-precip-efficiency 0.5: the fallback would
+    downgrade convection to sbm, silently ignoring the mass-flux-only option;
+    it must error instead of accept-then-ignore (codex r2)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21", "--convective-precip-efficiency", "0.5"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    with pytest.raises(SystemExit):
+        _apply_spectral_scheme_fallback(args, argv, p)

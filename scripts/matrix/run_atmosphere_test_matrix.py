@@ -1320,7 +1320,7 @@ _RUNTIME_RRTMGP_OVERRIDES: dict[str, float | str | None] = {
     # internal field is still ``p_peak_hPa`` (mixed-case unit
     # suffix); the override dict layer stays lower-case so
     # ``results.txt`` columns are consistent.
-    "ozone_source": None,    # "standard" | "analytical" | "none"
+    "ozone_source": None,    # "standard" | "analytical" | "mls" | "none"
     "ozone_peak_hpa": None,  # float (analytical-source only)
     "ozone_max_vmr": None,   # float (analytical-source only); 0 < vmr <= 1
 }
@@ -8157,11 +8157,12 @@ def build_parser() -> argparse.ArgumentParser:
     # stratospheric ozone amplitude on tropospheric circulation.
     p.add_argument(
         "--ozone-source", type=str, default=None,
-        choices=["standard", "analytical", "none"],
+        choices=["standard", "analytical", "mls", "none"],
         help="Override RRTMGP ozone profile source.  Default: "
              "``standard`` (US-Standard-1976, no latitude dependence). "
              "``analytical`` enables the latitude-dependent Gaussian "
-             "profile.  ``none`` disables ozone absorption entirely. "
+             "profile.  ``mls`` uses the SAM RCEMIP MLS climatology. "
+             "``none`` disables ozone absorption entirely. "
              "Only takes effect with ``--radiation rrtmgp``.")
     p.add_argument(
         "--ozone-peak-hpa", type=float, default=None,
