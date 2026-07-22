@@ -944,11 +944,17 @@ def _step_multilayer_land_impl(
     if _do_intercept:
         _wet_evap_demand = jnp.maximum(
             surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
-        _wet_evap = jnp.minimum(_wet_evap_demand, _W_int / dt)  # store-limited
+        # Cap by BOTH the store (can't evaporate water it doesn't hold) AND the
+        # transpiration the caller is about to draw (the wet-leaf flux re-sources
+        # transpiration; drawing more than that from the store would remove more
+        # surface water than the reported atmospheric latent flux — codex).
+        _wet_evap = jnp.minimum(
+            jnp.minimum(_wet_evap_demand, _W_int / dt),
+            jnp.maximum(evap_transp, 0.0))
         W_canopy_new = jnp.maximum(_W_int - _wet_evap * dt, 0.0)
         # Wet-leaf water came from the store, so remove it from the root-zone
-        # transpiration sink (never below zero).
-        evap_transp = jnp.maximum(evap_transp - _wet_evap, 0.0)
+        # transpiration sink; wet_evap <= evap_transp keeps this >= 0.
+        evap_transp = evap_transp - _wet_evap
 
     flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 

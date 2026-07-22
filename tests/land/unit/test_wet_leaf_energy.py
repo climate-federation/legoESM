@@ -75,6 +75,9 @@ def _le_pm(fwet):
     return float(LE[0])
 
 
-def test_fwet_zero_recovers_dry_balance_pm():
-    assert np.isclose(_le_pm(jnp.array([0.0])), _le_pm(jnp.array([0.0])))
-    assert _le_pm(jnp.array([0.05])) > _le_pm(jnp.array([0.0]))  # PM also boosts
+def test_wet_leaf_evaporates_more_pm():
+    """PM also boosts LE with wetness, and fwet=0 uses rc=rs exactly (the
+    where-guard), so a dry PM leaf is the legacy balance."""
+    dry = _le_pm(jnp.array([0.0]))
+    assert _le_pm(jnp.array([0.05])) > dry
+    assert _le_pm(jnp.array([0.3])) > _le_pm(jnp.array([0.05]))

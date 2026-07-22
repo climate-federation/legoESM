@@ -78,6 +78,14 @@ def test_wetted_fraction_bounded():
     assert fwet[0] == 0.0                 # empty canopy is dry
 
 
+def test_dry_store_is_exactly_zero_wetted():
+    """An empty store (W=0) gives fwet EXACTLY 0 even with plant area, so an
+    interception-enabled but dry canopy is bit-identical to interception-off
+    (the base floor is only for gradients at W>0, not a spurious wet fraction)."""
+    fwet = np.asarray(wetted_fraction(jnp.zeros(3), jnp.asarray([1.0, 3.0, 6.0]), _CFG))
+    assert np.all(fwet == 0.0)
+
+
 def test_dew_is_excluded_from_the_store():
     """A downward (negative) potential flux produces NO store evaporation and no
     dew deposition here (dew stays in the caller's surface path — excluding it

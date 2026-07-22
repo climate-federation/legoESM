@@ -346,7 +346,9 @@ def leaf_energy_balance_bt(
     g_lh = gs / (gs * Rb + 1.0)
     # Dry part transpires through the stomata (g_lh); wet part evaporates at the
     # boundary-layer limit 1/Rb (no stomatal resistance).  Blend by wetted area.
-    g_lh_wet = 1.0 / Rb
+    # Rb guarded (an optimised leaf-width / cv could drive Rb -> 0; the 1/Rb term
+    # would then NaN even on the inactive fwet=0 branch of the blend).
+    g_lh_wet = 1.0 / jnp.maximum(Rb, 1e-9)
     g_lh_eff = (1.0 - fwet) * g_lh + fwet * g_lh_wet
     LE = lam * rhoa * (q_f - q_c) * g_lh_eff
 
@@ -412,9 +414,12 @@ def leaf_energy_balance_pm(
         An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
-    # Wet/dry vapour-conductance blend -> effective canopy resistance.
-    g_v = (1.0 - fwet) / (Rb + rs) + fwet / Rb
-    rc = 1.0 / g_v - Rb
+    # Wet/dry vapour-conductance blend -> effective canopy resistance.  The
+    # ``where(fwet>0)`` keeps ``rc == rs`` BIT-IDENTICAL at fwet=0 (the algebra
+    # 1/(1/(Rb+rs))-Rb only recovers rs to rounding).  Rb guarded.
+    _Rb_s = jnp.maximum(Rb, 1e-9)
+    g_v = (1.0 - fwet) / (_Rb_s + rs) + fwet / _Rb_s
+    rc = jnp.where(fwet > 0.0, 1.0 / g_v - _Rb_s, rs)
 
     ddesTc_Rb2          = ddesTc * Rb**2
     gamma_Rb_rc          = gamma_c * (Rb + rc)
@@ -668,8 +673,15 @@ def canopy_air_update(
     raw_below: jax.Array,
     fStress: jax.Array,
     Ps: jax.Array,
+    fwet: jax.Array = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Update canopy air temperature Tc and specific humidity q_c.
+
+    ``fwet`` (wetted leaf fraction) blends the leaf WATER conductance with the
+    wet-surface value ``1/Rb`` so the humidity balance transports the same
+    wet-leaf vapour flux the leaf energy balance produces — otherwise ``q_c``
+    is biased dry and the wet LE boost is amplified (must match
+    ``leaf_energy_balance_bt`` ``g_lh_eff``).  ``fwet = 0`` is unchanged.
 
     Conductance-weighted mixing of above-canopy air, sunlit and shaded
     leaves, and soil — DifferBESS FULLY_COUPLED formulation.  Leaves and
@@ -690,8 +702,15 @@ def canopy_air_update(
     # intermediate.  Soil conductance = fStress / raw_below (the soil
     # evaporation efficiency times the below-canopy aerodynamic conductance),
     # finite as the soil dries.  See the leaf/soil energy-balance notes.
-    cw_sun = gs_Sun / (gs_Sun * Rb_Sun + 1.0)
-    cw_sh  = gs_Sh  / (gs_Sh  * Rb_Sh  + 1.0)
+    # Wet/dry blend of the leaf water conductance — matches the leaf energy
+    # balance g_lh_eff so the vapour transported into the canopy air equals the
+    # vapour the leaf loses (Rb guarded like the ch terms above).
+    _Rb_Sun_s = jnp.maximum(Rb_Sun, 1e-9)
+    _Rb_Sh_s  = jnp.maximum(Rb_Sh,  1e-9)
+    cw_sun = ((1.0 - fwet) * gs_Sun / (gs_Sun * _Rb_Sun_s + 1.0)
+              + fwet / _Rb_Sun_s)
+    cw_sh  = ((1.0 - fwet) * gs_Sh  / (gs_Sh  * _Rb_Sh_s  + 1.0)
+              + fwet / _Rb_Sh_s)
     # Soil water conductance = fStress / raw_below (beta form; fStress = soil pore
     # RH h_r).  Beta (not alpha sub-saturation) for consistency with the soil
     # energy balance under a PROGNOSTIC skin T — see soil_energy_balance_bt.
