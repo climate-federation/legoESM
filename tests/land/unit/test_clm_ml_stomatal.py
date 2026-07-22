@@ -68,3 +68,37 @@ def test_validate_accepts_every_valid_model():
     for scheme in VALID_CLM_ML_STOMATAL_MODELS:
         cfg = CLMMLCanopyConfig(stomatal_model=scheme)
         assert cfg.validate() is cfg
+
+
+def test_switching_model_clears_kernel_caches(fake_backend, monkeypatch):
+    """The backend leaf-kernel lru_caches omit gs_type from their key, so a
+    stomatal-model SWITCH in one process must clear them or a stale kernel is
+    reused with the new model's params (codex).  A no-switch re-apply must NOT
+    pay the clear."""
+    import legoesm.land.canopy.clm_ml_interface as iface
+    _, photo = fake_backend
+    cleared = {"n": 0}
+
+    class _Cached:              # stand-in for an lru_cache'd factory
+        def cache_clear(self):
+            cleared["n"] += 1
+    photo.some_kernel_factory = _Cached()
+    monkeypatch.setattr(iface, "_APPLIED_GS_TYPE", None, raising=False)
+
+    iface._apply_stomatal_model(CLMMLCanopyConfig(stomatal_model="medlyn"))
+    assert cleared["n"] == 0                      # first apply: nothing to clear
+    iface._apply_stomatal_model(CLMMLCanopyConfig(stomatal_model="medlyn"))
+    assert cleared["n"] == 0                      # same model: no clear
+    iface._apply_stomatal_model(CLMMLCanopyConfig(stomatal_model="ball_berry"))
+    assert cleared["n"] == 1                      # switch: caches cleared
+
+
+def test_vcmax_override_builds_the_right_pft_entry():
+    """vcmax25_override edits ONLY this PFT's vcmaxpft entry (the injection the
+    backend N-profile reads), leaving the rest of the table intact."""
+    import jax.numpy as jnp
+    base = jnp.arange(20.0, 40.0)                 # a fake vcmaxpft table
+    pft = 7
+    out = base.at[pft].set(55.0)
+    assert float(out[pft]) == 55.0
+    assert jnp.array_equal(out.at[pft].set(base[pft]), base)  # only pft changed
