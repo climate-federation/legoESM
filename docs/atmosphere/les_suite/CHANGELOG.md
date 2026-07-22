@@ -113,161 +113,38 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
 
 ---
 
-## Iteration log
+## Iteration log (condensed 2026-07-22 — detail in git history + the tracker above)
 
-### Iter 1 (2026-07-21)
-- Read LES_SUITE.md + existing registry/catalog/tests (all passing, 23 tests).
-- Confirmed registry + catalog complete and merged (commit 49959ec94).
-- Created this CHANGELOG.
-- **`bridge.py` (22 tests)**: `LESReferenceArtifact` self-describing schema
-  (truth profiles + applied forcing), `artifact_to_scm_forcing`,
-  `diagnostic_truth`/`prognostic_truth`, `total_turbulent_flux`. Orientation
-  contract documented (artifact surface-first; SCM top-to-bottom; flip deferred to
-  the SCM-coupling layer, not silently buried in the bridge).
-- **`counter_gradient.py` (10 tests)**: Q1 structural diagnostic —
-  `flux·dθ/dz > gate` over a contiguous layer ⇒ any K≥0 down-gradient closure must
-  fail. `centered_dtheta_dz` (non-uniform grid), `counter_gradient_diagnostic`,
-  `diagnose_truth`. Single-cell blips rejected (min-layer guard).
-- **`score.py` (11 tests)**: D6 diagnostic (`diagnostic_flux_score`) + prognostic
-  (`prognostic_profile_score`) assemblies, std-normalized mass-weighted RMSE,
-  AD-safe (finite grad at perfect fit). No new numerics — reuses core primitives.
-- **`core/profile_metrics.py` (8 tests)**: extracted `safe_sqrt`/`weighted_std`/
-  `weighted_rmse` from `scm_rce_metrics.py` (now re-exports them) into the shared
-  low-level home the design doc names, + `layer_weights_from_heights`. Avoids the
-  atmosphere→training circular import and the "no dup numerics" doctrine violation.
-  `test_scm_rce_metrics.py` still green after the re-point.
-- Fixed a series-path NaN gradient in `score._normalized_rmse_series` (single
-  `safe_sqrt` over the time-mean-square, no intermediate bare sqrt).
-- Pre-existing unrelated failure noted: `test_no_private_cross_imports` red on the
-  branch baseline (fv3/grids/ocean private imports) — NOT caused by this work; out
-  of scope for the LES suite.
-- Guardrails run: `test_no_hardcoded_constants`, `test_federation_plan` green;
-  les_suite modules are outside `*/physics/*` so the inline-coeff/physics-contract
-  gates do not apply (floors/gates are numerics one-offs, documented in-line).
-- **`matrix.py` + `run_les_suite_matrix.py` (16 tests)**: `_les_suite_matrix_spec()`
-  (routes through `core.setup_selector.MatrixRunnerSpec`, `valid_grids` = registry
-  resolution labels), `build_test_matrix()` (every (name,grid) real),
-  `select_cases()` (exact/substring/grid filters; empty exact/grid selection →
-  `SystemExit` = dispatch hardening). Grid axis = LES resolution label (`96x96x96`);
-  core locked to spectral (D1), not a selection axis.
-- **npz artifact I/O** added to `bridge.py` (`save_artifact`/`load_artifact`, 2
-  round-trip tests) — self-describing `.npz` the LES driver writes and the tuner
-  reads; scalars/strings ride a JSON `__meta__` key, optional None channels omitted.
+**Iter 1 (2026-07-21) — CPU library.** Built + codex-CLEAN: `bridge` (self-describing
+artifact + forcing/truth extraction), `counter_gradient` (Q1), `score` (D6),
+`core/profile_metrics` (extracted shared primitives from `scm_rce_metrics`, avoids
+atmosphere→training cycle), `matrix` wiring. Codex round-1 found 6 bridge/score
+defects (forcing orientation, dry/moist + prescribe validation gaps, unvalidated
+weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round-2 CLEAN.
 
-- **Codex adversarial review round 1** (mandatory, CLAUDE.md) ran on bridge/
-  counter_gradient/score/core.profile_metrics. Verdict: ISSUES FOUND (6). All fixed
-  same iteration + non-vacuous tests added:
-  1. `artifact_to_scm_forcing` returned surface-first profiles to a top-to-bottom
-     SCM (latent reversal bug). FIX: `scm_top_to_bottom=True` default reverses every
-     vertical forcing profile; surface time-series left unreversed. Same-grid
-     assumption documented; cross-grid regrid still deferred to coupling layer.
-  2. Dry artifact could carry silently-discarded moisture fields. FIX: `validate()`
-     forbids wqt_resolved/wqt_sgs/qv_adv/w_qv_s when qt is None; wqt_sgs requires
-     wqt_resolved.
-  3. `prescribe` mode allowed stored-but-ignored surface fields (broke the
-     self-describing/exact-forcing contract). FIX: each mode requires exactly its
-     field(s) and forbids the others.
-  4. Explicit score weights unvalidated (a x100 or negative weight silently
-     corrupted the metric; negatives could report a false perfect). FIX:
-     `_resolve_weights` rejects negative + non-unit-sum weights.
-  5. `prognostic_truth(t0_s)` used nearest-sample argmin, not "at or after". FIX:
-     `searchsorted(side='left')`; raises if t0 past the last sample.
-  6. Moist score silently became a dry score when the caller omitted the SCM
-     moisture output (an incomplete run could out-score a complete one). FIX: raise
-     when moist truth lacks the matching SCM moisture arg.
-  Plus a mathematically-wrong docstring comment in counter_gradient.py corrected.
-- **Codex round 2: VERDICT CLEAN.** All 6 round-1 fixes verified correct + complete;
-  matrix.py selection/dispatch-hardening verified across all 16 cases; no new
-  defects. The mandatory iterate-with-codex loop converged in 2 iterations.
-- Full suite at iter-1 close: 109 les_suite/core/scm-rce tests green; ruff clean.
-- **Committed** as `feat(les-suite): LES→SCM bridge, Q1 counter-gradient, D6 score,
-  matrix wiring` (branch les-suite-optimization).
+**Iter 2 (2026-07-21..22) — GPU unblocked, full pipeline + science.**
+- `intercomparison` (D7) + gate-0: **Nieuwstadt CBL PASSED** on GPU (σ_w/w_*=0.68,
+  well-mixed, surface flux 0.86, entrainment −0.156). Metric fix found by
+  instrumentation: entrainment = flux MINIMUM (inversion base), not θ-grad-max height.
+- `emit` + `run_les_suite` (dry-CBL emission). Codex found 2 issues → 3 rounds to
+  CLEAN: SGS flux must use the core's FACE discretization (bit-exact vs c2f/ddz_c2f/
+  f2c), and frame timing (true IC + step-index scheduling). Full pipeline validated
+  end-to-end on GPU (surface total 1.01·Q0).
+- `scm_coupling` (regrid + θ↔T, added the thermo inverse) + `scm_runner` (SCM forward
+  eval; auto-sizes the SCM lid above the LES top or T collapses) + `tune_scm_to_les`
+  (D4 derivative-free) + `scorecard` (Q2/Q3). Coupling/tuner codex-CLEAN (orientation
+  verified — no upside-down scoring).
+- **BUG (instrument-don't-infer):** a diverged SCM scored 0.0 (perfect) because
+  `safe_sqrt(NaN)=0`, so the tuner selected blown-up candidates. Fixed → +inf on
+  non-finite output; regression test locks it.
+- 5 closures wired (local→nonlocal→1.5-order). Perf limit: the tuner recompiles per
+  candidate (~8 h for a 5-closure tier-1 CBL ranking on CPU) → the AD-traced-params
+  path (D4's other half) is the fix + the AD-vs-DF deliverable.
+- Science outputs recorded above (Q1a ceiling, Q2 tuned ranking, Q3 machinery).
 
-### Iter 2 (2026-07-21) — GPU unblocked
-- **GPU became available** (2× Tesla V100S-32GB, JAX backend=gpu). This unblocks the
-  D10 gate-0 and the LES ensemble (§8 step 3 was CPU-blocked).
-- **`intercomparison.py` (10 tests) + CLI**: the D7 buoyant-path credibility gate —
-  `cbl_diagnostics` extracts the universal dry-CBL convective scaling (z_i, w_*, peak
-  σ_w/w_*, mixed-layer ∂θ/∂z, surface + entrainment ⟨w'θ'⟩/Q0), banded against the
-  Nieuwstadt-1993 + entrainment-ratio envelope; `gate_from_cbl_profiles`,
-  `evaluate_cbl_gate`; CLI exits non-zero on any band failure. Committed de7672463.
-  (`g` from `legoesm.constants` — the local banned-literal hook caught a hardcoded
-  9.80616 in the test and forced `constants.g`.)
-- **Gate-0 launched** on GPU: `run_spectral_cbl.py` 96³ x64 (D8 production res),
-  Q0=0.06, z_i0=800 m, 2 h (~10 t*), LASD SGS, adaptive CFL. A 48³ smoke test first
-  confirmed the buoyant path develops correctly (σ_w/w_*=0.56, surface flux ratio
-  0.89, well-mixing). Verdict recorded once the production run + validator finish.
-- Codex review of `intercomparison.py` running in parallel with the LES run.
-
-- **Gate-0 PASS** (validator on the 96³ x64 run): σ_w/w_*=0.679, mixed-layer
-  ∂θ/∂z=0.070 mK/m, surface flux 0.861, entrainment -0.156 — all four bands. The
-  buoyant path of the spectral truth core is validated against Nieuwstadt-1993; the
-  §3 named risk (buoyant path least-validated) is retired. Fixture: JSON committed.
-- **`emit.py` (12 tests) + `run_les_suite.py` (3 dispatch tests)**: the ensemble
-  driver. emit does the horizontal-mean + resolved/SGS flux reductions (SGS flux =
-  -<(ν_t/Pr)∂θ/∂z> from the closure's `eddy_viscosity`); SGS-flux SIGN convention
-  gets explicit analytic tests. Driver: registry case → spectral LES → validated
-  artifact. Dry CBL wired; stable/moist regimes raise (honest dispatch).
-- **SGS-flux model-consistency CONFIRMED** (read the core, not inferred):
-  `spectral_les_plane.rhs` sets `nu_t = eddy_viscosity(...)` (line 1116) and
-  `scalar_rhs` uses `Kh = nu_t/pr_sgs` — identical to emit. The `sgs_buoyancy` Lilly
-  rescale (1126-7) is skipped (driver pins `sgs_buoyancy=False`), so the emitted SGS
-  flux equals the flux the model integrated. Driver comments the invariant.
-- **Full pipeline VALIDATED end-to-end on GPU** (96³ CBL, 0.35 h f32): emit →
-  `load_artifact` → `diagnostic_truth` → surface flux ratio resolved 0.999 + SGS
-  0.011 = **1.010** (~1, physically correct); the Q1 `diagnose_truth` counter-gradient
-  diagnostic **detects a structural-ceiling layer at 675-758 m** — a real Q1a result.
-- 132 les_suite/core tests green; counter-gradient gradient tests made
-  precision-robust (x32/x64).
-- **Codex review of emit/run_les_suite: ISSUES FOUND (2), both fixed** (798434caf):
-  (1) emit's SGS flux used a cell-centred `K_h·gradient`, not the core's FACE
-  discretization (`c2f(K_h)·ddz_c2f(θ)`, surface face = Q0, lid = 0) — a plausible
-  approximation, wrong at the surface. Rewrote to replicate `scalar_rhs` exactly;
-  a new test asserts bit-agreement (atol 1e-10) with the core's own c2f/ddz_c2f/f2c
-  ops. (2) the driver stepped once then labelled it t=0 (dropped the true IC) and
-  could drop the final frame — now records the real t=0 IC before stepping and
-  drives every frame target through T; added --frames/--hours/--dt validation.
-  Re-run GPU round-trip: true IC at t=0 (resolved flux exactly 0), surface total
-  1.04·Q0, k=1 = 1.01·Q0.
-  (Codex invocation note: the positional-arg form hung on stdin this session; the
-  working form is `codex exec [flags] < prompt.md` — feed the prompt via stdin.)
-- **Codex round 2**: Fix 1 (SGS face flux) CONFIRMED bit-exact (maxerr=0.0 vs the
-  core's own operators); true-IC recording correct. One remaining issue: the frame
-  loop still dropped/overshot frames when dt was large vs the frame spacing. FIXED
-  (f70a7b46a): step-index sampling via the tested pure helper `frame_step_schedule`
-  — strictly-increasing distinct times, final at n_steps·dt≈T, dt≥T guarded; 3
-  regression tests cover codex's failing cases. GPU re-run: [0,252,504,756,1008,1260].
-- **Codex round 3: VERDICT CLEAN** — frame_step_schedule verified over exhaustive
-  n_steps=1..500 × frames=2..700 (distinct, final=n_steps, no silent shorten); driver
-  records len(schedule)+1 frames, times strictly increasing, no off-by-one; the
-  removed dedup/sel logic is safe (duplicates no longer constructible). The
-  iterate-with-codex loop on emission converged (2→1→0 issues).
-- Committed: intercomparison gate (de7672463), gate-0 fix (8d1bdc81b), emit +
-  run_les_suite (218129efd).
-
-- **`scm_coupling.py` (12 tests)**: the tuner's grid bridge — `interp_profile`
-  (linear height regrid, surface-first, clamps out-of-range), `regrid_truth` (LES
-  truth onto a fixed eval grid held identical across closures), and the θ↔T pair
-  (added the missing `potential_temperature_from_temperature` inverse to
-  `thermodynamics.py`, reusing the canonical Exner constants). Physics guardrails
-  green (3807). This de-risks the hardest tuner sub-problem (SCM sigma/T ↔ LES
-  height/θ). Committed 0e9095433.
-
-**NEXT:** `tune_scm_to_les.py` composes coupling + SCM run + score: init the SCM from
-LES(t=0) (θ→T via `T_from_theta` on the SCM pressure; `interp_profile` LES→SCM
-heights), drive it with `artifact_to_scm_forcing`, score with `regrid_truth` +
-`score.*`, then tune each closure's `__param_spec__` via AD (`eqx.filter_value_and_grad`
-+ `param_collector.apply_param_overrides` in the loss) AND derivative-free (D4). Then
-`build_les_scorecard.py`, the full GPU ensemble, and the Q1/Q2/Q3 answers.
-
---- earlier NEXT (superseded) ---
-`tune_scm_to_les.py` — the per-(closure,
-regime) AD + derivative-free tuner (D4). Reuse (do NOT fork): `scm.py` +
-`scm_forcing.py` (single-column integration, CPU-cheap), `training/param_collector`
-(`build_trainable_params`/`apply_param_overrides`), `ml/training.create_optimizer`,
-and the RCE-tuning precedents `scripts/run/{run_scm_rce_params,train_scm_rce_params,
-run_scm_rce_campaign}.py`. It consumes cached LES artifacts (`bridge.load_artifact`)
-→ `artifact_to_scm_forcing` + `diagnostic_truth`/`prognostic_truth` → `score.*`.
-Then the two validators (`build_les_scorecard.py`, `compare_les_intercomparison.py`)
-and, GPU-gated, `run_les_suite.py` + gate-0. Science answers (Q1/Q2/Q3) stay blocked
-until a GPU allocation runs the LES ensemble (§8 step 3).
+**NEXT:** (1) AD path — traced params via `apply_param_overrides` inside a jitted/AD
+loss (one compile serves all candidates; fixes the 8 h→minutes tuner cost + gives the
+D4 AD-vs-DF comparison; needs a scan-based differentiable SCM segment). (2) Wire the
+stable/sheared/moist regime emission in `run_les_suite` (only dry-convective CBL
+today) to span the §6 flux×shear grid + BOMEX/DYCOMS. (3) Run the full ensemble +
+tuning campaign + the D7 σ_LES SGS-spread runs → the complete Q1/Q2/Q3 answers.
