@@ -484,12 +484,13 @@ def MLCanopyFluxes(
     mlcanopy_inst = LeafHeatCapacity(num_mlcan, filter_mlcan, mlcanopy_inst)
 
     # Soil surface relative humidity — Fortran lines 259-262
-    # Pre-materialise patch.column as numpy so int() is concrete even inside
-    # jax.grad tracing (patch hierarchy is invariant for a fixed site).
-    _patch_col_np = np.asarray(patch.column)
+    # patch.column as a DEVICE (jnp) array indexed by dynamic gather — valid for a
+    # concrete p (identity map c==p single-site, value-identical) AND a traced scan
+    # index (S3).  (Was np.asarray + int(), which breaks on a traced p.)
+    _patch_col_rhg = jnp.asarray(patch.column)
     rhg = mlcanopy_inst.rhg_soil
     for p in filter_mlcan:
-        c = int(_patch_col_np[p])
+        c = _patch_col_rhg[p]
         smp1 = soilstate_inst.smp_l_col[c, 1]  # mm
         tsoi1 = temperature_inst.t_soisno_col[c, 1]  # K
         rhg_val = jnp.exp(grav * mmh2o * smp1 * 1.0e-3 / (rgas * tsoi1))
