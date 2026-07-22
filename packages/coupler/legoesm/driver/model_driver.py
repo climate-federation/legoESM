@@ -4897,8 +4897,12 @@ class ModelDriver:
             Python loop (useful for debugging or when the compiled path
             is not applicable).
         segment_callback : callable, optional
-            Called at each diagnostic interval boundary with
-            ``(driver, day, dt_segment)`` for coupled-model integration.
+            Called at each SEGMENT boundary with ``(driver, day,
+            dt_segment)`` for coupled-model integration, where
+            ``dt_segment`` (= ``seg_steps * dt``) is the elapsed time since
+            the previous call.  In the compiled lane the segment length is
+            a divisor of the diagnostic interval, so this fires at least as
+            often as diagnostics -- never less (issue F4).
 
         Returns
         -------
@@ -9130,6 +9134,30 @@ class ModelDriver:
                 self._write_blowup_state(current_step, day)
                 break
 
+            # Segment callback for coupled integration (e.g. the coupler
+            # step).  Hoisted OUT of the diagnostics block (issue F4): it
+            # must fire on EVERY segment so the coupler is handed the TRUE
+            # elapsed time since the previous coupling call (seg_steps *
+            # DT), not once per diagnostic interval.  When a checkpoint
+            # cadence makes segment_length = GCD(diag, checkpoint) a PROPER
+            # divisor of diag_interval the old diag-gated placement fired
+            # only once per diag interval yet reported a single segment's
+            # duration -- under-integrating the ocean/land/ice by
+            # diag_interval / segment_length and silently dropping the
+            # intervening segments' fluxes.  The coupler-facing carry_aux
+            # (seg_precip RATE, seg_shflx, seg_lhflx, held_* fields) is
+            # rebuilt every segment (see the dict above), so per-segment
+            # firing reads fresh per-segment fluxes.  Stateless +
+            # restart-safe: each segment self-reports its own duration;
+            # coupling runs BEFORE the checkpoint write below, and
+            # segment_length divides checkpoint_interval, so a checkpoint
+            # boundary is always a segment boundary and the post-couple
+            # coupled state is captured.  Placed AFTER the stability check so
+            # the coupler never observes an unstable state.
+            if self._segment_callback is not None:
+                dt_seg = float(seg_steps * DT)
+                self._segment_callback(self, day, dt_seg)
+
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
                 # Convert accumulated quantities to rates over segment duration.
@@ -9228,11 +9256,6 @@ class ModelDriver:
                     )
                     if _seg_max_cfl > 0:
                         logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
-
-                # Segment callback for coupled integration (e.g., coupler step)
-                if self._segment_callback is not None:
-                    dt_seg = float(seg_steps * DT)
-                    self._segment_callback(self, day, dt_seg)
 
                 # Adaptive dt: if CFL exceeds threshold, halve dt and rebuild
                 if _seg_max_cfl > 1.0:
@@ -9810,9 +9833,18 @@ class ModelDriver:
                     "seg_precip": phys_out.precip,
                 })
 
-                # Segment callback for coupled integration
+                # Segment callback for coupled integration.  This lane is a
+                # PER-STEP loop (no segments); the callback fires exactly on
+                # diagnostic boundaries, so the elapsed time since the
+                # previous call is ``diag_interval * DT`` -- NOT a single
+                # step ``DT`` (issue F4: passing DT under-reported the
+                # elapsed coupling interval by the full diag_interval
+                # factor).  This legacy/debug lane (run(compiled=False)) is
+                # not a production coupled path -- CoupledESMDriver uses the
+                # compiled lane -- but the elapsed dt is corrected here for
+                # consistency with the hoisted compiled-lane callback.
                 if self._segment_callback is not None:
-                    self._segment_callback(self, day, DT)
+                    self._segment_callback(self, day, float(diag_interval * DT))
 
             # Checkpoint
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:

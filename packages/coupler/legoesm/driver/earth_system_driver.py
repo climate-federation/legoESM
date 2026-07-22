@@ -300,6 +300,18 @@ class EarthSystemDriver:
 
         Runs the coupler and feeds surface temperature back to the
         atmosphere for the next segment.
+
+        NOTE (issue F4): unlike ``CoupledESMDriver._segment_hook`` this hook
+        does NOT sub-cycle -- ``_step_coupler`` integrates the land/ice/lake
+        surface with a SINGLE forward-Euler step of the full ``dt_segment``.
+        That is acceptable only for the small idealized configs this
+        REFERENCE/TEST-ONLY driver is exercised with (it is instantiated
+        nowhere in packages/, src/ or scripts/ -- only in tests).  A real
+        coupled run MUST use ``CoupledESMDriver``, which sub-cycles the
+        surface + ocean + carbon at ``coupling_dt``; do NOT wire this driver
+        into a production entry point without first adding the same
+        n_sub/sub_dt loop, or a large ``dt_segment`` (now correctly reported
+        per segment) becomes an unstable forward-Euler surface step.
         """
         if self._step_surface is None:
             return
