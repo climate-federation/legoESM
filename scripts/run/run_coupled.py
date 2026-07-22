@@ -743,12 +743,25 @@ def build_parser():
                              "(CloudConfig.conv_cloud_condensate). LOWER => "
                              "optically THINNER / more realistic anvil. Range "
                              "[1e-5, 1e-3]. Default: CloudConfig default.")
-    parser.add_argument("--microphysics", default="morrison",
+    # Default None → resolved per-grid in main(): 'morrison' (ice-capable
+    # double-moment) on cube/latlon/voronoi, 'kessler' on the spectral/gaussian
+    # path.  The full coupled spectral graph (morrison's 9 prognostic tracers +
+    # convection + turbulence + GWD + clouds + the spectral transforms + the
+    # ocean coupling, all fused into one lax.scan at production nlev) exceeds
+    # XLA-CPU LLVM codegen and SIGSEGVs during compile (confirmed 2026-07-22:
+    # nlev=10 and bare-morrison compile, the full nlev=20 stack crashes).
+    # kessler's warm-rain graph compiles and gives the same equator-to-pole SST
+    # structure. An explicit --microphysics on spectral is honored (with a
+    # codegen warning for the heavy schemes).
+    parser.add_argument("--microphysics", default=None,
                         choices=list(VALID_MICROPHYSICS),
-                        help="Microphysics scheme (default: morrison — the "
-                             "ice-capable double-moment scheme; warm-rain-only "
-                             "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
-                             "(no freeze->snow->precip sink), which drives the TOA "
+                        help="Microphysics scheme (default: morrison on "
+                             "cube/latlon/voronoi, kessler on spectral/gaussian "
+                             "— the full double-moment spectral graph exceeds "
+                             "XLA-CPU codegen). morrison is the ice-capable "
+                             "double-moment scheme; warm-rain-only kessler "
+                             "leaves SUPERCOOLED LIQUID high cloud aloft (no "
+                             "freeze->snow->precip sink), which drives the TOA "
                              "cold drift in coupled CMIP runs. Use --microphysics "
                              "kessler for the cheap warm-rain path; 'none' with "
                              "active convection gives pr=0 and a cloud-water trap)")
@@ -1085,6 +1098,38 @@ def build_parser():
     return parser
 
 
+# Heavy multi-tracer microphysics whose FULLY-FUSED coupled spectral graph
+# (scheme + convection + turbulence + GWD + clouds + spectral transforms +
+# ocean coupling in one lax.scan at production nlev) overruns XLA-CPU LLVM
+# codegen and SIGSEGVs during compile (confirmed 2026-07-22: nlev=10 and
+# bare-scheme compile; the full nlev=20 stack crashes). Warm-rain kessler
+# stays well under the limit and gives the same equator-to-pole SST structure.
+_SPECTRAL_HEAVY_MICRO = frozenset(
+    {"morrison", "thompson", "p3", "sdm", "seifert_beheng", "fast_sbm"})
+
+
+def resolve_coupled_microphysics(grid: str, microphysics: str | None):
+    """Resolve the per-grid microphysics default for a coupled run.
+
+    ``microphysics is None`` means the user did not pass ``--microphysics``:
+    default to ``kessler`` on the spectral/gaussian path (the heavy
+    double-moment default is intractable for XLA-CPU codegen there — see
+    ``_SPECTRAL_HEAVY_MICRO``) and ``morrison`` elsewhere.  An explicit choice
+    is always honored; a heavy explicit choice on the spectral path returns an
+    ``"explicit_heavy_warn"`` action so ``main`` can warn about the codegen
+    risk.  Returns ``(resolved_scheme, action)`` where action is one of
+    ``"kept"`` / ``"defaulted_kessler"`` / ``"defaulted_morrison"`` /
+    ``"explicit_heavy_warn"``.
+    """
+    if microphysics is None:
+        if grid == "gaussian":
+            return "kessler", "defaulted_kessler"
+        return "morrison", "defaulted_morrison"
+    if grid == "gaussian" and microphysics in _SPECTRAL_HEAVY_MICRO:
+        return microphysics, "explicit_heavy_warn"
+    return microphysics, "kept"
+
+
 def main():
     parser = build_parser()
 
@@ -1102,6 +1147,25 @@ def main():
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
     # AFTER parsing so it cleanly overrides whatever the per-scheme defaults
     # are, without fighting argparse precedence.
+    # Per-grid microphysics default (2026-07-22 audit): see
+    # resolve_coupled_microphysics.  Resolve BEFORE --minimal-physics (which
+    # forces 'none' regardless).
+    args.microphysics, _micro_action = resolve_coupled_microphysics(
+        args.grid, args.microphysics)
+    if _micro_action == "defaulted_kessler":
+        logger.info(
+            "  Microphysics: defaulting to 'kessler' on the spectral path "
+            "(the coupled double-moment graph exceeds XLA-CPU codegen at "
+            "production nlev). Pass --microphysics explicitly to override.")
+    elif _micro_action == "explicit_heavy_warn":
+        logger.warning(
+            "  --microphysics %s on the spectral/gaussian coupled path builds "
+            "a very large fused graph; it compiles at reduced nlev / physics "
+            "but can SIGSEGV in XLA-CPU codegen at production nlev. If it "
+            "crashes, lower --nlev, drop physics, use --microphysics kessler, "
+            "or run double-moment microphysics on the MPAS/cube backend.",
+            args.microphysics)
+
     if args.minimal_physics:
         args.radiation = "gray"
         args.turbulence = "none"

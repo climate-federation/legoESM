@@ -1445,4 +1445,9 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 # these symbols are imported by sibling modules; expose a public alias
 # so importers use the sanctioned public name (definitions keep the
 # original underscore name for in-module callers).
-depth_average_to_faces = _depth_average_to_faces
+#
+# Distinct name (NOT plain ``depth_average_to_faces``): this module already
+# imports the canonical ``depth_average_to_faces`` from ocean_tendency_common
+# (line 65); the barotropic C-grid has its OWN face-averaging variant, so the
+# public alias is namespaced to avoid shadowing that import (codex).
+barotropic_depth_average_to_faces = _depth_average_to_faces
