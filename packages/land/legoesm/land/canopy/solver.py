@@ -394,8 +394,9 @@ def canopy_forward(
     # routes ``LE_wet_canopy`` to the store and ``LE_canopy - LE_wet_canopy`` to
     # the transpiration sink.
     def _le_wet(LE, gs, Rb):
-        g_lh = gs / (gs * Rb + 1.0)
-        g_lh_wet = 1.0 / Rb
+        Rb_s = jnp.maximum(Rb, 1e-9)             # guard 1/Rb (matches leaf LE)
+        g_lh = gs / (gs * Rb_s + 1.0)
+        g_lh_wet = 1.0 / Rb_s
         g_lh_eff = (1.0 - b.fwet) * g_lh + b.fwet * g_lh_wet
         return LE * jnp.where(g_lh_eff > 0.0,
                               b.fwet * g_lh_wet / g_lh_eff, 0.0)
