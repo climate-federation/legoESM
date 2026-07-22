@@ -52,6 +52,25 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   mixing coefficients have negligible leverage on the dry-CBL θ fit → the default is
   already near-optimal). A real Q2 data point for the dry-convective anchor; the full
   ranking needs the other 8 closures wired. Scorecard generated end-to-end.
+- **Q2 TUNED RANKING (dry_convective CBL, 5 closures)** — derivative-free tier-1
+  tuning of each closure against the 2 h CBL truth, scorecard assembled end-to-end.
+  Ranking by tuned loss (lower = better):
+  | rank | closure | type | tuned | default |
+  |---|---|---|---|---|
+  | 1 | holtslag_boville | nonlocal | **0.241** | 0.241 |
+  | 2 | smagorinsky | local | 0.265 | 0.334 (**−20%** tuned) |
+  | 3 | louis | local | 0.280 | 0.281 |
+  | 4 | ysu | nonlocal | 0.363 | 0.363 |
+  | 5 | mynn25 | 1.5-order | 0.365 | 0.365 |
+  **Preliminary Q2 finding:** the higher-order (1.5-order) mynn25 is the WORST and the
+  nonlocal holtslag_boville the best ⇒ "closure order buys skill" is NOT supported for
+  this dry-convective CBL — consistent with the Q1a counter-gradient result (nonlocal
+  transport matters). **Caveats (precision rule):** COARSE tuning — tier-1 only,
+  small search (n_random=3), nlev=24, single case, single metric (final θ/u/v
+  prognostic RMSE). 4/5 closures show 0% improvement, i.e. the small search did not
+  beat default (smagorinsky's −20% shows tuning CAN help, so the ranking is partly
+  default-dominated). NOT a definitive calibration — a real Q2 data point pending the
+  larger search (needs the AD-path perf fix) and the other regimes for the full answer.
 - **5 closures now wired for the CBL tuner** (smagorinsky, louis, holtslag_boville,
   ysu, mynn25 — spanning local→nonlocal→1.5-order). **Preliminary DEFAULT-parameter**
   θ-loss on the 2 h CBL (NOT the tuned ranking — Q2 requires tuning each; labeled
