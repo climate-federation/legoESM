@@ -49,19 +49,26 @@ print(d.get('output_dir') or '')
       echo "[unified-train] WARNING: OUT=$OUT ignored; run_aimip writes to the suite's output_dir=$SUITE_OUT"
     fi
     OUT="$SUITE_OUT"
+    # Resume detection is keyed on THIS variant's own dir ($OUT/$VARIANT),
+    # NOT $OUT/* — variants share one suite output_dir, and a sibling
+    # variant's checkpoints must not flag resume for this one (which would
+    # make run_aimip try to load an incompatible/stale checkpoint, e.g. a
+    # column_nn arch that changed input channels). RESUME=1 still forces it.
     RESUME_FLAG=""
-    if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 \
-       || ls "$OUT"/*/chunk_latest.eqx >/dev/null 2>&1 \
+    if ls "$OUT/$VARIANT"/epoch_*.eqx >/dev/null 2>&1 \
+       || ls "$OUT/$VARIANT"/chunk_latest.eqx >/dev/null 2>&1 \
        || [ "${RESUME:-0}" = "1" ]; then
       RESUME_FLAG="--resume"
     fi
     DRIVER=(scripts/run/run_aimip.py --suite "$SUITE" --variants "$VARIANT")
     # run_aimip writes <out>/<variant>/params.eqx after the final epoch.
     FINAL="$OUT/$VARIANT/params.eqx"
+    WATCH_DIR="$OUT/$VARIANT"   # chain-progress signature, this variant only
     ;;
   wb)
     OUT="${OUT:-results/unified_wb/$(basename "${SUITE%.*}")}"
     RESUME_FLAG=""   # WB trainer has no resume — never pass --resume
+    WATCH_DIR="$OUT"
     WB_MODES="${VARIANT//+/,}"
     DRIVER=(scripts/run/run_weatherbench_campaign.py --config "$SUITE" \
             --modes "$WB_MODES" --stages train --out-root "$OUT")
@@ -84,7 +91,7 @@ echo "[unified-train] $(date) campaign=$CAMPAIGN variant=$VARIANT link=$CHAIN su
 # Nanosecond mtime + size: two same-second checkpoint replacements must not
 # read as "no progress" (codex MED).
 _ckpt_sig() {
-  ls -t "$OUT"/*/epoch_*.eqx "$OUT"/*/chunk_latest.eqx 2>/dev/null \
+  ls -t "$WATCH_DIR"/epoch_*.eqx "$WATCH_DIR"/chunk_latest.eqx 2>/dev/null \
     | head -1 | xargs -r stat -c '%n:%.Y:%s' 2>/dev/null
 }
 SIG_BEFORE="$(_ckpt_sig)"
