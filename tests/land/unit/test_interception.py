@@ -17,6 +17,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import constants
 from legoesm.land.canopy.interception import (
     InterceptionConfig,
+    intercept_rain,
     max_canopy_water,
     update_canopy_water,
     water_balance_residual,
@@ -98,6 +99,20 @@ def test_evaporation_cannot_exceed_storage():
         W, jnp.zeros(1), jnp.asarray([1e4]), pai, _DT, _CFG, constants.L_v)
     assert float(W_new[0]) >= 0.0
     assert float(ev[0]) * _DT <= float(W[0]) + 1e-12
+
+
+def test_capacity_shrink_drips_at_zero_rain():
+    """A store over the (shrunken) capacity drips even with NO rain — the caller
+    must route that drip to the soil or it leaks (codex).  intercept_rain emits
+    it as throughfall; here capacity 0.3 < stored 0.4 -> 0.1 kg m-2 must drip."""
+    cfg = InterceptionConfig()
+    pai = jnp.asarray([3.0])                     # h2ocanmx = dewmx*pai = 0.3
+    cap = float(max_canopy_water(pai, cfg)[0])
+    assert np.isclose(cap, 0.3)
+    W = jnp.asarray([0.4])                       # over capacity
+    W_int, tf = intercept_rain(W, jnp.zeros(1), pai, _DT, cfg)
+    assert np.isclose(float(W_int[0]), cap, atol=1e-12)          # capped
+    assert np.isclose(float(tf[0]) * _DT, 0.4 - cap, atol=1e-12)  # excess drips
 
 
 def test_differentiable_through_parameters():

@@ -820,8 +820,14 @@ def _step_multilayer_land_impl(
     # partition so it can be capped by the transpiration demand (closure).  Two-
     # leaf path only (CLM-ML has its own internal store; SimpleSEB has no canopy
     # latent stream).  See land/canopy/interception.py.
+    # Gated ALSO on ``state.W_canopy is not None`` so the step never changes the
+    # carry pytree structure (``None`` -> array would break a ``lax.scan``) and
+    # never intercepts water it cannot store (which would leak): the store is
+    # allocated at init / restored from restart when interception is configured,
+    # so a genuine run always carries it (codex).
     _do_intercept = (config.interception is not None
-                     and isinstance(config.surface_scheme, TwoLeafCanopyConfig))
+                     and isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                     and state.W_canopy is not None)
     infil_rain = precip_rain
     _W_int = None
     _pai = None
@@ -831,13 +837,15 @@ def _step_multilayer_land_impl(
         _sai = _get(lp, "SAI", None)
         _pai = _lai + (0.0 if _sai is None
                        else jnp.broadcast_to(_sai, precip_rain.shape))
-        _W0 = (state.W_canopy if state.W_canopy is not None
-               else jnp.zeros_like(precip_rain))
-        _W_int, infil_rain = intercept_rain(
-            _W0, jnp.maximum(precip_rain, 0.0), _pai, dt, config.interception)
-        # Negative "rain" (numerical) or its refreeze deficit is passed through
-        # unintercepted so the column budget is unchanged in that edge case.
-        infil_rain = jnp.where(precip_rain > 0.0, infil_rain, precip_rain)
+        _W_int, _throughfall = intercept_rain(
+            state.W_canopy, jnp.maximum(precip_rain, 0.0), _pai, dt,
+            config.interception)
+        # ``_throughfall`` already carries the canopy DRIP (which is nonzero even
+        # at zero rain when the plant area — hence storage capacity — shrinks, so
+        # it must NOT be discarded, else that water leaks; codex).  Add back any
+        # negative "rain" (numerical / refreeze deficit) so the column budget is
+        # unchanged in that edge case.
+        infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / constants.L_v
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
@@ -1002,13 +1010,13 @@ def _step_multilayer_land_impl(
         # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
         # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
         canopy_state=canopy_state_new,
-        # Intercepted-water store: whenever interception is active the freshly
-        # computed store is output (even if the incoming state carried ``None``,
-        # e.g. a restart before this field existed — else the store would be
-        # silently discarded, codex).  ``None`` only when interception is off.
-        W_canopy=(W_canopy_new if _do_intercept
-                  else (_match(W_canopy_new, state.W_canopy)
-                        if state.W_canopy is not None else None)),
+        # Intercepted-water store: structure-preserving — an array in, an array
+        # out (updated on the two-leaf interception path, else carried), a
+        # ``None`` in stays ``None``.  ``_do_intercept`` already requires the
+        # store to exist, so an active interception step never introduces the
+        # store (no ``None`` -> array carry-structure change under a scan).
+        W_canopy=(_match(W_canopy_new, state.W_canopy)
+                  if state.W_canopy is not None else None),
     )
 
     # --- Post-step surface state for coupler ---

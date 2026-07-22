@@ -599,9 +599,11 @@ class CLMMLCanopyConfig(NamedTuple):
 
     # Per-site Vcmax25 override [µmol m-2 s-1].  ``None`` (default) keeps the
     # MLpftcon per-PFT lookup value.  A float replaces the global lookup for THIS
-    # column's PFT — the "go beyond the global table" per-site value.  Under
-    # "medlyn" it is injected as the traced ``vcmaxpft_jax`` leaf (trainable);
-    # otherwise it is written to the ``MLpftcon.vcmaxpft`` module table.
+    # column's PFT — the "go beyond the global table" per-site value — by feeding
+    # the traced ``vcmaxpft_jax`` array to the backend nitrogen-profile routine,
+    # which selects it before leaf photosynthesis under ANY stomatal model (WUE,
+    # Medlyn, Ball-Berry).  A trainable Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument from the training loop instead.
     vcmax25_override: float | None = None
 
     # SW band partitioning.

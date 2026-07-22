@@ -203,6 +203,9 @@ _PSIHAT_RSL: dict[str, Any] | None = None
 # bakes the psihat table into the jaxpr as a trace-time constant, so a compiled
 # or differentiated function cannot follow a later switch.
 _DIFF_TURBULENCE_SCHEME: str | None = None
+# Backend gs_type in force from the last ``_apply_stomatal_model``; used to clear
+# the leaf-kernel lru_caches only on an actual stomatal-model switch.
+_APPLIED_GS_TYPE: int | None = None
 
 
 def _psihat_probe() -> dict[str, float]:
@@ -284,6 +287,22 @@ def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
     import multilayer_canopy.MLLeafPhotosynthesisMod as _photo
     _ml_ctl.gs_type = gs
     _photo.gs_type = gs
+    # The backend's leaf-kernel factories are ``functools.lru_cache``d on their
+    # parameter tuple but NOT on ``gs_type`` (the returned kernel closes over it
+    # as a static Python branch).  So SWITCHING stomatal model in one process
+    # could otherwise reuse a kernel compiled for the previous model with the new
+    # model's parameters.  Clear those caches whenever the applied gs_type
+    # actually changes (tracked in ``_APPLIED_GS_TYPE`` so the common no-switch
+    # case pays nothing).  This is a serial-process guard; concurrent mixed-model
+    # calls remain unsupported (the state is process-global) — one stomatal model
+    # per process is the contract.  Upstream fix: key the caches on gs_type.
+    global _APPLIED_GS_TYPE
+    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != gs:
+        for _name in dir(_photo):
+            _fn = getattr(_photo, _name, None)
+            if hasattr(_fn, "cache_clear"):
+                _fn.cache_clear()
+    _APPLIED_GS_TYPE = gs
 
 
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
@@ -1934,23 +1953,22 @@ def compute_clm_ml_canopy_fluxes(
     # including production forward-only runs).  Diff mode is already gated by the
     # capability guard above.
     # Per-site Vcmax25 override (config) — the "beyond the global PFT table"
-    # value.  Build the traced ``vcmaxpft_jax`` from the module lookup with this
-    # PFT's entry replaced by the site value, so it feeds photosynthesis (and
-    # flows gradients — trainable) instead of the global default.  The backend
-    # threads ``vcmaxpft_jax`` ONLY through the Medlyn path, so it requires
-    # ``stomatal_model="medlyn"``; under WUE it would be silently inert, which we
-    # reject loudly rather than run the wrong Vcmax.  An explicitly-passed
-    # ``vcmaxpft_jax`` (e.g. from a training loop) takes precedence.
+    # value.  Build ``vcmaxpft_jax`` from the module lookup with this PFT's entry
+    # replaced by the site value; the backend's nitrogen-profile routine
+    # (``CanopyNitrogenProfile``) selects the supplied array over the global
+    # table BEFORE leaf photosynthesis, regardless of stomatal model, so this
+    # feeds photosynthesis under WUE, Medlyn and Ball-Berry alike.  A per-site
+    # FIXED value goes here; a TRAINABLE Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument (from a training loop), which takes precedence.
     if canopy_config.vcmax25_override is not None and vcmaxpft_jax is None:
-        if canopy_config.stomatal_model != "medlyn":
-            raise ValueError(
-                "CLMMLCanopyConfig.vcmax25_override requires stomatal_model="
-                "'medlyn' — the backend threads the per-site Vcmax injection only "
-                f"through the Medlyn path; got {canopy_config.stomatal_model!r}. "
-                "Set stomatal_model='medlyn', or drop the override to use the "
-                "PFT-table Vcmax under WUE.")
         from multilayer_canopy import MLpftconMod as _pftmod
-        vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[int(canopy_config.pft_clm)].set(
+        _pft = int(canopy_config.pft_clm)
+        _vlen = int(_pftmod.MLpftcon.vcmaxpft.shape[0])
+        if not (0 <= _pft < _vlen):
+            raise ValueError(
+                f"CLMMLCanopyConfig.pft_clm={_pft} out of range for the MLpftcon "
+                f"vcmaxpft table (0..{_vlen - 1}); cannot apply vcmax25_override")
+        vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[_pft].set(
             float(canopy_config.vcmax25_override))
 
     _opt_kwargs: dict[str, Any] = {}
