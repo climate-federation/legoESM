@@ -975,6 +975,46 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         "_deln_flux fy differs from baseline when corner "
                         "blocks poisoned — corner ghosts used somewhere")
 
+    def test_deln_flux_mass_branch_coefficient(self):
+        """#1255: the mass branch must add damp*mean(mass)*f2 — the
+        Fortran's 0.5 (tp_core.F90:1339-1363) is the two-point mass
+        mean, not an extra factor on damp.  Mechanical gate: with
+        uniform mass=c the added diffusive flux must be EXACTLY c
+        times the mass=None branch's.  The old code applied 0.5*damp
+        on an already-averaged mass (half the certified damping) and
+        fails this at c=1 (fx_mass-fx == 0.5*(fx_none-fx)).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        q = jnp.ones((6, n, n)) * 10.0 + jnp.sin(
+            jnp.linspace(0, 3.14, n))[None, None, :]
+        fx = jnp.zeros((6, n + 1, n))
+        fy = jnp.zeros((6, n, n + 1))
+        damp = 0.001
+
+        fx_none, fy_none = fv_tp_2d_mod._deln_flux(
+            1, damp, q, fx, fy, cdgrid)
+        for c in (1.0, 3.0):
+            mass = jnp.full((6, n, n), c)
+            fx_m, fy_m = fv_tp_2d_mod._deln_flux(
+                1, damp, q, fx, fy, cdgrid, mass=mass)
+            self.assertTrue(
+                bool(jnp.allclose(fx_m - fx, c * (fx_none - fx),
+                                  rtol=0, atol=1e-14)),
+                f"mass-branch fx coefficient wrong at mass={c} — "
+                "expected damp*mean(mass)*fx2 (#1255 factor-2)")
+            self.assertTrue(
+                bool(jnp.allclose(fy_m - fy, c * (fy_none - fy),
+                                  rtol=0, atol=1e-14)),
+                f"mass-branch fy coefficient wrong at mass={c} — "
+                "expected damp*mean(mass)*fy2 (#1255 factor-2)")
+
     def test_del6_vt_flux_routes_halo_through_duogrid_when_active(self):
         """Iter-78: `_del6_vt_flux` accepted a `use_duogrid` parameter
         but never used it — its halo was pinned to `interp_offsets`.

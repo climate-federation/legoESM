@@ -916,10 +916,12 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
     # Apply `damp` here rather than at Step 1 (iter-934 float32-overflow fix).
     if mass is not None:
         mass_pad = pad_halo(mass, interp_offsets=_offs, duogrid=_dg_arg)
+        # Fortran: fx += damp*0.5*(mass(i-1,j)+mass(i,j))*fx2 — the 0.5 IS
+        # the face-mean of mass; do not apply it again on damp (#1255).
         mass_u = 0.5 * (mass_pad[:, :-1, 1:-1] + mass_pad[:, 1:, 1:-1])  # (6, n+1, n)
         mass_v = 0.5 * (mass_pad[:, 1:-1, :-1] + mass_pad[:, 1:-1, 1:])  # (6, n, n+1)
-        fx = fx + 0.5 * damp * mass_u * fx2
-        fy = fy + 0.5 * damp * mass_v * fy2
+        fx = fx + damp * mass_u * fx2
+        fy = fy + damp * mass_v * fy2
     else:
         fx = fx + damp * fx2
         fy = fy + damp * fy2
