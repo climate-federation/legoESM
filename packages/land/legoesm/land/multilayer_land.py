@@ -145,7 +145,12 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     """
     grid = make_soil_grid(config.soil_grid)
     root_depth = _get(land_params, "root_depth", config.root_depth)
-    theta_wp   = _get(land_params, "theta_wp", config.theta_wp)
+    # Plant wilting point (transpiration extraction) drives this root-zone
+    # availability; falls back to the soil wilting point when unset.
+    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
+                     else config.theta_wp)
+    theta_wp   = _get(land_params, "theta_wp_plant",
+                      _get(land_params, "theta_wp", _wp_plant_cfg))
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
         theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
@@ -390,8 +395,16 @@ def _step_multilayer_land_impl(
 
     # Spatially-varying root zone params.
     root_depth = _get(lp, "root_depth", config.root_depth)
-    theta_wp = _get(lp, "theta_wp", config.theta_wp)
+    theta_wp = _get(lp, "theta_wp", config.theta_wp)          # SOIL wilting point
     theta_fc = _get(lp, "theta_fc", config.theta_fc)
+    # PLANT wilting point drives the ROOT-ZONE transpiration / GPP stress and is
+    # kept SEPARATE from the soil wilting point: deep-rooted vegetation extracts
+    # water below the soil-evaporation cutoff.  Falls back to ``theta_wp`` (per-
+    # column params first, then config) so an unset plant wp reproduces the
+    # single-wilting-point behaviour exactly.
+    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
+                     else config.theta_wp)
+    theta_wp_plant = _get(lp, "theta_wp_plant", _wp_plant_cfg)
 
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]
@@ -452,7 +465,9 @@ def _step_multilayer_land_impl(
         return arr
 
     root_depth_c = _to_ncol(root_depth)
-    theta_wp_c   = _to_ncol(theta_wp)
+    # Root-zone stress uses the PLANT wilting point (transpiration extraction
+    # limit); the soil wilting point ``theta_wp`` is the soil-column reference.
+    theta_wp_c   = _to_ncol(theta_wp_plant)
     theta_fc_c   = _to_ncol(theta_fc)
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
