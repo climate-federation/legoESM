@@ -42,6 +42,8 @@ Fortran-indexed access for the verbatim patch loops.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_halos import (
     ed_supergrid_lonlat_ref,
@@ -59,6 +61,12 @@ from legoesm.grids.fv3_native_metrics import (
 )
 
 from legoesm import constants
+
+# Vertex-instability diagnostic mode (codex vertex-kill C1-B), frozen
+# at import — no per-call env reads, no mid-run env mutation of a
+# running experiment (codex screens-r1 F6).  Default OFF = faithful.
+_AVG_B_ENDPOINTS_LOCAL = (
+    os.environ.get("LEGOESM_DUO_AVG_B_ENDPOINTS", "") == "local")
 
 # --- upstream fill/sentinel constants (fv_grid_utils.F90) ---
 BIG_NUMBER = 1.0e8       # fv_grid_utils big_number
@@ -1524,6 +1532,14 @@ def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
     touched once per array, matching the Fortran loop split).
     Gather-then-apply; mutates in place.
     """
+    import os
+
+    # DIAGNOSTIC (codex vertex-kill C1-B screen, NON-FAITHFUL): skip
+    # the endpoint blends abutting the 3-valent cube vertices (yb S/N
+    # rows at fi in {1, npx}; xb W/E cols at fj in {1, npx}) — if the
+    # vertex instability collapses, the local endpoint mapping is
+    # implicated.
+    skip_endpoints = _AVG_B_ENDPOINTS_LOCAL
     npx = n + 1
     updates = []
     for tile in range(1, 7):
@@ -1531,12 +1547,16 @@ def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
         xb = xb6[tile - 1]
         yb = yb6[tile - 1]
         for fi in range(1, npx + 1):
+            if skip_endpoints and fi in (1, npx):
+                continue
             for fj, n_src in ((1, ns), (npx, nn)):
                 part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
                                            2 * fj - 1, "j", n, ng, n_src)
                 updates.append((yb, fi - 1, fj - 1,
                                 0.5 * (yb[fi - 1, fj - 1] + part)))
         for fj in range(1, npx + 1):
+            if skip_endpoints and fj in (1, npx):
+                continue
             for fi, n_src in ((1, nw), (npx, ne)):
                 part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
                                            2 * fj - 1, "i", n, ng, n_src)
@@ -1572,7 +1592,8 @@ def _latlon_vectors(ll: np.ndarray):
 def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
                           alpha: float = np.pi / 4.0,
                           delp0: float = 3.0e4, ddelp: float = 1.0e4,
-                          pt0: float = 300.0, dpt: float = 10.0) -> dict:
+                          pt0: float = 300.0, dpt: float = 10.0,
+                          wind_fn=None, scalars_fn=None) -> dict:
     """Smooth analytic (delp, pt, u, v) on the kinked single-tile lattice.
 
     Solid-body wind rotated by ``alpha`` (nontrivial at every face seam),
@@ -1585,6 +1606,12 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
     ``BIG_NUMBER`` — FV3 fills scalar corners itself (``fill2_4corners``)
     and the d2a2c corner fixes overwrite the vector ones before any
     consumed read.
+
+    ``wind_fn(ll) -> (u_east, v_north)`` / ``scalars_fn(ll) -> (delp,
+    pt)`` override the default solid-body/Williamson-like fields with
+    any geographic analytic IC (e.g. the colliding-modon Gaussian
+    bursts) while keeping the SAME certified D-grid projection; both
+    default to the historical closures (byte-identical when omitted).
     """
     g_lon, g_lat = gs["grid_lon"], gs["grid_lat"]
     node_ok, cell_ok = gs["node_ok"], gs["cell_ok"]
@@ -1606,6 +1633,11 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
         delp = delp0 - ddelp * s**2
         pt = pt0 + dpt * np.cos(2.0 * lon) * np.cos(lat) ** 3
         return delp, pt
+
+    if wind_fn is not None:
+        wind = wind_fn
+    if scalars_fn is not None:
+        scalars = scalars_fn
 
     a_ll = np.stack([gs["agrid_lon"], gs["agrid_lat"]], axis=-1)
     delp_all, pt_all = scalars(a_ll)

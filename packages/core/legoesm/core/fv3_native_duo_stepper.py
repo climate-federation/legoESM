@@ -24,6 +24,8 @@ Williamson-2 duo-target gate is the arbiter.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     analytic_swcore_state,
@@ -32,13 +34,19 @@ from legoesm.grids.fv3_native_gridstruct import (
     exchange_cgrid_vector_halos,
 )
 
+# Vertex-instability diagnostic mode (codex vertex-kill C3), frozen at
+# import — no per-call env reads, no mid-run env mutation (codex
+# screens-r1 F6).  Default OFF = faithful.
+_PG_BVERTEX_MEAN2 = os.environ.get("LEGOESM_DUO_PG_BVERTEX", "") == "mean2"
+
 
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
                                vector_corner: str = "lagrange",
                                ext_exclude: tuple = (),
                                use_ext_metrics: bool = False,
-                               oracle_conventions: bool = False) -> dict:
+                               oracle_conventions: bool = False,
+                               omega: float | None = None) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
@@ -71,13 +79,18 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
     # constants.R_earth/Omega defaults put a broad scale error on every
     # metric and Coriolis term (codex vertex-diff P2).
+    # omega override: the colliding-modon case runs a NON-ROTATING
+    # planet (FV3 case 8; omega=0); default = the FMS value
+    if omega is None:
+        omega = FV3_OMEGA
     if oracle_conventions:
-        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t,
+                                                   omega=omega)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
                                            radius=FV3_RADIUS_M,
-                                           omega=FV3_OMEGA)
+                                           omega=omega)
                for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
@@ -331,11 +344,15 @@ def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
 
 
 def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
-                       dt: float) -> list:
+                       dt: float, sw_cfg: dict | None = None) -> list:
     """SB2: geopk(SW,1-lev) + p_grad_c per face, the post-PG duo
     exchanges, d_sw1 per face, the C-ring inter-panel flux averaging
     (dyn_core.F90:853-900 — the first excluded mpp site, now live),
     then d_sw2 per face on the AVERAGED slots.
+
+    ``sw_cfg`` overrides the W2-tuned damping/reconstruction defaults
+    (``_SW_CFG_DEFAULT``) — e.g. the Zenodo case-8 configuration turns
+    vorticity damping OFF and runs hord=8 everywhere.
 
     Workspace choice: d_sw1's ut/vt workspaces enter as ZEROS
     (workspace_sentinel=0.0) — the defined analog of upstream's
@@ -391,6 +408,8 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
             exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
 
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     s1 = []
     for t in range(1, 7):
         st = states[t - 1]
@@ -400,8 +419,10 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             np.zeros((npx, n)), np.zeros((n, npx)),
             np.zeros((npx, m_a)), np.zeros((m_a, npx)),
             ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
-            hord_tr=8, hord_vt=6, hord_tm=6, hord_dp=6,
-            nord_v=1, nord_t=0, damp_v=0.2, damp_t=0.0,
+            hord_tr=cfg["hord_tr"], hord_vt=cfg["hord_vt"],
+            hord_tm=cfg["hord_tm"], hord_dp=cfg["hord_dp"],
+            nord_v=cfg["nord_v"], nord_t=0,
+            damp_v=cfg["damp_v"], damp_t=0.0,
             workspace_sentinel=0.0))
 
     afx6 = [o["allflux_x"] for o in s1]
@@ -421,7 +442,28 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     return outs
 
 
-def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
+# W2-tuned stage configuration (the historical hardcoded values —
+# byte-identical default).  The Zenodo case-8 run uses: hords all 8,
+# damp_v=0 (do_vort_damp=.false.), dddmp=0, d2_bg=0, d4_bg=0.12 with
+# nord=2 (del-6 — ported and certified bit-exact 6/6, job 9108229;
+# SW_CFG_CASE8 below carries it).
+_SW_CFG_DEFAULT = {
+    "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
+    "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
+    "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 1,
+}
+
+SW_CFG_CASE8 = {
+    # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml:
+    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8
+    "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
+    "hord_mt": 8, "nord_v": 1, "damp_v": 0.0,
+    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
+}
+
+
+def acoustic_step_sixface(ctx: dict, states: list, dt: float,
+                          sw_cfg: dict | None = None) -> list:
     """SB3: ONE full duo acoustic step on all six faces —
     c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
     -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
@@ -499,12 +541,15 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
-    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt)
+    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt, sw_cfg=sw_cfg)
 
     s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
                     s12[t - 1]["uc"], s12[t - 1]["vc"],
-                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt, hord_mt=6)
+                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
+                    hord_mt=cfg["hord_mt"])
           for t in range(1, 7)]
 
     ubb6 = [np.array(o["ubb"], copy=True) for o in s3]
@@ -528,13 +573,16 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
                        s12[t - 1]["xfx_adv"], s12[t - 1]["yfx_adv"],
                        s12[t - 1]["ra_x"], s12[t - 1]["ra_y"],
                        s4["ke"], ctx["gs6"][t - 1], bd, npx, npx,
-                       dt=dt, hord_vt=6, nord=1, dddmp=0.2,
-                       d2_bg=0.0, d4_bg=0.12, d_con=0.0)
+                       dt=dt, hord_vt=cfg["hord_vt"], nord=cfg["nord"],
+                       dddmp=cfg["dddmp"],
+                       d2_bg=cfg["d2_bg"], d4_bg=cfg["d4_bg"],
+                       d_con=0.0)
         s6 = d_sw6_duo(states[t - 1]["u"], states[t - 1]["v"],
                        s5["ut"], s5["vt"], s5["ke"], s5["wk"],
                        s5["vortfluxx"], s5["vortfluxy"],
                        ctx["gs6"][t - 1], bd, npx, npx,
-                       nord_v=1, damp_v=0.2, d_con=0.0)
+                       nord_v=cfg["nord_v"], damp_v=cfg["damp_v"],
+                       d_con=0.0)
         outs.append({"delp": s12[t - 1]["delp"], "pt": s12[t - 1]["pt"],
                      "u": s6["u"], "v": s6["v"],
                      "ke": s5["ke"], "wk": s5["wk"],
@@ -604,11 +652,27 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         for i in range(is_, ie + 1 + 1):
             pk1[i - lo, j - lo] = 0.0
     wkb = np.zeros_like(pk2)
+    pg_bvertex_mean2 = _PG_BVERTEX_MEAN2
     for arr in (pk2, gz1, gz2):
         fq = fort(arr, isd, jsd)
         fwk = fort(wkb, isd, jsd)
         a2b_ord4(fq, fwk, gsf, npx, npy, is_, ie, js, je, ng,
                  replace=True, duogrid=True)
+        if pg_bvertex_mean2:
+            # DIAGNOSTIC (codex vertex-kill C3 screen, NON-FAITHFUL):
+            # replace the four projected B vertices with the mean of
+            # their two edge neighbours — isolates the PG-tail
+            # B-vertex projection as an amplifier
+            B = fort(arr, isd, jsd)
+            snap = {(i, j): B[i, j]
+                    for i in (is_, is_ + 1, ie, ie + 1)
+                    for j in (js, js + 1, je, je + 1)}
+            B[is_, js] = 0.5 * (snap[(is_ + 1, js)] + snap[(is_, js + 1)])
+            B[ie + 1, js] = 0.5 * (snap[(ie, js)] + snap[(ie + 1, js + 1)])
+            B[ie + 1, je + 1] = 0.5 * (snap[(ie, je + 1)]
+                                       + snap[(ie + 1, je)])
+            B[is_, je + 1] = 0.5 * (snap[(is_ + 1, je + 1)]
+                                    + snap[(is_, je)])
 
     if d_ext > 0.0:
         wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
@@ -652,7 +716,8 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
 
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
-                               d_ext: float = 0.02) -> list:
+                               d_ext: float = 0.02,
+                               sw_cfg: dict | None = None) -> list:
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
@@ -672,7 +737,7 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     bd = ctx["bd"]
     npx = n + 1
 
-    stage = acoustic_step_sixface(ctx, states, dt)
+    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg)
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]

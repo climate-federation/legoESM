@@ -89,7 +89,7 @@ def test_extract_sha_pinned(oracle):
             f"(got sha256 {got}) — regenerate dsw5_duo_oracle_c12.npz")
 
 
-def _run_chain(inputs):
+def _run_chain(inputs, *, nord=1, hord_vt=6, dddmp=0.2):
     from legoesm.core.fv3_native_duo_sw_core import (
         d_sw1_duo,
         d_sw3_duo,
@@ -135,8 +135,37 @@ def _run_chain(inputs):
                      s1["xfx_adv"], s1["yfx_adv"],
                      s1["ra_x"], s1["ra_y"], s4["ke"],
                      gs, bd, res + 1, res + 1, dt=dt,
-                     hord_vt=6, nord=1, dddmp=0.2, d2_bg=0.0,
-                     d4_bg=0.12, d_con=0.0)
+                     hord_vt=hord_vt, nord=nord, dddmp=dddmp,
+                     d2_bg=0.0, d4_bg=0.12, d_con=0.0)
+
+
+@pytest.fixture(scope="module")
+def oracle_n2():
+    path = os.path.join(FIX, "dsw5_duo_oracle_c12_n2.npz")
+    if not os.path.exists(path):
+        pytest.skip("nord=2 fixture not generated yet "
+                    "(dsw5_duo_oracle.sbatch --n2 lane)")
+    return np.load(path, allow_pickle=True)
+
+
+def test_dsw5_duo_nord2_bit_exact(inputs, oracle_n2):
+    """case-8 damping lane: nord=2 (del-6) + hord_vt=8 + dddmp=0,
+    every output token BIT-exact vs the verbatim Fortran chain (the
+    n-loop generalisation and the hord-8 vorticity transport branch
+    certified together)."""
+    assert int(oracle_n2["nord"]) == 2 and int(oracle_n2["hord_vt"]) == 8
+    out = _run_chain(inputs, nord=2, hord_vt=8, dddmp=0.0)
+    for key in ("delpc", "ptc", "wk", "divg_d", "ke", "uc", "ut",
+                "vc", "vt", "vortfluxx", "vortfluxy", "ub", "vb"):
+        got = np.asarray(out[key], dtype=np.float64)
+        want = np.asarray(oracle_n2[key], dtype=np.float64)
+        assert got.shape == want.shape, (key, got.shape, want.shape)
+        nd = int((got.view(np.uint64) != want.view(np.uint64)).sum())
+        assert nd == 0, f"{key}: {nd}/{want.size} words differ bitwise"
+    # non-vacuity: nord=2 must genuinely differ from the nord=1 chain
+    out1 = _run_chain(inputs)
+    assert not np.array_equal(np.asarray(out["ke"]),
+                              np.asarray(out1["ke"]))
 
 
 def test_dsw5_duo_bit_exact(inputs, oracle):

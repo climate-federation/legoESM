@@ -1,6 +1,7 @@
 """Colliding-modons nonlinear SW driver + faithfulness diagnostics (issue #521).
 
-Runs the FV3 case-8 twin-vortex ("Colliding Modons", doi:10.1002/2017MS000965)
+Runs the FV3 case-8 twin Gaussian u-bursts ("Colliding Modons",
+doi:10.1002/2017MS000965 — eastward wind bursts, not azimuthal vortices)
 on the cubed-sphere FV3 shallow-water solver, non-rotating (f=0), and tracks the
 collision/exchange/return plus conservation and cube-symmetry artifacts.
 
