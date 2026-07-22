@@ -9256,6 +9256,13 @@ class ModelDriver:
                         f"  CFL={_seg_max_cfl:.2f} > 1.0 at day {elapsed_day:.0f}. "
                         f"Halving dt to {DT:.0f}s."
                     )
+                    # Keep the CLM-ML canopy's CONCRETE dt in step with the halved
+                    # DT: the canopy resolves its static ML sub-step count from
+                    # this value, and the segment is rebuilt below (retraces), so a
+                    # new count is fine.  A stale land_ml_dt would advance the
+                    # canopy at the old timestep while the dynamics use the new one.
+                    if getattr(self.physics, "land_ml_dt", None) is not None:
+                        self.physics.land_ml_dt = DT
                     n_steps_total = int(cfg.days * 86400 / DT)
                     diag_interval = int(cfg.output.diag_days * 86400 / DT)
                     checkpoint_interval = (

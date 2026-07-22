@@ -1011,11 +1011,16 @@ def _build_stubs(
     def _hydraulics_at(cfg_hyd, ci, li):
         def _sel(x):
             nd = getattr(x, "ndim", 0)
-            if nd >= 2:
-                return x[ci, li]              # (ncol, n_layer) -> scalar
-            if nd == 1 and x.shape[0] == ncol:
-                return x[ci]                  # (ncol,) -> scalar (defensive)
-            return x
+            if nd == 0:
+                return x                       # scalar / retention_curve string
+            if nd == 1:
+                # (ncol,) per-column, or (n_layer,) per-layer — disambiguate by
+                # size (the size-1 / clamped case is the layer-broadcast form).
+                return x[ci] if x.shape[0] == ncol else x[min(li, x.shape[0] - 1)]
+            # nd >= 2: (ncol, L) with L == n_layer OR 1 (clm_hydraulics_config makes
+            # (ncol, 1), meant to broadcast over layers) — CLAMP the layer index so
+            # a size-1 layer dim does not go out of bounds.
+            return x[ci, min(li, x.shape[1] - 1)]
         return jax.tree_util.tree_map(_sel, cfg_hyd)
 
     for i in range(ncol):
