@@ -11,6 +11,41 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+def column_mass_integral(field, p_s, dsigma):
+    """Column mass-weighted integral ``(1/g) * sum_k(field_k * p_s * dsigma_k)``.
+
+    The generic ∫ field dp/g on the sigma column: for a mixing-ratio-like
+    ``field`` [X/kg] this is the column burden [X/m²]; for a tendency
+    [X/kg/s] it is the column rate [X/m²/s].  ``column_water_vapor`` is the
+    ``field = q_v`` specialization — new column integrals MUST call this
+    instead of re-deriving the sum (CLAUDE.md shared-utilities rule).
+
+    Parameters
+    ----------
+    field : jax.Array
+        Per-level field [..., nlev].
+    p_s : jax.Array
+        Surface pressure [...] (same leading dims, without level axis).
+    dsigma : array-like
+        Layer thickness in sigma coordinates (nlev,).
+    """
+    # iter-48: promote to fp64 budget accumulator before the
+    # column product+sum.  Same fp32-field convention as iter-42..47:
+    # the canonical column-integral helper is imported by the
+    # driver / model_driver / plotters, so promoting here cleans
+    # every downstream diagnostic in one place.  q·p_s·dσ is
+    # ~10⁻²·10⁵·10⁻¹ = 10² per cell, summed over nlev (~32) → ~10³
+    # column total; fp32 quantum at that magnitude is ~10⁻⁴.
+    from legoesm.core.conservation import conservation_accumulator
+    _acc = conservation_accumulator()
+    return jnp.sum(
+        field.astype(_acc)
+        * p_s.astype(_acc)[..., None]
+        * jnp.asarray(dsigma).astype(_acc),
+        axis=-1,
+    ) / jnp.asarray(constants.g, dtype=_acc)
+
+
 def column_water_vapor(q_v, p_s, dsigma):
     """Column-integrated water vapor [kg/m^2].
 
@@ -30,21 +65,7 @@ def column_water_vapor(q_v, p_s, dsigma):
     jax.Array
         Column water vapor [...], same leading shape as p_s.
     """
-    # iter-48: promote to fp64 budget accumulator before the
-    # column product+sum.  Same fp32-field convention as iter-42..47:
-    # the canonical column-water-vapor helper is imported by the
-    # driver / model_driver / plotters, so promoting here cleans
-    # every downstream diagnostic in one place.  q_v·p_s·dσ is
-    # ~10⁻²·10⁵·10⁻¹ = 10² per cell, summed over nlev (~32) → ~10³
-    # column total; fp32 quantum at that magnitude is ~10⁻⁴.
-    from legoesm.core.conservation import conservation_accumulator
-    _acc = conservation_accumulator()
-    return jnp.sum(
-        q_v.astype(_acc)
-        * p_s.astype(_acc)[..., None]
-        * dsigma.astype(_acc),
-        axis=-1,
-    ) / jnp.asarray(constants.g, dtype=_acc)
+    return column_mass_integral(q_v, p_s, dsigma)
 
 
 def column_mass_weighted_mean(field, mass_per_cell, axis: int = -1):

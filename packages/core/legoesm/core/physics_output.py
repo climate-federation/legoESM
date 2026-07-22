@@ -57,3 +57,11 @@ class PhysicsOutput(NamedTuple):
     # of the RH grid-scale fraction (use_clubb_cloud_fraction).  None for schemes
     # with no PDF cloud closure => radiation keeps the grid-scale cloud path.
     cloud_fraction: jax.Array | None = None
+    # Per-process column budget ledger (diagnostics.process_ledger): the
+    # (N_LEDGER, 2) [water kg/m²/s, dry-enthalpy W/m²] global-mean rates of
+    # the PHYSICS rows (turbulence/convection/microphysics/radiation/
+    # other_physics; the clips/dynamics rows are filled by the segment
+    # driver).  ``None`` (default — the static ``budget_ledger`` gate off)
+    # keeps the pytree byte-identical to the pre-ledger output.  Appended
+    # LAST to preserve positional-construction ABI.
+    budget_ledger: jax.Array | None = None
