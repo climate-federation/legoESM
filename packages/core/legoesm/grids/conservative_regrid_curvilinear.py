@@ -302,3 +302,11 @@ def make_curvilinear_to_regular_weights(
     # src = tripole (trip_cell), dst = regular (reg_cell).
     pairs = [(t, r, a) for (t, r), a in overlap.items()]
     return _assemble_weights(pairs, dst_area, trip_shape, reg_shape)
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet): the
+# cubed-sphere conservative regridder reuses the lat-lon tiling + point-location
+# quadrature core, so expose public aliases (definitions keep the underscore
+# name for in-module callers).
+tile_regular_grid = _tile_regular_grid
+locate_in_regular = _locate_in_regular
