@@ -336,11 +336,16 @@ class _CornerLagrange:
 
     def fill(self, f: np.ndarray):
         """The nine-slot per-corner sequence [fv_duogrid.F90:1743-1901]."""
+        import os
+
         n = self.n
         lo = self.flo
         ie = n + self.istag                       # last compute slot
         je = n + self.jstag
         is_, js_ = 1, 1
+
+        corner_nearest = (os.environ.get("LEGOESM_DUO_CORNER_MODE", "")
+                          == "nearest")
 
         def diag(i_t, j_t, d1, d2):
             fa, fb = f.copy(), f.copy()
@@ -381,6 +386,25 @@ class _CornerLagrange:
         diag(is_ - 1, js_ - 1, "X-", "Y-")
         diag(is_ - 3, js_ - 3, "X-", "Y-")
         diag(is_ - 2, js_ - 2, "X-", "Y-")
+
+        if corner_nearest:
+            # DIAGNOSTIC (codex vertex-kill C2 screen, NON-FAITHFUL):
+            # after the standard sequence, overwrite ONLY the 3x3
+            # diagonal wedges with the nearest compute-corner value
+            # (upstream fv_duogrid.F90:1715 warns Lagrange
+            # extrapolation is "not highly recommended"; weights reach
+            # ~35 -> overshoot on sharp fields).  Directional strips
+            # keep their standard fills.
+            for (ci, cj, si, sj) in ((ie + 1, je + 1, ie, je),
+                                     (is_ - 1, je + 1, is_, je),
+                                     (ie + 1, js_ - 1, ie, js_),
+                                     (is_ - 1, js_ - 1, is_, js_)):
+                di = 1 if ci > ie else -1
+                dj = 1 if cj > je else -1
+                for a in range(3):
+                    for b in range(3):
+                        f[ci + di * a - lo, cj + dj * b - lo] = \
+                            f[si - lo, sj - lo]
 
 
 # ---------------------------------------------------------------------------

@@ -1524,6 +1524,15 @@ def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
     touched once per array, matching the Fortran loop split).
     Gather-then-apply; mutates in place.
     """
+    import os
+
+    # DIAGNOSTIC (codex vertex-kill C1-B screen, NON-FAITHFUL): skip
+    # the endpoint blends abutting the 3-valent cube vertices (yb S/N
+    # rows at fi in {1, npx}; xb W/E cols at fj in {1, npx}) — if the
+    # vertex instability collapses, the local endpoint mapping is
+    # implicated.
+    skip_endpoints = (os.environ.get("LEGOESM_DUO_AVG_B_ENDPOINTS", "")
+                      == "local")
     npx = n + 1
     updates = []
     for tile in range(1, 7):
@@ -1531,12 +1540,16 @@ def average_shared_edge_bgrid(xb6: list, yb6: list, n: int, ng: int):
         xb = xb6[tile - 1]
         yb = yb6[tile - 1]
         for fi in range(1, npx + 1):
+            if skip_endpoints and fi in (1, npx):
+                continue
             for fj, n_src in ((1, ns), (npx, nn)):
                 part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
                                            2 * fj - 1, "j", n, ng, n_src)
                 updates.append((yb, fi - 1, fj - 1,
                                 0.5 * (yb[fi - 1, fj - 1] + part)))
         for fj in range(1, npx + 1):
+            if skip_endpoints and fj in (1, npx):
+                continue
             for fi, n_src in ((1, nw), (npx, ne)):
                 part = _bgrid_edge_partner(xb6, yb6, tile, 2 * fi - 1,
                                            2 * fj - 1, "i", n, ng, n_src)

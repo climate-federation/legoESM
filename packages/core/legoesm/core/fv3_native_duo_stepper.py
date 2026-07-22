@@ -645,11 +645,29 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
         for i in range(is_, ie + 1 + 1):
             pk1[i - lo, j - lo] = 0.0
     wkb = np.zeros_like(pk2)
+    import os
+    pg_bvertex_mean2 = (os.environ.get("LEGOESM_DUO_PG_BVERTEX", "")
+                        == "mean2")
     for arr in (pk2, gz1, gz2):
         fq = fort(arr, isd, jsd)
         fwk = fort(wkb, isd, jsd)
         a2b_ord4(fq, fwk, gsf, npx, npy, is_, ie, js, je, ng,
                  replace=True, duogrid=True)
+        if pg_bvertex_mean2:
+            # DIAGNOSTIC (codex vertex-kill C3 screen, NON-FAITHFUL):
+            # replace the four projected B vertices with the mean of
+            # their two edge neighbours — isolates the PG-tail
+            # B-vertex projection as an amplifier
+            B = fort(arr, isd, jsd)
+            snap = {(i, j): B[i, j]
+                    for i in (is_, is_ + 1, ie, ie + 1)
+                    for j in (js, js + 1, je, je + 1)}
+            B[is_, js] = 0.5 * (snap[(is_ + 1, js)] + snap[(is_, js + 1)])
+            B[ie + 1, js] = 0.5 * (snap[(ie, js)] + snap[(ie + 1, js + 1)])
+            B[ie + 1, je + 1] = 0.5 * (snap[(ie, je + 1)]
+                                       + snap[(ie + 1, je)])
+            B[is_, je + 1] = 0.5 * (snap[(is_ + 1, je + 1)]
+                                    + snap[(is_, je)])
 
     if d_ext > 0.0:
         wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
