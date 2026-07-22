@@ -244,6 +244,24 @@ config next to every number.
 - **Bonus (from D4)** — agreement between AD and derivative-free optima per closure = a
   statement on whether closure coefficients are gradient-calibratable in legoESM.
 
+### 7.1 Demonstrated results so far (dry-convective anchor; 2026-07-22)
+The full machinery is built + validated; these are the first real numbers, for the
+`cbl_nieuwstadt` anchor only (the complete answers need every regime + the deeper
+tuning — see `CHANGELOG.md`):
+- **Q1a (structural ceiling)** — on the 2 h 96³ x64 CBL (model-exact resolved+SGS
+  flux), a counter-gradient layer appears at **275–292 m** (24% of levels): a
+  tuning-independent layer where any local K≥0 closure cannot match the LES flux.
+- **Q2 (tuned ranking, coarse tier-1)** — holtslag_boville (nonlocal) **0.241** <
+  smagorinsky 0.265 < louis 0.280 < ysu 0.363 < mynn25 (1.5-order) 0.365. Preliminary
+  finding: **closure order does NOT buy skill here** (the 1.5-order mynn25 is worst,
+  the nonlocal holtslag_boville best) — consistent with Q1a. Coarse search; not
+  definitive (small n_random, single case/metric).
+- **Q3 (machinery)** — the tuned-coefficient scorecard assembles; the inter-regime
+  spread + σ_LES need the other regimes and the SGS-spread runs.
+- **D4 bonus** — the AD-vs-derivative-free comparison awaits the AD path (which also
+  fixes the tuner's recompile-per-candidate cost; the RCE trainer's `lax.scan` +
+  `eqx.filter_value_and_grad` pattern is the reuse target).
+
 ---
 
 ## 8. Immediate next steps (D10 sequencing)
