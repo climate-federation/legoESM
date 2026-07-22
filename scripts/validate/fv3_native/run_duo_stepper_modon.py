@@ -56,10 +56,9 @@ def main():
                     choices=("case8", "w2tuned"),
                     help="stage configuration: 'case8' = the Zenodo "
                          "C48.sw.case8 damping block (vort damping OFF, "
-                         "dddmp=0, d_ext=0, hords=8, d4_bg=0.12; the "
-                         "ported nord=1/del-4 stands in for their "
-                         "nord=2/del-6 — disclosed) + FV3 gravity "
-                         "9.80665 in delp; 'w2tuned' = the historical "
+                         "dddmp=0, d_ext=0, hords=8, nord=2/del-6 "
+                         "d4_bg=0.12 — certified bit-exact 6/6) + FV3 "
+                         "gravity 9.80665 in delp; 'w2tuned' = the historical "
                          "W2-tuned defaults (damp_v=0.2, dddmp=0.2, "
                          "d_ext=0.02, hord=6)")
     args = ap.parse_args()

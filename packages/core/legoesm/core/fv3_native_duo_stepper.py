@@ -445,8 +445,8 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
 # W2-tuned stage configuration (the historical hardcoded values —
 # byte-identical default).  The Zenodo case-8 run uses: hords all 8,
 # damp_v=0 (do_vort_damp=.false.), dddmp=0, d2_bg=0, d4_bg=0.12 with
-# nord=2 (del-6; our d_sw5 port is nord=1/del-4 — the one disclosed
-# deviation until the nord=2 arm is ported).
+# nord=2 (del-6 — ported and certified bit-exact 6/6, job 9108229;
+# SW_CFG_CASE8 below carries it).
 _SW_CFG_DEFAULT = {
     "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
     "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
