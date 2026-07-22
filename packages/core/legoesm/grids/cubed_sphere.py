@@ -3845,3 +3845,11 @@ def create_cubed_sphere_panel(
         rsin_v=rsin_v_panel.astype(cdgrid_panel.rsin_v.dtype),
     )
     return panel, cdgrid_panel
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+GNOMONIC_ED_FACE_PERM = _GNOMONIC_ED_FACE_PERM
+GNOMONIC_ED_FACE_ROT = _GNOMONIC_ED_FACE_ROT

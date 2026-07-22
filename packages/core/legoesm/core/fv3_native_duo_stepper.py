@@ -120,7 +120,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # on area (real side values; the true wedge areas arrive with the
     # ext-machinery swap) + rarea recomputed there.
     from legoesm.grids.fv3_native_gridstruct import (
-        _fill_corners_agrid_x,
+        fill_corners_agrid_x as _fill_corners_agrid_x,
     )
     from legoesm.grids.fv3_native_gridstruct import (
         fort as _fort,

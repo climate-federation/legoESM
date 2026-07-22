@@ -1439,3 +1439,10 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
         v=state.v.replace(data=v_new),
     )
     return state_new, (Hu_avg, Hv_avg)
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+depth_average_to_faces = _depth_average_to_faces
