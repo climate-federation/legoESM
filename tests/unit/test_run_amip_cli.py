@@ -2177,6 +2177,26 @@ def test_sb81_omega_conversion_flag_flows_to_dycore_config():
     assert cfg_on.dycore.sb81_omega_conversion is True
 
 
+def test_budget_ledger_flag_flows_to_output_config():
+    """--budget-ledger (per-process budget attribution diagnostic)
+    round-trips into OutputConfig; default OFF = byte-identical model."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.output.budget_ledger is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--budget-ledger",
+    ]), parser))
+    assert cfg_on.output.budget_ledger is True
+
+    # BooleanOptionalAction: a YAML-true value stays CLI-overridable.
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-budget-ledger",
+    ]), parser))
+    assert cfg_neg.output.budget_ledger is False
+
+
 def test_convective_precip_efficiency_allows_bechtold():
     """--convective-precip-efficiency now round-trips for bechtold (shared
     split_convective_rain), not just tiedtke; a non-supporting scheme still

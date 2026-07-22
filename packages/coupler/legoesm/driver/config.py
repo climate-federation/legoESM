@@ -296,6 +296,13 @@ class OutputConfig(NamedTuple):
     monthly_means: bool = False
     cmip_output: bool = False
     clear_sky_diag: bool = False
+    # Per-process column water/energy budget ledger (diagnostics.
+    # process_ledger): attributes the global column-store tendencies to
+    # turbulence/convection/microphysics/radiation/other/clips/dynamics
+    # every step and writes segment-mean rates to budget_ledger.npz.
+    # Static diagnostic gate (default OFF = byte-identical model);
+    # single-rank only.
+    budget_ledger: bool = False
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
@@ -2007,6 +2014,7 @@ class ExperimentConfig(NamedTuple):
             monthly_means=getattr(amip_cfg, 'monthly_means', False),
             cmip_output=getattr(amip_cfg, 'cmip_output', False),
             clear_sky_diag=getattr(amip_cfg, 'clear_sky_diag', False),
+            budget_ledger=getattr(amip_cfg, 'budget_ledger', False),
         )
         return ExperimentConfig(
             grid=grid,
