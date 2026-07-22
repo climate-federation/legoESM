@@ -287,14 +287,24 @@ def leaf_energy_balance_bt(
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    fwet: jax.Array = 0.0,
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
-    LE = λ ρ (q_f - q_c) / (Rb + rs)
+    LE = λ ρ (q_f - q_c) * g_lh_eff
     H  = Rn - LE
     Tf_new = Tc + Rb / (ρ Cp) * H
+
+    ``fwet`` (wetted leaf fraction, 0..~0.05) splits the leaf into a DRY part
+    that transpires through the stomata (series conductance ``g_lh``) and a WET
+    part that evaporates intercepted water at the boundary-layer-limited rate
+    (``1/Rb``, no stomatal resistance).  The effective conductance is the
+    area-weighted blend, so a wet leaf evaporates MORE than a dry one — the
+    interception-loss increase in ET.  ``fwet = 0`` recovers the pure-stomatal
+    form exactly.  The wet-part water comes from the canopy store, routed by the
+    caller (``LE_wet`` recomputed in ``canopy_forward``).
 
     Parameters
     ----------
@@ -334,7 +344,11 @@ def leaf_energy_balance_bt(
     # (gs*Rb + 1) >= 1, so no small-denominator guard is needed.  (DifferBESS
     # Apr-13 conductance refactor.)
     g_lh = gs / (gs * Rb + 1.0)
-    LE = lam * rhoa * (q_f - q_c) * g_lh
+    # Dry part transpires through the stomata (g_lh); wet part evaporates at the
+    # boundary-layer limit 1/Rb (no stomatal resistance).  Blend by wetted area.
+    g_lh_wet = 1.0 / Rb
+    g_lh_eff = (1.0 - fwet) * g_lh + fwet * g_lh_wet
+    LE = lam * rhoa * (q_f - q_c) * g_lh_eff
 
     # Bound LE to the available energy (default soft cap).  This is what keeps
     # ``Tf_new`` from running away: the smooth ``soft`` mode still admits
@@ -377,13 +391,18 @@ def leaf_energy_balance_pm(
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    fwet: jax.Array = 0.0,
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
 
     ``stomatal_model`` selects Ball-Berry or Medlyn; see
-    ``leaf_energy_balance_bt`` for details.
+    ``leaf_energy_balance_bt`` for details.  ``fwet`` (wetted leaf fraction)
+    blends the DRY vapour conductance ``1/(Rb+rs)`` with the WET one ``1/Rb``
+    (no stomatal resistance) and uses the equivalent canopy resistance
+    ``rc_eff = 1/g_v - Rb`` in the quadratic, so a wet leaf evaporates more
+    (interception loss).  ``fwet = 0`` gives ``rc_eff = rs`` exactly.
 
     Returns
     -------
@@ -393,7 +412,9 @@ def leaf_energy_balance_pm(
         An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
-    rc = rs
+    # Wet/dry vapour-conductance blend -> effective canopy resistance.
+    g_v = (1.0 - fwet) / (Rb + rs) + fwet / Rb
+    rc = 1.0 / g_v - Rb
 
     ddesTc_Rb2          = ddesTc * Rb**2
     gamma_Rb_rc          = gamma_c * (Rb + rc)

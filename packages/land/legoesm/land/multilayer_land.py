@@ -47,8 +47,8 @@ from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
-    evaporate_wet_leaf,
     intercept_rain,
+    wetted_fraction as interception_wetted_fraction,
 )
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
@@ -532,6 +532,21 @@ def _step_multilayer_land_impl(
             theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
             1e-6, 1.0)[:, 0].astype(theta.dtype)
 
+        # Wetted leaf fraction from the START-of-step canopy-water store, driving
+        # the wet-leaf evaporation INSIDE the canopy energy balance (interception
+        # loss: a wet leaf evaporates at the boundary-layer limit, so LE rises).
+        # ``None`` when interception is off — the canopy then runs the pure-
+        # stomatal balance unchanged.
+        _fwet_pre = None
+        if config.interception is not None and state.W_canopy is not None:
+            _lai_i = jnp.broadcast_to(
+                _get(lp, "LAI", jnp.zeros_like(T_surface)), T_surface.shape)
+            _sai_i = _get(lp, "SAI", None)
+            _pai_i = _lai_i + (0.0 if _sai_i is None
+                               else jnp.broadcast_to(_sai_i, T_surface.shape))
+            _fwet_pre = interception_wetted_fraction(
+                state.W_canopy, _pai_i, config.interception)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -546,6 +561,7 @@ def _step_multilayer_land_impl(
             dt=dt,
             TgC_override=TgC_override,
             LAI_override=LAI_override,
+            fwet=_fwet_pre,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -915,23 +931,24 @@ def _step_multilayer_land_impl(
         soil_evap, has_snow, f_veg,
         surface_out.LE_canopy, surface_out.LE_soil)
 
-    # --- Canopy interception, phase 2: evaporate the wet leaf from the store --
-    # The wet leaf substitutes STORED water for transpiration: draw from the
-    # store instead of the root zone, CAPPED by the transpiration ``evap_transp``
-    # the caller is about to take, so shifting it onto the store never removes
-    # more surface water than the atmosphere is taking (closure).  The reported
-    # surface latent flux is unchanged (a water re-sourcing, not a new energy
-    # term — a full wet-leaf energy balance is a documented follow-up; see
-    # interception.py).  Dew stays in the existing surface-dew path.
+    # --- Canopy interception, phase 2: deplete the store by the wet-leaf flux --
+    # The canopy energy balance already computed the wet-leaf evaporation
+    # (``surface_out.LE_wet_canopy``, the fwet share of the boosted LE — a real
+    # interception-loss latent flux, NOT re-labelled transpiration).  That water
+    # is drawn from the store; the REST of the canopy latent stays transpiration
+    # from the root zone.  Cap the draw by the store (fwet is bounded, so this
+    # rarely bites); any store shortfall reverts that flux to the soil sink, so
+    # the total soil+canopy water budget closes against precip - ET - runoff and
+    # the reported LE is unchanged.
     W_canopy_new = state.W_canopy
     if _do_intercept:
-        _transp_mass = jnp.maximum(evap_transp, 0.0)   # kg m-2 s-1 available
-        W_canopy_new, _wet_evap, _fwet = evaporate_wet_leaf(
-            _W_int, surface_out.LE_canopy, _pai, dt,
-            config.interception, constants.L_v, transp_avail=_transp_mass)
-        # wet_evap <= evap_transp by construction, so this stays >= 0 and the
-        # total soil+canopy water budget closes against precip - ET - runoff.
-        evap_transp = evap_transp - _wet_evap
+        _wet_evap_demand = jnp.maximum(
+            surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
+        _wet_evap = jnp.minimum(_wet_evap_demand, _W_int / dt)  # store-limited
+        W_canopy_new = jnp.maximum(_W_int - _wet_evap * dt, 0.0)
+        # Wet-leaf water came from the store, so remove it from the root-zone
+        # transpiration sink (never below zero).
+        evap_transp = jnp.maximum(evap_transp - _wet_evap, 0.0)
 
     flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 
