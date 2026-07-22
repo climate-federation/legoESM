@@ -101,3 +101,44 @@ scatter for `canopy_state` (scatter `[1:ncol+1]`, keep index 0), (b) per-rank
 grid_info (slice the tuple / re-extract after scatter), (c) rank-local topology
 (the interface re-installs per trace using the local ncol — already handles it).
 Currently refused at `model_driver.py` (the MPI-scatter guard).
+
+## RE-SCOPING (2026-07-22) — uniform ncan/ntop makes S3 far smaller
+
+Two facts discovered after vendoring the backend in-repo change the S3 cost estimate:
+
+1. **The backend is now vendored** (`packages/land/legoesm/land/canopy/clm_ml_backend/`,
+   PR #1269). S3 lands IN legoESM — no external clm-ml-jax PR/release needed.
+2. **`ncan`/`ntop` are UNIFORM across columns** in the DEFAULT (explicit-count)
+   layering mode (`nlayer_within>0 and nlayer_above>0`, set by #1268's
+   `_apply_canopy_layering`). `MLinitVerticalMod` lines 146-151:
+   `_ntop = nlayer_within`, `_ncan = _ntop + nabove` — **independent of the column's
+   htop**. Only `nbot` (beta-distribution + `dpai_min` zeroing) varies per column/PFT.
+
+So S3 does NOT need to mask every per-layer loop. The tractable path:
+
+- **`lax.map` (or `vmap`) the single-column kernel over columns** at the interface
+  (replaces the S2 Python loop → O(1) compile). Under the map, the patch index
+  `grid.p = c` is a TRACED int — jax handles traced-index gather (`X[p]`) and scatter
+  (`.at[p].set`), so the per-patch data access needs no restructure.
+- **`ncan`/`ntop` stay SHARED CONCRETE** (uniform, from the config) → every
+  `range(1, ncan+1)` / `range(1, ntop+1)` loop stays STATIC (unrolled once, shared
+  across the map). Turbulence, RungeKutta, FluxProfile, Photosynthesis use only
+  `ncan`/`ntop` → **NO masking** (they were most of the 14 loops).
+- **`nbot` is the only per-column-varying int** → make `grid.nbot` a TRACED scalar
+  and MASK just the `nbot`-dependent loops. Scope: `MLSolarRadiationMod` (34 refs,
+  `range(ntop, nbot-1, -1)`) + `MLLongwaveRadiationMod` (14 refs, `range(nbot, ntop+1)`).
+  Convert each to a static `range(1, ntop+1)` with a `(ic >= nbot)` / `(ic <= ntop)`
+  mask (nbot traced). ~2 modules, not 5.
+- **`MLinitVerticalMod` stays exempt** (eager warm-start only).
+
+Gate the map path on uniform structure (explicit-count mode); fall back to the S2
+loop for height-increment mode (varying ncan) — so it is never wrong, only slower
+there.
+
+VALIDATION unchanged: whole-canopy column-parity vs the S2 loop
+(`test_multicolumn_matches_independent_single_columns`) is the oracle; assert equal
+compile time at ncol=2 vs ncol=64 (O(1)); gradients stay finite.
+
+RISK: still a radiation-kernel edit (solar/longwave nbot masking) with slow (5-16 min)
+per-parity validation, but ~2 modules + the interface map — a focused single-session
+effort, not the 5-module rewrite the original estimate implied.
