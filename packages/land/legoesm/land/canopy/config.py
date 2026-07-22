@@ -504,7 +504,15 @@ class CLMMLCanopyConfig(NamedTuple):
     """
 
     # Canopy vertical discretisation
-    nlevmlcan: int = 9          # Number of canopy layers (MLclm_varpar.nlevmlcan)
+    # Total canopy layers: ``nlevmlcan - nlayer_above`` within-canopy layers
+    # spanning 0..htop, plus ``nlayer_above`` layers from htop to the reference
+    # height.  These select CLM-ML's EXPLICIT layer-count mode; the backend's
+    # alternative height-increment mode (dz_tall = 0.5 m) puts ~54 layers in a
+    # 27 m forest canopy, whose thin beta-distribution tails fall below
+    # ``dpai_min`` and abort the run with "canopy layer has zero plant area
+    # index".  Installed by ``clm_ml_interface._apply_canopy_layering``.
+    nlevmlcan: int = 9          # Number of canopy layers (within + above)
+    nlayer_above: int = 1       # ...of which above-canopy (htop -> zref)
 
     # Sub-cycling / Runge-Kutta integration
     # 10 → Euler (nrk_steps = 0); 2x → RK with x stages
@@ -747,4 +755,19 @@ class CLMMLCanopyConfig(NamedTuple):
                 "CLM-ML canopy-airspace turbulence scheme must be one of "
                 f"{VALID_CLM_ML_TURBULENCE_SCHEMES} ('rsl_bonan'=Harman & "
                 "Finnigan roughness sublayer, 'most'=Monin-Obukhov only)")
+        # Layering: integral, non-boolean counts (the backend allocates arrays
+        # of this size and ``int()``-casts silently truncate a float).
+        for _nm, _v in (("nlevmlcan", self.nlevmlcan),
+                        ("nlayer_above", self.nlayer_above)):
+            if isinstance(_v, bool) or not isinstance(_v, int):
+                raise ValueError(
+                    f"CLM-ML {_nm} must be a plain int; got {_v!r}")
+        # Both counts must be >= 1, else the backend silently falls back to its
+        # height-increment mode (which aborts on a tall canopy).
+        if self.nlayer_above < 1 or self.nlevmlcan - self.nlayer_above < 1:
+            raise ValueError(
+                f"CLM-ML canopy layering needs at least one within-canopy and "
+                f"one above-canopy layer; got nlevmlcan={self.nlevmlcan}, "
+                f"nlayer_above={self.nlayer_above} "
+                f"(within = {self.nlevmlcan - self.nlayer_above})")
         return self

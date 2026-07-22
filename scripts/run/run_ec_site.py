@@ -45,6 +45,15 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
+from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+# Stem area index supplied to the CLM-ML multilayer canopy [m2/m2].  The EC
+# driver carries LAI only (the two-leaf canopy has no stem-area term), so the
+# multilayer canopy — whose plant-area profile is LAI + SAI — needs a value;
+# 0.5 is the CLM temperate-forest stem/dead-leaf area typical of the offline
+# sites.  It is a real +8% plant area relative to the two-leaf arm; see the
+# canopy-scheme comparison notes in docs/ec_site_offline_run.md.
+_CLMML_SAI = 0.5
 
 # Soil presets for the offline land config.  ``default`` = legoESM loam defaults
 # (6.4 m free-draining column).  The site presets set texture-appropriate
@@ -230,16 +239,62 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
             np.concatenate(h), np.concatenate(ts))
 
 
+def _is_float_leaf(x) -> bool:
+    """True for a floating-point array leaf.
+
+    The carried state is not uniformly floating point: the CLM-ML canopy state
+    (``state.canopy_state.mlcanopy``) carries integer topology arrays, so the
+    finiteness scan must look at the float leaves only.
+    """
+    return (hasattr(x, "dtype")
+            and jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact))
+
+
+def _is_array_leaf(x) -> bool:
+    """True for any array leaf (float OR int).
+
+    Used by the rollback: a failed step must revert EVERY array leaf, not just
+    the float ones, or the canopy state ends up a hybrid of old float
+    prognostics and new integer topology/counters.  ``jnp.where`` is dtype-
+    agnostic, so this reverts int arrays too; only genuinely non-array leaves
+    (None, Python scalars) are carried as-is.
+    """
+    return hasattr(x, "dtype") and hasattr(x, "shape")
+
+
 def _any_nonfinite(tree) -> jnp.ndarray:
-    """Scalar bool: True if any leaf of ``tree`` holds a non-finite value."""
+    """Scalar bool: True if any FLOAT leaf of ``tree`` holds a non-finite value."""
     flags = [jnp.any(~jnp.isfinite(leaf))
-             for leaf in jax.tree_util.tree_leaves(tree)]
+             for leaf in jax.tree_util.tree_leaves(tree) if _is_float_leaf(leaf)]
     return jnp.any(jnp.stack(flags)) if flags else jnp.asarray(False)
 
 
-def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
+def _clmml_land_params(cp, sai: float):
+    """``CanopyLandParams`` + the structural fields the CLM-ML canopy reads.
+
+    The EC driver builds the two-leaf ``CanopyLandParams`` (``hc``, ``LAI``);
+    the multilayer canopy reads ``htop`` / ``SAI`` / ``LAI``.  Rather than
+    duplicate the reader, widen the same per-step pytree with ``htop <- hc``
+    and a constant ``SAI``.
+
+    NOTE: the two canopy arms are NOT byte-identical in structure — the
+    multilayer canopy has a stem-area term the two-leaf big-leaf canopy has
+    none of, so ``SAI`` is real extra plant area (+SAI/(LAI+SAI) at US-MMS)
+    that only CLM-ML sees.  The *site meteorology, soil, wind floor and scoring
+    mask* are identical; the canopy structural parameterisation differs by
+    construction.  ``sai`` is exposed as a knob (``--clmml-sai``) so it can be
+    set to a site/PFT value or tuned; it is recorded in the output metadata.
+    """
+    import collections
+    cls = collections.namedtuple("ClmMlLandParams", cp._fields + ("SAI", "htop"))
+    return cls(*cp, SAI=jnp.full_like(cp.LAI, sai), htop=cp.hc)
+
+
+def _prognostic_fluxes(d: ECSiteDriver,
+                       canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
-                       nudge_tau_days: float = 0.0):
+                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
+                       stomatal_m_scale: float = 1.0):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
@@ -267,6 +322,18 @@ def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
 
     Returns (gpp_gC, le_wm2, h_wm2, t_surface, reverted) each shape (n_time,).
     """
+    is_clmml = isinstance(canopy_config, CLMMLCanopyConfig)
+
+    # Stomatal-slope sensitivity: scale the two-leaf Ball-Berry slope m (C3+C4),
+    # which sets stomatal conductance per unit assimilation.  Higher m => more
+    # transpiration at the SAME GPP (lower water-use efficiency) => more LE, less
+    # H — the correct-direction lever for the Bowen bias.  Applied to the driver
+    # canopy params for the two-leaf arm only (CLM-ML reads its own g1_BB).
+    if stomatal_m_scale != 1.0 and not is_clmml:
+        d = d._replace(canopy_params=d.canopy_params._replace(
+            m_C3=d.canopy_params.m_C3 * stomatal_m_scale,
+            m_C4=d.canopy_params.m_C4 * stomatal_m_scale))
+
     # --- initial soil state from the driver's first finite soil obs ---
     # Initialise from the OBSERVED volumetric soil moisture directly (theta_soil
     # = SWC/100), NOT by inverting w_frac_rz: the reader derives w_frac_rz with
@@ -296,14 +363,40 @@ def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
     _znode = np.asarray(make_soil_grid(land_config.soil_grid).z_node)
     _i5 = int(np.argmin(np.abs(_znode - 0.05)))
 
+    # The CLM-ML multilayer canopy needs the site latitude (host-side CLM solar
+    # geometry); the two-leaf canopy takes its radiation straight from the driver.
+    lat_arg = jnp.asarray([np.rad2deg(d.lat_rad)]) if is_clmml else None
+
     def _scan_step(state, xs):
         forcing_t, params_t, doy_t, theta_obs_t = xs
         new_state, _resp, _carbon, out = step_multilayer_land_with_diagnostics(
             state, forcing_t, land_config, U_min, d.dt_s,
-            lat=None, carbon_state=None, doy=doy_t, land_params=params_t)
-        reverted = _any_nonfinite(new_state)
-        safe_state = jax.tree_util.tree_map(
-            lambda n, o: jnp.where(reverted, o, n), new_state, state)
+            lat=lat_arg, carbon_state=None, doy=doy_t, land_params=params_t)
+        # The CLM-ML cold-start step grows the carry (canopy_state None ->
+        # CanopyState), so there is no same-structure previous state to revert
+        # to; that step is taken unguarded and every later step is guarded.
+        if (jax.tree_util.tree_structure(new_state)
+                == jax.tree_util.tree_structure(state)):
+            reverted = _any_nonfinite(new_state)
+            # Revert EVERY array leaf (int topology included) so a rolled-back
+            # step cannot leave a hybrid of old float prognostics + new integer
+            # counters; only non-array leaves (None) are carried unchanged.
+            safe_state = jax.tree_util.tree_map(
+                lambda n, o: jnp.where(reverted, o, n) if _is_array_leaf(n) else n,
+                new_state, state)
+        else:
+            # Structure grew (CLM-ML cold start: canopy_state None -> CanopyState).
+            # There is no same-shape previous state to revert to, so a poisoned
+            # cold-start state would become the "old" state and every later
+            # rollback would restore NaNs forever.  Guard it explicitly instead.
+            if bool(_any_nonfinite(new_state)):
+                raise FloatingPointError(
+                    "CLM-ML cold-start step produced a non-finite land state; "
+                    "the vertical structure or first flux solve failed. Check "
+                    "the canopy config (layering, PFT, htop/LAI) — a cold-start "
+                    "NaN cannot be rolled back and would poison the whole run.")
+            reverted = jnp.asarray(False)
+            safe_state = new_state
         if nudge_alpha > 0.0:
             # Relax theta toward observed SWC (all layers; only where obs finite),
             # then make psi consistent.  Keeps water stress realistic while the
@@ -335,9 +428,30 @@ def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
                 masked(u_star))
         return safe_state, emit
 
-    xs = (d.forcing, d.canopy_params, d.doy, jnp.asarray(d.theta_soil))
-    run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
-    _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar) = run(state0, xs)
+    params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml
+              else d.canopy_params)
+    xs = (d.forcing, params, d.doy, jnp.asarray(d.theta_soil))
+    if is_clmml:
+        # CLM-ML runs EAGERLY, one Python step at a time.  Its interface reads
+        # per-step canopy structure on the host (``float(land_params.LAI[i])``,
+        # ``htop``), so a time-varying-LAI rollout cannot be traced yet — the
+        # jit-traceable forward path assumes a fixed canopy structure.
+        # ponytail: eager loop; switch to lax.scan once the per-step structural
+        # reads are de-hosted (CLM-ML de-host stage S2+).  Physics, config,
+        # driver and scoring are identical to the two-leaf arm either way.
+        n_steps = int(d.forcing.T_lowest.shape[0])
+        state, emits = state0, []
+        for i in range(n_steps):
+            xi = jax.tree_util.tree_map(lambda a: a[i], xs)
+            state, e = _scan_step(state, xi)
+            emits.append(jax.tree_util.tree_map(np.asarray, e))
+            if (i + 1) % 200 == 0:
+                print(f"  clmml step {i + 1}/{n_steps}", flush=True)
+        gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar = (
+            np.stack(v) for v in zip(*emits))
+    else:
+        run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
+        _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar) = run(state0, xs)
     rav = lambda a: np.asarray(a).ravel()
     return (rav(gpp), rav(le), rav(h), rav(ts), rav(reverted),
             rav(ts_soil), rav(swc_soil), rav(ustar))
@@ -365,7 +479,8 @@ def _skill(model: np.ndarray, obs: np.ndarray, valid: np.ndarray) -> dict:
 def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
                   mode: str = "diagnostic",
                   reverted: np.ndarray | None = None,
-                  score_valid: np.ndarray | None = None) -> str:
+                  score_valid: np.ndarray | None = None,
+                  extra_attrs: dict | None = None) -> str:
     import xarray as xr
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{d.site_id}_ec_{mode}.nc")
@@ -403,7 +518,8 @@ def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
         attrs=dict(site=d.site_id, pft=d.pft, climate=d.climate, igbp=int(d.igbp),
                    lat_deg=float(np.rad2deg(d.lat_rad)), lon_deg=float(d.lon_deg),
                    dt_s=float(d.dt_s), mode=mode,
-                   gpp_units="umolCO2/m2/s", le_units="W/m2", h_units="W/m2"),
+                   gpp_units="umolCO2/m2/s", le_units="W/m2", h_units="W/m2",
+                   **(extra_attrs or {})),
     )
     ds.to_netcdf(path)
     return path
@@ -456,9 +572,18 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              k_sat_decay_m: float = 0.0, soil_evap_resistance_exp: float = 2.0,
              root_depth: float | None = None, z_ref: float | None = None,
              stress_b0: bool = False, select_best_year: bool = False,
-             texture_csv: str = _DEFAULT_TEXTURE_CSV) -> dict:
+             texture_csv: str = _DEFAULT_TEXTURE_CSV,
+             canopy: str = "two_leaf", clm_pft: int = 7,
+             clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
+             stomatal_m_scale: float = 1.0) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
+    if canopy not in ("two_leaf", "clmml"):
+        raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
+    if canopy == "clmml" and mode != "prognostic":
+        # Diagnostic mode vmaps the canopy over timesteps; the CLM-ML interface
+        # mutates CLM module globals per step and cannot be vmapped.
+        raise ValueError("--canopy clmml requires --mode prognostic")
     d = read_ec_site_driver(driver_nc)
     # Site-level physics from the consolidated table (tower height, phreatophyte
     # root/column depth).  An explicit non-None argument (CLI override) wins; a
@@ -487,7 +612,16 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # phreatophytic) canopy sustains a baseline transpiration, while a
     # deciduous / senescent canopy self-limits because its LAI -> 0.  This is
     # the physically-general default for the offline sites (see EC_SITE_PHYSICS).
-    canopy_config = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+    if canopy == "two_leaf":
+        canopy_config = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+    elif canopy == "clmml":
+        # CLM-ML multilayer canopy.  num_ml_steps=None derives the canopy
+        # sub-step from dtime_ml_target_s (300 s), so an hourly EC driver
+        # sub-cycles instead of running the stiff canopy-air storage term at
+        # the host step (PR #1240).
+        canopy_config = CLMMLCanopyConfig(pft_clm=clm_pft).validate()
+    else:
+        raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
         canopy_config, soil, bottom_bc, soil_depth_m,
         k_sat_decay_m=k_sat_decay_m,
@@ -500,7 +634,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk)
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
-            d, canopy_config, land_config, _U_MIN, nudge_tau_days=nudge_tau_days)
+            d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
+            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale)
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
@@ -537,8 +672,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         metrics["SWC"] = _skill(model["swc_soil"], np.asarray(d.theta_soil), soil_score)
         # friction velocity: modelled u* (from momentum stress) vs observed USTAR.
         metrics["USTAR"] = _skill(model["ustar"], np.asarray(d.obs["ustar"]), score_valid)
-    path = _write_output(out_dir, d, model, mode=mode, reverted=reverted,
-                         score_valid=score_valid)
+    # Tag the output with the canopy arm so a two-leaf and a CLM-ML run of the
+    # same site/mode do not overwrite each other.
+    extra_attrs = {"canopy": canopy}
+    if canopy == "clmml":
+        extra_attrs.update(clm_pft=clm_pft, clmml_sai=float(clmml_sai),
+                           nlevmlcan=canopy_config.nlevmlcan,
+                           nlayer_above=canopy_config.nlayer_above)
+    path = _write_output(out_dir, d, model,
+                         mode=mode if canopy == "two_leaf" else f"{mode}_{canopy}",
+                         reverted=reverted, score_valid=score_valid,
+                         extra_attrs=extra_attrs)
     forcing_note = ("" if d.met_filled is None else
                     f"; scored on observed forcing only "
                     f"({100 * (d.met_filled == 0).mean():.0f}% of steps)")
@@ -607,6 +751,23 @@ def main() -> int:
     ap.add_argument("--root-depth", type=float, default=None,
                     help="root e-folding depth [m] (deeper => more deep-water "
                          "access; default: per-site EC_SITE_PHYSICS table, else 1 m)")
+    ap.add_argument("--canopy", default="two_leaf", choices=["two_leaf", "clmml"],
+                    help="surface canopy scheme: the two-leaf big-leaf canopy "
+                         "(default) or the CLM-ML multilayer canopy (requires the "
+                         "'canopy' extra; --mode prognostic only, runs eagerly)")
+    ap.add_argument("--clm-pft", type=int, default=7,
+                    help="CLM PFT index for --canopy clmml (7 = broadleaf "
+                         "deciduous temperate tree; 13 = C3 grass)")
+    ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
+                    help="stem area index [m2/m2] for the CLM-ML canopy (the "
+                         "two-leaf arm has no stem-area term); tunable")
+    ap.add_argument("--stomatal-m-scale", type=float, default=1.0,
+                    help="scale the two-leaf Ball-Berry slope m (transpiration "
+                         "per assimilation); >1 => more LE, less H at fixed GPP")
+    ap.add_argument("--u-min", type=float, default=_U_MIN,
+                    help="wind-speed floor [m/s]; canopy sees "
+                         "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
+                         "less aerodynamic conductance => less sensible heat")
     ap.add_argument("--select-best-year", action="store_true",
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
@@ -621,7 +782,10 @@ def main() -> int:
                  soil_evap_resistance_exp=args.soil_evap_resistance_exp,
                  root_depth=args.root_depth, z_ref=args.z_ref,
                  stress_b0=args.stress_b0, select_best_year=args.select_best_year,
-                 texture_csv=args.texture_csv)
+                 texture_csv=args.texture_csv,
+                 canopy=args.canopy, clm_pft=args.clm_pft,
+                 clmml_sai=args.clmml_sai, u_min=args.u_min,
+                 stomatal_m_scale=args.stomatal_m_scale)
     return 0
 
 
