@@ -2932,13 +2932,18 @@ class TestLwAerosolPath:
         )
         return base, ncol, nlev
 
-    def _solver(self, use_optimal_angle=False):
+    def _solver(self, use_optimal_angle=False, gpoint_batch_size=None):
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
 
-        return RRTMGP.from_legoesm_config(
-            RRTMGPConfig(include_clouds=False, use_optimal_angle=use_optimal_angle)
-        )
+        cfg = dict(include_clouds=False, use_optimal_angle=use_optimal_angle)
+        # gpoint_batch_size=0 forces the sequential per-g-point lax.scan (vs the
+        # default 16-wide vmap block); a test that captures per-g-point values
+        # via jax.debug.callback needs that deterministic g-point ORDER, because
+        # callbacks inside a vmapped block fire in an undefined order.
+        if gpoint_batch_size is not None:
+            cfg["gpoint_batch_size"] = gpoint_batch_size
+        return RRTMGP.from_legoesm_config(RRTMGPConfig(**cfg))
 
     @staticmethod
     def _elevated_aod(ncol, nlev, value=0.3):
@@ -3042,22 +3047,39 @@ class TestLwAerosolPath:
         def spy(optical_depth, *args, **kwargs):
             # Defer to execution time (the scan body is traced, not run, at
             # call time) so the concrete summed τ is captured per g-point.
+            # ordered=True: append in program (g-point) order — an UNORDERED
+            # callback may reorder/coalesce effects even in a sequential scan, so
+            # the two runs' arrays could still misalign by g-point.
             jax.debug.callback(
-                lambda v: seen.append(float(v)), jnp.sum(optical_depth)
+                lambda v: seen.append(float(v)), jnp.sum(optical_depth),
+                ordered=True,
             )
             return orig(optical_depth, *args, **kwargs)
 
         monkeypatch.setattr(two_stream, "_compute_optimal_lw_secant", spy)
-        solver = self._solver(use_optimal_angle=True)
+        # Sequential per-g-point scan (gpoint_batch_size=0) so the spy's
+        # jax.debug.callback fires in deterministic g-point order in BOTH the
+        # gas-only and gas+aerosol runs; under the default 16-wide vmap block the
+        # callback order within a block is undefined, so the two captured arrays
+        # would misalign by g-point (each gas τ differs) and the per-g-point Δ
+        # comparison would see arbitrary differences, not the injected OD.
+        solver = self._solver(use_optimal_angle=True, gpoint_batch_size=0)
         base, ncol, nlev = self._cols()
         aod_value = 1.0
         aod = jnp.zeros((ncol, nlev)).at[:, 2:5].set(aod_value)
 
+        # block_until_ready before reading/clearing ``seen``: the ordered
+        # callback fires in-order WITHIN a run, but on an async backend the
+        # effects can still be in flight when solve_columns returns — forcing
+        # the outputs guarantees every g-point's append has landed first.
         seen.clear()
-        solver.solve_columns(**base)  # gas only
+        out_gas = solver.solve_columns(**base)  # gas only
+        jax.block_until_ready(out_gas.lw_flux_up)
         gas = np.array(seen)
         seen.clear()
-        solver.solve_columns(**base, aerosol_absorption_optical_depth_lw=aod)
+        out_aer = solver.solve_columns(
+            **base, aerosol_absorption_optical_depth_lw=aod)
+        jax.block_until_ready(out_aer.lw_flux_up)
         aer = np.array(seen)
 
         assert gas.size > 0 and gas.size == aer.size, (

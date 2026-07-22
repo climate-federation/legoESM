@@ -47,6 +47,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.bottom_drag.config",
     "legoesm.ice.config",
     "legoesm.coupler.config",
+    "legoesm.coupler.coupled_latlon_band",
     "legoesm.coupler.lake.config",
     "legoesm.land.canopy.config",
     "legoesm.land.canopy.interception",

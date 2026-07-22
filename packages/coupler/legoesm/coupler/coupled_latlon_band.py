@@ -41,6 +41,26 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Machine-checked parameter spec (see tests/test_param_specs.py).  The two heat
+# capacities and the bulk exchange coefficient are per-site tunable closures
+# (tier 2, literature-bounded); the ocean freezing floor is a physical constant
+# (constants.T_freeze_ocean), not a free parameter.
+__param_spec__ = {
+    "CoupledSlabConfig": {
+        "scheme_key": "coupler.slab_band",
+        "excluded": {
+            "t_freeze_ocean_K": "ocean freezing point is a physical constant "
+                                "(constants.T_freeze_ocean), a measurement "
+                                "convention, not a tunable closure",
+        },
+        "params": {
+            "k_exchange": {"units": "W m-2 K-1", "bounds": (5.0, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "bulk sensible-heat transfer coefficient (slab-band coupling)", "shape": None},
+            "c_atm_area": {"units": "J m-2 K-1", "bounds": (5.0e5, 2.0e6), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "atmospheric surface-layer heat capacity per area, order c_pd*dp/g", "shape": None},
+            "c_ocean_area": {"units": "J m-2 K-1", "bounds": (1.0e7, 8.0e7), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_coupling", "reference": "slab mixed-layer heat capacity per area, order rho_ocean*c_ocean*h_mix", "shape": None},
+        },
+    },
+}
+
 
 class CoupledSlabConfig(NamedTuple):
     """Sensible-heat coupling + slab mixed-layer parameters.
