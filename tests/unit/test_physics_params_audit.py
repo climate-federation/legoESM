@@ -143,7 +143,14 @@ class TestConvectionAudit:
             out = kain_fritsch_convection(T, q_v, p_full, p_half, A["w"],
                 A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 1800.0, "kain_fritsch.cape_consumption_time")
+        # Probe at an INTERIOR TIMEC (2400 s), not the default 1800 s: the
+        # operative timec is clip(cape_consumption_time, timec_min_s=1800,
+        # timec_max_s=3600), and the default 1800 s sits EXACTLY on the clamp
+        # FLOOR (== timec_min_s), where d(clip)/dx is zero.  The parameter is
+        # genuinely AD-reachable — the gradient flows for any value strictly
+        # inside (1800, 3600) (verified nonzero at 2000/2400/3000 s); the
+        # zero at 1800 is the degenerate clamp boundary, not a dead param.
+        assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
 
     def test_tiedtke_epsilon_deep(self):
         from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
