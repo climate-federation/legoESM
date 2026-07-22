@@ -147,23 +147,41 @@ def tune_closure_derivative_free(
     )
 
 
-# --- scheme → (config attr, registry scheme_key, base-config factory) ----------
+# --- scheme → (sub-config class, registry scheme_key) --------------------------
+# The closures wired for the dry-CBL (prescribed-flux) tuner, spanning the
+# closure-order ladder for Q1/Q2 (local first-order → nonlocal → 1.5-order).
+def _cbl_scheme_table():
+    from legoesm.atmosphere.physics.turbulence.config import (
+        HoltslagBovilleConfig,
+        LouisConfig,
+        MYNN25Config,
+        SmagorinskyConfig,
+        YSUConfig,
+    )
+
+    return {
+        "smagorinsky": (SmagorinskyConfig, "atm.turb.SmagorinskyConfig"),   # local
+        "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
+        "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
+        "ysu": (YSUConfig, "atm.turb.YSUConfig"),                          # nonlocal
+        "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order
+    }
+
+
 def _base_turbulence(scheme: str):
     """A CBL-appropriate base TurbulenceConfig + its registry scheme_key."""
     from legoesm.atmosphere.physics import TurbulenceConfig
-    from legoesm.atmosphere.physics.turbulence.config import (
-        MYNN25Config,
-        SurfaceLayerConfig,
-    )
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 
+    table = _cbl_scheme_table()
+    if scheme not in table:
+        raise SystemExit(
+            f"--scheme {scheme!r} not wired for the CBL tuner; "
+            f"available: {sorted(table)}")
+    config_cls, scheme_key = table[scheme]
     surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
-    if scheme == "mynn25":
-        return (
-            TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(surface=surf)),
-            "atm.turb.MYNN25Config",
-        )
-    raise SystemExit(
-        f"--scheme {scheme!r} not wired for the CBL tuner yet; available: mynn25")
+    turb = TurbulenceConfig(scheme=scheme, **{scheme: config_cls(surface=surf)})
+    return turb, scheme_key
 
 
 def main(argv: list[str] | None = None) -> int:

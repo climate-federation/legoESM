@@ -52,6 +52,16 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   mixing coefficients have negligible leverage on the dry-CBL θ fit → the default is
   already near-optimal). A real Q2 data point for the dry-convective anchor; the full
   ranking needs the other 8 closures wired. Scorecard generated end-to-end.
+- **5 closures now wired for the CBL tuner** (smagorinsky, louis, holtslag_boville,
+  ysu, mynn25 — spanning local→nonlocal→1.5-order). **Preliminary DEFAULT-parameter**
+  θ-loss on the 2 h CBL (NOT the tuned ranking — Q2 requires tuning each; labeled
+  per the precision rule): holtslag_boville **0.241** (nonlocal, best), louis 0.281
+  (local), smagorinsky 0.334 (local), ysu 0.395 (nonlocal), mynn25 0.397. The
+  nonlocal holtslag_boville leading at default is consistent with the Q1a
+  counter-gradient finding (nonlocal transport in the CBL). All 5 run cleanly (finite
+  losses). The tuned Q2 ranking is the next campaign step.
+  NOTE: single-column tuning runs on CPU (`JAX_PLATFORMS=cpu`) — trivial there and
+  avoids GPU contention (the GPU is for the LES ensemble emission).
 - **BUG found + fixed (CLAUDE.md precision rule — instrument, don't infer)**: the FIRST
   Q2 run reported "100% improvement, best_loss=0.0". Instrumenting it (not trusting it)
   showed the "best" candidate's SCM had DIVERGED to NaN θ, yet `scm_les_final_loss`

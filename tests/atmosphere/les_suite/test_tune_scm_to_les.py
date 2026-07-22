@@ -76,6 +76,18 @@ def test_unknown_scheme_rejected():
         m._base_turbulence("not_a_scheme")
 
 
+def test_all_wired_schemes_build_with_registry_key():
+    # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
+    # registry scheme_key that has scalar tunable params.
+    m = _tuner()
+    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "mynn25"):
+        base, key = m._base_turbulence(scheme)
+        assert base.scheme == scheme
+        assert getattr(base, scheme) is not None
+        metas = m._scheme_tunable_metas(key, tiers=(1,))
+        assert metas  # tier-1 params exist for the ranking
+
+
 def test_no_tunable_params_raises():
     m = _tuner()
     with pytest.raises(SystemExit):
