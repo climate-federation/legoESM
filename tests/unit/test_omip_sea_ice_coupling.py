@@ -347,3 +347,42 @@ def test_jra55_builders_thread_land_mask_to_wrapper():
         seen[fn.name] = True
     assert set(seen) == builders, (
         f"missing JRA55 builder(s) in run_omip.py: {builders - set(seen)}")
+
+
+def test_blend_gates_direct_precip_by_ice_model_snow_reservoir():
+    """OMIP double-count guard (#1250): when the ice model OWNS a snow reservoir
+    (v2 / _thermo_v2 -- it routes the ice-fraction rain/snow to the ocean via
+    freshwater_flux -> ice_fw), the DIRECT full-cell precip channel must be
+    scaled to the open-water share f_open=(1-A) so ice-fraction precip lands
+    exactly ONCE (matching the coupled-ESM path).  For a reservoir-less slab
+    (default gate False) the direct channel stays full-cell (no regression).
+    Sign: precip +into ocean; f_open in [0,1] is a pure fraction (no sign flip).
+    """
+    A_val = 0.5
+    conc = jnp.full(SHAPE, A_val)
+    sf0, fw0 = _open_ocean_forcing()          # fw0.precip = 1e-5 full-cell P
+    P = np.asarray(fw0.precip)
+    # v2 ice tile delivers the ice-fraction precip share (A*P) via freshwater_flux
+    ice_fw_share = A_val * float(np.max(P))
+    resp_v2 = _tile_response(SHAPE, ice_fw=ice_fw_share)
+
+    # v2: direct precip is scaled to the open-water share f_open*P.
+    fw_v2, _ = blend_ice_ocean_forcing(
+        ice_resp=resp_v2, ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=jnp.ones(SHAPE),
+        ice_owns_snow_reservoir=True)
+    np.testing.assert_allclose(np.asarray(fw_v2.precip), P * (1.0 - A_val))
+    # Total precip delivered = direct (f_open*P) + ice_fw share (A*P) == P,
+    # counted ONCE -- NOT (1+A)*P, NOT (1-A)*P.  (f_water = f_open+A = 1, so
+    # ice_ocean_forcing_from_ice_response passes the ice_fw share through 1:1.)
+    total = np.asarray(fw_v2.precip) + np.asarray(fw_v2.ice_fw)
+    np.testing.assert_allclose(total, P)
+    # Explicitly reject the unpatched double-count value.
+    assert not np.allclose(total, P * (1.0 + A_val))
+
+    # slab / legacy-dynamic (default gate False): direct precip stays full-cell;
+    # ice_fw carries melt/freeze only (0 here) -> P counted once, unchanged.
+    fw_slab, _ = blend_ice_ocean_forcing(
+        ice_resp=_tile_response(SHAPE, ice_fw=0.0), ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=jnp.ones(SHAPE))
+    np.testing.assert_allclose(np.asarray(fw_slab.precip), P)
