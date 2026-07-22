@@ -1010,17 +1010,19 @@ def _build_stubs(
     # retention_curve string / per-layer-only fields pass through unchanged.
     def _hydraulics_at(cfg_hyd, ci, li):
         def _sel(x):
+            # The shipped producers emit ONLY scalars (default SoilHydraulicsConfig)
+            # or 2-D (ncol, L) fields (build_soil_hydraulics -> (ncol, n_layer);
+            # clm_hydraulics_config -> (ncol, 1) layer-broadcast).  Clamp BOTH dims
+            # so a size-1 column- or layer-broadcast dim never goes out of bounds
+            # (min(ci, ncol-1) is a no-op for a real ncol-sized dim).
             nd = getattr(x, "ndim", 0)
             if nd == 0:
                 return x                       # scalar / retention_curve string
             if nd == 1:
-                # (ncol,) per-column, or (n_layer,) per-layer — disambiguate by
-                # size (the size-1 / clamped case is the layer-broadcast form).
+                # 1-D hydraulics fields are not emitted by the shipped producers;
+                # treat a length-ncol vector as per-column, else per-layer (clamped).
                 return x[ci] if x.shape[0] == ncol else x[min(li, x.shape[0] - 1)]
-            # nd >= 2: (ncol, L) with L == n_layer OR 1 (clm_hydraulics_config makes
-            # (ncol, 1), meant to broadcast over layers) — CLAMP the layer index so
-            # a size-1 layer dim does not go out of bounds.
-            return x[ci, min(li, x.shape[1] - 1)]
+            return x[min(ci, x.shape[0] - 1), min(li, x.shape[1] - 1)]
         return jax.tree_util.tree_map(_sel, cfg_hyd)
 
     for i in range(ncol):
