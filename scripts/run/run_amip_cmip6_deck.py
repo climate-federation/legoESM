@@ -593,7 +593,8 @@ def main(argv: list[str] | None = None) -> int:
     rad_active = rad in ("rrtmg", "rrtmgp")
     spectral_path = (args.grid_type == "gaussian"
                      and args.discretization == "spectral")
-    mpas_path = (args.grid_type == "voronoi"
+    mpas_path = (args.grid_type in ("voronoi", "mpas", "mpas_voronoi",
+                                    "icosahedral")
                  and args.discretization == "mpas")
     effective_active = rad_active
 
