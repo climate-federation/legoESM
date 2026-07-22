@@ -269,6 +269,25 @@ def test_clmml_turbulence_rejects_unknown(tmp_path):
                      canopy="clmml", clmml_turbulence="bogus")
 
 
+def test_spinup_steps_trims_to_eval_window(tmp_path):
+    """--spinup-steps runs extra steps before the window but scores only the
+    evaluation window: the output length and metric count match a no-spinup run
+    of the same window, and the spin-up soil state carries into it."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc, n=96)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96,
+                        start_step=48, max_steps=48)
+    spun = mod.run_site(driver_nc, "prognostic", str(tmp_path / "s"), chunk=96,
+                        start_step=48, max_steps=48, spinup_steps=48)
+    # same evaluation window => same scored sample count
+    assert base["GPP"]["n"] == spun["GPP"]["n"]
+    out = xr.open_dataset(pathlib.Path(tmp_path / "s") / "SYN-Test_ec_prognostic.nc")
+    assert out.sizes["time"] == 48          # scored window only, spin-up trimmed
+    # the spun-up soil state differs from the cold start => fluxes are not identical
+    assert base["LE"]["bias"] != spun["LE"]["bias"]
+
+
 def test_de_hai_has_reference_height():
     """DE-Hai (canopy ~34 m) must have a tower z_ref above its canopy, else the
     CLM-ML within-canopy wind profile hits a math-domain error."""

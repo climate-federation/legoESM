@@ -594,7 +594,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              canopy: str = "two_leaf", clm_pft: int = 7,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
-             clmml_turbulence: str = "rsl_bonan") -> dict:
+             clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -615,6 +615,23 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         start_step, max_steps, _yr = _best_year_slice(driver_nc, d)
         print(f"  select-best-year: {_yr} (steps {start_step}..{start_step + max_steps}, "
               f"{max_steps} of {int(d.forcing.T_lowest.shape[0])})")
+    # Soil-moisture spin-up: prepend ``spinup_steps`` before the evaluation window
+    # so the prognostic soil column reaches a realistic state before scoring.
+    # Essential at seasonally-dry (Mediterranean) sites: a mid-summer cold start
+    # initialises the whole column at the dry observed surface moisture, which for
+    # a phreatophyte (US-Ton oaks tapping deep winter-recharged water) is at/below
+    # wilting -> root-zone stress w_frac_rz = 0 -> Vcmax * 0 -> GPP identically
+    # zero.  Starting earlier fills the deep root zone from the wet season and the
+    # summer GPP recovers.  The spin-up steps run but are trimmed from the scored
+    # output (prognostic only; diagnostic mode has no carried soil state).
+    n_spinup = 0
+    if spinup_steps > 0 and mode == "prognostic":
+        n_spinup = min(spinup_steps, start_step)
+        start_step -= n_spinup
+        if max_steps is not None:
+            max_steps += n_spinup
+        print(f"  spin-up: {n_spinup} steps before the evaluation window "
+              f"(trimmed from scoring)")
     if max_steps is not None or start_step:
         n = int(d.forcing.T_lowest.shape[0])
         k = (n - start_step) if max_steps is None else max_steps
@@ -662,6 +679,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
             clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale,
             vcmax_scale=vcmax_scale)
+    # Trim the spin-up window from BOTH the model arrays and the driver ``d``
+    # (obs/valid/provenance) so scoring, output and provenance all cover the
+    # evaluation window only, while the carried soil state that reaches it was
+    # spun up.  Keep the two in lock-step so score_valid still aligns.
+    if n_spinup > 0:
+        _tr = lambda a: None if a is None else a[n_spinup:]
+        gpp_gC, le, h = _tr(gpp_gC), _tr(le), _tr(h)
+        reverted, ts_soil = _tr(reverted), _tr(ts_soil)
+        swc_soil, ustar = _tr(swc_soil), _tr(ustar)
+        d = _slice_driver(d, n_spinup, int(d.forcing.T_lowest.shape[0]) - n_spinup)
+
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
@@ -808,6 +836,12 @@ def main() -> int:
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
                          "than the full multi-decade record")
+    ap.add_argument("--spinup-steps", type=int, default=0,
+                    help="prognostic soil spin-up: run this many steps before the "
+                         "evaluation window (trimmed from scoring) so the soil "
+                         "column reaches a realistic state. Needed at seasonally-"
+                         "dry sites (e.g. US-Ton) where a mid-summer cold start "
+                         "puts the root zone below wilting and zeros GPP")
     args = ap.parse_args()
     for nc in args.driver_nc:
         run_site(nc, args.mode, args.out, args.chunk,
@@ -823,7 +857,8 @@ def main() -> int:
                  clmml_sai=args.clmml_sai, u_min=args.u_min,
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
-                 clmml_turbulence=args.clmml_turbulence)
+                 clmml_turbulence=args.clmml_turbulence,
+                 spinup_steps=args.spinup_steps)
     return 0
 
 
