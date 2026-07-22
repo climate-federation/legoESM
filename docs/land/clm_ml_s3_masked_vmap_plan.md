@@ -142,3 +142,45 @@ compile time at ncol=2 vs ncol=64 (O(1)); gradients stay finite.
 RISK: still a radiation-kernel edit (solar/longwave nbot masking) with slow (5-16 min)
 per-parity validation, but ~2 modules + the interface map — a focused single-session
 effort, not the 5-module rewrite the original estimate implied.
+
+## FINAL IMPLEMENTATION SCOPE (2026-07-22) — lax.scan over columns, traced p
+
+The cleanest O(1)-compile path is **`jax.lax.scan` over columns** (NOT vmap): the scan
+carry IS the shared `mlcanopy` (scattered at a traced patch index `p=c` each step), so
+NO per-column-pure kernel restructure is needed — the existing scatter-into-shared flow
+threads through the carry. Requirements (all in the vendored backend now, no external PR):
+
+1. **Traced `p` support in the `grid=` path.** The kernel still reads per-column CLM
+   PROCESS GLOBALS by `p` with numpy + `int()`, which break under a traced `p`. Convert
+   these to `jnp` dynamic gather (device, traced-index-safe):
+   - `MLSolarRadiationMod.py:164` `pft = int(_itype_np[p])` — the per-column PFT. Thread
+     it as a per-column jnp value (from `grid` / a `(ncol,)` array) and make the MLpftcon
+     table lookups (`table[pft]`, spread across Solar + `MLLeafPhotosynthesisMod`) DYNAMIC
+     gathers on traced `pft`. This is the biggest sub-task.
+   - `MLCanopyFluxesMod.py:489,1050-1056,1137-1142` `int(_patch_col_np[p])` /
+     `_patch_gridcell_np[p]` / `_snl_np[c]` / `grc.latdeg[g]` — patch→column→gridcell
+     topology maps. Single-site they are identity-ish; under scan, jnp-gather at traced p.
+   - `col.z/zi` (soil grid) are UNIFORM across columns → fine as globals (no per-p read).
+2. **`ncan`/`ntop` stay CONCRETE static** (uniform explicit-count) → all their
+   `range(1, ncan+1)` loops stay static across the scan body. No change.
+3. **`nbot` becomes a traced per-column value** (`grid.nbot` from a `(ncol,)` array) →
+   MASK the `range(nbot, ntop+1)` / `range(ntop, nbot-1, -1)` loops in
+   `MLSolarRadiationMod` (34 refs) + `MLLongwaveRadiationMod` (14 refs): iterate the
+   static `1..ntop` and gate each layer op with `(ic >= nbot)`. DELICATE — the LW/SW
+   two-stream solves are layer-coupled; the mask must zero exactly the below-`nbot`
+   layers' contributions without changing the linear-system structure. This is the
+   radiation-numerics risk; validate as a NO-OP first (nbot still concrete → masked ==
+   ranged), THEN make nbot traced.
+4. **Interface:** replace the S2 per-column Python loop with `lax.scan` (carry=mlcanopy,
+   xs=arange(ncol) + per-column nbot/pft arrays). `extract_clm_ml_grid_info` returns
+   `(ncol,)` nbot/pft arrays alongside the shared static ncan/ntop.
+
+INCREMENTAL, VALIDATED ORDER (S2 loop stays default behind a `scan_columns` flag):
+(a) nbot-mask Solar+Longwave as a NO-OP (concrete nbot) → device==host parity UNCHANGED.
+(b) de-host PFT + topology reads to jnp-gather (concrete p) → parity UNCHANGED.
+(c) flip to lax.scan (traced p, traced nbot/pft) → whole-canopy column-parity vs S2 loop.
+(d) assert O(1) compile (ncol=2 vs ncol=64).
+
+Each of (a)-(d) is independently parity-checkable against the current per-column path —
+so the radiation-boundary risk is caught before the scan flip. Focused single-session
+effort; do NOT rush (an nbot-boundary bug "would corrupt all global runs").
