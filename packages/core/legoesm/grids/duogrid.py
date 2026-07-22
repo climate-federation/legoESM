@@ -1373,3 +1373,10 @@ def cubed_a2d_halo_orthogonal(
     vd = jnp.sum(ve * yhat, axis=-1)  # (6, n_p-1, n_p)
 
     return ud, vd
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+compute_corner_lagrange_coeff = _compute_corner_lagrange_coeff

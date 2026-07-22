@@ -74,3 +74,42 @@ def test_gaussian_slab_coupled_runs(tmp_path):
     assert hi - lo > 5.0, (
         f"SST spread {hi - lo:.1f}K too small — ocean under-forced (zero-SW "
         f"regression?)")
+
+
+def test_ocean_mode_label_mapping():
+    """GAP-5 guard companion: the public accessor maps every SimpleOceanConfig
+    mode onto its CoupledConfig.ocean_mode value, None on unknown."""
+    from legoesm.driver.coupled_config import ocean_mode_label
+
+    assert ocean_mode_label("fixed") == "slab"
+    assert ocean_mode_label("slab") == "slab"
+    assert ocean_mode_label("two_layer") == "two_layer"
+    assert ocean_mode_label("dynamic") is None
+    assert ocean_mode_label("typo") is None
+
+
+def test_resolve_coupled_microphysics_per_grid_default():
+    """2026-07-22 audit: coupled spectral path defaults to graph-tractable
+    kessler (the double-moment default segfaults XLA-CPU codegen at production
+    nlev); other grids keep morrison; explicit choices are honored."""
+    from scripts.run.run_coupled import resolve_coupled_microphysics
+
+    # default (None) is grid-dependent
+    assert resolve_coupled_microphysics("gaussian", None) == (
+        "kessler", "defaulted_kessler")
+    for g in ("cubed_sphere", "latlon", "voronoi"):
+        assert resolve_coupled_microphysics(g, None) == (
+            "morrison", "defaulted_morrison")
+
+    # explicit light scheme honored everywhere without warning
+    assert resolve_coupled_microphysics("gaussian", "kessler") == (
+        "kessler", "kept")
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")
+
+    # explicit heavy scheme on spectral is honored but flagged for the warning
+    assert resolve_coupled_microphysics("gaussian", "morrison") == (
+        "morrison", "explicit_heavy_warn")
+    # heavy scheme on a non-spectral grid is fine (no codegen wall there)
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")

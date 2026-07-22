@@ -100,3 +100,60 @@ class TestGWDCompositeValidation:
             ExperimentConfig(
                 gravity_wave_drag="mcfarlane+e3sm_cam"
             ).validate_strict()
+
+
+class TestForcingSelectorValidation:
+    """2026-07-21 AMIP/CMIP audit: forcing-source selectors are membership-
+    validated in validate_strict (the driver activates each channel with an
+    equality gate, so a typo used to silently deactivate the channel)."""
+
+    def test_typo_ozone_forcing_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="ozone_forcing"):
+            ExperimentConfig(ozone_forcing="externl").validate_strict()
+
+    def test_typo_ghg_forcing_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="ghg_forcing"):
+            ExperimentConfig(ghg_forcing="file").validate_strict()
+
+    def test_typo_solar_source_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="solar_source"):
+            ExperimentConfig(solar_source="spectral").validate_strict()
+
+    def test_typo_aerosol_forcing_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="aerosol_forcing"):
+            ExperimentConfig(aerosol_forcing="on").validate_strict()
+
+    def test_typo_dataset_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="dataset"):
+            ExperimentConfig(dataset="hadsst").validate_strict()
+
+    def test_unknown_experiment_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="experiment"):
+            ExperimentConfig(experiment="histrical").validate_strict()
+
+    def test_known_experiments_accepted(self):
+        for exp in ("", "amip", "historical", "piControl", "abrupt-4xCO2",
+                    "1pctCO2", "ssp245", "ssp585"):
+            ExperimentConfig(experiment=exp).validate_strict()
+
+    def test_fixed_experiment_with_external_ghg_rejected(self):
+        # abrupt-4xCO2 prescribes FIXED GHG scalars; an external annual file
+        # would take precedence in _precompute_external_forcing and silently
+        # run the file's (historical) trajectory instead of 4xCO2.
+        import pytest
+        with pytest.raises(ValueError, match="FIXED GHG"):
+            ExperimentConfig(
+                experiment="abrupt-4xCO2", ghg_forcing="external",
+                ghg_file="ghg.nc",
+            ).validate_strict()
+
+    def test_transient_experiment_with_external_ghg_allowed(self):
+        ExperimentConfig(
+            experiment="historical", ghg_forcing="external", ghg_file="g.nc",
+        ).validate_strict()

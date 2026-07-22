@@ -203,7 +203,7 @@ def ext_parity_lonlat_ref(n: int, ng: int, parity: str):
     parity "A": (2i, 2j) nodes, (6, n+2ng, n+2ng);
     parity "B": (2i-1, 2j-1) nodes, (6, n+2ng+1, n+2ng+1).
     """
-    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+    from legoesm.grids.fv3_native_halos import ED_CARTS as _ED_CARTS, ed_line as _ed_line
 
     line = _ed_line(n, 2 * (ng + 2))
     if parity == "A":
@@ -243,7 +243,7 @@ def _row_arc_coords(lon_row, lat_row):
 
 
 def _lagrange_w(xt: float, xs: np.ndarray) -> np.ndarray:
-    from legoesm.grids.fv3_native_halos import _lagrange_coef
+    from legoesm.grids.fv3_native_halos import lagrange_coef as _lagrange_coef
 
     return _lagrange_coef(xt, xs)
 
@@ -403,7 +403,7 @@ def build_ext_context(n: int, ng: int, gs6: list, *,
     - per-stagger corner Lagrange operators on the stepper lattice.
     """
     from legoesm.grids.fv3_native_halos import (
-        _compute_ext_vectors_native,
+        compute_ext_vectors_native as _compute_ext_vectors_native,
     )
 
     amat6 = [center_a_matrix(gs) for gs in gs6]

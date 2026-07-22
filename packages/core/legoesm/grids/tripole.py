@@ -278,6 +278,10 @@ def _compute_rotation_angles(
     # For u-points: delta_lon and delta_lat along the i-direction
     # at the u-point gives the orientation of the local i-axis.
     dlon_u = jnp.diff(glamu, axis=1)  # along i
+    # H6: unwrap the along-i longitude difference across the +-180 branch cut so
+    # a cell straddling the seam does not get a spurious ~360 deg dlon and a
+    # garbage angle.  180/360 are branch-cut geometry, not physical constants.
+    dlon_u = ((dlon_u + 180.0) % 360.0) - 180.0
     dlat_u = jnp.diff(gphiu, axis=1)
     # Angle of local i-axis relative to east
     alpha_u_interior = jnp.arctan2(
@@ -295,6 +299,8 @@ def _compute_rotation_angles(
 
     # v-points: same approach along j-direction
     dlon_v = jnp.diff(glamv, axis=0)
+    # H6: unwrap across the +-180 branch cut (see the u-point note above).
+    dlon_v = ((dlon_v + 180.0) % 360.0) - 180.0
     dlat_v = jnp.diff(gphiv, axis=0)
     alpha_v_interior = jnp.arctan2(
         jnp.deg2rad(dlon_v) * jnp.cos(jnp.deg2rad(gphiv[:-1, :])),
@@ -306,7 +312,15 @@ def _compute_rotation_angles(
     )
     mask_v = jnp.arange(n_lat_v)[:, None] >= cap_j
     cos_alpha_v = jnp.where(mask_v, jnp.cos(alpha_v_full), 1.0)
-    sin_alpha_v = jnp.where(mask_v, jnp.sin(alpha_v_full), 0.0)
+    # H5: the v-point arctan2 args are swapped vs the u-point, so
+    # alpha_v_full = atan2(E_j, N_j) = -alpha (the i-axis->east angle).
+    # cos(-alpha)=+cos(alpha) is already correct, but sin(-alpha)=-sin(alpha) is
+    # sign-flipped relative to the SINGLE convention every consumer uses
+    # (+sin(alpha) at BOTH u- and v-faces: the ocean/ice/omip inverse stress
+    # rotation j-row tau_j = -tau_e*sin_alpha_v + tau_n*cos_alpha_v with an
+    # EXPLICIT minus and the +cos_alpha_v above, and the fold-halo relative
+    # rotation).  Negate to restore +sin(alpha); cos is left unchanged.
+    sin_alpha_v = jnp.where(mask_v, -jnp.sin(alpha_v_full), 0.0)
 
     return cos_alpha_u, sin_alpha_u, cos_alpha_v, sin_alpha_v
 
