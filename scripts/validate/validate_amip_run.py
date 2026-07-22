@@ -35,6 +35,44 @@ import numpy as np
 # (2-yr AMIP pilot: 2034 W/m² over the Caspian, 2026-07-22).
 HFLS_CELL_MAX_W_M2 = 500.0
 
+# P1.5 production-stack closure gate: convective column heating must be
+# PAIRED with the latent release of the water convection removes.  The
+# 2-yr AMIP pilot warm-runaway signature was this pairing broken by ~5x
+# (ledger conv +322 W/m2 vs an L_v-consistent ~56 on the cold start;
+# post-fix 8b47b6359: +59.9 vs ~55, rel ~0.08).  0.35 cleanly separates
+# the two regimes while leaving room for legitimate sensible transport
+# and CMT contributions to the convection energy row.
+CONV_PAIRING_REL_MAX = 0.35
+# Below this convective activity the ratio is numerical noise, not a
+# physical verdict — skip rather than certify.
+CONV_PAIRING_MIN_MM_DAY = 0.2
+
+
+def conv_pairing_rel(run_dir: Path) -> float:
+    """Relative mismatch between the run-mean convection energy row and
+    -L_v x its water row from ``budget_ledger.npz``; NaN if the ledger is
+    absent or convection is too weak to judge.
+
+    Sign convention: the ledger water row is NEGATIVE when convection
+    removes water from the column store, so the paired heating is
+    ``-L_v * W > 0``.
+    """
+    from legoesm import constants
+
+    path = run_dir / "budget_ledger.npz"
+    if not path.exists():
+        return float("nan")
+    led = np.load(path)
+    rates = np.asarray(led["rates"], dtype=np.float64)   # (t, proc, 2)
+    processes = [str(p) for p in led["processes"]]
+    i = processes.index("convection")
+    w = float(rates[:, i, 0].mean())                     # kg/m2/s
+    e = float(rates[:, i, 1].mean())                     # W/m2
+    if abs(w) * 86400.0 < CONV_PAIRING_MIN_MM_DAY:
+        return float("nan")
+    e_from_water = -w * constants.L_v
+    return abs(e - e_from_water) / max(abs(e), abs(e_from_water))
+
 
 def hfls_cell_max(run_dir: Path) -> float:
     """Max over cells of the time-mean CMOR ``hfls`` [W/m²]; NaN if absent.
@@ -223,6 +261,17 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
                   lambda x: x < HFLS_CELL_MAX_W_M2, fatal=True,
                   skip_if_nan=True):
         failures.append("hfls_cell_max")
+
+    # Convective energy/water pairing (FATAL when measurable).  Reads the
+    # per-process budget ledger when the run was launched with
+    # --budget-ledger; skips otherwise.  Guards the assembled production
+    # stack against a re-decoupling of convective heating from its water
+    # sink (the mid-troposphere warm-runaway mechanism).
+    pairing = conv_pairing_rel(run_dir)
+    if not _check("conv energy/water pairing rel", pairing,
+                  lambda x: x < CONV_PAIRING_REL_MAX, fatal=True,
+                  skip_if_nan=True):
+        failures.append("conv_pairing")
 
     print()
     print(f"  Failures: {failures}")
