@@ -1373,7 +1373,11 @@ class ExperimentConfig(NamedTuple):
                 f"ozone_forcing must be one of {_valid_ozone_forcing}, "
                 f"got {self.ozone_forcing!r}"
             )
-        _valid_ozone_source = ("standard", "analytical", "none")
+        # "mls" (SAM RCEMIP MLS climatology) is implemented in
+        # _compute_ozone_vmr and reachable from YAML/programmatic configs;
+        # "ml" is NOT accepted here — it needs T/lon/ridge-weight plumbing
+        # the ExperimentConfig path does not carry.
+        _valid_ozone_source = ("standard", "analytical", "mls", "none")
         if self.ozone_source not in _valid_ozone_source:
             errors.append(
                 f"ozone_source must be one of {_valid_ozone_source}, "

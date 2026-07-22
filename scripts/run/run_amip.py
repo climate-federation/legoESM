@@ -468,7 +468,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=_EXPERIMENT_DEFAULTS.tau_pole,
                         help="Gray-radiation polar optical depth")
     parser.add_argument("--ozone-source", type=str, default="standard",
-                        choices=["standard", "analytical", "none"])
+                        choices=["standard", "analytical", "mls", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
                         choices=["inline", "external", "off"])
     parser.add_argument(
@@ -1871,7 +1871,16 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     if args.grid_type is None:
         args.grid_type = "cubed_sphere"
     if args.discretization is None:
-        args.discretization = "centered"
+        # Per-grid default: the SCVT Voronoi mesh has exactly one dycore
+        # discretization ('mpas'); the previous unconditional 'centered'
+        # default made bare ``--grid-type voronoi`` die at the dycore
+        # factory with an unsupported (hydrostatic, centered, mpas) triple
+        # (2026-07-21 audit — cross-grid smoke).
+        if args.grid_type in ("voronoi", "mpas", "mpas_voronoi",
+                              "icosahedral"):
+            args.discretization = "mpas"
+        else:
+            args.discretization = "centered"
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
@@ -2277,8 +2286,14 @@ def main(argv: list[str] | None = None):
                          "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
-    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
+    # Postprocess FIRST: it resolves the grid/discretization sentinels
+    # (``--truncation 21`` alone sets discretization="spectral" only there),
+    # and the spectral fallback keys off ``args.discretization == "spectral"``
+    # — calling it on the unresolved sentinel made it a silent no-op for the
+    # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
+    # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser)
+    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work
     # (ModelDriver/setup query devices; a jax op before init makes

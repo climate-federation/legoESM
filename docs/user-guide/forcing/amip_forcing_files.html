@@ -569,14 +569,14 @@
                     <td>auto-detected: <span class="badge-var">ozone</span> / <span class="badge-var">vmro3</span> / <span class="badge-var">o3</span> / <span class="badge-var">O3</span> / <span class="badge-var">tro3</span> [mol/mol], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, optional <span class="badge-var">plev</span>/<span class="badge-var">level</span>/<span class="badge-var">lev</span></td>
                     <td><span class="badge-dim">(time=12, lat[, plev])</span>; CMIP6 <span class="badge-dim">(time, plev, lat)</span> auto-swapped → <span class="badge-dim">(time, lat, plev)</span></td>
                     <td>Vertical levels: <code>nlev_src</code> from <code>plev</code> (Pa; hPa auto-converted if units ∈ {hPa, mb,…} or max&lt;1500)</td>
-                    <td><code>external.py:637-707</code> <code>get_ozone_at_time</code>; <code>_detect_ozone_varname</code>, <code>_load_monthly_zonal_with_levels</code>; cyclic monthly interp 365.25 d</td>
+                    <td><code>external.py:637-707</code> <code>get_ozone_at_time</code>; <code>_detect_ozone_varname</code>, <code>_load_monthly_zonal_with_levels</code>; cyclic monthly interp 365.0 d (noleap model clock; 2026-07-21)</td>
                 </tr>
                 <tr>
                     <td class="col-file">GHG annual — <code>--ghg-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ghg-forcing external</code>)</span></td>
                     <td><span class="badge-var">CO2</span> [1e-6], <span class="badge-var">CH4</span> [1e-9], <span class="badge-var">N2O</span> [1e-9], <span class="badge-var">CFC_11</span> [1e-12], <span class="badge-var">CFC_12</span> [1e-12], <span class="badge-var">time</span> (fractional year, <code>"year as %Y.%f"</code>)</td>
                     <td><span class="badge-dim">(time, lat=1, lon=1)</span> → squeezed to <span class="badge-dim">(time,)</span>; 5 separate 1-D series</td>
                     <td>Global-mean scalar; no bands/levels</td>
-                    <td><code>external.py:446-485</code> <code>_load_ghg_annual_file</code>; <code>external.py:519-535</code> <code>get_ghg_at_time</code> annual_file branch; day→year via <code>start_year + day/365.25</code></td>
+                    <td><code>external.py:446-485</code> <code>_load_ghg_annual_file</code>; <code>external.py:519-535</code> <code>get_ghg_at_time</code> annual_file branch; day→year via <code>start_year + day/365.0</code> (noleap model clock; 2026-07-21)</td>
                 </tr>
                 <tr>
                     <td class="col-file">Solar TSI — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source file</code>)</span></td>
@@ -714,7 +714,7 @@
         <ul>
             <li><span class="badge-var">aod</span> variable present with <span class="badge-dim">(time=12, lnwl, lat=180, lon=360)</span> layout.</li>
             <li><code>_load_monthly_zonal</code> averages over <code>lon</code>, then collapses <code>lnwl</code> → <span class="badge-dim">(time=12, lat=180)</span> (<code>external.py:177-196</code>). ✓</li>
-            <li>No <code>time.units</code> attribute, but numeric mid-days <code>14…349</code> go through <code>_to_days_float</code> → cyclic interp <code>day % 365.25</code> works correctly.</li>
+            <li>No <code>time.units</code> attribute, but numeric mid-days <code>14…349</code> go through <code>_to_days_float</code> → cyclic interp <code>day % 365.0</code> works correctly.</li>
         </ul>
     </div>
 
@@ -725,7 +725,7 @@
         <ul>
             <li>File units: <code>"months since 1850-01-01"</code>, values <code>0, 1, 2, …, 599</code>.</li>
             <li><code>_to_days_float</code> only handles <code>datetime64</code> / <code>cftime.datetime</code> / numeric — on a numeric array it just casts <code>.astype(np.float64)</code>, <strong>ignoring the unit string</strong>. So <code>month=1</code> is treated as <code>day=1</code>.</li>
-            <li><code>_interp_monthly_cyclic</code> then does <code>day_mod = day % 365.25</code> on this mis-scaled axis and against mid-days in <code>[0, 599]</code> → wrong month selected for every query.</li>
+            <li><code>_interp_monthly_cyclic</code> then does <code>day_mod = day % 365.0</code> on this mis-scaled axis and against mid-days in <code>[0, 599]</code> → wrong month selected for every query.</li>
             <li>Additional mismatch: the loader assumes 12-month climatology; this file has 600 months of time-varying ozone. Cyclic interpolation discards all interannual evolution.</li>
             <li><strong>Fix needed</strong>: detect <code>"months since"</code> in <code>units</code> attr and convert (e.g., × 30.4375) inside <code>_to_days_float</code>; or collapse the file to a climatology before passing to <code>--ozone-file</code>; or add a non-cyclic time-varying ozone code path.</li>
         </ul>

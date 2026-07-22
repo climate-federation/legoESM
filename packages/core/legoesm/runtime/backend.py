@@ -514,12 +514,18 @@ def _apply_mps_rev_workaround() -> None:
             "through gather on the mps platform. Upgrade jax-mps and "
             "this workaround deactivates itself."
         )
-    except Exception as exc:  # pragma: no cover - best-effort shim
-        logger.error(
-            "jax-mps rev workaround could not be applied (%s); "
-            "cubed-sphere runs on mps WILL produce garbage momentum "
-            "tendencies. Use JAX_PLATFORMS=cpu.", exc,
-        )
+    except Exception as exc:
+        # Fail CLOSED (codex r1 HIGH): the probe said the platform mis-fuses
+        # rev, and the fix could not be installed — continuing would produce
+        # the exact garbage-momentum blowup the workaround exists to prevent.
+        raise RuntimeError(
+            "jax-mps native lax.rev is broken on this platform (reversed "
+            "operands are silently un-reversed when fused) and the gather-"
+            "lowering workaround could not be registered "
+            f"({exc!r}; likely a jax private-API change). Refusing to run "
+            "with known-corrupt cubed-sphere metrics — set JAX_PLATFORMS=cpu "
+            "or upgrade jax-mps."
+        ) from exc
 
 
 def _configure_persistent_jit_cache() -> None:
