@@ -1000,6 +1000,24 @@ def _build_stubs(
     if rootfr_total > 0:
         rootfr_padded /= rootfr_total  # guarantee sum == 1.0
 
+    # The COUPLED path supplies PER-COLUMN, PER-LAYER hydraulics
+    # (build_soil_hydraulics -> (ncol, n_layer) fields: theta_sat/psi_sat/b_ch/
+    # K_sat), while the single-site path (run_lmip) supplies SCALAR fields.  Slice
+    # the config down to the current (column, layer) before hydraulic_conductivity
+    # so it returns a SCALAR K — otherwise the full (ncol, n_layer) params broadcast
+    # K to (ncol, ...) and ``hk_l_col.at[p, j].set(K)`` (a scalar slot) fails with
+    # "Cannot broadcast to shape with fewer dimensions".  Scalars / the
+    # retention_curve string / per-layer-only fields pass through unchanged.
+    def _hydraulics_at(cfg_hyd, ci, li):
+        def _sel(x):
+            nd = getattr(x, "ndim", 0)
+            if nd >= 2:
+                return x[ci, li]              # (ncol, n_layer) -> scalar
+            if nd == 1 and x.shape[0] == ncol:
+                return x[ci]                  # (ncol,) -> scalar (defensive)
+            return x
+        return jax.tree_util.tree_map(_sel, cfg_hyd)
+
     for i in range(ncol):
         p = i + 1  # 1-based patch = column
         # Fill all nlevsoi layers so that layers beyond n_layers don't stay at
@@ -1015,7 +1033,7 @@ def _build_stubs(
                     and theta_soil is not None and j - 1 < theta_soil.shape[1]):
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
                 K = hydraulic_conductivity(psi_soil[i, j - 1], theta_soil[i, j - 1],
-                                           soil_hydraulics)
+                                           _hydraulics_at(soil_hydraulics, i, j - 1))
                 # Keep K traced (no float()) so d(hk)/d(psi,theta) stays on the
                 # jax.grad tape; numerically identical to the prior float() cast.
                 hk_l_col = hk_l_col.at[p, j].set(K * 1000.0)  # m/s → mm/s

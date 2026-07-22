@@ -106,21 +106,86 @@ def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
         driver_two_leaf.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
 
 
-def test_setup_clm_ml_coupled_raises_ncol_gt1_pending(monkeypatch, tmp_path):
-    """A coupled clm_ml setup fails LOUDLY (S2 ncol>1 pending) rather than letting
-    the eager host path raise a cryptic tracer error inside the jitted segment.
+def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
+    """A coupled clm_ml setup (S2) warm-starts the canopy and threads a per-column
+    grid_info into the pipeline — it no longer raises.
 
-    S4-AMIP plumbing makes 'clm_ml' a first-class selector (accepted by the CLI +
-    validate_strict), but the coupled land tile steps every model column (ncol>1)
-    and the CLM-ML forward path is jit-traceable only at ncol==1 so far.  The
-    driver setup must reject it with actionable guidance (use run_lmip)."""
+    The setup runs ONE eager cold canopy step to build the per-column vertical
+    structure, grafts the warm canopy_state onto the cold-start land state, and
+    stores the concrete per-column GridInfo tuple on the pipeline so the jitted run
+    steps run the ncol>1 traceable canopy.  Requires the clm-ml-jax backend."""
     import pytest
+    pytest.importorskip("multilayer_canopy")
+    import inspect as _inspect
+    from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    if "cos_zenith_device" not in _inspect.signature(
+            _mlmod.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
     _patch_land_loaders(monkeypatch)
-    driver_clm = ModelDriver(
-        _small_cfg()._replace(land_surface_scheme="clm_ml"),
-        output_dir=tmp_path / "clmml")
-    with pytest.raises(NotImplementedError, match="ncol>1 traceable CLM-ML"):
-        driver_clm.setup()
+    # A tiny grid keeps the eager warm-start + O(ncol) machinery cheap.
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver_clm = ModelDriver(cfg, output_dir=tmp_path / "clmml")
+    driver_clm.setup()
+
+    gi = driver_clm.physics.clm_ml_grid_info
+    assert isinstance(gi, tuple) and len(gi) >= 1, (
+        f"expected a per-column GridInfo tuple, got {type(gi)}")
+    ncol = int(driver_clm._land_ml_state.T_soil.shape[0])
+    assert len(gi) == ncol, f"grid_info has {len(gi)} entries for {ncol} columns"
+    # Each entry is a concrete GridInfo with a warm-started structure (ncan>=1).
+    assert all(int(g.ncan) >= 1 for g in gi)
+    # The land state carries a WARM canopy (mlcanopy populated), not a cold None.
+    cs = driver_clm._land_ml_state.canopy_state
+    assert cs is not None and cs.mlcanopy is not None, "canopy not warm-started"
+
+
+def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
+    """The coupled land tile runs the CLM-ML canopy over ncol>1 INSIDE jax.jit (S2
+    + coupler threading).  Exercises the exact coupled-segment mechanism — the
+    pipeline threads the per-column grid_info + concrete dt into step_multilayer_land
+    with a TRACED mlcanopy carry (as in the lax.scan segment) — via one jitted land
+    step, ~100x cheaper than a full-day run (which is 288 canopy sub-steps x ncol).
+
+    A crash would surface here (trace or first exec); a finite, advanced land state
+    with a still-warm canopy proves the jitted ncol>1 coupled canopy works."""
+    import pytest
+    pytest.importorskip("multilayer_canopy")
+    import inspect as _inspect
+    import jax
+    from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    if "cos_zenith_device" not in _inspect.signature(
+            _mlmod.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+
+    # One jitted coupled land step: land_ml (with the warm mlcanopy) is a jit ARG,
+    # so canopy_state.mlcanopy is a TRACER exactly like the segment's scan carry;
+    # the pipeline supplies grid_info + concrete dt from setup.
+    tile = driver.physics._step_multilayer_land_tile
+
+    @jax.jit
+    def _step(land_ml, T, p_s, q_v, u, v):
+        return tile(land_ml, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+                    T, p_s, q_v, u, v, None, 600.0)
+
+    land_new, T_sfc_col, _ = _step(
+        driver._land_ml_state, driver.state.T.data, driver.state.p_s.data,
+        driver.q_v, driver.state.u.data, driver.state.v.data)
+
+    assert jnp.isfinite(T_sfc_col).all(), "coupled CLM-ML skin T not finite"
+    assert T_sfc_col.shape[0] == ncol
+    # The canopy carry stays warm (structure came from the threaded grid_info, so
+    # the traced mlcanopy did not need a host int()).
+    assert land_new.canopy_state is not None
+    assert land_new.canopy_state.mlcanopy is not None
 
 
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):

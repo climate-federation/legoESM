@@ -168,6 +168,10 @@ class PhysicsPipeline:
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
+        # CONCRETE dynamics timestep [s] for the CLM-ML canopy's static sub-step
+        # count (the segment passes dt as a tracer; set at driver setup). None ⇒
+        # use the traced dt (simple_seb / two_leaf, byte-identical).
+        self.land_ml_dt = None
         # Optional PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI) for the
         # multilayer tile.  None (default) ⇒ no carbon coupling (Jarvis stomata /
         # byte-identical).  When set (+ land_ml_cfg.stomata.enabled +
@@ -175,6 +179,12 @@ class PhysicsPipeline:
         # making Vc_max25 / g1 / LCMA affect the surface flux — i.e. TRAINABLE in the
         # coupled calibration — without paying a multi-decade carbon-pool spin-up.
         self.land_ml_carbon = None     # CarbonState (prescribed) or None
+        # CLM-ML canopy: concrete per-column GridInfo tuple (structural ints
+        # ncan/ntop/nbot per column) extracted from the warm-started canopy at
+        # driver setup and threaded into the jitted step so the CLM-ML forward runs
+        # traceably over ncol>1 (S2).  None ⇒ not a CLM-ML run (byte-identical for
+        # simple_seb / two_leaf, which pass it straight through as None).
+        self.clm_ml_grid_info = None
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -544,6 +554,14 @@ class PhysicsPipeline:
             cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
+        # CLM-ML needs a CONCRETE dt to resolve its static ML sub-step count
+        # (num_ml_steps = ceil(dt/dtime_ml)); the jitted segment passes dt as a
+        # TRACER, which fails require_positive_finite.  The timestep is fixed, so
+        # the concrete config dt (threaded from setup) is numerically identical.
+        # Only the clm_ml path substitutes it — simple_seb / two_leaf keep the
+        # traced dt_rad (byte-identical).
+        if self.clm_ml_grid_info is not None and self.land_ml_dt is not None:
+            dt_rad = float(self.land_ml_dt) * self.rad_update_steps
         # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
         # carbon pools are discarded so the prescribed leaf carbon is reused every
         # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
@@ -554,7 +572,8 @@ class PhysicsPipeline:
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=_lmp, carbon_state=self.land_ml_carbon)
+            land_params=_lmp, carbon_state=self.land_ml_carbon,
+            clm_ml_grid_info=self.clm_ml_grid_info)
         return land_new, resp.T_sfc, resp.albedo
 
     def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):

@@ -1721,22 +1721,20 @@ class ModelDriver:
         elif _scheme_name == "two_leaf":
             _surface_scheme = TwoLeafCanopyConfig()
         elif _scheme_name == "clm_ml":
-            # CLM-ML-JAX multilayer canopy.  The forward path is jit-traceable
-            # only at ncol==1 today (S1); a coupled/global run steps the land
-            # tile over ALL model columns (ncol>1) inside the jitted segment,
-            # which needs the per-column traceable canopy (S2, in progress).
-            # Fail LOUDLY here rather than let the eager host path raise a cryptic
-            # TracerArrayConversionError deep inside the jitted coupler step.
-            # Single-point CLM-ML runs today via scripts/run/run_lmip.py.
-            raise NotImplementedError(
-                "land_surface_scheme='clm_ml' in the coupled driver requires the "
-                "ncol>1 traceable CLM-ML canopy path (S2), not yet available: the "
-                "coupled land tile steps every model column inside the jitted "
-                "segment, but the CLM-ML forward path is jit-traceable only at "
-                "ncol==1 so far. Use scripts/run/run_lmip.py "
-                "--land-surface-scheme clm_ml for single-point CLM-ML today, or "
-                "select 'two_leaf' for a coupled canopy run."
-            )
+            # CLM-ML-JAX multilayer canopy.  The ncol>1 traceable path (S2) makes
+            # the coupled land tile steppable over all model columns inside the
+            # jitted segment: the canopy is warm-started once (eager) at setup and
+            # a concrete per-column ``grid_info`` is threaded into the jitted step
+            # (see the warm-start block at the end of this method + the pipeline's
+            # clm_ml_grid_info).  NOTE the two current limitations: (a) the land
+            # tile's cos_zenith is the same 0.5 placeholder the two_leaf canopy
+            # uses here (faithful diurnal zenith is a shared follow-up), and (b)
+            # the per-column Python loop unrolls O(ncol) in the trace, so this is
+            # for MODEST column counts, not full-AMIP resolution (the masked-vmap
+            # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
+            # (the 1-based mlcanopy array does not match the per-column remap).
+            from legoesm.land.canopy.config import CLMMLCanopyConfig
+            _surface_scheme = CLMMLCanopyConfig()
         else:
             raise ValueError(
                 f"Unknown land_surface_scheme {_scheme_name!r}; "
@@ -1810,6 +1808,13 @@ class ModelDriver:
         self.physics.land_ml_params = params
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
+        # CONCRETE dynamics timestep [s].  The jitted segment passes ``dt`` as a
+        # TRACER, but the CLM-ML canopy needs a concrete dt to resolve its static
+        # ML sub-step count (num_ml_steps = ceil(dt/dtime_ml)).  The timestep is
+        # fixed, so the concrete config dt is numerically identical to the traced
+        # one; the pipeline uses it only on the clm_ml path (byte-identical for
+        # simple_seb / two_leaf, which keep the traced dt).
+        self.physics.land_ml_dt = float(self.config.dycore.dt)
 
         # Transient land-use cover (LULC): load the annual cover series onto the SAME
         # model columns (identical _nearest_regrid targets => cell-for-cell aligned
@@ -1912,6 +1917,50 @@ class ModelDriver:
             logger.info(
                 "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
                 cfg.soil_grid.n_layers, ncol,
+            )
+
+        # CLM-ML canopy: warm-start ONCE (eager) so the jitted run steps can thread
+        # a concrete per-column ``grid_info`` (S2) and start from a warm
+        # ``canopy_state``.  The jitted forward path is single-column unless the
+        # caller supplies one GridInfo per column; the first (cold) canopy step
+        # builds the vertical structure host-side and cannot run on the jax.jit
+        # tape, so we run it HERE, eagerly, at setup.  The structure
+        # (ncan/ntop/nbot) is a function of canopy height / PFT only (forcing-
+        # INDEPENDENT), so a nominal concrete forcing suffices to build it; the
+        # returned soil step is DISCARDED (only ``canopy_state`` is grafted onto
+        # the cold-start template — the cold soil IC is preserved).  t_a10
+        # cold-starts to T_lowest (converges in ~10 days).
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        if isinstance(cfg.surface_scheme, CLMMLCanopyConfig):
+            from legoesm.core.coupling_fields import AtmToSurface
+            from legoesm.land.multilayer_land import step_multilayer_land
+            from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
+            _o = jnp.ones(ncol, dtype=storage_dtype)
+            _warm_forcing = AtmToSurface(
+                sw_down=400.0 * _o, lw_down=350.0 * _o,
+                precip_total=0.0 * _o, precip_snow=0.0 * _o,
+                T_lowest=T_init, q_lowest=0.008 * _o,
+                u_lowest=3.0 * _o, v_lowest=0.0 * _o,
+                p_lowest=0.99e5 * _o, p_surface=1.0e5 * _o, rho_lowest=1.2 * _o,
+                cos_zenith=0.5 * _o, co2_ppmv=400.0 * _o,
+                has_radiation=_o, has_precipitation=_o)
+            # Eager cold canopy step (grid_info=None, ncol>1 eager path): builds the
+            # per-column vertical structure and a warm canopy_state.
+            _warm_state, _, _ = step_multilayer_land(
+                self._land_ml_state, _warm_forcing, cfg,
+                self.physics.land_ml_u_min, float(self.config.dycore.dt),
+                lat=self.physics.land_ml_lat,
+                carbon_state=self.physics.land_ml_carbon, doy=0.0,
+                land_params=params, clm_ml_grid_info=None)
+            self._land_ml_state = self._land_ml_state._replace(
+                canopy_state=_warm_state.canopy_state)
+            self.physics.clm_ml_grid_info = extract_clm_ml_grid_info(
+                _warm_state.canopy_state)
+            _gi = self.physics.clm_ml_grid_info
+            logger.info(
+                "  Land tile: CLM-ML canopy warm-started (%d columns; per-column "
+                "grid_info threaded into the jitted step)",
+                (len(_gi) if isinstance(_gi, tuple) else 1),
             )
 
     def _transient_land_ml_params(self, day: float):
@@ -3146,6 +3195,21 @@ class ModelDriver:
                 if self._land_ml_state is not None:
                     # (Sub-face tiled layouts were already refused above, before
                     # any scatter.)
+                    # CLM-ML canopy under MPI/SPMD is not yet supported: the
+                    # canopy_state carries the CLM ``mlcanopy`` pytree whose arrays
+                    # are 1-based (shape (ncol+1, ...), index 0 unused), so the
+                    # per-column scatter below (which assumes (ncol, ...)) would
+                    # misalign every canopy field.  Refuse rather than silently
+                    # corrupt the canopy across ranks; single-rank coupled CLM-ML
+                    # works.  (A 1-based-aware scatter is a follow-up.)
+                    from legoesm.land.canopy.config import CLMMLCanopyConfig as _CLMML
+                    if (self.physics.land_ml_cfg is not None and isinstance(
+                            self.physics.land_ml_cfg.surface_scheme, _CLMML)):
+                        raise NotImplementedError(
+                            "land_surface_scheme='clm_ml' under MPI/SPMD is not yet "
+                            "supported: the CLM-ML canopy_state (1-based mlcanopy "
+                            "arrays) does not match the per-column scatter. Run "
+                            "single-rank for coupled CLM-ML, or use 'two_leaf'.")
                     n_tile = int(self.state.T.data.shape[1])
                     global_ncol = 6 * n_tile * n_tile
                     if self._land_cover_transient is not None:
