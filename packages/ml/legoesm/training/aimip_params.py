@@ -356,21 +356,42 @@ class AIMIPClassicalParams(eqx.Module):
             mc_proxy_RH_crit=d["tiedtke_mc_proxy_RH_crit"],
         )
 
-    def to_surface_config(self) -> SurfaceLayerConfig:
+    def to_surface_config(
+        self, bulk_scheme: str = "constant",
+    ) -> SurfaceLayerConfig:
+        """Assemble the trained SurfaceLayerConfig.
+
+        Parameters
+        ----------
+        bulk_scheme : str
+            Surface bulk-flux scheme routed into
+            ``SurfaceLayerConfig.bulk_scheme`` (``constant`` /
+            ``most`` / ``coare3`` / ``large_yeager``).  The default
+            ``constant`` reproduces the legacy AIMIP surface path
+            (constant-Cd bulk aerodynamics), for which the trained
+            ``most_unstable_gamma`` / ``most_stable_beta`` /
+            ``z0h_z0_ratio`` leaves are DEAD (never read).  A
+            stability-dependent scheme (``most`` etc.) routes through
+            ``compute_most_fluxes`` in ``turbulence/surface_layer.py``,
+            which consumes those leaves — making them live, trainable
+            gradients.  Validated at the builder entry via
+            ``legoesm.core.bulk_flux.validate_bulk_scheme``.
+        """
         d = self.as_dict()
         base = SurfaceLayerConfig()
         return base._replace(
             Cd_neutral=d["surface_Cd_neutral"],
             Ch_neutral=d["surface_Ch_neutral"],
             z0=d["surface_z0"],
+            bulk_scheme=bulk_scheme,
             most_unstable_gamma=d["surface_most_unstable_gamma"],
             most_stable_beta=d["surface_most_stable_beta"],
             z0h_z0_ratio=d["surface_z0h_z0_ratio"],
         )
 
-    def to_louis_config(self) -> LouisConfig:
+    def to_louis_config(self, bulk_scheme: str = "constant") -> LouisConfig:
         d = self.as_dict()
-        base = LouisConfig(surface=self.to_surface_config())
+        base = LouisConfig(surface=self.to_surface_config(bulk_scheme=bulk_scheme))
         return base._replace(
             l_mix_max=d["louis_l_mix_max"],
             Ri_crit=d["louis_Ri_crit"],
@@ -606,6 +627,7 @@ def make_aimip_classical_spectral_physics(
     rad_update_interval_steps: int = 6,
     convection_scheme: str = "tiedtke",
     turbulence_scheme: str = "louis",
+    surface_bulk_scheme: str = "constant",
     gwd_scheme: str = "mcfarlane",
     microphysics_scheme: str = "none",
     cloud_scheme: str = "xu_randall",
@@ -644,6 +666,14 @@ def make_aimip_classical_spectral_physics(
     """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.core.bulk_flux import validate_bulk_scheme
+
+    # Dispatch hardening: reject an unknown surface bulk scheme at builder
+    # entry on the static Python value (raises ValueError) so a YAML typo
+    # cannot silently fall back to constant-Cd bulk aerodynamics — which
+    # would leave the trained MOST stability / z0h-ratio leaves dead with no
+    # error.  Mirrors compute_surface_fluxes' own validate_bulk_scheme gate.
+    validate_bulk_scheme(surface_bulk_scheme)
 
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
@@ -796,22 +826,40 @@ def make_aimip_classical_spectral_physics(
     # ``turbulence/surface_layer.py`` already treats these fields as
     # broadcastable scalars (lines 83-84, 90-100), so no scheme-side
     # code change is required.
+    # Thread the selected surface bulk scheme onto the surface config of
+    # EVERY turbulence scheme (scalar AND spatial paths).  The override
+    # INSTALLS the AIMIP-trained surface config
+    # (``to_surface_config(bulk_scheme=...)``) onto ``inner_cfg.surface`` — so
+    # every scheme carries the TRAINED Cd/Ch/z0 AND the trained MOST leaves
+    # (most_unstable_gamma / most_stable_beta / z0h_z0_ratio), not the scheme
+    # ``*Config`` DEFAULT surface (codex iter-2 finding #4: a non-Louis scheme
+    # under "most" previously ran the default, non-trainable MOST coefficients).
+    # Then any spatial (ncol,) Cd/Ch/z0 fields overwrite the scalar baselines.
+    # For ``louis`` this is idempotent with ``to_louis_config`` (which already
+    # installed the trained surface).  Schemes without a ``surface`` member
+    # ("none") are returned unchanged.
+    trained_surface = params.to_surface_config(bulk_scheme=surface_bulk_scheme)
+
     def _spatial_surface_override(inner_cfg):
-        if not spatial_fields_col or not hasattr(inner_cfg, "surface"):
+        if not hasattr(inner_cfg, "surface"):
             return inner_cfg
-        new_surface = inner_cfg.surface._replace(
-            Cd_neutral=spatial_fields_col.get(
-                "Cd_neutral", inner_cfg.surface.Cd_neutral,
-            ),
-            Ch_neutral=spatial_fields_col.get(
-                "Ch_neutral", inner_cfg.surface.Ch_neutral,
-            ),
-            z0=spatial_fields_col.get("z0", inner_cfg.surface.z0),
-        )
+        new_surface = trained_surface
+        if spatial_fields_col:
+            new_surface = new_surface._replace(
+                Cd_neutral=spatial_fields_col.get(
+                    "Cd_neutral", new_surface.Cd_neutral,
+                ),
+                Ch_neutral=spatial_fields_col.get(
+                    "Ch_neutral", new_surface.Ch_neutral,
+                ),
+                z0=spatial_fields_col.get("z0", new_surface.z0),
+            )
         return inner_cfg._replace(surface=new_surface)
 
     if turbulence_scheme == "louis":
-        louis_cfg = _spatial_surface_override(params.to_louis_config())
+        louis_cfg = _spatial_surface_override(
+            params.to_louis_config(bulk_scheme=surface_bulk_scheme)
+        )
         turb_cfg = TurbulenceConfig(scheme="louis", louis=louis_cfg)
     elif turbulence_scheme == "tke":
         from legoesm.atmosphere.physics.turbulence.config import TKEConfig
@@ -828,10 +876,45 @@ def make_aimip_classical_spectral_physics(
             smagorinsky=_spatial_surface_override(SmagorinskyConfig()),
         )
     else:
-        # Other schemes (holtslag_boville, ysu, edmf, clubb_lite, none).
-        # Spatial surface override silently skipped — extend this
-        # branch when those become AIMIP ablation candidates.
-        turb_cfg = TurbulenceConfig(scheme=turbulence_scheme)
+        # Other schemes (mynn25, holtslag_boville, ysu, edmf, clubb_lite,
+        # clubb, none).  Build the scheme's default sub-config, install the
+        # trained surface (+ selected bulk scheme + any spatial fields) onto
+        # its ``surface`` member, and place it in the matching TurbulenceConfig
+        # field.  Without this, a non-Louis scheme selected together with
+        # ``surface_bulk_scheme="most"`` would SILENTLY stay on the constant
+        # surface path — the exact dead-knob failure this change fixes for
+        # Louis (codex review, iter-1/iter-2).  ``clubb`` is materialised from
+        # ``TurbulenceConfig.clubb`` (default None -> CLUBBConfig() with a
+        # settable ``surface``) in the dispatcher, so it MUST be threaded here
+        # too (iter-2 finding #6).  ``"none"`` carries no surface sub-config and
+        # falls through to a bare TurbulenceConfig (documented no-op).
+        from legoesm.atmosphere.physics.turbulence.config import (
+            CLUBBLiteConfig,
+            HoltslagBovilleConfig,
+            MYNN25Config,
+            TurbulentEDMFConfig,
+            YSUConfig,
+        )
+        # CLUBBConfig lives in clubb.py (config.py only imports it under
+        # TYPE_CHECKING to avoid a config<->clubb import cycle).
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+        _surface_scheme_configs = {
+            "mynn25": MYNN25Config,
+            "clubb_lite": CLUBBLiteConfig,
+            "clubb": CLUBBConfig,
+            "holtslag_boville": HoltslagBovilleConfig,
+            "ysu": YSUConfig,
+            "edmf": TurbulentEDMFConfig,
+        }
+        factory = _surface_scheme_configs.get(turbulence_scheme)
+        if factory is not None:
+            turb_cfg = TurbulenceConfig(
+                scheme=turbulence_scheme,
+                **{turbulence_scheme: _spatial_surface_override(factory())},
+            )
+        else:
+            # "none" — no surface sub-config to thread the bulk scheme onto.
+            turb_cfg = TurbulenceConfig(scheme=turbulence_scheme)
 
     # ---- Gravity wave drag ----
     if gwd_scheme == "mcfarlane":
