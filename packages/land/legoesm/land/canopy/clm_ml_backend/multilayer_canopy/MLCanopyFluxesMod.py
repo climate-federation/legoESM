@@ -1015,9 +1015,14 @@ def _GetCLMVar(
     z = col.z
     zi = col.zi
 
-    # Pre-materialise snl as numpy so int(snl[c]) is always concrete
-    # (snl is a JAX array; tracing would make it abstract inside jit/grad).
-    _snl_np = np.asarray(snl)
+    # Per-column CLM topology maps read by the patch index.  Kept as DEVICE (jnp)
+    # arrays and indexed by ``p`` via dynamic gather, so this copy is valid whether
+    # ``p`` is a concrete Python int (the per-column-call path) OR a TRACED scan
+    # index (the S3 lax.scan-over-columns path) — a value-identical no-op for the
+    # concrete case.  (Previously np.asarray + int(), which breaks on a traced p.)
+    _snl_j = jnp.asarray(snl)
+    _patch_column_j = jnp.asarray(patch.column)
+    _patch_gridcell_j = jnp.asarray(patch.gridcell)
 
     # ------------------------------------------------------------------
     # Mutable copies of the mlcanopy arrays to update
@@ -1045,15 +1050,12 @@ def _GetCLMVar(
     # ------------------------------------------------------------------
     # Copy CLM variables to multilayer canopy — Fortran lines 63-90
     # ------------------------------------------------------------------
-    # Pre-materialise patch hierarchy indices as numpy ints once so that
-    # int() calls below are always concrete, even inside jax.grad tracing.
-    _patch_column_np = np.asarray(patch.column)
-    _patch_gridcell_np = np.asarray(patch.gridcell)
-
     for fp in range(1, num_filter + 1):  # Fortran: do fp = 1, num_filter
         p = int(filter[fp - 1])
-        c = int(_patch_column_np[p])
-        g = int(_patch_gridcell_np[p])
+        # Dynamic gather (traced-p-safe): identity maps in single-site mode
+        # (c == p, g == p) so the values are unchanged for a concrete p.
+        c = _patch_column_j[p]
+        g = _patch_gridcell_j[p]
 
         # Wind: resultant from east/north components — Fortran line 67
         uref_cur = uref_cur.at[p].set(jnp.sqrt(forc_u[g] ** 2 + forc_v[g] ** 2))
@@ -1094,10 +1096,11 @@ def _GetCLMVar(
         # snl(c)+1 gives the Fortran index of the first snow or soil layer.
         # In standalone mode snl=0, so j=1 (first soil layer).
         # All arrays use direct j indexing (1:nlevgrnd), no nlevsno offset.
-        j = int(_snl_np[c]) + 1  # Fortran index = Python index
+        _snl_c = _snl_j[c]
+        j = _snl_c + 1  # Fortran index = Python index (snl==0 -> j==1 standalone)
 
         soil_t = soil_t.at[p].set(t_soisno[c, j])
-        soil_dz = soil_dz.at[p].set(z[c, j] - zi[c, int(_snl_np[c])])
+        soil_dz = soil_dz.at[p].set(z[c, j] - zi[c, _snl_c])
         soil_tk = soil_tk.at[p].set(thk[c, j])
 
     # ------------------------------------------------------------------
@@ -1139,7 +1142,9 @@ def _GetCLMVar(
 
         for fp in range(1, num_filter + 1):  # Fortran: do fp = 1, num_filter
             p = int(filter[fp - 1])
-            g = int(_patch_gridcell_np[p])  # use pre-materialised numpy copy
+            # HOST solar path (concrete p only — it reads float(grc.latdeg[g]));
+            # the traced-p scan path uses cos_zenith_device instead of this branch.
+            g = int(_patch_gridcell_j[p])
 
             # Latitude and longitude in radians — Fortran lines 107-108
             lat = float(_latdeg_np[g]) * pi / 180.0
