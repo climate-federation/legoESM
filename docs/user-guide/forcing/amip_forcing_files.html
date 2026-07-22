@@ -583,7 +583,7 @@
                     <td><span class="badge-var">tsi</span> (or user <code>--solar-tsi-var</code>, e.g. <code>TSI</code>; case-insensitive lookup), <span class="badge-var">time</span> (days)</td>
                     <td><span class="badge-dim">(time,)</span> 1-D</td>
                     <td>Broadband scalar; no bands</td>
-                    <td><code>external.py:891-913</code>; <code>_load_timeseries</code>; abs-day ref = 1850-01-01 (<code>abs_day = (start_year−1850)*365.25 + day</code>)</td>
+                    <td><code>external.py:891-913</code>; <code>_load_timeseries</code>; abs-day via calendar-date <code>_simday_to_file_day(day, start_year, anchor)</code> (no fixed 1850 ref; 2026-07-21)</td>
                 </tr>
                 <tr>
                     <td class="col-file">Solar spectral — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source spectral_file</code>)</span></td>
