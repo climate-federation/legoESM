@@ -503,3 +503,49 @@ buoyancy mixing via convection OK, wind-KPP under-rep — refinement).
 snapshot (332×362, 20 lev, °C) → NEMO grid_T (to/so/tos/sos/zos/MLD, 75 lev); compute SST/SSS/
 SSH RMSE + integral diags (ACC Drake, AMOC@26N, MOC, MLD) at matching year; score vs tolerances.
 Extend `ocean/fidelity` (references.py/metrics.py/tolerances.py NEMO tier). Build while runs proceed.
+
+## 2026-07-20/21 — Scheme-match breakthrough + regression hunts (session consolidate)
+
+**Shipped (all 2-round codex-clean, branch omip-arctic-vfs-tke-fix / PR #1225):**
+- MPAS-KPP eice (`4e96a8e47`+`ef8c97866`), tripole-KPP unlock/2x2 (`2988ef7d3`),
+  NEMO SI3 nn_icesal=2 brine entrapment+drainage (`565fe09c8`+`c86a68041`,
+  opt-in `--ice-sinew/--ice-drain-days`), **NEMO zdftke card on MPAS**
+  (`709f60103`+`f95e5f759`, `--mpas-vmix tke`), lead-freeze latent
+  charge/credit (`37b2aa454`+`8fa9f52c4`+`db3ca4e2e`).
+
+**Verdict ladder (d30 vs NEMO m1 unless noted):**
+| run | closure | Siberian | Arctic_ALL | Arctic MLD | SST rmse |
+|---|---|---|---|---|---|
+| mpas9 (d90/m3) | KPP | +2.56 | — | +62.6 | 0.957 |
+| mpas10 | KPP+eice3 | +1.82 | +1.31 | +42.9 | 1.330 |
+| mpas11a | +local-S | +1.71 | +1.26 | +42.5 | 1.328 |
+| mpas11b | +sinew/drain | +1.88 | +1.42 | +43.9 | 1.328 |
+| **mpas12** | **TKE card** | **+1.09** | **+1.06** | **−4.7** | **1.156** |
+| trp5 | TKE card | +0.24 | +0.68 | +6.7 (d90) | 0.984 (d90/m3) |
+| trp6 | tripole-KPP | +1.02 | +0.93 | +57.0 | 1.549 |
+
+- 2x2 decomposition: tripole↔MPAS Arctic gap = SCHEME +0.78 / GRID +0.80;
+  KPP over-deepens on ANY grid → **TKE = the NEMO closure, both grids now run
+  it**; cross-grid both-TKE pair SST rmse 0.905 / SSS 0.971 (was 1.360/1.140).
+- mpas13 (90-day TKE ship run, pairs trp5) — RUNNING, d90/m3 verdict pending;
+  must match mpas9's 0.957-class SST to confirm no d90 SST cost.
+
+**latlon ice runaway — bisected to mechanism class:**
+window f5925..384 → sea_ice.py (triple flip-confirmed) → the lead-freeze SST
+gate hunks (ll11 gate-revert BOUNDED). Latent credit (unit-correct) did NOT
+bound (ll12b 2270 m d7); transport=none FLAT-bounded (ll13) → advective
+coastal pileup of gate-concentrated packs; free_drift has NO ice strength.
+**ll14b: --prognostic-ice-dynamics mevp (NEMO runs EVP) — pending d10; early
+d3→d4 decay 170→72 leans BOUNDED = the faithful fix.**
+
+**Tropics +0.64 tree regression (controlled: ship1 config byte-fixed,
++0.073→+0.713):** probe pair at 0be115614 (EOS-consistent-KPP-mixing) —
+parent arm d30 tropics **+0.40**; EOS-commit arm pending. Delta vs +0.40
+names/clears the commit.
+
+**Tuning matrix STAGED (launch after mpas13 + bisect land):**
+run_mpas14a_eice1 (under-ice suppression strength; Central-Arctic/Hudson
+class), run_mpas14b_runoff300 (Siberian river-shelf spread),
+run_mpas14c_sssbound8 (restoring authority), run_trp7a_eice1 (tripole
+Hudson −1.87/Barents −0.57 fresh overshoots). One knob per arm, d30, A/B vs
+the mpas12/trp5 TKE baselines.
