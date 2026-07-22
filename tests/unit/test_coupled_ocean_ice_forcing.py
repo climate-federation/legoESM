@@ -75,7 +75,11 @@ def _assemble(conc, prev, *, precip=2.0e-5, lhflx=50.0, tau_x=0.0, ice_config=No
         # Prognostic ice concentration + static tile config drive f_ocean.
         _sfc_state=types.SimpleNamespace(
             ice=types.SimpleNamespace(
-                concentration=types.SimpleNamespace(data=conc))),
+                # single-category ice: dims carry no "category" axis, so
+                # _total_ice_sic uses the concentration as-is (no sum). A real
+                # Field exposes .dims; the stub must too.
+                concentration=types.SimpleNamespace(
+                    data=conc, dims=("lat", "lon")))),
         _tile_config=types.SimpleNamespace(
             f_land=jnp.full(shape, f_land), f_lake=z),
         _ice_config=ice_config,   # None => driver defaults to slab SeaIceConfig
