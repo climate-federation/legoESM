@@ -814,10 +814,15 @@ class DiagnosticCollector:
             area_weights=self._area_w,
         )
 
-        # Moisture budget
+        # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
+        # (positive-up evaporation source) so the E − P − dW/dt closure
+        # residual shares one flux definition with the output diagnostics;
+        # a fluxless config (lhflx None) closes against E = 0.
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
-            precip_total, elapsed_seconds=elapsed_s,
+            precip_total,
+            lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
+            elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
         )
 
@@ -1519,6 +1524,7 @@ class DiagnosticCollector:
             energy_residual=np.array(self.energy_tracker.residual),
             moisture_column_water=np.array(self.moisture_tracker.column_water),
             moisture_precip_rate=np.array(self.moisture_tracker.precip_rate),
+            moisture_evap_rate=np.array(self.moisture_tracker.evap_rate),
             moisture_residual=np.array(self.moisture_tracker.residual),
         )
 
