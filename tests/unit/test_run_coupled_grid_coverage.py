@@ -86,3 +86,30 @@ def test_ocean_mode_label_mapping():
     assert ocean_mode_label("two_layer") == "two_layer"
     assert ocean_mode_label("dynamic") is None
     assert ocean_mode_label("typo") is None
+
+
+def test_resolve_coupled_microphysics_per_grid_default():
+    """2026-07-22 audit: coupled spectral path defaults to graph-tractable
+    kessler (the double-moment default segfaults XLA-CPU codegen at production
+    nlev); other grids keep morrison; explicit choices are honored."""
+    from scripts.run.run_coupled import resolve_coupled_microphysics
+
+    # default (None) is grid-dependent
+    assert resolve_coupled_microphysics("gaussian", None) == (
+        "kessler", "defaulted_kessler")
+    for g in ("cubed_sphere", "latlon", "voronoi"):
+        assert resolve_coupled_microphysics(g, None) == (
+            "morrison", "defaulted_morrison")
+
+    # explicit light scheme honored everywhere without warning
+    assert resolve_coupled_microphysics("gaussian", "kessler") == (
+        "kessler", "kept")
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")
+
+    # explicit heavy scheme on spectral is honored but flagged for the warning
+    assert resolve_coupled_microphysics("gaussian", "morrison") == (
+        "morrison", "explicit_heavy_warn")
+    # heavy scheme on a non-spectral grid is fine (no codegen wall there)
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")

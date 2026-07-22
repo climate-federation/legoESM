@@ -2161,7 +2161,7 @@ class ModelDriver:
             # honored them (grid-dependent physics from the same config).
             # Reuse the backend's dispatcher for exact parity.
             from legoesm.atmosphere.physics.radiation.integration import (
-                _compute_ozone_vmr,
+                compute_ozone_vmr as _compute_ozone_vmr,
             )
             from legoesm.atmosphere.physics.radiation.config import (
                 OzoneProfileConfig,

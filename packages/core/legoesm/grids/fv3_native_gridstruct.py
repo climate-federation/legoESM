@@ -172,7 +172,7 @@ def build_extended_corner_lonlat(n: int, ng: int = 3, *, tile: int = 1):
     nodes (1..n+1) are BITWISE identical to the kinked builder's (same
     ED line, same carts).
     """
-    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+    from legoesm.grids.fv3_native_halos import ED_CARTS as _ED_CARTS, ed_line as _ed_line
 
     line = _ed_line(n, 2 * (ng + 2))
     idx = np.arange(1 - ng, n + 1 + ng + 1)
@@ -1640,3 +1640,10 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
     _fill_corners_dgrid(fort(u, clo, clo), fort(v, clo, clo),
                         n + 1, ng, sign=-1.0)
     return {"delp": delp, "pt": pt, "u": u, "v": v}
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+fill_corners_agrid_x = _fill_corners_agrid_x

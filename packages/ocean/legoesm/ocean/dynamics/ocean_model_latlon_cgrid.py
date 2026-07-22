@@ -4027,7 +4027,7 @@ class LatLonCGridOceanModel:
         (``_depth_average_to_faces``) so imposition restores exactly the mean
         the barotropic solve set."""
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-            _depth_average_to_faces,
+            barotropic_depth_average_to_faces as _depth_average_to_faces,
         )
         from legoesm.ocean.vertical import compute_layer_thickness
         h_k = compute_layer_thickness(
