@@ -16,6 +16,17 @@ single big-leaf layer so the two-leaf canopy and the multi-layer canopy share
 the same math.  The plant-area used is ``LAI + SAI``; a two-leaf canopy with no
 stem-area term passes ``sai = 0``.
 
+SCOPE — water cycle, not a wet-leaf energy balance.  This is a WATER-CYCLE
+interception: it advances the store, routes throughfall to the soil, and lets
+the wet leaf evaporate from the store.  On the two-leaf coupling the wet-leaf
+evaporation is a *substitution* — stored water is drawn instead of root-zone
+water, up to the transpiration the canopy is already demanding, leaving the
+reported surface latent flux unchanged.  It does NOT re-solve the leaf energy
+balance with a wetted fraction (which would recompute leaf temperature, sensible
+heat, and stomatal conductance for the wet surface); that fuller wet/dry-leaf
+energy partition is a documented follow-up.  The multi-layer (CLM-ML) canopy
+keeps its own internal per-layer interception with the same constants.
+
 Sign convention: all fluxes are rates [kg m-2 s-1] positive in the direction of
 the name (``throughfall`` down onto soil, ``wet_evap`` up off the leaf; a
 negative ``wet_evap`` is dew deposition adding to the store).  Water conserved:
@@ -45,8 +56,9 @@ __physics_contract__ = {
         "wet_evap": "kg m-2 s-1",
         "fwet": "1",
     },
-    "signs": "throughfall positive down onto soil; wet_evap positive up "
-             "(evaporation), negative down (dew); W_canopy >= 0",
+    "signs": "throughfall positive down onto soil; wet_evap >= 0 (evaporation "
+             "up); dew (downward flux) excluded from the store; W_canopy in "
+             "[0, h2ocanmx]",
     "conserves": "water: precip = throughfall + dW_canopy/dt + wet_evap",
     "differentiable": True,
     "reference": "Bonan et al. 2018 CLM-ML MLCanopyWaterMod; CLM5 tech note",
@@ -58,7 +70,11 @@ __physics_contract__ = {
 # Floors that keep gradients finite where a physical quantity may hit zero
 # (empty canopy, dry store).  Not tunable — pure numerics.
 _EPS_PAI = 1.0e-12       # m2 m-2, guards divide by plant area
-_EPS_POW = 1.0e-30       # guards 0**exponent -> inf gradient
+# Floor on the wetted-fraction base ``W/h2ocanmx``.  A tiny floor (1e-30) makes
+# ``base**(p-1)`` ~1e10 — a finite but optimisation-destroying gradient at the
+# dry limit.  1e-6 keeps ``d(base**p)`` <~100 while ``fwet(W=0) = 1e-6**0.667
+# ~1e-4`` stays negligibly small (dry canopy is effectively dry).
+_EPS_POW = 1.0e-6
 
 __param_spec__ = {
     "InterceptionConfig": {
@@ -114,59 +130,102 @@ def wetted_fraction(W_canopy: jnp.ndarray, pai: jnp.ndarray,
     return jnp.where(has_pai, fwet, 0.0)
 
 
+def intercept_rain(W_canopy: jnp.ndarray, precip: jnp.ndarray,
+                   pai: jnp.ndarray, dt: float, cfg: InterceptionConfig):
+    """Phase 1: intercept rain into the store; return ``(W_int, throughfall)``.
+
+    ``fpi = clip(interception_fraction * tanh(PAI), 0, 1)`` of the precip lands
+    on the leaves; the rest is direct throughfall.  The store is capped at
+    ``h2ocanmx`` and the excess drips.  No evaporation here — call
+    :func:`evaporate_wet_leaf` after the caller knows the transpiration demand,
+    so the store evaporation can be capped by it (closure).  Split so the
+    THROUGHFALL is known before the soil-evaporation water-availability limiter
+    (which must see throughfall, not raw precip).
+    """
+    pai = jnp.maximum(pai, 0.0)
+    h2ocanmx = max_canopy_water(pai, cfg)
+    fpi = jnp.clip(cfg.interception_fraction * jnp.tanh(pai), 0.0, 1.0)
+    W_int = W_canopy + precip * fpi * dt
+    drip = jnp.maximum(W_int - h2ocanmx, 0.0) / dt
+    W_int = jnp.minimum(W_int, h2ocanmx)
+    throughfall = precip * (1.0 - fpi) + drip
+    return W_int, throughfall
+
+
+def evaporate_wet_leaf(W_int: jnp.ndarray, le_pot_wet: jnp.ndarray,
+                       pai: jnp.ndarray, dt: float, cfg: InterceptionConfig,
+                       L_v: float, transp_avail: jnp.ndarray | None = None):
+    """Phase 2: evaporate the wet leaf from the store; return ``(W_new, wet_evap, fwet)``.
+
+    ``wet_evap = min(fwet * le_pot_wet / L_v, W_int/dt, transp_avail)``, positive
+    only (dew is excluded — it stays in the caller's surface-dew path, else the
+    atmospheric water is double-counted).  ``transp_avail`` (the root-zone
+    transpiration the caller will reduce by ``wet_evap``) caps the store
+    evaporation so the substitution never removes more surface water than the
+    atmosphere is taking (closure).
+    """
+    pai = jnp.maximum(pai, 0.0)
+    fwet = wetted_fraction(W_int, pai, cfg)
+    evap_demand = jnp.maximum(fwet * le_pot_wet / L_v, 0.0)
+    max_evap = W_int / dt
+    if transp_avail is not None:
+        max_evap = jnp.minimum(max_evap, jnp.maximum(transp_avail, 0.0))
+    wet_evap = jnp.minimum(evap_demand, max_evap)
+    W_new = jnp.maximum(W_int - wet_evap * dt, 0.0)
+    return W_new, wet_evap, fwet
+
+
 def update_canopy_water(W_canopy: jnp.ndarray, precip: jnp.ndarray,
                         le_pot_wet: jnp.ndarray, pai: jnp.ndarray, dt: float,
-                        cfg: InterceptionConfig, L_v: float):
+                        cfg: InterceptionConfig, L_v: float,
+                        transp_avail: jnp.ndarray | None = None):
     """Advance the canopy-water store one step; return the water partition.
 
     Ordering mirrors CLM-ML: intercept precip (cap storage, spill to drip),
-    then evaporate the wet leaf at the potential rate scaled by ``fwet``
-    (or deposit dew when the potential flux is downward).
+    then evaporate the wet leaf at the potential rate scaled by ``fwet``.
+
+    **Substitution model (see module docstring / caller).**  The wet-leaf
+    evaporation is a re-sourcing of canopy latent heat from the store rather
+    than the root zone; it is therefore capped at ``transp_avail`` (the
+    root-zone transpiration mass the caller is about to draw) so that shifting
+    it onto the store never removes MORE water from the surface than the
+    atmosphere is taking.  Without a cap, closure would fail when the wet demand
+    exceeds the available transpiration (codex).  This is a water-cycle
+    interception; it does NOT re-solve the leaf energy balance for a wet leaf.
+
+    Dew is NOT deposited into the store here: a downward (negative) potential
+    flux is clamped to zero so canopy dew stays entirely in the caller's
+    existing surface-dew path (routing it here too would double-count the
+    atmospheric water — codex).  The store is therefore bounded in
+    ``[0, h2ocanmx]`` every step.
 
     Parameters
     ----------
     W_canopy : (ncol,) intercepted-water store at the start of the step [kg m-2].
-    precip   : (ncol,) rate of liquid precip onto the canopy [kg m-2 s-1].
-    le_pot_wet : (ncol,) POTENTIAL latent-heat flux for a fully wet leaf
-        [W m-2], positive up.  The wet-leaf evaporation demand is
-        ``fwet * le_pot_wet``; a negative value is dew.
+    precip   : (ncol,) rate of liquid precip onto the canopy [kg m-2 s-1] (>= 0).
+    le_pot_wet : (ncol,) latent-heat flux the wet leaf would sustain [W m-2],
+        positive up.  The wet-leaf evaporation demand is ``fwet * le_pot_wet``;
+        a downward (negative) value contributes no store evaporation.
     pai      : (ncol,) plant area index ``LAI + SAI`` [m2 m-2].
     dt       : timestep [s].
     cfg      : :class:`InterceptionConfig`.
-    L_v      : latent heat of vaporization [J kg-1] (``constants.L_v``); converts
-        the wet-leaf latent-heat demand to a mass flux.
+    L_v      : latent heat of vaporization [J kg-1] (``constants.L_v``).
+    transp_avail : (ncol,) upper bound on the store evaporation [kg m-2 s-1] —
+        the root-zone transpiration the caller reduces by ``wet_evap``.  ``None``
+        imposes no cap (stand-alone use).
 
     Returns
     -------
     W_new : (ncol,) updated store [kg m-2], in ``[0, h2ocanmx]``.
     throughfall : (ncol,) water reaching the soil [kg m-2 s-1] = direct
         throughfall + canopy drip.
-    wet_evap : (ncol,) actual wet-leaf evaporation [kg m-2 s-1], positive up;
-        negative = dew retained.  Capped so the store cannot go negative.
+    wet_evap : (ncol,) wet-leaf evaporation [kg m-2 s-1], >= 0, capped by the
+        store AND by ``transp_avail``.
     fwet : (ncol,) wetted fraction used [-].
     """
-    pai = jnp.maximum(pai, 0.0)
-    h2ocanmx = max_canopy_water(pai, cfg)
-
-    # --- interception + throughfall (CLM5) ---
-    fpi = cfg.interception_fraction * jnp.tanh(pai)   # intercepted fraction
-    intercepted = precip * fpi                         # onto leaves [kg m-2 s-1]
-    through_direct = precip * (1.0 - fpi)              # misses the canopy
-
-    W_int = W_canopy + intercepted * dt                # provisional store
-    drip = jnp.maximum(W_int - h2ocanmx, 0.0) / dt     # spill once saturated
-    W_int = jnp.minimum(W_int, h2ocanmx)
-    throughfall = through_direct + drip
-
-    # --- wet-leaf evaporation / dew ---
-    fwet = wetted_fraction(W_int, pai, cfg)
-    evap_demand = fwet * le_pot_wet / L_v              # [kg m-2 s-1], +up
-    # Cannot evaporate more water than is stored; dew (negative) adds freely.
-    max_evap = W_int / dt                              # empties the store at most
-    wet_evap = jnp.minimum(evap_demand, max_evap)
-    W_new = W_int - wet_evap * dt                      # dew (wet_evap<0) grows W
-    # Guard tiny negatives from round-off; conservation uses the guarded W_new.
-    W_new = jnp.maximum(W_new, 0.0)
+    W_int, throughfall = intercept_rain(W_canopy, precip, pai, dt, cfg)
+    W_new, wet_evap, fwet = evaporate_wet_leaf(
+        W_int, le_pot_wet, pai, dt, cfg, L_v, transp_avail)
     return W_new, throughfall, wet_evap, fwet
 
 
@@ -175,8 +234,7 @@ def water_balance_residual(W_old: jnp.ndarray, W_new: jnp.ndarray,
                            wet_evap: jnp.ndarray, dt: float) -> jnp.ndarray:
     """Closure residual [kg m-2 s-1]: ``precip - throughfall - dW/dt - wet_evap``.
 
-    Zero to machine precision when the store is not clamped at its floor (a
-    clamp at ``W_new = 0`` legitimately destroys the sub-floor round-off; the
-    test exercises the unclamped regime).
+    Zero to machine precision (no store clamp fires now that dew is excluded and
+    the store is bounded in ``[0, h2ocanmx]`` each step).
     """
     return precip - throughfall - (W_new - W_old) / dt - wet_evap

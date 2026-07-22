@@ -258,6 +258,34 @@ def _apply_canopy_layering(canopy_config: CLMMLCanopyConfig) -> None:
         _mod.nlayer_above = n_above
 
 
+def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the leaf stomatal-conductance model (``gs_type``) into the backend.
+
+    Maps ``CLMMLCanopyConfig.stomatal_model`` -> backend ``gs_type``
+    {medlyn:0, ball_berry:1, wue:2}.  Patches BOTH ``MLclm_varctl.gs_type`` AND
+    ``MLLeafPhotosynthesisMod.gs_type`` because the photosynthesis module does
+    ``from MLclm_varctl import gs_type`` BY VALUE — a module-level copy the leaf
+    kernel branches on — so setting only ``MLclm_varctl.gs_type`` is a silent
+    no-op (the same by-value trap as the layering counts).
+
+    Re-applied every step (process-global CLM state shared by every column and
+    config).  Under ``"medlyn"`` the traced per-site ``vcmaxpft_jax`` injection
+    is live (the backend threads it only through the Medlyn path); the default
+    ``"wue"`` keeps the water-use-efficiency optimisation.
+    """
+    from legoesm.land.canopy.config import CLM_ML_STOMATAL_GS_TYPE
+    scheme = canopy_config.stomatal_model
+    if scheme not in CLM_ML_STOMATAL_GS_TYPE:
+        raise ValueError(
+            f"unknown CLM-ML stomatal_model {scheme!r}; must be one of "
+            f"{tuple(CLM_ML_STOMATAL_GS_TYPE)}")
+    gs = CLM_ML_STOMATAL_GS_TYPE[scheme]
+    import multilayer_canopy.MLclm_varctl as _ml_ctl
+    import multilayer_canopy.MLLeafPhotosynthesisMod as _photo
+    _ml_ctl.gs_type = gs
+    _photo.gs_type = gs
+
+
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
     """Point CLM-ML's ψ̂ lookup tables at the selected turbulence scheme.
 
@@ -1829,6 +1857,11 @@ def compute_clm_ml_canopy_fluxes(
     _apply_turbulence_scheme(
         canopy_config.turbulence_scheme, differentiable=bool(_diff_mode))
 
+    # ---- Select the leaf stomatal-conductance model (gs_type) ----
+    # Process-global like the turbulence tables; "medlyn" activates the traced
+    # vcmaxpft_jax injection path below.
+    _apply_stomatal_model(canopy_config)
+
     # ---- Build GridInfo for the differentiable path ----
     # Structural ints must be concrete Python ints extracted BEFORE jax.grad
     # tracing (int() on a tracer raises ConcretizationTypeError).  The warm-start
@@ -1900,6 +1933,26 @@ def compute_clm_ml_canopy_fluxes(
     # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
     # including production forward-only runs).  Diff mode is already gated by the
     # capability guard above.
+    # Per-site Vcmax25 override (config) — the "beyond the global PFT table"
+    # value.  Build the traced ``vcmaxpft_jax`` from the module lookup with this
+    # PFT's entry replaced by the site value, so it feeds photosynthesis (and
+    # flows gradients — trainable) instead of the global default.  The backend
+    # threads ``vcmaxpft_jax`` ONLY through the Medlyn path, so it requires
+    # ``stomatal_model="medlyn"``; under WUE it would be silently inert, which we
+    # reject loudly rather than run the wrong Vcmax.  An explicitly-passed
+    # ``vcmaxpft_jax`` (e.g. from a training loop) takes precedence.
+    if canopy_config.vcmax25_override is not None and vcmaxpft_jax is None:
+        if canopy_config.stomatal_model != "medlyn":
+            raise ValueError(
+                "CLMMLCanopyConfig.vcmax25_override requires stomatal_model="
+                "'medlyn' — the backend threads the per-site Vcmax injection only "
+                f"through the Medlyn path; got {canopy_config.stomatal_model!r}. "
+                "Set stomatal_model='medlyn', or drop the override to use the "
+                "PFT-table Vcmax under WUE.")
+        from multilayer_canopy import MLpftconMod as _pftmod
+        vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[int(canopy_config.pft_clm)].set(
+            float(canopy_config.vcmax25_override))
+
     _opt_kwargs: dict[str, Any] = {}
     if grid is not None:
         _opt_kwargs["grid"] = grid

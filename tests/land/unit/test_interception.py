@@ -37,10 +37,10 @@ def test_water_closes_to_machine_precision():
     W_new, tf, ev, fwet = update_canopy_water(
         W, precip, le_pot, pai, _DT, _CFG, constants.L_v)
     res = water_balance_residual(W, W_new, precip, tf, ev, _DT)
-    # keep only columns whose store did not clamp at the zero floor (those
-    # legitimately destroy sub-floor round-off); the rest must close exactly.
-    unclamped = np.asarray(W_new) > 1e-9
-    assert np.max(np.abs(np.asarray(res)[unclamped])) < 1e-12
+    # store is bounded in [0, h2ocanmx] and dew excluded, so closure is exact
+    # everywhere (no floor clamp fires).
+    assert np.max(np.abs(np.asarray(res))) < 1e-12
+    assert np.all(np.asarray(ev) >= 0.0)          # no dew into the store
 
 
 def test_store_capped_at_maximum_and_nonnegative():
@@ -77,15 +77,17 @@ def test_wetted_fraction_bounded():
     assert fwet[0] == 0.0                 # empty canopy is dry
 
 
-def test_dew_deposition_grows_store():
-    """A downward (negative) potential flux deposits dew, increasing W."""
+def test_dew_is_excluded_from_the_store():
+    """A downward (negative) potential flux produces NO store evaporation and no
+    dew deposition here (dew stays in the caller's surface path — excluding it
+    prevents double-counting the atmospheric water)."""
     pai = jnp.asarray([3.0])
     W = jnp.asarray([0.05])
     dew = jnp.asarray([-100.0])           # W m-2 downward
     W_new, tf, ev, _ = update_canopy_water(
         W, jnp.zeros(1), dew, pai, _DT, _CFG, constants.L_v)
-    assert float(W_new[0]) > float(W[0])   # dew added
-    assert float(ev[0]) < 0.0             # flux is downward (deposition)
+    assert float(ev[0]) == 0.0            # no store evaporation
+    assert float(W_new[0]) == float(W[0])  # store unchanged (no rain, no dew)
 
 
 def test_evaporation_cannot_exceed_storage():

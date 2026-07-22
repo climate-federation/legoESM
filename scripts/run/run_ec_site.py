@@ -47,6 +47,7 @@ from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
 from legoesm.land.canopy.config import (
     CLMMLCanopyConfig,
+    VALID_CLM_ML_STOMATAL_MODELS,
     VALID_CLM_ML_TURBULENCE_SCHEMES,
 )
 
@@ -599,7 +600,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
              clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
-             interception: bool = False) -> dict:
+             interception: bool = False, clmml_stomatal: str = "wue",
+             clmml_vcmax25: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -666,7 +668,9 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # which goes to a math-domain error for a very tall canopy where a layer
         # height drops below the displacement height — "most" avoids that.
         canopy_config = CLMMLCanopyConfig(
-            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence).validate()
+            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence,
+            stomatal_model=clmml_stomatal,
+            vcmax25_override=clmml_vcmax25).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
@@ -825,6 +829,14 @@ def main() -> int:
                          "(roughness sublayer, default) or most (Monin-Obukhov; "
                          "avoids the RSL wind-profile domain error on very tall "
                          "canopies)")
+    ap.add_argument("--clmml-stomatal", default="wue",
+                    choices=list(VALID_CLM_ML_STOMATAL_MODELS),
+                    help="CLM-ML leaf stomatal model: wue (default), medlyn, or "
+                         "ball_berry. medlyn activates the per-site Vcmax "
+                         "injection path (--clmml-vcmax25)")
+    ap.add_argument("--clmml-vcmax25", type=float, default=None,
+                    help="per-site CLM-ML Vcmax25 [umol/m2/s], beyond the global "
+                         "PFT table; requires --clmml-stomatal medlyn")
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
@@ -869,6 +881,8 @@ def main() -> int:
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
                  clmml_turbulence=args.clmml_turbulence,
+                 clmml_stomatal=args.clmml_stomatal,
+                 clmml_vcmax25=args.clmml_vcmax25,
                  spinup_steps=args.spinup_steps,
                  interception=args.interception)
     return 0
