@@ -753,46 +753,13 @@ def load_amip_forcing(
         # reproduces the observed monthly means; clamping the anchors here would
         # damp the SIC/SST seasonal cycle near the pack ice and cold tongue.
 
-        # Wrap longitude for interpolation continuity
-        # Pad one column at each end
-        lon_wrapped = np.concatenate([lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0])
-        sst_wrapped = np.concatenate([sst_data[:, :, -1:], sst_data, sst_data[:, :, :1]], axis=2)
-        sic_wrapped = np.concatenate([sic_data[:, :, -1:], sic_data, sic_data[:, :, :1]], axis=2)
-
-        # Use protocol: grid_lat gives 2D (or 3D for CS) lat in radians
-        grid_lat = np.asarray(grid.grid_lat)
-        grid_lon = np.asarray(grid.grid_lon)
-        is_gaussian = grid_lat.ndim == 2 and not hasattr(grid, 'n')
-
-        if is_gaussian:
-            target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi
-            target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi
-            target_lon_1d = target_lon_1d % 360.0
-            target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
-            target_shape = grid_lat.shape
-        else:
-            target_lat_2d = grid_lat * 180.0 / np.pi
-            target_lon_2d = grid_lon * 180.0 / np.pi
-            target_lon_2d = target_lon_2d % 360.0
-            target_shape = grid_lat.shape
-
+        # Bilinear regrid to the model grid — shared owner (also the q-flux
+        # loader): lon-wrap + RegularGridInterpolator target construction.
         ntime = sst_data.shape[0]
-        sst_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
-        sic_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
-
-        target_points = np.stack([target_lat_2d.ravel(), target_lon_2d.ravel()], axis=-1)
-
-        for t in range(ntime):
-            interp_sst = RegularGridInterpolator(
-                (lat_src, lon_wrapped), sst_wrapped[t],
-                method="linear", bounds_error=False, fill_value=None,
-            )
-            interp_sic = RegularGridInterpolator(
-                (lat_src, lon_wrapped), sic_wrapped[t],
-                method="linear", bounds_error=False, fill_value=None,
-            )
-            sst_regridded[t] = interp_sst(target_points).reshape(target_shape)
-            sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
+        sst_regridded = regrid_monthly_latlon_to_grid(
+            sst_data, lat_src, lon_src, grid)
+        sic_regridded = regrid_monthly_latlon_to_grid(
+            sic_data, lat_src, lon_src, grid)
 
         # Time axis. Build RELATIVE first (the span is invariant to anchoring)
         # to classify the file, then anchor ONLY a multi-year (transient) file
@@ -859,6 +826,96 @@ def load_amip_forcing(
     )
 
 
+def regrid_monthly_latlon_to_grid(field, lat_src_deg, lon_src_deg, grid):
+    """Bilinearly regrid a ``(ntime, nlat, nlon)`` regular-lat-lon field to the
+    model grid's ``grid_shape_2d``.
+
+    Shared by the AMIP SST/SIC loader and the slab q-flux loader (one owner for
+    the lon-wrap + RegularGridInterpolator target construction — no duplicated
+    regrid).  ``lat_src_deg``/``lon_src_deg`` are the source axes in degrees;
+    ``grid`` exposes ``grid_lat``/``grid_lon`` in radians (2-D for lat-lon /
+    cubed-sphere, or ``grid.lat``/``grid.lon`` for Gaussian).  Returns a
+    float64 array of shape ``(ntime, *target_shape)``; out-of-range target
+    points extrapolate (``fill_value=None``) as in the AMIP path.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    field = np.asarray(field, dtype=np.float64)
+    lat_src = np.asarray(lat_src_deg, dtype=np.float64)
+    lon_src = np.asarray(lon_src_deg, dtype=np.float64)
+    # Wrap longitude for interpolation continuity (pad one column each end).
+    lon_wrapped = np.concatenate(
+        [lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0])
+    field_wrapped = np.concatenate(
+        [field[:, :, -1:], field, field[:, :, :1]], axis=2)
+
+    grid_lat = np.asarray(grid.grid_lat)
+    grid_lon = np.asarray(grid.grid_lon)
+    is_gaussian = grid_lat.ndim == 2 and not hasattr(grid, 'n')
+    if is_gaussian:
+        target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi
+        target_lon_1d = (np.asarray(grid.lon) * 180.0 / np.pi) % 360.0
+        target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
+        target_shape = grid_lat.shape
+    else:
+        target_lat_2d = grid_lat * 180.0 / np.pi
+        target_lon_2d = (grid_lon * 180.0 / np.pi) % 360.0
+        target_shape = grid_lat.shape
+
+    target_points = np.stack(
+        [target_lat_2d.ravel(), target_lon_2d.ravel()], axis=-1)
+    ntime = field.shape[0]
+    out = np.zeros((ntime, *target_shape), dtype=np.float64)
+    for t in range(ntime):
+        interp = RegularGridInterpolator(
+            (lat_src, lon_wrapped), field_wrapped[t],
+            method="linear", bounds_error=False, fill_value=None,
+        )
+        out[t] = interp(target_points).reshape(target_shape)
+    return out
+
+
+def climatology_interp_indices(times: jnp.ndarray, day: float):
+    """Bracketing indices + weight for cyclic/transient monthly interpolation.
+
+    Shared by the AMIP SST/SIC path (``get_forcing_at_time``) and any other
+    monthly-climatology forcing (e.g. the slab q-flux) so the delicate
+    cyclic-wrap / transient-hold logic lives in ONE place (no duplicated
+    numerics).  Returns ``(idx, idx_next, weight)`` such that
+    ``field[idx]*(1-weight) + field[idx_next]*weight`` is the value at ``day``:
+
+    * single record (``ntime == 1``) → ``(0, 0, 0.0)`` (returns field[0]);
+    * ≤12 records not spanning a year → wrap on a 365-day noleap period, closing
+      the Dec→Jan seam (Taylor et al. 2000 mid-month bcs);
+    * >12 records or ≥1-year span → transient: clamp to the interior and let the
+      [0,1] weight HOLD the endpoints past the record.
+
+    ``ntime`` is a static shape → the Python branches are JIT-safe; ``day`` and
+    the span/period are traced.
+    """
+    ntime = times.shape[0]
+    if ntime == 1:
+        zero = jnp.zeros((), dtype=jnp.int32)
+        return zero, zero, jnp.zeros((), dtype=times.dtype)
+    span = times[-1] - times[0]
+    if ntime > 12:
+        period = jnp.zeros((), dtype=times.dtype)
+    else:
+        period = jnp.where(span < 366.0, 365.0, 0.0)
+    wrap = period > 0
+    period_safe = jnp.where(wrap, period, 1.0)
+    day = jnp.where(wrap, times[0] + (day - times[0]) % period_safe, day)
+    idx = jnp.searchsorted(times, day, side="right") - 1
+    idx = jnp.where(wrap, jnp.clip(idx, 0, ntime - 1),
+                    jnp.clip(idx, 0, ntime - 2))
+    idx_next = jnp.where(wrap, jnp.mod(idx + 1, ntime), idx + 1)
+    t_i = times[idx]
+    t_next = times[idx_next] + jnp.where(wrap & (idx == ntime - 1), period, 0.0)
+    dt = jnp.maximum(t_next - t_i, 1e-10)  # avoid division by zero
+    weight = jnp.clip((day - t_i) / dt, 0.0, 1.0)
+    return idx, idx_next, weight
+
+
 def get_forcing_at_time(
     forcing: AMIPForcing,
     day: float,
@@ -889,54 +946,14 @@ def get_forcing_at_time(
 
     # Single-record forcing (e.g. a climatological mean, or a 2D file promoted
     # to shape (1, ...) by load_amip_forcing): no interpolation is possible, so
-    # return the single field. ``ntime`` is a static shape, so this Python
-    # branch is JIT-safe. Without it, the cyclic-wrap below leaves period==0 and
-    # ``clip(idx, 0, ntime-2) = clip(idx, 0, -1)`` returns idx=-1 with dt=0,
-    # blowing up the weight (~5e10) and producing ~0 K SST via FP cancellation
-    # for any requested day != times[0].
+    # return the single field.
     if ntime == 1:
         return (jnp.maximum(forcing.sst[0], t_freeze),
                 jnp.clip(forcing.sic[0], 0.0, 1.0))
 
-    # Repeat the annual cycle ONLY for a monthly climatology: <=12 records that
-    # don't already span a full year. Wrap on a 365-day noleap (model-clock)
-    # period, NOT the ~334-day record span (which would drift the season
-    # ~31 d/yr). A >12-record OR >=1-yr file is TRANSIENT (mirror
-    # load_amip_forcing's ``is_transient = ntime > 12 or span >= 366``): period 0
-    # => never wrap, so a run past the file holds its last record instead of
-    # jumping back to the first era. ``ntime`` is a static shape => JIT-safe
-    # Python branch; ``span``/``period`` are traced.
-    span = times[-1] - times[0]
-    if ntime > 12:
-        period = jnp.zeros((), dtype=times.dtype)
-    else:
-        period = jnp.where(span < 366.0, 365.0, 0.0)
-    wrap = period > 0
-    # Safe divisor: the transient path (period == 0) still TRACES the modulo in
-    # the non-selected jnp.where branch, and ``x % 0`` emits a NaN that trips
-    # JAX_DEBUG_NANS and poisons any reverse-mode VJP (grad flows through both
-    # where-branches). Divide by 1.0 there — the result is discarded by
-    # ``where(wrap, ..., day)``.
-    period_safe = jnp.where(wrap, period, 1.0)
-    day = jnp.where(wrap, times[0] + (day - times[0]) % period_safe, day)
-
-    # Bracketing indices. The climatology path closes the Dec->Jan seam: the
-    # anchor after the last mid-month record (idx == ntime-1) is field[0] one
-    # period ahead, so days past mid-December interpolate December->January
-    # (Taylor et al. 2000 cyclic bcs) rather than holding December then jumping
-    # at the year boundary. The transient path clamps to the interior and lets
-    # the [0,1] weight clamp HOLD the endpoints (no extrapolation off a clamped
-    # bracket, which is physically unbounded: SST would run to hundreds of K).
-    # Index arithmetic only (no per-step array growth — ntime is ~1836 for a
-    # transient input4MIPs file).
-    idx = jnp.searchsorted(times, day, side="right") - 1
-    idx = jnp.where(wrap, jnp.clip(idx, 0, ntime - 1),
-                    jnp.clip(idx, 0, ntime - 2))
-    idx_next = jnp.where(wrap, jnp.mod(idx + 1, ntime), idx + 1)
-    t_i = times[idx]
-    t_next = times[idx_next] + jnp.where(wrap & (idx == ntime - 1), period, 0.0)
-    dt = jnp.maximum(t_next - t_i, 1e-10)  # avoid division by zero
-    weight = jnp.clip((day - t_i) / dt, 0.0, 1.0)
+    # Cyclic (monthly climatology) vs transient bracketing + weight — shared
+    # with the slab q-flux path (climatology_interp_indices).
+    idx, idx_next, weight = climatology_interp_indices(times, day)
 
     # Linear interpolation
     sst = (1.0 - weight) * forcing.sst[idx] + weight * forcing.sst[idx_next]

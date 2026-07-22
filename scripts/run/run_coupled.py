@@ -790,6 +790,13 @@ def build_parser():
                              "slab/two_layer/fixed = thermodynamic slab")
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
+    parser.add_argument("--ocean-qflux-path", type=str, default="",
+                        help="Slab/two-layer ocean q-flux (ocean-heat-transport "
+                             "convergence) climatology NetCDF [W/m2, +into the "
+                             "mixed layer], (time,lat,lon). Empty (default) => "
+                             "the scalar Q_flux everywhere. The standard CMIP "
+                             "slab BC so regional SSTs are correct; generate one "
+                             "with scripts/data/generate_qflux_climatology.py.")
     parser.add_argument("--grid", default="cubed_sphere",
                         choices=["cubed_sphere", "latlon", "voronoi", "gaussian"],
                         help="Atmosphere grid (default cubed_sphere). "
@@ -1446,6 +1453,7 @@ def main():
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
+            q_flux_path=args.ocean_qflux_path,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
@@ -1454,6 +1462,7 @@ def main():
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
+            q_flux_path=args.ocean_qflux_path,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"
