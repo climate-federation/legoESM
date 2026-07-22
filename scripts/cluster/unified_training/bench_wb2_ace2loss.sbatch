@@ -48,10 +48,16 @@ for v in classical column_nn; do
   fi
   out="$OUT_ROOT/${v}_scorecard.json"
   echo "[bench-wb2] $(date) eval $v ckpt=$ck"
-  "$UT_PYTHON" -u scripts/validate/run_aimip_wb2_eval.py \
-    --variant "$v" --suite "$SUITE" --checkpoint "$ck" \
-    --leads "$LEADS" --out "$out"
-  SCORECARD_ARGS+=(--scorecard "${v}=${out}")
+  # A single variant's eval failure (e.g. a checkpoint/skeleton channel
+  # mismatch) must NOT drop the other variants or the combined plot — score
+  # what we can, warn on the rest.
+  if "$UT_PYTHON" -u scripts/validate/run_aimip_wb2_eval.py \
+      --variant "$v" --suite "$SUITE" --checkpoint "$ck" \
+      --leads "$LEADS" --out "$out"; then
+    SCORECARD_ARGS+=(--scorecard "${v}=${out}")
+  else
+    echo "[bench-wb2] WARN: eval FAILED for $v (see traceback above) — skipping it in the plot" >&2
+  fi
 done
 
 if [ "${#SCORECARD_ARGS[@]}" -eq 0 ]; then
