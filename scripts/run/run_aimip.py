@@ -489,10 +489,15 @@ def _train_aimip_classical(
     gwd_scheme = str(cfg.get("aimip_gwd", "mcfarlane"))
     micro_scheme = str(cfg.get("aimip_microphysics", "none"))
     cloud_scheme = str(cfg.get("aimip_cloud", "xu_randall"))
+    # Surface bulk-flux scheme (constant | most | coare3 | large_yeager).
+    # Default "constant" reproduces the legacy AIMIP surface path; "most"
+    # activates the Monin-Obukhov stability functions + log-law local z0 so
+    # the trained surface_most_* / z0h_z0_ratio leaves become live gradients.
+    surface_bulk_scheme = str(cfg.get("aimip_surface_bulk_scheme", "constant"))
     logger.info(
         f"AIMIP classical physics: conv={conv_scheme} turb={turb_scheme} "
         f"gwd={gwd_scheme} micro={micro_scheme} cloud={cloud_scheme} "
-        f"rad={radiation}"
+        f"surface_bulk={surface_bulk_scheme} rad={radiation}"
     )
 
     # Training-period-mean GHG for the classical RRTMGP (CO2 matters for the
@@ -519,6 +524,7 @@ def _train_aimip_classical(
             rad_update_interval_steps=rad_update_interval,
             convection_scheme=conv_scheme,
             turbulence_scheme=turb_scheme,
+            surface_bulk_scheme=surface_bulk_scheme,
             gwd_scheme=gwd_scheme,
             microphysics_scheme=micro_scheme,
             cloud_scheme=cloud_scheme,
@@ -726,6 +732,7 @@ def _evaluate_variant(
             rad_update_interval_steps=eval_rad_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
+            surface_bulk_scheme=str(cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
             microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),

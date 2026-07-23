@@ -1539,7 +1539,16 @@ class BechtoldConfig(NamedTuple):
     # (diagonally dominant for θ·dt·g·M/Δp < 1; removes the 2Δz checkerboard
     # the explicit flux form NaN'd on — decoupled from the M_b_max clip).
     # The dispatch raises ValueError on any other value (fn-entry, static).
-    subsidence_solve: str = "advective"
+    # DEFAULT FLIPPED "advective" -> "implicit_flux" (2026-07-22): the leaf
+    # column-budget probe measured the advective residual at production
+    # L20/dt300 as a -9.5 mm/day column-WATER leak and ~-107 W/m² enthalpy
+    # leak on an active tropical fixture — the dominant term of the AMIP
+    # E-P non-closure (1.4 mm/day global) and heating/moisture mispairing.
+    # The implicit_flux solve zeroes the water residual to machine
+    # precision on the same fixture (and EDMF made the identical default
+    # flip for the same reason, #824).  "advective" stays selectable for
+    # byte-exact legacy reproduction.
+    subsidence_solve: str = "implicit_flux"
     # Off-centering for the implicit_flux solve.  1.0 = fully implicit
     # (backward Euler, most damping, default); the kernel clamps to
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused

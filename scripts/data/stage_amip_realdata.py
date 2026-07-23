@@ -8,10 +8,10 @@ Assembles the four pieces the production deck needs for realism:
   2. ERA5 initial condition           — the PUBLIC ARCO ERA5 store on
      GCS (no credentials); this script only verifies reachability.
   3. Real prescribed SST/SIC          — PCMDI / input4MIPs AMIP II bcs
-     (``tosbcs`` K, ``siconcbcs`` percent).  ESGF needs an account, so
-     this is a MANUAL download; the script prints the exact steps and,
-     once the file is present, validates its variables + units against
-     what the deck expects.
+     (``tosbcs`` K, ``siconcbcs`` percent).  input4MIPs is OPEN data
+     (no ESGF account) — fetch it with
+     ``scripts/data/download_cmip6_forcing.py``; this script validates a
+     staged file's variables + units against what the deck expects.
   4. Months of spin-up                — handled by the checkpointed
      ``run_amip30y_allgrids_local.sh`` launcher (not this script).
 
@@ -45,19 +45,24 @@ _ARCO_ERA5 = (
 )
 
 _ESGF_INSTRUCTIONS = """\
-Real AMIP II prescribed SST/SIC (PCMDI / input4MIPs) — manual download:
+Real AMIP II prescribed SST/SIC (PCMDI / input4MIPs):
 
-  1. Create a free ESGF account: https://esgf-node.llnl.gov/ (or any node).
-  2. Search input4MIPs for source_id 'PCMDI-AMIP-1-1-9' (or latest),
-     variables 'tosbcs' (SST) and 'siconcbcs' (sea-ice), the
-     'amip'/'observed' boundary-condition dataset.
-  3. Download the NetCDF (e.g.
-     tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202112.nc).
-     The SST file usually carries both tosbcs and siconcbcs.
-  4. Point the deck at it:
-       --sst-file <path>   (the deck defaults --sst-var tosbcs,
-                            --sic-var siconcbcs, --sst-offset 0,
-                            --sic-scale 0.01 for this dataset)
+  input4MIPs is OPEN data (served over the public LLNL Globus HTTPS endpoint,
+  no ESGF account needed).  Fetch it automatically:
+
+      python scripts/data/download_cmip6_forcing.py --channels sst_sic \\
+          --out-dir data/cmip6_forcing
+
+  That resolves source_id 'PCMDI-AMIP-1-1-9', variables 'tosbcs' (SST) and
+  'siconcbcs' (sea-ice), and downloads the NetCDF (e.g.
+  tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202112.nc)
+  into data/cmip6_forcing/sst_sic/.  Then point the deck at it:
+
+      --sst-file <path>   (the deck defaults --sst-var tosbcs,
+                           --sic-var siconcbcs, --sst-offset 0,
+                           --sic-scale 0.01 for this dataset)
+
+  '--dry-run' shows the plan first; '--list' shows every forcing channel.
 
 The loader's units-attribute guard cross-checks Kelvin/Celsius +
 percent/fraction, so a wrong file/flag combination fails loudly.
@@ -165,7 +170,10 @@ def main(argv=None) -> int:
             args.sst_file, args.sst_var, args.sic_var)
     else:
         print("[stage] no --sst-file given; for a faithful AMIP CMIP run "
-              "stage the real input4MIPs SST (see --print-esgf).")
+              "fetch the real input4MIPs SST with\n"
+              "        python scripts/data/download_cmip6_forcing.py "
+              "--channels sst_sic --out-dir data/cmip6_forcing\n"
+              "        (see --print-esgf for the full walkthrough).")
 
     print("\n[stage] Deck command for the full real-data combination:")
     if args.sst_file and sst_ok:

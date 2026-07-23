@@ -191,6 +191,17 @@ class RRTMGPConfig(NamedTuple):
     aerosol_g : float
         Bulk aerosol asymmetry factor used when aerosol optical depth is
         externally prescribed (default 0.70).
+    aerosol_ssa_bands : tuple[float, ...] | None
+        Optional PER-SHORTWAVE-BAND aerosol single-scattering albedo, length =
+        the SW gas-optics band count (14 for the shipped RRTMGP-SW table). When
+        set, the two-stream solver uses the value of the band each g-point
+        belongs to instead of the scalar ``aerosol_ssa`` — real aerosols scatter
+        very differently in the UV/visible vs the near-IR. ``None`` (default) =>
+        grey aerosol at the scalar ``aerosol_ssa`` (byte-identical).
+    aerosol_g_bands : tuple[float, ...] | None
+        Optional PER-SHORTWAVE-BAND aerosol asymmetry factor (same length /
+        semantics as ``aerosol_ssa_bands``). ``None`` (default) => grey aerosol
+        at the scalar ``aerosol_g``.
     use_scan : bool | None
         Column recurrence implementation inside the two-stream solver.
 
@@ -283,6 +294,13 @@ class RRTMGPConfig(NamedTuple):
     #         Must divide ncol.  A pure compile-time NUMERICS knob — NOT a
     #         tunable/trainable parameter (levels stay coupled, never chunked).
     column_chunk_size: int = 0
+    # Optional PER-SHORTWAVE-BAND aerosol optics (length = SW band count, 14 for
+    # the shipped table).  None => grey aerosol at the scalar aerosol_ssa/g
+    # (byte-identical).  Tuples so the value stays a hashable solver-cache key.
+    # APPENDED at the end of the field list (not next to aerosol_ssa/g) so no
+    # existing positional RRTMGPConfig(...) argument binding shifts.
+    aerosol_ssa_bands: tuple[float, ...] | None = None
+    aerosol_g_bands: tuple[float, ...] | None = None
 
 
 class OzoneProfileConfig(NamedTuple):

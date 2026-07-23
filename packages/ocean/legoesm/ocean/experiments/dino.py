@@ -444,7 +444,12 @@ class DINOConfig:
 
     # ------------------------------------------------------------------
     # Numerical scheme selections (decisions log 2026-05-14):
-    # - PGF: adcroft (closest to NEMO ln_hpg_sco standard Jacobian)
+    # - PGF: adcroft (legacy default).  NOTE (#1226): "adcroft" on the
+    #   masked-zco staircase is the eta=0 along-level gradient ONLY — it
+    #   misses NEMO hpg_sco's qco (1+r3t) stretch and gdept_z0 slope term
+    #   (zuap), i.e. the discrete topographic form stress at steps (wall-
+    #   face pgf sign flip vs NEMO).  The NEMO-faithful cards select
+    #   pgf_scheme="nemo_sco" (+ pgf_quadrature="nemo_trapezoid").
     # - Barotropic solver: implicit_cn (avoid checkerboard noise)
     # - Tracer advection: tvd (start simple; sensitivity study deferred)
     # - hi_precision_pressure: True
@@ -633,6 +638,9 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         tracer_advection="fct2",
         vertical_coordinate="masked_zco",
         pgf_quadrature="nemo_trapezoid",
+        # dynhpg ln_hpg_sco transcription (qco stretch + zuap slope term):
+        # the discrete topographic form stress at staircase faces (#1226).
+        pgf_scheme="nemo_sco",
         lateral_tracer_mixing="isoneutral",
         # #1226: the NEMO ln_traldf_iso operator IS nemo_iso_lap — the
         # DINOConfig default ("triads", the Griffies approximation) left this
@@ -731,6 +739,15 @@ DINO_RECIPES: dict[str, dict] = {
         "eos_depth": "geometric",                # key_qco z*/gdept depth for S-EOS
         # -- Vertical coordinate (namusr_def: ln_zco_nam=T, ln_zps_nam=F -> full-step z) --
         "vertical_coordinate": "masked_zco",
+        # -- Hydrostatic PGF (namdyn_hpg: ln_hpg_sco=T — forced by qco/nonlinear
+        #    free surface even on z-levels; dynhpg.F90:181 rejects hpg_zco).
+        #    "nemo_sco" = the hpg_sco transcription: qco (1+r3t) thickness
+        #    stretch + the gdept_z0 slope-correction term (zuap) — the terms
+        #    that transmit the discrete topographic form stress at staircase
+        #    u-faces (#1226 wall-face sign flip).  Paired with the dynhpg
+        #    trapezoid p' quadrature on the exact gdept ladder (enforced). --
+        "pgf_scheme": "nemo_sco",
+        "pgf_quadrature": "nemo_trapezoid",
         # -- Vertical mixing (namzdf: ln_zdftke=T; namzdf_tke rn_ediff=0.1 rn_ediss=0.7) --
         "vmix_scheme": "tke",
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)

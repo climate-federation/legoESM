@@ -133,8 +133,15 @@ def test_module_uses_constants_not_literal_g():
     accidental refactor that swaps in a literal is caught.
     """
     import inspect
-    src = inspect.getsource(column_water_vapor)
-    assert "constants.g" in src, "column_water_vapor must use constants.g"
-    # No hardcoded gravity values
-    assert "9.80616" not in src
-    assert "9.81" not in src
+    from legoesm.diagnostics.column_integrals import column_mass_integral
+    # column_water_vapor now delegates to the shared column_mass_integral
+    # (2026-07-22 process-ledger extraction) — the contract moves with it.
+    src = inspect.getsource(column_mass_integral)
+    assert "constants.g" in src, "column_mass_integral must use constants.g"
+    src_cwv = inspect.getsource(column_water_vapor)
+    assert "column_mass_integral" in src_cwv, (
+        "column_water_vapor must delegate to the shared helper")
+    # No hardcoded gravity values in either
+    for s in (src, src_cwv):
+        assert "9.80616" not in s  # const-ok: ratchet ASSERTS the literal is absent
+        assert "9.81" not in s  # const-ok: ratchet ASSERTS the literal is absent

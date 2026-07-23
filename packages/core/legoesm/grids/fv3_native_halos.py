@@ -434,8 +434,8 @@ def _ed_ext_agrid_lonlat(n: int, ng: int):
     A-points the reference uses, remapped to create's face layout.
     """
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM,
-        _GNOMONIC_ED_FACE_ROT,
+        GNOMONIC_ED_FACE_PERM as _GNOMONIC_ED_FACE_PERM,
+        GNOMONIC_ED_FACE_ROT as _GNOMONIC_ED_FACE_ROT,
     )
 
     # supergrid ghost width: need A-points to i = n+ng -> supergrid 2(n+ng),
@@ -475,8 +475,8 @@ def _ed_ext_stagger_lonlat(n: int, ng: int, parity: str):
     parity "B": odd nodes (2i-1, 2j-1), shape (6, n+2ng+1, n+2ng+1).
     """
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM,
-        _GNOMONIC_ED_FACE_ROT,
+        GNOMONIC_ED_FACE_PERM as _GNOMONIC_ED_FACE_PERM,
+        GNOMONIC_ED_FACE_ROT as _GNOMONIC_ED_FACE_ROT,
     )
 
     line = _ed_line(n, 2 * (ng + 2))
@@ -582,7 +582,7 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
     from legoesm.grids.duogrid import (
         DuoGridData,
         MAX_K2E_NORD,
-        _compute_corner_lagrange_coeff,
+        compute_corner_lagrange_coeff as _compute_corner_lagrange_coeff,
     )
     from legoesm.grids.halo import EAST, NORTH, SOUTH, WEST
     import jax.numpy as jnp
@@ -664,3 +664,13 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
         ew_ext=jnp.array(ew_ext, dtype=jnp.float64),
         es_ext=jnp.array(es_ext, dtype=jnp.float64),
     )
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+ED_CARTS = _ED_CARTS
+ed_line = _ed_line
+lagrange_coef = _lagrange_coef
+compute_ext_vectors_native = _compute_ext_vectors_native

@@ -169,6 +169,9 @@ def kessler_microphysics(
     _dt_safe = jnp.maximum(dt, 1e-10)
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, _dt_safe, sharpness, q_c=q_c,
+        hard_adjust=config.hard_saturation_adjustment,
+        hard_threshold=config.hard_sat_adjust_threshold,
+        hard_max_heating_K=config.hard_sat_max_heating_K,
     )
     q_v_avail = jnp.clip(q_v, 0.0, None)
     condensation = jnp.minimum(condensation, q_v_avail / _dt_safe)

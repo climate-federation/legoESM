@@ -16,7 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (14)
+    # atm: BechtoldConfig (12)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
@@ -28,12 +28,13 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.BechtoldConfig.delta_deep',
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
-    'atm.conv.BechtoldConfig.downdraft_alpha',
-    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
-    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
-    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
-    # via the --params qualified-name loader.  Conscious exclusion.
-    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
+    # downdraft_alpha / downdraft_entrain_rate were REMOVED 2026-07-23: their
+    # convention-named ExperimentConfig scalars (bechtold_downdraft_alpha /
+    # bechtold_downdraft_entrain_rate) are threaded unconditionally by
+    # _resolve_convection, so they are now in _ATM_SCALAR_PARAM_MAP
+    # (--params-reachable).  downdraft_evap_efficiency stays CLI-only: its
+    # scalar (bechtold_downdraft_evap) is NOT convention-named, so the map's
+    # verified-threading contract does not cover it.
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -211,6 +212,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KainFritschConfig.timec_min_s',
     'atm.conv.KainFritschConfig.usl_depth_pa',
     # atm: KesslerConfig (5)
+    # The hard-saturation-adjustment trigger + heating cap (all warm-rain
+    # micro configs) were REMOVED from this baseline 2026-07-23: they are now
+    # routed onto ExperimentConfig flat scalars (hard_sat_adjust_threshold /
+    # hard_sat_max_heating_K) and reachable via --params through
+    # _ATM_SCALAR_PARAM_MAP (the day-137 summer-regime tuning need).  The
+    # remaining sibling micro params stay SCM-RCE-only (pipeline-internal).
     'atm.micro.KesslerConfig.accretion_coeff',
     'atm.micro.KesslerConfig.autoconversion_rate',
     'atm.micro.KesslerConfig.autoconversion_threshold',
@@ -280,7 +287,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.rad.OzoneProfileConfig.o3_max_vmr',
     'atm.rad.OzoneProfileConfig.p_peak_hPa',
     'atm.rad.OzoneProfileConfig.sigma_logp',
-    # atm: P3Config (16)
+    # atm: P3Config (18)
     'atm.micro.P3Config.N_i0',
     'atm.micro.P3Config.Nc_0',
     'atm.micro.P3Config.a_v_i',
@@ -338,10 +345,18 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.SundqvistConfig.evap_coeff',
     'atm.micro.SundqvistConfig.qc_crit',
     'atm.micro.SundqvistConfig.rh_crit',
-    # atm: SurfaceLayerConfig (3)
+    # atm: SurfaceLayerConfig (6) — conscious exclusion: like Cd_neutral /
+    # Ch_neutral / z0, the MOST stability-function coefficients and the
+    # thermal/momentum roughness ratio z0h_z0_ratio are trained via the AIMIP
+    # classical bundle (aimip_params.surface_most_* / surface_z0h_z0_ratio), not
+    # the ExperimentConfig --params scalar map. Same reachability status as their
+    # SurfaceLayerConfig siblings.
     'atm.turb.SurfaceLayerConfig.Cd_neutral',
     'atm.turb.SurfaceLayerConfig.Ch_neutral',
+    'atm.turb.SurfaceLayerConfig.most_stable_beta',
+    'atm.turb.SurfaceLayerConfig.most_unstable_gamma',
     'atm.turb.SurfaceLayerConfig.z0',
+    'atm.turb.SurfaceLayerConfig.z0h_z0_ratio',
     # atm: TKEConfig (4)
     'atm.turb.TKEConfig.Ce',
     'atm.turb.TKEConfig.Ck',
@@ -520,11 +535,31 @@ UNREACHABLE_PARAMS = frozenset({
     'land.canopy.sif.kp',
     'land.canopy.sif.max_electron_yield',
     'land.snow_bands.alpha_glacier_ice',
-    'land.snow_bands.blow_snow_subl_rate',
     'land.snow_bands.blow_snow_wind_thresh_ms',
     'land.snow_bands.lapse_rate_K_m',
     'land.snow_bands.lw_elev_lapse_W_m2_per_m',
-    'land.snow_bands.refreeze_frac',
-    'land.snow_bands.sky_view_min',
     'land.snow_bands.sw_elev_grad_per_m',
+    # --- Land closures spec'd but not routed by any run_lmip land-surface
+    # scheme's config tree (#691). apply_params_to_config(driver="run_lmip")
+    # does not carry these nested *Config NamedTuples under simple_seb/two_leaf/
+    # clm_ml, so they are not settable from a calibration file yet. Conscious
+    # baseline entries (shrink as each config is wired through the router). The
+    # land_use_change family surfaced when the module was registered in
+    # param_collector.SPEC_MODULES (its spec is in-scope, so the drift guard
+    # requires registration); interception / d13c are pre-existing #691 debt.
+    # (clm_ml / two_leaf_canopy params ARE reachable under their
+    # --land-surface-scheme and are deliberately NOT baselined.)
+    'land.canopy.interception.dewmx',
+    'land.canopy.interception.fwet_exponent',
+    'land.canopy.interception.maximum_leaf_wetted_fraction',
+    'land.d13c.phi_c4_leakiness',
+    'land.land_use_change.clear_burn_frac',
+    'land.land_use_change.clear_slash_frac',
+    'land.land_use_change.prod_frac_100yr',
+    'land.land_use_change.prod_frac_10yr',
+    'land.land_use_change.prod_frac_1yr',
+    'land.land_use_change.tau_100yr_years',
+    'land.land_use_change.tau_10yr_years',
+    'land.land_use_change.tau_1yr_years',
+    'land.land_use_change.tau_regrow_years',
 })

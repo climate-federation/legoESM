@@ -148,6 +148,14 @@ VALID_LE_MODULES = ("BT", "PM")
 # applies the scheme and the config validator share one source of truth.
 VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 
+# CLM-ML leaf stomatal-conductance model (``CLMMLCanopyConfig.stomatal_model``)
+# → backend ``gs_type`` integer.  "wue" (default) is the backend default; only
+# "medlyn" wires the traced per-site ``vcmaxpft_jax`` injection path (used for
+# gradient-based Vcmax25 training).  Public so the interface applier and the
+# validator share one source of truth.
+CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
+VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
+
 
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
@@ -504,7 +512,15 @@ class CLMMLCanopyConfig(NamedTuple):
     """
 
     # Canopy vertical discretisation
-    nlevmlcan: int = 9          # Number of canopy layers (MLclm_varpar.nlevmlcan)
+    # Total canopy layers: ``nlevmlcan - nlayer_above`` within-canopy layers
+    # spanning 0..htop, plus ``nlayer_above`` layers from htop to the reference
+    # height.  These select CLM-ML's EXPLICIT layer-count mode; the backend's
+    # alternative height-increment mode (dz_tall = 0.5 m) puts ~54 layers in a
+    # 27 m forest canopy, whose thin beta-distribution tails fall below
+    # ``dpai_min`` and abort the run with "canopy layer has zero plant area
+    # index".  Installed by ``clm_ml_interface._apply_canopy_layering``.
+    nlevmlcan: int = 9          # Number of canopy layers (within + above)
+    nlayer_above: int = 1       # ...of which above-canopy (htop -> zref)
 
     # Sub-cycling / Runge-Kutta integration
     # 10 → Euler (nrk_steps = 0); 2x → RK with x stages
@@ -572,6 +588,23 @@ class CLMMLCanopyConfig(NamedTuple):
     #   13 = C3 non-arctic grass — CLM default grass PFT
     # When in doubt, choose the PFT whose Vcmax25 and htop match the site.
     pft_clm: int = 7
+
+    # Leaf stomatal-conductance model → backend ``gs_type``.  "wue" (default)
+    # is the CLM-ML water-use-efficiency optimization; "medlyn"/"ball_berry" are
+    # the Medlyn (2011) / Ball-Berry closures.  Selecting "medlyn" activates the
+    # traced ``vcmaxpft_jax`` injection path, so a per-site / trainable Vcmax25
+    # (``vcmax25_override``) can flow gradients — under "wue" that injection is
+    # inert and Vcmax25 is applied through the module-global lookup instead.
+    stomatal_model: str = "wue"
+
+    # Per-site Vcmax25 override [µmol m-2 s-1].  ``None`` (default) keeps the
+    # MLpftcon per-PFT lookup value.  A float replaces the global lookup for THIS
+    # column's PFT — the "go beyond the global table" per-site value — by feeding
+    # the traced ``vcmaxpft_jax`` array to the backend nitrogen-profile routine,
+    # which selects it before leaf photosynthesis under ANY stomatal model (WUE,
+    # Medlyn, Ball-Berry).  A trainable Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument from the training loop instead.
+    vcmax25_override: float | None = None
 
     # SW band partitioning.
     # f_vis: fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
@@ -733,6 +766,28 @@ class CLMMLCanopyConfig(NamedTuple):
     # than passing silently.
     allow_coarse_ml_substep: bool = False
 
+    # S3: fold the multi-column traceable forward's per-column Python loop into a
+    # jax.lax.scan (O(1) compile in ncol) WHEN the columns share vertical structure
+    # (ncan/ntop/nbot/pft uniform — the explicit-count-layering case).  True (default)
+    # takes the scan on that path; False forces the proven S2 per-column loop.  An
+    # internal PERF toggle (like a diagnostics-mode flag), not a physics/sensitivity
+    # knob — the scan is a numerical NO-OP vs the loop (validated column-for-column
+    # against independent single-column runs), so it needs no driver CLI flag.  When
+    # structure VARIES across columns the scan is skipped automatically regardless
+    # (heterogeneous nbot/pft needs traced-nbot radiation masking — deferred; see
+    # docs/land/clm_ml_s3_masked_vmap_plan.md), so this only selects the fast path
+    # where it is already proven correct.
+    scan_columns: bool = True
+
+    # Derive each column's CLM PFT from the surface map's DOMINANT PFT
+    # (argmax of pft_fractions) instead of the single pft_clm for all columns.
+    # True => mixed-PFT / heterogeneous columns (a real biome distribution),
+    # which the group-by-structure scan compiles at O(#distinct structures).
+    # OPT-IN (default False keeps the single pft_clm — no behaviour change): the
+    # dominant-PFT map changes bare/other-PFT columns off pft_clm, so a faithful run
+    # wants the full CLM PFT parameterisation validated first.
+    use_surfdata_pft: bool = False
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
@@ -747,4 +802,27 @@ class CLMMLCanopyConfig(NamedTuple):
                 "CLM-ML canopy-airspace turbulence scheme must be one of "
                 f"{VALID_CLM_ML_TURBULENCE_SCHEMES} ('rsl_bonan'=Harman & "
                 "Finnigan roughness sublayer, 'most'=Monin-Obukhov only)")
+        # Layering: integral, non-boolean counts (the backend allocates arrays
+        # of this size and ``int()``-casts silently truncate a float).
+        for _nm, _v in (("nlevmlcan", self.nlevmlcan),
+                        ("nlayer_above", self.nlayer_above)):
+            if isinstance(_v, bool) or not isinstance(_v, int):
+                raise ValueError(
+                    f"CLM-ML {_nm} must be a plain int; got {_v!r}")
+        # Both counts must be >= 1, else the backend silently falls back to its
+        # height-increment mode (which aborts on a tall canopy).
+        if self.nlayer_above < 1 or self.nlevmlcan - self.nlayer_above < 1:
+            raise ValueError(
+                f"CLM-ML canopy layering needs at least one within-canopy and "
+                f"one above-canopy layer; got nlevmlcan={self.nlevmlcan}, "
+                f"nlayer_above={self.nlayer_above} "
+                f"(within = {self.nlevmlcan - self.nlayer_above})")
+        # Stomatal model → gs_type dispatch (a typo must abort, not silently run
+        # the default WUE closure).
+        if self.stomatal_model not in VALID_CLM_ML_STOMATAL_MODELS:
+            raise ValueError(
+                f"unknown CLM-ML stomatal_model {self.stomatal_model!r}; must be "
+                f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
+                "('wue'=water-use-efficiency optimization (default), "
+                "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
         return self

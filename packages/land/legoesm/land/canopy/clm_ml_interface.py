@@ -114,17 +114,17 @@ def _ensure_clm_initialized() -> None:
     global _CLM_INITIALIZED
     if _CLM_INITIALIZED:
         return
-    from clm_src_main.clm_varpar import clm_varpar_init
-    from offline_driver import clmSoilOptionMod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import clm_varpar_init
+    from legoesm.land.canopy.clm_ml_backend.offline_driver import clmSoilOptionMod
 
     # Use CLM4.5 physics so nlevsoi=10 matches legoESM's default 10-layer soil.
     clmSoilOptionMod.clm_phys = "CLM4_5"
     clm_varpar_init()
 
     # Initialize MLpftcon and psihat look-up tables.
-    from multilayer_canopy.MLCanopyTurbulenceMod import LookupPsihatINI
-    from clm_src_main import pftconMod
-    from multilayer_canopy import MLpftconMod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyTurbulenceMod import LookupPsihatINI
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import pftconMod
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod
 
     pftconMod.pftcon = pftconMod.Init()
     MLpftconMod.MLpftcon = MLpftconMod.Init()
@@ -134,8 +134,8 @@ def _ensure_clm_initialized() -> None:
     # Must match the start_date_ymd=20010101 epoch used in _setup_clm_time so
     # that CLM's shr_orb_cosz gets consistent orbital geometry (year 2000 is
     # a leap year and shifts caldays after Feb 28 by one day).
-    from clm_share.shr_orb_mod import shr_orb_params
-    import clm_src_utils.clm_varorb as _varorb
+    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_params
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
 
     # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
     eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)  # coeff-ok: non-leap reference year 2001 for CLM orbital parameters epoch
@@ -203,6 +203,17 @@ _PSIHAT_RSL: dict[str, Any] | None = None
 # bakes the psihat table into the jaxpr as a trace-time constant, so a compiled
 # or differentiated function cannot follow a later switch.
 _DIFF_TURBULENCE_SCHEME: str | None = None
+# Backend gs_type in force from the last ``_apply_stomatal_model``; used to clear
+# the leaf-kernel lru_caches only on an actual stomatal-model switch.
+_APPLIED_GS_TYPE: int | None = None
+
+# Last turbulence scheme concretely APPLIED + VERIFIED to the process-global ψ̂
+# tables by an eager (non-traced) _apply_turbulence_scheme call.  A traced step
+# (jax.jit / jax.grad) must NOT re-run the host-side float() probe on the now-traced
+# tables; instead it asserts against this record that the eager cold-start step
+# already installed the requested scheme.  Distinct from _DIFF_TURBULENCE_SCHEME,
+# which is the (stricter) trace-time LOCK committed only for a traced step.
+_APPLIED_TURBULENCE_SCHEME: str | None = None
 
 
 def _psihat_probe() -> dict[str, float]:
@@ -213,12 +224,93 @@ def _psihat_probe() -> dict[str, float]:
     versa), the run is an inconsistent hybrid — worse than either scheme — and
     the caller must be told exactly which path disagreed.
     """
-    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyTurbulenceMod as _turb
     return {
         name: float(getattr(_turb, name)(_PSIHAT_PROBE_ZDT, _PSIHAT_PROBE_DTL))
         for name in ("_LookupPsihatM", "_LookupPsihatH",
                      "_LookupPsihatM_scalar", "_LookupPsihatH_scalar")
     }
+
+
+def _apply_canopy_layering(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the canopy layer counts CLM-ML builds its vertical structure from.
+
+    ``CLMMLCanopyConfig.nlevmlcan`` / ``nlayer_above`` select the backend's
+    EXPLICIT-COUNT mode: ``nlayer_within = nlevmlcan - nlayer_above`` layers
+    spanning ``0..htop`` plus ``nlayer_above`` layers from ``htop`` to the
+    reference height.  Without this the backend falls back to its
+    height-increment mode (``dz_tall = 0.5 m``), which for a real forest canopy
+    (htop ~ 27 m) makes ~54 layers whose beta-distribution LAI tails fall below
+    ``dpai_min`` — those layers are zeroed and the run dies with
+    ``initVerticalStructure: canopy layer has zero plant area index``.
+
+    Both module namespaces are written because ``MLinitVerticalMod`` does
+    ``from MLclm_varctl import nlayer_within, nlayer_above`` — a BY-VALUE import,
+    so setting only the ``MLclm_varctl`` attribute is a silent no-op and the
+    layering would stay at the backend default.
+
+    Re-applied on every eager interface call (like the turbulence tables):
+    these are process-global CLM module state shared by every column and
+    config, so setting them once would leak the first caller's layering into a
+    later differently-configured run in the same process.  The mutation is a
+    host-side Python write — under ``jax.jit`` it happens at trace time, not per
+    compiled execution, so a jitted rollout that never re-traces will not
+    re-apply it (fine: the vertical structure is built once, at the cold-start
+    step, and the counts do not change within a run).  Concurrent runs with
+    different layerings in one process are unsafe unless externally serialised.
+    """
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLinitVerticalMod as _init_vert
+
+    n_above = int(canopy_config.nlayer_above)
+    n_within = int(canopy_config.nlevmlcan) - n_above
+    for _mod in (_ml_ctl, _init_vert):
+        _mod.nlayer_within = n_within
+        _mod.nlayer_above = n_above
+
+
+def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the leaf stomatal-conductance model (``gs_type``) into the backend.
+
+    Maps ``CLMMLCanopyConfig.stomatal_model`` -> backend ``gs_type``
+    {medlyn:0, ball_berry:1, wue:2}.  Patches BOTH ``MLclm_varctl.gs_type`` AND
+    ``MLLeafPhotosynthesisMod.gs_type`` because the photosynthesis module does
+    ``from MLclm_varctl import gs_type`` BY VALUE — a module-level copy the leaf
+    kernel branches on — so setting only ``MLclm_varctl.gs_type`` is a silent
+    no-op (the same by-value trap as the layering counts).
+
+    Re-applied every step (process-global CLM state shared by every column and
+    config).  Under ``"medlyn"`` the traced per-site ``vcmaxpft_jax`` injection
+    is live (the backend threads it only through the Medlyn path); the default
+    ``"wue"`` keeps the water-use-efficiency optimisation.
+    """
+    from legoesm.land.canopy.config import CLM_ML_STOMATAL_GS_TYPE
+    scheme = canopy_config.stomatal_model
+    if scheme not in CLM_ML_STOMATAL_GS_TYPE:
+        raise ValueError(
+            f"unknown CLM-ML stomatal_model {scheme!r}; must be one of "
+            f"{tuple(CLM_ML_STOMATAL_GS_TYPE)}")
+    gs = CLM_ML_STOMATAL_GS_TYPE[scheme]
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLLeafPhotosynthesisMod as _photo
+    _ml_ctl.gs_type = gs
+    _photo.gs_type = gs
+    # The backend's leaf-kernel factories are ``functools.lru_cache``d on their
+    # parameter tuple but NOT on ``gs_type`` (the returned kernel closes over it
+    # as a static Python branch).  So SWITCHING stomatal model in one process
+    # could otherwise reuse a kernel compiled for the previous model with the new
+    # model's parameters.  Clear those caches whenever the applied gs_type
+    # actually changes (tracked in ``_APPLIED_GS_TYPE`` so the common no-switch
+    # case pays nothing).  This is a serial-process guard; concurrent mixed-model
+    # calls remain unsupported (the state is process-global) — one stomatal model
+    # per process is the contract.  Upstream fix: key the caches on gs_type.
+    global _APPLIED_GS_TYPE
+    if _APPLIED_GS_TYPE is not None and _APPLIED_GS_TYPE != gs:
+        for _name in dir(_photo):
+            _fn = getattr(_photo, _name, None)
+            if hasattr(_fn, "cache_clear"):
+                _fn.cache_clear()
+    _APPLIED_GS_TYPE = gs
 
 
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
@@ -260,7 +352,7 @@ def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> No
     # MLCanopyTurbulenceMod allocates psigrid* as ZEROS, so snapshotting a
     # pre-init module would pin "rsl_bonan" to a MOST table forever.
     _ensure_clm_initialized()
-    from multilayer_canopy import MLCanopyTurbulenceMod as _turb
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyTurbulenceMod as _turb
 
     if _PSIHAT_RSL is None:
         snapshot: dict[str, Any] = {}
@@ -324,6 +416,58 @@ def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> No
                 "turbulence_scheme='rsl_bonan' left psihat at zero for "
                 f"{sorted(bad)}, so that path silently runs Monin-Obukhov while "
                 "the rest runs the roughness-sublayer correction.")
+
+    # Record the concretely-applied + verified scheme so a later TRACED step can
+    # assert the tables match without re-running the host float() probe (which
+    # cannot run inside a jax.jit trace — the lookups become tracers).
+    global _APPLIED_TURBULENCE_SCHEME
+    _APPLIED_TURBULENCE_SCHEME = scheme
+
+
+def _assert_turbulence_scheme_for_trace(scheme: str) -> None:
+    """Trace-safe turbulence-scheme check for the warm traceable path.
+
+    The ψ̂ tables are process-global and were applied + VERIFIED concretely by the
+    eager cold-start step that built the warm ``canopy_state`` (see
+    :func:`_apply_turbulence_scheme`).  A traced (jax.jit / jax.grad) step must NOT
+    re-run the host-side ``float()`` probe on the now-traced tables, but it MUST
+    still refuse a scheme it cannot honour:
+
+    * ``_APPLIED_TURBULENCE_SCHEME != scheme`` — the tables currently installed do
+      NOT match the requested scheme (no eager step applied it, or a different
+      scheme was applied since), so a trace would silently run the wrong physics.
+    * ``_DIFF_TURBULENCE_SCHEME`` set to another scheme — the process is already
+      locked to a different scheme that an already-compiled step keeps running.
+
+    Both are hard errors (no silent degrade), mirroring the eager probe's contract.
+
+    OPERATIONAL CONSTRAINT (codex round-2): the ψ̂ tables are process-global and this
+    check is a string label, not a lock over the assert→trace→table-capture region.
+    It is sound for the intended deployment — one serialized process running one
+    turbulence scheme — but is NOT thread-safe: a concurrent thread mutating the
+    tables between this assert and the backend trace could capture the wrong scheme.
+    Run CLM-ML canopy rollouts single-threaded / one-scheme-per-process.
+    """
+    if scheme not in VALID_CLM_ML_TURBULENCE_SCHEMES:
+        raise ValueError(
+            f"unknown CLM-ML turbulence_scheme {scheme!r}; the canopy-airspace "
+            f"turbulence scheme must be one of {VALID_CLM_ML_TURBULENCE_SCHEMES}")
+    if _APPLIED_TURBULENCE_SCHEME != scheme:
+        raise RuntimeError(
+            "CLM-ML traceable step requested turbulence_scheme="
+            f"{scheme!r}, but the process-global psihat tables currently hold "
+            f"{_APPLIED_TURBULENCE_SCHEME!r} (set by the last eager apply). The "
+            "host-side ψ̂ verification probe cannot run inside a jax.jit trace, so "
+            "the scheme must be applied + verified by an eager (differentiable=False, "
+            "cold-start) step in THIS process before a traced/jitted rollout. Run "
+            "one forward cold step first, then reuse its canopy_state.")
+    if (_DIFF_TURBULENCE_SCHEME is not None
+            and _DIFF_TURBULENCE_SCHEME != scheme):
+        raise RuntimeError(
+            "CLM-ML traceable mode cannot switch turbulence_scheme within a "
+            f"process (locked to {_DIFF_TURBULENCE_SCHEME!r}, now {scheme!r}). The "
+            "psihat lookup table is captured as a trace-time constant, so an "
+            "already-traced/compiled step keeps running the OLD scheme.")
 
 
 def _commit_diff_turbulence_scheme(scheme: str) -> None:
@@ -435,6 +579,7 @@ def _setup_clm_topology(
     z_soil: np.ndarray,
     z_ref: float,
     pft_clm: int = 7,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> None:
     """Set up CLM module-level topology singletons for ``ncol`` columns.
 
@@ -457,15 +602,24 @@ def _setup_clm_topology(
     z_ref : float
         Atmospheric reference height [m].
     pft_clm : int
-        CLM PFT index (1-based) applied to all columns.  Controls Vcmax25
-        and plant hydraulic parameters via the MLpftcon lookup table.
+        CLM PFT index (1-based) applied to all columns when ``pft_per_col`` is
+        None.  Controls Vcmax25 and plant hydraulic parameters via the MLpftcon
+        lookup table.
+    pft_per_col : np.ndarray, optional
+        Per-column CLM PFT index (1-based), CONCRETE, shape ``(ncol,)``.  When
+        supplied it overrides ``pft_clm`` column-by-column — the enabler for
+        MIXED-PFT (heterogeneous-structure) global columns: different PFTs give
+        different ``nbot`` (and MLpftcon params), so a warm state's per-column
+        ``GridInfo`` tuple then varies, which ``extract_clm_ml_grid_info`` reads
+        straight off ``patch.itype``.  None → single ``pft_clm`` for all columns
+        (back-compat).  Structural, so it must be concrete (like lat/lon).
     """
-    from clm_src_main import ColumnType as _col_mod
-    from clm_src_main import GridcellType as _grc_mod
-    from clm_src_main.ColumnType import column_type
-    from clm_src_main.PatchType import patch
-    from clm_src_main.clm_varpar import nlevsno, nlevgrnd, nlevsoi
-    from clm_src_main.clm_varcon import ispval
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import ColumnType as _col_mod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import GridcellType as _grc_mod
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.ColumnType import column_type
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import patch
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import nlevsno, nlevgrnd, nlevsoi
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import ispval
 
     n_layers = len(dz_soil)
 
@@ -478,7 +632,9 @@ def _setup_clm_topology(
         p = i + 1  # 1-based patch index
         col_arr[p] = p       # column = patch (1:1)
         gc_arr[p] = p        # gridcell = patch (1:1)
-        itype_arr[p] = pft_clm  # CLM PFT from config (was hardcoded to 13)
+        # Per-column PFT (mixed-PFT / heterogeneous columns) when supplied, else the
+        # single config pft_clm for every column (single-PFT default, back-compat).
+        itype_arr[p] = int(pft_per_col[i]) if pft_per_col is not None else pft_clm
 
     patch.column = jnp.array(col_arr, dtype=jnp.int32)
     patch.gridcell = jnp.array(gc_arr, dtype=jnp.int32)
@@ -532,7 +688,7 @@ def _setup_clm_topology(
     )
 
     # ---- grc ----
-    from clm_src_main.GridcellType import GridcellType as gridcell_type
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.GridcellType import GridcellType as gridcell_type
     latdeg_np = np.full(ncol + 1, 0.0, dtype=np.float64)
     londeg_np = np.full(ncol + 1, 0.0, dtype=np.float64)
     for i in range(ncol):
@@ -563,7 +719,7 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     actual simulation date, producing wrong solar zenith angles and hence
     wrong sun/shade fractions and per-layer radiation profiles.
     """
-    import clm_src_utils.clm_time_manager as _tm
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_time_manager as _tm
 
     _tm.dtstep = int(dt)
     # Encode actual day-of-year into itim so that get_curr_calday returns
@@ -674,8 +830,8 @@ def _compute_virtual_lon_deg(
     -------
     lon_deg : np.ndarray  shape (ncol,), virtual longitude [°, −180..180]
     """
-    from clm_share.shr_orb_mod import shr_orb_decl
-    import clm_src_utils.clm_varorb as _varorb
+    from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_decl
+    import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
 
     lat_r = np.deg2rad(lat_deg)
 
@@ -831,7 +987,7 @@ def _build_stubs(
                     waterstatebulk, temperature, frictionvel, canopystate,
                     energyflux, waterfluxbulk, solarabs, waterdiagnosticbulk
     """
-    from clm_src_main.clm_varpar import nlevsoi, ivis, inir, nlevgrnd, nlevsno
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import nlevsoi, ivis, inir, nlevgrnd, nlevsno
     # NOTE: ivis=1, inir=2 in CLM
 
     np_ = ncol + 1  # 1-based patch dimension
@@ -940,6 +1096,31 @@ def _build_stubs(
     if rootfr_total > 0:
         rootfr_padded /= rootfr_total  # guarantee sum == 1.0
 
+    # The COUPLED path supplies PER-COLUMN, PER-LAYER hydraulics
+    # (build_soil_hydraulics -> (ncol, n_layer) fields: theta_sat/psi_sat/b_ch/
+    # K_sat), while the single-site path (run_lmip) supplies SCALAR fields.  Slice
+    # the config down to the current (column, layer) before hydraulic_conductivity
+    # so it returns a SCALAR K — otherwise the full (ncol, n_layer) params broadcast
+    # K to (ncol, ...) and ``hk_l_col.at[p, j].set(K)`` (a scalar slot) fails with
+    # "Cannot broadcast to shape with fewer dimensions".  Scalars / the
+    # retention_curve string / per-layer-only fields pass through unchanged.
+    def _hydraulics_at(cfg_hyd, ci, li):
+        def _sel(x):
+            # The shipped producers emit ONLY scalars (default SoilHydraulicsConfig)
+            # or 2-D (ncol, L) fields (build_soil_hydraulics -> (ncol, n_layer);
+            # clm_hydraulics_config -> (ncol, 1) layer-broadcast).  Clamp BOTH dims
+            # so a size-1 column- or layer-broadcast dim never goes out of bounds
+            # (min(ci, ncol-1) is a no-op for a real ncol-sized dim).
+            nd = getattr(x, "ndim", 0)
+            if nd == 0:
+                return x                       # scalar / retention_curve string
+            if nd == 1:
+                # 1-D hydraulics fields are not emitted by the shipped producers;
+                # treat a length-ncol vector as per-column, else per-layer (clamped).
+                return x[ci] if x.shape[0] == ncol else x[min(li, x.shape[0] - 1)]
+            return x[min(ci, x.shape[0] - 1), min(li, x.shape[1] - 1)]
+        return jax.tree_util.tree_map(_sel, cfg_hyd)
+
     for i in range(ncol):
         p = i + 1  # 1-based patch = column
         # Fill all nlevsoi layers so that layers beyond n_layers don't stay at
@@ -955,7 +1136,7 @@ def _build_stubs(
                     and theta_soil is not None and j - 1 < theta_soil.shape[1]):
                 from legoesm.land.soil_hydraulics import hydraulic_conductivity
                 K = hydraulic_conductivity(psi_soil[i, j - 1], theta_soil[i, j - 1],
-                                           soil_hydraulics)
+                                           _hydraulics_at(soil_hydraulics, i, j - 1))
                 # Keep K traced (no float()) so d(hk)/d(psi,theta) stays on the
                 # jax.grad tape; numerically identical to the prior float() cast.
                 hk_l_col = hk_l_col.at[p, j].set(K * 1000.0)  # m/s → mm/s
@@ -1009,23 +1190,35 @@ def _build_stubs(
     esai_patch = jnp.zeros(np_, dtype=jnp.float64)
     for i in range(ncol):
         p = i + 1
-        htop_v = (float(land_params.htop[i]) if land_params is not None and land_params.htop is not None
+        # NO float() on the per-column land_params / lai_override values: on the
+        # COUPLED jitted path these are TRACED (LAI/htop/SAI flow through the land
+        # state + surface blend in step_unified), so float() raises
+        # ConcretizationTypeError.  Keep them as jnp/array scalars — .at[p].set
+        # accepts a tracer, a numpy scalar (eager) or a Python-float fallback alike,
+        # and the value is identical to the old float() path in eager mode.  Canopy
+        # STRUCTURE (ncan/ntop/nbot) is NOT built from these here on the traceable
+        # path — it comes from the concrete grid_info — so a traced htop/LAI only
+        # feeds per-column DATA (RSL reference height, dpai), never a slice bound.
+        htop_v = (land_params.htop[i] if land_params is not None and land_params.htop is not None
                   else 5.0)  # coeff-ok: 5 m fallback canopy height (CLM4.5 DBF-temperate default)
         # A prescribed/climatology htop can be 0 on a bare or uncovered column;
         # floor it so hbot = hbot_frac*htop stays < htop (valid CLM-ML layering).
-        # LAI is 0 there, so the nominal height changes no canopy flux.
-        htop_v = max(htop_v, _HTOP_GEOM_MIN_M)
+        # LAI is 0 there, so the nominal height changes no canopy flux.  jnp.maximum
+        # (not max()) so a traced htop_v does not break the Python comparison; pin
+        # the floor to the (float64) patch dtype so a float32 htop_v does not store a
+        # float32-rounded 0.1 (~1.5e-9 m drift vs the old float64 max()) (codex).
+        htop_v = jnp.maximum(htop_v, jnp.asarray(_HTOP_GEOM_MIN_M, dtype=htop_patch.dtype))
         # LAI precedence: prognostic ``lai_override`` (C_fol / LCMA from the
         # DifferLand carbon pool) > prescribed ``LandSurfaceParams.LAI``
         # climatology > scalar fallback.  Canopy STRUCTURE (htop/SAI) stays
         # prescribed either way (the carbon cycle produces no allometric map).
         if lai_override is not None:
-            lai_v = float(lai_override[i])
+            lai_v = lai_override[i]
         elif land_params is not None and land_params.LAI is not None:
-            lai_v = float(land_params.LAI[i])
+            lai_v = land_params.LAI[i]
         else:
             lai_v = 2.0  # coeff-ok: LAI=2 fallback (no prescribed/prognostic LAI)
-        sai_v  = (float(land_params.SAI[i]) if land_params is not None and land_params.SAI is not None
+        sai_v  = (land_params.SAI[i] if land_params is not None and land_params.SAI is not None
                   else 0.5)
         htop_patch = htop_patch.at[p].set(htop_v)
         elai_patch = elai_patch.at[p].set(lai_v)
@@ -1119,9 +1312,9 @@ def _init_mlcanopy(ncol: int, stubs: dict, canopy_config: CLMMLCanopyConfig) -> 
     vertical PAD profile, then calls ``init_cold`` for leaf water potential
     and intercepted water initialisation.
     """
-    from multilayer_canopy.MLCanopyFluxesType import create_mlcanopy, init_cold
-    from multilayer_canopy.MLclm_varpar import nlevmlcan
-    from clm_src_main.clm_varcon import spval
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType import create_mlcanopy, init_cold
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varpar import nlevmlcan
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import spval
 
     mlcanopy = create_mlcanopy(1, ncol)
 
@@ -1249,7 +1442,7 @@ def _extract_surface_fluxes(
     - ``lwup_canopy``:  upwelling LW [W/m²]
     - ``gppveg_canopy``: GPP [µmol CO₂/m²/s]
     """
-    from clm_src_main.clm_varpar import ivis, inir
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import ivis, inir
 
     # Per-column arrays → (ncol,)
     shflx = jnp.stack([mlcanopy.shflx_canopy[i + 1] for i in range(ncol)])
@@ -1391,16 +1584,19 @@ def _extract_surface_fluxes(
 # ---------------------------------------------------------------------------
 
 
-def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
-    """Extract the concrete ``GridInfo(p, ncan, ntop, nbot)`` from a warm state.
+def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None) -> Any:
+    """Extract the concrete canopy structure (``ncan``/``ntop``/``nbot``) from a warm state.
 
     Call this ONCE on a concrete (non-traced) warm-start ``CanopyState`` — e.g.
     the state returned by the first forward step — and thread the result through
-    every subsequent differentiable step via ``compute_clm_ml_canopy_fluxes(...,
-    grid_info=...)``.  This keeps the single-site structural integers
-    (``ncan``/``ntop``/``nbot``) CONCRETE even when the carried
-    ``canopy_state.mlcanopy`` becomes a ``jax.grad`` tracer in a multi-step
+    every subsequent traceable step via ``compute_clm_ml_canopy_fluxes(...,
+    grid_info=...)``.  This keeps the structural integers CONCRETE even when the
+    carried ``canopy_state.mlcanopy`` becomes a tracer in a jitted/differentiated
     rollout (otherwise ``int(tracer)`` raises ``ConcretizationTypeError``).
+
+    ``ncan``/``ntop``/``nbot`` VARY per column (they are functions of canopy
+    height / PFT beta-distribution, built per patch in ``initVerticalStructure``),
+    so a multi-column run needs one ``GridInfo`` per column.
 
     Parameters
     ----------
@@ -1408,27 +1604,49 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int = 1) -> Any:
         A concrete warm-started state (``canopy_state.mlcanopy`` populated by a
         prior forward step).  Must NOT be a tracer.
     patch:
-        1-based patch index (single-site diff mode uses ``1``).
+        Optional 1-based patch index.  When given, extract ONLY that patch and
+        return a single ``GridInfo`` (single-site diff / back-compat).  When
+        ``None`` (default), auto-detect: a single-column state returns one
+        ``GridInfo``; a multi-column state (ncol>1) returns a TUPLE of per-column
+        ``GridInfo`` aligned with the 1-based patch order (entry ``c`` -> patch
+        ``c+1``), which the traceable path threads into its per-column loop.
 
     Returns
     -------
-    GridInfo
-        ``multilayer_canopy.MLclm_varctl.GridInfo`` with concrete Python ints.
+    GridInfo | tuple[GridInfo, ...]
+        One ``GridInfo`` (single column / explicit ``patch``) or a per-column
+        tuple (ncol>1).  ``multilayer_canopy.MLclm_varctl.GridInfo`` fields are
+        concrete Python ints.
     """
-    from multilayer_canopy.MLclm_varctl import GridInfo
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import patch as _patch
     if canopy_state is None or canopy_state.mlcanopy is None:
         raise ValueError(
             "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
             "mlcanopy is populated; got None. Run one forward step first."
         )
     m = canopy_state.mlcanopy
-    try:
+    # 1-based patch dim: arrays are (ncol+1,) with index 0 unused (begp=1).
+    ncol = int(m.ncan_canopy.shape[0]) - 1
+    # PFT per patch (patch.itype installed by _setup_clm_topology at the cold step)
+    # — threaded so the physics need no int(patch.itype[p]) under a traced scan p.
+    _itype = np.asarray(_patch.itype)
+
+    def _gi(p: int):
         return GridInfo(
-            p=int(patch),
-            ncan=int(m.ncan_canopy[patch]),
-            ntop=int(m.ntop_canopy[patch]),
-            nbot=int(m.nbot_canopy[patch]),
+            p=int(p),
+            ncan=int(m.ncan_canopy[p]),
+            ntop=int(m.ntop_canopy[p]),
+            nbot=int(m.nbot_canopy[p]),
+            pft=int(_itype[p]),
         )
+
+    try:
+        if patch is not None:
+            return _gi(patch)
+        if ncol == 1:
+            return _gi(1)
+        return tuple(_gi(c + 1) for c in range(ncol))
     except jax.errors.ConcretizationTypeError as exc:  # pragma: no cover - guard
         raise RuntimeError(
             "extract_clm_ml_grid_info must be called on a CONCRETE canopy_state "
@@ -1454,6 +1672,7 @@ def compute_clm_ml_canopy_fluxes(
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1533,11 +1752,54 @@ def compute_clm_ml_canopy_fluxes(
     _ensure_clm_initialized()
 
     # Lazy imports of CLM-ML-JAX entry point
-    from multilayer_canopy.MLCanopyFluxesMod import MLCanopyFluxes
-    from clm_src_main.decompMod import bounds_type
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesMod import MLCanopyFluxes
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.decompMod import bounds_type
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
+
+    # ---- Per-column PFT validation (structural → must be CONCRETE, like geometry) ----
+    # pft_per_col enables MIXED-PFT columns: it writes patch.itype[p] host-side in the
+    # topology setup, so it must be a concrete (ncol,) int array in a valid PFT range.
+    # A tracer / wrong shape / out-of-range index would corrupt the MLpftcon lookups
+    # silently — fail loud here instead.
+    if pft_per_col is not None:
+        if isinstance(pft_per_col, jax.core.Tracer):
+            raise ValueError(
+                "pft_per_col is a jax tracer, but per-column PFT is STRUCTURAL "
+                "(it writes host-side patch.itype in the CLM topology setup) and must "
+                "be a CONCRETE (ncol,) int array — like lat/lon geometry. Close over "
+                "it / build it outside the jit boundary.")
+        _pft_arr = np.asarray(pft_per_col)
+        if _pft_arr.shape != (ncol,):
+            raise ValueError(
+                f"pft_per_col must have shape ({ncol},) (one PFT per column); "
+                f"got {_pft_arr.shape}.")
+        # Integer dtype (NOT bool): a float array would be SILENTLY truncated by the
+        # int() cast when writing patch.itype (7.9 -> 7); a bool/object array is not a
+        # PFT index.  Reject up front (codex).
+        if _pft_arr.dtype == bool or not np.issubdtype(_pft_arr.dtype, np.integer):
+            raise ValueError(
+                f"pft_per_col must be an INTEGER PFT-index array (not "
+                f"{_pft_arr.dtype}); a float would be silently truncated writing "
+                "patch.itype.")
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod as _pftm
+        _mxpft = int(_pftm.MLpftcon.vcmaxpft.shape[0]) - 1
+        if _pft_arr.min() < 0 or _pft_arr.max() > _mxpft:
+            raise ValueError(
+                f"pft_per_col has PFT index outside 0..{_mxpft} (the MLpftcon table "
+                f"range): min={int(_pft_arr.min())} max={int(_pft_arr.max())}.")
+        # vcmax25_override overwrites only the single canopy_config.pft_clm table slot,
+        # so it is INCONSISTENT with mixed per-column PFTs (columns on other PFTs read
+        # their own un-overridden Vcmax25).  Reject the combination rather than apply a
+        # silently-wrong override; a per-PFT override is a separate feature (codex).
+        if getattr(canopy_config, "vcmax25_override", None) is not None:
+            raise ValueError(
+                "pft_per_col (mixed-PFT columns) is incompatible with "
+                "CLMMLCanopyConfig.vcmax25_override: the override applies only to the "
+                "single pft_clm table slot, so columns on other PFTs would keep their "
+                "un-overridden Vcmax25. Use per-PFT vcmaxpft_jax (traced) instead, or "
+                "drop vcmax25_override for a mixed-PFT run.")
 
     # ---- Differentiable-mode gate (static, resolved here — never traced) ----
     # ``differentiable=True`` opts a training run into the JAX-native diff path
@@ -1565,6 +1827,76 @@ def compute_clm_ml_canopy_fluxes(
     _warm_started = canopy_state is not None and canopy_state.mlcanopy is not None
     _diff_mode = _want_diff and _warm_started  # ncol == 1 guaranteed above
 
+    # ---- Traceable (jax.jit) forward path -------------------------------------
+    # A warm-started step whose caller threads a concrete ``grid_info`` opts into
+    # the fully device-native path (jnp forcing, ``grid=``, ``cos_zenith_device=``)
+    # even WITHOUT jax.grad — this is what a jax.jit scan-over-time uses to keep the
+    # whole segment on device (SegmentForcing / warm-start doctrine).  ``_diff_mode``
+    # stays the stricter grad-only subset (it additionally runs the AD-capability
+    # and geometry-tracer guards) and is SINGLE-COLUMN only (multi-column training
+    # would loop columns outside jax.grad).  Both share the de-hosted per-step
+    # machinery; the cold-start (first) step still runs the eager host build below.
+    #
+    # S2 (multi-column traceable jit-forward): canopy columns are PHYSICALLY
+    # INDEPENDENT (no horizontal coupling — each patch is a standalone 1-D canopy),
+    # so a warm ncol>1 step threads ONE GridInfo per column (a length-ncol tuple
+    # from ``extract_clm_ml_grid_info``) and the call site below loops the columns,
+    # invoking the proven single-patch kernel once per column with ``filter=[c+1]``,
+    # ``grid=gi[c]`` and a per-column ``cos_zenith_device``.  ncan/ntop/nbot VARY
+    # per column, which is exactly why the per-column GridInfo tuple is required.
+    # NOTE: GridInfo is a NamedTuple (hence a tuple), so distinguish a SINGLE
+    # GridInfo from a TUPLE-of-GridInfos by the ``ncan`` attribute (present on a
+    # GridInfo, absent on the outer tuple/list) — an isinstance(tuple) check would
+    # wrongly unpack a lone GridInfo into its four int fields.
+    _gi_list = None
+    if grid_info is not None:
+        _gi_list = [grid_info] if hasattr(grid_info, "ncan") else list(grid_info)
+    _percolumn_ok = _gi_list is not None and len(_gi_list) == ncol
+    # jax.grad training stays single-column; jit-forward supports ncol>=1 given a
+    # per-column GridInfo.
+    _traceable = (
+        (_diff_mode and ncol == 1)
+        or (_warm_started and grid_info is not None and (ncol == 1 or _percolumn_ok))
+    )
+    _traceable_multi = _traceable and ncol > 1  # the per-column loop path
+
+    # ---- Multi-column-under-trace backstop -----------------------------------
+    # ncol>1 traceable requires a per-column GridInfo tuple (the structural ints
+    # vary per column).  Without it, ncol>1 falls to the EAGER host path below,
+    # whose ``np.array(forcing.*)`` marshalling raises a cryptic
+    # TracerArrayConversionError on traced forcing deep in the backend.  Detect
+    # that case — ncol>1, NOT traceable, with ANY traced forcing/soil leaf — and
+    # fail with actionable guidance.  This is the single chokepoint every driver
+    # path funnels through, covering the object-config drivers (coupled_esm_driver
+    # / earth_system_driver) that pass a MultiLayerLandConfig(surface_scheme=
+    # CLMMLCanopyConfig()) directly.  EAGER multi-column forward (concrete arrays,
+    # offline global) stays valid — only a TRACED ncol>1 WITHOUT a per-column
+    # GridInfo is rejected.
+    if ncol != 1 and not _traceable:
+        _traced_ncol_leaf = next(
+            (
+                _n
+                for _n, _v in (
+                    [(f"forcing.{_f}", getattr(forcing, _f)) for _f in forcing._fields]
+                    + [("T_soil_top", T_soil_top), ("T_soil", T_soil),
+                       ("psi_soil", psi_soil), ("theta_soil", theta_soil)]
+                )
+                if _v is not None and isinstance(_v, jax.core.Tracer)
+            ),
+            None,
+        )
+        if _traced_ncol_leaf is not None:
+            raise NotImplementedError(
+                "CLM-ML multilayer canopy under jax.jit needs a per-column GridInfo "
+                f"for ncol>1; got ncol={ncol} with a traced leaf "
+                f"({_traced_ncol_leaf}) but grid_info="
+                f"{'None' if grid_info is None else f'len={len(_gi_list)}'} "
+                "(expected a length-ncol tuple from extract_clm_ml_grid_info on the "
+                "warm-start state).  Warm-start one forward step, extract the "
+                "per-column structure, and thread it via grid_info=.  (jax.grad "
+                "training through the canopy remains single-column.)"
+            )
+
     # Solar geometry (lat / lon / doy / cos_zenith) is a NON-differentiated
     # static input BY DESIGN: it is consumed by host-side CLM orbital setup
     # (_setup_clm_time / _setup_clm_topology / shr_orb_cosz), not by the traced
@@ -1575,20 +1907,35 @@ def compute_clm_ml_canopy_fluxes(
     # fail with an actionable message instead.  (Differentiating the physical
     # forcing leaves — T_lowest, sw_down, q, u, v, lw_down, p, co2 — is fully
     # supported; only geometry must stay concrete.)
-    if _want_diff:
-        for _geo_name, _geo_val in (
-            ("forcing.cos_zenith", forcing.cos_zenith),
-            ("lat", lat),
-            ("lon", lon),
-        ):
+    # lat/lon feed HOST-side CLM topology/orbital setup (np.array(lat),
+    # _setup_clm_topology) that runs at trace time on ANY traceable step (diff OR
+    # jit-forward), so a TRACED lat/lon (e.g. jax.jit over lat) would raise a cryptic
+    # TracerArrayConversionError.  Guard them on every traceable step.  (dt is
+    # already forced concrete upstream by resolve_num_ml_steps' math.ceil.)
+    # cos_zenith is NOT checked here: on the traceable path it is a DEVICE input
+    # (cos_zenith_device, jnp.asarray + stop_gradient), so it MAY be a tracer — the
+    # normal case when forcing is built inside the jitted step.  Codex round-2 HIGH.
+    if _want_diff or _traceable:
+        for _geo_name, _geo_val in (("lat", lat), ("lon", lon)):
             if _geo_val is not None and isinstance(_geo_val, jax.core.Tracer):
                 raise ValueError(
-                    f"CLM-ML diff mode: {_geo_name} is a jax tracer, but solar "
-                    "geometry (lat/lon/doy/cos_zenith) is a NON-differentiated static "
-                    "input (host-side CLM orbital setup). Differentiate only the "
-                    "physical forcing leaves and keep geometry concrete (close over "
-                    "it, or jax.lax.stop_gradient it before the grad boundary)."
+                    f"CLM-ML traceable/diff path: {_geo_name} is a jax tracer, but "
+                    "it feeds host-side CLM topology/orbital setup and must be a "
+                    "NON-differentiated STATIC input. Keep geometry concrete (close "
+                    "over it, or jax.lax.stop_gradient it before the jit/grad boundary); "
+                    "vary only the physical forcing leaves and doy per step."
                 )
+    # Diff-TRAINING contract: additionally keep cos_zenith concrete so a grad over the
+    # whole AtmToSurface pytree does not try to train through the Sun's position.
+    # (The jit-forward traceable path handles a traced cos_zenith via stop_gradient.)
+    if _want_diff and forcing.cos_zenith is not None and isinstance(
+            forcing.cos_zenith, jax.core.Tracer):
+        raise ValueError(
+            "CLM-ML diff mode: forcing.cos_zenith is a jax tracer, but solar geometry "
+            "is a NON-differentiated static input. Differentiate only the physical "
+            "forcing leaves (T_lowest, sw_down, q, u, v, lw_down, p, co2); close over "
+            "or stop_gradient cos_zenith before the grad boundary."
+        )
 
     # Cold-start-under-grad guard.  ``differentiable=True`` needs a WARM state:
     # the first (cold) step builds the canopy vertical structure via host-side
@@ -1641,76 +1988,146 @@ def compute_clm_ml_canopy_fluxes(
             )
 
     # ---- Build soil grid data ----
-    grid = make_soil_grid(land_config.soil_grid)
-    dz_soil = np.array(grid.dz, dtype=np.float64)     # (n_layers,)
-    z_soil = np.array(grid.z_node, dtype=np.float64)   # (n_layers,)
-    n_layers = len(dz_soil)
+    # The soil grid is STATIC structure (a pure function of the static soil_grid
+    # config).  Under jax.jit, make_soil_grid's jnp ops would otherwise yield
+    # tracers that the host-side structural arithmetic downstream (z_centers +
+    # root-fraction profile in _build_stubs, the topology cache key) cannot
+    # float()/np.array()/tobytes().  ensure_compile_time_eval evaluates this
+    # constant subgraph at trace time, so dz/z stay concrete numpy in EVERY mode
+    # (eager, jax.grad and jax.jit) — no per-mode branch needed.
+    with jax.ensure_compile_time_eval():
+        grid = make_soil_grid(land_config.soil_grid)
+        dz_soil = np.array(grid.dz, dtype=np.float64)     # (n_layers,)
+        z_soil = np.array(grid.z_node, dtype=np.float64)   # (n_layers,)
+    n_layers = int(dz_soil.shape[0])
 
-    # ---- Latitude / longitude arrays ----
-    if lat is not None:
-        lat_deg = np.array(lat, dtype=np.float64)
-    else:
-        lat_deg = np.zeros(ncol, dtype=np.float64)
-
-    # ---- CLM global state setup ----
-    # _setup_clm_time must precede _compute_virtual_lon_deg because the latter
-    # calls shr_orb_decl with orbital params set by _ensure_clm_initialized and
-    # needs caldaym1 derived from the itim we are about to write.
-    z_ref = float(land_config.z_ref)
-    _setup_clm_time(dt, doy, 0)
-    # caldaym1 matches what _MLCanopyForcing computes internally:
-    #   get_curr_calday(offset=-int(dtime_clm)) = 1 + (itim-1) * dt / 86400
-    # This is distinct from doy%1 by exactly one CLM step (dt/86400 days).
-    _itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
-    _caldaym1 = 1.0 + (_itim - 1) * dt / 86400.0
-
-    if lon is not None:
-        lon_deg = np.array(lon, dtype=np.float64)
-        # Use CLM's own Kepler shr_orb_cosz at caldaym1 — same declination and
-        # phase as CLM's internal solar_zen_forcing, so SW partitioning is
-        # consistent with beam extinction kb=0.5/coszen in MLCanopyFluxes.
-        from clm_share.shr_orb_mod import shr_orb_cosz as _clm_cosz, shr_orb_decl as _clm_decl
-        import clm_src_utils.clm_varorb as _varorb_loc
-        _declinm1, _ = _clm_decl(_caldaym1, _varorb_loc.eccen, _varorb_loc.mvelpp,
-                                  _varorb_loc.lambm0, _varorb_loc.obliqr)
-        _pi = np.pi
-        cos_zen = np.maximum(np.array([
-            float(_clm_cosz(_caldaym1,
-                            float(lat_deg[i]) * _pi / 180.0,
-                            float(lon_deg[i]) * _pi / 180.0,
-                            float(_declinm1)))
-            for i in range(ncol)
-        ], dtype=np.float64), 0.0)
-    else:
-        # Use coupler-provided cos_zenith directly — avoids 100× error in beam
-        # extinction (kb=0.5/coszen) that occurs when lon defaults to 0° (Greenwich).
-        # Then invert the CLM shr_orb_cosz formula (using CLM's own Kepler declination
-        # and caldaym1) so that CLM's internal solar_zen_forcing[p] reproduces the
-        # forcing.  Both arccos branches give the same cosz, so the virtual longitude
-        # is numerically correct even if not geographically meaningful.
-        cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
-        lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
-
-    # Topology cache key: capture EVERY input _setup_clm_topology consumes, over
-    # ALL columns — not just column 0.  Sampling only lat_deg[0]/lon_deg[0] (the
-    # prior key) reused stale per-column topology when two grids shared ncol and
-    # a column-0 coordinate but differed in interior columns (silent wrong lat/
-    # lon → wrong solar zenith for those columns).  ``tobytes()`` gives an exact,
-    # cheap, hashable signature of the full arrays; include the soil grid, z_ref
-    # and pft so a config change also forces a rebuild.  (In the virtual-longitude
-    # path lon_deg is re-derived each step and changes, so this still rebuilds
-    # per step there — same as before; no new cost.)
-    _topo_key = (
-        ncol,
-        lat_deg.tobytes(), lon_deg.tobytes(),
-        dz_soil.tobytes(), z_soil.tobytes(),
-        float(z_ref), int(canopy_config.pft_clm),
-    )
     global _last_topology_key
-    if _topo_key != _last_topology_key:
-        _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
-                            pft_clm=int(canopy_config.pft_clm))
-        _last_topology_key = _topo_key
+    if _traceable:
+        # ---- Warm traceable step (jax.jit / global path) ----------------------
+        # Removes the two per-step HOST dependencies that break a jax.jit trace:
+        #  (1) solar zenith — threaded to the kernel as a DEVICE array
+        #      (``cos_zenith_device``) instead of the host shr_orb_cosz recompute;
+        #  (2) per-step CLM time globals — at met_type==0 the backend's calendar
+        #      interpolation days are all 0 (curr_calday unused; verified in
+        #      MLCanopyFluxesMod's time block), so nothing per-step reads them.
+        # It STILL re-installs THIS (config, grid)'s CLM topology + step size every
+        # trace (concrete host writes, executed once at trace time — cheap): the
+        # kernel reads process-global ``col.z/zi``, ``patch.itype`` (pft) and
+        # ``get_step_size()``, but ``grid_info`` carries only (p,ncan,ntop,nbot).
+        # A DIFFERENT config's cold-start left in those globals would otherwise be
+        # traced against this warm state (silent wrong structure/params — codex
+        # CRITICAL), and a different caller's ``dt`` would corrupt ``num_ml_steps``.
+        if int(canopy_config.met_type) != 0:
+            raise ValueError(
+                "CLM-ML traceable/jit path supports met_type==0 (external coupler "
+                f"forcing) only; got met_type={canopy_config.met_type}. Other "
+                "met_types interpolate CLM forcing on curr_calday, a per-step CLM "
+                "time global that cannot be written from a traced doy.")
+        if lon is not None:
+            raise ValueError(
+                "CLM-ML traceable/jit path requires lon=None: it takes the solar "
+                "zenith straight from forcing.cos_zenith (device).  The lon-supplied "
+                "path instead computes zenith from lat/lon/doy and IGNORES "
+                "forcing.cos_zenith, so allowing lon here would silently diverge "
+                "from the eager result. Pass cos_zenith via forcing, leave lon=None.")
+        # Solar zenith is GEOMETRY (non-differentiated by contract): stop_gradient
+        # so a jax.grad over forcing.cos_zenith cannot leak a gradient through
+        # arccos into the radiation.  (The differentiable=True path already rejects
+        # a traced geometry leaf; this also covers the differentiable=False
+        # traceable path.)  (ncol,), aligned with the 1-based filter built below.
+        cos_zen = jnp.maximum(
+            jax.lax.stop_gradient(jnp.asarray(forcing.cos_zenith, dtype=jnp.float64)),
+            0.0)
+        # Re-install topology + step size for THIS (config, grid).  lat is geometry
+        # (concrete); lon is None here, so grc.londeg is irrelevant to the
+        # device-zenith path (structure only).  Soil grid is concrete (built under
+        # ensure_compile_time_eval above).  The _setup_* helpers write CLM module
+        # globals (col.snl, col.z/zi, patch.itype, grc.*, the step size) via jnp, so
+        # they must run under ensure_compile_time_eval too: otherwise those writes
+        # would be TRACERS under jax.jit and the backend's np.asarray(col.snl) etc.
+        # would raise.  Every input is concrete, so this is a pure trace-time setup.
+        _lat_deg = (np.array(lat, dtype=np.float64) if lat is not None
+                    else np.zeros(ncol, dtype=np.float64))
+        _lon_deg = np.zeros(ncol, dtype=np.float64)
+        with jax.ensure_compile_time_eval():
+            _setup_clm_time(dt, 0.0, 0)  # concrete: get_step_size()==dt; calday unused
+            _setup_clm_topology(ncol, _lat_deg, _lon_deg, dz_soil, z_soil,
+                                float(land_config.z_ref),
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
+        # Invalidate the eager topology cache: this traceable step overwrote the
+        # process-global topology (with lon_deg=0), so a LATER eager call whose
+        # cached _last_topology_key still matches would skip _setup_clm_topology and
+        # run against these (device-path) globals.  Forcing None makes the next
+        # eager call re-install its own topology (codex round-2 HIGH).
+        _last_topology_key = None
+    else:
+        # ---- Latitude / longitude arrays ----
+        if lat is not None:
+            lat_deg = np.array(lat, dtype=np.float64)
+        else:
+            lat_deg = np.zeros(ncol, dtype=np.float64)
+
+        # ---- CLM global state setup ----
+        # _setup_clm_time must precede _compute_virtual_lon_deg because the latter
+        # calls shr_orb_decl with orbital params set by _ensure_clm_initialized and
+        # needs caldaym1 derived from the itim we are about to write.
+        z_ref = float(land_config.z_ref)
+        _setup_clm_time(dt, doy, 0)
+        # caldaym1 matches what _MLCanopyForcing computes internally:
+        #   get_curr_calday(offset=-int(dtime_clm)) = 1 + (itim-1) * dt / 86400
+        # This is distinct from doy%1 by exactly one CLM step (dt/86400 days).
+        _itim = max(1, round(doy * 86400.0 / max(dt, 1.0)))
+        _caldaym1 = 1.0 + (_itim - 1) * dt / 86400.0
+
+        if lon is not None:
+            lon_deg = np.array(lon, dtype=np.float64)
+            # Use CLM's own Kepler shr_orb_cosz at caldaym1 — same declination and
+            # phase as CLM's internal solar_zen_forcing, so SW partitioning is
+            # consistent with beam extinction kb=0.5/coszen in MLCanopyFluxes.
+            from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_cosz as _clm_cosz, shr_orb_decl as _clm_decl
+            import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb_loc
+            _declinm1, _ = _clm_decl(_caldaym1, _varorb_loc.eccen, _varorb_loc.mvelpp,
+                                      _varorb_loc.lambm0, _varorb_loc.obliqr)
+            _pi = np.pi
+            cos_zen = np.maximum(np.array([
+                float(_clm_cosz(_caldaym1,
+                                float(lat_deg[i]) * _pi / 180.0,
+                                float(lon_deg[i]) * _pi / 180.0,
+                                float(_declinm1)))
+                for i in range(ncol)
+            ], dtype=np.float64), 0.0)
+        else:
+            # Use coupler-provided cos_zenith directly — avoids 100× error in beam
+            # extinction (kb=0.5/coszen) that occurs when lon defaults to 0° (Greenwich).
+            # Then invert the CLM shr_orb_cosz formula (using CLM's own Kepler declination
+            # and caldaym1) so that CLM's internal solar_zen_forcing[p] reproduces the
+            # forcing.  Both arccos branches give the same cosz, so the virtual longitude
+            # is numerically correct even if not geographically meaningful.
+            cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
+            lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
+
+        # Topology cache key: capture EVERY input _setup_clm_topology consumes, over
+        # ALL columns — not just column 0.  Sampling only lat_deg[0]/lon_deg[0] (the
+        # prior key) reused stale per-column topology when two grids shared ncol and
+        # a column-0 coordinate but differed in interior columns (silent wrong lat/
+        # lon → wrong solar zenith for those columns).  ``tobytes()`` gives an exact,
+        # cheap, hashable signature of the full arrays; include the soil grid, z_ref
+        # and pft so a config change also forces a rebuild.  (In the virtual-longitude
+        # path lon_deg is re-derived each step and changes, so this still rebuilds
+        # per step there — same as before; no new cost.)
+        _topo_key = (
+            ncol,
+            lat_deg.tobytes(), lon_deg.tobytes(),
+            dz_soil.tobytes(), z_soil.tobytes(),
+            float(z_ref), int(canopy_config.pft_clm),
+            None if pft_per_col is None else np.asarray(pft_per_col).tobytes(),
+        )
+        if _topo_key != _last_topology_key:
+            _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
+            _last_topology_key = _topo_key
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
     # MLCanopyFluxes copies t_a10_patch into tacclim_forcing on output — reading
@@ -1720,9 +2137,9 @@ def compute_clm_ml_canopy_fluxes(
     #   T_a10_new = (1 - alpha) * T_a10_old + alpha * T_lowest
     #   alpha = dt / (10 * 86400)  (10-day e-folding, CLM default)
     alpha = min(dt / (10.0 * 86400.0), 1.0)
-    if _diff_mode:
+    if _traceable:
         # Traced running mean: t_a10 is the Vcmax temperature-acclimation state,
-        # a real function of T_lowest, so keep it on the jax.grad tape (a host
+        # a real function of T_lowest, so keep it on device (a host
         # np.array(forcing.T_lowest) would raise on a tracer — scope item A).
         T_low = jnp.asarray(forcing.T_lowest, dtype=jnp.float64)
         if canopy_state is not None and canopy_state.t_a10_arr is not None:
@@ -1752,6 +2169,11 @@ def compute_clm_ml_canopy_fluxes(
         lai_override=lai_override,
     )
 
+    # ---- Install the canopy layer counts ----
+    # Must precede _init_mlcanopy: the cold-start call builds the vertical
+    # structure and reads these process-global counts.
+    _apply_canopy_layering(canopy_config)
+
     # ---- Allocate / retrieve mlcanopy_type ----
     if canopy_state is None or canopy_state.mlcanopy is None:
         mlcanopy = _init_mlcanopy(ncol, stubs, canopy_config)
@@ -1767,7 +2189,7 @@ def compute_clm_ml_canopy_fluxes(
     num_exposedvegp = ncol
 
     # ---- Set MLclm_varctl global settings ----
-    import multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
     _ml_ctl.runge_kutta_type = canopy_config.runge_kutta_type
     _ml_ctl.met_type = canopy_config.met_type
     # dtime_ml: sub-step length. Must divide dt evenly.  Count resolved (and
@@ -1780,20 +2202,33 @@ def compute_clm_ml_canopy_fluxes(
     _ml_ctl.DIFFERENTIABLE_MODE = bool(_diff_mode)
 
     # ---- Select the canopy-airspace turbulence scheme ----
-    # Re-applied every step (not once at init) because the psihat tables it
-    # swaps are process-global CLM state shared by every column and config.
-    # ``differentiable`` lets it refuse a mid-process switch that an already
-    # traced/compiled step could not follow.
-    _apply_turbulence_scheme(
-        canopy_config.turbulence_scheme, differentiable=bool(_diff_mode))
+    # Eager path: (re-)apply + VERIFY every step because the psihat tables are
+    # process-global CLM state shared by every column and config, so a one-shot
+    # mutation would leak the first caller's scheme.  Traceable path: the tables
+    # were already applied + verified concretely by the eager cold-start step that
+    # built this warm state; the host-side float() probe cannot run inside a jax.jit
+    # trace, so only ASSERT the scheme matches (and is not locked to another) — no
+    # re-apply / re-probe.  The trace-time lock is committed after the step below.
+    if _traceable:
+        _assert_turbulence_scheme_for_trace(canopy_config.turbulence_scheme)
+    else:
+        _apply_turbulence_scheme(
+            canopy_config.turbulence_scheme, differentiable=False)
 
-    # ---- Build GridInfo for the differentiable path ----
-    # Structural ints must be concrete Python ints extracted BEFORE jax.grad
-    # tracing (int() on a tracer raises ConcretizationTypeError).  The warm-start
-    # template ``mlcanopy`` is a captured constant under jax.grad, so these reads
-    # are concrete.  Mirrors make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
-    if _diff_mode:
-        from multilayer_canopy.MLclm_varctl import GridInfo
+    # ---- Select the leaf stomatal-conductance model (gs_type) ----
+    # Process-global like the turbulence tables; "medlyn" activates the traced
+    # vcmaxpft_jax injection path below.
+    _apply_stomatal_model(canopy_config)
+
+    # ---- Build GridInfo for the traceable (jax.jit / jax.grad) path ----
+    # Structural ints must be concrete Python ints extracted BEFORE tracing (int()
+    # on a tracer raises ConcretizationTypeError).  The warm-start template
+    # ``mlcanopy`` is a captured constant under jax.grad, so these reads are
+    # concrete; under a jax.jit scan the carried ``mlcanopy`` is a tracer, so the
+    # caller MUST thread ``grid_info`` (extract once from the warm state).  Mirrors
+    # make_clm_ml_forward (MLCanopyFluxesMod.py:2098).
+    if _traceable:
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
         # Capability guard: the differentiable path is only CORRECT with a
         # clm-ml-jax build whose ``_CanopyFluxesDiagnostics`` runs in diff mode
         # (``grid=`` parameter).  Older builds return from ``MLCanopyFluxes``
@@ -1802,53 +2237,110 @@ def compute_clm_ml_canopy_fluxes(
         # not on PyPI (local install), so we cannot pin a version; probe the
         # capability directly and fail LOUDLY instead.
         import inspect as _inspect
-        from multilayer_canopy import MLCanopyFluxesMod as _mlmod
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
         if "grid" not in _inspect.signature(_mlmod._CanopyFluxesDiagnostics).parameters:
             raise RuntimeError(
-                "CLMMLCanopyConfig.differentiable=True requires a clm-ml-jax build "
+                "CLM-ML traceable mode requires a clm-ml-jax build "
                 "whose _CanopyFluxesDiagnostics accepts grid= (runs canopy-flux "
-                "diagnostics on the jax.grad tape). The installed clm-ml-jax returns "
-                "before diagnostics in differentiable mode, which would leave shflx/"
-                "lhflx/gpp/rnet stale. Update clm-ml-jax to a revision including the "
-                "differentiable-diagnostics fix (adds grid= to _CanopyFluxesDiagnostics)."
+                "diagnostics on the jax.grad/jax.jit tape). The installed clm-ml-jax "
+                "returns before diagnostics in differentiable mode, which would leave "
+                "shflx/lhflx/gpp/rnet stale. Update clm-ml-jax to a revision including "
+                "the differentiable-diagnostics fix (adds grid= to _CanopyFluxesDiagnostics)."
             )
-        _p = int(filter_exposedvegp[0])
-        # Structural ints (ncan/ntop/nbot) must be CONCRETE Python ints — the diff
-        # path reads them at trace time.  Two sources:
-        #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
-        #      differentiated rollout: there the carried ``canopy_state.mlcanopy``
-        #      is itself a tracer, so reading ints off it would raise); or
-        #  (2) the warm template ``mlcanopy`` when it is concrete (single warm
-        #      step whose state is a captured constant under jax.grad).
+        # The traceable path also threads a DEVICE solar zenith (cos_zenith_device)
+        # into MLCanopyFluxes so the forcing step needs no per-step host orbital
+        # recompute (the last per-step host op).  A build with grid= but without
+        # cos_zenith_device would TypeError cryptically on the call below; fail with
+        # actionable guidance instead (matches the "no cryptic degrade" bar).
+        if "cos_zenith_device" not in _inspect.signature(_mlmod.MLCanopyFluxes).parameters:
+            raise RuntimeError(
+                "CLM-ML traceable mode (jax.jit / global path) requires a clm-ml-jax "
+                "build whose MLCanopyFluxes accepts cos_zenith_device= (device solar "
+                "zenith, so solar_zen_forcing is set WITHOUT the host shr_orb_cosz "
+                "recompute that breaks a jax.jit trace). Update clm-ml-jax to a "
+                "revision that adds cos_zenith_device= to MLCanopyFluxes / _GetCLMVar."
+            )
         # ``dpai_profile.shape`` is static, so the range check works either way.
         _ncan_max = int(mlcanopy.dpai_profile.shape[1])
-        if grid_info is not None:
-            _ncan_p = int(grid_info.ncan)
-            _ntop_p = int(grid_info.ntop)
-            _nbot_p = int(grid_info.nbot)
+        if _traceable_multi:
+            # Multi-column (S2): one validated GridInfo per column, mapped to the
+            # 1-based patch position (entry c -> patch c+1) so a tuple built in any
+            # order is realigned here.  ncan/ntop/nbot VARY per column.
+            if vcmaxpft_jax is not None or g1_medlyn_jax is not None:
+                raise NotImplementedError(
+                    "CLM-ML multi-column (ncol>1) traceable forward does not support "
+                    "the trainable-param overrides (vcmaxpft_jax / g1_medlyn_jax): "
+                    "those belong to the single-column jax.grad training path. "
+                    "Differentiate one column at a time."
+                )
+            # Realign by each GridInfo's OWN patch index (``.p``), NOT tuple
+            # position: the loop below drives column c -> patch c+1, so a tuple
+            # built in any order must still supply patch (c+1)'s structure.  Keying
+            # off position and overwriting p would silently apply another column's
+            # ncan/ntop/nbot to the wrong patch (codex).  Require exactly patches
+            # 1..ncol, one per column.
+            _by_p = {int(_g.p): _g for _g in _gi_list}
+            if set(_by_p) != set(range(1, ncol + 1)):
+                raise ValueError(
+                    f"CLM-ML multi-column grid_info covers patches {sorted(_by_p)}, "
+                    f"but exactly 1..{ncol} are required (one GridInfo per column, "
+                    "patch index c+1). Build it with extract_clm_ml_grid_info(warm_state)."
+                )
+            _grids = []
+            for _c in range(ncol):
+                _g = _by_p[_c + 1]
+                _ncan_c = int(_g.ncan)
+                if not (1 <= _ncan_c <= _ncan_max):
+                    raise ValueError(
+                        f"CLM-ML traceable multi-column: column {_c} (patch {_c + 1}) "
+                        f"has ncan={_ncan_c} (valid 1..{_ncan_max}) — the per-column "
+                        "grid_info is not a warm-started structure. Extract it from a "
+                        "warm forward step via extract_clm_ml_grid_info(state0)."
+                    )
+                _grids.append(GridInfo(p=_c + 1, ncan=_ncan_c,
+                                       ntop=int(_g.ntop), nbot=int(_g.nbot),
+                                       pft=int(_g.pft)))
         else:
-            try:
-                _ncan_p = int(mlcanopy.ncan_canopy[_p])
-                _ntop_p = int(mlcanopy.ntop_canopy[_p])
-                _nbot_p = int(mlcanopy.nbot_canopy[_p])
-            except jax.errors.ConcretizationTypeError as exc:
-                raise RuntimeError(
-                    "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
-                    "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
-                    "loss unrolls MULTIPLE canopy steps and carries the returned state "
-                    "as the jax.grad tape's carry. Extract the concrete structural "
-                    "ints once from the warm-start state and thread them through every "
-                    "step via grid_info=extract_clm_ml_grid_info(state0)."
-                ) from exc
-        if not (1 <= _ncan_p <= _ncan_max):
-            raise ValueError(
-                "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
-                f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
-                "Run one forward (differentiable=False or cold-start) step first."
-            )
-        grid = GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)
+            # Single column.  Structural ints (ncan/ntop/nbot) must be CONCRETE
+            # Python ints — the diff path reads them at trace time.  Two sources:
+            #  (1) caller-supplied ``grid_info`` (REQUIRED for a multi-step
+            #      differentiated rollout: the carried ``mlcanopy`` is a tracer,
+            #      so reading ints off it would raise); or
+            #  (2) the warm template ``mlcanopy`` when it is concrete.
+            _p = int(filter_exposedvegp[0])
+            if grid_info is not None:
+                _g0 = _gi_list[0]
+                _ncan_p = int(_g0.ncan)
+                _ntop_p = int(_g0.ntop)
+                _nbot_p = int(_g0.nbot)
+                _pft_p = int(_g0.pft)
+            else:
+                from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import (
+                    patch as _patch_s)
+                _pft_p = int(np.asarray(_patch_s.itype)[_p])
+                try:
+                    _ncan_p = int(mlcanopy.ncan_canopy[_p])
+                    _ntop_p = int(mlcanopy.ntop_canopy[_p])
+                    _nbot_p = int(mlcanopy.nbot_canopy[_p])
+                except jax.errors.ConcretizationTypeError as exc:
+                    raise RuntimeError(
+                        "CLM-ML diff mode: the canopy_state.mlcanopy structural ints "
+                        "(ncan/ntop/nbot) are TRACED — this happens when a differentiated "
+                        "loss unrolls MULTIPLE canopy steps and carries the returned state "
+                        "as the jax.grad tape's carry. Extract the concrete structural "
+                        "ints once from the warm-start state and thread them through every "
+                        "step via grid_info=extract_clm_ml_grid_info(state0)."
+                    ) from exc
+            if not (1 <= _ncan_p <= _ncan_max):
+                raise ValueError(
+                    "CLM-ML diff mode needs a warm-started canopy_state whose vertical "
+                    f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
+                    "Run one forward (differentiable=False or cold-start) step first."
+                )
+            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p,
+                               pft=_pft_p)]
     else:
-        grid = None
+        _grids = None
 
     # ---- Call MLCanopyFluxes ----
     # Only forward the diff-mode / trainable-param kwargs when they are actually
@@ -1858,35 +2350,128 @@ def compute_clm_ml_canopy_fluxes(
     # (Codex P1: an older clm-ml-jax would otherwise TypeError on every call,
     # including production forward-only runs).  Diff mode is already gated by the
     # capability guard above.
-    _opt_kwargs: dict[str, Any] = {}
-    if grid is not None:
-        _opt_kwargs["grid"] = grid
-    if vcmaxpft_jax is not None:
-        _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
-    if g1_medlyn_jax is not None:
-        _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
-    mlcanopy_new = MLCanopyFluxes(
-        bounds=bounds,
-        num_exposedvegp=num_exposedvegp,
-        filter_exposedvegp=filter_exposedvegp,
-        atm2lnd_inst=stubs["atm2lnd"],
-        canopystate_inst=stubs["canopystate"],
-        soilstate_inst=stubs["soilstate"],
-        temperature_inst=stubs["temperature"],
-        waterstatebulk_inst=stubs["waterstatebulk"],
-        waterfluxbulk_inst=stubs["waterfluxbulk"],
-        energyflux_inst=stubs["energyflux"],
-        frictionvel_inst=stubs["frictionvel"],
-        surfalb_inst=stubs["surfalb"],
-        solarabs_inst=stubs["solarabs"],
-        mlcanopy_inst=mlcanopy,
-        wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
-        waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
-        _o2ref_py=float(canopy_config.o2ref),
-        **_opt_kwargs,
-    )
+    # Per-site Vcmax25 override (config) — the "beyond the global PFT table"
+    # value.  Build ``vcmaxpft_jax`` from the module lookup with this PFT's entry
+    # replaced by the site value; the backend's nitrogen-profile routine
+    # (``CanopyNitrogenProfile``) selects the supplied array over the global
+    # table BEFORE leaf photosynthesis, regardless of stomatal model, so this
+    # feeds photosynthesis under WUE, Medlyn and Ball-Berry alike.  A per-site
+    # FIXED value goes here; a TRAINABLE Vcmax25 is supplied as the traced
+    # ``vcmaxpft_jax`` argument (from a training loop), which takes precedence.
+    if canopy_config.vcmax25_override is not None and vcmaxpft_jax is None:
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod as _pftmod
+        _pft = int(canopy_config.pft_clm)
+        _vlen = int(_pftmod.MLpftcon.vcmaxpft.shape[0])
+        if not (0 <= _pft < _vlen):
+            raise ValueError(
+                f"CLMMLCanopyConfig.pft_clm={_pft} out of range for the MLpftcon "
+                f"vcmaxpft table (0..{_vlen - 1}); cannot apply vcmax25_override")
+        vcmaxpft_jax = _pftmod.MLpftcon.vcmaxpft.at[_pft].set(
+            float(canopy_config.vcmax25_override))
 
-    if _diff_mode:
+    def _call_mlcanopy(mlc, flt, num, gridobj, cosz):
+        _opt_kwargs: dict[str, Any] = {}
+        if gridobj is not None:
+            _opt_kwargs["grid"] = gridobj
+        if _traceable:
+            # Device solar zenith (cos), aligned with ``flt`` (entry k -> patch
+            # flt[k]).  Lets _GetCLMVar set solar_zen_forcing WITHOUT the host
+            # shr_orb_cosz recompute that reads per-step orbital globals.
+            _opt_kwargs["cos_zenith_device"] = cosz
+        if vcmaxpft_jax is not None:
+            _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
+        if g1_medlyn_jax is not None:
+            _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
+        return MLCanopyFluxes(
+            bounds=bounds,
+            num_exposedvegp=num,
+            filter_exposedvegp=flt,
+            atm2lnd_inst=stubs["atm2lnd"],
+            canopystate_inst=stubs["canopystate"],
+            soilstate_inst=stubs["soilstate"],
+            temperature_inst=stubs["temperature"],
+            waterstatebulk_inst=stubs["waterstatebulk"],
+            waterfluxbulk_inst=stubs["waterfluxbulk"],
+            energyflux_inst=stubs["energyflux"],
+            frictionvel_inst=stubs["frictionvel"],
+            surfalb_inst=stubs["surfalb"],
+            solarabs_inst=stubs["solarabs"],
+            mlcanopy_inst=mlc,
+            wateratm2lndbulk_inst=stubs["wateratm2lndbulk"],
+            waterdiagnosticbulk_inst=stubs["waterdiagnosticbulk"],
+            _o2ref_py=float(canopy_config.o2ref),
+            **_opt_kwargs,
+        )
+
+    if _traceable_multi:
+        # Canopy columns are physically INDEPENDENT (no horizontal coupling), so the
+        # proven single-patch kernel runs once per column with ``grid.p`` = that
+        # column's patch index, the ``grid=`` kernel writing ONLY that patch.
+        #
+        # S3 — GROUP-BY-STRUCTURE jax.lax.scan over columns.  Partition the columns
+        # into groups sharing the SAME concrete vertical structure
+        # (ncan/ntop/nbot/pft), then run ONE uniform scan per group whose body is
+        # traced ONCE, closing over that group's concrete structure.  The scan carry
+        # is the shared mlcanopy; the ONLY traced input is the per-column patch index
+        # p, scattered at grid.p.  So compile is O(#distinct structures) — bounded by
+        # ~(PFTs × nbot values), INDEPENDENT of ncol — the heterogeneous path to
+        # O(1)-in-ncol compile, reusing the validated uniform-scan machinery with NO
+        # per-layer radiation masking or dynamic pft-gather.  ncan/ntop are uniform
+        # anyway (explicit-count layering, htop-INDEPENDENT: MLinitVerticalMod
+        # _ntop=nlayer_within / _ncan=_ntop+nlayer_above); only nbot + pft vary
+        # (mixed-PFT columns via pft_per_col), so the group count is small.  The
+        # all-uniform case is ONE group == the previous single scan (numerically a
+        # NO-OP vs the loop, validated column-for-column against independent
+        # single-column runs).
+        #
+        # A group falls back to the per-column Python loop when: the scan is disabled
+        # (scan_columns=False), the group carries a pft<0 sentinel (the Solar/Longwave
+        # host fallback int(patch.itype[grid.p]) needs a CONCRETE p — the loop
+        # supplies it), or the group is a singleton (a scan of one is just the loop).
+        _scan_enabled = bool(getattr(canopy_config, "scan_columns", True))
+        _struct_groups: dict = {}  # (ncan,ntop,nbot,pft) -> [patch indices, 1-based]
+        for _g in _grids:
+            _struct_groups.setdefault(
+                (_g.ncan, _g.ntop, _g.nbot, _g.pft), []).append(_g.p)
+
+        def _make_group_scan_body(_sig):
+            # Factory: bind THIS group's concrete structure (avoids the late-binding
+            # closure bug of referencing the loop variable).  filter=[1] is a STATIC
+            # dummy — under grid= the kernel indexes the column by grid.p (the traced
+            # xs), NOT the filter; cos is reshaped to the length-1 slice the kernel's
+            # cos_zenith_device contract expects.
+            _gncan, _gntop, _gnbot, _gpft = _sig
+
+            def _body(_mlc, _xs):
+                _p_c, _cosz_c = _xs
+                _g_c = GridInfo(p=_p_c, ncan=_gncan, ntop=_gntop,
+                                nbot=_gnbot, pft=_gpft)
+                return _call_mlcanopy(_mlc, [1], 1, _g_c,
+                                      jnp.reshape(_cosz_c, (1,))), None
+            return _body
+
+        mlcanopy_new = mlcanopy
+        for _sig, _pids in _struct_groups.items():
+            if _scan_enabled and _sig[3] >= 0 and len(_pids) > 1:
+                # xs: this group's patch indices (TRACED under the scan) + their
+                # cos(zenith) (0-based gather; patch pid -> cos_zen[pid-1]).
+                _pid_xs = jnp.asarray(_pids, dtype=jnp.int32)
+                _cos_xs = cos_zen[_pid_xs - 1]
+                mlcanopy_new, _ = jax.lax.scan(
+                    _make_group_scan_body(_sig), mlcanopy_new, (_pid_xs, _cos_xs))
+            else:
+                for _pid in _pids:
+                    _g_c = GridInfo(p=_pid, ncan=_sig[0], ntop=_sig[1],
+                                    nbot=_sig[2], pft=_sig[3])
+                    mlcanopy_new = _call_mlcanopy(
+                        mlcanopy_new, [_pid], 1, _g_c,
+                        cos_zen[_pid - 1:_pid] if _traceable else None)
+    else:
+        _grid0 = _grids[0] if _grids is not None else None
+        mlcanopy_new = _call_mlcanopy(
+            mlcanopy, filter_exposedvegp, num_exposedvegp, _grid0, cos_zen)
+
+    if _traceable:
         # MLCanopyFluxes RETURNED, so a traced artefact really was built with the
         # psihat table this scheme installed. Only now may the process be locked:
         # committing before the call would lock a scheme that a failed trace

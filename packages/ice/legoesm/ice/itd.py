@@ -177,15 +177,29 @@ def aggregate_state(
     ) * concentration[..., None]
     _agg = jnp.sum(_stack, axis=-2)
     conc_total = _agg[..., 0]
-    conc_safe = jnp.maximum(conc_total, 1e-20)
+    # float32 AD safety: ``jnp.maximum(x, TINY)`` is NOT a sufficient guard.
+    # JAX's divide-JVP w.r.t. the denominator is
+    # ``mul(mul(neg(g), num), integer_pow(den, -2))`` -- it forms ``den**-2``
+    # DIRECTLY, and ``integer_pow(1e-20, -2) == 1e40`` overflows float32 to
+    # ``inf``.  With an ice-free numerator that residual is ``0 * inf == NaN``.
+    # The NaN survives BOTH guards: the outer ``jnp.where`` transposes to a
+    # select that feeds cotangent 0.0 into the divide (0.0 * NaN == NaN), and
+    # ``jnp.maximum``'s JVP is a MULTIPLY by a 0/1 mask, not a select
+    # (NaN * 0 == NaN).  Use the two-sided idiom (safe denominator INSIDE the
+    # branch) already used by ``lipscomb_2001_remap`` below (L581/598).
+    # The predicate is deliberately TIGHTENED from ``> 0.0`` to ``> 1e-20``:
+    # with ``> 0.0`` a sliver denominator (e.g. 1e-25) still gives
+    # ``integer_pow(1e-25, -2) == inf`` and an ``inf`` adjoint.  Forward delta
+    # is confined to conc_total in (0, 1e-20], i.e. <= 1e-20 m of discarded
+    # ice volume per cell -- below float32 resolution of any budget.
+    has_ice = conc_total > 1e-20
+    conc_safe = jnp.where(has_ice, conc_total, 1.0)
 
     # Volume-conserving mean thickness: sum(h_k * a_k) / sum(a_k)
-    h_agg = _agg[..., 1] / conc_safe
-    h_agg = jnp.where(conc_total > 0.0, h_agg, 0.0)
+    h_agg = jnp.where(has_ice, _agg[..., 1] / conc_safe, 0.0)
 
     # Area-weighted mean temperature
-    T_agg = _agg[..., 2] / conc_safe
-    T_agg = jnp.where(conc_total > 0.0, T_agg, constants.T_freeze_ocean)
+    T_agg = jnp.where(has_ice, _agg[..., 2] / conc_safe, constants.T_freeze_ocean)
 
     return h_agg, T_agg, conc_total
 
@@ -344,8 +358,13 @@ def linear_remap(
 
     # Recover thickness from volume
     a_remap = jnp.clip(a_remap, 0.0, 1.0)
-    a_safe = jnp.maximum(a_remap, 1e-20)
-    h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
+    # float32 AD safety: safe denominator INSIDE the branch (see aggregate_state
+    # above for why the outer where + jnp.maximum do NOT stop the NaN).
+    # Predicate deliberately tightened >0.0 -> >1e-20 to also remove the
+    # sliver-denominator ``inf`` adjoint; forward delta <= 1e-20 m volume/cell.
+    has_area = a_remap > 1e-20
+    a_safe = jnp.where(has_area, a_remap, 1.0)
+    h_remap = jnp.where(has_area, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
     # Volume-conserving clamp.  An earlier implementation clamped
@@ -378,10 +397,20 @@ def linear_remap(
     #      bound when concentration saturates, but preserves mass —
     #      the proper Lipscomb redistribution to the next category is
     #      the long-term structural fix.  Codex iter-3 finding #4.
-    h_safe = jnp.maximum(h_clamped, 1e-20)
+    # float32 AD safety: this divide was UNCONDITIONAL, so the floored
+    # denominator NaN'd the adjoint for every ice-free category.  Physical
+    # predicate: the volume-conserving area rescale ``a_post = a_pre*h_pre/h_post``
+    # is only defined for a category that HAS a post-clamp thickness; with
+    # ``h_clamped <= 0`` there is no ice to hold area, so the rescaled area is 0.
+    # Byte-identity check: ``h_clamped == 0`` implies ``h_pre == 0`` (when
+    # a_remap > 0, h_clamped = max(h_pre, lo) >= h_pre; when a_remap == 0,
+    # h_pre == 0 identically from the where above), so the old floored value
+    # was ``a_pre*0/1e-20 == 0`` -- exactly the new fallback.
+    has_thickness = h_clamped > 1e-20
+    h_safe = jnp.where(has_thickness, h_clamped, 1.0)
     a_pre = a_remap
     vol_pre = a_pre * h_pre
-    a_rescaled = a_pre * h_pre / h_safe
+    a_rescaled = jnp.where(has_thickness, a_pre * h_pre / h_safe, 0.0)
     saturated = a_rescaled > 1.0
     a_remap = jnp.clip(a_rescaled, 0.0, 1.0)
     # When saturated: put the residual volume back into h.
@@ -406,8 +435,12 @@ def linear_remap(
     E_remap = E_remap + jnp.pad(E_deficit[..., 1:], (*e_pad_axes, (0, 1)))
 
     # Recover temperature from enthalpy
-    vol_safe = jnp.maximum(vol_remap, 1e-30)
-    T_remap = jnp.where(vol_remap > 0.0, E_remap / vol_safe, T_new)
+    # float32 AD safety: safe denominator INSIDE the branch.
+    # ``integer_pow(1e-30, -2) == 1e60`` overflows float32 to ``inf``, so the
+    # zero-numerator adjoint was NaN despite the outer where.
+    has_vol = vol_remap > 1e-30
+    vol_safe = jnp.where(has_vol, vol_remap, 1.0)
+    T_remap = jnp.where(has_vol, E_remap / vol_safe, T_new)
 
     # Clamp temperature to physical bounds.  Upper bound is the SURFACE
     # melt point (T_max = T_freeze = 273.15 K), not the saline basal

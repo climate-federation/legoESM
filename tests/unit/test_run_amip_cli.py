@@ -61,6 +61,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_hard_saturation_adjustment_flag_flows_to_config():
+    """--hard-saturation-adjustment round-trips to ExperimentConfig (opt-in
+    warm-rain hard saturation-adjustment guard; default OFF)."""
+    parser = build_arg_parser()
+    # default OFF: byte-identical smooth microphysics path
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.hard_saturation_adjustment is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_on.hard_saturation_adjustment is True
+
+    # BooleanOptionalAction exposes the explicit --no- off switch.
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_no.hard_saturation_adjustment is False
+
+
 def test_use_clubb_cloud_fraction_flag_flows_to_config():
     """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
     albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""
@@ -352,10 +375,53 @@ def test_land_surface_scheme_flag_flows_to_config():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.land_surface_scheme == "simple_seb"
 
+    # Canopy schemes require --use-multilayer-land (they run inside the multilayer
+    # land tile); the flag round-trips with it set.
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+        "--use-multilayer-land",
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
+
+    # clm_ml is a first-class selector (S4-AMIP plumbing); validate_strict must
+    # ACCEPT it (the coupled ncol>1 capability gate lives in the driver setup,
+    # not here — single-point CLM-ML runs today via run_lmip).
+    cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land",
+    ]), parser))
+    assert cfg_clm.land_surface_scheme == "clm_ml"
+    cfg_clm.validate_strict()  # must not raise
+
+
+def test_clm_ml_use_surfdata_pft_flag_flows_to_config():
+    """--clm-ml-use-surfdata-pft round-trips (per-column dominant PFT for CLM-ML ->
+    mixed-PFT columns handled by the group-by-structure scan).  Default off."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clm_ml_use_surfdata_pft is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land", "--clm-ml-use-surfdata-pft",
+    ]), parser))
+    assert cfg_on.clm_ml_use_surfdata_pft is True
+
+
+def test_canopy_scheme_requires_multilayer_land():
+    """A canopy surface scheme without --use-multilayer-land is a hard CLI error,
+    not a silent drop to the slab land (dispatch-hardening)."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical", "--land-surface-scheme", scheme,
+            ]), parser)
+    # simple_seb (the default) is a no-op on the slab and is NOT gated.
+    _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
+    ]), parser)
 
 
 def test_sponge_flags_flow_to_config():
@@ -375,6 +441,64 @@ def test_sponge_flags_flow_to_config():
     assert cfg.sponge_enabled is True
     assert cfg.sponge_coeff_per_day == 4.0
     assert cfg.sponge_sigma_top == 0.2
+
+
+def test_hard_sat_override_flags_flow_and_validate():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip;
+    gate + spec-bounds enforcement (day-137 drain-capacity lever)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "10.0",
+        "--hard-sat-adjust-threshold", "1.05",
+    ]), parser))
+    assert cfg.hard_sat_max_heating_K == 10.0
+    assert cfg.hard_sat_adjust_threshold == 1.05
+    cfg.validate_strict()
+
+    # Override without the boolean gate -> refused (silently-inert config).
+    cfg_nogate = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_saturation_adjustment=True"):
+        cfg_nogate.validate_strict()
+
+    # Spec bounds enforced.
+    cfg_oob = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "80.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg_oob.validate_strict()
+
+
+def test_mpas_land_boundary_flags_flow_to_config():
+    """--mpas-land-lapse-k-per-km / --mpas-land-beta round-trip (MPAS land
+    surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_lapse_K_per_km == 0.0
+    assert cfg_default.mpas_land_beta == 1.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
+    ]), parser))
+    assert cfg.mpas_land_lapse_K_per_km == 6.5
+    assert cfg.mpas_land_beta == 0.6
+    # validate_strict is exercised in test_mpas_land_boundary (the bare CLI
+    # invocation here has topography='flat', which the inert-corner guard
+    # correctly refuses).
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -890,6 +1014,31 @@ def test_bechtold_cape_threshold_flows_to_config():
     cfg = build_config_from_args(args)
     assert cfg.bechtold_cape_threshold == 10.0
     assert cfg.validate_strict() is None
+
+
+def test_bechtold_subsidence_solve_flows_to_config():
+    """--bechtold-subsidence-solve round-trips into ExperimentConfig (the
+    day-65 blowup-bisect stability escape hatch); unset matches the
+    BechtoldConfig default (byte-identical); unknown value rejected at
+    the parser (choices) and by validate_strict membership."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--bechtold-subsidence-solve", "advective",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "advective"
+    assert cfg.validate_strict() is None
+
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "implicit_flux"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--bechtold-subsidence-solve", "bogus"])
+    with pytest.raises(ValueError, match="bechtold_subsidence_solve"):
+        cfg._replace(bechtold_subsidence_solve="bogus").validate_strict()
 
 
 def test_bechtold_cape_threshold_defaults_to_scheme_default():
@@ -2052,6 +2201,26 @@ def test_sb81_omega_conversion_flag_flows_to_dycore_config():
     assert cfg_on.dycore.sb81_omega_conversion is True
 
 
+def test_budget_ledger_flag_flows_to_output_config():
+    """--budget-ledger (per-process budget attribution diagnostic)
+    round-trips into OutputConfig; default OFF = byte-identical model."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.output.budget_ledger is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--budget-ledger",
+    ]), parser))
+    assert cfg_on.output.budget_ledger is True
+
+    # BooleanOptionalAction: a YAML-true value stays CLI-overridable.
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-budget-ledger",
+    ]), parser))
+    assert cfg_neg.output.budget_ledger is False
+
+
 def test_convective_precip_efficiency_allows_bechtold():
     """--convective-precip-efficiency now round-trips for bechtold (shared
     split_convective_rain), not just tiedtke; a non-supporting scheme still
@@ -2902,3 +3071,112 @@ def test_restart_still_requires_forcing_path_for_real_data():
         "--forcing-path", "/tmp/sst.nc",
     ]), parser)
     assert args.forcing_path == "/tmp/sst.nc"
+
+
+def test_voronoi_default_discretization_is_mpas():
+    """2026-07-21 audit: bare --grid-type voronoi must resolve the only
+    supported discretization ('mpas'), not the generic 'centered' default that
+    dies at the dycore factory on (hydrostatic, centered, mpas)."""
+    p = build_arg_parser()
+    for grid in ("voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        args = _postprocess_args(p.parse_args(["--grid-type", grid]), p)
+        assert args.discretization == "mpas", (
+            f"--grid-type {grid} resolved discretization "
+            f"{args.discretization!r}, expected 'mpas'")
+
+
+def test_build_config_resolves_voronoi_discretization_without_postprocess():
+    """A caller that builds a config WITHOUT _postprocess_args (codex r2)
+    must still get the per-grid default, not the None-sentinel 'centered'."""
+    p = build_arg_parser()
+    args = p.parse_args(["--grid-type", "voronoi"])
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "mpas"
+
+
+def test_truncation_only_triggers_spectral_fallback():
+    """--truncation N without --discretization spectral must still fall back
+    off prognostic schemes (postprocess resolves discretization='spectral'
+    BEFORE the fallback runs; the old order made this a silent no-op)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    assert args.discretization == "spectral"
+    args = _apply_spectral_scheme_fallback(args, argv, p)
+    assert args.convection == "sbm"
+    assert args.gravity_wave_drag == "rayleigh"
+
+
+def test_spectral_fallback_rejects_dependent_option_silent_noop():
+    """--truncation 21 --convective-precip-efficiency 0.5: the fallback would
+    downgrade convection to sbm, silently ignoring the mass-flux-only option;
+    it must error instead of accept-then-ignore (codex r2)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21", "--convective-precip-efficiency", "0.5"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    with pytest.raises(SystemExit):
+        _apply_spectral_scheme_fallback(args, argv, p)
+
+
+def test_hard_sat_override_flags_flow_to_config():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip onto
+    the ExperimentConfig flat scalars (day-137 summer-regime drain tuning);
+    defaults None keep the per-scheme __param_spec__ values."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-adjust-threshold", "1.2",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    assert cfg.hard_sat_adjust_threshold == 1.2
+    assert cfg.hard_sat_max_heating_K == 10.0
+    cfg.validate_strict()
+
+
+def test_hard_sat_override_without_gate_is_refused():
+    """An override without --hard-saturation-adjustment would be silently
+    inert (the floats are only read where the boolean gate fires) —
+    validate_strict must refuse it."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg.validate_strict()
+
+
+def test_hard_sat_override_bounds_enforced():
+    """Out-of-spec-bounds overrides are refused (threshold (1,2) /
+    heating (0.5,50) per the warm-rain __param_spec__)."""
+    parser = build_arg_parser()
+    for flags, match in (
+            (["--hard-sat-adjust-threshold", "0.9"], "hard_sat_adjust_threshold"),
+            (["--hard-sat-max-heating-k", "100.0"], "hard_sat_max_heating_K")):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", "morrison",
+            "--hard-saturation-adjustment", *flags,
+        ]), parser))
+        with pytest.raises(ValueError, match=match):
+            cfg.validate_strict()
+
+
+def test_hard_saturation_adjustment_requires_warm_rain_scheme():
+    """--hard-saturation-adjustment with a non-warm-rain microphysics scheme
+    (default sundqvist, or none) is silently inert at runtime
+    (_resolve_microphysics / the MPAS post-step drain early-return before the
+    flag is read) — validate_strict must refuse it (codex F3)."""
+    parser = build_arg_parser()
+    for micro in ("sundqvist", "none"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", micro,
+            "--hard-saturation-adjustment",
+        ]), parser))
+        with pytest.raises(ValueError, match="warm-rain microphysics"):
+            cfg.validate_strict()

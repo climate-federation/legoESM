@@ -576,8 +576,8 @@ def _remap_fv3_metrics_to_create(m: dict) -> tuple:
     import numpy as np
 
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM,
-        _GNOMONIC_ED_FACE_ROT,
+        GNOMONIC_ED_FACE_PERM as _GNOMONIC_ED_FACE_PERM,
+        GNOMONIC_ED_FACE_ROT as _GNOMONIC_ED_FACE_ROT,
     )
 
     def _square(a):

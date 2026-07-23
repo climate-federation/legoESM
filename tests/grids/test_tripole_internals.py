@@ -254,6 +254,88 @@ class TestComputeRotationAngles:
         assert jnp.allclose(sin_au, 0.0, atol=1e-5)
 
 
+class TestRotationAngleSignAndSeam:
+    """H5 (v-point sin sign) + H6 (branch-cut unwrap) gates for
+    _compute_rotation_angles.  The pre-existing TestComputeRotationAngles cases
+    use regular lat-lon caps (dlat=0 => sin==0) so they cannot catch either
+    bug; these build a genuinely TILTED / SEAM-CROSSING cap and check the
+    SIGNED angle."""
+
+    @staticmethod
+    def _tilted_cap(alpha_deg, lon0=0.0, lat0=60.0, d=0.05, n=6):
+        # Rigid in-tangent-plane rotation of a lat-lon patch by alpha about
+        # (lon0, lat0): i-axis -> (cos a east, sin a north); j-axis ->
+        # (-sin a east, cos a north).  Both u- and v-faces sample the SAME cell
+        # orientation, so cos/sin must agree at both after the fix.
+        a = np.deg2rad(alpha_deg)
+        # indexing='xy' (default): ii varies along axis1 (i), jj along axis0 (j)
+        ii, jj = np.meshgrid(np.arange(n), np.arange(n))
+        cphi = np.cos(np.deg2rad(lat0))
+        east = (ii * d * np.cos(a)) + (jj * (-d) * np.sin(a))
+        north = (ii * d * np.sin(a)) + (jj * d * np.cos(a))
+        glam = lon0 + east / cphi
+        gphi = lat0 + north
+        return jnp.asarray(glam), jnp.asarray(gphi)
+
+    def test_h5_vpoint_sin_matches_uface_convention(self):
+        from legoesm.grids.tripole import _compute_rotation_angles
+
+        alpha = 30.0
+        glam, gphi = self._tilted_cap(alpha)
+        cos_au, sin_au, cos_av, sin_av = _compute_rotation_angles(
+            glam, gphi, glam, gphi, cap_j=0)
+        j, i = 2, 2  # interior cell (avoid the wrap-padded last col/row)
+        s = np.sin(np.deg2rad(alpha))
+        c = np.cos(np.deg2rad(alpha))
+        # u-face recovers +alpha (sanity; passes before and after)
+        assert np.isclose(float(sin_au[j, i]), s, atol=5e-3)
+        # H5: v-face MUST carry the SAME +sin(alpha), not -sin(alpha)
+        assert np.isclose(float(sin_av[j, i]), s, atol=5e-3)
+        assert np.isclose(float(cos_av[j, i]), c, atol=5e-3)
+        assert np.isclose(float(sin_av[j, i]), float(sin_au[j, i]), atol=5e-3)
+
+    def test_h5_consumer_matrix_is_orthonormal_roundtrip(self):
+        from legoesm.grids.tripole import _compute_rotation_angles
+
+        glam, gphi = self._tilted_cap(30.0)
+        cos_au, sin_au, cos_av, sin_av = _compute_rotation_angles(
+            glam, gphi, glam, gphi, cap_j=0)
+        j, i = 2, 2
+        # Exact 2x2 the consumers assemble (i-row +sin_au, j-row -sin_av).
+        M = np.array([[float(cos_au[j, i]), float(sin_au[j, i])],
+                      [-float(sin_av[j, i]), float(cos_av[j, i])]])
+        # Cross-row inner product = 2*sin*cos (~0.87) WITH the bug, ~0 after the
+        # fix.  (A magnitude-only cos^2+sin^2==1 test would NOT catch this.)
+        # atol 1.5e-2 accommodates the u-vs-v finite-difference floor: the u- and
+        # v-faces sample the SAME cell angle at half-cell-offset points under a
+        # varying cos(lat) metric, so sin_au and sin_av agree only to ~3e-3 on
+        # this coarse (d=0.05) patch.  The bug leaves a 0.87 cross-term -- ~60x
+        # this tol -- so the check stays decisively non-vacuous.
+        assert np.allclose(M @ M.T, np.eye(2), atol=1.5e-2)
+        v_geo = np.array([1.0, 0.0])          # pure eastward geographic vector
+        v_back = M.T @ (M @ v_geo)             # geo->grid->geo round-trip
+        assert np.allclose(v_back, v_geo, atol=1.5e-2)
+
+    def test_h6_seam_cell_matches_interior_neighbor(self):
+        from legoesm.grids.tripole import _compute_rotation_angles
+
+        # A due-east cap row (true i-axis = east everywhere) whose longitudes
+        # are wrapped across +-180 at one interior column.  dlat=0 isolates H6.
+        n_lat, n_lon = 4, 6
+        true_lon = 176.0 + 2.0 * np.arange(n_lon)          # monotonic true lon
+        wrapped = ((true_lon + 180.0) % 360.0) - 180.0     # ...,178,-180,-178,...
+        glam = jnp.asarray(
+            np.broadcast_to(wrapped[None, :], (n_lat, n_lon)).copy())
+        gphi = jnp.asarray(np.full((n_lat, n_lon), 75.0))
+        cos_au, sin_au, _, _ = _compute_rotation_angles(
+            glam, gphi, glam, gphi, cap_j=0)
+        # i-axis is due east at EVERY interior column, incl. the seam column
+        # (index 1, the 178 -> -180 step): cos=1, sin=0 everywhere.
+        assert np.allclose(np.asarray(cos_au[:, :n_lon - 1]), 1.0, atol=1e-6)
+        assert np.allclose(np.asarray(sin_au[:, :n_lon - 1]), 0.0, atol=1e-6)
+
+
+
 # -------------------------------------------------------------------------
 # _read_nemo_mesh_mask  (skip without netCDF4)
 # -------------------------------------------------------------------------

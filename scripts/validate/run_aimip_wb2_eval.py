@@ -325,6 +325,8 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
             rad_update_interval_steps=rad_update_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
+            surface_bulk_scheme=str(
+                cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
             microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),

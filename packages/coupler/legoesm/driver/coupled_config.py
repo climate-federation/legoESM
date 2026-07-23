@@ -226,10 +226,20 @@ def preset_slab_simple(**overrides) -> CoupledConfig:
     return CoupledConfig(**defaults)
 
 
-#: CoupledConfig.ocean_mode is a coarse, decorative *log label* (only logged by
-#: the coupled driver, never dispatched — the real ocean is make_ocean(ocean_config)).
-#: Map each simple-ocean mode onto the field's documented domain {slab, two_layer}.
+#: CoupledConfig.ocean_mode selects the coupled driver's ocean BRANCH
+#: (thermodynamic vs dynamic); within the thermodynamic branch the physics run
+#: is make_ocean(ocean_config), so the two fields must agree through this map:
+#: each simple-ocean mode onto the ocean_mode domain {slab, two_layer}.
+#: (The old comment called ocean_mode "never dispatched" — false: it gates
+#: dynamic-vs-thermodynamic in CoupledESMDriver._init_ocean.)
 _OCEAN_MODE_LABEL = {"fixed": "slab", "slab": "slab", "two_layer": "two_layer"}
+
+
+def ocean_mode_label(simple_mode: str) -> str | None:
+    """Public accessor: the ``CoupledConfig.ocean_mode`` value that a
+    ``SimpleOceanConfig.mode`` maps onto (None for unknown modes).  Used by
+    the coupled driver's consistency guard — do not import the private map."""
+    return _OCEAN_MODE_LABEL.get(simple_mode)
 
 
 def preset_complexity(level, **overrides) -> CoupledConfig:

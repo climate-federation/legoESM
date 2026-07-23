@@ -1422,8 +1422,12 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
                 "GHGConfig.path must be set when source='annual_file'"
             )
         years, data = _load_ghg_annual_file(config.path)
-        # Convert simulation day → fractional year
-        year = config.start_year + day / 365.25
+        # Convert simulation day → fractional year on the model's noleap
+        # (365-day) clock — matching the experiment-transient override in
+        # model_driver (day/365.0) and the calendar-date mapping the other
+        # forcing channels use.  365.25 here drifted ~9 days over a 35-year
+        # run relative to the rest of the forcing suite (audit 2026-07-21).
+        year = config.start_year + day / 365.0
         # ``_load_ghg_annual_file`` returns DIMENSIONLESS mole fractions
         # (mol/mol), normalized from the file's units attribute.  This
         # function's contract is ppmv/ppbv/pptv, so convert with the

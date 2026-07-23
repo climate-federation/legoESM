@@ -54,10 +54,14 @@ ABLATIONS: list[tuple[str, str, list[str]]] = [
 ]
 
 # Initial winning scheme set (matches the current AIMIP baseline).
+# ``surface_bulk_scheme`` is not an ablation DIMENSION here (constant is the
+# baseline), but it is threaded so the builder never silently defaults it out
+# of step with the rest of the resolved scheme set.
 INITIAL = {
     "gwd_scheme":          "mcfarlane",
     "convection_scheme":   "tiedtke",
     "turbulence_scheme":   "louis",
+    "surface_bulk_scheme": "constant",
     "microphysics_scheme": "none",
     "cloud_scheme":        "xu_randall",
 }

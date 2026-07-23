@@ -142,7 +142,7 @@ def test_plot_writes_figure(tmp_path):
 
 
 def test_capture_clm_ml_reads_real_forcing_fields():
-    mlt = pytest.importorskip("multilayer_canopy.MLCanopyFluxesType")
+    mlt = pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType")
     ml = mlt.create_mlcanopy(begp=1, endp=1)  # 1-based patch: column 0 at index 1
     # Fill the forcing + a filled sunlit leaf so capture returns finite values.
     ml = ml._replace(

@@ -73,13 +73,27 @@ def _print_forcing_activity(args) -> None:
     solar_file_active = getattr(args, "solar_source", "constant") in (
         "file", "spectral_file"
     )
+    # The gaussian/spectral and voronoi/mpas standalone radiation paths
+    # integrate with the configured constant S_0 — the solar FILE (TSI +
+    # 14-band spectral) is not threaded there (same gap the CMIP6 deck
+    # labels; keep the two tables telling the same truth).
+    _grid = getattr(args, "grid_type", None) or "cubed_sphere"
+    _disc = getattr(args, "discretization", None) or ""
+    solar_file_unthreaded = (
+        (_grid == "gaussian" and _disc == "spectral")
+        or (_grid in ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
+            and _disc == "mpas")
+    )
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
 
     print("[run_amip] Forcing-channel activity for this run:")
     print("  SST/SIC                              ACTIVE        (radiation-independent)")
-    if solar_file_active:
+    if solar_file_active and solar_file_unthreaded:
+        print("  Solar TSI                            inert         "
+              f"({_disc or _grid} path uses constant S_0; solar file not threaded)")
+    elif solar_file_active:
         print("  Solar TSI                            ACTIVE        (time-varying from file)")
     else:
         print("  Solar TSI                            constant S_0  (--solar-source constant)")
@@ -465,7 +479,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=_EXPERIMENT_DEFAULTS.tau_pole,
                         help="Gray-radiation polar optical depth")
     parser.add_argument("--ozone-source", type=str, default="standard",
-                        choices=["standard", "analytical", "none"])
+                        choices=["standard", "analytical", "mls", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
                         choices=["inline", "external", "off"])
     parser.add_argument(
@@ -722,6 +736,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-subsidence-solve", type=str,
+                        choices=["implicit_flux", "advective"],
+                        default=_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve,
+                        dest="bechtold_subsidence_solve",
+                        help="Bechtold compensating-subsidence vertical solve: "
+                             "implicit_flux (conservative, default) or advective "
+                             "(legacy; truncation-order conservation only — the "
+                             "stability escape hatch of the 2026-07-22 day-65 "
+                             "blowup bisect). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -920,6 +944,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(Morrison & Gettelman 2008 sub-grid closure) so "
                              "the non-linear KK2000 rate is not under-fed by "
                              "the grid-mean.  Requires --microphysics morrison.")
+    parser.add_argument("--hard-saturation-adjustment",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Opt-in iterated hard saturation adjustment "
+                             "for the warm-rain schemes (kessler/seifert_beheng/"
+                             "morrison/thompson/p3): where q_v exceeds "
+                             "hard_sat_adjust_threshold * q_sat (default 1.1), "
+                             "drain q_v onto the liquid saturation curve "
+                             "(conserving c_pd*T + L_v*q_v), rate-limited to "
+                             "hard_sat_max_heating_K per step (default 5 K ~ "
+                             "2 g/kg), removing local super-saturation pools the "
+                             "smooth path cannot.  Applied POST-STEP on the MPAS "
+                             "path (the validated placement) and in-scheme on "
+                             "the spectral/coupled path.  Default off (moist "
+                             "path byte-identical).  The threshold + cap default "
+                             "to the scheme-config values (matching the "
+                             "validated configuration); override via "
+                             "--hard-sat-adjust-threshold / "
+                             "--hard-sat-max-heating-k or --params.")
+    parser.add_argument("--hard-sat-adjust-threshold", type=float, default=None,
+                        dest="hard_sat_adjust_threshold",
+                        help="Override the hard-saturation-adjustment RH "
+                             "trigger (drain where q_v > threshold * q_sat). "
+                             "Requires --hard-saturation-adjustment; bounds "
+                             "[1, 2] per the scheme __param_spec__ (scheme "
+                             "default 1.1).")
+    parser.add_argument("--hard-sat-max-heating-k", type=float, default=None,
+                        dest="hard_sat_max_heating_K",
+                        help="Override the hard-saturation-adjustment per-step "
+                             "latent-heating cap [K]. Requires "
+                             "--hard-saturation-adjustment; bounds [0.5, 50] "
+                             "per the scheme __param_spec__ (scheme default "
+                             "5 K; 10 K = the day-137 summer-regime tuning "
+                             "arm).")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=None,
                         help="Convective in-updraft precipitation efficiency "
@@ -1126,7 +1183,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
                              "(byte-identical when unchanged).")
     parser.add_argument("--land-surface-scheme",
-                        choices=["simple_seb", "two_leaf"],
+                        choices=["simple_seb", "two_leaf", "clm_ml"],
                         default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
                         dest="land_surface_scheme",
                         help="Multilayer-land surface scheme (issue #730). "
@@ -1134,8 +1191,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
                              "energy balance (Kelvin h_r bare-soil + two-leaf "
                              "stomatal transpiration) that holds land ET below "
-                             "potential and breaks the over-evaporation wet loop. "
+                             "potential and breaks the over-evaporation wet loop; "
+                             "'clm_ml' = the CLM-ML-JAX multilayer canopy (needs the "
+                             "clm-ml-jax backend; coupled/global multi-column support "
+                             "is pending the ncol>1 traceable path — single-point "
+                             "CLM-ML runs today via run_lmip). "
                              "Only affects --use-multilayer-land runs.")
+    parser.add_argument("--clm-ml-use-surfdata-pft", action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.clm_ml_use_surfdata_pft,
+                        dest="clm_ml_use_surfdata_pft",
+                        help="CLM-ML only: give each column its DOMINANT PFT (argmax of "
+                             "the surface map's pft_fractions) instead of one pft_clm for "
+                             "all columns -> mixed-PFT heterogeneous columns, compiled at "
+                             "O(#distinct structures) by the group-by-structure canopy "
+                             "scan. Opt-in (default off = single pft_clm). Only affects "
+                             "--land-surface-scheme clm_ml + --use-multilayer-land.")
     parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -1161,6 +1231,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="sponge_sigma_top",
                         help="Sponge base: sigma below which the sin^2 damping "
                              "ramps up toward the lid (default 0.15).")
+    parser.add_argument("--mpas-land-lapse-k-per-km", type=float, default=None,
+                        dest="mpas_land_lapse_K_per_km",
+                        help="MPAS lane only: lapse-adjust the LAND fraction's "
+                             "surface-temperature anchor by this rate [K/km] "
+                             "times elevation (the AMIP loader fills land "
+                             "cells with nearest-ocean sea-level SST, which "
+                             "overheats elevated terrain). 0=off (default); "
+                             "6.5=ICAO standard atmosphere.")
+    parser.add_argument("--mpas-land-beta", type=float, default=None,
+                        dest="mpas_land_beta",
+                        help="MPAS lane only: land evaporation efficiency in "
+                             "[0, 1] throttling the land-fraction surface "
+                             "humidity gradient (1.0=saturated wet swamp, "
+                             "default; ~0.6 first-order continental mean).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1237,6 +1321,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection-scheme precip/albedo comparison (#872).
     parser.add_argument("--cmip-output", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--budget-ledger", action=argparse.BooleanOptionalAction,
+                        default=False, dest="budget_ledger",
+                        help="Per-process column water/energy budget ledger "
+                             "(diagnostics attribution: turbulence/convection/"
+                             "microphysics/radiation/other/clips/dynamics). "
+                             "Writes segment-mean rates to budget_ledger.npz. "
+                             "Single-rank only; default off = byte-identical "
+                             "model.")
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
@@ -1404,6 +1496,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _default_discretization_for_grid(grid_type: str) -> str:
+    """The dycore discretization to use when the user gave a grid but no
+    ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
+    other grid defaults to 'centered'.  Shared by ``_postprocess_args`` and
+    ``build_config_from_args`` so a caller that skips postprocess still resolves
+    a supported (model_type, discretization, grid_type) triple (codex r2)."""
+    if grid_type in ("voronoi", "mpas", "mpas_voronoi", "icosahedral"):
+        return "mpas"
+    return "centered"
+
+
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
@@ -1412,7 +1515,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     if args.grid_type is None:
         args.grid_type = "cubed_sphere"
     if args.discretization is None:
-        args.discretization = "centered"
+        args.discretization = _default_discretization_for_grid(args.grid_type)
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -1457,6 +1560,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
+        budget_ledger=args.budget_ledger,
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
         evaluation=EvaluationConfig(
@@ -1542,6 +1646,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=args.hard_sat_max_heating_K,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
@@ -1597,6 +1704,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
+        clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
         sponge_coeff_per_day=(args.sponge_coeff_per_day
@@ -1605,6 +1713,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_sigma_top=(args.sponge_sigma_top
                           if args.sponge_sigma_top is not None
                           else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
+        mpas_land_lapse_K_per_km=(
+            args.mpas_land_lapse_K_per_km
+            if args.mpas_land_lapse_K_per_km is not None
+            else _EXPERIMENT_DEFAULTS.mpas_land_lapse_K_per_km),
+        mpas_land_beta=(args.mpas_land_beta
+                        if args.mpas_land_beta is not None
+                        else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,
@@ -1625,6 +1740,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
@@ -1670,7 +1786,9 @@ _SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
     "edmf", "emanuel"})
 
 
-def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.Namespace:
+def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
+                                    parser: argparse.ArgumentParser | None = None
+                                    ) -> argparse.Namespace:
     """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
     physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
     are refused deep in setup. When the user did NOT explicitly pick them, fall
@@ -1698,6 +1816,30 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv) -> argparse.
     toks = list(argv or [])
     has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
     if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
+        # Reject a silent-no-op: the user did not pick --convection (so we
+        # downgrade to diagnostic sbm), but they DID pass an option that only
+        # the mass-flux convection honors — after the swap it would be
+        # silently ignored (codex r2).  Make them choose explicitly.
+        _convection_dependent_flags = [
+            f for f in ("--convective-precip-efficiency",
+                        "--convective-precip-split", "--autoconv-q-c-crit",
+                        "--autoconv-pe-max", "--convective-buoyancy-death-memory")
+            if has(f)
+        ]
+        if _convection_dependent_flags:
+            _msg = (
+                f"the spectral/gaussian loop cannot thread prognostic "
+                f"convection '{args.convection}' yet (issue #405) and would "
+                f"downgrade to diagnostic 'sbm', but you passed "
+                f"{_convection_dependent_flags}, which only a mass-flux "
+                f"convection honors — it would be silently ignored. Either "
+                f"drop those flags or pass an explicit --convection that "
+                f"supports them (and a --time-integrator leapfrog_si spectral "
+                f"path that threads the prognostic carry)."
+            )
+            if parser is not None:
+                parser.error(_msg)
+            raise SystemExit(f"run_amip: error: {_msg}")
         print(f"[run_amip] spectral loop cannot thread prognostic convection "
               f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
               f"Pass --convection to override.", flush=True)
@@ -1819,6 +1961,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "crashes on the unstructured mesh: VoronoiMesh has no "
                      "lat/lat2d). Pass --no-use-multilayer-land to override "
                      "a --config YAML that enables it.")
+    # Canopy surface schemes run INSIDE the multilayer land tile; without
+    # --use-multilayer-land the slab land runs and the scheme is silently dropped
+    # (the user asked for a canopy, got the slab).  Fail early rather than degrade
+    # silently.  simple_seb is the default and is a no-op on the slab, so it is not
+    # gated.
+    if (args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and not args.use_multilayer_land):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is a canopy scheme "
+            "that runs inside the multilayer land tile and has NO effect on the "
+            "slab land — it would be silently dropped. Pass --use-multilayer-land, "
+            "or use --land-surface-scheme simple_seb.")
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(
@@ -1870,7 +2024,12 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     if args.grid_type is None:
         args.grid_type = "cubed_sphere"
     if args.discretization is None:
-        args.discretization = "centered"
+        # Per-grid default: the SCVT Voronoi mesh has exactly one dycore
+        # discretization ('mpas'); the previous unconditional 'centered'
+        # default made bare ``--grid-type voronoi`` die at the dycore
+        # factory with an unsupported (hydrostatic, centered, mpas) triple
+        # (2026-07-21 audit — cross-grid smoke).
+        args.discretization = _default_discretization_for_grid(args.grid_type)
 
     # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
     # factory finds a matching (model_type, discretization, grid_type)
@@ -2276,8 +2435,15 @@ def main(argv: list[str] | None = None):
                          "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
-    _apply_spectral_scheme_fallback(args, argv if argv is not None else sys.argv[1:])
+    # Postprocess FIRST: it resolves the grid/discretization sentinels
+    # (``--truncation 21`` alone sets discretization="spectral" only there),
+    # and the spectral fallback keys off ``args.discretization == "spectral"``
+    # — calling it on the unresolved sentinel made it a silent no-op for the
+    # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
+    # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
     args = _postprocess_args(args, parser)
+    _apply_spectral_scheme_fallback(
+        args, argv if argv is not None else sys.argv[1:], parser)
 
     # Route-B multicontroller: initialize jax.distributed BEFORE any device work
     # (ModelDriver/setup query devices; a jax op before init makes

@@ -18,9 +18,12 @@ Exempt paths: the constants/thermo definition sites, the guard tests, this
 
 Fail-open: ANY error or unexpected input → exit 0 (allow). It must never wedge a
 session. Block protocol: exit 2 with a message on stderr (fed back to the model).
-"""
-from __future__ import annotations
 
+Runs under whatever ``python3`` the harness invokes it with, including the
+Python 3.6 shipped as the system interpreter on some HPC login nodes — so it
+avoids 3.7+-only syntax (``from __future__ import annotations``) and 3.9+-only
+subscripted-generic annotations in evaluated (signature) positions.
+"""
 import json
 import re
 import sys
@@ -63,8 +66,8 @@ def _proposed_text(tool: str, ti: dict) -> str:
     return ""
 
 
-def _hits(text: str) -> list[str]:
-    out: list[str] = []
+def _hits(text):  # -> list[str]
+    out = []
     for line in text.splitlines():
         if any(tag in line for tag in _EXEMPT_COMMENT):
             continue

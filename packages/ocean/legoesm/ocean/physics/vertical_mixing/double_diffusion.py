@@ -208,12 +208,16 @@ __param_spec__ = {
         "params": {
             "rn_avts": {
                 "units": "m^2/s", "bounds": (1e-5, 5e-4), "tunable_tier": 1,
-                "transform": "none", "category": "double_diffusion",
+                # sigmoid (not "none"): a FINITE-bounded param needs a bounds-
+                # respecting transform so training can never push it outside
+                # (1e-5, 5e-4); default 1e-4 is interior and round-trips.
+                "transform": "sigmoid", "category": "double_diffusion",
                 "reference": "NEMO namzdf_ddm rn_avts", "shape": None,
             },
             "rn_hsbfr": {
                 "units": "1", "bounds": (1.2, 2.0), "tunable_tier": 2,
-                "transform": "none", "category": "double_diffusion",
+                # sigmoid (not "none"): finite-bounded; default 1.6 is interior.
+                "transform": "sigmoid", "category": "double_diffusion",
                 # Default 1.6 = NEMO namzdf_ddm value. ROLE differs: here it is the
                 # Large/CVMix cubic HARD cutoff R_c; in NEMO it is the RATIONAL
                 # decay scale (avfs = rn_avts/2 at R_rho = rn_hsbfr, no cutoff).

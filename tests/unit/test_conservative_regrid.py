@@ -284,3 +284,37 @@ def test_apply_is_differentiable():
     grads = jax.grad(loss)(field)
     assert bool(jnp.all(jnp.isfinite(grads)))
     assert not bool(jnp.allclose(grads, 0.0))
+
+
+def test_partial_coverage_raises_when_required():
+    # Source covers only the WESTERN half [0, 180deg]; destination spans the full
+    # circle -> its eastern cells are UNCOVERED (sum(weights) 0 or < 1).
+    src_lat = np.deg2rad(np.linspace(-90, 90, 5))
+    src_lon = np.deg2rad(np.linspace(0, 180, 5))   # half circle only
+    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
+    dst_lon = np.deg2rad(np.linspace(0, 360, 9))   # full circle
+    # Default (require_full_coverage=False): silently reduced, documents hazard.
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
+    row = np.bincount(np.asarray(w.dst_idx_flat),
+                      weights=np.asarray(w.weights),
+                      minlength=w.n_dst_cells)
+    assert row.min() < 1.0 - 1e-6          # at least one dst cell under-covered
+    # Required coverage: must RAISE loudly instead of emitting a reduced field.
+    with pytest.raises(ValueError, match="does not fully cover"):
+        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True)
+
+
+def test_full_coverage_passes_when_required():
+    # Source FINER than destination, both spanning the full sphere -> every dst
+    # cell fully covered; require_full_coverage must NOT raise and weights sum 1.
+    src_lat = np.deg2rad(np.linspace(-90, 90, 9))
+    src_lon = np.deg2rad(np.linspace(0, 360, 17))
+    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
+    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True)
+    row = np.bincount(np.asarray(w.dst_idx_flat),
+                      weights=np.asarray(w.weights),
+                      minlength=w.n_dst_cells)
+    np.testing.assert_allclose(row, 1.0, atol=1e-12)

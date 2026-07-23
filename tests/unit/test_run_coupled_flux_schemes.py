@@ -492,15 +492,26 @@ def test_there_is_no_ridging_flag():
         mod.build_parser().parse_args(["--ice-ridging"])
 
 
-def test_the_phantom_flags_are_gone():
-    """Regression pin: --ice-categories/--ice-dynamics must not come back.
-
-    They parse cleanly and then die at runtime, which is strictly worse than
-    the gap they were meant to close.
+def test_ice_categories_now_reachable_dynamics_still_gated():
+    """2026-07-22: --ice-categories is now REAL — the coupled tile runs
+    multi-category ITD thermodynamics (build_sea_ice_config sets n_categories,
+    init_surface_state builds a DynamicSeaIceState).  --ice-dynamics stays a
+    phantom: EVP/mEVP + free-drift need the ice-velocity / grid-global momentum
+    solve that the per-cell coupled tile does not provide (run_omip_core2 only).
     """
-    for phantom in ("--ice-categories", "--ice-dynamics"):
-        with pytest.raises(SystemExit):
-            mod.build_parser().parse_args([phantom, "5"])
+    # --ice-categories parses and builds a multi-category config.
+    args = mod.build_parser().parse_args(["--ice-categories", "5"])
+    assert args.ice_categories == 5
+    cfg = mod.build_sea_ice_config(args)
+    assert cfg is not None and cfg.n_categories == 5
+    assert cfg.dynamics == "none"  # thermodynamics only in the coupled tile
+    # A non-positive category count is rejected loudly.
+    with pytest.raises(SystemExit):
+        mod.build_sea_ice_config(
+            mod.build_parser().parse_args(["--ice-categories", "0"]))
+    # --ice-dynamics remains absent (unreachable velocity solve).
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--ice-dynamics", "evp"])
 
 
 def test_there_is_no_itd_remap_flag():

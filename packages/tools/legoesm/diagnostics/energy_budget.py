@@ -549,20 +549,31 @@ class MoistureBudget(NamedTuple):
     column_water: float      # column-integrated water vapor [kg/m²]
     dW_dt: float             # water vapor tendency [kg/m²/s]
     precip_rate: float       # precipitation rate [mm/day]
-    residual: float          # dW/dt + P [mm/day]
+    evap_rate: float         # surface evaporation rate [mm/day]
+    residual: float          # E − P − dW/dt [mm/day] (0 = closed column)
 
 
 class MoistureBudgetTracker:
     """Track moisture budget evolution over a simulation.
 
     Tracks column-integrated water vapor and its tendency, precipitation,
-    and the moisture budget residual.  For a well-conserving model,
-    the annual-mean residual should be < 0.01 mm/day.
+    surface evaporation, and the moisture budget CLOSURE residual
+    E − P − dW/dt.  For a well-conserving model, the annual-mean residual
+    should be < 0.01 mm/day.
+
+    Sign convention: E (evaporation, from the latent heat flux) is
+    positive UPWARD = a vapor source for the atmospheric column; P
+    (surface precipitation) is positive = a column sink; dW/dt is the
+    column vapor storage tendency.  A closed column satisfies
+    E − P − dW/dt = 0.  (The pre-2026-07-22 residual was dW/dt + P — the
+    net apparent source — which never ingested E and equals ~P in steady
+    state, so it could NOT detect a vapor-destroying process; the 2-yr
+    AMIP pilot's 1.4 mm/day E−P non-closure sailed through it.)
 
     Usage
     -----
     tracker = MoistureBudgetTracker()
-    tracker.update(q_v, p_s, dsigma, precip, elapsed_seconds)
+    tracker.update(q_v, p_s, dsigma, precip, lhflx, elapsed_seconds)
     print(tracker.summary())
     """
 
@@ -570,6 +581,7 @@ class MoistureBudgetTracker:
         self.times: list[float] = []
         self.column_water: list[float] = []
         self.precip_rate: list[float] = []
+        self.evap_rate: list[float] = []
         self.dW_dt: list[float] = []
         self.residual: list[float] = []
         self._prev_water: float | None = None
@@ -581,6 +593,7 @@ class MoistureBudgetTracker:
         p_s: jax.Array,
         dsigma: jax.Array,
         precip: jax.Array,
+        lhflx: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
     ) -> MoistureBudget:
@@ -595,7 +608,12 @@ class MoistureBudgetTracker:
         dsigma : array, shape (nlev,)
             Sigma layer thicknesses.
         precip : array, shape (...)
-            Precipitation rate [kg/m²/s].
+            Precipitation rate [kg/m²/s], positive = column sink.
+        lhflx : array, shape (...)
+            Surface latent heat flux [W/m²], positive upward — converted
+            to the evaporation vapor source E = lhflx / L_v.  Pass the
+            SAME field reported as CMOR ``hfls`` so the closure check and
+            the output diagnostics share one flux definition.
         elapsed_seconds : float
             Time since simulation start [s].
 
@@ -604,14 +622,16 @@ class MoistureBudgetTracker:
         MoistureBudget
         """
         W = column_water_vapor(q_v, p_s, dsigma)
-        # Fuse the column-water-vapor + precipitation means into one
+        # Fuse the column-water-vapor + precip + evap means into one
         # host transfer.
         _h = np.asarray(jnp.stack([
             area_weighted_mean(W, area_weights),
             area_weighted_mean(precip, area_weights),
+            area_weighted_mean(lhflx, area_weights),
         ]))
         mean_W = float(_h[0])
-        mean_P = float(_h[1]) * 86400.0  # kg/m²/s → mm/day
+        mean_P = float(_h[1]) * 86400.0                  # kg/m²/s → mm/day
+        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:
@@ -620,11 +640,13 @@ class MoistureBudgetTracker:
                 dW_dt = (mean_W - self._prev_water) / dt
             else:
                 dW_dt = 0.0
-            # Residual: dW/dt + P ≈ E (evaporation)
-            # Residual = dW/dt + P - E; without explicit E, residual = dW/dt + P
-            # For a closed system: dW/dt = E - P → residual = dW/dt + P - E = 0
-            # We compute dW/dt + P as the "net source" — should be ~0 if E ≈ P over time
-            residual_mm_day = dW_dt * 86400.0 + mean_P
+            # CLOSURE residual: E − P − dW/dt = 0 for a conserving column
+            # (E positive-up source, P positive sink — see class docstring).
+            # A POSITIVE residual = water destroyed inside the atmosphere
+            # (vapor entered via E but reached neither storage nor precip);
+            # negative = spurious source.  The 2-yr AMIP pilot's signature
+            # is residual ≈ +1.4 mm/day.
+            residual_mm_day = mean_E - mean_P - dW_dt * 86400.0
         else:
             dW_dt = 0.0
             residual_mm_day = 0.0
@@ -636,12 +658,14 @@ class MoistureBudgetTracker:
             column_water=mean_W,
             dW_dt=dW_dt,
             precip_rate=mean_P,
+            evap_rate=mean_E,
             residual=residual_mm_day,
         )
 
         self.times.append(elapsed_seconds)
         self.column_water.append(mean_W)
         self.precip_rate.append(mean_P)
+        self.evap_rate.append(mean_E)
         self.dW_dt.append(dW_dt)
         self.residual.append(residual_mm_day)
 
@@ -653,12 +677,14 @@ class MoistureBudgetTracker:
             "times": self.times,
             "column_water": self.column_water,
             "precip_rate": self.precip_rate,
+            "evap_rate": self.evap_rate,
             "dW_dt": self.dW_dt,
             "residual": self.residual,
         }
         self.times = []
         self.column_water = []
         self.precip_rate = []
+        self.evap_rate = []
         self.dW_dt = []
         self.residual = []
         return data
@@ -672,6 +698,7 @@ class MoistureBudgetTracker:
         res = np.array(self.residual[1:])
         W = np.array(self.column_water[1:])
         P = np.array(self.precip_rate[1:])
+        E = np.array(self.evap_rate[1:])
 
         lines = [
             "Moisture Budget Summary",
@@ -679,7 +706,8 @@ class MoistureBudgetTracker:
             f"  Samples:           {len(res)}",
             f"  <CWV>:             {np.mean(W):.2f} kg/m²",
             f"  <Precip>:          {np.mean(P):.2f} mm/day",
-            f"  <dW/dt + P>:       {np.mean(res):+.4f} mm/day",
+            f"  <Evap>:            {np.mean(E):.2f} mm/day",
+            f"  <E - P - dW/dt>:   {np.mean(res):+.4f} mm/day",
             f"  |Residual| max:    {np.max(np.abs(res)):.4f} mm/day",
         ]
         status = "PASS" if np.max(np.abs(res)) < 0.1 else "CHECK"

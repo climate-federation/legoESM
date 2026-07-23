@@ -49,7 +49,9 @@ from legoesm.coupler.tile_fractions import (
 )
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.sea_ice import step_sea_ice
-from legoesm.ice.state import SeaIceState
+from legoesm.ice.state import (
+    SeaIceState, DynamicSeaIceState, init_dynamic_ice_state,
+)
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
@@ -59,9 +61,17 @@ from legoesm.land.state import LandState
 
 
 class SurfaceState(NamedTuple):
-    """Combined surface state for all tiles."""
+    """Combined surface state for all tiles.
+
+    ``ice`` is a scalar-slab :class:`SeaIceState` by default, or a
+    :class:`DynamicSeaIceState` when the run requests multi-category ITD
+    thermodynamics (``SeaIceConfig.n_categories > 1``) or free-drift dynamics —
+    ``step_sea_ice`` dispatches on the state type and returns an AGGREGATE
+    single-category :class:`TileResponse` either way, so the tile-fraction and
+    blend path is transparent to the choice.
+    """
     land: LandState
-    ice: SeaIceState
+    ice: SeaIceState | DynamicSeaIceState
     lake: LakeState
     accumulator: FluxAccumulator
     carbon: CarbonState | None = None
@@ -145,6 +155,7 @@ def init_surface_state(
     T_ice_init: float = 260.0,  # coeff-ok: initial condition [K]
     land_config: LandConfig | None = None,
     carbon_override: CarbonState | None = None,
+    ice_config: SeaIceConfig | None = None,
 ) -> SurfaceState:
     """Initialize all surface tile states.
 
@@ -200,14 +211,29 @@ def init_surface_state(
             runoff=jnp.zeros(shape, dtype=_sd),
         )
 
-    ice = SeaIceState(
-        h_ice=Field(data=jnp.zeros(shape, dtype=_sd),
-                    name="h_ice", dims=dims_2d, units="m"),
-        T_ice=Field(data=jnp.full(shape, T_ice_init, dtype=_sd),
-                    name="T_ice", dims=dims_2d, units="K"),
-        concentration=Field(data=jnp.zeros(shape, dtype=_sd),
-                           name="ice_concentration", dims=dims_2d, units="1"),
-    )
+    # Multi-category ITD thermodynamics (or free-drift) needs the richer
+    # DynamicSeaIceState (per-category thickness/T/concentration + the velocity/
+    # stress fields step_sea_ice carries); the scalar-slab SeaIceState is the
+    # default.  A DynamicSeaIceState with n_categories==1 and dynamics="none" is
+    # thermodynamically equivalent to the slab, so only build it when the config
+    # actually asks for more (keeps the default coupled run byte-identical).
+    _needs_dynamic_ice = ice_config is not None and (
+        getattr(ice_config, "n_categories", 1) > 1
+        or getattr(ice_config, "dynamics", "none") != "none")
+    if _needs_dynamic_ice:
+        _ncat = int(getattr(ice_config, "n_categories", 1))
+        _ice_shape = shape + (_ncat,) if _ncat > 1 else shape
+        ice = init_dynamic_ice_state(
+            _ice_shape, n_categories=_ncat, T_ice_init=T_ice_init)
+    else:
+        ice = SeaIceState(
+            h_ice=Field(data=jnp.zeros(shape, dtype=_sd),
+                        name="h_ice", dims=dims_2d, units="m"),
+            T_ice=Field(data=jnp.full(shape, T_ice_init, dtype=_sd),
+                        name="T_ice", dims=dims_2d, units="K"),
+            concentration=Field(data=jnp.zeros(shape, dtype=_sd),
+                               name="ice_concentration", dims=dims_2d, units="1"),
+        )
 
     # Pin lake temperatures to the same storage precision as the rest
     # of the coupler state (sea-ice / land use ``_sd`` above) so the

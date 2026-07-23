@@ -2186,3 +2186,10 @@ def _make_spectral_pe_radiation(
 
 
 # _make_mpas_radiation is defined as an alias above (= _make_hydrostatic_radiation)
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+compute_ozone_vmr = _compute_ozone_vmr
