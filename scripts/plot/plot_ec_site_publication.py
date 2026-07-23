@@ -100,6 +100,50 @@ def _daily(a, v, dt, mf=0.3):
     return np.where(np.mean(np.isfinite(a), 1) >= mf, np.nanmean(a, 1), np.nan)
 
 
+def _pair(m, o, v):
+    """Co-sampling mask: timesteps where the run is valid AND both the model and
+    the observation are finite. Model and obs must be compared on the SAME
+    timesteps, otherwise an obs gap (which the model never has) makes a model-obs
+    discrepancy indistinguishable from a temporal-sampling artifact."""
+    return np.asarray(v, bool) & np.isfinite(np.asarray(m)) & np.isfinite(np.asarray(o))
+
+
+# --- stratified, temporally balanced annual mean --------------------------------
+# A raw mean over a year's available days over-weights whatever season is best
+# sampled. We stratify by calendar month and weight the months EQUALLY (mean of
+# monthly means), which reduces to the naive mean when coverage is balanced and
+# removes the seasonal-sampling bias when it is not. A year is reported only if the
+# seasonal cycle is adequately covered.
+_STRAT_MONTHS_MIN = 8     # months (of 12) that must be present in a year
+_STRAT_DAYS_MIN = 5       # co-sampled days a month needs to count as "present"
+
+
+def _annual_balanced(daily_m, daily_o, daily_oc, months):
+    """Per-year month-stratified means of co-sampled daily (model, obs, obs_corr).
+
+    Returns (years, m, o, oc, imbalance) where imbalance is max/min of the per-month
+    day counts (1.0 = perfectly balanced), reported so we know when stratification
+    actually changed anything. Years failing the seasonal-coverage gate are dropped.
+    """
+    n = min(len(daily_m), len(months))
+    df = pd.DataFrame({"m": daily_m[:n], "o": daily_o[:n], "oc": daily_oc[:n],
+                       "yr": pd.DatetimeIndex(months[:n]).year,
+                       "mon": pd.DatetimeIndex(months[:n]).month}).dropna(subset=["m", "o"])
+    yrs, mm, oo, cc, imb = [], [], [], [], []
+    for y, g in df.groupby("yr"):
+        counts = g.groupby("mon").size()
+        present = counts[counts >= _STRAT_DAYS_MIN]
+        if len(present) < _STRAT_MONTHS_MIN:
+            continue                                   # seasonal cycle under-sampled
+        by_month = g[g["mon"].isin(present.index)].groupby("mon").mean(numeric_only=True)
+        yrs.append(int(y))
+        mm.append(by_month["m"].mean()); oo.append(by_month["o"].mean())
+        cc.append(by_month["oc"].mean())
+        imb.append(float(present.max() / present.min()))
+    return (np.array(yrs), np.array(mm), np.array(oo), np.array(cc),
+            float(np.nanmax(imb)) if imb else np.nan)
+
+
 def _r2(m, o):
     g = np.isfinite(m) & np.isfinite(o)
     if g.sum() < 20 or m[g].std() == 0 or o[g].std() == 0:
@@ -166,12 +210,13 @@ def fig_energy():
         a = ax[r, 0]
         _row_label(a, site)
         hrs = range(24)
-        for om, oc, col in [(lo, lo_c, C_LE), (ho, ho_c, C_H)]:
-            od, ocd = _diurnal(om, v, t, dt, jja), _diurnal(oc, v, t, dt, jja)
+        # model and obs composited on the SAME (co-sampled) timesteps
+        for mmod, om, oc, col in [(lm, lo, lo_c, C_LE), (hm, ho, ho_c, C_H)]:
+            b = _pair(mmod, om, v)
+            od, ocd = _diurnal(om, b, t, dt, jja), _diurnal(oc, b, t, dt, jja)
             a.fill_between(hrs, od, ocd, color=col, alpha=0.18, lw=0)
             a.plot(hrs, od, "o", color=col, ms=2.5, mfc="white")
-        a.plot(hrs, _diurnal(lm, v, t, dt, jja), "-", color=C_LE, lw=1.6)
-        a.plot(hrs, _diurnal(hm, v, t, dt, jja), "-", color=C_H, lw=1.6)
+            a.plot(hrs, _diurnal(mmod, b, t, dt, jja), "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _hour_axis(a, bot)
         if r == 0:
             a.legend(handles=[Line2D([], [], color=C_LE, lw=1.6, label="Latent heat"),
@@ -187,16 +232,17 @@ def fig_energy():
         a = ax[r, 1]
         td = t[::int(round(86400 / dt))]
 
-        def _mon(arr):
-            dd = _daily(arr, v, dt)
+        def _mon(arr, b):
+            dd = _daily(arr, b, dt)
             mo, mm, _ = _monthly(dd, dd, td[:len(dd)].month)
             return mo, mm
-        for om, oc, col in [(lo, lo_c, C_LE), (ho, ho_c, C_H)]:
-            mo, raw = _mon(om); _, cor = _mon(oc)
+        # co-sample each pair, then composite the monthly cycle on shared timesteps
+        for mmod, om, oc, col in [(lm, lo, lo_c, C_LE), (hm, ho, ho_c, C_H)]:
+            b = _pair(mmod, om, v)
+            mo, raw = _mon(om, b); _, cor = _mon(oc, b); _, mln = _mon(mmod, b)
             a.fill_between(mo, raw, cor, color=col, alpha=0.18, lw=0)
             a.plot(mo, raw, "o", color=col, ms=2.5, mfc="white")
-        for arr, col in [(lm, C_LE), (hm, C_H)]:
-            mo, mm = _mon(arr); a.plot(mo, mm, "-", color=col, lw=1.6)
+            a.plot(mo, mln, "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
 
         for c in range(2): ax[r, c].spines[["top", "right"]].set_visible(False)
@@ -219,9 +265,11 @@ def fig_carbon():
         t = pd.DatetimeIndex(ds.time.values); td = t[::int(round(86400 / dt))]
         bot = r == len(SITES) - 1
 
-        # col0: GPP seasonal
+        # col0: GPP seasonal (model and obs co-sampled)
         a = ax[r, 0]
-        gm = _daily(np.asarray(ds.gpp_mod), v, dt); go = _daily(np.asarray(ds.gpp_obs), v, dt)
+        gm_, go_ = np.asarray(ds.gpp_mod), np.asarray(ds.gpp_obs)
+        bG = _pair(gm_, go_, v)
+        gm = _daily(gm_, bG, dt); go = _daily(go_, bG, dt)
         mo, mm, moo = _monthly(gm, go, td[:len(gm)].month)
         a.plot(mo, moo, "o-", color=C_OBS, ms=2.5, lw=1.2, mfc="white", label="Observed")
         a.plot(mo, mm, "-", color=C_GPP, lw=1.7, label="Model")
@@ -230,10 +278,12 @@ def fig_carbon():
         _row_label(a, site)
         if r == 0: a.legend(frameon=False, fontsize=7, loc="upper right")
 
-        # col1: latent-heat partition (transpiration vs soil evaporation)
+        # col1: latent-heat partition (transpiration vs soil evaporation), model
+        # partition and obs total co-sampled on shared timesteps
         a = ax[r, 1]
-        lec = _daily(np.asarray(ds.le_canopy), v, dt); les = _daily(np.asarray(ds.le_soil), v, dt)
-        leo = _daily(_obs_le(ds), v, dt); leo_c = _daily(_obs_le_corr(ds), v, dt)
+        lm_, lo_ = np.asarray(ds.le_mod), _obs_le(ds); bLE = _pair(lm_, lo_, v)
+        lec = _daily(np.asarray(ds.le_canopy), bLE, dt); les = _daily(np.asarray(ds.le_soil), bLE, dt)
+        leo = _daily(lo_, bLE, dt); leo_c = _daily(_obs_le_corr(ds), bLE, dt)
         n = min(len(lec), len(td)); mon = td.month[:n]
         df = pd.DataFrame({"c": lec[:n], "s": les[:n], "o": leo[:n],
                            "oc": leo_c[:n], "m": mon}).groupby("m").mean()
@@ -290,14 +340,19 @@ def fig_summary():
     for site in SITES:
         ds = _load(site)
         if ds is None: continue
-        dt = float(ds.attrs["dt_s"]); v = _valid(ds)
+        dt = float(ds.attrs["dt_s"]); v = _valid(ds); spd = int(round(86400 / dt))
+        lm, lo = np.asarray(ds.le_mod), _obs_le(ds)
+        hm, ho = np.asarray(ds.h_mod), _obs_h(ds)
+        gm, go = np.asarray(ds.gpp_mod), np.asarray(ds.gpp_obs)
+        bLE, bH, bG = _pair(lm, lo, v), _pair(hm, ho, v), _pair(gm, go, v)
         data[site] = dict(
-            yr=pd.DatetimeIndex(ds.time.values)[::int(round(86400 / dt))].year,
-            LE=(_daily(np.asarray(ds.le_mod), v, dt), _daily(_obs_le(ds), v, dt)),
-            H=(_daily(np.asarray(ds.h_mod), v, dt), _daily(_obs_h(ds), v, dt)),
-            GPP=(_daily(np.asarray(ds.gpp_mod), v, dt), _daily(np.asarray(ds.gpp_obs), v, dt)),
-            # closure-corrected observation (band edge) for the energy fluxes only
-            LE_c=_daily(_obs_le_corr(ds), v, dt), H_c=_daily(_obs_h_corr(ds), v, dt))
+            day=pd.DatetimeIndex(ds.time.values)[::spd].values,   # daily stamps
+            # each model-obs pair aggregated on the SAME (co-sampled) timesteps
+            LE=(_daily(lm, bLE, dt), _daily(lo, bLE, dt)),
+            H=(_daily(hm, bH, dt), _daily(ho, bH, dt)),
+            GPP=(_daily(gm, bG, dt), _daily(go, bG, dt)),
+            # closure-corrected obs on the same LE/H paired timesteps
+            LE_c=_daily(_obs_le_corr(ds), bLE, dt), H_c=_daily(_obs_h_corr(ds), bH, dt))
     VARS = [("LE", "Latent heat", "W m$^{-2}$"), ("H", "Sensible heat", "W m$^{-2}$"),
             ("GPP", "GPP", "µmol m$^{-2}$ s$^{-1}$")]
     for i, (key, lab, unit) in enumerate(VARS):
@@ -314,32 +369,33 @@ def fig_summary():
         # Skill against the raw measurement (primary); for the energy fluxes also
         # report the Nash-Sutcliffe score against the closure-corrected value so
         # the reader sees the whole closure-uncertainty range.
-        st = _nse(M, O)
+        st = _nse(M, O); stc_nse = np.nan
         txt = f"R$^2$={st['r2']:.2f}\nNSE={st['nse']:.2f}\nbias={st['bias']:+.2g}"
         if key in ("LE", "H"):
             Mc, Oc = [], []
             for s in data:
                 mc, oc = data[s][key][0], data[s][f"{key}_c"]
                 g = np.isfinite(mc) & np.isfinite(oc); Mc.append(mc[g]); Oc.append(oc[g])
-            stc = _nse(np.concatenate(Mc), np.concatenate(Oc))
-            txt += f"\nNSE$_{{corr}}$={stc['nse']:.2f}"
+            stc_nse = _nse(np.concatenate(Mc), np.concatenate(Oc))["nse"]
+            txt += f"\nNSE$_{{corr}}$={stc_nse:.2f}"
+        print(f"  pooled {key:3s}: NSE_raw={st['nse']:.3f}  NSE_corr={stc_nse:.3f}  "
+              f"R2={st['r2']:.3f}  n={st['n']}  (co-sampled daily)")
         a.text(0.05, 0.95, txt, transform=a.transAxes, va="top", fontsize=8.5,
                bbox=dict(boxstyle="round,pad=0.3", fc="w", ec="0.7", alpha=0.9))
         a.set_xlabel(f"Observed {lab} ({unit})"); a.set_ylabel(f"Modelled {lab} ({unit})")
         a.annotate(f"({chr(97 + i)})", xy=(0, 1.02), xycoords="axes fraction",
                    ha="left", va="bottom", fontweight="bold", fontsize=10)
         a.spines[["top", "right"]].set_visible(False)
-    # --- bottom row: interannual means, ONE short panel per site (own year axis) ---
+    # --- bottom row: interannual means, ONE short panel per site (own year axis).
+    # Co-sampled (model and obs on the same timesteps) and month-stratified so a
+    # season-heavy sample does not bias the annual value. ---
+    imbalance = {}
     def _annual(s, key):
-        m, o = data[s][key]; yr = data[s]["yr"][:len(m)].astype(int)
-        oc = data[s][f"{key}_c"][:len(yr)] if key in ("LE", "H") else o[:len(yr)]
-        grp = pd.DataFrame({"m": m[:len(yr)], "o": o[:len(yr)],
-                            "oc": oc, "yr": yr}).groupby("yr")
-        df = grp.mean()
-        # Keep only years with adequate valid daily coverage (>=150 days) so a
-        # sparse/corrupt year does not appear as a spurious annual value.
-        ok = (grp["o"].count() >= 150) & (grp["m"].count() >= 150)
-        return df[ok.reindex(df.index).fillna(False).values]
+        dm, do = data[s][key]
+        doc = data[s][f"{key}_c"] if key in ("LE", "H") else do
+        yrs, m, o, oc, imb = _annual_balanced(dm, do, doc, data[s]["day"])
+        imbalance[(s, key)] = imb
+        return pd.DataFrame({"m": m, "o": o, "oc": oc}, index=yrs)
 
     for j, s in enumerate(data):
         a = fig.add_subplot(gs[1, 3 * j:3 * j + 3])
@@ -355,7 +411,8 @@ def fig_summary():
         a2.tick_params(axis="y", labelcolor=C_GPP, labelsize=7)
         a2.spines[["top"]].set_visible(False)
         xs_all = _annual(s, "LE").index.values.astype(int)
-        a.set_xticks(xs_all); a.set_xlim(xs_all.min() - 0.5, xs_all.max() + 0.5)
+        if len(xs_all):
+            a.set_xticks(xs_all); a.set_xlim(xs_all.min() - 0.5, xs_all.max() + 0.5)
         a.tick_params(axis="both", labelsize=7)
         a.set_title(s, fontsize=9.5, fontweight="bold")
         a.set_xlabel("Year", fontsize=8)
@@ -373,6 +430,10 @@ def fig_summary():
         Line2D([], [], color="0.35", marker="s", ls="-", label="Model"),
         Line2D([], [], color="0.35", marker="o", ls="--", mfc="white", label="Observed")],
         frameon=False, fontsize=7.5, ncol=5, loc="lower center", bbox_to_anchor=(0.5, -0.01))
+    im = [v for v in imbalance.values() if np.isfinite(v)]
+    print(f"  interannual month-imbalance (max/min monthly day-count): "
+          f"median={np.median(im):.2f} worst={np.max(im):.2f}  "
+          f"(1.0 = perfectly balanced; stratification neutralizes it)")
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(f"{OUT}_summary.png", bbox_inches="tight", dpi=300)
     print("saved", f"{OUT}_summary.png")

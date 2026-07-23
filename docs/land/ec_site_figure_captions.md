@@ -61,18 +61,22 @@ stress.
 
 **Pooled model–observation skill (top) and per-site year-to-year means
 (bottom).** Top row: daily-mean model-vs-observation scatter pooled across all
-four sites for latent heat, sensible heat and GPP, against the raw observations;
+four sites for latent heat, sensible heat and GPP, against the raw observations.
+Model and observations are **co-sampled** (compared only on timesteps where both
+are available) so a discrepancy reflects model error and not a sampling mismatch;
 the 1:1 line and the Nash–Sutcliffe efficiency (vs raw and, for LE/H, vs the
 closure-corrected obs) are annotated. Bottom row: **one panel per site**, each on
 its own year axis so that sites with different observational coverage are not
 forced onto a shared timeline. Each panel shows annual-mean latent heat (orange)
 and sensible heat (blue) on the left axis and GPP (green) on the right axis;
-dashed open markers are observations, solid filled markers are the model, and the
-shaded band is the energy-balance-closure envelope on the energy fluxes.
+annual means are co-sampled and **month-stratified** (equal weight per month) so a
+season-heavy sample does not bias them; dashed open markers are observations, solid
+filled markers are the model, and the shaded band is the energy-balance-closure
+envelope on the energy fluxes.
 
-Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs): **LE ≈ 0.57**,
-**H ≈ 0.56**, **GPP ≈ 0.72** (LE / H rise to 0.67 / 0.68 vs the closure-corrected
-obs).
+Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs, co-sampled):
+**LE ≈ 0.58**, **H ≈ 0.57**, **GPP ≈ 0.80** (LE / H are 0.65 / 0.68 vs the
+closure-corrected obs).
 
 ---
 

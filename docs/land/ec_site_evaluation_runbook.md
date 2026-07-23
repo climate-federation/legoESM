@@ -54,8 +54,11 @@ JAX_ENABLE_X64=1 python scripts/plot/plot_ec_site_publication.py \
 - **`_summary.png`** — pooled model–observation scatter (skill vs raw and vs corrected
   obs) and year-to-year means.
 
-Expected pooled daily skill (Nash–Sutcliffe vs raw obs): LE ≈ 0.57, H ≈ 0.56,
-GPP ≈ 0.72 (LE / H rise to 0.67 / 0.68 vs the closure-corrected obs).
+Expected pooled daily skill (Nash–Sutcliffe vs raw obs, on co-sampled timesteps —
+model and observations compared only where both are available): LE ≈ 0.58,
+H ≈ 0.57, GPP ≈ 0.80 (LE / H are 0.65 / 0.68 vs the closure-corrected obs). The
+interannual means are co-sampled and month-stratified (each year is an equal-weight
+mean of monthly means) so a season-heavy sample does not bias the annual value.
 
 The rendered high-resolution figures are also checked in under
 `docs/land/figures/ec_site/` (`ec_site_energy.png`, `ec_site_carbon.png`,
