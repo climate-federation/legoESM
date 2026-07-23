@@ -16,7 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (14)
+    # atm: BechtoldConfig (12)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
@@ -28,12 +28,13 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.BechtoldConfig.delta_deep',
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
-    'atm.conv.BechtoldConfig.downdraft_alpha',
-    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
-    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
-    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
-    # via the --params qualified-name loader.  Conscious exclusion.
-    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
+    # downdraft_alpha / downdraft_entrain_rate were REMOVED 2026-07-23: their
+    # convention-named ExperimentConfig scalars (bechtold_downdraft_alpha /
+    # bechtold_downdraft_entrain_rate) are threaded unconditionally by
+    # _resolve_convection, so they are now in _ATM_SCALAR_PARAM_MAP
+    # (--params-reachable).  downdraft_evap_efficiency stays CLI-only: its
+    # scalar (bechtold_downdraft_evap) is NOT convention-named, so the map's
+    # verified-threading contract does not cover it.
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -210,20 +211,17 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KainFritschConfig.timec_max_s',
     'atm.conv.KainFritschConfig.timec_min_s',
     'atm.conv.KainFritschConfig.usl_depth_pa',
-    # atm: KesslerConfig (7)
-    # ``hard_sat_adjust_threshold`` (all warm-rain micro configs below) is the
-    # opt-in hard-saturation-adjustment RH trigger: a per-scheme __param_spec__
-    # tier-2 float, calibratable via the SCM-RCE training path
-    # (build_trainable_params), NOT via the run_amip --params qualified-name
-    # loader — exactly like the sibling atm-micro scheme params in this file
-    # (the atm micro *Config is pipeline-internal, not routed onto
-    # ExperimentConfig).  Conscious addition (2026-07-23).
+    # atm: KesslerConfig (5)
+    # The hard-saturation-adjustment trigger + heating cap (all warm-rain
+    # micro configs) were REMOVED from this baseline 2026-07-23: they are now
+    # routed onto ExperimentConfig flat scalars (hard_sat_adjust_threshold /
+    # hard_sat_max_heating_K) and reachable via --params through
+    # _ATM_SCALAR_PARAM_MAP (the day-137 summer-regime tuning need).  The
+    # remaining sibling micro params stay SCM-RCE-only (pipeline-internal).
     'atm.micro.KesslerConfig.accretion_coeff',
     'atm.micro.KesslerConfig.autoconversion_rate',
     'atm.micro.KesslerConfig.autoconversion_threshold',
     'atm.micro.KesslerConfig.evaporation_coeff',
-    'atm.micro.KesslerConfig.hard_sat_adjust_threshold',
-    'atm.micro.KesslerConfig.hard_sat_max_heating_K',
     'atm.micro.KesslerConfig.rain_fall_speed',
     # atm: KuoConfig (2)
     'atm.conv.KuoConfig.anthes_rh_offset',
@@ -263,7 +261,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.gwd.McFarlaneConfig.fcrit2',
     'atm.gwd.McFarlaneConfig.h_topo',
     'atm.gwd.McFarlaneConfig.min_wind',
-    # atm: MorrisonConfig (23)
+    # atm: MorrisonConfig (21)
     'atm.micro.MorrisonConfig.N_i0',
     'atm.micro.MorrisonConfig.Nc_0',
     'atm.micro.MorrisonConfig.a_v_i',
@@ -275,8 +273,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.MorrisonConfig.cooper_a',
     'atm.micro.MorrisonConfig.dep_coeff',
     'atm.micro.MorrisonConfig.evap_coeff',
-    'atm.micro.MorrisonConfig.hard_sat_adjust_threshold',
-    'atm.micro.MorrisonConfig.hard_sat_max_heating_K',
     'atm.micro.MorrisonConfig.ice_snow_d_auto',
     'atm.micro.MorrisonConfig.k_ac',
     'atm.micro.MorrisonConfig.k_au',
@@ -306,8 +302,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.P3Config.cooper_supi_min',
     'atm.micro.P3Config.dep_coeff',
     'atm.micro.P3Config.evap_coeff',
-    'atm.micro.P3Config.hard_sat_adjust_threshold',
-    'atm.micro.P3Config.hard_sat_max_heating_K',
     'atm.micro.P3Config.k_ac',
     'atm.micro.P3Config.k_au',
     'atm.micro.P3Config.k_sc',
@@ -330,12 +324,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.sdm.SDMConfig.cdnc',
     'atm.sdm.SDMConfig.golovin_b',
     'atm.sdm.SDMConfig.r_rain',
-    # atm: SeifertBehengConfig (9)
+    # atm: SeifertBehengConfig (7)
     'atm.micro.SeifertBehengConfig.Nc_0',
     'atm.micro.SeifertBehengConfig.a_v_r',
     'atm.micro.SeifertBehengConfig.evap_coeff',
-    'atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold',
-    'atm.micro.SeifertBehengConfig.hard_sat_max_heating_K',
     'atm.micro.SeifertBehengConfig.k_ac',
     'atm.micro.SeifertBehengConfig.k_au',
     'atm.micro.SeifertBehengConfig.k_sc',
@@ -370,7 +362,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.TKEConfig.Ck',
     'atm.turb.TKEConfig.Pr_t',
     'atm.turb.TKEConfig.l_mix_max',
-    # atm: ThompsonConfig (23)
+    # atm: ThompsonConfig (21)
     'atm.micro.ThompsonConfig.N_i0',
     'atm.micro.ThompsonConfig.Nc_0',
     'atm.micro.ThompsonConfig.a_v_g',
@@ -383,8 +375,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.ThompsonConfig.cooper_a',
     'atm.micro.ThompsonConfig.dep_coeff',
     'atm.micro.ThompsonConfig.evap_coeff',
-    'atm.micro.ThompsonConfig.hard_sat_adjust_threshold',
-    'atm.micro.ThompsonConfig.hard_sat_max_heating_K',
     'atm.micro.ThompsonConfig.ice_snow_d_auto',
     'atm.micro.ThompsonConfig.k_ac',
     'atm.micro.ThompsonConfig.k_au',

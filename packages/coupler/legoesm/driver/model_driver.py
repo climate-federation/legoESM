@@ -33,6 +33,7 @@ from legoesm.core.tracers import (
 )
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
+    convection_config_for,
     build_physics_pipeline,
     required_microphysics_tracer_slots,
     turbulence_config_for,
@@ -5315,12 +5316,14 @@ class ModelDriver:
 
         Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
         host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        ``mean_T`` is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal cell
+        weight — areaCell weighting is a deferred refinement on the
+        quasi-uniform SCVT).
         """
         from mpi4py import MPI as _MPI
         vl = self._voronoi_layout
         om_c = vl.owned_mask_cells          # (n_local_cells,) bool
         om_e = vl.owned_mask_edges          # (n_local_edges,) bool
-        nlev = T_data.shape[-1]
         T_owned = jnp.where(om_c[:, None], T_data, 0.0)
         ps_owned = jnp.where(om_c, p_s_data, 0.0)
         absu_owned = jnp.where(om_e[:, None], jnp.abs(u_data), 0.0)
@@ -5329,11 +5332,24 @@ class ModelDriver:
         finite_l = jnp.all(jnp.isfinite(T_owned))
         cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
                      if cwv_field is not None else jnp.asarray(0.0))
+        # Pressure-weighted mean T (sum T*dp / sum dp; equal cell weight —
+        # the quasi-uniform SCVT makes areaCell weighting a negligible
+        # refinement, and the pre-fix convention was equal-cell too), owned
+        # cells only: an unweighted level mean is coordinate-dependent
+        # (stretched hybrid grids overstate it by ~+9 K vs sigma on the same
+        # state; quantified 2026-07-23), which made hybrid-vs-sigma
+        # stability curves incomparable.  Mirrors the serial day-line
+        # diagnostic.  The where() wraps the PRODUCT so a non-finite halo
+        # p_s cannot leak NaN through 0*NaN (codex F-B6).
+        _p_half_d = self.sigma.pressure_at_half(p_s_data)
+        _dp_d = _p_half_d[..., 1:] - _p_half_d[..., :-1]
+        Tdp_sum_l = jnp.sum(jnp.where(om_c[:, None], T_data * _dp_d, 0.0))
+        dp_sum_l = jnp.sum(jnp.where(om_c[:, None], _dp_d, 0.0))
         # One device→host transfer for all local reductions.
         _loc = np.asarray(jnp.stack([
-            jnp.sum(T_owned), jnp.sum(ps_owned), jnp.max(absu_owned),
+            Tdp_sum_l, jnp.sum(ps_owned), jnp.max(absu_owned),
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
-            cwv_sum_l.astype(T_data.dtype),
+            cwv_sum_l.astype(T_data.dtype), dp_sum_l,
         ]))
         comm = _MPI.COMM_WORLD
         # THREE batched buffer allreduces instead of eight scalar pickle
@@ -5341,13 +5357,14 @@ class ModelDriver:
         # collective; at multi-node rank counts the per-diag latency is
         # 8x a single round for no reason).  The finite flag (as a float)
         # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
-        _sums = np.array([_loc[0], _loc[1], _loc[6]], dtype=np.float64)
+        _sums = np.array([_loc[0], _loc[1], _loc[6], _loc[7]],
+                         dtype=np.float64)
         _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
         _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
         comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
         comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
         comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
-        g_sum_T, g_sum_ps, g_sum_cwv = (float(v) for v in _sums)
+        g_sum_Tdp, g_sum_ps, g_sum_cwv, g_sum_dp = (float(v) for v in _sums)
         g_max_u, g_T_max = (float(v) for v in _maxs)
         g_T_min, g_finite_min = (float(v) for v in _mins)
         g_finite = bool(g_finite_min > 0.5)
@@ -5356,7 +5373,7 @@ class ModelDriver:
             self._mpas_g_n_cells = comm.allreduce(
                 int(vl.partition.n_owned_cells), op=_MPI.SUM)
         g_n_cells = self._mpas_g_n_cells
-        mean_T = g_sum_T / (g_n_cells * nlev)
+        mean_T = g_sum_Tdp / max(g_sum_dp, 1e-30)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
@@ -5720,6 +5737,13 @@ class ModelDriver:
                     # proven-stable intervention (40/40 + multi-month pilots).
                     # So on MPAS the flag is applied post-step below; the
                     # coupled path (physics_pipeline) still applies it in-scheme.
+                    # The float trigger/heating-cap OVERRIDES are threaded here
+                    # so the post-step reads below pick them up (the post-step
+                    # drain reads the scheme sub-config, not ExperimentConfig).
+                    hard_sat_adjust_threshold=getattr(
+                        cfg, "hard_sat_adjust_threshold", None),
+                    hard_sat_max_heating_K=getattr(
+                        cfg, "hard_sat_max_heating_K", None),
                 )
             })
         # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
@@ -5738,6 +5762,12 @@ class ModelDriver:
                 "use a warm-rain scheme (kessler, seifert_beheng, morrison, "
                 "thompson, p3) or drop --hard-saturation-adjustment."
             )
+        # _hsub already carries any --hard-sat-adjust-threshold /
+        # --hard-sat-max-heating-k ExperimentConfig overrides: they are
+        # threaded through apply_microphysics_experiment_flags above (the
+        # day-137 drain-capacity lever; the --params route cannot reach this
+        # lane's micro sub-config, which is built here rather than in the
+        # flattened atm scalar map).
         _hard_sat_threshold = (
             _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
         _hard_sat_max_heating = (
@@ -5778,7 +5808,7 @@ class ModelDriver:
                 # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
-            convection=ConvectionConfig(scheme=cfg.convection),
+            convection=convection_config_for(cfg),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
@@ -5835,13 +5865,25 @@ class ModelDriver:
         _f_land_cells = None
         if self._f_land is not None:
             _f_land_cells = jnp.asarray(self._f_land).reshape(-1)
-        if (_land_beta != 1.0 or _land_lapse_K_m > 0.0) \
-                and _f_land_cells is None:
-            raise ValueError(
-                "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
-                "fraction, but none was loaded (no --topography / land "
-                "mask source) — the knobs would be silently inert."
-            )
+        if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
+            # Under MPI self._f_land is the RANK-LOCAL (owned+halo) field; an
+            # ocean-only rank must not falsely abort a run whose GLOBAL mask
+            # has land (codex F-C2).  The logical-OR allreduce is collective
+            # and every rank computes the same verdict, so the raise (or
+            # not) is deadlock-free.
+            _has_land = (_f_land_cells is not None
+                         and bool(jnp.any(_f_land_cells > 0.0)))
+            if self._voronoi_layout is not None:
+                from mpi4py import MPI as _MPI
+                _has_land = bool(
+                    _MPI.COMM_WORLD.allreduce(_has_land, op=_MPI.LOR))
+            if not _has_land:
+                raise ValueError(
+                    "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
+                    "fraction, but none was loaded or it is all-zero "
+                    "globally (flat / ocean-only topography) — the knobs "
+                    "would be silently inert."
+                )
         if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
             logger.info(
                 "  MPAS land boundary: lapse=%.2f K/km, beta=%.2f "
@@ -5976,8 +6018,15 @@ class ModelDriver:
                 _ts = blend_surface_temperature(
                     jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
                 if _lapse_z is not None:
+                    # Cast the storage-dtype (possibly f32) statics to the
+                    # anchor dtype so the correction is formed at anchor
+                    # precision (mirrors the turbulence-path cast).  Where
+                    # f_land and sic overlap (elevated icy coasts) the lapse
+                    # cools the blended anchor's land fraction too —
+                    # directionally harmless (see codex F5).
                     _ts = land_lapse_adjusted_surface_temperature(
-                        _ts, _f_land_cells, _lapse_z, _land_lapse_K_m)
+                        _ts, _f_land_cells.astype(_ts.dtype),
+                        _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
@@ -6543,8 +6592,19 @@ class ModelDriver:
                 else:
                     # Serial / single-rank: fuse the reductions into one
                     # device→host transfer (each ``float()`` is a GPU stall).
+                    # mean T is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal
+                    # cell weight on the quasi-uniform SCVT): an unweighted
+                    # level mean is coordinate-dependent — the stretched
+                    # hybrid grid packs thin warm near-surface levels that
+                    # each get one equal vote, overstating the global mean
+                    # by +9.2 K vs sigma on the same state (quantified
+                    # 2026-07-23, hybrid-L20 day-8 ckpt), which made
+                    # hybrid-vs-sigma stability curves incomparable.
+                    _p_half_diag = self.sigma.pressure_at_half(p_s_data)
+                    _dp_diag = (_p_half_diag[..., 1:]
+                                - _p_half_diag[..., :-1])
                     _stats = jnp.stack([
-                        jnp.mean(T_data),
+                        jnp.sum(T_data * _dp_diag) / jnp.sum(_dp_diag),
                         jnp.mean(p_s_data),
                         jnp.max(jnp.abs(u_data)),
                         jnp.min(T_data),
@@ -7000,7 +7060,7 @@ class ModelDriver:
                     orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
-                convection=ConvectionConfig(scheme=cfg.convection),
+                convection=convection_config_for(cfg),
                 turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
                 gravity_wave_drag=GravityWaveDragConfig(

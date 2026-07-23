@@ -163,10 +163,24 @@ def test_atm_scalar_map_is_pipeline_threaded():
         "CloudConfig": {"cloud_scheme": "sundqvist"},
         "SBMConfig": {"convection": "sbm", "microphysics": "kessler"},
         "BechtoldConfig": {"convection": "bechtold", "microphysics": "kessler"},
+        "TiedtkeConfig": {"convection": "tiedtke", "microphysics": "kessler"},
+        # warm-rain hard-saturation-adjustment overrides: activate each scheme
+        # so _resolve_microphysics threads the flat scalar into its sub-config.
+        "KesslerConfig": {"microphysics": "kessler"},
+        "MorrisonConfig": {"microphysics": "morrison"},
+        "P3Config": {"microphysics": "p3"},
+        "SeifertBehengConfig": {"microphysics": "seifert_beheng"},
+        "ThompsonConfig": {"microphysics": "thompson"},
     }
     resolved_attr = {
         "SBMConfig": "convection_config",
         "BechtoldConfig": "convection_config",
+        "TiedtkeConfig": "convection_config",
+        "KesslerConfig": "micro_config",
+        "MorrisonConfig": "micro_config",
+        "P3Config": "micro_config",
+        "SeifertBehengConfig": "micro_config",
+        "ThompsonConfig": "micro_config",
     }
     sentinel = 0.123456789
     for qname, ec_field in build_atm_scalar_param_map().items():
@@ -190,8 +204,15 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 conv_cloud_max=getattr(pipe, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     pipe, "_cloud_conv_cloud_condensate", None),
+                cloud_inhomogeneity_factor=getattr(
+                    pipe, "_cloud_inhomogeneity_factor", None),
+                cloud_optics_inhomogeneity=getattr(
+                    pipe, "_cloud_optics_inhomogeneity", None),
+                cloud_fsd=getattr(pipe, "_cloud_fsd", None),
                 p_xr=getattr(pipe, "_cloud_p_xr", None),
                 alpha_xr=getattr(pipe, "_cloud_alpha_xr", None),
+                diagnostic_condensate_scheme=getattr(
+                    pipe, "_cloud_diagnostic_condensate_scheme", None),
                 adiabatic_lwc_rate=getattr(
                     pipe, "_cloud_adiabatic_lwc_rate", None))
             got = getattr(cc, m.field)
@@ -236,6 +257,27 @@ def test_atm_scalar_map_has_no_under_claim():
         ("BechtoldConfig", "bechtold_", {"convection": "bechtold",
                                          "microphysics": "kessler"},
          lambda pipe, field: getattr(pipe.convection_config, field, None)),
+        # Tiedtke shares the UNPREFIXED autoconv_* flat scalars with Bechtold
+        # (one ExperimentConfig scalar serves whichever mass-flux scheme is
+        # active), so its convention prefix is empty.
+        ("TiedtkeConfig", "", {"convection": "tiedtke",
+                               "microphysics": "kessler"},
+         lambda pipe, field: getattr(pipe.convection_config, field, None)),
+        # Warm-rain micro families: their threaded flat scalars carry the SAME
+        # name as the scheme field (hard_sat_adjust_threshold /
+        # hard_sat_max_heating_K), so the convention prefix is empty — the
+        # ec_lower lookup below simply skips micro fields with no same-named
+        # ExperimentConfig scalar.
+        ("KesslerConfig", "", {"microphysics": "kessler"},
+         lambda pipe, field: getattr(pipe.micro_config, field, None)),
+        ("MorrisonConfig", "", {"microphysics": "morrison"},
+         lambda pipe, field: getattr(pipe.micro_config, field, None)),
+        ("P3Config", "", {"microphysics": "p3"},
+         lambda pipe, field: getattr(pipe.micro_config, field, None)),
+        ("SeifertBehengConfig", "", {"microphysics": "seifert_beheng"},
+         lambda pipe, field: getattr(pipe.micro_config, field, None)),
+        ("ThompsonConfig", "", {"microphysics": "thompson"},
+         lambda pipe, field: getattr(pipe.micro_config, field, None)),
     ]
     # Companion drift-guard: the family list scanned below must exactly match
     # the config classes present in the verified allowlist map.  The selector /

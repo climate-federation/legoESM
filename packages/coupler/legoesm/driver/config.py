@@ -613,13 +613,20 @@ class ExperimentConfig(NamedTuple):
     # vertical vapour transport -- the in-scheme placement cannot correct the
     # per-step transport spike within the dt window (it detonated at day 24),
     # while the post-step correction is the proven-stable intervention.  The
-    # float trigger + heating cap use the per-scheme __param_spec__ defaults
-    # (1.1, 5 K -- matching the validated configuration); like all atmosphere
-    # microphysics params they are calibratable via the SCM-RCE training path,
-    # NOT the run_amip/run_coupled --params loader (they are not routable onto
-    # ExperimentConfig).  Default OFF => the moist path is byte-identical to the
-    # smooth-only scheme.
+    # float trigger + heating cap default to the per-scheme __param_spec__
+    # values (1.1, 5 K -- matching the validated configuration) and are
+    # overridable via the flat scalars below (threaded through
+    # apply_microphysics_experiment_flags on BOTH placement paths; routed for
+    # --params via _ATM_SCALAR_PARAM_MAP -- the 2026-07-23 day-137 summer-
+    # regime tuning need).  Default OFF => the moist path is byte-identical to
+    # the smooth-only scheme.
     hard_saturation_adjustment: bool = False
+    # Optional overrides of the hard-saturation-adjustment trigger + per-step
+    # heating cap (None = per-scheme __param_spec__ defaults).  Setting either
+    # without hard_saturation_adjustment=True is refused (silently-inert
+    # configuration); bounds follow the scheme __param_spec__.
+    hard_sat_adjust_threshold: float | None = None   # RH trigger, q_v > thr*q_sat
+    hard_sat_max_heating_K: float | None = None      # per-step latent-heating cap [K]
 
     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
     # updraft precipitation).  A value >0 diverts that fraction of the
@@ -1730,7 +1737,14 @@ class ExperimentConfig(NamedTuple):
         # there — accepting those flags on MPAS ran a 60-day A/B against a
         # byte-identical twin (2026-07-23).  Conversely the MPAS land boundary
         # knobs are consumed only by the MPAS lane.
-        _is_mpas = d.discretization == "mpas"
+        # Lane detection keys on BOTH fields: the _run_mpas dispatch actually
+        # keys on grid_type (any Voronoi alias), and discretization stays
+        # consistent only via run_amip's postprocessor; a mismatched pair is
+        # fail-closed at the component factory, but the guard here must not
+        # emit a wrong-lane message for grid_type-keyed configs (codex F4,
+        # alias set via normalize_grid_type per codex F-B3).
+        _is_mpas = (d.discretization == "mpas"
+                    or normalize_grid_type(g.grid_type) == "mpas")
         if _is_mpas:
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
@@ -1742,6 +1756,34 @@ class ExperimentConfig(NamedTuple):
                         "knobs instead: mpas_land_lapse_K_per_km / "
                         "mpas_land_beta."
                     )
+            # Inert-corner rejection (codex F1-F3): each knob needs the
+            # machinery it modifies to actually be on.
+            if (self.mpas_land_lapse_K_per_km > 0.0
+                    and self.radiation == "none"):
+                errors.append(
+                    "mpas_land_lapse_K_per_km adjusts the SST-forcing "
+                    "surface anchor, which is only built when radiation != "
+                    "'none' — the knob would be silently inert."
+                )
+            if self.mpas_land_beta != 1.0 and self.turbulence == "none":
+                errors.append(
+                    "mpas_land_beta throttles the turbulence surface "
+                    "humidity; turbulence='none' has no surface latent flux "
+                    "to throttle — the knob would be silently inert."
+                )
+            # flat topography yields all-zero f_land UNLESS an explicit land
+            # mask overrides it (codex F-B2); the driver's runtime all-zero
+            # guard remains authoritative for degenerate mask files.
+            if ((self.mpas_land_lapse_K_per_km > 0.0
+                 or self.mpas_land_beta != 1.0)
+                    and self.topography == "flat"
+                    and not self.land_mask_path):
+                errors.append(
+                    "mpas_land_lapse_K_per_km/mpas_land_beta need a land "
+                    "fraction, but topography='flat' (with no land-mask "
+                    "file) yields an all-zero f_land — the knobs would "
+                    "change nothing."
+                )
         else:
             if self.mpas_land_lapse_K_per_km != 0.0 or self.mpas_land_beta != 1.0:
                 errors.append(
@@ -1762,6 +1804,45 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"mpas_land_beta (land evaporation efficiency) must be finite "
                 f"in [0, 1]; got {self.mpas_land_beta!r}."
+            )
+        # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
+        # The float overrides only act when the boolean gate is on; bounds
+        # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,
+        # (0.5, 50) K heating cap).
+        for _hs_name, _hs_val, _hs_lo, _hs_hi in (
+                ("hard_sat_adjust_threshold",
+                 self.hard_sat_adjust_threshold, 1.0, 2.0),
+                ("hard_sat_max_heating_K",
+                 self.hard_sat_max_heating_K, 0.5, 50.0)):
+            if _hs_val is None:
+                continue
+            if not self.hard_saturation_adjustment:
+                errors.append(
+                    f"{_hs_name}={_hs_val!r} requires "
+                    "hard_saturation_adjustment=True (the override would be "
+                    "silently inert). Add --hard-saturation-adjustment or "
+                    "drop the override."
+                )
+            if not (math.isfinite(_hs_val) and _hs_lo <= _hs_val <= _hs_hi):
+                errors.append(
+                    f"{_hs_name} must be finite in [{_hs_lo}, {_hs_hi}] "
+                    f"(scheme __param_spec__ bounds); got {_hs_val!r}."
+                )
+        # The activation gate (and thus any override) is silently inert unless
+        # the selected microphysics is a warm-rain scheme carrying the field:
+        # microphysics="none" early-returns (None, None) in _resolve_microphysics
+        # / the MPAS post-step drain before the flag is ever read, so the gate
+        # would do nothing.  Reject it at config time (codex F3) rather than let
+        # it silently no-op.  Same scheme set as the fail-loud runtime raise in
+        # microphysics/config.apply_microphysics_experiment_flags.
+        _warm_rain_micro = (
+            "kessler", "seifert_beheng", "morrison", "thompson", "p3")
+        if (self.hard_saturation_adjustment
+                and self.microphysics not in _warm_rain_micro):
+            errors.append(
+                "hard_saturation_adjustment requires a warm-rain microphysics "
+                f"scheme {_warm_rain_micro}; got microphysics="
+                f"{self.microphysics!r} (the guard would be silently inert)."
             )
         # gs_max is a physical conductance [mol/m2/s]: must be finite and
         # strictly positive (nan/<=0 would zero or NaN the whole land latent
