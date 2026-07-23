@@ -509,6 +509,13 @@ def build_jra55_cache(
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
+    # Clamp src/target lat edges into [-pi/2, pi/2]: uniform-spacing edge
+    # inference from Gaussian JRA55 latitudes lands the outer edge off the
+    # pole (its sin caps below 1), which would falsely trip
+    # require_full_coverage on legitimate data. The clamp is MANDATORY for
+    # the coverage flag below. _grid_edges_from_centers returns RADIANS.
+    src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
+    target_lat_edges = np.clip(config.target_lat_edges, -np.pi / 2, np.pi / 2)
 
     # Periodic longitude wrap: the source grid may not cover the full
     # [0°, 360°] range of the target (e.g. JRA55 TL319 at 640 points
@@ -527,9 +534,14 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
+    # require_full_coverage=True: lat edges clamped to the pole above and the
+    # one-sided ghost column (added when the ~360 deg source under-reaches the
+    # target seam) closes the lon wrap, so any residual deficit is a real
+    # partial-coverage source -> raise loudly. Host-side; no AD/JIT impact.
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
-        config.target_lat_edges, config.target_lon_edges,
+        target_lat_edges, config.target_lon_edges,
+        require_full_coverage=True,
     )
 
     # Allocate output arrays on the cache axis.

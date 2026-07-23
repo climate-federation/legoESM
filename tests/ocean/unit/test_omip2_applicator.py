@@ -781,3 +781,55 @@ def test_no_full_host_convert_guard_is_not_vacuous():
     # ... while the sliced surface child converts fine and is the right slab.
     child = np.asarray(guard[..., 0])
     assert child.shape == (4, 5)
+
+
+def test_conservative_regrid_seam_full_coverage_high_ratio():
+    """A coarse dst cell that STRADDLES the 0/360 seam (dst 8x wider than
+    src in lon, so a single ghost cannot span its half-width) must get full
+    source coverage: a constant source regrids to the same constant even in
+    the seam-straddling column. RED under the old single-ghost pad (seam
+    cell weight-sum < 1 -> constant returns ~0.625 there); GREEN with
+    ceil(dd/ds) ghosts."""
+    from legoesm.ocean.coupler.omip2_applicator import (
+        _conservative_regrid_to_latlon,
+    )
+    # src 8x deg-finer than dst in lon (ratio 8 so 1 ghost under-covers).
+    # Latitudes ASCENDING (south->north): compute_overlap_weights requires
+    # strictly-increasing edges (see _check_edges).
+    n_src_lat, n_src_lon = 8, 64
+    half = 90.0 / n_src_lat
+    src_lat = np.linspace(-90.0 + half, 90.0 - half, n_src_lat)
+    half_lon = 180.0 / n_src_lon
+    src_lon = np.linspace(half_lon, 360.0 - half_lon, n_src_lon)
+    # dst centred ON the seam: first centre at 0 -> cell [-22.5, 22.5]
+    # straddles the 360/0 wrap. dd = 45, ds = 5.625 -> dd/ds = 8.
+    n_dst_lat, n_dst_lon = 4, 8
+    dhalf = 90.0 / n_dst_lat
+    dst_lat = np.linspace(-90.0 + dhalf, 90.0 - dhalf, n_dst_lat)
+    dd = 360.0 / n_dst_lon
+    dst_lon = np.linspace(0.0, 360.0 - dd, n_dst_lon)
+    field = np.ones((n_src_lat, n_src_lon))
+    out = _conservative_regrid_to_latlon(
+        field, src_lat, src_lon, dst_lat, dst_lon,
+    )
+    np.testing.assert_allclose(out, 1.0, atol=1e-6)
+
+
+def test_conservative_regrid_raises_on_partial_source():
+    """A genuinely non-global source (spans only ~180 deg lon) must RAISE
+    via require_full_coverage rather than silently under-cover."""
+    from legoesm.ocean.coupler.omip2_applicator import (
+        _conservative_regrid_to_latlon,
+    )
+    n_src_lat, n_src_lon = 8, 16
+    half = 90.0 / n_src_lat
+    src_lat = np.linspace(90.0 - half, -90.0 + half, n_src_lat)
+    # centres only across [5, 175] -> source cannot cover a global dst
+    src_lon = np.linspace(5.0, 175.0, n_src_lon)
+    dst_lat = np.linspace(67.5, -67.5, 4)
+    dst_lon = np.linspace(22.5, 337.5, 8)
+    field = np.ones((n_src_lat, n_src_lon))
+    with pytest.raises(ValueError):
+        _conservative_regrid_to_latlon(
+            field, src_lat, src_lon, dst_lat, dst_lon,
+        )
