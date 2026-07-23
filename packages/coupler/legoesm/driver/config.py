@@ -787,6 +787,14 @@ class ExperimentConfig(NamedTuple):
     use_multilayer_land: bool = False
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
+    # CLM-ML only: derive each column's PFT from the surface map's DOMINANT PFT
+    # (argmax of pft_fractions) instead of one pft_clm for all columns -> mixed-PFT
+    # heterogeneous columns, compiled at O(#distinct structures) by the group-by-
+    # structure canopy scan.  Opt-in (default False = single pft_clm, no change): the
+    # dominant-PFT map moves bare/other columns off pft_clm, so a faithful run wants
+    # the full CLM PFT parameterisation validated.  Ignored unless land_surface_scheme
+    # == 'clm_ml' (+ use_multilayer_land).
+    clm_ml_use_surfdata_pft: bool = False
     multilayer_soil_texture: str = "loam"  # van-Genuchten preset
     # Strategy B: hydrate MultiLayerLandState from an ERA5 land NetCDF
     # at IC time instead of the strategy-A uniform 0.5*theta_sat fill.

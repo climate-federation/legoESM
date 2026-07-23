@@ -646,3 +646,59 @@ def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
     # the jitted graph consumed the TRACED param (not the closure-baked attribute)
     assert not np.allclose(np.asarray(out_base[sw_net_sfc]),
                            np.asarray(out_bright[sw_net_sfc]))
+
+
+def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path):
+    """The coupled driver with clm_ml_use_surfdata_pft=True gives each column its
+    DOMINANT PFT (argmax of the surface map's pft_fractions), so the warm CLM-ML
+    grid_info has MULTIPLE structure groups -> the group-by-structure scan engages.
+
+    Uses a MIXED-PFT synthetic surface map (half columns dominant PFT 7, half PFT 11).
+    Asserts (a) driver.physics.clm_ml_pft_per_col is the mixed {7,11} derivation, and
+    (b) the extracted per-column grid_info spans >=2 distinct (ncan,ntop,nbot,pft)
+    structures.  This is the end-to-end wiring of the per-column-PFT / group-by-
+    structure work down through the coupled land driver."""
+    import pytest
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
+    import inspect as _inspect
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _m
+    if "cos_zenith_device" not in _inspect.signature(_m.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
+    import legoesm.land.clm_surface_map as _clm
+
+    def _mixed_pft_surface_map(path, lat_deg, lon_deg):
+        n = int(np.asarray(lat_deg).size)
+        pft = np.zeros((n, 17))
+        half = max(1, n // 2)
+        pft[:half, 7] = 1.0    # dominant PFT 7
+        pft[half:, 11] = 1.0   # dominant PFT 11
+        o = np.ones(n)
+        return dict(
+            pft_fractions=jnp.asarray(pft),
+            theta_wp=jnp.asarray(0.12 * o), theta_fc=jnp.asarray(0.30 * o),
+            glacier_frac=jnp.asarray(np.zeros(n)),
+            pct_sand=jnp.asarray(40.0 * o), pct_clay=jnp.asarray(20.0 * o),
+            theta_r=jnp.asarray(0.05 * o), theta_sat=jnp.asarray(0.45 * o),
+            alpha_vg=jnp.asarray(2.0 * o), n_vg=jnp.asarray(1.4 * o),
+            K_sat=jnp.asarray(1.0e-5 * o))
+
+    _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(_clm, "load_clm_surface", _mixed_pft_surface_map)
+
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                clm_ml_use_surfdata_pft=True,
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    ppc = driver.physics.clm_ml_pft_per_col
+    assert ppc is not None, "clm_ml_pft_per_col must be set when use_surfdata_pft=True"
+    ppc = np.asarray(ppc)
+    assert set(np.unique(ppc).tolist()) == {7, 11}, (
+        f"dominant-PFT derivation should give mixed {{7, 11}}, got {set(np.unique(ppc).tolist())}")
+
+    gi = driver.physics.clm_ml_grid_info
+    sigs = {(int(g.ncan), int(g.ntop), int(g.nbot), int(g.pft)) for g in gi}
+    assert len(sigs) >= 2, (
+        f"mixed PFT must yield >=2 structure groups (group-by-structure engages), got {sigs}")

@@ -169,6 +169,7 @@ def step_multilayer_land_with_diagnostics(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -186,6 +187,7 @@ def step_multilayer_land_with_diagnostics(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
         clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         soil_frozen_fraction=soil_frozen_fraction)
@@ -260,6 +262,7 @@ def step_multilayer_land(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -284,6 +287,7 @@ def step_multilayer_land(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
         clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         soil_frozen_fraction=soil_frozen_fraction)
@@ -348,6 +352,7 @@ def _step_multilayer_land_impl(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -646,6 +651,7 @@ def _step_multilayer_land_impl(
             doy=doy,
             lai_override=LAI_override,
             grid_info=clm_ml_grid_info,
+            pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         )

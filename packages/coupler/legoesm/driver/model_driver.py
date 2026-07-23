@@ -1764,7 +1764,9 @@ class ModelDriver:
             # rewrite, S3, removes the unroll).  MPI/SPMD is refused at the scatter
             # (the 1-based mlcanopy array does not match the per-column remap).
             from legoesm.land.canopy.config import CLMMLCanopyConfig
-            _surface_scheme = CLMMLCanopyConfig()
+            _surface_scheme = CLMMLCanopyConfig(
+                use_surfdata_pft=bool(getattr(
+                    self.config, "clm_ml_use_surfdata_pft", False)))
         else:
             raise ValueError(
                 f"Unknown land_surface_scheme {_scheme_name!r}; "
@@ -1974,6 +1976,27 @@ class ModelDriver:
                 p_lowest=0.99e5 * _o, p_surface=1.0e5 * _o, rho_lowest=1.2 * _o,
                 cos_zenith=0.5 * _o, co2_ppmv=400.0 * _o,
                 has_radiation=_o, has_precipitation=_o)
+            # Per-column PFT: OPT-IN (use_surfdata_pft) => each column's DOMINANT PFT
+            # (argmax of the surface map's pft_fractions), a concrete (ncol,) int
+            # array -> mixed-PFT / heterogeneous columns that the group-by-structure
+            # scan compiles at O(#distinct structures).  Default (flag off) => None ->
+            # the single pft_clm for all columns (byte-identical to before).  Stored on
+            # the pipeline so the jitted coupled step re-installs the SAME per-column
+            # topology; it also drives the warm-start below (where patch.itype is set).
+            _clm_ml_pft_per_col = None
+            if getattr(cfg.surface_scheme, "use_surfdata_pft", False):
+                _dom = np.asarray(
+                    surface_map["pft_fractions"]).argmax(axis=1).astype(np.int32)
+                # Surface CLM5 PFT axis (CLM5_PFT_NAMES) aligns with the MLpftcon
+                # canopy table for slots 0..15 (bare, trees, grasses incl c4_grass at
+                # 14, crop_c3==c3_crop at 15).  ONLY surface slot 16 (crop_c4) differs:
+                # MLpftcon 16 is c3_irrigated, NOT a C4 crop.  Cross-walk crop_c4 ->
+                # c3_crop (15) — the nearest CROP structure — rather than install the
+                # wrong (irrigated) canopy; the C4->C3 photosynthesis is the model's
+                # already-documented C4-as-C3 approximation (surface_params CLM5 table
+                # note), so no new physics is lost.  (codex: slot-16 axis mismatch.)
+                _clm_ml_pft_per_col = np.where(_dom == 16, 15, _dom).astype(np.int32)
+            self.physics.clm_ml_pft_per_col = _clm_ml_pft_per_col
             # Eager cold canopy step (grid_info=None, ncol>1 eager path): builds the
             # per-column vertical structure and a warm canopy_state.
             _warm_state, _, _ = step_multilayer_land(
@@ -1981,7 +2004,8 @@ class ModelDriver:
                 self.physics.land_ml_u_min, float(self.config.dycore.dt),
                 lat=self.physics.land_ml_lat,
                 carbon_state=self.physics.land_ml_carbon, doy=0.0,
-                land_params=params, clm_ml_grid_info=None)
+                land_params=params, clm_ml_grid_info=None,
+                clm_ml_pft_per_col=_clm_ml_pft_per_col)
             self._land_ml_state = self._land_ml_state._replace(
                 canopy_state=_warm_state.canopy_state)
             self.physics.clm_ml_grid_info = extract_clm_ml_grid_info(
@@ -3268,6 +3292,13 @@ class ModelDriver:
                     if getattr(self.physics, "land_ml_lat", None) is not None:
                         self.physics.land_ml_lat = _scatter_flat_columns(
                             self.physics.land_ml_lat, layout, n_tile)
+                    # Per-column CLM PFT (mixed-PFT columns) is a 0-based (global_ncol,)
+                    # vector like land_ml_lat -> scatter it to the rank's local columns
+                    # too, else the coupled local step would pass the GLOBAL-length
+                    # array into the (ncol,)-shape-checked pft_per_col (codex).
+                    if getattr(self.physics, "clm_ml_pft_per_col", None) is not None:
+                        self.physics.clm_ml_pft_per_col = _scatter_flat_columns(
+                            self.physics.clm_ml_pft_per_col, layout, n_tile)
                     if getattr(self.physics, "land_ml_params", None) is not None:
                         self.physics.land_ml_params = _map_flat_column_leaves(
                             self.physics.land_ml_params, n_tile, global_ncol,

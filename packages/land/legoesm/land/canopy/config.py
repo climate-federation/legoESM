@@ -779,6 +779,15 @@ class CLMMLCanopyConfig(NamedTuple):
     # where it is already proven correct.
     scan_columns: bool = True
 
+    # Derive each column's CLM PFT from the surface map's DOMINANT PFT
+    # (argmax of pft_fractions) instead of the single pft_clm for all columns.
+    # True => mixed-PFT / heterogeneous columns (a real biome distribution),
+    # which the group-by-structure scan compiles at O(#distinct structures).
+    # OPT-IN (default False keeps the single pft_clm — no behaviour change): the
+    # dominant-PFT map changes bare/other-PFT columns off pft_clm, so a faithful run
+    # wants the full CLM PFT parameterisation validated first.
+    use_surfdata_pft: bool = False
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 
