@@ -455,6 +455,36 @@ def test_clmml_mosaic_orchestration_area_weights(monkeypatch):
     np.testing.assert_array_equal(reverted, np.array([0, 1, 0, 0]))
 
 
+def test_two_leaf_mosaic_prognostic_orchestration(monkeypatch, tmp_path):
+    """Two-leaf outer-loop mosaic runs one prognostic column per tile with the
+    tile's ROOT DEPTH (deep tree vs shallow grass) and area-weights.  Stubs the
+    solve to check per-tile root-depth threading + area-weighting deterministically."""
+    import numpy as np
+    from legoesm.land.surface_scheme.patch_mosaic import savanna_two_patch
+    mod = _load_driver_module()
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5, n=8)
+    from legoesm.land.boundary_data.ec_site import read_ec_site_driver
+    d = read_ec_site_driver(driver_nc)
+    seen = []
+    def _stub(dd, cc, lc, u_min, nudge_tau_days=0.0, clmml_sai=0.5):
+        seen.append(round(float(lc.root_depth), 3))
+        k = len(seen)
+        base = np.full(4, float(k))
+        return base, base * 10, base * 100, base + 290, np.zeros(4), base, base, base
+    monkeypatch.setattr(mod, "_prognostic_fluxes", _stub)
+    m = savanna_two_patch(tree_frac=0.4, grass_fc4=0.0, tree_root_m=5.0,
+                          grass_root_m=0.5)
+    gpp, le, h, ts, rev, tsoil, swc, ustar = mod._two_leaf_mosaic_prognostic(
+        d, m, soil="default", bottom_bc="free_drainage", soil_depth_m=0.0,
+        k_sat_decay_m=0.0, soil_evap_resistance_exp=2.0, z_ref=10.0, texture=None,
+        interception=False, plant_wilting_point=None, stress_b0=False,
+        root_depth=2.0, u_min=1.0, nudge_tau_days=0.0)
+    assert seen == [5.0, 0.5]                       # tree deep, grass shallow
+    np.testing.assert_allclose(gpp, np.full(4, 0.4 * 1.0 + 0.6 * 2.0))
+    np.testing.assert_allclose(h, np.full(4, 0.4 * 100.0 + 0.6 * 200.0))
+
+
 def test_run_site_savanna_mosaic_diagnostic(tmp_path):
     """--mosaic savanna runs end-to-end in diagnostic mode with finite skill."""
     driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
@@ -472,12 +502,10 @@ def test_run_site_mosaic_rejects_bad_combos(tmp_path):
     with pytest.raises(ValueError):                      # unknown mosaic
         mod.run_site(driver_nc, "diagnostic", str(tmp_path / "a"), chunk=8,
                      mosaic="bogus")
-    with pytest.raises(ValueError):                      # two_leaf + prognostic
-        mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=8,
-                     mosaic="savanna", canopy="two_leaf")
     with pytest.raises(ValueError):                      # clmml + diagnostic
         mod.run_site(driver_nc, "diagnostic", str(tmp_path / "c"), chunk=8,
                      mosaic="savanna", canopy="clmml")
+    # (two_leaf + prognostic + savanna is now VALID — the outer-loop mosaic.)
 
 
 def test_clmml_turbulence_rejects_unknown(tmp_path):

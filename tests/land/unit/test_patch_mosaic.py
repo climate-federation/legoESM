@@ -38,6 +38,8 @@ def test_validate_accepts_unit_and_two_patch():
     (PatchSpec(frac=1.0, fc4=1.5),),                 # fc4 out of [0,1]
     (PatchSpec(frac=1.0, vcmax_c4_scale=-1.0),),     # negative scale
     (PatchSpec(frac=float("nan")),),                 # non-finite fraction
+    (PatchSpec(frac=1.0, root_depth_m=0.0),),        # zero root depth
+    (PatchSpec(frac=1.0, root_depth_m=-1.0),),       # negative root depth
 ])
 def test_validate_raises_on_bad_mosaic(patches):
     with pytest.raises(ValueError):

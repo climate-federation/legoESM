@@ -91,6 +91,12 @@ class PatchSpec(NamedTuple):
                       diagnostic stand-in for per-patch rooting (deep tree vs
                       shallow grass); <1 => drier patch.  The clip keeps the
                       scaled beta in [0, 1].
+    root_depth_m    : per-patch root-density e-folding depth [m] for the PROGNOSTIC
+                      outer-loop two-leaf mosaic (deep tree vs shallow grass — the
+                      real dry-season water-stress handoff).  ``None`` uses the
+                      site root depth.  Ignored by the diagnostic inner-loop
+                      (which prescribes a single ``w_frac_rz`` and has no soil
+                      column), where ``w_frac_rz_scale`` is the rooting stand-in.
     """
     frac: float
     lai_scale: float = 1.0
@@ -98,6 +104,7 @@ class PatchSpec(NamedTuple):
     vcmax_c3_scale: float = 1.0
     vcmax_c4_scale: float = 1.0
     w_frac_rz_scale: float = 1.0
+    root_depth_m: float | None = None
 
 
 class PatchMosaicConfig(NamedTuple):
@@ -127,6 +134,11 @@ class PatchMosaicConfig(NamedTuple):
                         f"patch {i}: {name} must be finite and >= 0, got {v}")
             if p.fc4 is not None and not (0.0 <= p.fc4 <= 1.0 and _finite(p.fc4)):
                 raise ValueError(f"patch {i}: fc4 must be in [0, 1], got {p.fc4}")
+            if p.root_depth_m is not None and (
+                    not (p.root_depth_m > 0.0) or not _finite(p.root_depth_m)):
+                raise ValueError(
+                    f"patch {i}: root_depth_m must be finite and > 0, "
+                    f"got {p.root_depth_m}")
             total += p.frac
         if abs(total - 1.0) > _FRAC_SUM_TOL:
             raise ValueError(
@@ -140,26 +152,35 @@ def _finite(v: float) -> bool:
 
 
 def savanna_two_patch(tree_frac: float = _DEFAULT_TREE_FRAC, *,
+                      grass_fc4: float = 1.0,
                       grass_vcmax_c4_scale: float = 1.0,
+                      grass_vcmax_c3_scale: float = 1.0,
                       tree_vcmax_c3_scale: float = 1.0,
                       grass_w_frac_rz_scale: float = 1.0,
-                      tree_w_frac_rz_scale: float = 1.0) -> PatchMosaicConfig:
-    """A 2-patch woody-savanna mosaic: a C3 tree overstory + a C4 grass understory.
+                      tree_w_frac_rz_scale: float = 1.0,
+                      tree_root_m: float | None = None,
+                      grass_root_m: float | None = None) -> PatchMosaicConfig:
+    """A 2-patch woody-savanna mosaic: a C3 tree overstory + a grass understory.
 
     ``tree_frac`` is the woody (tree) area fraction; the grass patch is the
-    residual ``1 - tree_frac``.  The patches keep the driver LAI by default
-    (``lai_scale=1``); the C4/C3 split and per-patch water-stress scales are the
-    savanna tuning knobs.  Defaults are a neutral starting point (no data-tuned
-    values are baked in — the real values await site validation).
+    residual ``1 - tree_frac``.  ``grass_fc4`` sets the grass photosynthetic
+    pathway: 1.0 for a C4-grass understory (tropical savanna, e.g. AU-How) or 0.0
+    for a C3-grass understory (Mediterranean savanna, e.g. US-Ton blue-oak /
+    C3-annual-grass).  The patches keep the driver LAI by default (``lai_scale=1``);
+    the pathway split and per-patch water-stress scales are the savanna tuning
+    knobs.  Defaults are a neutral starting point (no data-tuned values baked in).
     """
     if not (0.0 < tree_frac < 1.0):
         raise ValueError(f"tree_frac must be in (0, 1), got {tree_frac}")
     tree = PatchSpec(frac=tree_frac, fc4=0.0,
                      vcmax_c3_scale=tree_vcmax_c3_scale,
-                     w_frac_rz_scale=tree_w_frac_rz_scale)
-    grass = PatchSpec(frac=1.0 - tree_frac, fc4=1.0,
+                     w_frac_rz_scale=tree_w_frac_rz_scale,
+                     root_depth_m=tree_root_m)
+    grass = PatchSpec(frac=1.0 - tree_frac, fc4=grass_fc4,
+                      vcmax_c3_scale=grass_vcmax_c3_scale,
                       vcmax_c4_scale=grass_vcmax_c4_scale,
-                      w_frac_rz_scale=grass_w_frac_rz_scale)
+                      w_frac_rz_scale=grass_w_frac_rz_scale,
+                      root_depth_m=grass_root_m)
     return PatchMosaicConfig(patches=(tree, grass)).validate()
 
 

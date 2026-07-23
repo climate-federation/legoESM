@@ -304,15 +304,64 @@ def _clmml_mosaic_prognostic(d: ECSiteDriver, mosaic: ClmmlMosaicConfig, *,
             d, cc, lc, u_min, nudge_tau_days=nudge_tau_days, clmml_sai=clmml_sai)
         gpps.append(g); les.append(l); hs.append(h); tss.append(ts)
         revs.append(rev); tsoils.append(tsoil); swcs.append(swc); ustars.append(ustar)
+    return _aggregate_prognostic_tiles(
+        list(zip(gpps, les, hs, tss, revs, tsoils, swcs, ustars)), fracs)
 
-    def _aw(series):     # area-weight, or None if the tiles produced no diagnostic
+
+def _aggregate_prognostic_tiles(tile_results, fracs):
+    """Area-weight a list of per-tile ``_prognostic_fluxes`` 8-tuples into one grid
+    8-tuple ``(gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)``.
+
+    Flux / soil-state / ustar / skin-T series are area-weighted; ``reverted`` is the
+    per-step max (a step is reverted if ANY tile rolled it back).  A diagnostic that
+    is ``None`` on any tile aggregates to ``None`` (schema preserved).
+    """
+    cols = list(zip(*tile_results))     # [gpps, les, hs, tss, revs, tsoils, swcs, ustars]
+    def _aw(series):
         return None if any(s is None for s in series) \
             else area_weight_series(series, fracs)
+    revs = cols[4]
     reverted = None if any(r is None for r in revs) \
         else np.maximum.reduce([np.asarray(r) for r in revs])
-    return (area_weight_series(gpps, fracs), area_weight_series(les, fracs),
-            area_weight_series(hs, fracs), _aw(tss), reverted,
-            _aw(tsoils), _aw(swcs), _aw(ustars))
+    return (_aw(cols[0]), _aw(cols[1]), _aw(cols[2]), _aw(cols[3]),
+            reverted, _aw(cols[5]), _aw(cols[6]), _aw(cols[7]))
+
+
+def _two_leaf_mosaic_prognostic(d: ECSiteDriver, mosaic: "PatchMosaicConfig", *,
+                                soil: str, bottom_bc: str, soil_depth_m: float,
+                                k_sat_decay_m: float, soil_evap_resistance_exp: float,
+                                z_ref: float, texture, interception: bool,
+                                plant_wilting_point: float | None, stress_b0: bool,
+                                root_depth: float, u_min: float,
+                                nudge_tau_days: float):
+    """Two-leaf mosaic OUTER-loop (prognostic): one two-leaf column per tile with
+    its OWN rooting depth (deep tree vs shallow grass) → its own prognostic
+    water-stress, then area-weight.  This is the big-leaf analogue of the CLM-ML
+    outer-loop and, unlike the diagnostic INNER-loop mosaic (which shares one
+    prescribed ``w_frac_rz``), it captures the dry-season water-stress handoff.
+    Independent columns → no inter-patch water competition (documented v1).
+    """
+    fracs = [p.frac for p in mosaic.patches]
+    results = []
+    for p in mosaic.patches:
+        cc = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
+        rd = root_depth if p.root_depth_m is None else float(p.root_depth_m)
+        lc = _build_land_config(
+            cc, soil, bottom_bc, soil_depth_m, k_sat_decay_m=k_sat_decay_m,
+            soil_evap_resistance_exp=soil_evap_resistance_exp, root_depth=rd,
+            z_ref=z_ref, texture=texture, interception=interception,
+            plant_wilting_point=plant_wilting_point)
+        # Per-tile canopy params: pathway (fC4) + Vcmax scales; LAI scale.
+        dd = _scale_two_leaf_params(d, p.vcmax_c3_scale, p.vcmax_c4_scale, 1.0, 1.0)
+        cp = dd.canopy_params
+        if p.fc4 is not None:
+            cp = cp._replace(fC4=jnp.full_like(cp.fC4, float(p.fc4)))
+        if p.lai_scale != 1.0:
+            cp = cp._replace(LAI=cp.LAI * p.lai_scale)
+        dd = dd._replace(canopy_params=cp)
+        results.append(_prognostic_fluxes(
+            dd, cc, lc, u_min, nudge_tau_days=nudge_tau_days))
+    return _aggregate_prognostic_tiles(results, fracs)
 
 
 def _is_float_leaf(x) -> bool:
@@ -681,8 +730,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              stomatal_m_c3_scale: float | None = None,
              stomatal_m_c4_scale: float | None = None,
              mosaic: str = "none", tree_frac: float = 0.4,
-             savanna_grass_pft: int = 15, savanna_grass_root_m: float = 0.5
-             ) -> dict:
+             savanna_grass_pft: int = 15, savanna_grass_root_m: float = 0.5,
+             savanna_grass_fc4: float = 1.0) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -696,10 +745,9 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if mosaic not in ("none", "savanna"):
         raise ValueError(f"mosaic {mosaic!r} not supported (none|savanna)")
     if mosaic == "savanna":
-        if canopy == "two_leaf" and mode != "diagnostic":
-            raise ValueError(
-                "mosaic=savanna with --canopy two_leaf is diagnostic-only "
-                "(per-patch prognostic root-zone water stress is the CLM-ML path)")
+        # two_leaf: diagnostic -> INNER-loop mosaic (shares one prescribed
+        # w_frac_rz); prognostic -> OUTER-loop mosaic (per-tile rooting => per-tile
+        # water stress, the real dry-season handoff).  Both modes supported.
         if canopy == "clmml" and mode != "prognostic":
             raise ValueError(
                 "mosaic=savanna with --canopy clmml requires --mode prognostic")
@@ -802,7 +850,11 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # shallow-rooted.  Two-leaf -> inner-loop (diagnostic); CLM-ML -> outer-loop.
     if mosaic == "savanna":
         if canopy == "two_leaf":
-            mosaic_cfg = savanna_two_patch(tree_frac=tree_frac)
+            # tree tile keeps the site (deep) rooting; grass tile is shallow.  The
+            # per-tile root depth only bites in the prognostic OUTER-loop.
+            mosaic_cfg = savanna_two_patch(
+                tree_frac=tree_frac, grass_fc4=savanna_grass_fc4,
+                tree_root_m=float(root_depth), grass_root_m=savanna_grass_root_m)
         else:                                              # clmml (prognostic)
             clmml_mosaic = savanna_clmml_two_patch(
                 tree_frac=tree_frac, tree_pft=clm_pft, grass_pft=savanna_grass_pft,
@@ -813,6 +865,16 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if mode == "diagnostic":
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
                                               mosaic=mosaic_cfg)
+    elif mosaic_cfg is not None:
+        # Two-leaf prognostic OUTER-loop mosaic (per-tile rooting -> per-tile water
+        # stress).  Preserves the prognostic 8-tuple output schema.
+        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _two_leaf_mosaic_prognostic(
+            d, mosaic_cfg, soil=soil, bottom_bc=bottom_bc, soil_depth_m=soil_depth_m,
+            k_sat_decay_m=k_sat_decay_m,
+            soil_evap_resistance_exp=soil_evap_resistance_exp, z_ref=z_ref,
+            texture=texture, interception=interception,
+            plant_wilting_point=plant_wilting_point, stress_b0=stress_b0,
+            root_depth=float(root_depth), u_min=u_min, nudge_tau_days=nudge_tau_days)
     elif clmml_mosaic is not None:
         # CLM-ML outer-loop mosaic: run each tile as its own prognostic column and
         # area-weight (soil-state / ustar diagnostics area-weighted; reverted =
@@ -1016,8 +1078,12 @@ def main() -> int:
                     help="CLM PFT index for the grass tile of the CLM-ML savanna "
                          "mosaic (default 15 = C4 grass); tree tile uses --clm-pft")
     ap.add_argument("--savanna-grass-root-m", type=float, default=0.5,
-                    help="grass-tile root depth [m] for the CLM-ML savanna mosaic "
+                    help="grass-tile root depth [m] for the savanna mosaic "
                          "(shallow); the tree tile uses the site root depth")
+    ap.add_argument("--savanna-grass-fc4", type=float, default=1.0,
+                    help="grass-tile C4 fraction for the two-leaf savanna mosaic: "
+                         "1.0 = C4 grass (tropical savanna), 0.0 = C3 grass "
+                         "(Mediterranean, e.g. US-Ton)")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -1063,6 +1129,7 @@ def main() -> int:
                  mosaic=args.mosaic, tree_frac=args.tree_frac,
                  savanna_grass_pft=args.savanna_grass_pft,
                  savanna_grass_root_m=args.savanna_grass_root_m,
+                 savanna_grass_fc4=args.savanna_grass_fc4,
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,
