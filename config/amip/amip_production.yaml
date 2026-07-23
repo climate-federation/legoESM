@@ -144,8 +144,16 @@ sst_var: tosbcs
 sst_offset: 0.0
 sic_var: siconcbcs
 sic_scale: 0.01
-solar_source: file
+solar_source: spectral_file  # transient TSI + 14-band spectral SSI (2026-07-23
+                            # upgrade; was `file` = TSI-only since the first
+                            # campaign config — the spectral weights in the
+                            # swflux_14band file were never consumed). Reader
+                            # validated on the MPI-M file: SSI_frac -> 112
+                            # g-points, sum=1, band rotation `auto` (#322 fix);
+                            # TSI reproduces solar cycles 21/22 (~1.2 W/m^2).
+                            # Weights reach rrtmg/rrtmgp only (gray: TSI only).
 solar_tsi_var: TSI
+solar_spectral_var: SSI_frac
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
