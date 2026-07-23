@@ -1895,6 +1895,13 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     _sg_taper = adjoint_stabilization == "stop_gradient_taper"
 
     def _slope(num, dz=drho_dz_w):
+        # Sign-preserving denominator floor: a fully-dry / unstratified
+        # column has drho_dz == 0 exactly (0/0 -> NaN poisons the flux even
+        # through masked branches). Floor at the STABLE-limit sign (drho_dz
+        # < 0 for stable stratification, see the dz_half note above); wet
+        # stratified columns (|dz| >> 1e-20) are bit-identical. Mirrors
+        # NEMO's ldfslp MIN(zbu, -eps·|zau|) denominator capping.
+        dz = jnp.where(jnp.abs(dz) > 1e-20, dz, -1e-20)
         s = -num / dz
         s = jnp.clip(s, -S_max, S_max) if clip else s
         return jax.lax.stop_gradient(s) if _sg_slopes else s
@@ -2279,6 +2286,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     _clip_slope = (slope_density != "neutral") or (slope_limit == "nemo_cap")
 
     def _uvslope(num, dz):
+        # Sign-preserving denominator floor (same rationale as _slope above:
+        # dry/unstratified columns give exact 0/0 -> NaN; wet stratified
+        # columns bit-identical; NEMO ldfslp denominator-capping analogue).
+        dz = jnp.where(jnp.abs(dz) > 1e-20, dz, -1e-20)
         s = -num / dz
         s = jnp.clip(s, -S_max, S_max) if _clip_slope else s
         # Adjoint stabilization: frozen-coefficient slopes (primal-invisible).
