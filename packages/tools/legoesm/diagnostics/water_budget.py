@@ -28,17 +28,21 @@ supplies; when the caller RECONSTRUCTS the ocean wet-mask gating, a small
 cross-grid conservative-remap residual / fractional-coast wet fraction sits at
 its floor and the balanced all-wet case is exactly zero.
 
-RANK-LOCAL CAVEAT
------------------
-``coupled_esm_driver`` has ZERO MPI awareness; every reduction fed to these
-helpers is a rank-local area reduction (matching the existing ``sst_mean``
-diagnostic in the same driver).  A SHARDED coupled run MUST route the
-underlying SUM through ``global_sum_mpi`` (the only AD-safe collective)
-before the residual is physically meaningful -- advective moisture divergence
-moves water across rank boundaries, so a per-rank water budget does not
-close.  Callers therefore label the emitted diagnostic keys with an explicit
-``_ranklocal`` suffix.  ``global_max_mpi``/``global_min_mpi`` are not AD-safe
-and are deliberately not used.
+MULTI-RANK REDUCTION
+--------------------
+Every area-integral SUM in these helpers is routed through
+``global_sum_if_distributed`` (the only AD-safe collective, ``allreduce(SUM)``
+with full VJP): a no-op returning the rank-local value when serial (BYTE-
+IDENTICAL), an ``allreduce(SUM)`` when a shard/Voronoi decomposition is armed.
+So a SHARDED coupled run gets a globally-closed residual -- advective moisture
+divergence moves water across rank boundaries, so a per-rank budget would not
+close.  This is CONTINGENT on each field being a DISJOINT INTERIOR shard (no
+replication -> N-count, no halo inclusion -> boundary double-count) over a
+shared ``COMM_WORLD`` rank set; certified by the MPI gate
+``tests/distributed/test_water_budget_global_reduction_mpi.py`` (np1 residual
+== np2 residual on a small coupled config), never by a login-node run.
+``global_max_mpi``/``global_min_mpi`` are not AD-safe and are deliberately not
+used.
 """
 
 from __future__ import annotations
@@ -46,18 +50,58 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from legoesm.diagnostics.energy_budget import area_weighted_mean
+from legoesm.parallel.reductions import (
+    global_sum_if_distributed,
+    is_multi_process,
+)
 
 from legoesm import constants
 
 
-def area_integral_ranklocal(field: jax.Array, area: jax.Array) -> jax.Array:
-    """Rank-local area integral ``sum_i field_i * area_i``.
+def area_integral(field: jax.Array, area: jax.Array) -> jax.Array:
+    """Area integral ``sum_i field_i * area_i``, globally reduced when sharded.
 
     Units are ``[field-units] * m^2`` (e.g. a ``kg/m^2/s`` flux integrates to
-    ``kg/s``).  Rank-local by construction (see the module docstring): a
-    sharded run must replace the ``jnp.sum`` with ``global_sum_mpi``.
+    ``kg/s``).  The local partial sum is routed through
+    :func:`legoesm.parallel.reductions.global_sum_if_distributed` -- the only
+    AD-safe reduction (``allreduce(SUM)`` with full VJP).  A SINGLE-process run
+    pays no reduction and the value is BYTE-IDENTICAL to the rank-local integral;
+    a SHARDED coupled run gets the true GLOBAL integral so the water budget
+    closes across ranks (advective moisture divergence crosses rank boundaries).
+    Correctness under sharding REQUIRES ``field``/``area`` to be the DISJOINT
+    INTERIOR shard on their grid -- no replication (would N-count) and no halo
+    inclusion (would double-count boundary cells), the same owned-shard contract
+    every ``global_sum_if_distributed`` caller relies on.
     """
-    return jnp.sum(field * area)
+    return global_sum_if_distributed(jnp.sum(field * area))
+
+
+def _area_weighted_mean_maybe_global(field, area):
+    """``area_weighted_mean`` reduced across shards when distributed.
+
+    SERIAL (or ``area is None`` / horizontal-shape-mismatch): delegates to
+    :func:`area_weighted_mean` so the result is BYTE-IDENTICAL to the rank-local
+    diagnostic.  DISTRIBUTED well-formed WEIGHTED case: forms the mean from the
+    GLOBALLY reduced ``sum(field*area)`` and ``sum(area)`` (AD-safe
+    ``allreduce(SUM)``) so the closed-sphere moisture budget closes across ranks.
+    ``area_weighted_mean`` itself is LEFT UNTOUCHED -- it is shared far beyond the
+    water budget (``sst_mean``, ML losses, bias metrics); wrapping it in place
+    would silently make those collective (out of scope).  NOTE the DEGENERATE
+    distributed ``area is None`` / shape-mismatch branch delegates to the LOCAL
+    unweighted ``jnp.mean`` and therefore stays RANK-LOCAL (not globally
+    reduced) -- acceptable only because a real sharded coupled call always
+    passes the atm ``grid_area`` matching the field's horizontal shape (the
+    weighted branch); tripwire A is global ONLY on the weighted branch.
+    """
+    if (not is_multi_process() or area is None
+            or field.ndim < area.ndim
+            or tuple(field.shape[:area.ndim]) != tuple(area.shape)):
+        return area_weighted_mean(field, area)
+    if field.ndim > area.ndim:
+        field = jnp.mean(field, axis=tuple(range(area.ndim, field.ndim)))
+    num = global_sum_if_distributed(jnp.sum(field * area))
+    den = global_sum_if_distributed(jnp.sum(area))
+    return num / den
 
 
 def atm_moisture_residual(cwv_now, cwv_prev, evap, precip, area, dt_s):
@@ -93,10 +137,10 @@ def atm_moisture_residual(cwv_now, cwv_prev, evap, precip, area, dt_s):
     to a hypothetical bug that also mis-scaled the atmosphere's OWN q_v precip
     sink (then CWV would move with the inflated precip).
     """
-    dcwv_dt = (area_weighted_mean(cwv_now, area)
-               - area_weighted_mean(cwv_prev, area)) / dt_s
-    e_mean = area_weighted_mean(evap, area)
-    p_mean = area_weighted_mean(precip, area)
+    dcwv_dt = (_area_weighted_mean_maybe_global(cwv_now, area)
+               - _area_weighted_mean_maybe_global(cwv_prev, area)) / dt_s
+    e_mean = _area_weighted_mean_maybe_global(evap, area)
+    p_mean = _area_weighted_mean_maybe_global(precip, area)
     return dcwv_dt - (e_mean - p_mean)
 
 
@@ -122,8 +166,8 @@ def runoff_conservation_residual(river_atm, area_atm,
     residual / fractional-coast wet fraction sits at its floor, while the
     balanced all-wet case is exactly zero.
     """
-    return (area_integral_ranklocal(river_atm, area_atm)
-            - area_integral_ranklocal(runoff_applied_ocean, area_ocean))
+    return (area_integral(river_atm, area_atm)
+            - area_integral(runoff_applied_ocean, area_ocean))
 
 
 def ice_water_content(h_ice, concentration, cell_water_fraction, *,

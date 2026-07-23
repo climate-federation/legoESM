@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 from legoesm.diagnostics.water_budget import (
-    area_integral_ranklocal,
+    area_integral,
     atm_moisture_residual,
     ice_water_content,
     land_water_content_multilayer,
@@ -85,10 +85,10 @@ def test_runoff_conservation_residual_flags_wet_mask_discard_m2():
     assert abs(float(r) - 2.0) < 1e-12
 
 
-def test_area_integral_ranklocal_matches_hand_sum():
+def test_area_integral_matches_hand_sum():
     field = jnp.array([[1.0, 2.0], [3.0, 4.0]])
     area = jnp.array([[0.5, 0.5], [2.0, 1.0]])
-    r = area_integral_ranklocal(field, area)
+    r = area_integral(field, area)
     assert abs(float(r) - (0.5 + 1.0 + 6.0 + 4.0)) < 1e-12
 
 
@@ -135,11 +135,11 @@ def test_water_inventory_residual_land_storage_no_false_flag():
     w_atm_prev = jnp.array([10.0, 10.0])
     w_land_prev = land_water_content_slab(
         jnp.array([0.0, 0.0]), jnp.array([0.0, 0.0]), f_land)
-    store_prev = area_integral_ranklocal(w_atm_prev + w_land_prev, area)
+    store_prev = area_integral(w_atm_prev + w_land_prev, area)
     w_atm_now = jnp.array([6.0, 10.0])           # cell 0 rained 4 kg/m2
     w_land_now = land_water_content_slab(
         jnp.array([4.0, 0.0]), jnp.array([0.0, 0.0]), f_land)
-    store_now = area_integral_ranklocal(w_atm_now + w_land_now, area)
+    store_now = area_integral(w_atm_now + w_land_now, area)
     r = water_inventory_residual(store_now, store_prev, 0.0, dt)
     assert abs(float(r)) < 1e-3
 
@@ -183,3 +183,49 @@ def test_land_water_content_slab_fraction_weight():
     w = land_water_content_slab(
         jnp.array([20.0]), jnp.array([5.0]), jnp.array([0.5]))
     assert abs(float(w[0]) - 0.5 * 25.0) < 1e-6
+
+
+def test_area_integral_routes_through_global_sum_when_distributed(monkeypatch):
+    # Distributed WIRING (non-vacuous): area_integral must route its SUM through
+    # the AD-safe global_sum_if_distributed collective. Simulate a 2-shard
+    # reduction by patching the collective (in the water_budget namespace) to
+    # DOUBLE its input; the returned integral must then be 2x the rank-local sum.
+    import legoesm.diagnostics.water_budget as wb
+    monkeypatch.setattr(wb, "global_sum_if_distributed", lambda x: x * 2.0)
+    field = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    area = jnp.array([[0.5, 0.5], [2.0, 1.0]])
+    local = 0.5 + 1.0 + 6.0 + 4.0
+    r = wb.area_integral(field, area)
+    assert abs(float(r) - 2.0 * local) < 1e-9
+
+
+def test_area_integral_serial_is_rank_local_byte_identical():
+    # Serial path: the real global_sum_if_distributed is identity on a single
+    # process (is_multi_process() False), so the wrap is a no-op and the value
+    # is byte-identical to the rank-local integral.
+    import legoesm.diagnostics.water_budget as wb
+    field = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    area = jnp.array([[0.5, 0.5], [2.0, 1.0]])
+    assert float(wb.area_integral(field, area)) == float(jnp.sum(field * area))
+
+
+def test_atm_moisture_residual_reduces_globally_when_distributed(monkeypatch):
+    # Tripwire A WIRING (non-vacuous): must form its area means from GLOBALLY
+    # reduced sums. Patch is_multi_process True and the collective to a call-
+    # recording identity; assert it is invoked (numerator + denominator of the
+    # weighted means) and the identity collective reproduces the balanced (~0)
+    # serial residual (no serial-value regression).
+    import legoesm.diagnostics.water_budget as wb
+    calls = {"n": 0}
+    def spy(x):
+        calls["n"] += 1
+        return x
+    monkeypatch.setattr(wb, "is_multi_process", lambda: True)
+    monkeypatch.setattr(wb, "global_sum_if_distributed", spy)
+    area = jnp.ones((4, 8))
+    cwv_prev, cwv_now = _balanced_cwv_fields(area)
+    evap = jnp.full((4, 8), _E0)
+    precip = jnp.full((4, 8), _P0)
+    r = atm_moisture_residual(cwv_now, cwv_prev, evap, precip, area, _DT)
+    assert calls["n"] > 0
+    assert abs(float(r)) < 1e-12
