@@ -1969,20 +1969,38 @@ class CoupledESMDriver:
                     raise ValueError(
                         "cross-grid coupling requires the ocean wet mask "
                         "(self._ocean_land_mask) for the open-water fraction.")
-                # M13 (DEFERRED): the DYNAMIC sea-ice cross term below drops
-                # sub-cell covariance -- remap(sic)*remap(F) != remap(sic*F).
-                # The STATIC land/sea factor is already the ocean's OWN wet mask
-                # (H3/H4, b6366d2ef), so ONLY the remap(sic) x remap(flux) term
-                # remains.  Residual is nonzero ONLY in the marginal ice zone
-                # (a few % of ocean area), EXACTLY zero for the identity/
-                # aquaplanet path (sic=0, byte-identical), near-zero global mean,
-                # and for coarse-atm -> fine-ocean production coupling a small
-                # FIRST-ORDER local redistribution, NOT a global-budget leak.
-                # Partition-before-remap is architecturally blocked: the
-                # turbulent tile fluxes are computed on the OCEAN grid (they need
-                # ocean SST/currents), so sic*F_bulk cannot be formed on the atm
-                # grid without remapping SST back.  Revisit only if a MIZ-
-                # sensitive coupled diagnostic shows a real bias.
+                # M13 (DEFERRED -- corrected proof): the DYNAMIC sea-ice cross
+                # term drops sub-cell covariance -- ocean_wet*remap(sic)*remap(F)
+                # vs the ideal ocean_wet*remap(sic*F).  a2o is a partition-of-
+                # unity conservative remap out[d]=Sum_s w[d,s] F[s], Sum_s w=1
+                # (segment_sum), so Cov_d = remap(sic*F)-remap(sic)*remap(F) is
+                # NONZERO ONLY when >=2 ATM SOURCE cells map into ONE OCEAN
+                # destination cell, i.e. only when the OCEAN is COARSER than the
+                # ATM.  In every reachable config the lat-lon atm (n_lat 16-90,
+                # ~2-11 deg) is COARSER than the eORCA1 tripole ocean (332x362,
+                # ~1 deg), so the ocean is FINER: each ocean cell nests in one
+                # atm cell, a2o is a refinement copy, and Cov_d=0 EXACTLY on the
+                # nested interior -- only a SECOND-ORDER residual at the thin band
+                # of ocean cells straddling an atm-cell boundary (nonzero only
+                # where sic AND a flux BOTH jump across that boundary; a few %
+                # of ocean area, near-zero global mean).  EXACTLY zero for the
+                # identity/aquaplanet path (sic=0, byte-identical).
+                #   Partition-before-remap is CONSTRUCTIBLE + AD-safe for the
+                # ATM-ORIGIN class-A fluxes ONLY (sw_down/lw_down/precip: form
+                # (1-sic_atm)*F_atm on the atm grid, remap the product, then
+                # *ocean_wet) -- but it recovers only the ~0 second-order
+                # straddling residual here, so it is NOT worth the restructuring
+                # (raw atm forcing is consumed only after the L2237 a2o remap)
+                # nor the risk to the byte-exact shared-grid identity branch.
+                # The class-B turbulent tile fluxes (lw_up/shflx/lhflx/tau) are
+                # computed ON the ocean grid from ocean SST/currents, so
+                # sic_ocean=remap(sic) IS already their correct LOCAL fraction --
+                # they have NO atm-grid covariance to lose (the prior 'sic*F_bulk
+                # cannot be formed on the atm grid' reason is TRUE only for these,
+                # not for class A).  Revisit ONLY if the ocean is deliberately
+                # run COARSER than the atm (fine cube/gaussian atm + a coarse
+                # --ocean-grid latlon:<res>) -- the one regime where the dropped
+                # covariance becomes first-order.
                 sic_ocean = remap_field(_sic, _remapper.a2o)
                 f_ocean = cross_grid_open_water_fraction(_owet, sic_ocean)
                 # f_water = the ocean's OWN wet fraction (open water + ice);
@@ -2108,15 +2126,15 @@ class CoupledESMDriver:
         # sharded run must route the SUM through global_sum_mpi).
         _oa_fw = getattr(self, "_ocean_area_w", None)
         if _oa_fw is not None:
-            from legoesm.diagnostics.water_budget import area_integral_ranklocal
+            from legoesm.diagnostics.water_budget import area_integral
             _owet_fw = getattr(self, "_ocean_land_mask", None)
             _runoff_applied = (river if _owet_fw is None
                                else river * jnp.clip(_owet_fw, 0.0, 1.0))
             self._last_f_ocean_applied_integral_ranklocal = (
-                area_integral_ranklocal(precip, _oa_fw)
-                - area_integral_ranklocal(evap, _oa_fw)
-                + area_integral_ranklocal(_runoff_applied, _oa_fw)
-                + area_integral_ranklocal(surface_extra, _oa_fw)
+                area_integral(precip, _oa_fw)
+                - area_integral(evap, _oa_fw)
+                + area_integral(_runoff_applied, _oa_fw)
+                + area_integral(surface_extra, _oa_fw)
             )
         # F2 (M2) runoff-conservation tripwire: the conservative a2o remap
         # preserves the river-runoff INTEGRAL; the ocean wet mask then drops
@@ -2142,12 +2160,12 @@ class CoupledESMDriver:
                       "grid_area", None)
         if (prev is not None and _owet is not None
                 and _oa is not None and _aa is not None):
-            from legoesm.diagnostics.water_budget import area_integral_ranklocal
+            from legoesm.diagnostics.water_budget import area_integral
             _applied = river * jnp.clip(_owet, 0.0, 1.0)  # kept on wet cells
             self._last_runoff_export_integral_ranklocal = (
-                area_integral_ranklocal(prev.river_runoff_flux, _aa))
+                area_integral(prev.river_runoff_flux, _aa))
             self._last_runoff_applied_integral_ranklocal = (
-                area_integral_ranklocal(_applied, _oa))
+                area_integral(_applied, _oa))
         # --- Ice → ocean back-reaction: the melt/freeze water in ``ice_fw`` must
         #     arrive WITH its melt/freeze HEAT + brine SALT + ice-ocean STRESS,
         #     else the ocean gets freshwater without its energy/salt (a mass↔heat
@@ -2371,7 +2389,7 @@ class CoupledESMDriver:
                 jnp.asarray(self._atm.sigma.dsigma),
             )
             if self._cwv_prev is not None:
-                diag["water_atm_residual_kg_m2_s_ranklocal"] = float(
+                diag["water_atm_residual_kg_m2_s_global"] = float(
                     atm_moisture_residual(
                         cwv_now, self._cwv_prev,
                         self._last_sfc_response.surface_mass_flux,
@@ -2383,7 +2401,7 @@ class CoupledESMDriver:
         _rexp = getattr(self, "_last_runoff_export_integral_ranklocal", None)
         _rapp = getattr(self, "_last_runoff_applied_integral_ranklocal", None)
         if _rexp is not None and _rapp is not None:
-            diag["water_runoff_residual_kg_s_ranklocal"] = (
+            diag["water_runoff_residual_kg_s_global"] = (
                 float(_rexp) - float(_rapp))
 
         # --- F2 closed water-INVENTORY residual (tripwire C: ice-fraction
@@ -2408,7 +2426,7 @@ class CoupledESMDriver:
                     column_water_vapor,
                 )
                 from legoesm.diagnostics.water_budget import (
-                    area_integral_ranklocal,
+                    area_integral,
                     ice_water_content,
                     land_water_content_multilayer,
                     land_water_content_slab,
@@ -2459,10 +2477,10 @@ class CoupledESMDriver:
                     # atm grid.
                     w_cell = (w_atm.reshape(-1) + w_ice.reshape(-1)
                               + w_land.reshape(-1))
-                    store_int = area_integral_ranklocal(
+                    store_int = area_integral(
                         w_cell, atm_area.reshape(-1))
                     if self._water_store_prev_integral_ranklocal is not None:
-                        diag["water_inventory_residual_kg_s_ranklocal"] = float(
+                        diag["water_inventory_residual_kg_s_global"] = float(
                             water_inventory_residual(
                                 store_int,
                                 self._water_store_prev_integral_ranklocal,
