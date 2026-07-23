@@ -304,12 +304,38 @@ def _clmml_land_params(cp, sai: float):
     return cls(*cp, SAI=jnp.full_like(cp.LAI, sai), htop=cp.hc)
 
 
+def _scale_two_leaf_params(d: ECSiteDriver, vcmax_c3_scale: float,
+                           vcmax_c4_scale: float, m_c3_scale: float,
+                           m_c4_scale: float) -> ECSiteDriver:
+    """Independently scale the two-leaf canopy's C3 (tree) and C4 (grass) params.
+
+    Savanna / woody-savanna sites (US-Ton, AU-How, US-SRM) are a MIX of sparse C3
+    trees (overstory) and C4 (or C3) grass (understory); the driver blends them by
+    the per-timestep ``fC4`` fraction with a shared ``Vcmax25`` / Ball-Berry slope
+    per pathway.  These knobs let the tree (C3) and grass (C4) photosynthetic
+    capacity (``Vcmax25``) and stomatal slope (``m``) be tuned separately — e.g.
+    down-weight an over-productive grass understory without touching the trees.
+
+    Scales the DRIVER canopy params (two-leaf arm only; CLM-ML reads its own
+    ``MLpftcon`` Vcmax / ``g1_BB``).  A scale of 1.0 is a no-op.  NOTE: this scales
+    the DifferBESS-provided values, so a scaled run is a SENSITIVITY run, not a
+    like-for-like DifferBESS comparison.  It shifts flux MAGNITUDE/bias, not the
+    temporal correlation (the savanna GPP-``r`` gap is a two-source phenology
+    limitation of the single canopy, which no scalar knob fixes).
+    """
+    cp = d.canopy_params
+    if vcmax_c3_scale != 1.0 or vcmax_c4_scale != 1.0:
+        cp = cp._replace(Vcmax25_C3_leaf=cp.Vcmax25_C3_leaf * vcmax_c3_scale,
+                         Vcmax25_C4_leaf=cp.Vcmax25_C4_leaf * vcmax_c4_scale)
+    if m_c3_scale != 1.0 or m_c4_scale != 1.0:
+        cp = cp._replace(m_C3=cp.m_C3 * m_c3_scale, m_C4=cp.m_C4 * m_c4_scale)
+    return d._replace(canopy_params=cp)
+
+
 def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
-                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
-                       stomatal_m_scale: float = 1.0,
-                       vcmax_scale: float = 1.0):
+                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
@@ -338,29 +364,9 @@ def _prognostic_fluxes(d: ECSiteDriver,
     Returns (gpp_gC, le_wm2, h_wm2, t_surface, reverted) each shape (n_time,).
     """
     is_clmml = isinstance(canopy_config, CLMMLCanopyConfig)
-
-    # Stomatal-slope sensitivity: scale the two-leaf Ball-Berry slope m (C3+C4),
-    # which sets stomatal conductance per unit assimilation.  Higher m => more
-    # transpiration at the SAME GPP (lower water-use efficiency) => more LE, less
-    # H — the correct-direction lever for the Bowen bias.  Applied to the driver
-    # canopy params for the two-leaf arm only (CLM-ML reads its own g1_BB).
-    if stomatal_m_scale != 1.0 and not is_clmml:
-        d = d._replace(canopy_params=d.canopy_params._replace(
-            m_C3=d.canopy_params.m_C3 * stomatal_m_scale,
-            m_C4=d.canopy_params.m_C4 * stomatal_m_scale))
-
-    # Vcmax25 sensitivity (the GPP knob): scale the two-leaf maximum carboxylation
-    # rate (C3+C4), which sets the Rubisco-limited assimilation and hence GPP.
-    # Higher Vcmax => more GPP (and, via the Ball-Berry coupling A->gs, some extra
-    # transpiration).  This is the primary photosynthetic-capacity lever, tuned
-    # separately from gs (--stomatal-m-scale) and ET (--soil-evap-resistance-exp).
-    # Two-leaf only: CLM-ML's Vcmax lives in MLpftcon and its jax injection is
-    # gated behind the Medlyn stomatal model (default is WUE), so it is not a
-    # clean single-flag knob here.
-    if vcmax_scale != 1.0 and not is_clmml:
-        d = d._replace(canopy_params=d.canopy_params._replace(
-            Vcmax25_C3_leaf=d.canopy_params.Vcmax25_C3_leaf * vcmax_scale,
-            Vcmax25_C4_leaf=d.canopy_params.Vcmax25_C4_leaf * vcmax_scale))
+    # Canopy-param C3/C4 scaling (the GPP / Bowen levers) is applied once in
+    # ``run()`` before mode dispatch (``_scale_two_leaf_params``) so it reaches
+    # BOTH diagnostic and prognostic mode.
 
     # --- initial soil state from the driver's first finite soil obs ---
     # Initialise from the OBSERVED volumetric soil moisture directly (theta_soil
@@ -607,7 +613,11 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
              interception: bool = False, clmml_stomatal: str = "wue",
              clmml_vcmax25: float | None = None,
-             plant_wilting_point: float | None = None) -> dict:
+             plant_wilting_point: float | None = None,
+             vcmax_c3_scale: float | None = None,
+             vcmax_c4_scale: float | None = None,
+             stomatal_m_c3_scale: float | None = None,
+             stomatal_m_c4_scale: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -686,6 +696,18 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         root_depth=root_depth, z_ref=z_ref, texture=texture,
         interception=interception, plant_wilting_point=plant_wilting_point)
 
+    # Independent C3 (tree) / C4 (grass) canopy-param tuning for savanna sites.
+    # A per-pathway flag (``--vcmax-c3-scale`` etc.) wins; otherwise the combined
+    # ``--vcmax-scale`` / ``--stomatal-m-scale`` applies to both pathways.  Applied
+    # here (before mode dispatch) so it reaches diagnostic AND prognostic; two-leaf
+    # only (CLM-ML reads its own MLpftcon Vcmax / g1_BB).
+    if canopy == "two_leaf":
+        eff_vc3 = vcmax_scale if vcmax_c3_scale is None else vcmax_c3_scale
+        eff_vc4 = vcmax_scale if vcmax_c4_scale is None else vcmax_c4_scale
+        eff_mc3 = stomatal_m_scale if stomatal_m_c3_scale is None else stomatal_m_c3_scale
+        eff_mc4 = stomatal_m_scale if stomatal_m_c4_scale is None else stomatal_m_c4_scale
+        d = _scale_two_leaf_params(d, eff_vc3, eff_vc4, eff_mc3, eff_mc4)
+
     reverted = None
     ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
@@ -693,8 +715,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai, stomatal_m_scale=stomatal_m_scale,
-            vcmax_scale=vcmax_scale)
+            clmml_sai=clmml_sai)
     # Trim the spin-up window from BOTH the model arrays and the driver ``d``
     # (obs/valid/provenance) so scoring, output and provenance all cover the
     # evaluation window only, while the carried soil state that reaches it was
@@ -852,6 +873,22 @@ def main() -> int:
     ap.add_argument("--vcmax-scale", type=float, default=1.0,
                     help="scale the two-leaf Vcmax25 (photosynthetic capacity); "
                          ">1 => more GPP. The GPP knob, tuned separately from gs")
+    # Independent C3 (tree) / C4 (grass) tuning for savanna sites (US-Ton, AU-How,
+    # US-SRM): sparse trees + grass understory blended by the driver fC4 fraction.
+    # A per-pathway flag overrides the combined --vcmax-scale/--stomatal-m-scale
+    # for that pathway; default None => the combined value applies to both.
+    ap.add_argument("--vcmax-c3-scale", type=float, default=None,
+                    help="scale ONLY the C3 (tree/overstory) Vcmax25; overrides "
+                         "--vcmax-scale for the C3 pathway (savanna tuning)")
+    ap.add_argument("--vcmax-c4-scale", type=float, default=None,
+                    help="scale ONLY the C4 (grass/understory) Vcmax25; overrides "
+                         "--vcmax-scale for the C4 pathway (savanna tuning)")
+    ap.add_argument("--stomatal-m-c3-scale", type=float, default=None,
+                    help="scale ONLY the C3 (tree) Ball-Berry slope m; overrides "
+                         "--stomatal-m-scale for the C3 pathway")
+    ap.add_argument("--stomatal-m-c4-scale", type=float, default=None,
+                    help="scale ONLY the C4 (grass) Ball-Berry slope m; overrides "
+                         "--stomatal-m-scale for the C4 pathway")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -890,6 +927,10 @@ def main() -> int:
                  clmml_sai=args.clmml_sai, u_min=args.u_min,
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
+                 vcmax_c3_scale=args.vcmax_c3_scale,
+                 vcmax_c4_scale=args.vcmax_c4_scale,
+                 stomatal_m_c3_scale=args.stomatal_m_c3_scale,
+                 stomatal_m_c4_scale=args.stomatal_m_c4_scale,
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,

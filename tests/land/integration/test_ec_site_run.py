@@ -26,8 +26,13 @@ def _load_driver_module():
     return mod
 
 
-def _make_driver(path: str, n: int = 96) -> None:
-    """A minimal valid v2 driver: n half-hourly steps over a diurnal cycle."""
+def _make_driver(path: str, n: int = 96, igbp: float = 3.0,
+                 fc4: float = 0.0) -> None:
+    """A minimal valid v2 driver: n half-hourly steps over a diurnal cycle.
+
+    ``igbp``/``fc4`` default to a pure-C3 DBF; pass ``igbp=8, fc4=0.5`` for a
+    woody-savanna (SAV) fixture with a C3-tree + C4-grass canopy mix.
+    """
     rng = np.arange(n)
     hour = (rng * 0.5) % 24.0
     day = np.clip(np.sin(np.pi * (hour - 6.0) / 12.0), 0.0, None)   # 0 at night
@@ -49,8 +54,8 @@ def _make_driver(path: str, n: int = 96) -> None:
             "BESS_PAR_DIFF_PAR_RATIO": var(0.3 + 0.4 * (1.0 - day)),
             "Albedo_BSA_vis": var(0.08 * ones), "Albedo_WSA_vis": var(0.09 * ones),
             "Albedo_BSA_nir": var(0.30 * ones), "Albedo_WSA_nir": var(0.32 * ones),
-            "IGBP": var(3.0 * ones),       # DBF
-            "CLIMATE": var(2.0 * ones), "C4": var(0.0 * ones),
+            "IGBP": var(igbp * ones),
+            "CLIMATE": var(2.0 * ones), "C4": var(fc4 * ones),
             "CANOPY_HEIGHT": var(20.0 * ones), "LAT": var(39.0 * ones),
             "LONG": var(-86.0 * ones), "ELEVATION": var(275.0 * ones),
             # observed fluxes (only daytime "measured" for GPP/H; ET in mm/day)
@@ -258,6 +263,36 @@ def test_vcmax_scale_raises_gpp(tmp_path):
     hi = mod.run_site(driver_nc, "prognostic", str(tmp_path / "h"), chunk=96,
                       vcmax_scale=1.5)
     assert hi["GPP"]["bias"] > base["GPP"]["bias"]
+
+
+def test_savanna_c3_c4_vcmax_split(tmp_path):
+    """On a savanna (fC4>0) fixture, the C3 (tree) and C4 (grass) Vcmax knobs each
+    move GPP independently, and the per-pathway flag overrides --vcmax-scale."""
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)          # woody savanna, 50% C4
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=96)
+    c4 = mod.run_site(driver_nc, "prognostic", str(tmp_path / "c4"), chunk=96,
+                      vcmax_c4_scale=1.6)               # grass only
+    c3 = mod.run_site(driver_nc, "prognostic", str(tmp_path / "c3"), chunk=96,
+                      vcmax_c3_scale=1.6)               # trees only
+    assert c4["GPP"]["bias"] > base["GPP"]["bias"]      # grass tuning raises GPP
+    assert c3["GPP"]["bias"] > base["GPP"]["bias"]      # tree  tuning raises GPP
+    # Per-pathway flag wins over the combined knob: c4-only != both-scaled.
+    both = mod.run_site(driver_nc, "prognostic", str(tmp_path / "bo"), chunk=96,
+                        vcmax_scale=1.6)
+    assert both["GPP"]["bias"] > c4["GPP"]["bias"]      # scaling both > grass alone
+
+
+def test_grass_tree_knob_reaches_diagnostic_mode(tmp_path):
+    """The C3/C4 knobs apply in diagnostic mode too (not prognostic-only)."""
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    mod = _load_driver_module()
+    base = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "b"), chunk=96)
+    hi = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "h"), chunk=96,
+                      vcmax_c4_scale=1.6)
+    assert hi["GPP"]["bias"] != base["GPP"]["bias"]
 
 
 def test_clmml_turbulence_rejects_unknown(tmp_path):
