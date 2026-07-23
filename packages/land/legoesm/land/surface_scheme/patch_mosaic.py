@@ -250,16 +250,24 @@ class ClmmlMosaicConfig(NamedTuple):
 
 
 def savanna_clmml_two_patch(*, tree_frac: float, tree_pft: int, grass_pft: int,
-                            tree_root_m: float, grass_root_m: float
+                            tree_root_m: float, grass_root_m: float,
+                            tree_vcmax25: float | None = None,
+                            grass_vcmax25: float | None = None
                             ) -> ClmmlMosaicConfig:
     """A 2-tile woody-savanna CLM-ML mosaic: a deep-rooted tree overstory + a
-    shallow-rooted grass understory, run as independent columns."""
+    shallow-rooted grass understory, run as independent columns.
+
+    ``tree_vcmax25`` / ``grass_vcmax25`` override the tile's MLpftcon table Vcmax25
+    (e.g. with the driver's site value, for parity with two-leaf); ``None`` keeps
+    the generic table value.
+    """
     if not (0.0 < tree_frac < 1.0):
         raise ValueError(f"tree_frac must be in (0, 1), got {tree_frac}")
     tree = ClmmlPatchSpec(frac=tree_frac, pft_clm=tree_pft,
-                          root_depth_m=tree_root_m)
+                          root_depth_m=tree_root_m, vcmax25_override=tree_vcmax25)
     grass = ClmmlPatchSpec(frac=1.0 - tree_frac, pft_clm=grass_pft,
-                           root_depth_m=grass_root_m)
+                           root_depth_m=grass_root_m,
+                           vcmax25_override=grass_vcmax25)
     return ClmmlMosaicConfig(patches=(tree, grass)).validate()
 
 
