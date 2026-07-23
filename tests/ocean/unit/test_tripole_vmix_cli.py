@@ -203,6 +203,37 @@ def test_build_tripole_keyword_surface_bc_defaults_none():
     assert params["tke_surface_bc"].default is None
 
 
+def test_orca1_zdftke_mxl_choice_override():
+    """--tke-mxl-choice: None keeps the card value (2); 3 selects NEMO nn_mxl=3
+    (lup/ldown sweeps + ln_mxl0 anchor); an unknown value raises."""
+    r = _runner()
+    assert r.orca1_zdftke_config().tke_mxl_choice == 2                # default
+    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 2
+    c3 = r.orca1_zdftke_config(mxl_choice=3)
+    assert c3.tke_mxl_choice == 3
+    # ONLY the mixing-length choice changes; every other leaf byte-identical.
+    assert c3._replace(tke_mxl_choice=2) == r.orca1_zdftke_config()
+    for bad in (1, 4, 0):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
+    # composes with surface_bc (both overrides apply, independent)
+    both = r.orca1_zdftke_config(surface_bc="nemo_dirichlet", mxl_choice=3)
+    assert both.tke_mxl_choice == 3 and both.surface_bc == "nemo_dirichlet"
+
+
+def test_builder_tke_mxl_choice_threads():
+    """build_tripole_vmix_config threads --tke-mxl-choice onto the closure."""
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_mxl_choice=3)
+    assert vm.tke.tke_mxl_choice == 3
+    assert vm.tke == r.orca1_zdftke_config(mxl_choice=3)
+    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 2  # default
+    # off-tke closure rejects (dispatch hardening), like the other knobs
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tke-mxl-choice"):
+            r.build_tripole_vmix_config(vmix, tke_mxl_choice=3)
+
+
 def test_tke_card_knobs_require_tripole_tke():
     """--tke-eice / --tke-surface-bc are applied ONLY in the tke branch of
     build_tripole_vmix_config; they are silently discarded on every other
@@ -230,6 +261,12 @@ def test_tke_card_knobs_require_tripole_tke():
     # discard path 3: tripole but vmix kpp (knob not applied in kpp branch)
     with pytest.raises(SystemExit, match="tke-eice"):
         r._validate_tke_card_grid("tripole", "kpp", tke_eice=1)
+    # --tke-mxl-choice is guarded the same way (all three discard paths)
+    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3)   # allowed
+    for grid, vmix in (("mpas", "tke"), ("latlon_bathy", "tke"),
+                       ("tripole", "none"), ("tripole", "kpp")):
+        with pytest.raises(SystemExit, match="tke-mxl-choice"):
+            r._validate_tke_card_grid(grid, vmix, tke_mxl_choice=3)
 
 
 def test_main_wires_tke_card_guard_before_builders(monkeypatch):
