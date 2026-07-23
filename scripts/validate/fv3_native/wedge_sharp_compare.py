@@ -82,11 +82,20 @@ def _run_oracle(exe: Path, n: int, ng: int, a_lon_w, a_lat_w,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dump", required=True)
+    ap.add_argument("--dump", default=None,
+                    help="lattice-dump npz (run_duo_stepper_modon "
+                         "--dump-lattice-days); omit with --ic")
+    ap.add_argument("--ic", default=None, metavar="LON,LAT",
+                    help="skip the dump: build the single-burst IC at "
+                         "LON,LAT in-process (the day-0 state is the "
+                         "SHARPEST field of the run — max|u| 47.9 vs "
+                         "day-2's 20.6) and compare on that")
     ap.add_argument("--n", type=int, default=36)
     ap.add_argument("--ng", type=int, default=3)
     ap.add_argument("--build-dir", required=True)
     args = ap.parse_args()
+    if not (args.dump or args.ic):
+        ap.error("need --dump or --ic")
 
     sys.path.insert(0, str(REPO / "packages/core"))
     from legoesm.grids.fv3_native_ext_vector import (
@@ -107,9 +116,44 @@ def main():
     )
 
     n, ng = args.n, args.ng
-    d = np.load(args.dump)
     ctx = build_six_face_duo_context(n, ng, use_ext_bundle=True,
                                      oracle_conventions=True, omega=0.0)
+    if args.ic:
+        from legoesm.grids.cubed_sphere import great_circle_distance
+        from legoesm.grids.fv3_native_gridstruct import (
+            FV3_RADIUS_M,
+            analytic_swcore_state,
+        )
+        sys.path.insert(0, str(REPO))
+        from tests.test_cases.colliding_modons import (
+            _MODON_H0,
+            _MODON_SIZE,
+            _MODON_UMAX,
+        )
+
+        lon0, lat0 = (np.deg2rad(float(x)) for x in args.ic.split(","))
+
+        def wind_fn(ll):
+            r = great_circle_distance(ll[..., 0], ll[..., 1], lon0,
+                                      lat0, FV3_RADIUS_M)
+            u_e = _MODON_UMAX * np.exp(-(np.asarray(r)
+                                         / _MODON_SIZE) ** 2)
+            return u_e, np.zeros_like(u_e)
+
+        def scalars_fn(ll):
+            delp = np.full(ll.shape[:-1], 9.80665 * _MODON_H0)
+            return delp, np.ones_like(delp)
+
+        d = {}
+        for t, gs in enumerate(ctx["gs6"], start=1):
+            st = analytic_swcore_state(gs, wind_fn=wind_fn,
+                                       scalars_fn=scalars_fn)
+            for k in ("delp", "pt", "u", "v"):
+                d[f"{k}_t{t}"] = np.asarray(st[k])
+        src_desc = f"IC single burst at {args.ic}"
+    else:
+        d = np.load(args.dump)
+        src_desc = args.dump
     ectx = ctx["ectx"]
     exe = _driver(Path(args.build_dir))
     a_lon_w, a_lat_w = (x[0] for x in
@@ -152,7 +196,7 @@ def main():
     fams.append(("u", (0, 1), u6, "corner_du3"))
     fams.append(("v", (1, 0), v6, "corner_dv3"))
 
-    print(f"dump={args.dump}")
+    print(f"state={src_desc}")
     worst_overall = 0.0
     for name, (istag, jstag), f6, opkey in fams:
         worst = 0.0
