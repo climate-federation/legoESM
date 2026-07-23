@@ -250,10 +250,18 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     logging/checkpointing belongs in ``on_epoch(epoch, mean_loss)``. Returns
     ``(params, opt_state, history)``.
     """
+    import jax
+
     history = []
     for epoch in range(n_epochs):
         losses = []
         for sample in local_samples:
+            # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
+            # whole training set is never parked in device memory; move ONE
+            # sample onto the device here and let it free at the next iteration.
+            # A no-op (cheap) when the sample is already device-resident (the
+            # legacy eager path), so this is safe for both.
+            sample = jax.device_put(sample)
             params, opt_state, loss = mpi_data_parallel_train_step(
                 loss_fn, params, opt_state, optimizer, sample, num_processes, comm=comm)
             losses.append(float(loss))
