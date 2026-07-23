@@ -345,14 +345,16 @@ class TestDINORecipes:
             # (DINO's &namdrg override sets only ln_non_lin) -- but kept OFF
             # here: a controlled 4-way attribution (2026-07-23) measured
             # BOTH flags inert for the east-wall checkerboard v-mode (all
-            # combos identical to the 5th digit), and enabling
-            # zdf_drag_in_matrix under this card's barotropic_solver=
-            # "explicit_substep" is now a hard construction-time error (no
-            # in-subcycle implicit drag transcribed yet, dynspg_ts.F90:
-            # 1584-1644). See the honest-gate comment at DINO_RECIPES
-            # ["nemo_dino_kamm"] in dino.py.
+            # combos identical to the 5th digit).  The full NEMO drag
+            # composition is now AVAILABLE as zdf_drag_in_matrix=True +
+            # zdf_baroclinic_only=True + barotropic_drag_substep=True
+            # (dyn_drg, dynspg_ts.F90:700-706 + 1584-1642) but stays OFF
+            # pending a controlled measurement.
+            # See the honest-gate comment at DINO_RECIPES["nemo_dino_kamm"]
+            # in dino.py.
             "zdf_drag_in_matrix": False,
             "zdf_baroclinic_only": False,
+            "barotropic_drag_substep": False,
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -374,10 +376,12 @@ class TestDINORecipes:
             c = dino_config_for_recipe(recipe)
             assert c.zdf_drag_in_matrix is False, recipe
             assert c.zdf_baroclinic_only is False, recipe
+            assert c.barotropic_drag_substep is False, recipe
             grid = dino_lat_lon_grid(c, n_lon=10)
             mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
             assert mc.zdf_drag_in_matrix is False, recipe
             assert mc.zdf_baroclinic_only is False, recipe
+            assert mc.barotropic_drag_substep is False, recipe
 
     def test_zdf_flags_default_false_on_other_recipes(self):
         # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
@@ -388,6 +392,7 @@ class TestDINORecipes:
             c = dino_config_for_recipe(recipe)
             assert c.zdf_drag_in_matrix is False, recipe
             assert c.zdf_baroclinic_only is False, recipe
+            assert c.barotropic_drag_substep is False, recipe
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The

@@ -1980,6 +1980,36 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Default False -> the solve acts on the full (baroclinic + barotropic)
     # velocity as before -> BIT-IDENTICAL.
     zdf_baroclinic_only: bool = False
+    # barotropic_drag_substep (dynspg_ts.F90:700-706 + dyn_drg_init
+    # :1584-1642): NEMO's split-explicit barotropic drag — run whenever
+    # ln_dynspg_ts=T, independent of ln_drgimp — in two pieces:
+    # (1) per-substep EXPLICIT bottom stress on the evolving barotropic
+    #     velocity, ``zu_trd += zCdU_u*un_e*hur_e`` (:703; the DINO-active
+    #     ``.NOT.ll_wd`` branch — the implicit division at :764-768 is the
+    #     wetting-drying-only variant, ll_wd=F for DINO).  In lego's
+    #     positive-r convention (``r_eff = -zCdU_u >= 0``) this is
+    #     ``dU/dt += -r_eff*U/H_u`` per substep — a damping term;
+    # (2) a once-per-step slow-forcing correction
+    #     ``pu_RHSi += r1_hu(Kmm) * pCdU_u * (u_bot - U_bar)`` (:1616+1627+
+    #     :1642, bottom-only + forward branches) — the bottom-cell
+    #     baroclinic residual's drag projection onto the barotropic RHS
+    #     (NEMO zu_frc → lego F_slow_u/F_slow_v).
+    # REQUIRES zdf_drag_in_matrix=True AND zdf_baroclinic_only=True (or
+    # barotropic.nemo_stage_mean_imposition=True), validated at model
+    # construction: (a) with the default explicit 3-D drag kick
+    # (_bc_bottom_drag) active, F_slow already carries the depth-mean of
+    # drag on the FULL bottom velocity into every substep — adding (1)+(2)
+    # on top would double-count; (b) NEMO removes the barotropic mean from
+    # the 3-D implicit solve unconditionally under ln_drgimp + ln_dynspg_ts
+    # (dynzdf.F90:147-159), so the in-matrix drag acts on the baroclinic
+    # residual only — without that removal the matrix diagonal would drag
+    # the barotropic mode too and the substep drag would double-count it.
+    # NEMO's DINO namelist composition (ln_drgimp=T + ln_dynspg_ts=T
+    # simultaneously) therefore maps to zdf_drag_in_matrix=True +
+    # zdf_baroclinic_only=True + barotropic_drag_substep=True.
+    # explicit_substep solver only (the in-subcycle mechanism has no other
+    # consumer; loud error otherwise).  Default False -> BIT-IDENTICAL.
+    barotropic_drag_substep: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

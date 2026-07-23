@@ -180,6 +180,12 @@ class DINOConfig:
     # bit-identical.
     zdf_drag_in_matrix: bool = False
     zdf_baroclinic_only: bool = False
+    # NEMO dyn_drg in-subcycle barotropic drag (#1226): see
+    # LatLonCGridOceanConfig.barotropic_drag_substep. Threaded 1:1.
+    # Requires zdf_drag_in_matrix=True + zdf_baroclinic_only=True (NEMO's
+    # DINO composition ln_drgimp=T + ln_dynspg_ts=T). Default False =
+    # bit-identical.
+    barotropic_drag_substep: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -796,18 +802,23 @@ DINO_RECIPES: dict[str, dict] = {
         #    2026-07-23) measured the east-wall checkerboard v-mode metric
         #    IDENTICAL to the 5th digit across all four combinations -- these
         #    options are inert for that mode, so enabling them buys no
-        #    fidelity while adding risk (drag_in_matrix + explicit_substep is
-        #    also now a hard construction-time error, see
-        #    LatLonCGridOceanConfig's zdf_drag_in_matrix guard: this card's
-        #    barotropic_solver="explicit_substep" has no in-subcycle implicit
-        #    drag of its own -- NEMO's dyn_drg_init, dynspg_ts.F90:1584-1644,
-        #    is not yet transcribed -- so drag_in_matrix would leave the
-        #    barotropic mode undamped). Both flags stay as faithful,
-        #    independently-selectable dynzdf transcriptions (see
-        #    LatLonCGridOceanConfig docstrings) for future re-measurement
-        #    once dyn_drg_init lands. --
+        #    fidelity while adding risk. The full NEMO-DINO drag composition
+        #    (ln_drgimp=T + ln_dynspg_ts=T) is NOW available as
+        #    zdf_drag_in_matrix=True + zdf_baroclinic_only=True +
+        #    barotropic_drag_substep=True (the dyn_drg in-subcycle explicit
+        #    drag + pu_RHSi correction, dynspg_ts.F90:700-706 + 1584-1642,
+        #    landed 2026-07-23; the drag_in_matrix+explicit_substep
+        #    construction error is lifted exactly when
+        #    barotropic_drag_substep is on, and baroclinic_only is required
+        #    with it — dynzdf.F90:147-159 removes the barotropic mean from
+        #    the 3-D solve unconditionally in this composition). Kept OFF
+        #    pending a controlled measurement (pre-registered acceptance:
+        #    enable the three flags together, hold everything else on this
+        #    card fixed, compare the ACC/checkerboard/SSH metrics vs this
+        #    baseline). --
         "zdf_drag_in_matrix": False,
         "zdf_baroclinic_only": False,
+        "barotropic_drag_substep": False,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
@@ -2432,6 +2443,7 @@ def dino_lat_lon_model_config(
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
         zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
         zdf_baroclinic_only=cfg.zdf_baroclinic_only,
+        barotropic_drag_substep=cfg.barotropic_drag_substep,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

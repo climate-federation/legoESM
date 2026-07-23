@@ -89,6 +89,7 @@ def test_default_flags_are_false_and_model_bit_identical():
     cfg_default = LatLonCGridOceanConfig.from_flat()
     assert cfg_default.zdf_drag_in_matrix is False
     assert cfg_default.zdf_baroclinic_only is False
+    assert cfg_default.barotropic_drag_substep is False
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -97,7 +98,8 @@ def test_default_flags_are_false_and_model_bit_identical():
         bottom_drag_scheme="legacy", bottom_drag_r=1.0e-3, A_v=1.0e-3,
         K_v=1.0e-4)
     config_b = config_a._replace(
-        zdf_drag_in_matrix=False, zdf_baroclinic_only=False)
+        zdf_drag_in_matrix=False, zdf_baroclinic_only=False,
+        barotropic_drag_substep=False)
     state = _uniform_flow(state, 0.1, -0.05)
     model_a = LatLonCGridOceanModel(grid, z, config_a)
     model_b = LatLonCGridOceanModel(grid, z, config_b)
@@ -185,20 +187,171 @@ def test_drag_in_matrix_requires_implicit_vmix():
 
 
 def test_drag_in_matrix_rejects_explicit_substep_barotropic():
-    """zdf_drag_in_matrix=True with the default barotropic_solver=
-    "explicit_substep" must hard-error: that combination would skip
-    _bc_bottom_drag (single-owner guard) while the explicit_substep
-    barotropic loop's ONLY drag source IS _bc_bottom_drag's RHS kick
-    (barotropic_latlon_cgrid.py:670-679) -- NEMO's own in-subcycle implicit
-    drag (dyn_drg_init, dynspg_ts.F90:1584-1644) is not yet transcribed, so
-    the barotropic mode would silently run undamped."""
+    """zdf_drag_in_matrix=True with barotropic_solver="explicit_substep"
+    and WITHOUT barotropic_drag_substep must still hard-error: that
+    combination skips _bc_bottom_drag (single-owner guard) while the
+    explicit_substep barotropic loop's ONLY default drag source IS
+    _bc_bottom_drag's RHS kick — the barotropic mode would silently run
+    undamped unless the NEMO dyn_drg in-subcycle drag
+    (barotropic_drag_substep, dynspg_ts.F90:700-706 + 1584-1642) takes
+    over."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
     grid, z, state, config = _partial_cell_channel(
         zdf_drag_in_matrix=True, barotropic_solver="explicit_substep")
-    with pytest.raises(ValueError, match="zdf_drag_in_matrix"):
+    with pytest.raises(ValueError, match="barotropic_drag_substep"):
         LatLonCGridOceanModel(grid, z, config)
+
+
+# ----------------------------------------------- barotropic_drag_substep ---
+# NEMO dyn_drg (#1226): the split-explicit barotropic drag composition —
+# per-substep explicit bottom stress (dynspg_ts.F90:700-706, the DINO-active
+# .NOT.ll_wd branch) + the once-per-step pu_RHSi baroclinic-residual
+# correction into F_slow (dyn_drg_init, :1584-1642).
+
+
+def test_barotropic_drag_substep_requires_drag_in_matrix():
+    """barotropic_drag_substep without zdf_drag_in_matrix double-counts (the
+    default _bc_bottom_drag depth-mean already reaches F_slow) — must
+    raise."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        barotropic_drag_substep=True, barotropic_solver="explicit_substep")
+    with pytest.raises(ValueError, match="barotropic_drag_substep"):
+        LatLonCGridOceanModel(grid, z, config)
+
+
+def test_barotropic_drag_substep_requires_explicit_substep_solver():
+    """barotropic_drag_substep under a non-substep solver is a partial
+    mechanism (only the F_slow correction would apply) — must raise."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True, barotropic_solver="rigid_lid")
+    with pytest.raises(ValueError, match="explicit_substep"):
+        LatLonCGridOceanModel(grid, z, config)
+
+
+def test_nemo_dino_drag_composition_constructs():
+    """The full NEMO-DINO drag composition (ln_drgimp=T + ln_dynspg_ts=T ⇒
+    zdf_drag_in_matrix=True + zdf_baroclinic_only=True +
+    barotropic_drag_substep=True + explicit_substep) must construct — this
+    is exactly the combination the old guard rejected before dyn_drg
+    landed.  baroclinic_only is REQUIRED: NEMO removes the barotropic mean
+    from the 3-D implicit solve unconditionally in this composition
+    (dynzdf.F90:147-159), so the matrix drag acts on the baroclinic
+    residual only and the barotropic mode is dragged once, by the substep
+    drag."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    LatLonCGridOceanModel(grid, z, config)   # must not raise
+
+
+def test_barotropic_drag_substep_requires_baroclinic_only():
+    """substep drag + matrix drag WITHOUT the barotropic-mean removal
+    (zdf_baroclinic_only / nemo_stage_mean_imposition both off) must raise:
+    the matrix diagonal would drag the FULL bottom velocity (barotropic
+    included) and the substep drag would double-count the barotropic mode
+    (adversarial-review finding 1; NEMO's removal at dynzdf.F90:147-159 is
+    unconditional under ln_drgimp + ln_dynspg_ts)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        zdf_drag_in_matrix=True, barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    with pytest.raises(ValueError, match="zdf_baroclinic_only"):
+        LatLonCGridOceanModel(grid, z, config)
+
+
+def test_barotropic_drag_substep_analytic_one_substep():
+    """One substep, uniform zonal u0, v0=0, flat bottom, Coriolis off, no
+    slow forcing: uniform zonal flow is exactly divergence-free on the
+    C-grid (equal fluxes on both u-faces of every cell), so eta stays 0 and
+    the PGF vanishes — the substep update reduces to the transcribed NEMO
+    form alone.  DERIVED from dynspg_ts.F90:701-724 (NOT from the code under
+    test): ``zu_trd += zCdU_u*un_e*hur_e`` then ``ua_e = un_e +
+    rDt_e*(spg+trd+frc)`` with zCdU_u = -r_eff, hur_e = 1/H_u gives
+
+        U_1 = u0 * (1 - dt * r_eff / H_u),   r_eff = Cd0*sqrt(u0^2 + ke0)
+
+    (uniform flow → the 2-point face average of t-point rates collapses to
+    the constant rate; flat bottom → H_u = H_bathy at every face)."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        barotropic_drag_substep=True)
+    u0 = 0.2
+    state = _uniform_flow(state, u0, 0.0)
+    dt_s = 600.0
+    s_new, _ = barotropic_substeps_latlon_cgrid(
+        state, dt_s, 1, grid, z, config, add_barotropic_coriolis=False)
+
+    H_u = float(np.asarray(state.H_bathy.data)[2, 3])   # flat: 1860 m
+    r_eff = CD0 * float(np.sqrt(u0 * u0 + KE0))
+    expect = u0 * (1.0 - dt_s * r_eff / H_u)
+    assert 0.0 < expect < u0
+    u_new = np.asarray(s_new.u.data)
+    # rtol 1e-6: the rest state is float32 (matches test 2's tolerance).
+    np.testing.assert_allclose(u_new[2, 2:-1, :], expect, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(s_new.v.data), 0.0, atol=1e-15)
+    np.testing.assert_allclose(np.asarray(s_new.eta.data), 0.0, atol=1e-15)
+
+
+def test_barotropic_drag_substep_damps_over_substeps():
+    """Multiple substeps, drag on, all forcing off: the barotropic velocity
+    magnitude must strictly DECREASE (positive-r damping sign gate — a
+    flipped sign would amplify), and stay positive (no overshoot at this
+    dt*r/H << 1)."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        barotropic_drag_substep=True)
+    u0 = 0.2
+    state = _uniform_flow(state, u0, 0.0)
+    s_new, _ = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 8, grid, z, config, add_barotropic_coriolis=False)
+    u_new = np.asarray(s_new.u.data)
+    assert np.all(u_new[2, 2:-1, :] > 0.0)
+    assert np.all(u_new[2, 2:-1, :] < u0)
+
+
+def test_barotropic_drag_substep_off_is_bit_identical():
+    """Flag off (default) vs explicitly False: the substep loop must be
+    byte-identical (the drag branch is statically not built)."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+    grid, z, state, config = _partial_cell_channel()
+    assert config.barotropic_drag_substep is False
+    config_b = config._replace(barotropic_drag_substep=False)
+    state = _uniform_flow(state, 0.15, -0.05)
+    s_a, (hu_a, hv_a) = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 4, grid, z, config)
+    s_b, (hu_b, hv_b) = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 4, grid, z, config_b)
+    np.testing.assert_array_equal(np.asarray(s_a.u.data), np.asarray(s_b.u.data))
+    np.testing.assert_array_equal(np.asarray(s_a.v.data), np.asarray(s_b.v.data))
+    np.testing.assert_array_equal(
+        np.asarray(s_a.eta.data), np.asarray(s_b.eta.data))
+    np.testing.assert_array_equal(np.asarray(hu_a), np.asarray(hu_b))
+    # And flag ON differs (the term is live, not silently dropped).
+    s_c, _ = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 4, grid, z,
+        config._replace(barotropic_drag_substep=True))
+    assert not np.array_equal(np.asarray(s_c.u.data), np.asarray(s_a.u.data))
 
 
 def test_baroclinic_only_plus_drag_in_matrix_bt_correction_damps():

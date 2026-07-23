@@ -465,6 +465,7 @@ def _run_substep_loop(
     linear_free_surface=False,
     ab3_za=None, ab3_zb=None, ab3_hist=None,
     een_pre=None,
+    drag_r_u=None, drag_r_v=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -627,8 +628,28 @@ def _run_substep_loop(
             _cor_u = _cor_u_een
         else:
             _cor_u = f_u * V_at_u
+        # NEMO dyn_drg in-subcycle explicit bottom stress (#1226;
+        # dynspg_ts.F90:701-705, the .NOT.ll_wd branch — DINO's active path;
+        # the implicit division at :764-768 is wetting-drying-only, ll_wd=F
+        # for DINO):
+        #   zu_trd += zCdU_u * un_e * hur_e ;  ua_e = un_e + rDt_e*(spg+trd+frc)
+        # zCdU_u = -r_eff (NEMO rCdU_bot <= 0; lego r_eff >= 0), un_e = the
+        # substep-START velocity (NEMO uses un_e here even in AB3 mode, NOT
+        # the mid-step extrapolation), hur_e = 1/(u-face column depth at
+        # substep level jn) — lego's min-rule H_u/H_v of the carry eta (NEMO
+        # updates hu_e per substep from the fresh ssh the same way,
+        # dynspg_ts.F90:771-778; min-rule vs ssh-average face depth is lego's
+        # documented global face-depth convention).
+        # SIGN (positive-r damping convention): dU/dt += -r_eff*U/H opposes
+        # U_bar — strictly reduces |U_bar| (drag can never accelerate).
+        # Static Python gate (drag_r_u is a closure capture) — no traced
+        # control flow, carry unchanged, off ⇒ byte-identical.
+        if drag_r_u is not None:
+            _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
+        else:
+            _drag_u = 0.0
         U_bar_new = (U_bar_c + dt_s * (
-            _cor_u - g * deta_dx + F_slow_u
+            _cor_u + _drag_u - g * deta_dx + F_slow_u
         )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
@@ -648,8 +669,14 @@ def _run_substep_loop(
             _cor_v = _cor_v_een
         else:
             _cor_v = -f_v * U_new_at_v
+        # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
+        # substep-START velocity + carry-eta face depth as the u-drag above.
+        if drag_r_v is not None:
+            _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
+        else:
+            _drag_v = 0.0
         V_bar_new = (V_bar_c + dt_s * (
-            _cor_v - g * deta_dy + F_slow_v
+            _cor_v + _drag_v - g * deta_dy + F_slow_v
         )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
@@ -667,16 +694,23 @@ def _run_substep_loop(
                 V_bar_new + div_damp_coeff * div_damp_area_v * grad_div_y
             ) * v_mask
 
-        # Bottom drag — SINGLE OWNER (finding #6 fix).
-        # The 3D PE tendency (``_bc_bottom_drag``) already applies the full
-        # bottom drag ``-r·u_bot/h_bot`` (with BBL / partial-cell handling) to
-        # ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the barotropic
-        # mode through ``F_slow_u``/``F_slow_v`` and applied at every substep
-        # above.  Re-applying ``implicit_bottom_drag_factor`` here would make the
-        # effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2 finding #1).
-        # The drag is therefore owned exclusively by the 3D tendency / F_slow;
-        # we do NOT re-apply it here.  (The implicit-CN solver already relied on
-        # F_slow alone, so the two barotropic paths are now consistent.)
+        # Bottom drag — TWO mutually-exclusive compositions (single owner per
+        # config; finding #6 + #1226 dyn_drg):
+        # * ``barotropic_drag_substep=False`` (default): the 3D PE tendency
+        #   (``_bc_bottom_drag``) applies the full bottom drag ``-r·u_bot/h_bot``
+        #   to ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the
+        #   barotropic mode through ``F_slow_u``/``F_slow_v`` at every substep
+        #   above.  Re-applying ``implicit_bottom_drag_factor`` here would make
+        #   the effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2
+        #   finding #1) — so no in-loop drag on this path.  (The implicit-CN
+        #   solver relies on F_slow alone the same way.)
+        # * ``barotropic_drag_substep=True`` (requires ``zdf_drag_in_matrix``,
+        #   which SKIPS ``_bc_bottom_drag`` — so F_slow carries no drag): the
+        #   NEMO dyn_drg composition instead — the per-substep explicit
+        #   ``-r_eff·U/H`` term applied in the updates above
+        #   (dynspg_ts.F90:701-705) plus the once-per-step ``pu_RHSi``
+        #   baroclinic-residual correction folded into F_slow by the model
+        #   (dynspg_ts.F90:1627-1642).  Exactly one owner in each mode.
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
@@ -1021,6 +1055,31 @@ def barotropic_substeps_latlon_cgrid(
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 
+    # NEMO dyn_drg_init barotropic drag coefficient (#1226;
+    # dynspg_ts.F90:1614-1618, bottom-only branch — DINO has ln_isfcav=F,
+    # ln_drgice_imp=F):
+    #   pCdU_u(ji,jj) = r1_2*( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) )
+    # Computed ONCE per baroclinic step (frozen across substeps, exactly like
+    # NEMO's zCdU_u closure over the DO jn loop) from the NOW 3-D velocity
+    # (zdfdrg's rCdU_bot level).  ``nemo_bottom_drag_rate_faces`` IS that
+    # same 0.5-average-at-faces transcription in lego's positive-r
+    # convention (``r_eff = -pCdU >= 0``) — shared helper, never re-derived.
+    # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
+    # is not built ⇒ byte-identical.
+    _drag_r_u = _drag_r_v = None
+    if getattr(config, "barotropic_drag_substep", False):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            nemo_bottom_drag_rate_faces,
+        )
+        # NOW-level thickness for the rate (the MLF seed override re-seeds
+        # only the fast integration; the drag coef stays at NOW like NEMO's
+        # zdfdrg rCdU_bot).
+        _hk_now = _h_k_corr if _seed_override else h_k
+        _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
+            u_corr, v_corr, _hk_now, z_coord, config, grid)
+        _drag_r_u = _r_u_bt.astype(_dt)
+        _drag_r_v = _r_v_bt.astype(_dt)
+
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
 
@@ -1068,6 +1127,7 @@ def barotropic_substeps_latlon_cgrid(
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
         ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
         een_pre=_een_pre,
+        drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
     )
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
@@ -1235,6 +1295,12 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
             "barotropic_coriolis='een'/'een_metric' is not wired into the "
             "wide-halo barotropic path (the EEN precompute would need the "
             "extended band); use the standard split-explicit path or 'avg'.")
+    if getattr(config, "barotropic_drag_substep", False):
+        raise NotImplementedError(
+            "barotropic_drag_substep=True is not wired into the wide-halo "
+            "barotropic path (the drag-rate faces would need widening to the "
+            "extended band); use the standard split-explicit path or disable "
+            "barotropic_wide_halo.")
 
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data

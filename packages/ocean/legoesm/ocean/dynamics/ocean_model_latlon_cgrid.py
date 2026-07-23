@@ -1686,27 +1686,79 @@ class LatLonCGridOceanModel:
             # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
             # counting drag in the 3-D momentum tendency. But under
             # barotropic_solver="explicit_substep", _bc_bottom_drag is ALSO
-            # the barotropic substep's ONLY drag source in F_slow
-            # (barotropic_latlon_cgrid.py:670-679 single-owner comment) — the
+            # the barotropic substep's ONLY default drag source in F_slow
+            # (barotropic_latlon_cgrid.py substep-loop drag comment) — the
             # implicit-matrix diagonal built here never reaches the
-            # barotropic mode. NEMO instead runs its OWN in-subcycle implicit
-            # drag under ln_dynspg_ts (dyn_drg_init, dynspg_ts.F90:1584-1644),
-            # which legoESM does not yet transcribe. Until that lands, this
-            # combination would silently run the barotropic mode with NO
-            # bottom drag at all — a hard error, not a bit-identical no-op.
-            if config.barotropic.barotropic_solver == "explicit_substep":
+            # barotropic mode. NEMO covers the split-explicit barotropic
+            # with its OWN in-subcycle drag under ln_dynspg_ts (dyn_drg,
+            # dynspg_ts.F90:700-706 + dyn_drg_init :1584-1642), transcribed
+            # as barotropic_drag_substep — required here so the barotropic
+            # mode is never silently undamped.
+            if (config.barotropic.barotropic_solver == "explicit_substep"
+                    and not getattr(config, "barotropic_drag_substep",
+                                    False)):
                 raise ValueError(
                     "zdf_drag_in_matrix=True with "
-                    'barotropic_solver="explicit_substep" is not supported: '
-                    "the explicit_substep barotropic loop gets its ONLY "
-                    "bottom-drag source from _bc_bottom_drag's RHS kick, "
-                    "which zdf_drag_in_matrix skips (single-owner guard, no "
-                    "double-count in the 3-D matrix). NEMO covers this case "
-                    "with its own in-subcycle implicit drag (dyn_drg_init, "
-                    "dynspg_ts.F90:1584-1644), which legoESM has not yet "
-                    "transcribed — enabling both here would leave the "
-                    "barotropic mode completely undamped. Use a different "
-                    "barotropic_solver, or leave zdf_drag_in_matrix=False.")
+                    'barotropic_solver="explicit_substep" requires '
+                    "barotropic_drag_substep=True: zdf_drag_in_matrix skips "
+                    "_bc_bottom_drag's RHS kick (single-owner guard, no "
+                    "double-count in the 3-D matrix), which is the "
+                    "explicit_substep barotropic loop's ONLY default drag "
+                    "source in F_slow — without the in-subcycle substep "
+                    "drag (NEMO dyn_drg, dynspg_ts.F90:700-706 + 1584-1642) "
+                    "the barotropic mode would run completely undamped. "
+                    "Enable barotropic_drag_substep=True (NEMO's DINO "
+                    "composition), use a different barotropic_solver, or "
+                    "leave zdf_drag_in_matrix=False.")
+        # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
+        # explicit barotropic drag + pu_RHSi slow-forcing correction.
+        if getattr(config, "barotropic_drag_substep", False):
+            if not getattr(config, "zdf_drag_in_matrix", False):
+                raise ValueError(
+                    "barotropic_drag_substep=True requires "
+                    "zdf_drag_in_matrix=True: with the default explicit 3-D "
+                    "drag kick (_bc_bottom_drag) active, F_slow already "
+                    "carries the depth-mean of drag on the FULL bottom "
+                    "velocity into every substep — adding the in-subcycle "
+                    "substep drag + the dyn_drg_init pu_RHSi correction on "
+                    "top would double-count the barotropic drag. NEMO's "
+                    "DINO composition (ln_drgimp=T + ln_dynspg_ts=T) maps "
+                    "to zdf_drag_in_matrix=True + zdf_baroclinic_only=True "
+                    "+ barotropic_drag_substep=True.")
+            # NEMO dynzdf.F90:147-159 UNCONDITIONALLY (under ln_drgimp +
+            # ln_dynspg_ts) removes the barotropic mean uu_b/vv_b from the
+            # 3-D implicit solve, so the in-matrix drag diagonal acts on the
+            # baroclinic residual only and the barotropic mode is dragged
+            # ONCE — by dynspg_ts's in-subcycle drag.  In lego that removal
+            # is the zdf_baroclinic_only / nemo_stage_mean_imposition
+            # machinery; without it the extra_diag drags the FULL bottom
+            # velocity (barotropic included, surviving into the 3-D depth
+            # mean) AND the substep drag damps the barotropic mode again —
+            # a double count (adversarial-review finding 1).
+            if not (getattr(config, "zdf_baroclinic_only", False)
+                    or getattr(config.barotropic,
+                               "nemo_stage_mean_imposition", False)):
+                raise ValueError(
+                    "barotropic_drag_substep=True requires "
+                    "zdf_baroclinic_only=True (or "
+                    "barotropic.nemo_stage_mean_imposition=True): NEMO "
+                    "removes the barotropic mean from the 3-D implicit "
+                    "solve unconditionally under ln_drgimp + ln_dynspg_ts "
+                    "(dynzdf.F90:147-159), so the in-matrix drag acts on "
+                    "the baroclinic residual only. Without that removal "
+                    "the matrix diagonal drags the FULL bottom velocity "
+                    "(barotropic included) and the in-subcycle substep "
+                    "drag double-counts the barotropic mode.")
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    "barotropic_drag_substep=True is the explicit_substep "
+                    "in-subcycle drag (NEMO dyn_drg, dynspg_ts.F90:700-706); "
+                    "under barotropic_solver="
+                    f"{config.barotropic.barotropic_solver!r} it would be a "
+                    "partial mechanism (only the F_slow pu_RHSi correction "
+                    "would apply). Use "
+                    'barotropic_solver="explicit_substep" or leave the flag '
+                    "False.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -2617,6 +2669,42 @@ class LatLonCGridOceanModel:
         # on U_bar, not on the perturbation u' = u - U_bar.
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
         dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
+
+        # NEMO dyn_drg_init baroclinic-residual drag correction (#1226;
+        # dynspg_ts.F90:1614-1643, DINO branch ln_isfcav=F/ln_drgice_imp=F):
+        #   pCdU_u  = r1_2*(rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj))        (:1616)
+        #   zu_i    = puu(ji,jj,ikbu,Kmm) - puu_b(ji,jj,Kmm)          (:1627)
+        #   pu_RHSi += r1_hu(ji,jj,Kmm) * pCdU_u * zu_i               (:1642)
+        # SIGN WALK (positive-r convention here): NEMO rCdU_bot <= 0 ⇒
+        # pCdU_u = -r_eff (r_eff >= 0, the shared nemo_bottom_drag_rate_faces
+        # 0.5-average), so the term is  -r_eff/H_u · (u_bot − U_bar): it
+        # DAMPS the bottom-cell baroclinic residual's projection onto the
+        # barotropic RHS (F_slow = NEMO's zu_frc).  Placed AFTER the
+        # du_dt_pert split above because NEMO removes the vertical mean from
+        # puu(Krhs) at :344-347 BEFORE dyn_drg_init runs — the correction
+        # lives ONLY in the barotropic forcing, never in the 3-D residual.
+        # Time level: NOW (:1627, ln_bt_fw=T form).  NB DINO's namelist runs
+        # ln_bt_fw=F (CENTRED → Kbb residual, :1634); lego's forward-frame
+        # F_slow is assembled at NOW (the MLF leapfrog re-seeds only the
+        # fast integration, keeping F_slow at NOW), so the NOW form is the
+        # consistent transcription here.
+        if getattr(self.config, "barotropic_drag_substep", False):
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_bottom_drag_rate_faces,
+            )
+            _r_u_bt, _r_v_bt, _isb_u, _isb_v = nemo_bottom_drag_rate_faces(
+                state.u.data, state.v.data, h_k_pre, self.z_coord,
+                self.config, _grid)
+            _u_bot = jnp.sum(state.u.data * _isb_u, axis=-1)
+            _v_bot = jnp.sum(state.v.data * _isb_v, axis=-1)
+            _U_bar_now = jnp.sum(state.u.data * h_u_pre, axis=-1) / H_u_pre
+            _V_bar_now = jnp.sum(state.v.data * h_v_pre, axis=-1) / H_v_pre
+            F_slow_u = (F_slow_u
+                        - _r_u_bt.astype(F_slow_u.dtype) / H_u_pre
+                        * (_u_bot - _U_bar_now)) * state.u_mask.data
+            F_slow_v = (F_slow_v
+                        - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
+                        * (_v_bot - _V_bar_now)) * state.v_mask.data
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -5120,14 +5208,13 @@ class LatLonCGridOceanModel:
         # -rCdU_bot >= 0 is the 0.5-AVERAGE of those same two rates, so
         # extra_diag = +2*dt_mom*r_eff/h at the bottom cell reproduces
         # NEMO's sum (see the factor-of-2 comment at the extra_diag_u/v
-        # assignment below).  This flag requires a NEMO bottom-drag scheme
-        # and the barotropic solver NOT to be "explicit_substep" (validated
-        # at construction — see the guard near
-        # barotropic_time_filter="nemo_boxcar_ab3"): under explicit_substep,
-        # skipping ``_bc_bottom_drag`` here would leave the barotropic
-        # substep's F_slow with NO drag source at all (NEMO's own
-        # in-subcycle implicit drag, dyn_drg_init/dynspg_ts.F90:1584-1644,
-        # is not yet transcribed).
+        # assignment below).  This flag requires a NEMO bottom-drag scheme,
+        # and under barotropic_solver="explicit_substep" it additionally
+        # requires barotropic_drag_substep=True (validated at construction):
+        # skipping ``_bc_bottom_drag`` here removes the barotropic
+        # substep's default F_slow drag source, so the NEMO dyn_drg
+        # in-subcycle drag (dynspg_ts.F90:700-706 + dyn_drg_init :1584-1642,
+        # transcribed as barotropic_drag_substep) must take over.
         # Under ln_dynspg_ts (NEMO's split-explicit barotropic), NEMO ALSO
         # adds a barotropic-drag RHS correction at the bottom cell using the
         # AFTER barotropic velocity (dynzdf.F90:148-171): "add bottom stress
