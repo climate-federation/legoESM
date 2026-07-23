@@ -9078,6 +9078,7 @@ class ModelDriver:
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
             advect_moisture=self._moisture_advection_active(),
             pipeline=self.physics,
+            budget_ledger=cfg.output.budget_ledger,
         )
 
         # Conservation-fixer targets MUST come from the IC, not zero: fix_mass is on
@@ -9094,9 +9095,15 @@ class ModelDriver:
             if cfg.fix_moisture else jnp.asarray(0.0))
 
         day_of_year, seconds_of_day = day_to_calendar(ctx["START_DAY"])
+        from legoesm.diagnostics.process_ledger import (
+            N_LEDGER as _N_LEDGER_ROWS,
+        )
         carry0 = pack_carry(
             self.state, self.q_v, self.q_c, self.q_r,
             conv_prog=ctx["conv_prog"],
+            budget_ledger_accum=(
+                jnp.zeros((_N_LEDGER_ROWS, 2))
+                if cfg.output.budget_ledger else None),
             held_dT_rad=ctx["held_dT_rad"],
             held_sw_net_sfc=ctx["held_sw_net_sfc"],
             held_lw_net_sfc=ctx["held_lw_net_sfc"],
@@ -9373,6 +9380,7 @@ class ModelDriver:
             # as two separate executables.  Passing it is harmless when the
             # flag is off (the attributes are simply never invoked).
             pipeline=self.physics,
+            budget_ledger=cfg.output.budget_ledger,
         )
 
         logger.info(
@@ -9494,6 +9502,9 @@ class ModelDriver:
             forcing = shard_forcing(forcing, self._device_config)
 
             # Pack state into carry
+            from legoesm.diagnostics.process_ledger import (
+                N_LEDGER as _N_LEDGER_ROWS,
+            )
             carry = pack_carry(
                 self.state, self.q_v, self.q_c, self.q_r,
                 conv_prog=conv_prog,
@@ -9522,6 +9533,12 @@ class ModelDriver:
                 sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 t_low_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Per-process budget-ledger accumulator: zeros seed (reset
+                # each segment) when the diagnostic is on, None (byte-
+                # identical carry) otherwise.
+                budget_ledger_accum=(
+                    jnp.zeros((_N_LEDGER_ROWS, 2))
+                    if self.config.output.budget_ledger else None),
                 # Persist the lagged convective-cloud precip ACROSS segment
                 # boundaries (radiation runs before convection; without this the
                 # lag would reset to zeros at step 0 of every segment).  Only the
@@ -9850,6 +9867,31 @@ class ModelDriver:
                 seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
                 seg_t_low_mean = _dm_carry.t_low_accum / _seg_dur
 
+                # Per-process budget ledger: segment-mean rates
+                # (accum/duration), appended host-side and rewritten to
+                # budget_ledger.npz each diag step (small file).
+                if (self.config.output.budget_ledger
+                        and _dm_carry.budget_ledger_accum is not None):
+                    import numpy as _np
+                    from legoesm.diagnostics.process_ledger import (
+                        LEDGER_COLUMNS, LEDGER_PROCESSES,
+                    )
+                    _led_rates = _np.asarray(
+                        _dm_carry.budget_ledger_accum) / _seg_dur
+                    if not hasattr(self, "_budget_ledger_days"):
+                        self._budget_ledger_days = []
+                        self._budget_ledger_rates = []
+                    self._budget_ledger_days.append(float(day))
+                    self._budget_ledger_rates.append(_led_rates)
+                    if self.output_dir is not None:
+                        _np.savez(
+                            str(self.output_dir / "budget_ledger.npz"),
+                            days=_np.asarray(self._budget_ledger_days),
+                            rates=_np.asarray(self._budget_ledger_rates),
+                            processes=_np.asarray(LEDGER_PROCESSES),
+                            columns=_np.asarray(LEDGER_COLUMNS),
+                        )
+
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
@@ -9961,6 +10003,7 @@ class ModelDriver:
                         energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
                         advect_moisture=self._moisture_advection_active(),
                         pipeline=self.physics,
+                        budget_ledger=cfg.output.budget_ledger,
                     )
 
             # Checkpoint (a coupled run routes this through its own
@@ -10534,4 +10577,16 @@ class ModelDriver:
                 f.write(f"Final <Precip>: {d.precip[-1]:.2f} mm/day\n")
                 f.write(f"Final <CWV>: {d.CWV[-1]:.1f} kg/m2\n")
             f.write(f"\n{d.energy_tracker.summary()}\n")
+            # Per-process budget ledger: run-mean attribution table (also
+            # printed to the log) when the diagnostic was on.
+            if getattr(self, "_budget_ledger_rates", None):
+                import numpy as _np
+                from legoesm.diagnostics.process_ledger import (
+                    format_ledger_table,
+                )
+                _tbl = format_ledger_table(
+                    _np.mean(_np.asarray(self._budget_ledger_rates), axis=0),
+                    header="Per-process column budget ledger (run mean)")
+                f.write(f"\n{_tbl}\n")
+                print(_tbl)
         logger.info(f"  Results saved to {self._output_dir}")

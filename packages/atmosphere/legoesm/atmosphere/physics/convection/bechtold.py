@@ -145,12 +145,16 @@ __physics_contract__ = {
         "fold it back into cloud so no water is lost); the optional downdraft cools and moistens the sub-cloud "
         "layer by rain evaporation; the optional CMT drag opposes the "
         "cloud-relative wind shear; surface at the last vertical index. "
-        "Column enthalpy/total-water closure is delegated to the orchestrator "
-        "rebalance + microphysics (the shared mass-flux kernel is not "
-        "self-closing), so no hard conservation is claimed for the raw "
-        "tendencies."
+        "IN-SCHEME CLOSURE (2026-07-22, default implicit_flux solve + "
+        "released detrained-condensate latent): column total water "
+        "integral(dq_v+dq_c+dq_r) dp/g = 0 and column moist enthalpy "
+        "integral(c_pd*dT + L_v*dq_v) dp/g = 0 (L_f books cancel "
+        "internally), gated by tests/unit/test_bechtold_column_conservation "
+        "on every flag set.  The legacy subsidence_solve='advective' path "
+        "conserves only to truncation order (documented residual) and "
+        "remains selectable for byte-exact reproduction."
     ),
-    "conserves": ["none"],
+    "conserves": ["moisture", "energy"],
     "differentiable": True,
     "reference": (
         "Bechtold et al. (2008), QJRMS 134, 1337-1351; Bechtold et al. "
@@ -2777,6 +2781,28 @@ def bechtold_convection(
     dq_c_conv_dt = (
         dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
+    # -- Condensation latent heat of the detrained condensate (2026-07-22
+    # column-enthalpy fix).  SIGN CONVENTION in scope: tendencies are
+    # SOURCES (state += dt*tend), z up, condensation WARMS (+L_v), budget
+    # on h = c_p*T + L_v*q_v closes as in - out - d(storage) = 0.  The
+    # plume condensed this water from vapor on the way up, but the kernel's
+    # environment tendencies only ever booked the transport/mixing of
+    # (T_u - T): the vapor -> liquid conversion enthalpy never reached the
+    # column.  Measured (leaf budget probe, quasi-steady 20-level tropical
+    # fixture, conservative implicit_flux transport): column
+    # ∫(c_pd*dT + L_v*dq_v) dp/g = -L_v * ∫dq_c_conv dp/g to 4 digits
+    # (-56.85 W/m² vs 56.86) — i.e. the residual IS the unheated
+    # detrainment, the mechanism behind the AMIP heating/moisture
+    # mispairing (2-yr pilot: E-P gap 1.4 mm/day, mid-troposphere warm
+    # runaway equilibrating against a heating field decoupled from its
+    # water sink).  Booked at the detrainment source levels (same field,
+    # same stratosphere gate); the downstream rain SPLITS (constant /
+    # autoconversion) carve mass out of this already-heated source, and
+    # the IFS in-plume rain synthesizes its own vapor sink with its own
+    # +L_v pairing (codex R1 #2 block below) — no share is heated twice.
+    # Sub-cloud/downdraft re-evaporation books -L_v on evaporation, so the
+    # formation (+L_v here) / evaporation (-L_v there) loop now closes.
+    dT_dt = dT_dt + (constants.L_v / constants.c_pd) * dq_c_conv_dt
 
     # -- Early precip split (IFS sub-cloud evap path only) -------------------
     # The Kessler evaporation needs the POST-SPLIT rain-source profile (only

@@ -278,6 +278,14 @@ class PhysicsPipeline:
         # pass to produce CMOR rsutcs/rlutcs; when False (default) every
         # clear-sky code path is a byte-identical no-op.
         self._clear_sky_diag = False  # set by build_physics_pipeline (#843)
+        # Per-process column budget ledger (diagnostics.process_ledger):
+        # static Python bool set by build_physics_pipeline from
+        # config.output.budget_ledger.  When True, physics_step_no_rad
+        # attributes its column water/dry-enthalpy tendency rates per
+        # operator and returns them on PhysicsOutput.budget_ledger; when
+        # False (default) every ledger code path is a byte-identical no-op
+        # (feature-gating exception: Python ``if``, never jnp.where).
+        self.budget_ledger = False  # set by build_physics_pipeline
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -1291,6 +1299,30 @@ class PhysicsPipeline:
         # convection AND turbulence drying (codex#4 round-2 HIGH) — not just
         # convection, so it can only be applied on the assembled totals.
 
+        # --- Budget-ledger capture: microphysics + convection rows ---------
+        # Taken HERE because dq_c_dt/dq_r_dt/... still hold the MICRO-ONLY
+        # values (the convective detrainment is merged just below and the
+        # donor clamp adjusts them at the end).  Ledger sign convention:
+        # positive = the process adds water/dry enthalpy to the column
+        # (process_ledger module docstring).
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import ledger_entry
+            _bl_dsigma = self.sigma_half[1:] - self.sigma_half[:-1]
+            _bl_micro = ledger_entry(
+                dq_v_dt_micro + dq_c_dt + dq_r_dt
+                + dq_i_dt + dq_s_dt + dq_g_dt,
+                dT_dt_micro, p_s, _bl_dsigma)
+            # Convection's column store contribution: vapour tendency plus —
+            # for detraining (mass-flux) schemes only — the anvil condensate
+            # routed into q_c below.  The in-updraft rain (dq_r_conv_dt) and
+            # the adjustment-scheme condensate go straight to surface precip,
+            # i.e. they LEAVE the column and correctly do not appear here: a
+            # conserving scheme's water row equals −(its surface precip).
+            _bl_conv_q = dq_v_dt_conv + (
+                dq_c_dt_conv if _ctr.detrains_to_cloud
+                else jnp.zeros_like(dq_v_dt_conv))
+            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma)
+
         # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
         # schemes, ``detrains_to_cloud``) adds convective condensate to the
         # cloud-water tendency; microphysics processes the augmented bucket on
@@ -1536,6 +1568,21 @@ class PhysicsPipeline:
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
 
+        # --- Budget-ledger capture: turbulence row -------------------------
+        # The BL scheme's tendencies INCLUDE its implicit surface-flux bottom
+        # BC, so surface evaporation enters the ledger through this row.  On
+        # a no-turbulence (bulk-kick) config the surface exchange lands in
+        # the other_physics residual instead (documented in process_ledger).
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import ledger_entry
+            if turb_out is not None:
+                _bl_turb = ledger_entry(
+                    ad.unflatten_3d(turb_out.dq_v_dt),
+                    ad.unflatten_3d(turb_out.dT_dt),
+                    p_s, _bl_dsigma)
+            else:
+                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma)
+
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
             _gwd_kwargs = dict(
@@ -1696,6 +1743,30 @@ class PhysicsPipeline:
         else:
             snow_new = snow
 
+        # --- Budget-ledger assembly: radiation row + other_physics residual.
+        # ``other_physics`` = assembled totals − (turb+conv+micro+rad), so
+        # the five physics rows sum to the PhysicsOutput totals BY
+        # CONSTRUCTION (GWD heating, the donor clamp, the bulk-BL kick and
+        # any future operator land there until given their own row).  The
+        # clips/dynamics rows stay zero here — the segment driver fills them.
+        _bl_out = None
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import (
+                N_LEDGER, ROW_CONVECTION, ROW_MICROPHYSICS, ROW_OTHER,
+                ROW_RADIATION, ROW_TURBULENCE, ledger_entry,
+            )
+            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma)
+            _bl_total = ledger_entry(
+                dq_v_dt + dq_c_dt + dq_r_dt + dq_i_dt + dq_s_dt + dq_g_dt,
+                dT_dt, p_s, _bl_dsigma)
+            _bl_other = _bl_total - (_bl_turb + _bl_conv + _bl_micro + _bl_rad)
+            _bl_out = jnp.zeros((N_LEDGER, 2), dtype=_bl_total.dtype)
+            _bl_out = _bl_out.at[ROW_TURBULENCE].set(_bl_turb)
+            _bl_out = _bl_out.at[ROW_CONVECTION].set(_bl_conv)
+            _bl_out = _bl_out.at[ROW_MICROPHYSICS].set(_bl_micro)
+            _bl_out = _bl_out.at[ROW_RADIATION].set(_bl_rad)
+            _bl_out = _bl_out.at[ROW_OTHER].set(_bl_other)
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -1740,6 +1811,7 @@ class PhysicsPipeline:
             # diagnostic CLUBB, always-None otherwise), so no dtype flip.
             cloud_fraction=(
                 turb_out.cloud_fraction if turb_out is not None else None),
+            budget_ledger=_bl_out,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -2848,6 +2920,10 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # Vertical subsidence solve selector (day-65 blowup bisect,
+            # 2026-07-22): fallback matches the BechtoldConfig default.
+            subsidence_solve=getattr(
+                config, 'bechtold_subsidence_solve', 'implicit_flux'),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3512,6 +3588,9 @@ def build_physics_pipeline(grid, sigma, config):
     # only when config.output.clear_sky_diag is set (default off).
     pipeline._clear_sky_diag = bool(
         getattr(getattr(config, 'output', None), 'clear_sky_diag', False))
+    # Per-process budget ledger (same OutputConfig flow as clear_sky_diag).
+    pipeline.budget_ledger = bool(
+        getattr(getattr(config, 'output', None), 'budget_ledger', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

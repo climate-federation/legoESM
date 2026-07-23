@@ -736,6 +736,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-subsidence-solve", type=str,
+                        choices=["implicit_flux", "advective"],
+                        default=_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve,
+                        dest="bechtold_subsidence_solve",
+                        help="Bechtold compensating-subsidence vertical solve: "
+                             "implicit_flux (conservative, default) or advective "
+                             "(legacy; truncation-order conservation only — the "
+                             "stability escape hatch of the 2026-07-22 day-65 "
+                             "blowup bisect). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_subsidence_solve}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -1296,6 +1306,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection-scheme precip/albedo comparison (#872).
     parser.add_argument("--cmip-output", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--budget-ledger", action=argparse.BooleanOptionalAction,
+                        default=False, dest="budget_ledger",
+                        help="Per-process column water/energy budget ledger "
+                             "(diagnostics attribution: turbulence/convection/"
+                             "microphysics/radiation/other/clips/dynamics). "
+                             "Writes segment-mean rates to budget_ledger.npz. "
+                             "Single-rank only; default off = byte-identical "
+                             "model.")
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
@@ -1527,6 +1545,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
+        budget_ledger=args.budget_ledger,
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
         evaluation=EvaluationConfig(
@@ -1704,6 +1723,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
