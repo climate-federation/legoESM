@@ -1,0 +1,10 @@
+Confirmed: all three Round-6 fixes are complete and physically consistent.
+
+- `q_c=None` is a true no-op; with `q_c` present, `dq` transfers exactly `q_v → q_c` while conserving moist enthalpy.
+- The post-step gate is strict (`q_v > threshold*q_sat`), so RH ≤ 1.1 drains exactly zero; strong supersaturation still drains, capped at 5 K/step.
+- The post-step path reuses the same on-curve solver and shared rate limiter. The in-scheme smooth path bypasses this logic when disabled and remains bit-identical.
+- The hook runs in the Python MPAS loop after the JITted model step, so the non-differentiable hard gate creates no JIT/autodiff concern.
+
+Focused x64 test suite: 23 collected, successful.
+
+OVERALL VERDICT: no substantive findings

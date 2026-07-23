@@ -592,6 +592,28 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
+    # Hard (iterated) saturation-adjustment guard for the warm-rain schemes
+    # (kessler/seifert_beheng/morrison/thompson/p3): where q_v exceeds the
+    # scheme's hard_sat_adjust_threshold * q_sat, an iterated saturation
+    # adjustment drains q_v ONTO the liquid saturation curve (conserving
+    # c_pd*T + L_v*q_v exactly), rate-limited to hard_sat_max_heating_K per step,
+    # removing local super-saturation pools the smooth sigmoid path cannot.
+    # PLACEMENT differs by dycore path (the integration trial showed placement is
+    # load-bearing): on the SPECTRAL/COUPLED path it is applied IN-SCHEME
+    # (threaded onto the per-scheme micro config via
+    # apply_microphysics_experiment_flags); on the MPAS path it is applied
+    # POST-STEP in model_driver._run_mpas, on the final state after the dycore's
+    # vertical vapour transport -- the in-scheme placement cannot correct the
+    # per-step transport spike within the dt window (it detonated at day 24),
+    # while the post-step correction is the proven-stable intervention.  The
+    # float trigger + heating cap use the per-scheme __param_spec__ defaults
+    # (1.1, 5 K -- matching the validated configuration); like all atmosphere
+    # microphysics params they are calibratable via the SCM-RCE training path,
+    # NOT the run_amip/run_coupled --params loader (they are not routable onto
+    # ExperimentConfig).  Default OFF => the moist path is byte-identical to the
+    # smooth-only scheme.
+    hard_saturation_adjustment: bool = False
+
     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
     # updraft precipitation).  A value >0 diverts that fraction of the
     # convective condensate to rain (sediments via microphysics, invisible to
@@ -1041,6 +1063,21 @@ class ExperimentConfig(NamedTuple):
     sponge_enabled: bool = False
     sponge_coeff_per_day: float = 2.0   # Rayleigh damping rate at the model top [1/day]
     sponge_sigma_top: float = 0.15      # sponge base: sigma below which damping ramps up
+
+    # --- MPAS land surface boundary (standalone MPAS lane only) -------------
+    # The MPAS combined-physics lane has NO land tile: the AMIP loader fills
+    # land cells with the NEAREST-OCEAN SST (a sea-level temperature) and the
+    # surface humidity is saturated everywhere, so every land cell acts as a
+    # warm infinite swamp (+5-12 K vs its own air over elevated terrain).
+    # Instrumented on the 2026-07-23 pilot: tropical-land latent flux 110-240
+    # W/m2 (vs 74 ocean), SBM precip up to 19 mm/day on highlands, and a
+    # cell-scale CWV recharge/discharge speckle.  Two first-order corrections:
+    # lapse-adjust the land anchor (T_eff = T_sfc - f_land*lapse*z) and
+    # throttle the land evaporation efficiency (beta).  Defaults are OFF /
+    # byte-identical.  FV / spectral lanes have a real land tile — these
+    # knobs are refused there (validate_strict).
+    mpas_land_lapse_K_per_km: float = 0.0  # land anchor lapse [K/km]; 0=off, 6.5=ICAO std
+    mpas_land_beta: float = 1.0            # land evaporation efficiency [0-1]; 1=wet swamp
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -1660,6 +1697,46 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_bucket_w_init_frac (initial fill fraction) must be in "
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
+            )
+        # --- MPAS lane land-surface consistency (fail-fast, no silent no-ops)
+        # The standalone MPAS lane builds its physics from combined.make_physics
+        # (NOT the driver PhysicsPipeline), so the pipeline land tile
+        # (slab_land_active / land_soil_bucket / surface_tiled) never executes
+        # there — accepting those flags on MPAS ran a 60-day A/B against a
+        # byte-identical twin (2026-07-23).  Conversely the MPAS land boundary
+        # knobs are consumed only by the MPAS lane.
+        _is_mpas = d.discretization == "mpas"
+        if _is_mpas:
+            for _flag in ("slab_land_active", "land_soil_bucket",
+                          "surface_tiled"):
+                if getattr(self, _flag):
+                    errors.append(
+                        f"{_flag}=True is silently inert on the MPAS lane "
+                        "(its physics comes from combined.make_physics, not "
+                        "the driver pipeline). Use the MPAS land boundary "
+                        "knobs instead: mpas_land_lapse_K_per_km / "
+                        "mpas_land_beta."
+                    )
+        else:
+            if self.mpas_land_lapse_K_per_km != 0.0 or self.mpas_land_beta != 1.0:
+                errors.append(
+                    "mpas_land_lapse_K_per_km/mpas_land_beta are MPAS-lane "
+                    f"knobs; discretization={d.discretization!r} has its own "
+                    "land tile (slab_land_active / use_multilayer_land) and "
+                    "would silently ignore them."
+                )
+        if not (math.isfinite(self.mpas_land_lapse_K_per_km)
+                and 0.0 <= self.mpas_land_lapse_K_per_km <= 20.0):
+            errors.append(
+                f"mpas_land_lapse_K_per_km must be finite in [0, 20] "
+                f"(0=off, 6.5=ICAO standard); got "
+                f"{self.mpas_land_lapse_K_per_km!r}."
+            )
+        if not (math.isfinite(self.mpas_land_beta)
+                and 0.0 <= self.mpas_land_beta <= 1.0):
+            errors.append(
+                f"mpas_land_beta (land evaporation efficiency) must be finite "
+                f"in [0, 1]; got {self.mpas_land_beta!r}."
             )
         # gs_max is a physical conductance [mol/m2/s]: must be finite and
         # strictly positive (nan/<=0 would zero or NaN the whole land latent

@@ -61,6 +61,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_hard_saturation_adjustment_flag_flows_to_config():
+    """--hard-saturation-adjustment round-trips to ExperimentConfig (opt-in
+    warm-rain hard saturation-adjustment guard; default OFF)."""
+    parser = build_arg_parser()
+    # default OFF: byte-identical smooth microphysics path
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.hard_saturation_adjustment is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_on.hard_saturation_adjustment is True
+
+    # BooleanOptionalAction exposes the explicit --no- off switch.
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_no.hard_saturation_adjustment is False
+
+
 def test_use_clubb_cloud_fraction_flag_flows_to_config():
     """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
     albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""
@@ -418,6 +441,25 @@ def test_sponge_flags_flow_to_config():
     assert cfg.sponge_enabled is True
     assert cfg.sponge_coeff_per_day == 4.0
     assert cfg.sponge_sigma_top == 0.2
+
+
+def test_mpas_land_boundary_flags_flow_to_config():
+    """--mpas-land-lapse-k-per-km / --mpas-land-beta round-trip (MPAS land
+    surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_lapse_K_per_km == 0.0
+    assert cfg_default.mpas_land_beta == 1.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
+    ]), parser))
+    assert cfg.mpas_land_lapse_K_per_km == 6.5
+    assert cfg.mpas_land_beta == 0.6
+    cfg.validate_strict()
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

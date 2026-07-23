@@ -17,6 +17,53 @@ from legoesm.thermo import saturation_mixing_ratio
 # Default condensation/autoconversion sigmoid sharpness (used in signatures).
 _DEFAULT_SAT_SHARPNESS = 50.0
 
+# --- Hard (iterated) saturation-adjustment guard (opt-in) -------------------
+# A bracketed-bisection saturation adjustment that lands q_v ON the liquid
+# saturation curve wherever q_v > threshold * q_sat, conserving the moist
+# enthalpy c_pd*T + L_v*q_v EXACTLY (the caller maps the returned condensation
+# rate to dT_dt with +L_v/c_pd and to dq_v_dt with -1, so the enthalpy invariant
+# holds by construction for any rate).  It drains local super-saturation pools
+# the smooth sigmoid branch cannot: the sign of q_v - q_sat flips once q_sat
+# rises with T and then smooth-caps at 1 kg/kg, so the sigmoid under-condenses
+# moderate super-saturation and cannot fire on the hot-phase pools at all.
+# Opt-in (``hard_adjust=True``); the ``hard_adjust=False`` default path is
+# byte-identical to the historical smooth-only behaviour.
+_DEFAULT_HARD_SAT_THRESHOLD = 1.1     # RH trigger: fire where q_v > thr*q_sat [-]
+# Per-step latent-heating cap [K] on the hard adjustment.  Draining a large
+# super-saturation pool ONTO the curve in a single step dumps its full latent
+# heat at once (a 67 g/kg pool ~ 165 K) -- itself a detonation (observed in the
+# field with the naive post-step cap; codex F2/F3).  Bounding the per-step
+# heating to this value (equivalently the per-step condensed Delta q_v =
+# cap*c_pd/L_v ~ 2 g/kg at 5 K) makes big pools drain over MANY steps,
+# monotonically, without overshoot.  Mild super-saturation (whose full drain is
+# below the cap) still lands ON the curve in one step (the cap is inactive).
+_DEFAULT_HARD_SAT_MAX_HEATING_K = 5.0
+# Fixed BISECTION step count (a loop-iteration count, never tunable/config).
+# The equilibrium root is BRACKETED in [q_sat(T), q_v] and f is strictly
+# monotone, so bracketed bisection converges for ANY (T, p, q_v) -- including
+# extreme super-saturation (q_v up to 1 kg/kg) at low pressure and through the
+# q_sat cap edge, the regimes where a Clausius-Clapeyron Newton step overshoots
+# into a SUB-saturated (over-condensed) state (codex rounds 1-2: n=8 Newton at
+# 200 K/100 Pa landed RH ~ 0.35; n=16 still off-curve at q_v=0.3 kg/kg).  30
+# bisection steps drive |RH-1| to machine precision across p >= 100 Pa,
+# T in [150,400] K, q_v in [0.066, 1.0] kg/kg (verified 8.9e-14).  The
+# bracketing ``where`` reductions make the raw autodiff gradient finite but
+# inaccurate, so the exact gradient is re-attached by implicit differentiation
+# (see :func:`_hard_saturation_condensation`).
+_HARD_SAT_BISECT_ITERS = 30
+# Smooth activation ramp steepness [1/RH] for the trigger sigmoid, centred on
+# the threshold: a finite ramp (not a hard step) keeps the blend continuous and
+# differentiable (avoiding the discontinuity of a naive post-step cap).  At
+# steepness 30 a cell reaches ~full hard adjustment (lands on the curve) within
+# ~0.15 RH above the threshold, and is ~fully smooth ~0.15 RH below it; cells in
+# the narrow transition band are a smooth handoff (not exactly on the curve, by
+# construction -- an exact landing there would require a discontinuity).
+_HARD_SAT_MASK_SHARPNESS = 30.0
+# Floor on q_sat in the RH trigger q_v/q_sat, so the ratio stays finite where
+# q_sat underflows (very cold cells); the bisection solve itself uses the true
+# (unfloored) q_sat.  A safety floor (<= 1e-6), not a physical scale.
+_HARD_SAT_QSAT_FLOOR = 1.0e-12
+
 
 def safe_pow(x, p):
     """Differentiable ``x ** p`` with grad=0 wherever ``x <= 0``.
@@ -129,7 +176,220 @@ def _air_transport_props(T, p, rho):
     return dv, mu, sc
 
 
-def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None):
+def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
+    """Hard-saturation-adjustment condensation rate [kg/kg/s].
+
+    Solves for the equilibrium vapour ``q_eq`` on the LIQUID saturation curve
+    that an enthalpy-conserving moist adjustment would reach::
+
+        q_eq = q_sat_liq(T + (L_v/c_pd)*(q_v - q_eq), p)
+
+    The residual ``f(q_eq) = q_eq - q_sat_liq(T + (L_v/c_pd)*(q_v - q_eq), p)``
+    is STRICTLY INCREASING in ``q_eq`` (q_sat rises with T, and T falls as
+    q_eq rises) with ``f(q_sat(T)) <= 0 <= f(q_v)``, so the root is BRACKETED in
+    ``[q_sat(T), q_v]``.  A fixed ``_HARD_SAT_BISECT_ITERS`` bracketed-bisection
+    sweep is therefore unconditionally convergent for ANY (T, p, q_v):
+    it is robust to the steep low-pressure curve AND to the q_sat cap edge,
+    where a Clausius-Clapeyron Newton step overshoots into a sub-saturated
+    (over-condensed) state.  Because ``q_eq <= q_v`` the returned rate is a pure
+    DRAIN (>= 0); a sub-saturated column has ``q_sat(T) >= q_v`` so the bracket
+    collapses to ``q_v`` and the rate is 0 (evaporation is left to the smooth
+    branch).
+
+    Differentiability: the bracketing ``where`` reductions give a finite but
+    INACCURATE autodiff gradient, so the bisection root is detached
+    (``stop_gradient``) and the EXACT gradient re-attached by implicit
+    differentiation -- one Newton correction at the converged root, whose
+    residual is ~0 (VALUE unchanged) but whose derivative is the
+    implicit-function gradient ``dq_eq/dtheta = (dq_sat/dtheta)/psychrometric``,
+    with the psychrometric factor the exact ``1 + (L_v/c_pd)*dq_sat/dT`` (a jvp
+    of the capped curve) held constant.  Verified against centred finite
+    differences to rel <= 5e-7 in d/dq_v, d/dT, d/dp.
+
+    Parameters
+    ----------
+    T, q_v, p_full : array
+        Temperature [K], vapour mixing ratio [kg/kg], pressure [Pa] (the TRUE
+        model pressure the scheme receives; never rebuilt from p_s*sigma).
+    dt : float
+        Physics step [s] (the same dt the smooth branch uses).
+    q_sat : array
+        The (capped) liquid saturation mixing ratio already computed by the
+        caller; the lower bracket ``q_sat(T)``.
+
+    Returns
+    -------
+    array
+        Condensation rate ``(q_v - q_eq)/dt`` [kg/kg/s], >= 0.
+    """
+    l_over_cp = constants.L_v / constants.c_pd
+    q_v_pos = jnp.maximum(q_v, 0.0)
+    lo = jnp.clip(q_sat, 0.0, q_v_pos)     # f(lo) <= 0 (bracket lower bound)
+    hi = q_v_pos                           # f(hi) >= 0 (bracket upper bound)
+    for _ in range(_HARD_SAT_BISECT_ITERS):
+        mid = 0.5 * (lo + hi)
+        t_new = T + l_over_cp * (q_v_pos - mid)
+        f_mid = mid - saturation_mixing_ratio(t_new, p_full)
+        hi = jnp.where(f_mid > 0.0, mid, hi)
+        lo = jnp.where(f_mid > 0.0, lo, mid)
+    q_eq = jax.lax.stop_gradient(0.5 * (lo + hi))
+    # Implicit-function gradient via one exact-Jacobian Newton correction at the
+    # (detached) converged root: value ~ unchanged (residual ~ 0), gradient =
+    # (dq_sat/dtheta)/psychrometric.  ``dqsat_dt`` is the exact derivative of the
+    # (capped) curve from a jvp; psychrometric is held constant (stop_gradient)
+    # so the correction contributes only the implicit gradient, not a spurious
+    # second-order term.
+    t_new = T + l_over_cp * (q_v_pos - q_eq)
+    q_sat_new, dqsat_dt = jax.jvp(
+        lambda t: saturation_mixing_ratio(t, p_full),
+        (t_new,), (jnp.ones_like(t_new),))
+    psychrometric = jax.lax.stop_gradient(1.0 + dqsat_dt * l_over_cp)
+    q_eq = q_eq - (q_eq - q_sat_new) / psychrometric
+    # Keep q_eq in the physical bracket so the rate is a pure DRAIN (>= 0): the
+    # single correction can nudge q_eq just past q_v for a (near-)sub-saturated
+    # column (there f(q_v) < 0), which the activation mask suppresses anyway, but
+    # this makes the >= 0 contract exact.  Inactive (gradient-transparent) in the
+    # super-saturated region where q_sat(T) < q_eq < q_v strictly.
+    q_eq = jnp.clip(q_eq, 0.0, q_v_pos)
+    return (q_v_pos - q_eq) / dt
+
+
+def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K):
+    """Bound the per-step POSITIVE condensation (shared by both entry points).
+
+    Caps the per-step condensed ``Delta q_v = cond*dt`` at
+    ``hard_max_heating_K * c_pd / L_v`` (per-step latent heating <=
+    ``hard_max_heating_K``, so a large pool drains over MANY steps not one) AND
+    at the available vapour ``q_v`` (mass-positivity: never condense more than
+    the column holds; also guards the tiny-NEGATIVE q_sat the smooth cap returns
+    near 150 K).  The evaporation branch (rate < 0) is untouched.  ``minimum``
+    has a dead gradient only where a cap binds, where the per-step condensation
+    is constant (correctly zero sensitivity).
+    """
+    dqv_cap = hard_max_heating_K * constants.c_pd / constants.L_v
+    cond_cap = jnp.minimum(dqv_cap, jnp.maximum(q_v, 0.0)) \
+        / jnp.maximum(dt, 1.0e-10)
+    return jnp.where(
+        condensation > 0.0, jnp.minimum(condensation, cond_cap), condensation)
+
+
+def _hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
+                           hard_threshold, hard_max_heating_K):
+    """Blend the on-curve hard adjustment into ``condensation`` + rate-limit.
+
+    The ONE place the reviewed hard-adjustment logic lives, shared by
+    :func:`saturation_adjustment` (in-scheme: ``condensation`` is the smooth
+    condensation rate) and :func:`hard_saturation_drain` (driver post-step:
+    ``condensation = 0`` -> a pure activation-gated drain).  Steps:
+
+    1. Solve the bracketed-bisection on-curve root ``cond_hard`` (fp64 when
+       available; extreme pools drive large trial-T excursions).
+    2. Smooth activation ramp CENTRED on ``hard_threshold`` (RH trigger, using
+       the capped ``q_sat`` so vapour above the capped saturation still drains);
+       0.5 at the threshold, -> 1 (asymptotically) above, -> 0 below.
+    3. Blend smooth -> hard, then CAP at ``cond_hard`` so the finite smooth term
+       cannot push a cell PAST saturation into a re-evaporating overshoot
+       (``cond_hard`` never overshoots).  The under-condensing smooth branch
+       (smooth < cond_hard: below-threshold / mild) is untouched; evaporation
+       (< 0 <= cond_hard) passes.
+    4. Rate-limit the POSITIVE rate so the per-step condensed
+       ``Delta q_v = cond*dt <= hard_max_heating_K * c_pd / L_v`` (per-step
+       heating <= ``hard_max_heating_K``) AND ``<= q_v`` (mass-positivity: never
+       condense more than the column holds; also guards the tiny-NEGATIVE q_sat
+       the smooth cap returns near 150 K).  ``minimum`` has a dead gradient only
+       where a cap binds, where the per-step condensation is constant (correctly
+       zero sensitivity).
+
+    Returns the final condensation rate [kg/kg/s].
+    """
+    if jax.config.jax_enable_x64:
+        cond_hard = _hard_saturation_condensation(
+            T.astype(jnp.float64), q_v.astype(jnp.float64),
+            p_full.astype(jnp.float64), dt,
+            q_sat.astype(jnp.float64),
+        ).astype(q_v.dtype)
+    else:
+        cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat)
+    rel_humidity = q_v / jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
+    activation = jax.nn.sigmoid(
+        _HARD_SAT_MASK_SHARPNESS * (rel_humidity - hard_threshold))
+    blended = condensation + activation * (cond_hard - condensation)
+    condensation = jnp.minimum(blended, cond_hard)     # no overshoot past curve
+    return _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K)
+
+
+def hard_saturation_drain(T, q_v, p_full, dt,
+                          hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
+                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
+    """HARD-gated hard-saturation DRAIN rate [kg/kg/s] (>= 0).
+
+    The condensation the hard saturation adjustment applies to drain
+    super-saturation ONTO the liquid curve -- the entry point for the MPAS
+    driver POST-STEP hook, which corrects the dycore's per-step vertical
+    vapour-transport spike on the FINAL state (the placement the integration
+    trial showed is load-bearing: the in-scheme adjustment leaves that spike
+    uncorrected until the next physics call, and at dt=100 s the
+    transport+latent feedback detonates within that window).
+
+    Reuses the reviewed core EXACTLY -- the bracketed-bisection on-curve solve
+    :func:`_hard_saturation_condensation` and the per-step heating & vapour
+    (mass-positivity) rate limit :func:`_hard_saturation_rate_limit` -- but with
+    a HARD relative-humidity gate ``q_v > hard_threshold * q_sat`` (NOT the
+    in-scheme smooth sigmoid).  The hard gate matches the VALIDATED post-step cap
+    exactly: it drains ONLY strongly super-saturated cells (the transport spike)
+    and leaves mild sub-threshold super-saturation for the next microphysics
+    call, with NO sub-threshold leakage.  A hard gate is appropriate here because
+    the post-step hook is EAGER (outside jit / no autodiff through it), so the
+    smooth ramp the in-scheme AD path needs is unnecessary.  The gated rate is
+    ``cond_hard`` (already <= the on-curve drain), so no overshoot is possible
+    and the separate on-curve cap is not needed.  Result is a PURE DRAIN (>= 0):
+    no evaporation of sub-saturated cells.
+
+    Apply (conserving ``c_pd*T + L_v*q_v`` exactly)::
+
+        dq = rate * dt ;  q_v -= dq ;  q_c += dq ;  T += (L_v/c_pd) * dq
+
+    Parameters
+    ----------
+    T, q_v, p_full : array
+        Temperature [K], vapour mixing ratio [kg/kg], pressure [Pa] (the TRUE
+        pressure the caller uses; on the pure-sigma MPAS path this is
+        ``p_s * sigma_full``).
+    dt : float
+        Physics/dycore step [s].
+    hard_threshold : float, default 1.1
+        RH trigger; drain fires where ``q_v > hard_threshold * q_sat``.
+    hard_max_heating_K : float, default 5.0
+        Per-step latent-heating cap [K] (~ 2 g/kg per step); a large pool drains
+        over many steps rather than detonating.
+
+    Returns
+    -------
+    array
+        Drain rate [kg/kg/s], >= 0.
+    """
+    if jax.config.jax_enable_x64:
+        q_sat = saturation_mixing_ratio(
+            T.astype(jnp.float64), p_full.astype(jnp.float64)).astype(q_v.dtype)
+        cond_hard = _hard_saturation_condensation(
+            T.astype(jnp.float64), q_v.astype(jnp.float64),
+            p_full.astype(jnp.float64), dt,
+            q_sat.astype(jnp.float64)).astype(q_v.dtype)
+    else:
+        q_sat = saturation_mixing_ratio(T, p_full)
+        cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat)
+    # HARD RH gate (matches the validated post-step cap): drain ONLY where
+    # q_v > hard_threshold * q_sat; no sub-threshold leakage.  ``cond_hard`` is
+    # the on-curve drain, so the gated rate never overshoots.
+    drain = jnp.where(
+        q_v > hard_threshold * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR),
+        cond_hard, 0.0)
+    return _hard_saturation_rate_limit(drain, q_v, dt, hard_max_heating_K)
+
+
+def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None,
+                          hard_adjust=False, hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
+                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
     """Compute smooth saturation adjustment (condensation tendency).
 
     Parameters
@@ -150,6 +410,31 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
         evaporation cannot drive ``q_c`` below zero in subsaturated
         clear air.  Without ``q_c`` the legacy signed return is
         produced (callers must apply their own donor clamp).
+    hard_adjust : bool, default False
+        Opt-in hard (bracketed-bisection) saturation adjustment.  When True,
+        wherever ``q_v > hard_threshold * q_sat`` the condensation rate is
+        smoothly blended toward the rate that lands q_v exactly ON the liquid
+        saturation curve (:func:`_hard_saturation_condensation`), draining
+        local super-saturation pools that the smooth sigmoid branch cannot.
+        The blend weight is a smooth sigmoid of the relative-humidity excess
+        (no discontinuity), and the moist enthalpy ``c_pd*T + L_v*q_v`` is
+        conserved exactly because the caller maps the returned rate to the T
+        and q_v tendencies consistently.  When False the code path — and hence
+        the result — is byte-identical to the historical smooth-only scheme.
+    hard_threshold : float, default 1.1
+        Relative-humidity trigger for the hard adjustment (dimensionless): it
+        fires where ``q_v > hard_threshold * q_sat``.  The comparison uses the
+        (capped) ``q_sat``, so vapour above the capped saturation value is
+        still drained — the region a naive post-step cap missed.  Ignored when
+        ``hard_adjust`` is False.
+    hard_max_heating_K : float, default 5.0
+        Per-step latent-heating cap [K] on the hard adjustment.  The condensed
+        ``Delta q_v`` per step is bounded to ``hard_max_heating_K * c_pd / L_v``
+        (~2 g/kg at 5 K), so a large super-saturation pool drains ONTO the curve
+        over MANY steps rather than dumping its full latent heat (~165 K for a
+        67 g/kg pool) in one step — the detonation the naive cap caused.  Mild
+        super-saturation (full drain below the cap) still lands on the curve in
+        one step.  Ignored when ``hard_adjust`` is False.
 
     Returns
     -------
@@ -197,6 +482,14 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
     psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
     condensation = cond_frac * excess / (dt * psychrometric)
+    if hard_adjust:
+        # Iterated hard saturation adjustment, blended in smoothly where
+        # q_v > hard_threshold * q_sat, with the per-step latent-heating rate
+        # limit.  The reviewed core is shared with the driver post-step hook
+        # (:func:`hard_saturation_drain`) via :func:`_hard_saturation_blend`.
+        condensation = _hard_saturation_blend(
+            condensation, T, q_v, p_full, dt, q_sat,
+            hard_threshold, hard_max_heating_K)
     if q_c is not None:
         # Evaporation rate (negative ``condensation``) is bounded by
         # the available cloud water: |condensation| × dt ≤ q_c, i.e.

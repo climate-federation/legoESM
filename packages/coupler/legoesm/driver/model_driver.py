@@ -207,6 +207,69 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
     )
 
 
+# Post-step hard-saturation-adjustment diagnostics cadence (loud counter): log
+# roughly twice a day at dt~100 s.  A logging cadence + a count epsilon, not
+# physics.
+_HARD_SAT_LOG_CADENCE_STEPS = 432
+_HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
+
+
+def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
+                                   hard_threshold, hard_max_heating_K):
+    """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
+
+    Applies the reviewed hard-saturation-adjustment DRAIN
+    (:func:`legoesm.atmosphere.physics.microphysics._warm_rain.hard_saturation_drain`
+    -- bracketed-bisection on-curve solve + per-step latent-heating & vapour
+    rate limit) on the FINAL post-dycore state, on the pure-sigma pressure
+    ``p_full = p_s * sigma_full`` (the SAME convention the driver diagnostics
+    use; this MPAS path is pure sigma, so the hybrid A_full/B_full reduce to
+    sigma_full).  Conserves ``c_pd*T + L_v*q_v`` exactly: the SAME drain
+    ``dq = rate*dt`` is removed from vapour, added to cloud water, and heats T by
+    ``(L_v/c_pd)*dq``.  A pure drain (>= 0) -- no spurious evaporation.
+
+    Parameters
+    ----------
+    T, q_v, p_s : array
+        Temperature [K] (ncol, nlev), vapour [kg/kg] (ncol, nlev), surface
+        pressure [Pa] (ncol,).
+    q_c : array or None
+        Cloud water [kg/kg] (ncol, nlev), the condensate RECIPIENT.  ``None`` if
+        the run carries no q_c tracer -> the drain is a NO-OP (there is no
+        reservoir to receive the condensate; draining vapour with nowhere to put
+        it would LOSE total water).  On the moist warm-rain MPAS path q_c is
+        always present (the driver hook additionally gates on it).
+    sigma_full : array
+        Full-level sigma (nlev,).
+    dt : float
+        Dycore step [s].
+    hard_threshold, hard_max_heating_K : float
+        RH trigger and per-step latent-heating cap [K] from the scheme config.
+
+    Returns
+    -------
+    (T_new, q_v_new, q_c_new, dq) : tuple of arrays
+        Updated fields and the per-step condensed increment ``dq`` [kg/kg]
+        (>= 0), for diagnostics.  All inputs are returned unchanged (dq = 0) when
+        ``q_c is None`` -- total water is conserved.
+    """
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        hard_saturation_drain,
+    )
+    if q_c is None:
+        # No condensate reservoir -> cannot conserve total water by draining;
+        # do nothing (the moist path always has q_c).
+        return T, q_v, None, jnp.zeros_like(q_v)
+    p_full = p_s[:, None] * jnp.asarray(sigma_full)[None, :]
+    rate = hard_saturation_drain(T, q_v, p_full, dt, hard_threshold,
+                                 hard_max_heating_K)
+    dq = rate * dt
+    T_new = T + (constants.L_v / constants.c_pd) * dq
+    q_v_new = q_v - dq
+    q_c_new = q_c + dq
+    return T_new, q_v_new, q_c_new, dq
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -330,6 +393,9 @@ class ModelDriver:
         # ``_voronoi_layout is not None`` and read owned-cell ids straight
         # off ``_voronoi_layout.partition``.
         self._voronoi_layout = None
+        # Gate for the MPAS CMOR spatial/zonal accumulator feed (set per run
+        # in _run_mpas; False here so any other path is a safe no-op).
+        self._mpas_cmip_feed_on = False
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
@@ -1214,17 +1280,26 @@ class ModelDriver:
         if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
-            # Pass phis at construction so p_s is hydrostatically reduced over
-            # topography (p_s = p_ref*exp(-phis/(R_d*T_init))) — same fix the
-            # lat-lon branch below documents.  Patching phis in afterwards left
-            # p_s flat over terrain: a startup pressure shock over all
-            # orography (audit 2026-07-17).
-            phis_mpas = (
-                self._phis_data if jnp.any(self._phis_data != 0) else None
-            )
+            # REVERT of the 2026-07-17 audit change (#1179): passing phis into
+            # held_suarez_init_mpas hydrostatically reduces the seed p_s over
+            # topography (p_s = p_ref*exp(-phis/(R_d*T_init))) — and EVERY
+            # moist MPAS AMIP run then NaNs within day 1 (ERA5 and uniform IC;
+            # dt 100-240 s, L20/L40, sbm/bechtold, fp32/fp64; hunk-level
+            # bisection conviction 2026-07-23, see
+            # docs/dev-notes/mpas_seed_ps_reduction_nan_2026-07-23.md).  A
+            # control probe (phis field kept, p_s left FLAT) is stable, so the
+            # reduction itself is the poison — the seed leaks into the run
+            # through a channel the ERA5 overlay does not replace.  Until that
+            # is root-caused, keep the empirically stable pre-audit semantics:
+            # flat seed p_s + phis patched afterwards (a brief, bounded
+            # startup pressure shock over orography for ic='default').
             self.state = held_suarez_init_mpas(
-                self.grid, self.sigma, T_init=cfg.T_init, phis=phis_mpas,
+                self.grid, self.sigma, T_init=cfg.T_init,
             )
+            if jnp.any(self._phis_data != 0):
+                self.state = self.state._replace(
+                    phis=self.state.phis.replace(data=self._phis_data),
+                )
         elif cfg.dycore.discretization == "spectral":
             from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
             shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
@@ -1477,6 +1552,23 @@ class ModelDriver:
                     phis=self.state.phis.replace(data=carry.phis),
                 )
                 self.tracers["q_v"] = jnp.asarray(carry.q_v)
+                # Re-attach the ERA5 q_v into the DYCORE-ADVECTED tracer
+                # state, mirroring the spectral branch above.  Without this
+                # the MPAS run advected the moist-init rest-state RH taper
+                # (q_v ~ q_sat(seed T, seed p_s)·sigma²) while only the dead
+                # driver-level dict got ERA5 moisture — the codex-confirmed
+                # root cause (F1, 2026-07-23) of the "seed p_s leaks into
+                # ERA5 runs" mystery: seed q_v scales with seed q_sat(p_s),
+                # so the seed-p_s choice modulated the latent FUEL at the
+                # moist-runaway cells.  See
+                # docs/dev-notes/mpas_seed_ps_reduction_nan_2026-07-23.md.
+                if (self.state.tracers is not None
+                        and "q_v" in self.state.tracers):
+                    self.state = self.state._replace(tracers={
+                        **self.state.tracers,
+                        "q_v": self.state.tracers["q_v"].replace(
+                            data=jnp.asarray(carry.q_v)),
+                    })
                 _stats_era5 = jnp.stack([
                     jnp.mean(self.tracers["q_v"]),
                     jnp.mean(column_water_vapor(
@@ -5269,6 +5361,188 @@ class ModelDriver:
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
 
+    def _mpas_cmip_feed_enabled(self, diag) -> tuple[bool, bool]:
+        """Decide whether the per-interval MPAS CMOR accumulator feed runs.
+
+        Returns ``(feed_on, wants_cmip)``:
+
+        * ``wants_cmip`` — the collector actually holds a CMOR spatial or a
+          zonal monthly accumulator (``cmip_output`` / ``monthly_means`` on).
+        * ``feed_on`` — ``wants_cmip`` AND the layout is safe to feed: SERIAL
+          (``_voronoi_layout is None``) or a 1-rank Voronoi layout that owns the
+          whole mesh (no halo; the collector's local regrid weights ARE the
+          global weights).  A MULTI-rank cell partition is NOT safe (rank-local
+          owned+halo cells + local weights would bin one rank's cells into the
+          global lat-lon boxes) and returns ``feed_on=False`` so the caller can
+          warn loudly instead of writing rank-local "global" means.
+        """
+        feed_safe = (
+            self._voronoi_layout is None
+            or getattr(self, "_mpi_world_size", 1) <= 1
+        )
+        wants_cmip = diag is not None and (
+            getattr(diag, "_spatial_monthly", None) is not None
+            or (getattr(diag, "monthly_means", False)
+                and getattr(diag, "monthly_accum", None) is not None)
+        )
+        return (feed_safe and wants_cmip, wants_cmip)
+
+    def _feed_mpas_cmip_accumulators(self, day: float) -> None:
+        """Feed the CMOR monthly/daily/zonal accumulators from the current
+        MPAS (Voronoi) state at a diagnostic interval.
+
+        The lean MPAS loop never called :meth:`DiagnosticCollector.collect`
+        (the cube/lat-lon spatial-accumulation path), so the CMOR ``Amon`` /
+        ``day`` accumulators the collector constructs stayed EMPTY
+        (``call_counts: []`` / ``max_count_ever: 0``) even though the restart
+        sidecar dutifully SAVED them each checkpoint.  This bridges that gap:
+        it reconstructs geographic cell winds (edge-normal ``state.u`` -> cell
+        ``(u_east, v_north)`` via the Perot reconstruction), reads the
+        surface-precip export the physics stashes on the dynamics object, and
+        hands the native cell arrays to
+        :meth:`DiagnosticCollector.feed_cmip_accumulators_native`, which
+        regrids to the CMOR lat-lon grid (the collector's Voronoi IDW weights)
+        and bins the zonal means.
+
+        Serial or a 1-rank Voronoi layout only — the caller gates via
+        :meth:`_mpas_cmip_feed_enabled`.  A MULTI-rank cell partition holds only
+        this rank's LOCAL cells and the collector holds LOCAL regrid weights, so
+        a per-rank feed would bin one rank's cells into the global lat-lon boxes
+        (a rank-local, wrong "global" monthly mean).  A correct multi-rank feed
+        needs an owned-cell -> global gather plus global regrid weights on rank
+        0; tracked as a follow-up.  The lightweight timeseries is already a true
+        global via :meth:`_mpas_global_diag`.
+
+        Fully guarded: a diagnostic-feed failure is LOUD but never aborts the
+        run (the host-side accumulation cannot perturb the prognostic state).
+        """
+        diag = getattr(self, "diagnostics", None)
+        if diag is None:
+            return
+        try:
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            state = self.state
+            # Geographic cell-centre winds from the edge-normal velocity.
+            u_east, v_north = reconstruct_cell_velocity(
+                state.u.data, self.grid)
+            # Water vapour (moist runs only).
+            q_v = None
+            if (state.tracers is not None and "q_v" in state.tracers):
+                q_v = state.tracers["q_v"].data
+            # Surface precip [kg/m2/s]: the physics stashes the tuple
+            # (sw_net_sfc, lw_net_sfc, precip) on the dynamics object every
+            # step (commit d4fbca3ec); the third slot is None on a dry run.
+            precip = None
+            _sfc_diag = getattr(self.model, "_sfc_diag", None)
+            if (_sfc_diag is not None and len(_sfc_diag) > 2
+                    and _sfc_diag[2] is not None):
+                precip = _sfc_diag[2].data
+            # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
+            # this path (``get_sst_sic`` set for a radiation+SST run) — matches
+            # the cube-path collect() ``tas`` instead of a bare lowest-level
+            # proxy.  Uses the RECONSTRUCTED cell winds (``state.u`` is
+            # edge-normal on MPAS, not cell-collocated).  A failure falls back
+            # to the lowest model level (logged once) so a tas-only glitch never
+            # drops the whole CMOR feed.
+            tas = None
+            _get_sst_sic = getattr(self, "get_sst_sic", None)
+            if _get_sst_sic is not None:
+                try:
+                    _sst, _sic = _get_sst_sic(day)
+                    _sst = jnp.asarray(_sst).reshape(-1)
+                    _sic = jnp.asarray(_sic).reshape(-1)
+                    tas = diag._tas_2m(
+                        state, q_v, _sst, _sic,
+                        getattr(self.config, "T_ice", None),
+                        u_low=u_east[..., -1], v_low=v_north[..., -1])
+                except Exception as exc:
+                    if not getattr(self, "_logged_tas2m_fallback", False):
+                        logger.warning(
+                            "  CMOR tas: 2 m MOST calc failed (%s); using the "
+                            "lowest model level as the tas proxy.", exc)
+                        self._logged_tas2m_fallback = True
+                    tas = None
+            lat_deg = np.degrees(np.asarray(self.grid.latCell))
+            diag.feed_cmip_accumulators_native(
+                day,
+                T=state.T.data,
+                p_s=state.p_s.data,
+                lat_deg=lat_deg,
+                q_v=q_v,
+                u_east=u_east,
+                v_north=v_north,
+                precip=precip,
+                phis=state.phis.data,
+                tas=tas,
+            )
+        except Exception as exc:  # pragma: no cover - defensive diag guard
+            logger.error(
+                "  CMOR accumulator feed FAILED at day %.2f (run continues; "
+                "the monthly/daily CMOR means for this interval are lost): %s",
+                day, exc)
+
+    def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
+        """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
+        accumulators at a CLEAN MPAS completion.
+
+        ``_run_mpas`` bypasses the shared :meth:`_finalize_run` (whose
+        ``diagnostics.save()`` ALSO writes the cube/lat-lon ``timeseries.npz`` +
+        snapshots this lean path tracks SEPARATELY in ``_ts`` — calling it here
+        would clobber the lightweight timeseries).  So mirror ONLY the
+        CMIP-file finalize of ``save()``.  Wallclock-graceful exits already
+        flush COMPLETED months incrementally and POP them
+        (:meth:`_maybe_wallclock_exit`); this covers the final / standalone
+        clean completion, writing whatever remains (in-progress + not-yet-
+        flushed months, subject to the finalize partial-month guard) — which
+        otherwise left the now-fed accumulators unwritten (empty ``cmor/``).
+
+        The writers do NOT pop, so this is TERMINAL.  On success it (a) sets
+        ``_suppress_cmor_sidecar`` so a still-to-be-written final checkpoint
+        skips its CMOR sidecar, AND (b) RETIRES (unlinks) the terminal-day
+        sidecar if one was ALREADY written this step — the exact-checkpoint-
+        cadence case, where the in-loop periodic checkpoint wrote the sidecar
+        BEFORE this finalizer runs and the after-loop "final checkpoint" is
+        skipped, so suppression alone (which only blocks a FUTURE write) would
+        leave a stale same-day sidecar that a run-EXTENDING restart would
+        restore and re-append (duplicate ``time`` coords).  Mirrors the intent
+        of :meth:`_finalize_run`.  Rank-0 only; fully guarded (a writer failure
+        must not turn a COMPLETED run into a crash after the science is done —
+        the accumulators/sidecar are left intact for inspection).
+
+        NOTE: the underlying CMOR writer appends field-by-field and is not
+        itself transactional, so a mid-write I/O failure can leave a partially
+        written NetCDF (inherited from the shared ``save()`` path); on such a
+        failure the sidecar is intentionally NOT retired, but a blind retry
+        could still duplicate the already-appended fields — a durable
+        per-write progress record is the follow-up for full crash-safety."""
+        diag = getattr(self, "diagnostics", None)
+        if diag is None or getattr(diag, "cf_writer", None) is None:
+            return
+        _is_root = (getattr(self, "_mpi_rank", None) is None
+                    or self._mpi_rank == 0)
+        if not _is_root:
+            return
+        try:
+            diag._write_cmip_monthly_files()
+            diag._write_cmip_daily_files()
+            diag._write_cmip_fixed_files()
+            diag.cf_writer.close()
+            # Terminal: block any future sidecar write AND retire a same-day
+            # sidecar already written by the in-loop periodic checkpoint.
+            self._suppress_cmor_sidecar = True
+            if final_day is not None:
+                _out = getattr(self, "_output_dir", None)
+                if _out is not None:
+                    _sc = Path(_out) / (
+                        f"cmor_accum_day_{int(round(final_day)):04d}.npz")
+                    if _sc.exists():
+                        _sc.unlink()
+        except Exception as exc:  # pragma: no cover - defensive I/O guard
+            logger.error(
+                "  MPAS CMOR NetCDF finalize FAILED (accumulators/sidecar left "
+                "intact for inspection; the NetCDF may be partially written — "
+                "the shared CMOR writer is not transactional): %s", exc)
+
     def _insolation_day(self, day):
         """Model ``day`` shifted by the static seasonal insolation offset
         (``_insolation_day_offset``, from ``config.insolation_start_doy``). The
@@ -5327,6 +5601,29 @@ class ModelDriver:
             if cfg.output.checkpoint_days > 0 else 0
         )
         START_DAY = start_day if start_day is not None else cfg.start_day
+
+        # Whether to feed the CMOR spatial/zonal accumulators at diag cadence.
+        # The lean MPAS loop historically fed nothing into them (empty CMOR
+        # ``Amon``/``day`` output despite the sidecar SAVE running).  Serial
+        # only: an MPI voronoi feed needs an owned-cell -> global gather +
+        # global regrid weights (see _feed_mpas_cmip_accumulators).  Computed
+        # once — the collector's accumulator handles are stable for the run.
+        _diag = getattr(self, "diagnostics", None)
+        self._mpas_cmip_feed_on, _diag_wants_cmip = (
+            self._mpas_cmip_feed_enabled(_diag))
+        # Make the unsupported multi-rank case LOUD (rank 0 only) rather than
+        # silently reproducing the empty-accumulator symptom this fix targets.
+        if (_diag_wants_cmip and not self._mpas_cmip_feed_on
+                and getattr(self, "_mpi_rank", 0) == 0):
+            logger.warning(
+                "  CMOR output requested (cmip_output/monthly_means on) but "
+                "this is a %d-rank MPAS/Voronoi run — the per-interval "
+                "spatial/zonal CMOR feed is UNSUPPORTED under cell-partition "
+                "MPI (rank-local cells + local regrid weights). The "
+                "monthly/daily CMOR accumulators will stay EMPTY; run "
+                "single-rank for CMOR spatial output. (Follow-up: owned-cell "
+                "gather + global weights on rank 0.)",
+                getattr(self, "_mpi_world_size", 1))
 
         # Build MPAS-compatible physics via make_physics (same code path as
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
@@ -5414,8 +5711,37 @@ class ModelDriver:
                     _msub, cfg.microphysics,
                     nc_from_aerosol=cfg.nc_from_aerosol,
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
+                    # NOTE: hard_saturation_adjustment is INTENTIONALLY NOT
+                    # threaded in-scheme on the MPAS path.  The integration
+                    # trial showed the in-scheme placement cannot correct the
+                    # MPAS dycore's per-step vertical vapour-transport spike
+                    # within the dt window (blew up at day 24), while the same
+                    # adjustment applied POST-STEP on the final state is the
+                    # proven-stable intervention (40/40 + multi-month pilots).
+                    # So on MPAS the flag is applied post-step below; the
+                    # coupled path (physics_pipeline) still applies it in-scheme.
                 )
             })
+        # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
+        # threshold + per-step heating cap from the (unmodified) scheme config,
+        # and fail LOUDLY here if a non-warm-rain scheme was requested with the
+        # flag (matching apply_microphysics_experiment_flags' contract).
+        _hard_sat_on = bool(getattr(cfg, "hard_saturation_adjustment", False))
+        _hsub = getattr(_micro_cfg, cfg.microphysics, None)
+        _hsub_has_field = (
+            _hsub is not None
+            and "hard_saturation_adjustment" in getattr(_hsub, "_fields", ()))
+        if _hard_sat_on and not _hsub_has_field:
+            raise ValueError(
+                f"hard_saturation_adjustment=True is not supported by the "
+                f"{cfg.microphysics!r} microphysics scheme on the MPAS path; "
+                "use a warm-rain scheme (kessler, seifert_beheng, morrison, "
+                "thompson, p3) or drop --hard-saturation-adjustment."
+            )
+        _hard_sat_threshold = (
+            _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
+        _hard_sat_max_heating = (
+            _hsub.hard_sat_max_heating_K if _hsub_has_field else None)
         from legoesm.atmosphere.physics.radiation.solar import earth_orbit
         _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
@@ -5499,8 +5825,35 @@ class ModelDriver:
                 f"divisible by n_devices={_n_dev}; running single-device "
                 f"(throughput not scaled across GPUs)"
             )
+        # --- MPAS land surface boundary knobs (validate_strict-bounded) -----
+        # beta throttles the land-fraction surface humidity inside the MPAS
+        # turbulence factory (closure const); the lapse adjusts the T_sfc
+        # forcing anchor below.  Both default OFF => byte-identical builds.
+        _land_beta = float(getattr(cfg, "mpas_land_beta", 1.0))
+        _land_lapse_K_m = (
+            float(getattr(cfg, "mpas_land_lapse_K_per_km", 0.0)) * 1.0e-3)
+        _f_land_cells = None
+        if self._f_land is not None:
+            _f_land_cells = jnp.asarray(self._f_land).reshape(-1)
+        if (_land_beta != 1.0 or _land_lapse_K_m > 0.0) \
+                and _f_land_cells is None:
+            raise ValueError(
+                "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
+                "fraction, but none was loaded (no --topography / land "
+                "mask source) — the knobs would be silently inert."
+            )
+        if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
+            logger.info(
+                "  MPAS land boundary: lapse=%.2f K/km, beta=%.2f "
+                "(f_land mean=%.3f)",
+                _land_lapse_K_m * 1.0e3, _land_beta,
+                float(jnp.mean(_f_land_cells)),
+            )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
-                                  column_mesh=_column_mesh)
+                                  column_mesh=_column_mesh,
+                                  f_land=(_f_land_cells
+                                          if _land_beta != 1.0 else None),
+                                  land_beta=_land_beta)
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
         # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
@@ -5520,7 +5873,10 @@ class ModelDriver:
         _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
         physics_fn_norad = (
             make_physics(phys_cfg, model_type="mpas", dt=DT,
-                         column_mesh=_column_mesh, need_rad=False)
+                         column_mesh=_column_mesh, need_rad=False,
+                         f_land=(_f_land_cells
+                                 if _land_beta != 1.0 else None),
+                         land_beta=_land_beta)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -5566,20 +5922,63 @@ class ModelDriver:
         # retracing — matching the cube/spectral AMIP paths.  Without any
         # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
         # lowest air level) and the column cold-drifts, decoupled from the SST.
+        # Top-of-atmosphere Rayleigh sponge (#836) on the MPAS edge winds.
+        # The hydrostatic MPAS PE has NO sponge of its own (unlike the NH MPAS
+        # dycore), and the moist-AMIP slow-onset blowup (day ~10-14 across
+        # L20/L30/L40, dt 50-100; 2026-07-23 forensics: top-level (k=0)
+        # edge-wind 2Δσ noise doubling per 5 days at localized cells while
+        # global norms stay flat) is the classic rigid-lid gravity-wave
+        # accumulation signature.  Physics tendencies live on CELL columns and
+        # cannot damp EDGE winds, so the sponge is applied as a post-step
+        # decay on u — the same #836 sin² profile the lat-lon path folds into
+        # fric_decay.  Config-gated: identity when --sponge is off.
+        # sigma_full is monotone in both sigma and hybrid coordinates.
+        _sponge_decay = None
+        if getattr(cfg, "sponge_enabled", False):
+            _k_sp_max = cfg.sponge_coeff_per_day / 86400.0
+            _sig_top = max(cfg.sponge_sigma_top, 1e-6)  # coeff-ok: /~0 guard
+            _sig_full = jnp.asarray(self.sigma.sigma_full)
+            _frac = jnp.clip((_sig_top - _sig_full) / _sig_top, 0.0, 1.0)
+            _k_sp = _k_sp_max * jnp.sin(0.5 * jnp.pi * _frac) ** 2
+            _sponge_decay = jnp.exp(-_k_sp * DT).astype(
+                self.state.u.data.dtype
+            )
+            logger.info(
+                "  MPAS top sponge ON: coeff=%.2f/day above sigma=%.3f "
+                "(top-level decay %.5f/step)",
+                cfg.sponge_coeff_per_day, _sig_top,
+                float(_sponge_decay[0]),
+            )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
         if _sst_forcing:
-            from legoesm.forcing.surface_utils import blend_surface_temperature
+            from legoesm.forcing.surface_utils import (
+                blend_surface_temperature,
+                land_lapse_adjusted_surface_temperature,
+            )
             _T_ice = cfg.T_ice
             _ncell = int(self.state.T.data.shape[0])
+            # Land anchor lapse correction: the AMIP loader fills land cells
+            # with the NEAREST-OCEAN SST (sea-level temperature); anchoring
+            # elevated land at that value overheats its surface by lapse*z.
+            # Applied on the land fraction only; z clipped at 0 inside the
+            # helper.  Static gate (validate_strict bounds the rate).
+            _lapse_z = None
+            if _land_lapse_K_m > 0.0:
+                _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
+                            / constants.g)
 
             def _compute_T_sfc(day):
                 # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
                 # built on grid.grid_lat = mesh.latCell for analytical/AMIP
                 # data), sea-ice-blended, as a (nCells,) surface temperature.
                 _sst, _sic = self.get_sst_sic(day)
-                return blend_surface_temperature(
+                _ts = blend_surface_temperature(
                     jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+                if _lapse_z is not None:
+                    _ts = land_lapse_adjusted_surface_temperature(
+                        _ts, _f_land_cells, _lapse_z, _land_lapse_K_m)
+                return _ts
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.
@@ -6067,6 +6466,47 @@ class ModelDriver:
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+            # Top sponge (#836): per-step Rayleigh decay of the edge winds
+            # toward rest above sigma_top (see profile construction above).
+            # Pure device elementwise multiply — no host sync, no retrace.
+            if _sponge_decay is not None:
+                self.state = self.state._replace(
+                    u=self.state.u.replace(
+                        data=self.state.u.data * _sponge_decay))
+            # Post-step HARD SATURATION ADJUSTMENT (opt-in), applied on the FINAL
+            # state AFTER the dycore's vertical vapour transport has acted this
+            # step -- the load-bearing placement (in-scheme leaves the transport
+            # spike uncorrected until the next physics call, and at dt~100 s the
+            # transport+latent feedback detonates within that window).  Reuses
+            # the reviewed _warm_rain hard-adjustment core EXACTLY (bracketed-
+            # bisection on-curve solve + per-step latent-heating & vapour rate
+            # limit + conservation bookkeeping) as a pure activation-gated drain
+            # (no spurious evaporation).  Eager (this site is outside jit): the
+            # jnp.sum counter is a rare host sync, at low cadence only.
+            # Requires BOTH q_v and q_c tracers: q_c is the condensate recipient,
+            # so draining without it would lose total water (moist warm-rain
+            # runs always carry both).
+            _trc = self.state.tracers
+            if (_hard_sat_on and _trc is not None
+                    and "q_v" in _trc and "q_c" in _trc):
+                _qc_fld = _trc["q_c"]
+                _T_hs, _qv_hs, _qc_hs, _dq_hs = _mpas_hard_saturation_poststep(
+                    self.state.T.data, _trc["q_v"].data, _qc_fld.data,
+                    self.state.p_s.data, self.sigma.sigma_full, DT,
+                    _hard_sat_threshold, _hard_sat_max_heating)
+                if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                    _n_hs = int(jnp.sum(_dq_hs > _HARD_SAT_LOG_QV_EPS))
+                    if _n_hs > 0:
+                        logger.warning(
+                            "hard saturation adjustment (post-step): drained "
+                            "%d points (max dq_v %.2f g/kg, <= %.1f K) at "
+                            "step %d", _n_hs, float(jnp.max(_dq_hs)) * 1e3,
+                            float(_hard_sat_max_heating), step)
+                _new_trc = dict(_trc)
+                _new_trc["q_v"] = _trc["q_v"].replace(data=_qv_hs)
+                _new_trc["q_c"] = _qc_fld.replace(data=_qc_hs)
+                self.state = self.state._replace(
+                    T=self.state.T.replace(data=_T_hs), tracers=_new_trc)
             # Keep the persisted-carry handle fresh for save_checkpoint
             # (#413) — reference assignment, no device work.
             self._mpas_phys_state = _phys_state
@@ -6165,6 +6605,15 @@ class ModelDriver:
                         START_DAY + (step + 1) * DT / 86400.0)
                     break
 
+                # Feed the CMOR monthly/daily/zonal accumulators.  Placed
+                # AFTER the finiteness/bounds guard so a blown-up state never
+                # pollutes the accumulators (the guard ``break``s first).  The
+                # day is ABSOLUTE (START_DAY + elapsed) so multi-link restart
+                # chains keep monotonic calendar months (matches the cube
+                # path).  Feed cost is host-side numpy at diag cadence only.
+                if self._mpas_cmip_feed_on:
+                    self._feed_mpas_cmip_accumulators(START_DAY + elapsed_day)
+
             # Periodic checkpoint for the 100-yr restart chain — cadence is
             # independent of the diagnostic interval.  ``day`` is the
             # absolute simulated day (START_DAY + local elapsed); the
@@ -6198,6 +6647,18 @@ class ModelDriver:
                 _ckpt(start_step + step + 1, _ckpt_day)
                 # Wallclock-aware clean exit for long HPC dependency chains.
                 self._maybe_wallclock_exit(_ckpt, start_step + step + 1, _ckpt_day)
+
+        # Write the CMOR NetCDF from the (now-fed) accumulators on a CLEAN
+        # completion.  MUST run BEFORE the final checkpoint below so its
+        # ``_suppress_cmor_sidecar`` (set on a successful write) reaches a
+        # still-to-be-written final checkpoint; ``final_day`` also lets it
+        # RETIRE a same-day sidecar already written by the last in-loop
+        # periodic checkpoint (exact-checkpoint-cadence completion).  Gated on
+        # the feed being active (serial / 1-rank with CMIP output); a no-op
+        # otherwise.
+        if run_status == "COMPLETED" and self._mpas_cmip_feed_on:
+            self._finalize_mpas_cmip(
+                START_DAY + n_steps_total * DT / 86400.0)
 
         # Final checkpoint so the next chain link resumes from the exact end
         # state.  Skipped (a) on blow-up — state is non-finite — and (b) when
