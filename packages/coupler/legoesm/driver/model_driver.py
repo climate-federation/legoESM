@@ -45,6 +45,29 @@ from legoesm.driver.restart import save_restart, load_restart
 logger = logging.getLogger("legoesm.driver")
 
 
+def _external_forcing_active(
+    radiation_ok: bool,
+    ozone_active: bool,
+    aerosol_active: bool,
+    aerosol_lw_active: bool,
+    ghg_active: bool,
+    experiment_active: bool,
+) -> bool:
+    """Whether the per-step external-forcing dict (o3/aerosol/ghg) must be built.
+
+    Single source of truth for the ``_ext_forcing`` gate used on both the
+    hydrostatic and spectral full-physics AMIP paths.  ``radiation_ok`` is the
+    per-path scheme test (both paths need a gas-radiation scheme, but the
+    spectral path is rrtmgp-only).  ``aerosol_lw_active`` MUST be included:
+    volcanic stratospheric LW aerosol supplied alone (no ozone / SW aerosol /
+    GHG / experiment) still has to reach RRTMGP's LW absorption slot.
+    """
+    return radiation_ok and (
+        ozone_active or aerosol_active or aerosol_lw_active
+        or ghg_active or experiment_active
+    )
+
+
 def _scatter_flat_columns(flat_arr, layout, n_tile):
     """Scatter a FLATTENED-column array ``(6*n*n, ...)`` to this rank's owned
     faces, returning ``(n_local*n*n, ...)`` in the identical face-major
@@ -2340,7 +2363,10 @@ class ModelDriver:
             get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
-        from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
+        from legoesm.forcing.surface_utils import (
+            distribute_column_aod_to_layers,
+            place_stratospheric_aod_profile_to_layers,
+        )
 
         nlev = self.sigma.sigma_full.shape[0]
         shape_2d = p_s.shape
@@ -2406,19 +2432,24 @@ class ModelDriver:
         # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
         # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
         # and a run without volcanic LW aerosol is byte-identical (zeros LW
-        # od is a RRTMGP no-op).  Distributed to layers by the SAME
-        # pressure-thickness helper used for the SW aerosol.  Stored as an
-        # instance attribute (NOT added to the 3-tuple return) so the five
-        # existing unpack call sites keep their arity.
+        # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
+        # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
+        # weighted gray band collapse) plus its pressure edges; the profile
+        # is placed at its true stratospheric pressure by a conservative
+        # overlap remap -- NOT spread by full-column pressure mass, which
+        # dumped ~90% of a stratospheric aerosol into the troposphere.
+        # Stored as an instance attribute (NOT added to the 3-tuple return)
+        # so the five existing unpack call sites keep their arity.
         aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_lw_active:
-            aerosol_lw_col = get_aerosol_lw_at_time(
+            aerosol_lw_prof = get_aerosol_lw_at_time(
                 self._aerosol_config, day, lat_grid=lat_col,
             )
-            if aerosol_lw_col is not None:
-                aerosol_lw_od = distribute_column_aod_to_layers(
-                    jnp.asarray(aerosol_lw_col), p_half_col,
-                )
+            if aerosol_lw_prof is not None:
+                prof_col, p_edges = aerosol_lw_prof
+                aerosol_lw_od = place_stratospheric_aod_profile_to_layers(
+                    jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+                ).astype(p_s.dtype)
         self._aerosol_lw_od = aerosol_lw_od
 
         # GHG VMR override (None for gray radiation / constant forcing)
@@ -5808,7 +5839,12 @@ class ModelDriver:
                 # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
-            convection=convection_config_for(cfg),
+            # grid_dx_m: SCVT sqrt(mean cell area) [m] — auto-fills Bechtold's
+            # IFS ZTAURES resolution factor (codex 2026-07-23 finding A;
+            # areaCell is physical, sums to 4*pi*R^2).
+            convection=convection_config_for(
+                cfg,
+                grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
@@ -6154,10 +6190,10 @@ class ModelDriver:
         # value change stays a traced-value change (no retrace); the
         # dict KEY STRUCTURE is decided once here and never changes
         # mid-run (pytree stability for the JIT'd step).
-        _ext_forcing = (
-            cfg.radiation in ("rrtmg", "rrtmgp")
-            and (self._ozone_ext_active or self._aerosol_active
-                 or self._ghg_active or bool(self._experiment))
+        _ext_forcing = _external_forcing_active(
+            cfg.radiation in ("rrtmg", "rrtmgp"),
+            self._ozone_ext_active, self._aerosol_active,
+            self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
         )
         # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
         # MICROPHYSICS step regardless of the radiation scheme (the second
@@ -7109,10 +7145,11 @@ class ModelDriver:
                     "each step).")
             else:
                 _phys_fn_loop = _amip_physics_fn
-            _ext_forcing = (
-                _rad_scheme == "rrtmgp"
-                and (self._ozone_ext_active or self._aerosol_active
-                     or self._ghg_active or bool(self._experiment))
+            _ext_forcing = _external_forcing_active(
+                _rad_scheme == "rrtmgp",
+                self._ozone_ext_active, self._aerosol_active,
+                self._aerosol_lw_active, self._ghg_active,
+                bool(self._experiment),
             )
             logger.info(
                 "  Spectral full-physics AMIP pipeline: "

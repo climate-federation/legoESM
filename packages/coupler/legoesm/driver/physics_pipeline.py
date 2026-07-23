@@ -2865,7 +2865,7 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
-def convection_config_for(config):
+def convection_config_for(config, grid_dx_m=None):
     """The ``ConvectionConfig`` (scheme + tuned per-scheme leaf) to build a
     combined-physics convection kernel from.
 
@@ -2876,6 +2876,14 @@ def convection_config_for(config):
     ``convective_precip_efficiency``, ...) silently never reached them —
     the same gap class as the 2026-07-23 hard-sat override. This wraps the
     FV resolver so all lanes share ONE tuned leaf.
+
+    ``grid_dx_m``: the caller's grid spacing [m] (sqrt of mean cell area).
+    Fills Bechtold's IFS ZTAURES ``dx_m`` when the user left the 0.0
+    sentinel — otherwise the deep CAPE closure runs the legacy
+    resolution-agnostic turnover (factor 1.0 instead of ~3 at 2°),
+    over-vigorous convection on coarse meshes (codex 2026-07-23 finding A).
+    An explicit ``bechtold_dx_m``/``--params`` value always wins.  Static
+    Python float — trace-time constant, no retrace.
     """
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 
@@ -2888,6 +2896,9 @@ def convection_config_for(config):
         # Schemes without a leaf slot (or resolver-handled specially) keep
         # the plain scheme selection — the factory dispatch validates it.
         return cc
+    if (scheme == "bechtold" and grid_dx_m is not None
+            and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
+        leaf = leaf._replace(dx_m=float(grid_dx_m))
     return cc._replace(**{scheme: leaf})
 
 

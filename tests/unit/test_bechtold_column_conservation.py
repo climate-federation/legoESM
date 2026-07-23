@@ -44,7 +44,6 @@ PROD_CONFIG = BechtoldConfig(
     M_b_max=0.02,
     cmt_c_u=0.7,
     cmt_c_d=0.7,
-    cape_sink_heating_ratio=5.0,
     p_conv_top_pa=15000.0,
     precip_split_scheme="constant",
     precip_efficiency=0.8,
