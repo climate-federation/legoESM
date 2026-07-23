@@ -1264,11 +1264,12 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
                 f"got {d.discretization!r}"
             )
-        if d.pgf_scheme not in ("two_term", "lin1997"):
-            errors.append(
-                f"dycore.pgf_scheme must be one of ('two_term', 'lin1997'), "
-                f"got {d.pgf_scheme!r}"
-            )
+        # NOTE (2026-07-23 fix-forward): the dycore.pgf_scheme membership
+        # check (3fa76cc7b) referenced a field added by a3b450b7f, which is
+        # on ap/amip-cmip6-integration and NOT yet on main — every
+        # validate_strict() call died on AttributeError.  Re-add the check
+        # (and its bogus-teeth coverage in test_validate_strict_coverage)
+        # together with the a3b450b7f DycoreConfig.pgf_scheme field.
         _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
         if self.precision not in _valid_precisions:
             errors.append(
