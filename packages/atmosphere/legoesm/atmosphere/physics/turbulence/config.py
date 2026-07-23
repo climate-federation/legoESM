@@ -150,6 +150,7 @@ __param_spec__ = {
             "z0": {"units": "m", "bounds": (1e-05, 1e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "surface-layer aerodynamic roughness length", "shape": None},  # 2-decade range (default 1e-4); wider spans lose float32 sigmoid precision near the floor
             "most_unstable_gamma": {"units": "1", "bounds": (8.0, 28.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Businger-Dyer (1971) / Dyer (1974) MOST unstable-branch stability-function coefficient gamma (phi=(1-gamma*zeta)^-1/4); only used by a stability-dependent bulk_scheme", "shape": None},
             "most_stable_beta": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Dyer (1974) MOST stable-branch linear stability-function coefficient beta (psi=-beta*zeta); only used by the dyer1974 stability_scheme of a stability-dependent bulk_scheme", "shape": None},
+            "z0h_z0_ratio": {"units": "1", "bounds": (0.01, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "roughness", "reference": "Garratt (1992) thermal/momentum roughness ratio z0h/z0", "shape": None},
             "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
         },
     },
@@ -245,6 +246,15 @@ class SurfaceLayerConfig(NamedTuple):
         (psi = -beta*zeta); default 5.  ONLY consumed on the stability-dependent
         MOST path AND when ``stability_scheme="dyer1974"``.  A larger beta =>
         weaker fluxes under stable stratification.
+    z0h_z0_ratio : float
+        Thermal/momentum roughness ratio z0h/z0 (default 0.1).  On the
+        fixed-roughness MOST path the scalar roughness is z0_t = z0_q =
+        z0 * z0h_z0_ratio.  ONLY consumed on the stability-dependent
+        ``compute_most_fluxes`` paths, and of those only the constant/most
+        fixed-roughness branch reads it (COARE 3.0 / large_yeager compute their
+        own scalar roughness).  A LARGER ratio => larger z0_t => smaller
+        ln(z_t/z0_t) => larger heat exchange coefficient => STRONGER sensible/
+        latent flux (Garratt 1992; Zilitinkevich kB^-1 range).
     """
     z0: float = 1e-4
     Cd_neutral: float = 1.5e-3
@@ -279,6 +289,17 @@ class SurfaceLayerConfig(NamedTuple):
     # tree_deserialise_leaves field ordering are unchanged.
     most_unstable_gamma: float = 16.0
     most_stable_beta: float = 5.0
+    # Thermal/momentum roughness ratio z0h/z0 (Garratt 1992; Zilitinkevich
+    # kB^-1 = ln(z0/z0h) family) for the FIXED-roughness MOST path: z0_t = z0_q
+    # = z0 * z0h_z0_ratio.  Default 0.1 reproduces the historical hardcoded
+    # ``z0 * 0.1`` byte-for-byte.  Consumed ONLY on the stability-dependent
+    # ``compute_most_fluxes`` paths (bulk_scheme in {most, coare3,
+    # large_yeager}) — and, of those, ONLY the fixed-roughness constant/most
+    # branch actually uses it (COARE 3.0 / large_yeager compute their own
+    # scalar roughness).  A larger ratio => larger z0_t => stronger heat/
+    # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
+    # tree_deserialise_leaves field ordering are unchanged.
+    z0h_z0_ratio: float = 0.1
 
 
 class SmagorinskyConfig(NamedTuple):

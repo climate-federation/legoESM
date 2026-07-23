@@ -51,8 +51,8 @@ _CACHE: dict = {}
 def _layout_transforms():
     """FV3-reference <-> create face layout (cubed_sphere canonical)."""
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM as PERM,
-        _GNOMONIC_ED_FACE_ROT as ROT,
+        GNOMONIC_ED_FACE_PERM as PERM,
+        GNOMONIC_ED_FACE_ROT as ROT,
     )
 
     def create_to_ref(field6: np.ndarray) -> np.ndarray:
@@ -241,8 +241,8 @@ def build_d5_metric_bundle(n: int, ng: int = 3) -> dict:
         return _CACHE[key]
 
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM as PERM,
-        _GNOMONIC_ED_FACE_ROT as ROT,
+        GNOMONIC_ED_FACE_PERM as PERM,
+        GNOMONIC_ED_FACE_ROT as ROT,
     )
     from legoesm.grids.fv3_native_gridstruct import (
         build_fv3_native_gridstruct_bounded,
@@ -364,8 +364,8 @@ def _run_certified_dvector(u6c: np.ndarray, v6c: np.ndarray,
        reference-layout init.  Never hand-derive seam conventions.
     """
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM as PERM,
-        _GNOMONIC_ED_FACE_ROT as ROT,
+        GNOMONIC_ED_FACE_PERM as PERM,
+        GNOMONIC_ED_FACE_ROT as ROT,
     )
     from legoesm.grids.fv3_native_ext_vector import (
         ext_vector_dgrid_sixface,

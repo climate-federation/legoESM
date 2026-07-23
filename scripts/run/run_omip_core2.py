@@ -5835,6 +5835,7 @@ def main() -> int:
                 # so adding the old ocean-side A*tau*swd surrogate here would
                 # now DOUBLE-COUNT it (codex L1 — budget closed).
                 from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
+                from legoesm.ice import uses_new_physics
                 fw, sf = blend_ice_ocean_forcing(
                     open_sf=sf, open_fw=fw, ice_resp=ice_resp,
                     ice_concentration=_ice_conc_pre,
@@ -5842,6 +5843,7 @@ def main() -> int:
                     sw_partition="raw_core2",
                     alpha_ocean=float(_ice_const.alpha_ocean_broadband),
                     sw_transmittance_ice=0.0,
+                    ice_owns_snow_reservoir=uses_new_physics(ice_config),
                 )
                 # Thread the SAME partition-time-level ice concentration to
                 # the vertical-mixing closure: the TKE lc/etau under-ice

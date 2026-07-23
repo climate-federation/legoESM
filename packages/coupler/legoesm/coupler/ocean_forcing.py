@@ -109,6 +109,7 @@ def blend_ice_ocean_forcing(
     sw_partition: str = "prescaled",
     alpha_ocean: float | None = None,
     sw_transmittance_ice: float = _SW_TRANSMITTANCE_ICE,
+    ice_owns_snow_reservoir: bool = False,
 ):
     """Partition a full-cell open-ocean forcing between the open-water fraction
     ``f_open = 1 - A`` and the sea-ice tile, and add the ice->ocean exchange —
@@ -129,8 +130,18 @@ def blend_ice_ocean_forcing(
       each added exactly ONCE, via :func:`ice_ocean_forcing_from_ice_response`
       (its validated F11 sign conventions: ``tau_ice = -A*ocean_stress`` so the
       core's ``-tau`` consumer applies ``+A*stress`` on the ocean);
-    * precipitation and runoff stay full-cell inputs (no-snow-reservoir policy:
-      precip is not stored on ice), so only ``evap`` is rescaled in ``open_fw``.
+    * precipitation and runoff stay full-cell inputs UNLESS the ice model owns a
+      snow reservoir (``ice_owns_snow_reservoir=True``, i.e. ``uses_new_physics``
+      / the ``_thermo_v2`` path): a snow-reservoir ice model routes its
+      ice-fraction rain/snow to the ocean via ``ice_resp.freshwater_flux`` ->
+      ``ice_fw``, so the DIRECT precip channel must then carry only the
+      open-water share ``f_open*P`` to avoid counting the ``A*P`` ice-fraction
+      precip twice (once full-cell here, once via ``ice_fw``).  For a
+      reservoir-less slab / legacy-dynamic model (default False) precip stays
+      full-cell and ``ice_fw`` carries melt/freeze only, so P is counted once.
+      This matches the coupled-ESM gate (``coupled_esm_driver`` uses_new_physics
+      -> ``f_ocean*P``).  ``runoff`` is always full-cell; only ``evap`` (and now,
+      when gated, ``precip``) is rescaled in ``open_fw``.
 
     ``ocean_mask`` (1 = ocean, 0 = land; ``None`` = all ocean) zeroes the ice
     concentration AND every ice->ocean channel on land cells, so a spurious
@@ -238,8 +249,20 @@ def blend_ice_ocean_forcing(
              + tau_y_ice)
 
     if open_fw is not None:
+        # No-snow-reservoir policy: full-cell precip reaches the ocean directly.
+        # But when the ice model OWNS a snow reservoir (v2 / uses_new_physics ->
+        # the _thermo_v2 path), it delivers the ice-fraction rain/snow to the
+        # ocean via ice_fw (= f_water*ice_resp.freshwater_flux), so the DIRECT
+        # channel must carry only the open-water share f_open*P (kg/m2/s, +into
+        # ocean; f_open in [0,1] is a pure fraction -> positive scaling, no sign
+        # flip) or the A*P ice-fraction precip is counted twice.  Mirrors
+        # coupled_esm_driver's f_ocean*P gate.
+        precip = (
+            open_fw.precip * f_open
+            if ice_owns_snow_reservoir else open_fw.precip
+        )
         fw = FreshwaterForcing(
-            precip=open_fw.precip,
+            precip=precip,
             evap=(open_fw.evap * f_open if open_fw.evap is not None else z),
             runoff=open_fw.runoff,
             ice_fw=ice_fw,
@@ -293,10 +316,15 @@ def omip_sea_ice_surface_forcing(
       ``open_ocean_sf`` is scaled by ``f_ocean``.  The ice tile then ADDS its
       ice->ocean exchange (basal heat, melt/freeze freshwater, brine salt,
       ice-ocean stress) via :func:`ice_ocean_forcing_from_ice_response`.
-    * Freshwater: precipitation + runoff reach the ocean over the whole cell
-      (this slab ice has no snow reservoir — ``SnowConfig`` off by default — so
-      precip is not stored on ice); evaporation acts only on the open-ocean
-      fraction (``f_ocean``); ice melt/freeze enters via ``ice_fw``.
+    * Freshwater: runoff reaches the ocean over the whole cell; evaporation acts
+      only on the open-ocean fraction (``f_ocean``); ice melt/freeze enters via
+      ``ice_fw``.  Precipitation reaches the ocean full-cell for a reservoir-less
+      ice model (slab / legacy-dynamic: no snow reservoir, ``ice_fw`` carries no
+      precip), but only over the open-water fraction ``f_ocean*P`` when the
+      configured ice model owns a snow reservoir (``uses_new_physics`` / the
+      ``_thermo_v2`` path), which then delivers the ``A*P`` ice-fraction precip
+      itself via ``ice_fw`` -- see :func:`blend_ice_ocean_forcing`'s
+      ``ice_owns_snow_reservoir`` gate (so precip is counted exactly once).
     * ``sf.freshwater`` carries the PHYSICAL net freshwater ``P - E + R +
       ice_fw`` as the KPP surface-buoyancy signal (buoyancy-only under the
       direct-forced scheme ``"none"``; the mass is applied once via the
@@ -337,6 +365,7 @@ def omip_sea_ice_surface_forcing(
     -------
     (new_ice_state, FreshwaterForcing, OceanSurfaceForcing)
     """
+    from legoesm.ice import uses_new_physics
     from legoesm.ice.sea_ice import step_sea_ice
 
     u_o = u_ocean if u_ocean is not None else jnp.zeros_like(ocean_sst_K)
@@ -359,6 +388,7 @@ def omip_sea_ice_surface_forcing(
         ice_concentration=new_ice.concentration.data,
         ocean_mask=ocean_mask,
         sw_partition="prescaled",
+        ice_owns_snow_reservoir=uses_new_physics(ice_config),
     )
     return new_ice, fw, sf
 

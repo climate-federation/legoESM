@@ -113,7 +113,13 @@ def compute_surface_fluxes(
         Friction velocity [m/s], shape (ncol,).
     """
     validate_bulk_scheme(config.bulk_scheme)
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    # Route every stability-dependent bulk scheme — the fixed-roughness
+    # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
+    # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
+    # uses the local roughness ``config.z0`` via the neutral log law and the
+    # selectable ``stability_scheme`` stable branch; without this it would fall
+    # through to the constant-Cd path and silently ignore z0 and stability.
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_ref=config.z_ref,
@@ -125,6 +131,7 @@ def compute_surface_fluxes(
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
+            z0h_z0_ratio=config.z0h_z0_ratio,
         )
         return tau_x, tau_y, shflx, lhflx, ustar
 
@@ -233,6 +240,7 @@ def _single_tile_flux(
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
+            z0h_z0_ratio=config.z0h_z0_ratio,
         )
 
     # Constant neutral coefficients.

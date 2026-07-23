@@ -419,3 +419,19 @@ class TestTpointCurrentRotation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_make_latlon_remapper_seam_full_coverage_high_ratio():
+    # Destination 4x COARSER than source in longitude (dd/ds = 64/16 = 4 > 3).
+    # dst has a cell centred at lon=0 straddling the 0/2pi seam; a single ghost
+    # column (old code) under-covers it, ceil(dd/ds)=4 ghosts close it.
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.coupler.grid_remap import make_latlon_remapper
+    src = create_latlon_grid(n_lat=16, n_lon=64)   # fine
+    dst = create_latlon_grid(n_lat=8, n_lon=16)     # 4x coarser in lon
+    w = make_latlon_remapper(src, dst)              # must not raise (ghost fix)
+    row = np.bincount(np.asarray(w.dst_idx_flat),
+                      weights=np.asarray(w.weights),
+                      minlength=w.n_dst_cells)
+    # Every destination cell -- including the seam-straddling column -- covered.
+    np.testing.assert_allclose(row, 1.0, atol=1e-9)

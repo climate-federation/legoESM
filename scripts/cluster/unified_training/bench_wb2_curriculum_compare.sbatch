@@ -27,17 +27,22 @@ OUT_ROOT="${OUT_ROOT:-results/bench_wb2_curriculum}"
 mkdir -p "$OUT_ROOT"
 
 # label -> "suite|result_dir/variant" (suite drives the eval model skeleton).
+# Ladder: base (fixed 2-step) -> curr (rollout curriculum, constant surface)
+# -> curr_most (curriculum + MOST surface closure w/ trainable global MOST
+# coeffs + z0h + local z0). classical only for the MOST arm (surface scheme
+# is N/A when an NN replaces physics).
 declare -A ENTRY=(
   [classical_base]="config/aimip/ace2/suite.yaml|results/aimip_ace2loss/classical"
   [classical_curr]="config/aimip/ace2/suite_curriculum.yaml|results/aimip_ace2curr/classical"
+  [classical_curr_most]="config/aimip/ace2/suite_curriculum_most.yaml|results/aimip_ace2curr_most/classical"
   [column_nn_base]="config/aimip/ace2/suite.yaml|results/aimip_ace2loss/column_nn"
   [column_nn_curr]="config/aimip/ace2/suite_curriculum.yaml|results/aimip_ace2curr/column_nn"
 )
-# variant token for --variant (strip the _base/_curr suffix).
+# variant token for --variant (strip the _base/_curr/_curr_most suffix).
 _variant_of() { case "$1" in classical_*) echo classical;; column_nn_*) echo column_nn;; esac; }
 
 SCORECARD_ARGS=()
-for label in classical_base classical_curr column_nn_base column_nn_curr; do
+for label in classical_base classical_curr classical_curr_most column_nn_base column_nn_curr; do
   suite="${ENTRY[$label]%%|*}"; dir="${ENTRY[$label]##*|}"
   ck="$dir/params.eqx"; ema="$dir/params_ema.eqx"
   [ -f "$ema" ] && ck="$ema"

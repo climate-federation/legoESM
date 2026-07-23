@@ -1178,23 +1178,35 @@ def _build_stubs(
     esai_patch = jnp.zeros(np_, dtype=jnp.float64)
     for i in range(ncol):
         p = i + 1
-        htop_v = (float(land_params.htop[i]) if land_params is not None and land_params.htop is not None
+        # NO float() on the per-column land_params / lai_override values: on the
+        # COUPLED jitted path these are TRACED (LAI/htop/SAI flow through the land
+        # state + surface blend in step_unified), so float() raises
+        # ConcretizationTypeError.  Keep them as jnp/array scalars — .at[p].set
+        # accepts a tracer, a numpy scalar (eager) or a Python-float fallback alike,
+        # and the value is identical to the old float() path in eager mode.  Canopy
+        # STRUCTURE (ncan/ntop/nbot) is NOT built from these here on the traceable
+        # path — it comes from the concrete grid_info — so a traced htop/LAI only
+        # feeds per-column DATA (RSL reference height, dpai), never a slice bound.
+        htop_v = (land_params.htop[i] if land_params is not None and land_params.htop is not None
                   else 5.0)  # coeff-ok: 5 m fallback canopy height (CLM4.5 DBF-temperate default)
         # A prescribed/climatology htop can be 0 on a bare or uncovered column;
         # floor it so hbot = hbot_frac*htop stays < htop (valid CLM-ML layering).
-        # LAI is 0 there, so the nominal height changes no canopy flux.
-        htop_v = max(htop_v, _HTOP_GEOM_MIN_M)
+        # LAI is 0 there, so the nominal height changes no canopy flux.  jnp.maximum
+        # (not max()) so a traced htop_v does not break the Python comparison; pin
+        # the floor to the (float64) patch dtype so a float32 htop_v does not store a
+        # float32-rounded 0.1 (~1.5e-9 m drift vs the old float64 max()) (codex).
+        htop_v = jnp.maximum(htop_v, jnp.asarray(_HTOP_GEOM_MIN_M, dtype=htop_patch.dtype))
         # LAI precedence: prognostic ``lai_override`` (C_fol / LCMA from the
         # DifferLand carbon pool) > prescribed ``LandSurfaceParams.LAI``
         # climatology > scalar fallback.  Canopy STRUCTURE (htop/SAI) stays
         # prescribed either way (the carbon cycle produces no allometric map).
         if lai_override is not None:
-            lai_v = float(lai_override[i])
+            lai_v = lai_override[i]
         elif land_params is not None and land_params.LAI is not None:
-            lai_v = float(land_params.LAI[i])
+            lai_v = land_params.LAI[i]
         else:
             lai_v = 2.0  # coeff-ok: LAI=2 fallback (no prescribed/prognostic LAI)
-        sai_v  = (float(land_params.SAI[i]) if land_params is not None and land_params.SAI is not None
+        sai_v  = (land_params.SAI[i] if land_params is not None and land_params.SAI is not None
                   else 0.5)
         htop_patch = htop_patch.at[p].set(htop_v)
         elai_patch = elai_patch.at[p].set(lai_v)
