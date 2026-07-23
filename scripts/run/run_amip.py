@@ -1245,6 +1245,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
+    parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
+                        dest="mpas_qv_smooth_del2_m2s",
+                        help="MPAS lane only: horizontal q_v del2 (unweighted "
+                             "SCVT Laplacian) smoothing diffusivity [m^2/s], "
+                             "applied post-step + a q>=0 floor (~1e5-1e6 "
+                             "typical at 240 km; 0=off, default). Conserves "
+                             "(to roundoff) the per-level mixing-ratio integral "
+                             "but NOT column water vapour (non-conservative "
+                             "filter). "
+                             "Setup refuses coefficients above the explicit "
+                             "monotonicity bound for the mesh+dt.")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1720,6 +1731,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_land_beta=(args.mpas_land_beta
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
+        mpas_qv_smooth_del2_m2s=(
+            args.mpas_qv_smooth_del2_m2s
+            if args.mpas_qv_smooth_del2_m2s is not None
+            else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

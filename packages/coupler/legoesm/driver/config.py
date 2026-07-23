@@ -1224,6 +1224,29 @@ class ExperimentConfig(NamedTuple):
     # ``fcrit2``, ...); without it they were silently discarded.
     gravity_wave_drag_override: Any = None
 
+    # Horizontal q_v smoothing on the MPAS lane [m^2/s]; 0 = off (byte-
+    # identical; appended at the tuple END to preserve the positional ABI).
+    # The MPAS lane historically had NO horizontal moisture smoothing (the FV
+    # lanes smooth q_v every step in their step factories) — the confirmed
+    # missing third suspect behind the cell-scale CWV recharge/discharge
+    # speckle (2026-07-23).  Applied post-step as an UNWEIGHTED SCVT del2 (∇²)
+    # + a q>=0 floor: monotone / positivity-preserving under the setup-time
+    # CFL guard (the floor is then a no-op, to roundoff), and it conserves the per-level
+    # mixing-ratio area integral sum_c A_c q_c (exact in exact arithmetic; to
+    # floating-point roundoff — ~1e-7 relative in fp32).  It is NOT column-
+    # water-vapour (CWV = sum_c A_c dp_c q_c/g) conserving: across a surface-
+    # pressure gradient an unweighted del2 redistributes a little water mass
+    # (bias set by the humidity–terrain correlation), so this is an explicitly
+    # NON-conservative grid-scale filter — monitor the water budget if used in
+    # long runs.  Unweighted (not dp-weighted) is REQUIRED: the default hybrid
+    # coordinate's surface-layer dp goes <= 0 for p_s below ~2/3 p_ref over
+    # high terrain, which a dp-weighted form would divide by (Inf/NaN).  It is
+    # a del2 (∇²), not the FV lanes' scale-selective del4 (∇⁴): del2 is
+    # monotone under the explicit guard (hence the exact per-level integral)
+    # but damps resolved gradients more broadly — use a gentle coefficient.
+    # MPAS-only: refused on other discretizations (validate_strict).
+    mpas_qv_smooth_del2_m2s: float = 0.0   # del2 diffusivity [m^2/s]; ~1e5-1e6 typical at 240 km
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -1793,6 +1816,13 @@ class ExperimentConfig(NamedTuple):
                     "land tile (slab_land_active / use_multilayer_land) and "
                     "would silently ignore them."
                 )
+            if self.mpas_qv_smooth_del2_m2s != 0.0:
+                errors.append(
+                    "mpas_qv_smooth_del2_m2s is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} already smooths q_v "
+                    "in its step factories (qv_smooth_coeff) and would "
+                    "silently ignore it."
+                )
         if not (math.isfinite(self.mpas_land_lapse_K_per_km)
                 and 0.0 <= self.mpas_land_lapse_K_per_km <= 20.0):
             errors.append(
@@ -1805,6 +1835,17 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"mpas_land_beta (land evaporation efficiency) must be finite "
                 f"in [0, 1]; got {self.mpas_land_beta!r}."
+            )
+        # Numerics diffusivity, not a trainable closure: 0 = off; upper bound
+        # 1e8 m^2/s is far above any del2 a stable explicit step admits (the
+        # driver additionally enforces the mesh-specific CFL/monotonicity
+        # bound at setup — presence of a q_v tracer is checked there too).
+        if not (math.isfinite(self.mpas_qv_smooth_del2_m2s)
+                and 0.0 <= self.mpas_qv_smooth_del2_m2s <= 1.0e8):
+            errors.append(
+                f"mpas_qv_smooth_del2_m2s (horizontal q_v del2 diffusivity "
+                f"[m^2/s]) must be finite in [0, 1e8]; got "
+                f"{self.mpas_qv_smooth_del2_m2s!r}."
             )
         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
         # The float overrides only act when the boolean gate is on; bounds

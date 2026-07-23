@@ -238,6 +238,37 @@ _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+    """MPAS post-step horizontal q_v smoothing (array-level, testable).
+
+    UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
+    the FV lane's module-scope ``_apply_qv_smoothing`` so the exact driver
+    code is unit-tested directly (not just a replicated expression).  Plain
+    (no dp weighting) is deliberate: the default hybrid coordinate's surface
+    dp can be <= 0 over high terrain, which a mass-weighted form would divide
+    by (Inf/NaN).  Monotone under the setup-time CFL guard
+    ``nu*dt*scalar_del2_cell_cfl_factor(mesh) <= 1`` (the driver enforces
+    <= 0.5), so the floor is then a no-op (to roundoff) and the per-level
+    ``sum_c A_c q_c`` integral is conserved (in exact arithmetic; to roundoff —
+    ~1e-7 relative in fp32).  The floor only sanitises finite negatives from a
+    violated bound, NOT pre-existing NaN/Inf in ``q_v`` (max(NaN,0)=NaN).
+
+    Parameters
+    ----------
+    q_v : jax.Array, shape (nCells, nlev) — vapour mixing ratio [kg/kg].
+    mesh : VoronoiMesh
+    nu : float — del2 diffusivity [m^2/s].
+    dt : float — step [s].
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev) — smoothed, floored q_v (q_v dtype).
+    """
+    from legoesm.core.operators_voronoi import scalar_del2_cell_3d
+    lap = scalar_del2_cell_3d(q_v, mesh)
+    return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+
+
 def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
                                    hard_threshold, hard_max_heating_K):
     """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
@@ -6027,6 +6058,61 @@ class ModelDriver:
                 cfg.sponge_coeff_per_day, _sig_top,
                 float(_sponge_decay[0]),
             )
+        # Horizontal q_v smoothing (post-step, MPAS lane; see the config
+        # field note for the full rationale).  The MPAS lane historically had
+        # no horizontal moisture smoothing — the missing third suspect behind
+        # the cell-scale CWV recharge/discharge speckle.  UNWEIGHTED SCVT del2
+        # (∇²) + a q>=0 floor.  Unweighted (NOT mass-weighted) is REQUIRED:
+        # the default MPAS vertical coordinate is hybrid, whose surface-layer
+        # thickness dp = dA*p_ref + dB*p_s goes <= 0 for p_s below ~2/3 p_ref
+        # (~660 hPa, reached over high terrain — Tibet, Andes, Antarctica)
+        # because dA < 0 near the surface; a dp-weighted del2 would then
+        # divide by a non-positive dp (Inf/NaN).  This conserves (to fp
+        # roundoff) the per-level sum_c A_c q_c integral, NOT column water
+        # vapour (an explicitly non-conservative filter).  The plain-del2
+        # monotonicity factor is
+        # geometry-only, so the CFL guard below is EXACT for the applied op.
+        _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        if _qv_smooth_nu > 0.0:
+            from legoesm.core.operators_voronoi import (
+                scalar_del2_cell_cfl_factor,
+            )
+            if self._voronoi_layout is not None:
+                raise ValueError(
+                    "mpas_qv_smooth_del2_m2s > 0 is not wired for the "
+                    "distributed Voronoi (MPI) lane yet — the horizontal "
+                    "stencil needs a halo refresh after the dycore step. "
+                    "Run single-process or set the coefficient to 0."
+                )
+            if self.state.tracers is None or "q_v" not in self.state.tracers:
+                raise ValueError(
+                    "mpas_qv_smooth_del2_m2s > 0 needs a q_v tracer; this "
+                    "run has none (dry configuration) — the knob would be "
+                    "silently inert."
+                )
+            # Explicit-del2 monotonicity/positivity bound: q + nu*dt*lap is a
+            # convex combination of stencil values iff nu*dt*g_max <= 1, with
+            # g_c = (1/A_c) sum_e dvEdge_e/dcEdge_e (shared helper — same
+            # factor the operator obeys, so guard and operator cannot drift).
+            # Enforce <= 0.5 (2x safety; keeps the q>=0 floor a no-op to
+            # roundoff, so the per-level sum_c A_c q_c integral is conserved —
+            # exact arithmetic, to fp roundoff ~1e-7 in fp32).
+            # EXACT for the plain form actually applied — no dp-ratio guess.
+            _g_max = scalar_del2_cell_cfl_factor(self.grid)
+            _cfl = _qv_smooth_nu * DT * _g_max
+            if _cfl > 0.5:
+                raise ValueError(
+                    f"mpas_qv_smooth_del2_m2s={_qv_smooth_nu:g} violates the "
+                    f"explicit-diffusion monotonicity bound: nu*dt*g_max = "
+                    f"{_cfl:.3f} > 0.5 (dt={DT:g}s, mesh g_max={_g_max:.3e} "
+                    f"1/m^2). Max stable coefficient here: "
+                    f"{0.5 / (DT * _g_max):.3e} m^2/s."
+                )
+            logger.info(
+                "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
+                "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
+                _qv_smooth_nu, _cfl,
+            )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
         if _sst_forcing:
@@ -6558,6 +6644,22 @@ class ModelDriver:
                 self.state = self.state._replace(
                     u=self.state.u.replace(
                         data=self.state.u.data * _sponge_decay))
+            # Post-step horizontal q_v smoothing (opt-in).  Placed BEFORE the
+            # hard-saturation drain so the drain acts on the smoothed field
+            # (smoothing spreads a grid-scale supersaturation spike across
+            # neighbours; the drain then removes what remains).  Module-scope
+            # _mpas_qv_smooth_step (the exact code the unit test exercises):
+            # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
+            # the per-level sum_c A_c q_c integral, NOT column water vapour —
+            # an explicitly non-conservative filter (see the config field note).
+            # Eager like the drain below (outside jit).
+            if _qv_smooth_nu > 0.0:
+                _trc_sm = self.state.tracers
+                _qv_new_sm = _mpas_qv_smooth_step(
+                    _trc_sm["q_v"].data, self.grid, _qv_smooth_nu, DT)
+                _new_trc_sm = dict(_trc_sm)
+                _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
+                self.state = self.state._replace(tracers=_new_trc_sm)
             # Post-step HARD SATURATION ADJUSTMENT (opt-in), applied on the FINAL
             # state AFTER the dycore's vertical vapour transport has acted this
             # step -- the load-bearing placement (in-scheme leaves the transport
