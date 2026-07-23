@@ -1682,6 +1682,31 @@ class LatLonCGridOceanModel:
                     "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
                     '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
                     f"rCdU_bot rate); got {_bd_scheme!r}.")
+            # zdf_drag_in_matrix skips the explicit _bc_bottom_drag RHS kick
+            # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
+            # counting drag in the 3-D momentum tendency. But under
+            # barotropic_solver="explicit_substep", _bc_bottom_drag is ALSO
+            # the barotropic substep's ONLY drag source in F_slow
+            # (barotropic_latlon_cgrid.py:670-679 single-owner comment) — the
+            # implicit-matrix diagonal built here never reaches the
+            # barotropic mode. NEMO instead runs its OWN in-subcycle implicit
+            # drag under ln_dynspg_ts (dyn_drg_init, dynspg_ts.F90:1584-1644),
+            # which legoESM does not yet transcribe. Until that lands, this
+            # combination would silently run the barotropic mode with NO
+            # bottom drag at all — a hard error, not a bit-identical no-op.
+            if config.barotropic.barotropic_solver == "explicit_substep":
+                raise ValueError(
+                    "zdf_drag_in_matrix=True with "
+                    'barotropic_solver="explicit_substep" is not supported: '
+                    "the explicit_substep barotropic loop gets its ONLY "
+                    "bottom-drag source from _bc_bottom_drag's RHS kick, "
+                    "which zdf_drag_in_matrix skips (single-owner guard, no "
+                    "double-count in the 3-D matrix). NEMO covers this case "
+                    "with its own in-subcycle implicit drag (dyn_drg_init, "
+                    "dynspg_ts.F90:1584-1644), which legoESM has not yet "
+                    "transcribed — enabling both here would leave the "
+                    "barotropic mode completely undamped. Use a different "
+                    "barotropic_solver, or leave zdf_drag_in_matrix=False.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -5089,21 +5114,32 @@ class LatLonCGridOceanModel:
         # (dynzdf.F90:293-305) instead of the explicit RHS kick
         # (_bc_bottom_drag, disabled at the tendency stage when this flag is
         # on — see the ocean_pe_latlon_cgrid single-owner guard).  Sign:
-        # NEMO's rCdU_bot <= 0 and the diagonal SUBTRACTS it
-        # (zwd -= zDt_2*(...)), which ADDS positive definiteness (damping);
-        # legoESM's r_eff = -rCdU_bot >= 0, so extra_diag = +dt_mom*r_eff/h
-        # at the bottom cell reproduces the identical sign/magnitude.
-        # Under ln_dynspg_ts (DINO's split-explicit barotropic — the only
-        # case implemented here), NEMO ALSO adds a barotropic-drag RHS
-        # correction at the bottom cell using the AFTER barotropic velocity
-        # (dynzdf.F90:148-171): "add bottom stress due to barotropic
-        # component only", zDt_2*(rCdU_bot sum)*uu_b(Kaa)/e3u(Kaa). With
-        # zdf_baroclinic_only ALSO on, u_solve_in's bottom cell already had
-        # the barotropic mean subtracted out; the drag correction below adds
-        # back EXACTLY that missing barotropic-mode drag contribution at the
-        # bottom cell (using the SAME depth mean this stage just removed),
-        # so the two flags compose into NEMO's full ln_dynspg_ts treatment.
-        # Without zdf_baroclinic_only, the barotropic mode is already inside
+        # NEMO's rCdU_bot <= 0 and the diagonal SUBTRACTS the SUM of the two
+        # T-point rates (zwd -= zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u),
+        # which ADDS positive definiteness (damping); legoESM's r_eff =
+        # -rCdU_bot >= 0 is the 0.5-AVERAGE of those same two rates, so
+        # extra_diag = +2*dt_mom*r_eff/h at the bottom cell reproduces
+        # NEMO's sum (see the factor-of-2 comment at the extra_diag_u/v
+        # assignment below).  This flag requires a NEMO bottom-drag scheme
+        # and the barotropic solver NOT to be "explicit_substep" (validated
+        # at construction — see the guard near
+        # barotropic_time_filter="nemo_boxcar_ab3"): under explicit_substep,
+        # skipping ``_bc_bottom_drag`` here would leave the barotropic
+        # substep's F_slow with NO drag source at all (NEMO's own
+        # in-subcycle implicit drag, dyn_drg_init/dynspg_ts.F90:1584-1644,
+        # is not yet transcribed).
+        # Under ln_dynspg_ts (NEMO's split-explicit barotropic), NEMO ALSO
+        # adds a barotropic-drag RHS correction at the bottom cell using the
+        # AFTER barotropic velocity (dynzdf.F90:148-171): "add bottom stress
+        # due to barotropic component only", zDt_2*(rCdU_bot sum)*uu_b(Kaa)
+        # /e3u(Kaa), with rCdU_bot <= 0 so this term OPPOSES (damps) uu_b —
+        # see the sign walk at the u_solve_in/v_solve_in correction below.
+        # With zdf_baroclinic_only ALSO on, u_solve_in's bottom cell already
+        # had the barotropic mean subtracted out; the drag correction below
+        # re-applies that same damping at the bottom cell (using the SAME
+        # depth mean this stage just removed), so the two flags compose
+        # into NEMO's full ln_dynspg_ts treatment. Without
+        # zdf_baroclinic_only, the barotropic mode is already inside
         # u_solve_in, so no separate correction is added (nothing missing).
         extra_diag_u = 0.0
         extra_diag_v = 0.0
@@ -5117,18 +5153,35 @@ class LatLonCGridOceanModel:
                     self.config, _grid))
             _r_eff_u = _r_eff_u.astype(state.u.data.dtype)
             _r_eff_v = _r_eff_v.astype(state.v.data.dtype)
+            # NEMO dynzdf.F90:293-296: zwd(iku) -= zDt_2*(rCdU_bot(i+1,j)
+            # + rCdU_bot(i,j))/e3u(iku) -- a SUM of the two T-point rates
+            # (no 1/2), with zDt_2 = the physical timestep (not the 2*dt
+            # leapfrog form despite the name). ``_r_eff_{u,v}`` is
+            # ``nemo_bottom_drag_rate_faces``'s 0.5*(...) AVERAGE of those
+            # same two T-point rates (the shared helper used elsewhere for
+            # the RHS drag kick), so reproducing NEMO's sum from the
+            # average requires the explicit factor of 2 here.
             extra_diag_u = (
-                dt_mom * _r_eff_u[..., jnp.newaxis]
+                2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
                 / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
             extra_diag_v = (
-                dt_mom * _r_eff_v[..., jnp.newaxis]
+                2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
                 / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
-            if _zdf_baroclinic_only and self.config.barotropic.barotropic_solver == "explicit_substep":
-                u_solve_in = u_solve_in + (
-                    dt_mom * _r_eff_u[..., jnp.newaxis]
+            if _zdf_baroclinic_only:
+                # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
+                # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
+                # convention -- so this RHS term is NEGATIVE (it damps the
+                # barotropic bottom velocity uu_b/vv_b, opposing it, not
+                # reinforcing it). legoESM's r_eff = -rCdU_bot >= 0, so the
+                # sign-translated term SUBTRACTS from the solve input:
+                # the barotropic-mode bottom cell loses ``2*dt_mom*r_eff
+                # /e3u * u_bt_mean`` before the solve, matching NEMO's
+                # damping direction.
+                u_solve_in = u_solve_in - (
+                    2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
                     / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
-                v_solve_in = v_solve_in + (
-                    dt_mom * _r_eff_v[..., jnp.newaxis]
+                v_solve_in = v_solve_in - (
+                    2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---

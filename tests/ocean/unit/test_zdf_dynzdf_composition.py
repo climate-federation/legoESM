@@ -115,20 +115,23 @@ def test_drag_in_matrix_analytic_bottom_cell():
     term decouples the tridiagonal system into independent per-level scalar
     equations (K=0 -> a=c=0 everywhere), so
 
-        b_bot = 1 + dt_mom * r_eff / e3_bot   (extra_diag at the bottom only)
+        b_bot = 1 + 2 * dt_mom * r_eff / e3_bot   (extra_diag at the bottom only)
         u_new_bot = u_old_bot / b_bot
 
-    and every level ABOVE the bottom is unchanged (b=1 there).  This
-    directly derives the exact transcription in
-    ``LatLonCGridOceanConfig.zdf_drag_in_matrix`` / dynzdf.F90:293-305:
-    ``zwd(iku) -= zDt_2*(rCdU_bot(i+1)+rCdU_bot(i))/e3u(iku)`` with
-    ``rCdU_bot<=0``, i.e. b gains ``+dt_mom*r_eff/e3u`` at the bottom cell,
-    where ``r_eff = -rCdU_bot = Cd*sqrt(u^2+v^2+ke0)`` (nemo_quadratic)."""
+    and every level ABOVE the bottom is unchanged (b=1 there).  b_bot is
+    DERIVED from NEMO's dynzdf.F90:293-296, NOT from the legoESM code under
+    test: ``zwd(iku) -= zDt_2*(rCdU_bot(i+1)+rCdU_bot(i))/e3u(iku)`` is a SUM
+    of the two T-point rates (rCdU_bot<=0, so the subtraction ADDS damping);
+    ``r_eff = -rCdU_bot`` here is the 0.5-AVERAGE of those same two rates
+    (``nemo_bottom_drag_rate_faces``'s shared convention), so reproducing
+    NEMO's SUM from the AVERAGE needs the explicit factor of 2:
+    b gains ``+2*dt_mom*r_eff/e3u`` at the bottom cell, where
+    ``r_eff = Cd*sqrt(u^2+v^2+ke0)`` (nemo_quadratic)."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
     grid, z, state, config = _partial_cell_channel(
-        zdf_drag_in_matrix=True)
+        zdf_drag_in_matrix=True, barotropic_solver="rigid_lid")
     u0, v0 = 0.25, -0.15
     state = _uniform_flow(state, u0, v0)
     dt_mom = 1800.0
@@ -144,7 +147,7 @@ def test_drag_in_matrix_analytic_bottom_cell():
     bl = int(np.asarray(z.bottom_level)[2, 3])
     h_bot = float(np.asarray(z.h_partial)[2, 3, bl])
     r_eff = CD0 * float(np.sqrt(u0 * u0 + v0 * v0 + KE0))
-    b_bot = 1.0 + dt_mom * r_eff / h_bot
+    b_bot = 1.0 + 2.0 * dt_mom * r_eff / h_bot
     expect_u_bot = u0 / b_bot
     expect_v_bot = v0 / b_bot
 
@@ -179,6 +182,66 @@ def test_drag_in_matrix_requires_implicit_vmix():
         zdf_drag_in_matrix=True, implicit_vertical_mixing=False)
     with pytest.raises(ValueError, match="zdf_drag_in_matrix"):
         LatLonCGridOceanModel(grid, z, config)
+
+
+def test_drag_in_matrix_rejects_explicit_substep_barotropic():
+    """zdf_drag_in_matrix=True with the default barotropic_solver=
+    "explicit_substep" must hard-error: that combination would skip
+    _bc_bottom_drag (single-owner guard) while the explicit_substep
+    barotropic loop's ONLY drag source IS _bc_bottom_drag's RHS kick
+    (barotropic_latlon_cgrid.py:670-679) -- NEMO's own in-subcycle implicit
+    drag (dyn_drg_init, dynspg_ts.F90:1584-1644) is not yet transcribed, so
+    the barotropic mode would silently run undamped."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        zdf_drag_in_matrix=True, barotropic_solver="explicit_substep")
+    with pytest.raises(ValueError, match="zdf_drag_in_matrix"):
+        LatLonCGridOceanModel(grid, z, config)
+
+
+def test_baroclinic_only_plus_drag_in_matrix_bt_correction_damps():
+    """Combined zdf_drag_in_matrix + zdf_baroclinic_only, A_v=0, uniform u0
+    everywhere (so u_bt_mean == u0 at every column): the BT-drag RHS
+    correction (dynzdf.F90:156-159, rCdU_bot<=0 -> the term OPPOSES uu_b) must
+    DAMP the bottom-cell velocity in magnitude, not amplify or flip its sign.
+
+    Trace: baroclinic strip zeroes u_solve_in everywhere (uniform column);
+    the BT correction then sets the bottom cell to
+    ``-2*dt_mom*r_eff/e3u * u0``; the decoupled A_v=0 solve divides that by
+    ``b_bot = 1 + 2*dt_mom*r_eff/e3u``; re-adding u_bt_mean=u0 afterward gives
+
+        u_final_bot = u0 - 2*dt_mom*r_eff/e3u*u0 / b_bot = u0 / b_bot
+
+    i.e. the SAME damped form as the drag-in-matrix-alone case (test 2),
+    with |u_final_bot| < |u0| since b_bot > 1 (r_eff > 0)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_solver="rigid_lid")
+    u0 = 0.2
+    state = _uniform_flow(state, u0, 0.0)
+    dt_mom = 1800.0
+    model = LatLonCGridOceanModel(grid, z, config)
+    s_new = model._apply_implicit_vertical_mixing(
+        state, dt_mom, surface_forcing=None, do_tracers=False,
+    )
+
+    bl = int(np.asarray(z.bottom_level)[2, 3])
+    h_bot = float(np.asarray(z.h_partial)[2, 3, bl])
+    r_eff = CD0 * float(np.sqrt(u0 * u0 + KE0))
+    b_bot = 1.0 + 2.0 * dt_mom * r_eff / h_bot
+    expect_u_bot = u0 / b_bot
+    assert abs(expect_u_bot) < abs(u0)
+
+    u_new = np.asarray(s_new.u.data)
+    np.testing.assert_allclose(u_new[2, 2:-1, bl], expect_u_bot, rtol=1e-6)
+    # Above the bottom (A_v=0, no drag there): the baroclinic-only round
+    # trip is exact, so those levels are untouched at u0.
+    np.testing.assert_allclose(u_new[2, 2:-1, :bl], u0, rtol=1e-6)
 
 
 # --------------------------------------------------------------- test 3 ---

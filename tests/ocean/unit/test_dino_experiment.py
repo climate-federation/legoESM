@@ -342,11 +342,17 @@ class TestDINORecipes:
             "pgf_scheme": "nemo_sco",
             "pgf_quadrature": "nemo_trapezoid",
             # dynzdf composition (#1226): namdrg ref default ln_drgimp=.true.
-            # (DINO's &namdrg override sets only ln_non_lin) + ln_dynspg_ts=
-            # .true. (namdyn_spg ref default, matches this card's
-            # barotropic_solver="explicit_substep").
-            "zdf_drag_in_matrix": True,
-            "zdf_baroclinic_only": True,
+            # (DINO's &namdrg override sets only ln_non_lin) -- but kept OFF
+            # here: a controlled 4-way attribution (2026-07-23) measured
+            # BOTH flags inert for the east-wall checkerboard v-mode (all
+            # combos identical to the 5th digit), and enabling
+            # zdf_drag_in_matrix under this card's barotropic_solver=
+            # "explicit_substep" is now a hard construction-time error (no
+            # in-subcycle implicit drag transcribed yet, dynspg_ts.F90:
+            # 1584-1644). See the honest-gate comment at DINO_RECIPES
+            # ["nemo_dino_kamm"] in dino.py.
+            "zdf_drag_in_matrix": False,
+            "zdf_baroclinic_only": False,
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -357,17 +363,21 @@ class TestDINORecipes:
         dino_lat_lon_model_config(grid, c, physics=True)
 
     def test_kamm_cards_propagate_zdf_flags_to_model_config(self):
-        # #1226: zdf_drag_in_matrix / zdf_baroclinic_only must reach the
-        # model config on BOTH kamm cards (MLF inherits them from the base
-        # nemo_dino_kamm dict — see DINO_RECIPES["nemo_dino_kamm_mlf"]).
+        # #1226: zdf_drag_in_matrix / zdf_baroclinic_only are OFF on BOTH
+        # kamm cards (MLF inherits from the base nemo_dino_kamm dict — see
+        # DINO_RECIPES["nemo_dino_kamm_mlf"]) -- measured inert for the
+        # east-wall checkerboard (4-way controlled attribution 2026-07-23),
+        # kept as faithful selectable dynzdf transcriptions but not enabled
+        # by the cards. Assert False propagates through to the model config
+        # unchanged on both.
         for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             c = dino_config_for_recipe(recipe)
-            assert c.zdf_drag_in_matrix is True, recipe
-            assert c.zdf_baroclinic_only is True, recipe
+            assert c.zdf_drag_in_matrix is False, recipe
+            assert c.zdf_baroclinic_only is False, recipe
             grid = dino_lat_lon_grid(c, n_lon=10)
             mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
-            assert mc.zdf_drag_in_matrix is True, recipe
-            assert mc.zdf_baroclinic_only is True, recipe
+            assert mc.zdf_drag_in_matrix is False, recipe
+            assert mc.zdf_baroclinic_only is False, recipe
 
     def test_zdf_flags_default_false_on_other_recipes(self):
         # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/

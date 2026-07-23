@@ -1951,6 +1951,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # term needs NEMO's rCdU_bot rate, not the legacy linear/MOM6 rate.
     # Default False -> the pre-existing outside-the-matrix explicit drag
     # application is UNCHANGED -> BIT-IDENTICAL.
+    # NOTE (tendency-probe fidelity): when enabled, the bottom-drag
+    # contribution moves OUT of the explicit tendency (``_bc_bottom_drag``
+    # is skipped, so ``diag_botdrag`` is zero) and INTO the implicit vmix
+    # increment. ``fidelity/tendency_probe.py``'s du_mix/dv_mix comparison
+    # then includes drag on the legoESM side too -- matching NEMO's
+    # vtrd_zdf diagnostic, which likewise includes the ``ln_drgimp`` drag
+    # contribution when NEMO's implicit-drag option is on.
     zdf_drag_in_matrix: bool = False
     # zdf_baroclinic_only (dynzdf.F90:119-171, stpmlf.F90:392): NEMO solves
     # the implicit vertical-friction tridiagonal system on the BAROCLINIC

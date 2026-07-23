@@ -790,19 +790,24 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
         # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
-        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block
-        #    (which sets only ln_non_lin=.true.) -- so DINO resolves
-        #    ln_drgimp=.true.: semi-implicit bottom friction IS in the matrix
-        #    (dynzdf.F90:293-305). ln_drgice_imp also ref-defaults .true. but
-        #    zdfdrg.F90:320 force-resets it to .false. whenever nn_ice/=2, and
-        #    DINO's namelist_cfg sets nn_ice=0 -- so no top-friction term (no
-        #    ice-shelf cavities in DINO either). ln_dynspg_ts=.true. (namdyn_spg
-        #    ref default, not overridden; this card's barotropic_solver=
-        #    "explicit_substep" IS the split-explicit match) -- so the
-        #    barotropic-drag RHS correction (dynzdf.F90:148-171) also applies,
-        #    which is why zdf_baroclinic_only is enabled alongside. --
-        "zdf_drag_in_matrix": True,
-        "zdf_baroclinic_only": True,
+        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block)
+        #    -- kept OFF here despite that reference default: a controlled
+        #    4-way attribution (zdf_drag_in_matrix x zdf_baroclinic_only,
+        #    2026-07-23) measured the east-wall checkerboard v-mode metric
+        #    IDENTICAL to the 5th digit across all four combinations -- these
+        #    options are inert for that mode, so enabling them buys no
+        #    fidelity while adding risk (drag_in_matrix + explicit_substep is
+        #    also now a hard construction-time error, see
+        #    LatLonCGridOceanConfig's zdf_drag_in_matrix guard: this card's
+        #    barotropic_solver="explicit_substep" has no in-subcycle implicit
+        #    drag of its own -- NEMO's dyn_drg_init, dynspg_ts.F90:1584-1644,
+        #    is not yet transcribed -- so drag_in_matrix would leave the
+        #    barotropic mode undamped). Both flags stay as faithful,
+        #    independently-selectable dynzdf transcriptions (see
+        #    LatLonCGridOceanConfig docstrings) for future re-measurement
+        #    once dyn_drg_init lands. --
+        "zdf_drag_in_matrix": False,
+        "zdf_baroclinic_only": False,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
