@@ -211,20 +211,32 @@ O(1)-compile + scan==loop no-op test. Codex-clean (3 rounds). Behind
 `CLMMLCanopyConfig.scan_columns` (default True); heterogeneous structure (should it
 ever arise) falls back to the proven S2 per-column loop — correct, only O(ncol) there.
 
-### Remaining ONLY when per-column PFT is plumbed (not today)
-Heterogeneous structure becomes reachable only if a future interface assigns
-per-column PFT (different biomes) — then `nbot`/`pft` vary across columns and the
-single concrete-structure scan would be wrong (it falls back to the O(ncol) loop).
-The PREFERRED extension is **NOT** the nbot-masking radiation rewrite of (a)/(c)
-above (HIGH risk — coupled two-stream tridiagonal solve) but **GROUP-BY-STRUCTURE**:
-partition columns into groups sharing `(ncan,ntop,nbot,pft)`, run ONE Phase-1 uniform
-scan per group (body closed over that group's concrete structure, `jax.lax.scan` over
-the group's patch-index array). Compile is O(#distinct structures) — bounded by
-~(PFTs × nbot values), independent of ncol — reusing the VALIDATED uniform-scan
-machinery with ZERO radiation risk. (Prototyped 2026-07-22 and reverted UNSHIPPED:
-its multi-group path is currently unreachable/untestable with the single-PFT interface,
-so shipping it would be untested speculative code — implement + test it in the same PR
-that plumbs per-column PFT.) The nbot-masking approach (a)/(c) remains a theoretical
-alternative only if a single O(1) scan over ALL heterogeneous columns is ever needed
-(vs O(#structures) groups), and only with the mixed-structure parity oracle that
-per-column PFT would make constructible.
+### SHIPPED (2026-07-23) — heterogeneous via GROUP-BY-STRUCTURE (per-column PFT + group scan)
+Heterogeneous structure is now reachable AND handled at O(#structures) compile — the
+nbot-masking radiation rewrite of (a)/(c) was NEVER needed.
+
+1. **Per-column PFT** (PR #1299, merged): an optional concrete `pft_per_col (ncol,)` int
+   array threads through `compute_clm_ml_canopy_fluxes → _setup_clm_topology` to set
+   `patch.itype[p]` per column, so `extract_clm_ml_grid_info`'s per-column `GridInfo`
+   tuple varies (different PFT → different nbot + MLpftcon params). `None` keeps the
+   single-PFT default. This is what makes mixed-PFT columns — hence multiple structure
+   groups — reachable and TESTABLE.
+2. **Group-by-structure scan** (this PR): the interface `_traceable_multi` seam now
+   partitions `_grids` by `(ncan,ntop,nbot,pft)` and runs ONE uniform `lax.scan` per
+   group (body closed over that group's CONCRETE structure via a `_make_group_scan_body`
+   factory; only `grid.p` is traced; disjoint groups → order-independent chaining;
+   singleton / pft<0 / scan_columns=False groups fall back to the per-column loop).
+   Compile is O(#distinct structures) — bounded by ~(PFTs × nbot values), independent
+   of ncol. The all-uniform case is exactly ONE group == the previous single S3 scan
+   (byte-identical), so the uniform ncol=2 parity + O(1) tests are unchanged.
+
+VALIDATED (`test_clm_ml_jit_forward.py`, 13 pass): the mixed-PFT oracle
+`test_group_by_structure_matches_loop_for_mixed_pft` — `pft_per_col=[7,7,11,11]` forms
+2 groups of 2, the group-scan is a NO-OP vs the S2 loop (column-for-column), and the
+group HLO is smaller than the ncol-unrolled loop HLO (O(#groups) traces). Codex CLEAN
+("correct, faithful generalization of the uniform scan"). ZERO radiation-solver change.
+
+The nbot-masking approach (a)/(c) is now purely theoretical — only relevant if a single
+O(1) scan over ALL heterogeneous columns (vs O(#structures) groups) is ever needed;
+group-by-structure covers the real case with none of the coupled-solver masking risk.
+Follow-on: driver-side wiring of `pft_per_col` from the surface map's dominant PFT.
