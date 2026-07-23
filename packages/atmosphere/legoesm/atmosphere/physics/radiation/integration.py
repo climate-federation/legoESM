@@ -1025,6 +1025,15 @@ def _make_hydrostatic_radiation(
             _doy = forcing["day_of_year"]
         if forcing is not None and forcing.get("seconds_of_day") is not None:
             _sod = forcing["seconds_of_day"]
+        # Transient solar (CMIP6 TSI + optional per-g-point spectral weights):
+        # traced per-step forcing, same channel as T_sfc/o3/ghg above, so a
+        # multi-year MPAS/standalone run follows the solar file WITHOUT
+        # retracing (the coupled cube/lat-lon pipeline threads the equivalent
+        # via SegmentForcing/current_s_0).  Absent keys -> the configured
+        # static S_0 and the solver's default spectrum, byte-identical.
+        _tsi_ext = forcing.get("tsi") if forcing is not None else None
+        _ssf_ext = (forcing.get("solar_spectral_fraction")
+                    if forcing is not None else None)
 
         insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config,
@@ -1032,6 +1041,15 @@ def _make_hydrostatic_radiation(
             day_of_year=_doy,
             seconds_of_day=_sod,
         )
+        if _tsi_ext is not None:
+            # insolation is EXACTLY linear in S_0 in both the diurnal and
+            # daily-mean branches of _compute_insolation, so a post-scale by
+            # tsi/S_0_config is the transient-TSI application with no second
+            # orbital computation.
+            _S0_cfg = (radiation_config.rrtmgp.S_0
+                       if radiation_config.scheme == "rrtmgp"
+                       else radiation_config.gray.S_0)
+            insol = insol * (_tsi_ext / _S0_cfg)
 
         # Flatten to column-major (ncol, nlev)
         T_col = T.reshape(ncol, nlev)
@@ -1177,6 +1195,7 @@ def _make_hydrostatic_radiation(
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
+            solar_spectral_fraction=_ssf_ext,
         )
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)

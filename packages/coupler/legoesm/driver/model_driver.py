@@ -6253,6 +6253,18 @@ class ModelDriver:
             and (self._ozone_ext_active or self._aerosol_active
                  or self._ghg_active or bool(self._experiment))
         )
+        # Transient solar file (CMIP6 TSI + optional 14-band spectral):
+        # sampled DAILY like SST/ozone, threaded as traced
+        # ``forcing["tsi"]``/["solar_spectral_fraction"] into the radiation
+        # physics (the previously-inert channel of the MPAS deck — the
+        # run_amip channel table used to print "solar file not threaded").
+        # Spectral weights only reach the rrtmg/rrtmgp solver; gray consumes
+        # the TSI scaling alone.
+        _solar_ext = (cfg.radiation != "none"
+                      and cfg.solar_source in ("file", "spectral_file"))
+        _solar_spectral = (_solar_ext
+                           and cfg.solar_source == "spectral_file"
+                           and cfg.radiation in ("rrtmg", "rrtmgp"))
         # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
         # MICROPHYSICS step regardless of the radiation scheme (the second
         # indirect / KK2000 ``Nc^-1.79`` effect is independent of how
@@ -6494,7 +6506,8 @@ class ModelDriver:
             # is present, so the ocean/land still steps even on a coupled run with
             # radiation=none (where _sst_forcing is False) — else coupling would
             # silently freeze. SST re-sampling below stays gated on _sst_forcing.
-            if _sst_forcing or _ext_forcing or self._segment_callback is not None:
+            if (_sst_forcing or _ext_forcing or _solar_ext
+                    or self._segment_callback is not None):
                 _force_day = START_DAY + step * DT / 86400.0
                 # floor, not int() — see daily_forcing_bucket (negative
                 # fractional days land in the wrong bucket under
@@ -6581,6 +6594,21 @@ class ModelDriver:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
                             }
+                    if _solar_ext:
+                        # Same canonical-day sampling as SST/ozone
+                        # (FIX_RESTART_TIME: bit-exact restart continuation).
+                        from legoesm.forcing.external import (
+                            get_solar_forcing_at_time,
+                        )
+                        _sol = get_solar_forcing_at_time(
+                            self._solar_config, _force_day_canonical)
+                        _forcing_daily["tsi"] = jnp.asarray(
+                            float(_sol["tsi"]))
+                        if (_solar_spectral
+                                and _sol.get("solar_fraction_by_gpt")
+                                is not None):
+                            _forcing_daily["solar_spectral_fraction"] = (
+                                jnp.asarray(_sol["solar_fraction_by_gpt"]))
                     _last_force_day = _fd_int
                 # Per-STEP traced calendar time: the radiation factory
                 # closure (``set_time``) is baked at trace time inside the

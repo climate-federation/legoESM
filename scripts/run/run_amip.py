@@ -73,17 +73,16 @@ def _print_forcing_activity(args) -> None:
     solar_file_active = getattr(args, "solar_source", "constant") in (
         "file", "spectral_file"
     )
-    # The gaussian/spectral and voronoi/mpas standalone radiation paths
-    # integrate with the configured constant S_0 — the solar FILE (TSI +
-    # 14-band spectral) is not threaded there (same gap the CMIP6 deck
-    # labels; keep the two tables telling the same truth).
+    # The gaussian/spectral standalone radiation path integrates with the
+    # configured constant S_0 — the solar FILE (TSI + 14-band spectral) is
+    # not threaded there (same gap the CMIP6 deck labels; keep the two
+    # tables telling the same truth).  The MPAS lane threads it since the
+    # 2026-07-23 port: daily-sampled traced forcing["tsi"] (+
+    # ["solar_spectral_fraction"] under --solar-source spectral_file with
+    # rrtmg/rrtmgp) into the standalone radiation.
     _grid = getattr(args, "grid_type", None) or "cubed_sphere"
     _disc = getattr(args, "discretization", None) or ""
-    solar_file_unthreaded = (
-        (_grid == "gaussian" and _disc == "spectral")
-        or (_grid in ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
-            and _disc == "mpas")
-    )
+    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral")
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
