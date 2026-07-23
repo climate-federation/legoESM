@@ -1172,6 +1172,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "is pending the ncol>1 traceable path — single-point "
                              "CLM-ML runs today via run_lmip). "
                              "Only affects --use-multilayer-land runs.")
+    parser.add_argument("--clm-ml-use-surfdata-pft", action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.clm_ml_use_surfdata_pft,
+                        dest="clm_ml_use_surfdata_pft",
+                        help="CLM-ML only: give each column its DOMINANT PFT (argmax of "
+                             "the surface map's pft_fractions) instead of one pft_clm for "
+                             "all columns -> mixed-PFT heterogeneous columns, compiled at "
+                             "O(#distinct structures) by the group-by-structure canopy "
+                             "scan. Opt-in (default off = single pft_clm). Only affects "
+                             "--land-surface-scheme clm_ml + --use-multilayer-land.")
     parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -1645,6 +1654,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
+        clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
         sponge_coeff_per_day=(args.sponge_coeff_per_day

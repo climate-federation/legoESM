@@ -394,6 +394,21 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg_clm.validate_strict()  # must not raise
 
 
+def test_clm_ml_use_surfdata_pft_flag_flows_to_config():
+    """--clm-ml-use-surfdata-pft round-trips (per-column dominant PFT for CLM-ML ->
+    mixed-PFT columns handled by the group-by-structure scan).  Default off."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clm_ml_use_surfdata_pft is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land", "--clm-ml-use-surfdata-pft",
+    ]), parser))
+    assert cfg_on.clm_ml_use_surfdata_pft is True
+
+
 def test_canopy_scheme_requires_multilayer_land():
     """A canopy surface scheme without --use-multilayer-land is a hard CLI error,
     not a silent drop to the slab land (dispatch-hardening)."""
