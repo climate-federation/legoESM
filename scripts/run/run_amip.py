@@ -1206,6 +1206,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="sponge_sigma_top",
                         help="Sponge base: sigma below which the sin^2 damping "
                              "ramps up toward the lid (default 0.15).")
+    parser.add_argument("--mpas-land-lapse-k-per-km", type=float, default=None,
+                        dest="mpas_land_lapse_K_per_km",
+                        help="MPAS lane only: lapse-adjust the LAND fraction's "
+                             "surface-temperature anchor by this rate [K/km] "
+                             "times elevation (the AMIP loader fills land "
+                             "cells with nearest-ocean sea-level SST, which "
+                             "overheats elevated terrain). 0=off (default); "
+                             "6.5=ICAO standard atmosphere.")
+    parser.add_argument("--mpas-land-beta", type=float, default=None,
+                        dest="mpas_land_beta",
+                        help="MPAS lane only: land evaporation efficiency in "
+                             "[0, 1] throttling the land-fraction surface "
+                             "humidity gradient (1.0=saturated wet swamp, "
+                             "default; ~0.6 first-order continental mean).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1663,6 +1677,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_sigma_top=(args.sponge_sigma_top
                           if args.sponge_sigma_top is not None
                           else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
+        mpas_land_lapse_K_per_km=(
+            args.mpas_land_lapse_K_per_km
+            if args.mpas_land_lapse_K_per_km is not None
+            else _EXPERIMENT_DEFAULTS.mpas_land_lapse_K_per_km),
+        mpas_land_beta=(args.mpas_land_beta
+                        if args.mpas_land_beta is not None
+                        else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

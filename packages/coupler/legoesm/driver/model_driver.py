@@ -5825,8 +5825,35 @@ class ModelDriver:
                 f"divisible by n_devices={_n_dev}; running single-device "
                 f"(throughput not scaled across GPUs)"
             )
+        # --- MPAS land surface boundary knobs (validate_strict-bounded) -----
+        # beta throttles the land-fraction surface humidity inside the MPAS
+        # turbulence factory (closure const); the lapse adjusts the T_sfc
+        # forcing anchor below.  Both default OFF => byte-identical builds.
+        _land_beta = float(getattr(cfg, "mpas_land_beta", 1.0))
+        _land_lapse_K_m = (
+            float(getattr(cfg, "mpas_land_lapse_K_per_km", 0.0)) * 1.0e-3)
+        _f_land_cells = None
+        if self._f_land is not None:
+            _f_land_cells = jnp.asarray(self._f_land).reshape(-1)
+        if (_land_beta != 1.0 or _land_lapse_K_m > 0.0) \
+                and _f_land_cells is None:
+            raise ValueError(
+                "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
+                "fraction, but none was loaded (no --topography / land "
+                "mask source) — the knobs would be silently inert."
+            )
+        if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
+            logger.info(
+                "  MPAS land boundary: lapse=%.2f K/km, beta=%.2f "
+                "(f_land mean=%.3f)",
+                _land_lapse_K_m * 1.0e3, _land_beta,
+                float(jnp.mean(_f_land_cells)),
+            )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
-                                  column_mesh=_column_mesh)
+                                  column_mesh=_column_mesh,
+                                  f_land=(_f_land_cells
+                                          if _land_beta != 1.0 else None),
+                                  land_beta=_land_beta)
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
         # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
@@ -5846,7 +5873,10 @@ class ModelDriver:
         _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
         physics_fn_norad = (
             make_physics(phys_cfg, model_type="mpas", dt=DT,
-                         column_mesh=_column_mesh, need_rad=False)
+                         column_mesh=_column_mesh, need_rad=False,
+                         f_land=(_f_land_cells
+                                 if _land_beta != 1.0 else None),
+                         land_beta=_land_beta)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -5922,17 +5952,33 @@ class ModelDriver:
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
         if _sst_forcing:
-            from legoesm.forcing.surface_utils import blend_surface_temperature
+            from legoesm.forcing.surface_utils import (
+                blend_surface_temperature,
+                land_lapse_adjusted_surface_temperature,
+            )
             _T_ice = cfg.T_ice
             _ncell = int(self.state.T.data.shape[0])
+            # Land anchor lapse correction: the AMIP loader fills land cells
+            # with the NEAREST-OCEAN SST (sea-level temperature); anchoring
+            # elevated land at that value overheats its surface by lapse*z.
+            # Applied on the land fraction only; z clipped at 0 inside the
+            # helper.  Static gate (validate_strict bounds the rate).
+            _lapse_z = None
+            if _land_lapse_K_m > 0.0:
+                _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
+                            / constants.g)
 
             def _compute_T_sfc(day):
                 # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
                 # built on grid.grid_lat = mesh.latCell for analytical/AMIP
                 # data), sea-ice-blended, as a (nCells,) surface temperature.
                 _sst, _sic = self.get_sst_sic(day)
-                return blend_surface_temperature(
+                _ts = blend_surface_temperature(
                     jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+                if _lapse_z is not None:
+                    _ts = land_lapse_adjusted_surface_temperature(
+                        _ts, _f_land_cells, _lapse_z, _land_lapse_K_m)
+                return _ts
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.

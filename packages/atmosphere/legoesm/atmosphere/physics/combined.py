@@ -121,6 +121,8 @@ def make_physics(
     sfc_albedo_override=None,
     sfc_emissivity_override=None,
     need_rad: bool = True,
+    f_land=None,
+    land_beta: float = 1.0,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -171,6 +173,15 @@ def make_physics(
     # a trained value never touches RRTMGPConfig.sfc_* (RRTMGP's solver-cache
     # key). Only the spectral_pe combined path threads them today; reject loudly
     # elsewhere rather than silently dropping a trained surface field.
+    # MPAS land surface boundary knobs (f_land + land_beta): consumed by the
+    # MPAS turbulence factory only.  Reject loudly elsewhere — the FV/spectral
+    # pipelines have their own land tile, so accepting the args there would be
+    # a silently-inert configuration (the 2026-07-23 --slab-land-active lesson).
+    if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
+        raise ValueError(
+            "f_land/land_beta are MPAS-only land surface boundary knobs "
+            f"(model_type={model_type!r} would silently ignore them)."
+        )
     if (sfc_albedo_override is not None or sfc_emissivity_override is not None) \
             and model_type != "spectral_pe":
         raise ValueError(
@@ -192,7 +203,7 @@ def make_physics(
         # MPAS (Voronoi mesh) uses the unified hydrostatic combined path.
         fn = _make_hydrostatic_combined(
             config, dt, model_type="mpas", column_mesh=column_mesh,
-            need_rad=need_rad)
+            need_rad=need_rad, f_land=f_land, land_beta=land_beta)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -313,7 +324,9 @@ def _attach_lifecycle_hooks(physics_fn, tagged_fns):
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                model_type: str = "hydrostatic",
                                column_mesh=None,
-                               need_rad: bool = True) -> Callable:
+                               need_rad: bool = True,
+                               f_land=None,
+                               land_beta: float = 1.0) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
@@ -381,7 +394,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
         _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
-            make_turbulence_physics(config.turbulence, model_type, dt),
+            make_turbulence_physics(config.turbulence, model_type, dt,
+                                    f_land=f_land, land_beta=land_beta),
             True,
             _turb_field,
         ))

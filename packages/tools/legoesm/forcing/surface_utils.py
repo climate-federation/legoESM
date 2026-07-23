@@ -37,6 +37,49 @@ def blend_surface_temperature(
     return sic * T_ice + (1.0 - sic) * sst
 
 
+def land_lapse_adjusted_surface_temperature(
+    T_sfc: jnp.ndarray,
+    f_land: jnp.ndarray,
+    z_sfc: jnp.ndarray,
+    lapse_K_per_m: float,
+) -> jnp.ndarray:
+    """Lower the LAND fraction of a surface-temperature anchor by a lapse rate.
+
+    AMIP SST loaders fill land cells with the nearest-ocean SST (a sea-level
+    temperature).  Anchoring surface fluxes / radiation to that value at an
+    elevated cell overheats the surface by ``lapse * z`` (e.g. ~+13 K at 2 km
+    for 6.5 K/km), driving spurious surface fluxes and convection over
+    highlands.  This applies the standard-atmosphere correction on the land
+    fraction only::
+
+        T_eff = T_sfc - f_land * lapse_K_per_m * max(z_sfc, 0)
+
+    Sign convention: ``z_sfc`` positive up [m]; ``lapse_K_per_m > 0`` cools
+    with height.  The ocean fraction (``f_land = 0``) is unchanged; negative
+    elevations (below-sea-level basins) are clipped to zero rather than
+    warmed.
+
+    Parameters
+    ----------
+    T_sfc : array
+        Surface-temperature anchor [K] (ocean/ice blended, land = nearest-
+        ocean fill).
+    f_land : array
+        Land fraction in [0, 1], same shape as ``T_sfc``.
+    z_sfc : array
+        Surface elevation [m] (e.g. ``phis / g``), same shape.
+    lapse_K_per_m : float
+        Lapse rate [K/m]; 0 disables (returns ``T_sfc`` unchanged up to
+        floating-point identity).
+
+    Returns
+    -------
+    T_eff : array
+        Lapse-adjusted surface temperature [K].
+    """
+    return T_sfc - f_land * lapse_K_per_m * jnp.maximum(z_sfc, 0.0)
+
+
 def blend_surface_property(
     sic: jnp.ndarray,
     value_ice: float | jnp.ndarray,

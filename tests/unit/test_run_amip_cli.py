@@ -441,6 +441,25 @@ def test_sponge_flags_flow_to_config():
     assert cfg.sponge_enabled is True
     assert cfg.sponge_coeff_per_day == 4.0
     assert cfg.sponge_sigma_top == 0.2
+
+
+def test_mpas_land_boundary_flags_flow_to_config():
+    """--mpas-land-lapse-k-per-km / --mpas-land-beta round-trip (MPAS land
+    surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_lapse_K_per_km == 0.0
+    assert cfg_default.mpas_land_beta == 1.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
+    ]), parser))
+    assert cfg.mpas_land_lapse_K_per_km == 6.5
+    assert cfg.mpas_land_beta == 0.6
+    cfg.validate_strict()
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
