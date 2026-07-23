@@ -39,9 +39,39 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
     compute_two_leaf_canopy_fluxes,
 )
 
+# The mosaic patch specs are STRUCTURAL sensitivity knobs (tile area fractions,
+# per-tile LAI / Vcmax / water-stress scales, tile rooting depth) for an offline
+# validation tool — not physics closure parameters injected through the trainable
+# param collector.  They are therefore all classified ``excluded`` (fixed at
+# run-config time), mirroring the grid-structure configs (e.g. SoilGridConfig).
+# Only float fields WITH a default are spec-eligible; ``frac`` / ``root_depth_m``
+# are required (no default) and ``ClmmlPatchSpec`` has no defaulted float field, so
+# only ``PatchSpec``'s defaulted scale knobs are listed (all excluded).
+__param_spec__ = {
+    "PatchSpec": {
+        "scheme_key": "land.patch_mosaic.patch",
+        "excluded": {
+            "lai_scale": "mosaic: per-tile LAI multiplier (structural)",
+            "vcmax_c3_scale": "mosaic: per-tile C3 Vcmax scale (sensitivity knob)",
+            "vcmax_c4_scale": "mosaic: per-tile C4 Vcmax scale (sensitivity knob)",
+            "w_frac_rz_scale": "mosaic: per-tile water-stress scale (sensitivity knob)",
+        },
+        "params": {},
+    },
+}
+
+# Default woody (tree) area fraction for the 2-tile savanna mosaic.
+_DEFAULT_TREE_FRAC = 0.4
+
 # Area fractions must sum to one within this tolerance (round-off on a handful of
 # Python-float fractions); a larger drift is a mis-specified mosaic and raises.
 _FRAC_SUM_TOL = 1.0e-6
+
+# The CLM-ML MLpftcon table initialises PFT parameters for 1-based indices 1..16;
+# any other index leaves them at the -999 sentinel, so a mosaic tile PFT must be a
+# plain int in this range.
+_CLM_PFT_MIN = 1
+_CLM_PFT_MAX = 16
 
 
 class PatchSpec(NamedTuple):
@@ -109,7 +139,7 @@ def _finite(v: float) -> bool:
     return v == v and v not in (float("inf"), float("-inf"))
 
 
-def savanna_two_patch(tree_frac: float = 0.4, *,
+def savanna_two_patch(tree_frac: float = _DEFAULT_TREE_FRAC, *,
                       grass_vcmax_c4_scale: float = 1.0,
                       tree_vcmax_c3_scale: float = 1.0,
                       grass_w_frac_rz_scale: float = 1.0,
@@ -131,6 +161,111 @@ def savanna_two_patch(tree_frac: float = 0.4, *,
                       vcmax_c4_scale=grass_vcmax_c4_scale,
                       w_frac_rz_scale=grass_w_frac_rz_scale)
     return PatchMosaicConfig(patches=(tree, grass)).validate()
+
+
+# --- CLM-ML (multilayer canopy) mosaic -------------------------------------
+# The CLM-ML forward is jit-traced with a single scalar PFT (``grid.pft``);
+# per-column PFT is deferred (S3), so tree + grass tiles cannot share one call.
+# Instead each patch is an independent single-PFT CLM-ML column run OVER THE FULL
+# TIME SERIES (its own prognostic soil), and the flux series are area-weighted.
+# This gives each tile its own PFT, rooting depth and hence its own water-stress
+# phenology (the deep-tree vs shallow-grass handoff) — at the cost of NO
+# inter-patch soil-water competition (independent columns, not a shared column).
+
+
+class ClmmlPatchSpec(NamedTuple):
+    """One CLM-ML tile of a :class:`ClmmlMosaicConfig`.
+
+    frac             : patch area fraction [0-1]; the mosaic's fractions sum to 1.
+    pft_clm          : CLM PFT index (1-based) for this tile (e.g. a tree PFT for
+                       the overstory, a C4-grass PFT for the understory).
+    root_depth_m     : root-density e-folding depth [m] for this tile's soil column
+                       (deep for trees, shallow for grass) — sets the water stress.
+    vcmax25_override : optional Vcmax25 [umol m-2 s-1] override for the tile; ``None``
+                       uses the CLM ``MLpftcon`` table value for ``pft_clm``.
+    """
+    frac: float
+    pft_clm: int
+    root_depth_m: float
+    vcmax25_override: float | None = None
+
+
+class ClmmlMosaicConfig(NamedTuple):
+    """A selectable-``N`` mosaic of CLM-ML tiles run as independent columns."""
+    patches: tuple[ClmmlPatchSpec, ...]
+
+    def validate(self) -> "ClmmlMosaicConfig":
+        """Fail early on a mis-specified CLM-ML mosaic (dispatch hardening)."""
+        n = len(self.patches)
+        if n == 0:
+            raise ValueError("ClmmlMosaicConfig needs >= 1 patch, got none")
+        total = 0.0
+        for i, p in enumerate(self.patches):
+            if not (p.frac > 0.0) or not _finite(p.frac):
+                raise ValueError(
+                    f"clmml patch {i}: frac must be finite and > 0, got {p.frac}")
+            if not isinstance(p.pft_clm, int) or isinstance(p.pft_clm, bool):
+                raise ValueError(
+                    f"clmml patch {i}: pft_clm must be a plain int, got "
+                    f"{type(p.pft_clm).__name__} {p.pft_clm!r}")
+            if not (_CLM_PFT_MIN <= p.pft_clm <= _CLM_PFT_MAX):
+                raise ValueError(
+                    f"clmml patch {i}: pft_clm must be in "
+                    f"[{_CLM_PFT_MIN}, {_CLM_PFT_MAX}], got {p.pft_clm}")
+            if not (p.root_depth_m > 0.0) or not _finite(p.root_depth_m):
+                raise ValueError(
+                    f"clmml patch {i}: root_depth_m must be finite and > 0, "
+                    f"got {p.root_depth_m}")
+            if p.vcmax25_override is not None and (
+                    not _finite(p.vcmax25_override) or p.vcmax25_override <= 0.0):
+                raise ValueError(
+                    f"clmml patch {i}: vcmax25_override must be finite and > 0, "
+                    f"got {p.vcmax25_override}")
+            total += p.frac
+        if abs(total - 1.0) > _FRAC_SUM_TOL:
+            raise ValueError(
+                f"clmml patch area fractions must sum to 1, got {total}")
+        return self
+
+
+def savanna_clmml_two_patch(*, tree_frac: float, tree_pft: int, grass_pft: int,
+                            tree_root_m: float, grass_root_m: float
+                            ) -> ClmmlMosaicConfig:
+    """A 2-tile woody-savanna CLM-ML mosaic: a deep-rooted tree overstory + a
+    shallow-rooted grass understory, run as independent columns."""
+    if not (0.0 < tree_frac < 1.0):
+        raise ValueError(f"tree_frac must be in (0, 1), got {tree_frac}")
+    tree = ClmmlPatchSpec(frac=tree_frac, pft_clm=tree_pft,
+                          root_depth_m=tree_root_m)
+    grass = ClmmlPatchSpec(frac=1.0 - tree_frac, pft_clm=grass_pft,
+                           root_depth_m=grass_root_m)
+    return ClmmlMosaicConfig(patches=(tree, grass)).validate()
+
+
+def area_weight_series(series, fracs) -> "jnp.ndarray":
+    """Area-weighted sum of per-tile flux time series: ``sum_i frac_i * series_i``.
+
+    ``series`` is a sequence of ``N`` equal-length 1-D arrays (one per tile);
+    ``fracs`` the matching area fractions.  Used by the CLM-ML outer-loop mosaic to
+    combine the independent-column flux series into one grid series.  All tile
+    series must be 1-D and the SAME length, else a shorter/length-1 series would
+    silently broadcast and be reused for every timestep.
+    """
+    import numpy as _np
+    fr = _np.asarray(fracs)
+    if fr.ndim != 1:
+        raise ValueError(f"fracs must be 1-D, got shape {fr.shape}")
+    if len(series) == 0 or len(series) != len(fr):
+        raise ValueError(f"series/fracs length mismatch: {len(series)} vs {len(fr)}")
+    arrs = [_np.asarray(s) for s in series]
+    shape0 = arrs[0].shape
+    if arrs[0].ndim != 1:
+        raise ValueError(f"tile series must be 1-D, got shape {shape0}")
+    for k, a in enumerate(arrs):
+        if a.shape != shape0:
+            raise ValueError(
+                f"tile series {k} shape {a.shape} != tile 0 shape {shape0}")
+    return sum(f * a for f, a in zip(fr, arrs))
 
 
 def _bcast_patch(a: jnp.ndarray, n: int) -> jnp.ndarray:

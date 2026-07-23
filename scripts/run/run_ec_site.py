@@ -46,8 +46,11 @@ from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
 from legoesm.land.surface_scheme.patch_mosaic import (
+    ClmmlMosaicConfig,
     PatchMosaicConfig,
+    area_weight_series,
     compute_mosaic_canopy_fluxes,
+    savanna_clmml_two_patch,
     savanna_two_patch,
 )
 from legoesm.land.canopy.config import (
@@ -261,6 +264,55 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
         h.append(np.asarray(hh).ravel()); ts.append(np.asarray(t).ravel())
     return (np.concatenate(gpp), np.concatenate(le),
             np.concatenate(h), np.concatenate(ts))
+
+
+def _clmml_mosaic_prognostic(d: ECSiteDriver, mosaic: ClmmlMosaicConfig, *,
+                             soil: str, bottom_bc: str, soil_depth_m: float,
+                             k_sat_decay_m: float, soil_evap_resistance_exp: float,
+                             z_ref: float, texture, interception: bool,
+                             plant_wilting_point: float | None,
+                             clmml_turbulence: str, clmml_stomatal: str,
+                             u_min: float, nudge_tau_days: float, clmml_sai: float):
+    """Run the CLM-ML mosaic OUTER-loop: one prognostic column per tile, then
+    area-weight the flux series.
+
+    Each tile is an independent single-PFT CLM-ML column with its OWN rooting
+    depth (hence its own prognostic water stress) — the deep-tree vs shallow-grass
+    phenology the single canopy cannot represent.  The tiles do NOT share soil
+    water (independent columns, no inter-patch competition), a documented v1
+    simplification of a shared-column mosaic.
+
+    Returns the same 8-tuple as :func:`_prognostic_fluxes`
+    ``(gpp_gC, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)`` so the
+    caller's output/metrics schema is preserved: the soil-state / ustar / skin-T
+    diagnostics are area-weighted across tiles and ``reverted`` is the per-step
+    max (a step is flagged reverted if ANY tile rolled it back).
+    """
+    fracs = [p.frac for p in mosaic.patches]
+    gpps, les, hs, tss, revs, tsoils, swcs, ustars = ([], [], [], [], [], [], [], [])
+    for p in mosaic.patches:
+        cc = CLMMLCanopyConfig(
+            pft_clm=int(p.pft_clm), turbulence_scheme=clmml_turbulence,
+            stomatal_model=clmml_stomatal,
+            vcmax25_override=p.vcmax25_override).validate()
+        lc = _build_land_config(
+            cc, soil, bottom_bc, soil_depth_m, k_sat_decay_m=k_sat_decay_m,
+            soil_evap_resistance_exp=soil_evap_resistance_exp,
+            root_depth=p.root_depth_m, z_ref=z_ref, texture=texture,
+            interception=interception, plant_wilting_point=plant_wilting_point)
+        g, l, h, ts, rev, tsoil, swc, ustar = _prognostic_fluxes(
+            d, cc, lc, u_min, nudge_tau_days=nudge_tau_days, clmml_sai=clmml_sai)
+        gpps.append(g); les.append(l); hs.append(h); tss.append(ts)
+        revs.append(rev); tsoils.append(tsoil); swcs.append(swc); ustars.append(ustar)
+
+    def _aw(series):     # area-weight, or None if the tiles produced no diagnostic
+        return None if any(s is None for s in series) \
+            else area_weight_series(series, fracs)
+    reverted = None if any(r is None for r in revs) \
+        else np.maximum.reduce([np.asarray(r) for r in revs])
+    return (area_weight_series(gpps, fracs), area_weight_series(les, fracs),
+            area_weight_series(hs, fracs), _aw(tss), reverted,
+            _aw(tsoils), _aw(swcs), _aw(ustars))
 
 
 def _is_float_leaf(x) -> bool:
@@ -628,24 +680,37 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              vcmax_c4_scale: float | None = None,
              stomatal_m_c3_scale: float | None = None,
              stomatal_m_c4_scale: float | None = None,
-             mosaic: str = "none", tree_frac: float = 0.4) -> dict:
+             mosaic: str = "none", tree_frac: float = 0.4,
+             savanna_grass_pft: int = 15, savanna_grass_root_m: float = 0.5
+             ) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     # N-patch mosaic (tree + grass tiles) for savanna sites.  Fail early on an
-    # unknown selection or an unsupported combination (dispatch hardening).
+    # unknown selection or an unsupported combination (dispatch hardening).  The
+    # concrete mosaic configs are built lower down, once the site root depth is
+    # resolved: the two-leaf mosaic runs INNER-loop (patches on the canopy ncol
+    # axis) in diagnostic mode; the CLM-ML mosaic runs OUTER-loop (one prognostic
+    # column per tile, area-weighted) because the CLM-ML forward is single-PFT.
     if mosaic not in ("none", "savanna"):
         raise ValueError(f"mosaic {mosaic!r} not supported (none|savanna)")
-    mosaic_cfg: PatchMosaicConfig | None = None
     if mosaic == "savanna":
-        if mode != "diagnostic":
+        if canopy == "two_leaf" and mode != "diagnostic":
             raise ValueError(
-                "mosaic=savanna is diagnostic-only; per-patch prognostic root-zone "
-                "water stress is a follow-up (needs per-patch soil coupling)")
-        if canopy != "two_leaf":
-            raise ValueError("mosaic=savanna requires --canopy two_leaf")
-        mosaic_cfg = savanna_two_patch(tree_frac=tree_frac)
+                "mosaic=savanna with --canopy two_leaf is diagnostic-only "
+                "(per-patch prognostic root-zone water stress is the CLM-ML path)")
+        if canopy == "clmml" and mode != "prognostic":
+            raise ValueError(
+                "mosaic=savanna with --canopy clmml requires --mode prognostic")
+        if canopy == "clmml" and clmml_vcmax25 is not None:
+            # A single --clmml-vcmax25 has no well-defined meaning across distinct
+            # tree/grass tiles; per-tile Vcmax lives in the tile spec instead.
+            raise ValueError(
+                "--clmml-vcmax25 is not supported with mosaic=savanna; the tree/"
+                "grass tiles carry their own PFT Vcmax (per-tile override)")
+    mosaic_cfg: PatchMosaicConfig | None = None
+    clmml_mosaic: ClmmlMosaicConfig | None = None
     if canopy == "clmml" and mode != "prognostic":
         # Diagnostic mode vmaps the canopy over timesteps; the CLM-ML interface
         # mutates CLM module globals per step and cannot be vmapped.
@@ -732,11 +797,34 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         eff_mc4 = stomatal_m_scale if stomatal_m_c4_scale is None else stomatal_m_c4_scale
         d = _scale_two_leaf_params(d, eff_vc3, eff_vc4, eff_mc3, eff_mc4)
 
+    # Build the concrete savanna mosaic now that the site root depth is resolved:
+    # the tree tile keeps the site (deep phreatophyte) rooting; the grass tile is
+    # shallow-rooted.  Two-leaf -> inner-loop (diagnostic); CLM-ML -> outer-loop.
+    if mosaic == "savanna":
+        if canopy == "two_leaf":
+            mosaic_cfg = savanna_two_patch(tree_frac=tree_frac)
+        else:                                              # clmml (prognostic)
+            clmml_mosaic = savanna_clmml_two_patch(
+                tree_frac=tree_frac, tree_pft=clm_pft, grass_pft=savanna_grass_pft,
+                tree_root_m=float(root_depth), grass_root_m=savanna_grass_root_m)
+
     reverted = None
     ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
                                               mosaic=mosaic_cfg)
+    elif clmml_mosaic is not None:
+        # CLM-ML outer-loop mosaic: run each tile as its own prognostic column and
+        # area-weight (soil-state / ustar diagnostics area-weighted; reverted =
+        # per-step any-tile max) so the prognostic output schema is preserved.
+        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _clmml_mosaic_prognostic(
+            d, clmml_mosaic, soil=soil, bottom_bc=bottom_bc,
+            soil_depth_m=soil_depth_m, k_sat_decay_m=k_sat_decay_m,
+            soil_evap_resistance_exp=soil_evap_resistance_exp, z_ref=z_ref,
+            texture=texture, interception=interception,
+            plant_wilting_point=plant_wilting_point,
+            clmml_turbulence=clmml_turbulence, clmml_stomatal=clmml_stomatal,
+            u_min=u_min, nudge_tau_days=nudge_tau_days, clmml_sai=clmml_sai)
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
@@ -924,6 +1012,12 @@ def main() -> int:
     ap.add_argument("--tree-frac", type=float, default=0.4,
                     help="woody (tree) area fraction for --mosaic savanna; grass "
                          "is the residual 1-tree_frac")
+    ap.add_argument("--savanna-grass-pft", type=int, default=15,
+                    help="CLM PFT index for the grass tile of the CLM-ML savanna "
+                         "mosaic (default 15 = C4 grass); tree tile uses --clm-pft")
+    ap.add_argument("--savanna-grass-root-m", type=float, default=0.5,
+                    help="grass-tile root depth [m] for the CLM-ML savanna mosaic "
+                         "(shallow); the tree tile uses the site root depth")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -967,6 +1061,8 @@ def main() -> int:
                  stomatal_m_c3_scale=args.stomatal_m_c3_scale,
                  stomatal_m_c4_scale=args.stomatal_m_c4_scale,
                  mosaic=args.mosaic, tree_frac=args.tree_frac,
+                 savanna_grass_pft=args.savanna_grass_pft,
+                 savanna_grass_root_m=args.savanna_grass_root_m,
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,

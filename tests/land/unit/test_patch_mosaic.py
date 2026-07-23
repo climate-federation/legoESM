@@ -13,9 +13,13 @@ import pytest
 
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
 from legoesm.land.surface_scheme.patch_mosaic import (
+    ClmmlMosaicConfig,
+    ClmmlPatchSpec,
     PatchMosaicConfig,
     PatchSpec,
     _area_weight,
+    area_weight_series,
+    savanna_clmml_two_patch,
     savanna_two_patch,
 )
 
@@ -49,6 +53,47 @@ def test_savanna_two_patch_shapes_and_split():
     for bad in (0.0, 1.0, -0.2):
         with pytest.raises(ValueError):
             savanna_two_patch(tree_frac=bad)
+
+
+def test_clmml_validate_and_savanna_factory():
+    savanna_clmml_two_patch(tree_frac=0.4, tree_pft=7, grass_pft=15,
+                            tree_root_m=5.0, grass_root_m=0.5)
+    ClmmlMosaicConfig(patches=(ClmmlPatchSpec(frac=1.0, pft_clm=7,
+                                              root_depth_m=2.0),)).validate()
+    for bad in [
+        (),                                                        # empty
+        (ClmmlPatchSpec(0.4, 7, 5.0), ClmmlPatchSpec(0.4, 15, 0.5)),  # sum 0.8
+        (ClmmlPatchSpec(1.0, 0, 5.0),),                            # pft < 1
+        (ClmmlPatchSpec(1.0, 17, 5.0),),                           # pft > 16
+        (ClmmlPatchSpec(1.0, 1.9, 5.0),),                          # non-int pft
+        (ClmmlPatchSpec(1.0, True, 5.0),),                         # bool pft
+        (ClmmlPatchSpec(1.0, 7, 0.0),),                            # root <= 0
+        (ClmmlPatchSpec(1.0, 7, float("nan")),),                  # non-finite root
+        (ClmmlPatchSpec(1.0, 7, 5.0, vcmax25_override=-1.0),),     # bad vcmax
+    ]:
+        with pytest.raises(ValueError):
+            ClmmlMosaicConfig(patches=bad).validate()
+    for bad_tf in (0.0, 1.0):
+        with pytest.raises(ValueError):
+            savanna_clmml_two_patch(tree_frac=bad_tf, tree_pft=7, grass_pft=15,
+                                    tree_root_m=5.0, grass_root_m=0.5)
+
+
+def test_area_weight_series_sums_by_fraction():
+    a = np.array([1.0, 2.0, 3.0])
+    b = np.array([10.0, 20.0, 30.0])
+    out = area_weight_series([a, b], [0.25, 0.75])
+    np.testing.assert_allclose(out, 0.25 * a + 0.75 * b)
+    # single tile is the identity
+    np.testing.assert_allclose(area_weight_series([a], [1.0]), a)
+    with pytest.raises(ValueError):
+        area_weight_series([a, b], [1.0])           # tile/frac count mismatch
+    with pytest.raises(ValueError):
+        area_weight_series([a, b[:2]], [0.5, 0.5])  # unequal series length
+    with pytest.raises(ValueError):
+        area_weight_series([np.ones((2, 2)), np.ones((2, 2))], [0.5, 0.5])  # 2-D
+    with pytest.raises(ValueError):
+        area_weight_series([], [])                   # empty
 
 
 def _fake_output(shflx, gpp, T_surface=300.0, emissivity=0.97, n_iters=None):

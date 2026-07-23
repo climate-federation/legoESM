@@ -413,6 +413,48 @@ def test_mosaic_compute_api_validates_at_entry(tmp_path):
             dt=dt, LAI_override=p.LAI, TgC_override=p.TgC)
 
 
+def test_clmml_mosaic_orchestration_area_weights(monkeypatch):
+    """The CLM-ML outer-loop mosaic runs one prognostic column PER TILE with the
+    tile's PFT + root depth, and area-weights the flux series.  The (pre-existing,
+    synthetic-driver) CLM-ML solve is stubbed so this checks MY orchestration
+    deterministically: per-tile config wiring + area-weighting."""
+    import numpy as np
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.surface_scheme.patch_mosaic import savanna_clmml_two_patch
+    mod = _load_driver_module()
+
+    seen = []
+    def _stub(d, cc, lc, u_min, nudge_tau_days=0.0, clmml_sai=0.5):
+        assert isinstance(cc, CLMMLCanopyConfig)
+        seen.append((int(cc.pft_clm), float(lc.root_depth)))
+        k = len(seen)                                   # 1st tile -> 1s, 2nd -> 2s
+        base = np.full(4, float(k))
+        rev = np.array([0, k - 1, 0, 0])                # tile2 reverts step 1
+        # (gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)
+        return base, base * 10, base * 100, base + 290, rev, base + 280, base / 10, base / 20
+
+    monkeypatch.setattr(mod, "_prognostic_fluxes", _stub)
+    m = savanna_clmml_two_patch(tree_frac=0.4, tree_pft=7, grass_pft=15,
+                                tree_root_m=5.0, grass_root_m=0.5)
+    gpp, le, h, ts, reverted, ts_soil, swc, ustar = mod._clmml_mosaic_prognostic(
+        None, m, soil="default", bottom_bc="free_drainage", soil_depth_m=0.0,
+        k_sat_decay_m=0.0, soil_evap_resistance_exp=2.0, z_ref=10.0, texture=None,
+        interception=False, plant_wilting_point=None, clmml_turbulence="most",
+        clmml_stomatal="wue", u_min=1.0, nudge_tau_days=0.0, clmml_sai=0.5)
+    # per-tile config wiring: tree (pft 7, root 5) then grass (pft 15, root 0.5)
+    assert seen == [(7, 5.0), (15, 0.5)]
+    # area-weight: 0.4*tile1 + 0.6*tile2 (tile1 val=1, tile2 val=2)
+    np.testing.assert_allclose(gpp, np.full(4, 0.4 * 1.0 + 0.6 * 2.0))
+    np.testing.assert_allclose(le, np.full(4, 0.4 * 10.0 + 0.6 * 20.0))
+    np.testing.assert_allclose(h, np.full(4, 0.4 * 100.0 + 0.6 * 200.0))
+    # soil-state / ustar diagnostics area-weighted (schema preserved, not dropped)
+    np.testing.assert_allclose(ts_soil, np.full(4, 0.4 * 281.0 + 0.6 * 282.0))
+    np.testing.assert_allclose(swc, np.full(4, 0.4 * 0.1 + 0.6 * 0.2))
+    np.testing.assert_allclose(ustar, np.full(4, 0.4 * 0.05 + 0.6 * 0.1))
+    # reverted = per-step any-tile max (tile2 reverted step 1)
+    np.testing.assert_array_equal(reverted, np.array([0, 1, 0, 0]))
+
+
 def test_run_site_savanna_mosaic_diagnostic(tmp_path):
     """--mosaic savanna runs end-to-end in diagnostic mode with finite skill."""
     driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
@@ -430,9 +472,12 @@ def test_run_site_mosaic_rejects_bad_combos(tmp_path):
     with pytest.raises(ValueError):                      # unknown mosaic
         mod.run_site(driver_nc, "diagnostic", str(tmp_path / "a"), chunk=8,
                      mosaic="bogus")
-    with pytest.raises(ValueError):                      # prognostic unsupported
+    with pytest.raises(ValueError):                      # two_leaf + prognostic
         mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=8,
-                     mosaic="savanna")
+                     mosaic="savanna", canopy="two_leaf")
+    with pytest.raises(ValueError):                      # clmml + diagnostic
+        mod.run_site(driver_nc, "diagnostic", str(tmp_path / "c"), chunk=8,
+                     mosaic="savanna", canopy="clmml")
 
 
 def test_clmml_turbulence_rejects_unknown(tmp_path):
