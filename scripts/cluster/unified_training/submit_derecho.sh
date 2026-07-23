@@ -49,7 +49,7 @@ case "$CAMPAIGN" in
       fi
       echo "[submit] aimip variant=$v suite=$suite"
       qsub "${_alloc_flag[@]}" \
-        -v CAMPAIGN=aimip,SUITE="$suite",VARIANT="$v",CHAIN_MAX="$CHAIN_MAX" \
+        -v LEGOESM_REPO="$REPO_ROOT",CAMPAIGN=aimip,SUITE="$suite",VARIANT="$v",CHAIN_MAX="$CHAIN_MAX" \
         "$PBS"
     done
     ;;
@@ -62,7 +62,7 @@ case "$CAMPAIGN" in
     fi
     echo "[submit] wb suite=$WB_SUITE modes=$WB_MODES (single link)"
     qsub "${_alloc_flag[@]}" \
-      -v CAMPAIGN=wb,SUITE="$WB_SUITE",VARIANT="$WB_MODES",CHAIN_MAX=0 \
+      -v LEGOESM_REPO="$REPO_ROOT",CAMPAIGN=wb,SUITE="$WB_SUITE",VARIANT="$WB_MODES",CHAIN_MAX=0 \
       "$PBS"
     ;;
   *)
