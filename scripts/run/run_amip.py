@@ -988,6 +988,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(Morrison & Gettelman 2008 sub-grid closure) so "
                              "the non-linear KK2000 rate is not under-fed by "
                              "the grid-mean.  Requires --microphysics morrison.")
+    parser.add_argument("--hard-saturation-adjustment",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Opt-in iterated hard saturation adjustment "
+                             "for the warm-rain schemes (kessler/seifert_beheng/"
+                             "morrison/thompson/p3): where q_v exceeds "
+                             "hard_sat_adjust_threshold * q_sat (default 1.1), "
+                             "drain q_v onto the liquid saturation curve "
+                             "(conserving c_pd*T + L_v*q_v), rate-limited to "
+                             "hard_sat_max_heating_K per step (default 5 K ~ "
+                             "2 g/kg), removing local super-saturation pools the "
+                             "smooth path cannot.  Applied POST-STEP on the MPAS "
+                             "path (the validated placement) and in-scheme on "
+                             "the spectral/coupled path.  Default off (moist "
+                             "path byte-identical).  The threshold + cap use the "
+                             "scheme-config defaults (matching the validated "
+                             "configuration); like all atmosphere microphysics "
+                             "params they are calibratable via the SCM-RCE "
+                             "training path, not the run_amip --params loader.")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=None,
                         help="Convective in-updraft precipitation efficiency "
@@ -1262,6 +1280,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="sponge_sigma_top",
                         help="Sponge base: sigma below which the sin^2 damping "
                              "ramps up toward the lid (default 0.15).")
+    parser.add_argument("--mpas-land-lapse-k-per-km", type=float, default=None,
+                        dest="mpas_land_lapse_K_per_km",
+                        help="MPAS lane only: lapse-adjust the LAND fraction's "
+                             "surface-temperature anchor by this rate [K/km] "
+                             "times elevation (the AMIP loader fills land "
+                             "cells with nearest-ocean sea-level SST, which "
+                             "overheats elevated terrain). 0=off (default); "
+                             "6.5=ICAO standard atmosphere.")
+    parser.add_argument("--mpas-land-beta", type=float, default=None,
+                        dest="mpas_land_beta",
+                        help="MPAS lane only: land evaporation efficiency in "
+                             "[0, 1] throttling the land-fraction surface "
+                             "humidity gradient (1.0=saturated wet swamp, "
+                             "default; ~0.6 first-order continental mean).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1668,6 +1700,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
@@ -1734,6 +1767,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_sigma_top=(args.sponge_sigma_top
                           if args.sponge_sigma_top is not None
                           else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
+        mpas_land_lapse_K_per_km=(
+            args.mpas_land_lapse_K_per_km
+            if args.mpas_land_lapse_K_per_km is not None
+            else _EXPERIMENT_DEFAULTS.mpas_land_lapse_K_per_km),
+        mpas_land_beta=(args.mpas_land_beta
+                        if args.mpas_land_beta is not None
+                        else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

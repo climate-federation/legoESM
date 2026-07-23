@@ -1,0 +1,11 @@
+(a) Finding: with `q_c` present, bookkeeping conserves total water and `c_pd*T + L_v*q_v` algebraically; `dq >= 0`, the cap bounds ΔT, and `dq <= cond_hard*dt` prevents over-condensation. But the `q_c is None` branch removes `dq` from vapour without a recipient, so total water is lost whenever it fires. It is crash-safe, not conserving. Also, the sigmoid gate is nonzero below the 1.1 threshold: e.g. RH=1.05 produces a positive drain, contrary to “do not re-condense mild super-saturation / only RH > threshold.”
+
+(b) Pass: on the current MPAS path the scheme config is constructed with `hard_saturation_adjustment=False` and the MPAS call omits that flag, so the hook is the sole application. The coupled/spectral path is separate and still applies in-scheme.
+
+(c) Finding: the non-warm-rain guard is correct for current schemes. However, the advertised `--params` tuning does not work: `atm.micro.KesslerConfig.hard_sat_max_heating_K` is rejected because `KesslerConfig` is not nested in `ExperimentConfig` and is absent from the scalar routing map. Thus MPAS uses defaults (1.1, 5 K), not `--params` overrides.
+
+(d) Pass apart from the nonconserving `q_c=None` case: this is outside JIT, static dict/Field structure is preserved via `.replace(data=...)`, and cadence-limited scalar conversion causes only intentional occasional host synchronization.
+
+(e) Pass: `p_full = p_s * sigma_full`, latent-heating sign, and units match the existing MPAS driver convention. “Exactly” is algebraic rather than bitwise IEEE exact.
+
+OVERALL VERDICT: findings remain: nonconserving `q_c=None` drain, sigmoid leakage below the claimed threshold, and broken `--params` tuning for threshold/cap.

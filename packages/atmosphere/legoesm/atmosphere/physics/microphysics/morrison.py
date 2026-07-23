@@ -235,6 +235,9 @@ def morrison_microphysics(
     # subsaturated clear air.  See _warm_rain.saturation_adjustment.
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
+        hard_adjust=config.hard_saturation_adjustment,
+        hard_threshold=config.hard_sat_adjust_threshold,
+        hard_max_heating_K=config.hard_sat_max_heating_K,
     )
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the

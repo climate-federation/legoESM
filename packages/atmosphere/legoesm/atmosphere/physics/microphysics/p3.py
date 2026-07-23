@@ -216,6 +216,9 @@ def p3_microphysics(
 
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, dt, config.saturation_sharpness, q_c=q_c,
+        hard_adjust=config.hard_saturation_adjustment,
+        hard_threshold=config.hard_sat_adjust_threshold,
+        hard_max_heating_K=config.hard_sat_max_heating_K,
     )
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
         q_c, N_c_eff, rho, config.k_au, config.x_star,

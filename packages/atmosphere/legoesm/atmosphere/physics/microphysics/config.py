@@ -45,6 +45,8 @@ __param_spec__ = {
             "accretion_coeff": {"units": "1", "bounds": (0.5, 6.6), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Kessler (1969)", "shape": None},
             "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Kessler (1969)", "shape": None},
             "rain_fall_speed": {"units": "m/s", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Kessler (1969)", "shape": None},
+            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "MicrophysicsMLEmulatorConfig": {
@@ -166,6 +168,8 @@ __param_spec__ = {
             "graupel_collect_eff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
             "graupel_rain_collect_eff": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},  # unclamped collection-rate multiplier (default 1.0 nominal), not a [0,1] probability
             "graupel_embryo_mass": {"units": "kg", "bounds": (5e-11, 5e-10), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
+            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "P3Config": {
@@ -214,6 +218,8 @@ __param_spec__ = {
             "rho_rim_max": {"units": "kg/m^3", "bounds": (300.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "rho_rim_accrete": {"units": "kg/m^3", "bounds": (132.0, 900.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "rho_ice_ref": {"units": "kg/m^3", "bounds": (165.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "SeifertBehengConfig": {
@@ -233,6 +239,8 @@ __param_spec__ = {
             "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Seifert & Beheng (2001)", "shape": None},
             "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "SundqvistConfig": {
@@ -310,6 +318,8 @@ __param_spec__ = {
             "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
             "a_v_g": {"units": "m^(1-b)/s", "bounds": (26.0, 240.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
             "b_v_g": {"units": "1", "bounds": (0.13, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
 }
@@ -323,6 +333,15 @@ class KesslerConfig(NamedTuple):
     evaporation_coeff: float = 1.0              # Evaporation coefficient
     rain_fall_speed: float = 5.0                # Terminal velocity [m/s]
     saturation_sharpness: float = 100.0         # Smooth switch sharpness
+    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
+    # Iterated (bracketed-bisection) saturation adjustment that lands q_v ON liquid
+    # saturation curve where q_v > hard_sat_adjust_threshold * q_sat, draining
+    # local super-saturation pools the smooth sigmoid path cannot (conserving
+    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical to the smooth
+    # path.  See ``_warm_rain.saturation_adjustment``.
+    hard_saturation_adjustment: bool = False
+    hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
+    hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
 
 class SundqvistConfig(NamedTuple):
@@ -372,6 +391,12 @@ class SeifertBehengConfig(NamedTuple):
     # Kessler-like onset.  Distinct from ``saturation_sharpness`` which
     # is in units of kg/kg and would be 100× too steep here.
     autoconversion_sharpness: float = 10.0
+    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
+    # See ``_warm_rain.saturation_adjustment`` / ``KesslerConfig`` above.
+    # Default OFF => byte-identical to the smooth path.
+    hard_saturation_adjustment: bool = False
+    hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
+    hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
 
 class MorrisonConfig(NamedTuple):
@@ -731,6 +756,17 @@ class MorrisonConfig(NamedTuple):
     # (``arg_activation.activated_nc_field``). Appended LAST (nested config,
     # non-float) so positional construction and the param spec are unaffected.
     activation: ActivationConfig = ActivationConfig()
+    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
+    # Iterated (bracketed-bisection) saturation adjustment that lands q_v ON liquid
+    # saturation curve where q_v > hard_sat_adjust_threshold * q_sat, draining
+    # local super-saturation pools the smooth sigmoid path cannot (conserving
+    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical to the smooth
+    # path.  Threaded from ExperimentConfig via
+    # ``apply_microphysics_experiment_flags``.  See
+    # ``_warm_rain.saturation_adjustment``.
+    hard_saturation_adjustment: bool = False
+    hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
+    hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
 
 class ThompsonConfig(NamedTuple):
@@ -813,6 +849,14 @@ class ThompsonConfig(NamedTuple):
     # Gamma distribution shape
     mu_c: float = 3.0                        # Cloud droplet shape parameter
     mu_r: float = 1.0                        # Rain drop shape parameter
+    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
+    # See ``_warm_rain.saturation_adjustment`` / ``KesslerConfig``.  Newton-
+    # iterated saturation adjustment that lands q_v ON the liquid saturation
+    # curve where q_v > hard_sat_adjust_threshold * q_sat (conserving
+    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical smooth path.
+    hard_saturation_adjustment: bool = False
+    hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
+    hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
 
 
 class P3Config(NamedTuple):
@@ -888,6 +932,14 @@ class P3Config(NamedTuple):
     rho_rim_accrete: float = 400.0  # Density of newly accreted rime [kg/m³]
     # --- Bulk ice density (for B_rim from nucleation) ---
     rho_ice: float = constants.rho_ice  # Solid ice density [kg/m³]
+    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
+    # See ``_warm_rain.saturation_adjustment`` / ``KesslerConfig``.  Newton-
+    # iterated saturation adjustment that lands q_v ON the liquid saturation
+    # curve where q_v > hard_sat_adjust_threshold * q_sat (conserving
+    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical smooth path.
+    hard_saturation_adjustment: bool = False
+    hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
+    hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
 
 
 class MicrophysicsMLEmulatorConfig(NamedTuple):
@@ -951,13 +1003,16 @@ def apply_microphysics_experiment_flags(
     *,
     nc_from_aerosol: bool = False,
     subgrid_autoconversion: bool = False,
+    hard_saturation_adjustment: bool = False,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
 
-    Both switches are warm-rain closures currently implemented only by
-    Morrison's ``effective_Nc`` (specified-Nc aerosol mode) and in-cloud
-    autoconversion.  This single helper is shared by the coupled
+    The switches are warm-rain closures implemented by the warm-rain-based
+    schemes: Morrison's ``effective_Nc`` (specified-Nc aerosol mode) and
+    in-cloud autoconversion, and the shared ``saturation_adjustment`` hard
+    (iterated) saturation-adjustment guard (kessler/seifert_beheng/morrison/
+    thompson/p3).  This single helper is shared by the coupled
     (``physics_pipeline._resolve_microphysics``) and the combined-physics /
     MPAS (``model_driver._run_mpas``) paths so the gating + fail-loud
     validation is written ONCE — a scheme that would silently ignore the
@@ -969,15 +1024,18 @@ def apply_microphysics_experiment_flags(
         The active per-scheme sub-config (e.g. ``MorrisonConfig``).
     scheme : str
         Scheme name, used only in the error message.
-    nc_from_aerosol, subgrid_autoconversion : bool
+    nc_from_aerosol, subgrid_autoconversion, hard_saturation_adjustment : bool
         ExperimentConfig switches; when True the matching field is set on
-        ``scheme_config`` (raising if the field is absent).
+        ``scheme_config`` (raising if the field is absent).  The hard
+        saturation-adjustment TRIGGER (``hard_sat_adjust_threshold``) is a
+        per-scheme float default (overridable via ``--params``), so only the
+        boolean enable switch is threaded here.
 
     Returns
     -------
     NamedTuple
         ``scheme_config`` with the requested flags applied (a new instance;
-        unchanged when both switches are False).
+        unchanged when all switches are False).
     """
     fields = getattr(scheme_config, "_fields", ())
     if nc_from_aerosol:
@@ -996,4 +1054,13 @@ def apply_microphysics_experiment_flags(
                 "or drop --subgrid-autoconversion."
             )
         scheme_config = scheme_config._replace(subgrid_autoconversion=True)
+    if hard_saturation_adjustment:
+        if "hard_saturation_adjustment" not in fields:
+            raise ValueError(
+                f"hard_saturation_adjustment=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no warm-rain saturation "
+                "adjustment); use a warm-rain scheme (kessler, seifert_beheng, "
+                "morrison, thompson, p3) or drop --hard-saturation-adjustment."
+            )
+        scheme_config = scheme_config._replace(hard_saturation_adjustment=True)
     return scheme_config

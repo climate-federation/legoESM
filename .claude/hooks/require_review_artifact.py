@@ -16,6 +16,11 @@ Safety (it must never trap a session):
     allow stop. It only EVER blocks when it has both detected a major change AND
     successfully recorded the one-shot sentinel.
   * Advisory: a single ``decision: block`` with a reason; the next Stop is allowed.
+
+Runs under whatever ``python3`` the harness invokes it with, including the
+Python 3.6 shipped as the system interpreter on some HPC login nodes — so it
+avoids 3.7+-only syntax and stdlib kwargs (``from __future__ import
+annotations``, ``subprocess.run(capture_output=, text=)``).
 """
 import hashlib
 import json
@@ -35,9 +40,11 @@ _SIGNIFICANT = (
 _REVIEW_RECENCY_S = 2 * 60 * 60  # a review patch within 2h counts as "reviewed"
 
 
-def _git(cwd: str, *args: str) -> str:
+def _git(cwd, *args):
     return subprocess.run(
-        ["git", "-C", cwd, *args], capture_output=True, text=True, timeout=15
+        ["git", "-C", cwd] + list(args),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True, timeout=15,
     ).stdout
 
 
@@ -76,7 +83,7 @@ def main() -> None:
 
         # Only a change to a numerics/physics path is review-worthy here — a large
         # edit to CLI/docs/test/build Python must NOT trigger a *physics* reminder.
-        touched = set()
+        touched: set[str] = set()
         for line in _git(cwd, "diff", "--numstat", "HEAD").splitlines():
             parts = line.split("\t")
             if len(parts) == 3 and _is_significant_py(parts[2]):

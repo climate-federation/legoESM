@@ -158,6 +158,48 @@ def compute_surface_fluxes(
     return tau_x, tau_y, shflx, lhflx, ustar
 
 
+def beta_limited_surface_humidity(
+    q_sat_sfc: jax.Array,
+    q_air: jax.Array,
+    f_land: jax.Array,
+    beta_land: float,
+) -> jax.Array:
+    """Soil-moisture-limited effective surface humidity for a BLENDED surface.
+
+    On a non-tiled surface the bulk latent flux is
+    ``LH ∝ (q_sfc - q_air)``.  Using the saturated ``q_sat_sfc`` everywhere
+    makes every land cell an infinite swamp (beta = 1).  This throttles the
+    LAND fraction's humidity gradient by ``beta_land`` while leaving the
+    ocean/ice fraction saturated::
+
+        q_sfc = q_air + (1 - f_land * (1 - beta_land)) * (q_sat_sfc - q_air)
+
+    so the land-fraction latent flux is ``beta_land`` times its wet-surface
+    potential — the same alpha-method form the tiled pipeline applies per
+    tile (``physics_pipeline._tiled_surface_flux``).  ``beta_land = 1``
+    returns ``q_sat_sfc`` exactly (byte-identical wet surface);
+    ``beta_land = 0`` zeroes the land-fraction humidity gradient in both
+    directions (no land evaporation and no land dew — a closed surface).
+
+    Parameters
+    ----------
+    q_sat_sfc : array
+        Saturation mixing ratio at the surface anchor [kg/kg], shape (ncol,).
+    q_air : array
+        Lowest-level vapor mixing ratio [kg/kg], shape (ncol,).
+    f_land : array
+        Land fraction in [0, 1], shape (ncol,).
+    beta_land : float
+        Land evaporation efficiency in [0, 1].
+
+    Returns
+    -------
+    q_sfc : array
+        Effective surface humidity for the bulk latent flux [kg/kg].
+    """
+    return q_air + (1.0 - f_land * (1.0 - beta_land)) * (q_sat_sfc - q_air)
+
+
 class SurfaceTileSpec(NamedTuple):
     """Per-tile, per-column surface STATE for a mosaic (tiled) surface.
 
