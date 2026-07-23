@@ -579,6 +579,7 @@ def _setup_clm_topology(
     z_soil: np.ndarray,
     z_ref: float,
     pft_clm: int = 7,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> None:
     """Set up CLM module-level topology singletons for ``ncol`` columns.
 
@@ -601,8 +602,17 @@ def _setup_clm_topology(
     z_ref : float
         Atmospheric reference height [m].
     pft_clm : int
-        CLM PFT index (1-based) applied to all columns.  Controls Vcmax25
-        and plant hydraulic parameters via the MLpftcon lookup table.
+        CLM PFT index (1-based) applied to all columns when ``pft_per_col`` is
+        None.  Controls Vcmax25 and plant hydraulic parameters via the MLpftcon
+        lookup table.
+    pft_per_col : np.ndarray, optional
+        Per-column CLM PFT index (1-based), CONCRETE, shape ``(ncol,)``.  When
+        supplied it overrides ``pft_clm`` column-by-column — the enabler for
+        MIXED-PFT (heterogeneous-structure) global columns: different PFTs give
+        different ``nbot`` (and MLpftcon params), so a warm state's per-column
+        ``GridInfo`` tuple then varies, which ``extract_clm_ml_grid_info`` reads
+        straight off ``patch.itype``.  None → single ``pft_clm`` for all columns
+        (back-compat).  Structural, so it must be concrete (like lat/lon).
     """
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import ColumnType as _col_mod
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import GridcellType as _grc_mod
@@ -622,7 +632,9 @@ def _setup_clm_topology(
         p = i + 1  # 1-based patch index
         col_arr[p] = p       # column = patch (1:1)
         gc_arr[p] = p        # gridcell = patch (1:1)
-        itype_arr[p] = pft_clm  # CLM PFT from config (was hardcoded to 13)
+        # Per-column PFT (mixed-PFT / heterogeneous columns) when supplied, else the
+        # single config pft_clm for every column (single-PFT default, back-compat).
+        itype_arr[p] = int(pft_per_col[i]) if pft_per_col is not None else pft_clm
 
     patch.column = jnp.array(col_arr, dtype=jnp.int32)
     patch.gridcell = jnp.array(gc_arr, dtype=jnp.int32)
@@ -1660,6 +1672,7 @@ def compute_clm_ml_canopy_fluxes(
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1744,6 +1757,49 @@ def compute_clm_ml_canopy_fluxes(
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
+
+    # ---- Per-column PFT validation (structural → must be CONCRETE, like geometry) ----
+    # pft_per_col enables MIXED-PFT columns: it writes patch.itype[p] host-side in the
+    # topology setup, so it must be a concrete (ncol,) int array in a valid PFT range.
+    # A tracer / wrong shape / out-of-range index would corrupt the MLpftcon lookups
+    # silently — fail loud here instead.
+    if pft_per_col is not None:
+        if isinstance(pft_per_col, jax.core.Tracer):
+            raise ValueError(
+                "pft_per_col is a jax tracer, but per-column PFT is STRUCTURAL "
+                "(it writes host-side patch.itype in the CLM topology setup) and must "
+                "be a CONCRETE (ncol,) int array — like lat/lon geometry. Close over "
+                "it / build it outside the jit boundary.")
+        _pft_arr = np.asarray(pft_per_col)
+        if _pft_arr.shape != (ncol,):
+            raise ValueError(
+                f"pft_per_col must have shape ({ncol},) (one PFT per column); "
+                f"got {_pft_arr.shape}.")
+        # Integer dtype (NOT bool): a float array would be SILENTLY truncated by the
+        # int() cast when writing patch.itype (7.9 -> 7); a bool/object array is not a
+        # PFT index.  Reject up front (codex).
+        if _pft_arr.dtype == bool or not np.issubdtype(_pft_arr.dtype, np.integer):
+            raise ValueError(
+                f"pft_per_col must be an INTEGER PFT-index array (not "
+                f"{_pft_arr.dtype}); a float would be silently truncated writing "
+                "patch.itype.")
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod as _pftm
+        _mxpft = int(_pftm.MLpftcon.vcmaxpft.shape[0]) - 1
+        if _pft_arr.min() < 0 or _pft_arr.max() > _mxpft:
+            raise ValueError(
+                f"pft_per_col has PFT index outside 0..{_mxpft} (the MLpftcon table "
+                f"range): min={int(_pft_arr.min())} max={int(_pft_arr.max())}.")
+        # vcmax25_override overwrites only the single canopy_config.pft_clm table slot,
+        # so it is INCONSISTENT with mixed per-column PFTs (columns on other PFTs read
+        # their own un-overridden Vcmax25).  Reject the combination rather than apply a
+        # silently-wrong override; a per-PFT override is a separate feature (codex).
+        if getattr(canopy_config, "vcmax25_override", None) is not None:
+            raise ValueError(
+                "pft_per_col (mixed-PFT columns) is incompatible with "
+                "CLMMLCanopyConfig.vcmax25_override: the override applies only to the "
+                "single pft_clm table slot, so columns on other PFTs would keep their "
+                "un-overridden Vcmax25. Use per-PFT vcmaxpft_jax (traced) instead, or "
+                "drop vcmax25_override for a mixed-PFT run.")
 
     # ---- Differentiable-mode gate (static, resolved here — never traced) ----
     # ``differentiable=True`` opts a training run into the JAX-native diff path
@@ -1997,7 +2053,8 @@ def compute_clm_ml_canopy_fluxes(
             _setup_clm_time(dt, 0.0, 0)  # concrete: get_step_size()==dt; calday unused
             _setup_clm_topology(ncol, _lat_deg, _lon_deg, dz_soil, z_soil,
                                 float(land_config.z_ref),
-                                pft_clm=int(canopy_config.pft_clm))
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
         # Invalidate the eager topology cache: this traceable step overwrote the
         # process-global topology (with lon_deg=0), so a LATER eager call whose
         # cached _last_topology_key still matches would skip _setup_clm_topology and
@@ -2064,10 +2121,12 @@ def compute_clm_ml_canopy_fluxes(
             lat_deg.tobytes(), lon_deg.tobytes(),
             dz_soil.tobytes(), z_soil.tobytes(),
             float(z_ref), int(canopy_config.pft_clm),
+            None if pft_per_col is None else np.asarray(pft_per_col).tobytes(),
         )
         if _topo_key != _last_topology_key:
             _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
-                                pft_clm=int(canopy_config.pft_clm))
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
             _last_topology_key = _topo_key
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----

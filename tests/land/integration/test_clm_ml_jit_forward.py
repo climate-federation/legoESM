@@ -471,3 +471,86 @@ def test_scan_columns_is_o1_and_matches_loop():
         ll = getattr(out_loop, name)
         assert jnp.allclose(s, ll, atol=1e-6, rtol=1e-6), (
             f"{name}: scan {s} != loop {ll} (the column scan must be a no-op vs the loop)")
+
+
+def test_pft_per_col_threads_per_column_pft_and_backcompat():
+    """Per-column PFT plumbing: pft_per_col makes patch.itype (→ GridInfo.pft) vary
+    per column — the S3-heterogeneous unblock — while None keeps the single-PFT
+    default byte-identical.
+
+    Warm-start ncol=2 with pft_per_col=[7, 11] (two different tree PFTs), extract the
+    per-column GridInfo tuple, and assert the two columns carry their DISTINCT PFTs
+    (7 and 11) — i.e. structure is now heterogeneous.  Then the default (pft_per_col
+    =None) must give both columns the config pft_clm.  This is what makes a mixed-PFT
+    grid reach the group-by-structure path (today it falls back to the S2 loop —
+    correct, only O(ncol)).
+    """
+    import numpy as np
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    cfg = CLMMLCanopyConfig()          # pft_clm default = 7
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    Ts = jnp.full((2, 8), 290.0)
+    psi = jnp.full((2, 8), -0.5)
+    th = jnp.full((2, 8), 0.25)
+    lat = jnp.zeros(2)
+
+    def _warm(pft_per_col):
+        ifc._last_topology_key = None
+        _o, st = compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=_forcing_n(2, jnp.full(2, 295.0)),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+            dt=1800.0, T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+            pft_per_col=pft_per_col)
+        return extract_clm_ml_grid_info(st)
+
+    # --- mixed PFT: [7, 11] -> per-column grid.pft differs (heterogeneous) ---
+    gi = _warm(np.array([7, 11], dtype=np.int32))
+    assert isinstance(gi, tuple) and len(gi) == 2
+    pfts = sorted(int(g.pft) for g in gi)
+    assert pfts == [7, 11], f"per-column PFT not threaded: got {pfts}, expected [7, 11]"
+
+    # --- default (None): both columns = config pft_clm (single-PFT back-compat) ---
+    gi0 = _warm(None)
+    assert all(int(g.pft) == int(cfg.pft_clm) for g in gi0), (
+        f"pft_per_col=None must keep the single config pft_clm={cfg.pft_clm}; "
+        f"got {[int(g.pft) for g in gi0]}")
+
+
+def test_pft_per_col_rejects_bad_input():
+    """pft_per_col is structural (writes host patch.itype) — reject a tracer, a wrong
+    shape, and an out-of-range PFT index loudly, before the topology setup corrupts
+    the MLpftcon lookups."""
+    import numpy as _np
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+
+    cfg = CLMMLCanopyConfig()
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    Ts = jnp.full((2, 8), 290.0)
+    kw = dict(T_soil_top=Ts[:, 0], forcing=_forcing_n(2, jnp.full(2, 295.0)),
+              canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+              dt=1800.0, T_soil=Ts, psi_soil=jnp.full((2, 8), -0.5),
+              theta_soil=jnp.full((2, 8), 0.25), lat=jnp.zeros(2), doy=180.0)
+
+    with pytest.raises(ValueError, match="shape"):
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7], dtype=_np.int32))
+    with pytest.raises(ValueError, match="range"):
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7, 9999], dtype=_np.int32))
+    with pytest.raises(ValueError, match="INTEGER"):  # float would silently truncate
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7.9, 11.2]))
+    with pytest.raises(ValueError, match="tracer"):
+        jax.jit(lambda p: compute_clm_ml_canopy_fluxes(**kw, pft_per_col=p)[0].shflx)(
+            jnp.array([7, 11]))
+
+    # vcmax25_override (single-PFT) is incompatible with mixed per-column PFT
+    cfg_ov = CLMMLCanopyConfig(vcmax25_override=60.0)
+    lc_ov = MultiLayerLandConfig(surface_scheme=cfg_ov)
+    kw_ov = dict(kw); kw_ov["canopy_config"] = cfg_ov; kw_ov["land_config"] = lc_ov
+    with pytest.raises(ValueError, match="vcmax25_override"):
+        compute_clm_ml_canopy_fluxes(**kw_ov, pft_per_col=_np.array([7, 11], dtype=_np.int32))
