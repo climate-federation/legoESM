@@ -453,7 +453,8 @@ def _get_grid_lat_lon(grid_or_mesh, shape_2d):
 
 
 def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
-                                 sw_net_sfc=None, lw_net_sfc=None):
+                                 sw_net_sfc=None, lw_net_sfc=None,
+                                 sw_down_sfc=None, lw_down_sfc=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -491,6 +492,15 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
     lw_field = None if lw_net_sfc is None else Field(
         data=lw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
         name="lw_net_sfc_rad", dims=dims_2d, units="W/m^2")
+    # Downwelling counterparts (+down): forcing for an interactive land tile on
+    # the lean MPAS loop (AtmToSurface.sw_down/lw_down); NOT derivable from the
+    # net fields at the consumer without re-assuming sfc albedo/emissivity.
+    swd_field = None if sw_down_sfc is None else Field(
+        data=sw_down_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="sw_down_sfc_rad", dims=dims_2d, units="W/m^2")
+    lwd_field = None if lw_down_sfc is None else Field(
+        data=lw_down_sfc.reshape(shape_2d).astype(_ps_dtype),
+        name="lw_down_sfc_rad", dims=dims_2d, units="W/m^2")
     return HydrostaticTendencies(
         du_dt=Field(
             data=jnp.zeros(du_shape, dtype=_u_dtype), name="du_dt_rad",
@@ -508,6 +518,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         dv_dt=dv_dt,
         sw_net_sfc=sw_field,
         lw_net_sfc=lw_field,
+        sw_down_sfc=swd_field,
+        lw_down_sfc=lwd_field,
     )
 
 
@@ -1178,7 +1190,9 @@ def _make_hydrostatic_radiation(
         _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
         return _pack_hydrostatic_tendencies(
             dT_dt, state, shape_3d, shape_2d,
-            sw_net_sfc=_swn, lw_net_sfc=_lwn)
+            sw_net_sfc=_swn, lw_net_sfc=_lwn,
+            sw_down_sfc=rad_out.sw_flux_down[:, -1],
+            lw_down_sfc=rad_out.lw_flux_down[:, -1])
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

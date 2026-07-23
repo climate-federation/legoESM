@@ -1866,22 +1866,40 @@ class ModelDriver:
                 "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
             )
 
-        ad = self.physics.adapter
-        # column-order latitude / longitude in RADIANS, flattened to (ncol,).
-        # Cubed-sphere stores per-cell (6,n,n) lat/lon; the LAT-LON grid stores
-        # 1-D axes (lat (n_lat,), lon (n_lon,)) — flatten_2d on those raised
-        # "cannot reshape (n_lat,) into ncol" and killed every latlon
-        # use_multilayer_land run at setup (#837 follow-up / #869 lane).
-        # Prefer the grid's own 2-D fields when present, else broadcast the
-        # 1-D axes to the (n_lat, n_lon) cell grid (same convention as
-        # run_lmip_smoke.grid_latlon_rad).  The CLM map regrids onto DEGREE
-        # coordinates; the land tile consumes radians.
-        _glat = _np.asarray(getattr(self.grid, "lat2d", self.grid.lat))
-        _glon = _np.asarray(getattr(self.grid, "lon2d", self.grid.lon))
-        if _glat.ndim == 1 and _glon.ndim == 1:
-            _glon, _glat = _np.meshgrid(_glon, _glat)   # -> (n_lat, n_lon)
-        lat_rad = _np.asarray(ad.flatten_2d(_glat)).reshape(-1)
-        lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
+        # Unstructured (Voronoi/MPAS) meshes carry per-cell 1-D coordinates and
+        # per-cell (nCells, ...) state — already the flattened (ncol,) column
+        # order the land tile wants; the structured paths go through the
+        # pipeline adapter.  ``_flat_cols`` is the one flattener both branches
+        # share so every consumer below stays layout-agnostic.
+        _unstructured = hasattr(self.grid, "latCell")
+        if _unstructured:
+            ad = None
+            lat_rad = _np.asarray(self.grid.latCell).reshape(-1)
+            lon_rad = _np.asarray(self.grid.lonCell).reshape(-1)
+
+            def _flat_cols(x):
+                return jnp.asarray(getattr(x, "data", x)).reshape(-1)
+        else:
+            ad = self.physics.adapter
+
+            def _flat_cols(x):
+                return jnp.asarray(
+                    ad.flatten_2d(getattr(x, "data", x))).reshape(-1)
+            # column-order latitude / longitude in RADIANS, flattened to (ncol,).
+            # Cubed-sphere stores per-cell (6,n,n) lat/lon; the LAT-LON grid stores
+            # 1-D axes (lat (n_lat,), lon (n_lon,)) — flatten_2d on those raised
+            # "cannot reshape (n_lat,) into ncol" and killed every latlon
+            # use_multilayer_land run at setup (#837 follow-up / #869 lane).
+            # Prefer the grid's own 2-D fields when present, else broadcast the
+            # 1-D axes to the (n_lat, n_lon) cell grid (same convention as
+            # run_lmip_smoke.grid_latlon_rad).  The CLM map regrids onto DEGREE
+            # coordinates; the land tile consumes radians.
+            _glat = _np.asarray(getattr(self.grid, "lat2d", self.grid.lat))
+            _glon = _np.asarray(getattr(self.grid, "lon2d", self.grid.lon))
+            if _glat.ndim == 1 and _glon.ndim == 1:
+                _glon, _glat = _np.meshgrid(_glon, _glat)   # -> (n_lat, n_lon)
+            lat_rad = _np.asarray(ad.flatten_2d(_glat)).reshape(-1)
+            lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
@@ -1968,8 +1986,7 @@ class ModelDriver:
             )
 
         ncol = lat_deg.shape[0]
-        T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
-            storage_dtype)
+        T_init = _flat_cols(self.state.T.data[..., -1]).astype(storage_dtype)
         # Aridity-aware cold-start soil moisture (#730 / #837).  Seed theta from
         # the near-surface RH of the IC atmosphere, mapped into the per-column
         # plant-available range [theta_wp, theta_fc] the tile's beta reads
@@ -1985,11 +2002,9 @@ class ModelDriver:
         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
         if _qv is not None:
-            q_v_low = ad.flatten_2d(
-                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
-            p_s = ad.flatten_2d(
-                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
-                    storage_dtype)
+            q_v_low = _flat_cols(
+                getattr(_qv, "data", _qv)[..., -1]).astype(storage_dtype)
+            p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
             rh_low = q_v_low / jnp.maximum(
                 saturation_mixing_ratio(T_init, p_s), 1e-12)
             theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
@@ -4195,6 +4210,15 @@ class ModelDriver:
                 _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
                 for _k in trc_d:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
+            # Multilayer (Richards) land columns (MPAS port): same namespaced
+            # ``land_ml_<field>`` payload as the coupled carry_aux channel
+            # (_checkpoint_carry_aux), so the loader can reuse the shared
+            # fail-loud restore (#730 contract).  None fields are skipped on
+            # save; restore validates the field-set exactly.
+            if self._land_ml_state is not None:
+                for _f, _v in self._land_ml_state._asdict().items():
+                    if _v is not None:
+                        _save[f"land_ml_{_f}"] = np.asarray(_v)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             self._save_cmor_accumulator_sidecar(day)
@@ -4749,6 +4773,24 @@ class ModelDriver:
                         name=_k, dims=("nCells", "nlev"), units="kg/kg")
                     for _k in _names
                 })
+            # Multilayer (Richards) land columns (MPAS port): stage the
+            # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
+            # fail-loud restore (#730 exact-field-set contract).  Single-
+            # process only (matches the run-side phase-1 guard): under MPI the
+            # writer's columns are the full mesh and cannot be band-scattered.
+            _lml_keys = [k for k in d.files if k.startswith("land_ml_")]
+            if _lml_keys:
+                if _mpi:
+                    raise ValueError(
+                        "Checkpoint carries multilayer-land (land_ml_*) "
+                        "columns, which cannot be scattered under MPI "
+                        "(multilayer land is single-process only on the "
+                        "MPAS lane); restart single-process.")
+                if not isinstance(self._carry_aux, dict):
+                    self._carry_aux = {}
+                for _k in _lml_keys:
+                    self._carry_aux[_k] = jnp.asarray(d[_k])
+                self._restore_land_ml_from_carry_aux()
             # Restore the stateful-physics carry (#413): stash the
             # ``physstate_<field>`` arrays into carry_aux for the
             # _run_mpas seed overlay.  Cell-dimensioned fields scatter to
@@ -6001,6 +6043,107 @@ class ModelDriver:
                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
             )
 
+        # ---- Interactive multilayer (Richards) land tile — MPAS port -------
+        # Phase-1 coupling contract (tasks/mpas_land_port.md): the land is
+        # stepped OUTSIDE the jitted atmosphere step, once per dt, forced by
+        # the surface radiation/precip export the physics stashed on the
+        # PREVIOUS step (``model._sfc_diag``: sw/lw down refresh on radiation
+        # steps, precip every step) plus the current lowest-level state; the
+        # land skin temperature feeds back through the existing traced
+        # ``forcing["T_sfc"]`` channel (explicit flux coupling, one-step lag,
+        # no retrace).  The static ``mpas_land_beta`` humidity throttle still
+        # applies inside the turbulence factory; a traced per-cell beta is the
+        # phase-2b follow-up (see the port plan).
+        _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
+                       and self._land_ml_state is not None)
+        _land_step_fn = None
+        _land_T_skin = None            # (nCells,) land skin T of the last step
+        if _land_ml_on:
+            if not _sst_forcing:
+                raise ValueError(
+                    "use_multilayer_land on the MPAS lane requires the SST "
+                    "surface-forcing channel (radiation != 'none' with SST "
+                    "data): the land skin temperature feeds back through "
+                    "forcing['T_sfc'], which only exists on that path.")
+            if _f_land_cells is None:
+                raise ValueError(
+                    "use_multilayer_land on the MPAS lane requires a land "
+                    "fraction (--topography / --land-mask-file); none was "
+                    "loaded — the land tile would be silently inert.")
+            if (self._device_config is not None
+                    and self._device_config.is_distributed):
+                # Land columns are rank-local under MPI while the setup built
+                # them on the full mesh — scatter wiring is the follow-up
+                # (multilayer land is single-rank-only on every lane, #769).
+                raise ValueError(
+                    "use_multilayer_land on the MPAS lane is single-process "
+                    "only (phase 1); run without MPI or drop the flag.")
+            from legoesm.land.multilayer_land import step_multilayer_land
+            from legoesm.core.coupling_fields import AtmToSurface
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            _lml_cfg = self.physics.land_ml_cfg
+            _lml_params = self.physics.land_ml_params
+            _lml_lat = self.physics.land_ml_lat
+            _lml_umin = float(getattr(self.physics, "land_ml_u_min", 1.0))
+
+            @jax.jit
+            def _land_step_fn(land_state, a2s, doy):
+                new_state, resp, _carbon = step_multilayer_land(
+                    land_state, a2s, _lml_cfg, _lml_umin, DT,
+                    lat=_lml_lat, doy=doy, land_params=_lml_params)
+                return new_state, resp.T_sfc
+
+            def _marshal_land_forcing():
+                """AtmToSurface from the last radiation export + current state.
+
+                Returns None until the first radiation solve has populated the
+                downwelling fluxes (step 0 pre-physics) — the land holds its
+                initial state for that single step.  Mirrors the coupled
+                pipeline's ``_step_multilayer_land_tile`` marshalling
+                (physics_pipeline.py) field-for-field.
+                """
+                _sd = getattr(self.model, "_sfc_diag", None)
+                if (_sd is None or len(_sd) < 5
+                        or _sd[3] is None or _sd[4] is None):
+                    return None
+                sw_down = jnp.asarray(_sd[3].data).reshape(-1)
+                lw_down = jnp.asarray(_sd[4].data).reshape(-1)
+                precip = (jnp.asarray(_sd[2].data).reshape(-1)
+                          if _sd[2] is not None else jnp.zeros_like(sw_down))
+                T_air = self.state.T.data[:, -1]
+                _qv_tr = (self.state.tracers or {}).get("q_v")
+                q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
+                         else jnp.zeros_like(T_air))
+                p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
+                u_c, v_c = reconstruct_cell_velocity(
+                    self.state.u.data[:, -1], self.grid)
+                # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
+                # ideal-gas rho at the lowest level, snow split at T_freeze,
+                # fixed cos_zenith=0.5 for the non-canopy schemes (the real
+                # zenith already drives RRTMGP; the land uses it only for
+                # canopy radiation, which is coupled-pipeline-only here).
+                return AtmToSurface(
+                    sw_down=sw_down, lw_down=lw_down,
+                    precip_total=precip,
+                    precip_snow=jnp.where(
+                        T_air < constants.T_freeze, precip, 0.0),
+                    T_lowest=T_air, q_lowest=q_air,
+                    u_lowest=u_c, v_lowest=v_c,
+                    p_lowest=0.99 * p_s, p_surface=p_s,
+                    rho_lowest=p_s / (constants.R_d * T_air),
+                    cos_zenith=jnp.full_like(T_air, 0.5),
+                    co2_ppmv=jnp.full_like(T_air, float(
+                        getattr(cfg, "co2_ppmv", 412.0))),
+                    has_radiation=jnp.ones_like(T_air),
+                    has_precipitation=jnp.ones_like(T_air),
+                )
+            logger.info(
+                "  Interactive multilayer land (MPAS): %d columns, "
+                "f_land mean=%.3f — skin T -> forcing['T_sfc'] blend, "
+                "one-step-lag explicit coupling",
+                int(_lml_lat.shape[0]), float(jnp.mean(_f_land_cells)),
+            )
+
         # Wrap with Held-Suarez forcing when enabled.  Factored into a helper
         # so the SAME wrap applies to BOTH radiation sub-cycle variants (the
         # full ``physics_fn`` and the held ``physics_fn_norad``).
@@ -6455,6 +6598,17 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                # Interactive land skin T (one-step lag): blend the multilayer
+                # tile's last skin temperature into the surface anchor over the
+                # land fraction.  Ocean/ice keep the prescribed SST/SIC blend;
+                # before the first land step (_land_T_skin None) the anchor is
+                # the unmodified SST field (incl. the lapse fallback) — the
+                # cold-start value the land tile itself was initialized from.
+                if (_land_ml_on and _land_T_skin is not None
+                        and "T_sfc" in _forcing):
+                    _forcing["T_sfc"] = (
+                        (1.0 - _f_land_cells) * _forcing["T_sfc"]
+                        + _f_land_cells * _land_T_skin)
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -6472,6 +6626,19 @@ class ModelDriver:
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+            # Interactive multilayer land step (MPAS port): advance the soil/
+            # snow columns with the surface fluxes this step just exported
+            # (sw/lw down refresh on radiation steps; precip every step) and
+            # the post-step lowest-level state.  Jitted closure, device-only —
+            # no host sync; its skin T enters next step's forcing blend above.
+            # Skipped (state held) only until the first radiation solve
+            # populates the downwelling export.
+            if _land_ml_on:
+                _a2s = _marshal_land_forcing()
+                if _a2s is not None:
+                    self._land_ml_state, _land_T_skin = _land_step_fn(
+                        self._land_ml_state, _a2s,
+                        jnp.asarray(_doy, dtype=jnp.float64))
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.

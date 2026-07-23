@@ -633,7 +633,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # coupled loop can export sw/lw net to the coupler (_build_combined
             # constructs a fresh tendency that drops these diagnostic fields).
             combined = combined._replace(
-                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
+                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc,
+                sw_down_sfc=first.sw_down_sfc, lw_down_sfc=first.lw_down_sfc)
         # Same for surface precip (from microphysics; _build_combined drops it).
         combined = _attach_sfc_precip(combined, first, precip_accum)
         phys_state_out = update_physics_state(phys_state, phys_updates)
