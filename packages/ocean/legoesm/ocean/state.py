@@ -807,6 +807,21 @@ class BarotropicConfig(NamedTuple):
     #   not the Coriolis V->u averaging) -- it is a fidelity refinement, not that
     #   fix.
     barotropic_coriolis: str = "avg"
+    # C-grid face depth used by the substep continuity flux AND the drag/update
+    # depth (dynspg_ts.F90:568-592 zhup2_e/zhvp2_e; :658-666,771-778 zsshu_a/
+    # hu_e — same spatial rule, different ssh time-level).  "min_rule" (DEFAULT,
+    # bit-identical legacy): lego's C-grid min-rule face depth (MOM6/MITgcm
+    # hFacW convention), applied to the total column depth.  "nemo_ssh_avg":
+    # NEMO's own rule — a FIXED still-water reference depth (hu_0/hv_0; lego's
+    # min-rule applied to H_bathy alone) PLUS an e1e2-area-weighted 2-point
+    # average of the dynamic ssh at the two adjacent T-cells (r1_e1e2u ==
+    # 1/(e1u*e2u), the u-/v-point's OWN metric area — verified against
+    # domhgr.F90:146-160, NOT a sum of the two T-cell areas).  CAVEAT: lego's
+    # min-rule is load-bearing for a Hallberg-Adcroft column-sum invariant
+    # elsewhere in the tracer step; selecting "nemo_ssh_avg" may break that
+    # invariant at topographic steps (expected/accepted for this oracle-fidelity
+    # experiment — NEMO itself does not satisfy lego's invariant either).
+    barotropic_face_depth: str = "min_rule"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
