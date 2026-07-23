@@ -61,6 +61,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_hard_saturation_adjustment_flag_flows_to_config():
+    """--hard-saturation-adjustment round-trips to ExperimentConfig (opt-in
+    warm-rain hard saturation-adjustment guard; default OFF)."""
+    parser = build_arg_parser()
+    # default OFF: byte-identical smooth microphysics path
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.hard_saturation_adjustment is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_on.hard_saturation_adjustment is True
+
+    # BooleanOptionalAction exposes the explicit --no- off switch.
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_no.hard_saturation_adjustment is False
+
+
 def test_use_clubb_cloud_fraction_flag_flows_to_config():
     """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
     albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""

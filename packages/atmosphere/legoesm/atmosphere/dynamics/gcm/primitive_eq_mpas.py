@@ -571,6 +571,20 @@ def mpas_hydrostatic_tendencies(
             dq = dq + jax.vmap(
                 lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
                 in_axes=-1, out_axes=-1)(q)
+        # #930 vertical checkerboard damper on TRACERS (same operator + rate
+        # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
+        # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
+        # at the hot levels) show the moist checkerboard's primary oscillator
+        # is the TRACER field: tracer vertical transport reuses the
+        # checkerboard-prone ``vertical_advection`` form (only T got the #962
+        # θ-form rewrite), so damping T alone cannot stabilize the coupled
+        # q↔latent-heating mode.  Column-integral ZERO by the same no-flux
+        # outer-Laplacian padding as the T filter → conserves column moisture
+        # to machine precision.  Zero when nu_vert4_T == 0 (bit-identical).
+        if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_del4_T_tendency(qk, config.nu_vert4_T),
+                in_axes=-1, out_axes=-1)(q)
         _phys_tt = (physics_tendency.tracer_tendencies
                     if physics_tendency is not None else None)
         for _i, k in enumerate(_tnames):

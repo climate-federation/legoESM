@@ -210,11 +210,20 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KainFritschConfig.timec_max_s',
     'atm.conv.KainFritschConfig.timec_min_s',
     'atm.conv.KainFritschConfig.usl_depth_pa',
-    # atm: KesslerConfig (5)
+    # atm: KesslerConfig (7)
+    # ``hard_sat_adjust_threshold`` (all warm-rain micro configs below) is the
+    # opt-in hard-saturation-adjustment RH trigger: a per-scheme __param_spec__
+    # tier-2 float, calibratable via the SCM-RCE training path
+    # (build_trainable_params), NOT via the run_amip --params qualified-name
+    # loader — exactly like the sibling atm-micro scheme params in this file
+    # (the atm micro *Config is pipeline-internal, not routed onto
+    # ExperimentConfig).  Conscious addition (2026-07-23).
     'atm.micro.KesslerConfig.accretion_coeff',
     'atm.micro.KesslerConfig.autoconversion_rate',
     'atm.micro.KesslerConfig.autoconversion_threshold',
     'atm.micro.KesslerConfig.evaporation_coeff',
+    'atm.micro.KesslerConfig.hard_sat_adjust_threshold',
+    'atm.micro.KesslerConfig.hard_sat_max_heating_K',
     'atm.micro.KesslerConfig.rain_fall_speed',
     # atm: KuoConfig (2)
     'atm.conv.KuoConfig.anthes_rh_offset',
@@ -254,7 +263,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.gwd.McFarlaneConfig.fcrit2',
     'atm.gwd.McFarlaneConfig.h_topo',
     'atm.gwd.McFarlaneConfig.min_wind',
-    # atm: MorrisonConfig (21)
+    # atm: MorrisonConfig (23)
     'atm.micro.MorrisonConfig.N_i0',
     'atm.micro.MorrisonConfig.Nc_0',
     'atm.micro.MorrisonConfig.a_v_i',
@@ -266,6 +275,8 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.MorrisonConfig.cooper_a',
     'atm.micro.MorrisonConfig.dep_coeff',
     'atm.micro.MorrisonConfig.evap_coeff',
+    'atm.micro.MorrisonConfig.hard_sat_adjust_threshold',
+    'atm.micro.MorrisonConfig.hard_sat_max_heating_K',
     'atm.micro.MorrisonConfig.ice_snow_d_auto',
     'atm.micro.MorrisonConfig.k_ac',
     'atm.micro.MorrisonConfig.k_au',
@@ -280,7 +291,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.rad.OzoneProfileConfig.o3_max_vmr',
     'atm.rad.OzoneProfileConfig.p_peak_hPa',
     'atm.rad.OzoneProfileConfig.sigma_logp',
-    # atm: P3Config (16)
+    # atm: P3Config (18)
     'atm.micro.P3Config.N_i0',
     'atm.micro.P3Config.Nc_0',
     'atm.micro.P3Config.a_v_i',
@@ -295,6 +306,8 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.P3Config.cooper_supi_min',
     'atm.micro.P3Config.dep_coeff',
     'atm.micro.P3Config.evap_coeff',
+    'atm.micro.P3Config.hard_sat_adjust_threshold',
+    'atm.micro.P3Config.hard_sat_max_heating_K',
     'atm.micro.P3Config.k_ac',
     'atm.micro.P3Config.k_au',
     'atm.micro.P3Config.k_sc',
@@ -317,10 +330,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.sdm.SDMConfig.cdnc',
     'atm.sdm.SDMConfig.golovin_b',
     'atm.sdm.SDMConfig.r_rain',
-    # atm: SeifertBehengConfig (7)
+    # atm: SeifertBehengConfig (9)
     'atm.micro.SeifertBehengConfig.Nc_0',
     'atm.micro.SeifertBehengConfig.a_v_r',
     'atm.micro.SeifertBehengConfig.evap_coeff',
+    'atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold',
+    'atm.micro.SeifertBehengConfig.hard_sat_max_heating_K',
     'atm.micro.SeifertBehengConfig.k_ac',
     'atm.micro.SeifertBehengConfig.k_au',
     'atm.micro.SeifertBehengConfig.k_sc',
@@ -353,7 +368,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.TKEConfig.Ck',
     'atm.turb.TKEConfig.Pr_t',
     'atm.turb.TKEConfig.l_mix_max',
-    # atm: ThompsonConfig (21)
+    # atm: ThompsonConfig (23)
     'atm.micro.ThompsonConfig.N_i0',
     'atm.micro.ThompsonConfig.Nc_0',
     'atm.micro.ThompsonConfig.a_v_g',
@@ -366,6 +381,8 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.ThompsonConfig.cooper_a',
     'atm.micro.ThompsonConfig.dep_coeff',
     'atm.micro.ThompsonConfig.evap_coeff',
+    'atm.micro.ThompsonConfig.hard_sat_adjust_threshold',
+    'atm.micro.ThompsonConfig.hard_sat_max_heating_K',
     'atm.micro.ThompsonConfig.ice_snow_d_auto',
     'atm.micro.ThompsonConfig.k_ac',
     'atm.micro.ThompsonConfig.k_au',

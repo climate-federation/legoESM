@@ -592,6 +592,28 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
+    # Hard (iterated) saturation-adjustment guard for the warm-rain schemes
+    # (kessler/seifert_beheng/morrison/thompson/p3): where q_v exceeds the
+    # scheme's hard_sat_adjust_threshold * q_sat, an iterated saturation
+    # adjustment drains q_v ONTO the liquid saturation curve (conserving
+    # c_pd*T + L_v*q_v exactly), rate-limited to hard_sat_max_heating_K per step,
+    # removing local super-saturation pools the smooth sigmoid path cannot.
+    # PLACEMENT differs by dycore path (the integration trial showed placement is
+    # load-bearing): on the SPECTRAL/COUPLED path it is applied IN-SCHEME
+    # (threaded onto the per-scheme micro config via
+    # apply_microphysics_experiment_flags); on the MPAS path it is applied
+    # POST-STEP in model_driver._run_mpas, on the final state after the dycore's
+    # vertical vapour transport -- the in-scheme placement cannot correct the
+    # per-step transport spike within the dt window (it detonated at day 24),
+    # while the post-step correction is the proven-stable intervention.  The
+    # float trigger + heating cap use the per-scheme __param_spec__ defaults
+    # (1.1, 5 K -- matching the validated configuration); like all atmosphere
+    # microphysics params they are calibratable via the SCM-RCE training path,
+    # NOT the run_amip/run_coupled --params loader (they are not routable onto
+    # ExperimentConfig).  Default OFF => the moist path is byte-identical to the
+    # smooth-only scheme.
+    hard_saturation_adjustment: bool = False
+
     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
     # updraft precipitation).  A value >0 diverts that fraction of the
     # convective condensate to rain (sediments via microphysics, invisible to

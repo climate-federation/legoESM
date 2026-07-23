@@ -3065,6 +3065,21 @@ def _resolve_microphysics(config):
             )
         micro_config = micro_config._replace(subgrid_autoconversion=True)
 
+    # Hard (iterated) saturation-adjustment guard (opt-in): drain local super-
+    # saturation pools the smooth sigmoid path cannot, landing q_v on the liquid
+    # saturation curve (conserving c_pd*T + L_v*q_v).  Fail loudly on a scheme
+    # without the field (e.g. sundqvist) rather than silently ignoring it.
+    if getattr(config, "hard_saturation_adjustment", False):
+        if "hard_saturation_adjustment" not in getattr(
+                micro_config, "_fields", ()):
+            raise ValueError(
+                f"hard_saturation_adjustment=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no warm-rain saturation "
+                "adjustment); use a warm-rain scheme (kessler, seifert_beheng, "
+                "morrison, thompson, p3) or drop --hard-saturation-adjustment."
+            )
+        micro_config = micro_config._replace(hard_saturation_adjustment=True)
+
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
             MicrophysicsEmulator,

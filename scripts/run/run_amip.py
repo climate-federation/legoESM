@@ -934,6 +934,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(Morrison & Gettelman 2008 sub-grid closure) so "
                              "the non-linear KK2000 rate is not under-fed by "
                              "the grid-mean.  Requires --microphysics morrison.")
+    parser.add_argument("--hard-saturation-adjustment",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Opt-in iterated hard saturation adjustment "
+                             "for the warm-rain schemes (kessler/seifert_beheng/"
+                             "morrison/thompson/p3): where q_v exceeds "
+                             "hard_sat_adjust_threshold * q_sat (default 1.1), "
+                             "drain q_v onto the liquid saturation curve "
+                             "(conserving c_pd*T + L_v*q_v), rate-limited to "
+                             "hard_sat_max_heating_K per step (default 5 K ~ "
+                             "2 g/kg), removing local super-saturation pools the "
+                             "smooth path cannot.  Applied POST-STEP on the MPAS "
+                             "path (the validated placement) and in-scheme on "
+                             "the spectral/coupled path.  Default off (moist "
+                             "path byte-identical).  The threshold + cap use the "
+                             "scheme-config defaults (matching the validated "
+                             "configuration); like all atmosphere microphysics "
+                             "params they are calibratable via the SCM-RCE "
+                             "training path, not the run_amip --params loader.")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=None,
                         help="Convective in-updraft precipitation efficiency "
@@ -1571,6 +1589,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
