@@ -455,6 +455,32 @@ def test_clmml_mosaic_orchestration_area_weights(monkeypatch):
     np.testing.assert_array_equal(reverted, np.array([0, 1, 0, 0]))
 
 
+def test_clm_pft_derived_from_site_igbp():
+    """CLM-ML PFT is derived from the site IGBP+climate (not a fixed 7), so a
+    non-broadleaf site runs the right PFT for parity with the site-aware two-leaf."""
+    mod = _load_driver_module()
+    assert mod.clm_pft_for_site(0, "temperate") == 1    # ENF -> NET temperate
+    assert mod.clm_pft_for_site(0, "boreal") == 2       # ENF -> NET boreal
+    assert mod.clm_pft_for_site(3, "temperate") == 7    # DBF -> BDT temperate
+    assert mod.clm_pft_for_site(7, "temperate") == 7    # SAV -> BDT temperate (oak)
+    assert mod.clm_pft_for_site(9, "temperate") == 13   # GRA -> C3 grass
+    assert mod.clm_pft_for_site(99, "temperate") == mod._CLM_PFT_DEFAULT   # unmapped
+    assert mod.clm_pft_for_site(0, "bogus") == 1        # unknown climate -> temperate
+
+
+def test_site_mean_vcmax_from_driver(tmp_path):
+    """The CLM-ML Vcmax override defaults to the driver's site-mean Vcmax (what
+    two-leaf uses), not None."""
+    import numpy as np
+    from legoesm.land.boundary_data.ec_site import read_ec_site_driver
+    mod = _load_driver_module()
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    d = read_ec_site_driver(driver_nc)
+    v = mod._site_mean_vcmax25(d)
+    assert v is not None and 20.0 < v < 120.0          # finite, physical
+
+
 def test_two_leaf_mosaic_prognostic_orchestration(monkeypatch, tmp_path):
     """Two-leaf outer-loop mosaic runs one prognostic column per tile with the
     tile's ROOT DEPTH (deep tree vs shallow grass) and area-weights.  Stubs the
