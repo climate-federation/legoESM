@@ -348,3 +348,189 @@ def test_al81_enstrophy_conservation_partial_cells_diagnostic():
         f"step/flat amplification = {amplification:.2e}× "
         f"(baseline 1.30×, threshold 10×)."
     )
+
+
+# ----------------------------------------------------------------------
+# q_boundary coverage: "neumann_fill" (default) vs "nemo_live"
+# ----------------------------------------------------------------------
+#
+# NEMO dynvor.F90:769-779 (``vor_een``, ``ln_dynvor_msk=.false.``) computes
+# ``zwz`` (absolute PV) from the MASKED velocities directly, with NO fill at
+# land-adjacent vertices — the coast wall-shear vorticity (``-u/e2f`` etc.)
+# rides the same 12-point triad as the interior.  ``q_boundary="neumann_fill"``
+# is the legacy legoESM default: it smooths land-adjacent q from wet
+# neighbours, erasing that coast shear-vorticity signal from the PV flux.
+# ``q_boundary="nemo_live"`` reproduces the NEMO behaviour: q is left live at
+# masked vertices (only the fully-dry BIG_H sentinel makes q→0 there).
+
+
+def _coastal_vertex_probe_state(q_boundary="neumann_fill"):
+    """Tiny hand-built C-grid state with ONE land-adjacent vertex carrying a
+    real velocity-shear vorticity signal, so the two ``q_boundary`` branches
+    are forced apart at that vertex.
+
+    Layout: a 4×4 flat-bottom grid (nlev=1) with cell (row=1, col=1) LAND;
+    every other cell wet.  Vertex (j=1, i=1) — the SW corner of the land
+    cell — has 3 wet neighbour cells + 1 dry neighbour, so
+    ``vtx_mask[1, 1] = 0`` (compute_vertex_mask convention: wet only if ALL
+    4 surrounding cells are wet) while ``h_vtx`` there is finite (min over
+    the *active* surrounding cells, BIG_H convention) — the "land-adjacent
+    but not fully-dry" case the two q_boundary modes disagree on.
+
+    A uniform shear ``u`` field (independent of the land cell) gives that
+    vertex a nonzero relative vorticity from the wet cells around it.
+    """
+    n_lat, n_lon, nlev = 4, 4, 1
+    land_row, land_col = 1, 1
+
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[land_row, land_col] = 0.0
+
+    H_flat = 4000.0
+    h_T = jnp.asarray((land_mask * H_flat)[:, :, None])
+
+    # u-face / v-face thicknesses: min over the two adjacent cells (wet-wet
+    # min is H_flat; any face touching the land cell is 0 by min-rule).
+    h_T_np = np.asarray(h_T[:, :, 0])
+    h_W = np.roll(h_T_np, 1, axis=1)
+    h_u_int = np.minimum(h_T_np, h_W)
+    h_u = jnp.asarray(np.concatenate([h_u_int, h_u_int[:, :1]], axis=1)[:, :, None])
+
+    h_S = np.concatenate([np.zeros((1, n_lon)), h_T_np[:-1]], axis=0)
+    h_v_int = np.minimum(
+        h_T_np, np.concatenate([h_T_np[1:], np.zeros((1, n_lon))], axis=0)
+    )
+    h_v_full = np.zeros((n_lat + 1, n_lon))
+    h_v_full[:-1] = np.minimum(h_T_np, h_S)
+    h_v_full[1:-1] = np.minimum(h_T_np[:-1], h_T_np[1:])
+    h_v_full[0] = 0.0
+    h_v_full[-1] = 0.0
+    h_v = jnp.asarray(h_v_full[:, :, None])
+
+    # h_vtx: min over the 4 surrounding cells, BIG_H sentinel for LAND cells
+    # (matching the production convention documented in
+    # pv_flux_al81_partial_cell's docstring / _build_test_state above).
+    BIG_H = 1.0e30
+    h_T_active = np.where(land_mask > 0.0, H_flat, BIG_H)
+    h_W_active = np.roll(h_T_active, 1, axis=1)
+    h_vtx_int = np.minimum(
+        np.minimum(h_T_active[:-1], h_T_active[1:]),
+        np.minimum(h_W_active[:-1], h_W_active[1:]),
+    )
+    h_vtx_full = np.full((n_lat + 1, n_lon), BIG_H)
+    h_vtx_full[1:-1] = h_vtx_int
+    h_vtx = jnp.asarray(np.concatenate([h_vtx_full, h_vtx_full[:, :1]], axis=1)[:, :, None])
+
+    # vtx_mask: wet (1) only if ALL 4 surrounding cells are wet.
+    land_active = (land_mask > 0.0).astype(np.float64)
+    land_W = np.roll(land_active, 1, axis=1)
+    vtx_int = np.minimum(
+        np.minimum(land_active[:-1], land_active[1:]),
+        np.minimum(land_W[:-1], land_W[1:]),
+    )
+    vtx_full = np.zeros((n_lat + 1, n_lon))
+    vtx_full[1:-1] = vtx_int
+    vtx_mask = jnp.asarray(np.concatenate([vtx_full, vtx_full[:, :1]], axis=1))
+
+    # Face masks: wet only if both adjacent cells wet.
+    u_mask_3d = (h_u > 0.0).astype(jnp.float64)
+    v_mask_3d = (h_v > 0.0).astype(jnp.float64)
+
+    # A deterministic shear varying in BOTH row and column (u increases with
+    # row index, v increases with column index) gives every vertex a real,
+    # distinct relative vorticity — including a genuine east-west variation
+    # along the land-adjacent row, so the Neumann-fill average of wet
+    # neighbours actually differs from the vertex's own live value (a
+    # spatially-uniform field would make fill == live by symmetry and hide
+    # the boundary-treatment difference this test targets). Scaled by 1e6
+    # purely so the resulting curl (divided by a ~R² spherical vertex area)
+    # sits well above float64 round-off, not for any physical reason.
+    u_np = np.zeros((n_lat, n_lon + 1, nlev))
+    u_np[:, :, 0] = np.arange(n_lat)[:, None] * 1.0e6
+    v_np = np.zeros((n_lat + 1, n_lon, nlev))
+    v_np[:, :, 0] = np.arange(n_lon)[None, :] * 1.0e6
+    u = jnp.asarray(u_np)
+    v = jnp.asarray(v_np).at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+    zeta = curl_vertex_cgrid(u, v, create_latlon_grid(n_lat, n_lon))
+
+    assert float(vtx_mask[land_row, land_col]) == 0.0, "probe vertex must be land-adjacent"
+    assert float(zeta[land_row, land_col, 0]) != 0.0, "probe vertex must carry real shear vorticity"
+
+    return dict(
+        zeta=zeta, h_vtx=h_vtx, h_v=h_v, v=v, h_u=h_u, u=u,
+        u_mask_3d=u_mask_3d, v_mask_3d=v_mask_3d, vtx_mask=vtx_mask,
+        land_row=land_row, land_col=land_col,
+    )
+
+
+def test_q_boundary_nemo_live_keeps_coastal_vertex_vorticity_nonzero():
+    """At the land-adjacent vertex, ``nemo_live`` leaves q computed from the
+    live (masked-but-unfilled) velocities — nonzero because the surrounding
+    wet-cell shear vorticity is real (NEMO dynvor.F90:769-779,
+    ``ln_dynvor_msk=.false.``: zwz built from masked velocities, no fill).
+    ``neumann_fill`` instead overwrites q at that vertex with the average of
+    wet neighbours, and the two mass fluxes multiplying q_live vs q_filled
+    at that vertex's 4 adjacent faces genuinely differ, so the resulting
+    du/dv contributions touching that vertex must differ between modes."""
+    s = _coastal_vertex_probe_state()
+
+    F_u_fill, F_v_fill = pv_flux_al81_partial_cell(
+        s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+        s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+        q_boundary="neumann_fill",
+    )
+    F_u_live, F_v_live = pv_flux_al81_partial_cell(
+        s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+        s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+        q_boundary="nemo_live",
+    )
+
+    # The land-adjacent vertex q differs between the two modes (nonzero
+    # live q vs a filled q) — a direct probe of the boundary treatment
+    # itself, independent of which face ends up carrying it.
+    eps_h = 1.0e-10
+    q_live = s["zeta"] / jnp.maximum(s["h_vtx"], eps_h)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import neumann_fill_vertex
+    q_fill = neumann_fill_vertex(q_live, s["vtx_mask"])
+    jr, jc = s["land_row"], s["land_col"]
+    assert float(q_live[jr, jc, 0]) != 0.0, "nemo_live must keep a nonzero coastal q"
+    assert not np.isclose(
+        float(q_live[jr, jc, 0]), float(q_fill[jr, jc, 0]), rtol=1e-6, atol=0.0,
+    ), "neumann_fill must actually change q at the land-adjacent vertex"
+
+    # And the operator outputs genuinely differ between the two modes (not
+    # merely at that one vertex in isolation, but in the assembled du/dv —
+    # proving the "nemo_live" branch is wired all the way through, not a
+    # dead no-op alias of "neumann_fill").
+    assert not np.allclose(np.asarray(F_u_fill), np.asarray(F_u_live), atol=1e-12)
+    assert not np.allclose(np.asarray(F_v_fill), np.asarray(F_v_live), atol=1e-12)
+
+
+def test_q_boundary_rest_state_zero_tendency_both_modes():
+    """u = v = 0 (rest): mass fluxes F_u = F_v = 0 everywhere, so q·F = 0 at
+    every face regardless of what q is at land-adjacent vertices — both
+    q_boundary modes must give EXACTLY zero tendency."""
+    s = _coastal_vertex_probe_state()
+    zeros_u = jnp.zeros_like(s["u"])
+    zeros_v = jnp.zeros_like(s["v"])
+
+    for mode in ("neumann_fill", "nemo_live"):
+        F_u, F_v = pv_flux_al81_partial_cell(
+            s["zeta"], s["h_vtx"], s["h_v"], zeros_v, s["h_u"], zeros_u,
+            s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+            q_boundary=mode,
+        )
+        assert np.all(np.asarray(F_u) == 0.0), f"{mode}: rest u must give exactly zero F_u"
+        assert np.all(np.asarray(F_v) == 0.0), f"{mode}: rest v must give exactly zero F_v"
+
+
+def test_q_boundary_unknown_value_raises():
+    """Dispatch hardening: an unknown q_boundary raises at operator entry
+    (registered in tests/test_dispatch_hardening.py::BASELINE_DISPATCHERS)."""
+    s = _coastal_vertex_probe_state()
+    with pytest.raises(ValueError, match="unknown q_boundary variant"):
+        pv_flux_al81_partial_cell(
+            s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+            s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+            q_boundary="bogus",
+        )

@@ -244,6 +244,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # AL81/EEN q-boundary convention (q_boundary: neumann_fill | nemo_live).
+        # A typo must raise, not silently pick the coast-vorticity behaviour
+        # (nemo_live keeps wall shear vorticity live; neumann_fill erases it).
+        ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),

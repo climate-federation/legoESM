@@ -157,6 +157,43 @@ class TestDINOConfig:
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
 
+    def test_tke_etau_htau_mode_is_latitude_and_matches_nemo_profile(self):
+        """DINO's TKE closure uses the NEMO nn_htau=1 LATITUDE sub-ML
+        penetration-depth profile (namelist_ref default, unoverridden by DINO's
+        namelist_cfg), not the constant10m (nn_htau=0) profile a prior card
+        used — see the etau_htau_mode="latitude" comment in
+        _dino_vertical_mixing_config. Pins both the config wiring and the
+        exact numeric htau(lat) NEMO formula (zdftke.F90:870):
+            htau = max(0.5, min(30, 45*|sin(deg2rad(lat))|))  [m]
+        at lat=0 (floor), lat=45 (ceiling), and a mid-latitude value — by
+        back-solving nemo_etau_injection() (the real production function),
+        not a re-derived formula."""
+        import dataclasses
+        from legoesm.ocean.physics.vertical_mixing.tke import nemo_etau_injection
+
+        cfg = dataclasses.replace(DINOConfig(), vmix_scheme="tke")
+        vm = dino._dino_vertical_mixing_config(cfg)
+        assert vm.tke.etau_htau_mode == "latitude"
+        assert vm.tke.etau_mode == "below_ml"
+
+        expected_20 = 45.0 * math.sin(math.radians(20.0))
+        assert expected_20 == pytest.approx(15.390906449655093, abs=1e-9)
+
+        # Recover the htau the closure actually applies at each latitude by
+        # back-solving inj = etau_frac*e_sfc*exp(-depth_w/htau): evaluate the
+        # injection at depth_w=0 (isolates etau_frac*e_sfc) and at depth_w=100
+        # (adds the exp factor), then invert for htau — exercises the real
+        # nemo_etau_injection() call the TKE column uses, no re-derivation.
+        e0 = jnp.zeros((1,))
+        taum = jnp.asarray([1.0])
+        for lat_deg, expected_htau in ((0.0, 0.5), (45.0, 30.0), (20.0, expected_20)):
+            lat = jnp.asarray([lat_deg])
+            inj0 = nemo_etau_injection(e0, taum, jnp.asarray([0.0]), vm.tke, lat_deg=lat)
+            inj100 = nemo_etau_injection(e0, taum, jnp.asarray([100.0]), vm.tke, lat_deg=lat)
+            recovered_htau = float(-100.0 / jnp.log(inj100[0, 0] / inj0[0, 0]))
+            assert recovered_htau == pytest.approx(expected_htau, rel=0, abs=1e-10), (
+                f"lat={lat_deg}: htau={recovered_htau} != expected {expected_htau}")
+
     def test_tke_prandtl_ri_maps_nemo_nn_pdl(self):
         """DINOConfig.tke_prandtl_ri=True wires the NEMO zdftke nn_pdl=1
         Richardson Prandtl: prandtl_mode='richardson' with coeff=1/ri_cri,
