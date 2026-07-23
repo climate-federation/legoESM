@@ -295,6 +295,146 @@ def test_grass_tree_knob_reaches_diagnostic_mode(tmp_path):
     assert hi["GPP"]["bias"] != base["GPP"]["bias"]
 
 
+def _single_step_canopy_inputs(driver_nc):
+    """Read a driver and return the (T_soil, forcing, params, w_frac, wind) tuple
+    for one daytime timestep (ncol=1), mirroring run_ec_site._diagnostic_fluxes."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.land.boundary_data.ec_site import read_ec_site_driver
+    d = read_ec_site_driver(driver_nc)
+    lai = np.asarray(d.canopy_params.LAI).ravel()
+    sw = np.asarray(d.forcing.sw_down).ravel()
+    t = int(np.argmax((sw > 100.0) & (lai > 0.1)))     # a lit, leafy step
+    tree = lambda x: jax.tree_util.tree_map(lambda a: a[t], x)
+    f, p = tree(d.forcing), tree(d.canopy_params)
+    wind = jnp.sqrt(f.u_lowest ** 2 + f.v_lowest ** 2 + 1.0)
+    return d.T_soil_top[t], f, p, d.w_frac_rz[t], wind, d.dt_s
+
+
+def test_mosaic_single_patch_identical_to_canopy(tmp_path):
+    """N=1 mosaic (frac=1, unit scales) is bit-identical to the direct canopy."""
+    import jax.numpy as jnp
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    from legoesm.land.surface_scheme.two_leaf_canopy import (
+        compute_two_leaf_canopy_fluxes)
+    from legoesm.land.surface_scheme.patch_mosaic import (
+        PatchMosaicConfig, PatchSpec, compute_mosaic_canopy_fluxes)
+
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    Ts, f, p, wf, wind, dt = _single_step_canopy_inputs(driver_nc)
+    cc, lc = TwoLeafCanopyConfig(max_iters=30), MultiLayerLandConfig()
+    kw = dict(T_soil_top=Ts, forcing=f, canopy_config=cc, land_config=lc,
+              canopy_params=p, w_frac_rz=wf, wind_speed=wind,
+              wind_dir_x=jnp.ones_like(wind), wind_dir_y=jnp.zeros_like(wind),
+              soil_thermal_fn=lambda G, dt_: Ts, dt=dt,
+              LAI_override=p.LAI, TgC_override=p.TgC)
+    direct = compute_two_leaf_canopy_fluxes(**kw)
+    mono = compute_mosaic_canopy_fluxes(
+        mosaic=PatchMosaicConfig(patches=(PatchSpec(frac=1.0),)).validate(), **kw)
+    for fld in ("gpp", "lhflx", "shflx", "T_surface"):
+        a, b = getattr(direct, fld), getattr(mono, fld)
+        np.testing.assert_allclose(np.asarray(a).ravel(), np.asarray(b).ravel(),
+                                   rtol=1e-12, atol=0.0, err_msg=fld)
+
+
+def test_mosaic_two_identical_patches_equal_single(tmp_path):
+    """Two identical patches (any area split) reduce to the single-canopy value."""
+    import jax.numpy as jnp
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    from legoesm.land.surface_scheme.patch_mosaic import (
+        PatchMosaicConfig, PatchSpec, compute_mosaic_canopy_fluxes)
+
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    Ts, f, p, wf, wind, dt = _single_step_canopy_inputs(driver_nc)
+    cc, lc = TwoLeafCanopyConfig(max_iters=30), MultiLayerLandConfig()
+    kw = dict(T_soil_top=Ts, forcing=f, canopy_config=cc, land_config=lc,
+              canopy_params=p, w_frac_rz=wf, wind_speed=wind,
+              wind_dir_x=jnp.ones_like(wind), wind_dir_y=jnp.zeros_like(wind),
+              soil_thermal_fn=lambda G, dt_: Ts, dt=dt,
+              LAI_override=p.LAI, TgC_override=p.TgC)
+    one = compute_mosaic_canopy_fluxes(
+        mosaic=PatchMosaicConfig(patches=(PatchSpec(frac=1.0),)).validate(), **kw)
+    two = compute_mosaic_canopy_fluxes(
+        mosaic=PatchMosaicConfig(patches=(PatchSpec(frac=0.3),
+                                          PatchSpec(frac=0.7))).validate(), **kw)
+    np.testing.assert_allclose(np.asarray(two.gpp).ravel(),
+                               np.asarray(one.gpp).ravel(), rtol=1e-9, atol=0.0)
+
+
+def test_mosaic_c3_tree_vs_c4_grass_patches_differ(tmp_path):
+    """A C3-tree + C4-grass 2-patch mosaic gives a different GPP than the blended
+    single canopy — the two-source split does something."""
+    import jax.numpy as jnp
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    from legoesm.land.surface_scheme.patch_mosaic import (
+        PatchMosaicConfig, PatchSpec, compute_mosaic_canopy_fluxes, savanna_two_patch)
+
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    Ts, f, p, wf, wind, dt = _single_step_canopy_inputs(driver_nc)
+    cc, lc = TwoLeafCanopyConfig(max_iters=30), MultiLayerLandConfig()
+    kw = dict(T_soil_top=Ts, forcing=f, canopy_config=cc, land_config=lc,
+              canopy_params=p, w_frac_rz=wf, wind_speed=wind,
+              wind_dir_x=jnp.ones_like(wind), wind_dir_y=jnp.zeros_like(wind),
+              soil_thermal_fn=lambda G, dt_: Ts, dt=dt,
+              LAI_override=p.LAI, TgC_override=p.TgC)
+    blended = compute_mosaic_canopy_fluxes(
+        mosaic=PatchMosaicConfig(patches=(PatchSpec(frac=1.0),)).validate(), **kw)
+    savanna = compute_mosaic_canopy_fluxes(mosaic=savanna_two_patch(tree_frac=0.4), **kw)
+    assert np.isfinite(np.asarray(savanna.gpp)).all()
+    assert float(savanna.gpp[0]) != float(blended.gpp[0])
+
+
+def test_mosaic_compute_api_validates_at_entry(tmp_path):
+    """compute_mosaic_canopy_fluxes rejects a bad mosaic (fractions sum != 1)
+    before running the canopy, not silently returning corrupted fluxes."""
+    import jax.numpy as jnp
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    from legoesm.land.surface_scheme.patch_mosaic import (
+        PatchMosaicConfig, PatchSpec, compute_mosaic_canopy_fluxes)
+
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5, n=8)
+    Ts, f, p, wf, wind, dt = _single_step_canopy_inputs(driver_nc)
+    bad = PatchMosaicConfig(patches=(PatchSpec(frac=0.4), PatchSpec(frac=0.4)))
+    with pytest.raises(ValueError):
+        compute_mosaic_canopy_fluxes(
+            mosaic=bad, T_soil_top=Ts, forcing=f,
+            canopy_config=TwoLeafCanopyConfig(max_iters=30),
+            land_config=MultiLayerLandConfig(), canopy_params=p, w_frac_rz=wf,
+            wind_speed=wind, wind_dir_x=jnp.ones_like(wind),
+            wind_dir_y=jnp.zeros_like(wind), soil_thermal_fn=lambda G, dt_: Ts,
+            dt=dt, LAI_override=p.LAI, TgC_override=p.TgC)
+
+
+def test_run_site_savanna_mosaic_diagnostic(tmp_path):
+    """--mosaic savanna runs end-to-end in diagnostic mode with finite skill."""
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5)
+    mod = _load_driver_module()
+    res = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "m"), chunk=96,
+                       mosaic="savanna", tree_frac=0.4)
+    assert np.isfinite(res["GPP"]["bias"])
+
+
+def test_run_site_mosaic_rejects_bad_combos(tmp_path):
+    driver_nc = str(tmp_path / "SAV-Test_driver_v2.nc")
+    _make_driver(driver_nc, igbp=8.0, fc4=0.5, n=8)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError):                      # unknown mosaic
+        mod.run_site(driver_nc, "diagnostic", str(tmp_path / "a"), chunk=8,
+                     mosaic="bogus")
+    with pytest.raises(ValueError):                      # prognostic unsupported
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "b"), chunk=8,
+                     mosaic="savanna")
+
+
 def test_clmml_turbulence_rejects_unknown(tmp_path):
     driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
     _make_driver(driver_nc, n=8)

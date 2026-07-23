@@ -45,6 +45,11 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
+from legoesm.land.surface_scheme.patch_mosaic import (
+    PatchMosaicConfig,
+    compute_mosaic_canopy_fluxes,
+    savanna_two_patch,
+)
 from legoesm.land.canopy.config import (
     CLMMLCanopyConfig,
     VALID_CLM_ML_STOMATAL_MODELS,
@@ -216,17 +221,20 @@ _U_MIN = 1.0
 
 
 def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
-                       land_config: MultiLayerLandConfig, chunk: int):
+                       land_config: MultiLayerLandConfig, chunk: int,
+                       mosaic: "PatchMosaicConfig | None" = None):
     """vmap the canopy over time with the soil state PRESCRIBED from the driver.
 
-    Returns (gpp_gC, le_wm2, h_wm2, t_surface) each shape (n_time,).
+    Returns (gpp_gC, le_wm2, h_wm2, t_surface) each shape (n_time,).  When
+    ``mosaic`` is given, each timestep runs the N-patch mosaic (tree + grass +
+    ... tiles, area-weighted) instead of the single blended canopy.
     """
     def _step(T_soil_t, forcing_t, params_t, w_frac_t):
         # Mirror production: floor wind as sqrt(u^2 + v^2 + U_min^2) (the canopy
         # never sees raw calm wind in the coupled model).
         wind_t = jnp.sqrt(forcing_t.u_lowest ** 2 + forcing_t.v_lowest ** 2
                           + _U_MIN ** 2)
-        out = compute_two_leaf_canopy_fluxes(
+        kw = dict(
             T_soil_top=T_soil_t, forcing=forcing_t,
             canopy_config=canopy_config, land_config=land_config,
             canopy_params=params_t, w_frac_rz=w_frac_t, wind_speed=wind_t,
@@ -237,6 +245,8 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
             dt=d.dt_s,
             LAI_override=params_t.LAI, TgC_override=params_t.TgC,
         )
+        out = (compute_two_leaf_canopy_fluxes(**kw) if mosaic is None
+               else compute_mosaic_canopy_fluxes(mosaic=mosaic, **kw))
         return out.gpp, out.lhflx, out.shflx, out.T_surface
 
     vstep = jax.jit(jax.vmap(_step))
@@ -617,11 +627,25 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              vcmax_c3_scale: float | None = None,
              vcmax_c4_scale: float | None = None,
              stomatal_m_c3_scale: float | None = None,
-             stomatal_m_c4_scale: float | None = None) -> dict:
+             stomatal_m_c4_scale: float | None = None,
+             mosaic: str = "none", tree_frac: float = 0.4) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
+    # N-patch mosaic (tree + grass tiles) for savanna sites.  Fail early on an
+    # unknown selection or an unsupported combination (dispatch hardening).
+    if mosaic not in ("none", "savanna"):
+        raise ValueError(f"mosaic {mosaic!r} not supported (none|savanna)")
+    mosaic_cfg: PatchMosaicConfig | None = None
+    if mosaic == "savanna":
+        if mode != "diagnostic":
+            raise ValueError(
+                "mosaic=savanna is diagnostic-only; per-patch prognostic root-zone "
+                "water stress is a follow-up (needs per-patch soil coupling)")
+        if canopy != "two_leaf":
+            raise ValueError("mosaic=savanna requires --canopy two_leaf")
+        mosaic_cfg = savanna_two_patch(tree_frac=tree_frac)
     if canopy == "clmml" and mode != "prognostic":
         # Diagnostic mode vmaps the canopy over timesteps; the CLM-ML interface
         # mutates CLM module globals per step and cannot be vmapped.
@@ -711,7 +735,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     reverted = None
     ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
-        gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk)
+        gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
+                                              mosaic=mosaic_cfg)
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
@@ -889,6 +914,16 @@ def main() -> int:
     ap.add_argument("--stomatal-m-c4-scale", type=float, default=None,
                     help="scale ONLY the C4 (grass) Ball-Berry slope m; overrides "
                          "--stomatal-m-scale for the C4 pathway")
+    # N-patch canopy mosaic for savanna sites (US-Ton, AU-How, US-SRM): run the
+    # canopy per tile (C3 tree + C4 grass) and area-weight, instead of one blended
+    # canopy.  Diagnostic-mode, two-leaf only for now.
+    ap.add_argument("--mosaic", default="none", choices=["none", "savanna"],
+                    help="canopy mosaic: 'savanna' = 2 patches (C3 tree overstory "
+                         "+ C4 grass understory), area-weighted; diagnostic + "
+                         "two_leaf only")
+    ap.add_argument("--tree-frac", type=float, default=0.4,
+                    help="woody (tree) area fraction for --mosaic savanna; grass "
+                         "is the residual 1-tree_frac")
     ap.add_argument("--u-min", type=float, default=_U_MIN,
                     help="wind-speed floor [m/s]; canopy sees "
                          "sqrt(u^2+v^2+u_min^2). Shared by both arms; lower => "
@@ -931,6 +966,7 @@ def main() -> int:
                  vcmax_c4_scale=args.vcmax_c4_scale,
                  stomatal_m_c3_scale=args.stomatal_m_c3_scale,
                  stomatal_m_c4_scale=args.stomatal_m_c4_scale,
+                 mosaic=args.mosaic, tree_frac=args.tree_frac,
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,
