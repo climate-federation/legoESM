@@ -760,3 +760,52 @@ def test_glue_jit_compiles():
 
     out = go(slc, jnp.full((4, 8), 100.0))
     assert jnp.isfinite(out)
+
+
+def test_cache_polar_coverage_after_lat_clamp(tmp_path):
+    """A constant source whose uniform-inferred lat edge does NOT land on
+    the pole (outer centre 86 deg -> inferred outer edge ~98 deg, whose
+    sin caps at ~0.9897 < 1) leaves the polar destination cell only ~96.5%
+    covered: without the lat clamp the polar rows regrid the constant to
+    LESS than its value. RED before the clamp (polar tas ~279.8 K != 290);
+    GREEN after np.clip(src/target lat edges, +/- pi/2) restores full
+    coverage (and require_full_coverage then passes)."""
+    pytest.importorskip("dask")
+    src_path = tmp_path / "gaussianish_jra55.zarr"
+    n_lat, n_lon = 8, 16
+    n_t = 8
+    time = np.arange(n_t, dtype=np.float64) * (3.0 / 24.0)
+    # Outer centre 86 deg; uniform edge inference overshoots the pole so the
+    # outermost source cell has sin(edge) < 1 -> a genuine polar gap.
+    lat = np.linspace(86.0, -86.0, n_lat)
+    half_lon = 180.0 / n_lon
+    lon = np.linspace(half_lon, 360.0 - half_lon, n_lon)
+    const_values = {
+        "uas": 5.0, "vas": -3.0, "tas": 290.0, "huss": 0.01,
+        "psl": 1.013e5, "rsds": 250.0, "rlds": 350.0,
+        "prra": 1e-5, "prsn": 0.0, "friver": 0.0,
+    }
+    data_vars = {
+        var: (("time", "lat", "lon"), np.full((n_t, n_lat, n_lon), val))
+        for var, val in const_values.items()
+    }
+    ds = xr.Dataset(
+        data_vars=data_vars, coords={"time": time, "lat": lat, "lon": lon},
+    )
+    ds["time"].attrs["units"] = "days since 1958-01-01 00:00:00"
+    ds.to_zarr(str(src_path), mode="w", consolidated=True)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path),
+        years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache_gauss",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    # Constant source must regrid to the same constant on EVERY row,
+    # including the two polar rows, once the lat clamp closes the pole gap.
+    slc = load_jra55_slice(cache_path, day=0.0)
+    np.testing.assert_allclose(
+        np.asarray(slc.tas), 290.0, atol=1e-6,
+        err_msg="polar tas reduced by uncovered pole cell",
+    )
