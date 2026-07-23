@@ -125,6 +125,15 @@ class HydrostaticTendencies(NamedTuple):
     # this is the SURFACE precip (micro sedimentation), NOT the column vapour
     # sink (which is P-E and would double-count the separately-applied evap).
     precip: Field | None = None
+    # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
+    # radiation tendency for the lean MPAS/spectral loops: an interactive land
+    # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
+    # NET fluxes above cannot be inverted for them without assuming the
+    # radiation code's surface albedo/emissivity at the consumer.  None on
+    # non-radiation tendencies; appended at the end with None defaults so every
+    # existing (incl. positional) constructor is unaffected.
+    sw_down_sfc: Field | None = None
+    lw_down_sfc: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

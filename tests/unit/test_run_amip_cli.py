@@ -193,17 +193,46 @@ def test_no_surface_tiled_overrides_yaml_default():
     assert cfg.surface_tiled is False
 
 
-def test_multilayer_land_rejected_on_mpas():
-    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
-    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
-    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+def test_multilayer_land_accepted_on_mpas():
+    """use_multilayer_land + MPAS grid parses (MPAS port,
+    tasks/mpas_land_port.md): the tile is stepped in the MPAS driver loop with
+    skin-T feedback via forcing['T_sfc'].  The old early argparse rejection
+    (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "mpas", "--discretization", "mpas",
+        "--use-multilayer-land",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.use_multilayer_land is True
+    cfg.validate_strict()
+
+
+def test_multilayer_land_still_rejected_on_spectral():
+    """The SPECTRAL standalone path keeps the early rejection (passive land
+    tile, no soil-column stepping wired there)."""
     parser = build_arg_parser()
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
             "--dataset", "analytical",
-            "--grid-type", "mpas", "--discretization", "mpas",
+            "--truncation", "21", "--discretization", "spectral",
             "--use-multilayer-land",
         ]), parser)
+
+
+def test_canopy_schemes_rejected_on_mpas():
+    """Canopy surface schemes (two_leaf/clm_ml) need the coupled pipeline's
+    clm_ml threading — only simple_seb is wired on the MPAS lane; a canopy
+    selection must fail early, not silently run simple_seb."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical",
+                "--grid-type", "mpas", "--discretization", "mpas",
+                "--use-multilayer-land", "--land-surface-scheme", scheme,
+            ]), parser)
 
 
 def test_clm_surfdata_path_flows_to_config():

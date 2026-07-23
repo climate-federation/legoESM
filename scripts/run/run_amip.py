@@ -1933,17 +1933,27 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "spectral standalone radiation paths use the "
                      "RRTMGPConfig constant surface albedo and would "
                      "silently ignore the flag.")
-    if args.use_multilayer_land and (
-            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-            or args.discretization in ("spectral", "mpas")):
+    if args.use_multilayer_land and args.discretization == "spectral":
         parser.error("--use-multilayer-land runs inside the coupled physics "
-                     "pipeline (cubed_sphere / latlon only); the MPAS and "
-                     "spectral standalone physics carry a PASSIVE land tile "
-                     "and cannot step the soil column (the multilayer setup "
-                     "crashes on the unstructured mesh: VoronoiMesh has no "
-                     "lat/lat2d). Pass --no-use-multilayer-land to override "
-                     "a --config YAML that enables it.")
+                     "pipeline or the MPAS driver loop; the SPECTRAL "
+                     "standalone physics carries a PASSIVE land tile and "
+                     "cannot step the soil column. Pass "
+                     "--no-use-multilayer-land to override a --config YAML "
+                     "that enables it.")
+    # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
+    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']), but
+    # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
+    # only simple_seb is wired on MPAS.
+    if (args.use_multilayer_land
+            and args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                                    "mpas")
+                 or args.discretization == "mpas")):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is not wired "
+            "on the MPAS lane (coupled-pipeline canopy threading); use "
+            "--land-surface-scheme simple_seb with --use-multilayer-land "
+            "on MPAS.")
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade

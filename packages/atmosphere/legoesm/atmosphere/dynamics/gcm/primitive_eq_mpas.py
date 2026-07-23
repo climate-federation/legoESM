@@ -755,7 +755,10 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # a full-radiation step, precip every step, so a wholesale overwrite
             # on a held-radiation step (sw/lw None) would DROP the last radiation
             # fluxes. Keep the last non-None value per slot (sw, lw, precip).
-            _prev = getattr(self, "_sfc_diag", None) or (None, None, None)
+            _prev = getattr(self, "_sfc_diag", None) or (None,) * 5
+            # Tolerate a shorter persisted bundle (pre-downwelling restart of
+            # the in-process object): right-pad with None before the merge.
+            _prev = tuple(_prev) + (None,) * (len(sfc_diag) - len(_prev))
             self._sfc_diag = tuple(
                 new if new is not None else old
                 for new, old in zip(sfc_diag, _prev))
@@ -859,13 +862,18 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
+            # Downwelling counterparts (+down): interactive-land forcing
+            # (AtmToSurface.sw_down/lw_down); refresh on radiation steps only,
+            # like the net fluxes.
+            _swd_sfc = getattr(_pt, "sw_down_sfc", None)
+            _lwd_sfc = getattr(_pt, "lw_down_sfc", None)
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would
             # stash stale precip. Each element is None-guarded by the consumer.
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None):
-                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc, _swd_sfc, _lwd_sfc)
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
