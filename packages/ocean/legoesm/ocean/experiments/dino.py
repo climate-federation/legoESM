@@ -2075,12 +2075,19 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             surface_bc=cfg.tke_surface_bc,
             dissipation_discretization=cfg.tke_dissipation,
             kappa_convention=cfg.tke_kappa_convention,
-            # NEMO zdftke surface terms — BOTH are namelist_ref defaults
-            # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
-            # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
-            # (rn_efr=0.05, nn_htau=0 → constant 10 m)). Faithful ON.
+            # NEMO zdftke surface terms — namelist_ref defaults (DINO's
+            # namelist_cfg sets no &namzdf_tke overrides): ln_lc=T
+            # (rn_lc=0.15), nn_etau=1 (rn_efr=0.05) and nn_htau=1 — the
+            # LATITUDE penetration profile htau=max(0.5,min(30,45|sin(lat)|))
+            # (zdftke.F90:870), NOT the constant 10 m (that is nn_htau=0).
+            # The prior card ran constant10m: 3x-too-shallow sub-ML TKE at
+            # mid/high lat -> A_v collapses below the ML at boundary/ridge
+            # columns -> the east-wall mode balance breaks (#1226
+            # mode-projection: lego implicit-friction f=-2e-8 vs NEMO
+            # vtrd_zdf -1.07e-5). Coefficient-sweep live mismatch, now fixed.
             lc=True,
             etau_mode="below_ml",
+            etau_htau_mode="latitude",
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
