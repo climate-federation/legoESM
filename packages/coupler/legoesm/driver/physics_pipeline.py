@@ -185,6 +185,10 @@ class PhysicsPipeline:
         # traceably over ncol>1 (S2).  None ⇒ not a CLM-ML run (byte-identical for
         # simple_seb / two_leaf, which pass it straight through as None).
         self.clm_ml_grid_info = None
+        # Per-column CLM PFT (concrete (ncol,) int array) for mixed-PFT columns;
+        # set in model_driver._setup_multilayer_land from the surface map's dominant
+        # PFT when CLMMLCanopyConfig.use_surfdata_pft. None => single pft_clm.
+        self.clm_ml_pft_per_col = None
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -587,7 +591,8 @@ class PhysicsPipeline:
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
             land_params=_lmp, carbon_state=self.land_ml_carbon,
-            clm_ml_grid_info=self.clm_ml_grid_info)
+            clm_ml_grid_info=self.clm_ml_grid_info,
+            clm_ml_pft_per_col=self.clm_ml_pft_per_col)
         return land_new, resp.T_sfc, resp.albedo
 
     def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):

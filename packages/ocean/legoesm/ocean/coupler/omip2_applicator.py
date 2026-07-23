@@ -184,8 +184,13 @@ def _conservative_regrid_to_latlon(
         # back HALVED, and the 10-m pressure iteration then NaN'd on the
         # resulting garbage air temperature).
         src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+        n_src_lon = src_lon.size
+        ds = abs(float(src_lon[1] - src_lon[0]))
+        dd = abs(float(np.asarray(dst_lon_deg)[1] - np.asarray(dst_lon_deg)[0]))
+        n_ghost = max(1, int(np.ceil(dd / ds)))
+        n_ghost = min(n_ghost, n_src_lon)
         src_lon_padded = np.concatenate(
-            [[src_lon[-1] - 360.0], src_lon, [src_lon[0] + 360.0]])
+            [src_lon[-n_ghost:] - 360.0, src_lon, src_lon[:n_ghost] + 360.0])
         src_lat_edges = _edges_from_centers_deg(src_lat_deg)
         src_lon_edges = _edges_from_centers_deg(src_lon_padded, periodic=True)
         dst_lat_edges = _edges_from_centers_deg(dst_lat_deg)
@@ -194,13 +199,29 @@ def _conservative_regrid_to_latlon(
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
+        # require_full_coverage=True: lat edges are clamped to [-pi/2, pi/2]
+        # above and the ghost columns close the lon seam, so any residual
+        # coverage deficit is a BUG (e.g. a genuinely non-global source) ->
+        # raise loudly instead of silently under-covering. Host-side check on
+        # the static weights; no AD/JIT impact.
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
+            require_full_coverage=True,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
+    # Ghost-column count matches the weight build below (width ratio, NOT
+    # count ratio: this caller's dst may be a sub-global regional grid where
+    # count ratio over-estimates). Clamp so slicing can't over-wrap the src.
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+    n_src_lon = src_lon.size
+    ds = abs(float(src_lon[1] - src_lon[0]))
+    dd = abs(float(np.asarray(dst_lon_deg)[1] - np.asarray(dst_lon_deg)[0]))
+    n_ghost = max(1, int(np.ceil(dd / ds)))
+    n_ghost = min(n_ghost, n_src_lon)
     f = jnp_local.asarray(field_2d)
-    f_padded = jnp_local.concatenate([f[:, -1:], f, f[:, :1]], axis=1)
+    f_padded = jnp_local.concatenate(
+        [f[:, -n_ghost:], f, f[:, :n_ghost]], axis=1)
     return np.asarray(apply_conservative_regrid(f_padded, weights))
 
 
