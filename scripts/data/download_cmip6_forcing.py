@@ -169,8 +169,9 @@ FORCINGS: dict[str, ForcingSpec] = {
         directly_consumable=False,
         # Loader wants TSI (W/m2) + SSI_frac (14 RRTMG-SW band FRACTIONS summing
         # to 1); the raw SOLARIS-HEPPA ssi is high-spectral-resolution W/m2/nm.
-        adapter_note="bin the native-resolution ssi into the 14 RRTMG-SW bands "
-                     "and normalise to fractions (SSI_frac); keep tsi as TSI.",
+        adapter_note="run scripts/data/adapt_cmip6_solar.py --in <solar.nc> "
+                     "--out solar.nc (bins the native ssi into the 14 RRTMG-SW "
+                     "bands -> SSI_frac, keeps tsi as TSI).",
     ),
     "aerosol": ForcingSpec(
         channel="aerosol",
