@@ -2793,6 +2793,32 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
+def convection_config_for(config):
+    """The ``ConvectionConfig`` (scheme + tuned per-scheme leaf) to build a
+    combined-physics convection kernel from.
+
+    Single source of truth mirroring :func:`turbulence_config_for`: the
+    combined-physics lanes (MPAS, spectral) previously built
+    ``ConvectionConfig(scheme=...)`` with BARE scheme defaults, so every
+    tuned ExperimentConfig field (``bechtold_*``, ``sbm_tau_c``,
+    ``convective_precip_efficiency``, ...) silently never reached them —
+    the same gap class as the 2026-07-23 hard-sat override. This wraps the
+    FV resolver so all lanes share ONE tuned leaf.
+    """
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+
+    scheme = config.convection
+    cc = ConvectionConfig(scheme=scheme)
+    if scheme == "none":
+        return cc
+    _, leaf = _resolve_convection(config)
+    if leaf is None or scheme not in cc._fields:
+        # Schemes without a leaf slot (or resolver-handled specially) keep
+        # the plain scheme selection — the factory dispatch validates it.
+        return cc
+    return cc._replace(**{scheme: leaf})
+
+
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
@@ -2917,6 +2943,16 @@ def _resolve_convection(config):
         # so a scheme without the field keeps its default "constant"; the scheme
         # body raises on an unknown value (dispatch-hardening).
         _split = getattr(config, "convective_precip_split", "constant")
+        # Thread the Sundqvist-split autoconversion scalars UNCONDITIONALLY on
+        # any scheme that exposes them (tiedtke here; bechtold threads its own
+        # dedicated kwargs above) — mirroring bechtold, so the --params /
+        # _ATM_SCALAR_PARAM_MAP reachability claim holds regardless of the
+        # split selector.  Byte-identical at defaults (5.0e-4 / 0.9 == the
+        # scheme defaults); the values are inert until the split activates.
+        if hasattr(conv_config, "precip_split_scheme"):
+            conv_config = conv_config._replace(
+                autoconv_q_c_crit=getattr(config, "autoconv_q_c_crit", 5.0e-4),
+                autoconv_pe_max=getattr(config, "autoconv_pe_max", 0.9))
         if _split != "constant":
             if not hasattr(conv_config, "precip_split_scheme"):
                 # A requested non-constant split on a scheme that cannot honour
@@ -2926,10 +2962,7 @@ def _resolve_convection(config):
                     f"convective_precip_split={_split!r} requires a convection "
                     "scheme with the physical autoconversion split (bechtold or "
                     f"tiedtke); scheme {scheme!r} does not support it")
-            conv_config = conv_config._replace(
-                precip_split_scheme=_split,
-                autoconv_q_c_crit=getattr(config, "autoconv_q_c_crit", 5.0e-4),
-                autoconv_pe_max=getattr(config, "autoconv_pe_max", 0.9))
+            conv_config = conv_config._replace(precip_split_scheme=_split)
 
     _check_pipeline_convection_supported(scheme, conv_config)
 
@@ -3084,6 +3117,23 @@ def _resolve_microphysics(config):
                 "morrison, thompson, p3) or drop --hard-saturation-adjustment."
             )
         micro_config = micro_config._replace(hard_saturation_adjustment=True)
+
+    # Optional trigger/heating-cap overrides (flat ExperimentConfig scalars /
+    # --params via _ATM_SCALAR_PARAM_MAP).  Threaded through the SHARED helper
+    # so the fail-loud "scheme lacks the field" contract is written once
+    # (mirrors the model_driver MPAS call site); validate_strict has already
+    # refused an override without the boolean gate.
+    _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
+    _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
+    if _hs_thr is not None or _hs_cap is not None:
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        micro_config = apply_microphysics_experiment_flags(
+            micro_config, scheme,
+            hard_sat_adjust_threshold=_hs_thr,
+            hard_sat_max_heating_K=_hs_cap,
+        )
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (

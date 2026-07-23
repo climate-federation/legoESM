@@ -947,11 +947,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smooth path cannot.  Applied POST-STEP on the MPAS "
                              "path (the validated placement) and in-scheme on "
                              "the spectral/coupled path.  Default off (moist "
-                             "path byte-identical).  The threshold + cap use the "
-                             "scheme-config defaults (matching the validated "
-                             "configuration); like all atmosphere microphysics "
-                             "params they are calibratable via the SCM-RCE "
-                             "training path, not the run_amip --params loader.")
+                             "path byte-identical).  The threshold + cap default "
+                             "to the scheme-config values (matching the "
+                             "validated configuration); override via "
+                             "--hard-sat-adjust-threshold / "
+                             "--hard-sat-max-heating-k or --params.")
+    parser.add_argument("--hard-sat-adjust-threshold", type=float, default=None,
+                        dest="hard_sat_adjust_threshold",
+                        help="Override the hard-saturation-adjustment RH "
+                             "trigger (drain where q_v > threshold * q_sat). "
+                             "Requires --hard-saturation-adjustment; bounds "
+                             "[1, 2] per the scheme __param_spec__ (scheme "
+                             "default 1.1).")
+    parser.add_argument("--hard-sat-max-heating-k", type=float, default=None,
+                        dest="hard_sat_max_heating_K",
+                        help="Override the hard-saturation-adjustment per-step "
+                             "latent-heating cap [K]. Requires "
+                             "--hard-saturation-adjustment; bounds [0.5, 50] "
+                             "per the scheme __param_spec__ (scheme default "
+                             "5 K; 10 K = the day-137 summer-regime tuning "
+                             "arm).")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=None,
                         help="Convective in-updraft precipitation efficiency "
@@ -1613,6 +1628,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
         hard_saturation_adjustment=args.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=args.hard_sat_max_heating_K,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
