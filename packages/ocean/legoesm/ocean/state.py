@@ -1922,6 +1922,58 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     used for the runoff-depth-spread channel too.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
+    # --- NEMO dynzdf composition (#1226): drag-in-matrix + baroclinic-only ---
+    # Two SEPARATELY toggleable options transcribing NEMO's ``ln_drgimp``
+    # implicit-friction composition (dynzdf.F90), each independently
+    # attributable against the measured east-wall 2Δx checkerboard v-mode
+    # (legoESM's implicit vertical-friction stage damps it at 1/20-1/300 of
+    # NEMO's vtrd_zdf, pattern corr 0.091).
+    #
+    # zdf_drag_in_matrix (dynzdf.F90:293-305 + 148-171, zdfdrg.F90 rCdU_bot):
+    # NEMO's semi-implicit bottom friction adds the drag rate directly INTO
+    # the tridiagonal matrix diagonal at each column's deepest wet cell,
+    # instead of an explicit RHS kick before the solve:
+    #   zwd(iku) = zwd(iku) - zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa)
+    # (rCdU_bot <= 0 in NEMO's convention, so the SUBTRACTION of a negative
+    # quantity ADDS positive definiteness to the diagonal -- a damping term;
+    # legoESM's r_eff [m/s] is the positive ``-rCdU_bot``, so the diagonal
+    # gains ``+ dt_mom * r_eff / e3u`` at the bottom cell only).  With
+    # ``ln_dynspg_ts`` (split-explicit barotropic, DINO's default) NEMO ALSO
+    # adds a barotropic-drag RHS correction at the bottom cell using the
+    # AFTER barotropic velocity uu_b/vv_b (dynzdf.F90:148-171) -- see
+    # zdf_baroclinic_only below, which folds that correction into the SAME
+    # depth-mean split.  REQUIRES the model's OWN outside bottom-drag
+    # application on momentum (``_bc_bottom_drag`` in the explicit tendency)
+    # to be SKIPPED when this flag is True -- double-applying drag both
+    # outside AND inside the matrix would double-count it (2x the intended
+    # damping).  Requires ``bottom_drag_scheme`` in {"nemo_quadratic",
+    # "nemo_loglayer"} (validated at model construction) since the diagonal
+    # term needs NEMO's rCdU_bot rate, not the legacy linear/MOM6 rate.
+    # Default False -> the pre-existing outside-the-matrix explicit drag
+    # application is UNCHANGED -> BIT-IDENTICAL.
+    zdf_drag_in_matrix: bool = False
+    # zdf_baroclinic_only (dynzdf.F90:119-171, stpmlf.F90:392): NEMO solves
+    # the implicit vertical-friction tridiagonal system on the BAROCLINIC
+    # residual only -- it subtracts the (Kaa) barotropic mean uu_b/vv_b from
+    # the RHS BEFORE the solve and (under ln_dynspg_ts) re-injects the
+    # barotropic drag correction at the bottom cell directly (the "barotropic
+    # component only" comment at dynzdf.F90:144); the barotropic splice back
+    # into the 3-D field happens AFTER dyn_zdf, at mlf_baro_corr.  legoESM's
+    # barotropic mode is already spliced into u/v BEFORE this stage (stage
+    # A->2 of _leapfrog_step / the AB2 state), so the faithful transcription
+    # is: take the e3-weighted depth mean of the solve's INPUT velocity (the
+    # SAME dz_u/dz_v the solve uses, at the solve's time level), subtract it,
+    # solve the tridiagonal on the residual, then add the SAME depth mean
+    # back UNCHANGED to the solve's OUTPUT -- exactly conservative when
+    # A_v=0 (round-trips to the input).  Combines with zdf_drag_in_matrix's
+    # barotropic-drag bottom-cell RHS correction (both flags target the
+    # ln_dynspg_ts barotropic-component treatment; zdf_baroclinic_only can
+    # be enabled alone, in which case the barotropic mean simply free-wheels
+    # through the solve unchanged rather than getting the drag correction).
+    # Default False -> the solve acts on the full (baroclinic + barotropic)
+    # velocity as before -> BIT-IDENTICAL.
+    zdf_baroclinic_only: bool = False
+
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
         """Construct from FLAT keyword args (the legacy / YAML field names),

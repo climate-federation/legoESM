@@ -174,6 +174,12 @@ class DINOConfig:
     # dynspg_ts.F90 ~L360).  Requires wind_through_step=True (the stress must
     # reach model.step's surface_forcing).  Default False = prior behaviour.
     surface_stress_implicit: bool = False
+    # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
+    # / zdf_baroclinic_only docstrings for the full transcription. Threaded
+    # 1:1 (same field names) to the model config. Default False on both =
+    # bit-identical.
+    zdf_drag_in_matrix: bool = False
+    zdf_baroclinic_only: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -783,6 +789,20 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_n2_threshold": -1e-12,
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
+        # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
+        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block
+        #    (which sets only ln_non_lin=.true.) -- so DINO resolves
+        #    ln_drgimp=.true.: semi-implicit bottom friction IS in the matrix
+        #    (dynzdf.F90:293-305). ln_drgice_imp also ref-defaults .true. but
+        #    zdfdrg.F90:320 force-resets it to .false. whenever nn_ice/=2, and
+        #    DINO's namelist_cfg sets nn_ice=0 -- so no top-friction term (no
+        #    ice-shelf cavities in DINO either). ln_dynspg_ts=.true. (namdyn_spg
+        #    ref default, not overridden; this card's barotropic_solver=
+        #    "explicit_substep" IS the split-explicit match) -- so the
+        #    barotropic-drag RHS correction (dynzdf.F90:148-171) also applies,
+        #    which is why zdf_baroclinic_only is enabled alongside. --
+        "zdf_drag_in_matrix": True,
+        "zdf_baroclinic_only": True,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
@@ -2404,6 +2424,9 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
+        # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
+        zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
+        zdf_baroclinic_only=cfg.zdf_baroclinic_only,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

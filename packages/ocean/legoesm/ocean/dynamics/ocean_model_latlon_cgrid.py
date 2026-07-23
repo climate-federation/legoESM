@@ -1663,6 +1663,25 @@ class LatLonCGridOceanModel:
                 f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
                 'barotropic_time_filter="nemo_boxcar_centred" for the '
                 "forward-frame boxcar.")
+        # zdf_drag_in_matrix (#1226 dynzdf.F90:293-305): the diagonal term is
+        # NEMO's rCdU_bot (zdfdrg zdf_drg_nonlin/loglayer), so it requires a
+        # NEMO bottom-drag scheme (the legacy linear / MOM6 DRAG_BG_VEL rate
+        # is not what NEMO's ln_drgimp path uses) AND the implicit vmix solve
+        # itself (there is no matrix to add the diagonal term into otherwise).
+        if getattr(config, "zdf_drag_in_matrix", False):
+            if not getattr(config, "implicit_vertical_mixing", False):
+                raise ValueError(
+                    "zdf_drag_in_matrix=True requires "
+                    "implicit_vertical_mixing=True (NEMO ln_drgimp adds the "
+                    "drag into the implicit vertical-friction tridiagonal "
+                    "matrix; there is no matrix without the implicit solve).")
+            _bd_scheme = getattr(config.bottom_drag, "bottom_drag_scheme",
+                                  "legacy")
+            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer"):
+                raise ValueError(
+                    "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
+                    '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
+                    f"rCdU_bot rate); got {_bd_scheme!r}.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -5042,6 +5061,76 @@ class LatLonCGridOceanModel:
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 
+        # ---- #1226 NEMO dynzdf composition options (u/v ONLY) ----
+        # zdf_baroclinic_only: split u_solve_in/v_solve_in into (baroclinic
+        # residual, barotropic depth mean) BEFORE the solve, so the implicit
+        # friction acts on the residual only (dynzdf.F90:148-150 "remove
+        # barotropic velocities"); the depth mean is re-added UNCHANGED to
+        # u_new/v_new after the solve (mlf_baro_corr's later re-splice is
+        # already how legoESM's barotropic mode re-enters u/v elsewhere in
+        # the step, so re-adding here — rather than leaving it out — is what
+        # keeps this stage a no-op on the barotropic mode).  Zero-flux BCs
+        # make the solve exactly conservative on the residual (Σ residual·dz
+        # invariant), so round-tripping the mean is exact at A_v=0 (test 3).
+        _zdf_baroclinic_only = (
+            do_momentum and getattr(self.config, "zdf_baroclinic_only", False))
+        if _zdf_baroclinic_only:
+            _u_bt_mean = depth_mean(
+                u_solve_in, dz_u, self.config.min_water_column_m,
+                keepdims=True)
+            _v_bt_mean = depth_mean(
+                v_solve_in, dz_v, self.config.min_water_column_m,
+                keepdims=True)
+            u_solve_in = u_solve_in - _u_bt_mean
+            v_solve_in = v_solve_in - _v_bt_mean
+
+        # zdf_drag_in_matrix: NEMO's semi-implicit bottom friction goes INTO
+        # the tridiagonal diagonal at each face-column's deepest wet cell
+        # (dynzdf.F90:293-305) instead of the explicit RHS kick
+        # (_bc_bottom_drag, disabled at the tendency stage when this flag is
+        # on — see the ocean_pe_latlon_cgrid single-owner guard).  Sign:
+        # NEMO's rCdU_bot <= 0 and the diagonal SUBTRACTS it
+        # (zwd -= zDt_2*(...)), which ADDS positive definiteness (damping);
+        # legoESM's r_eff = -rCdU_bot >= 0, so extra_diag = +dt_mom*r_eff/h
+        # at the bottom cell reproduces the identical sign/magnitude.
+        # Under ln_dynspg_ts (DINO's split-explicit barotropic — the only
+        # case implemented here), NEMO ALSO adds a barotropic-drag RHS
+        # correction at the bottom cell using the AFTER barotropic velocity
+        # (dynzdf.F90:148-171): "add bottom stress due to barotropic
+        # component only", zDt_2*(rCdU_bot sum)*uu_b(Kaa)/e3u(Kaa). With
+        # zdf_baroclinic_only ALSO on, u_solve_in's bottom cell already had
+        # the barotropic mean subtracted out; the drag correction below adds
+        # back EXACTLY that missing barotropic-mode drag contribution at the
+        # bottom cell (using the SAME depth mean this stage just removed),
+        # so the two flags compose into NEMO's full ln_dynspg_ts treatment.
+        # Without zdf_baroclinic_only, the barotropic mode is already inside
+        # u_solve_in, so no separate correction is added (nothing missing).
+        extra_diag_u = 0.0
+        extra_diag_v = 0.0
+        if do_momentum and getattr(self.config, "zdf_drag_in_matrix", False):
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_bottom_drag_rate_faces,
+            )
+            _r_eff_u, _r_eff_v, _is_bot_u, _is_bot_v = (
+                nemo_bottom_drag_rate_faces(
+                    state.u.data, state.v.data, dz_cell, self.z_coord,
+                    self.config, _grid))
+            _r_eff_u = _r_eff_u.astype(state.u.data.dtype)
+            _r_eff_v = _r_eff_v.astype(state.v.data.dtype)
+            extra_diag_u = (
+                dt_mom * _r_eff_u[..., jnp.newaxis]
+                / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
+            extra_diag_v = (
+                dt_mom * _r_eff_v[..., jnp.newaxis]
+                / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
+            if _zdf_baroclinic_only and self.config.barotropic.barotropic_solver == "explicit_substep":
+                u_solve_in = u_solve_in + (
+                    dt_mom * _r_eff_u[..., jnp.newaxis]
+                    / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
+                v_solve_in = v_solve_in + (
+                    dt_mom * _r_eff_v[..., jnp.newaxis]
+                    / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
+
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static
         # Python `if`, baked into the compiled graph — flip BEFORE the
@@ -5054,9 +5143,16 @@ class LatLonCGridOceanModel:
             implicit_vertical_diffusion_ocean,
             implicit_vertical_diffusion_ocean_pair,
         )
+        # #1226: the batched entry point has no extra_diag slot (it shares
+        # ONE coefficient-build code path across all 4 fields); the
+        # drag-in-matrix diagonal term is momentum-only, so batched mode is
+        # incompatible with it — fall through to the per-field solves
+        # instead of silently dropping the term (LEGOESM_VMIX_BATCHED is
+        # opt-in perf-only, so this never regresses correctness).
         _vmix_batched = (
             os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1"
             and do_tracers and do_momentum
+            and not getattr(self.config, "zdf_drag_in_matrix", False)
         )
         # Double-diffusion salinity diffusivity: K_v (heat) + (avs - avt).
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
@@ -5101,14 +5197,23 @@ class LatLonCGridOceanModel:
             if do_momentum:
                 u_new = implicit_vertical_diffusion_ocean(
                     u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
+                    extra_diag=extra_diag_u,
                 )
                 v_new = implicit_vertical_diffusion_ocean(
                     v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
+                    extra_diag=extra_diag_v,
                 )
         if do_tracers:
             T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
             S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
         if do_momentum:
+            if _zdf_baroclinic_only:
+                # Re-add the SAME depth mean that was subtracted before the
+                # solve (dynzdf.F90's barotropic component re-enters via
+                # mlf_baro_corr AFTER dyn_zdf) — exactly conservative at
+                # A_v=0 (test 3: strip + re-add round-trips to the input).
+                u_new = u_new + _u_bt_mean
+                v_new = v_new + _v_bt_mean
             u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
             v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
             if self._tke_realized_kdiss_active() and (

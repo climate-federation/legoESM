@@ -341,6 +341,12 @@ class TestDINORecipes:
             # p' quadrature on the exact gdept ladder.
             "pgf_scheme": "nemo_sco",
             "pgf_quadrature": "nemo_trapezoid",
+            # dynzdf composition (#1226): namdrg ref default ln_drgimp=.true.
+            # (DINO's &namdrg override sets only ln_non_lin) + ln_dynspg_ts=
+            # .true. (namdyn_spg ref default, matches this card's
+            # barotropic_solver="explicit_substep").
+            "zdf_drag_in_matrix": True,
+            "zdf_baroclinic_only": True,
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -349,6 +355,29 @@ class TestDINORecipes:
         # dict of values.
         grid = dino_lat_lon_grid(c, n_lon=10)
         dino_lat_lon_model_config(grid, c, physics=True)
+
+    def test_kamm_cards_propagate_zdf_flags_to_model_config(self):
+        # #1226: zdf_drag_in_matrix / zdf_baroclinic_only must reach the
+        # model config on BOTH kamm cards (MLF inherits them from the base
+        # nemo_dino_kamm dict — see DINO_RECIPES["nemo_dino_kamm_mlf"]).
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            c = dino_config_for_recipe(recipe)
+            assert c.zdf_drag_in_matrix is True, recipe
+            assert c.zdf_baroclinic_only is True, recipe
+            grid = dino_lat_lon_grid(c, n_lon=10)
+            mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
+            assert mc.zdf_drag_in_matrix is True, recipe
+            assert mc.zdf_baroclinic_only is True, recipe
+
+    def test_zdf_flags_default_false_on_other_recipes(self):
+        # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
+        # nemo_paper) must NOT silently pick up NEMO's dynzdf composition —
+        # it is namelist-specific, not a legoESM-wide default.
+        for recipe in ("legoesm_default", "nemo_paper", "veros", "mitgcm",
+                       "oceananigans"):
+            c = dino_config_for_recipe(recipe)
+            assert c.zdf_drag_in_matrix is False, recipe
+            assert c.zdf_baroclinic_only is False, recipe
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
