@@ -337,12 +337,13 @@ class DINOConfig:
     use_gm_redi: bool = True
     # Adaptive-κ_GM scaling: "visbeck" (Visbeck 1997, the historical legoESM
     # DINO choice) | "treguier" (Treguier 1997 / NEMO nn_aei_ijk_t=21 — the
-    # ACTUAL DINO+ORCA1 oracle scaling; cap aei0 = rn_Ue·rn_Le = 0.03·100 km
-    # = 3000 m²/s from the DINO &namtra_eiv). The GM-effectiveness diagnostic
+    # ACTUAL DINO+ORCA1 oracle scaling; cap aei0 = 0.5·rn_Ue·rn_Le
+    # (ldftra.F90:332 — NEMO's explicit 1/2 factor) = 0.5·0.03·100 km
+    # = 1500 m²/s from the DINO &namtra_eiv). The GM-effectiveness diagnostic
     # (2026-07-01) showed Visbeck κ (200-2000) under-predicts the 1° channel
     # need — Treguier is the faithful option. Lat-lon only (MPAS raises).
     gm_kappa_scheme: str = "visbeck"
-    treguier_aei0: float = 3000.0  # Treguier κ cap [m²/s] = rn_Ue·rn_Le
+    treguier_aei0: float = 1500.0  # Treguier κ cap [m²/s] = 0.5·rn_Ue·rn_Le (ldftra.F90:332)
     visbeck_alpha: float = 0.015   # Visbeck dimensionless prefactor
     visbeck_kappa_min: float = 200.0      # κ_GM floor [m²/s]
     visbeck_kappa_max: float = 2000.0     # κ_GM ceiling [m²/s]
