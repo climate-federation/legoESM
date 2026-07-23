@@ -516,6 +516,12 @@ class DINOConfig:
     # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
     # n_barotropic_substeps as-is).
     barotropic_auto_cmax: float = 0.0
+    # LatLonCGridOceanConfig.barotropic.barotropic_diffusion_alpha (#1226),
+    # threaded 1:1 via from_flat/BarotropicConfig. NEMO has no eta-diffusion
+    # term in dynspg_ts; the legoESM default 0.01 is a forward-frame 2Δx
+    # stability crutch. Default here (0.01) keeps every non-kamm recipe
+    # bit-identical; the kamm cards override to 0.0 (see DINO_RECIPES).
+    barotropic_diffusion_alpha: float = 0.01
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -796,29 +802,27 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
         # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
-        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block)
-        #    -- kept OFF here despite that reference default: a controlled
-        #    4-way attribution (zdf_drag_in_matrix x zdf_baroclinic_only,
-        #    2026-07-23) measured the east-wall checkerboard v-mode metric
-        #    IDENTICAL to the 5th digit across all four combinations -- these
-        #    options are inert for that mode, so enabling them buys no
-        #    fidelity while adding risk. The full NEMO-DINO drag composition
-        #    (ln_drgimp=T + ln_dynspg_ts=T) is NOW available as
-        #    zdf_drag_in_matrix=True + zdf_baroclinic_only=True +
-        #    barotropic_drag_substep=True (the dyn_drg in-subcycle explicit
-        #    drag + pu_RHSi correction, dynspg_ts.F90:700-706 + 1584-1642,
-        #    landed 2026-07-23; the drag_in_matrix+explicit_substep
-        #    construction error is lifted exactly when
-        #    barotropic_drag_substep is on, and baroclinic_only is required
-        #    with it — dynzdf.F90:147-159 removes the barotropic mean from
-        #    the 3-D solve unconditionally in this composition). Kept OFF
-        #    pending a controlled measurement (pre-registered acceptance:
-        #    enable the three flags together, hold everything else on this
-        #    card fixed, compare the ACC/checkerboard/SSH metrics vs this
-        #    baseline). --
-        "zdf_drag_in_matrix": False,
-        "zdf_baroclinic_only": False,
-        "barotropic_drag_substep": False,
+        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block).
+        #    NEMO-faithful composition (namelist cites): ln_drgimp=T puts the
+        #    bottom drag on the implicit vertical diagonal (dynzdf.F90:293-305,
+        #    zdf_drag_in_matrix), removes the barotropic mean from the 3-D
+        #    solve unconditionally (dynzdf.F90:147-171, zdf_baroclinic_only),
+        #    and the barotropic mode gets its own explicit in-subcycle drag +
+        #    pu_RHSi slow-forcing correction (dyn_drg, dynspg_ts.F90:700-706 +
+        #    1584-1642, barotropic_drag_substep). The three together +
+        #    explicit_substep is exactly the combination that lifts the
+        #    drag_in_matrix+explicit_substep construction guard (baroclinic_only
+        #    is required alongside barotropic_drag_substep — see
+        #    ocean_model_latlon_cgrid.py's construction-time raises).
+        #    Enablement here reflects FIDELITY (this is what NEMO's namelist
+        #    actually runs), NOT a fix claim: the east-wall checkerboard
+        #    v-mode status (previously measured inert across a 4-way
+        #    zdf_drag_in_matrix x zdf_baroclinic_only attribution, 2026-07-23,
+        #    before barotropic_drag_substep existed) is tracked separately on
+        #    #1226. --
+        "zdf_drag_in_matrix": True,
+        "zdf_baroclinic_only": True,
+        "barotropic_drag_substep": True,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
@@ -884,9 +888,19 @@ DINO_RECIPES: dict[str, dict] = {
         # pattern = the forward_euler-vs-MLF integrator-frame difference, which no
         # barotropic sub-step composition can remove. The bit-faithful NEMO-DINO
         # dynspg_ts match is the MLF card (nemo_dino_kamm_mlf), not this FE card.
-        # barotropic_diffusion_alpha (0.01, default) is a forward-frame 2dx
-        # stability crutch, not a NEMO term; setting it 0 slightly WORSENS step-1
-        # eta (1.88->1.94e-2) and does not touch the (non-2dx) residual.
+        # alpha=0: no NEMO counterpart; the 0.01 crutch masks pump signal
+        # (2026-07-23 sweep B measured ~1/3 of the barotropic pump signal
+        # masked by the default 0.01 eta-diffusion damping — it corrupts
+        # oracle tendency comparisons). dynspg_ts.F90 has no eta-diffusion
+        # term at all; set to 0 for the NEMO-true composition.
+        "barotropic_diffusion_alpha": 0.0,
+        # barotropic_face_depth stays "min_rule" (the LatLonCGridOceanConfig
+        # default): NEMO uses the e1e2-weighted ssh average for the substep
+        # flux (zhup2_e, dynspg_ts.F90:581-592), but lego's min-rule is
+        # load-bearing for the tracer-step column-sum conservation invariant
+        # and the deviation is MEASURED INERT for the checkerboard mode
+        # (2026-07-23 config-D experiment, <=0.1% on pump + 90-day twin).
+        # Truth tiers outrank oracle-matching (CLAUDE.md precedence).
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -2466,6 +2480,9 @@ def dino_lat_lon_model_config(
         barotropic_time_filter=cfg.barotropic_time_filter,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
+        # BarotropicConfig field (#1226; see DINOConfig.barotropic_diffusion_alpha
+        # docstring). Routed by from_flat into config.barotropic.
+        barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,

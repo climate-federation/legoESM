@@ -342,19 +342,19 @@ class TestDINORecipes:
             "pgf_scheme": "nemo_sco",
             "pgf_quadrature": "nemo_trapezoid",
             # dynzdf composition (#1226): namdrg ref default ln_drgimp=.true.
-            # (DINO's &namdrg override sets only ln_non_lin) -- but kept OFF
-            # here: a controlled 4-way attribution (2026-07-23) measured
-            # BOTH flags inert for the east-wall checkerboard v-mode (all
-            # combos identical to the 5th digit).  The full NEMO drag
-            # composition is now AVAILABLE as zdf_drag_in_matrix=True +
-            # zdf_baroclinic_only=True + barotropic_drag_substep=True
-            # (dyn_drg, dynspg_ts.F90:700-706 + 1584-1642) but stays OFF
-            # pending a controlled measurement.
-            # See the honest-gate comment at DINO_RECIPES["nemo_dino_kamm"]
-            # in dino.py.
-            "zdf_drag_in_matrix": False,
-            "zdf_baroclinic_only": False,
-            "barotropic_drag_substep": False,
+            # (DINO's &namdrg override sets only ln_non_lin) -- the full
+            # NEMO-faithful drag composition is now ON: zdf_drag_in_matrix
+            # (implicit diagonal, dynzdf.F90:293-305) + zdf_baroclinic_only
+            # (barotropic mean removed from the 3-D solve, dynzdf.F90:147-171)
+            # + barotropic_drag_substep (in-subcycle explicit drag + pu_RHSi
+            # correction, dyn_drg, dynspg_ts.F90:700-706 + 1584-1642). See
+            # the comment at DINO_RECIPES["nemo_dino_kamm"] in dino.py.
+            "zdf_drag_in_matrix": True,
+            "zdf_baroclinic_only": True,
+            "barotropic_drag_substep": True,
+            # NEMO dynspg_ts has no eta-diffusion term; alpha=0 is the
+            # NEMO-true composition (see dino.py card comment).
+            "barotropic_diffusion_alpha": 0.0,
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -365,23 +365,26 @@ class TestDINORecipes:
         dino_lat_lon_model_config(grid, c, physics=True)
 
     def test_kamm_cards_propagate_zdf_flags_to_model_config(self):
-        # #1226: zdf_drag_in_matrix / zdf_baroclinic_only are OFF on BOTH
-        # kamm cards (MLF inherits from the base nemo_dino_kamm dict — see
-        # DINO_RECIPES["nemo_dino_kamm_mlf"]) -- measured inert for the
-        # east-wall checkerboard (4-way controlled attribution 2026-07-23),
-        # kept as faithful selectable dynzdf transcriptions but not enabled
-        # by the cards. Assert False propagates through to the model config
-        # unchanged on both.
+        # #1226: the full NEMO-faithful drag composition (zdf_drag_in_matrix +
+        # zdf_baroclinic_only + barotropic_drag_substep) is ON for BOTH kamm
+        # cards (MLF inherits from the base nemo_dino_kamm dict — see
+        # DINO_RECIPES["nemo_dino_kamm_mlf"]), together with alpha=0 (no NEMO
+        # eta-diffusion counterpart) and face_depth="min_rule" (conservation-
+        # load-bearing, measured inert — see the dino.py card comment).
+        # Assert these propagate through to the model config unchanged on both.
         for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             c = dino_config_for_recipe(recipe)
-            assert c.zdf_drag_in_matrix is False, recipe
-            assert c.zdf_baroclinic_only is False, recipe
-            assert c.barotropic_drag_substep is False, recipe
+            assert c.zdf_drag_in_matrix is True, recipe
+            assert c.zdf_baroclinic_only is True, recipe
+            assert c.barotropic_drag_substep is True, recipe
+            assert c.barotropic_diffusion_alpha == 0.0, recipe
             grid = dino_lat_lon_grid(c, n_lon=10)
             mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
-            assert mc.zdf_drag_in_matrix is False, recipe
-            assert mc.zdf_baroclinic_only is False, recipe
-            assert mc.barotropic_drag_substep is False, recipe
+            assert mc.zdf_drag_in_matrix is True, recipe
+            assert mc.zdf_baroclinic_only is True, recipe
+            assert mc.barotropic_drag_substep is True, recipe
+            assert mc.barotropic.barotropic_diffusion_alpha == 0.0, recipe
+            assert mc.barotropic.barotropic_face_depth == "min_rule", recipe
 
     def test_zdf_flags_default_false_on_other_recipes(self):
         # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
@@ -393,6 +396,9 @@ class TestDINORecipes:
             assert c.zdf_drag_in_matrix is False, recipe
             assert c.zdf_baroclinic_only is False, recipe
             assert c.barotropic_drag_substep is False, recipe
+            # #1226: alpha=0 is a kamm-only override; every other recipe
+            # keeps the legoESM 2Δx stability-crutch default (0.01).
+            assert c.barotropic_diffusion_alpha == 0.01, recipe
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
