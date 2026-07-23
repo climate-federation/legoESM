@@ -506,6 +506,34 @@ def _run_substep_loop(
     U_sum = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
     V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
 
+    _nfold_mask = north_fold_mask(grid)
+
+    def _face_depths(H_total):
+        """Min-rule C-grid face depths of a total column depth field.
+
+        Min-rule (consistent with implicit solver and PE tendency).
+        Arithmetic mean overestimates face depth at topographic steps,
+        creating a transport mismatch.  Pole rows are zero (wall BC) on
+        regular lat-lon; fold min-rule on tripolar.
+        Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
+        so the v-face min at a partition cut uses the neighbour rank's
+        adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
+        (consistent MPI call count — the previous direct-concat fold branch
+        skipped it and deadlocked against the else branch); the fold seam is
+        overwritten only on the rank that owns it.
+        """
+        H_u = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
+        H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
+        H_total_pad = pad_ns_zero(H_total)
+        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
+        H_v = _zero_polar_lat_ends(H_v)
+        if fold_is_local(grid) or _nfold_mask is not None:
+            north = jnp.minimum(
+                H_total[-1:], fold_vface_row(H_total, grid),
+            )
+            H_v = apply_north_fold(H_v, north, grid, north_mask=_nfold_mask)
+        return H_u, H_v
+
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
 
@@ -535,39 +563,42 @@ def _run_substep_loop(
         else:
             H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
-        # Forward: update eta from continuity (C-grid divergence)
-        # Min-rule face depth (consistent with implicit solver and PE
-        # tendency).  Arithmetic mean overestimates face depth at
-        # topographic steps, creating a transport mismatch.
-        H_u = jnp.minimum(jnp.roll(H_total_c, 1, axis=1), H_total_c)
-        H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
-        # Pole rows are zero (wall BC) on regular lat-lon; fold min-rule
-        # on tripolar.
-        # Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
-        # so the v-face min at a partition cut uses the neighbour rank's
-        # adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
-        # (consistent MPI call count — the previous direct-concat fold branch
-        # skipped it and deadlocked against the else branch); the fold seam is
-        # overwritten only on the rank that owns it.
-        H_total_pad = pad_ns_zero(H_total_c)
-        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
-        H_v = _zero_polar_lat_ends(H_v)
-        nmask = north_fold_mask(grid)
-        if fold_is_local(grid) or nmask is not None:
-            north = jnp.minimum(
-                H_total_c[-1:], fold_vface_row(H_total_c, grid),
-            )
-            H_v = apply_north_fold(H_v, north, grid, north_mask=nmask)
+        # Forward: update eta from continuity (C-grid divergence).
+        # Substep-START (level jn) min-rule face depths: the DRAG denominator
+        # (NEMO hur_e/hvr_e — hu_e is refreshed at the END of the previous
+        # substep from its fresh ssh, dynspg_ts.F90:771-778, so the drag at
+        # :703 sees the level-jn depth).
+        H_u, H_v = _face_depths(H_total_c)
 
         if ab3_za is not None:
-            # NEMO nn_bt_flt=3: mid-step AB3 velocity extrapolation
+            # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
             # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
             U_mid = za_i[0] * U_bar_c + za_i[1] * Ub_c + za_i[2] * Ubb_c
             V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
-        flux_u = H_u * U_mid * u_mask
-        flux_v = H_v * V_mid * v_mask
+        if ab3_za is not None and not linear_free_surface:
+            # NEMO vvl continuity-flux depth at jn+1/2 (dynspg_ts.F90:556-595):
+            # the ssh is extrapolated with the SAME za coefficients as the
+            # velocity,
+            #   zsshp2_e = za1*sshn_e + za2*sshb_e + za3*sshbb_e     (:562)
+            # and the mid-step depths zhup2_e/zhvp2_e = h_0 + <ssh avg>
+            # (:583-592) feed the flux zhU = e2u*ua_e*zhup2_e (:604-609) and
+            # its un_adv transport accumulation (:639-643).  lego keeps its
+            # global min-rule face-depth convention in place of NEMO's
+            # e1e2-weighted two-point ssh average (documented deviation, same
+            # as the drag depth above).  Under linssh NEMO holds the depth
+            # FIXED over the subcycle (zhup2_e = hu_0, :478-482) — no
+            # extrapolation, hence the `not linear_free_surface` gate.  The
+            # ll_init ramp rows have za=(1,0,0) ⇒ eta_mid == eta_c on the
+            # first two substeps (NEMO-exact, :535-538).
+            eta_mid = za_i[0] * eta_c + za_i[1] * etab_c + za_i[2] * etabb_c
+            H_total_mid = jnp.maximum(eta_mid + H_bathy, min_water_col) * mask
+            H_u_flux, H_v_flux = _face_depths(H_total_mid)
+        else:
+            H_u_flux, H_v_flux = H_u, H_v
+        flux_u = H_u_flux * U_mid * u_mask
+        flux_v = H_v_flux * V_mid * v_mask
 
         # Accumulate transport (always box-filtered for volume conservation)
         Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
