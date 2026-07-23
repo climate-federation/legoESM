@@ -93,6 +93,52 @@ def _pert_ppm_iv0(q, bl, br):
     return bl_out, br_out
 
 
+def _pert_ppm_iv0_inline(q, bl, br):
+    """FV3 INLINE positive-definite constraint for iord==7/12
+    (xppm ``elseif ( iord==7 .or. iord==12 )`` — tp_core.F90 / duo extract
+    ``fv3_tpcore_duo_extract.F90:560-583``).
+
+    Same extremum-clip math as :func:`_pert_ppm_iv0` (the ``pert_ppm(iv=0)``
+    SUBROUTINE that iord==9/13 call at extract line 590), with ONE oracle
+    difference: the inline iord=7/12 branch has **no** unconditional
+    ``q <= 0 -> zero`` flatten and **no** ``q > 0`` gate on the fix — it
+    applies the ``ext6 (|da1| < -a4)`` + ``fmin < 0`` clip regardless of the
+    sign of ``q``.  For the positive-definite fields these transports carry
+    (``q > 0``) the two are identical; they differ only for ``q <= 0``, so
+    using the subroutine form for hord=12 was a faithfulness defect that
+    only surfaces on non-positive input (#1256).  hord=9 keeps
+    :func:`_pert_ppm_iv0` (its oracle IS the subroutine).
+    """
+    r12 = 1.0 / 12.0
+
+    # a4 = -3*(bl+br), da1 = br-bl  (oracle 563-565)
+    a4 = -3.0 * (br + bl)
+    da1 = br - bl
+
+    # ext6: parabola has an extremum in [0,1]  (oracle 566, raw a4)
+    has_extremum = jnp.abs(da1) < -a4
+    # fmin only evaluated where a4 != 0 (has_extremum false when a4==0);
+    # a4_safe just keeps the unused JAX branch finite.
+    a4_safe = jnp.where(jnp.abs(a4) < 1e-30, -1e-30, a4)
+    fmin = q + 0.25 / a4_safe * da1 ** 2 + a4_safe * r12
+    is_negative = fmin < 0.0
+
+    # NO q-sign gate (the key #1256 difference from the subroutine form).
+    needs_fix = has_extremum & is_negative
+    both_positive = (br > 0.0) & (bl > 0.0)   # oracle ext5
+    da1_positive = da1 > 0.0
+
+    zero = jnp.zeros_like(bl)
+    bl_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, bl, -2.0 * br))
+    br_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, -2.0 * bl, br))
+
+    bl_out = jnp.where(needs_fix, bl_fix, bl)
+    br_out = jnp.where(needs_fix, br_fix, br)
+    return bl_out, br_out
+
+
 def apply_hord8_limiter(bl, br, dm):
     """FV3_3D iter 585: FV3 iord=8 Lin (1996) monotonicity limiter
     (tp_core.F90:548-553).
@@ -509,15 +555,13 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord8_limiter(bl, br, dm_c)
     elif hord == 9:
-        # FV3 iord=9 → pert_ppm(iv=0) for the SCALAR/mass/vorticity transport
-        # (tp_core.F90:610: `if(iord==9 .or. iord==13) call pert_ppm(...,0)`).
-        # iv=1 (`pert_ppm`) is FV3's BOUNDARY-only limiter (tp_core.F90:629,
-        # 648) + the MOMENTUM ytp_v/xtp_u path (handled separately in
-        # fv3_sw_core `ppm_transport_1d`).  This `_ppm_1d` is the scalar
-        # path, so hord=9 must use iv=0 — matching the `_pert_ppm_iv0`
-        # docstring ("the limiter used by hord=9") and the hord=12 default.
-        # (Was `pert_ppm` (iv=1): a latent mislabel; unexercised because the
-        # live scalar callers use the hord=12 default — codex/oracle iter62.)
+        # FV3 iord=9: bare bl/br (the xppm `else` branch) THEN
+        # `call pert_ppm(...,0)` — the pert_ppm SUBROUTINE with iv=0
+        # (duo extract fv3_tpcore_duo_extract.F90:584-590; the call is the
+        # `if(iord==9 .or. iord==13)` line 590).  `_pert_ppm_iv0` IS that
+        # subroutine (extract:1233-1291), including its `a0<=0 -> flatten`
+        # branch.  iv=1 (`pert_ppm`) is the boundary/momentum limiter,
+        # handled separately in fv3_sw_core; this scalar `_ppm_1d` uses iv=0.
         bl, br = _pert_ppm_iv0(q_c, bl, br)
     elif hord == 10:
         dm_c = dm[:, 1:n + 3, :]
@@ -526,8 +570,15 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord11_limiter(bl, br, dm_c)
     elif hord == 12:
-        # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
-        bl, br = _pert_ppm_iv0(q_c, bl, br)
+        # FV3 iord=12: the INLINE positive-definite branch
+        # `elseif ( iord==7 .or. iord==12 )` (duo extract
+        # fv3_tpcore_duo_extract.F90:560-583) — NOT the pert_ppm(iv=0)
+        # subroutine iord=9/13 call.  They share the extremum clip but the
+        # inline branch has NO `q<=0 -> flatten` (and no q>0 gate), so hord=12
+        # uses `_pert_ppm_iv0_inline`.  Identical to hord=9 for q>0 (the
+        # positive-definite fields these transports carry); differs only for
+        # q<=0 (#1256 — using the subroutine form here was an infidelity).
+        bl, br = _pert_ppm_iv0_inline(q_c, bl, br)
     else:
         raise ValueError(
             f"hord must be one of {{8, 9, 10, 11, 12}}; got {hord}"

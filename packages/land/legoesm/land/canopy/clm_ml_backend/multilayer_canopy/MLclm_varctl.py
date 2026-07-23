@@ -33,6 +33,11 @@ class GridInfo(NamedTuple):
     ncan: int  # number of canopy layers
     ntop: int  # top foliage layer
     nbot: int  # bottom foliage layer
+    # PFT (patch.itype) threaded as a concrete int so the physics need not read
+    # ``int(patch.itype[p])`` — which breaks when ``p`` is a TRACED lax.scan index
+    # (S3 scan-over-columns).  Default -1 means "not supplied": callers fall back to
+    # the ``patch.itype[p]`` read (valid only for a concrete p).
+    pft: int = -1
 
 
 DIFFERENTIABLE_MODE: bool = False

@@ -151,9 +151,10 @@ FORCINGS: dict[str, ForcingSpec] = {
         # Loader wants ONE file with vars named CO2/CH4/N2O/CFC_11/CFC_12 on a
         # fractional-year axis; the raw input4MIPs 'gm' files are one-gas-per-
         # file with CF-long variable names.
-        adapter_note="merge the five per-gas input4MIPs files into one, rename "
+        adapter_note="run scripts/data/adapt_cmip6_ghg.py --in-dir <ghg dir> "
+                     "--out ghg.nc (merges the five per-gas files, renames "
                      "mole_fraction_of_<gas>_in_air -> CO2/CH4/N2O/CFC_11/"
-                     "CFC_12, on a fractional-year time axis.",
+                     "CFC_12 on a fractional-year axis).",
     ),
     "solar": ForcingSpec(
         channel="solar",
@@ -168,8 +169,9 @@ FORCINGS: dict[str, ForcingSpec] = {
         directly_consumable=False,
         # Loader wants TSI (W/m2) + SSI_frac (14 RRTMG-SW band FRACTIONS summing
         # to 1); the raw SOLARIS-HEPPA ssi is high-spectral-resolution W/m2/nm.
-        adapter_note="bin the native-resolution ssi into the 14 RRTMG-SW bands "
-                     "and normalise to fractions (SSI_frac); keep tsi as TSI.",
+        adapter_note="run scripts/data/adapt_cmip6_solar.py --in <solar.nc> "
+                     "--out solar.nc (bins the native ssi into the 14 RRTMG-SW "
+                     "bands -> SSI_frac, keeps tsi as TSI).",
     ),
     "aerosol": ForcingSpec(
         channel="aerosol",
@@ -186,9 +188,12 @@ FORCINGS: dict[str, ForcingSpec] = {
         # loader (external.py) reads a gridded 'aod'. The ICON Kinne
         # aeropt_kinne_sw_b14 files ARE gridded+directly read but are DKRZ-
         # preprocessed, not published on ESGF as such.
-        adapter_note="evaluate the MACv2-SP simple plume to a gridded, "
-                     "band-resolved AOD/SSA/asymmetry (Stevens 2017), or fetch "
-                     "the ICON Kinne aeropt files from a DKRZ mirror.",
+        adapter_note="run scripts/data/adapt_cmip6_aerosol.py --in "
+                     "<MACv2SP.nc> --out <aod.nc> for an IDEALIZED simple-plume "
+                     "550nm AOD (structural, NOT the reference mo_simple_plumes "
+                     "magnitudes; no SSA/asy). Production MACv2-SP needs the "
+                     "reference Fortran routine, or fetch the ICON Kinne aeropt "
+                     "files from a DKRZ mirror.",
     ),
 }
 

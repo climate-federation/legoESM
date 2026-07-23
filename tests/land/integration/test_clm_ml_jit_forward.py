@@ -381,3 +381,246 @@ def test_multicolumn_matches_independent_single_columns():
             canopy_config=cfg, land_config=lc, land_params=None, canopy_state=st2,
             dt=1800.0, T_soil=Ts2, psi_soil=psi2, theta_soil=th2, lat=lat2,
             doy=180.0, grid_info=bad_gi)[0])()
+
+
+def test_scan_columns_is_o1_and_matches_loop():
+    """S3 Phase 1: the uniform-structure column scan is O(1)-compile AND a no-op.
+
+    Two guarantees, one warm-start:
+
+    1. **O(1) compile.** ``scan_columns=True`` lowers the per-column canopy to a
+       single ``while`` in the HLO (jax.lax.scan), so the program text does NOT
+       grow with ncol; ``scan_columns=False`` unrolls the Python loop to ncol
+       full kernel copies (no ``while``, O(ncol) text).  We lower BOTH at the
+       same ncol and assert: scan HLO has a ``while`` and is materially shorter
+       than the unrolled loop HLO — the structural proof that the scan removed
+       the O(ncol) unroll (the S3 compile wall).  Non-vacuous: the loop lowering
+       is asserted to LACK the ``while`` and be larger, so a scan that silently
+       fell back to the loop would fail here.
+
+    2. **Numerical no-op.** RUN both paths and assert equal fluxes — the scan is
+       value-identical to the proven S2 loop on the uniform-structure path (so
+       switching the default to the scan changes compile cost, not answers).
+    """
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    ncol = 4  # small: enough to distinguish O(1) scan from O(ncol) unroll cheaply
+    Ts = jnp.full((ncol, 8), 290.0)
+    psi = jnp.full((ncol, 8), -0.5)
+    th = jnp.full((ncol, 8), 0.25)
+    lat = jnp.zeros(ncol)
+
+    def _cfg(scan_columns):
+        return CLMMLCanopyConfig(scan_columns=scan_columns)
+
+    # --- Warm-start ncol columns ONCE (eager cold step), extract the per-column
+    # GridInfo tuple.  Columns share the default PFT => uniform (ncan/ntop/nbot/pft)
+    # => the scan path is eligible; the loop path is selected by scan_columns=False.
+    ifc._last_topology_key = None
+    _o0, st = compute_clm_ml_canopy_fluxes(
+        T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, jnp.full(ncol, 295.0)),
+        canopy_config=_cfg(True), land_config=MultiLayerLandConfig(surface_scheme=_cfg(True)),
+        land_params=None, canopy_state=None, dt=1800.0,
+        T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0)
+    gi = extract_clm_ml_grid_info(st)
+    assert isinstance(gi, tuple) and len(gi) == ncol
+
+    Tl = jnp.full(ncol, 296.0)
+
+    def _run(scan_columns):
+        cfg = _cfg(scan_columns)
+        lc = MultiLayerLandConfig(surface_scheme=cfg)
+
+        def fwd(Tl_):
+            return compute_clm_ml_canopy_fluxes(
+                T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, Tl_), canopy_config=cfg,
+                land_config=lc, land_params=None, canopy_state=st, dt=1800.0,
+                T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+                grid_info=gi)[0]
+        return fwd
+
+    # --- (1) O(1): compare lowered HLO of scan vs unrolled loop ---
+    # NOTE: both paths contain a ``stablehlo.while`` from the INNER sub-step scan
+    # (num_ml_steps) — so "loop has no while" is NOT the signal.  The signal is
+    # that the column scan collapses ncol copies of that inner while into ONE
+    # (nested in one column while), whereas the loop UNROLLS ncol full kernels:
+    #  - fewer while-blocks in the scan HLO than the loop HLO, and
+    #  - materially shorter scan HLO (the O(ncol) unroll is what S3 removes).
+    hlo_scan = jax.jit(_run(True)).lower(Tl).as_text()
+    hlo_loop = jax.jit(_run(False)).lower(Tl).as_text()
+    n_while_scan = hlo_scan.count("stablehlo.while")
+    n_while_loop = hlo_loop.count("stablehlo.while")
+    assert n_while_scan >= 1, "scan_columns=True should lower to a lax.scan while-loop"
+    assert n_while_scan < n_while_loop, (
+        f"the column scan should collapse the per-column unroll into fewer while-"
+        f"blocks than the loop, got scan={n_while_scan} loop={n_while_loop} "
+        f"(equal ⇒ the scan silently fell back to the unrolled loop)")
+    assert len(hlo_loop) > 2 * len(hlo_scan), (
+        f"the unrolled loop HLO ({len(hlo_loop)} chars) should be >2x the scan HLO "
+        f"({len(hlo_scan)} chars) at ncol={ncol} — the O(ncol) unroll S3 removes")
+
+    # --- (2) no-op: scan values == loop values ---
+    out_scan = jax.jit(_run(True))(Tl)
+    out_loop = jax.jit(_run(False))(Tl)
+    for name in ("shflx", "lhflx", "gpp", "sw_net", "lw_net"):
+        s = getattr(out_scan, name)
+        ll = getattr(out_loop, name)
+        assert jnp.allclose(s, ll, atol=1e-6, rtol=1e-6), (
+            f"{name}: scan {s} != loop {ll} (the column scan must be a no-op vs the loop)")
+
+
+def test_pft_per_col_threads_per_column_pft_and_backcompat():
+    """Per-column PFT plumbing: pft_per_col makes patch.itype (→ GridInfo.pft) vary
+    per column — the S3-heterogeneous unblock — while None keeps the single-PFT
+    default byte-identical.
+
+    Warm-start ncol=2 with pft_per_col=[7, 11] (two different tree PFTs), extract the
+    per-column GridInfo tuple, and assert the two columns carry their DISTINCT PFTs
+    (7 and 11) — i.e. structure is now heterogeneous.  Then the default (pft_per_col
+    =None) must give both columns the config pft_clm.  This is what makes a mixed-PFT
+    grid reach the group-by-structure path (today it falls back to the S2 loop —
+    correct, only O(ncol)).
+    """
+    import numpy as np
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    cfg = CLMMLCanopyConfig()          # pft_clm default = 7
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    Ts = jnp.full((2, 8), 290.0)
+    psi = jnp.full((2, 8), -0.5)
+    th = jnp.full((2, 8), 0.25)
+    lat = jnp.zeros(2)
+
+    def _warm(pft_per_col):
+        ifc._last_topology_key = None
+        _o, st = compute_clm_ml_canopy_fluxes(
+            T_soil_top=Ts[:, 0], forcing=_forcing_n(2, jnp.full(2, 295.0)),
+            canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+            dt=1800.0, T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+            pft_per_col=pft_per_col)
+        return extract_clm_ml_grid_info(st)
+
+    # --- mixed PFT: [7, 11] -> per-column grid.pft differs (heterogeneous) ---
+    gi = _warm(np.array([7, 11], dtype=np.int32))
+    assert isinstance(gi, tuple) and len(gi) == 2
+    pfts = sorted(int(g.pft) for g in gi)
+    assert pfts == [7, 11], f"per-column PFT not threaded: got {pfts}, expected [7, 11]"
+
+    # --- default (None): both columns = config pft_clm (single-PFT back-compat) ---
+    gi0 = _warm(None)
+    assert all(int(g.pft) == int(cfg.pft_clm) for g in gi0), (
+        f"pft_per_col=None must keep the single config pft_clm={cfg.pft_clm}; "
+        f"got {[int(g.pft) for g in gi0]}")
+
+
+def test_pft_per_col_rejects_bad_input():
+    """pft_per_col is structural (writes host patch.itype) — reject a tracer, a wrong
+    shape, and an out-of-range PFT index loudly, before the topology setup corrupts
+    the MLpftcon lookups."""
+    import numpy as _np
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+
+    cfg = CLMMLCanopyConfig()
+    lc = MultiLayerLandConfig(surface_scheme=cfg)
+    Ts = jnp.full((2, 8), 290.0)
+    kw = dict(T_soil_top=Ts[:, 0], forcing=_forcing_n(2, jnp.full(2, 295.0)),
+              canopy_config=cfg, land_config=lc, land_params=None, canopy_state=None,
+              dt=1800.0, T_soil=Ts, psi_soil=jnp.full((2, 8), -0.5),
+              theta_soil=jnp.full((2, 8), 0.25), lat=jnp.zeros(2), doy=180.0)
+
+    with pytest.raises(ValueError, match="shape"):
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7], dtype=_np.int32))
+    with pytest.raises(ValueError, match="range"):
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7, 9999], dtype=_np.int32))
+    with pytest.raises(ValueError, match="INTEGER"):  # float would silently truncate
+        compute_clm_ml_canopy_fluxes(**kw, pft_per_col=_np.array([7.9, 11.2]))
+    with pytest.raises(ValueError, match="tracer"):
+        jax.jit(lambda p: compute_clm_ml_canopy_fluxes(**kw, pft_per_col=p)[0].shflx)(
+            jnp.array([7, 11]))
+
+    # vcmax25_override (single-PFT) is incompatible with mixed per-column PFT
+    cfg_ov = CLMMLCanopyConfig(vcmax25_override=60.0)
+    lc_ov = MultiLayerLandConfig(surface_scheme=cfg_ov)
+    kw_ov = dict(kw); kw_ov["canopy_config"] = cfg_ov; kw_ov["land_config"] = lc_ov
+    with pytest.raises(ValueError, match="vcmax25_override"):
+        compute_clm_ml_canopy_fluxes(**kw_ov, pft_per_col=_np.array([7, 11], dtype=_np.int32))
+
+
+def test_group_by_structure_matches_loop_for_mixed_pft():
+    """S3-heterogeneous closure: group-by-structure scan == S2 loop for MIXED PFT.
+
+    pft_per_col=[7,7,11,11] yields TWO structure groups (PFT 7 vs 11 -> different
+    (ncan,ntop,nbot,pft) signature), each with two columns.  The interface runs ONE
+    uniform scan per group; assert (1) exactly 2 groups form, (2) the group-scan is a
+    numerical NO-OP vs the proven S2 per-column loop (scan_columns=False), and (3) the
+    group-scan HLO is materially smaller than the fully-unrolled loop HLO — O(#groups)
+    kernel traces, not O(ncol).  This heterogeneous oracle is what per-column PFT
+    (PR #1299) made constructible; the uniform (single-group) case is the S3 scan.
+    """
+    import numpy as np
+    import legoesm.land.canopy.clm_ml_interface as ifc
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.clm_ml_interface import (
+        compute_clm_ml_canopy_fluxes, extract_clm_ml_grid_info)
+
+    ncol = 4
+    pft = np.array([7, 7, 11, 11], dtype=np.int32)   # 2 groups of 2
+    Ts = jnp.full((ncol, 8), 290.0)
+    psi = jnp.full((ncol, 8), -0.5)
+    th = jnp.full((ncol, 8), 0.25)
+    lat = jnp.zeros(ncol)
+    Tl = jnp.array([293.0, 300.0, 291.0, 298.0])     # different forcing per column
+
+    def _cfg(sc):
+        return CLMMLCanopyConfig(scan_columns=sc)
+
+    # warm-start with the mixed PFT -> per-column GridInfo tuple with 2 structures
+    ifc._last_topology_key = None
+    _o, st = compute_clm_ml_canopy_fluxes(
+        T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, jnp.full(ncol, 295.0)),
+        canopy_config=_cfg(True),
+        land_config=MultiLayerLandConfig(surface_scheme=_cfg(True)),
+        land_params=None, canopy_state=None, dt=1800.0, T_soil=Ts, psi_soil=psi,
+        theta_soil=th, lat=lat, doy=180.0, pft_per_col=pft)
+    gi = extract_clm_ml_grid_info(st)
+    sigs = {(g.ncan, g.ntop, g.nbot, g.pft) for g in gi}
+    assert len(sigs) == 2, f"expected 2 structure groups for mixed PFT, got {len(sigs)}: {sigs}"
+
+    def _run(sc):
+        cfg = _cfg(sc)
+        lc = MultiLayerLandConfig(surface_scheme=cfg)
+
+        def fwd(Tl_):
+            return compute_clm_ml_canopy_fluxes(
+                T_soil_top=Ts[:, 0], forcing=_forcing_n(ncol, Tl_), canopy_config=cfg,
+                land_config=lc, land_params=None, canopy_state=st, dt=1800.0,
+                T_soil=Ts, psi_soil=psi, theta_soil=th, lat=lat, doy=180.0,
+                grid_info=gi, pft_per_col=pft)[0]
+        return fwd
+
+    # (2) group-scan == loop (numerical no-op on the heterogeneous grid)
+    out_grp = jax.jit(_run(True))(Tl)
+    out_loop = jax.jit(_run(False))(Tl)
+    for name in ("shflx", "lhflx", "gpp", "sw_net", "lw_net"):
+        g_ = getattr(out_grp, name)
+        l_ = getattr(out_loop, name)
+        assert jnp.allclose(g_, l_, atol=1e-6, rtol=1e-6), (
+            f"{name}: group-scan {g_} != loop {l_} (heterogeneous group scan must == loop)")
+
+    # (3) O(#groups): 2 traced group kernels vs 4 unrolled loop kernels -> smaller HLO
+    hlo_grp = jax.jit(_run(True)).lower(Tl).as_text()
+    hlo_loop = jax.jit(_run(False)).lower(Tl).as_text()
+    assert len(hlo_grp) < len(hlo_loop), (
+        f"group-scan HLO ({len(hlo_grp)}) should be smaller than the ncol-unrolled "
+        f"loop HLO ({len(hlo_loop)}) — O(#groups) traces, not O(ncol)")

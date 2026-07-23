@@ -715,3 +715,29 @@ def test_aimip_param_roundtrip_most_coeffs():
     )
     assert float(params2.to_surface_config().most_stable_beta) != float(
         cfg.most_stable_beta)
+
+
+def test_aimip_param_roundtrip_z0h_z0_ratio():
+    """surface_z0h_z0_ratio flows AIMIPClassicalParams -> to_surface_config ->
+    SurfaceLayerConfig.z0h_z0_ratio, within its (0.01, 1.0) bounds, and is
+    genuinely trainable (a perturbed raw leaf moves the config value)."""
+    pytest.importorskip("legoesm.training.aimip_params")
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    params = AIMIPClassicalParams.from_defaults()
+    d = params.as_dict()
+    assert "surface_z0h_z0_ratio" in d
+
+    cfg = params.to_surface_config()
+    assert float(cfg.z0h_z0_ratio) == pytest.approx(
+        float(d["surface_z0h_z0_ratio"]), rel=1e-6)
+    assert 0.01 <= float(cfg.z0h_z0_ratio) <= 1.0
+
+    raw2 = dict(params.raw_values)
+    raw2["surface_z0h_z0_ratio"] = raw2["surface_z0h_z0_ratio"] + 1.0
+    params2 = AIMIPClassicalParams(
+        raw_values=raw2, constraints=params.constraints,
+        spatial_surface=params.spatial_surface,
+    )
+    assert float(params2.to_surface_config().z0h_z0_ratio) != float(
+        cfg.z0h_z0_ratio)

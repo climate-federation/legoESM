@@ -766,6 +766,19 @@ class CLMMLCanopyConfig(NamedTuple):
     # than passing silently.
     allow_coarse_ml_substep: bool = False
 
+    # S3: fold the multi-column traceable forward's per-column Python loop into a
+    # jax.lax.scan (O(1) compile in ncol) WHEN the columns share vertical structure
+    # (ncan/ntop/nbot/pft uniform — the explicit-count-layering case).  True (default)
+    # takes the scan on that path; False forces the proven S2 per-column loop.  An
+    # internal PERF toggle (like a diagnostics-mode flag), not a physics/sensitivity
+    # knob — the scan is a numerical NO-OP vs the loop (validated column-for-column
+    # against independent single-column runs), so it needs no driver CLI flag.  When
+    # structure VARIES across columns the scan is skipped automatically regardless
+    # (heterogeneous nbot/pft needs traced-nbot radiation masking — deferred; see
+    # docs/land/clm_ml_s3_masked_vmap_plan.md), so this only selects the fast path
+    # where it is already proven correct.
+    scan_columns: bool = True
+
     def validate(self) -> "CLMMLCanopyConfig":
         """Fail-early check of the static string-dispatch fields.
 

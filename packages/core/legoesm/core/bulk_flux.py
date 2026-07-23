@@ -130,6 +130,18 @@ _GRYANIK_A_H = 5.0
 _GRYANIK_B_H = 0.4
 _GRYANIK_PR0 = 0.98
 
+# --- Thermal/momentum roughness ratio z0h/z0 ---
+# Ratio of the thermal (scalar) roughness length z0h (= z0_t = z0_q) to the
+# aerodynamic momentum roughness length z0 for the FIXED-roughness MOST path
+# ("constant"/"most"): z0_t = z0 * _Z0H_Z0_RATIO_DEFAULT.  ~0.1 is the typical
+# land value (Garratt 1992 §4; the Zilitinkevich 1995 kB^-1 = ln(z0/z0h) family
+# spans ~0.01-1 over natural surfaces).  A LARGER ratio raises z0_t, SHRINKS the
+# heat log-law denominator ln(z_t/z0_t), RAISES the heat exchange coefficient
+# and thereby STRENGTHENS the sensible/latent flux.  COARE 3.0 and large_yeager
+# compute their OWN scalar roughness (Fairall smooth-flow Re fit / LY09
+# coefficient space) and DO NOT read this ratio.
+_Z0H_Z0_RATIO_DEFAULT = 0.1
+
 # Safety floor for the base of the Beljaars-Holtslag psi_h ^{3/2} power. In the
 # valid domain (zeta > 0) the base 1 + 2a*zeta/3 >= 1, so the floor is inert; it
 # only guards a direct out-of-domain (zeta <= 0) call from a NaN value/gradient
@@ -585,6 +597,7 @@ def compute_most_fluxes(
     *,
     unstable_gamma=_DYER_UNSTABLE_GAMMA,
     stable_beta=_DYER_STABLE_BETA,
+    z0h_z0_ratio=_Z0H_Z0_RATIO_DEFAULT,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -617,7 +630,10 @@ def compute_most_fluxes(
     z0_init : float
         Initial momentum roughness length [m] (default 1e-4).
     scheme : str
-        ``"coare3"`` or ``"large_yeager"``.
+        ``"constant"``, ``"most"``, ``"coare3"`` or ``"large_yeager"``.  The
+        fixed-roughness log-law path (``"constant"``/``"most"``) uses
+        ``z0_init`` (and ``z0h_z0_ratio`` for the scalar roughness) directly;
+        ``coare3``/``large_yeager`` evolve the roughness in the iteration.
     n_iter : int
         Number of MOST iterations (default 5).
     charnock : float
@@ -678,6 +694,18 @@ def compute_most_fluxes(
         denominator => smaller exchange coefficient => weaker fluxes.  Ignored by
         the non-linear ``beljaars_holtslag1991``/``grachev2007_sheba``/
         ``gryanik2020`` stable forms (their own published fits) and by COARE 3.0.
+    z0h_z0_ratio : float
+        Thermal/momentum roughness ratio z0h/z0 for the FIXED-roughness path:
+        z0_t = z0_q = z0_init * z0h_z0_ratio.  Default 0.1 (byte-identical to
+        the prior hardcoded ``z0 * 0.1``).  Consumed ONLY by the
+        ``constant``/``most`` (log-law fixed-roughness) branch.  COARE 3.0 and
+        large_yeager compute their own scalar roughness in the loop and are
+        EXACTLY invariant to this argument: their pre-loop z0_t seed is pinned to
+        the historical 0.1 so a finite-``n_iter`` seed residual cannot leak the
+        ratio into the ocean-scheme fluxes.  A LARGER ratio => larger z0_t =>
+        smaller ln(z_t/z0_t) denom_h => larger heat exchange coefficient =>
+        STRONGER sensible/latent flux (Garratt 1992; Zilitinkevich kB^-1 range
+        ~0.01-1).
     return_convergence : bool
         When True, additionally return the MOST fixed-point convergence
         residual (the relative change in ``u*`` over the FINAL iteration).
@@ -784,9 +812,27 @@ def compute_most_fluxes(
         # historical 0.5-floor behaviour.
         _coeff_cap = KAPPA / _denom_floor
 
-    # Initialize with neutral log-law profile
+    # Initialize with neutral log-law profile. The thermal (scalar) roughness
+    # z0_t = z0_q = z0 * z0h_z0_ratio (default 0.1) is the trainable knob for
+    # the FIXED-roughness "constant"/"most" path — that path carries the init
+    # z0_t straight through to the flux via the log law.
+    #
+    # COARE 3.0 and large_yeager compute their OWN scalar roughness inside the
+    # loop (Fairall smooth-flow Re fit / LY09 coefficient space), so z0h_z0_ratio
+    # is not a physical parameter for them.  BUT the pre-loop z0_t also seeds the
+    # first-iteration theta*/q* -> theta_v* -> Obukhov length -> zeta -> psi, and
+    # with a finite ``n_iter`` (no exact convergence) that seed leaves a small
+    # residual in the ocean-scheme fluxes.  To keep those schemes EXACTLY
+    # invariant to z0h_z0_ratio (and byte-identical to the pre-#z0h behaviour),
+    # seed their z0_t with the historical constant ratio, applying the tunable
+    # ratio ONLY on the fixed-roughness path.  Static Python select on the
+    # (compile-time) scheme string -> no traced branch, constant-folded.
+    _init_z0h_ratio = (
+        z0h_z0_ratio if scheme in ("constant", "most")
+        else _Z0H_Z0_RATIO_DEFAULT
+    )
     z0 = jnp.full_like(wind_speed, z0_init)
-    z0_t = z0 * 0.1
+    z0_t = z0 * _init_z0h_ratio
     z0_q = z0_t
 
     ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))

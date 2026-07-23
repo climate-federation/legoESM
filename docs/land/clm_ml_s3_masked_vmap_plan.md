@@ -184,3 +184,59 @@ INCREMENTAL, VALIDATED ORDER (S2 loop stays default behind a `scan_columns` flag
 Each of (a)-(d) is independently parity-checkable against the current per-column path —
 so the radiation-boundary risk is caught before the scan flip. Focused single-session
 effort; do NOT rush (an nbot-boundary bug "would corrupt all global runs").
+
+## SHIPPED (2026-07-22) — Phase 1: uniform-structure lax.scan achieves the S3 goal
+
+**S3's compile goal is DONE for the current interface via a uniform-structure scan —
+the delicate nbot-masking radiation rewrite of (a)/(c) turned out to be UNNECESSARY
+for anything the interface can currently produce.** Two measured facts collapsed the
+scope:
+
+1. **The interface is single-PFT.** `compute_clm_ml_canopy_fluxes`'s topology setup
+   sets `itype_arr[p] = pft_clm` for EVERY column (one `CLMMLCanopyConfig.pft_clm`),
+   so all columns share a PFT. Per-column PFT is not plumbed.
+2. **`nbot` is invariant to LAI for a fixed PFT.** Warm-starting ncol=3 with
+   `lai_override` spanning `[0.05, 0.15, 12.0]` (desert→rainforest) gave the SAME
+   `(ncan,ntop,nbot,pft) = (9,8,2,7)` for every column — the dpai_min zeroing +
+   redistribution leaves the active-layer bottom fixed across the whole realistic LAI
+   range.
+
+⇒ Every current multi-column CLM-ML run has UNIFORM `(ncan,ntop,nbot,pft)`, so the
+**single lax.scan over columns** (Phase 1) — carry = shared mlcanopy, only the patch
+index `p` traced, structure closed-over CONCRETE — traces ONCE and gives **O(1)
+compile in ncol** with NO per-layer masking and NO dynamic pft-gather. Validated
+(`tests/land/integration/test_clm_ml_jit_forward.py`): device==host single-column
+no-op, ncol=2 column-parity vs independent single-column runs, and an ncol=4
+O(1)-compile + scan==loop no-op test. Codex-clean (3 rounds). Behind
+`CLMMLCanopyConfig.scan_columns` (default True); heterogeneous structure (should it
+ever arise) falls back to the proven S2 per-column loop — correct, only O(ncol) there.
+
+### SHIPPED (2026-07-23) — heterogeneous via GROUP-BY-STRUCTURE (per-column PFT + group scan)
+Heterogeneous structure is now reachable AND handled at O(#structures) compile — the
+nbot-masking radiation rewrite of (a)/(c) was NEVER needed.
+
+1. **Per-column PFT** (PR #1299, merged): an optional concrete `pft_per_col (ncol,)` int
+   array threads through `compute_clm_ml_canopy_fluxes → _setup_clm_topology` to set
+   `patch.itype[p]` per column, so `extract_clm_ml_grid_info`'s per-column `GridInfo`
+   tuple varies (different PFT → different nbot + MLpftcon params). `None` keeps the
+   single-PFT default. This is what makes mixed-PFT columns — hence multiple structure
+   groups — reachable and TESTABLE.
+2. **Group-by-structure scan** (this PR): the interface `_traceable_multi` seam now
+   partitions `_grids` by `(ncan,ntop,nbot,pft)` and runs ONE uniform `lax.scan` per
+   group (body closed over that group's CONCRETE structure via a `_make_group_scan_body`
+   factory; only `grid.p` is traced; disjoint groups → order-independent chaining;
+   singleton / pft<0 / scan_columns=False groups fall back to the per-column loop).
+   Compile is O(#distinct structures) — bounded by ~(PFTs × nbot values), independent
+   of ncol. The all-uniform case is exactly ONE group == the previous single S3 scan
+   (byte-identical), so the uniform ncol=2 parity + O(1) tests are unchanged.
+
+VALIDATED (`test_clm_ml_jit_forward.py`, 13 pass): the mixed-PFT oracle
+`test_group_by_structure_matches_loop_for_mixed_pft` — `pft_per_col=[7,7,11,11]` forms
+2 groups of 2, the group-scan is a NO-OP vs the S2 loop (column-for-column), and the
+group HLO is smaller than the ncol-unrolled loop HLO (O(#groups) traces). Codex CLEAN
+("correct, faithful generalization of the uniform scan"). ZERO radiation-solver change.
+
+The nbot-masking approach (a)/(c) is now purely theoretical — only relevant if a single
+O(1) scan over ALL heterogeneous columns (vs O(#structures) groups) is ever needed;
+group-by-structure covers the real case with none of the coupled-solver masking risk.
+Follow-on: driver-side wiring of `pft_per_col` from the surface map's dominant PFT.

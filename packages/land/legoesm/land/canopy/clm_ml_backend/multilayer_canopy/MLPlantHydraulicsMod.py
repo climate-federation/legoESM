@@ -70,6 +70,7 @@ def PlantResistance(
     num_filter: int,
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate whole-plant leaf-specific conductance (soil-to-leaf).
@@ -99,9 +100,9 @@ def PlantResistance(
     gplant_SPA = MLpftcon.gplant_SPA
     lsc = mlcanopy_inst.lsc_profile
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
-        pft = patch.itype[p]  # JAX int — dynamic index
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
+        pft = patch.itype[p]  # JAX int — dynamic index (traced-p safe)
 
         lsc_v = _lsc_layers(
             mlcanopy_inst.dpai_profile[p, 1:],
@@ -124,6 +125,7 @@ def SoilResistance(
     soilstate_inst: soilstate_type,
     waterstatebulk_inst: waterstatebulk_type,
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate soil hydraulic resistance and fractional water uptake
@@ -192,8 +194,8 @@ def SoilResistance(
     # Static soil-layer index array (1-based, shape (nlevsoi,))
     j_arr = jnp.arange(1, nlevsoi + 1)
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
         c = patch.column[p]  # JAX int — dynamic index
         pft = patch.itype[p]
 
@@ -290,6 +292,7 @@ def LeafWaterPotential(
     filter_patch: Sequence[int],
     il: int,
     mlcanopy_inst: mlcanopy_type,
+    grid: "GridInfo | None" = None,
 ) -> mlcanopy_type:
     """
     Calculate leaf water potential by analytically integrating the
@@ -330,9 +333,9 @@ def LeafWaterPotential(
     capac_SPA = MLpftcon.capac_SPA
     lwp = mlcanopy_inst.lwp_leaf
 
-    for fp in range(num_filter):  # Fortran: do fp = 1, num_filter
-        p = filter_patch[fp]
-        pft = patch.itype[p]  # JAX int — dynamic index
+    for fp in range(1 if grid is not None else num_filter):  # Fortran: do fp = 1, num_filter
+        p = grid.p if grid is not None else filter_patch[fp]  # grid.p may be TRACED (S3)
+        pft = patch.itype[p]  # JAX int — dynamic index (traced-p safe)
 
         lwp_v = _lwp_layers(
             mlcanopy_inst.dpai_profile[p, 1:],

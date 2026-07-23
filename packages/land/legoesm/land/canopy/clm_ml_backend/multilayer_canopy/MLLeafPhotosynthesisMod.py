@@ -2329,7 +2329,7 @@ def LeafPhotosynthesis(
         else:
             p = int(filter_patch[fp - 1])
             _ncan_p = int(mlcanopy_inst.ncan_canopy[p])
-        pft = int(_patch_itype_np[p])
+        pft = grid.pft if (grid is not None and grid.pft >= 0) else int(_patch_itype_np[p])
         _c3psn_val = float(_c3psn_np[pft])
         is_c3 = round(_c3psn_val) == 1
 
@@ -2630,7 +2630,7 @@ def LeafPhotosynthesis(
         else:
             p = int(filter_patch[fp - 1])
             _ncan_p = int(mlcanopy_inst.ncan_canopy[p])
-        pft = int(_patch_itype_np[p])  # use pre-materialised numpy copy
+        pft = grid.pft if (grid is not None and grid.pft >= 0) else int(_patch_itype_np[p])
         _c3psn_val = float(_c3psn_np[pft])  # use pre-materialised numpy copy
         is_c3 = round(_c3psn_val) == 1
         _gsmin_pft2 = _gsmin_jnp[pft]  # JAX scalar — differentiable floor

@@ -579,6 +579,7 @@ def _setup_clm_topology(
     z_soil: np.ndarray,
     z_ref: float,
     pft_clm: int = 7,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> None:
     """Set up CLM module-level topology singletons for ``ncol`` columns.
 
@@ -601,8 +602,17 @@ def _setup_clm_topology(
     z_ref : float
         Atmospheric reference height [m].
     pft_clm : int
-        CLM PFT index (1-based) applied to all columns.  Controls Vcmax25
-        and plant hydraulic parameters via the MLpftcon lookup table.
+        CLM PFT index (1-based) applied to all columns when ``pft_per_col`` is
+        None.  Controls Vcmax25 and plant hydraulic parameters via the MLpftcon
+        lookup table.
+    pft_per_col : np.ndarray, optional
+        Per-column CLM PFT index (1-based), CONCRETE, shape ``(ncol,)``.  When
+        supplied it overrides ``pft_clm`` column-by-column — the enabler for
+        MIXED-PFT (heterogeneous-structure) global columns: different PFTs give
+        different ``nbot`` (and MLpftcon params), so a warm state's per-column
+        ``GridInfo`` tuple then varies, which ``extract_clm_ml_grid_info`` reads
+        straight off ``patch.itype``.  None → single ``pft_clm`` for all columns
+        (back-compat).  Structural, so it must be concrete (like lat/lon).
     """
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import ColumnType as _col_mod
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import GridcellType as _grc_mod
@@ -622,7 +632,9 @@ def _setup_clm_topology(
         p = i + 1  # 1-based patch index
         col_arr[p] = p       # column = patch (1:1)
         gc_arr[p] = p        # gridcell = patch (1:1)
-        itype_arr[p] = pft_clm  # CLM PFT from config (was hardcoded to 13)
+        # Per-column PFT (mixed-PFT / heterogeneous columns) when supplied, else the
+        # single config pft_clm for every column (single-PFT default, back-compat).
+        itype_arr[p] = int(pft_per_col[i]) if pft_per_col is not None else pft_clm
 
     patch.column = jnp.array(col_arr, dtype=jnp.int32)
     patch.gridcell = jnp.array(gc_arr, dtype=jnp.int32)
@@ -1178,23 +1190,35 @@ def _build_stubs(
     esai_patch = jnp.zeros(np_, dtype=jnp.float64)
     for i in range(ncol):
         p = i + 1
-        htop_v = (float(land_params.htop[i]) if land_params is not None and land_params.htop is not None
+        # NO float() on the per-column land_params / lai_override values: on the
+        # COUPLED jitted path these are TRACED (LAI/htop/SAI flow through the land
+        # state + surface blend in step_unified), so float() raises
+        # ConcretizationTypeError.  Keep them as jnp/array scalars — .at[p].set
+        # accepts a tracer, a numpy scalar (eager) or a Python-float fallback alike,
+        # and the value is identical to the old float() path in eager mode.  Canopy
+        # STRUCTURE (ncan/ntop/nbot) is NOT built from these here on the traceable
+        # path — it comes from the concrete grid_info — so a traced htop/LAI only
+        # feeds per-column DATA (RSL reference height, dpai), never a slice bound.
+        htop_v = (land_params.htop[i] if land_params is not None and land_params.htop is not None
                   else 5.0)  # coeff-ok: 5 m fallback canopy height (CLM4.5 DBF-temperate default)
         # A prescribed/climatology htop can be 0 on a bare or uncovered column;
         # floor it so hbot = hbot_frac*htop stays < htop (valid CLM-ML layering).
-        # LAI is 0 there, so the nominal height changes no canopy flux.
-        htop_v = max(htop_v, _HTOP_GEOM_MIN_M)
+        # LAI is 0 there, so the nominal height changes no canopy flux.  jnp.maximum
+        # (not max()) so a traced htop_v does not break the Python comparison; pin
+        # the floor to the (float64) patch dtype so a float32 htop_v does not store a
+        # float32-rounded 0.1 (~1.5e-9 m drift vs the old float64 max()) (codex).
+        htop_v = jnp.maximum(htop_v, jnp.asarray(_HTOP_GEOM_MIN_M, dtype=htop_patch.dtype))
         # LAI precedence: prognostic ``lai_override`` (C_fol / LCMA from the
         # DifferLand carbon pool) > prescribed ``LandSurfaceParams.LAI``
         # climatology > scalar fallback.  Canopy STRUCTURE (htop/SAI) stays
         # prescribed either way (the carbon cycle produces no allometric map).
         if lai_override is not None:
-            lai_v = float(lai_override[i])
+            lai_v = lai_override[i]
         elif land_params is not None and land_params.LAI is not None:
-            lai_v = float(land_params.LAI[i])
+            lai_v = land_params.LAI[i]
         else:
             lai_v = 2.0  # coeff-ok: LAI=2 fallback (no prescribed/prognostic LAI)
-        sai_v  = (float(land_params.SAI[i]) if land_params is not None and land_params.SAI is not None
+        sai_v  = (land_params.SAI[i] if land_params is not None and land_params.SAI is not None
                   else 0.5)
         htop_patch = htop_patch.at[p].set(htop_v)
         elai_patch = elai_patch.at[p].set(lai_v)
@@ -1595,6 +1619,7 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
         concrete Python ints.
     """
     from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import GridInfo
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import patch as _patch
     if canopy_state is None or canopy_state.mlcanopy is None:
         raise ValueError(
             "extract_clm_ml_grid_info needs a warm-started canopy_state whose "
@@ -1603,6 +1628,9 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
     m = canopy_state.mlcanopy
     # 1-based patch dim: arrays are (ncol+1,) with index 0 unused (begp=1).
     ncol = int(m.ncan_canopy.shape[0]) - 1
+    # PFT per patch (patch.itype installed by _setup_clm_topology at the cold step)
+    # — threaded so the physics need no int(patch.itype[p]) under a traced scan p.
+    _itype = np.asarray(_patch.itype)
 
     def _gi(p: int):
         return GridInfo(
@@ -1610,6 +1638,7 @@ def extract_clm_ml_grid_info(canopy_state: CanopyState, patch: int | None = None
             ncan=int(m.ncan_canopy[p]),
             ntop=int(m.ntop_canopy[p]),
             nbot=int(m.nbot_canopy[p]),
+            pft=int(_itype[p]),
         )
 
     try:
@@ -1643,6 +1672,7 @@ def compute_clm_ml_canopy_fluxes(
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
+    pft_per_col: "np.ndarray | None" = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1727,6 +1757,49 @@ def compute_clm_ml_canopy_fluxes(
     from legoesm.land.soil_grid import make_soil_grid
 
     ncol = T_soil_top.shape[0]
+
+    # ---- Per-column PFT validation (structural → must be CONCRETE, like geometry) ----
+    # pft_per_col enables MIXED-PFT columns: it writes patch.itype[p] host-side in the
+    # topology setup, so it must be a concrete (ncol,) int array in a valid PFT range.
+    # A tracer / wrong shape / out-of-range index would corrupt the MLpftcon lookups
+    # silently — fail loud here instead.
+    if pft_per_col is not None:
+        if isinstance(pft_per_col, jax.core.Tracer):
+            raise ValueError(
+                "pft_per_col is a jax tracer, but per-column PFT is STRUCTURAL "
+                "(it writes host-side patch.itype in the CLM topology setup) and must "
+                "be a CONCRETE (ncol,) int array — like lat/lon geometry. Close over "
+                "it / build it outside the jit boundary.")
+        _pft_arr = np.asarray(pft_per_col)
+        if _pft_arr.shape != (ncol,):
+            raise ValueError(
+                f"pft_per_col must have shape ({ncol},) (one PFT per column); "
+                f"got {_pft_arr.shape}.")
+        # Integer dtype (NOT bool): a float array would be SILENTLY truncated by the
+        # int() cast when writing patch.itype (7.9 -> 7); a bool/object array is not a
+        # PFT index.  Reject up front (codex).
+        if _pft_arr.dtype == bool or not np.issubdtype(_pft_arr.dtype, np.integer):
+            raise ValueError(
+                f"pft_per_col must be an INTEGER PFT-index array (not "
+                f"{_pft_arr.dtype}); a float would be silently truncated writing "
+                "patch.itype.")
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod as _pftm
+        _mxpft = int(_pftm.MLpftcon.vcmaxpft.shape[0]) - 1
+        if _pft_arr.min() < 0 or _pft_arr.max() > _mxpft:
+            raise ValueError(
+                f"pft_per_col has PFT index outside 0..{_mxpft} (the MLpftcon table "
+                f"range): min={int(_pft_arr.min())} max={int(_pft_arr.max())}.")
+        # vcmax25_override overwrites only the single canopy_config.pft_clm table slot,
+        # so it is INCONSISTENT with mixed per-column PFTs (columns on other PFTs read
+        # their own un-overridden Vcmax25).  Reject the combination rather than apply a
+        # silently-wrong override; a per-PFT override is a separate feature (codex).
+        if getattr(canopy_config, "vcmax25_override", None) is not None:
+            raise ValueError(
+                "pft_per_col (mixed-PFT columns) is incompatible with "
+                "CLMMLCanopyConfig.vcmax25_override: the override applies only to the "
+                "single pft_clm table slot, so columns on other PFTs would keep their "
+                "un-overridden Vcmax25. Use per-PFT vcmaxpft_jax (traced) instead, or "
+                "drop vcmax25_override for a mixed-PFT run.")
 
     # ---- Differentiable-mode gate (static, resolved here — never traced) ----
     # ``differentiable=True`` opts a training run into the JAX-native diff path
@@ -1980,7 +2053,8 @@ def compute_clm_ml_canopy_fluxes(
             _setup_clm_time(dt, 0.0, 0)  # concrete: get_step_size()==dt; calday unused
             _setup_clm_topology(ncol, _lat_deg, _lon_deg, dz_soil, z_soil,
                                 float(land_config.z_ref),
-                                pft_clm=int(canopy_config.pft_clm))
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
         # Invalidate the eager topology cache: this traceable step overwrote the
         # process-global topology (with lon_deg=0), so a LATER eager call whose
         # cached _last_topology_key still matches would skip _setup_clm_topology and
@@ -2047,10 +2121,12 @@ def compute_clm_ml_canopy_fluxes(
             lat_deg.tobytes(), lon_deg.tobytes(),
             dz_soil.tobytes(), z_soil.tobytes(),
             float(z_ref), int(canopy_config.pft_clm),
+            None if pft_per_col is None else np.asarray(pft_per_col).tobytes(),
         )
         if _topo_key != _last_topology_key:
             _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
-                                pft_clm=int(canopy_config.pft_clm))
+                                pft_clm=int(canopy_config.pft_clm),
+                                pft_per_col=pft_per_col)
             _last_topology_key = _topo_key
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
@@ -2222,7 +2298,8 @@ def compute_clm_ml_canopy_fluxes(
                         "warm forward step via extract_clm_ml_grid_info(state0)."
                     )
                 _grids.append(GridInfo(p=_c + 1, ncan=_ncan_c,
-                                       ntop=int(_g.ntop), nbot=int(_g.nbot)))
+                                       ntop=int(_g.ntop), nbot=int(_g.nbot),
+                                       pft=int(_g.pft)))
         else:
             # Single column.  Structural ints (ncan/ntop/nbot) must be CONCRETE
             # Python ints — the diff path reads them at trace time.  Two sources:
@@ -2236,7 +2313,11 @@ def compute_clm_ml_canopy_fluxes(
                 _ncan_p = int(_g0.ncan)
                 _ntop_p = int(_g0.ntop)
                 _nbot_p = int(_g0.nbot)
+                _pft_p = int(_g0.pft)
             else:
+                from legoesm.land.canopy.clm_ml_backend.clm_src_main.PatchType import (
+                    patch as _patch_s)
+                _pft_p = int(np.asarray(_patch_s.itype)[_p])
                 try:
                     _ncan_p = int(mlcanopy.ncan_canopy[_p])
                     _ntop_p = int(mlcanopy.ntop_canopy[_p])
@@ -2256,7 +2337,8 @@ def compute_clm_ml_canopy_fluxes(
                     f"structure is initialised; got ncan={_ncan_p} (valid 1..{_ncan_max}). "
                     "Run one forward (differentiable=False or cold-start) step first."
                 )
-            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p)]
+            _grids = [GridInfo(p=_p, ncan=_ncan_p, ntop=_ntop_p, nbot=_nbot_p,
+                               pft=_pft_p)]
     else:
         _grids = None
 
@@ -2322,18 +2404,68 @@ def compute_clm_ml_canopy_fluxes(
         )
 
     if _traceable_multi:
-        # Per-column loop (S2): canopy columns are physically independent, so the
-        # proven single-patch kernel runs once per column with ``filter=[c+1]`` and
-        # that column's GridInfo + cos(zenith) slice; the ``grid=`` kernel writes
-        # ONLY patch c+1, so chaining the returned mlcanopy accumulates every
-        # column.  NOTE (perf ceiling): the Python loop UNROLLS in the trace, so the
-        # HLO grows O(ncol) — fine for a modest coupled test, not for a full-AMIP
-        # column count (thousands).  The masked-vmap rewrite (S3) removes the loop.
+        # Canopy columns are physically INDEPENDENT (no horizontal coupling), so the
+        # proven single-patch kernel runs once per column with ``grid.p`` = that
+        # column's patch index, the ``grid=`` kernel writing ONLY that patch.
+        #
+        # S3 — GROUP-BY-STRUCTURE jax.lax.scan over columns.  Partition the columns
+        # into groups sharing the SAME concrete vertical structure
+        # (ncan/ntop/nbot/pft), then run ONE uniform scan per group whose body is
+        # traced ONCE, closing over that group's concrete structure.  The scan carry
+        # is the shared mlcanopy; the ONLY traced input is the per-column patch index
+        # p, scattered at grid.p.  So compile is O(#distinct structures) — bounded by
+        # ~(PFTs × nbot values), INDEPENDENT of ncol — the heterogeneous path to
+        # O(1)-in-ncol compile, reusing the validated uniform-scan machinery with NO
+        # per-layer radiation masking or dynamic pft-gather.  ncan/ntop are uniform
+        # anyway (explicit-count layering, htop-INDEPENDENT: MLinitVerticalMod
+        # _ntop=nlayer_within / _ncan=_ntop+nlayer_above); only nbot + pft vary
+        # (mixed-PFT columns via pft_per_col), so the group count is small.  The
+        # all-uniform case is ONE group == the previous single scan (numerically a
+        # NO-OP vs the loop, validated column-for-column against independent
+        # single-column runs).
+        #
+        # A group falls back to the per-column Python loop when: the scan is disabled
+        # (scan_columns=False), the group carries a pft<0 sentinel (the Solar/Longwave
+        # host fallback int(patch.itype[grid.p]) needs a CONCRETE p — the loop
+        # supplies it), or the group is a singleton (a scan of one is just the loop).
+        _scan_enabled = bool(getattr(canopy_config, "scan_columns", True))
+        _struct_groups: dict = {}  # (ncan,ntop,nbot,pft) -> [patch indices, 1-based]
+        for _g in _grids:
+            _struct_groups.setdefault(
+                (_g.ncan, _g.ntop, _g.nbot, _g.pft), []).append(_g.p)
+
+        def _make_group_scan_body(_sig):
+            # Factory: bind THIS group's concrete structure (avoids the late-binding
+            # closure bug of referencing the loop variable).  filter=[1] is a STATIC
+            # dummy — under grid= the kernel indexes the column by grid.p (the traced
+            # xs), NOT the filter; cos is reshaped to the length-1 slice the kernel's
+            # cos_zenith_device contract expects.
+            _gncan, _gntop, _gnbot, _gpft = _sig
+
+            def _body(_mlc, _xs):
+                _p_c, _cosz_c = _xs
+                _g_c = GridInfo(p=_p_c, ncan=_gncan, ntop=_gntop,
+                                nbot=_gnbot, pft=_gpft)
+                return _call_mlcanopy(_mlc, [1], 1, _g_c,
+                                      jnp.reshape(_cosz_c, (1,))), None
+            return _body
+
         mlcanopy_new = mlcanopy
-        for _c in range(ncol):
-            mlcanopy_new = _call_mlcanopy(
-                mlcanopy_new, [_c + 1], 1, _grids[_c],
-                cos_zen[_c:_c + 1] if _traceable else None)
+        for _sig, _pids in _struct_groups.items():
+            if _scan_enabled and _sig[3] >= 0 and len(_pids) > 1:
+                # xs: this group's patch indices (TRACED under the scan) + their
+                # cos(zenith) (0-based gather; patch pid -> cos_zen[pid-1]).
+                _pid_xs = jnp.asarray(_pids, dtype=jnp.int32)
+                _cos_xs = cos_zen[_pid_xs - 1]
+                mlcanopy_new, _ = jax.lax.scan(
+                    _make_group_scan_body(_sig), mlcanopy_new, (_pid_xs, _cos_xs))
+            else:
+                for _pid in _pids:
+                    _g_c = GridInfo(p=_pid, ncan=_sig[0], ntop=_sig[1],
+                                    nbot=_sig[2], pft=_sig[3])
+                    mlcanopy_new = _call_mlcanopy(
+                        mlcanopy_new, [_pid], 1, _g_c,
+                        cos_zen[_pid - 1:_pid] if _traceable else None)
     else:
         _grid0 = _grids[0] if _grids is not None else None
         mlcanopy_new = _call_mlcanopy(

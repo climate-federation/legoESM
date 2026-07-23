@@ -160,11 +160,48 @@ def cell_edges_1d(
     return edges
 
 
+_COVERAGE_TOL = 1e-6  # relative |sum(weights) - 1| tolerance for a remap that is
+# REQUIRED to fully cover every destination cell.  float64 area-ratio roundoff is
+# ~1e-14 (~4 adds/cell), so 1e-6 sits ~1e8x above noise yet flags a single
+# missing 0.25deg source cell in a 1deg destination or a ~12.5% seam deficit.
+
+
+def _validate_full_coverage(dst_idx, weights, n_dst_cells, *, tol, name):
+    """Raise if any destination cell's summed overlap weights depart from 1.
+
+    HOST-SIDE (numpy) check on the STATIC weights BEFORE they become a jnp
+    constant -- zero autodiff / JIT / trace impact (the traced apply is an
+    unchanged ``segment_sum`` over these compile-time weights).  A destination
+    cell only PARTIALLY covered by the source silently gets ``sum(weights) < 1``
+    -- a physically REDUCED field (seam/ghost deficit, or a source that does not
+    reach the pole fabricating polar data); a fully-uncovered cell gets 0.  Per
+    dispatch-hardening, fail LOUDLY rather than emit a reduced field.
+    """
+    row_sum = np.bincount(
+        np.asarray(dst_idx).ravel(),
+        weights=np.asarray(weights).ravel(),
+        minlength=int(n_dst_cells),
+    )
+    dev = np.abs(row_sum - 1.0)
+    bad = np.nonzero(dev > tol)[0]
+    if bad.size:
+        worst = int(bad[int(dev[bad].argmax())])
+        raise ValueError(
+            f"{name}: {bad.size} destination cell(s) have summed remap weights "
+            f"off 1 by > {tol:g} (worst |sum-1| = {float(dev.max()):.3e} at flat "
+            f"dst index {worst}); the source does not fully cover the destination "
+            "(seam/ghost deficit or a source that does not reach the pole). This "
+            "would silently produce a reduced field."
+        )
+
+
 def compute_overlap_weights(
     src_lat_edges: np.ndarray,
     src_lon_edges: np.ndarray,
     dst_lat_edges: np.ndarray,
     dst_lon_edges: np.ndarray,
+    *,
+    require_full_coverage: bool = False,
 ) -> ConservativeRegridWeights:
     """Compute conservative overlap weights between two regular lat-lon grids.
 
@@ -275,6 +312,12 @@ def compute_overlap_weights(
 
     src_idx = j_src_flat * n_src_lon + i_src_flat
     dst_idx = j_dst_flat * n_dst_lon + i_dst_flat
+
+    if require_full_coverage:
+        _validate_full_coverage(
+            dst_idx, weights, n_dst_lat * n_dst_lon,
+            tol=_COVERAGE_TOL, name="compute_overlap_weights",
+        )
 
     return ConservativeRegridWeights(
         src_idx_flat=jnp.asarray(src_idx, dtype=jnp.int32),
