@@ -19,7 +19,7 @@ route-A CUDA-aware mpi4jax not exercised on Levante).
 | Axis | Ladder | Result | Job(s) |
 |---|---|---|---|
 | Atm lat-lon LL720×1440 L26 | 4→8→16 A100 (1→4 nodes) | 7.72→5.40→3.54 ms/step, monotone; np16 = 7.6 GC/s (477 Mc/s/GPU sustained) | 26450848/26453240/26449147 |
-| Atm MPAS ico L8 (28 km) L26 | 6→16 A100 | 8.66→7.08 ms/step; np16 = 2.41 GC/s — 1.6× Derecho's matched-grid 16-A100 aggregate | 26453240/26449147 |
+| Atm MPAS ico L8 (28 km) L26 | 6→16 A100 | 8.66→7.08 ms/step; np16 = 2.41 GC/s — 1.6x the Derecho 16-A100 aggregate reported in `derecho_levante_sota_review_2026-07.md` SS3b (route-A, eff ~0.38 @16); CROSS-MACHINE, different stack/date - indicative, not a controlled A/B | 26453240/26449147 |
 | **Atm cube C768/L60 (same-path cs-spmd)** | 6→24 A100 | 58.35→14.09 ms/step = **4.14× = eff 1.04 (at ideal)**, 15.1 GC/s (629 Mc/s/GPU) | 26453782 |
 | Atm cube C384/L60 (same-path cs-spmd) | 6→24 A100 | 15.44→8.81 ms/step = 1.75× (eff 0.44), 6.0 GC/s | 26452894 |
 | Atm cube C192/L60 (same-path) | 6→24 | 6.20→6.80 ms — ANTI-scales (eff 0.23): 9.2k cols/GPU is below the ~30k-column floor | 26452979 |
@@ -38,10 +38,13 @@ efficiency). The claim is that comm does not degrade this ladder, not that
 parallelism is free. (same code path, harness, config, IC;
 only the tile size varies — jobs 26452979/26452894/26453782): 6→24 GPU
 speedup 0.91× / 1.75× / 4.14× at 9.2k / 36.9k / 147k columns per GPU. The
-"poor cube strong scaling" of the earlier receipts is ENTIRELY the
-per-device saturation floor at undersized tiles, not a communication
-defect: at production tiles the cube scales IDEALLY to 24 A100 across 6
-nodes. Production rule confirmed: keep ≳30k columns/GPU.
+"poor cube strong scaling" of the earlier receipts TRACKS TILE SIZE:
+holding code path, harness, config and IC fixed and varying only the tile,
+efficiency goes 0.23 -> 0.44 -> 1.04, so tile size is SUFFICIENT to recover
+ideal scaling at 24 A100 across 6 nodes. (That shows comm does not degrade
+the ladder at production tiles; it does not prove comm costs nothing at
+small tiles — that needs a per-phase profile.) Production rule confirmed:
+keep >~30k columns/GPU.
 
 Tiled-lane size sweep at fixed 24 GPUs (own bench, closed loop, CFL-scaled
 dt; jobs 26450938/26452632/26453645): 1.87 / 5.89 / 14.34 GCells/s at
@@ -61,8 +64,9 @@ jobs 26447957/26449622):
 | explicit + wide-halo | 0 (solver) | 33.4/19.1/11.5 | 0.73 |
 
 Monotone count→efficiency mapping at every size (LL192/384/768); at LL768
-all arms converge to 0.71–0.77 (tiles amortize latency). Fused-halo ≡
-plain implicit (null → reductions, not pad count, dominate). NCCL_PROTO
+all arms converge to 0.71–0.77 (tiles amortize latency). Fused-halo == plain implicit (a NULL result: pad aggregation does not
+move this step, consistent with reductions being the larger cost - the
+arms differ in solver internals too, so this is consistency, not proof). NCCL_PROTO
 default ≡ LL, LL128 harmful (job 26449812) — protocol lever closed.
 `LEGOESM_VMIX_F32_SOLVE=1` (f32 tridiagonal vmix inside the f64 step):
 icn +9.1%, wide +11.7% at nd4, conservation-gated at `--cons-rtol 1e-5`
@@ -107,7 +111,8 @@ than np2 while np8 is 2.5x faster than np4. Evidence gathered:
   device count is a compile-time property so the HLO matches what the GPUs
   execute): collective-permutes per step are 3 / 9 / 21 at np 2/4/8, i.e.
   np8 issues 2.3x MORE collectives than np4 and still runs 2.5x faster.
-  Communication cannot be what makes np4 slow. (Fusion count 136/173/240,
+  Collective COUNT therefore cannot explain the np4 dip (this assumes cost
+rises with count; a per-message-size effect is not excluded). (Fusion count 136/173/240,
   bitcasts 526/582/694 — the np8 program is finer-grained.)
 - PARTITION METHOD REFUTED (job 26455829): the dip is method-independent —
   np4/np8 = 17.22/7.00 ms (sfc), 17.20/6.97 (metis), 19.35/6.26
@@ -118,8 +123,7 @@ than np2 while np8 is 2.5x faster than np4. Evidence gathered:
   (The multi-output-fusion arm errored on an unsupported flag name and is
   not counted.)
 VERDICT: five hypotheses refuted by measurement (placement, halo volume,
-collective count, partition method, codegen env knobs). The cheap-lever
-space is EXHAUSTED; the remaining suspect — per-device kernel efficiency
+collective count, partition method, codegen env knobs). The cheap levers known to this campaign are exhausted; the remaining suspect — per-device kernel efficiency
 for this shape — needs a GPU op-level profile (nsys / XLA op profile of
 np4 vs np8), which is a separate instrumented project, not another timing
 run. Per-GPU throughput across the ladder is non-monotone in tile size
@@ -138,7 +142,7 @@ f32 L20) run at two tile sizes, 4 -> 16 GPUs:
 | LL576x1152 (13.3M) | 0.83M | 12.81 -> 8.63 ms | 0.37 | 1.53 GCells/s |
 | LL1152x2304 (53.1M) | 3.3M | 43.47 -> 17.24 ms | **0.63** | **3.08 GCells/s** |
 
-So the ocean obeys the SAME per-device-floor law the cube does: the 2.01x
+So the ocean shows the SAME tile-size dependence the cube does: the 2.01x
 multinode improvement measured at LL576 was partly a floor effect, and at
 a production tile the identical code scales substantially better (0.37 ->
 0.63). Per-device throughput also rises (259 -> 305 Mc/s/GPU at np4).
@@ -152,10 +156,11 @@ latency floor). Re-run at PRODUCTION size (288 rows × 1152 lon × L20 =
 1.00/0.72/0.70, improved wide-halo+vmix-f32 1.00/0.86/0.85.
 PRECISION MATCHED (self-audit correction): BOTH ladders compared here are
 **float32** — the production-tile run is f32, so it is compared against
-the earlier ladder's f32 rows (eff 0.26/0.25 at nd 2/4), not its f64 rows.
+the earlier ladder's f32 rows (eff 0.26/0.25 at nd 2/4), not its f64 rows (both from job 26445836).
 An earlier revision of this file mislabelled the production-tile run f64
 and cited the f64 small-base numbers; the direction and size of the effect
-are unchanged, but the comparison is only valid precision-matched. So the weak collapse was a protocol artifact, and the same
+are unchanged, but the comparison is only valid precision-matched. So the earlier weak ladder measured a below-floor tile rather than a code
+limit, and the same
 config that fixes strong scaling also carries weak (+0.15 at nd4). Ideal is
 flat; the improved arm holds 22.5→22.9 ms while production drifts
 17.8→25.3 ms.
@@ -168,16 +173,23 @@ flat; the improved arm holds 22.5→22.9 ms while production drifts
   LARGE REGRESSION, not a precise machine ranking — the two campaigns
   differ in machine (A100-80 SXM vs A100-40), jax/tree version and date,
   so the ~13% gap is not attributable to any single factor.
-- Cube "404 vs 141 Mc/s" = physics-tier confound: the 404 was RTX-5090
-  Held-Suarez; gray+SBM is priced ~3× by `SCALING_SUMMARY.md`'s own tier
-  table (404/3 ≈ 135 expected; 141 measured on A100).
-- Ocean absolutes are memory-bandwidth-consistent across GPUs (A100 f64
-  165–201 Mc/s vs 5090's compute-crippled-f64 152; f32 352 vs 400).
+- Cube "404 vs 141 Mc/s": the 404 is the single-GPU RTX-5090 Held-Suarez
+  row in `SCALING_SUMMARY.md` SS1; ours is gray+SBM on A100 (job 26445836).
+  That file's own tier table prices gray+SBM ~3x Held-Suarez, so ~135 is
+  the expected equivalent vs 141 measured. PLAUSIBLE reconciliation from
+  two published tables, NOT a matched A/B (GPU, physics and date differ).
+- Ocean absolutes (A100 f64 165-201 Mc/s, f32 352, job 26445836; 5090 f64
+  152 / f32 400 from `SCALING_SUMMARY.md` SS1) are of the same order -
+  again a cross-machine sanity check, not a controlled comparison.
 - Ginsburg "0.92 eff @2 GPU" reconciled: the old bench silently defaulted
   to `explicit_substep`; our explicit/wide arm reproduces that class
   (0.88 @2, LL384) — the production implicit config was never measured
-  there. Protocol, not regression.
-- No merge regression: nd=1 stock-CG LL192 8.90 ms pre-merge vs 8.94 post.
+  there. So the gap is explained by the solver the old bench selected;
+  labelling it 'protocol, not regression' is an inference from that
+  config difference, not an independent bisect.
+- No merge regression: nd=1 stock-CG LL192 8.90 ms pre-merge (job 26445836)
+  vs 8.94 ms post-merge (smoke on tree d3ec1ccce) - one sample each, so
+  this bounds a large regression only.
 
 ## CPU-MPI (compute nodes)
 
@@ -189,10 +201,13 @@ single-node ladders conflate Milan DRAM contention with comm. The first
 4-node pair collided into one OUTDIR (same-second stamp) and was discarded.
 
 4-node SPREAD ladder (job 26452578, f64, ranks round-robin, solver-matched):
-atm latlon np2 eff ≈1.00 (DRAM contention confirmed as the packed-ladder
-confound: r128 np32 eff 0.38 spread vs 0.20 packed), decaying to 0.06–0.16
+atm latlon np2 eff ~1.00; spreading ranks over 4 nodes nearly doubles
+efficiency at high rank counts (r128 np32: 0.38 spread vs 0.20 packed),
+which is CONSISTENT with per-node memory-bandwidth contention in the
+packed ladder (not isolated by a bandwidth counter), decaying to 0.06–0.16
 at np64–128 — the 1-D band perimeter ceiling as designed (r256/np128 = 2
-rows/rank). Ocean strong spread: np2 eff 1.32 (superlinear, cache), 0.88@8,
+rows/rank). Ocean strong spread: np2 eff 1.32 (superlinear - typical of a base leg whose working set does
+not fit cache; not instrumented here), 0.88@8,
 0.35@32, wall at np64 (79 ms > np32's 74 ms). The job died in a high-rank
 ocean case (one rank exit-3 → kill-on-bad-exit) before the weak tail —
 np128 ocean + weak ladders and the rank-failure attribution remain open.
@@ -214,7 +229,9 @@ np128 ocean + weak ladders and the rank-failure attribution remain open.
    ULPs (size-dependent!) — process-0 broadcast + allgathered
    tolerance-compared divergence guard (quantized-equality v1
    false-positived on a rounding boundary; v2 rtol=1e-5). Gates:
-   equivalence 6/6, selfspawn 2/2, live np4/8/16.
+   equivalence 6/6 and selfspawn 2/2 re-run on EVERY iteration of the
+   guard (last: jobs 26453906/26453981), plus live np4/8/16 multinode
+   (jobs 26452743-45, 26453279).
 6. Multicontroller host materialization in the tiled bench finiteness gate
    → on-device global reduce.
 7. OUTDIR same-second stamp collision → job-ID suffix everywhere.
@@ -222,21 +239,26 @@ np128 ocean + weak ladders and the rank-failure attribution remain open.
    pip → pins first + `install_federation.py --all`; mpi4jax source-built
    with the system toolchain (GLIBCXX mismatch with gcc-11-built OpenMPI
    module).
-9. Diagnosis tool halo/overlap phases produce garbage on the
-   single-process no-mpi4jax GPU config (20-second "exchanges", 0 GB/s) —
-   OPEN defect; census + scan phases are sound (cube C96/L40 census:
-   0/7/14 CP/step at nd 1/2/3 + 1 all-reduce; 24-dev tiled closed loop:
-   384 CP + 1 AR).
+9. Diagnosis tool halo/overlap phases timed UN-JITTED eager pads
+   (20.5e6 us per "exchange", bandwidth 0.0 GB/s; job 26447827) - FIXED
+   this campaign (jit + dtype-correct bytes + refuse a bandwidth at
+   world_size==1; overlap fractions >100% now refused), contract test
+   tests/bench/test_halo_profiler_contract.py, verified 27-162 us at
+   C24/L8 and 463-4791 us at C384/L60 (job 26454084). Census + scan phases
+   were always sound (cube C96/L40: 0/7/14 CP/step at nd 1/2/3 + 1
+   all-reduce, job 26447827; 24-dev tiled closed loop 384 CP + 1 AR,
+   job 26450938).
 
 ## Closed levers (nulls with receipts — do not re-run)
 
 NCCL_PROTO forcing (default already optimal; LL128 −8–12%), fused-halo on
 the implicit arm AND on the wide arm (pad aggregation is not the residual),
 `xla_gpu_collective_permute_combine_threshold_bytes` alone,
-`--xla_gpu_enable_pipelined_p2p` alone, `LEGOESM_BAROCLINIC_F32` (~+0.5%).
-PGLE arm invalid as measured (33-step window catches its
-profile+recompile; Derecho saw +8.5% with proper warmup — rerun long-window
-only if revisited).
+`--xla_gpu_enable_pipelined_p2p` alone, `LEGOESM_BAROCLINIC_F32` (~+0.5%, within run-to-run spread; job 26451282).
+PGLE arm invalid as measured here (the 33-step window catches its
+profile+recompile). The +8.5% figure is from the DERECHO lane-T campaign
+(see the SOTA review), not reproduced on Levante — rerun long-window if
+revisited.
 
 ## Still open (ranked)
 
