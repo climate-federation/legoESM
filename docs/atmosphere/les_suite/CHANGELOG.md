@@ -137,6 +137,22 @@ is the fix.
   (dry_convective vs dry_stable inter-regime coefficient spread) once both are tuned.
   Moist regimes (shallow_cumulus/stratocumulus) still need their IC builders + D9 cloud.
 
+- **Iter 14 (this commit) — campaign single-instance guard (Q2 throughput fix).**
+  Diagnosed a real drag on Q2: TWO `run_les_suite_campaign.sh` shells were running at
+  once — the original (17:27) had been orphaned from its dead harness task (reparented to
+  init, kept running) and an iter-13 resubmit (19:02) then duplicated it. Both landed on
+  the heavy `clubb_lite` (nlev=24) tune, racing on the same `__clubb_lite__df.json` and
+  halving each other's CPU (the "1h50m clubb_lite" was contention, not a deadlock — both
+  at 136% CPU). They self-heal (idempotent skip-if-exists) but waste a core and can clobber.
+  FIX: a `flock -n` single-instance guard (fd 9 on `campaign/.campaign.lock`, auto-released
+  on exit) so any concurrent resubmit is a clean no-op. Self-tested (2nd instance refuses)
+  + `bash -n`. Shell orchestration only (no numerics/AD) → codex-exempt. Does NOT stop the
+  two pre-guard shells (kill is classifier-blocked); they finish idempotently, and future
+  resubmits can't re-duplicate. AD scan-rollout re-scoped as NOT on the critical path: D4's
+  AD-vs-DF agreement is a controlled `--method both` run at EQUAL config, not full-res AD
+  (reduced-res AD vs full-res DF would be a resolution confound); the scan-rollout is a pure
+  perf nicety, deferred. SBL 4 h vreman emit still integrating (jet develops over ~12.5 h).
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.

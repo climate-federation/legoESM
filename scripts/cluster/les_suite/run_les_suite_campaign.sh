@@ -13,6 +13,16 @@ mkdir -p "$ART" "$OUT/tuned" "$OUT/campaign"
 LOG=$OUT/campaign/progress.log
 say(){ echo "[$(date +%F_%T)] $*" | tee -a "$LOG"; }
 
+# Single-instance guard. A campaign orphaned from a dead parent keeps running
+# (reparented to init); a resubmit then races it — two copies halve each other's
+# CPU throughput and clobber the same tuned JSON. flock (held on fd 9 for the
+# shell's lifetime, auto-released on exit) makes a concurrent resubmit a no-op.
+exec 9>"$OUT/campaign/.campaign.lock"
+if ! flock -n 9; then
+  say "another campaign instance holds the lock -> exiting (no-op)"
+  exit 0
+fi
+
 say "=== LES-suite campaign START (host=$(hostname)) ==="
 
 # 1) Q1 buoyancy-axis sweep: free-convective CBLs at these surface fluxes (GPU).
