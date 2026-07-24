@@ -81,7 +81,7 @@ SPMD_PARITY_MAX_STEPS = 8
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
                           tripole=False, baro_solver="implicit_cn",
-                          force_pcg=False):
+                          force_pcg=False, pcg_variant="standard"):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -130,6 +130,12 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                 "--force-pcg only affects the implicit_cn barotropic solve; "
                 "drop it for explicit_substep arms.")
         flat["barotropic_implicit_force_pcg"] = True
+    if pcg_variant != "standard":
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-variant only affects the implicit_cn fixed-M PCG; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_pcg_variant"] = pcg_variant
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -204,6 +210,13 @@ def main() -> int:
                         "nd=1 strong-scaling reference leg times the SAME "
                         "solver the nd>1 SPMD legs run (the dispatch "
                         "otherwise routes nd=1 to adaptive stock CG).")
+    p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
+                   default="standard",
+                   help="Fixed-M PCG recurrence for the implicit_cn "
+                        "barotropic solve: standard = 2 dependent reduction "
+                        "batches/iter; single_reduce = Chronopoulos-Gear, "
+                        "ONE batched reduction/iter (halves the per-step "
+                        "reduction count the census reports).")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
@@ -339,7 +352,7 @@ def main() -> int:
         n_lat, args.n_lon, args.nlev,
         wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
         tripole=args.tripole, baro_solver=args.baro_solver,
-        force_pcg=args.force_pcg)
+        force_pcg=args.force_pcg, pcg_variant=args.pcg_variant)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
