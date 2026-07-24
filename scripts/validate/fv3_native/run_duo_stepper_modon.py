@@ -54,6 +54,11 @@ def main():
                          "halos) next to --out as <out>_lat_dayD.npz — "
                          "feeds the corner-wedge sharp-state "
                          "capture-compare (codex deficiency-r1 endgame)")
+    ap.add_argument("--d4-bg", type=float, default=None,
+                    help="del-6 divergence-damping strength override "
+                         "(NON-FAITHFUL diagnostic; Zenodo case-8 = "
+                         "0.12): boost to test whether the day-5 vertex "
+                         "spike is a del-6 dissipation deficit")
     ap.add_argument("--ic-perturb", type=float, default=0.0,
                     help="relative IC wind kick (chaos discriminator): "
                          "if day-5 max|V| moves wildly vs the "
@@ -125,7 +130,14 @@ def main():
         # {"nord": N} overrides just that key).  Was a silent no-op
         # for w2tuned (codex screens-r1 F2).
         sw_cfg = {**(sw_cfg or {}), "nord": args.nord}
+    if args.d4_bg is not None:
+        # del-6 divergence-damping strength override (NON-FAITHFUL
+        # diagnostic): if boosting it above the Zenodo 0.12 suppresses
+        # the day-5 vertex spike, the residual is a del-6 dissipation
+        # deficit; if not, del-6 strength is not the lever.
+        sw_cfg = {**(sw_cfg or {}), "d4_bg": args.d4_bg}
     nord_effective = (sw_cfg or {}).get("nord", 1)
+    d4_bg_effective = (sw_cfg or {}).get("d4_bg", None)
 
     # diagnostic env modes active this run (provenance — screens-r1 F5)
     import os
