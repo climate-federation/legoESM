@@ -307,6 +307,22 @@ class TKEConfig(NamedTuple):
     #   stage N² source changes (the post-mixing ``taup1`` N² recompute is
     #   untouched); consulted only for ``n2_mode="adiabatic"``.
     n2_before_advection: bool = False
+    # ----- rn2b time level for Prandtl/Langmuir (Phase-2 #1317 T8/T13) -----
+    # NEMO feeds TWO genuinely different N² time levels into zdftke: ``rn2``
+    # (Nnow, step-entry T/S — the buoyancy sink + mixing length,
+    # zdftke.F90:418,650) and ``rn2b`` (Nbb, the LEAP-FROG BEFORE level — one
+    # full leap-frog step behind Nnow — the Prandtl zri :384-395 and the
+    # Langmuir PE integral :340-344). ``n2_before_advection`` above supplies
+    # only ONE before-tracer set (Nnow, correct for rn2); this axis supplies
+    # the SECOND, genuinely-older level for the rn2b consumers.
+    # ``"step_entry"`` (default, BIT-IDENTICAL legacy): rn2b consumers reuse
+    #   the SAME N² as rn2 (the historical relabelling — not a true Nbb).
+    # ``"nemo_before"``: the caller supplies the true leap-frog BEFORE
+    #   tracers (``state.T_before``/``S_before``, MLF integrator only —
+    #   construction raises on FE, which carries no before-state) as
+    #   ``T_n2b``/``S_n2b`` to ``tke_vertical_mixing``; Prandtl zri and the
+    #   Langmuir PE integral are evaluated on that TRUE Nbb level.
+    tke_n2_time_level: str = "step_entry"
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -446,6 +462,26 @@ class TKEConfig(NamedTuple):
     #   ``buoyancy_timing="post_mixing_veros"`` (the realized increments
     #   exist only after the friction solve); fail loudly otherwise.
     shear_production: str = "pre_solve"
+    # ----- TKE shear-production DISCRETIZATION (Phase-2 #1317 T4) -----
+    # Orthogonal to ``shear_production`` above (which selects the Veros
+    # realized-friction form, ``post_mixing_veros`` only): this axis is the
+    # standard ``pre_mixing`` (MLF) closure's own shear stencil.
+    # ``"squared_centered"`` (default, BIT-IDENTICAL legacy): P_s = K_M·S²
+    #   with S² = (du/dz)² + (dv/dz)² from a SINGLE (now) velocity state
+    #   (:func:`_shared.vertical_shear_squared`) — always >= 0.
+    # ``"nemo_burchard"``: Burchard (2002) energy-conserving now×before
+    #   cross term (zdfsh2.F90:44-92; :func:`_shared.vertical_shear_burchard`)
+    #   — P_s = K_M·[(du_now/dz)(du_before/dz) + (dv_now/dz)(dv_before/dz)],
+    #   built from the CARRIED leap-frog before-velocities
+    #   (``state.u_before``/``v_before``). May be negative (a genuine
+    #   feature — the implicit friction and the shear production it feeds
+    #   are built from the SAME du/dz history). Requires
+    #   ``outer_integrator="leapfrog"`` (construction raises otherwise — the
+    #   before-velocities do not exist under forward_euler/ab2); the FE/AB2
+    #   kamm cards keep "squared_centered" (a documented FE-frame fidelity
+    #   ceiling, the same class as the existing FE-frame notes on those
+    #   cards).
+    tke_shear_production: str = "squared_centered"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor
