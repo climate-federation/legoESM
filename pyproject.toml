@@ -282,6 +282,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
 # subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
 "scripts/validate/run_perfect_model_osse.py" = ["E402"]
+# Same run-as-a-script sys.path bootstrap (REPO_ROOT insert precedes the ``scripts.run``
+# import), so its module-level imports trip E402.
+"scripts/run/train_scm_rce_params.py" = ["E402"]
 # ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
 # field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the
 # x64-before-import idiom / logging setup.

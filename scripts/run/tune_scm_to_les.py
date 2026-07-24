@@ -31,6 +31,10 @@ import numpy as np
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing  # noqa: F401  (doc)
 from legoesm.atmosphere.les_suite.bridge import load_artifact
 from legoesm.atmosphere.les_suite.scm_runner import scm_les_final_loss
+from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
+    rewrap_tunable_subconfig,
+    tunable_subconfig,
+)
 from legoesm.training.param_collector import apply_param_overrides, build_registry
 
 
@@ -87,6 +91,24 @@ def _candidate_overrides(metas: list, n_random: int, seed: int) -> list[dict]:
     return cands
 
 
+def apply_overrides_to_base(base_turbulence, overrides: dict):
+    """Splice tuned ``overrides`` into ``base_turbulence``'s ACTIVE sub-config.
+
+    Descends to the tunable leaf first, so full CLUBB (whose coefficients nest in
+    ``CLUBBConfig.params``) is handled exactly like every flat scheme — for which the
+    shared ``tunable_subconfig``/``rewrap_tunable_subconfig`` helpers are identities.
+    Empty ``overrides`` returns ``base_turbulence`` unchanged (the default candidate).
+    This is the tuner's single apply-site, factored out so it is directly unit-tested.
+    """
+    if not overrides:
+        return base_turbulence
+    scheme = base_turbulence.scheme
+    sub = getattr(base_turbulence, scheme)
+    tuned_leaf = apply_param_overrides(tunable_subconfig(sub), overrides)
+    tuned_sub = rewrap_tunable_subconfig(sub, tuned_leaf)
+    return base_turbulence._replace(**{scheme: tuned_sub})
+
+
 def tune_closure_derivative_free(
     artifact,
     base_turbulence,
@@ -105,15 +127,10 @@ def tune_closure_derivative_free(
     tunable fields. Returns the best overrides + loss and the full history.
     """
     scheme = base_turbulence.scheme
-    sub = getattr(base_turbulence, scheme)
     metas = _scheme_tunable_metas(scheme_key, tiers)
 
-    def _config_with(overrides: dict):
-        tuned_sub = apply_param_overrides(sub, overrides) if overrides else sub
-        return base_turbulence._replace(**{scheme: tuned_sub})
-
     def _loss(overrides: dict) -> float:
-        cfg = _config_with(overrides)
+        cfg = apply_overrides_to_base(base_turbulence, overrides)
         return float(scm_les_final_loss(artifact, cfg, nlev=nlev, dt=dt))
 
     history: list = []
@@ -151,6 +168,7 @@ def tune_closure_derivative_free(
 # The closures wired for the dry-CBL (prescribed-flux) tuner, spanning the
 # closure-order ladder for Q1/Q2 (local first-order → nonlocal → 1.5-order).
 def _cbl_scheme_table():
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     from legoesm.atmosphere.physics.turbulence.config import (
         CLUBBLiteConfig,
         HoltslagBovilleConfig,
@@ -163,12 +181,12 @@ def _cbl_scheme_table():
     )
 
     # The Q2 closure-order ladder (LES_SUITE.md D3): local → nonlocal → 1.5-order →
-    # higher-order/mass-flux. Each entry is (config_cls, registry scheme_key) and is
-    # constructed as ``config_cls(surface=surf)``; the scheme_key selects the tunable
-    # ParamMeta. Full ``clubb`` is NOT in this table yet (a deliberate gap, not wired
-    # elsewhere): its tier-1 coefficients live in nested ``CLUBBConfig.params``
-    # (scheme_key atm.turb.CLUBBParams), so it needs the descend/re-wrap path rather
-    # than this flat ``config_cls(surface=)`` construction — a documented follow-up.
+    # higher-order/mass-flux → full higher-order. Each entry is (config_cls, registry
+    # scheme_key), constructed as ``config_cls(surface=surf)``; the scheme_key selects
+    # the tunable ParamMeta. Full ``clubb`` nests its tier-1 coefficients in
+    # ``CLUBBConfig.params`` (scheme_key atm.turb.CLUBBParams, NOT the CLUBBConfig
+    # wrapper), so the apply-site descends via the shared ``tunable_subconfig`` helper;
+    # ``CLUBBConfig(surface=surf)`` still constructs the base like the flat schemes.
     return {
         "smagorinsky": (SmagorinskyConfig, "atm.turb.SmagorinskyConfig"),   # local
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
@@ -178,6 +196,7 @@ def _cbl_scheme_table():
         "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
         "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
         "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux
+        "clubb": (CLUBBConfig, "atm.turb.CLUBBParams"),                    # full higher-order
     }
 
 

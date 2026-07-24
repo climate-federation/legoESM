@@ -184,10 +184,40 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
-**NEXT:** (1) full `clubb` into the tuner (nested-params descend/re-wrap) → complete
-the 9-closure Q2 roster. (2) AD path — traced params via `apply_param_overrides`
-inside a jitted/AD loss (one compile serves all candidates; fixes the per-candidate
-recompile + gives the D4 AD-vs-DF comparison; needs a scan-based differentiable SCM
-segment). (3) Wire the stable/sheared/moist regime emission in `run_les_suite` (only
-dry-convective CBL today) → the §6 flux×shear grid + BOMEX/DYCOMS (unlocks Q3
-inter-regime spread). (4) D7 σ_LES SGS-spread + 2×-resolution runs → the error bars.
+**Iter 4 (2026-07-24) — Q2 roster 8→9: full `clubb` wired + shared nested-leaf helper.**
+- **Extracted the nested-CLUBB descend/re-wrap to a shared public module**
+  `atmosphere/physics/turbulence/tunable_subconfig.py` (`tunable_subconfig` /
+  `rewrap_tunable_subconfig`). The logic FORMERLY lived, privately, in
+  `run_scm_rce_campaign.py` (as `_tunable_subconfig`/`_rewrap_tunable_subconfig`) and
+  `train_scm_rce_params.py` imported it as `campaign._tunable_subconfig` — a private
+  cross-module import (CLAUDE.md violation). Now a single public source of truth reused
+  by the RCE campaign, the RCE AD trainer, AND the LES-suite tuner; no live code
+  references the old private names, and the cross-import is gone. Direct unit test
+  `test_tunable_subconfig.py`; excluded from the physics-contract gate (config plumbing,
+  not a scheme); existing `test_scm_rce_clubb_nesting.py` repointed.
+- **Full `clubb` wired into the LES tuner** (`_cbl_scheme_table` → 9 closures): entry
+  `"clubb": (CLUBBConfig, "atm.turb.CLUBBParams")`. The tuner's single apply-site was
+  factored to a module function `apply_overrides_to_base` that DESCENDS via the shared
+  helper before `apply_param_overrides`, so an override lands on the nested
+  `CLUBBParams` (flat schemes: the helper is identity) — directly unit-tested
+  (`test_clubb_override_descends_into_nested_params`, `test_apply_overrides_flat_scheme`).
+  `CLUBBConfig(surface=)` constructs the base like the flat schemes; build test → 9
+  schemes. **Finite-SCM-loss probe CONFIRMED**: full CLUBB runs to loss **0.2349**
+  (finite) on the 0.06 CBL anchor — sensible vs the wired set (clubb_lite 0.236, edmf
+  0.233, holtslag 0.241). CAVEAT (controlled-comparison): this probe is at **nlev=8,
+  dt=30** (a coarse grid), NOT the campaign's nlev=24 — CLUBB's full nlev=24 XLA
+  compile OOM'd 3× on the memory-contended shared node (other users' 50–192 GB jobs),
+  so the 0.235 is a viability smoke test, NOT a scorecard-comparable number. Full
+  CLUBB tuning into the per-flux scorecard therefore stays a **separate step pending
+  memory headroom** (CLUBB's higher-order compile is far heavier than the flat
+  schemes'); `clubb` is deliberately NOT yet in the running 8-closure campaign shell
+  so its nlev=24 compile can't OOM-crash that campaign.
+- The D3 order ladder is now COMPLETE: local(2)→nonlocal(2)→1.5-order(2)→
+  higher-order/MF(2)→full-higher-order(clubb). Q2 nine-closure roster wired.
+
+**NEXT:** (1) AD path — traced params via `apply_param_overrides` inside a jitted/AD
+loss (one compile serves all candidates; fixes the per-candidate recompile + gives the
+D4 AD-vs-DF comparison; needs a scan-based differentiable SCM segment). (2) Wire the
+stable/sheared/moist regime emission in `run_les_suite` (only dry-convective CBL today)
+→ the §6 flux×shear grid + BOMEX/DYCOMS (unlocks Q3 inter-regime spread). (3) D7 σ_LES
+SGS-spread + 2×-resolution runs → the error bars.

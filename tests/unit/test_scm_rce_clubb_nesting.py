@@ -13,6 +13,10 @@ from __future__ import annotations
 from legoesm.atmosphere.physics.combined import PhysicsConfig
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig, CLUBBParams
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
+from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
+    rewrap_tunable_subconfig,
+    tunable_subconfig,
+)
 from legoesm.training.param_collector import apply_param_overrides
 
 import scripts.run.run_scm_rce_campaign as campaign
@@ -29,17 +33,17 @@ def test_tunable_and_rewrap_clubb_vs_flat():
     # CLUBB: tunable target is the nested CLUBBParams; rewrap restores the wrapper
     # and preserves its other fields (surface, clubb_dt, ...).
     cfg = CLUBBConfig()
-    tunable = campaign._tunable_subconfig(cfg)
+    tunable = tunable_subconfig(cfg)
     assert isinstance(tunable, CLUBBParams)
     tuned = apply_param_overrides(tunable, {"C1": 2.5})
-    wrapped = campaign._rewrap_tunable_subconfig(cfg, tuned)
+    wrapped = rewrap_tunable_subconfig(cfg, tuned)
     assert isinstance(wrapped, CLUBBConfig)
     assert wrapped.params.C1 == 2.5
     assert wrapped.surface == cfg.surface and wrapped.clubb_dt == cfg.clubb_dt
     # flat scheme: both helpers are identity.
     smag = SmagorinskyConfig()
-    assert campaign._tunable_subconfig(smag) is smag
-    assert campaign._rewrap_tunable_subconfig(smag, smag) is smag
+    assert tunable_subconfig(smag) is smag
+    assert rewrap_tunable_subconfig(smag, smag) is smag
 
 
 def _clubb_physics_config() -> PhysicsConfig:
@@ -55,8 +59,8 @@ def test_campaign_active_subconfig_roundtrip_sets_nested_param():
     scheme_key = campaign._scheme_key_for_subconfig(subcfg)
     assert scheme_key == "atm.turb.CLUBBParams"
     tuned_tunable = apply_param_overrides(
-        campaign._tunable_subconfig(subcfg), {"gamma_coef": 0.42})
-    tuned_sub = campaign._rewrap_tunable_subconfig(subcfg, tuned_tunable)
+        tunable_subconfig(subcfg), {"gamma_coef": 0.42})
+    tuned_sub = rewrap_tunable_subconfig(subcfg, tuned_tunable)
     new_cfg = campaign._set_active_subconfig(base, "turbulence", tuned_sub)
     assert new_cfg.turbulence.clubb.params.gamma_coef == 0.42
     # untouched coefficient keeps its default.

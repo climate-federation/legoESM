@@ -322,11 +322,19 @@ The full machinery is built + validated; these are the first real numbers, for t
    - **Q1a structural ceiling** — DONE across the dry-CBL flux axis (5 fluxes; a
      counter-gradient layer at every Q0 0.02→0.12). The height *trend* is
      non-monotonic; only presence-at-all-fluxes is claimed.
-   - **Q2 dry-CBL ranking** — **8 of 9 closures** now wired in `tune_scm_to_les`
+   - **Q2 dry-CBL ranking** — **all 9 closures** now wired in `tune_scm_to_les`
      (`_cbl_scheme_table`: smagorinsky, louis, holtslag_boville, ysu, tke, mynn25,
-     clubb_lite, edmf — the D3 order ladder), all probe-confirmed to finite SCM loss.
-     8-closure × 5-flux tuning campaign running (~24 h CPU). Full `clubb` (9th) is the
-     one gap — nested `CLUBBParams` needs the descend/re-wrap path (follow-up).
+     clubb_lite, edmf, clubb — the full D3 order ladder). The 8 flat schemes are
+     probe-confirmed finite at the campaign grid (nlev=24); full `clubb` is confirmed
+     finite only at a COARSE nlev=8, dt=30 grid (loss 0.235) — its nlev=24 XLA compile
+     OOM'd 3× on the memory-contended shared node, so 0.235 is a viability smoke test
+     and is NOT scorecard-comparable to the nlev=24 numbers (controlled-comparison
+     rule). The nested-CLUBB descend/re-wrap is the shared public helper
+     `turbulence/tunable_subconfig.py` (also used by the RCE campaign + AD trainer; an
+     earlier private cross-import fixed). 8-closure × 5-flux tuning campaign running
+     (~24 h CPU, ×contention); **full `clubb` tuning into the scorecard is a separate
+     step pending memory headroom** (nlev=24) — clubb is deliberately kept out of the
+     running campaign shell so its heavy compile can't OOM-crash it.
    - **Scorecard** reports PER surface-flux (dedup'd; `n fluxes` denominators).
    - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
      `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;

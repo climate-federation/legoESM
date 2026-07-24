@@ -81,12 +81,38 @@ def test_all_wired_schemes_build_with_registry_key():
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
     for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "tke",
-                   "mynn25", "clubb_lite", "edmf"):
+                   "mynn25", "clubb_lite", "edmf", "clubb"):
         base, key = m._base_turbulence(scheme)
         assert base.scheme == scheme
         assert getattr(base, scheme) is not None
         metas = m._scheme_tunable_metas(key, tiers=(1,))
         assert metas  # tier-1 params exist for the ranking
+
+
+def test_clubb_override_descends_into_nested_params():
+    # full CLUBB tunables live in CLUBBConfig.params; the tuner's REAL apply-site
+    # (apply_overrides_to_base) must descend + re-wrap so an override lands on the
+    # nested CLUBBParams, not the wrapper — exercised directly, not re-implemented.
+    m = _tuner()
+    base, key = m._base_turbulence("clubb")
+    metas = m._scheme_tunable_metas(key, tiers=(1,))
+    field = metas[0].field  # e.g. "C1"
+    cfg = m.apply_overrides_to_base(base, {field: 0.4321})
+    assert cfg.scheme == "clubb"
+    assert getattr(cfg.clubb.params, field) == pytest.approx(0.4321)  # nested override
+    assert getattr(base.clubb.params, field) != pytest.approx(0.4321)  # base unmutated
+    assert cfg.clubb.surface == base.clubb.surface  # wrapper fields preserved
+    # empty overrides return the base unchanged (the default candidate)
+    assert m.apply_overrides_to_base(base, {}) is base
+
+
+def test_apply_overrides_flat_scheme_lands_on_config():
+    # for a flat scheme the same apply-site sets the field on the sub-config directly.
+    m = _tuner()
+    base, key = m._base_turbulence("mynn25")
+    field = m._scheme_tunable_metas(key, tiers=(1,))[0].field
+    cfg = m.apply_overrides_to_base(base, {field: 0.4321})
+    assert getattr(cfg.mynn25, field) == pytest.approx(0.4321)
 
 
 def test_no_tunable_params_raises():
