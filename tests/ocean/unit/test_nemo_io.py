@@ -5,11 +5,13 @@ Self-contained: writes a tiny synthetic NEMO-shaped NetCDF (halo included,
 moves the vertical axis last — no dependency on an external NEMO run.
 """
 import numpy as np
+import pytest
 import xarray as xr
 
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
+    read_nemo_restart_en,
 )
 
 # Global-with-halo dims: nn_hls=1 -> interior (ny-2, nx-2) = (4, 3).
@@ -38,12 +40,14 @@ def _write_mesh_mask(path):
     ds.to_netcdf(path)
 
 
-def _write_restart(path, with_rhd=True):
+def _write_restart(path, with_rhd=True, with_en=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     data = {"tn": d3, "sn": d3, "un": d3, "vn": d3, "sshn": d2}
     if with_rhd:
         data["rhd"] = d3
+    if with_en:
+        data["en"] = d3
     xr.Dataset(data).to_netcdf(path)
 
 
@@ -76,6 +80,25 @@ def test_restart_without_rhd(tmp_path):
     _write_restart(p, with_rhd=False)
     s = read_nemo_restart(str(p), nn_hls=1)
     assert s.rhd is None
+
+
+def test_read_nemo_restart_en_halo_strip_and_axis_order(tmp_path):
+    """en (TKE closure w-level memory, #1317 --bridge-tke) uses the same
+    halo-strip + (z,y,x)->(y,x,z) reshape as tn/sn/un/vn -- shares
+    _to_latlon_lev, not a re-derived reshape."""
+    p = tmp_path / "restart_en.nc"
+    _write_restart(p, with_rhd=False, with_en=True)
+    en = read_nemo_restart_en(str(p), nn_hls=1)
+    assert en.shape == (IY, IX, NZ)
+    # same decodable pattern z*100+y*10+x, interior origin (y=1,x=1)
+    assert en[1, 2, 0] == (1 + 1) * 10 + (2 + 1)
+
+
+def test_read_nemo_restart_en_missing_raises(tmp_path):
+    p = tmp_path / "restart_no_en.nc"
+    _write_restart(p, with_rhd=False, with_en=False)
+    with pytest.raises(KeyError):
+        read_nemo_restart_en(str(p), nn_hls=1)
 
 
 class TestHalolessFiles:

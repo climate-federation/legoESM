@@ -171,4 +171,27 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
     )
 
 
-__all__ = ("NemoGrid", "NemoState", "read_nemo_mesh_mask", "read_nemo_restart")
+def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
+    """Read + halo-strip NEMO's TKE restart field ``en`` (w-levels, T-points).
+
+    Not part of :class:`NemoState` (``en`` is closure-scheme integrator memory,
+    not a core prognostic field every caller needs) -- a standalone reader for
+    fidelity harnesses that want to bridge the TKE closure's cold-start memory
+    specifically (e.g. the #1317 ``--bridge-tke`` twin experiment).
+
+    Returns ``(n_lat, n_lon, jpk)`` with ``jpk`` NEMO w-levels, index 0 = the
+    surface w-level (``gdepw_1d[0]=0``), same convention as ``gdepw_1d``.
+    ``jpk == nlev`` (NEMO's w-levels and T-levels share the same
+    ``nav_lev``-length axis). The caller maps this onto legoESM's ``nlev-1``
+    interior interfaces (``state.tke``, dims ``("lat","lon","level")``) by
+    dropping only the surface w-level (index 0): ``en[..., 1:jpk]`` has
+    exactly ``jpk-1 == nlev-1`` levels, aligned index-for-index with lego's
+    interior interfaces 0..nlev-2 -- see ``kamm_twin_90d.py``'s
+    ``--bridge-tke``.
+    """
+    r = xr.open_dataset(path, decode_times=False)
+    return _to_latlon_lev(np.asarray(r["en"].values).squeeze(), nn_hls)
+
+
+__all__ = ("NemoGrid", "NemoState", "read_nemo_mesh_mask", "read_nemo_restart",
+           "read_nemo_restart_en")

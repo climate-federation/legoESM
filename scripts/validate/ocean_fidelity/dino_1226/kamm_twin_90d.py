@@ -51,7 +51,12 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays,
     dino_step_surface_forcing,
 )
-from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
+from legoesm.core.field import Field
+from legoesm.ocean.fidelity.nemo_io import (
+    read_nemo_mesh_mask,
+    read_nemo_restart,
+    read_nemo_restart_en,
+)
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 
 # NEMO oracle-build artifact roots (mesh/restart donors). Override via env var
@@ -136,7 +141,27 @@ def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e
         )
 
 
-def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str):
+def bridge_tke_from_restart(st, restart_en, land_mask):
+    """Seed ``st.tke`` from a NEMO restart's ``en`` (TKE closure integrator memory).
+
+    ``restart_en`` is the raw ``(n_lat, n_lon, jpk)`` array from
+    :func:`read_nemo_restart_en` (index 0 = surface w-level, matching
+    ``gdepw_1d``). legoESM's ``state.tke`` is ``(n_lat, n_lon, nlev-1)`` at
+    the interior interfaces (dims ``("lat","lon","level")``); since
+    ``jpk == nlev`` (NEMO w/T-levels share one ``nav_lev`` axis), dropping the
+    surface w-level index (``restart_en[..., 1:]``) leaves exactly ``nlev-1``
+    levels aligned index-for-index with lego's interior interfaces. Masked to
+    wet columns (matches the cold-start seed's ``land_mask``-gated fill).
+    """
+    en_interior = np.asarray(restart_en, dtype=np.float64)[..., 1:]  # drop w-level 0 (surface)
+    wet = (np.asarray(land_mask) > 0.5)[:, :, None]
+    tke_data = jnp.asarray(np.where(wet, en_interior, 0.0), dtype=st.T.data.dtype)
+    return st._replace(tke=Field(data=tke_data, name="tke",
+                                  dims=("lat", "lon", "level"), units="m^2/s^2"))
+
+
+def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
+                       bridge_tke: bool = False):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
@@ -155,6 +180,22 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str):
     print("twin from developed NEMO state (br.state, NOT dino_lat_lon_state)")
     verify_day0_matches_restart(st, s, br.land_mask)
 
+    # OPTIONAL: bridge NEMO's developed TKE closure memory (`en`) onto lego's
+    # cold-start `state.tke` -- isolates whether the TKE cold-start (vs the
+    # bridged prognostic T/S/eta/u/v) drives the day 0-4 surface-layer
+    # handshake divergence (#1317). Off by default (matches the module
+    # docstring's documented cold-start caveat) so `--bridge-tke` is additive,
+    # not a silent behavior change.
+    if bridge_tke:
+        en_restart = read_nemo_restart_en(f"{run_stepdump}/{RESTART_FILE}", nn_hls=0)
+        st = bridge_tke_from_restart(st, en_restart, br.land_mask)
+        wet = np.asarray(br.land_mask) > 0.5
+        d_en = float(np.max(np.abs(
+            np.asarray(st.tke.data)[wet] - en_restart[..., 1:][wet])))
+        print(f"TKE BRIDGE: seeded state.tke from NEMO restart en "
+              f"(w-level 1..{en_restart.shape[-1]-1} -> interior interface "
+              f"0..{en_restart.shape[-1]-2})  max|d_en|={d_en:.3e}", flush=True)
+
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     print(f"barotropic_diffusion_alpha={mc.barotropic.barotropic_diffusion_alpha} "
           f"barotropic_face_depth={mc.barotropic.barotropic_face_depth} "
@@ -172,9 +213,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str):
 
 
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
-             run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP) -> bool:
+             run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
+             bridge_tke: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable."""
-    br, cfg, mc, model, forcing, sf, st = _build_twin_state(recipe, run_traj, run_stepdump)
+    br, cfg, mc, model, forcing, sf, st = _build_twin_state(
+        recipe, run_traj, run_stepdump, bridge_tke=bridge_tke)
     nsteps = STEPS_PER_DAY * n_days
 
     dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
@@ -274,13 +317,17 @@ def _parse_args(argv=None):
     p.add_argument("--run-traj", default=RUN_TRAJ, help="NEMO RUN_TRAJ dir (mesh_mask donor)")
     p.add_argument("--run-stepdump", default=RUN_STEPDUMP,
                     help="NEMO RUN_STEPDUMP dir (restart donor)")
+    p.add_argument("--bridge-tke", action="store_true",
+                    help="seed state.tke from the NEMO restart's en (#1317 TKE "
+                         "cold-start isolation experiment); default off (cold start)")
     return p.parse_args(argv)
 
 
 def main(argv=None):
     args = _parse_args(argv)
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
-              run_traj=args.run_traj, run_stepdump=args.run_stepdump)
+              run_traj=args.run_traj, run_stepdump=args.run_stepdump,
+              bridge_tke=args.bridge_tke)
 
 
 if __name__ == "__main__":
