@@ -44,6 +44,12 @@ OUT="${OUT:-results/a1/cube_tiled_scaling_levante_j${SLURM_JOB_ID:-local}.jsonl}
 RES="${RES:-192}"
 NLEV="${NLEV:-60}"
 KT="${KT:-2}"
+# CFL-scaled timestep: the bench default dt=60 s is stable at C192-C384 but
+# NOT at C768 (~13 km) — the closed-loop trajectory went non-finite there
+# (job 26453524; the single-shot leg, which re-feeds pristine inputs, was
+# unaffected and is a valid throughput row). Halve dt per resolution
+# doubling from the C192 anchor.
+DT="${DT:-$(awk -v r="$RES" 'BEGIN{printf "%.4f", 60.0*192.0/r}')}"
 # This job reserves EXACTLY 24 GPUs; a different kt needs its own
 # --nodes/--ntasks allocation (see the PBS twin's refusal note).
 if [ "${KT}" != "2" ]; then
@@ -72,13 +78,13 @@ export JAX_PLATFORMS=cuda
 # cube_tiled_step.pbs for the full rationale + bisection).
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
 timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" --dt "${DT}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
 echo "== single-shot done"
 # Closed-loop production lane (state resident tile-sharded across steps).
 echo "== closed-loop start"
 timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" --dt "${DT}" \
     --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 
 echo "done: ${OUT}"
