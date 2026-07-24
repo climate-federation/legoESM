@@ -20,7 +20,7 @@ route-A CUDA-aware mpi4jax not exercised on Levante).
 |---|---|---|---|
 | Atm lat-lon LL720×1440 L26 | 4→8→16 A100 (1→4 nodes) | 7.72→5.40→3.54 ms/step, monotone; np16 = 7.6 GC/s (477 Mc/s/GPU sustained) | 26450848/26453240/26449147 |
 | Atm MPAS ico L8 (28 km) L26 | 6→16 A100 | 8.66→7.08 ms/step; np16 = 2.41 GC/s — 1.6× Derecho's matched-grid 16-A100 aggregate | 26453240/26449147 |
-| **Atm cube C768/L60 (same-path cs-spmd)** | 6→24 A100 | 58.35→14.09 ms/step = **4.14× = eff 1.04 (IDEAL)**, 15.1 GC/s (629 Mc/s/GPU) | 26453782 |
+| **Atm cube C768/L60 (same-path cs-spmd)** | 6→24 A100 | 58.35→14.09 ms/step = **4.14× = eff 1.04 (at ideal)**, 15.1 GC/s (629 Mc/s/GPU) | 26453782 |
 | Atm cube C384/L60 (same-path cs-spmd) | 6→24 A100 | 15.44→8.81 ms/step = 1.75× (eff 0.44), 6.0 GC/s | 26452894 |
 | Atm cube C192/L60 (same-path) | 6→24 | 6.20→6.80 ms — ANTI-scales (eff 0.23): 9.2k cols/GPU is below the ~30k-column floor | 26452979 |
 | Ocean lat-lon LL576×1152 L20, production implicit | 4→8→16 | 15.6→17.2→17.4 ms — anti-scales across nodes | 26452743-45 |
@@ -30,7 +30,12 @@ route-A CUDA-aware mpi4jax not exercised on Levante).
 Single-node GPU (job 26445836): cube C192 gray_sbm strong eff 0.84–1.07
 (1→3 A100); C48/C96 latency-floored. Ocean single-node solver ladder: below.
 
-**THE cube strong-scaling result** (same code path, harness, config, IC;
+**THE cube strong-scaling result** — read 1.04 as "at ideal", NOT "better
+than ideal": efficiency slightly above 1 is expected when the BASE leg is
+per-device disadvantaged (np6 holds 4x the working set per GPU of np24, so
+part of the 4.14x is cache/occupancy recovery rather than parallel
+efficiency). The claim is that comm does not degrade this ladder, not that
+parallelism is free. (same code path, harness, config, IC;
 only the tile size varies — jobs 26452979/26452894/26453782): 6→24 GPU
 speedup 0.91× / 1.75× / 4.14× at 9.2k / 36.9k / 147k columns per GPU. The
 "poor cube strong scaling" of the earlier receipts is ENTIRELY the
@@ -142,10 +147,15 @@ Config is byte-identical between the two rows; only the grid changes.
 ## Weak scaling at production per-device size (job 26453523)
 
 The earlier weak ladders used a 64-row base (0.17M cells/GPU — under the
-latency floor) and showed 0.25–0.35 efficiency. Re-run at PRODUCTION size
-(288 rows × 1152 lon × L20 = 6.6M cells/GPU, f64, 1→4 A100, conservation
-gated): production implicit 1.00/0.72/0.70, improved wide-halo+vmix-f32
-1.00/0.86/0.85. So the weak collapse was a protocol artifact, and the same
+latency floor). Re-run at PRODUCTION size (288 rows × 1152 lon × L20 =
+6.6M cells/GPU, 1→4 A100, conservation gated): production implicit
+1.00/0.72/0.70, improved wide-halo+vmix-f32 1.00/0.86/0.85.
+PRECISION MATCHED (self-audit correction): BOTH ladders compared here are
+**float32** — the production-tile run is f32, so it is compared against
+the earlier ladder's f32 rows (eff 0.26/0.25 at nd 2/4), not its f64 rows.
+An earlier revision of this file mislabelled the production-tile run f64
+and cited the f64 small-base numbers; the direction and size of the effect
+are unchanged, but the comparison is only valid precision-matched. So the weak collapse was a protocol artifact, and the same
 config that fixes strong scaling also carries weak (+0.15 at nd4). Ideal is
 flat; the improved arm holds 22.5→22.9 ms while production drifts
 17.8→25.3 ms.
@@ -154,7 +164,10 @@ flat; the improved arm holds 22.5→22.9 ms while production drifts
 
 - Cross-machine anchor (matched bench/config/grid/physics/precision,
   job 26450081): Levante single A100-80 latlon-moist r720 f32 =
-  **418.5 Mc/s** vs Derecho single-A100 ≈370 — Levante is ~13% faster.
+  **418.5 Mc/s** vs Derecho single-A100 ≈370. SCOPE: this establishes NO
+  LARGE REGRESSION, not a precise machine ranking — the two campaigns
+  differ in machine (A100-80 SXM vs A100-40), jax/tree version and date,
+  so the ~13% gap is not attributable to any single factor.
 - Cube "404 vs 141 Mc/s" = physics-tier confound: the 404 was RTX-5090
   Held-Suarez; gray+SBM is priced ~3× by `SCALING_SUMMARY.md`'s own tier
   table (404/3 ≈ 135 expected; 141 measured on A100).
