@@ -465,6 +465,7 @@ def _run_substep_loop(
     linear_free_surface=False,
     ab3_za=None, ab3_zb=None, ab3_hist=None,
     een_pre=None,
+    drag_r_u=None, drag_r_v=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -505,6 +506,129 @@ def _run_substep_loop(
     U_sum = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
     V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
 
+    _nfold_mask = north_fold_mask(grid)
+
+    _face_depth_mode = config.barotropic.barotropic_face_depth
+    if _face_depth_mode not in ("min_rule", "nemo_ssh_avg"):
+        raise ValueError(
+            "unknown barotropic_face_depth "
+            f"{_face_depth_mode!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
+
+    def _face_depths(H_total):
+        """Min-rule C-grid face depths of a total column depth field.
+
+        Min-rule (consistent with implicit solver and PE tendency).
+        Arithmetic mean overestimates face depth at topographic steps,
+        creating a transport mismatch.  Pole rows are zero (wall BC) on
+        regular lat-lon; fold min-rule on tripolar.
+        Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
+        so the v-face min at a partition cut uses the neighbour rank's
+        adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
+        (consistent MPI call count — the previous direct-concat fold branch
+        skipped it and deadlocked against the else branch); the fold seam is
+        overwritten only on the rank that owns it.
+        """
+        H_u = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
+        H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
+        H_total_pad = pad_ns_zero(H_total)
+        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
+        H_v = _zero_polar_lat_ends(H_v)
+        if fold_is_local(grid) or _nfold_mask is not None:
+            north = jnp.minimum(
+                H_total[-1:], fold_vface_row(H_total, grid),
+            )
+            H_v = apply_north_fold(H_v, north, grid, north_mask=_nfold_mask)
+        return H_u, H_v
+
+    # --- "nemo_ssh_avg" reference depth + metric prep (built ONCE, outside the
+    # substep loop — geometry-only, matches NEMO's frozen hu_0/hv_0/r1_e1e2u).
+    # Reference depth = the min-rule applied to H_bathy ALONE (time-invariant,
+    # still-water) — the lego equivalent of NEMO's hu_0/hv_0 (domain.F90:139-
+    # 147: a masked vertical sum of the u-/v-point's own reference thickness,
+    # NOT a T-point average).  This is a documented assumption for the
+    # reference term only; the rule under test is the ssh-averaging term below.
+    if _face_depth_mode == "nemo_ssh_avg":
+        # Mask H_bathy FIRST (matches the min-rule's own H_total_c convention,
+        # ``jnp.maximum(eta_c + H_bathy, ...) * mask`` — H_bathy itself is raw
+        # bathymetry, not zero over land) so the reference depth is zero at a
+        # land T-cell exactly like the min-rule path, rather than picking up
+        # a nonzero land-bathymetry value later masked out inconsistently.
+        H_u_ref, H_v_ref = _face_depths(H_bathy * mask)
+        # u-/v-point metric areas e1u*e2u / e1v*e2v (NEMO r1_e1e2u ==
+        # 1/(e1u*e2u), verified against domhgr.F90:146-160 — the face's OWN
+        # area, NOT the sum of the two adjacent T-cell areas).  dx_u/dy_u/
+        # dx_v/dy_v already exist on the grid (ensure_geometry) — reused
+        # verbatim, no new grid fields added.  NOTE: ``area`` (the T-cell
+        # weight in the numerator) is the EXACT spherical-cap cell area
+        # (``_exact_uniform_cell_area_lat``), while ``dx_u*dy_u``/``dx_v*dy_v``
+        # (the normalizer) are the midpoint-rule metric — R·dλ·cos(φ)·R·dφ.
+        # These two area conventions differ by O(dφ²/24) (the same small-angle
+        # discrepancy documented on ``_exact_uniform_cell_area_lat``: ~0.6% at
+        # n_lat=8, ~80 ppm at n_lat=72) — so even on a u-face (same latitude
+        # row, where the T-cell areas either side are IDENTICAL) the ratio
+        # ``area/(dx_u*dy_u)`` is not exactly 1, and the u-face average is only
+        # the plain 2-point mean up to that resolution-dependent factor, not
+        # bit-exactly.  v-face normalizer differs for the same reason PLUS the
+        # genuinely distinct cos(lat_v) metric — must use the real e1v*e2v.
+        from legoesm.grids.latlon import ensure_geometry
+        _geom = ensure_geometry(grid)
+        _r1_e1e2u = (1.0 / (_geom.dx_u * _geom.dy_u)).astype(dtype)  # (nlat, nlon+1)
+        _r1_e1e2v = (1.0 / (_geom.dx_v * _geom.dy_v)).astype(dtype)  # (nlat+1, nlon)
+
+    def _ssh_avg_face_depths(eta_dyn):
+        """NEMO zhup2_e/zhvp2_e-style face depth (dynspg_ts.F90:568-592 flux
+        depth; :658-666,771-778 drag/update depth — same formula, evaluated
+        on a different ssh time-level by each caller):
+
+            H_u = hu_0 + 0.5 * r1_e1e2u * (area[j]*eta[j] + area[j+1]*eta[j+1])
+
+        Masked by u_mask/v_mask (the lego equivalent of NEMO's ssumask/
+        ssvmask — a column-wet mask built from umask/vmask, i.e. 1 only where
+        BOTH T-neighbours are wet, dommsk.F90:150,187-190).  A dry T-neighbour
+        therefore never contributes at an interior wet u-/v-face on this
+        grid: every face where u_mask/v_mask == 1 has, by C-grid mask
+        construction, both T-neighbours wet — so eta there is never a
+        masked-to-land value, and no special renormalization for a dry
+        neighbour is needed (matching NEMO: ssumask masks the WHOLE face, it
+        does not renormalize the average over the wet neighbour alone).
+        Periodic in longitude (DINO's zonal BC) for the u-face pairing,
+        matching the existing min-rule wrap convention.  Pole/fold v-face
+        rows: forced to the reference-only value (no ssh-average term) —
+        `_zero_polar_lat_ends` unconditionally overwrites the v-face wall
+        rows to 0 downstream in every caller (`_face_depths`), so an
+        add-on term at those rows would be masked away regardless; here we
+        avoid even computing a leaking pad-adjacent average by using the
+        SAME pad_ns_zero + zero_polar_lat_ends + north-fold handling as the
+        min-rule (an average with a zero pad is NOT zero like a min with a
+        zero pad — it would leak half the edge value — so it must be forced
+        to zero explicitly, not left to a stray pad).
+        """
+        # West-neighbour pairing at each u-face (mirrors min_cell_to_uface's
+        # roll+concat wrap convention exactly): face i pairs cell (i-1) [west]
+        # with cell i [east] — periodic in longitude, then the column-0 value
+        # is appended as the wrap face at index n_lon (n_lon+1 faces total).
+        area_w = jnp.roll(area, 1, axis=1)
+        eta_w = jnp.roll(eta_dyn, 1, axis=1)
+        ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
+        ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
+        H_u = (H_u_ref + ssh_avg_u) * u_mask
+
+        area_pad = pad_ns_zero(area)
+        eta_pad = pad_ns_zero(eta_dyn)
+        ssh_avg_v = 0.5 * _r1_e1e2v * (
+            area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
+        )
+        ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
+        if fold_is_local(grid) or _nfold_mask is not None:
+            area_fold = fold_vface_row(area, grid)
+            eta_fold = fold_vface_row(eta_dyn, grid)
+            ssh_avg_north = 0.5 * _r1_e1e2v[-1:] * (
+                area[-1:] * eta_dyn[-1:] + area_fold * eta_fold)
+            ssh_avg_v = apply_north_fold(
+                ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
+        H_v = (H_v_ref + ssh_avg_v) * v_mask
+        return H_u, H_v
+
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
 
@@ -534,39 +658,54 @@ def _run_substep_loop(
         else:
             H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
-        # Forward: update eta from continuity (C-grid divergence)
-        # Min-rule face depth (consistent with implicit solver and PE
-        # tendency).  Arithmetic mean overestimates face depth at
-        # topographic steps, creating a transport mismatch.
-        H_u = jnp.minimum(jnp.roll(H_total_c, 1, axis=1), H_total_c)
-        H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
-        # Pole rows are zero (wall BC) on regular lat-lon; fold min-rule
-        # on tripolar.
-        # Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
-        # so the v-face min at a partition cut uses the neighbour rank's
-        # adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
-        # (consistent MPI call count — the previous direct-concat fold branch
-        # skipped it and deadlocked against the else branch); the fold seam is
-        # overwritten only on the rank that owns it.
-        H_total_pad = pad_ns_zero(H_total_c)
-        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
-        H_v = _zero_polar_lat_ends(H_v)
-        nmask = north_fold_mask(grid)
-        if fold_is_local(grid) or nmask is not None:
-            north = jnp.minimum(
-                H_total_c[-1:], fold_vface_row(H_total_c, grid),
-            )
-            H_v = apply_north_fold(H_v, north, grid, north_mask=nmask)
+        # Forward: update eta from continuity (C-grid divergence).
+        # Substep-START (level jn) face depths: the DRAG denominator
+        # (NEMO hur_e/hvr_e — hu_e is refreshed at the END of the previous
+        # substep from its fresh ssh, dynspg_ts.F90:771-778, so the drag at
+        # :703 sees the level-jn depth).  "min_rule" (default, bit-identical):
+        # min-rule of the total column depth.  "nemo_ssh_avg": NEMO's own
+        # zsshu_a/hu_e rule (dynspg_ts.F90:658-666,771-778) — fixed reference
+        # depth + e1e2-area-weighted average of the CARRY-level ssh (eta_c,
+        # the level-jn dynamic ssh — same time level NEMO's hu_e sees here).
+        if _face_depth_mode == "nemo_ssh_avg":
+            H_u, H_v = _ssh_avg_face_depths(eta_c)
+        else:
+            H_u, H_v = _face_depths(H_total_c)
 
         if ab3_za is not None:
-            # NEMO nn_bt_flt=3: mid-step AB3 velocity extrapolation
+            # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
             # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
             U_mid = za_i[0] * U_bar_c + za_i[1] * Ub_c + za_i[2] * Ubb_c
             V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
-        flux_u = H_u * U_mid * u_mask
-        flux_v = H_v * V_mid * v_mask
+        if ab3_za is not None and not linear_free_surface:
+            # NEMO vvl continuity-flux depth at jn+1/2 (dynspg_ts.F90:556-595):
+            # the ssh is extrapolated with the SAME za coefficients as the
+            # velocity,
+            #   zsshp2_e = za1*sshn_e + za2*sshb_e + za3*sshbb_e     (:562)
+            # and the mid-step depths zhup2_e/zhvp2_e = h_0 + <ssh avg>
+            # (:583-592) feed the flux zhU = e2u*ua_e*zhup2_e (:604-609) and
+            # its un_adv transport accumulation (:639-643).  lego's DEFAULT
+            # ("min_rule") keeps its global min-rule face-depth convention in
+            # place of NEMO's e1e2-weighted two-point ssh average; the
+            # ``barotropic_face_depth="nemo_ssh_avg"`` option below selects
+            # the NEMO-exact rule instead (see BarotropicConfig docstring).
+            # Under linssh NEMO holds the depth FIXED over the subcycle
+            # (zhup2_e = hu_0, :478-482) — no
+            # extrapolation, hence the `not linear_free_surface` gate.  The
+            # ll_init ramp rows have za=(1,0,0) ⇒ eta_mid == eta_c on the
+            # first two substeps (NEMO-exact, :535-538).
+            eta_mid = za_i[0] * eta_c + za_i[1] * etab_c + za_i[2] * etabb_c
+            if _face_depth_mode == "nemo_ssh_avg":
+                H_u_flux, H_v_flux = _ssh_avg_face_depths(eta_mid)
+            else:
+                H_total_mid = jnp.maximum(eta_mid + H_bathy, min_water_col) * mask
+                H_u_flux, H_v_flux = _face_depths(H_total_mid)
+        else:
+            H_u_flux, H_v_flux = H_u, H_v
+        flux_u = H_u_flux * U_mid * u_mask
+        flux_v = H_v_flux * V_mid * v_mask
 
         # Accumulate transport (always box-filtered for volume conservation)
         Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
@@ -627,8 +766,27 @@ def _run_substep_loop(
             _cor_u = _cor_u_een
         else:
             _cor_u = f_u * V_at_u
+        # NEMO dyn_drg in-subcycle explicit bottom stress (#1226;
+        # dynspg_ts.F90:701-705, the .NOT.ll_wd branch — DINO's active path;
+        # the implicit division at :764-768 is wetting-drying-only, ll_wd=F
+        # for DINO):
+        #   zu_trd += zCdU_u * un_e * hur_e ;  ua_e = un_e + rDt_e*(spg+trd+frc)
+        # zCdU_u = -r_eff (NEMO rCdU_bot <= 0; lego r_eff >= 0), un_e = the
+        # substep-START velocity (NEMO uses un_e here even in AB3 mode, NOT
+        # the mid-step extrapolation), hur_e = 1/(u-face column depth at
+        # substep level jn) — H_u/H_v of the carry eta, computed above per
+        # ``barotropic_face_depth`` (NEMO updates hu_e per substep from the
+        # fresh ssh the same way, dynspg_ts.F90:771-778).
+        # SIGN (positive-r damping convention): dU/dt += -r_eff*U/H opposes
+        # U_bar — strictly reduces |U_bar| (drag can never accelerate).
+        # Static Python gate (drag_r_u is a closure capture) — no traced
+        # control flow, carry unchanged, off ⇒ byte-identical.
+        if drag_r_u is not None:
+            _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
+        else:
+            _drag_u = 0.0
         U_bar_new = (U_bar_c + dt_s * (
-            _cor_u - g * deta_dx + F_slow_u
+            _cor_u + _drag_u - g * deta_dx + F_slow_u
         )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
@@ -648,8 +806,14 @@ def _run_substep_loop(
             _cor_v = _cor_v_een
         else:
             _cor_v = -f_v * U_new_at_v
+        # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
+        # substep-START velocity + carry-eta face depth as the u-drag above.
+        if drag_r_v is not None:
+            _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
+        else:
+            _drag_v = 0.0
         V_bar_new = (V_bar_c + dt_s * (
-            _cor_v - g * deta_dy + F_slow_v
+            _cor_v + _drag_v - g * deta_dy + F_slow_v
         )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
@@ -667,16 +831,23 @@ def _run_substep_loop(
                 V_bar_new + div_damp_coeff * div_damp_area_v * grad_div_y
             ) * v_mask
 
-        # Bottom drag — SINGLE OWNER (finding #6 fix).
-        # The 3D PE tendency (``_bc_bottom_drag``) already applies the full
-        # bottom drag ``-r·u_bot/h_bot`` (with BBL / partial-cell handling) to
-        # ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the barotropic
-        # mode through ``F_slow_u``/``F_slow_v`` and applied at every substep
-        # above.  Re-applying ``implicit_bottom_drag_factor`` here would make the
-        # effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2 finding #1).
-        # The drag is therefore owned exclusively by the 3D tendency / F_slow;
-        # we do NOT re-apply it here.  (The implicit-CN solver already relied on
-        # F_slow alone, so the two barotropic paths are now consistent.)
+        # Bottom drag — TWO mutually-exclusive compositions (single owner per
+        # config; finding #6 + #1226 dyn_drg):
+        # * ``barotropic_drag_substep=False`` (default): the 3D PE tendency
+        #   (``_bc_bottom_drag``) applies the full bottom drag ``-r·u_bot/h_bot``
+        #   to ``du_dt``; its depth-mean ``-r·u_bot/H`` is carried into the
+        #   barotropic mode through ``F_slow_u``/``F_slow_v`` at every substep
+        #   above.  Re-applying ``implicit_bottom_drag_factor`` here would make
+        #   the effective barotropic-mode drag ``≈ 2·r/H`` (codex iter-2
+        #   finding #1) — so no in-loop drag on this path.  (The implicit-CN
+        #   solver relies on F_slow alone the same way.)
+        # * ``barotropic_drag_substep=True`` (requires ``zdf_drag_in_matrix``,
+        #   which SKIPS ``_bc_bottom_drag`` — so F_slow carries no drag): the
+        #   NEMO dyn_drg composition instead — the per-substep explicit
+        #   ``-r_eff·U/H`` term applied in the updates above
+        #   (dynspg_ts.F90:701-705) plus the once-per-step ``pu_RHSi``
+        #   baroclinic-residual correction folded into F_slow by the model
+        #   (dynspg_ts.F90:1627-1642).  Exactly one owner in each mode.
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
@@ -1010,16 +1181,60 @@ def barotropic_substeps_latlon_cgrid(
         raise ValueError(
             "unknown barotropic_coriolis scheme "
             f"{_bt_cor!r}: must be one of ('avg', 'een', 'een_metric').")
+    # EEN coefficient seed level (#1226 zero-deviation item 4).  NEMO freezes
+    # the dyn_cor_2D coefficients over the substep window at Kmm=NOW
+    # (dyn_cor_2D_init(Kmm), dynspg_ts.F90:355 + :1349-1379 — every e3u/e3v/
+    # r1_hu/r1_hv at Kmm); lego's legacy "window_start" freezes them at the
+    # integration's OWN seed thickness (h_k — the Nbb eta under the MLF
+    # before-level seed).  "nemo_kmm" selects the NOW thickness (_h_k_corr,
+    # already built for the 3-D depth-mean correction / drag rate) under the
+    # seed override; without an override the two coincide (h_k IS the NOW
+    # thickness) — byte-identical.  Validated here on the static config value
+    # (dispatch hardening, same pattern as barotropic_coriolis above).
+    _een_seed = getattr(config.barotropic, "barotropic_een_seed",
+                        "window_start")
+    if _een_seed not in ("window_start", "nemo_kmm"):
+        raise ValueError(
+            "unknown barotropic_een_seed "
+            f"{_een_seed!r}: must be one of ('window_start', 'nemo_kmm').")
     _een_pre = None
     if _bt_cor in ("een", "een_metric") and add_barotropic_coriolis:
         # "een_metric" (node-16 finale) folds NEMO's e1v/r1_e1u (u) and e2u/
         # r1_e2v (v) horizontal metrics into the EEN coefficients — the factors
         # the per-unit-width "een" operator drops (dynspg_ts.F90:1349-1379).
+        _h_k_een = (_h_k_corr
+                    if (_een_seed == "nemo_kmm" and _seed_override)
+                    else h_k)
         _een_pre = _build_een_barotropic_inputs(
-            h_k, grid, mask, u_mask, v_mask, eta.dtype,
+            _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
             metric_complete=(_bt_cor == "een_metric"))
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
+
+    # NEMO dyn_drg_init barotropic drag coefficient (#1226;
+    # dynspg_ts.F90:1614-1618, bottom-only branch — DINO has ln_isfcav=F,
+    # ln_drgice_imp=F):
+    #   pCdU_u(ji,jj) = r1_2*( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) )
+    # Computed ONCE per baroclinic step (frozen across substeps, exactly like
+    # NEMO's zCdU_u closure over the DO jn loop) from the NOW 3-D velocity
+    # (zdfdrg's rCdU_bot level).  ``nemo_bottom_drag_rate_faces`` IS that
+    # same 0.5-average-at-faces transcription in lego's positive-r
+    # convention (``r_eff = -pCdU >= 0``) — shared helper, never re-derived.
+    # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
+    # is not built ⇒ byte-identical.
+    _drag_r_u = _drag_r_v = None
+    if getattr(config, "barotropic_drag_substep", False):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            nemo_bottom_drag_rate_faces,
+        )
+        # NOW-level thickness for the rate (the MLF seed override re-seeds
+        # only the fast integration; the drag coef stays at NOW like NEMO's
+        # zdfdrg rCdU_bot).
+        _hk_now = _h_k_corr if _seed_override else h_k
+        _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
+            u_corr, v_corr, _hk_now, z_coord, config, grid)
+        _drag_r_u = _r_u_bt.astype(_dt)
+        _drag_r_v = _r_v_bt.astype(_dt)
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
@@ -1068,6 +1283,7 @@ def barotropic_substeps_latlon_cgrid(
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
         ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
         een_pre=_een_pre,
+        drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
     )
     (eta_f, U_bar_f, V_bar_f,
      Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = _finals[:8]
@@ -1235,6 +1451,12 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
             "barotropic_coriolis='een'/'een_metric' is not wired into the "
             "wide-halo barotropic path (the EEN precompute would need the "
             "extended band); use the standard split-explicit path or 'avg'.")
+    if getattr(config, "barotropic_drag_substep", False):
+        raise NotImplementedError(
+            "barotropic_drag_substep=True is not wired into the wide-halo "
+            "barotropic path (the drag-rate faces would need widening to the "
+            "extended band); use the standard split-explicit path or disable "
+            "barotropic_wide_halo.")
 
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data

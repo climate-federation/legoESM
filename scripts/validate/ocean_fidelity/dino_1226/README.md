@@ -29,3 +29,13 @@ model's own wet cells — NO cross-model mask). SSH small-scale ratio = std of
 (field - 5pt boxcar) over wet cells, lego/NEMO. Current: lego ACC 14.5 Sv vs
 NEMO 69.1; SSH ratio 0.51. `dino_year5_compare.py` = the 9-panel climate
 comparison (edit paths at top; written for the year-5 pair).
+
+## Twin instruments (promoted 2026-07-24)
+- `kamm_twin_90d.py` — state-initialized 90-day twin runner (recipe, out.npz, `--days`, `--save-3d`). HARD day-0 gate: lego state must equal the NEMO restart bit-exactly on wet cells AND be non-rest — a silent rest-start "twin" is impossible (see WARNING below).
+- `heat_discriminator.py` — redistribution-vs-heat-loss discriminator: drift-by-level profiles, X-crossing depth, heat-content series (2026-07-24 finding: crossing ~88 m → TKE entrainment suspect for the SST cool bias).
+- `mode_projection.py` — shared checkerboard projector (build_checkerboard_projector / project); use this, don't re-derive P.
+
+### WARNINGS (instrument-trap ledger)
+- **Twin-initialization defect (resolved 2026-07-24):** the historical scratchpad twin runner bridged the NEMO restart for TOPOGRAPHY ONLY and silently ran from the analytic rest IC while claiming "twin from developed NEMO state". All pre-2026-07-24 twin amplitude/comparison results are rest-start artifacts (see #1226). `kamm_twin_90d.py`'s day-0 gate exists to make this class of error impossible.
+- **Never compare lego tendencies to raw NEMO trddyn terms**: NEMO's vtrd_zdf is ~98.6% barotropic-strip bookkeeping (−vv_b(Kaa)/rDt inside the capture window, dynzdf.F90:148-152/526-528); subtract it (or add lego-side bookkeeping) first. Same trap family as KEG bundling.
+- NEMO daily-restart runs (nn_stock=32) crash on NFS — run on local disk.

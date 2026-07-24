@@ -157,9 +157,48 @@ class TestDINOConfig:
             dino._dino_vertical_mixing_config(
                 dataclasses.replace(cfg, vmix_scheme="bogus"))
 
+    def test_tke_etau_htau_mode_is_latitude_and_matches_nemo_profile(self):
+        """DINO's TKE closure uses the NEMO nn_htau=1 LATITUDE sub-ML
+        penetration-depth profile (namelist_ref default, unoverridden by DINO's
+        namelist_cfg), not the constant10m (nn_htau=0) profile a prior card
+        used — see the etau_htau_mode="latitude" comment in
+        _dino_vertical_mixing_config. Pins both the config wiring and the
+        exact numeric htau(lat) NEMO formula (zdftke.F90:870):
+            htau = max(0.5, min(30, 45*|sin(deg2rad(lat))|))  [m]
+        at lat=0 (floor), lat=45 (ceiling), and a mid-latitude value — by
+        back-solving nemo_etau_injection() (the real production function),
+        not a re-derived formula."""
+        import dataclasses
+        from legoesm.ocean.physics.vertical_mixing.tke import nemo_etau_injection
+
+        cfg = dataclasses.replace(DINOConfig(), vmix_scheme="tke")
+        vm = dino._dino_vertical_mixing_config(cfg)
+        assert vm.tke.etau_htau_mode == "latitude"
+        assert vm.tke.etau_mode == "below_ml"
+
+        expected_20 = 45.0 * math.sin(math.radians(20.0))
+        assert expected_20 == pytest.approx(15.390906449655093, abs=1e-9)
+
+        # Recover the htau the closure actually applies at each latitude by
+        # back-solving inj = etau_frac*e_sfc*exp(-depth_w/htau): evaluate the
+        # injection at depth_w=0 (isolates etau_frac*e_sfc) and at depth_w=100
+        # (adds the exp factor), then invert for htau — exercises the real
+        # nemo_etau_injection() call the TKE column uses, no re-derivation.
+        e0 = jnp.zeros((1,))
+        taum = jnp.asarray([1.0])
+        for lat_deg, expected_htau in ((0.0, 0.5), (45.0, 30.0), (20.0, expected_20)):
+            lat = jnp.asarray([lat_deg])
+            inj0 = nemo_etau_injection(e0, taum, jnp.asarray([0.0]), vm.tke, lat_deg=lat)
+            inj100 = nemo_etau_injection(e0, taum, jnp.asarray([100.0]), vm.tke, lat_deg=lat)
+            recovered_htau = float(-100.0 / jnp.log(inj100[0, 0] / inj0[0, 0]))
+            assert recovered_htau == pytest.approx(expected_htau, rel=0, abs=1e-10), (
+                f"lat={lat_deg}: htau={recovered_htau} != expected {expected_htau}")
+
     def test_tke_prandtl_ri_maps_nemo_nn_pdl(self):
         """DINOConfig.tke_prandtl_ri=True wires the NEMO zdftke nn_pdl=1
-        Richardson Prandtl: prandtl_mode='richardson' with coeff=1/ri_cri,
+        Richardson Prandtl: prandtl_mode='nemo_ri' (Phase-2 #1317 T8 — NEMO's
+        EXACT zri=rn2b*avm/(sh2+bshear) form, not Veros's own "richardson"
+        Ri=N2/shear_sq, which is missing the avm factor) with coeff=1/ri_cri,
         ri_cri=2/(2+c_eps/c_k)=2/9 -> coeff=4.5. Default False keeps Pr=10
         constant (other recipes byte-identical). Truth-tier: in a strongly
         stratified column (Ri>>ri_cri) the tracer avt drops to 0.1*avm (NEMO
@@ -178,7 +217,7 @@ class TestDINOConfig:
         vm_on = dino._dino_vertical_mixing_config(
             dataclasses.replace(cfg, vmix_scheme="tke", tke_prandtl_ri=True))
         tke = vm_on.tke
-        assert tke.prandtl_mode == "richardson"
+        assert tke.prandtl_mode == "nemo_ri"
         ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)          # NEMO 2/9
         assert tke.prandtl_ri_coeff == pytest.approx(1.0 / ri_cri)
         assert tke.prandtl_ri_coeff == pytest.approx(4.5)
@@ -209,7 +248,7 @@ class TestDINOConfig:
         cfg = dino_config_for_recipe("nemo_dino_kamm")
         assert cfg.tke_prandtl_ri is True
         vm = dino._dino_vertical_mixing_config(cfg)
-        assert vm.tke.prandtl_mode == "richardson"
+        assert vm.tke.prandtl_mode == "nemo_ri"
         assert vm.tke.prandtl_ri_coeff == pytest.approx(4.5)
         # Backward-compat: the Veros DINO card keeps constant Pr.
         assert dino_config_for_recipe("veros").tke_prandtl_ri is False
@@ -304,6 +343,25 @@ class TestDINORecipes:
             # p' quadrature on the exact gdept ladder.
             "pgf_scheme": "nemo_sco",
             "pgf_quadrature": "nemo_trapezoid",
+            # dynzdf composition (#1226): namdrg ref default ln_drgimp=.true.
+            # (DINO's &namdrg override sets only ln_non_lin) -- the full
+            # NEMO-faithful drag composition is now ON: zdf_drag_in_matrix
+            # (implicit diagonal, dynzdf.F90:293-305) + zdf_baroclinic_only
+            # (barotropic mean removed from the 3-D solve, dynzdf.F90:147-171)
+            # + barotropic_drag_substep (in-subcycle explicit drag + pu_RHSi
+            # correction, dyn_drg, dynspg_ts.F90:700-706 + 1584-1642). See
+            # the comment at DINO_RECIPES["nemo_dino_kamm"] in dino.py.
+            "zdf_drag_in_matrix": True,
+            "zdf_baroclinic_only": True,
+            "barotropic_drag_substep": True,
+            # NEMO dynspg_ts has no eta-diffusion term; alpha=0 is the
+            # NEMO-true composition (see dino.py card comment).
+            "barotropic_diffusion_alpha": 0.0,
+            # Zero-deviation item 2 (#1226): NEMO zhup2_e/zhvp2_e ssh-average
+            # face depths (dynspg_ts.F90:568-592), pair-consistent with the
+            # tracer continuity; conservation gate
+            # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate.
+            "barotropic_face_depth": "nemo_ssh_avg",
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -312,6 +370,84 @@ class TestDINORecipes:
         # dict of values.
         grid = dino_lat_lon_grid(c, n_lon=10)
         dino_lat_lon_model_config(grid, c, physics=True)
+
+    def test_kamm_cards_propagate_zdf_flags_to_model_config(self):
+        # #1226: the full NEMO-faithful drag composition (zdf_drag_in_matrix +
+        # zdf_baroclinic_only + barotropic_drag_substep) is ON for BOTH kamm
+        # cards (MLF inherits from the base nemo_dino_kamm dict — see
+        # DINO_RECIPES["nemo_dino_kamm_mlf"]), together with alpha=0 (no NEMO
+        # eta-diffusion counterpart) and face_depth="nemo_ssh_avg" (zero-
+        # deviation item 2, pair-consistent with the tracer continuity;
+        # conservation gate test_partial_cells_phase7.py::
+        # TestNemoSshAvgFaceDepthGate — see the dino.py card comment).
+        # Assert these propagate through to the model config unchanged on both.
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            c = dino_config_for_recipe(recipe)
+            assert c.zdf_drag_in_matrix is True, recipe
+            assert c.zdf_baroclinic_only is True, recipe
+            assert c.barotropic_drag_substep is True, recipe
+            assert c.barotropic_diffusion_alpha == 0.0, recipe
+            assert c.barotropic_face_depth == "nemo_ssh_avg", recipe
+            grid = dino_lat_lon_grid(c, n_lon=10)
+            mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
+            assert mc.zdf_drag_in_matrix is True, recipe
+            assert mc.zdf_baroclinic_only is True, recipe
+            assert mc.barotropic_drag_substep is True, recipe
+            assert mc.barotropic.barotropic_diffusion_alpha == 0.0, recipe
+            assert mc.barotropic.barotropic_face_depth == "nemo_ssh_avg", recipe
+
+    def test_zdf_flags_default_false_on_other_recipes(self):
+        # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
+        # nemo_paper) must NOT silently pick up NEMO's dynzdf composition —
+        # it is namelist-specific, not a legoESM-wide default.
+        for recipe in ("legoesm_default", "nemo_paper", "veros", "mitgcm",
+                       "oceananigans"):
+            c = dino_config_for_recipe(recipe)
+            assert c.zdf_drag_in_matrix is False, recipe
+            assert c.zdf_baroclinic_only is False, recipe
+            assert c.barotropic_drag_substep is False, recipe
+            # #1226: alpha=0 is a kamm-only override; every other recipe
+            # keeps the legoESM 2Δx stability-crutch default (0.01).
+            assert c.barotropic_diffusion_alpha == 0.01, recipe
+            # #1226: nemo_ssh_avg face depths are a kamm-only override; every
+            # other recipe keeps the bit-identical min-rule default.
+            assert c.barotropic_face_depth == "min_rule", recipe
+
+    def test_barotropic_forcing_centred_mlf_card_only(self):
+        # #1226 zero-deviation item 3 (NEMO ln_bt_fw=.FALSE. centred
+        # barotropic wind/emp forcing, dynspg_ts.F90:392-421 + the Kbb drag
+        # residual :1623-1636): only meaningful under the leapfrog outer
+        # integrator, so it lands ONLY on nemo_dino_kamm_mlf -- the FE
+        # nemo_dino_kamm card (ln_bt_fw=T forward branch, already uncentred)
+        # must stay False.
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.barotropic_forcing_centred is True
+        fe = dino_config_for_recipe("nemo_dino_kamm")
+        assert fe.barotropic_forcing_centred is False
+        for recipe in ("legoesm_default", "nemo_paper", "veros", "mitgcm",
+                       "oceananigans"):
+            assert dino_config_for_recipe(recipe).barotropic_forcing_centred is False, recipe
+        # Threads into the model config + actually runs (leapfrog + centred
+        # forcing + the full NEMO drag composition all together).
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.barotropic_forcing_centred is True
+
+    def test_barotropic_een_seed_mlf_card_only(self):
+        # #1226 zero-deviation item 4 (NEMO dyn_cor_2D_init(Kmm) EEN
+        # coefficient seed, dynspg_ts.F90:355 + :1349-1379): only differs
+        # from the legacy window-start freeze under the MLF before-level
+        # seed, so "nemo_kmm" lands ONLY on nemo_dino_kamm_mlf; every other
+        # recipe keeps the bit-identical "window_start" default.
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.barotropic_een_seed == "nemo_kmm"
+        for recipe in ("nemo_dino_kamm", "legoesm_default", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            assert (dino_config_for_recipe(recipe).barotropic_een_seed
+                    == "window_start"), recipe
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.barotropic.barotropic_een_seed == "nemo_kmm"
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
