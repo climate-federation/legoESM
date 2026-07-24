@@ -52,14 +52,17 @@ def _ring(n):
     return [(i, (i + 1) % n) for i in range(n)]
 
 
-def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters):
-    """Median wall time of one ring ppermute of n_elem elements per device."""
+def _build(mesh, n_dev, n_reps):
+    """jit'd program doing n_reps back-to-back ring ppermutes on device."""
     perm = _ring(n_dev)
 
     @jax.jit
     def run(x):
         def body(xl):
-            return jax.lax.ppermute(xl, axis_name=AXIS, perm=perm)
+            def one(_, v):
+                return jax.lax.ppermute(v, axis_name=AXIS, perm=perm)
+
+            return jax.lax.fori_loop(0, n_reps, one, xl)
 
         # check_vma is the current spelling of the old check_rep (matches
         # sharded_dynamics.py); fall back for older JAX.
@@ -71,10 +74,13 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters):
                            out_specs=P(AXIS), check_rep=False)
         return sm(x)
 
-    x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
+    return run
+
+
+def _median_us(run, x, n_warmup, n_iters):
     for _ in range(n_warmup):
-        x2 = run(x)
-    jax.block_until_ready(x2)
+        out = run(x)
+    jax.block_until_ready(out)
     times = []
     for _ in range(n_iters):
         t0 = time.perf_counter_ns()
@@ -82,6 +88,27 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters):
         jax.block_until_ready(out)
         times.append((time.perf_counter_ns() - t0) / 1e3)   # us
     return statistics.median(times)
+
+
+def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64):
+    """Per-ppermute time with HOST DISPATCH SUBTRACTED.
+
+    A single jit call per exchange measures dispatch + launch + wire, and on
+    this stack dispatch DOMINATES (287-518 us intercepts on A100 NVLink/IB —
+    two orders above the wire latency those fabrics actually have). Timing
+    1 rep and ``n_reps`` reps of the same program and taking the difference
+    cancels the constant per-call overhead:
+
+        t_per_exchange = (t[n_reps] - t[1]) / (n_reps - 1)
+
+    Returns (per_exchange_us, single_call_us) so the contaminated number
+    stays visible alongside the corrected one.
+    """
+    x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
+    t1 = _median_us(_build(mesh, n_dev, 1), x, n_warmup, n_iters)
+    tn = _median_us(_build(mesh, n_dev, n_reps), x, n_warmup, n_iters)
+    per = (tn - t1) / (n_reps - 1)
+    return per, t1
 
 
 def fit_latency_bandwidth(sizes_bytes, times_us):
@@ -107,6 +134,10 @@ def main() -> int:
     p.add_argument("--dtype", choices=["float32", "float64"], default="float32")
     p.add_argument("--n-warmup", type=int, default=5)
     p.add_argument("--n-iters", type=int, default=50)
+    p.add_argument("--n-reps", type=int, default=64,
+                   help="Back-to-back ppermutes inside ONE jit call; the "
+                        "1-rep vs n-rep difference cancels host dispatch, "
+                        "which otherwise dominates the intercept.")
     p.add_argument("--out", default=None, help="Append one JSON line here.")
     args = p.parse_args()
 
@@ -130,12 +161,15 @@ def main() -> int:
     # Sweep from a latency-dominated message to a bandwidth-dominated one.
     elems = [1 << k for k in range(6, 23)]      # 64 .. 4M elements/device
     rows = []
+    dispatch_us = []
     for n_elem in elems:
-        t_us = time_one(mesh, n_dev, n_elem, dtype,
-                        args.n_warmup, args.n_iters)
+        t_us, t_single = time_one(mesh, n_dev, n_elem, dtype,
+                                  args.n_warmup, args.n_iters, args.n_reps)
         rows.append((n_elem * itemsize, t_us))
+        dispatch_us.append(t_single)
         if jax.process_index() == 0:
-            print(f"  {n_elem * itemsize / 1024:10.1f} KiB  {t_us:9.2f} us",
+            print(f"  {n_elem * itemsize / 1024:10.1f} KiB  {t_us:9.2f} us "
+                  f"(single-call {t_single:8.1f} us incl. dispatch)",
                   flush=True)
 
     # Latency from the SMALL-message end (where bytes/bandwidth is
@@ -160,11 +194,18 @@ def main() -> int:
         "backend": jax.default_backend(),
         "latency_us": round(lat_us, 3),
         "bandwidth_gbs": round(bw_gbs, 2),
+        "n_reps": args.n_reps,
+        "dispatch_us_median": round(float(np.median(dispatch_us)), 2),
+        "dispatch_subtracted": True,
         "sweep": [{"bytes": b, "median_us": round(t, 3)} for b, t in rows],
-        "note": ("latency = median of messages <=64 KiB (latency-dominated); "
-                 "bandwidth = slope fit over messages >=256 KiB. Feed to the "
-                 "SPMD benches via --comm-latency-us / --comm-bandwidth-gbs "
-                 "so t_bound is calibrated for THIS lane."),
+        "note": ("Per-exchange times have HOST DISPATCH SUBTRACTED via the "
+                 "1-rep vs n-rep difference; dispatch_us_median is the "
+                 "single-call overhead that was removed (it dominated the "
+                 "raw intercept). latency = median of messages <=64 KiB; "
+                 "bandwidth = slope fit over messages >=256 KiB. Feed to "
+                 "the SPMD benches via --comm-latency-us / "
+                 "--comm-bandwidth-gbs so t_bound is calibrated for THIS "
+                 "lane."),
     }
     if jax.process_index() == 0:
         print(json.dumps(rec))
