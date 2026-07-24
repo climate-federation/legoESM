@@ -534,14 +534,22 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
-    # require_full_coverage=True: lat edges clamped to the pole above and the
-    # one-sided ghost column (added when the ~360 deg source under-reaches the
-    # target seam) closes the lon wrap, so any residual deficit is a real
-    # partial-coverage source -> raise loudly. Host-side; no AD/JIT impact.
+    # require_full_coverage is deliberately NOT set here -- same reason as
+    # ocean/coupler/omip2_applicator.py (see the long note there).  The flag was
+    # added on the premise that a pole-clamped lat edge makes any residual
+    # deficit a bug; that is FALSE for a source whose outermost latitude row does
+    # not reach +-90.  JRA55-do is Gaussian (outermost centre ~+-89.57 deg), so a
+    # destination cell in the polar ROW legitimately extends past the last source
+    # cell.  The equivalent real-forcing smoke test on CORE-II (job 9176233, span
+    # +-88.542 deg) raised at EVERY production target resolution and would have
+    # aborted preprocessing; JRA55 has the same geometry, and no cached JRA55 was
+    # available here to prove otherwise, so the flag is not enabled on faith.
+    # The pole-clamp above is KEPT: it still prevents a rounding-induced edge from
+    # spilling past +-90 (a real defect).  The conservative remap handles the
+    # genuine polar gap correctly by averaging the source that does overlap.
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         target_lat_edges, config.target_lon_edges,
-        require_full_coverage=True,
     )
 
     # Allocate output arrays on the cache axis.

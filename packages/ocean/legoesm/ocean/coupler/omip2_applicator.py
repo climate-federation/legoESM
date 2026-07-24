@@ -199,15 +199,24 @@ def _conservative_regrid_to_latlon(
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
-        # require_full_coverage=True: lat edges are clamped to [-pi/2, pi/2]
-        # above and the ghost columns close the lon seam, so any residual
-        # coverage deficit is a BUG (e.g. a genuinely non-global source) ->
-        # raise loudly instead of silently under-covering. Host-side check on
-        # the static weights; no AD/JIT impact.
+        # require_full_coverage is deliberately NOT set here.  It was enabled in
+        # the M8 hardening on the premise that "lat edges are clamped to the pole
+        # so any residual deficit is a BUG" -- that premise is FALSE for a
+        # genuinely non-polar source.  The real CORE-II NYF forcing spans
+        # +-88.542 deg (94 Gaussian-ish rows), so a destination cell in the polar
+        # ROW legitimately extends past the last source cell and its weights sum
+        # to < 1.  A real-forcing smoke test (job 9176233) showed the flag raising
+        # on EVERY production target resolution -- 18x36, 60x120 and 90x180, worst
+        # |sum-1| = 6.6e-2, always in lat-row 0 or n_lat-1 -- i.e. it would ABORT
+        # production OMIP preprocessing.  The polar deficit is physical (no data
+        # north of 88.5 deg), not a seam/ghost defect: it persists at dd/ds ~ 1.1
+        # where the ghost logic is irrelevant.  The conservative remap already
+        # does the right thing there (it averages the source that DOES overlap).
+        # The ceil(dd/ds) ghost padding above is kept -- that fix is correct and
+        # closes the genuine 0/360 seam deficit.
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
-            require_full_coverage=True,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
     # Ghost-column count matches the weight build below (width ratio, NOT

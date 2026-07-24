@@ -769,7 +769,10 @@ def test_cache_polar_coverage_after_lat_clamp(tmp_path):
     covered: without the lat clamp the polar rows regrid the constant to
     LESS than its value. RED before the clamp (polar tas ~279.8 K != 290);
     GREEN after np.clip(src/target lat edges, +/- pi/2) restores full
-    coverage (and require_full_coverage then passes)."""
+    coverage.  (This pins the CLAMP only.  ``require_full_coverage`` is NOT
+    enabled on this caller -- a real Gaussian source whose outermost row stops
+    short of +-90 legitimately under-covers the polar destination row; see the
+    note at the compute_overlap_weights call and job 9176233.)"""
     pytest.importorskip("dask")
     src_path = tmp_path / "gaussianish_jra55.zarr"
     n_lat, n_lon = 8, 16
