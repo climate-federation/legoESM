@@ -524,34 +524,49 @@ def make_sharded_ocean_step(model, mesh):
         # area-scale fields differing at 1e-7 relative). Broadcast process
         # 0's bytes so every controller puts the SAME replicated value.
         # GUARD (codex round-3): process 0 must not silently mask REAL
-        # cross-process divergence. Compare an allgathered fingerprint with
-        # a TOLERANCE (quantize-then-assert-equal false-positived on a
-        # rounding-boundary straddle, job 26453240): structural entries
-        # exactly, value entries to rtol 1e-5 — ULP drift passes, a wrong
-        # mask/grid/config (>=1e-4 relative) refuses loudly.
+        # cross-process divergence. Compare an allgathered fingerprint:
+        # structural entries exactly; value entries EXACTLY for integer/bool
+        # arrays (masks are comparison results — bit-reproducible, and an
+        # exact compare is the only way to catch a two-cell flip that cancels
+        # in the sum, codex round-4) and to rtol 1e-5 for float arrays (only
+        # ULP autotune drift is expected there; quantize-then-assert-equal
+        # false-positived on a rounding boundary, job 26453240).
+        # NO DEADLOCK RISK: every process fingerprints the same fields in the
+        # same order and derives the verdict from the SAME gathered array, so
+        # the refusal is symmetric — all raise or none.
+        # Residual (documented): a float-geometry divergence preserving sum,
+        # sum-of-squares AND absmax to 1e-5 is not detected; band grids are
+        # analytic in lat/lon, so any real inconsistency moves those moments.
         host = np.asarray(arr)
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
 
             flat = host.ravel()
-            finite = flat[np.isfinite(flat)]
+            is_exact = host.dtype.kind in "biu"
+            finite = flat if is_exact else flat[np.isfinite(flat)]
             struct = np.array(
                 [float(host.ndim), *map(float, host.shape),
                  float(np.dtype(host.dtype).num),
                  float(flat.size - finite.size)], dtype=np.float64)
+            f64 = finite.astype(np.float64)
             vals = np.array(
-                [float(finite.sum()) if finite.size else 0.0,
-                 float(np.abs(finite).max()) if finite.size else 0.0],
+                [float(f64.sum()) if f64.size else 0.0,
+                 float((f64 * f64).sum()) if f64.size else 0.0,
+                 float(np.abs(f64).max()) if f64.size else 0.0],
                 dtype=np.float64)
             g_struct = multihost_utils.process_allgather(struct)
             g_vals = multihost_utils.process_allgather(vals)
             struct_ok = bool(np.all(g_struct == g_struct[0]))
-            vals_ok = bool(np.allclose(g_vals, g_vals[0], rtol=1e-5, atol=0.0))
+            if is_exact:
+                vals_ok = bool(np.all(g_vals == g_vals[0]))
+            else:
+                vals_ok = bool(np.allclose(g_vals, g_vals[0],
+                                           rtol=1e-5, atol=0.0))
             if not (struct_ok and vals_ok):
                 raise RuntimeError(
                     f"make_sharded_ocean_step: band-geometry field {name!r} "
-                    f"DIVERGES across processes beyond ULP tolerance "
-                    f"(struct_ok={struct_ok}, vals_ok={vals_ok}, "
+                    f"DIVERGES across processes (struct_ok={struct_ok}, "
+                    f"vals_ok={vals_ok}, exact_dtype={is_exact}, "
                     f"gathered={g_vals.tolist()}) — a real config/grid "
                     f"inconsistency, not autotune noise; refusing to "
                     f"broadcast process 0 over it.")

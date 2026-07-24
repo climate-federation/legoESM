@@ -20,6 +20,7 @@ route-A CUDA-aware mpi4jax not exercised on Levante).
 |---|---|---|---|
 | Atm lat-lon LL720×1440 L26 | 4→8→16 A100 (1→4 nodes) | 7.72→5.40→3.54 ms/step, monotone; np16 = 7.6 GC/s (477 Mc/s/GPU sustained) | 26450848/26453240/26449147 |
 | Atm MPAS ico L8 (28 km) L26 | 6→16 A100 | 8.66→7.08 ms/step; np16 = 2.41 GC/s — 1.6× Derecho's matched-grid 16-A100 aggregate | 26453240/26449147 |
+| **Atm cube C768/L60 (same-path cs-spmd)** | 6→24 A100 | 58.35→14.09 ms/step = **4.14× = eff 1.04 (IDEAL)**, 15.1 GC/s (629 Mc/s/GPU) | 26453782 |
 | Atm cube C384/L60 (same-path cs-spmd) | 6→24 A100 | 15.44→8.81 ms/step = 1.75× (eff 0.44), 6.0 GC/s | 26452894 |
 | Atm cube C192/L60 (same-path) | 6→24 | 6.20→6.80 ms — ANTI-scales (eff 0.23): 9.2k cols/GPU is below the ~30k-column floor | 26452979 |
 | Ocean lat-lon LL576×1152 L20, production implicit | 4→8→16 | 15.6→17.2→17.4 ms — anti-scales across nodes | 26452743-45 |
@@ -28,6 +29,19 @@ route-A CUDA-aware mpi4jax not exercised on Levante).
 
 Single-node GPU (job 26445836): cube C192 gray_sbm strong eff 0.84–1.07
 (1→3 A100); C48/C96 latency-floored. Ocean single-node solver ladder: below.
+
+**THE cube strong-scaling result** (same code path, harness, config, IC;
+only the tile size varies — jobs 26452979/26452894/26453782): 6→24 GPU
+speedup 0.91× / 1.75× / 4.14× at 9.2k / 36.9k / 147k columns per GPU. The
+"poor cube strong scaling" of the earlier receipts is ENTIRELY the
+per-device saturation floor at undersized tiles, not a communication
+defect: at production tiles the cube scales IDEALLY to 24 A100 across 6
+nodes. Production rule confirmed: keep ≳30k columns/GPU.
+
+Tiled-lane size sweep at fixed 24 GPUs (own bench, closed loop, CFL-scaled
+dt; jobs 26450938/26452632/26453645): 1.87 / 5.89 / 14.34 GCells/s at
+C192/C384/C768 = 78 / 246 / 597 Mc/s per GPU — per-device throughput still
+climbing at 8.85M cells/GPU, so an A100 is not saturated even there.
 
 ## Ocean strong-scaling: bottleneck → fix (the campaign's improvement arc)
 
@@ -151,8 +165,9 @@ only if revisited).
    benches.
 2. ATM weak-scaling ladders at production per-device sizes (ocean done,
    job 26453523 above).
-3. Cube C768-class tiled run (36.9k cols/GPU at 24 was eff 0.44 right AT
-   the floor; bigger grids should climb toward the latlon curve).
+3. DONE (job 26453782/26453645): C768 same-path 6→24 eff 1.04, tiled
+   closed loop 14.3 GCells/s. Next size point C1152+ only if a science
+   driver needs it.
 4. Diagnosis halo/overlap phase fix (defect 9) + calibrated t_bound lines
    on every plot from a dependency-matched comm microbenchmark.
 5. CPU spread ladders + Milan np16 NUMA anomaly attribution.
