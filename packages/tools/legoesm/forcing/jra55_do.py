@@ -509,11 +509,13 @@ def build_jra55_cache(
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
-    # Clamp src/target lat edges into [-pi/2, pi/2]: uniform-spacing edge
-    # inference from Gaussian JRA55 latitudes lands the outer edge off the
-    # pole (its sin caps below 1), which would falsely trip
-    # require_full_coverage on legitimate data. The clamp is MANDATORY for
-    # the coverage flag below. _grid_edges_from_centers returns RADIANS.
+    # Clamp src/target lat edges into [-pi/2, pi/2]: for a COARSE source the
+    # uniform-spacing edge inference can overshoot the pole (the 8-row test
+    # fixture's 86 deg outer centre lands at ~98 deg), where sin() caps below 1
+    # and leaves a spurious polar gap -- the polar rows would then regrid a
+    # constant to LESS than its value.  INERT on real TL319 JRA55-do, whose
+    # inferred outer edge is ~+-89.85 deg; kept as a cheap guard for coarse or
+    # irregular inputs.  _grid_edges_from_centers returns RADIANS.
     src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
     target_lat_edges = np.clip(config.target_lat_edges, -np.pi / 2, np.pi / 2)
 
@@ -534,19 +536,11 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
-    # require_full_coverage is deliberately NOT set here -- same reason as
-    # ocean/coupler/omip2_applicator.py (see the long note there).  The flag was
-    # added on the premise that a pole-clamped lat edge makes any residual
-    # deficit a bug; that is FALSE for a source whose outermost latitude row does
-    # not reach +-90.  JRA55-do is Gaussian (outermost centre ~+-89.57 deg), so a
-    # destination cell in the polar ROW legitimately extends past the last source
-    # cell.  The equivalent real-forcing smoke test on CORE-II (job 9176233, span
-    # +-88.542 deg) raised at EVERY production target resolution and would have
-    # aborted preprocessing; JRA55 has the same geometry, and no cached JRA55 was
-    # available here to prove otherwise, so the flag is not enabled on faith.
-    # The pole-clamp above is KEPT: it still prevents a rounding-induced edge from
-    # spilling past +-90 (a real defect).  The conservative remap handles the
-    # genuine polar gap correctly by averaging the source that does overlap.
+    # NO require_full_coverage here: JRA55-do is Gaussian (outermost centre
+    # ~+-89.57 deg), so the polar destination row legitimately under-covers --
+    # same reason as the OMIP2 remapper.  Reverted on geometry, not on a
+    # measurement: no cached JRA55 was available to reproduce the CORE-II
+    # failure.  See regrid_polar_coverage_2026-07-24.md
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         target_lat_edges, config.target_lon_edges,

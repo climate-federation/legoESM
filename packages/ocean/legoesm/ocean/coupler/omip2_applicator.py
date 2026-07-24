@@ -137,11 +137,11 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
 _REGRID_WEIGHTS_CACHE: dict = {}
 
 
-def _edges_from_centers_deg(centers_deg, *, periodic: bool = False):
+def _edges_from_centers_deg(centers_deg):
     """Derive uniform-spaced cell edges (radians) from cell centres.
 
-    Assumes the centres are uniformly spaced. ``periodic`` only changes
-    the conventional first / last edge offsets.
+    Assumes the centres are uniformly spaced.  The 0/360 seam is closed by the
+    ghost columns in :func:`_conservative_regrid_to_latlon`, not here.
     """
     c = np.asarray(centers_deg, dtype=np.float64)
     if c.size < 2:
@@ -192,28 +192,21 @@ def _conservative_regrid_to_latlon(
         src_lon_padded = np.concatenate(
             [src_lon[-n_ghost:] - 360.0, src_lon, src_lon[:n_ghost] + 360.0])
         src_lat_edges = _edges_from_centers_deg(src_lat_deg)
-        src_lon_edges = _edges_from_centers_deg(src_lon_padded, periodic=True)
+        src_lon_edges = _edges_from_centers_deg(src_lon_padded)
         dst_lat_edges = _edges_from_centers_deg(dst_lat_deg)
-        dst_lon_edges = _edges_from_centers_deg(dst_lon_deg, periodic=True)
+        dst_lon_edges = _edges_from_centers_deg(dst_lon_deg)
         # Clamp lat edges into [-pi/2, pi/2] in case the inferred edge
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
-        # require_full_coverage is deliberately NOT set here.  It was enabled in
-        # the M8 hardening on the premise that "lat edges are clamped to the pole
-        # so any residual deficit is a BUG" -- that premise is FALSE for a
-        # genuinely non-polar source.  The real CORE-II NYF forcing spans
-        # +-88.542 deg (94 Gaussian-ish rows), so a destination cell in the polar
-        # ROW legitimately extends past the last source cell and its weights sum
-        # to < 1.  A real-forcing smoke test (job 9176233) showed the flag raising
-        # on EVERY production target resolution -- 18x36, 60x120 and 90x180, worst
-        # |sum-1| = 6.6e-2, always in lat-row 0 or n_lat-1 -- i.e. it would ABORT
-        # production OMIP preprocessing.  The polar deficit is physical (no data
-        # north of 88.5 deg), not a seam/ghost defect: it persists at dd/ds ~ 1.1
-        # where the ghost logic is irrelevant.  The conservative remap already
-        # does the right thing there (it averages the source that DOES overlap).
-        # The ceil(dd/ds) ghost padding above is kept -- that fix is correct and
-        # closes the genuine 0/360 seam deficit.
+        # NO require_full_coverage here: real forcing sources stop short of the
+        # pole (CORE-II NYF outermost CENTRE +-88.542 deg -> inferred outer EDGE
+        # ~+-89.5 deg; the edge is what sets the deficit), so the polar dst ROW
+        # legitimately under-covers and the flag would ABORT production
+        # preprocessing; the remap averages the source that DOES overlap.  The
+        # clamp above and the ceil(dd/ds) ghosts stay -- they fix real defects
+        # (edge past the pole; 0/360 seam).  Measurements + the deferred
+        # helper-side fix: regrid_polar_coverage_2026-07-24.md
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
