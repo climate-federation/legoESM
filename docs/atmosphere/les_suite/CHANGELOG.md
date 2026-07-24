@@ -184,6 +184,25 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
+**Iter 7 (2026-07-24) — σ_LES aggregator (D7) in the tuner's loss units.**
+- NEW `les_suite/sigma_les.py` (`sigma_les_prognostic`, `SigmaLES`, `SigmaLESError`):
+  aggregates a set of same-case SGS-variant artifacts (the `run_les_suite --sgs` spread
+  ± 2×-resolution) into σ_LES = RMS over ordered variant PAIRS of
+  `score.prognostic_profile_score(truth=A, B-regridded-to-A).combined`. Because it
+  reuses the EXACT normalized weighted-RMSE the SCM tuner scores with, σ_LES is DIRECTLY
+  comparable to a closure's tuned loss and to a Q1b margin — the D7 significance gate
+  ("a margin below σ_LES is not a result") is finally quantifiable. Regrids B→A's
+  heights (so 2×-resolution compares to coarse), requires matched output-time schedules,
+  rejects <2 / mixed-case / moist inputs (loud errors). Pure assembly (no LES, no SCM,
+  no new numerics — reuses `prognostic_truth`/`prognostic_profile_score`/`interp_profile`).
+  Exported from `les_suite/__init__`. Tests: `test_sigma_les.py` (7 — identical→0,
+  θ-only spread isolates σ_θ, pair count, all error paths).
+- WIRED via `scripts/validate/les_suite/compute_sigma_les.py` (loads `{case}__{sgs}.npz`
+  variants + prints σ_LES + per-pair distances + the interpretation). Test:
+  `test_compute_sigma_les.py` (2). NEXT to fully close D7: emit the 3 SGS variants (GPU)
+  + the 2×-resolution runs, run this driver, then gate the Q1b margins / Q3 spread on the
+  resulting σ_LES in `build_les_scorecard`.
+
 **Iter 6 (2026-07-24) — `--sgs` selector in `run_les_suite` (D7 σ_LES enabler).**
 - `run_les_suite.py` gains `_sgs_les_config(sgs)` + a `--sgs` flag: emit the dry-CBL
   with any of the case's `sgs_variants` — `lasd` (scale-dependent dynamic Smagorinsky),

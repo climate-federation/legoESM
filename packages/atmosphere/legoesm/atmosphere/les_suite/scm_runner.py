@@ -180,6 +180,25 @@ def scm_final_theta_on(
     return theta_eval, u_eval, v_eval
 
 
+def final_prognostic_truth(artifact: LESReferenceArtifact, z_eval) -> LESTruth:
+    """The single-time LES prognostic truth at the artifact's LAST output time, on the
+    ``z_eval`` grid. This is the exact target :func:`scm_les_final_loss` scores against
+    (the derivative-free tuner's objective); factored so σ_LES scores the SAME final
+    snapshot — otherwise a full-series σ_LES would live on a different loss scale and
+    could not gate the tuned-loss margins (D7)."""
+    truth_series = prognostic_truth(artifact)
+    final_truth = LESTruth(
+        case_name=artifact.case_name,
+        heights_m=jnp.asarray(z_eval),
+        times_s=jnp.asarray(truth_series.times_s)[-1][None],
+        theta=jnp.asarray(truth_series.theta)[-1],
+        u=jnp.asarray(truth_series.u)[-1],
+        v=jnp.asarray(truth_series.v)[-1],
+        wtheta=jnp.asarray(truth_series.wtheta)[-1],
+    )
+    return regrid_truth(final_truth, jnp.asarray(z_eval))
+
+
 def scm_les_final_loss(
     artifact: LESReferenceArtifact,
     turbulence: TurbulenceConfig,
@@ -213,16 +232,6 @@ def scm_les_final_loss(
         return float("inf")
 
     # LES truth at the final time on the same eval grid.
-    truth_series = prognostic_truth(artifact)
-    final_truth = LESTruth(
-        case_name=artifact.case_name,
-        heights_m=z_eval,
-        times_s=jnp.asarray(truth_series.times_s)[-1][None],
-        theta=jnp.asarray(truth_series.theta)[-1],
-        u=jnp.asarray(truth_series.u)[-1],
-        v=jnp.asarray(truth_series.v)[-1],
-        wtheta=jnp.asarray(truth_series.wtheta)[-1],
-    )
-    final_truth = regrid_truth(final_truth, z_eval)  # identity here (already z_eval)
+    final_truth = final_prognostic_truth(artifact, z_eval)
     score = prognostic_profile_score(final_truth, theta_eval, u_eval, v_eval)
     return float(score.combined)

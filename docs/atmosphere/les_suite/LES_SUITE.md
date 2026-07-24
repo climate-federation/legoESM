@@ -345,12 +345,13 @@ The full machinery is built + validated; these are the first real numbers, for t
      step pending memory headroom** (nlev=24) — clubb is deliberately kept out of the
      running campaign shell so its heavy compile can't OOM-crash it.
    - **Scorecard** reports PER surface-flux (dedup'd; `n fluxes` denominators).
-   - **D7 σ_LES enabler DONE**: `run_les_suite --sgs {lasd,smagorinsky,vreman}` now
-     emits the SGS-spread variants (was hardcoded LASD). Still to build: the emission
-     (3 GPU runs/case) AND a multi-artifact σ_LES aggregator (spread of the mean
-     profiles across the variant + 2×-resolution artifacts) — `intercomparison.py`
-     only checks a single run vs published bands, it does NOT yet compute σ_LES. σ_LES
-     gates the Q1b margin significance + Q3 spread.
+   - **D7 σ_LES machinery DONE (compute pending)**: `run_les_suite --sgs
+     {lasd,smagorinsky,vreman}` emits the SGS-spread variants, and
+     `les_suite/sigma_les.py::sigma_les_prognostic` (+ CLI `compute_sigma_les.py`)
+     aggregates them into σ_LES IN THE TUNER'S LOSS UNITS (RMS over variant pairs of the
+     same `prognostic_profile_score` the tuner uses), so the D7 gate is quantifiable.
+     Remaining compute: emit the 3 SGS variants (GPU) + the 2×-resolution runs, run the
+     driver, then gate the Q1b margins / Q3 spread on σ_LES in `build_les_scorecard`.
    - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
      `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;
      the AD path (D4 comparison + perf); run the D7 σ_LES SGS-spread + 2×-resolution.

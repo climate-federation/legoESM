@@ -82,12 +82,20 @@ from .scorecard import (
     rank_closures_per_regime,
     render_markdown,
 )
+from .sigma_les import (
+    SigmaLES,
+    SigmaLESError,
+    sigma_les_prognostic,
+)
 
 __all__ = [
     "ANCHOR_CASES",
     "CBL_ENVELOPE",
     "CBLDiagnostics",
     "CI_MARKERS",
+    "SigmaLES",
+    "SigmaLESError",
+    "sigma_les_prognostic",
     "BridgeError",
     "CounterGradientResult",
     "DiagnosticScore",
