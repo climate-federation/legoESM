@@ -60,11 +60,36 @@ class CoefficientSpread:
     n_regimes: int
 
 
+# Closure-order families (LES_SUITE.md §3 D3). Used for the Q1b local→nonlocal skill
+# threshold: "the flux at which best-tuned nonlocal beats best-tuned local by a stated
+# margin". A closure absent here is ignored by the skill analysis (not local/nonlocal).
+CLOSURE_FAMILY = {
+    "smagorinsky": "local", "louis": "local",
+    "holtslag_boville": "nonlocal", "ysu": "nonlocal",
+    "tke": "tke_1.5", "mynn25": "tke_1.5",
+    "clubb_lite": "higher_order", "edmf": "higher_order", "clubb": "higher_order",
+}
+
+
+@dataclass(frozen=True)
+class SkillCrossing:
+    """Q1b: best-tuned LOCAL vs best-tuned NONLOCAL closure at one (regime, flux)."""
+
+    regime: str
+    subcase: str
+    q0: float | None
+    best_local: tuple | None      # (scheme, best_loss) or None if no local tuned
+    best_nonlocal: tuple | None   # (scheme, best_loss) or None if no nonlocal tuned
+    margin: float | None          # local_best - nonlocal_best (>0 ⇒ nonlocal wins)
+    nonlocal_wins: bool | None
+
+
 @dataclass(frozen=True)
 class Scorecard:
     rankings: tuple            # ClosureRanking per regime, flux-mean summary (Q2)
     spreads: tuple             # CoefficientSpread per (scheme, field) (Q3)
     per_flux: tuple = ()       # ClosureRanking per (regime, flux) — primary Q2 view
+    skill: tuple = ()          # SkillCrossing per (regime, flux) — Q1b threshold
 
 
 _REQUIRED = ("case", "scheme", "regime", "best_loss")
@@ -212,13 +237,41 @@ def coefficient_spreads(records: list[dict]) -> list[CoefficientSpread]:
     return spreads
 
 
+def local_vs_nonlocal_skill(records: list[dict]) -> list[SkillCrossing]:
+    """Q1b: per (regime, flux), the best-tuned LOCAL vs best-tuned NONLOCAL closure
+    loss and their margin (local_best − nonlocal_best; >0 ⇒ nonlocal wins — the Q1
+    skill signal). Built on the deduped per-flux rankings. The *skill threshold* is the
+    flux where ``nonlocal_wins`` first holds by a margin the caller deems significant;
+    per D7 a margin below σ_LES is NOT a result, so this reports the raw margins and
+    leaves the significance cut to the σ_LES-aware CLI/reader."""
+    out: list[SkillCrossing] = []
+    for rk in rank_closures_per_flux(records):
+        best_local = best_nonlocal = None
+        for scheme, loss, _default in rk.ranked:
+            fam = CLOSURE_FAMILY.get(scheme)
+            if fam == "local" and (best_local is None or loss < best_local[1]):
+                best_local = (scheme, loss)
+            elif fam == "nonlocal" and (best_nonlocal is None or loss < best_nonlocal[1]):
+                best_nonlocal = (scheme, loss)
+        margin = wins = None
+        if best_local is not None and best_nonlocal is not None:
+            margin = best_local[1] - best_nonlocal[1]
+            wins = margin > 0.0
+        out.append(SkillCrossing(
+            regime=rk.regime, subcase=rk.subcase, q0=rk.q0,
+            best_local=best_local, best_nonlocal=best_nonlocal,
+            margin=margin, nonlocal_wins=wins))
+    return out
+
+
 def assemble_scorecard(records: list[dict]) -> Scorecard:
-    """Assemble the Q2 ranking + Q3 coefficient-spread scorecard from tuned records."""
+    """Assemble the Q1b/Q2/Q3 scorecard from tuned records."""
     _validate(records)
     return Scorecard(
         rankings=tuple(rank_closures_per_regime(records)),
         spreads=tuple(coefficient_spreads(records)),
         per_flux=tuple(rank_closures_per_flux(records)),
+        skill=tuple(local_vs_nonlocal_skill(records)),
     )
 
 
@@ -242,10 +295,34 @@ def _mean_table(ranked: tuple, counts: dict, n_total: int) -> list[str]:
     return rows
 
 
+def _skill_section(skill: tuple) -> list[str]:
+    """Q1b — the best-tuned local vs nonlocal margin per (regime, flux)."""
+    lines = ["## Q1b — local → nonlocal skill threshold",
+             "(best-tuned LOCAL vs best-tuned NONLOCAL; margin = local − nonlocal, "
+             "so **margin > 0 ⇒ nonlocal wins**. Significance vs σ_LES is a D7 "
+             "follow-up — a margin below σ_LES is NOT a result.)", ""]
+    if not skill:
+        lines += ["(no local/nonlocal tuned pairs yet)", ""]
+        return lines
+    lines.append("| regime | flux | best local | best nonlocal | margin | nonlocal wins |")
+    lines.append("|---|---|---|---|---|---|")
+    for s in skill:
+        flux = f"Q0={s.q0:g}" if s.q0 is not None else s.subcase
+        bl = f"{s.best_local[0]} {s.best_local[1]:.4f}" if s.best_local else "—"
+        bn = f"{s.best_nonlocal[0]} {s.best_nonlocal[1]:.4f}" if s.best_nonlocal else "—"
+        mg = f"{s.margin:+.4f}" if s.margin is not None else "—"
+        win = ("yes" if s.nonlocal_wins else "no") if s.nonlocal_wins is not None else "—"
+        lines.append(f"| {s.regime} | {flux} | {bl} | {bn} | {mg} | {win} |")
+    lines.append("")
+    return lines
+
+
 def render_markdown(card: Scorecard) -> str:
     """Human-readable scorecard (the generated artifact)."""
-    lines = ["# LES-suite scorecard", "", "## Q2 — per-regime closure ranking",
-             "(lower tuned LES loss = better)", ""]
+    lines = ["# LES-suite scorecard", ""]
+    lines += _skill_section(card.skill)
+    lines += ["## Q2 — per-regime closure ranking",
+              "(lower tuned LES loss = better)", ""]
     # group the per-flux rankings by regime, preserving their (regime, q0) order
     per_flux_by_regime: dict[str, list[ClosureRanking]] = {}
     for rk in card.per_flux:

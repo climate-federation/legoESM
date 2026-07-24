@@ -6,6 +6,7 @@ from legoesm.atmosphere.les_suite.scorecard import (
     ScorecardError,
     assemble_scorecard,
     coefficient_spreads,
+    local_vs_nonlocal_skill,
     rank_closures_per_flux,
     rank_closures_per_regime,
     render_markdown,
@@ -151,6 +152,53 @@ def test_render_shows_per_flux_and_mean():
     assert "per surface-flux ranking" in md
     assert "Q0 = 0.02 K m/s" in md and "Q0 = 0.12 K m/s" in md
     assert "flux-mean ranking (mean over 2 flux points)" in md
+
+
+def test_skill_local_vs_nonlocal_margin_and_winner():
+    # at Q0=0.02: best local=louis 0.13, best nonlocal=holtslag 0.10 → nonlocal wins
+    # (margin = 0.13 - 0.10 = +0.03 > 0). Other families are ignored.
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.13, q0=0.02),        # local
+        _rec("cbl", "smagorinsky", "dry_convective", 0.15, q0=0.02),  # local (worse)
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.10, q0=0.02),  # nonlocal
+        _rec("cbl", "ysu", "dry_convective", 0.12, q0=0.02),          # nonlocal (worse)
+        _rec("cbl", "mynn25", "dry_convective", 0.09, q0=0.02),       # 1.5-order: ignored
+    ]
+    skill = local_vs_nonlocal_skill(recs)
+    assert len(skill) == 1
+    s = skill[0]
+    assert s.best_local == ("louis", pytest.approx(0.13))
+    assert s.best_nonlocal == ("holtslag_boville", pytest.approx(0.10))
+    assert s.margin == pytest.approx(0.03)
+    assert s.nonlocal_wins is True
+
+
+def test_skill_local_wins_negative_margin():
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.10, q0=0.06),       # local better
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.20, q0=0.06),
+    ]
+    s = local_vs_nonlocal_skill(recs)[0]
+    assert s.margin == pytest.approx(-0.10)
+    assert s.nonlocal_wins is False
+
+
+def test_skill_missing_family_gives_none():
+    # only a local closure present → no crossing (nonlocal side absent)
+    recs = [_rec("cbl", "louis", "dry_convective", 0.10, q0=0.06)]
+    s = local_vs_nonlocal_skill(recs)[0]
+    assert s.best_nonlocal is None
+    assert s.margin is None and s.nonlocal_wins is None
+
+
+def test_skill_rendered_in_scorecard():
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.13, q0=0.02),
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.10, q0=0.02),
+    ]
+    md = render_markdown(assemble_scorecard(recs))
+    assert "Q1b" in md and "nonlocal wins" in md
+    assert "Q0=0.02" in md
 
 
 def test_missing_field_rejected():

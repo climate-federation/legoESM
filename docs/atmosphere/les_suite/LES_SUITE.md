@@ -256,6 +256,15 @@ The full machinery is built + validated; these are the first real numbers, for t
   The layer-base *trend* is **non-monotonic** (descends through 0.06, rises at
   0.08–0.12) — an earlier 2-point "drops with flux" read is not supported; only the
   structural presence-at-all-fluxes is claimed.
+- **Q1b (skill threshold, prognostic)** — per-flux best-tuned LOCAL vs best-tuned
+  NONLOCAL (scorecard §Q1b): nonlocal (`holtslag_boville`) beats the best-tuned local
+  (`smagorinsky`) at **every** flux 0.02→0.12 (margins +0.0053, +0.0142, +0.0207,
+  +0.0196, +0.0257) — generally widening with flux but NOT strictly monotonic (a slight
+  dip at 0.08). So the local→nonlocal skill crossover lies **below the lowest sampled
+  flux** (nonlocal already wins at 0.02) and the local handicap broadly deepens with
+  buoyancy — consistent with the Q1a structural ceiling (a counter-gradient layer at
+  every flux). CAVEAT (D7): significance vs σ_LES is pending the SGS-spread runs — a
+  margin below σ_LES is not a result; the +0.005 margin at 0.02 is small.
 - **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
   is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
   Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <

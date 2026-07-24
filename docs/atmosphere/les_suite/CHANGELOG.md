@@ -184,6 +184,24 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
+**Iter 5 (2026-07-24) — Q1b skill-threshold analysis in the scorecard.**
+- Added `local_vs_nonlocal_skill` + `CLOSURE_FAMILY` (D3 families) + `SkillCrossing`
+  to `scorecard.py`, rendered as a new **Q1b** scorecard section: per (regime, flux),
+  best-tuned LOCAL vs best-tuned NONLOCAL and their margin (local−nonlocal; >0 ⇒
+  nonlocal wins). Reuses the deduped per-flux rankings; families not in {local,
+  nonlocal} are ignored. Tests: `test_skill_*` (4). This is the **Q1b deliverable**
+  (§7 Q1's skill-threshold half; the structural half Q1a was already done).
+- **Q1b RESULT (dry-CBL flux sweep, prognostic, 5-closure results):** nonlocal
+  (`holtslag_boville`) beats best-tuned local (`smagorinsky`) at EVERY flux 0.02→0.12,
+  margins +0.0053, +0.0142, +0.0207, +0.0196, +0.0257 — generally widening with flux
+  but NOT strictly monotonic (a slight dip at Q0=0.08). So the local→nonlocal skill
+  crossover is below the lowest sampled flux, and the local handicap broadly deepens
+  with buoyancy (consistent with the Q1a counter-gradient ceiling). CAVEAT: σ_LES
+  significance is a D7 follow-up; the +0.005 margin at 0.02 is small. NOTE: computed
+  from the existing per-flux campaign tuned results under gitignored `results/` (the
+  8-closure campaign's new-closure tunes are still running); the local/nonlocal
+  families are unchanged by the new closures so Q1b is stable.
+
 **Iter 4 (2026-07-24) — Q2 roster 8→9: full `clubb` wired + shared nested-leaf helper.**
 - **Extracted the nested-CLUBB descend/re-wrap to a shared public module**
   `atmosphere/physics/turbulence/tunable_subconfig.py` (`tunable_subconfig` /
