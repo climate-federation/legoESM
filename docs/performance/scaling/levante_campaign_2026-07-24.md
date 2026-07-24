@@ -81,9 +81,17 @@ Single-node ladders (job 26445986, f64): atm latlon strong eff
 0.87–0.92@np2 → 0.11–0.23@np32–64; ocean implicit 0.90@2 → 0.24@32; weak
 collapses ≤0.14@32. CAVEATS: np=1 ocean leg was stock-CG (solver-mismatched
 — fixed via `--force-pcg` in the job scripts; np≥2 slopes valid), and
-single-node ladders conflate Milan DRAM contention with comm. 4-node
-spread ladders with job-ID-collision fix rerunning (26452578/79); the
-first pair collided into one OUTDIR (same-second stamp) and was discarded.
+single-node ladders conflate Milan DRAM contention with comm. The first
+4-node pair collided into one OUTDIR (same-second stamp) and was discarded.
+
+4-node SPREAD ladder (job 26452578, f64, ranks round-robin, solver-matched):
+atm latlon np2 eff ≈1.00 (DRAM contention confirmed as the packed-ladder
+confound: r128 np32 eff 0.38 spread vs 0.20 packed), decaying to 0.06–0.16
+at np64–128 — the 1-D band perimeter ceiling as designed (r256/np128 = 2
+rows/rank). Ocean strong spread: np2 eff 1.32 (superlinear, cache), 0.88@8,
+0.35@32, wall at np64 (79 ms > np32's 74 ms). The job died in a high-rank
+ocean case (one rank exit-3 → kill-on-bad-exit) before the weak tail —
+np128 ocean + weak ladders and the rank-failure attribution remain open.
 
 ## Infrastructure defects found + fixed (each with a receipt)
 
