@@ -184,6 +184,24 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
+**Iter 6 (2026-07-24) — `--sgs` selector in `run_les_suite` (D7 σ_LES enabler).**
+- `run_les_suite.py` gains `_sgs_les_config(sgs)` + a `--sgs` flag: emit the dry-CBL
+  with any of the case's `sgs_variants` — `lasd` (scale-dependent dynamic Smagorinsky),
+  `smagorinsky` (static Mason-capped), `vreman` (Vreman 2004). Previously the SGS was
+  hardcoded to LASD, so the D7 σ_LES SGS-spread (which needs the SAME case run under
+  {lasd, smagorinsky, vreman}) could not be emitted. `--sgs` is validated against the
+  case's declared `sgs_variants` (hard error on a stray closure — dispatch hardening),
+  drives the artifact's `sgs` tag + filename (`cbl_nieuwstadt__{lasd,smagorinsky,
+  vreman}.npz`), and the emit SGS-flux reconstruction reads the same `eddy_viscosity`
+  the core integrates so it stays bit-consistent per variant. Tests: `test_sgs_*`,
+  `test_build_cbl_selects_sgs_in_config` (builds each config on CPU — no GPU). This is
+  the CODE enabler for D7; still to build are (a) the SGS-spread EMISSION (3 GPU
+  runs/case) and (b) a **multi-artifact σ_LES aggregator** (the spread of the mean
+  profiles across the {lasd,smagorinsky,vreman} artifacts + the 2×-resolution runs) —
+  `intercomparison.py` today only checks a single run vs published bands, it does NOT
+  compute σ_LES. σ_LES then gates the Q1b margin significance + the Q3 inter-regime
+  spread.
+
 **Iter 5 (2026-07-24) — Q1b skill-threshold analysis in the scorecard.**
 - Added `local_vs_nonlocal_skill` + `CLOSURE_FAMILY` (D3 families) + `SkillCrossing`
   to `scorecard.py`, rendered as a new **Q1b** scorecard section: per (regime, flux),

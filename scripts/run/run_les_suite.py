@@ -58,6 +58,25 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 _WIRED_REGIMES = ("dry_convective",)
 
 
+def _sgs_les_config(sgs: str) -> dict:
+    """SpectralLESConfig overrides selecting the LES SGS closure (the D7 σ_LES spread).
+
+    ``lasd`` = Bou-Zeid scale-dependent dynamic Smagorinsky (``smagorinsky_dynamic``);
+    ``smagorinsky`` = static Mason-capped |S|-Smagorinsky; ``vreman`` = Vreman 2004.
+    The emit SGS-flux reconstruction reads the SAME ``eddy_viscosity`` the core
+    integrates, so it stays bit-consistent for every variant. Raises on an unknown SGS
+    (dispatch hardening) — never a silent wrong-closure emission.
+    """
+    if sgs == "lasd":
+        return {"smagorinsky_dynamic": True, "sgs_model": "smagorinsky"}
+    if sgs == "smagorinsky":
+        return {"smagorinsky_dynamic": False, "sgs_model": "smagorinsky"}
+    if sgs == "vreman":
+        return {"smagorinsky_dynamic": False, "sgs_model": "vreman"}
+    raise SystemExit(
+        f"unknown --sgs {sgs!r}; supported: lasd, smagorinsky, vreman")
+
+
 def frame_step_schedule(n_steps: int, frames: int) -> list[int]:
     """Step indices (after the t=0 IC) at which to record ``frames`` snapshots.
 
@@ -72,14 +91,17 @@ def frame_step_schedule(n_steps: int, frames: int) -> list[int]:
     return sorted({int(round(k * n_steps / n_out)) for k in range(1, n_out + 1)})
 
 
-def _build_cbl(case, args, dtype):
-    """Dry free-convective CBL IC + config (mirrors run_spectral_cbl.build)."""
+def _build_cbl(case, args, dtype, sgs="lasd"):
+    """Dry free-convective CBL IC + config (mirrors run_spectral_cbl.build).
+
+    ``sgs`` selects the SGS closure (the D7 σ_LES spread) via :func:`_sgs_les_config`.
+    """
     theta0 = args.theta0
     cfg = sl.SpectralLESConfig(
         nx=case.grid.nx, ny=case.grid.ny, nz=case.grid.nz,
         Lx=case.grid.Lx_m, Ly=case.grid.Ly_m, Lz=case.grid.Lz_m,
-        z0=args.z0, dealias=True, smagorinsky_dynamic=True,
-        sgs_model="smagorinsky", time_scheme="rk3",
+        z0=args.z0, dealias=True, **_sgs_les_config(sgs),
+        time_scheme="rk3",
         buoyancy=True, theta_ref0=theta0, pr_sgs=args.pr_sgs,
         # sgs_buoyancy MUST stay off: emit.sgs_vertical_scalar_flux_mean reconstructs
         # the SGS heat flux from eddy_viscosity() with K_h=ν_t/Pr, matching the core's
@@ -152,6 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--q0", type=float, default=None,
                    help="override the case surface kinematic heat flux [K m/s] "
                         "(the Q1 buoyancy-axis sweep); default = the case value")
+    p.add_argument("--sgs", type=str, default=None,
+                   help="LES SGS closure (the D7 σ_LES spread): one of the case's "
+                        "sgs_variants (lasd/smagorinsky/vreman). Default: the case's "
+                        "first variant. Sets the artifact's sgs tag + filename.")
     p.add_argument("--label", type=str, default=None,
                    help="extra tag in the artifact filename (e.g. q0 value) to keep "
                         "a flux sweep from overwriting")
@@ -174,10 +200,18 @@ def main(argv: list[str] | None = None) -> int:
             f"{case.name}: regime {case.regime!r} emission is not wired yet "
             f"(wired: {list(_WIRED_REGIMES)}). The stable/moist IC builders are a "
             "follow-up; refusing to emit a wrong-regime artifact.")
+    # Resolve the SGS closure (D7 σ_LES spread). Must be one of the case's declared
+    # variants — a stray SGS is a hard error (dispatch hardening), never a silent
+    # emission of a closure the case never claimed.
+    sgs_name = args.sgs if args.sgs is not None else case.sgs_variants[0]
+    if sgs_name not in case.sgs_variants:
+        raise SystemExit(
+            f"{case.name}: --sgs {sgs_name!r} is not one of the case's sgs_variants "
+            f"{list(case.sgs_variants)}")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
 
-    g, st, Q0 = _build_cbl(case, args, dtype)
+    g, st, Q0 = _build_cbl(case, args, dtype, sgs=sgs_name)
     hours = args.hours if args.hours is not None else case.duration_hours
     T = hours * 3600.0
     step = jax.jit(partial(sl.step, g=g, u_geo=(0.0, 0.0), f_cor=0.0,
@@ -204,7 +238,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[warn] dt={dt0:.3f}s over {n_steps} steps cannot resolve "
               f"{args.frames} frames; recording {len(rec_steps) + 1}")
 
-    sgs_name = case.sgs_variants[0]
     print(f"[les-suite emit] case={case.name} regime={case.regime} "
           f"grid={case.grid.label} Q0={Q0} hours={hours} dt={dt0:.3f} "
           f"n_steps={n_steps} frames={len(rec_steps) + 1} sgs={sgs_name}")

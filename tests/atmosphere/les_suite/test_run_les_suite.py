@@ -38,6 +38,52 @@ def test_wired_regimes_contains_dry_convective():
     assert "dry_convective" in m._WIRED_REGIMES
 
 
+# --- SGS selection for the D7 σ_LES spread ------------------------------------
+def test_sgs_les_config_maps_each_variant():
+    m = _driver()
+    assert m._sgs_les_config("lasd") == {
+        "smagorinsky_dynamic": True, "sgs_model": "smagorinsky"}
+    assert m._sgs_les_config("smagorinsky") == {
+        "smagorinsky_dynamic": False, "sgs_model": "smagorinsky"}
+    assert m._sgs_les_config("vreman") == {
+        "smagorinsky_dynamic": False, "sgs_model": "vreman"}
+
+
+def test_sgs_les_config_unknown_raises():
+    m = _driver()
+    with pytest.raises(SystemExit):
+        m._sgs_les_config("amd")  # not wired into the emit reconstruction → hard error
+
+
+def test_sgs_not_in_case_variants_raises():
+    # --sgs must be one of the case's declared sgs_variants; a stray one is a hard
+    # error, not a silent emission of an unclaimed closure.
+    m = _driver()
+    with pytest.raises(SystemExit):
+        m.main(["--case", "cbl_nieuwstadt", "--sgs", "amd"])
+
+
+def test_build_cbl_selects_sgs_in_config():
+    # _build_cbl only builds the config + IC (no integration) → CPU-safe. Each SGS
+    # variant must land in the SpectralLESConfig the core will integrate.
+    import argparse
+
+    m = _driver()
+    from legoesm.atmosphere.les_suite import get_case, list_cases, register_default_catalog
+    if not list_cases():
+        register_default_catalog()
+    case = get_case("cbl_nieuwstadt")
+    args = argparse.Namespace(
+        theta0=300.0, z0=0.1, pr_sgs=1.0, gamma=0.008, zi0=800.0, q0=None)
+    import jax.numpy as jnp
+    for sgs, dyn, model in (("lasd", True, "smagorinsky"),
+                            ("smagorinsky", False, "smagorinsky"),
+                            ("vreman", False, "vreman")):
+        g, _st, _q0 = m._build_cbl(case, args, jnp.float32, sgs=sgs)
+        assert bool(g.cfg.smagorinsky_dynamic) is dyn
+        assert g.cfg.sgs_model == model
+
+
 # --- frame scheduling (codex round-2 regression) ------------------------------
 def test_frame_schedule_production_evenly_spaced():
     m = _driver()

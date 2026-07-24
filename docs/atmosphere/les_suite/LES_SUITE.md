@@ -345,9 +345,15 @@ The full machinery is built + validated; these are the first real numbers, for t
      step pending memory headroom** (nlev=24) — clubb is deliberately kept out of the
      running campaign shell so its heavy compile can't OOM-crash it.
    - **Scorecard** reports PER surface-flux (dedup'd; `n fluxes` denominators).
+   - **D7 σ_LES enabler DONE**: `run_les_suite --sgs {lasd,smagorinsky,vreman}` now
+     emits the SGS-spread variants (was hardcoded LASD). Still to build: the emission
+     (3 GPU runs/case) AND a multi-artifact σ_LES aggregator (spread of the mean
+     profiles across the variant + 2×-resolution artifacts) — `intercomparison.py`
+     only checks a single run vs published bands, it does NOT yet compute σ_LES. σ_LES
+     gates the Q1b margin significance + Q3 spread.
    - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
      `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;
-     the AD path (D4 comparison + perf); the D7 σ_LES SGS-spread + 2×-resolution runs.
+     the AD path (D4 comparison + perf); run the D7 σ_LES SGS-spread + 2×-resolution.
    See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
