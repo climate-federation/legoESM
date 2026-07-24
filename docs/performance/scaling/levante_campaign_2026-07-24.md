@@ -107,12 +107,19 @@ than np2 while np8 is 2.5x faster than np4. Evidence gathered:
 - PARTITION METHOD REFUTED (job 26455829): the dip is method-independent —
   np4/np8 = 17.22/7.00 ms (sfc), 17.20/6.97 (metis), 19.35/6.26
   (geometric). Every method shows the same 2.5-3.1x jump.
-Remaining suspect (UNVERIFIED): per-device compute efficiency / XLA codegen
-for the per-device shape (655376/np = 327688 / 163844 / 81922 / 40961 —
-2^k x 40961, np16 landing on an odd leading dimension). Cheap env-only
-codegen arms (autotune level, multi-output fusion, latency-hiding
-scheduler, command buffers) are the last knobs; if none recovers np4, the
-honest next step is a GPU op-level profile, not more timing runs.
+- XLA CODEGEN ENV KNOBS REFUTED (job 26455948): np4 is 17.12 ms base,
+  17.06 autotune-level-4, 17.10 latency-hiding-off, 17.01
+  command-buffers-off — every arm within 1 %, none recovers np4.
+  (The multi-output-fusion arm errored on an unsupported flag name and is
+  not counted.)
+VERDICT: five hypotheses refuted by measurement (placement, halo volume,
+collective count, partition method, codegen env knobs). The cheap-lever
+space is EXHAUSTED; the remaining suspect — per-device kernel efficiency
+for this shape — needs a GPU op-level profile (nsys / XLA op profile of
+np4 vs np8), which is a separate instrumented project, not another timing
+run. Per-GPU throughput across the ladder is non-monotone in tile size
+(430 / 249 / 305 / 150 Mc/s/GPU at 327688 / 163844 / 81922 / 40961
+cells/device), which is itself the clue to hand the profiler.
 PRACTICAL GUIDANCE MEANWHILE: run this grid at np>=8, where per-device
 throughput is 304-340 Mc/s/GPU vs 220-248 at np4.
 
