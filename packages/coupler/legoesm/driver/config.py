@@ -291,7 +291,12 @@ class EvaluationConfig(NamedTuple):
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
-    diag_days: int = 5
+    # Fractional values give sub-daily diagnostics; the CMOR monthly means
+    # average one snapshot per diag interval, so diag_days=1 is diurnally
+    # aliased at the fixed diagnostic phase (00 UTC) — day/night fields
+    # (rsut, pr, tas, hfss/hfls) need diag_days<=0.125 for evaluation-grade
+    # monthly means (see feed_cmip_accumulators_native docstring).
+    diag_days: float = 5
     checkpoint_days: int = 0
     monthly_means: bool = False
     cmip_output: bool = False

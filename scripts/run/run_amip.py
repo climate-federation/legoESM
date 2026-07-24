@@ -331,7 +331,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "explicit path will blow up."
         ),
     )
-    parser.add_argument("--diag-days", type=int, default=5)
+    parser.add_argument(
+        "--diag-days", type=float, default=5,
+        help="Diagnostic cadence in days; fractional = sub-daily (e.g. "
+             "0.125 = 3-hourly, needed for diurnally-unaliased CMOR "
+             "monthly means of rsut/pr/tas).")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")

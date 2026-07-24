@@ -586,6 +586,23 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     assert cfg_off.mpas_land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
+
+
+def test_diag_days_fractional_flows_to_config():
+    """--diag-days accepts fractional (sub-daily) values — required for
+    diurnally-unaliased CMOR monthly means of day/night fields (rsut/pr/tas);
+    integer values keep byte-identical behavior."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "0.125",
+    ]), parser))
+    assert cfg.output.diag_days == pytest.approx(0.125)
+    cfg_int = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "1",
+    ]), parser))
+    assert cfg_int.output.diag_days == pytest.approx(1.0)
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
