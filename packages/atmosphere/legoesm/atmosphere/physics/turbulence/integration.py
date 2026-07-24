@@ -677,6 +677,13 @@ def _make_mpas_turbulence(
                 tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
 
         zero_ps = jnp.zeros_like(p_s)
+        # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,
+        # positive upward — the schemes' own shflx/lhflx sign, which is
+        # already the CMOR convention]. None-guarded: a scheme without
+        # surface fluxes (or turbulence "none") simply leaves the fields
+        # unset, byte-identical to the pre-export tendency.
+        _shf = getattr(turb_out, "shflx", None)
+        _lhf = getattr(turb_out, "lhflx", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
             dv_dt=None,
@@ -684,6 +691,14 @@ def _make_mpas_turbulence(
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
             tracer_tendencies=tracer_tends if tracer_tends else None,
+            # units="W/m^2": p_s.replace would otherwise INHERIT p_s's "Pa"
+            # (Field.replace keeps self.units), mislabelling the flux Field.
+            shflx_sfc=None if _shf is None else state.p_s.replace(
+                data=_shf.reshape(p_s.shape), name="shflx_sfc_turb",
+                units="W/m^2"),
+            lhflx_sfc=None if _lhf is None else state.p_s.replace(
+                data=_lhf.reshape(p_s.shape), name="lhflx_sfc_turb",
+                units="W/m^2"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

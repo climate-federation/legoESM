@@ -125,6 +125,21 @@ class HydrostaticTendencies(NamedTuple):
     # this is the SURFACE precip (micro sedimentation), NOT the column vapour
     # sink (which is P-E and would double-count the separately-applied evap).
     precip: Field | None = None
+    # TOA radiative fluxes (CMOR sign conventions: *_up positive UPWARD /
+    # outgoing, sw_down_toa positive DOWNWARD / incoming) [W/m^2], carried on
+    # the radiation tendency so the lean MPAS loop can feed the CMOR
+    # rlut/rsut/rsdt accumulators (PhysicsOutput carries the equivalent on the
+    # compiled path). None on non-radiation tendencies / radiation off.
+    sw_up_toa: Field | None = None
+    lw_up_toa: Field | None = None
+    sw_down_toa: Field | None = None
+    # Surface turbulent fluxes [W/m^2, positive UPWARD out of the surface —
+    # the CMOR hfss/hfls convention, matching the surface-layer helpers'
+    # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
+    # feed (evspsbl is derived downstream as lhflx / L_v). None when
+    # turbulence is off or a scheme computes no surface fluxes.
+    shflx_sfc: Field | None = None
+    lhflx_sfc: Field | None = None
     # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
     # radiation tendency for the lean MPAS/spectral loops: an interactive land
     # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the

@@ -454,6 +454,8 @@ def _get_grid_lat_lon(grid_or_mesh, shape_2d):
 
 def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_net_sfc=None, lw_net_sfc=None,
+                                 sw_up_toa=None, lw_up_toa=None,
+                                 sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
@@ -492,6 +494,16 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
     lw_field = None if lw_net_sfc is None else Field(
         data=lw_net_sfc.reshape(shape_2d).astype(_ps_dtype),
         name="lw_net_sfc_rad", dims=dims_2d, units="W/m^2")
+
+    # TOA fluxes for the CMOR rlut/rsut/rsdt feed (CMOR signs: *_up positive
+    # upward/outgoing, sw_down positive downward/incoming — exactly the
+    # radiation solver's own flux orientation, no sign flip here).
+    def _toa_field(arr, name):
+        if arr is None:
+            return None
+        return Field(data=arr.reshape(shape_2d).astype(_ps_dtype),
+                     name=name, dims=dims_2d, units="W/m^2")
+
     # Downwelling counterparts (+down): forcing for an interactive land tile on
     # the lean MPAS loop (AtmToSurface.sw_down/lw_down); NOT derivable from the
     # net fields at the consumer without re-assuming sfc albedo/emissivity.
@@ -518,6 +530,9 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         dv_dt=dv_dt,
         sw_net_sfc=sw_field,
         lw_net_sfc=lw_field,
+        sw_up_toa=_toa_field(sw_up_toa, "sw_up_toa_rad"),
+        lw_up_toa=_toa_field(lw_up_toa, "lw_up_toa_rad"),
+        sw_down_toa=_toa_field(sw_down_toa, "sw_down_toa_rad"),
         sw_down_sfc=swd_field,
         lw_down_sfc=lwd_field,
     )
@@ -1241,9 +1256,23 @@ def _make_hydrostatic_radiation(
         # lw net (down - up) matches that path's lw_net_sfc convention exactly.
         _swn = rad_out.sw_flux_down[:, -1] - rad_out.sw_flux_up[:, -1]
         _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
+        # TOA is the FIRST half-level (surface is the last, see above):
+        # rlut = lw_flux_up[:, 0], rsut = sw_flux_up[:, 0] — the range-limited
+        # top-halo up-faces, exactly what the compiled path reads
+        # (physics_pipeline.py:2219-2220), already in CMOR sign conventions.
+        # rsdt = PRESCRIBED toa_insolation (#620), NOT the quadratically clamped
+        # top-halo down-flux rad_out.sw_flux_down[:, 0] (~15% low; historically
+        # ~2x high before the range-limit) — matches the compiled path
+        # (physics_pipeline.py:2225-2228). Halo fallback keeps a value for any
+        # path that leaves toa_insolation=None (e.g. the zero-radiation stub).
         return _pack_hydrostatic_tendencies(
             dT_dt, state, shape_3d, shape_2d,
             sw_net_sfc=_swn, lw_net_sfc=_lwn,
+            sw_up_toa=rad_out.sw_flux_up[:, 0],
+            lw_up_toa=rad_out.lw_flux_up[:, 0],
+            sw_down_toa=(rad_out.toa_insolation
+                         if rad_out.toa_insolation is not None
+                         else rad_out.sw_flux_down[:, 0]),
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1])
 
