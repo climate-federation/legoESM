@@ -372,7 +372,7 @@ class TestDinoFaithfulWiring:
         vm = dmod._dino_vertical_mixing_config(cfg)
         assert vm.tke.lc is True
         assert vm.tke.etau_mode == "below_ml"
-        assert vm.tke.etau_htau_mode == "constant10m"   # DINO nn_htau default
+        assert vm.tke.etau_htau_mode == "latitude"   # nn_htau=1 (namelist_ref default, c1a661da2)
 
     def test_dino_evd_momentum_gating(self):
         import dataclasses
@@ -757,3 +757,33 @@ class TestNemoBottomTkeDirichlet:
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[..., -1], 3e-4, rtol=0, atol=1e-12)
         assert bool(np.all(np.isfinite(np.asarray(out.tke_new))))
+
+
+class TestTridiagMixedPrecision:
+    """Regression for the #1317 T3 acceptance blocker: mixed f32/f64 rows
+    fed to tridiag_thomas crashed the lax.scan carry (float32 seed vs
+    float64 body) on the first model step of the mixed-precision twin."""
+
+    def test_mixed_dtype_inputs_solve_and_match_f64(self):
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.ocean.physics.vertical_mixing._shared import tridiag_thomas
+
+        rng = np.random.default_rng(0)
+        n = 12
+        b64 = 2.0 + rng.random((5, n))
+        a64 = -0.3 * rng.random((5, n)); a64[:, 0] = 0.0
+        c64 = -0.3 * rng.random((5, n)); c64[:, -1] = 0.0
+        d64 = rng.random((5, n))
+        x_ref = tridiag_thomas(*(jnp.asarray(v, dtype=jnp.float64)
+                                 for v in (a64, b64, c64, d64)))
+        # f32 matrix, f64 rhs — the crashing combination
+        x_mix = tridiag_thomas(
+            jnp.asarray(a64, dtype=jnp.float32),
+            jnp.asarray(b64, dtype=jnp.float32),
+            jnp.asarray(c64, dtype=jnp.float32),
+            jnp.asarray(d64, dtype=jnp.float64),
+        )
+        assert x_mix.dtype == jnp.float64
+        np.testing.assert_allclose(np.asarray(x_mix), np.asarray(x_ref),
+                                   rtol=2e-5)

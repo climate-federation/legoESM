@@ -425,6 +425,13 @@ def tridiag_thomas(a, b, c, d):
     are unused (left as zero by the caller). Returns ``x`` of shape ``(..., N)``.
     Shared by the TKE and CATKE backward-Euler vertical solves.
     """
+    # Mixed-precision guard: callers may assemble rows from float32 state
+    # fields and float64 scalars (JAX_ENABLE_X64 promotes constants). The
+    # lax.scan carries are seeded from `b`/`d` while the bodies compute in
+    # the promoted dtype — a mismatch is a hard TypeError at trace time.
+    # Unify once at entry; no-op when dtypes already agree.
+    common = jnp.result_type(a, b, c, d)
+    a, b, c, d = (x.astype(common) for x in (a, b, c, d))
     N = b.shape[-1]
 
     def step(carry, k):
