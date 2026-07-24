@@ -9,6 +9,14 @@
 #SBATCH --time=12:00:00
 #
 # =============================================================================
+# DEPRECATED (2026-07-24): this was the CUBE-lane (C48/L40 cd-grid) production
+# chain.  The cube lane is RETIRED (Pierre directive 2026-07-23; #1296) and
+# config/amip/amip_production.yaml now defaults to the MPAS lane — sourcing it
+# from this 4-GPU runner would launch MPAS single-lane physics on a multi-GPU
+# allocation (unsupported: the MPAS land port + q_v filter are single-process).
+# USE INSTEAD: scripts/cluster/levante/amip_mpas_gpu_chain.sbatch.
+# Kept for the historical record of the cube campaign; do not submit as-is.
+# =============================================================================
 # legoESM AMIP — proper CMIP6 production run (self-chaining), convective_cloud OFF
 # =============================================================================
 # Runs the AUTHORITATIVE production physics (config/amip/amip_production.yaml:

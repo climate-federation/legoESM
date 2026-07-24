@@ -47,8 +47,19 @@
 : "${ICON_ROOT:=/pool/data/ICON/grids/public/mpim}"
 : "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01.zarr}"
 : "${ETOPO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/bathymetry/etopo_1deg_clean.nc}"
-: "${SST:=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sst_1979_2016.nc}"
-: "${SIC:=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sic_1979_2016.nc}"
+# SST/SIC: PCMDI CMIP7 AMIP boundary conditions (the protocol-standard tosbcs/
+# siconcbcs mid-month files, 1870-2022) — the dataset every proven MPAS-lane
+# run uses (Pierre's climeval_bech day-247+ and the replica chains).  The file
+# is in degC -> the PAIRED offset below converts to K; keep SST and
+# AMIP_SST_OFFSET consistent when overriding (the legacy ICON bc_sst files are
+# already Kelvin and need offset 0).
+: "${PCMDI_BC:=/pool/data/INPUT4MIP/data/input4MIPs/CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10}"
+: "${SST:=${PCMDI_BC}/ocean/mon/tosbcs/gn/v20250807/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc}"
+: "${SIC:=${PCMDI_BC}/seaIce/mon/siconcbcs/gn/v20250807/siconcbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc}"
+: "${AMIP_SST_OFFSET:=273.15}"
+# Legacy alternative (Kelvin; pair with AMIP_SST_OFFSET=0):
+#   SST=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sst_1979_2016.nc
+#   SIC=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sic_1979_2016.nc
 : "${SOLAR:=${ICON_ROOT}/common/solar_radiation/swflux_14band_cmip6_1850-2299-v3.2.nc}"
 : "${GHG:=${ICON_ROOT}/independent/greenhouse_gases/greenhouse_historical_plus.nc}"
 # Ozone/aerosol/volcanic default to the merged 1979-2014 transient files (432
@@ -82,6 +93,7 @@ AMIP_PATH_FLAGS=(
   --ic-path "${ERA5_IC}"
   --forcing-path "${SST}"
   --sic-path "${SIC}"
+  --sst-offset "${AMIP_SST_OFFSET}"
   --solar-file "${SOLAR}"
   --ozone-file "${OZONE}"
   --ghg-file "${GHG}"

@@ -7,31 +7,35 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
-#SBATCH --output=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/slurm_logs/%x-%j.out
+#SBATCH --output=/scratch/b/b309178/amip_mpas/slurm_hdr-%j.out
 #
 # MPAS-lane AMIP CMIP chain on DKRZ Levante GPU (2026-07-23), adapted from the
-# proven cube-lane /scratch/b/b309178/amip_decade/amip365_chain.sbatch with
-# these deliberate deltas:
-#   1. Runs from THIS checkout (legoesm_pg, clean main) with its own uv venv
-#      (CUDA jax installed 2026-07-23) — fully independent of the legoesm_ap
-#      checkout + diffesm conda env the cube lane mutates mid-campaign.
-#   2. MPAS grid overrides arrive via EXTRA (grid/resolution/dt/convection);
-#      base physics + forcing selectors stay amip_production.yaml + the
-#      Levante paths in amip_production.sh (single source of truth).
-#   3. Chain link = 12 h GPU job; run_amip checkpoints + exits cleanly at
-#      MAX_WALLCLOCK_SECONDS (11 h) and the link resubmits itself afterok
-#      until TARGET_DAYS is reached.
+# proven cube-lane /scratch/b/b309178/amip_decade/amip365_chain.sbatch.
+# MPAS is THE production AMIP lane (grid now defaulted in
+# amip_production.yaml); EXTRA carries per-run physics deltas only.
+# Chain link = 12 h GPU job; run_amip checkpoints + exits cleanly at
+# MAX_WALLCLOCK_SECONDS (11 h) and the link resubmits itself afterok
+# until TARGET_DAYS is reached.
 # Env: NAME (outdir under ROOT, required), EXTRA (flag overrides), TARGET_DAYS
-#      (default 365), PREV_CKPT_DIR (optional warm start).
+#      (default 365), PREV_CKPT_DIR (optional warm start), REPO/PY (checkout +
+#      interpreter — DEFAULTS BELOW; a submit that intends a different checkout
+#      MUST export both, they are paired).
 set -uo pipefail
-: "${REPO:=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM}"
-: "${ROOT:=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs}"
+: "${REPO:=/work/bd1083/b309178/diffESM/legoesm_ap}"
+: "${ROOT:=/scratch/b/b309178/amip_mpas}"
 : "${TARGET_DAYS:=365}"
 : "${MAX_WALLCLOCK_SECONDS:=39600}"   # 11 h: checkpoint+exit before the 12 h kill
 OUTDIR="${ROOT}/${NAME}"
 # PY overridable so a git-worktree bisect can run an older REPO tree with the
 # main checkout's venv (PATH-style editable .pth entries; PYTHONPATH wins).
-: "${PY:=${REPO}/.venv/bin/python}"
+# Default: the checkout's .venv if present, else the diffesm conda env.
+if [[ -z "${PY:-}" ]]; then
+  if [[ -x "${REPO}/.venv/bin/python" ]]; then
+    PY="${REPO}/.venv/bin/python"
+  else
+    PY=/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python
+  fi
+fi
 PKG="${REPO}/packages"
 
 # shellcheck source=/dev/null

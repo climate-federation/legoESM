@@ -1796,13 +1796,26 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is the C48/L40 publication lane (#899 restored it from
-    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
-    assert args.resolution == 48
-    assert args.nlev == 40
-    assert args.discretization == "cdgrid"
-    assert args.grid_type == "cubed_sphere"
+    # production YAML is the MPAS lane (2026-07-24: cube retired per Pierre
+    # directive + #1296): SCVT level 5 / L30 sigma / dt 75 — the proven-stable
+    # recipe (Pierre's day-247+ climeval_bech + the replica chains); the lane
+    # is recipe-sensitive, so these five keys are load-bearing together.
+    assert args.resolution == 5
+    assert args.nlev == 30
+    assert args.discretization == "mpas"
+    # the YAML says grid_type: voronoi; _postprocess_args normalizes the
+    # alias to the canonical "mpas"
+    assert args.grid_type == "mpas"
+    assert args.dt == pytest.approx(75.0)
+    assert args.vertical_coord == "sigma"
     cfg = build_config_from_args(args)
+    # The MPAS-lane Bechtold stabilizer (both no-hard-sat chains NaN'd d25/d40)
+    assert cfg.hard_saturation_adjustment is True
+    # MPAS runs UNTILED (tiled surface not ported to the standalone path)
+    assert cfg.surface_tiled is False
+    # passive/slab land-tile knobs shared by both arms of the land A/B
+    assert cfg.mpas_land_lapse_K_per_km == pytest.approx(6.5)
+    assert cfg.mpas_land_beta == pytest.approx(0.6)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     # oro (McFarlane) + non-oro (Hines) composite, directive 2026-07-15:
     # +hines pushed the latlon24 topo-wave blowup day 100->179 and is
@@ -1811,8 +1824,7 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"         # required by the tiled surface
-    assert cfg.surface_tiled is True
+    assert cfg.turbulence == "louis"         # directive turbulence
     assert cfg.start_year == 1979
     # convective_cloud ON — mirrors the canonical tuned base
     # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
