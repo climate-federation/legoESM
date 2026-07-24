@@ -46,6 +46,7 @@ __param_spec__ = {
             "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
             "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
             "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
+            "bshear_floor": "NEMO rn_bshear namelist_ref fixed background-shear floor (numerics: division-by-zero guard, not a trained closure knob)",
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
@@ -265,6 +266,20 @@ class TKEConfig(NamedTuple):
     #                             the implicit solve. ~60x larger surface TKE
     #                             than the flux BC under an ~0.07 Pa wind.
     surface_bc: str = "veros_flux"
+    # Surface TKE BC PLACEMENT (Phase-2 #1317 T3 — the #1 ranked suspect).
+    # NEMO holds en(1) at the z=0 W-POINT and SOLVES the tridiagonal from
+    # jk=2, the first INTERIOR w-level (zdftke.F90:264,403-410).
+    #   "interior_pinned" (default, BIT-IDENTICAL legacy): the Dirichlet
+    #     value (surface_bc="nemo_dirichlet") is held AT interior interface
+    #     0 itself (legoESM's topmost carried level) — one w-level too
+    #     deep vs NEMO. Synthetic-column probe: en(20m) 8.6x, avt(30m) ~50x
+    #     NEMO with this placement alone held as the only variable.
+    #   "nemo_z0": prepend a VIRTUAL surface row (z=0, Dirichlet) to the
+    #     tridiagonal so interior interface 0 becomes a genuinely SOLVED
+    #     row coupled to it, matching NEMO's jk=2 exactly. Only meaningful
+    #     with surface_bc="nemo_dirichlet" (raises otherwise — "nemo_z0"
+    #     changes WHERE the Dirichlet value sits, not whether one exists).
+    tke_surface_bc_level: str = "interior_pinned"
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
     # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
@@ -344,6 +359,24 @@ class TKEConfig(NamedTuple):
     #   the RHS, linearized at the carried sqrt(e)/l_eps. Same first-order
     #   dissipation; different discrete decay factor at large dt.
     dissipation_discretization: str = "backward_euler"
+    # ----- Buoyancy-sink discretization (Phase-2 #1317 T6) -----
+    # "implicit_linearized" (default, BIT-IDENTICAL legacy): the stable-
+    #   branch sink -K_H*N^2 (N^2>=0) is linearised IMPLICITLY on the
+    #   diagonal (rate K_H*N^2/e); the unstable branch is explicit. See
+    #   the sign-aware split documented at the call site.
+    # "nemo_explicit": NEMO zdftke.F90:417-418 — the WHOLE term
+    #   -p_avt(jk)*rn2(jk) enters the RHS EXPLICITLY using the PREVIOUS-
+    #   step (before-solve) diffusivity (legoESM's carried K_H_old), for
+    #   EITHER sign of N^2; the post-solve floor en=MAX(en,rn_emin)
+    #   (zdftke.F90:468-470, already applied unconditionally by this
+    #   solver's tail) catches any negative overshoot from a large stable
+    #   sink. The lego linearised form instead damps toward the floor
+    #   smoothly (an implicit sink asymptotes, it never drives e below its
+    #   pre-sink value in one step the way an explicit sink can); NEMO's
+    #   explicit sink can clamp en sharply to rn_emin at the ML base —
+    #   the "hard mixing cutoff" vs "soft tail" contrast in the Phase-1
+    #   audit (T6, ranked suspect #3).
+    tke_buoyancy_sink: str = "implicit_linearized"
     # ----- K-from-TKE amplitude convention -----
     # ``"gaspar_sqrt2e"`` (default, BIT-IDENTICAL legacy):
     #   K_M = c_k·l_k·sqrt(2·max(e, tke_background)) — the Gaspar form.
@@ -425,7 +458,21 @@ class TKEConfig(NamedTuple):
     #   K_M / Prandtl). In the stratified interior Pr -> 10 (small abyssal
     #   K_H); in a convecting column Ri < 0 -> Pr -> 1 (K_H tracks the large
     #   convective K_M). This is the Veros ACC default.
+    # ``"nemo_ri"`` (Phase-2 #1317 T8): NEMO's EXACT nn_pdl=1 Richardson
+    #   number (zdftke.F90:381-401) — zri = rn2b*p_avm / (p_sh2 + rn_bshear),
+    #   pdlr = max(0.1, ri_cri/max(ri_cri, zri)), Pr = 1/pdlr. Differs from
+    #   "richardson" (Veros's own formula) by an EXTRA p_avm=K_M numerator
+    #   factor and the rn_bshear denominator floor — NOT the same formula
+    #   despite both being "Richardson-number Prandtl"; NEMO's zri is
+    #   PHYSICALLY a bulk/flux Richardson-like ratio K_M*N^2/S^2 (an eddy-
+    #   viscosity-weighted stability measure), not the plain gradient Ri.
+    #   The prior nemo_dino_kamm card used "richardson" with
+    #   prandtl_ri_coeff=1/ri_cri, which reproduces NEMO's pdlr TRANSFORM
+    #   (the clamp/scaling) but NOT NEMO's zri INPUT (missing avm, missing
+    #   bshear) — this mode is the fix. ``prandtl_ri_coeff`` still supplies
+    #   ``1/ri_cri`` (unchanged meaning: Pr = clamp(coeff*zri, 1, 10)).
     prandtl_mode: str = "unit"
+    bshear_floor: float = 1.0e-20        # NEMO rn_bshear [s^-2] (namelist_ref)
     Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
     # ----- NEMO zdftke surface terms (Langmuir + sub-ML TKE penetration) -----
     # Faithful ports of NEMO 5.0.1 ``zdftke.F90``. BOTH are ON in NEMO's
@@ -452,6 +499,33 @@ class TKEConfig(NamedTuple):
     etau_mode: str = "none"              # "none" | "below_ml"  (NEMO nn_etau 0/1)
     etau_frac: float = 0.05              # NEMO rn_efr — fraction of surface TKE penetrating
     etau_htau_mode: str = "constant10m"  # "constant10m" | "latitude" (NEMO nn_htau 0/1)
+    # ----- Bottom TKE boundary condition (Phase-2 #1317 T15) -----
+    # ``False`` (default, BIT-IDENTICAL legacy): the deepest carried
+    #   interface keeps its natural no-flux Neumann row (no special bottom
+    #   BC — the prior legoESM behaviour).
+    # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
+    #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
+    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
+    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
+    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
+    #   column here reaches the max depth) these coincide exactly; on
+    #   variable topography (a shallower column) the true seafloor
+    #   interface sits SHALLOWER than the array's last row, so the pin
+    #   lands one level below the real bottom (a masked/dry level there —
+    #   downstream wet-interface masking prevents any leak into wet cells,
+    #   so this is NOT a correctness bug, but the BC does not fire at the
+    #   physically correct row on shallow columns). Physics-validator
+    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
+    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
+    #   bottom_level-relative scatter is the documented follow-up before
+    #   any abyssal-tendency certification.
+    #   Requires the model-step caller to thread the bottom-cell velocities
+    #   + the NEMO bottom-drag rate (reusing
+    #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no
+    #   re-derived drag coefficient) as ``bottom_dirichlet`` to
+    #   ``tke_vertical_mixing``. Deep/not entrainment-relevant (Phase-1
+    #   audit T15) — a small correction far from the thermocline.
+    bottom_tke_bc: bool = False
     # ----- Prognostic TKE carry (Veros enable_tke PROGNOSTIC form) -----
     # ``prognostic=False`` (default, BIT-IDENTICAL): the Mode-B quasi-steady
     #   diagnostic chain runs in ``compute_vertical_K_profiles`` — ``tke_old=None``
@@ -737,3 +811,31 @@ class VerticalMixingConfig(NamedTuple):
     # Requires ``implicit_vertical_mixing=True`` (the shared-K explicit/pair
     # path cannot carry avs != avt).  Default off ⇒ bit-exact legacy.
     ddm: DoubleDiffusionConfig = DoubleDiffusionConfig()
+    # ----- Background composition (Phase-2 #1317 T23) -----
+    # How the model-level background floors (``A_v``/``K_v`` on the ocean
+    # config, threaded to ``compute_vertical_K_profiles`` as
+    # ``A_v_background``/``K_v_background``) compose with the ACTIVE
+    # closure's own output (``K_vmix``/``A_vmix``, which already carries its
+    # OWN internal MAX-floor — e.g. NEMO zdftke avm=max(rn_ediff*mxl*sqrt(en),
+    # avm0), zdftke.F90:713-716).
+    #   "additive" (default, BIT-IDENTICAL legacy): K_v_total = K_v_background
+    #     + K_vmix — the model-level floor is ADDED on top of the closure's
+    #     own (already-floored) output. NEMO has NO such extra addition: its
+    #     background enters ONLY as the MAX floor inside zdftke/zdfevd
+    #     themselves. In a stable thermocline where zdftke's own MAX floor
+    #     already binds at avtb (=K_v_background under the nemo_dino_kamm
+    #     card), the additive composition DOUBLES the background diffusivity
+    #     (K_v_background + K_v_background = 2x avtb) before any EVD
+    #     contribution is even added.
+    #   "nemo_max_floor": K_v_total = max(K_v_background, K_vmix) — the
+    #     model-level floor participates in the SAME max-floor semantics
+    #     NEMO uses everywhere (zdftke avm/avt, zdfevd's stable branch),
+    #     nothing is ADDED. Convection (enhanced_diffusion) composes the
+    #     same way: the "stable branch" background (K_bg / nu_bg, the EVD
+    #     zdfevd non-firing value) folds INTO the same max, not a second
+    #     additive term — EVD acting only where ``N²<0`` still fires the
+    #     K_conv branch (unaffected; only the STABLE branch's contribution
+    #     to the total changes from +K_bg to a no-op max).
+    # Unknown values raise (dispatch hardening); consulted only by
+    # ``compute_vertical_K_profiles`` (k_profiles.py).
+    vmix_background_mode: str = "additive"
