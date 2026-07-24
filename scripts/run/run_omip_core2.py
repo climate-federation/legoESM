@@ -449,7 +449,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         c_eps=rn_ediss,
         tke_background=1.0e-6,          # rn_emin
         tke_surface_min=1.0e-4,         # rn_emin0
-        tke_mxl_choice=2,               # nn_mxl=2 (closest; see docstring gaps)
+        # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
+        # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
+        # (ln_mxl0=T).  choice=2 (Veros Bougeault-Lacarrere, no ln_mxl0) was the
+        # flagged fidelity gap; =3 closes it.  See the A/B campaign (2026-07-24).
+        tke_mxl_choice=3,
+        # NEMO nn_bc_surf=1: en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0) Dirichlet surface
+        # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
+        # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.
+        surface_bc="nemo_dirichlet",
+        # NEMO integrates `en` PROGNOSTICALLY (one backward-Euler step/model-step
+        # carrying OceanState.tke).  The quasi-steady diagnostic Mode-B was the
+        # flagged gap; prognostic accumulates the tropical mixing energy and
+        # RECOVERS the tropical SST (+0.55→+0.12; SST rmse 1.44→0.90, MLD 74→38 in
+        # the controlled tripole d30 A/B) — the faithful tropical fix.  Revert any
+        # lever via --tke-surface-bc/--tke-mxl-choice/--tke-prognostic.
+        prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
         lc=True,                        # ln_lc
