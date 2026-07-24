@@ -20,13 +20,57 @@ import re
 import sys
 from pathlib import Path
 
-from legoesm.atmosphere.les_suite import get_case, list_cases, register_default_catalog
+from legoesm.atmosphere.les_suite import (
+    SigmaLESError,
+    get_case,
+    list_cases,
+    register_default_catalog,
+    sigma_les_prognostic,
+)
+from legoesm.atmosphere.les_suite.bridge import load_artifact
 from legoesm.atmosphere.les_suite.scorecard import assemble_scorecard, render_markdown
 
 # scheme suffix on a tuned filename ``<artifact>__<scheme>__df.json`` — used only to
 # recover per-flux provenance for LEGACY records that predate the tuner stamping
 # ``artifact``/``q0`` into the JSON itself.
 _Q0_RE = re.compile(r"__q0_([0-9]*\.?[0-9]+)")
+
+# The D7 SGS-spread closures whose same-case artifacts (from ``run_les_suite --sgs``)
+# define σ_LES. Explicit list, NOT a glob (a glob would grab flux-sweep artifacts).
+_SGS_SPREAD = ("lasd", "smagorinsky", "vreman")
+
+
+def _sigma_les_by_regime(records: list[dict], artifacts_dir: Path) -> dict[str, float]:
+    """Per-regime σ_LES (loss units) from each case's SGS-spread artifacts, for the D7
+    gate on the Q1b margins. A case needs ≥2 emitted variants; regimes with several cases
+    take the MAX σ_LES — the most conservative bar, though NOT strictly case-comparable:
+    one pathological (e.g. wind-dominated Ug=0) case can veto another's real result, so
+    prefer per-case gating once a regime has several cases (moot while it has one).
+    Missing/short/erroring/unreadable variant sets are skipped WITH a warning — the gate
+    just stays off there, never crashes."""
+    by_regime: dict[str, float] = {}
+    for case in sorted({r["case"] for r in records}):
+        arts = []
+        for s in _SGS_SPREAD:
+            path = artifacts_dir / f"{case}__{s}.npz"
+            if not path.exists():
+                continue
+            try:
+                arts.append(load_artifact(path))
+            except Exception as e:  # noqa: BLE001 — a corrupt artifact must not crash the card
+                print(f"[warn] σ_LES: could not load {path.name}: {e}", file=sys.stderr)
+        if len(arts) < 2:
+            print(f"[warn] σ_LES for {case}: <2 usable SGS-spread artifacts "
+                  f"(found {len(arts)}); gate stays off for its regime", file=sys.stderr)
+            continue
+        try:
+            sl = sigma_les_prognostic(arts)
+        except SigmaLESError as e:
+            print(f"[warn] σ_LES for {case}: {e}", file=sys.stderr)
+            continue
+        regime = get_case(case).regime
+        by_regime[regime] = max(by_regime.get(regime, 0.0), sl.sigma_combined)
+    return by_regime
 
 
 def _backfill_provenance(rec: dict, path: Path) -> None:
@@ -74,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tuned-dir", type=Path, default=Path("results/les_suite/tuned"))
     p.add_argument("--output", type=Path, default=Path("results/les_suite/scorecard.md"))
+    p.add_argument("--sgs-artifacts-dir", type=Path, default=None,
+                   help="if given, compute σ_LES per regime from each case's SGS-spread "
+                        "artifacts here and GATE the Q1b margins on it (D7)")
     args = p.parse_args(argv)
 
     if not args.tuned_dir.exists():
@@ -85,8 +132,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no usable tuned records in {args.tuned_dir}", file=sys.stderr)
         return 1
 
+    sigma_les_by_regime = None
+    if args.sgs_artifacts_dir is not None:
+        sigma_les_by_regime = _sigma_les_by_regime(records, args.sgs_artifacts_dir)
+        if not sigma_les_by_regime:
+            print("[warn] --sgs-artifacts-dir given but no case had >=2 SGS-spread "
+                  "artifacts; the Q1b σ_LES gate stays off", file=sys.stderr)
+
     card = assemble_scorecard(records)
-    md = render_markdown(card)
+    md = render_markdown(card, sigma_les_by_regime)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(md)
     print(md)

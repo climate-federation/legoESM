@@ -261,10 +261,19 @@ The full machinery is built + validated; these are the first real numbers, for t
   (`smagorinsky`) at **every** flux 0.02→0.12 (margins +0.0053, +0.0142, +0.0207,
   +0.0196, +0.0257) — generally widening with flux but NOT strictly monotonic (a slight
   dip at 0.08). So the local→nonlocal skill crossover lies **below the lowest sampled
-  flux** (nonlocal already wins at 0.02) and the local handicap broadly deepens with
-  buoyancy — consistent with the Q1a structural ceiling (a counter-gradient layer at
-  every flux). CAVEAT (D7): significance vs σ_LES is pending the SGS-spread runs — a
-  margin below σ_LES is not a result; the +0.005 margin at 0.02 is small.
+  flux** (nonlocal already wins at 0.02), consistent with the Q1a structural ceiling.
+- **Q1b D7 SIGNIFICANCE (2026-07-24, real SGS spread):** emitted the {lasd, smagorinsky,
+  vreman} SGS spread for `cbl_nieuwstadt` on GPU and computed **σ_LES = 0.3186** (combined
+  loss units, `compute_sigma_les`). Gated on it, **NONE of the Q1b margins are
+  significant** (all 0.005–0.026 ≪ 0.3186) — so the dry-CBL local→nonlocal skill
+  advantage, though directionally robust, does NOT survive the D7 gate. **BUT** the caveat
+  matters: σ_LES(combined) is DOMINATED by the winds (σ_LES(u)=0.43, σ_LES(v)=0.34) while
+  σ_LES(θ)=**0.0074** is tiny — and for this Ug=0 FREE-CONVECTIVE CBL the winds are ~0, so
+  their normalized spread is ill-conditioned (near-zero std). The θ physics (what the CBL
+  is about) has a tiny noise floor 0.0074, comparable to the low-flux margins. VERDICT: a
+  defensible local→nonlocal skill threshold needs the SHEARED cases (Ug>0, well-conditioned
+  winds) — this directly motivates wiring the U_g axis; on the no-wind CBL the combined-metric
+  gate is dominated by wind noise and the θ-only picture is borderline at low flux.
 - **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
   is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
   Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <
@@ -345,13 +354,13 @@ The full machinery is built + validated; these are the first real numbers, for t
      step pending memory headroom** (nlev=24) — clubb is deliberately kept out of the
      running campaign shell so its heavy compile can't OOM-crash it.
    - **Scorecard** reports PER surface-flux (dedup'd; `n fluxes` denominators).
-   - **D7 σ_LES machinery DONE (compute pending)**: `run_les_suite --sgs
-     {lasd,smagorinsky,vreman}` emits the SGS-spread variants, and
-     `les_suite/sigma_les.py::sigma_les_prognostic` (+ CLI `compute_sigma_les.py`)
-     aggregates them into σ_LES IN THE TUNER'S LOSS UNITS (RMS over variant pairs of the
-     same `prognostic_profile_score` the tuner uses), so the D7 gate is quantifiable.
-     Remaining compute: emit the 3 SGS variants (GPU) + the 2×-resolution runs, run the
-     driver, then gate the Q1b margins / Q3 spread on σ_LES in `build_les_scorecard`.
+   - **D7 σ_LES DONE for the dry CBL anchor**: `run_les_suite --sgs
+     {lasd,smagorinsky,vreman}` + `sigma_les.py`/`compute_sigma_les.py` produced a REAL
+     σ_LES(cbl_nieuwstadt)=**0.3186** (loss units), and `build_les_scorecard
+     --sgs-artifacts-dir` gates the Q1b margins on it (all "not significant by combined
+     gate" — see the wind-conditioning caveat in §7.1). Remaining D7 compute: the
+     2×-resolution runs (fold into σ_LES), and the SGS spread for the OTHER regimes as
+     they come online.
    - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
      `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;
      the AD path (D4 comparison + perf); run the D7 σ_LES SGS-spread + 2×-resolution.

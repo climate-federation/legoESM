@@ -295,32 +295,59 @@ def _mean_table(ranked: tuple, counts: dict, n_total: int) -> list[str]:
     return rows
 
 
-def _skill_section(skill: tuple) -> list[str]:
-    """Q1b — the best-tuned local vs nonlocal margin per (regime, flux)."""
+def _skill_section(skill: tuple, sigma_les_by_regime: dict | None = None) -> list[str]:
+    """Q1b — the best-tuned local vs nonlocal margin per (regime, flux).
+
+    When ``sigma_les_by_regime`` (regime -> σ_LES, in the same loss units) is given, a
+    significance verdict is applied per D7: a margin is a result only when
+    ``|margin| > σ_LES`` — the LES's own SGS/resolution spread. Without it, the section
+    reports raw margins and flags significance as a pending follow-up.
+    """
+    # `is not None` (not truthiness): an EMPTY map means "σ_LES was requested but no
+    # regime had a usable spread" — still show the columns with "—", don't silently drop
+    # them (which would make the output structurally depend on whether a case succeeded).
+    has_sigma = sigma_les_by_regime is not None
+    note = ("Significance is gated on the COMBINED-metric σ_LES (D7): a result only when "
+            "|margin| > σ_LES. NOTE: for a Ug=0 free-convective CBL σ_LES(combined) is "
+            "wind-dominated (near-zero winds → ill-conditioned) — see the σ_LES(θ/u/v) "
+            "decomposition + the CHANGELOG caveat before reading a bare 'no' as physics."
+            if has_sigma else
+            "Significance vs σ_LES is a D7 follow-up — a margin below σ_LES is NOT a "
+            "result.")
     lines = ["## Q1b — local → nonlocal skill threshold",
              "(best-tuned LOCAL vs best-tuned NONLOCAL; margin = local − nonlocal, "
-             "so **margin > 0 ⇒ nonlocal wins**. Significance vs σ_LES is a D7 "
-             "follow-up — a margin below σ_LES is NOT a result.)", ""]
+             f"so **margin > 0 ⇒ nonlocal wins**. {note})", ""]
     if not skill:
         lines += ["(no local/nonlocal tuned pairs yet)", ""]
         return lines
-    lines.append("| regime | flux | best local | best nonlocal | margin | nonlocal wins |")
-    lines.append("|---|---|---|---|---|---|")
+    cols = ["regime", "flux", "best local", "best nonlocal", "margin", "nonlocal wins"]
+    if has_sigma:
+        cols += ["σ_LES (combined)", "significant by combined gate (|margin|>σ_LES)"]
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("|" + "---|" * len(cols))
     for s in skill:
         flux = f"Q0={s.q0:g}" if s.q0 is not None else s.subcase
         bl = f"{s.best_local[0]} {s.best_local[1]:.4f}" if s.best_local else "—"
         bn = f"{s.best_nonlocal[0]} {s.best_nonlocal[1]:.4f}" if s.best_nonlocal else "—"
         mg = f"{s.margin:+.4f}" if s.margin is not None else "—"
         win = ("yes" if s.nonlocal_wins else "no") if s.nonlocal_wins is not None else "—"
-        lines.append(f"| {s.regime} | {flux} | {bl} | {bn} | {mg} | {win} |")
+        cells = [s.regime, flux, bl, bn, mg, win]
+        if has_sigma:
+            sigma = sigma_les_by_regime.get(s.regime)
+            if sigma is not None and s.margin is not None:
+                cells += [f"{sigma:.4f}", "yes" if abs(s.margin) > sigma else "no"]
+            else:
+                cells += ["—", "—"]  # regime with no computed σ_LES → gate off for it
+        lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     return lines
 
 
-def render_markdown(card: Scorecard) -> str:
-    """Human-readable scorecard (the generated artifact)."""
+def render_markdown(card: Scorecard, sigma_les_by_regime: dict | None = None) -> str:
+    """Human-readable scorecard (the generated artifact). ``sigma_les_by_regime``
+    (regime -> σ_LES, loss units) activates the D7 significance gate on the Q1b margins."""
     lines = ["# LES-suite scorecard", ""]
-    lines += _skill_section(card.skill)
+    lines += _skill_section(card.skill, sigma_les_by_regime)
     lines += ["## Q2 — per-regime closure ranking",
               "(lower tuned LES loss = better)", ""]
     # group the per-flux rankings by regime, preserving their (regime, q0) order

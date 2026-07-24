@@ -199,6 +199,55 @@ def test_skill_rendered_in_scorecard():
     md = render_markdown(assemble_scorecard(recs))
     assert "Q1b" in md and "nonlocal wins" in md
     assert "Q0=0.02" in md
+    # no σ_LES given → no significance column, and the follow-up note is shown
+    assert "σ_LES" not in md.split("## Q2")[0] or "follow-up" in md
+
+
+def _q1b_row(md):
+    # the single data row of the Q1b table (starts "| dry_convective | Q0=...")
+    for line in md.split("## Q2")[0].splitlines():
+        if line.startswith("| dry_convective |"):
+            return [c.strip() for c in line.strip("|").split("|")]
+    raise AssertionError("no Q1b data row")
+
+
+def test_skill_sigma_les_gate_marks_significance():
+    # margin = 0.13 - 0.10 = 0.03. With σ_LES=0.01 it's significant; with 0.05 it's not.
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.13, q0=0.02),
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.10, q0=0.02),
+    ]
+    card = assemble_scorecard(recs)
+    md_sig = render_markdown(card, {"dry_convective": 0.01})
+    assert "significant by combined gate" in md_sig
+    row = _q1b_row(md_sig)
+    assert row[-2] == "0.0100"          # σ_LES cell
+    assert row[-1] == "yes"             # margin 0.03 > 0.01 → significant
+    # a large σ_LES makes the same margin NOT significant
+    row_insig = _q1b_row(render_markdown(card, {"dry_convective": 0.05}))
+    assert row_insig[-1] == "no"        # margin 0.03 < 0.05
+
+
+def test_skill_gate_empty_map_keeps_columns_with_dashes():
+    # {} = σ_LES requested but no usable spread → columns stay, cells are "—" (not dropped)
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.13, q0=0.02),
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.10, q0=0.02),
+    ]
+    md = render_markdown(assemble_scorecard(recs), {})
+    assert "significant by combined gate" in md  # columns present
+    row = _q1b_row(md)
+    assert row[-2] == "—" and row[-1] == "—"     # this regime had no σ_LES
+
+
+def test_skill_gate_missing_regime_shows_dash():
+    # σ_LES for a DIFFERENT regime → this regime's rows show "—"
+    recs = [
+        _rec("cbl", "louis", "dry_convective", 0.13, q0=0.02),
+        _rec("cbl", "holtslag_boville", "dry_convective", 0.10, q0=0.02),
+    ]
+    row = _q1b_row(render_markdown(assemble_scorecard(recs), {"dry_stable": 0.02}))
+    assert row[-2] == "—" and row[-1] == "—"
 
 
 def test_missing_field_rejected():

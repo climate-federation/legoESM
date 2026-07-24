@@ -184,6 +184,26 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
+**Iter 8 (2026-07-24) — REAL σ_LES computed + D7 gate wired into the scorecard.**
+- Emitted the {lasd, smagorinsky, vreman} SGS spread for `cbl_nieuwstadt` on GPU (each
+  96³, 2 h, 12 frames, Q0=0.06 — only the SGS differs; ~4 min/run). First real σ_LES:
+  **σ_LES(combined)=0.3186** in the tuner's loss units (`compute_sigma_les`).
+  Decomposition: σ_LES(θ)=**0.0074** (tiny), σ_LES(u)=0.431, σ_LES(v)=0.344 (large).
+- Wired the D7 gate into the scorecard: `build_les_scorecard --sgs-artifacts-dir`
+  computes σ_LES per regime (`_sigma_les_by_regime`, max over a regime's cases) and
+  `render_markdown(card, sigma_les_by_regime)` adds a "significant (|margin|>σ_LES)"
+  column to Q1b. Tests: `test_skill_sigma_les_gate_marks_significance`.
+- **RESULT (honest, precision rule):** gated on σ_LES=0.3186, **NONE of the Q1b margins
+  (0.005–0.026) are significant** — the dry-CBL local→nonlocal skill advantage, while
+  directionally robust across the flux sweep, does NOT survive the D7 gate. CAVEAT:
+  σ_LES(combined) is DOMINATED by the winds, which are ill-conditioned for this Ug=0
+  free-convective CBL (near-zero winds → tiny normalization std → inflated normalized
+  wind RMSE — exactly the small-truth-std pathology the σ_LES docstring warns of). The
+  θ-only noise floor is 0.0074, comparable to the low-flux margins. ⇒ a defensible
+  local→nonlocal skill threshold needs the SHEARED cases (Ug>0) — this quantitatively
+  motivates wiring the U_g axis (currently unwired). The gate itself is correct
+  (combined-vs-combined); the wind ill-conditioning is a property of the no-wind CBL.
+
 **Iter 7 (2026-07-24) — σ_LES aggregator (D7) in the tuner's loss units.**
 - NEW `les_suite/sigma_les.py` (`sigma_les_prognostic`, `SigmaLES`, `SigmaLESError`):
   aggregates a set of same-case SGS-variant artifacts (the `run_les_suite --sgs` spread
