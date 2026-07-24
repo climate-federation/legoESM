@@ -1666,7 +1666,20 @@ def main() -> int:
             )
 
     # --- MPI init ---
-    rank, n_ranks = _init_mpi()
+    if args.cs_spmd:
+        # Route-B: jax.distributed is already federated (initialized above,
+        # BEFORE any JAX use) and mpi4jax is never armed — rank identity
+        # comes from the runtime, so a CUDA venv without a loadable libmpi
+        # is VALID here (job 26449146: the mpi4py loud-guard killed the
+        # NCCL cube lane that needs no MPI at all). n_ranks keeps the
+        # LAUNCHER world size so the partial-federation gate below still
+        # compares jax.process_count() against what was launched.
+        import jax as _jax
+        _lw = _launcher_world_size()
+        rank = _jax.process_index()
+        n_ranks = _lw if _lw > 1 else _jax.process_count()
+    else:
+        rank, n_ranks = _init_mpi()
     is_rank0 = (rank == 0)
 
     # cs-spmd consistency gate: every launched process must have joined
