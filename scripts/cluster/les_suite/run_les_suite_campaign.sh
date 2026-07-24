@@ -1,6 +1,6 @@
 #!/bin/bash
 # LES-truth suite campaign: emit the Q1 flux sweep (GPU) -> Q1a structural diagnostic
-# -> derivative-free tuning of 5 closures per flux (CPU) -> Q2/Q3 scorecard.
+# -> derivative-free tuning of 8 closures per flux (CPU) -> Q2/Q3 scorecard.
 # IDEMPOTENT/RESUMABLE: skips artifacts + tuned JSONs that already exist, so a
 # timed-out job can just be resubmitted. All output under results/les_suite/.
 set -u
@@ -38,7 +38,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 $PY \
 for f in "$ART"/cbl_nieuwstadt__lasd*.npz; do
   [ -f "$f" ] || continue
   base=$(basename "$f" .npz)
-  for s in smagorinsky louis holtslag_boville ysu mynn25; do
+  for s in smagorinsky louis holtslag_boville ysu tke mynn25 clubb_lite edmf; do
     out="$OUT/tuned/${base}__${s}__df.json"
     if [ -f "$out" ]; then say "skip tune $base $s (exists)"; continue; fi
     say "tune $base $s"

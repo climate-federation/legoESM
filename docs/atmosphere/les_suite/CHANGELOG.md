@@ -46,35 +46,45 @@ Demonstrating the §7 machinery produces real numbers (full answers need the ens
   an up-gradient transport layer where ANY non-negative eddy-diffusivity (local
   down-gradient) closure is STRUCTURALLY unable to match the LES flux, regardless of
   tuning — the tuning-independent ceiling on local closures.
-  **Flux sweep (campaign 9157232):** `run_les_suite --q0` verified end-to-end; the
-  CG layer is present at every emitted flux and moves DOWN + grows with the surface
-  flux (stronger heating → more/lower up-gradient transport): Q0=0.02 → 308–325 m,
-  frac 0.22; Q0=0.06 → 275–292 m, frac 0.24. The campaign fills {0.04,0.08,0.12} →
-  `results/les_suite/q1_counter_gradient_sweep.json` (see CAMPAIGN.md).
+  **Flux sweep COMPLETE (campaign 9157232, 5 points 2026-07-24)** →
+  `results/les_suite/q1_counter_gradient_sweep.json`. A counter-gradient layer is
+  present at **every** flux 0.02→0.12 K m/s (base[m]/frac): 0.02→308/0.22,
+  0.04→292/0.38, 0.06→275/0.24, 0.08→392/0.51, 0.12→492/0.36. **CORRECTION** to the
+  earlier 2-point read (commit ec2fa1cd6, "CG layer drops with flux"): with all 5
+  points the layer-base trend is **non-monotonic** — it descends only through 0.06,
+  then rises steeply at 0.08–0.12; the fraction is noisy (0.22→0.51→0.36), not
+  monotone. The height/fraction *trend* is NOT a supported result on this data. The
+  robust, defensible Q1a claim is the **structural** one: an up-gradient layer exists
+  at every flux across the buoyancy axis ⇒ the tuning-independent ceiling on local
+  K≥0 closures holds throughout, not just at the anchor.
 - **Q2 (per-regime closure skill)** — mynn25 tier-1 derivative-free tuning on the 2 h
   CBL (17 candidates, dt=5, nlev=32): default loss **0.397**, best **0.397** (A1/A2
   mixing coefficients have negligible leverage on the dry-CBL θ fit → the default is
   already near-optimal). A real Q2 data point for the dry-convective anchor; the full
   ranking needs the other 8 closures wired. Scorecard generated end-to-end.
-- **Q2 TUNED RANKING (dry_convective CBL, 5 closures)** — derivative-free tier-1
-  tuning of each closure against the 2 h CBL truth, scorecard assembled end-to-end.
-  Ranking by tuned loss (lower = better):
-  | rank | closure | type | tuned | default |
-  |---|---|---|---|---|
-  | 1 | holtslag_boville | nonlocal | **0.241** | 0.241 |
-  | 2 | smagorinsky | local | 0.265 | 0.334 (**−20%** tuned) |
-  | 3 | louis | local | 0.280 | 0.281 |
-  | 4 | ysu | nonlocal | 0.363 | 0.363 |
-  | 5 | mynn25 | 1.5-order | 0.365 | 0.365 |
-  **Preliminary Q2 finding:** the higher-order (1.5-order) mynn25 is the WORST and the
-  nonlocal holtslag_boville the best ⇒ "closure order buys skill" is NOT supported for
-  this dry-convective CBL — consistent with the Q1a counter-gradient result (nonlocal
-  transport matters). **Caveats (precision rule):** COARSE tuning — tier-1 only,
-  small search (n_random=3), nlev=24, single case, single metric (final θ/u/v
-  prognostic RMSE). 4/5 closures show 0% improvement, i.e. the small search did not
-  beat default (smagorinsky's −20% shows tuning CAN help, so the ranking is partly
-  default-dominated). NOT a definitive calibration — a real Q2 data point pending the
-  larger search (needs the AD-path perf fix) and the other regimes for the full answer.
+- **Q2 TUNED RANKING — dry_convective CBL, FULL FLUX SWEEP (5 closures × 5 fluxes,
+  2026-07-24)** — derivative-free tier-1 tuning of each closure against each flux
+  artifact; scorecard now reports **per surface-flux** (`results/les_suite/scorecard.md`),
+  not a single flux-mean. Best tuned loss (lower = better) by Q0 [K m/s]:
+  | closure | type | 0.02 | 0.04 | 0.06 | 0.08 | 0.12 | flux-mean |
+  |---|---|---|---|---|---|---|---|
+  | holtslag_boville | nonlocal | **0.128** | **0.166** | **0.241** | **0.439** | **0.741** | **0.343** |
+  | smagorinsky (tuned) | local | 0.133 | 0.180 | 0.261 | 0.458 | 0.767 | 0.360 |
+  | louis | local | 0.134 | 0.184 | 0.269 | 0.468 | 0.783 | 0.367 |
+  | ysu | nonlocal | 0.152 | 0.240 | 0.363 | 0.579 | 0.962 | 0.459 |
+  | mynn25 | 1.5-order | 0.152 | 0.241 | 0.365 | 0.580 | 0.965 | 0.461 |
+  **Q2 finding (now flux-robust, not a single anchor):** `holtslag_boville` (nonlocal)
+  is best and `mynn25` (1.5-order) worst at **every** flux across a 6× range ⇒
+  "closure order buys skill" is NOT supported for the dry CBL — consistent with the
+  Q1a counter-gradient result. **Caveats (precision rule):** COARSE tuning — tier-1
+  only, small search (n_random=3), nlev=24, single case/regime, single metric (final
+  θ/u/v prognostic RMSE). Only **smagorinsky** responds to tuning (+8% to +19%,
+  descending with flux); the other four show ~0% improvement, so their rank is
+  default-dominated (smag's rank-2 is *entirely* tuning-driven — its default 0.402
+  is worse than louis). NOT a definitive calibration; Q3 inter-regime spread is still
+  0 (one regime). The flux-mean row de-duplicates the anchor — a prior scorecard
+  double-counted the 0.06 point (two protocol-inconsistent records), inflating it to
+  0.326; the correct dedup'd flux-mean is 0.343.
 - **5 closures now wired for the CBL tuner** (smagorinsky, louis, holtslag_boville,
   ysu, mynn25 — spanning local→nonlocal→1.5-order). **Preliminary DEFAULT-parameter**
   θ-loss on the 2 h CBL (NOT the tuned ranking — Q2 requires tuning each; labeled
@@ -146,9 +156,38 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   path (D4's other half) is the fix + the AD-vs-DF deliverable.
 - Science outputs recorded above (Q1a ceiling, Q2 tuned ranking, Q3 machinery).
 
-**NEXT:** (1) AD path — traced params via `apply_param_overrides` inside a jitted/AD
-loss (one compile serves all candidates; fixes the 8 h→minutes tuner cost + gives the
-D4 AD-vs-DF comparison; needs a scan-based differentiable SCM segment). (2) Wire the
-stable/sheared/moist regime emission in `run_les_suite` (only dry-convective CBL
-today) to span the §6 flux×shear grid + BOMEX/DYCOMS. (3) Run the full ensemble +
-tuning campaign + the D7 σ_LES SGS-spread runs → the complete Q1/Q2/Q3 answers.
+**Iter 3 (2026-07-24) — per-flux scorecard + Q2 roster 5→8 closures.**
+- **Scorecard reworked to PER-SURFACE-FLUX + anchor dedup** (codex CLEAN, 3 rounds):
+  `scorecard.py` `rank_closures_per_flux` (one ranking per Q0 slice) + typed canonical
+  flux key `("q0", round(q0,6))` (float32/exact merge; distinct campaign fluxes stay
+  separate) + non-finite-`best_loss` rejection + per-closure `n fluxes` denominator
+  (⚠ on incomplete matrix). `tune_scm_to_les.py` stamps `artifact`/`sgs`/`q0`
+  provenance; default output filename now keys off `artifact.stem` (case_name would
+  overwrite across fluxes). `build_les_scorecard.py` `_backfill_provenance` for legacy
+  records. Deleted 5 protocol-inconsistent pre-`__lasd__` stale anchor tunings; the
+  dedup'd holtslag flux-mean is 0.343 (a prior double-count read 0.326). Q2 ranking is
+  flux-robust: holtslag(nonlocal) best, mynn25(1.5-order) worst at every flux 0.02→0.12.
+- **Q2 CLOSURE ROSTER 5→8** (`tune_scm_to_les._cbl_scheme_table`): added `tke`
+  (1.5-order k-l), `clubb_lite` (higher-order), `edmf` (mass-flux) — the D3 order
+  ladder is now local(2)→nonlocal(2)→1.5-order(2)→higher-order/MF(2). **Probe-confirmed
+  finite SCM losses** on the 0.06 CBL anchor (nlev=24, dt=10, single eval ~12 min CPU):
+  tke 0.266, clubb_lite 0.236, edmf 0.233 — all sensible vs the wired set (holtslag
+  0.241, louis 0.269, smag 0.261). clubb_lite/edmf even beat holtslag at default.
+  Build test extended to all 8 (each builds + has tier-1 metas). **Full `clubb` (9th)
+  DEFERRED**: its tier-1 coefficients live in nested `CLUBBConfig.params` (scheme_key
+  `atm.turb.CLUBBParams`), so it needs the descend/re-wrap path (`_tunable_subconfig`
+  pattern from `run_scm_rce_campaign.py`), not the flat `config_cls(surface=)` table —
+  a focused follow-up.
+- **8-closure tuning campaign LAUNCHED** (`run_les_suite_campaign.sh`, closure loop now
+  8-wide; idempotent → tunes only the 15 new (closure,flux) combos, ~24 h CPU). On
+  completion the per-flux scorecard extends to an 8-closure Q2 ranking across the flux
+  sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
+  remains the perf fix.
+
+**NEXT:** (1) full `clubb` into the tuner (nested-params descend/re-wrap) → complete
+the 9-closure Q2 roster. (2) AD path — traced params via `apply_param_overrides`
+inside a jitted/AD loss (one compile serves all candidates; fixes the per-candidate
+recompile + gives the D4 AD-vs-DF comparison; needs a scan-based differentiable SCM
+segment). (3) Wire the stable/sheared/moist regime emission in `run_les_suite` (only
+dry-convective CBL today) → the §6 flux×shear grid + BOMEX/DYCOMS (unlocks Q3
+inter-regime spread). (4) D7 σ_LES SGS-spread + 2×-resolution runs → the error bars.

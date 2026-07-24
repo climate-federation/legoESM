@@ -152,19 +152,32 @@ def tune_closure_derivative_free(
 # closure-order ladder for Q1/Q2 (local first-order → nonlocal → 1.5-order).
 def _cbl_scheme_table():
     from legoesm.atmosphere.physics.turbulence.config import (
+        CLUBBLiteConfig,
         HoltslagBovilleConfig,
         LouisConfig,
         MYNN25Config,
         SmagorinskyConfig,
+        TKEConfig,
+        TurbulentEDMFConfig,
         YSUConfig,
     )
 
+    # The Q2 closure-order ladder (LES_SUITE.md D3): local → nonlocal → 1.5-order →
+    # higher-order/mass-flux. Each entry is (config_cls, registry scheme_key) and is
+    # constructed as ``config_cls(surface=surf)``; the scheme_key selects the tunable
+    # ParamMeta. Full ``clubb`` is NOT in this table yet (a deliberate gap, not wired
+    # elsewhere): its tier-1 coefficients live in nested ``CLUBBConfig.params``
+    # (scheme_key atm.turb.CLUBBParams), so it needs the descend/re-wrap path rather
+    # than this flat ``config_cls(surface=)`` construction — a documented follow-up.
     return {
         "smagorinsky": (SmagorinskyConfig, "atm.turb.SmagorinskyConfig"),   # local
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
         "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
         "ysu": (YSUConfig, "atm.turb.YSUConfig"),                          # nonlocal
-        "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order
+        "tke": (TKEConfig, "atm.turb.TKEConfig"),                          # 1.5-order (k-l)
+        "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
+        "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
+        "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux
     }
 
 
@@ -227,14 +240,26 @@ def main(argv: list[str] | None = None) -> int:
     rounded = {k: round(v, 4) for k, v in result.best_overrides.items()}
     print(f"  best overrides: {json.dumps(rounded)}")
 
+    # Default filename keys off the ARTIFACT stem, not case_name: several flux
+    # artifacts share one case_name (e.g. every CBL Q0), so a case-name default would
+    # silently overwrite the same JSON across fluxes and lose the per-flux records.
     out = args.output or Path("results/les_suite/tuned") / \
-        f"{artifact.case_name}__{result.scheme}__df.json"
+        f"{args.artifact.stem}__{result.scheme}__df.json"
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Provenance: which artifact/flux this record tuned against, so the scorecard can
+    # group per surface-flux (Q1/Q3 axis) and never double-count the same flux point.
+    # ``w_theta_s`` is the applied surface kinematic heat flux [K m/s]; for the CBL
+    # anchor it is constant = Q0. ``None`` for cases with no prescribed surface flux.
+    q0 = (float(np.asarray(artifact.w_theta_s).reshape(-1)[0])
+          if artifact.w_theta_s is not None else None)
     with open(out, "w") as f:
         # JSON has no Inf/NaN literal — write null for a non-finite default loss so
         # the scorecard reader (which falls back to best_loss) stays valid.
         json.dump({
             "case": artifact.case_name,
+            "artifact": args.artifact.stem,
+            "sgs": artifact.sgs,
+            "q0": q0,
             "scheme": result.scheme,
             "method": "derivative_free",
             "tiers": list(args.tiers),

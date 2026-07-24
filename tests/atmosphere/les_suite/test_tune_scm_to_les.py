@@ -80,7 +80,8 @@ def test_all_wired_schemes_build_with_registry_key():
     # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
-    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "mynn25"):
+    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "tke",
+                   "mynn25", "clubb_lite", "edmf"):
         base, key = m._base_turbulence(scheme)
         assert base.scheme == scheme
         assert getattr(base, scheme) is not None
@@ -92,3 +93,24 @@ def test_no_tunable_params_raises():
     m = _tuner()
     with pytest.raises(SystemExit):
         m._scheme_tunable_metas("atm.turb.MYNN25Config", tiers=(99,))
+
+
+def test_main_stamps_flux_provenance(tmp_path):
+    # main() must write artifact + q0 provenance so the scorecard can group per flux.
+    import json
+
+    from legoesm.atmosphere.les_suite.bridge import save_artifact
+    m = _tuner()
+    art = tmp_path / "cbl_probe.npz"
+    save_artifact(_cbl_artifact(), art)
+    out = tmp_path / "tuned.json"
+    rc = m.main([
+        "--artifact", str(art), "--scheme", "mynn25", "--tiers", "1",
+        "--n-random", "1", "--dt", "20", "--nlev", str(NZ), "--output", str(out),
+    ])
+    assert rc == 0
+    rec = json.loads(out.read_text())
+    assert rec["artifact"] == "cbl_probe"       # artifact stem, not the case name
+    assert rec["q0"] == pytest.approx(0.06)     # constant surface flux = Q0
+    assert rec["sgs"] == "lasd"
+    assert rec["case"] == "cbl_tune"

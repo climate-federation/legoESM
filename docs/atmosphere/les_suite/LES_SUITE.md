@@ -244,20 +244,31 @@ config next to every number.
 - **Bonus (from D4)** — agreement between AD and derivative-free optima per closure = a
   statement on whether closure coefficients are gradient-calibratable in legoESM.
 
-### 7.1 Demonstrated results so far (dry-convective anchor; 2026-07-22)
+### 7.1 Demonstrated results so far (dry-convective CBL, full flux sweep; 2026-07-24)
 The full machinery is built + validated; these are the first real numbers, for the
-`cbl_nieuwstadt` anchor only (the complete answers need every regime + the deeper
-tuning — see `CHANGELOG.md`):
-- **Q1a (structural ceiling)** — on the 2 h 96³ x64 CBL (model-exact resolved+SGS
-  flux), a counter-gradient layer appears at **275–292 m** (24% of levels): a
-  tuning-independent layer where any local K≥0 closure cannot match the LES flux.
-- **Q2 (tuned ranking, coarse tier-1)** — holtslag_boville (nonlocal) **0.241** <
-  smagorinsky 0.265 < louis 0.280 < ysu 0.363 < mynn25 (1.5-order) 0.365. Preliminary
-  finding: **closure order does NOT buy skill here** (the 1.5-order mynn25 is worst,
-  the nonlocal holtslag_boville best) — consistent with Q1a. Coarse search; not
-  definitive (small n_random, single case/metric).
+`cbl_nieuwstadt` dry-convective anchor swept across its surface-flux (Q0) axis only
+(the complete answers need every regime + the deeper tuning — see `CHANGELOG.md`):
+- **Q1a (structural ceiling), full sweep** — on the 2 h 96³ x64 CBL (model-exact
+  resolved+SGS flux), a counter-gradient layer is present at **every** Q0 from
+  0.02→0.12 K m/s (base[m]/frac: 0.02→308/0.22, 0.04→292/0.38, 0.06→275/0.24,
+  0.08→392/0.51, 0.12→492/0.36). This is the tuning-independent layer where any local
+  K≥0 closure cannot match the LES flux, and it holds across the whole buoyancy axis.
+  The layer-base *trend* is **non-monotonic** (descends through 0.06, rises at
+  0.08–0.12) — an earlier 2-point "drops with flux" read is not supported; only the
+  structural presence-at-all-fluxes is claimed.
+- **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
+  is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
+  Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <
+  ysu 0.363 < mynn25 0.365; the ordering is identical at 0.02/0.04/0.08/0.12 (see the
+  per-flux scorecard). Finding: **closure order does NOT buy skill here** — consistent
+  with Q1a. Coarse search; only smagorinsky responds to tuning (+8–19%), the rest
+  ~0% (default-dominated); single case/regime/metric — not definitive.
 - **Q3 (machinery)** — the tuned-coefficient scorecard assembles; the inter-regime
-  spread + σ_LES need the other regimes and the SGS-spread runs.
+  spread is still 0 (one regime). σ_LES need the other regimes and the SGS-spread runs.
+- **Scorecard now reports per surface-flux** (not one regime-mean) and de-duplicates
+  the anchor: a prior scorecard double-counted the 0.06 point (two protocol-inconsistent
+  tuned records), inflating holtslag's flux-mean to 0.326; the dedup'd mean over the
+  5 distinct fluxes {0.128,0.166,0.241,0.439,0.741} is **0.343**.
 - **D4 bonus** — the AD-vs-derivative-free comparison awaits the AD path (which also
   fixes the tuner's recompile-per-candidate cost; the RCE trainer's `lax.scan` +
   `eqx.filter_value_and_grad` pattern is the reuse target).
@@ -306,12 +317,21 @@ tuning — see `CHANGELOG.md`):
    derivative-free), `scorecard` + `build_les_scorecard` (Q2/Q3). **Gate-0
    Nieuwstadt CBL PASSED** on GPU (buoyant path validated). The full chain runs
    end-to-end: LES → self-describing artifact → SCM tuning → Q2/Q3 scorecard.
-6. **[pending compute] The Q1/Q2/Q3 science answers (§7).** The machinery is done;
-   what remains is a GPU ensemble + tuning campaign: wire the stable/moist regime IC
-   builders + the sheared-CBL `--Ug` in `run_les_suite.py` (only dry-convective is
-   wired), the remaining closures' base configs + the AD path in `tune_scm_to_les.py`
-   (only mynn25 today), then run the ensemble (14 production + SGS-spread +
-   convergence, ~1.5–2 GPU-days) and assemble. See `CHANGELOG.md`.
+6. **[in progress] The Q1/Q2/Q3 science answers (§7).** The machinery is done; this is
+   the compute + coverage campaign. Status (2026-07-24):
+   - **Q1a structural ceiling** — DONE across the dry-CBL flux axis (5 fluxes; a
+     counter-gradient layer at every Q0 0.02→0.12). The height *trend* is
+     non-monotonic; only presence-at-all-fluxes is claimed.
+   - **Q2 dry-CBL ranking** — **8 of 9 closures** now wired in `tune_scm_to_les`
+     (`_cbl_scheme_table`: smagorinsky, louis, holtslag_boville, ysu, tke, mynn25,
+     clubb_lite, edmf — the D3 order ladder), all probe-confirmed to finite SCM loss.
+     8-closure × 5-flux tuning campaign running (~24 h CPU). Full `clubb` (9th) is the
+     one gap — nested `CLUBBParams` needs the descend/re-wrap path (follow-up).
+   - **Scorecard** reports PER surface-flux (dedup'd; `n fluxes` denominators).
+   - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
+     `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;
+     the AD path (D4 comparison + perf); the D7 σ_LES SGS-spread + 2×-resolution runs.
+   See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
 the CLUBB spec, the bridge, and the score assembly (physics/numerics-touching) — the mandatory
