@@ -800,13 +800,22 @@ def estimate_overlap_potential(
     Runs the full step, then measures halo exchange time separately.
     The overlap potential is the fraction of step time occupied by
     halo exchange (which could theoretically be hidden).
+
+    ``halo_fn`` MUST be compiled (it is jitted here if it is not): timing
+    the eager pad measured Python op-dispatch — 23 s "halo" inside a 46 ms
+    step, i.e. a 49451 % "theoretical speedup" (Levante job 26454084).
+    A halo fraction above 100 % is arithmetically impossible for a
+    component of the step, so it is reported as a defect, not a finding.
     """
     import jax
 
-    # Warm up
+    halo_fn = jax.jit(halo_fn)
+
+    # Warm up (also compiles halo_fn)
     for _ in range(3):
         state = step_fn(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
+    jax.block_until_ready(jax.tree.leaves(halo_fn(state)))
 
     # Time full step
     step_times = []
@@ -827,13 +836,28 @@ def estimate_overlap_potential(
     mean_step = sum(step_times) / len(step_times)
     mean_halo = sum(halo_times) / len(halo_times)
     overlap_pct = (mean_halo / mean_step * 100) if mean_step > 0 else 0
-
-    return {
+    # The standalone halo is a COMPONENT of the step: >100 % means the
+    # measurement is invalid (un-jitted dispatch, a different shape, or a
+    # step that does not actually contain this exchange), never a real
+    # "hide 100 % of the step" opportunity.
+    valid = overlap_pct <= 100.0
+    out = {
         "mean_step_ms": round(mean_step, 3),
         "mean_halo_ms": round(mean_halo, 3),
         "halo_fraction_pct": round(overlap_pct, 1),
-        "overlap_potential_ms": round(mean_halo, 3),
-        "theoretical_speedup_pct": round(overlap_pct, 1),
+        "measurement_valid": valid,
         "step_times_ms": [round(t, 3) for t in step_times],
         "halo_times_ms": [round(t, 3) for t in halo_times],
     }
+    if valid:
+        out["overlap_potential_ms"] = round(mean_halo, 3)
+        out["theoretical_speedup_pct"] = round(overlap_pct, 1)
+    else:
+        out["overlap_potential_ms"] = None
+        out["theoretical_speedup_pct"] = None
+        out["invalid_reason"] = (
+            f"standalone halo ({mean_halo:.1f} ms) exceeds the full step "
+            f"({mean_step:.1f} ms) — the halo probe is not measuring a "
+            f"component of this step; refusing to report an overlap "
+            f"potential from it")
+    return out

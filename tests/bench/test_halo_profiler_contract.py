@@ -53,6 +53,32 @@ def test_dtype_bytes_match_the_x64_setting(profile):
         assert profile[label]["dtype_bytes"] == expected
 
 
+def test_overlap_estimator_refuses_impossible_fractions():
+    """A standalone halo cannot exceed the step it is part of.
+
+    Pre-fix the estimator timed an eager pad and reported a 49451 %
+    "theoretical speedup" (Levante job 26454084). Feed it a deliberately
+    slow halo probe and assert the verdict is refused, not published.
+    """
+    import time as _time
+
+    from legoesm.parallel.scaling_diagnostics import estimate_overlap_potential
+
+    def fast_step(s, dt):
+        return s
+
+    def slow_halo(s):
+        _time.sleep(0.002)      # 2 ms >> the ~0 ms no-op step
+        return s
+
+    out = estimate_overlap_potential(fast_step, slow_halo, {"x": 1.0}, 1.0,
+                                     n_iters=3)
+    assert out["measurement_valid"] is False
+    assert out["theoretical_speedup_pct"] is None
+    assert out["overlap_potential_ms"] is None
+    assert "exceeds the full step" in out["invalid_reason"]
+
+
 if __name__ == "__main__":  # pragma: no cover - manual run
     p = profile_halo_exchange(16, 4, halo=1, n_warmup=2, n_iters=5,
                               rank=0, world_size=1)
