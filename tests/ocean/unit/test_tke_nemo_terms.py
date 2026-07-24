@@ -567,8 +567,9 @@ class TestNemoZ0SurfaceBCPlacement:
         from legoesm.ocean.physics.vertical_mixing._shared import (
             compute_N2 as _compute_N2, vertical_shear_squared as _vsq,
         )
+        from legoesm import constants as _constants
         dz_half_np = np.asarray(dz_half)
-        N2_arr = np.asarray(_compute_N2(rho, dz_half, _RHO0, 9.80665))
+        N2_arr = np.asarray(_compute_N2(rho, dz_half, _RHO0, _constants.g))
         taum = float(np.asarray(_safe_stress_modulus(tx, ty))[0, 0])
         e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
         e_old_np = np.asarray(tke_old)[0, 0]
@@ -614,7 +615,10 @@ class TestNemoZ0SurfaceBCPlacement:
         from legoesm.ocean.physics.vertical_mixing._shared import (
             compute_N2 as _compute_N2, vertical_shear_squared as _vsq,
         )
-        g = 9.80665
+        from legoesm import constants as _constants
+        g = _constants.g   # the orchestrator's own default — a 9.80665
+        # literal here would inject a 5e-5 relative N2/anchor mismatch vs
+        # the function under test (physics-validator review CONCERN 2).
         shear_sq_np = np.asarray(_vsq(u, v, dz_half))[0, 0]
         N2_arr = np.asarray(_compute_N2(rho, dz_half, _RHO0, g))
         taum_batch = _safe_stress_modulus(tx, ty)          # shape (1, 1)
@@ -637,14 +641,8 @@ class TestNemoZ0SurfaceBCPlacement:
             cfg.alpha_tke, avm1=avm1, shear_sq=shear_sq_np)
         expected = np.maximum(expected, cfg.tke_background)
         expected[0] = max(expected[0], cfg.tke_surface_min)
-        # rtol=2e-4 (not 1e-9): the reconstructed l_eps/K_M route through a
-        # lax.scan mixing-length sweep (tke_mxl_choice=3), whose summation
-        # order differs from this hand-solve's naive Python loop — pure
-        # float-associativity noise at the ~1e-4 level, not a formula gap
-        # (still >1000x tighter than the 2x surface-coupling double-count
-        # this test caught, so it remains a real regression gate).
         np.testing.assert_allclose(
-            np.asarray(out.tke_new)[0, 0], expected, rtol=2e-4)
+            np.asarray(out.tke_new)[0, 0], expected, rtol=1e-9)
         # And it must NOT equal the approximation (avm1 != K_M[0] generically
         # — otherwise this test would not discriminate the fix).
         assert not np.isclose(avm1, float(np.asarray(K_M)[0, 0, 0]), rtol=1e-6)

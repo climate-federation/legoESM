@@ -566,6 +566,11 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 "tke_set_diffusivities does not accept T_n2b/S_n2b and "
                 "would silently keep step_entry. Disable tke_n2_time_level "
                 "or use the standard pre_mixing path.")
+        if _n2_tl == "step_entry" and n2_tracers_before is not None:
+            raise ValueError(
+                "n2_tracers_before was passed but TKEConfig.tke_n2_time_level"
+                "='step_entry' — set 'nemo_before' to actually use it "
+                "(silent-no-op guard, mirrors bottom_level/u_before_cell).")
         T_n2b, S_n2b = (n2_tracers_before if _n2_tl == "nemo_before"
                        else (None, None))
         dz_half = jnp.broadcast_to(
