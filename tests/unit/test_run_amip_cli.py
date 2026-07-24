@@ -499,6 +499,23 @@ def test_mpas_land_boundary_flags_flow_to_config():
     # validate_strict is exercised in test_mpas_land_boundary (the bare CLI
     # invocation here has topography='flat', which the inert-corner guard
     # correctly refuses).
+
+
+def test_mpas_qv_smoothing_flag_flows_to_config():
+    """--mpas-qv-smooth-del2-m2s round-trip (MPAS horizontal moisture
+    smoothing, 2026-07-23 speckle fix); default byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_qv_smooth_del2_m2s == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-qv-smooth-del2-m2s", "2e5",
+    ]), parser))
+    assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
+    # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

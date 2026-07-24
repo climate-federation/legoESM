@@ -1234,3 +1234,88 @@ def biharmonic_vorticity_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     # partial-land triangles — this is a codebase-wide concern for all
     # curl-based operators, not specific to this one.
     return grad_tangent
+
+
+def scalar_del2_cell_3d(q_cell_3d, mesh):
+    """Unweighted conservative Laplacian of a cell scalar, all levels (SCVT).
+
+    Two-point flux form on the orthogonal Voronoi dual
+    (Ringler et al. 2010, eq. 22 applied to a cell scalar):
+
+        lap(q)_c = (1 / A_c) * sum_e sign_ce * dvEdge_e
+                                * (q_c2 - q_c1) / dcEdge_e
+
+    the composition of :func:`gradient_edge_3d` and
+    :func:`divergence_cell_3d`, so the flux through every edge enters its
+    two cells with opposite sign and ``sum_c A_c * q_c`` is conserved
+    exactly in exact arithmetic (per level — the operator is purely
+    horizontal); in fp32 to floating-point roundoff (~1e-7 relative).
+
+    Monotone (discrete max principle, hence positivity-preserving for
+    q >= 0) when used explicitly as ``q + nu*dt*lap`` under the CFL bound
+    ``nu * dt * g_max <= 1`` with
+    ``g_max = max_c (1/A_c) sum_e dvEdge_e/dcEdge_e`` — every updated value
+    is then a convex combination of the old stencil values (all edge weights
+    positive on the orthogonal dual).  The caller enforces the bound;
+    :func:`scalar_del2_cell_cfl_factor` returns ``g_max`` (see the MPAS q_v
+    smoother's setup guard in ``_run_mpas``).
+
+    NOTE: this is UNWEIGHTED (mixing-ratio, not mass-weighted).  A
+    mass-weighted ``div(dp*grad q)/dp`` would conserve ``sum_c A_c dp_c q_c``
+    but REQUIRES dp > 0 everywhere; the default hybrid sigma-pressure
+    coordinate yields ``dp_k = dA_k*p_ref + dB_k*p_s`` with ``dA_k < 0`` near
+    the surface, so surface dp goes <= 0 for p_s below ~2/3 p_ref (~660 hPa,
+    reached over high terrain) and the division is non-finite.  That form is
+    therefore intentionally NOT offered here; if you need it, use a separate
+    weighted-flux implementation ``div(dp_edge*grad q)/dp`` AFTER asserting
+    dp > 0 on your coordinate — it cannot be obtained by pre-weighting ``q``.
+
+    Parameters
+    ----------
+    q_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev) — lap(q), units [q]/m^2.
+    """
+    grad = gradient_edge_3d(q_cell_3d, mesh)  # (nEdges, nlev)
+    return divergence_cell_3d(grad, mesh)
+
+
+def scalar_del2_cell_cfl_factor(mesh):
+    """Geometry factor ``g_max`` for the explicit plain-del2 stability bound.
+
+    The explicit update ``q + nu*dt*scalar_del2_cell_3d(q, mesh)`` is a
+    convex combination of the cell's stencil values — hence discrete-max-
+    principle / positivity preserving — iff
+
+        nu * dt * g_max <= 1 ,   g_c = (1/A_c) * sum_e dvEdge_e/dcEdge_e ,
+        g_max = max_c g_c .
+
+    (All edge weights are positive on the orthogonal SCVT dual, so the
+    diagonal coefficient ``1 - nu*dt*g_c`` stays non-negative under the
+    bound.)  Geometry-only — independent of ``q`` and ``dt`` — so a caller
+    enforces the bound once at setup.  Shared by the MPAS q_v smoother's
+    setup guard and its unit test so the two cannot drift.  numpy: the mesh
+    is static, this never runs inside a traced/jit region.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    float — ``g_max`` [1/m^2].
+    """
+    import numpy as np
+
+    eoc = np.asarray(mesh.edgesOnCell)          # (maxEdges, nCells)
+    mask = eoc >= 0
+    safe = np.maximum(eoc, 0)
+    dv = np.asarray(mesh.dvEdge)[safe]
+    dc = np.asarray(mesh.dcEdge)[safe]
+    g_cell = np.sum(
+        np.where(mask, dv / np.maximum(dc, 1e-30), 0.0),
+        axis=0) / np.asarray(mesh.areaCell)
+    return float(np.max(g_cell))
