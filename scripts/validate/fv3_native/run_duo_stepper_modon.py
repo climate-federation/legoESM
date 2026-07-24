@@ -54,6 +54,12 @@ def main():
                          "halos) next to --out as <out>_lat_dayD.npz — "
                          "feeds the corner-wedge sharp-state "
                          "capture-compare (codex deficiency-r1 endgame)")
+    ap.add_argument("--ext-exclude", default=None,
+                    help="comma list of ext-bundle exchanges to swap to "
+                         "the interim mpp-analog (diagnostic): "
+                         "'cvec' isolates the post-PG C-vector vertex "
+                         "extension (codex vsrc rank-1 source), "
+                         "also ascalar/dvec/divgd/metrics")
     ap.add_argument("--d4-bg", type=float, default=None,
                     help="del-6 divergence-damping strength override "
                          "(NON-FAITHFUL diagnostic; Zenodo case-8 = "
@@ -107,9 +113,12 @@ def main():
     )
 
     oc = not args.plain_conventions
+    ext_exclude = tuple(x for x in
+                        (args.ext_exclude or "").split(",") if x)
     ctx = build_six_face_duo_context(args.n, 3,
                                      use_ext_bundle=True,
                                      oracle_conventions=oc,
+                                     ext_exclude=ext_exclude,
                                      omega=0.0)
 
     # FV3 constants_mod GRAV (case-8 delp = 5000*Grav); legoESM
