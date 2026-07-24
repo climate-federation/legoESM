@@ -274,6 +274,16 @@ The full machinery is built + validated; these are the first real numbers, for t
   defensible local→nonlocal skill threshold needs the SHEARED cases (Ug>0, well-conditioned
   winds) — this directly motivates wiring the U_g axis; on the no-wind CBL the combined-metric
   gate is dominated by wind noise and the θ-only picture is borderline at low flux.
+- **Sheared σ_LES (Ug=8, 2026-07-24):** emitted the {lasd,smagorinsky,vreman} spread at
+  Ug=8 and computed σ_LES(combined)=0.283, σ_LES(θ)=0.0073, σ_LES(u)=0.114, σ_LES(v)=0.476
+  — vs free-convective 0.319/0.0074/0.431/0.344. Shear WELL-CONDITIONS the streamwise wind
+  as hypothesised (σ_u 0.43→0.11, 4×), but the Ekman CROSS-wind stays weak (~0.5 m/s) so
+  σ_v RISES (0.34→0.48) and now dominates σ_combined (only 0.32→0.28). σ_LES(θ)≈0.0074 is
+  unchanged — a robust, metric-invariant floor. ⇒ Even Ug=8 does not fully condition
+  σ_LES(combined); a clean D7 verdict for the θ-driven CBL wants a θ-CONSISTENT metric —
+  score BOTH the closure loss AND σ_LES on θ alone (comparing a combined-margin to a
+  θ-only σ would mix metrics, the exact error the σ_LES design guards). That θ-focused
+  gate + the sheared Q1b margins (tune the closures on the sheared case) is the next step.
 - **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
   is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
   Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <
