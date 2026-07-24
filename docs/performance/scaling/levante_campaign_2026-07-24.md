@@ -297,17 +297,34 @@ profile+recompile). The +8.5% figure is from the DERECHO lane-T campaign
 (see the SOTA review), not reproduced on Levante — rerun long-window if
 revisited.
 
-## Still open (ranked)
+## Still open (ranked) — refreshed at campaign close
 
-1. Wide-halo stability gates → promote the improved ocean config beyond
-   benches.
-2. ATM weak-scaling ladders at production per-device sizes (ocean done,
-   job 26453523 above).
-3. DONE (job 26453782/26453645): C768 same-path 6→24 eff 1.04, tiled
-   closed loop 14.3 GCells/s. Next size point C1152+ only if a science
-   driver needs it.
-4. Diagnosis halo/overlap phase fix (defect 9) + calibrated t_bound lines
-   on every plot from a dependency-matched comm microbenchmark.
-5. CPU spread ladders + Milan np16 NUMA anomaly attribution.
-6. Route-A CUDA-aware mpi4jax lane (`gpu_moist_scaling.slurm`) — only if a
-   route-A-vs-B A/B is ever needed; route-B beat all route-A references.
+1. **Wide-halo stability gates** → the blocker to promoting the improved
+   ocean config (wide-halo + vmix-f32) beyond benches. It is worth 2.01x
+   multinode and +0.15 weak efficiency, so this is the highest-value
+   remaining item. Needs: averaging-filter stability under stale-halo
+   substeps, plus a science sign-off on the f32 vmix solve.
+2. **MPAS ico np4 per-device dip** — five hypotheses refuted by
+   measurement (see above); needs a GPU op-level profile (nsys / XLA op
+   profile of np4 vs np8). A scoped instrumentation project, not a knob.
+3. **Calibrated theoretical-limit lines on every plot.** The ocean bench
+   already computes a `t_bound` from a latency/bandwidth model but reports
+   `bound_calibrated=false` because the latency and bandwidth inputs are
+   placeholders. A dependency-matched comm microbenchmark would turn every
+   ideal line from "linear" into a machine-specific roofline.
+4. **Ocean wet-cell compaction + wet-balanced partitions** (~2x on
+   ~40%-land grids, per `SCALING_STATUS_AUDIT.md` item 4) — untouched here.
+5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
+   ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
+   quantifies the prize.
+6. **Milan np16 anomaly** in the packed CPU ladder (np16 slower than np8,
+   recovering by np32) — spread ladder reduced but did not remove it.
+7. Route-A CUDA-aware mpi4jax lane (`gpu_moist_scaling.slurm`) — only if a
+   route-A-vs-B A/B is ever wanted; route-B beat every route-A reference
+   available here.
+
+DONE during the campaign (were open at the start): C768 same-path ladder
+(eff 1.04) and tiled closed loop (14.3 GCells/s); atm lat-lon weak at a
+production tile; ocean weak at a production tile; the ico CPU-MPI ladder;
+the CPU spread ladder; and the diagnosis tool's halo + overlap phases,
+which were found broken and fixed with a contract test.
