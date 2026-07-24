@@ -290,3 +290,137 @@ def test_compare_probe_results_skips_face_fields_gracefully(state, grid, z_coord
     # pgf_ke_u sits on u-faces — must be skipped with a clear reason.
     assert "_skipped" in cmp["pgf_ke_u"]
     assert "shape" in cmp["pgf_ke_u"]["_skipped"]["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 6. GM/Redi probe == production (#1317): the probe must thread the SAME
+#    kappa_redi_override production always computes, and support an optional
+#    (T, S) override for callers whose oracle's iso operator lives at a
+#    different time level than the state's primary T/S (NEMO leap-frog: iso
+#    is evaluated on the *before* level, advection on *now* — see the
+#    ``gm_redi_tracer_state`` docstring in tendency_probe.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gm_redi_config():
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    gm = GMRediConfig(
+        kappa_GM=0.0, kappa_Redi=1.0e3,
+        kappa_redi_lat_scaling=True,   # NEMO nn_aht_ijk_t=20 cos(lat) scaling
+        slope_scheme="nemo_iso_lap",
+    )
+    return LatLonCGridOceanConfig.from_flat(
+        A_h=0.0, A_v=1.0e-3, K_h=0.0, K_v=0.0,
+        bottom_drag_r=0.0, gm_redi=gm,
+    )
+
+
+def test_gm_redi_probe_threads_kappa_redi_cos_lat_override(
+    state, grid, z_coord, gm_redi_config,
+):
+    """``kappa_redi_lat_scaling=True`` (the DINO nemo_dino_kamm_mlf recipe)
+    means kappa_Redi is NOT the flat scalar the probe would use if it
+    silently dropped ``kappa_redi_override`` — reproduce production's own
+    ``_static_kappa_redi_override`` + ``gm_redi_tracer_tendency_latlon`` call
+    verbatim and assert the probe matches it bit-for-bit. This is the actual
+    #1317 defect: the probe used to call ``gm_redi_tracer_tendency_latlon``
+    WITHOUT ``kappa_redi_override``, silently running Redi at the (wrong,
+    non-cos-scaled) equator-value kappa everywhere."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _static_kappa_redi_override,
+    )
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        gm_redi_tracer_tendency_latlon,
+    )
+
+    result = probe_latlon_cgrid(
+        state, grid, z_coord, gm_redi_config,
+        gm_redi_tracer_state=(state.T.data, state.S.data),
+    )
+
+    kappa_redi_override = _static_kappa_redi_override(gm_redi_config.gm_redi, grid)
+    assert kappa_redi_override is not None, "fixture must exercise the cos-lat path"
+    dT_expected, dS_expected = gm_redi_tracer_tendency_latlon(
+        state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+        grid, z_coord, gm_redi_config.gm_redi,
+        eos=gm_redi_config.eos, eos_linear=gm_redi_config.eos_linear,
+        mask=state.land_mask.data,
+        u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+        rho_0=gm_redi_config.constants.rho_0, g=gm_redi_config.constants.g,
+        kappa_redi_override=kappa_redi_override,
+        dt=300.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.dT_gm_redi), np.asarray(dT_expected),
+        atol=1e-14, rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.dS_gm_redi), np.asarray(dS_expected),
+        atol=1e-14, rtol=1e-12,
+    )
+
+    # Sanity: the fix is not a no-op — omitting kappa_redi_override (the old,
+    # buggy behaviour) gives a materially different tendency on this cos-lat
+    # recipe, so a regression back to "no override" would be caught above.
+    dT_no_override, _ = gm_redi_tracer_tendency_latlon(
+        state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+        grid, z_coord, gm_redi_config.gm_redi,
+        eos=gm_redi_config.eos, eos_linear=gm_redi_config.eos_linear,
+        mask=state.land_mask.data,
+        u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+        rho_0=gm_redi_config.constants.rho_0, g=gm_redi_config.constants.g,
+        dt=300.0,
+    )
+    assert float(jnp.max(jnp.abs(dT_expected - dT_no_override))) > 1e-10
+
+
+def test_gm_redi_tracer_state_override_changes_iso_bucket_only(
+    state, grid, z_coord, gm_redi_config,
+):
+    """``gm_redi_tracer_state`` must retarget ONLY the GM/Redi (iso) bucket —
+    perturbing it must leave every momentum/advection-adjacent probe field
+    (which reads ``state.T``/``state.S`` directly, e.g. ``rho``) unchanged,
+    and must change ``dT_gm_redi``/``dS_gm_redi`` (and hence the folded
+    ``dT_dt_total``) relative to the default (``state.T``/``state.S``)."""
+    baseline = probe_latlon_cgrid(state, grid, z_coord, gm_redi_config)
+
+    rng = np.random.default_rng(3)
+    T_before = np.asarray(state.T.data) + 0.3 * rng.standard_normal(state.T.data.shape)
+    S_before = np.asarray(state.S.data)
+    perturbed = probe_latlon_cgrid(
+        state, grid, z_coord, gm_redi_config,
+        gm_redi_tracer_state=(jnp.asarray(T_before), jnp.asarray(S_before)),
+    )
+
+    # rho is computed from state.T/state.S directly (not gm_redi_tracer_state)
+    # -> must be untouched by the override.
+    np.testing.assert_array_equal(np.asarray(baseline.rho), np.asarray(perturbed.rho))
+
+    # The iso bucket must actually respond to the override.
+    assert float(jnp.max(jnp.abs(
+        perturbed.dT_gm_redi - baseline.dT_gm_redi))) > 1e-10
+    # ... and it must be folded into dT_dt_total (dT_dt_total = dT_dt + dT_gm).
+    np.testing.assert_allclose(
+        np.asarray(perturbed.dT_dt_total - perturbed.dT_gm_redi),
+        np.asarray(baseline.dT_dt_total - baseline.dT_gm_redi),
+        atol=1e-14, rtol=1e-12,
+    )
+
+
+def test_gm_redi_tracer_state_default_none_is_backward_compatible(
+    state, grid, z_coord, gm_redi_config,
+):
+    """``gm_redi_tracer_state=None`` (the default, used by every pre-existing
+    caller: compare_tendencies_acc.py, budget_{pointwise,fullframe}.py,
+    momentum_budget_diff.py, poison_gate.py) must be byte-identical to
+    explicitly passing ``(state.T.data, state.S.data)``."""
+    default = probe_latlon_cgrid(state, grid, z_coord, gm_redi_config)
+    explicit = probe_latlon_cgrid(
+        state, grid, z_coord, gm_redi_config,
+        gm_redi_tracer_state=(state.T.data, state.S.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(default.dT_gm_redi), np.asarray(explicit.dT_gm_redi))
+    np.testing.assert_array_equal(
+        np.asarray(default.dS_gm_redi), np.asarray(explicit.dS_gm_redi))
