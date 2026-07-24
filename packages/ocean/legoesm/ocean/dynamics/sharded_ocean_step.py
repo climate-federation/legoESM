@@ -515,17 +515,6 @@ def make_sharded_ocean_step(model, mesh):
     # device holds the whole small grid stack.
     rep = NamedSharding(mesh, P())
 
-    def _sig_round(x: float, digits: int = 5) -> float:
-        # Quantize to `digits` significant digits so per-process ULP drift
-        # (observed ~1e-7 relative) compares EQUAL while real divergence
-        # (a differing mask/config changes sums at >=1e-4 relative) differs.
-        if x == 0.0 or not np.isfinite(x):
-            return float(x)
-        from math import floor, log10
-
-        mag = floor(log10(abs(x)))
-        return float(round(x, -int(mag) + digits - 1))
-
     def _replicated_put(arr, name):
         # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
         # value is bit-identical on every process. The band-geometry arrays
@@ -535,29 +524,37 @@ def make_sharded_ocean_step(model, mesh):
         # area-scale fields differing at 1e-7 relative). Broadcast process
         # 0's bytes so every controller puts the SAME replicated value.
         # GUARD (codex round-3): process 0 must not silently mask REAL
-        # cross-process divergence — assert a structure + quantized-value
-        # fingerprint (5 significant digits: ULP drift collapses, a wrong
-        # mask/grid/config does not) BEFORE adopting process 0's bytes.
+        # cross-process divergence. Compare an allgathered fingerprint with
+        # a TOLERANCE (quantize-then-assert-equal false-positived on a
+        # rounding-boundary straddle, job 26453240): structural entries
+        # exactly, value entries to rtol 1e-5 — ULP drift passes, a wrong
+        # mask/grid/config (>=1e-4 relative) refuses loudly.
         host = np.asarray(arr)
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
 
             flat = host.ravel()
             finite = flat[np.isfinite(flat)]
-            fp = np.array(
+            struct = np.array(
                 [float(host.ndim), *map(float, host.shape),
                  float(np.dtype(host.dtype).num),
-                 _sig_round(float(finite.sum()) if finite.size else 0.0),
-                 _sig_round(float(np.abs(finite).max()) if finite.size else 0.0),
-                 float(flat.size - finite.size)],  # non-finite count
+                 float(flat.size - finite.size)], dtype=np.float64)
+            vals = np.array(
+                [float(finite.sum()) if finite.size else 0.0,
+                 float(np.abs(finite).max()) if finite.size else 0.0],
                 dtype=np.float64)
-            multihost_utils.assert_equal(
-                fp, fail_message=(
+            g_struct = multihost_utils.process_allgather(struct)
+            g_vals = multihost_utils.process_allgather(vals)
+            struct_ok = bool(np.all(g_struct == g_struct[0]))
+            vals_ok = bool(np.allclose(g_vals, g_vals[0], rtol=1e-5, atol=0.0))
+            if not (struct_ok and vals_ok):
+                raise RuntimeError(
                     f"make_sharded_ocean_step: band-geometry field {name!r} "
                     f"DIVERGES across processes beyond ULP tolerance "
-                    f"(shape/dtype/5-sig-digit fingerprint mismatch) — this "
-                    f"is a real config/grid inconsistency, not autotune "
-                    f"noise; refusing to broadcast process 0 over it."))
+                    f"(struct_ok={struct_ok}, vals_ok={vals_ok}, "
+                    f"gathered={g_vals.tolist()}) — a real config/grid "
+                    f"inconsistency, not autotune noise; refusing to "
+                    f"broadcast process 0 over it.")
             host = multihost_utils.broadcast_one_to_all(host)
         return jax.device_put(jnp.asarray(host), rep)
 
