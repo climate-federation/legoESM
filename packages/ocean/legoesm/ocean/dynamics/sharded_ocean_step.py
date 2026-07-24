@@ -202,6 +202,40 @@ def build_band_grids(grid, n_devices: int):
     ]
 
 
+def _content_hash48(arr) -> float:
+    """48-bit content digest of ``arr``'s bytes, exactly representable in f64.
+
+    Used to compare EXACT-dtype arrays (masks, index tables) across
+    processes: unlike moment fingerprints, a byte digest is positional, so a
+    permutation or a two-cell flip cannot cancel. 48 bits keeps the value
+    under 2**53 so it survives the float64 ``process_allgather`` payload
+    exactly. Not cryptographic — collision-resistance at 2**-48 is far
+    beyond the ~10 setup-time comparisons this guard makes.
+    """
+    import hashlib
+
+    a = np.ascontiguousarray(arr)
+    h = hashlib.blake2b(a.tobytes(), digest_size=6)
+    return float(int.from_bytes(h.digest(), "big"))
+
+
+def _schema_fingerprint(names, n_dev) -> np.ndarray:
+    """Fixed-shape schema digest: field-name list, count, x64 flag, n_dev.
+
+    Gathered ONCE before the per-field loop so a process-dependent field
+    selection is caught by a collective every process reaches, instead of
+    desynchronizing the per-field gathers (codex round-5 findings 3/4).
+    """
+    import hashlib
+
+    joined = ",".join(names).encode()
+    digest = float(int.from_bytes(
+        hashlib.blake2b(joined, digest_size=6).digest(), "big"))
+    return np.array(
+        [float(len(names)), digest, float(bool(jax.config.jax_enable_x64)),
+         float(n_dev)], dtype=np.float64)
+
+
 def _build_band_vertex_masks(model, n_dev):
     """Per-band vertex masks (n_lat/N+1, n_lon+1): SLICE the model's primed GLOBAL
     vertex mask ``[s : e+1]`` per band (the v/q-row stagger ``slice_cgrid_geometry_
@@ -542,18 +576,30 @@ def make_sharded_ocean_step(model, mesh):
             from jax.experimental import multihost_utils
 
             flat = host.ravel()
+            # Integer/bool arrays (masks, index tables) are exact data, not
+            # autotuned arithmetic: fingerprint their BYTES so a positional
+            # difference is caught. Moment-only compares are blind to a
+            # permutation — a bool mask's (sum, sumsq, absmax) is identical
+            # for every arrangement with the same true-count (codex round-5).
+            # A mask that genuinely differs across processes means different
+            # wet domains = different physics: refusing is the correct
+            # outcome, not a false alarm.
             is_exact = host.dtype.kind in "biu"
-            finite = flat if is_exact else flat[np.isfinite(flat)]
             struct = np.array(
                 [float(host.ndim), *map(float, host.shape),
-                 float(np.dtype(host.dtype).num),
-                 float(flat.size - finite.size)], dtype=np.float64)
-            f64 = finite.astype(np.float64)
-            vals = np.array(
-                [float(f64.sum()) if f64.size else 0.0,
-                 float((f64 * f64).sum()) if f64.size else 0.0,
-                 float(np.abs(f64).max()) if f64.size else 0.0],
-                dtype=np.float64)
+                 float(np.dtype(host.dtype).num)], dtype=np.float64)
+            if is_exact:
+                vals = np.array([_content_hash48(host)], dtype=np.float64)
+            else:
+                finite = flat[np.isfinite(flat)]
+                f64 = finite.astype(np.float64)
+                struct = np.concatenate(
+                    [struct, [float(flat.size - finite.size)]])
+                vals = np.array(
+                    [float(f64.sum()) if f64.size else 0.0,
+                     float((f64 * f64).sum()) if f64.size else 0.0,
+                     float(np.abs(f64).max()) if f64.size else 0.0],
+                    dtype=np.float64)
             g_struct = multihost_utils.process_allgather(struct)
             g_vals = multihost_utils.process_allgather(vals)
             struct_ok = bool(np.all(g_struct == g_struct[0]))
@@ -572,6 +618,23 @@ def make_sharded_ocean_step(model, mesh):
                     f"broadcast process 0 over it.")
             host = multihost_utils.broadcast_one_to_all(host)
         return jax.device_put(jnp.asarray(host), rep)
+
+    if jax.process_count() > 1:
+        # Schema gate FIRST (one fixed-shape collective every process
+        # reaches): a process-dependent field list or a mixed
+        # jax_enable_x64 setting would otherwise desynchronize the
+        # per-field gathers below instead of failing with a clear message.
+        from jax.experimental import multihost_utils as _mhu
+
+        _g = _mhu.process_allgather(
+            _schema_fingerprint(list(array_field_names), n_dev))
+        if not bool(np.all(_g == _g[0])):
+            raise RuntimeError(
+                "make_sharded_ocean_step: the band-geometry SCHEMA differs "
+                "across processes (field list / x64 setting / device count "
+                f"— gathered {_g.tolist()}). Fix the per-process config "
+                "before sharding; the per-field checks below assume one "
+                "schema.")
 
     geom_stacks = {
         name: _replicated_put(
