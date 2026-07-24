@@ -59,6 +59,17 @@ selections (`barotropic_solver="explicit_substep"` + wide-halo flags,
 the wide-halo stability gates (`SCALING_STATUS_AUDIT` item 3) and a
 science sign-off on the mixed-precision vmix.
 
+## Weak scaling at production per-device size (job 26453523)
+
+The earlier weak ladders used a 64-row base (0.17M cells/GPU — under the
+latency floor) and showed 0.25–0.35 efficiency. Re-run at PRODUCTION size
+(288 rows × 1152 lon × L20 = 6.6M cells/GPU, f64, 1→4 A100, conservation
+gated): production implicit 1.00/0.72/0.70, improved wide-halo+vmix-f32
+1.00/0.86/0.85. So the weak collapse was a protocol artifact, and the same
+config that fixes strong scaling also carries weak (+0.15 at nd4). Ideal is
+flat; the improved arm holds 22.5→22.9 ms while production drifts
+17.8→25.3 ms.
+
 ## "It used to be faster / did we regress?" — resolved, no regression
 
 - Cross-machine anchor (matched bench/config/grid/physics/precision,
@@ -138,8 +149,8 @@ only if revisited).
 
 1. Wide-halo stability gates → promote the improved ocean config beyond
    benches.
-2. Ocean/atm weak-scaling ladders at production per-device sizes (weak
-   receipts so far use small bases).
+2. ATM weak-scaling ladders at production per-device sizes (ocean done,
+   job 26453523 above).
 3. Cube C768-class tiled run (36.9k cols/GPU at 24 was eff 0.44 right AT
    the floor; bigger grids should climb toward the latlon curve).
 4. Diagnosis halo/overlap phase fix (defect 9) + calibrated t_bound lines
