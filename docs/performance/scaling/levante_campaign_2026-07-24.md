@@ -219,9 +219,18 @@ campaign. Efficiency t1/(n*tn) by subdivision:
 
 | subdiv | np2 | np4 | np8 | np16 | np32 | np64 |
 |---|---|---|---|---|---|---|
+| 4 | 0.90 | 0.76 | 1.00 | 0.53 | 0.26 | 0.15 |
+| 5 | 1.02 | 0.88 | 1.15 | 0.56 | 0.58 | 0.30 |
 | 6 | 1.02 | 0.88 | 1.07 | 0.51 | 0.54 | 0.57 |
 | 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
 | 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
+
+THE TILE-SIZE LAW, THIRD INDEPENDENT COMPONENT: the np64 column collapses
+on coarse grids (0.15 at subdiv4, 0.30 at subdiv5) and holds on fine ones
+(0.52-0.57 at subdiv6-7). Same pattern as the cube (0.23 -> 1.04 across
+tile sizes) and the ocean (0.37 -> 0.63) — now on a third component and a
+different transport (CPU-MPI, not NCCL). This is the campaign's most
+reproducible finding.
 
 Shape: ~1.0 through np8, one step down, then FLAT 0.5 from np16 to np64 —
 4x more ranks with no further loss, the signature of a fixed per-rank cost
