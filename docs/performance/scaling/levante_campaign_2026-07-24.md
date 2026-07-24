@@ -73,6 +73,36 @@ selections (`barotropic_solver="explicit_substep"` + wide-halo flags,
 the wide-halo stability gates (`SCALING_STATUS_AUDIT` item 3) and a
 science sign-off on the mixed-precision vmix.
 
+## Atm ladders added late in the campaign
+
+**Lat-lon WEAK at a production tile** (45 rows x 1440 lon x L26 = 64.8k
+columns/GPU, f32, job 26454476): efficiency 1.00 / 0.45 / 0.41 / 0.45 /
+0.44 at 1/2/4/8/16 GPUs — the cost is paid ONCE on the first cross-device
+step and then FLAT to 16 GPUs across two node crossings (1.09 -> 7.66
+GCells/s aggregate). Weak scaling on this grid is a fixed entry toll, not
+a compounding one.
+
+**MPAS icosahedral L8 (28 km) STRONG, identical padded mesh** (jobs
+26454476 + 26454618): 19.90 / 17.09 / 6.92 / 7.10 ms at np 2/4/8/16.
+Taking np2 as the base (it has the BEST per-device throughput, 430
+Mc/s/GPU): 2->8 = 2.88x = eff 0.72, 2->16 = 2.80x = eff 0.35 (small-tile
+floor).
+
+OPEN ANOMALY, characterised not explained: per-GPU throughput dips at
+np=4 (247 Mc/s/GPU vs 430 at np2 and 306 at np8), so np4 is barely faster
+than np2 while np8 is 2.5x faster than np4. Evidence gathered:
+- REPRODUCIBLE: two repeats per arm agree within 1 % (19.92/19.87,
+  17.14/17.04, 6.87/6.97).
+- PLACEMENT REFUTED: np4 packed on one node (17.09 ms) == np4 spread over
+  two nodes (17.12 ms), so node crossing is irrelevant.
+- HALO VOLUME REFUTED: ghost-cell census on the padded mesh gives
+  1540/1587/1400/1136 ghost cells per device at np 2/4/8/16 — flat to
+  falling, and under 3 % of owned cells at every count.
+Remaining suspect (UNVERIFIED): an XLA layout/tiling choice for the
+per-device cell count (655376/np = 327688 / 163844 / 81922 / 40961 —
+2^k x 40961, with np16 landing on an odd leading dimension). Next probe
+is an HLO/profile diff of the np4 vs np8 compiles, NOT another timing run.
+
 ## Weak scaling at production per-device size (job 26453523)
 
 The earlier weak ladders used a 64-row base (0.17M cells/GPU — under the
