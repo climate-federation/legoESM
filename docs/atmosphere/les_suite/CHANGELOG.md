@@ -117,7 +117,27 @@ is the fix.
   practical only at modest nsteps until a `lax.scan` rollout lands (the full-resolution
   perf follow-on).
 
-**NEXT:** (1) the θ-consistent D7 metric + the sheared Q1b margins → a DEFENSIBLE skill
-threshold. (2) AD scan-rollout for full-resolution AD tuning (fold into the campaign).
-(3) STABLE (SBL) + MOIST (BOMEX/DYCOMS) IC builders → Q3 inter-regime spread + Q2
-per-regime. (4) clubb tuning at nlev=24 (memory); the 2×-resolution σ_LES.
+- **Iter 12 (this commit) — STABLE (SBL) regime wired → the 2nd regime for Q3.**
+  `run_les_suite` gains `_build_sbl` (GABLS1 stratified sounding — the smooth θ ramp
+  zi=100/Δ=25/γ=0.01, Ug=8 geostrophic IC + lower-half perturbations, projected) and
+  `_make_emit_step` (a regime factory: dry CBL = plain `sl.step`; SBL adds the Rayleigh
+  sponge in the top 25% + a re-projection so the low-level jet / GWs are absorbed at the
+  rigid lid, not reflected → no ~0.9 h blow-up). `dry_stable` added to `_WIRED_REGIMES`;
+  the SBL uses the case grid dt (0.1 s, stiffer stratification), `nu_floor` background
+  viscosity, and negative surface flux (cooling). All faithful to the validated
+  `run_spectral_sbl.py`. Coriolis via `--lat` (GABLS1 73° → f=1.39e-4). Tests:
+  `test_build_sbl_stratified_ic_and_geostrophic_wind` (θ increases upward, u≈Ug, Q0<0),
+  `test_emit_step_factory_rejects_unknown_regime`, wired-regimes. GPU VALIDATION (0.3 h,
+  64×64×96, vreman): runs STABLY — no blow-up (the sponge holds the lid), θ stays stratified
+  (sfc 264.8 → top 267.9 K, cooled from 265), the surface wind is dragged to 2.62 m/s
+  (< Ug=8), forcing recorded (u_geo=8, f=1.39e-4, w'θ'=−0.005), all finite. The
+  super-geostrophic low-level JET has not formed yet — expected, it develops over HOURS
+  (inertial period 2π/f≈12.5 h); 0.3 h is early spin-up. So the wiring runs correctly;
+  the equilibrium jet + full validation await the 4 h run. This unlocks Q3
+  (dry_convective vs dry_stable inter-regime coefficient spread) once both are tuned.
+  Moist regimes (shallow_cumulus/stratocumulus) still need their IC builders + D9 cloud.
+
+**NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
+Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
+full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
+(5) clubb tuning at nlev=24 (memory); the 2×-resolution σ_LES.

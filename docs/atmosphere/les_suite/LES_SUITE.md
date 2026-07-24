@@ -380,9 +380,13 @@ The full machinery is built + validated; these are the first real numbers, for t
      {df,ad,both}` (the AD-vs-DF comparison). Traced-leaf params reuse one compiled grad
      (vs DF's per-candidate recompile); caveat — the Python step-loop UNROLLS under
      jax.grad, so full-resolution AD awaits a `lax.scan` rollout.
-   - Remaining: the STABLE (SBL) + MOIST (BOMEX/DYCOMS) IC builders (only dry-convective
-     wired) → Q3 inter-regime + Q2 per-regime; the AD scan-rollout (full-res perf); the
-     θ-consistent D7 metric; the 2×-resolution σ_LES runs.
+   - **STABLE (SBL) regime DONE**: `run_les_suite` wires `dry_stable` via `_build_sbl`
+     (GABLS1 stratified IC) + `_make_emit_step` (Rayleigh sponge + re-projection). GPU
+     0.3 h validation runs stably (stratified, surface-dragged, cooled, finite; the
+     equilibrium jet needs the 4 h run). This is the 2nd regime → Q3 once tuned.
+   - Remaining: emit the SBL 4 h SGS spread + tune → Q3 inter-regime spread; the MOIST
+     (BOMEX/DYCOMS) IC builders + D9 cloud scheme; the AD scan-rollout (full-res perf);
+     the θ-consistent D7 metric; the 2×-resolution σ_LES runs.
    See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for

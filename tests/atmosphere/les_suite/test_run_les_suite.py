@@ -33,9 +33,44 @@ def test_not_wired_regime_raises_systemexit():
         m.main(["--case", "dycoms_rf01_sc"])
 
 
-def test_wired_regimes_contains_dry_convective():
+def test_wired_regimes_contains_dry_convective_and_stable():
     m = _driver()
     assert "dry_convective" in m._WIRED_REGIMES
+    assert "dry_stable" in m._WIRED_REGIMES  # SBL now wired
+
+
+# --- stable (SBL) regime ------------------------------------------------------
+def test_build_sbl_stratified_ic_and_geostrophic_wind():
+    # _build_sbl builds the config + IC (no integration) → CPU-safe. GABLS1: θ increases
+    # with height (STABLE, unlike the CBL's mixed layer), u≈U_g, and Q0<0 (cooling).
+    import argparse
+
+    import jax.numpy as jnp
+    import numpy as np
+    m = _driver()
+    from legoesm.atmosphere.les_suite import get_case, list_cases, register_default_catalog
+    if not list_cases():
+        register_default_catalog()
+    case = get_case("sbl_gabls1")
+    assert case.regime == "dry_stable"
+    args = argparse.Namespace(theta0=265.0, z0=0.1, pr_sgs=1.0, nu_floor=0.05,
+                              q0=None, dt=None)
+    g, st, q0 = m._build_sbl(case, args, jnp.float32, sgs="vreman", u_geo_mag=8.0)
+    thm = np.asarray(st.theta).mean((0, 1))
+    nz = thm.shape[0]
+    assert thm[-1] > thm[0] + 1.0     # stratified: θ increases upward (unlike a CBL)
+    # the free atmosphere (upper half, above the perturbed z<0.5·Lz seed) is monotone
+    assert bool(np.all(np.diff(thm[nz // 2:]) >= -1e-3))
+    assert float(np.asarray(st.u).mean()) == pytest.approx(8.0, abs=0.2)  # ~geostrophic
+    assert q0 < 0.0                    # surface COOLING (GABLS1 -0.005)
+
+
+def test_emit_step_factory_rejects_unknown_regime():
+    import jax.numpy as jnp
+    m = _driver()
+    with pytest.raises(SystemExit):
+        m._make_emit_step(None, "shallow_cumulus", (0.0, 0.0), 0.0, 0.06, 400.0,
+                          jnp.float32)
 
 
 # --- SGS selection for the D7 σ_LES spread ------------------------------------
