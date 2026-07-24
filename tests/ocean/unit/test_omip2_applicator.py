@@ -815,21 +815,43 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     np.testing.assert_allclose(out, 1.0, atol=1e-6)
 
 
-def test_conservative_regrid_raises_on_partial_source():
-    """A genuinely non-global source (spans only ~180 deg lon) must RAISE
-    via require_full_coverage rather than silently under-cover."""
+def test_conservative_regrid_allows_real_non_polar_source():
+    """REGRESSION (job 9176233): a source whose outermost latitude row does NOT
+    reach +-90 -- i.e. every real forcing dataset -- must NOT raise.
+
+    This pins the correction to the M8 hardening: ``require_full_coverage=True``
+    was briefly enabled on this caller on the premise that a pole-clamped lat
+    edge makes any residual deficit a bug.  That premise is false here.  The real
+    CORE-II NYF forcing spans +-88.542 deg, so a destination cell in the polar
+    ROW legitimately extends past the last source cell and its weights sum to
+    < 1; with the flag on, real-forcing preprocessing raised at EVERY production
+    target resolution (18x36, 60x120, 90x180 -- worst |sum-1| = 6.6e-2, always in
+    lat-row 0 or n_lat-1) and would have ABORTED a production OMIP run.  The
+    conservative remap handles the polar gap correctly by averaging the source
+    that DOES overlap, so the right behaviour is to regrid finitely, not to raise.
+
+    Geometry below mirrors the real source (outermost centre inside the pole) at
+    toy size; the interior must still reproduce a constant field exactly.
+    """
     from legoesm.ocean.coupler.omip2_applicator import (
         _conservative_regrid_to_latlon,
     )
     n_src_lat, n_src_lon = 8, 16
-    half = 90.0 / n_src_lat
-    src_lat = np.linspace(90.0 - half, -90.0 + half, n_src_lat)
-    # centres only across [5, 175] -> source cannot cover a global dst
-    src_lon = np.linspace(5.0, 175.0, n_src_lon)
-    dst_lat = np.linspace(67.5, -67.5, 4)
-    dst_lon = np.linspace(22.5, 337.5, 8)
+    # Outermost centres at +-78.75 deg => the source does NOT reach the pole,
+    # exactly like CORE-II (+-88.542) and JRA55-do (~+-89.57).
+    src_lat = np.linspace(-78.75, 78.75, n_src_lat)
+    src_lon = np.linspace(360.0 / n_src_lon / 2, 360.0 - 360.0 / n_src_lon / 2,
+                          n_src_lon)
+    n_dst_lat, n_dst_lon = 4, 8
+    dhalf = 90.0 / n_dst_lat
+    dst_lat = np.linspace(-90.0 + dhalf, 90.0 - dhalf, n_dst_lat)
+    dst_lon = np.linspace(360.0 / n_dst_lon / 2, 360.0 - 360.0 / n_dst_lon / 2,
+                          n_dst_lon)
     field = np.ones((n_src_lat, n_src_lon))
-    with pytest.raises(ValueError):
-        _conservative_regrid_to_latlon(
-            field, src_lat, src_lon, dst_lat, dst_lon,
-        )
+    out = np.asarray(_conservative_regrid_to_latlon(
+        field, src_lat, src_lon, dst_lat, dst_lon,
+    ))
+    # No raise, all finite, and the NON-polar interior rows reproduce the
+    # constant exactly (the polar rows are partially covered by construction).
+    assert np.all(np.isfinite(out)), out
+    np.testing.assert_allclose(out[1:-1, :], 1.0, atol=1e-6)
