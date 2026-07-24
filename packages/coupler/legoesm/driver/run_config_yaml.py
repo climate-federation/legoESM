@@ -194,16 +194,46 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.cape_sink_heating_ratio": "bechtold_cape_sink_heating_ratio",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
-    "atm.clouds.CloudConfig.cloud_inhomogeneity_factor": "cloud_inhomogeneity_factor",
+    # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:
+    # upstream #1280 moved it to CloudConfig's __param_spec__ EXCLUDED
+    # partition (default 1.0 sits ON its physical bound — not a well-posed
+    # sigmoid tunable), which drops it from the param registry, and a map key
+    # absent from the registry breaks the --params loader contract (the
+    # semantic conflict this branch inherited on merge).  The flat
+    # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # bechtold penetrative-downdraft closure knobs -> the dedicated
+    # _bechtold_kwargs threading in _resolve_convection (unconditional), so
+    # they are --params-reachable (2026-07-23; previously baselined CLI-only).
+    "atm.conv.BechtoldConfig.downdraft_alpha": "bechtold_downdraft_alpha",
+    "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
-    # marine-Sc cloud-top entrainment -> turbulence_config_for (single source of
-    # truth for FV/MPAS/spectral); the flat scalar is the single on/off+strength
-    # knob (0 = off), so --params both sets and activates it.
-    "atm.turb.LouisConfig.cloudtop_entrainment_efficiency": "louis_cloudtop_entrainment_efficiency",
+    # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
+    # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
+    # post-step drain reads the same threaded sub-config in model_driver).
+    # One flat scalar serves all five warm-rain schemes (only the active
+    # scheme's sub-config is built).
+    "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.MorrisonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.P3Config.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.P3Config.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
+    # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
+    # upstream excluded it from the __param_spec__ registry (default 0.0 = off
+    # sits ON its bound), so the qualified name no longer exists for the
+    # --params loader.  The flat scalar louis_cloudtop_entrainment_efficiency
+    # remains settable via --config / CLI.  FOLLOW-UP: if --params reachability
+    # is wanted back, re-spec the param with an activation-aware transform
+    # instead of re-adding a dangling map key.
     # NOTE: the idealized GRAY radiation scheme threads a few of its params
     # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
     # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the

@@ -175,8 +175,12 @@ def beta_limited_surface_humidity(
         q_sfc = q_air + (1 - f_land * (1 - beta_land)) * (q_sat_sfc - q_air)
 
     so the land-fraction latent flux is ``beta_land`` times its wet-surface
-    potential — the same alpha-method form the tiled pipeline applies per
-    tile (``physics_pipeline._tiled_surface_flux``).  ``beta_land = 1``
+    potential — a first-order analogue of the tiled pipeline's per-tile
+    alpha method (``physics_pipeline._tiled_surface_flux``).  The
+    decomposition is exact only for a fixed shared transfer coefficient; a
+    stability-dependent MOST/COARE bulk scheme recomputes ``C_E`` from the
+    throttled ``q_sfc``, so this is approximate, not a true mosaic.
+    ``beta_land = 1``
     returns ``q_sat_sfc`` exactly (byte-identical wet surface);
     ``beta_land = 0`` zeroes the land-fraction humidity gradient in both
     directions (no land evaporation and no land dew — a closed surface).

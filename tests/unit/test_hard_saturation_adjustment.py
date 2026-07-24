@@ -497,6 +497,31 @@ def test_experiment_flag_threads_and_raises():
             SundqvistConfig(), "sundqvist", hard_saturation_adjustment=True)
 
 
+def test_experiment_float_overrides_thread_and_raise():
+    """The trigger/heating-cap overrides (ExperimentConfig flat scalars /
+    --hard-sat-* flags, day-137 drain tuning) thread onto the scheme
+    sub-config through the shared helper; None keeps the scheme defaults;
+    a scheme without the fields raises (no silently-inert override)."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig,
+        SundqvistConfig,
+        apply_microphysics_experiment_flags,
+    )
+    out = apply_microphysics_experiment_flags(
+        MorrisonConfig(), "morrison", hard_saturation_adjustment=True,
+        hard_sat_adjust_threshold=1.2, hard_sat_max_heating_K=10.0)
+    assert out.hard_sat_adjust_threshold == pytest.approx(1.2)
+    assert out.hard_sat_max_heating_K == pytest.approx(10.0)
+    # None = keep scheme defaults (byte-identical config)
+    kept = apply_microphysics_experiment_flags(
+        MorrisonConfig(), "morrison", hard_saturation_adjustment=True)
+    assert kept.hard_sat_adjust_threshold == pytest.approx(1.1)
+    assert kept.hard_sat_max_heating_K == pytest.approx(5.0)
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        apply_microphysics_experiment_flags(
+            SundqvistConfig(), "sundqvist", hard_sat_max_heating_K=10.0)
+
+
 def test_all_warm_rain_configs_carry_the_fields():
     from legoesm.atmosphere.physics.microphysics.config import (
         KesslerConfig, SeifertBehengConfig, MorrisonConfig, ThompsonConfig,

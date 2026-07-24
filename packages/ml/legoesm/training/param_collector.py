@@ -62,6 +62,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_albedo",
     "legoesm.land.soil_grid",
     "legoesm.land.soil_hydraulics",
+    "legoesm.land.surface_scheme.patch_mosaic",
     "legoesm.land.topmodel_runoff",
     "legoesm.ocean.physics.convection.config",
     "legoesm.ocean.physics.ice_shelf",
