@@ -209,6 +209,11 @@ def test_model_helper_arming_and_guard():
     # Armed -> returns the entry-state T/S.
     out = helper(make("tke", True), _St())
     assert out is not None and out[0].shape == (1, 1, 3)
-    # Flag set with a non-adiabatic n2_mode -> loud failure (no silent no-op).
-    with pytest.raises(ValueError, match="n2_mode='adiabatic'"):
+    # Armed with the NEMO card's actual N² source (nemo_bn2) -> also returns
+    # the entry-state T/S (the guard must accept BOTH T/S-reading N² modes;
+    # nemo_dino_kamm sets tke_n2_mode="nemo_bn2", not "adiabatic").
+    out_bn2 = helper(make("tke", True, n2_mode="nemo_bn2"), _St())
+    assert out_bn2 is not None and out_bn2[0].shape == (1, 1, 3)
+    # Flag set with a non-T/S-reading n2_mode -> loud failure (no silent no-op).
+    with pytest.raises(ValueError, match="n2_mode='adiabatic' or 'nemo_bn2'"):
         helper(make("tke", True, n2_mode="insitu"), _St())

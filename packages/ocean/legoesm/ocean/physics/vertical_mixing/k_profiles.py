@@ -100,6 +100,7 @@ def compute_vertical_K_profiles(
     lat_deg=None,
     iwm_fields=None,
     n2_tracers=None,
+    tke_bottom_dirichlet=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -157,6 +158,12 @@ def compute_vertical_K_profiles(
         ``TKEConfig.buoyancy_timing="post_mixing_veros"`` the third slot is
         instead a :class:`...tke.TKEPostMixingContext` (phase-1 kappa from the
         carried TKE; the model step advances the TKE AFTER the tracer solve).
+
+    tke_bottom_dirichlet
+        NEMO bottom TKE BC value (T15; ``tke.nemo_bottom_tke_dirichlet``),
+        threaded to the "tke" scheme only. REQUIRED when
+        ``vertical_mixing.tke.bottom_tke_bc=True`` (the TKE closure raises
+        otherwise); ignored for every other scheme.
     """
     T = state.T.data
     nlev = T.shape[-1]
@@ -220,6 +227,21 @@ def compute_vertical_K_profiles(
             and getattr(vmix.constant, "lat_dependent", False)):
         K_v_background = 0.0
         A_v_background = 0.0
+    # Background composition mode (Phase-2 #1317 T23; VerticalMixingConfig.
+    # vmix_background_mode). "additive" (default, BIT-IDENTICAL legacy):
+    # every contribution below SUMS onto the model-level floor. "nemo_max_
+    # floor": NEMO's own composition — a closure's/EVD's stable-branch
+    # background never ADDS to another background, only MAX-floors it
+    # (zdftke avm=max(rn_ediff*mxl*sqrt(en), avm0), avt=max(pdlr*avm, avtb);
+    # zdfevd REPLACES avt/avm=rn_evd where unstable, no-ops elsewhere).
+    # Dispatch hardening: unknown value raises at the top of this function's
+    # only consumption site so a typo can't silently pick a composition.
+    _bg_mode = getattr(vmix, "vmix_background_mode", "additive")
+    if _bg_mode not in ("additive", "nemo_max_floor"):
+        raise ValueError(
+            "Unknown VerticalMixingConfig.vmix_background_mode: must be one "
+            f"of ('additive', 'nemo_max_floor'), got {_bg_mode!r}.")
+    _nemo_floor = _bg_mode == "nemo_max_floor"
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
@@ -229,9 +251,14 @@ def compute_vertical_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
             tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
-            lat_deg=lat_deg, n2_tracers=n2_tracers)
-        K_v_total = K_v_total + K_vmix
-        A_v_total = A_v_total + A_vmix
+            lat_deg=lat_deg, n2_tracers=n2_tracers,
+            tke_bottom_dirichlet=tke_bottom_dirichlet)
+        if _nemo_floor:
+            K_v_total = jnp.maximum(K_v_total, K_vmix)
+            A_v_total = jnp.maximum(A_v_total, A_vmix)
+        else:
+            K_v_total = K_v_total + K_vmix
+            A_v_total = A_v_total + A_vmix
 
     conv = physics_config.convection
     if conv.scheme == "enhanced_diffusion":
@@ -253,8 +280,15 @@ def compute_vertical_K_profiles(
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
                                                eos_fn=eos_fn,
                                                before_tracers=n2_tracers)
-        # Convection enhances tracer diffusivity (convective_κz).
-        K_v_total = K_v_total + K_conv
+        # Convection enhances tracer diffusivity (convective_κz). Under
+        # nemo_max_floor the EVD stable-branch background (K_bg) folds into
+        # the SAME max as every other background (a no-op once K_v_total
+        # already >= K_bg); the unstable branch's large K_conv still fires
+        # via the max (unaffected — EVD only replaces where N²<0).
+        if _nemo_floor:
+            K_v_total = jnp.maximum(K_v_total, K_conv)
+        else:
+            K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
         # = ``nu_conv``).  When KPP is on, the KPP interior already enhances
         # momentum for the same N²<0 instability (A_interior includes its
@@ -262,7 +296,10 @@ def compute_vertical_K_profiles(
         # When KPP is off, apply A_conv so the explicit/implicit equivalence
         # holds for the constant + convection composition.
         if vmix.scheme != "kpp":
-            A_v_total = A_v_total + A_conv
+            if _nemo_floor:
+                A_v_total = jnp.maximum(A_v_total, A_conv)
+            else:
+                A_v_total = A_v_total + A_conv
 
     # Clip to KPP K_max when KPP is the vertical mixing scheme, matching
     # the explicit path's saturation behavior.  Otherwise leave the sum
@@ -362,7 +399,8 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
-                     lat_deg=None, n2_tracers=None):
+                     lat_deg=None, n2_tracers=None,
+                     tke_bottom_dirichlet=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -500,8 +538,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # scaled by the z-star Jacobian like every other thickness. On a
         # Veros u_centered coordinate -z_full_ref[0] IS 0.5·dzw_top exactly
         # (dzw_top = 2·dzt_top - dzw[-2] = -2·zt_top, numerics.py:21).
+        # Also required (Phase-2 #1317 T3) by tke_surface_bc_level="nemo_z0"
+        # — the virtual z=0 surface row's face distance to interior
+        # interface 0 uses the SAME slot.
         dz_surface = None
-        if getattr(tke_cfg, "veros_dz_slots", False):
+        if (getattr(tke_cfg, "veros_dz_slots", False)
+                or getattr(tke_cfg, "tke_surface_bc_level",
+                           "interior_pinned") == "nemo_z0"):
             dz_surface = (-z_coord.z_full_ref[0]) * J
         # Veros tke_mxl_choice=1 distance-to-boundary cap (tke.py:43-47):
         # the buoyancy mixing length may not exceed the distance to the
@@ -609,12 +652,24 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 T_n2=T_n2, S_n2=S_n2,
                 t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
                 ice_frac=_tke_ice_fr,
+                bottom_dirichlet=tke_bottom_dirichlet,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
         # background and 3 iterations of the same backward-Euler step bring TKE
         # to within ~few % of the prognostic equilibrium for typical ocean
         # shear / stratification. No TKE field is carried.
+        if getattr(tke_cfg, "bottom_tke_bc", False):
+            # T15's Dirichlet bottom row assumes ONE physical dt (Veros
+            # tke.py:137 dt_tke=dt_mom); the Mode-B diagnostic path uses a
+            # fake dt=86400 s equilibrium iteration where "held value at
+            # the real dt" has no meaning — reject rather than silently
+            # applying it under the wrong dt (dispatch hardening).
+            raise ValueError(
+                "TKEConfig.bottom_tke_bc=True requires "
+                "TKEConfig.prognostic=True (the Mode-B diagnostic "
+                "quasi-steady path has no physical dt for the bottom "
+                "Dirichlet BC).")
         _DIAGNOSTIC_DT = 86400.0   # long dt drives implicit solve to equilibrium
         tke_out = tke_vertical_mixing(
             u_data, v_data, T_data, S_data, rho, dz_half,
