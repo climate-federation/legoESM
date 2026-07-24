@@ -211,6 +211,91 @@ def test_hydrostatic_bridge_routes_rain_to_qr_only_when_split_on():
     assert _total_routed_condensate(tt7["q_r"].data) > 0.0
 
 
+def _run_hydrostatic_with_carry(pe, with_qr):
+    """Same firing setup as ``_run_hydrostatic`` but returning BOTH bridge
+    outputs ``(tracer_tendencies, carry)`` — for the conv_precip carry tests."""
+    grid = create_cubed_sphere(_N_CUBE)
+    sigma = create_sigma_coordinate(_N_LEV)
+    state = held_suarez_init(grid, sigma)
+    horiz = state.p_s.data.shape
+    t_grid, q_v_grid = _firing_T_qv(sigma.sigma_full, horiz)
+    dtype = state.T.data.dtype
+    dims_3d = state.T.dims
+    zeros = jnp.zeros(t_grid.shape, dtype=dtype)
+    tracers = {
+        "q_v": Field(data=q_v_grid.astype(dtype), name="q_v",
+                     dims=dims_3d, units="kg/kg"),
+        "q_c": Field(data=zeros, name="q_c", dims=dims_3d, units="kg/kg"),
+    }
+    if with_qr:
+        tracers["q_r"] = Field(data=zeros, name="q_r",
+                               dims=dims_3d, units="kg/kg")
+    state = state._replace(
+        T=state.T.replace(data=t_grid.astype(dtype)), tracers=tracers,
+    )
+    tend, carry = _bechtold_bridge(pe, "hydrostatic")(state, grid, sigma)
+    return tend.tracer_tendencies, carry, state, sigma
+
+
+def test_bridge_publishes_conv_precip_carry_matching_rain_column():
+    """2026-07-24 Slingo threading: with the rain split ON the bridge publishes
+    ``conv_precip`` (the column-integrated in-updraft rain production,
+    kg/m^2/s) into its carry dict — and it EQUALS (1/g)·Σ max(dq_r,0)·dp
+    recomputed from the emitted ``q_r`` tendency (one formula, verified)."""
+    tt, carry, state, sigma = _run_hydrostatic_with_carry(0.7, with_qr=True)
+    assert isinstance(carry, dict) and "conv_precip" in carry, (
+        "PE=0.7 bridge must publish the conv_precip carry")
+    p_conv = jnp.asarray(carry["conv_precip"])
+    ncol = int(jnp.asarray(state.p_s.data).size)
+    assert p_conv.shape == (ncol,)
+    assert float(jnp.min(p_conv)) >= 0.0
+    assert float(jnp.max(p_conv)) > 0.0, "firing state must produce rain"
+    # Independent recomputation from the emitted q_r tendency.
+    p_half = sigma.pressure_at_half(state.p_s.data)
+    nlev = int(sigma.n_levels)
+    dp = (p_half.reshape(ncol, nlev + 1)[:, 1:]
+          - p_half.reshape(ncol, nlev + 1)[:, :-1])
+    expect = jnp.sum(
+        jnp.maximum(tt["q_r"].data.reshape(ncol, nlev), 0.0) * dp,
+        axis=-1) / constants.g
+    assert jnp.allclose(p_conv, expect, rtol=1e-12), (
+        "conv_precip carry disagrees with the column integral of the "
+        "emitted q_r tendency")
+
+
+def test_bridge_publishes_no_conv_precip_without_rain_source():
+    """With NO rain source at all (PE=0 AND the IFS in-plume precip off —
+    2026-07 main defaults in-plume ON, which produces rain even at PE=0) the
+    bridge publishes no conv_precip — the PhysicsState carry stays at its
+    zero seed (an honest zero cumulus fraction)."""
+    grid = create_cubed_sphere(_N_CUBE)
+    sigma = create_sigma_coordinate(_N_LEV)
+    state = held_suarez_init(grid, sigma)
+    horiz = state.p_s.data.shape
+    t_grid, q_v_grid = _firing_T_qv(sigma.sigma_full, horiz)
+    dtype = state.T.data.dtype
+    dims_3d = state.T.dims
+    zeros = jnp.zeros(t_grid.shape, dtype=dtype)
+    state = state._replace(
+        T=state.T.replace(data=t_grid.astype(dtype)),
+        tracers={
+            "q_v": Field(data=q_v_grid.astype(dtype), name="q_v",
+                         dims=dims_3d, units="kg/kg"),
+            "q_c": Field(data=zeros, name="q_c", dims=dims_3d, units="kg/kg"),
+            "q_r": Field(data=zeros, name="q_r", dims=dims_3d, units="kg/kg"),
+        },
+    )
+    cfg = ConvectionConfig(
+        scheme="bechtold",
+        bechtold=BechtoldConfig(precip_efficiency=0.0,
+                                use_ifs_inplume_precip=False),
+    )
+    bridge = make_convection_physics(cfg, model_type="hydrostatic", dt=_DT_S)
+    _, carry = bridge(state, grid, sigma)
+    if isinstance(carry, dict):
+        assert "conv_precip" not in carry
+
+
 def test_inplume_default_rains_at_pe0():
     """Companion to the legacy-premise tests (#1322): with the PRODUCTION
     default ``use_ifs_inplume_precip=True``, the IFS in-plume precipitation

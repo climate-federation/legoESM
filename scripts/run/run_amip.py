@@ -73,17 +73,16 @@ def _print_forcing_activity(args) -> None:
     solar_file_active = getattr(args, "solar_source", "constant") in (
         "file", "spectral_file"
     )
-    # The gaussian/spectral and voronoi/mpas standalone radiation paths
-    # integrate with the configured constant S_0 — the solar FILE (TSI +
-    # 14-band spectral) is not threaded there (same gap the CMIP6 deck
-    # labels; keep the two tables telling the same truth).
+    # The gaussian/spectral standalone radiation path integrates with the
+    # configured constant S_0 — the solar FILE (TSI + 14-band spectral) is
+    # not threaded there (same gap the CMIP6 deck labels; keep the two
+    # tables telling the same truth).  The MPAS lane threads it since the
+    # 2026-07-23 port: daily-sampled traced forcing["tsi"] (+
+    # ["solar_spectral_fraction"] under --solar-source spectral_file with
+    # rrtmg/rrtmgp) into the standalone radiation.
     _grid = getattr(args, "grid_type", None) or "cubed_sphere"
     _disc = getattr(args, "discretization", None) or ""
-    solar_file_unthreaded = (
-        (_grid == "gaussian" and _disc == "spectral")
-        or (_grid in ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
-            and _disc == "mpas")
-    )
+    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral")
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
@@ -1245,6 +1244,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
+    parser.add_argument("--mpas-land-beta-soil",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_land_beta_soil",
+                        help="MPAS lane only (#1312 phase 2b): thread the "
+                             "interactive multilayer land's per-cell "
+                             "root-zone beta_soil into the turbulence "
+                             "surface humidity (traced forcing['beta_land'], "
+                             "one-step lag) — the land latent flux is then "
+                             "throttled by the soil's own moisture state, "
+                             "REPLACING the static --mpas-land-beta over "
+                             "land. Requires --use-multilayer-land.")
     parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
                         dest="mpas_qv_smooth_del2_m2s",
                         help="MPAS lane only: horizontal q_v del2 (unweighted "
@@ -1745,6 +1755,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_land_beta=(args.mpas_land_beta
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
+        mpas_land_beta_soil=args.mpas_land_beta_soil,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
@@ -1984,17 +1995,27 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "spectral standalone radiation paths use the "
                      "RRTMGPConfig constant surface albedo and would "
                      "silently ignore the flag.")
-    if args.use_multilayer_land and (
-            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-            or args.discretization in ("spectral", "mpas")):
+    if args.use_multilayer_land and args.discretization == "spectral":
         parser.error("--use-multilayer-land runs inside the coupled physics "
-                     "pipeline (cubed_sphere / latlon only); the MPAS and "
-                     "spectral standalone physics carry a PASSIVE land tile "
-                     "and cannot step the soil column (the multilayer setup "
-                     "crashes on the unstructured mesh: VoronoiMesh has no "
-                     "lat/lat2d). Pass --no-use-multilayer-land to override "
-                     "a --config YAML that enables it.")
+                     "pipeline or the MPAS driver loop; the SPECTRAL "
+                     "standalone physics carries a PASSIVE land tile and "
+                     "cannot step the soil column. Pass "
+                     "--no-use-multilayer-land to override a --config YAML "
+                     "that enables it.")
+    # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
+    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']), but
+    # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
+    # only simple_seb is wired on MPAS.
+    if (args.use_multilayer_land
+            and args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                                    "mpas")
+                 or args.discretization == "mpas")):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is not wired "
+            "on the MPAS lane (coupled-pipeline canopy threading); use "
+            "--land-surface-scheme simple_seb with --use-multilayer-land "
+            "on MPAS.")
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade

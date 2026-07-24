@@ -869,10 +869,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # + surface turbulent fluxes (every step). Slot ORDER is the
             # sfc_diag tuple contract shared with the driver feed:
             # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
-            #  shflx, lhflx).
+            #  shflx, lhflx, sw_down_sfc, lw_down_sfc).
+            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
+            # interactive multilayer land forcing (AtmToSurface.sw_down/
+            # lw_down; model_driver._marshal_land_forcing reads these slots).
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc"))
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would
