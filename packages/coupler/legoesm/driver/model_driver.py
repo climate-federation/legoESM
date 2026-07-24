@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     convection_config_for,
     build_physics_pipeline,
+    gwd_config_for,
     required_microphysics_tracer_slots,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
@@ -5947,7 +5948,6 @@ class ModelDriver:
         from legoesm.atmosphere.physics.microphysics.config import (
             MicrophysicsConfig, apply_microphysics_experiment_flags,
         )
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
         from legoesm.atmosphere.physics.radiation.config import (
             RRTMGPConfig, OzoneProfileConfig,
         )
@@ -6135,7 +6135,7 @@ class ModelDriver:
                 grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
-            gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
+            gravity_wave_drag=gwd_config_for(cfg),
         )
         # Phase D perf: shard the per-column RRTMGP workload across all local
         # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
@@ -7815,10 +7815,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.microphysics.config import (
                 MicrophysicsConfig,
             )
-            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-                GravityWaveDragConfig,
-            )
-
             # Normalize the CLI radiation alias ("rrtmg") to the
             # physics-layer scheme name — see the _run_mpas rationale.
             _rad_scheme = ("rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
@@ -7865,8 +7861,7 @@ class ModelDriver:
                 convection=convection_config_for(cfg),
                 turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
-                gravity_wave_drag=GravityWaveDragConfig(
-                    scheme=cfg.gravity_wave_drag),
+                gravity_wave_drag=gwd_config_for(cfg),
             )
             _combined_fn = make_physics(
                 phys_cfg, model_type="spectral_pe", dt=DT,
@@ -9688,9 +9683,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.turbulence import (
                 TurbulenceConfig,
             )
-            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-                GravityWaveDragConfig,
-            )
             from legoesm.atmosphere.physics.physics_state import (
                 init_physics_state,
             )
@@ -9706,9 +9698,15 @@ class ModelDriver:
                 conv_ncol, _nlev,
                 PhysicsConfig(
                     turbulence=TurbulenceConfig(scheme=cfg.turbulence),
-                    gravity_wave_drag=GravityWaveDragConfig(
-                        scheme=cfg.gravity_wave_drag,
-                    ),
+                    # MUST be the SAME resolved config the pipeline kernel gets
+                    # (_resolve_gwd -> gwd_config_for): init_physics_state sizes
+                    # and fills the gwd_spectrum carry from
+                    # ``prognostic_spectral.n_azimuths/.n_wavenumbers/
+                    # .launch_flux``, and a gravity_wave_drag_override may set
+                    # all three.  A bare config here seeded (ncol,4,20) at the
+                    # default launch flux while the kernel expected the
+                    # override's shape/amplitude (codex round 1, finding 2).
+                    gravity_wave_drag=gwd_config_for(cfg),
                 ),
                 dtype=_seed_dtype,
             )

@@ -3382,6 +3382,60 @@ def _resolve_turbulence(config):
 # Gravity wave drag resolver
 # ---------------------------------------------------------------------------
 
+def gwd_config_for(config):
+    """The ``GravityWaveDragConfig`` (scheme + tuned per-scheme leaves) to
+    build a gravity-wave-drag kernel from.
+
+    Third member of the resolver family (:func:`turbulence_config_for`,
+    :func:`convection_config_for`): every lane — FV pipeline, MPAS,
+    spectral — previously built ``GravityWaveDragConfig(scheme=...)`` from
+    the scheme STRING alone, so the tuned ExperimentConfig scalars
+    (``mcfarlane_k_wave`` / ``mcfarlane_directional_spread`` /
+    ``mcfarlane_tau_max``, and the Hines launch amplitude) silently never
+    reached the kernel on ANY production AMIP path; only the AIMIP training
+    path consumed them.  Same gap class as the 2026-07-23 convection and
+    hard-sat overrides.
+
+    ``config.gravity_wave_drag_override`` (a full config whose ``scheme``
+    must equal ``config.gravity_wave_drag`` — enforced by
+    ``validate_strict``) still wins verbatim: an explicitly injected config
+    is never second-guessed by the scalar overlay.
+
+    COMPOSITE schemes ("mcfarlane+hines") carry BOTH leaves, so the overlay
+    is applied per-leaf independently of which names appear in the string.
+    Static Python floats — trace-time constants, no retrace.
+    """
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+
+    scheme = getattr(config, "gravity_wave_drag", "none")
+    override = getattr(config, "gravity_wave_drag_override", None)
+    if override is not None:
+        return override
+    gc = GravityWaveDragConfig(scheme=scheme)
+    if scheme == "none":
+        return gc
+    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
+    # NOT wired: no McFarlaneConfig field of that name exists (dangling
+    # ExperimentConfig scalar, tracked separately).
+    mc = gc.mcfarlane._replace(
+        k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
+        directional_spread=float(getattr(
+            config, "mcfarlane_directional_spread",
+            gc.mcfarlane.directional_spread)),
+        tau_max=float(getattr(config, "mcfarlane_tau_max",
+                              gc.mcfarlane.tau_max)),
+    )
+    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    hn = gc.hines._replace(
+        total_rms_wind=float(getattr(config, "hines_total_rms_wind",
+                                     gc.hines.total_rms_wind)),
+        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
+    )
+    return gc._replace(mcfarlane=mc, hines=hn)
+
+
 def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
@@ -3399,16 +3453,11 @@ def _resolve_gwd(config):
     if scheme == "none":
         return None, None
 
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-        GravityWaveDragConfig,
-    )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
         get_gwd_fn,
     )
 
-    override = getattr(config, 'gravity_wave_drag_override', None)
-    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
-    _name, gwd_fn, gwd_config = get_gwd_fn(gc)
+    _name, gwd_fn, gwd_config = get_gwd_fn(gwd_config_for(config))
     return gwd_fn, gwd_config
 
 

@@ -1266,6 +1266,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "filter). "
                              "Setup refuses coefficients above the explicit "
                              "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--hines-total-rms-wind", type=float, default=None,
+                        dest="hines_total_rms_wind",
+                        help="Hines (1997) non-orographic GWD launch RMS wind "
+                             "[m/s] (default 2.0). Larger = stronger "
+                             "non-orographic drag; the low-level extratropical "
+                             "westerly bias is the observable lever.")
+    parser.add_argument("--hines-fmax", type=float, default=None,
+                        dest="hines_Fmax",
+                        help="Hines saturation momentum-flux cap [Pa] "
+                             "(default 0.1).")
+    parser.add_argument("--mcfarlane-tau-max", type=float, default=None,
+                        dest="mcfarlane_tau_max",
+                        help="McFarlane orographic GWD surface stress cap [Pa] "
+                             "(default 10.0). Reaches the kernel on every lane "
+                             "via gwd_config_for.")
+    parser.add_argument("--mcfarlane-k-wave", type=float, default=None,
+                        dest="mcfarlane_k_wave",
+                        help="McFarlane orographic GWD horizontal wavenumber "
+                             "[1/m] (default 2*pi/100 km). Scales the launch "
+                             "stress tau_0 ~ G_0*rho*N*k*h^2*U. No "
+                             "__param_spec__ entry yet (bounds undecided), so "
+                             "this flag is its ONLY route -- --params cannot "
+                             "reach it.")
     parser.add_argument("--hard-sat-ice-curve",
                         action=argparse.BooleanOptionalAction, default=False,
                         dest="hard_sat_ice_curve",
@@ -1770,6 +1793,18 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
         hard_sat_ice_curve=args.hard_sat_ice_curve,
+        hines_total_rms_wind=(
+            args.hines_total_rms_wind
+            if args.hines_total_rms_wind is not None
+            else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
+        hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
+                    else _EXPERIMENT_DEFAULTS.hines_Fmax),
+        mcfarlane_tau_max=(
+            args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
+            else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),
+        mcfarlane_k_wave=(
+            args.mcfarlane_k_wave if args.mcfarlane_k_wave is not None
+            else _EXPERIMENT_DEFAULTS.mcfarlane_k_wave),
         mpas_ice_skin_prognostic=args.mpas_ice_skin_prognostic,
         mpas_ice_thickness_m=(
             args.mpas_ice_thickness_m

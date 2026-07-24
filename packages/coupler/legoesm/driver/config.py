@@ -983,8 +983,16 @@ class ExperimentConfig(NamedTuple):
     louis_z0: float = 1.0e-4                    # SurfaceLayerConfig.z0 [m]
     louis_Ch_neutral: float = 1.5e-3            # SurfaceLayerConfig.Ch_neutral
     louis_Cd_neutral: float = 1.5e-3            # SurfaceLayerConfig.Cd_neutral
-    mcfarlane_k_wave: float = 6.283185307e-5    # McFarlaneConfig.k_wave [1/m]
-    mcfarlane_N_ref: float = 0.01               # McFarlaneConfig.N_ref [1/s]
+    # Exact 2*pi/100 km — MUST equal McFarlaneConfig.k_wave's own
+    # expression: gwd_config_for overlays this onto the leaf, so a
+    # truncated literal would silently perturb the default kernel.
+    mcfarlane_k_wave: float = 2.0 * math.pi / 100e3  # McFarlaneConfig.k_wave [1/m]
+    # INERT: no McFarlaneConfig field of this name exists — the scheme derives
+    # N from the column state (mcfarlane.py).  Kept only for the positional ABI
+    # + serialized-config compatibility; gwd_config_for deliberately does not
+    # wire it, and it was dropped from the ml/tuning.py catalog so it can no
+    # longer be advertised as a live knob (codex round 1, finding 5).
+    mcfarlane_N_ref: float = 0.01               # INERT (no leaf field)
     mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
     mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
     # Morrison ice-microphysics tunables (active when microphysics='morrison'
@@ -1272,6 +1280,14 @@ class ExperimentConfig(NamedTuple):
     # surface temperature).
     mpas_ice_skin_prognostic: bool = False
     mpas_ice_thickness_m: float = 2.0      # climatological ice slab thickness [m]
+    # Hines (1997) non-orographic GWD launch amplitude + saturation flux cap.
+    # Reached through gwd_config_for on EVERY lane (like the mcfarlane_*
+    # scalars above, which were silently inert on every production path until
+    # that resolver existed).  The low-level extratropical westerlies are the
+    # observable lever: hines deposits momentum that decelerates them.
+    # Appended at the tuple END to preserve the positional ABI.
+    hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
+    hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2093,6 +2109,25 @@ class ExperimentConfig(NamedTuple):
                     "refines the same scheme's sub-config, it does not switch "
                     "schemes)"
                 )
+        # GWD scalars that ``gwd_config_for`` overlays onto the kernel leaves.
+        # Every one is a strictly-positive physical quantity (a wavenumber, a
+        # spreading factor, a stress/flux cap, an rms launch wind), and none is
+        # bounds-checked anywhere else on the CLI/--config route (the
+        # ``__param_spec__`` bounds only gate the ``--params`` loader).  Silent
+        # failure modes without this guard: ``hines_Fmax < 0`` makes
+        # ``jnp.clip(drag, 0.0, Fmax)`` return the NEGATIVE cap at every level
+        # (constant spurious drag, no error), and ``hines_total_rms_wind <= 0``
+        # zeroes the amplitude growth so the scheme silently does nothing.
+        # Positivity + finiteness only — the calibratable RANGE stays in
+        # ``__param_spec__`` so it is not maintained twice.
+        for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
+                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax"):
+            _v = getattr(self, _f)
+            if not math.isfinite(_v) or _v <= 0.0:
+                errors.append(
+                    f"{_f} must be a positive, finite gravity-wave-drag "
+                    f"parameter, got {_v!r}"
+                )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
@@ -2476,7 +2511,14 @@ class ExperimentConfig(NamedTuple):
             louis_z0=getattr(amip_cfg, 'louis_z0', 1.0e-4),
             louis_Ch_neutral=getattr(amip_cfg, 'louis_Ch_neutral', 1.5e-3),
             louis_Cd_neutral=getattr(amip_cfg, 'louis_Cd_neutral', 1.5e-3),
-            mcfarlane_k_wave=getattr(amip_cfg, 'mcfarlane_k_wave', 6.283185307e-5),
+            # Default from the live field default (NOT a re-typed literal): the
+            # truncated 6.283185307e-5 that used to sit here is ~3e-11 off the
+            # exact 2*pi/100 km, which gwd_config_for now overlays onto the
+            # kernel — a legacy-checkpoint upconvert would silently run a
+            # different default k_wave (codex round 1, finding 6).
+            mcfarlane_k_wave=getattr(
+                amip_cfg, 'mcfarlane_k_wave',
+                ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_N_ref=getattr(amip_cfg, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
@@ -2652,7 +2694,9 @@ class ExperimentConfig(NamedTuple):
             louis_z0=getattr(self, 'louis_z0', 1.0e-4),
             louis_Ch_neutral=getattr(self, 'louis_Ch_neutral', 1.5e-3),
             louis_Cd_neutral=getattr(self, 'louis_Cd_neutral', 1.5e-3),
-            mcfarlane_k_wave=getattr(self, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_k_wave=getattr(
+                self, 'mcfarlane_k_wave',
+                ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_N_ref=getattr(self, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),

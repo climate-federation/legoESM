@@ -181,9 +181,9 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.rad.GrayRadiationConfig.tau_equator',
     'atm.rad.GrayRadiationConfig.tau_moist_coeff',
     'atm.rad.GrayRadiationConfig.tau_pole',
-    # atm: HinesConfig (2)
-    'atm.gwd.HinesConfig.Fmax',
-    'atm.gwd.HinesConfig.total_rms_wind',
+    # atm: HinesConfig (0) — Fmax + total_rms_wind became reachable when
+    # gwd_config_for started threading the hines_* ExperimentConfig scalars
+    # into the kernel leaf on every lane (2026-07-24).
     # atm: HoltslagBovilleConfig (13)
     'atm.turb.HoltslagBovilleConfig.Ri_crit',
     'atm.turb.HoltslagBovilleConfig.betah',
@@ -253,9 +253,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.MassFluxConfig.cape_threshold',
     'atm.conv.MassFluxConfig.delta_0',
     'atm.conv.MassFluxConfig.tau_adj',
-    # atm: McFarlaneConfig (7)
+    # atm: McFarlaneConfig (6) — directional_spread became reachable via the
+    # mcfarlane_directional_spread scalar + gwd_config_for (2026-07-24); the
+    # rest still have no ExperimentConfig scalar to route through.
     'atm.gwd.McFarlaneConfig.G_0',
-    'atm.gwd.McFarlaneConfig.directional_spread',
     'atm.gwd.McFarlaneConfig.efficiency',
     'atm.gwd.McFarlaneConfig.envelope_scale',
     'atm.gwd.McFarlaneConfig.fcrit2',
