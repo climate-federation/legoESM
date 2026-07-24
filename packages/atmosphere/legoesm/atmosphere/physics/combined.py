@@ -480,6 +480,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # diagnostic (not a tendency) so the lean MPAS loop can export it.
         precip_accum = (first.precip.data
                         if getattr(first, "precip", None) is not None else None)
+        # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
+        # feed: each comes from exactly ONE module (TOA trio from radiation,
+        # shflx/lhflx from turbulence), so first-non-None across modules is
+        # the correct combine (no summing).
+        _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
+                        "shflx_sfc", "lhflx_sfc")
+        sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Accumulate tracer tendencies from all physics modules
         combined_tracer_tends = {}
@@ -529,8 +536,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 precip_accum = (t.precip.data if precip_accum is None
                                 else precip_accum + t.precip.data)
 
+            for _k in _DIAG_FIELDS:
+                if sfc_diag_extras[_k] is None:
+                    sfc_diag_extras[_k] = getattr(t, _k, None)
+
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-                combined_tracer_tends, phys_updates, first, precip_accum)
+                combined_tracer_tends, phys_updates, first, precip_accum,
+                sfc_diag_extras)
 
     def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                         combined_tracer_tends):
@@ -564,6 +576,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             data=precip_accum, name="precip",
             dims=first.dp_s_dt.dims, units="kg/m^2/s"))
 
+    def _attach_sfc_diag_extras(combined, extras):
+        """Carry the per-module surface/TOA diagnostic Fields (TOA trio from
+        radiation, shflx/lhflx from turbulence) on the combined tendency —
+        _build_combined constructs a fresh tendency that drops them. No-op /
+        byte-identical when every extra is None (radiation+turbulence off)."""
+        _set = {k: v for k, v in extras.items() if v is not None}
+        return combined._replace(**_set) if _set else combined
+
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
@@ -587,7 +607,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first,
-             precip_accum) = _accumulate(
+             precip_accum, sfc_diag_extras) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
@@ -596,8 +616,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
             # Held-radiation sub-step: no fresh sw/lw solve, but precip (from
-            # microphysics, which runs every step) is still exported.
+            # microphysics, which runs every step) is still exported — same
+            # for the turbulence shflx/lhflx extras (radiation's TOA extras
+            # are None here; the consumer keeps the last radiation-step
+            # value slot-wise, exactly like sw/lw net).
             combined = _attach_sfc_precip(combined, first, precip_accum)
+            combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
             # rad_heating is carried UNCHANGED (not in phys_updates).
             phys_state_out = update_physics_state(phys_state, phys_updates)
             return combined, phys_state_out
@@ -607,7 +631,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
          combined_tracer_tends, phys_updates, first,
-         precip_accum) = _accumulate(
+         precip_accum, sfc_diag_extras) = _accumulate(
             tagged_fns, state, grid, sigma_coord, phys_state, forcing)
         # Cache the radiative heating contribution for the held sub-cycle
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
@@ -634,8 +658,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # constructs a fresh tendency that drops these diagnostic fields).
             combined = combined._replace(
                 sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
-        # Same for surface precip (from microphysics; _build_combined drops it).
+        # Same for surface precip (from microphysics; _build_combined drops it)
+        # and the TOA/turbulent-flux diagnostic extras.
         combined = _attach_sfc_precip(combined, first, precip_accum)
+        combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 

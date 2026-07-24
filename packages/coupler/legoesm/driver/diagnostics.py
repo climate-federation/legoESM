@@ -1279,6 +1279,11 @@ class DiagnosticCollector:
         precip=None,
         phis=None,
         tas=None,
+        rlut=None,
+        rsut=None,
+        rsdt=None,
+        hfss=None,
+        hfls=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
         accumulators from NATIVE-grid host arrays, bypassing the heavy
@@ -1407,6 +1412,14 @@ class DiagnosticCollector:
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
         phis_np = None if phis is None else np.asarray(phis, dtype=_f64)
+        # TOA / surface-flux CMOR fields (already in CMOR sign conventions:
+        # rlut/rsut/hfss/hfls positive up, rsdt positive down; see the
+        # radiation/turbulence packers).
+        rlut_np = None if rlut is None else np.asarray(rlut, dtype=_f64)
+        rsut_np = None if rsut is None else np.asarray(rsut, dtype=_f64)
+        rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
+        hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
+        hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1421,6 +1434,11 @@ class DiagnosticCollector:
             ("precip", precip_np, (_ncol,)),
             ("phis", phis_np, (_ncol,)),
             ("tas", tas_field, (_ncol,)),
+            ("rlut", rlut_np, (_ncol,)),
+            ("rsut", rsut_np, (_ncol,)),
+            ("rsdt", rsdt_np, (_ncol,)),
+            ("hfss", hfss_np, (_ncol,)),
+            ("hfls", hfls_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
@@ -1451,11 +1469,22 @@ class DiagnosticCollector:
         fields_3d: dict[str, np.ndarray] = {}
         daily_2d: dict[str, np.ndarray] = {}
         if have_spatial:
+            # evspsbl [kg/m2/s] = latent heat flux / L_v. Approximation
+            # documented for this lane: no sublimation split (L_s over
+            # ice-covered cells), matching the bulk-flux scheme's own L_v-only
+            # partition of lhflx.
+            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
             for _name, _src in (
                 ('tas', tas_field),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('psl', psl),
+                ('rlut', rlut_np),
+                ('rsut', rsut_np),
+                ('rsdt', rsdt_np),
+                ('hfss', hfss_np),
+                ('hfls', hfls_np),
+                ('evspsbl', evspsbl_np),
             ):
                 if _src is None:
                     continue

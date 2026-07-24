@@ -5516,6 +5516,20 @@ class ModelDriver:
             if (_sfc_diag is not None and len(_sfc_diag) > 2
                     and _sfc_diag[2] is not None):
                 precip = _sfc_diag[2].data
+            # TOA + surface turbulent fluxes (slots 3.. of the sfc_diag
+            # contract: lw_up_toa, sw_up_toa, sw_down_toa, shflx, lhflx) —
+            # None on runs without radiation/turbulence; the collector
+            # skips absent fields.
+            def _sfc_slot(i):
+                if (_sfc_diag is not None and len(_sfc_diag) > i
+                        and _sfc_diag[i] is not None):
+                    return _sfc_diag[i].data
+                return None
+            rlut = _sfc_slot(3)
+            rsut = _sfc_slot(4)
+            rsdt = _sfc_slot(5)
+            hfss = _sfc_slot(6)
+            hfls = _sfc_slot(7)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -5553,6 +5567,11 @@ class ModelDriver:
                 precip=precip,
                 phis=state.phis.data,
                 tas=tas,
+                rlut=rlut,
+                rsut=rsut,
+                rsdt=rsdt,
+                hfss=hfss,
+                hfls=hfls,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
@@ -6171,7 +6190,6 @@ class ModelDriver:
         # full ``physics_fn`` and the held ``physics_fn_norad``).
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
-            from legoesm.core.state import HydrostaticTendencies
             from legoesm.atmosphere.physics.combined import (
                 physics_config_requires_phys_state,
             )
@@ -6183,7 +6201,16 @@ class ModelDriver:
                     rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
                     phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
                     hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
-                    summed = HydrostaticTendencies(
+                    # HS adds only the 4 DYNAMICS tendencies (du/dT/dp_s/dphis);
+                    # ``_replace`` overrides just those and PRESERVES every
+                    # diagnostic field on the radiation tendency — sw/lw net,
+                    # precip, AND the CMOR TOA/turbulent-flux extras (sw_up_toa,
+                    # lw_up_toa, sw_down_toa, shflx_sfc, lhflx_sfc). An explicit
+                    # constructor that enumerated the forwarded fields silently
+                    # dropped whichever were not listed (it lost sw/lw net + precip
+                    # once already, codex); _replace makes the repack field-count
+                    # agnostic so a future diagnostic cannot regress here.
+                    summed = rrtmgp_tend._replace(
                         du_dt=rrtmgp_tend.du_dt.replace(
                             data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
                         dT_dt=rrtmgp_tend.dT_dt.replace(
@@ -6192,15 +6219,6 @@ class ModelDriver:
                             data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
                         dphis_dt=rrtmgp_tend.dphis_dt.replace(
                             data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
-                        tracer_tendencies=rrtmgp_tend.tracer_tendencies,
-                        # Forward the radiation surface-flux diagnostics (HS adds
-                        # no surface radiation) so the coupled export survives the
-                        # HS repack — else HS+radiation loses them (codex).
-                        sw_net_sfc=rrtmgp_tend.sw_net_sfc,
-                        lw_net_sfc=rrtmgp_tend.lw_net_sfc,
-                        # ...including surface precip (HS+microphysics), else the
-                        # ocean P-E / land forcing loses it through the repack.
-                        precip=getattr(rrtmgp_tend, "precip", None),
                     )
                     return summed, phys_state_out
 
