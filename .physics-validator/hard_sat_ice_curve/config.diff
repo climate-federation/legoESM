@@ -1,0 +1,57 @@
+diff --git a/packages/coupler/legoesm/driver/config.py b/packages/coupler/legoesm/driver/config.py
+index c68c2b3fd..e123b4c33 100644
+--- a/packages/coupler/legoesm/driver/config.py
++++ b/packages/coupler/legoesm/driver/config.py
+@@ -627,6 +627,13 @@ class ExperimentConfig(NamedTuple):
+     # configuration); bounds follow the scheme __param_spec__.
+     hard_sat_adjust_threshold: float | None = None   # RH trigger, q_v > thr*q_sat
+     hard_sat_max_heating_K: float | None = None      # per-step latent-heating cap [K]
++    # Mixed-phase (ice-curve) drain: gate + land on the w(T)-blended
++    # liquid/ice saturation curve with the blended latent heat below
++    # freezing, and route cold condensate to cloud ice.  The liquid-only
++    # drain leaves permanent ~60% ice-supersaturation at TTL temperatures —
++    # the 20x-ERA5 TTL vapour bias (+17.8 K warm bias at 100 hPa) of the
++    # first ClimateEval scorecard.  Requires hard_saturation_adjustment.
++    hard_sat_ice_curve: bool = False
+ 
+     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+     # updraft precipitation).  A value >0 diverts that fraction of the
+@@ -1887,6 +1894,38 @@ class ExperimentConfig(NamedTuple):
+                 f"mpas_ice_thickness_m (climatological ice slab [m]) must be "
+                 f"finite in [0.1, 10]; got {self.mpas_ice_thickness_m!r}."
+             )
++        # Ice-curve drain preconditions (fail-fast: every one is a silent no-op
++        # or an unphysical deposition otherwise).  It is a Morrison-on-MPAS
++        # post-step correction that gates+lands on the blended liquid/ice curve
++        # and DEPOSITS to prognostic cloud ice q_i (seeding ice number N_i):
++        #   (a) needs the boolean drain gate it modifies (else inert);
++        #   (b) is only wired into the MPAS post-step hook (else inert on other
++        #       lanes — the in-scheme liquid adjustment is untouched);
++        #   (c) needs Morrison's prognostic q_i + N_i + nucleation mass (other
++        #       schemes lack a cloud-ice reservoir, so the drain would deposit
++        #       LIQUID at ice saturation — re-evaporating, energy-inconsistent).
++        if self.hard_sat_ice_curve:
++            if not self.hard_saturation_adjustment:
++                errors.append(
++                    "hard_sat_ice_curve=True requires "
++                    "hard_saturation_adjustment=True (the mixed-phase curve "
++                    "only modifies the active drain — it would be silently "
++                    "inert)."
++                )
++            if normalize_grid_type(self.grid.grid_type) != "mpas":
++                errors.append(
++                    "hard_sat_ice_curve=True requires an MPAS grid (the "
++                    "ice-curve drain is only wired into the MPAS post-step "
++                    "hook; on grid_type="
++                    f"{self.grid.grid_type!r} it would be silently inert)."
++                )
++            if self.microphysics != "morrison":
++                errors.append(
++                    "hard_sat_ice_curve=True requires microphysics='morrison' "
++                    "(the drain deposits to prognostic cloud ice q_i and seeds "
++                    "ice number N_i from Morrison's nucleation mass; "
++                    f"microphysics={self.microphysics!r} has no such reservoir)."
++                )
+         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
+         # The float overrides only act when the boolean gate is on; bounds
+         # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,

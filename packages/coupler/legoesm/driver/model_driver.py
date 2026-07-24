@@ -282,7 +282,8 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
 
 
 def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
-                                   hard_threshold, hard_max_heating_K):
+                                   hard_threshold, hard_max_heating_K,
+                                   ice_curve=False, q_i=None):
     """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
 
     Applies the reviewed hard-saturation-adjustment DRAIN
@@ -313,28 +314,107 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
     hard_threshold, hard_max_heating_K : float
         RH trigger and per-step latent-heating cap [K] from the scheme config.
 
+    ice_curve : bool, default False
+        Mixed-phase drain (TTL dehydration fix): gate + land on the
+        w(T)-blended liquid/ice saturation curve with the matching blended
+        latent heat (frozen at the pre-adjustment T — the SAME array the
+        drain's internal solve uses, so ``c_pd*T + L_eff(T0)*q_v`` is
+        conserved exactly), and route each cell's condensate by phase:
+        the liquid fraction w(T0) to ``q_c``, the ice fraction to ``q_i``
+        when that tracer exists (else everything to ``q_c`` — Morrison's
+        own freezing then handles the phase, documented approximation).
+    q_i : array or None
+        Cloud-ice tracer [kg/kg] (ncol, nlev) — the cold-cell condensate
+        recipient under ``ice_curve``.  Ignored when ``ice_curve`` is off.
+
     Returns
     -------
-    (T_new, q_v_new, q_c_new, dq) : tuple of arrays
+    (T_new, q_v_new, q_c_new, q_i_new, dq) : tuple of arrays
         Updated fields and the per-step condensed increment ``dq`` [kg/kg]
-        (>= 0), for diagnostics.  All inputs are returned unchanged (dq = 0) when
-        ``q_c is None`` -- total water is conserved.
+        (>= 0), for diagnostics.  ``q_i_new`` is None when no q_i was given.
+        All inputs are returned unchanged (dq = 0) when ``q_c is None`` --
+        total water is conserved.
     """
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
         hard_saturation_drain,
+        mixed_phase_l_over_cp,
+        mixed_phase_liquid_fraction,
     )
     if q_c is None:
         # No condensate reservoir -> cannot conserve total water by draining;
         # do nothing (the moist path always has q_c).
-        return T, q_v, None, jnp.zeros_like(q_v)
+        return T, q_v, None, q_i, jnp.zeros_like(q_v)
     p_full = p_s[:, None] * jnp.asarray(sigma_full)[None, :]
+    # The ice curve DEPOSITS to cloud ice; without a q_i reservoir it cannot do
+    # so, and heating with the blended (L_s-weighted) latent heat while binning
+    # the condensate as LIQUID q_c would inject (1-w)*L_f*dq of spurious energy.
+    # So degrade FULLY to the energy-exact liquid drain when q_i is absent (the
+    # rate AND the heating both liquid).  validate_strict forbids ice_curve
+    # without Morrison (q_i present), so this is a defensive fallback only.
+    _use_ice = bool(ice_curve) and (q_i is not None)
     rate = hard_saturation_drain(T, q_v, p_full, dt, hard_threshold,
-                                 hard_max_heating_K)
+                                 hard_max_heating_K, ice_curve=_use_ice)
     dq = rate * dt
-    T_new = T + (constants.L_v / constants.c_pd) * dq
+    if _use_ice:
+        # Heating with the SAME frozen-at-T0 blended latent heat the solve
+        # used; condensate split by the same w(T0) -> cloud water / cloud ice.
+        # (Landing q_c below the LIQUID curve at cold T would re-evaporate, so
+        # the ice fraction MUST go to q_i for the drain to stick; the caller
+        # seeds N_i for that ice mass.)
+        _l_cp = mixed_phase_l_over_cp(T).astype(T.dtype)
+        T_new = T + _l_cp * dq
+        w_liq = mixed_phase_liquid_fraction(T).astype(q_v.dtype)
+        q_c_new = q_c + w_liq * dq
+        q_i_new = q_i + (1.0 - w_liq) * dq
+    else:
+        # Liquid path (ice_curve off, or requested without a cloud-ice
+        # reservoir): condense to q_c with L_v -> c_pd*T + L_v*q_v exact.
+        T_new = T + (constants.L_v / constants.c_pd) * dq
+        q_c_new = q_c + dq
+        q_i_new = q_i
     q_v_new = q_v - dq
-    q_c_new = q_c + dq
-    return T_new, q_v_new, q_c_new, dq
+    return T_new, q_v_new, q_c_new, q_i_new, dq
+
+
+# Air-density floor for the Cooper ice-number/mass conversion, matching
+# Morrison's ``_RHO_FLOOR`` (module_mp_graupel density floor in divisions) so the
+# seed ceiling is Morrison-consistent at low density (without floors the p/(R_dT)
+# ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
+_ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
+
+
+def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
+    """Seed cloud-ice NUMBER [1/kg] for freshly deposited ice mass ``dq_i``.
+
+    A two-moment scheme (Morrison) needs a matching NUMBER for the deposited ice
+    or the new mass is ill-posed: M2005 diffusional growth self-gates as
+    ``EPSI ~ N_i^(2/3)`` (orphan ice with ``N_i = 0`` can neither grow nor
+    sublimate), and the fall-speed PSD slope ``lambda_i=(rho_ci pi N_i/q_i)^1/3``
+    is degenerate at ``N_i = 0`` (ice cannot sediment out).  Give each new
+    crystal the Morrison nucleation mass ``mi0 = 4/3 pi rho_ci r_nuc^3`` (mean
+    size = the nucleation radius), i.e. ``dN_i = dq_i / mi0`` -- the SAME
+    mass<->number closure Morrison's Cooper nucleation uses
+    (``dq_i_nuc = dN_i_nuc * mi0``).
+
+    The added number is CAPPED at Morrison's Cooper ice-number ceiling
+    ``N_i_nuc_max`` [1/m^3], converted to per-mass via
+    ``rho_air = p/(R_d T)`` floored at ``_ICE_SEED_RHO_FLOOR`` (0.1 kg/m^3) --
+    exactly Morrison's own Cooper target conversion
+    (``kc2 = min(...) / clip(rho, 0.1)``): a large (heating-cap-sized) deposit
+    then GROWS the crystals (bigger mean size)
+    rather than over-populating number -- an uncapped ``dq_i/mi0`` at the ~2 g/kg
+    cap seeds ~1e8 m^-3, ~300x the 5e5 m^-3 (500/L) ceiling, which would perturb
+    deposition and sedimentation.  Number is additive and carries no latent heat,
+    so this does not affect the water/energy budgets the drain already conserves.
+    ``rho_air`` uses dry ``p/(R_d T)``; Morrison's diagnostic uses moist/virtual-T
+    density, so above the floor this cap is marginally TIGHTER (~0.6%, i.e.
+    conservative -- fewer crystals) and at the low-density floor the two coincide.
+    """
+    rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
+    n_i_max_perkg = n_i_nuc_max / jnp.maximum(rho_air, _ICE_SEED_RHO_FLOOR)
+    d_n_raw = jnp.maximum(dq_i, 0.0) / jnp.maximum(ice_nuc_mass, 1.0e-30)
+    headroom = jnp.maximum(n_i_max_perkg - N_i, 0.0)   # 0 if already at ceiling
+    return N_i + jnp.minimum(d_n_raw, headroom)
 
 
 class ModelDriver:
@@ -5987,6 +6067,27 @@ class ModelDriver:
             _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
         _hard_sat_max_heating = (
             _hsub.hard_sat_max_heating_K if _hsub_has_field else None)
+        # Mixed-phase (ice-curve) drain: TTL dehydration fix — gate + land on
+        # the blended liquid/ice curve below freezing (validate_strict requires
+        # hard_saturation_adjustment + grid_type='mpas' + microphysics='morrison'
+        # when set).
+        _hard_sat_ice_curve = bool(
+            getattr(cfg, "hard_sat_ice_curve", False)) and _hard_sat_on
+        # Morrison nucleation crystal mass mi0 = 4/3 pi rho_ci r_nuc^3 [kg] — the
+        # mass<->number closure used to seed N_i for the ice the drain deposits
+        # (else orphan q_i is deposition-inert and cannot sediment).  Read from
+        # the (Morrison) micro sub-config; None disables number seeding.
+        # ``_n_i_nuc_max`` [1/m^3] caps the seeded number at Morrison's Cooper
+        # ceiling (per mass via rho_air) so a large deposit grows crystals.
+        _ice_nuc_mass = None
+        _n_i_nuc_max = None
+        if _hard_sat_ice_curve and _hsub is not None:
+            _rho_ci = getattr(_hsub, "rho_cloud_ice", None)
+            _r_nuc = getattr(_hsub, "ice_nuc_radius", None)
+            _n_i_nuc_max = getattr(_hsub, "N_i_nuc_max", None)
+            if _rho_ci is not None and _r_nuc is not None:
+                _ice_nuc_mass = (4.0 / 3.0) * jnp.pi * float(_rho_ci) \
+                    * float(_r_nuc) ** 3
         from legoesm.atmosphere.physics.radiation.solar import earth_orbit
         _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
@@ -7218,21 +7319,43 @@ class ModelDriver:
             if (_hard_sat_on and _trc is not None
                     and "q_v" in _trc and "q_c" in _trc):
                 _qc_fld = _trc["q_c"]
-                _T_hs, _qv_hs, _qc_hs, _dq_hs = _mpas_hard_saturation_poststep(
+                _qi_fld = _trc.get("q_i") if _hard_sat_ice_curve else None
+                (_T_hs, _qv_hs, _qc_hs, _qi_hs,
+                 _dq_hs) = _mpas_hard_saturation_poststep(
                     self.state.T.data, _trc["q_v"].data, _qc_fld.data,
                     self.state.p_s.data, self.sigma.sigma_full, DT,
-                    _hard_sat_threshold, _hard_sat_max_heating)
+                    _hard_sat_threshold, _hard_sat_max_heating,
+                    ice_curve=_hard_sat_ice_curve,
+                    q_i=None if _qi_fld is None else _qi_fld.data)
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
                     _n_hs = int(jnp.sum(_dq_hs > _HARD_SAT_LOG_QV_EPS))
                     if _n_hs > 0:
                         logger.warning(
-                            "hard saturation adjustment (post-step): drained "
+                            "hard saturation adjustment (post-step%s): drained "
                             "%d points (max dq_v %.2f g/kg, <= %.1f K) at "
-                            "step %d", _n_hs, float(jnp.max(_dq_hs)) * 1e3,
+                            "step %d",
+                            ", ice curve" if _hard_sat_ice_curve else "",
+                            _n_hs, float(jnp.max(_dq_hs)) * 1e3,
                             float(_hard_sat_max_heating), step)
                 _new_trc = dict(_trc)
                 _new_trc["q_v"] = _trc["q_v"].replace(data=_qv_hs)
                 _new_trc["q_c"] = _qc_fld.replace(data=_qc_hs)
+                if _qi_fld is not None and _qi_hs is not None:
+                    _new_trc["q_i"] = _qi_fld.replace(data=_qi_hs)
+                    # Seed cloud-ice NUMBER for the deposited ice mass so the
+                    # two-moment scheme sees a physical crystal count (orphan
+                    # q_i with N_i=0 is deposition-inert and cannot sediment),
+                    # capped at Morrison's Cooper ceiling N_i_nuc_max/rho_air.
+                    _ni_fld = _trc.get("N_i")
+                    if (_ni_fld is not None and _ice_nuc_mass is not None
+                            and _n_i_nuc_max is not None):
+                        _dq_i_dep = _qi_hs - _qi_fld.data
+                        _pf = self.state.p_s.data[:, None] * jnp.asarray(
+                            self.sigma.sigma_full)[None, :]
+                        _new_trc["N_i"] = _ni_fld.replace(
+                            data=_seed_nucleated_ice_number(
+                                _ni_fld.data, _dq_i_dep, _ice_nuc_mass,
+                                _n_i_nuc_max, _pf, _T_hs))
                 self.state = self.state._replace(
                     T=self.state.T.replace(data=_T_hs), tracers=_new_trc)
             # Keep the persisted-carry handle fresh for save_checkpoint
