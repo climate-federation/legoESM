@@ -267,6 +267,62 @@ def test_prandtl_unknown_mode_raises():
         _prandtl_number(jnp.ones(3), jnp.ones(3), jnp.ones(3), cfg)
 
 
+# ---------------------------------------------------------------------------
+# T8 (Phase-2 #1317): "nemo_ri" — NEMO's EXACT zri=rn2b*avm/(sh2+bshear)
+# form (zdftke.F90:381-401), distinct from "richardson" (Veros's own
+# Ri=N2/shear_sq, missing the avm numerator factor).
+# ---------------------------------------------------------------------------
+
+
+def test_nemo_ri_matches_hand_derivation():
+    """zri = N2*kappaM/(shear_sq+bshear_floor); Pr = clamp(coeff*zri,1,10)
+    — re-derived by hand from the F90 line, not copy-pasted."""
+    N2 = jnp.full((4,), 2e-5)
+    shear = jnp.full((4,), 1e-6)
+    K_M = jnp.full((4,), 3.0)   # kappaM factor NEMO's zri carries, "richardson" lacks
+    cfg = TKEConfig(prandtl_mode="nemo_ri", prandtl_ri_coeff=4.5)
+    Pr = _prandtl_number(N2, shear, K_M, cfg)
+    zri = 2e-5 * 3.0 / (1e-6 + cfg.bshear_floor)
+    expected = max(1.0, min(10.0, 4.5 * zri))
+    np.testing.assert_allclose(np.asarray(Pr), expected, rtol=1e-10)
+
+
+def test_nemo_ri_differs_from_richardson_via_kappaM_factor():
+    """With kappaM != 1, "nemo_ri" and "richardson" diverge — the avm
+    numerator factor is the fidelity content of T8. Values chosen so
+    NEITHER mode saturates against the [1,10] clamp (which would mask the
+    difference)."""
+    N2 = jnp.full((4,), 4e-6)
+    shear = jnp.full((4,), 1e-5)
+    K_M = jnp.full((4,), 5.0)   # kappaM far from 1 -> the two modes MUST differ
+    cfg_nemo = TKEConfig(prandtl_mode="nemo_ri", prandtl_ri_coeff=1.0)
+    cfg_veros = TKEConfig(prandtl_mode="richardson", prandtl_ri_coeff=1.0)
+    Pr_nemo = _prandtl_number(N2, shear, K_M, cfg_nemo)
+    Pr_veros = _prandtl_number(N2, shear, K_M, cfg_veros)
+    assert not np.allclose(np.asarray(Pr_nemo), np.asarray(Pr_veros))
+    np.testing.assert_allclose(np.asarray(Pr_veros), 1.0, rtol=1e-9)
+    np.testing.assert_allclose(np.asarray(Pr_nemo), 2.0, rtol=1e-6)
+
+
+def test_nemo_ri_saturates_at_10_in_stratified_interior():
+    N2 = jnp.full((4,), 1e-4)
+    shear = jnp.full((4,), 1e-8)
+    K_M = jnp.full((4,), 1e-3)
+    cfg = TKEConfig(prandtl_mode="nemo_ri")
+    Pr = _prandtl_number(N2, shear, K_M, cfg)
+    np.testing.assert_allclose(np.asarray(Pr), 10.0, rtol=1e-12)
+
+
+def test_nemo_ri_floors_at_1_in_convection():
+    """Unstable (N²<0) -> zri<0 -> Pr floors at 1 (K_H tracks K_M)."""
+    N2 = jnp.full((4,), -1e-6)
+    shear = jnp.full((4,), 1e-6)
+    K_M = jnp.full((4,), 1e-1)
+    cfg = TKEConfig(prandtl_mode="nemo_ri")
+    Pr = _prandtl_number(N2, shear, K_M, cfg)
+    np.testing.assert_allclose(np.asarray(Pr), 1.0, rtol=1e-12)
+
+
 def test_prandtl_chain_drops_abyssal_KH():
     """In a stratified interior the richardson Prandtl chain gives K_H ~ K_M/10,
     far below the legacy K_H = max(K_M, kappaH_min)."""

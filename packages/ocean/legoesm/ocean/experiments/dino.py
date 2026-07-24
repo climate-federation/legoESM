@@ -320,12 +320,24 @@ class DINOConfig:
     # measurably nil at the 62-day state — so it is characterised, not shipped
     # here. See docs/ocean/fidelity/dino_tendency_certificate.md.)
     convection_n2_threshold: float = 0.0        # -1e-12 = NEMO rn_evd threshold
+    # NEMO's full EVD switch is the two-time-level MIN(rn2, rn2b) <= -1e-12
+    # (zdfevd.F90:119) — Phase-2 #1317 T25 ships this as
+    # ``EnhancedDiffusionConfig.two_level_trigger`` (elementwise max of the
+    # now/before coefficients — equivalent to the MIN-N² trigger for a hard
+    # threshold), enabled on the nemo_dino_kamm card below.
     # TKE static-stability trigger. Default "insitu" (BIT-IDENTICAL legacy).
     # NEMO's zdftke consumes the SAME rn2 (eosbn2 bn2) as zdfevd — select
     # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². For the DINO S-EOS
     # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
     # convection comment), so no recipe switches by default.
     tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
+    # NEMO's step-entry (Nnow) N² sequencing (bn2 computed BEFORE tra_adv,
+    # stpmlf.F90:186-190) — Phase-2 #1317 T5. Consumed by BOTH zdfevd (via
+    # convection_n2_mode) and zdftke (via tke_n2_mode); wires the SAME
+    # entry-state T/S override into both triggers when set on the
+    # nemo_dino_kamm card. Default False = BIT-IDENTICAL (post-advection
+    # mid-step T/S, the prior legoESM behaviour).
+    n2_before_advection: bool = False
     # ------------------------------------------------------------------
     # NEMO zdftke closure-IDENTITY axes (Kamm 2025 DINO, namzdf_tke ref
     # defaults). Every default below reproduces the PRIOR DINO TKE behaviour
@@ -355,6 +367,50 @@ class DINOConfig:
     # NEMO zdftke diffuses en with 0.5·(avm[k+1]+avm[k]) (zdftke.F90:406-410),
     # i.e. alpha_tke=1.0. None = keep the TKEConfig default (30).
     tke_alpha: float | None = None              # 1.0 = NEMO en self-diffusion
+    # ----- Phase-2 #1317 Tier A: the ranked structural suspects -----
+    # T3 — surface TKE BC PLACEMENT: NEMO holds en(1) at z=0 and SOLVES the
+    # tridiagonal from jk=2 (the first INTERIOR w-level, zdftke.F90:264,
+    # 403-410); the prior legoESM Dirichlet placement pins the CARRIED
+    # interior interface 0 itself — one w-level too deep (probe:
+    # avt(30m)~50x NEMO with placement held as the only variable).
+    # "nemo_z0" prepends a virtual z=0 row so interior interface 0 becomes
+    # a genuinely SOLVED row, matching NEMO exactly.
+    tke_surface_bc_level: str = "interior_pinned"  # "nemo_z0" = NEMO
+    # T23 — background COMPOSITION: NEMO's avm/avt/avs backgrounds are
+    # MAX-only floors (zdftke avm=max(...,avm0), zdfevd REPLACES where
+    # unstable); legoESM's default ADDS the model-level A_v/K_v floor on
+    # top of the closure's own (already-floored) output, doubling the
+    # stable-thermocline background.
+    vmix_background_mode: str = "additive"       # "nemo_max_floor" = NEMO
+    # T6 — buoyancy SINK discretization: NEMO subtracts avt·rn2·dt fully
+    # EXPLICITLY using the previous-step avt (zdftke.F90:417-418), with the
+    # post-solve floor clamping negative overshoot; legoESM's default
+    # linearises the stable-branch sink IMPLICITLY on the diagonal (a
+    # softer asymptotic decay vs NEMO's sharper clamp-to-floor cutoff).
+    tke_buoyancy_sink: str = "implicit_linearized"  # "nemo_explicit" = NEMO
+    # ----- Phase-2 #1317 Tier B: one-line card flips (knobs pre-existed) -----
+    # T25 — EVD two-time-level trigger: NEMO's zdfevd fires on
+    # MIN(rn2, rn2b) <= threshold (zdfevd.F90:119); requires
+    # n2_before_advection=True to give the "before" state genuine content
+    # (otherwise before==after and the flag is a no-op).
+    convection_two_level_trigger: bool = False   # True = NEMO MIN(rn2,rn2b)
+    # ----- Phase-2 #1317 Tier C: small faithful items -----
+    # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
+    # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
+    # the avm factor — see tke_prandtl_ri below, now wired to "nemo_ri").
+    # T18/T19 — mixing-length floors: NEMO's ln_mxl0 init OVERWRITES BOTH
+    # rn_mxl0 (surface) and rmxl_min (interior) to the SAME derived value
+    # rmxl_min=1e-6/(rn_ediff*sqrt(rn_emin))=0.01 m for DINO's rn_ediff=0.1,
+    # rn_emin=1e-6 (zdftke.F90:846,859-863) — the namelist rn_mxl0=0.04 is
+    # DEAD CODE once ln_mxl0=T. legoESM defaults: mxl_min=1e-8 (interior,
+    # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
+    tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
+    tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
+    # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
+    # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
+    # completeness. Requires a NEMO bottom_drag_scheme.
+    tke_bottom_bc: bool = False                  # True = NEMO bottom BC
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -807,6 +863,19 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_dissipation": "nemo_1p5_split",     # zdftke zfact2/zfact3 1.5/0.5 split
         "tke_kappa_convention": "veros_sqrte",   # avm=rn_ediff·zmxlm·SQRT(en) (zdftke:713)
         "tke_alpha": 1.0,                        # en self-diffusion 0.5·(avm+avm) (zdftke:406)
+        # -- Phase-2 #1317 Tier A: the ranked structural suspects (surface BC
+        #    placement, background composition, buoyancy-sink discretization) --
+        "tke_surface_bc_level": "nemo_z0",       # solve from jk=2, hold z=0 (#1 suspect)
+        "vmix_background_mode": "nemo_max_floor",  # MAX-only floors, nothing added (#2 suspect)
+        "tke_buoyancy_sink": "nemo_explicit",    # explicit -avt*rn2*dt, prev-step avt (#3 suspect)
+        # -- Phase-2 #1317 Tier B: one-line card flips (knobs pre-existed) --
+        "n2_before_advection": True,             # step-entry (Nnow) N² (stpmlf.F90:186-190)
+        "convection_two_level_trigger": True,    # zdfevd MIN(rn2,rn2b) (zdfevd.F90:119)
+        # -- Phase-2 #1317 Tier C: small faithful items (tke_prandtl_ri --
+        #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
+        "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
+        "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
+        "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
         # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
@@ -2183,21 +2252,35 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             lc=True,
             etau_mode="below_ml",
             etau_htau_mode="latitude",
+            # Phase-2 #1317 Tier A/C: closure-identity axes (see DINOConfig
+            # docstrings above the field declarations).
+            n2_before_advection=cfg.n2_before_advection,
+            tke_surface_bc_level=cfg.tke_surface_bc_level,
+            tke_buoyancy_sink=cfg.tke_buoyancy_sink,
+            mxl_min=cfg.tke_mxl_min_m,
+            mxl0_min_m=cfg.tke_mxl0_min_m,
+            bottom_tke_bc=cfg.tke_bottom_bc,
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
             # vs the Gaspar/Veros default 30. None ⇒ keep the TKEConfig default.
             tke = tke._replace(alpha_tke=cfg.tke_alpha)
         if cfg.tke_prandtl_ri:
-            # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. richardson mode with
-            # coeff=1/ri_cri reproduces NEMO's Pr=1/pdlr=clamp(Ri/ri_cri,1,10)
-            # to machine precision (clamp-to-[1,10] is order-independent). ri_cri
-            # is derived from the SAME c_eps/c_k the TKE closure uses, so it
-            # auto-tracks a retuned dissipation ratio (NEMO 0.7/0.1 → 2/9 → 4.5).
+            # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. "nemo_ri" mode
+            # with coeff=1/ri_cri reproduces NEMO's zri=rn2b*avm/(sh2+bshear),
+            # pdlr=max(0.1,ri_cri/max(ri_cri,zri)), Pr=1/pdlr EXACTLY (Phase-2
+            # #1317 T8 — "richardson" is VEROS's own Ri=N2/shear_sq formula,
+            # missing NEMO's avm numerator factor; "nemo_ri" is the fix).
+            # ri_cri is derived from the SAME c_eps/c_k the TKE closure uses,
+            # so it auto-tracks a retuned dissipation ratio (NEMO 0.7/0.1 →
+            # 2/9 → 4.5).
             ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)
             tke = tke._replace(
-                prandtl_mode="richardson", prandtl_ri_coeff=1.0 / ri_cri)
-        return VerticalMixingConfig(scheme="tke", tke=tke)
+                prandtl_mode="nemo_ri", prandtl_ri_coeff=1.0 / ri_cri)
+        return VerticalMixingConfig(
+            scheme="tke", tke=tke,
+            vmix_background_mode=cfg.vmix_background_mode,
+        )
     if cfg.vmix_scheme == "kpp":
         return VerticalMixingConfig(
             scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
@@ -2443,6 +2526,11 @@ def dino_lat_lon_model_config(
                     smooth_transition=cfg.convection_smooth_transition,
                     n2_mode=cfg.convection_n2_mode,
                     n2_threshold=cfg.convection_n2_threshold,
+                    # Phase-2 #1317 T25: NEMO's two-time-level MIN(rn2,rn2b)
+                    # trigger (zdfevd.F90:119). Only genuinely differs from
+                    # the single-level trigger when n2_before_advection=True
+                    # gives the "before" state real content.
+                    two_level_trigger=cfg.convection_two_level_trigger,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -2758,6 +2846,7 @@ def dino_mpas_model_config(
                 smooth_transition=cfg.convection_smooth_transition,
                 n2_mode=cfg.convection_n2_mode,
                 n2_threshold=cfg.convection_n2_threshold,
+                two_level_trigger=cfg.convection_two_level_trigger,
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(

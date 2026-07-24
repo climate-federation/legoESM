@@ -196,7 +196,9 @@ class TestDINOConfig:
 
     def test_tke_prandtl_ri_maps_nemo_nn_pdl(self):
         """DINOConfig.tke_prandtl_ri=True wires the NEMO zdftke nn_pdl=1
-        Richardson Prandtl: prandtl_mode='richardson' with coeff=1/ri_cri,
+        Richardson Prandtl: prandtl_mode='nemo_ri' (Phase-2 #1317 T8 — NEMO's
+        EXACT zri=rn2b*avm/(sh2+bshear) form, not Veros's own "richardson"
+        Ri=N2/shear_sq, which is missing the avm factor) with coeff=1/ri_cri,
         ri_cri=2/(2+c_eps/c_k)=2/9 -> coeff=4.5. Default False keeps Pr=10
         constant (other recipes byte-identical). Truth-tier: in a strongly
         stratified column (Ri>>ri_cri) the tracer avt drops to 0.1*avm (NEMO
@@ -215,7 +217,7 @@ class TestDINOConfig:
         vm_on = dino._dino_vertical_mixing_config(
             dataclasses.replace(cfg, vmix_scheme="tke", tke_prandtl_ri=True))
         tke = vm_on.tke
-        assert tke.prandtl_mode == "richardson"
+        assert tke.prandtl_mode == "nemo_ri"
         ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)          # NEMO 2/9
         assert tke.prandtl_ri_coeff == pytest.approx(1.0 / ri_cri)
         assert tke.prandtl_ri_coeff == pytest.approx(4.5)
@@ -246,7 +248,7 @@ class TestDINOConfig:
         cfg = dino_config_for_recipe("nemo_dino_kamm")
         assert cfg.tke_prandtl_ri is True
         vm = dino._dino_vertical_mixing_config(cfg)
-        assert vm.tke.prandtl_mode == "richardson"
+        assert vm.tke.prandtl_mode == "nemo_ri"
         assert vm.tke.prandtl_ri_coeff == pytest.approx(4.5)
         # Backward-compat: the Veros DINO card keeps constant Pr.
         assert dino_config_for_recipe("veros").tke_prandtl_ri is False
