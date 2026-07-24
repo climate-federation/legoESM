@@ -411,6 +411,26 @@ class TestDINORecipes:
             # other recipe keeps the bit-identical min-rule default.
             assert c.barotropic_face_depth == "min_rule", recipe
 
+    def test_barotropic_forcing_centred_mlf_card_only(self):
+        # #1226 zero-deviation item 3 (NEMO ln_bt_fw=.FALSE. centred
+        # barotropic wind/emp forcing, dynspg_ts.F90:392-421 + the Kbb drag
+        # residual :1623-1636): only meaningful under the leapfrog outer
+        # integrator, so it lands ONLY on nemo_dino_kamm_mlf -- the FE
+        # nemo_dino_kamm card (ln_bt_fw=T forward branch, already uncentred)
+        # must stay False.
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.barotropic_forcing_centred is True
+        fe = dino_config_for_recipe("nemo_dino_kamm")
+        assert fe.barotropic_forcing_centred is False
+        for recipe in ("legoesm_default", "nemo_paper", "veros", "mitgcm",
+                       "oceananigans"):
+            assert dino_config_for_recipe(recipe).barotropic_forcing_centred is False, recipe
+        # Threads into the model config + actually runs (leapfrog + centred
+        # forcing + the full NEMO drag composition all together).
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.barotropic_forcing_centred is True
+
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
         # legoESM sigmoid default leaks enhanced mixing into weakly-stable water

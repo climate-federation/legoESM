@@ -506,6 +506,31 @@ class LatLonCGridOceanState(NamedTuple):
     # equal histories", silently skipping the cold-start ramp) — nemo_ab3am4
     # runs are step-1-eager, then scan.
     bt_hist: object = None
+    # NEMO ln_bt_fw=.FALSE. CENTRED barotropic slow forcing (#1226 item 3;
+    # dynspg_ts.F90:392-421): under the centred (non-forward) split-explicit
+    # integration NEMO forces zu_frc/ssh_frc with the TIME-AVERAGE
+    # ½(before+now) of the wind stress (utau_b+utauU) and the net freshwater
+    # flux (emp_b+emp), NOT the plain now-value. These carry the PREVIOUS
+    # step's forcing at the SAME representation as the ``surface_forcing``/
+    # ``freshwater`` step() args (T-point, pre-rotation) so
+    # ``barotropic_forcing_centred=True`` can rebuild the NEMO average
+    # without re-deriving the tau sign/interp/rotation chain twice.
+    # ``tau_x_prev``/``tau_y_prev`` mirror ``OceanSurfaceForcing.tau_x/tau_y``
+    # (T-point, atmosphere convention [Pa]); ``freshwater_eta_prev`` is the
+    # previous step's REDUCED net eta-forcing rate
+    # (``freshwater_eta_tendency`` output, T-point [m/s]) rather than a full
+    # carried ``FreshwaterForcing`` — only the eta/barotropic (NEMO
+    # ``ssh_frc``) channel is centred; the separate virtual-salt-flux tracer
+    # deposit (NEMO ``tra_sbc``) is untouched and stays at NOW. Default
+    # None -> inert (barotropic_forcing_centred=False path never reads
+    # these): zero behaviour change for existing configs. NEMO's nit000
+    # seeding (sbcmod.F90:568-573, "before" set equal to "now" on step 1,
+    # no restart) is reproduced by seeding these to the FIRST step's now
+    # values rather than zero (done in ``_step_impl``/``_leapfrog_step``,
+    # not here — this field only carries the state).
+    tau_x_prev: object = None
+    tau_y_prev: object = None
+    freshwater_eta_prev: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -2028,6 +2053,33 @@ class LatLonCGridOceanConfig(NamedTuple):
     # explicit_substep solver only (the in-subcycle mechanism has no other
     # consumer; loud error otherwise).  Default False -> BIT-IDENTICAL.
     barotropic_drag_substep: bool = False
+    # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+    # dynspg_ts.F90:392-421 + the dyn_drg_init Kbb residual :1623-1636):
+    # under NEMO's CENTRED (non-forward) split-explicit integration — the
+    # branch DINO's namelist actually runs — the once-per-step barotropic
+    # slow forcing zu_frc/ssh_frc uses the TIME-AVERAGE of the before and
+    # now surface forcing, not the plain now-value:
+    #   wind:  zu_frc += (utau_b+utauU)/(2*rho0*hu(Kmm))       (:400-401)
+    #   emp:   ssh_frc = ((emp+emp_b) - (rnf+rnf_b))/(2*rho0)  (:417-421)
+    #   drag:  zu_i = puu(ikbu,Kbb) - puu_b(Kbb)  [NOT centred -- pure
+    #          BEFORE, ln_bt_fw=F branch]                     (:1634-1636)
+    # lego's default (False) freezes F_slow at NOW throughout (documented
+    # residual #1 in ``_leapfrog_step``): the wind/freshwater terms use the
+    # NOW ``surface_forcing``/``freshwater`` step() args unaveraged, and the
+    # ``barotropic_drag_substep`` residual uses NOW ``state.u/v`` (see its
+    # own docstring). True flips wind+emp to the ½(before+now) average
+    # (using ``state.tau_x_prev``/``tau_y_prev``/``freshwater_eta_prev``)
+    # and the drag residual to the pure-BEFORE (``state.u_before``/
+    # ``v_before``) level -- matching the SAME dynspg_ts.F90 branch this
+    # flag is named for. Requires ``outer_integrator="leapfrog"`` (the
+    # ``_before`` carry fields this reads only exist there; validated at
+    # construction). Only the eta/barotropic (NEMO ``ssh_frc``) freshwater
+    # channel is centred -- the separate virtual-salt-flux tracer deposit
+    # (NEMO ``tra_sbc``) is untouched. First step (``*_prev`` is None):
+    # seeded to the NOW value (NEMO nit000 sbcmod.F90:568-573, no restart
+    # -> "before" set equal to "now"), so the average degenerates to NOW on
+    # step 1 exactly like NEMO. Default False -> BIT-IDENTICAL.
+    barotropic_forcing_centred: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

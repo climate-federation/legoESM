@@ -186,6 +186,14 @@ class DINOConfig:
     # DINO composition ln_drgimp=T + ln_dynspg_ts=T). Default False =
     # bit-identical.
     barotropic_drag_substep: bool = False
+    # NEMO ln_bt_fw=.FALSE. centred barotropic slow forcing (#1226 item 3):
+    # see LatLonCGridOceanConfig.barotropic_forcing_centred docstring.
+    # Threaded 1:1. Requires outer_integrator="leapfrog" (validated at model
+    # construction) -- only the nemo_dino_kamm_mlf card sets this True; the
+    # FE nemo_dino_kamm card has no NEMO ln_bt_fw=.FALSE. counterpart (FE
+    # runs the forward branch, ln_bt_fw=T, which is already what lego's
+    # uncentred F_slow matches). Default False = bit-identical.
+    barotropic_forcing_centred: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -1021,6 +1029,15 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # residual (residual #1b, alongside the Nbb before-level seed).  Boxcar
     # averaging + window are identical to nemo_boxcar_centred.
     "barotropic_time_filter": "nemo_boxcar_ab3",
+    # Zero-deviation item 3 (#1226): NEMO ln_bt_fw=.FALSE. centres the
+    # barotropic wind/emp slow forcing at ½(before+now) and the dyn_drg_init
+    # drag residual at the BEFORE (Kbb) level (dynspg_ts.F90:392-421,
+    # :1623-1636) -- the branch DINO's namelist actually runs. Only
+    # meaningful under the leapfrog (requires outer_integrator="leapfrog",
+    # validated at model construction), so it lands on THIS card only, not
+    # the FE nemo_dino_kamm card (which matches NEMO's ln_bt_fw=T forward
+    # branch, already uncentred).
+    "barotropic_forcing_centred": True,
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2470,6 +2487,9 @@ def dino_lat_lon_model_config(
         zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
         zdf_baroclinic_only=cfg.zdf_baroclinic_only,
         barotropic_drag_substep=cfg.barotropic_drag_substep,
+        # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
+        # see DINOConfig.barotropic_forcing_centred docstring).
+        barotropic_forcing_centred=cfg.barotropic_forcing_centred,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

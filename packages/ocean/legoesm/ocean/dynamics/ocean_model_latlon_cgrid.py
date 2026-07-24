@@ -859,6 +859,32 @@ def _thickness_weighted_asselin(now, before, after,
     return jnp.where(mask > 0, ztc_f / e3_f_safe, now)
 
 
+def _seed_centred_forcing_carry(surface_forcing, freshwater, rho_0, land_mask):
+    """Seed ``state.{tau_x,tau_y}_prev``/``freshwater_eta_prev`` for
+    ``barotropic_forcing_centred`` (#1226 item 3) from THIS step's forcing.
+
+    Called (a) after the leap-frog forward-Euler start step (NEMO nit000,
+    ``sbcmod.F90:568-573`` — no-restart "before := now" rule: the step-1
+    ``_step_impl`` call already ran with ``tau_x_prev=None`` so its wind/emp
+    was unaveraged NOW, matching NEMO's degenerate first-step average) and
+    (b) after every subsequent leap-frog step, so the NEXT step's ½
+    (before+now) average has a real before-value.  A plain module-level
+    helper (not a closure) per the "no helper fns rebuilt inside the hot
+    loop" rule — called once per step, not per-substep.
+    """
+    out = {}
+    if surface_forcing is not None:
+        _tx = getattr(surface_forcing, "tau_x", None)
+        _ty = getattr(surface_forcing, "tau_y", None)
+        if _tx is not None and _ty is not None:
+            out["tau_x_prev"] = _tx
+            out["tau_y_prev"] = _ty
+    if freshwater is not None:
+        out["freshwater_eta_prev"] = (
+            freshwater_eta_tendency(freshwater, rho_0) * land_mask)
+    return out
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -1828,6 +1854,17 @@ class LatLonCGridOceanModel:
                     "the flow after the barotropic/implicit solves, unlike "
                     "_step_impl/_ab2_step). Use forward_euler or ab2 with "
                     "prescribed_flow.")
+        if (getattr(config, "barotropic_forcing_centred", False)
+                and _outer_int != "leapfrog"):
+            raise ValueError(
+                'barotropic_forcing_centred=True requires '
+                'outer_integrator="leapfrog": the ½(before+now) forcing '
+                "average (NEMO ln_bt_fw=.FALSE., dynspg_ts.F90:392-421) and "
+                "the drag-residual BEFORE level (:1623-1636) both read the "
+                "state's u_before/v_before/tau_x_prev/tau_y_prev/"
+                "freshwater_eta_prev carry fields, which only exist under "
+                "the leapfrog (NEMO Modified-Leap-Frog) time integrator. "
+                f"Got outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -2535,6 +2572,36 @@ class LatLonCGridOceanModel:
         # lever existed.  Never jnp.where/lax.cond here.
         _pflow = getattr(self.config, "prescribed_flow", None)
 
+        # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+        # dynspg_ts.F90:392-401 wind + :415-421 emp): rebind ``surface_forcing``
+        # to the ½(before+now) TAU average BEFORE it reaches
+        # ``self.tendencies()`` — lego deposits wind stress as a SINGLE explicit
+        # top-cell kick (``_bc_external_surface_forcing``, always-on) that plays
+        # BOTH of NEMO's separately-centred wind consumers at once (the 2D
+        # zu_frc barotropic RHS AND the dynzdf top-cell implicit-solve BC, which
+        # under MLF both average utau_b+utauU) — so centring the single lego
+        # deposit reproduces both NEMO terms together. Freshwater is NOT
+        # rebound here (only the eta/ssh_frc channel is centred, done
+        # surgically at the F_slow_eta call site below; the virtual-salt-flux
+        # tracer deposit stays at NOW). NEMO nit000 seeding (sbcmod.F90:
+        # 568-573): ``state.tau_x_prev`` is None on the very first leapfrog
+        # step (before ``u_before`` exists) -- that step takes the
+        # forward-Euler branch in ``_leapfrog_step`` before this function
+        # ever runs with centring on, so no seeding branch is needed here;
+        # every step this function runs under centring has a real
+        # ``tau_x_prev`` (seeded to the pre-step NOW value by
+        # ``_leapfrog_step``, matching NEMO's "before := now" nit000 rule).
+        if (getattr(self.config, "barotropic_forcing_centred", False)
+                and surface_forcing is not None
+                and getattr(surface_forcing, "tau_x", None) is not None
+                and getattr(surface_forcing, "tau_y", None) is not None
+                and getattr(state, "tau_x_prev", None) is not None
+                and getattr(state, "tau_y_prev", None) is not None):
+            surface_forcing = surface_forcing._replace(
+                tau_x=0.5 * (state.tau_x_prev + surface_forcing.tau_x),
+                tau_y=0.5 * (state.tau_y_prev + surface_forcing.tau_y),
+            )
+
         # Asynchronous ("distorted-physics") time stepping: the public ``dt`` IS
         # dt_tracer (the clock; Veros advances vs.time by dt_tracer). Momentum + the
         # barotropic solve + implicit vertical FRICTION use the shorter dt_mom; the
@@ -2683,22 +2750,32 @@ class LatLonCGridOceanModel:
         # du_dt_pert split above because NEMO removes the vertical mean from
         # puu(Krhs) at :344-347 BEFORE dyn_drg_init runs — the correction
         # lives ONLY in the barotropic forcing, never in the 3-D residual.
-        # Time level: NOW (:1627, ln_bt_fw=T form).  NB DINO's namelist runs
-        # ln_bt_fw=F (CENTRED → Kbb residual, :1634); lego's forward-frame
-        # F_slow is assembled at NOW (the MLF leapfrog re-seeds only the
-        # fast integration, keeping F_slow at NOW), so the NOW form is the
-        # consistent transcription here.
+        # Time level: NOW (:1627, ln_bt_fw=T form) by default.  DINO's
+        # namelist runs ln_bt_fw=F (CENTRED → Kbb residual, :1634 — NOT a
+        # before/now AVERAGE like the wind/emp terms above; the ln_bt_fw=F
+        # branch reads puu(Kbb)/puu_b(Kbb) OUTRIGHT, pure BEFORE). Under
+        # ``barotropic_forcing_centred=True`` the velocity source switches to
+        # ``state.u_before``/``v_before`` (Kbb) to match; the drag RATE +
+        # thickness scaling stay at NOW (h_k_pre/H_u_pre, matching NEMO's
+        # r1_hu(Kmm) at :1642 — only the velocity residual is Kbb-gated, not
+        # the geometry/rate). Default False -> the NOW form (bit-identical).
         if getattr(self.config, "barotropic_drag_substep", False):
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_bottom_drag_rate_faces,
             )
+            _centred_drag = (
+                getattr(self.config, "barotropic_forcing_centred", False)
+                and getattr(state, "u_before", None) is not None
+                and getattr(state, "v_before", None) is not None)
+            _u_src = state.u_before.data if _centred_drag else state.u.data
+            _v_src = state.v_before.data if _centred_drag else state.v.data
             _r_u_bt, _r_v_bt, _isb_u, _isb_v = nemo_bottom_drag_rate_faces(
                 state.u.data, state.v.data, h_k_pre, self.z_coord,
                 self.config, _grid)
-            _u_bot = jnp.sum(state.u.data * _isb_u, axis=-1)
-            _v_bot = jnp.sum(state.v.data * _isb_v, axis=-1)
-            _U_bar_now = jnp.sum(state.u.data * h_u_pre, axis=-1) / H_u_pre
-            _V_bar_now = jnp.sum(state.v.data * h_v_pre, axis=-1) / H_v_pre
+            _u_bot = jnp.sum(_u_src * _isb_u, axis=-1)
+            _v_bot = jnp.sum(_v_src * _isb_v, axis=-1)
+            _U_bar_now = jnp.sum(_u_src * h_u_pre, axis=-1) / H_u_pre
+            _V_bar_now = jnp.sum(_v_src * h_v_pre, axis=-1) / H_v_pre
             F_slow_u = (F_slow_u
                         - _r_u_bt.astype(F_slow_u.dtype) / H_u_pre
                         * (_u_bot - _U_bar_now)) * state.u_mask.data
@@ -2929,6 +3006,21 @@ class LatLonCGridOceanModel:
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
+            # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+            # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
+            # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's
+            # emp_b/rnf_b enter ssh_frc, never the separate tra_sbc tracer
+            # deposit (lego's virtual_salt_flux, called later from the SAME
+            # ``freshwater`` arg, stays at NOW/uncentred). Surgical (not a
+            # ``freshwater`` rebind) so the tracer channel is untouched.
+            # ``freshwater_eta_prev`` is the ALREADY-REDUCED previous
+            # F_slow_eta rate (same reduction, so the average is linear-exact
+            # vs averaging the raw FreshwaterForcing first). None seeding:
+            # same nit000 rule as the wind term above.
+            if (getattr(self.config, "barotropic_forcing_centred", False)
+                    and getattr(state, "freshwater_eta_prev", None)
+                    is not None):
+                F_slow_eta = 0.5 * (state.freshwater_eta_prev + F_slow_eta)
 
         # ab2_scope="advective": the dissipative momentum tendencies (lateral
         # friction + bottom drag) are withheld from du_dt for weight-1.0
@@ -6390,10 +6482,16 @@ class LatLonCGridOceanModel:
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds)
-            return naa._replace(
+            naa = naa._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+            if getattr(self.config, "barotropic_forcing_centred", False):
+                naa = naa._replace(
+                    **_seed_centred_forcing_carry(
+                        surface_forcing, freshwater, self.config.rho_0,
+                        state.land_mask.data))
+            return naa
 
         # --- LEAP-FROG + Asselin.
         rdt = 2.0 * dt
@@ -6628,13 +6726,24 @@ class LatLonCGridOceanModel:
             state.S.data, state.S_before.data, naa.S.data,
             e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
 
-        return naa._replace(
+        naa = naa._replace(
             u_before=state.u.replace(data=u_f),
             v_before=state.v.replace(data=v_f),
             T_before=state.T.replace(data=T_f),
             S_before=state.S.replace(data=S_f),
             eta_before=state.eta.replace(data=eta_f),
         )
+        # barotropic_forcing_centred (#1226 item 3): swap THIS step's
+        # now-forcing into the carry for the NEXT step's before-value —
+        # mirrors NEMO's sbcmod.F90:382-386 ``utau_b(:,:) = utauU(:,:)``
+        # end-of-step swap (done every step except nit000, which this
+        # function's forward-Euler-start branch above handles separately).
+        if getattr(self.config, "barotropic_forcing_centred", False):
+            naa = naa._replace(
+                **_seed_centred_forcing_carry(
+                    surface_forcing, freshwater, self.config.rho_0,
+                    state.land_mask.data))
+        return naa
 
     def _unsplit_ab2_step(self, state: LatLonCGridOceanState, dt: float,
                           freshwater=None, surface_forcing=None, sponge=None,
@@ -7048,6 +7157,32 @@ class LatLonCGridOceanModel:
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+
+        # barotropic_forcing_centred (#1226 item 3): seed tau_x_prev/
+        # tau_y_prev/freshwater_eta_prev from THIS step's forcing (NEMO
+        # nit000 rule, sbcmod.F90:568-573 -- "before" set equal to "now" on
+        # the very first call, no restart) so a scan driver's first
+        # centred step degenerates to plain NOW exactly like the eager
+        # ``_leapfrog_step`` forward-Euler-start branch. Reads
+        # ``surface_forcing``/``freshwater`` out of ``step_kwargs`` (the
+        # SAME forcing the scan will pass to ``step()``); a driver that
+        # varies forcing per scan iteration (xs=...) rather than a fixed
+        # kwarg must seed these fields itself before the scan starts.
+        # No-op when the flag is off or already seeded (idempotent re-seed).
+        if (getattr(self.config, "barotropic_forcing_centred", False)
+                and (state.tau_x_prev is None
+                     or state.freshwater_eta_prev is None)):
+            _seed = _seed_centred_forcing_carry(
+                step_kwargs.get("surface_forcing"),
+                step_kwargs.get("freshwater"),
+                self.config.rho_0, state.land_mask.data)
+            if state.tau_x_prev is None and "tau_x_prev" in _seed:
+                state = state._replace(tau_x_prev=_seed["tau_x_prev"],
+                                       tau_y_prev=_seed["tau_y_prev"])
+            if (state.freshwater_eta_prev is None
+                    and "freshwater_eta_prev" in _seed):
+                state = state._replace(
+                    freshwater_eta_prev=_seed["freshwater_eta_prev"])
 
         # Barotropic slow-forcing AB2 carry (Gᵁ time-centering): seed the prev
         # F_slow Fields to ZERO so the scan carry pytree is stable from step 1
