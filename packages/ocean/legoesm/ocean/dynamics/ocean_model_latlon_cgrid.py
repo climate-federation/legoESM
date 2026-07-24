@@ -1865,6 +1865,33 @@ class LatLonCGridOceanModel:
                 "freshwater_eta_prev carry fields, which only exist under "
                 "the leapfrog (NEMO Modified-Leap-Frog) time integrator. "
                 f"Got outer_integrator={_outer_int!r}.")
+        # TKE closure axes that read the leap-frog BEFORE (Nbb) state
+        # (T4 Burchard shear, T8/T13 rn2b Prandtl/Langmuir; Phase-2 #1317):
+        # both need state.u_before/v_before/T_before/S_before, which only
+        # exist under outer_integrator="leapfrog". Construction-time raise
+        # (dispatch hardening) rather than a silent no-op at model-step time.
+        _vmix_cfg_ctor = getattr(getattr(config, "physics", None),
+                                 "vertical_mixing", None)
+        if _vmix_cfg_ctor is not None and _vmix_cfg_ctor.scheme == "tke":
+            _tke_cfg_ctor = _vmix_cfg_ctor.tke
+            if (getattr(_tke_cfg_ctor, "tke_n2_time_level", "step_entry")
+                    == "nemo_before" and _outer_int != "leapfrog"):
+                raise ValueError(
+                    'vertical_mixing.tke.tke_n2_time_level="nemo_before" '
+                    'requires outer_integrator="leapfrog": the true rn2b '
+                    "(Nbb) tracers only exist as state.T_before/S_before "
+                    "under the leap-frog (NEMO Modified-Leap-Frog) time "
+                    f"integrator. Got outer_integrator={_outer_int!r}.")
+            if (getattr(_tke_cfg_ctor, "tke_shear_production",
+                        "squared_centered") == "nemo_burchard"
+                    and _outer_int != "leapfrog"):
+                raise ValueError(
+                    'vertical_mixing.tke.tke_shear_production='
+                    '"nemo_burchard" requires outer_integrator="leapfrog": '
+                    "the Burchard now×before shear cross term only exists "
+                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f"Modified-Leap-Frog) time integrator. Got "
+                    f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -4159,6 +4186,7 @@ class LatLonCGridOceanModel:
                 # set. ``state`` here is the step-entry state (never rebound;
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state)
+                _n2_tracers_before = self._n2_nemo_before_tracers(state)
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -4167,9 +4195,11 @@ class LatLonCGridOceanModel:
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
                     grid=_grid, n2_tracers=_n2_tracers,
+                    n2_tracers_before=_n2_tracers_before,
                 )
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state)
+                _n2_tracers_before = self._n2_nemo_before_tracers(state)
                 state_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -4177,6 +4207,7 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     grid=_grid, n2_tracers=_n2_tracers,
+                    n2_tracers_before=_n2_tracers_before,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -4357,6 +4388,29 @@ class LatLonCGridOceanModel:
                 f"read the T/S contrast); got n2_mode={vmix.tke.n2_mode!r}.")
         return (entry_state.T.data, entry_state.S.data)
 
+    def _n2_nemo_before_tracers(self, entry_state):
+        """TRUE leap-frog BEFORE (Nbb) T/S for the rn2b consumers (T8/T13).
+
+        Static Python predicate: returns ``(T_before, S_before)`` — the
+        carried leap-frog before-state, one FULL step behind
+        ``entry_state`` — when ``vertical_mixing.tke.tke_n2_time_level``
+        is "nemo_before"; ``None`` (default) ⇒ BIT-IDENTICAL (rn2b
+        consumers reuse the same N² as rn2, unchanged).
+
+        ``entry_state`` MUST be the step-entry state (before rebinding to
+        ``state_new``), matching ``_n2_before_advection_tracers``'s
+        convention. Construction already guarantees ``entry_state.T_before``
+        is not None when this flag is set (the leapfrog-integrator raise
+        above).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
+            return None
+        return (entry_state.T_before.data, entry_state.S_before.data)
+
     def _tke_bottom_dirichlet(self, cc_state):
         """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
 
@@ -4413,6 +4467,27 @@ class LatLonCGridOceanModel:
             nemo_bottom_tke_dirichlet,
         )
         return nemo_bottom_tke_dirichlet(r_t, u_bot, v_bot, vmix.tke)
+
+    def _tke_bottom_level(self):
+        """Per-column T-point bottom-cell index for the T15-exact bottom TKE
+        Dirichlet placement, or None.
+
+        Static Python predicate mirroring ``_tke_bottom_dirichlet``'s gate:
+        only meaningful together with a held bottom value, and only when a
+        partial-cell coordinate actually carries a per-column
+        ``bottom_level`` (the flat-bottom / pure z-star case has none —
+        ``bottom_dirichlet``'s unconditional last-row pin is already exact
+        there, so ``None`` here keeps that path BIT-IDENTICAL).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "bottom_tke_bc", False):
+            return None
+        if not isinstance(self.z_coord, OceanPartialCellCoordinate):
+            return None
+        return self.z_coord.bottom_level
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -4916,6 +4991,7 @@ class LatLonCGridOceanModel:
         return_K_diss_v: bool = False,
         grid=None,
         n2_tracers=None,
+        n2_tracers_before=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -5131,6 +5207,8 @@ class LatLonCGridOceanModel:
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
                     tke_bottom_dirichlet=self._tke_bottom_dirichlet(cc_state),
+                    tke_bottom_level=self._tke_bottom_level(),
+                    n2_tracers_before=n2_tracers_before,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -5147,6 +5225,7 @@ class LatLonCGridOceanModel:
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
+                    n2_tracers_before=n2_tracers_before,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -6736,6 +6815,7 @@ class LatLonCGridOceanModel:
                 tke_old=_tke_old, tke_source=tke_source,
                 return_tke=_tke_prog, grid=_grid,
                 n2_tracers=self._n2_before_advection_tracers(state),
+                n2_tracers_before=self._n2_nemo_before_tracers(state),
             )
             if _tke_prog:
                 naa, tke_new = _res

@@ -411,6 +411,22 @@ class DINOConfig:
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
     # completeness. Requires a NEMO bottom_drag_scheme.
     tke_bottom_bc: bool = False                  # True = NEMO bottom BC
+    # T21 — avm ceiling: NEMO's tke_avn has NO ceiling on avm at all (the
+    # closure's own max(rn_ediff*zmxlm*sqrt(en), avmb) is unbounded above);
+    # legoESM's kappaM_max defaults to K_conv (=100, numerically coincides
+    # with the EVD replace-value rn_evd by default but is a SEPARATE knob —
+    # the TKE closure's own ceiling could otherwise clip K_M before EVD ever
+    # sees it). None (default, BIT-IDENTICAL) keeps kappaM_max=cfg.K_conv;
+    # the kamm card sets this to float('inf') (no ceiling).
+    tke_kappaM_max: float | None = None           # inf = NEMO (no ceiling)
+    # T4 — Burchard now×before shear (zdfsh2.F90:44-92). Requires
+    # outer_integrator="leapfrog" (construction raises otherwise); the FE
+    # kamm card keeps "squared_centered" (FE-frame fidelity ceiling — no
+    # before-velocity state, same class as this card's other FE-frame notes).
+    tke_shear_production: str = "squared_centered"  # "nemo_burchard" = MLF-only
+    # T8/T13 — rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri + Langmuir PE.
+    # Requires outer_integrator="leapfrog" (construction raises otherwise).
+    tke_n2_time_level: str = "step_entry"          # "nemo_before" = MLF-only
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -849,6 +865,13 @@ DINO_RECIPES: dict[str, dict] = {
         "pgf_scheme": "nemo_sco",
         "pgf_quadrature": "nemo_trapezoid",
         # -- Vertical mixing (namzdf: ln_zdftke=T; namzdf_tke rn_ediff=0.1 rn_ediss=0.7) --
+        # FE-FRAME FIDELITY CEILING (Phase-2 #1317 T4/T8/T13): this card has
+        # no carried leap-frog before-state, so TKEConfig.tke_shear_production
+        # stays "squared_centered" (not the Burchard now×before cross term)
+        # and TKEConfig.tke_n2_time_level stays "step_entry" (rn2b consumers
+        # — Prandtl zri, Langmuir PE — reuse rn2 rather than the true Nbb
+        # level). Both are MLF-only fixes; see nemo_dino_kamm_mlf, which
+        # inherits this block and overrides ONLY those two axes.
         "vmix_scheme": "tke",
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
         "tke_prandtl_ri": True,                  # nn_pdl=1 Ri-dependent Prandtl (default namzdf_tke)
@@ -876,6 +899,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
         "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
+        "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
         # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
@@ -1122,6 +1146,15 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # under the leapfrog's Nbb seed, so it lands on THIS card only (under
     # FE the window seed IS Kmm and the options coincide byte-identically).
     "barotropic_een_seed": "nemo_kmm",
+    # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
+    # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
+    # — meaningful ONLY under the MLF integrator (construction raises
+    # otherwise), so they land on THIS card only, not the FE nemo_dino_kamm
+    # card (which has no before-state and keeps the FE-frame fidelity
+    # ceiling: squared_centered shear + step_entry rn2b, the same class as
+    # this card's other FE-frame notes).
+    "tke_shear_production": "nemo_burchard",  # zdfsh2 now×before shear
+    "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2229,7 +2262,12 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         tke = TKEConfig(
             prandtl_mode="constant",
             kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
-            kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            # T21: NEMO's tke_avn has NO avm ceiling. None (default) keeps
+            # the prior BIT-IDENTICAL kappaM_max=K_conv; the kamm card sets
+            # tke_kappaM_max=float('inf').
+            kappaM_max=(cfg.K_conv if cfg.tke_kappaM_max is None
+                       else cfg.tke_kappaM_max),
+            bg_diff_scale=0.0,
             # NEMO zdftke consumes eosbn2's rn2 — "nemo_bn2" (else "insitu").
             n2_mode=cfg.tke_n2_mode,
             # NEMO zdftke closure-identity axes (see DINOConfig; defaults keep
@@ -2260,6 +2298,8 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             mxl_min=cfg.tke_mxl_min_m,
             mxl0_min_m=cfg.tke_mxl0_min_m,
             bottom_tke_bc=cfg.tke_bottom_bc,
+            tke_shear_production=cfg.tke_shear_production,
+            tke_n2_time_level=cfg.tke_n2_time_level,
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
