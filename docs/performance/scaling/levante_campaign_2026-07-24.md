@@ -98,10 +98,19 @@ than np2 while np8 is 2.5x faster than np4. Evidence gathered:
 - HALO VOLUME REFUTED: ghost-cell census on the padded mesh gives
   1540/1587/1400/1136 ghost cells per device at np 2/4/8/16 — flat to
   falling, and under 3 % of owned cells at every count.
-Remaining suspect (UNVERIFIED): an XLA layout/tiling choice for the
-per-device cell count (655376/np = 327688 / 163844 / 81922 / 40961 —
-2^k x 40961, with np16 landing on an odd leading dimension). Next probe
-is an HLO/profile diff of the np4 vs np8 compiles, NOT another timing run.
+- COLLECTIVE COUNT REFUTED (HLO census, ico L7, CPU virtual devices —
+  device count is a compile-time property so the HLO matches what the GPUs
+  execute): collective-permutes per step are 3 / 9 / 21 at np 2/4/8, i.e.
+  np8 issues 2.3x MORE collectives than np4 and still runs 2.5x faster.
+  Communication cannot be what makes np4 slow. (Fusion count 136/173/240,
+  bitcasts 526/582/694 — the np8 program is finer-grained.)
+Remaining suspect (UNVERIFIED): per-device compute efficiency / XLA codegen
+for the per-device shape (655376/np = 327688 / 163844 / 81922 / 40961 —
+2^k x 40961, np16 landing on an odd leading dimension). A partition-method
+A/B (sfc vs metis vs geometric at np4/np8) is the last cheap discriminator;
+after that the honest next step is a GPU op-level profile, not more timing
+runs. PRACTICAL GUIDANCE MEANWHILE: run this grid at np>=8, where
+per-device throughput is 306 Mc/s/GPU vs 247 at np4.
 
 ## Weak scaling at production per-device size (job 26453523)
 
