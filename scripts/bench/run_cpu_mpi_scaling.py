@@ -152,9 +152,17 @@ def _configure_jax_gpu(precision: str) -> None:
 
 
 def _launcher_world_size() -> int:
-    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
-    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
-                "SLURM_NTASKS"):
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher).
+
+    GLOBAL sizes only (codex 2026-07-24 round-3): PALS_LOCAL_SIZE is
+    PER-NODE — using it as world size would accept a one-node partial
+    federation as complete. PALS jobs expose no global size env here, so
+    they fall through to 1 and rely on the mpi4py path. Prefer the STEP
+    task count over the allocation's SLURM_NTASKS so an `srun -n1` inside
+    a larger allocation is not mistaken for the allocation-wide count.
+    """
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS"):
         val = os.environ.get(var)
         if val and val.isdigit():
             return int(val)

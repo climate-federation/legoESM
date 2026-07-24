@@ -38,7 +38,9 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
-OUT="${OUT:-results/a1/cube_tiled_scaling_levante.jsonl}"
+# Job-id-suffixed default: concurrent tiled jobs must not append to one
+# JSONL (codex round-3 finding 4; same class as the OUTDIR stamp collision).
+OUT="${OUT:-results/a1/cube_tiled_scaling_levante_j${SLURM_JOB_ID:-local}.jsonl}"
 RES="${RES:-192}"
 NLEV="${NLEV:-60}"
 KT="${KT:-2}"

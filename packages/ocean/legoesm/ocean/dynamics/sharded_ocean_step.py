@@ -515,29 +515,61 @@ def make_sharded_ocean_step(model, mesh):
     # device holds the whole small grid stack.
     rep = NamedSharding(mesh, P())
 
-    def _replicated_put(arr):
+    def _sig_round(x: float, digits: int = 5) -> float:
+        # Quantize to `digits` significant digits so per-process ULP drift
+        # (observed ~1e-7 relative) compares EQUAL while real divergence
+        # (a differing mask/config changes sums at >=1e-4 relative) differs.
+        if x == 0.0 or not np.isfinite(x):
+            return float(x)
+        from math import floor, log10
+
+        mag = floor(log10(abs(x)))
+        return float(round(x, -int(mag) + digits - 1))
+
+    def _replicated_put(arr, name):
         # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
         # value is bit-identical on every process. The band-geometry arrays
         # are (re)computed per process and can differ in their last ULPs
         # (per-process XLA autotuning on device-derived grid fields), which
         # trips that assert at larger sizes (job 26450848: LL576 np=4,
         # area-scale fields differing at 1e-7 relative). Broadcast process
-        # 0's bytes so every controller puts the SAME replicated value —
-        # geometry is static metadata, so process 0 is authoritative.
+        # 0's bytes so every controller puts the SAME replicated value.
+        # GUARD (codex round-3): process 0 must not silently mask REAL
+        # cross-process divergence — assert a structure + quantized-value
+        # fingerprint (5 significant digits: ULP drift collapses, a wrong
+        # mask/grid/config does not) BEFORE adopting process 0's bytes.
+        host = np.asarray(arr)
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
 
-            arr = multihost_utils.broadcast_one_to_all(np.asarray(arr))
-        return jax.device_put(jnp.asarray(arr), rep)
+            flat = host.ravel()
+            finite = flat[np.isfinite(flat)]
+            fp = np.array(
+                [float(host.ndim), *map(float, host.shape),
+                 float(np.dtype(host.dtype).num),
+                 _sig_round(float(finite.sum()) if finite.size else 0.0),
+                 _sig_round(float(np.abs(finite).max()) if finite.size else 0.0),
+                 float(flat.size - finite.size)],  # non-finite count
+                dtype=np.float64)
+            multihost_utils.assert_equal(
+                fp, fail_message=(
+                    f"make_sharded_ocean_step: band-geometry field {name!r} "
+                    f"DIVERGES across processes beyond ULP tolerance "
+                    f"(shape/dtype/5-sig-digit fingerprint mismatch) — this "
+                    f"is a real config/grid inconsistency, not autotune "
+                    f"noise; refusing to broadcast process 0 over it."))
+            host = multihost_utils.broadcast_one_to_all(host)
+        return jax.device_put(jnp.asarray(host), rep)
 
     geom_stacks = {
         name: _replicated_put(
             jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
-                      axis=0))
+                      axis=0), name)
         for name in array_field_names
     }
     vmask_stack = _replicated_put(
-        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0))
+        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0),
+        "vertex_mask")
 
     # Static perms for the v north-boundary-row ppermute (band r receives band
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).

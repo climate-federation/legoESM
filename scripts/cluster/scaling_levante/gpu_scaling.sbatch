@@ -124,10 +124,14 @@ if [ "$RUN_OCEAN" = "1" ]; then
                     fi
                     # --force-pcg: solver-matched ladder (nd=1 otherwise
                     # times adaptive stock CG vs fixed-M PCG at nd>1).
+                    # Conservation gate on EVERY reported arm — a reported
+                    # ladder row must carry its own gate receipt, not
+                    # inherit the smoke's (codex round-3 finding 6).
                     JAX_ENABLE_X64=$_X64 "$PY" \
                         scripts/bench/bench_ocean_latlon_spmd_scaling.py \
                         --n-devices "$nd" $_GEOM --nlev "$OC_NLEV" \
                         --force-pcg \
+                        --check-conservation --cons-rtol "${OC_CONS_RTOL:-1e-5}" \
                         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
                         --out "$OUTDIR/ocean/ocean_spmd_scaling.jsonl"
                     rc=$?

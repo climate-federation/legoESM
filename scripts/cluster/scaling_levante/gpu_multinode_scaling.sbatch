@@ -132,8 +132,12 @@ rc_all=0
 # supported devices found"; nvidia-smi visibility — not a JAX device
 # check — because THAT was the observed failure mode).
 echo "=== PREFLIGHT: per-task GPU visibility (STEP_GPU_OPTS='$STEP_GPU_OPTS') ==="
+# Size the preflight to the ALLOCATION (all local IDs on every allocated
+# node), not to NP_LL — a lane-E-only run would otherwise test too few or
+# too many tasks (codex round-3 finding 5).
+PRE_NP=$((NODES_HAVE * 4))
 # shellcheck disable=SC2086
-srun --ntasks="$NP_LL" --ntasks-per-node=4 --time=2 $STEP_GPU_OPTS bash -c "$PIN" _ \
+srun --ntasks="$PRE_NP" --ntasks-per-node=4 --time=2 $STEP_GPU_OPTS bash -c "$PIN" _ \
     bash -c 'echo "task=$SLURM_PROCID host=$(hostname -s) CVD=${CUDA_VISIBLE_DEVICES:-UNSET} ngpu=$(nvidia-smi -L 2>/dev/null | wc -l)"' \
     | sort || echo "PREFLIGHT srun failed rc=$?"
 
@@ -170,13 +174,16 @@ fi
 
 # Gate: tests/parallel/test_latlon_ocean_spmd_multicontroller_selfspawn.py.
 if [ "$RUN_OCEAN" = "1" ]; then
-    echo "=== LANE D: ocean latlon multihost np=$NP_LL (LL$OC_RES) ==="
+    echo "=== LANE D: ocean latlon multihost np=$NP_LL (LL$OC_RES) $OC_EXTRA ==="
+    # OC_EXTRA: extra bench flags for improved-config ladders (e.g.
+    # "--baro-solver explicit_substep --wide-halo"); default = production
+    # implicit_cn. Env like LEGOESM_VMIX_F32_SOLVE propagates via --export.
     # shellcheck disable=SC2086
     srun --ntasks="$NP_LL" --ntasks-per-node=4 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/bench_ocean_latlon_spmd_scaling.py \
         --multicontroller --n-devices "$NP_LL" \
         --mode "$MODE" --n-lat "$OC_RES" --n-lon $((2 * OC_RES)) \
-        --nlev "$OC_NLEV" \
+        --nlev "$OC_NLEV" ${OC_EXTRA:-} \
         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
         --out "$OUTDIR/ocean_multicontroller/ocean_spmd_scaling.jsonl"
     rc=$?
