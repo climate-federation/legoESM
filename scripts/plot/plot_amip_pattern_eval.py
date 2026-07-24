@@ -106,13 +106,26 @@ def _open_cmor(run_dir: Path, var: str):
 
 
 def _open_ref(ref_root: Path, dataset: str, var: str):
+    """Open a reference variable time-CHUNKED and horizontally DECIMATED.
+
+    The ERA5 native6 3-D monthly files are ~90 GB (567 x 37 x 721 x 1440);
+    un-chunked opens + full-resolution month means OOM a login node.  Chunk
+    by single months and stride the horizontal axes down to ~180 points
+    (~1 deg) BEFORE any arithmetic — the comparison grid is the model's
+    5 deg CMOR grid, so ~1 deg reference sampling is accuracy-neutral.
+    """
     import xarray as xr
     hits = sorted(glob.glob(str(ref_root / dataset / "mon" / var / "*.nc")))
     if not hits:
         return None
-    ds = xr.open_mfdataset(hits, combine="by_coords")
+    ds = xr.open_mfdataset(hits, combine="by_coords", chunks={"time": 1})
     # obs4MIPs/native6 files name the variable canonically.
-    return ds[var] if var in ds else ds[list(ds.data_vars)[0]]
+    da = ds[var] if var in ds else ds[list(ds.data_vars)[0]]
+    for dim in ("lat", "lon"):
+        n = da.sizes.get(dim, 0)
+        if n > 360:
+            da = da.isel({dim: slice(None, None, max(1, n // 180))})
+    return da
 
 
 def _monthly_matched_ref(ref, model_times, epoch: str):
@@ -144,7 +157,7 @@ def _monthly_matched_ref(ref, model_times, epoch: str):
             continue
         parts.append(sel.mean("time") * float(cnt))
     out = sum(parts) / float(counts.sum())
-    return out, note + f", months={list(uniq)}"
+    return out, note + f", months={[int(m) for m in uniq]}"
 
 
 # ---------------------------------------------------------------------------
@@ -231,13 +244,7 @@ def main() -> int:
                 ax.set_axis_off()
             continue
         model_z = (da.mean("time").mean("lon") * scale)
-        # Decimate a fine (e.g. 0.25 deg) reanalysis before the zonal mean +
-        # interp onto the 5 deg model grid: pure speed, negligible accuracy
-        # cost at this target resolution (every ~1 deg point retained).
-        for dim in ("lat", "lon"):
-            n = ref_da.sizes.get(dim, 0)
-            if n > 720:
-                ref_da = ref_da.isel({dim: slice(None, None, n // 360)})
+        # (_open_ref already time-chunks + decimates the fine reanalysis.)
         ref_m, note = _monthly_matched_ref(ref_da, da["time"], "match")
         # ERA5 plev may be ascending/descending + finer: interp to model levels
         ref_z = (ref_m.mean("lon")
