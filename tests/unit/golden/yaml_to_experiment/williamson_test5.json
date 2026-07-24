@@ -110,6 +110,8 @@
     "vertical_coord": "none"
   },
   "held_suarez_forcing": false,
+  "hines_Fmax": 0.1,
+  "hines_total_rms_wind": 2.0,
   "ic": "default",
   "ic_path": "",
   "insolation_start_doy": null,
@@ -146,7 +148,7 @@
   "lw_diff_factor": 1.66,
   "mcfarlane_N_ref": 0.01,
   "mcfarlane_directional_spread": 1.0,
-  "mcfarlane_k_wave": 6.283185307e-05,
+  "mcfarlane_k_wave": 6.283185307179586e-05,
   "mcfarlane_tau_max": 10.0,
   "micro_substeps": 1,
   "microphysics": "none",

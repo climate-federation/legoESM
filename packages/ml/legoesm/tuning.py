@@ -502,17 +502,13 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "waves; scales the launch stress tau_0 ~ G_0*rho*N*k*h^2*U."
         ),
     ),
-    "mcfarlane_N_ref": TuningParameter(
-        name="mcfarlane_N_ref",
-        default=0.01,
-        min_val=0.005,
-        max_val=0.025,
-        units="1/s",
-        description="McFarlane GWD reference Brunt-Vaisala frequency",
-        category="gwd",
-        sensitivity="medium",
-        notes="Reference stratification used in the orographic launch-stress closure.",
-    ),
+    # NOTE: ``mcfarlane_N_ref`` was REMOVED from this catalog 2026-07-24.  It
+    # advertised a "reference stratification used in the orographic
+    # launch-stress closure" that does not exist: McFarlaneConfig has no
+    # ``N_ref`` field and mcfarlane_gwd derives N from the column state, so
+    # tuning it changed nothing.  The ExperimentConfig scalar stays (positional
+    # ABI + serialized configs) but is marked INERT there.  Re-add only if a
+    # real reference-stratification closure parameter is introduced.
     "mcfarlane_directional_spread": TuningParameter(
         name="mcfarlane_directional_spread",
         default=1.0,
