@@ -123,6 +123,22 @@ cells/device), which is itself the clue to hand the profiler.
 PRACTICAL GUIDANCE MEANWHILE: run this grid at np>=8, where per-device
 throughput is 304-340 Mc/s/GPU vs 220-248 at np4.
 
+## Ocean strong scaling vs TILE SIZE (jobs 26456334/37 vs 26452804-06)
+
+The same improved config (wide-halo + vmix-f32, multicontroller NCCL/IB,
+f32 L20) run at two tile sizes, 4 -> 16 GPUs:
+
+| grid | cells/GPU @16 | np4 -> np16 | eff | aggregate @16 |
+|---|---|---|---|---|
+| LL576x1152 (13.3M) | 0.83M | 12.81 -> 8.63 ms | 0.37 | 1.53 GCells/s |
+| LL1152x2304 (53.1M) | 3.3M | 43.47 -> 17.24 ms | **0.63** | **3.08 GCells/s** |
+
+So the ocean obeys the SAME per-device-floor law the cube does: the 2.01x
+multinode improvement measured at LL576 was partly a floor effect, and at
+a production tile the identical code scales substantially better (0.37 ->
+0.63). Per-device throughput also rises (259 -> 305 Mc/s/GPU at np4).
+Config is byte-identical between the two rows; only the grid changes.
+
 ## Weak scaling at production per-device size (job 26453523)
 
 The earlier weak ladders used a 64-row base (0.17M cells/GPU — under the
