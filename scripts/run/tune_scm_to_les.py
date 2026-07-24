@@ -38,6 +38,11 @@ from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
 from legoesm.training.param_collector import apply_param_overrides, build_registry
 
 
+# A tuned loss at/above this is the AD divergence penalty (scm_les_loss_jax returns a
+# large finite barrier for a non-finite SCM), NOT a real fit — real losses are O(1).
+_AD_DIVERGED_LOSS = 1.0e5
+
+
 @dataclass(frozen=True)
 class TuneResult:
     """Best overrides + loss and the full evaluated history for one closure."""
@@ -164,6 +169,101 @@ def tune_closure_derivative_free(
     )
 
 
+def tune_closure_ad(
+    artifact,
+    base_turbulence,
+    scheme_key: str,
+    *,
+    tiers: tuple[int, ...] = (1,),
+    nlev: int = 24,
+    dt: float = 10.0,
+    steps: int = 20,
+    lr: float = 0.08,
+    seed: int = 0,  # noqa: ARG001 — deterministic AD; kept for a uniform signature
+) -> TuneResult:
+    """AD calibration (D4): gradient descent on the tunable params via the DIFFERENTIABLE
+    ``scm_runner.scm_les_loss_jax`` (same final-snapshot objective as the DF path), and
+    the gradient is the D4 AD-vs-DF signal. The params enter as TRACED leaves, so the
+    grad has ONE jaxpr shape across every param value (XLA reuses the compiled executable)
+    — vs the DF path building a NEW static-leaf config per candidate (a fresh trace +
+    compile each). CAVEATS: (1) the SCM's ``run`` is a Python step-loop that ``jax.grad``
+    UNROLLS, so that backward graph grows with ``nsteps`` (practical only at modest
+    resolution until a ``lax.scan`` rollout lands); (2) a diverged trajectory can still
+    yield a NaN gradient (0×NaN backprop through the diverged states) — caught here by the
+    ``isfinite(grad)`` step guard, which stops the descent (the DF path is the fallback).
+
+    Optimises in NORMALISED space (each param mapped to [0,1] over its bounds) with Adam,
+    so disparate scales (C_s~0.2 vs l_mix_max~275) + tiny θ-loss gradients are handled;
+    clips back into bounds each step. A non-finite loss/grad (diverged SCM) stops the
+    descent (AD cannot use a concrete +inf under trace) — the DF path is the fallback.
+    """
+    import jax
+    import jax.numpy as jnp
+    import optax
+    from legoesm.atmosphere.les_suite.scm_runner import scm_les_loss_jax
+
+    metas = _scheme_tunable_metas(scheme_key, tiers)
+    fields = [m.field for m in metas]
+    lo = jnp.asarray([float(m.bounds[0]) for m in metas])
+    hi = jnp.asarray([float(m.bounds[1]) for m in metas])
+    span = hi - lo
+    if not bool(jnp.all(span > 0.0)):  # zero-span bound ⇒ normalisation divide-by-zero
+        bad = [m.field for m in metas if float(m.bounds[1]) <= float(m.bounds[0])]
+        raise SystemExit(f"{scheme_key}: params with non-positive bound span: {bad}")
+    n0 = jnp.clip((jnp.asarray([float(m.default) for m in metas]) - lo) / span, 0.0, 1.0)
+
+    def _overrides(norm):
+        vals = lo + jnp.clip(norm, 0.0, 1.0) * span
+        return {f: vals[i] for i, f in enumerate(fields)}
+
+    def _to_py(norm) -> dict:
+        vals = lo + jnp.clip(norm, 0.0, 1.0) * span
+        return {f: float(vals[i]) for i, f in enumerate(fields)}
+
+    def loss_of(norm):
+        cfg = apply_overrides_to_base(base_turbulence, _overrides(norm))
+        return scm_les_loss_jax(artifact, cfg, nlev=nlev, dt=dt)
+
+    # NOT jax.jit'd: build_cbl_scm_from_artifact has concrete float() grid-setup that is
+    # jit-incompatible with a traced config. The compile-reuse win is STRUCTURAL anyway —
+    # the params enter as TRACED leaves (one jaxpr across all param values, XLA-cached),
+    # whereas the DF path builds a NEW static-leaf config per candidate ⇒ a fresh compile
+    # each time. So AD re-uses the compiled grad while DF recompiles per candidate.
+    value_and_grad = jax.value_and_grad(loss_of)
+    opt = optax.adam(lr)
+    opt_state = opt.init(n0)
+    norm = n0
+    default_loss = float(loss_of(n0))
+    best_loss = default_loss if np.isfinite(default_loss) else np.inf
+    best_norm = n0
+    history: list = [(default_loss, _to_py(n0))]
+    for _ in range(max(1, steps)):
+        loss, grad = value_and_grad(norm)
+        if not (np.isfinite(float(loss)) and bool(jnp.all(jnp.isfinite(grad)))):
+            break  # diverged → stop; the derivative-free path is the fallback
+        updates, opt_state = opt.update(grad, opt_state)
+        norm = jnp.clip(optax.apply_updates(norm, updates), 0.0, 1.0)
+        cur = float(loss_of(norm))
+        history.append((cur, _to_py(norm)))
+        if np.isfinite(cur) and cur < best_loss:
+            best_loss, best_norm = cur, norm
+    # A diverged trajectory returns the large finite _AD_DIVERGE_PENALTY (not +inf), so a
+    # finite best_loss is not enough — a best still in penalty territory means EVERY
+    # evaluation diverged (no real fit). Threshold well above any real loss (O(1)).
+    if not np.isfinite(best_loss) or best_loss >= _AD_DIVERGED_LOSS:
+        raise RuntimeError(
+            f"{base_turbulence.scheme}: AD tuning found no non-diverged loss "
+            f"(best={best_loss:g}); try the derivative-free path or a smaller dt/lr.")
+    return TuneResult(
+        scheme=base_turbulence.scheme,
+        best_overrides=_to_py(best_norm),
+        best_loss=best_loss,
+        default_loss=default_loss,
+        n_evaluated=len(history),
+        history=history,
+    )
+
+
 # --- scheme → (sub-config class, registry scheme_key) --------------------------
 # The closures wired for the dry-CBL (prescribed-flux) tuner, spanning the
 # closure-order ladder for Q1/Q2 (local first-order → nonlocal → 1.5-order).
@@ -224,8 +324,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scheme", default="mynn25", help="turbulence closure to tune")
     p.add_argument("--tiers", type=int, nargs="+", default=[1],
                    help="tunable tiers to include (1=core, 2=extended, 3=aggressive)")
+    p.add_argument("--method", choices=("df", "ad", "both"), default="df",
+                   help="tuning method: df=derivative-free (default), ad=AD gradient "
+                        "descent (D4; traced-leaf params reuse one compiled grad, vs the "
+                        "DF per-candidate recompile), both=run+compare")
     p.add_argument("--n-random", type=int, default=12,
-                   help="number of random candidates after the coordinate probe")
+                   help="number of random candidates after the coordinate probe (df)")
+    p.add_argument("--ad-steps", type=int, default=20, help="AD gradient steps")
+    p.add_argument("--ad-lr", type=float, default=0.08, help="AD Adam learning rate")
     p.add_argument("--nlev", type=int, default=32, help="SCM vertical levels")
     p.add_argument("--dt", type=float, default=10.0, help="SCM timestep [s]")
     p.add_argument("--seed", type=int, default=0)
@@ -239,54 +345,66 @@ def main(argv: list[str] | None = None) -> int:
     artifact = load_artifact(args.artifact)
     base, scheme_key = _base_turbulence(args.scheme)
 
-    result = tune_closure_derivative_free(
-        artifact, base, scheme_key,
-        tiers=tuple(args.tiers), n_random=args.n_random,
-        nlev=args.nlev, dt=args.dt, seed=args.seed,
-    )
-    default_finite = bool(np.isfinite(result.default_loss))
-    print(f"[tune] case={artifact.case_name} scheme={result.scheme} "
-          f"evaluated={result.n_evaluated}")
-    print(f"  default loss = "
-          f"{result.default_loss:.4f}" if default_finite else "  default loss = diverged")
-    print(f"  best    loss = {result.best_loss:.4f}")
-    if default_finite:
-        improvement = result.default_loss - result.best_loss
-        print(f"  improvement  = {improvement:+.4f} "
-              f"({100 * improvement / result.default_loss:+.1f}%)")
-    else:
-        print("  improvement  = n/a (default config diverged; tuning recovered it)")
-    rounded = {k: round(v, 4) for k, v in result.best_overrides.items()}
-    print(f"  best overrides: {json.dumps(rounded)}")
+    results: dict = {}
+    if args.method in ("df", "both"):
+        results["df"] = tune_closure_derivative_free(
+            artifact, base, scheme_key, tiers=tuple(args.tiers),
+            n_random=args.n_random, nlev=args.nlev, dt=args.dt, seed=args.seed)
+    if args.method in ("ad", "both"):
+        results["ad"] = tune_closure_ad(
+            artifact, base, scheme_key, tiers=tuple(args.tiers), nlev=args.nlev,
+            dt=args.dt, steps=args.ad_steps, lr=args.ad_lr, seed=args.seed)
 
-    # Default filename keys off the ARTIFACT stem, not case_name: several flux
-    # artifacts share one case_name (e.g. every CBL Q0), so a case-name default would
-    # silently overwrite the same JSON across fluxes and lose the per-flux records.
+    for tag, r in results.items():
+        fin = bool(np.isfinite(r.default_loss))
+        imp = (f" ({100 * (r.default_loss - r.best_loss) / r.default_loss:+.1f}%)"
+               if fin and r.default_loss > 0 else "")
+        print(f"[tune {tag}] case={artifact.case_name} scheme={r.scheme} "
+              f"evaluated={r.n_evaluated}: default={r.default_loss:.4f} "
+              f"best={r.best_loss:.4f}{imp}")
+        rounded = {k: round(v, 4) for k, v in r.best_overrides.items()}
+        print(f"  best overrides: {json.dumps(rounded)}")
+
+    # D4 AD-vs-DF comparison (the tuning-method deliverable): do the two optima agree?
+    comparison = None
+    if args.method == "both":
+        df, ad = results["df"], results["ad"]
+        comparison = {
+            "df_best_loss": df.best_loss, "ad_best_loss": ad.best_loss,
+            "loss_gap": abs(df.best_loss - ad.best_loss),
+            "better": "ad" if ad.best_loss < df.best_loss else "df",
+        }
+        print(f"  [D4 AD-vs-DF] df={df.best_loss:.4f} ad={ad.best_loss:.4f} "
+              f"gap={comparison['loss_gap']:.4f} better={comparison['better']}")
+
+    primary = results["ad" if args.method == "ad" else "df"]
+    default_finite = bool(np.isfinite(primary.default_loss))
+    method_name = {"df": "derivative_free", "ad": "ad", "both": "both"}[args.method]
+    # Filename suffix by method so df/ad/both records don't overwrite one another; the
+    # default 'df' keeps the campaign's existing ``..._df.json`` name unchanged.
     out = args.output or Path("results/les_suite/tuned") / \
-        f"{args.artifact.stem}__{result.scheme}__df.json"
+        f"{args.artifact.stem}__{args.scheme}__{args.method}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    # Provenance: which artifact/flux this record tuned against, so the scorecard can
-    # group per surface-flux (Q1/Q3 axis) and never double-count the same flux point.
-    # ``w_theta_s`` is the applied surface kinematic heat flux [K m/s]; for the CBL
-    # anchor it is constant = Q0. ``None`` for cases with no prescribed surface flux.
     q0 = (float(np.asarray(artifact.w_theta_s).reshape(-1)[0])
           if artifact.w_theta_s is not None else None)
+    record = {
+        "case": artifact.case_name,
+        "artifact": args.artifact.stem,
+        "sgs": artifact.sgs,
+        "q0": q0,
+        "scheme": args.scheme,
+        "method": method_name,
+        "tiers": list(args.tiers),
+        "default_loss": primary.default_loss if default_finite else None,
+        "best_loss": primary.best_loss,
+        "best_overrides": primary.best_overrides,
+        "n_evaluated": primary.n_evaluated,
+    }
+    if comparison is not None:
+        record["comparison"] = comparison
+        record["ad_best_overrides"] = results["ad"].best_overrides
     with open(out, "w") as f:
-        # JSON has no Inf/NaN literal — write null for a non-finite default loss so
-        # the scorecard reader (which falls back to best_loss) stays valid.
-        json.dump({
-            "case": artifact.case_name,
-            "artifact": args.artifact.stem,
-            "sgs": artifact.sgs,
-            "q0": q0,
-            "scheme": result.scheme,
-            "method": "derivative_free",
-            "tiers": list(args.tiers),
-            "default_loss": result.default_loss if default_finite else None,
-            "best_loss": result.best_loss,
-            "best_overrides": result.best_overrides,
-            "n_evaluated": result.n_evaluated,
-        }, f, indent=2)
+        json.dump(record, f, indent=2)
     print(f"  -> {out}")
     return 0
 

@@ -76,6 +76,65 @@ def test_unknown_scheme_rejected():
         m._base_turbulence("not_a_scheme")
 
 
+def test_scm_les_loss_jax_is_differentiable():
+    # the AD path's objective must be a pure-JAX (traced) scalar, differentiable w.r.t.
+    # a traced turbulence param — smagorinsky C_s has real θ-leverage → nonzero grad.
+    import jax
+    import jax.numpy as jnp
+    from legoesm.atmosphere.les_suite.scm_runner import scm_les_loss_jax
+    from legoesm.atmosphere.physics import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.config import (
+        SmagorinskyConfig,
+        SurfaceLayerConfig,
+    )
+    art = _cbl_artifact()
+    surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
+
+    def loss(cs):
+        turb = TurbulenceConfig(scheme="smagorinsky",
+                                smagorinsky=SmagorinskyConfig(surface=surf, C_s=cs))
+        # dt=100 (few steps) keeps the jax.grad UNROLL of the Python step-loop small so
+        # the backward compile is a fast smoke test, not a full-resolution run.
+        return scm_les_loss_jax(art, turb, nlev=NZ, dt=100.0)
+
+    g = jax.grad(loss)(jnp.asarray(0.2))
+    assert np.isfinite(float(g)) and abs(float(g)) > 1e-9  # finite, nonzero gradient
+
+
+def test_scm_les_loss_jax_penalises_divergence(monkeypatch):
+    # a DIVERGED SCM (NaN θ/u/v) must NOT score ~0 (the safe_sqrt(NaN)=0 hazard would make
+    # it a "perfect fit") — scm_les_loss_jax returns the large AD penalty. Force the NaN
+    # output directly (the SCM's implicit solver rarely NaNs via dt alone).
+    import jax.numpy as jnp
+    from legoesm.atmosphere.les_suite import scm_runner as scmr
+    from legoesm.atmosphere.physics import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.config import MYNN25Config, SurfaceLayerConfig
+
+    def _nan_final(scm, grid, nsteps, z_eval):
+        nan = jnp.full_like(jnp.asarray(z_eval, float), jnp.nan)
+        return nan, nan, nan
+
+    monkeypatch.setattr(scmr, "scm_final_theta_on", _nan_final)
+    surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
+    turb = TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(surface=surf))
+    loss = float(scmr.scm_les_loss_jax(_cbl_artifact(), turb, nlev=NZ, dt=20.0))
+    assert loss >= 0.5 * scmr._AD_DIVERGE_PENALTY  # penalised, NOT a spurious ~0 "perfect fit"
+
+
+def test_tune_closure_ad_reduces_or_matches_default():
+    # AD gradient descent must not make the loss WORSE than the default (best <= default).
+    # dt=100 keeps the grad-unroll small (fast); steps few — a smoke test of convergence.
+    m = _tuner()
+    base, key = m._base_turbulence("smagorinsky")
+    result = m.tune_closure_ad(
+        _cbl_artifact(), base, key, tiers=(1,), nlev=NZ, dt=100.0, steps=3, lr=0.1)
+    assert result.scheme == "smagorinsky"
+    assert np.isfinite(result.best_loss)
+    assert result.best_loss <= result.default_loss + 1e-9
+    assert result.n_evaluated >= 2  # default + >=1 gradient step
+    assert isinstance(result.best_overrides, dict) and "C_s" in result.best_overrides
+
+
 def test_all_wired_schemes_build_with_registry_key():
     # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
     # registry scheme_key that has scalar tunable params.

@@ -49,6 +49,10 @@ _P_S_PA = 1.0e5
 # the temperature collapses. Auto-computed sigma_top covers this fraction ABOVE the
 # LES top (a 30% margin so the free atmosphere is resolved, not clipped at the lid).
 _DOMAIN_TOP_MARGIN = 1.3
+# AD-loss barrier for a diverged SCM (finite, >> any real loss ~O(1)): the DF path uses
+# a concrete +inf, which a traced AD loss cannot — so a large finite penalty steers the
+# AD optimiser away from a divergent region (see scm_les_loss_jax).
+_AD_DIVERGE_PENALTY = 1.0e6
 
 
 def _auto_sigma_top(z_top_les_m: float) -> float:
@@ -235,3 +239,43 @@ def scm_les_final_loss(
     final_truth = final_prognostic_truth(artifact, z_eval)
     score = prognostic_profile_score(final_truth, theta_eval, u_eval, v_eval)
     return float(score.combined)
+
+
+def scm_les_loss_jax(
+    artifact: LESReferenceArtifact,
+    turbulence: TurbulenceConfig,
+    *,
+    nlev: int = 32,
+    sigma_top: float | None = None,
+    dt: float = 5.0,
+):
+    """Differentiable (pure-JAX) form of :func:`scm_les_final_loss` — the AD path's
+    objective (D4). Returns a TRACED scalar (no ``float()``/``bool()`` concretization),
+    so it can be ``jax.grad``'d w.r.t. traced turbulence-config leaves (params spliced
+    in via ``apply_param_overrides`` as jnp arrays). SAME objective as the DF loss (the
+    final-snapshot θ/u/v ``prognostic_profile_score.combined`` on the LES eval grid).
+
+    A DIVERGED SCM must NOT score as a perfect (0) fit: the score's ``safe_sqrt`` maps
+    NaN→0, so a non-finite θ/u/v would otherwise yield a FINITE ZERO loss the AD optimiser
+    selects as "best" (the same hazard the DF path guards with +inf). Guard the LOSS VALUE
+    here: a large finite PENALTY selected by a raw-output finiteness flag, scored on
+    NaN-sanitised profiles so the FINITE case is bit-unchanged. This fixes the value only —
+    a diverged trajectory's GRADIENT may still be NaN (0×NaN backprop through the diverged
+    internal states); the AD optimiser's ``isfinite(grad)`` step guard is the second layer
+    that stops on that. Only the ``artifact`` (concrete data) uses Python floats for the
+    static step count; every config-dependent quantity stays traced.
+    """
+    scm, grid = build_cbl_scm_from_artifact(
+        artifact, turbulence, nlev=nlev, sigma_top=sigma_top, dt=dt)
+    t_end = float(jnp.asarray(artifact.times_s)[-1])  # concrete artifact data → static
+    nsteps = max(1, int(round(t_end / dt)))
+    z_eval = jnp.asarray(artifact.heights_m)
+    theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
+    finite = (jnp.isfinite(theta_eval).all() & jnp.isfinite(u_eval).all()
+              & jnp.isfinite(v_eval).all())
+    final_truth = final_prognostic_truth(artifact, z_eval)
+    combined = prognostic_profile_score(
+        final_truth, jnp.nan_to_num(theta_eval), jnp.nan_to_num(u_eval),
+        jnp.nan_to_num(v_eval)).combined
+    return jnp.where(finite, combined,
+                     jnp.asarray(_AD_DIVERGE_PENALTY, combined.dtype))

@@ -101,7 +101,23 @@ is the fix.
   needs a θ-CONSISTENT metric (score the closure loss AND σ_LES on θ alone — don't mix a
   combined margin with a θ-only σ). Doc-only + already-reviewed σ_LES code (codex-exempt).
 
-**NEXT:** (1) the θ-consistent D7 metric + the sheared Q1b margins (tune closures on the
-sheared case) → a DEFENSIBLE skill threshold. (2) AD path (D4 + the per-candidate-recompile
-perf fix). (3) STABLE (SBL) + MOIST (BOMEX/DYCOMS) IC builders → Q3 inter-regime spread +
-Q2 per-regime. (4) clubb tuning at nlev=24 (needs memory headroom); the 2×-resolution σ_LES.
+- **Iter 11 (this commit) — AD path (D4).** Feasibility confirmed by probe: the SCM
+  forward IS differentiable end-to-end w.r.t. traced turbulence params (the blocker was
+  `scm_les_final_loss`'s `float()`/`bool()` concretization). Built:
+  `scm_runner.scm_les_loss_jax` (a pure-JAX, traced-scalar form of the SAME final-snapshot
+  objective — jax.grad'able; smagorinsky C_s grad −2.3e-4 finite/nonzero, mynn25 A1 ~0
+  matching its known negligible θ-leverage); `tune_scm_to_les.tune_closure_ad` (Adam
+  gradient descent in normalised [0,1] param space; TRACED-leaf params → one jaxpr shape
+  so XLA reuses the compiled grad, vs the DF NEW-static-config-per-candidate recompile —
+  not jit'd since build's float() grid-setup is jit-incompatible with a traced config);
+  `--method {df,ad,both}`
+  in the CLI (`both` writes the D4 AD-vs-DF comparison: loss gap + which optimum wins).
+  Tests: `test_scm_les_loss_jax_is_differentiable`, `test_tune_closure_ad_reduces_or_
+  matches_default`. NOTE: `run` is a Python step-loop that jax.grad UNROLLS, so AD is
+  practical only at modest nsteps until a `lax.scan` rollout lands (the full-resolution
+  perf follow-on).
+
+**NEXT:** (1) the θ-consistent D7 metric + the sheared Q1b margins → a DEFENSIBLE skill
+threshold. (2) AD scan-rollout for full-resolution AD tuning (fold into the campaign).
+(3) STABLE (SBL) + MOIST (BOMEX/DYCOMS) IC builders → Q3 inter-regime spread + Q2
+per-regime. (4) clubb tuning at nlev=24 (memory); the 2×-resolution σ_LES.
