@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from functools import partial
@@ -56,6 +57,14 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 # Regimes whose IC/forcing builder is wired here. The rest raise (honest dispatch,
 # NOT a silent wrong-regime emission) until their builders land.
 _WIRED_REGIMES = ("dry_convective",)
+
+
+def _coriolis_f(lat_deg: float) -> float:
+    """Coriolis parameter f = 2Ω sin(φ) [1/s] at latitude ``lat_deg`` (Ω from
+    ``legoesm.constants``). A sheared CBL needs f≠0 for U_g to drive a geostrophic/Ekman
+    balance (the core's ``f_cor*(v−vg)`` / ``−f_cor*(u−ug)`` terms)."""
+    from legoesm import constants  # noqa: PLC0415
+    return float(2.0 * constants.Omega * np.sin(np.radians(lat_deg)))
 
 
 def _sgs_les_config(sgs: str) -> dict:
@@ -91,10 +100,13 @@ def frame_step_schedule(n_steps: int, frames: int) -> list[int]:
     return sorted({int(round(k * n_steps / n_out)) for k in range(1, n_out + 1)})
 
 
-def _build_cbl(case, args, dtype, sgs="lasd"):
-    """Dry free-convective CBL IC + config (mirrors run_spectral_cbl.build).
+def _build_cbl(case, args, dtype, sgs="lasd", u_geo_mag=0.0):
+    """Dry CBL IC + config (mirrors run_spectral_cbl.build).
 
     ``sgs`` selects the SGS closure (the D7 σ_LES spread) via :func:`_sgs_les_config`.
+    ``u_geo_mag`` (|U_g|, m/s) is the geostrophic wind for a SHEARED CBL: the wind is
+    initialised to (U_g, 0) so the column starts in geostrophic balance and the surface
+    drag builds the Ekman spiral. ``0`` reproduces the free-convective IC (u=v=0).
     """
     theta0 = args.theta0
     cfg = sl.SpectralLESConfig(
@@ -117,7 +129,8 @@ def _build_cbl(case, args, dtype, sgs="lasd"):
     th3 = jnp.broadcast_to(th, (cfg.ny, cfg.nx, cfg.nz)).astype(dtype) + (
         0.1 * jax.random.normal(key, (cfg.ny, cfg.nx, cfg.nz), dtype=dtype)
         * (z < args.zi0).astype(dtype))
-    u = jnp.zeros((cfg.ny, cfg.nx, cfg.nz), dtype)
+    # Sheared CBL starts in geostrophic balance (u=U_g, v=0); free-convective is u=v=0.
+    u = jnp.full((cfg.ny, cfg.nx, cfg.nz), dtype(u_geo_mag), dtype)
     v = jnp.zeros((cfg.ny, cfg.nx, cfg.nz), dtype)
     w = jnp.zeros((cfg.ny, cfg.nx, cfg.nz + 1), dtype)
     st = sl.SpectralLESState(
@@ -174,6 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--q0", type=float, default=None,
                    help="override the case surface kinematic heat flux [K m/s] "
                         "(the Q1 buoyancy-axis sweep); default = the case value")
+    p.add_argument("--Ug", type=float, default=None,
+                   help="geostrophic wind |U_g| [m/s] for a SHEARED CBL (the dry-grid "
+                        "U_g axis). Default: the case's geostrophic_wind_m_s (0 = free "
+                        "convection). U_g>0 initialises u=U_g and drives f-balance.")
+    p.add_argument("--lat", type=float, default=45.0,
+                   help="latitude [deg] for the Coriolis f=2Ω sin(φ) (only used when "
+                        "U_g>0; default 45°). GABLS1-style cases use ~73°.")
     p.add_argument("--sgs", type=str, default=None,
                    help="LES SGS closure (the D7 σ_LES spread): one of the case's "
                         "sgs_variants (lasd/smagorinsky/vreman). Default: the case's "
@@ -208,13 +228,24 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"{case.name}: --sgs {sgs_name!r} is not one of the case's sgs_variants "
             f"{list(case.sgs_variants)}")
+    # Geostrophic wind (U_g axis) + its Coriolis f. U_g=0 ⇒ free-convective (f=0, u=0),
+    # dynamically unchanged from the pre-shear path; U_g>0 ⇒ sheared CBL (u₀=U_g, f from
+    # --lat). NaN/inf must be rejected (a NaN comparison is False → would slip through).
+    u_geo_mag = args.Ug if args.Ug is not None else (case.geostrophic_wind_m_s or 0.0)
+    if not math.isfinite(u_geo_mag) or u_geo_mag < 0.0:
+        raise SystemExit(f"--Ug must be finite and >= 0, got {u_geo_mag}")
+    f_cor = 0.0
+    if u_geo_mag > 0.0:
+        if not math.isfinite(args.lat) or not (-90.0 <= args.lat <= 90.0):
+            raise SystemExit(f"--lat must be finite in [-90, 90], got {args.lat}")
+        f_cor = _coriolis_f(args.lat)
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
 
-    g, st, Q0 = _build_cbl(case, args, dtype, sgs=sgs_name)
+    g, st, Q0 = _build_cbl(case, args, dtype, sgs=sgs_name, u_geo_mag=u_geo_mag)
     hours = args.hours if args.hours is not None else case.duration_hours
     T = hours * 3600.0
-    step = jax.jit(partial(sl.step, g=g, u_geo=(0.0, 0.0), f_cor=0.0,
+    step = jax.jit(partial(sl.step, g=g, u_geo=(u_geo_mag, 0.0), f_cor=f_cor,
                            force=(0.0, 0.0), sfc_theta_flux=Q0),
                    static_argnames=("first",))
     dt0 = (float(args.dt) if args.dt is not None else
@@ -239,8 +270,9 @@ def main(argv: list[str] | None = None) -> int:
               f"{args.frames} frames; recording {len(rec_steps) + 1}")
 
     print(f"[les-suite emit] case={case.name} regime={case.regime} "
-          f"grid={case.grid.label} Q0={Q0} hours={hours} dt={dt0:.3f} "
-          f"n_steps={n_steps} frames={len(rec_steps) + 1} sgs={sgs_name}")
+          f"grid={case.grid.label} Q0={Q0} Ug={u_geo_mag} f={f_cor:.3e} "
+          f"hours={hours} dt={dt0:.3f} n_steps={n_steps} "
+          f"frames={len(rec_steps) + 1} sgs={sgs_name}")
 
     recs_z = None
     theta_s, u_s, v_s, wthr_s, wths_s, times = [], [], [], [], [], []
@@ -286,13 +318,21 @@ def main(argv: list[str] | None = None) -> int:
         v=np.stack(v_s),
         wtheta_resolved=np.stack(wthr_s),
         wtheta_sgs=np.stack(wths_s),
-        subsidence_w=np.zeros_like(recs_z),   # free-convective CBL: no subsidence
+        subsidence_w=np.zeros_like(recs_z),   # dry CBL: no large-scale subsidence
         prescribe="fluxes",
         w_theta_s=np.full(times_arr.shape[0], Q0),
-        f_c=0.0,
+        # geostrophic forcing the SCM must receive too: the bridge rebuilds SCMForcing
+        # from these so the SCM arm sees the SAME U_g/f. Free-convective (U_g=0) leaves
+        # u_geo/v_geo absent (None) — byte-identical to the pre-shear artifacts.
+        u_geo=(np.full_like(recs_z, u_geo_mag) if u_geo_mag > 0.0 else None),
+        v_geo=(np.zeros_like(recs_z) if u_geo_mag > 0.0 else None),
+        f_c=f_cor,
     )
-    tag = f"__{args.label}" if args.label else ""
-    out = args.output / f"{case.name}__{sgs_name}{tag}.npz"
+    # Sheared runs auto-tag with U_g so they never overwrite the free-convective
+    # ``{case}__{sgs}.npz`` (or a different-shear run); --label adds any further distinction.
+    shear_tag = f"__ug{u_geo_mag:g}" if u_geo_mag > 0.0 else ""
+    label_tag = f"__{args.label}" if args.label else ""
+    out = args.output / f"{case.name}__{sgs_name}{shear_tag}{label_tag}.npz"
     save_artifact(artifact, out)
     print(f"  artifact -> {out}  (nt={artifact.nt}, nz={artifact.nz})")
     return 0

@@ -63,6 +63,61 @@ def test_sgs_not_in_case_variants_raises():
         m.main(["--case", "cbl_nieuwstadt", "--sgs", "amd"])
 
 
+# --- sheared CBL (U_g axis) ---------------------------------------------------
+def test_coriolis_f_from_latitude():
+    m = _driver()
+    import numpy as np
+
+    from legoesm import constants
+    # f = 2Ω sin(φ); GABLS1 latitude ~73° gives ~1.39e-4
+    assert m._coriolis_f(0.0) == 0.0
+    assert m._coriolis_f(90.0) == pytest.approx(2.0 * constants.Omega)
+    assert m._coriolis_f(73.0) == pytest.approx(
+        2.0 * constants.Omega * np.sin(np.radians(73.0)))
+
+
+def test_build_cbl_sheared_initialises_geostrophic_wind():
+    import argparse
+
+    import jax.numpy as jnp
+    import numpy as np
+    m = _driver()
+    from legoesm.atmosphere.les_suite import get_case, list_cases, register_default_catalog
+    if not list_cases():
+        register_default_catalog()
+    case = get_case("cbl_nieuwstadt")
+    args = argparse.Namespace(theta0=300.0, z0=0.1, pr_sgs=1.0, gamma=0.008,
+                              zi0=800.0, q0=None)
+    # free convection: u=0
+    g0, st0, _ = m._build_cbl(case, args, jnp.float32, sgs="lasd", u_geo_mag=0.0)
+    assert float(np.mean(np.asarray(st0.u))) == pytest.approx(0.0, abs=1e-6)
+    # sheared: u initialised to U_g everywhere
+    g8, st8, _ = m._build_cbl(case, args, jnp.float32, sgs="lasd", u_geo_mag=8.0)
+    assert float(np.mean(np.asarray(st8.u))) == pytest.approx(8.0, abs=1e-5)
+    assert float(np.mean(np.asarray(st8.v))) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_negative_ug_rejected():
+    m = _driver()
+    with pytest.raises(SystemExit):
+        m.main(["--case", "cbl_nieuwstadt", "--Ug", "-1.0"])
+
+
+def test_nonfinite_ug_rejected():
+    # a NaN comparison is False, so `--Ug nan` would slip past `< 0` → must be caught
+    m = _driver()
+    with pytest.raises(SystemExit):
+        m.main(["--case", "cbl_nieuwstadt", "--Ug", "nan"])
+
+
+def test_bad_latitude_rejected_for_sheared():
+    # these raise at input validation BEFORE the GPU emit (Ug valid, lat invalid)
+    m = _driver()
+    for lat in ("100", "-91", "nan"):
+        with pytest.raises(SystemExit):
+            m.main(["--case", "cbl_nieuwstadt", "--Ug", "8", "--lat", lat])
+
+
 def test_build_cbl_selects_sgs_in_config():
     # _build_cbl only builds the config + IC (no integration) → CPU-safe. Each SGS
     # variant must land in the SpectralLESConfig the core will integrate.

@@ -184,6 +184,28 @@ weights, prognostic t0 semantics, silent moist→dry score) — all fixed; round
   sweep. NOTE: single CPU SCM eval is ~11–12 min (recompile-per-candidate); the AD path
   remains the perf fix.
 
+**Iter 9 (2026-07-24) — sheared CBL driver (U_g axis), motivated by the Iter-8 result.**
+- Iter 8 showed the dry-CBL Q1b σ_LES gate is dominated by ill-conditioned winds
+  (Ug=0 → near-zero winds) → a defensible skill threshold needs SHEARED cases. Wired
+  the U_g axis into `run_les_suite`: `--Ug` (geostrophic |U_g|, default = the case's
+  `geostrophic_wind_m_s`; 0 = free convection) + `--lat` (Coriolis f=2Ω sin φ via
+  `_coriolis_f`, Ω from `legoesm.constants`; default 45°, GABLS1-style ~73°). U_g>0
+  initialises u=U_g (geostrophic balance; the surface drag builds the Ekman spiral) and
+  drives the core's `f_cor*(v−vg)`/`−f_cor*(u−ug)` balance; the artifact records
+  `u_geo`/`v_geo`/`f_c` so the SCM arm gets the SAME forcing (controlled comparison).
+  U_g=0 is byte-identical to the pre-shear free-convective path (f=0, u=0). Sign
+  convention checked: `du/dt=+f(v−vg)`, `dv/dt=−f(u−ug)` = standard NH Coriolis toward
+  geostrophic. Tests: `test_coriolis_f_from_latitude`,
+  `test_build_cbl_sheared_initialises_geostrophic_wind`, `test_negative_ug_rejected`
+  (CPU, no integration). **GPU VALIDATED** (Ug=8, lat=45°, 96³, 2 h,
+  `cbl_nieuwstadt__lasd__ug8.npz`): textbook sheared BL — u develops 4.69 (surface,
+  dragged) → 8.00 m/s (top, geostrophic), v shows the Ekman veering 0.63 (surface) →
+  0.02 m/s (top); CBL θ inversion jump 5.78 K; all finite; forcing (u_geo=8, f=1.03e-4)
+  stored in the artifact. The winds are now WELL-CONDITIONED (~5–8 m/s) vs the
+  free-convective near-zero (u∈[−0.05,0.05]) — directly fixing the Iter-8 σ_LES wind
+  ill-conditioning. NEXT (compute): emit the sheared SGS spread (smag/vreman at Ug=8) +
+  σ_LES → a defensible Q1b local→nonlocal significance on a well-conditioned case.
+
 **Iter 8 (2026-07-24) — REAL σ_LES computed + D7 gate wired into the scorecard.**
 - Emitted the {lasd, smagorinsky, vreman} SGS spread for `cbl_nieuwstadt` on GPU (each
   96³, 2 h, 12 frames, Q0=0.06 — only the SGS differs; ~4 min/run). First real σ_LES:

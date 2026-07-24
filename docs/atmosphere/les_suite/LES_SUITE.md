@@ -361,9 +361,12 @@ The full machinery is built + validated; these are the first real numbers, for t
      gate" — see the wind-conditioning caveat in §7.1). Remaining D7 compute: the
      2×-resolution runs (fold into σ_LES), and the SGS spread for the OTHER regimes as
      they come online.
-   - **Remaining**: wire the stable/moist regime IC builders + sheared-CBL `--Ug` in
-     `run_les_suite.py` (only dry-convective wired) → Q3 inter-regime + Q2 per-regime;
-     the AD path (D4 comparison + perf); run the D7 σ_LES SGS-spread + 2×-resolution.
+   - **Sheared-CBL `--Ug` DONE**: `run_les_suite --Ug <U_g> --lat <φ>` drives the dry
+     U_g axis (geostrophic + Coriolis; records u_geo/v_geo/f_c). Well-conditioned winds
+     fix the Iter-8 σ_LES pathology → a defensible Q1b significance once the sheared
+     SGS-spread is emitted. Remaining: the STABLE (SBL) + MOIST (BOMEX/DYCOMS) IC
+     builders (only dry-convective wired) → Q3 inter-regime + Q2 per-regime; the AD path
+     (D4 comparison + perf); the 2×-resolution σ_LES runs.
    See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
