@@ -8,13 +8,13 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 
 **§5 INFRASTRUCTURE: COMPLETE** (all les_suite modules built, tested, codex-CLEAN).
 
-| Deliverable | Status (2026-07-24, iter 13) |
+| Deliverable | Status (2026-07-24, iter 15) |
 |---|---|
 | §5 infrastructure (registry…scorecard, gate-0) | **DONE** (codex-CLEAN) |
 | Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
 | Q1b skill threshold (dry CBL, prognostic) | **DONE** — nonlocal beats local every flux; NOT significant vs σ_LES (wind-dominated, Ug=0) |
-| Q2 nine-closure ranking | **5/9 fully tuned** (holtslag<smag<louis<ysu<mynn25); tke 1/5 fluxes, clubb_lite/edmf running (campaign resumed), clubb nlev=24 deferred (OOM) |
-| Q3 inter-regime coefficient spread | **regimes ready** (CBL + sheared + SBL wired/validated); needs the SBL tuned (SBL 4 h emit running) |
+| Q2 nine-closure ranking | **7/9 tuned at the anchor** (clubb_lite 0.231 BEATS holtslag 0.241 at q0=0.06; +tke); edmf tuning, clubb nlev=24 deferred (OOM); flux-sweep for closures 6–9 pending |
+| Q3 inter-regime coefficient spread | **regimes ready + SBL validated at 4 h** (stable/stratified/Ekman, jet emerging weak — peaks ~9 h); needs SBL SGS spread → σ_LES(SBL), then SBL tuning |
 | D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
 | D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
 
@@ -152,6 +152,27 @@ is the fix.
   AD-vs-DF agreement is a controlled `--method both` run at EQUAL config, not full-res AD
   (reduced-res AD vs full-res DF would be a resolution confound); the scan-rollout is a pure
   perf nicety, deferred. SBL 4 h vreman emit still integrating (jet develops over ~12.5 h).
+
+- **Iter 15 (this commit) — SBL 4 h equilibrium VALIDATED + θ-breakdown score exposed.**
+  The GABLS1 4 h vreman emit (144,000 steps @ dt=0.1 s, 64×64×96, wall=2821 s) completed
+  and OVERWROTE the 0.3 h validation. Final-frame equilibrium (LES_SUITE.md §7.2): stably
+  stratified (Δθ=+3.36 K, sfc 264.3 → top 267.7 K), surface wind dragged to 2.04 m/s, a
+  clear Ekman spiral (v peaks ~3 m/s at 50–100 m → 0 above 200 m), all finite, NO blow-up
+  over the full 4 h (the sponge holds at the rigid lid). The super-geostrophic low-level
+  JET is EMERGING but WEAK — a local wind max of 8.05 m/s at ~170 m, only +0.05 m/s over
+  Ug=8; the classic GABLS1 ~1–2 m/s overshoot peaks near the ¾-inertial-period (~9 h), and
+  4 h is only 0.32 of the 2π/f≈12.5 h period ⇒ early jet formation, not the peak. So the
+  SBL regime is a physically-correct stable/stratified/Ekman target — usable for Q3 tuning
+  (a 9 h run would give the peaked jet, a follow-on). Also (commit 2211a7065): factored
+  `scm_les_final_score` (full θ/u/v + combined PrognosticScore) out of `scm_les_final_loss`
+  (now a thin wrapper; a test asserts `.combined == loss` bit-exactly), and recorded
+  nlev/dt in the tuner JSON — both enabling the θ-consistent D7 gate (rank closures on
+  θ_rmse, gate margins on σ_LES(θ)=0.0074 vs the wind-dominated σ_LES(combined)=0.319).
+  Campaign single-instance `flock` guard added (commit 8e47a6dc2) after two orphaned
+  campaigns raced clubb_lite. Q2 anchor now 7/9 (added tke + clubb_lite=0.231, which BEATS
+  holtslag=0.241 — a higher-order PDF closure edging the best nonlocal at the anchor flux;
+  edmf still tuning, clubb deferred). **NEXT-SBL:** emit the SBL SGS spread (lasd+smag) →
+  σ_LES(SBL) for the D7 gate on regime 2.
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for

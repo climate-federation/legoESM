@@ -301,6 +301,28 @@ The full machinery is built + validated; these are the first real numbers, for t
   fixes the tuner's recompile-per-candidate cost; the RCE trainer's `lax.scan` +
   `eqx.filter_value_and_grad` pattern is the reuse target).
 
+### 7.2 Stable BL (GABLS1 SBL) — regime 2 validated at 4 h (2026-07-24)
+
+The 2nd regime for Q3 (inter-regime coefficient spread). The 4 h vreman emit (144,000
+steps @ dt=0.1 s, 64×64×96, Q0=−0.005 K m/s cooling, Ug=8, φ=73° → f=1.395e-4) reaches a
+physically-correct stable equilibrium:
+
+- **Stable stratification** — Δθ = +3.36 K over the 400 m domain (sfc 264.3 → top 267.7 K,
+  surface cooled most); all fields finite; NO blow-up over the full 4 h (the Rayleigh
+  sponge + re-projection hold the rigid lid — the ~0.9 h reflective blow-up is absent).
+- **Surface drag** — wind dragged to 2.04 m/s at the surface (< Ug = 8).
+- **Ekman spiral** — v turns with height (peaks ~3 m/s at 50–100 m → 0 above 200 m), the
+  ageostrophic response to friction + Coriolis.
+- **Low-level jet: emerging, weak** — a local wind maximum of 8.05 m/s at ~170 m, only
+  **+0.05 m/s** super-geostrophic. The classic GABLS1 ~1–2 m/s overshoot peaks near the
+  ¾-inertial-period mark (~9 h); 4 h is only 0.32 of the 2π/f ≈ 12.5 h period ⇒ this is
+  early jet formation, not the peak. A 9 h run would give the peaked jet (a follow-on);
+  the 4 h stable/stratified/Ekman state is already a valid Q3 tuning target.
+
+Remaining for Q3: emit the SBL SGS spread (lasd + smagorinsky at this exact config) →
+σ_LES(SBL) for the D7 gate on regime 2, then tune the closures on the SBL and compare the
+tuned coefficients CBL-vs-SBL.
+
 ---
 
 ## 8. Immediate next steps (D10 sequencing)
