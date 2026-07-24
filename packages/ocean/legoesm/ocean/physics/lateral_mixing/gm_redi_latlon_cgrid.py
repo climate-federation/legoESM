@@ -365,7 +365,8 @@ def _slope_density_face_grads(
 # =====================================================================
 
 
-def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c):
+def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
+                                     active_3d=None):
     """Mixed-layer depth [m] via NEMO's zdfmxl density criterion.
 
     NEMO (``zdfmxl.F90:95-104``) integrates the buoyancy frequency ``N^2`` from
@@ -389,8 +390,14 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c):
     (Mirrors NEMO's discrete ``nmln``; unlike the tramle MLD diagnostic, no
     stop_gradient is applied.)
     """
-    T_filled = neumann_fill_cgrid(T, mask)
-    S_filled = neumann_fill_cgrid(S, mask)
+    # 3-D fill mask when available: sub-seafloor dry cells CARRY their IC
+    # (MLF carry fix) and must never enter the MLD density/N^2 — NEMO gates
+    # on 3-D tmask (zdfmxl/eosbn2); the 2-D surface mask leaks carried deep
+    # values into the ML ramp at bathymetry steps (#1226 boundary-column
+    # T anomaly, poison-probe verified).
+    _fillm = mask if active_3d is None else active_3d
+    T_filled = neumann_fill_cgrid(T, _fillm)
+    S_filled = neumann_fill_cgrid(S, _fillm)
     rho_pot = eos_fn(T_filled, S_filled, jnp.zeros_like(T_filled))  # (...,nlev)
     nlev = rho_pot.shape[-1]
     dz_ref = z_coord.dz_ref
@@ -414,7 +421,8 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c):
     return hml, m_base
 
 
-def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0):
+def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
+                               active_3d=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -445,8 +453,14 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0):
     normaliser) exactly like the pot-density sibling.
     """
     from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
-    T_filled = neumann_fill_cgrid(T, mask)
-    S_filled = neumann_fill_cgrid(S, mask)
+    # 3-D fill mask when available: sub-seafloor dry cells CARRY their IC
+    # (MLF carry fix) and must never enter the MLD density/N^2 — NEMO gates
+    # on 3-D tmask (zdfmxl/eosbn2); the 2-D surface mask leaks carried deep
+    # values into the ML ramp at bathymetry steps (#1226 boundary-column
+    # T anomaly, poison-probe verified).
+    _fillm = mask if active_3d is None else active_3d
+    T_filled = neumann_fill_cgrid(T, _fillm)
+    S_filled = neumann_fill_cgrid(S, _fillm)
     nlev = T_filled.shape[-1]
     dtype = T_filled.dtype
     dz_ref = z_coord.dz_ref
@@ -473,6 +487,16 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0):
         (m_arange < iref).reshape((1, 1, nlev - 1)),
         jnp.zeros((), dtype),
         jnp.maximum(n2_int, jnp.zeros((), dtype)) * e3w[None, None, :])
+    if active_3d is not None:
+        # NEMO zdfmxl integrates nlb10..BOTTOM only (hard loop truncation on
+        # 3-D tmask): zero the integrand at sub-seafloor interfaces. The
+        # Neumann fill covers the FIRST dry cell at a step; deeper dry cells
+        # (no wet lateral neighbour at that level) keep carried values whose
+        # spurious N2 would otherwise pollute the cumulative integral
+        # (#1226 boundary-column T anomaly, poison-gate verified).
+        iface_wet = (jnp.asarray(active_3d)[..., :-1] > 0.5) \
+            & (jnp.asarray(active_3d)[..., 1:] > 0.5)
+        contrib = jnp.where(iface_wet, contrib, jnp.zeros((), dtype))
     cum = jnp.cumsum(contrib, axis=-1)               # integral(N^2 dz) from nlb10
     thresh = jnp.asarray(g * rho_c / rho_0, dtype)   # zN2_c = g*rho_c/rho0
     reached = cum >= thresh                           # (...,nlev-1)
@@ -484,7 +508,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0):
 
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
-              g=constants.g, rho_0=_RHO_0):
+              g=constants.g, rho_0=_RHO_0, active_3d=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -493,17 +517,18 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
     ramps consume either transparently.
     """
     if criterion == "rho_c":
-        return _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c)
+        return _nemo_mld_from_potential_density(
+            T, S, mask, z_coord, eos_fn, rho_c, active_3d=active_3d)
     if criterion == "n2_integral":
         return _nemo_mld_from_n2_integral(
-            T, S, mask, z_coord, eos_fn, rho_c, g, rho_0)
+            T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
 
 
 def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
-                               mld_criterion="rho_c", *,
+                               mld_criterion="rho_c", *, active_3d=None,
                                g=constants.g, rho_0=_RHO_0):
     """Linearly ramp interface slopes to 0 through the mixed layer (NEMO ldfslp).
 
@@ -533,7 +558,8 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
     """
     nlev_m1 = S_x.shape[-1]
     hml, m_base = _nemo_mld(
-        mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0)
+        mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0,
+        active_3d=active_3d)
     z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
     # wslp_base = slope one interface BELOW the ML base (NEMO nmln+1).
     m_ref = jnp.clip(m_base + 1, 0, nlev_m1 - 1)
@@ -674,6 +700,14 @@ def compute_nemo_native_slopes(
         T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn)          # (...,nlev-1)
     pn2 = jnp.concatenate([jnp.zeros((nlat, nlon, 1), dtype=dtype),
                            n2_int.astype(dtype)], axis=-1)        # (...,nlev)
+    # NEMO masks pn2 by wmask AT CONSTRUCTION (eosbn2.F90:1467) — the ldfslp
+    # bottom-count "trick" (ldfslp.F90:188-192, transcribed as the
+    # (1-0.5*tmask(k+1)) factor below) is only an identity under that
+    # masking. Unmasked, the sub-seafloor CARRIED T/S (MLF dry-cell carry)
+    # produce spurious deep N^2 that leaks horizontally through
+    # zb_u=0.5*(zdzr[i]+zdzr[i+1]) into wet-face uslp/vslp (#1226
+    # boundary-column ~3K/yr T anomaly; poison-gate verified).
+    pn2 = pn2 * wmask3
     pn2_kp1 = jnp.concatenate([pn2[:, :, 1:],
                                jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
 
@@ -695,7 +729,7 @@ def compute_nemo_native_slopes(
     # helper: ``first`` = first stratified cell = 0-based nmln).
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
-        g=g, rho_0=rho_0)
+        g=g, rho_0=rho_0, active_3d=active_3d)
     first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
     # zhmlpt = gdept(nmln-1) = depth of the last T-point inside the ML
     zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
@@ -936,6 +970,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_x_t, S_y_t = _apply_nemo_mld_slope_ramp(
             S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
             cfg.mld_criterion, g=g, rho_0=rho_0,
+            active_3d=getattr(z_coord, "is_active", None),
         )
 
     # NEMO ldfslp horizontal Shapiro smoother (default OFF => byte-identical).
@@ -1895,6 +1930,13 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     _sg_taper = adjoint_stabilization == "stop_gradient_taper"
 
     def _slope(num, dz=drho_dz_w):
+        # Sign-preserving denominator floor: a fully-dry / unstratified
+        # column has drho_dz == 0 exactly (0/0 -> NaN poisons the flux even
+        # through masked branches). Floor at the STABLE-limit sign (drho_dz
+        # < 0 for stable stratification, see the dz_half note above); wet
+        # stratified columns (|dz| >> 1e-20) are bit-identical. Mirrors
+        # NEMO's ldfslp MIN(zbu, -eps·|zau|) denominator capping.
+        dz = jnp.where(jnp.abs(dz) > 1e-20, dz, -1e-20)
         s = -num / dz
         s = jnp.clip(s, -S_max, S_max) if clip else s
         return jax.lax.stop_gradient(s) if _sg_slopes else s
@@ -2279,6 +2321,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     _clip_slope = (slope_density != "neutral") or (slope_limit == "nemo_cap")
 
     def _uvslope(num, dz):
+        # Sign-preserving denominator floor (same rationale as _slope above:
+        # dry/unstratified columns give exact 0/0 -> NaN; wet stratified
+        # columns bit-identical; NEMO ldfslp denominator-capping analogue).
+        dz = jnp.where(jnp.abs(dz) > 1e-20, dz, -1e-20)
         s = -num / dz
         s = jnp.clip(s, -S_max, S_max) if _clip_slope else s
         # Adjoint stabilization: frozen-coefficient slopes (primal-invisible).

@@ -234,6 +234,35 @@ def test_builder_tke_mxl_choice_threads():
             r.build_tripole_vmix_config(vmix, tke_mxl_choice=3)
 
 
+def test_orca1_zdftke_prognostic_override():
+    """--tke-prognostic: None keeps the card value (False = diagnostic Mode-B);
+    True selects NEMO prognostic en (Mode-A). Composes with the other knobs."""
+    r = _runner()
+    assert r.orca1_zdftke_config().prognostic is False               # default
+    assert r.orca1_zdftke_config(prognostic=None).prognostic is False
+    cp = r.orca1_zdftke_config(prognostic=True)
+    assert cp.prognostic is True
+    # ONLY prognostic changes; every other leaf byte-identical.
+    assert cp._replace(prognostic=False) == r.orca1_zdftke_config()
+    # composes with surface_bc + mxl_choice (all three independent)
+    allc = r.orca1_zdftke_config(surface_bc="nemo_dirichlet", mxl_choice=3,
+                                 prognostic=True)
+    assert (allc.prognostic is True and allc.tke_mxl_choice == 3
+            and allc.surface_bc == "nemo_dirichlet")
+
+
+def test_builder_tke_prognostic_threads():
+    """build_tripole_vmix_config threads --tke-prognostic onto the closure."""
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_prognostic=True)
+    assert vm.tke.prognostic is True
+    assert vm.tke == r.orca1_zdftke_config(prognostic=True)
+    assert r.build_tripole_vmix_config("tke").tke.prognostic is False  # default
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tke-prognostic"):
+            r.build_tripole_vmix_config(vmix, tke_prognostic=True)
+
+
 def test_tke_card_knobs_require_tripole_tke():
     """--tke-eice / --tke-surface-bc are applied ONLY in the tke branch of
     build_tripole_vmix_config; they are silently discarded on every other
@@ -261,12 +290,15 @@ def test_tke_card_knobs_require_tripole_tke():
     # discard path 3: tripole but vmix kpp (knob not applied in kpp branch)
     with pytest.raises(SystemExit, match="tke-eice"):
         r._validate_tke_card_grid("tripole", "kpp", tke_eice=1)
-    # --tke-mxl-choice is guarded the same way (all three discard paths)
-    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3)   # allowed
+    # --tke-mxl-choice + --tke-prognostic are guarded the same way (all paths)
+    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3,
+                              tke_prognostic=True)                   # allowed
     for grid, vmix in (("mpas", "tke"), ("latlon_bathy", "tke"),
                        ("tripole", "none"), ("tripole", "kpp")):
         with pytest.raises(SystemExit, match="tke-mxl-choice"):
             r._validate_tke_card_grid(grid, vmix, tke_mxl_choice=3)
+        with pytest.raises(SystemExit, match="tke-prognostic"):
+            r._validate_tke_card_grid(grid, vmix, tke_prognostic=True)
 
 
 def test_main_wires_tke_card_guard_before_builders(monkeypatch):

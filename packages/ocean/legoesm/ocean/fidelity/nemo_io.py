@@ -4,9 +4,12 @@ The NEMO counterpart of :mod:`mitgcm_io`. NEMO writes plain NetCDF (via the
 native ``iom_nf90`` path — no XIOS needed), so this is a thin xarray reader; the
 only conventions it reconciles are:
 
-* **Halo strip.** NEMO global arrays carry an ``nn_hls``-cell halo on every side
-  (``nn_hls=1`` for GYRE: a 30x20 physical domain is stored 32x22). The physical
-  interior is ``[nn_hls:-nn_hls, nn_hls:-nn_hls]``.
+* **Halo strip.** ``nn_hls`` here is the FILE's halo, not the run's: NEMO
+  <= 4.0 wrote global arrays WITH an ``nn_hls``-cell halo per side
+  (``nn_hls=1`` for GYRE: 30x20 stored 32x22); NEMO 4.2+/5.x writes the
+  COMPUTE domain WITHOUT halos (pass ``nn_hls=0`` — DINO 5.0.2 files are
+  52x199 all-real; stripping a phantom halo discards the land-wall and
+  ridge columns, #1226 root cause). Interior is ``[h:-h, h:-h]`` for h>0.
 * **Axis order.** NEMO 3-D fields are ``(z, y, x)`` on disk; legoESM wants the
   vertical LAST — ``(y=lat, x=lon, z=lev)`` — a single ``moveaxis(0, -1)``.
 * **Vertical order.** NEMO ``k=1`` is the surface, ``k`` increasing downward —
@@ -76,19 +79,23 @@ class NemoState(NamedTuple):
 
 
 def _check_hls(nn_hls: int) -> None:
-    # a[h:-h] silently returns an empty slice for h=0, so a no-halo file would
-    # have its whole interior chopped. Require an explicit halo.
-    if nn_hls < 1:
-        raise ValueError(
-            f"nn_hls must be >= 1 (NEMO always writes a >=1-cell halo); got "
-            f"{nn_hls}. Pass the file's actual halo width."
-        )
+    # nn_hls must match the FILE, not the run: NEMO <= 4.0 wrote global
+    # arrays WITH the halo (GYRE 30x20 stored 32x22 -> nn_hls=1), but NEMO
+    # 4.2+/5.x writes the COMPUTE domain WITHOUT halos (DINO 5.0.2:
+    # jpiglo=56 at runtime with nn_hls=2, files 52 wide -> nn_hls=0).
+    # Stripping a phantom halo discards REAL boundary columns/rows (the
+    # DINO land-wall + ridge columns; #1226 root cause) — pass 0 for
+    # halo-free files.
+    if nn_hls < 0:
+        raise ValueError(f"nn_hls must be >= 0; got {nn_hls}.")
 
 
 def _strip_halo_2d(a: np.ndarray, nn_hls: int) -> np.ndarray:
     _check_hls(nn_hls)
     h = nn_hls
     a = np.asarray(a, dtype=np.float64)
+    if h == 0:      # a[0:-0] would be an empty slice — no-op explicitly
+        return a
     out = a[h:-h, h:-h]
     assert out.shape == (a.shape[0] - 2 * h, a.shape[1] - 2 * h)
     return out
@@ -99,6 +106,8 @@ def _to_latlon_lev(a: np.ndarray, nn_hls: int) -> np.ndarray:
     _check_hls(nn_hls)
     a = np.asarray(a, dtype=np.float64)
     h = nn_hls
+    if h == 0:
+        return np.moveaxis(a, 0, -1)
     return np.moveaxis(a[:, h:-h, h:-h], 0, -1)
 
 
@@ -121,11 +130,17 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
     # strip it to the interior rows.  Only a GENUINE partial seam (some
     # walled, some open) sets the field — a fully re-entrant or fully
     # walled config leaves it ``None`` (byte-identical downstream).
-    _tmask_raw = np.asarray(m["tmask"].values).squeeze()  # (z, y, x) with halo
-    _tsurf_west_halo = _tmask_raw[0, nn_hls:-nn_hls, 0]   # interior rows, col 0
-    _seam_wall = (_tsurf_west_halo < 0.5).astype(np.float64)  # 1 = walled
-    if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
+    if nn_hls == 0:
+        # Halo-free file (NEMO 4.2+/5.x): column 0 is a REAL domain column
+        # (DINO: the land-wall continent itself), not a halo probe — the
+        # wall is carried by the land mask, so no seam fabrication.
         _seam_wall = None
+    else:
+        _tmask_raw = np.asarray(m["tmask"].values).squeeze()  # (z,y,x) w/ halo
+        _tsurf_west_halo = _tmask_raw[0, nn_hls:-nn_hls, 0]   # interior rows
+        _seam_wall = (_tsurf_west_halo < 0.5).astype(np.float64)  # 1 = walled
+        if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
+            _seam_wall = None
 
     return NemoGrid(
         glamt=h2("glamt"), gphit=h2("gphit"),
