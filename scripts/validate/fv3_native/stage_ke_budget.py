@@ -50,6 +50,7 @@ def main():
     sys.path.insert(0, str(REPO))
     from legoesm.core.fv3_native_duo_stepper import (
         SW_CFG_CASE8,
+        acoustic_step_sixface,
         build_six_face_duo_context,
         full_acoustic_step_sixface,
     )
@@ -108,10 +109,41 @@ def main():
             mx = max(mx, float(np.nanmax(k)))
         return tot, mx
 
+    def pg_tail(ctx, stage):
+        """The geopk + one_grad_p tail of full_acoustic_step_sixface
+        (stepper:740-790), replicated so the stage block and the PG
+        tail can be budgeted separately."""
+        from legoesm.core.fv3_native_duo_stepper import (
+            geopk_sw_1lev_d,
+            one_grad_p_1lev,
+        )
+        from legoesm.grids.fv3_native_ext_vector import (
+            ext_scalar_sixface,
+        )
+        bd = ctx["bd"]
+        npx = n + 1
+        delp6 = [np.array(o["delp"], copy=True) for o in stage]
+        pt6 = [np.array(o["pt"], copy=True) for o in stage]
+        ext_scalar_sixface(delp6, "A", ctx["ectx"])
+        ext_scalar_sixface(pt6, "A", ctx["ectx"])
+        u6 = [np.array(o["u"], copy=True) for o in stage]
+        v6 = [np.array(o["v"], copy=True) for o in stage]
+        for t in range(1, 7):
+            gs = ctx["gs6"][t - 1]
+            hs = np.zeros_like(delp6[t - 1])
+            pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd,
+                                      pt=pt6[t - 1])
+            divg2 = np.zeros((npx, npx))
+            one_grad_p_1lev(u6[t - 1], v6[t - 1], pkc, gz, divg2, gs,
+                            bd, npx, npx, dt=args.dt, d_ext=0.0)
+        return [{"delp": delp6[t], "pt": pt6[t],
+                 "u": u6[t], "v": v6[t]} for t in range(6)]
+
     print(f"# one-step KE budget, n={n} dt={args.dt:g} "
-          f"spin-up {args.steps} steps")
-    print("# location        KE_before      KE_after       dKE/KE    "
-          "maxcellKE_before  maxcellKE_after")
+          f"spin-up {args.steps} steps  (case-8: only sink is del-6, "
+          f"so a faithful step must give dKE <= 0)")
+    print("# location          dKE/KE total   dKE/KE stages  "
+          "dKE/KE PG-tail   maxcellKE_after")
     for name, (lo, la) in (("vertex(45,35.26)", (45.0, 35.26)),
                            ("face-centre(0,0)", (0.0, 0.0))):
         ctx, states = build(lo, la)
@@ -119,15 +151,22 @@ def main():
             states = full_acoustic_step_sixface(
                 ctx, states, args.dt, d_ext=0.0,
                 sw_cfg=dict(SW_CFG_CASE8))
-        k0, m0 = face_ke(ctx, states)
-        states1 = full_acoustic_step_sixface(
-            ctx, states, args.dt, d_ext=0.0, sw_cfg=dict(SW_CFG_CASE8))
-        k1, m1 = face_ke(ctx, states1)
-        rel = (k1 - k0) / k0 if k0 else float("nan")
-        print(f"{name:17s} {k0:13.6e} {k1:13.6e} {rel:+9.3e} "
-              f"{m0:13.6e} {m1:13.6e}")
-    print("# a POSITIVE dKE at the vertex where the face centre is "
-          "negative (or much smaller) = the per-step vertex source")
+        k0, _ = face_ke(ctx, states)
+        # stage block only (c_sw + d_sw1..6)
+        stage = acoustic_step_sixface(ctx, states, args.dt,
+                                      sw_cfg=dict(SW_CFG_CASE8))
+        ks, _ = face_ke(ctx, stage)
+        # + PG tail
+        full = pg_tail(ctx, stage)
+        k1, m1 = face_ke(ctx, full)
+        rel_t = (k1 - k0) / k0 if k0 else float("nan")
+        rel_s = (ks - k0) / k0 if k0 else float("nan")
+        rel_p = (k1 - ks) / k0 if k0 else float("nan")
+        print(f"{name:17s} {rel_t:+14.3e} {rel_s:+14.3e} "
+              f"{rel_p:+14.3e} {m1:16.6e}")
+    print("# POSITIVE dKE at the vertex where the face centre is "
+          "negative = the per-step source; the column (stages vs "
+          "PG-tail) that carries the positive vertex value localizes it")
 
 
 if __name__ == "__main__":
