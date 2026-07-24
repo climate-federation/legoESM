@@ -80,7 +80,8 @@ SPMD_PARITY_MAX_STEPS = 8
 
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
-                          tripole=False, baro_solver="implicit_cn"):
+                          tripole=False, baro_solver="implicit_cn",
+                          force_pcg=False):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -118,6 +119,17 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     # is explicit_substep, so it MUST be set explicitly here or the bench
     # measures a non-production step.
     flat = {"barotropic_solver": baro_solver}
+    if force_pcg:
+        # Solver-matched strong ladders (codex 2026-07-24 finding 2): the
+        # implicit-CN dispatch runs adaptive stock CG on a SINGLE device but
+        # the fixed-iteration distributed PCG under SPMD/MPI — an nd=1
+        # reference leg without this flag times a DIFFERENT solver than the
+        # nd>1 legs. Forces the fixed-M PCG everywhere.
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--force-pcg only affects the implicit_cn barotropic solve; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_force_pcg"] = True
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -185,6 +197,13 @@ def main() -> int:
                         "previous silent explicit_substep default made the "
                         "bench measure a non-production configuration "
                         "(scaling audit, bottleneck 4).")
+    p.add_argument("--force-pcg", action="store_true",
+                   help="Force the fixed-iteration distributed PCG for the "
+                        "implicit_cn barotropic solve even on a single "
+                        "device (barotropic_implicit_force_pcg=True), so an "
+                        "nd=1 strong-scaling reference leg times the SAME "
+                        "solver the nd>1 SPMD legs run (the dispatch "
+                        "otherwise routes nd=1 to adaptive stock CG).")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
@@ -231,7 +250,7 @@ def main() -> int:
                         "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
                         "pair per direction per dtype group at every "
                         "pad_multi site instead of one per field — "
-                        "measured 25% fewer static collective-permutes on "
+                        "measured 25%% fewer static collective-permutes on "
                         "this step, bit-identical results. A/B against "
                         "the default run.")
     p.add_argument("--wide-halo", action="store_true",
@@ -319,7 +338,8 @@ def main() -> int:
     model, s0 = build_model_and_state(
         n_lat, args.n_lon, args.nlev,
         wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
-        tripole=args.tripole, baro_solver=args.baro_solver)
+        tripole=args.tripole, baro_solver=args.baro_solver,
+        force_pcg=args.force_pcg)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)

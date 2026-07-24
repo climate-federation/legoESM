@@ -118,14 +118,20 @@ if [ "$RUN_OCEAN" = "1" ]; then
             strong) OC_MODES="strong" ;;
             *)      OC_MODES="strong weak" ;;
         esac
+        # Solver-matched ladder (codex 2026-07-24): implicit_cn dispatches
+        # adaptive stock CG at np=1 but fixed-M PCG at np>1 — pass
+        # --force-pcg so every leg times the SAME solver.
+        OC_FORCE=""
+        [ "$OC_BARO" = "implicit_cn" ] && OC_FORCE="--force-pcg"
         for mode in $OC_MODES; do
             if [ "$mode" = "strong" ]; then res="$OC_STRONG_RES"; else res="$OC_WEAK_ROWS"; fi
             for np in $OC_RANKS; do
-                echo "--- ocean mpi: mode=$mode np=$np res=$res baro=$OC_BARO ---"
+                echo "--- ocean mpi: mode=$mode np=$np res=$res baro=$OC_BARO $OC_FORCE ---"
+                # shellcheck disable=SC2086
                 srun --ntasks="$np" --kill-on-bad-exit=1 \
                     "$PY" scripts/bench/bench_ocean_mpi_scaling.py \
                     --mode "$mode" --resolution "$res" --n-levels "$OC_NLEV" \
-                    --baro-solver "$OC_BARO" --precision "$PRECISION" \
+                    --baro-solver "$OC_BARO" $OC_FORCE --precision "$PRECISION" \
                     --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
                     --output-dir "$OUTDIR/ocean" < /dev/null
                 rc=$?

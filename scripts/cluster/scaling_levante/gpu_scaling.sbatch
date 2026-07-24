@@ -122,9 +122,12 @@ if [ "$RUN_OCEAN" = "1" ]; then
                     else
                         _GEOM="--mode weak --nlat-per-dev $res --n-lon $((2 * res))"
                     fi
+                    # --force-pcg: solver-matched ladder (nd=1 otherwise
+                    # times adaptive stock CG vs fixed-M PCG at nd>1).
                     JAX_ENABLE_X64=$_X64 "$PY" \
                         scripts/bench/bench_ocean_latlon_spmd_scaling.py \
                         --n-devices "$nd" $_GEOM --nlev "$OC_NLEV" \
+                        --force-pcg \
                         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
                         --out "$OUTDIR/ocean/ocean_spmd_scaling.jsonl"
                     rc=$?
