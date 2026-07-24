@@ -395,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
         "scheme": args.scheme,
         "method": method_name,
         "tiers": list(args.tiers),
+        "nlev": args.nlev,
+        "dt": args.dt,
         "default_loss": primary.default_loss if default_finite else None,
         "best_loss": primary.best_loss,
         "best_overrides": primary.best_overrides,

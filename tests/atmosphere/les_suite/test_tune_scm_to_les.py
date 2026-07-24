@@ -199,3 +199,7 @@ def test_main_stamps_flux_provenance(tmp_path):
     assert rec["q0"] == pytest.approx(0.06)     # constant surface flux = Q0
     assert rec["sgs"] == "lasd"
     assert rec["case"] == "cbl_tune"
+    # nlev/dt recorded so a tuned config can be re-scored faithfully (θ-consistent D7
+    # analysis re-scores best_overrides at the SAME resolution/timestep it was tuned at).
+    assert rec["nlev"] == NZ
+    assert rec["dt"] == pytest.approx(20.0)

@@ -12,6 +12,7 @@ from legoesm.atmosphere.les_suite.scm_runner import (
     build_cbl_scm_from_artifact,
     scm_final_theta_on,
     scm_les_final_loss,
+    scm_les_final_score,
 )
 from legoesm.atmosphere.physics import TurbulenceConfig
 from legoesm.atmosphere.physics.turbulence.config import (
@@ -100,6 +101,33 @@ def test_non_cbl_artifact_rejected():
     art = _cbl_artifact(prescribe="T_s", w_theta_s=None, T_s=np.full(NT, 300.0))
     with pytest.raises(ValueError):
         build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ)
+
+
+def test_final_score_components_finite_and_combined_matches_loss():
+    # scm_les_final_score exposes the per-variable (θ/u/v) breakdown behind the loss.
+    # Its .combined MUST equal scm_les_final_loss (the loss is a thin wrapper) — this
+    # is the self-check the θ-consistent D7 significance analysis relies on to confirm
+    # a re-score reproduces the harness before ranking closures on θ_rmse.
+    art = _cbl_artifact()
+    score = scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=10.0)
+    assert score is not None
+    for comp in (score.theta_rmse, score.u_rmse, score.v_rmse, score.combined):
+        assert np.isfinite(float(comp)) and float(comp) >= 0.0
+    assert score.qt_rmse is None  # dry CBL
+    loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=10.0)
+    assert float(score.combined) == pytest.approx(loss, rel=0, abs=1e-12)
+
+
+def test_final_score_none_on_divergence(monkeypatch):
+    # A diverged SCM yields None (the loss maps that to +inf); a caller wanting the θ
+    # component must not read a spurious safe_sqrt(NaN)=0 perfect fit.
+    from legoesm.atmosphere.les_suite import scm_runner
+
+    nan = jnp.full((NZ,), jnp.nan)
+    monkeypatch.setattr(scm_runner, "scm_final_theta_on",
+                        lambda *a, **k: (nan, nan, nan))
+    art = _cbl_artifact()
+    assert scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=20.0) is None
 
 
 def test_diverged_scm_scores_infinite_not_zero(monkeypatch):

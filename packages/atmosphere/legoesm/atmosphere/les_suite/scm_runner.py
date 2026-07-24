@@ -37,7 +37,7 @@ from legoesm.atmosphere.physics import (
 
 from .bridge import LESReferenceArtifact, LESTruth, prognostic_truth
 from .scm_coupling import T_from_theta, interp_profile, regrid_truth, theta_from_temperature
-from .score import prognostic_profile_score
+from .score import PrognosticScore, prognostic_profile_score
 
 Array = jnp.ndarray
 
@@ -203,6 +203,42 @@ def final_prognostic_truth(artifact: LESReferenceArtifact, z_eval) -> LESTruth:
     return regrid_truth(final_truth, jnp.asarray(z_eval))
 
 
+def scm_les_final_score(
+    artifact: LESReferenceArtifact,
+    turbulence: TurbulenceConfig,
+    *,
+    nlev: int = 32,
+    sigma_top: float | None = None,
+    dt: float = 5.0,
+) -> PrognosticScore | None:
+    """Full prognostic score (θ/u/v components + combined) of the free-run SCM final
+    profile vs LES truth — the per-variable breakdown behind :func:`scm_les_final_loss`.
+
+    Returns ``None`` for a DIVERGED (non-finite θ/u/v) SCM. The loss maps divergence to
+    ``+inf``; a ``None`` here lets a caller that wants the θ component treat divergence
+    explicitly instead of reading a sentinel or a spurious ``safe_sqrt(NaN)=0``. Factored
+    so the θ-only significance analysis (D7 θ-consistent gate) scores the SAME final
+    snapshot with the SAME normalization as the tuner — no duplicated score numerics.
+    """
+    scm, grid = build_cbl_scm_from_artifact(
+        artifact, turbulence, nlev=nlev, sigma_top=sigma_top, dt=dt)
+    t_end = float(jnp.asarray(artifact.times_s)[-1])
+    nsteps = max(1, int(round(t_end / dt)))
+
+    z_eval = jnp.asarray(artifact.heights_m)
+    theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
+
+    # A DIVERGED SCM (NaN/Inf θ) must NOT score as a perfect fit. The score's safe_sqrt
+    # maps NaN -> 0, so a non-finite SCM output would otherwise be selected as best.
+    if not (bool(jnp.all(jnp.isfinite(theta_eval)))
+            and bool(jnp.all(jnp.isfinite(u_eval)))
+            and bool(jnp.all(jnp.isfinite(v_eval)))):
+        return None
+
+    final_truth = final_prognostic_truth(artifact, z_eval)
+    return prognostic_profile_score(final_truth, theta_eval, u_eval, v_eval)
+
+
 def scm_les_final_loss(
     artifact: LESReferenceArtifact,
     turbulence: TurbulenceConfig,
@@ -213,32 +249,14 @@ def scm_les_final_loss(
 ) -> float:
     """Forward loss: free-run the SCM to the LES end time, score the final profile.
 
-    Builds the SCM from the artifact IC, integrates to the artifact's last output
-    time, and returns the prognostic profile score (std-normalized, mass-weighted
-    RMSE of θ/u/v) against the LES truth at that time — both on the LES (increasing)
-    evaluation grid. This is the objective the derivative-free tuner minimises.
+    The std-normalized, mass-weighted RMSE of θ/u/v against LES truth at the last output
+    time (both on the LES increasing grid) — the objective the derivative-free tuner
+    minimises. A diverged SCM ⇒ ``+inf`` (rejected). Thin wrapper over
+    :func:`scm_les_final_score` (which returns the per-variable breakdown).
     """
-    scm, grid = build_cbl_scm_from_artifact(
+    score = scm_les_final_score(
         artifact, turbulence, nlev=nlev, sigma_top=sigma_top, dt=dt)
-    t_end = float(jnp.asarray(artifact.times_s)[-1])
-    nsteps = max(1, int(round(t_end / dt)))
-
-    z_eval = jnp.asarray(artifact.heights_m)
-    theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
-
-    # A DIVERGED SCM (NaN/Inf θ) must score as a WORST (non-finite) loss, not a
-    # perfect one. The score's safe_sqrt maps NaN -> 0 (correct for its AD-at-perfect-
-    # fit purpose), so a non-finite SCM output would otherwise be selected as the best
-    # candidate. Guard here: any non-finite output ⇒ +inf loss (the tuner rejects it).
-    if not (bool(jnp.all(jnp.isfinite(theta_eval)))
-            and bool(jnp.all(jnp.isfinite(u_eval)))
-            and bool(jnp.all(jnp.isfinite(v_eval)))):
-        return float("inf")
-
-    # LES truth at the final time on the same eval grid.
-    final_truth = final_prognostic_truth(artifact, z_eval)
-    score = prognostic_profile_score(final_truth, theta_eval, u_eval, v_eval)
-    return float(score.combined)
+    return float("inf") if score is None else float(score.combined)
 
 
 def scm_les_loss_jax(
