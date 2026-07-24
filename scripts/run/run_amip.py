@@ -1256,6 +1256,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "filter). "
                              "Setup refuses coefficients above the explicit "
                              "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--mpas-ice-skin-prognostic",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_ice_skin_prognostic",
+                        help="MPAS lane only: prognostic sea-ice skin "
+                             "temperature (Semtner 1976 zero-layer conduction "
+                             "+ slab thermal inertia) replacing the constant "
+                             "T_ice anchor over ice-covered cells — removes "
+                             "the year-round 271.35 K pin behind the polar "
+                             "tas warm bias. Needs radiation != none.")
+    parser.add_argument("--mpas-ice-thickness-m", type=float, default=None,
+                        dest="mpas_ice_thickness_m",
+                        help="Climatological ice slab thickness [m] for the "
+                             "prognostic ice skin (default 2.0; bounds "
+                             "[0.1, 10]). Requires --mpas-ice-skin-prognostic.")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1735,6 +1749,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
+        mpas_ice_skin_prognostic=args.mpas_ice_skin_prognostic,
+        mpas_ice_thickness_m=(
+            args.mpas_ice_thickness_m
+            if args.mpas_ice_thickness_m is not None
+            else _EXPERIMENT_DEFAULTS.mpas_ice_thickness_m),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

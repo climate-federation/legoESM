@@ -1246,6 +1246,17 @@ class ExperimentConfig(NamedTuple):
     # but damps resolved gradients more broadly — use a gentle coefficient.
     # MPAS-only: refused on other discretizations (validate_strict).
     mpas_qv_smooth_del2_m2s: float = 0.0   # del2 diffusivity [m^2/s]; ~1e5-1e6 typical at 240 km
+    # Prognostic sea-ice skin temperature on the MPAS lane (Semtner 1976
+    # zero-layer conduction + slab thermal inertia; forcing/surface_utils
+    # helper).  The prescribed-SST anchor otherwise pins ice-covered cells
+    # at the CONSTANT T_ice (271.35 K) year-round — the +8.6 K polar tas
+    # warm bias of the first ClimateEval scorecard (real central-Arctic
+    # winter skin ~245-250 K).  Default OFF = byte-identical.  Needs
+    # radiation != "none" (the skin integrates the exported surface
+    # fluxes); refused on non-MPAS lanes (their land/ice tiles own the
+    # surface temperature).
+    mpas_ice_skin_prognostic: bool = False
+    mpas_ice_thickness_m: float = 2.0      # climatological ice slab thickness [m]
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1823,6 +1834,12 @@ class ExperimentConfig(NamedTuple):
                     "in its step factories (qv_smooth_coeff) and would "
                     "silently ignore it."
                 )
+            if self.mpas_ice_skin_prognostic:
+                errors.append(
+                    "mpas_ice_skin_prognostic is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} has its own "
+                    "surface/ice tiles and would silently ignore it."
+                )
         if not (math.isfinite(self.mpas_land_lapse_K_per_km)
                 and 0.0 <= self.mpas_land_lapse_K_per_km <= 20.0):
             errors.append(
@@ -1846,6 +1863,29 @@ class ExperimentConfig(NamedTuple):
                 f"mpas_qv_smooth_del2_m2s (horizontal q_v del2 diffusivity "
                 f"[m^2/s]) must be finite in [0, 1e8]; got "
                 f"{self.mpas_qv_smooth_del2_m2s!r}."
+            )
+        # Ice-skin inert corners: the skin integrates the physics' exported
+        # surface fluxes (radiation channel), so radiation="none" would leave
+        # it frozen at its seed forever; a thickness override without the
+        # boolean gate would be silently inert.
+        if self.mpas_ice_skin_prognostic and self.radiation == "none":
+            errors.append(
+                "mpas_ice_skin_prognostic integrates the surface energy "
+                "fluxes exported by the physics; radiation='none' computes "
+                "none — the skin would stay at its seed forever."
+            )
+        if (self.mpas_ice_thickness_m != 2.0
+                and not self.mpas_ice_skin_prognostic):
+            errors.append(
+                f"mpas_ice_thickness_m={self.mpas_ice_thickness_m!r} requires "
+                "mpas_ice_skin_prognostic=True (the override would be "
+                "silently inert)."
+            )
+        if not (math.isfinite(self.mpas_ice_thickness_m)
+                and 0.1 <= self.mpas_ice_thickness_m <= 10.0):
+            errors.append(
+                f"mpas_ice_thickness_m (climatological ice slab [m]) must be "
+                f"finite in [0.1, 10]; got {self.mpas_ice_thickness_m!r}."
             )
         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
         # The float overrides only act when the boolean gate is on; bounds
