@@ -4336,9 +4336,12 @@ class LatLonCGridOceanModel:
         the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
         N² on the post-advection state ⇒ BIT-IDENTICAL.
 
-        Only the ``adiabatic`` N² path reads the T/S contrast; ``n2_mode !=
-        "adiabatic"`` with the flag set would be a SILENT no-op, so raise
-        (dispatch hardening — a mis-wired flag must fail loudly).
+        Both the ``adiabatic`` (Veros parcel-displacement) and ``nemo_bn2``
+        (NEMO eosbn2 S-EOS) N² paths read the T/S contrast — the
+        ``nemo_dino_kamm`` card's actual N² source (see
+        ``compute_N2``/``_shared.py``); any OTHER ``n2_mode`` with the flag
+        set would be a SILENT no-op, so raise (dispatch hardening — a
+        mis-wired flag must fail loudly).
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4346,12 +4349,70 @@ class LatLonCGridOceanModel:
             return None
         if not getattr(vmix.tke, "n2_before_advection", False):
             return None
-        if getattr(vmix.tke, "n2_mode", "insitu") != "adiabatic":
+        if getattr(vmix.tke, "n2_mode", "insitu") not in (
+                "adiabatic", "nemo_bn2"):
             raise ValueError(
                 "vertical_mixing.tke.n2_before_advection=True requires "
-                "n2_mode='adiabatic' (the only N² path that reads the T/S "
-                f"contrast); got n2_mode={vmix.tke.n2_mode!r}.")
+                "n2_mode='adiabatic' or 'nemo_bn2' (the only N² paths that "
+                f"read the T/S contrast); got n2_mode={vmix.tke.n2_mode!r}.")
         return (entry_state.T.data, entry_state.S.data)
+
+    def _tke_bottom_dirichlet(self, cc_state):
+        """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
+
+        Static Python predicate: returns the Dirichlet TKE value when
+        ``vertical_mixing.scheme=="tke"`` and ``tke.bottom_tke_bc`` is set;
+        ``None`` (default) ⇒ BIT-IDENTICAL (no bottom BC).
+
+        Reuses the SAME NEMO bottom-drag rate + partial-cell bottom-level
+        machinery as ``zdf_drag_in_matrix``
+        (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
+        :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
+        re-derived drag coefficient. ``cc_state`` must already carry
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "bottom_tke_bc", False):
+            return None
+        if not isinstance(self.z_coord, OceanPartialCellCoordinate):
+            raise ValueError(
+                "vertical_mixing.tke.bottom_tke_bc=True requires a "
+                "partial-cell z-coordinate (bottom_level) — the flat-bottom "
+                "case is not covered.")
+        from legoesm import constants
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            nemo_effective_bottom_drag_r, validate_bottom_drag_scheme,
+        )
+        _scheme = validate_bottom_drag_scheme(
+            str(getattr(self.config.bottom_drag, "bottom_drag_scheme",
+                        "legacy")))
+        if _scheme == "legacy":
+            raise ValueError(
+                "vertical_mixing.tke.bottom_tke_bc=True requires a NEMO "
+                "bottom_drag_scheme ('nemo_quadratic' or 'nemo_loglayer'), "
+                f"got 'legacy'.")
+        h_k = self.z_coord.h_partial
+        _bl = jnp.maximum(self.z_coord.bottom_level, 0)
+        _bl_idx = _bl[..., jnp.newaxis]
+        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+        r_t = nemo_effective_bottom_drag_r(
+            u_bot, v_bot, h_bot,
+            scheme=_scheme,
+            cd0=float(self.config.bottom_drag.bottom_drag_cd0),
+            cd_max=float(self.config.bottom_drag.bottom_drag_cdmax),
+            z0=float(self.config.bottom_drag.bottom_drag_z0),
+            ke0=float(self.config.bottom_drag.bottom_drag_ke0),
+            von_karman=constants.kappa_von_karman,
+        )
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            nemo_bottom_tke_dirichlet,
+        )
+        return nemo_bottom_tke_dirichlet(r_t, u_bot, v_bot, vmix.tke)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -5069,6 +5130,7 @@ class LatLonCGridOceanModel:
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
+                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(cc_state),
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
