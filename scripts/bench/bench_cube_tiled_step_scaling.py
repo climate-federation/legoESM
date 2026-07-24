@@ -299,8 +299,14 @@ def main() -> int:
     if args.closed_loop:
         # A feedback trajectory can blow up where pristine-input samples
         # cannot — never record a timing row for a non-finite integration.
-        _finite = all(bool(np.all(np.isfinite(np.asarray(x))))
-                      for x in jax.tree.leaves(s))
+        # Reduce ON DEVICE: under multicontroller the state shards span
+        # non-addressable devices, so np.asarray(x) raises (job 26450318);
+        # a jitted global all-reduce yields a fully-replicated scalar every
+        # process may fetch.
+        import jax.numpy as jnp
+
+        _isfinite_all = jax.jit(lambda t: jnp.all(jnp.isfinite(t)))
+        _finite = all(bool(_isfinite_all(x)) for x in jax.tree.leaves(s))
         if not _finite:
             print("ERROR: closed-loop state went non-finite during the "
                   "timed window — refusing to record the row.", flush=True)
