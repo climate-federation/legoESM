@@ -1,0 +1,208 @@
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py b/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
+index a6910a668..c6e98da05 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
+@@ -12,7 +12,10 @@ import jax
+ import jax.numpy as jnp
+ 
+ from legoesm import constants
+-from legoesm.thermo import saturation_mixing_ratio
++from legoesm.thermo import (
++    saturation_mixing_ratio,
++    saturation_mixing_ratio_ice,
++)
+ 
+ # Default condensation/autoconversion sigmoid sharpness (used in signatures).
+ _DEFAULT_SAT_SHARPNESS = 50.0
+@@ -176,7 +179,48 @@ def _air_transport_props(T, p, rho):
+     return dv, mu, sc
+ 
+ 
+-def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
++def mixed_phase_liquid_fraction(T):
++    """Liquid fraction w(T) of the standard mixed-phase partition ramp.
++
++    Linear in T over ``[T_hom_freeze, T_freeze]`` (all-ice below -40 C,
++    all-liquid above 0 C) — the Morrison/IFS-style weight used to blend
++    liquid/ice saturation and latent heat consistently.
++    """
++    return jnp.clip(
++        (T - constants.T_hom_freeze)
++        / (constants.T_freeze - constants.T_hom_freeze), 0.0, 1.0)
++
++
++def mixed_phase_saturation_mixing_ratio(T, p_full):
++    """w(T)-blended liquid/ice saturation mixing ratio [kg/kg].
++
++    Below the mixed-phase ramp this is the ICE curve — at TTL temperatures
++    (~195 K) the liquid curve sits ~60% above it, so gating/draining on the
++    liquid curve leaves permanent ice-supersaturation (the 20x-ERA5 TTL
++    vapour bias of the first ClimateEval scorecard).
++    """
++    w = mixed_phase_liquid_fraction(T)
++    return (w * saturation_mixing_ratio(T, p_full)
++            + (1.0 - w) * saturation_mixing_ratio_ice(T, p_full))
++
++
++def mixed_phase_l_over_cp(T):
++    """Blended latent heat / c_pd [K per kg/kg] at the mixed-phase weight.
++
++    ``L_eff = w(T)*L_v + (1-w(T))*L_s`` — deposition releases the
++    sublimation latent heat where the target curve is ice.  Evaluated at
++    the PRE-adjustment temperature and held constant through the on-curve
++    solve (per-cell frozen linearization: the solve then conserves
++    ``c_pd*T + L_eff(T0)*q_v`` exactly, mirroring the scalar-L_v contract
++    of the liquid-only path).
++    """
++    w = mixed_phase_liquid_fraction(T)
++    return (w * constants.L_v + (1.0 - w) * constants.L_s) / constants.c_pd
++
++
++def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
++                                  sat_fn=saturation_mixing_ratio,
++                                  l_over_cp=None):
+     """Hard-saturation-adjustment condensation rate [kg/kg/s].
+ 
+     Solves for the equilibrium vapour ``q_eq`` on the LIQUID saturation curve
+@@ -222,14 +266,18 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
+     array
+         Condensation rate ``(q_v - q_eq)/dt`` [kg/kg/s], >= 0.
+     """
+-    l_over_cp = constants.L_v / constants.c_pd
++    # Scalar L_v/c_pd by default (byte-identical liquid path); the mixed-phase
++    # caller injects a per-cell frozen L_eff(T0)/c_pd array (broadcasts through
++    # the same expressions; monotonicity of the residual needs only L > 0).
++    if l_over_cp is None:
++        l_over_cp = constants.L_v / constants.c_pd
+     q_v_pos = jnp.maximum(q_v, 0.0)
+     lo = jnp.clip(q_sat, 0.0, q_v_pos)     # f(lo) <= 0 (bracket lower bound)
+     hi = q_v_pos                           # f(hi) >= 0 (bracket upper bound)
+     for _ in range(_HARD_SAT_BISECT_ITERS):
+         mid = 0.5 * (lo + hi)
+         t_new = T + l_over_cp * (q_v_pos - mid)
+-        f_mid = mid - saturation_mixing_ratio(t_new, p_full)
++        f_mid = mid - sat_fn(t_new, p_full)
+         hi = jnp.where(f_mid > 0.0, mid, hi)
+         lo = jnp.where(f_mid > 0.0, lo, mid)
+     q_eq = jax.lax.stop_gradient(0.5 * (lo + hi))
+@@ -241,7 +289,7 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
+     # second-order term.
+     t_new = T + l_over_cp * (q_v_pos - q_eq)
+     q_sat_new, dqsat_dt = jax.jvp(
+-        lambda t: saturation_mixing_ratio(t, p_full),
++        lambda t: sat_fn(t, p_full),
+         (t_new,), (jnp.ones_like(t_new),))
+     psychrometric = jax.lax.stop_gradient(1.0 + dqsat_dt * l_over_cp)
+     q_eq = q_eq - (q_eq - q_sat_new) / psychrometric
+@@ -254,19 +302,32 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
+     return (q_v_pos - q_eq) / dt
+ 
+ 
+-def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K):
++def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K,
++                                l_over_cp=None):
+     """Bound the per-step POSITIVE condensation (shared by both entry points).
+ 
+-    Caps the per-step condensed ``Delta q_v = cond*dt`` at
+-    ``hard_max_heating_K * c_pd / L_v`` (per-step latent heating <=
+-    ``hard_max_heating_K``, so a large pool drains over MANY steps not one) AND
+-    at the available vapour ``q_v`` (mass-positivity: never condense more than
+-    the column holds; also guards the tiny-NEGATIVE q_sat the smooth cap returns
+-    near 150 K).  The evaporation branch (rate < 0) is untouched.  ``minimum``
+-    has a dead gradient only where a cap binds, where the per-step condensation
+-    is constant (correctly zero sensitivity).
++    Caps the per-step condensed ``Delta q_v = cond*dt`` so the per-step latent
++    heating ``l_over_cp * Delta q_v <= hard_max_heating_K`` (a large pool drains
++    over MANY steps not one) AND ``Delta q_v <= q_v`` (mass-positivity: never
++    condense more than the column holds; also guards the tiny-NEGATIVE q_sat the
++    smooth cap returns near 150 K).  The evaporation branch (rate < 0) is
++    untouched.  ``minimum`` has a dead gradient only where a cap binds, where the
++    per-step condensation is constant (correctly zero sensitivity).
++
++    ``l_over_cp`` is the latent-heat / c_pd the CALLER heats with, so the K cap
++    bounds the ACTUAL heating.  Default ``None`` -> the scalar liquid
++    ``L_v / c_pd`` (the exact prior expression, byte-identical liquid path); the
++    mixed-phase ice-curve drain injects its per-cell frozen ``L_eff(T0) / c_pd``
++    array so the cap is exact on the ICE branch too (deposition releases L_s >
++    L_v, which would otherwise heat ~13% past the stated cap for a given dq).
+     """
+-    dqv_cap = hard_max_heating_K * constants.c_pd / constants.L_v
++    if l_over_cp is None:
++        # Scalar liquid path -- keep the exact prior expression (bit-identical).
++        dqv_cap = hard_max_heating_K * constants.c_pd / constants.L_v
++    else:
++        # Per-cell L_eff(T0)/c_pd the ice-curve caller deposits with: the
++        # heating l_over_cp*dq is then bounded by hard_max_heating_K exactly.
++        dqv_cap = hard_max_heating_K / l_over_cp
+     cond_cap = jnp.minimum(dqv_cap, jnp.maximum(q_v, 0.0)) \
+         / jnp.maximum(dt, 1.0e-10)
+     return jnp.where(
+@@ -320,7 +381,8 @@ def _hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
+ 
+ def hard_saturation_drain(T, q_v, p_full, dt,
+                           hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
+-                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
++                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K,
++                          ice_curve=False):
+     """HARD-gated hard-saturation DRAIN rate [kg/kg/s] (>= 0).
+ 
+     The condensation the hard saturation adjustment applies to drain
+@@ -362,29 +424,51 @@ def hard_saturation_drain(T, q_v, p_full, dt,
+     hard_max_heating_K : float, default 5.0
+         Per-step latent-heating cap [K] (~ 2 g/kg per step); a large pool drains
+         over many steps rather than detonating.
++    ice_curve : bool, default False
++        Gate AND land on the mixed-phase w(T)-blended liquid/ice saturation
++        curve with the blended latent heat (frozen at the pre-adjustment T)
++        instead of liquid-only.  At TTL temperatures (~195 K) the liquid
++        curve sits ~60% above the ice curve, so the liquid-only drain leaves
++        permanent ice-supersaturation — the 20x-ERA5 TTL vapour bias.
++        Default False is byte-identical to the reviewed liquid-only drain.
++        The caller applying the drained vapour MUST use the matching latent
++        heat (:func:`mixed_phase_l_over_cp` at the SAME pre-adjustment T)
++        and route cold-cell condensate to CLOUD ICE where available.
+ 
+     Returns
+     -------
+     array
+         Drain rate [kg/kg/s], >= 0.
+     """
++    sat_fn = (mixed_phase_saturation_mixing_ratio if ice_curve
++              else saturation_mixing_ratio)
+     if jax.config.jax_enable_x64:
+-        q_sat = saturation_mixing_ratio(
+-            T.astype(jnp.float64), p_full.astype(jnp.float64)).astype(q_v.dtype)
++        T64 = T.astype(jnp.float64)
++        l_over_cp = mixed_phase_l_over_cp(T64) if ice_curve else None
++        q_sat = sat_fn(
++            T64, p_full.astype(jnp.float64)).astype(q_v.dtype)
+         cond_hard = _hard_saturation_condensation(
+-            T.astype(jnp.float64), q_v.astype(jnp.float64),
++            T64, q_v.astype(jnp.float64),
+             p_full.astype(jnp.float64), dt,
+-            q_sat.astype(jnp.float64)).astype(q_v.dtype)
++            q_sat.astype(jnp.float64),
++            sat_fn=sat_fn, l_over_cp=l_over_cp).astype(q_v.dtype)
+     else:
+-        q_sat = saturation_mixing_ratio(T, p_full)
+-        cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat)
++        l_over_cp = mixed_phase_l_over_cp(T) if ice_curve else None
++        q_sat = sat_fn(T, p_full)
++        cond_hard = _hard_saturation_condensation(
++            T, q_v, p_full, dt, q_sat, sat_fn=sat_fn, l_over_cp=l_over_cp)
+     # HARD RH gate (matches the validated post-step cap): drain ONLY where
+     # q_v > hard_threshold * q_sat; no sub-threshold leakage.  ``cond_hard`` is
+     # the on-curve drain, so the gated rate never overshoots.
+     drain = jnp.where(
+         q_v > hard_threshold * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR),
+         cond_hard, 0.0)
+-    return _hard_saturation_rate_limit(drain, q_v, dt, hard_max_heating_K)
++    # Cap the per-step heating with the SAME per-cell latent heat the caller
++    # deposits with (frozen L_eff(T0)/c_pd under ice_curve; None -> scalar
++    # L_v/c_pd, byte-identical liquid path) so the K cap bounds ACTUAL heating.
++    lcp_cap = None if l_over_cp is None else l_over_cp.astype(q_v.dtype)
++    return _hard_saturation_rate_limit(drain, q_v, dt, hard_max_heating_K,
++                                       l_over_cp=lcp_cap)
+ 
+ 
+ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None,

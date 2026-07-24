@@ -451,7 +451,7 @@ def test_mpas_poststep_hook_conserves_and_rate_limits():
     p_s = jnp.array([65400.0, 100000.0])
     sigma_full = jnp.linspace(0.95, 0.2, nlev)
     dt = 100.0
-    T_new, q_v_new, q_c_new, dq = _mpas_hard_saturation_poststep(
+    T_new, q_v_new, q_c_new, _qi_unused, dq = _mpas_hard_saturation_poststep(
         T, q_v, q_c, p_s, sigma_full, dt, 1.1, 5.0)
     assert jnp.all(dq >= 0.0)                           # pure drain
     dT = _L_V * dq / _C_PD
@@ -471,7 +471,7 @@ def test_mpas_poststep_hook_conserves_and_rate_limits():
     assert float(jnp.sum(dq[1])) == pytest.approx(0.0, abs=1e-12)
     # None-q_c path is a conserving NO-OP: with no reservoir for the condensate,
     # the drain must not remove vapour (that would LOSE total water).
-    T2, qv2, qc2, dq2 = _mpas_hard_saturation_poststep(
+    T2, qv2, qc2, _qi2_unused, dq2 = _mpas_hard_saturation_poststep(
         T, q_v, None, p_s, sigma_full, dt, 1.1, 5.0)
     assert qc2 is None
     np.testing.assert_allclose(np.asarray(qv2), np.asarray(q_v), rtol=1e-12)
