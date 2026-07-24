@@ -4291,6 +4291,26 @@ class ModelDriver:
                 _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
                 for _k in s.tracers:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            # #1310: persist the anchored mass-fixer target.  With
+            # ``fix_mass + anchor_mass_to_initial`` the spectral model snapshots
+            # ``_target_mass`` from the FIRST state it sees; on restart a fresh
+            # model would re-anchor to the LOADED (mid-run) state — a target
+            # ~1e-15 off the original epoch mass — so the per-step lnps rescale
+            # pins the resumed trajectory to a different mass, breaking bitwise
+            # continuation (uniform ~1e-8 drift by day 2).  Save the concrete
+            # target and restore it via ``set_target_mass`` so the resumed run
+            # anchors to the IDENTICAL mass.
+            _tmass = getattr(self.model, "_target_mass", None)
+            if _tmass is not None:
+                _save["target_mass"] = np.asarray(_tmass, dtype=np.float64)
+            # SCOPE (bit-exact restart): the state (*_hat + trc_*) and the
+            # mass-fixer anchor (target_mass) are the full checkpoint for the
+            # self-starting integrators (ssp_rk3/34/54 — the spectral default).
+            # The opt-in ``leapfrog_si`` path additionally holds 3-time-level
+            # history (``_state_prev``/``_prev_phys_tend``) that is NOT
+            # persisted here, so a leapfrog_si resume re-bootstraps via the
+            # forward-Euler startup branch and is NOT bitwise (a separate,
+            # pre-existing gap; checkpointing that history is the follow-up).
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
             self._save_cmor_accumulator_sidecar(day)
@@ -4938,6 +4958,16 @@ class ModelDriver:
             with np.load(path) as d:
                 self.state, step, day = reconstruct_spectral_state_from_npz(
                     d, template=self.state)
+                # #1310: restore the anchored mass-fixer target so the resumed
+                # run pins to the SAME mass as the straight run (see the save
+                # branch).  set_target_mass pre-seeds it, so the model's
+                # first-step _maybe_snapshot_target_mass (which only fires when
+                # _target_mass is None) does NOT re-anchor to the loaded state.
+                if "target_mass" in (d.files if hasattr(d, "files") else d) \
+                        and hasattr(self.model, "set_target_mass"):
+                    import jax.numpy as _jnp
+                    self.model.set_target_mass(
+                        _jnp.asarray(d["target_mass"], dtype=_jnp.float64))
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
