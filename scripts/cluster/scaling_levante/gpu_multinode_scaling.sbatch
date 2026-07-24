@@ -112,21 +112,18 @@ echo "=== CONFIG ==="
 echo "lanes: cube=$RUN_NCCL latlon=$RUN_LATLON ocean=$RUN_OCEAN mpas=$RUN_MPAS | mode=$MODE prec=$PRECISION C$CS_RES LL$LL_RES OC$OC_RES ICO-L$ICO_LEVEL"
 echo "outdir=$OUTDIR"
 
-# One GPU per task: SLURM exports SLURM_LOCALID per task; jax's SLURM
-# auto-detection also derives local_device_ids from it, but pinning
-# CUDA_VISIBLE_DEVICES keeps the contract explicit and matches the Derecho
-# twin (each controller must own exactly ONE device so jax.process_count()
-# federates N single-GPU programs).
-# Pin by INDEXING into the already-visible GPU list, not by raw local-rank
-# ordinal: if SLURM/cgroups pre-bound GPUs per task the list is short (often
-# a single device) and ordinal ${SLURM_LOCALID} would name a non-visible
-# device; if the whole node is visible the index picks the LOCALID-th GPU
-# (codex finding).
-PIN='
-    IFS=, read -ra _gpus <<< "${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-    export CUDA_VISIBLE_DEVICES=${_gpus[$(( SLURM_LOCALID % ${#_gpus[@]} ))]}
-    exec "$@"
-'
+# One GPU per task — DO NOT pre-pin CUDA_VISIBLE_DEVICES here. Under SLURM
+# the benches call bare jax.distributed.initialize(), whose SLURM detection
+# derives local_device_ids=[SLURM_LOCALID]; pinning CVD to one device
+# renumbers it to index 0, so every localid!=0 task asks for a device index
+# it cannot see -> "no supported devices found for platform CUDA"
+# (observed job 26445837/26447612: preflight nvidia-smi fine, jax dead on
+# all nonzero localids). The Slurm-native contract is: all node GPUs
+# visible (STEP_GPU_OPTS --gpu-bind=none) + jax picks the LOCALID-th
+# device per process. The Derecho twin pins CVD instead because its PALS
+# path initializes with local_device_ids=[0] (the #693 shim convention) —
+# the two conventions must not be mixed.
+PIN='exec "$@"'
 
 rc_all=0
 
