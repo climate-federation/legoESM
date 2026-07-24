@@ -565,6 +565,7 @@ def _call_radiation_backend(
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
     cloud_fraction_override: jnp.ndarray | None = None,
+    conv_precip: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -686,6 +687,7 @@ def _call_radiation_backend(
             q_ice=q_ice,
             n_ice=n_ice,
             n_cloud=n_cloud,
+            conv_precip=conv_precip,
             cloud_fraction_override=cloud_fraction_override,
         )
         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
@@ -969,6 +971,12 @@ def _make_hydrostatic_radiation(
     column count ``ncol = ∏ shape_2d`` divides the mesh's device
     count.
 
+    When the attached cloud config enables ``convective_cloud``, the fn
+    reads the LAGGED ``phys_state.conv_precip`` carry (published by the
+    convection module the previous step) and threads it into the Slingo
+    cumulus cloud fraction — the standalone-path analogue of the FV
+    pipeline's ``conv_precip`` threading.
+
     When ``nc_from_aerosol`` is True AND the scheme is ``rrtmgp`` the
     cloud-optics droplet number is overridden with the per-column Andreae
     (2009) AOD->CCN diagnostic (``forcing["aerosol_od"]``) so the radiation
@@ -981,6 +989,15 @@ def _make_hydrostatic_radiation(
     """
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
+    # Static build-time gate for the Slingo convective-cloud carry read:
+    # only a cloud config that ENABLES convective_cloud makes the fn a
+    # phys_state consumer (byte-identical otherwise).
+    _conv_cloud_active = (
+        radiation_config.cloud_scheme != "none"
+        and radiation_config.cloud_config is not None
+        and bool(getattr(radiation_config.cloud_config,
+                         "convective_cloud", False))
+    )
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
@@ -1141,6 +1158,20 @@ def _make_hydrostatic_radiation(
             if _cf_ovr is not None:
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
 
+        # Convective-precip READ (standalone-path Slingo cumulus fraction):
+        # the convection module published its column-integrated in-updraft
+        # rain-production rate [kg/m^2/s] into ``phys_state.conv_precip``
+        # LAST step (radiation runs first in the module chain — one-step
+        # lag, the FV pipeline's ``conv_precip`` convention).  Gated by the
+        # cloud config's ``convective_cloud`` so every other run keeps
+        # ``None`` (byte-identical; compute_cloud_properties' misconfig
+        # guard still fires if convective_cloud is on with no carry).
+        _conv_precip_col = None
+        if _conv_cloud_active and phys_state is not None:
+            _conv_precip_col = getattr(phys_state, "conv_precip", None)
+            if _conv_precip_col is not None:
+                _conv_precip_col = _conv_precip_col.reshape(ncol)
+
         # Issue #273 follow-up: optionally shard the per-column radiation
         # workload across ``column_mesh`` so a 4×A100 (or any device
         # count that fails cubed-sphere face-divisibility) keeps every
@@ -1185,6 +1216,8 @@ def _make_hydrostatic_radiation(
                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
             if _cf_ovr is not None:
                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
+            if _conv_precip_col is not None:
+                _conv_precip_col = shard_columns(_conv_precip_col, column_mesh)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -1210,6 +1243,7 @@ def _make_hydrostatic_radiation(
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
+            conv_precip=_conv_precip_col,
             solar_spectral_fraction=_ssf_ext,
         )
 
@@ -1256,7 +1290,7 @@ def _make_hydrostatic_radiation(
     # ``phys_state`` to accepts_ps=False fns that advertise this flag.  Only set
     # when the feature is active (byte-identical otherwise: unmarked => not
     # forwarded => the RH grid-scale cloud path is unchanged).
-    if use_clubb_cloud_fraction:
+    if use_clubb_cloud_fraction or _conv_cloud_active:
         physics_fn._wants_phys_state_ro = True
     return physics_fn
 

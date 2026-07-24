@@ -545,6 +545,31 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     ]), parser))
     assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
     # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
+
+
+def test_mpas_land_beta_soil_flag_flows_to_config():
+    """--mpas-land-beta-soil round-trip (#1312 phase 2b traced beta_soil);
+    default byte-identical OFF, --no- form revertible from a YAML True."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_beta_soil is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--use-multilayer-land", "--mpas-land-beta-soil",
+    ]), parser))
+    assert cfg.mpas_land_beta_soil is True
+
+    parser2 = build_arg_parser()
+    parser2.set_defaults(mpas_land_beta_soil=True)   # simulates a YAML pin
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-mpas-land-beta-soil",
+    ]), parser2))
+    assert cfg_off.mpas_land_beta_soil is False
+    # validate_strict inert-corner guards live in
+    # test_mpas_multilayer_land_port (refusal without multilayer land).
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
