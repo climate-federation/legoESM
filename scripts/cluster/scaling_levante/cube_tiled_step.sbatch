@@ -3,16 +3,21 @@
 #SBATCH --partition=gpu
 #SBATCH --nodes=6
 #SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-task=1
-#SBATCH --gpu-bind=single:1
+#SBATCH --gpus-per-node=4
+#SBATCH --gpu-bind=none
 #SBATCH --time=01:30:00
 #SBATCH --output=cube_tiled_%j.log
 # ===========================================================================
 # Sub-face TILED cube hydrostatic step on Levante: 24 GPUs (6 x 4 A100),
 # kt=2 -> (6,2,2) mesh — the >6-GPU strong-scaling lane (audit item 5).
-# Stage A: CPU-virtual parity gate; Stage B: multicontroller timed run
-# (SLURM auto-detected jax.distributed; --gpu-bind=single:1 pins one GPU
-# per task so local_device_ids=[0] is the pinned device).
+# Stage A: CPU-virtual parity gate; Stage B: multicontroller timed run.
+# GPU binding: all 4 node GPUs visible per task (--gpu-bind=none); bare
+# jax.distributed.initialize() under SLURM derives
+# local_device_ids=[SLURM_LOCALID], so each task binds the LOCALID-th GPU.
+# Do NOT pin one GPU per task (--gpu-bind=single:1 / CVD shims): the pinned
+# device renumbers to index 0 while jax still asks for index LOCALID ->
+# CUDA_ERROR_INVALID_DEVICE on every localid!=0 task (observed 26446699;
+# same double-pin failure as gpu_multinode_scaling.sbatch job 26447612).
 # See scripts/cluster/scaling_derecho/cube_tiled_step.pbs for the lane's
 # contract (dynamics-only envelope; HLO anti-replication refusals).
 # ===========================================================================
