@@ -755,10 +755,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # a full-radiation step, precip every step, so a wholesale overwrite
             # on a held-radiation step (sw/lw None) would DROP the last radiation
             # fluxes. Keep the last non-None value per slot (sw, lw, precip).
-            _prev = getattr(self, "_sfc_diag", None) or (None,) * 5
-            # Tolerate a shorter persisted bundle (pre-downwelling restart of
-            # the in-process object): right-pad with None before the merge.
-            _prev = tuple(_prev) + (None,) * (len(sfc_diag) - len(_prev))
+            _prev = getattr(self, "_sfc_diag", None) or ()
+            # Pad the shorter of (prev, new) so a session that grows the
+            # tuple contract (3-slot legacy -> 8-slot with TOA/turb-flux
+            # extras) merges slot-wise instead of truncating.
+            _n = max(len(sfc_diag), len(_prev))
+            _prev = _prev + (None,) * (_n - len(_prev))
+            sfc_diag = sfc_diag + (None,) * (_n - len(sfc_diag))
             self._sfc_diag = tuple(
                 new if new is not None else old
                 for new, old in zip(sfc_diag, _prev))
@@ -862,18 +865,26 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
-            # Downwelling counterparts (+down): interactive-land forcing
-            # (AtmToSurface.sw_down/lw_down); refresh on radiation steps only,
-            # like the net fluxes.
-            _swd_sfc = getattr(_pt, "sw_down_sfc", None)
-            _lwd_sfc = getattr(_pt, "lw_down_sfc", None)
+            # CMOR-feed diagnostic extras: TOA fluxes (radiation steps only)
+            # + surface turbulent fluxes (every step). Slot ORDER is the
+            # sfc_diag tuple contract shared with the driver feed:
+            # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
+            #  shflx, lhflx, sw_down_sfc, lw_down_sfc).
+            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
+            # interactive multilayer land forcing (AtmToSurface.sw_down/
+            # lw_down; model_driver._marshal_land_forcing reads these slots).
+            _extras = tuple(getattr(_pt, _k, None) for _k in (
+                "lw_up_toa", "sw_up_toa", "sw_down_toa",
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would
             # stash stale precip. Each element is None-guarded by the consumer.
             if (_sw_sfc is not None or _lw_sfc is not None
-                    or _pr_sfc is not None):
-                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc, _swd_sfc, _lwd_sfc)
+                    or _pr_sfc is not None
+                    or any(_e is not None for _e in _extras)):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),

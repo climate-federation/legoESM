@@ -33,6 +33,7 @@ from legoesm.core.tracers import (
 )
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
+    convection_config_for,
     build_physics_pipeline,
     required_microphysics_tracer_slots,
     turbulence_config_for,
@@ -42,6 +43,29 @@ from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
+
+
+def _external_forcing_active(
+    radiation_ok: bool,
+    ozone_active: bool,
+    aerosol_active: bool,
+    aerosol_lw_active: bool,
+    ghg_active: bool,
+    experiment_active: bool,
+) -> bool:
+    """Whether the per-step external-forcing dict (o3/aerosol/ghg) must be built.
+
+    Single source of truth for the ``_ext_forcing`` gate used on both the
+    hydrostatic and spectral full-physics AMIP paths.  ``radiation_ok`` is the
+    per-path scheme test (both paths need a gas-radiation scheme, but the
+    spectral path is rrtmgp-only).  ``aerosol_lw_active`` MUST be included:
+    volcanic stratospheric LW aerosol supplied alone (no ozone / SW aerosol /
+    GHG / experiment) still has to reach RRTMGP's LW absorption slot.
+    """
+    return radiation_ok and (
+        ozone_active or aerosol_active or aerosol_lw_active
+        or ghg_active or experiment_active
+    )
 
 
 def _scatter_flat_columns(flat_arr, layout, n_tile):
@@ -159,7 +183,8 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
-def _standalone_cloud_config(cfg, cloud_scheme: str):
+def _standalone_cloud_config(cfg, cloud_scheme: str,
+                             allow_convective_cloud: bool = False):
     """Tuned ``CloudConfig`` for the standalone (MPAS/spectral) radiation path.
 
     Mirrors the FV pipeline's ``build_cloud_config`` call (#689) so the tuned
@@ -167,33 +192,44 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
     / Xu-Randall knobs) reach the standalone backends too (#870 Phase 1) —
     previously these paths silently ran ``CloudConfig`` defaults.
 
-    ``convective_cloud`` stays OFF here: the standalone radiation call
-    (``radiation/integration.py``) does not thread ``conv_precip`` into
-    ``compute_cloud_properties``, and ``convective_cloud=True`` without it
-    trips that function's loud misconfiguration guard by design.  Returns
-    ``None`` (=> scheme-default config) when the scheme is "none".
+    ``convective_cloud``: honoured on the MPAS path
+    (``allow_convective_cloud=True`` — 2026-07-24: the hydrostatic radiation
+    fn reads the LAGGED ``PhysicsState.conv_precip`` carry the convection
+    module publishes, closing the old "does not thread conv_precip" gap);
+    still FORCED OFF on the spectral path, whose lean loop refuses stateful
+    physics and therefore has no ``conv_precip`` carry to read — enabling it
+    there would trip ``compute_cloud_properties``' loud misconfiguration
+    guard by design.  Returns ``None`` (=> scheme-default config) when the
+    scheme is "none".
     """
     if cloud_scheme == "none":
         return None
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
 
-    # LOUD, not silent (repo doctrine): a user/YAML requesting
-    # convective_cloud=True on a standalone backend would otherwise get
-    # different physics with no trace (pre-merge codex review).  The lane
-    # still runs (the production YAML sets it true for the FV path); the
-    # forced drop is now visible in the log.
-    if bool(getattr(cfg, "convective_cloud", False)):
+    _conv_cloud = bool(getattr(cfg, "convective_cloud", False))
+    if _conv_cloud and allow_convective_cloud:
+        logger.info(
+            "convective_cloud=True ACTIVE on the MPAS standalone path: "
+            "Slingo cumulus fraction driven by the one-step-lagged "
+            "PhysicsState.conv_precip carry (the convection module's "
+            "column-integrated in-updraft rain production). Schemes with "
+            "no rain split publish zero — their cumulus fraction is zero."
+        )
+    elif _conv_cloud:
+        # LOUD, not silent (repo doctrine): the spectral lean loop refuses
+        # stateful physics, so there is no conv_precip carry to read — the
+        # forced drop stays visible in the log.
         logger.warning(
-            "convective_cloud=True is FORCED OFF on the standalone "
-            "(MPAS/spectral) radiation path: it does not thread conv_precip, "
-            "and convective_cloud without it trips compute_cloud_properties' "
-            "misconfiguration guard. The FV (cubed-sphere/latlon) pipeline "
-            "honours the setting."
+            "convective_cloud=True is FORCED OFF on the spectral "
+            "standalone radiation path: its lean loop carries no "
+            "PhysicsState, so there is no conv_precip for the Slingo "
+            "fraction. The FV pipeline and the MPAS lane honour the "
+            "setting."
         )
 
     return build_cloud_config(
         cloud_scheme,
-        convective_cloud=False,
+        convective_cloud=(_conv_cloud and allow_convective_cloud),
         rh_crit=getattr(cfg, "cloud_rh_crit", None),
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
@@ -212,6 +248,37 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
 # physics.
 _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
+
+
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+    """MPAS post-step horizontal q_v smoothing (array-level, testable).
+
+    UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
+    the FV lane's module-scope ``_apply_qv_smoothing`` so the exact driver
+    code is unit-tested directly (not just a replicated expression).  Plain
+    (no dp weighting) is deliberate: the default hybrid coordinate's surface
+    dp can be <= 0 over high terrain, which a mass-weighted form would divide
+    by (Inf/NaN).  Monotone under the setup-time CFL guard
+    ``nu*dt*scalar_del2_cell_cfl_factor(mesh) <= 1`` (the driver enforces
+    <= 0.5), so the floor is then a no-op (to roundoff) and the per-level
+    ``sum_c A_c q_c`` integral is conserved (in exact arithmetic; to roundoff —
+    ~1e-7 relative in fp32).  The floor only sanitises finite negatives from a
+    violated bound, NOT pre-existing NaN/Inf in ``q_v`` (max(NaN,0)=NaN).
+
+    Parameters
+    ----------
+    q_v : jax.Array, shape (nCells, nlev) — vapour mixing ratio [kg/kg].
+    mesh : VoronoiMesh
+    nu : float — del2 diffusivity [m^2/s].
+    dt : float — step [s].
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev) — smoothed, floored q_v (q_v dtype).
+    """
+    from legoesm.core.operators_voronoi import scalar_del2_cell_3d
+    lap = scalar_del2_cell_3d(q_v, mesh)
+    return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
 
 
 def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
@@ -2354,7 +2421,10 @@ class ModelDriver:
             get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
-        from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
+        from legoesm.forcing.surface_utils import (
+            distribute_column_aod_to_layers,
+            place_stratospheric_aod_profile_to_layers,
+        )
 
         nlev = self.sigma.sigma_full.shape[0]
         shape_2d = p_s.shape
@@ -2420,19 +2490,24 @@ class ModelDriver:
         # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
         # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
         # and a run without volcanic LW aerosol is byte-identical (zeros LW
-        # od is a RRTMGP no-op).  Distributed to layers by the SAME
-        # pressure-thickness helper used for the SW aerosol.  Stored as an
-        # instance attribute (NOT added to the 3-tuple return) so the five
-        # existing unpack call sites keep their arity.
+        # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
+        # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
+        # weighted gray band collapse) plus its pressure edges; the profile
+        # is placed at its true stratospheric pressure by a conservative
+        # overlap remap -- NOT spread by full-column pressure mass, which
+        # dumped ~90% of a stratospheric aerosol into the troposphere.
+        # Stored as an instance attribute (NOT added to the 3-tuple return)
+        # so the five existing unpack call sites keep their arity.
         aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_lw_active:
-            aerosol_lw_col = get_aerosol_lw_at_time(
+            aerosol_lw_prof = get_aerosol_lw_at_time(
                 self._aerosol_config, day, lat_grid=lat_col,
             )
-            if aerosol_lw_col is not None:
-                aerosol_lw_od = distribute_column_aod_to_layers(
-                    jnp.asarray(aerosol_lw_col), p_half_col,
-                )
+            if aerosol_lw_prof is not None:
+                prof_col, p_edges = aerosol_lw_prof
+                aerosol_lw_od = place_stratospheric_aod_profile_to_layers(
+                    jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+                ).astype(p_s.dtype)
         self._aerosol_lw_od = aerosol_lw_od
 
         # GHG VMR override (None for gray radiation / constant forcing)
@@ -5357,12 +5432,14 @@ class ModelDriver:
 
         Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
         host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        ``mean_T`` is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal cell
+        weight — areaCell weighting is a deferred refinement on the
+        quasi-uniform SCVT).
         """
         from mpi4py import MPI as _MPI
         vl = self._voronoi_layout
         om_c = vl.owned_mask_cells          # (n_local_cells,) bool
         om_e = vl.owned_mask_edges          # (n_local_edges,) bool
-        nlev = T_data.shape[-1]
         T_owned = jnp.where(om_c[:, None], T_data, 0.0)
         ps_owned = jnp.where(om_c, p_s_data, 0.0)
         absu_owned = jnp.where(om_e[:, None], jnp.abs(u_data), 0.0)
@@ -5371,11 +5448,24 @@ class ModelDriver:
         finite_l = jnp.all(jnp.isfinite(T_owned))
         cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
                      if cwv_field is not None else jnp.asarray(0.0))
+        # Pressure-weighted mean T (sum T*dp / sum dp; equal cell weight —
+        # the quasi-uniform SCVT makes areaCell weighting a negligible
+        # refinement, and the pre-fix convention was equal-cell too), owned
+        # cells only: an unweighted level mean is coordinate-dependent
+        # (stretched hybrid grids overstate it by ~+9 K vs sigma on the same
+        # state; quantified 2026-07-23), which made hybrid-vs-sigma
+        # stability curves incomparable.  Mirrors the serial day-line
+        # diagnostic.  The where() wraps the PRODUCT so a non-finite halo
+        # p_s cannot leak NaN through 0*NaN (codex F-B6).
+        _p_half_d = self.sigma.pressure_at_half(p_s_data)
+        _dp_d = _p_half_d[..., 1:] - _p_half_d[..., :-1]
+        Tdp_sum_l = jnp.sum(jnp.where(om_c[:, None], T_data * _dp_d, 0.0))
+        dp_sum_l = jnp.sum(jnp.where(om_c[:, None], _dp_d, 0.0))
         # One device→host transfer for all local reductions.
         _loc = np.asarray(jnp.stack([
-            jnp.sum(T_owned), jnp.sum(ps_owned), jnp.max(absu_owned),
+            Tdp_sum_l, jnp.sum(ps_owned), jnp.max(absu_owned),
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
-            cwv_sum_l.astype(T_data.dtype),
+            cwv_sum_l.astype(T_data.dtype), dp_sum_l,
         ]))
         comm = _MPI.COMM_WORLD
         # THREE batched buffer allreduces instead of eight scalar pickle
@@ -5383,13 +5473,14 @@ class ModelDriver:
         # collective; at multi-node rank counts the per-diag latency is
         # 8x a single round for no reason).  The finite flag (as a float)
         # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
-        _sums = np.array([_loc[0], _loc[1], _loc[6]], dtype=np.float64)
+        _sums = np.array([_loc[0], _loc[1], _loc[6], _loc[7]],
+                         dtype=np.float64)
         _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
         _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
         comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
         comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
         comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
-        g_sum_T, g_sum_ps, g_sum_cwv = (float(v) for v in _sums)
+        g_sum_Tdp, g_sum_ps, g_sum_cwv, g_sum_dp = (float(v) for v in _sums)
         g_max_u, g_T_max = (float(v) for v in _maxs)
         g_T_min, g_finite_min = (float(v) for v in _mins)
         g_finite = bool(g_finite_min > 0.5)
@@ -5398,7 +5489,7 @@ class ModelDriver:
             self._mpas_g_n_cells = comm.allreduce(
                 int(vl.partition.n_owned_cells), op=_MPI.SUM)
         g_n_cells = self._mpas_g_n_cells
-        mean_T = g_sum_T / (g_n_cells * nlev)
+        mean_T = g_sum_Tdp / max(g_sum_dp, 1e-30)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
@@ -5479,6 +5570,20 @@ class ModelDriver:
             if (_sfc_diag is not None and len(_sfc_diag) > 2
                     and _sfc_diag[2] is not None):
                 precip = _sfc_diag[2].data
+            # TOA + surface turbulent fluxes (slots 3.. of the sfc_diag
+            # contract: lw_up_toa, sw_up_toa, sw_down_toa, shflx, lhflx) —
+            # None on runs without radiation/turbulence; the collector
+            # skips absent fields.
+            def _sfc_slot(i):
+                if (_sfc_diag is not None and len(_sfc_diag) > i
+                        and _sfc_diag[i] is not None):
+                    return _sfc_diag[i].data
+                return None
+            rlut = _sfc_slot(3)
+            rsut = _sfc_slot(4)
+            rsdt = _sfc_slot(5)
+            hfss = _sfc_slot(6)
+            hfls = _sfc_slot(7)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -5516,6 +5621,11 @@ class ModelDriver:
                 precip=precip,
                 phis=state.phis.data,
                 tas=tas,
+                rlut=rlut,
+                rsut=rsut,
+                rsdt=rsdt,
+                hfss=hfss,
+                hfls=hfls,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
@@ -5627,6 +5737,21 @@ class ModelDriver:
         ``range(start_step, n_steps_total)`` and treat ``--days`` as total;
         do not copy their launcher convention here.
         """
+        # --budget-ledger is a compiled-segment (SegmentCarry) diagnostic —
+        # the per-process attribution hooks live in the FV segment loops and
+        # are NOT wired into this lean loop.  It used to be SILENTLY inert
+        # here (#1311: chains passed the flag and got no ledger, so the
+        # conv-pairing gate quietly never ran); refuse loudly until the
+        # attribution port lands.
+        if bool(getattr(self.config.output, "budget_ledger", False)):
+            raise ValueError(
+                "--budget-ledger is not implemented on the MPAS lean loop "
+                "(#1311): the per-process ledger accumulates inside the FV "
+                "compiled segments (SegmentCarry), which this path does not "
+                "use.  Run without the flag, or use the FV lanes for "
+                "ledger-attributed budget runs, until the MPAS attribution "
+                "port lands."
+            )
         import time
 
         cfg = self.config
@@ -5762,6 +5887,13 @@ class ModelDriver:
                     # proven-stable intervention (40/40 + multi-month pilots).
                     # So on MPAS the flag is applied post-step below; the
                     # coupled path (physics_pipeline) still applies it in-scheme.
+                    # The float trigger/heating-cap OVERRIDES are threaded here
+                    # so the post-step reads below pick them up (the post-step
+                    # drain reads the scheme sub-config, not ExperimentConfig).
+                    hard_sat_adjust_threshold=getattr(
+                        cfg, "hard_sat_adjust_threshold", None),
+                    hard_sat_max_heating_K=getattr(
+                        cfg, "hard_sat_max_heating_K", None),
                 )
             })
         # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
@@ -5780,6 +5912,12 @@ class ModelDriver:
                 "use a warm-rain scheme (kessler, seifert_beheng, morrison, "
                 "thompson, p3) or drop --hard-saturation-adjustment."
             )
+        # _hsub already carries any --hard-sat-adjust-threshold /
+        # --hard-sat-max-heating-k ExperimentConfig overrides: they are
+        # threaded through apply_microphysics_experiment_flags above (the
+        # day-137 drain-capacity lever; the --params route cannot reach this
+        # lane's micro sub-config, which is built here rather than in the
+        # flattened atm scalar map).
         _hard_sat_threshold = (
             _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
         _hard_sat_max_heating = (
@@ -5805,7 +5943,10 @@ class ModelDriver:
                 cloud_scheme=_cloud_scheme,
                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
                 # reach the MPAS radiation clouds too (#870 Phase 1).
-                cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
+                # convective_cloud honoured here (2026-07-24): the lagged
+                # PhysicsState.conv_precip carry exists on this path.
+                cloud_config=_standalone_cloud_config(
+                    cfg, _cloud_scheme, allow_convective_cloud=True),
                 diurnal_cycle=cfg.diurnal_cycle,
                 orbit=_orbit_params,
                 # CLUBB sub-grid cloud fraction -> radiation (marine-Sc albedo
@@ -5820,7 +5961,12 @@ class ModelDriver:
                 # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
-            convection=ConvectionConfig(scheme=cfg.convection),
+            # grid_dx_m: SCVT sqrt(mean cell area) [m] — auto-fills Bechtold's
+            # IFS ZTAURES resolution factor (codex 2026-07-23 finding A;
+            # areaCell is physical, sums to 4*pi*R^2).
+            convection=convection_config_for(
+                cfg,
+                grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
@@ -5872,18 +6018,34 @@ class ModelDriver:
         # turbulence factory (closure const); the lapse adjusts the T_sfc
         # forcing anchor below.  Both default OFF => byte-identical builds.
         _land_beta = float(getattr(cfg, "mpas_land_beta", 1.0))
+        # Phase 2b (#1312): traced per-cell beta_soil replaces the static
+        # knob over land; the turbulence factory then needs f_land even when
+        # the static knob is at its neutral 1.0.
+        _land_beta_soil_on = bool(getattr(cfg, "mpas_land_beta_soil", False))
         _land_lapse_K_m = (
             float(getattr(cfg, "mpas_land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
         if self._f_land is not None:
             _f_land_cells = jnp.asarray(self._f_land).reshape(-1)
-        if (_land_beta != 1.0 or _land_lapse_K_m > 0.0) \
-                and _f_land_cells is None:
-            raise ValueError(
-                "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
-                "fraction, but none was loaded (no --topography / land "
-                "mask source) — the knobs would be silently inert."
-            )
+        if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
+            # Under MPI self._f_land is the RANK-LOCAL (owned+halo) field; an
+            # ocean-only rank must not falsely abort a run whose GLOBAL mask
+            # has land (codex F-C2).  The logical-OR allreduce is collective
+            # and every rank computes the same verdict, so the raise (or
+            # not) is deadlock-free.
+            _has_land = (_f_land_cells is not None
+                         and bool(jnp.any(_f_land_cells > 0.0)))
+            if self._voronoi_layout is not None:
+                from mpi4py import MPI as _MPI
+                _has_land = bool(
+                    _MPI.COMM_WORLD.allreduce(_has_land, op=_MPI.LOR))
+            if not _has_land:
+                raise ValueError(
+                    "mpas_land_beta/mpas_land_lapse_K_per_km need a land "
+                    "fraction, but none was loaded or it is all-zero "
+                    "globally (flat / ocean-only topography) — the knobs "
+                    "would be silently inert."
+                )
         if _land_beta != 1.0 or _land_lapse_K_m > 0.0:
             logger.info(
                 "  MPAS land boundary: lapse=%.2f K/km, beta=%.2f "
@@ -5894,7 +6056,9 @@ class ModelDriver:
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
-                                          if _land_beta != 1.0 else None),
+                                          if (_land_beta != 1.0
+                                              or _land_beta_soil_on)
+                                          else None),
                                   land_beta=_land_beta)
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
@@ -5917,7 +6081,9 @@ class ModelDriver:
             make_physics(phys_cfg, model_type="mpas", dt=DT,
                          column_mesh=_column_mesh, need_rad=False,
                          f_land=(_f_land_cells
-                                 if _land_beta != 1.0 else None),
+                                 if (_land_beta != 1.0
+                                     or _land_beta_soil_on)
+                                 else None),
                          land_beta=_land_beta)
             if _subcycle_rad else None
         )
@@ -5991,6 +6157,61 @@ class ModelDriver:
                 cfg.sponge_coeff_per_day, _sig_top,
                 float(_sponge_decay[0]),
             )
+        # Horizontal q_v smoothing (post-step, MPAS lane; see the config
+        # field note for the full rationale).  The MPAS lane historically had
+        # no horizontal moisture smoothing — the missing third suspect behind
+        # the cell-scale CWV recharge/discharge speckle.  UNWEIGHTED SCVT del2
+        # (∇²) + a q>=0 floor.  Unweighted (NOT mass-weighted) is REQUIRED:
+        # the default MPAS vertical coordinate is hybrid, whose surface-layer
+        # thickness dp = dA*p_ref + dB*p_s goes <= 0 for p_s below ~2/3 p_ref
+        # (~660 hPa, reached over high terrain — Tibet, Andes, Antarctica)
+        # because dA < 0 near the surface; a dp-weighted del2 would then
+        # divide by a non-positive dp (Inf/NaN).  This conserves (to fp
+        # roundoff) the per-level sum_c A_c q_c integral, NOT column water
+        # vapour (an explicitly non-conservative filter).  The plain-del2
+        # monotonicity factor is
+        # geometry-only, so the CFL guard below is EXACT for the applied op.
+        _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        if _qv_smooth_nu > 0.0:
+            from legoesm.core.operators_voronoi import (
+                scalar_del2_cell_cfl_factor,
+            )
+            if self._voronoi_layout is not None:
+                raise ValueError(
+                    "mpas_qv_smooth_del2_m2s > 0 is not wired for the "
+                    "distributed Voronoi (MPI) lane yet — the horizontal "
+                    "stencil needs a halo refresh after the dycore step. "
+                    "Run single-process or set the coefficient to 0."
+                )
+            if self.state.tracers is None or "q_v" not in self.state.tracers:
+                raise ValueError(
+                    "mpas_qv_smooth_del2_m2s > 0 needs a q_v tracer; this "
+                    "run has none (dry configuration) — the knob would be "
+                    "silently inert."
+                )
+            # Explicit-del2 monotonicity/positivity bound: q + nu*dt*lap is a
+            # convex combination of stencil values iff nu*dt*g_max <= 1, with
+            # g_c = (1/A_c) sum_e dvEdge_e/dcEdge_e (shared helper — same
+            # factor the operator obeys, so guard and operator cannot drift).
+            # Enforce <= 0.5 (2x safety; keeps the q>=0 floor a no-op to
+            # roundoff, so the per-level sum_c A_c q_c integral is conserved —
+            # exact arithmetic, to fp roundoff ~1e-7 in fp32).
+            # EXACT for the plain form actually applied — no dp-ratio guess.
+            _g_max = scalar_del2_cell_cfl_factor(self.grid)
+            _cfl = _qv_smooth_nu * DT * _g_max
+            if _cfl > 0.5:
+                raise ValueError(
+                    f"mpas_qv_smooth_del2_m2s={_qv_smooth_nu:g} violates the "
+                    f"explicit-diffusion monotonicity bound: nu*dt*g_max = "
+                    f"{_cfl:.3f} > 0.5 (dt={DT:g}s, mesh g_max={_g_max:.3e} "
+                    f"1/m^2). Max stable coefficient here: "
+                    f"{0.5 / (DT * _g_max):.3e} m^2/s."
+                )
+            logger.info(
+                "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
+                "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
+                _qv_smooth_nu, _cfl,
+            )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
         if _sst_forcing:
@@ -6018,8 +6239,15 @@ class ModelDriver:
                 _ts = blend_surface_temperature(
                     jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
                 if _lapse_z is not None:
+                    # Cast the storage-dtype (possibly f32) statics to the
+                    # anchor dtype so the correction is formed at anchor
+                    # precision (mirrors the turbulence-path cast).  Where
+                    # f_land and sic overlap (elevated icy coasts) the lapse
+                    # cools the blended anchor's land fraction too —
+                    # directionally harmless (see codex F5).
                     _ts = land_lapse_adjusted_surface_temperature(
-                        _ts, _f_land_cells, _lapse_z, _land_lapse_K_m)
+                        _ts, _f_land_cells.astype(_ts.dtype),
+                        _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
@@ -6050,8 +6278,18 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
+        if _land_beta_soil_on and not _land_ml_on:
+            raise ValueError(
+                "mpas_land_beta_soil=True requires the interactive "
+                "multilayer land on the MPAS lane (use_multilayer_land with "
+                "a built land state); without it there is no soil moisture "
+                "to derive beta_soil from — the flag would be silently "
+                "inert."
+            )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
+        _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
+        _land_beta_cells = None        # (nCells,) traced beta of the last step
         if _land_ml_on:
             if not _sst_forcing:
                 raise ValueError(
@@ -6087,6 +6325,26 @@ class ModelDriver:
                     lat=_lml_lat, doy=doy, land_params=_lml_params)
                 return new_state, resp.T_sfc
 
+            # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
+            # ``forcing["beta_land"]`` the turbulence surface flux consumes.
+            # Same helper (land_tile_beta_soil) and thresholds the coupled
+            # pipeline's land tile applies — one formula, one place.
+            _land_beta_fn = None
+            if _land_beta_soil_on:
+                from legoesm.land.multilayer_land import land_tile_beta_soil
+
+                @jax.jit
+                def _land_beta_fn(land_state):
+                    return jnp.clip(
+                        land_tile_beta_soil(
+                            land_state.theta_soil, _lml_cfg, _lml_params),
+                        0.0, 1.0)
+                if _land_beta != 1.0:
+                    logger.info(
+                        "  mpas_land_beta_soil: traced per-cell beta_soil "
+                        "REPLACES the static mpas_land_beta=%.2f over land",
+                        _land_beta)
+
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
 
@@ -6097,11 +6355,17 @@ class ModelDriver:
                 (physics_pipeline.py) field-for-field.
                 """
                 _sd = getattr(self.model, "_sfc_diag", None)
-                if (_sd is None or len(_sd) < 5
-                        or _sd[3] is None or _sd[4] is None):
+                # Slot contract (primitive_eq_mpas #1318 CMOR feed +
+                # land port union): (sw_net, lw_net, precip, lw_up_toa,
+                # sw_up_toa, sw_down_toa, shflx, lhflx,
+                # sw_down_sfc, lw_down_sfc) — the DOWNWELLING surface
+                # fluxes the land needs are slots 8/9 (NOT 3/4, which are
+                # now TOA fields).
+                if (_sd is None or len(_sd) < 10
+                        or _sd[8] is None or _sd[9] is None):
                     return None
-                sw_down = jnp.asarray(_sd[3].data).reshape(-1)
-                lw_down = jnp.asarray(_sd[4].data).reshape(-1)
+                sw_down = jnp.asarray(_sd[8].data).reshape(-1)
+                lw_down = jnp.asarray(_sd[9].data).reshape(-1)
                 precip = (jnp.asarray(_sd[2].data).reshape(-1)
                           if _sd[2] is not None else jnp.zeros_like(sw_down))
                 T_air = self.state.T.data[:, -1]
@@ -6143,7 +6407,6 @@ class ModelDriver:
         # full ``physics_fn`` and the held ``physics_fn_norad``).
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_forcing_mpas
-            from legoesm.core.state import HydrostaticTendencies
             from legoesm.atmosphere.physics.combined import (
                 physics_config_requires_phys_state,
             )
@@ -6155,7 +6418,16 @@ class ModelDriver:
                     rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
                     phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
                     hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
-                    summed = HydrostaticTendencies(
+                    # HS adds only the 4 DYNAMICS tendencies (du/dT/dp_s/dphis);
+                    # ``_replace`` overrides just those and PRESERVES every
+                    # diagnostic field on the radiation tendency — sw/lw net,
+                    # precip, AND the CMOR TOA/turbulent-flux extras (sw_up_toa,
+                    # lw_up_toa, sw_down_toa, shflx_sfc, lhflx_sfc). An explicit
+                    # constructor that enumerated the forwarded fields silently
+                    # dropped whichever were not listed (it lost sw/lw net + precip
+                    # once already, codex); _replace makes the repack field-count
+                    # agnostic so a future diagnostic cannot regress here.
+                    summed = rrtmgp_tend._replace(
                         du_dt=rrtmgp_tend.du_dt.replace(
                             data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
                         dT_dt=rrtmgp_tend.dT_dt.replace(
@@ -6164,15 +6436,6 @@ class ModelDriver:
                             data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
                         dphis_dt=rrtmgp_tend.dphis_dt.replace(
                             data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
-                        tracer_tendencies=rrtmgp_tend.tracer_tendencies,
-                        # Forward the radiation surface-flux diagnostics (HS adds
-                        # no surface radiation) so the coupled export survives the
-                        # HS repack — else HS+radiation loses them (codex).
-                        sw_net_sfc=rrtmgp_tend.sw_net_sfc,
-                        lw_net_sfc=rrtmgp_tend.lw_net_sfc,
-                        # ...including surface precip (HS+microphysics), else the
-                        # ocean P-E / land forcing loses it through the repack.
-                        precip=getattr(rrtmgp_tend, "precip", None),
                     )
                     return summed, phys_state_out
 
@@ -6248,10 +6511,10 @@ class ModelDriver:
         # value change stays a traced-value change (no retrace); the
         # dict KEY STRUCTURE is decided once here and never changes
         # mid-run (pytree stability for the JIT'd step).
-        _ext_forcing = (
-            cfg.radiation in ("rrtmg", "rrtmgp")
-            and (self._ozone_ext_active or self._aerosol_active
-                 or self._ghg_active or bool(self._experiment))
+        _ext_forcing = _external_forcing_active(
+            cfg.radiation in ("rrtmg", "rrtmgp"),
+            self._ozone_ext_active, self._aerosol_active,
+            self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
         )
         # Transient solar file (CMIP6 TSI + optional 14-band spectral):
         # sampled DAILY like SST/ozone, threaded as traced
@@ -6385,7 +6648,13 @@ class ModelDriver:
             # prognostic-aerosol tracer is opt-in and zero before the feature
             # existed).  Any OTHER missing field is still a partial/corrupted
             # carry and must fail loudly (issue #405/#413).
-            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
+            _NEW_OPTIONAL_PS_FIELDS = frozenset({
+                "aerosol_number",
+                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+                # is the correct pre-feature state (no convective cloud was
+                # diagnosed before it existed).
+                "conv_precip",
+            })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
                     PHYSSTATE_INPUT_FIELDS,
@@ -6500,6 +6769,15 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
+        # Phase 2b (#1312): seed the traced per-cell beta from the CURRENT
+        # land state (cold-start or checkpoint-restored — beta is a pure
+        # function of the restored soil moisture, so restarts are exact
+        # without a new checkpoint field).  Seeding BEFORE the loop keeps
+        # the ``beta_land`` forcing key structurally present from step 0 —
+        # adding it mid-run would change the forcing pytree and retrace
+        # ``model.step``.
+        if _land_beta_fn is not None:
+            _land_beta_cells = _land_beta_fn(self._land_ml_state)
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -6631,6 +6909,11 @@ class ModelDriver:
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
                         + _f_land_cells * _land_T_skin)
+                # Phase 2b (#1312): traced per-cell beta_soil (same one-step
+                # lag as the skin T above; seeded pre-loop so the key is
+                # structurally stable — no retrace).
+                if _land_beta_cells is not None:
+                    _forcing["beta_land"] = _land_beta_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -6661,6 +6944,8 @@ class ModelDriver:
                     self._land_ml_state, _land_T_skin = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    if _land_beta_fn is not None:
+                        _land_beta_cells = _land_beta_fn(self._land_ml_state)
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.
@@ -6668,6 +6953,22 @@ class ModelDriver:
                 self.state = self.state._replace(
                     u=self.state.u.replace(
                         data=self.state.u.data * _sponge_decay))
+            # Post-step horizontal q_v smoothing (opt-in).  Placed BEFORE the
+            # hard-saturation drain so the drain acts on the smoothed field
+            # (smoothing spreads a grid-scale supersaturation spike across
+            # neighbours; the drain then removes what remains).  Module-scope
+            # _mpas_qv_smooth_step (the exact code the unit test exercises):
+            # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
+            # the per-level sum_c A_c q_c integral, NOT column water vapour —
+            # an explicitly non-conservative filter (see the config field note).
+            # Eager like the drain below (outside jit).
+            if _qv_smooth_nu > 0.0:
+                _trc_sm = self.state.tracers
+                _qv_new_sm = _mpas_qv_smooth_step(
+                    _trc_sm["q_v"].data, self.grid, _qv_smooth_nu, DT)
+                _new_trc_sm = dict(_trc_sm)
+                _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
+                self.state = self.state._replace(tracers=_new_trc_sm)
             # Post-step HARD SATURATION ADJUSTMENT (opt-in), applied on the FINAL
             # state AFTER the dycore's vertical vapour transport has acted this
             # step -- the load-bearing placement (in-scheme leaves the transport
@@ -6738,8 +7039,19 @@ class ModelDriver:
                 else:
                     # Serial / single-rank: fuse the reductions into one
                     # device→host transfer (each ``float()`` is a GPU stall).
+                    # mean T is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal
+                    # cell weight on the quasi-uniform SCVT): an unweighted
+                    # level mean is coordinate-dependent — the stretched
+                    # hybrid grid packs thin warm near-surface levels that
+                    # each get one equal vote, overstating the global mean
+                    # by +9.2 K vs sigma on the same state (quantified
+                    # 2026-07-23, hybrid-L20 day-8 ckpt), which made
+                    # hybrid-vs-sigma stability curves incomparable.
+                    _p_half_diag = self.sigma.pressure_at_half(p_s_data)
+                    _dp_diag = (_p_half_diag[..., 1:]
+                                - _p_half_diag[..., :-1])
                     _stats = jnp.stack([
-                        jnp.mean(T_data),
+                        jnp.sum(T_data * _dp_diag) / jnp.sum(_dp_diag),
                         jnp.mean(p_s_data),
                         jnp.max(jnp.abs(u_data)),
                         jnp.min(T_data),
@@ -7195,7 +7507,7 @@ class ModelDriver:
                     orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
-                convection=ConvectionConfig(scheme=cfg.convection),
+                convection=convection_config_for(cfg),
                 turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
                 gravity_wave_drag=GravityWaveDragConfig(
@@ -7244,10 +7556,11 @@ class ModelDriver:
                     "each step).")
             else:
                 _phys_fn_loop = _amip_physics_fn
-            _ext_forcing = (
-                _rad_scheme == "rrtmgp"
-                and (self._ozone_ext_active or self._aerosol_active
-                     or self._ghg_active or bool(self._experiment))
+            _ext_forcing = _external_forcing_active(
+                _rad_scheme == "rrtmgp",
+                self._ozone_ext_active, self._aerosol_active,
+                self._aerosol_lw_active, self._ghg_active,
+                bool(self._experiment),
             )
             logger.info(
                 "  Spectral full-physics AMIP pipeline: "

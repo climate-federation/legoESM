@@ -120,6 +120,57 @@ EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
 _EC_SITE_DEFAULTS = {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}
 
 
+# DifferBESS IGBP (0-indexed) + Koppen climate -> CLM4.5 multilayer-canopy PFT
+# index (1-based, MLpftconMod: 1 NET-temperate, 2 NET-boreal, 3 NDT-boreal,
+# 4 BET-tropical, 5 BET-temperate, 6 BDT-tropical, 7 BDT-temperate, 8 BDT-boreal,
+# 9 BES, 10 BDS-temperate, 11 BDS-boreal, 13 C3-grass, 14 C4-grass, 15 crop).
+# Two-leaf is site-aware via the driver CanopyLandParams; CLM-ML takes a single
+# PFT, so it MUST be derived from the site's IGBP+climate (not a fixed default 7),
+# or CLM-ML runs every site as broadleaf-deciduous and loses skill.  IGBP->PFT-name
+# category matches the reader's _IGBP_TO_PFT (WSA/SAV->savanna tree; CSH/OSH->shrub).
+_CLM_PFT_BY_CLIMATE: dict[int, dict[str, int]] = {
+    0: {"tropical": 1,  "temperate": 1,  "boreal": 2},   # ENF -> NET
+    1: {"tropical": 4,  "temperate": 5,  "boreal": 5},   # EBF -> BET
+    2: {"tropical": 3,  "temperate": 3,  "boreal": 3},   # DNF -> NDT boreal
+    3: {"tropical": 6,  "temperate": 7,  "boreal": 8},   # DBF -> BDT
+    4: {"tropical": 6,  "temperate": 7,  "boreal": 8},   # MF  -> BDT (approx)
+    5: {"tropical": 9,  "temperate": 10, "boreal": 11},  # CSH -> BES(trop)/BDS
+    6: {"tropical": 9,  "temperate": 10, "boreal": 11},  # OSH -> BES(trop)/BDS
+    7: {"tropical": 6,  "temperate": 7,  "boreal": 8},   # WSA -> BDT (savanna tree)
+    8: {"tropical": 6,  "temperate": 7,  "boreal": 8},   # SAV -> BDT
+    9: {"tropical": 13, "temperate": 13, "boreal": 13},  # GRA -> C3 grass
+    10: {"tropical": 15, "temperate": 15, "boreal": 15}, # CRO -> crop
+    12: {"tropical": 15, "temperate": 15, "boreal": 15}, # CNM/CRO -> crop
+}
+_CLM_PFT_DEFAULT = 7  # broadleaf-deciduous-temperate; fallback for an unmapped IGBP
+
+
+def clm_pft_for_site(igbp: int, climate: str) -> int:
+    """CLM4.5 multilayer-canopy PFT index for a site's ``(IGBP, climate)``.
+
+    Falls back to :data:`_CLM_PFT_DEFAULT` (BDT-temperate) for an IGBP absent from
+    the table, and to the temperate column for an unrecognised climate string.
+    """
+    by_clim = _CLM_PFT_BY_CLIMATE.get(int(igbp))
+    if by_clim is None:
+        return _CLM_PFT_DEFAULT
+    return by_clim.get(climate, by_clim.get("temperate", _CLM_PFT_DEFAULT))
+
+
+def _site_mean_vcmax25(d: ECSiteDriver) -> float | None:
+    """Valid-mean of the driver's per-site C3 Vcmax25 [umol/m2/s], or None.
+
+    This is the SAME per-site photosynthetic capacity two-leaf consumes
+    (``CanopyLandParams.Vcmax25_C3_leaf``); injected into CLM-ML's
+    ``vcmax25_override`` so the multilayer canopy uses the site value instead of
+    the generic MLpftcon PFT-table constant.  A scalar (site mean) — the seasonal
+    cycle two-leaf also uses is a documented follow-up (needs per-step injection).
+    """
+    v = np.asarray(d.canopy_params.Vcmax25_C3_leaf, dtype=float).ravel()
+    v = v[np.isfinite(v) & (v > 0.0)]
+    return float(v.mean()) if v.size else None
+
+
 def ec_site_physics(site: str) -> dict[str, float]:
     """Tower height + root/column depth for ``site`` (BADM-anchored; see table).
 
@@ -718,11 +769,11 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              root_depth: float | None = None, z_ref: float | None = None,
              stress_b0: bool = False, select_best_year: bool = False,
              texture_csv: str = _DEFAULT_TEXTURE_CSV,
-             canopy: str = "two_leaf", clm_pft: int = 7,
+             canopy: str = "two_leaf", clm_pft: int | None = None,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
              clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
-             interception: bool = False, clmml_stomatal: str = "wue",
+             interception: bool = False, clmml_stomatal: str = "ball_berry",
              clmml_vcmax25: float | None = None,
              plant_wilting_point: float | None = None,
              vcmax_c3_scale: float | None = None,
@@ -730,7 +781,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              stomatal_m_c3_scale: float | None = None,
              stomatal_m_c4_scale: float | None = None,
              mosaic: str = "none", tree_frac: float = 0.4,
-             savanna_grass_pft: int = 15, savanna_grass_root_m: float = 0.5,
+             savanna_grass_pft: int = 14, savanna_grass_root_m: float = 0.5,
              savanna_grass_fc4: float = 1.0) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
@@ -751,12 +802,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         if canopy == "clmml" and mode != "prognostic":
             raise ValueError(
                 "mosaic=savanna with --canopy clmml requires --mode prognostic")
-        if canopy == "clmml" and clmml_vcmax25 is not None:
-            # A single --clmml-vcmax25 has no well-defined meaning across distinct
-            # tree/grass tiles; per-tile Vcmax lives in the tile spec instead.
-            raise ValueError(
-                "--clmml-vcmax25 is not supported with mosaic=savanna; the tree/"
-                "grass tiles carry their own PFT Vcmax (per-tile override)")
+        # An explicit --clmml-vcmax25 (if given) overrides the TREE tile's Vcmax
+        # (see the clmml_mosaic build below); grass keeps its PFT-table value.
     mosaic_cfg: PatchMosaicConfig | None = None
     clmml_mosaic: ClmmlMosaicConfig | None = None
     if canopy == "clmml" and mode != "prognostic":
@@ -820,10 +867,21 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # only).  RSL's within-canopy wind profile takes log((z-d)/(ztop-d)),
         # which goes to a math-domain error for a very tall canopy where a layer
         # height drops below the displacement height — "most" avoids that.
+        # PARITY with two-leaf (a richer canopy must get the SAME site inputs, not
+        # generic PFT-table constants, or it loses skill by construction of the
+        # harness).  (a) PFT from the site IGBP+climate, not a fixed default 7;
+        # (b) Vcmax25 = the driver's per-site value (what two-leaf uses), not the
+        # MLpftcon table constant.  An explicit CLI value still wins.
+        pft_resolved = (clm_pft_for_site(d.igbp, d.climate)
+                        if clm_pft is None else int(clm_pft))
+        vcmax_resolved = (_site_mean_vcmax25(d)
+                          if clmml_vcmax25 is None else clmml_vcmax25)
+        print(f"  clmml: pft={pft_resolved} (IGBP={int(d.igbp)}, {d.climate}), "
+              f"Vcmax25={vcmax_resolved!r}, stomatal={clmml_stomatal}")
         canopy_config = CLMMLCanopyConfig(
-            pft_clm=clm_pft, turbulence_scheme=clmml_turbulence,
+            pft_clm=pft_resolved, turbulence_scheme=clmml_turbulence,
             stomatal_model=clmml_stomatal,
-            vcmax25_override=clmml_vcmax25).validate()
+            vcmax25_override=vcmax_resolved).validate()
     else:
         raise ValueError(f"canopy {canopy!r} not supported (two_leaf|clmml)")
     land_config = _build_land_config(
@@ -856,9 +914,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
                 tree_frac=tree_frac, grass_fc4=savanna_grass_fc4,
                 tree_root_m=float(root_depth), grass_root_m=savanna_grass_root_m)
         else:                                              # clmml (prognostic)
+            # Tree tile PFT from the site IGBP when --clm-pft is left to derive.
+            tree_pft = (clm_pft_for_site(d.igbp, d.climate)
+                        if clm_pft is None else int(clm_pft))
+            # Inject the driver site Vcmax (what two-leaf uses) into the tree tile
+            # for parity; grass keeps its PFT table value unless overridden.
+            _site_vcmax = (_site_mean_vcmax25(d)
+                           if clmml_vcmax25 is None else clmml_vcmax25)
             clmml_mosaic = savanna_clmml_two_patch(
-                tree_frac=tree_frac, tree_pft=clm_pft, grass_pft=savanna_grass_pft,
-                tree_root_m=float(root_depth), grass_root_m=savanna_grass_root_m)
+                tree_frac=tree_frac, tree_pft=tree_pft, grass_pft=savanna_grass_pft,
+                tree_root_m=float(root_depth), grass_root_m=savanna_grass_root_m,
+                tree_vcmax25=_site_vcmax)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -1022,23 +1088,28 @@ def main() -> int:
                     help="surface canopy scheme: the two-leaf big-leaf canopy "
                          "(default) or the CLM-ML multilayer canopy (requires the "
                          "'canopy' extra; --mode prognostic only, runs eagerly)")
-    ap.add_argument("--clm-pft", type=int, default=7,
-                    help="CLM PFT index for --canopy clmml (7 = broadleaf "
-                         "deciduous temperate tree; 13 = C3 grass)")
+    ap.add_argument("--clm-pft", type=int, default=None,
+                    help="CLM PFT index for --canopy clmml.  Default (None) DERIVES "
+                         "the PFT from the site IGBP+climate (clm_pft_for_site) so "
+                         "CLM-ML is site-appropriate like two-leaf; pass an int to "
+                         "override (7 = broadleaf-deciduous-temperate, 13 = C3 "
+                         "grass, 14 = C4 grass)")
     ap.add_argument("--clmml-turbulence", default="rsl_bonan",
                     choices=list(VALID_CLM_ML_TURBULENCE_SCHEMES),
                     help="CLM-ML canopy-airspace turbulence scheme: rsl_bonan "
                          "(roughness sublayer, default) or most (Monin-Obukhov; "
                          "avoids the RSL wind-profile domain error on very tall "
                          "canopies)")
-    ap.add_argument("--clmml-stomatal", default="wue",
+    ap.add_argument("--clmml-stomatal", default="ball_berry",
                     choices=list(VALID_CLM_ML_STOMATAL_MODELS),
-                    help="CLM-ML leaf stomatal model: wue (default), medlyn, or "
-                         "ball_berry. medlyn activates the per-site Vcmax "
-                         "injection path (--clmml-vcmax25)")
+                    help="CLM-ML leaf stomatal model: ball_berry (default, matches "
+                         "the two-leaf empirical closure — CLM g1_BB=9/g0_BB=0.01 "
+                         "equal the driver m_C3=9/b0=0.01), medlyn, or wue")
     ap.add_argument("--clmml-vcmax25", type=float, default=None,
-                    help="per-site CLM-ML Vcmax25 [umol/m2/s], beyond the global "
-                         "PFT table; requires --clmml-stomatal medlyn")
+                    help="per-site CLM-ML Vcmax25 [umol/m2/s].  Default (None) uses "
+                         "the driver's site-mean Vcmax25 (the value two-leaf uses) "
+                         "instead of the generic MLpftcon table; applies under any "
+                         "stomatal model")
     ap.add_argument("--clmml-sai", type=float, default=_CLMML_SAI,
                     help="stem area index [m2/m2] for the CLM-ML canopy (the "
                          "two-leaf arm has no stem-area term); tunable")
@@ -1074,9 +1145,10 @@ def main() -> int:
     ap.add_argument("--tree-frac", type=float, default=0.4,
                     help="woody (tree) area fraction for --mosaic savanna; grass "
                          "is the residual 1-tree_frac")
-    ap.add_argument("--savanna-grass-pft", type=int, default=15,
+    ap.add_argument("--savanna-grass-pft", type=int, default=14,
                     help="CLM PFT index for the grass tile of the CLM-ML savanna "
-                         "mosaic (default 15 = C4 grass); tree tile uses --clm-pft")
+                         "mosaic (default 14 = C4 grass; 13 = C3 grass for a "
+                         "Mediterranean savanna); tree tile uses --clm-pft/IGBP")
     ap.add_argument("--savanna-grass-root-m", type=float, default=0.5,
                     help="grass-tile root depth [m] for the savanna mosaic "
                          "(shallow); the tree tile uses the site root depth")

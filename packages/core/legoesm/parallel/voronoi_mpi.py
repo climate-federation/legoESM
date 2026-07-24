@@ -1026,8 +1026,9 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
-        # Surface-flux diagnostic (sw_net_sfc, lw_net_sfc, precip) the coupler
-        # reads from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
+        # Surface-flux diagnostic (8-slot contract: sw_net_sfc, lw_net_sfc,
+        # precip, then the CMOR TOA/turbulent-flux extras) the coupler reads
+        # from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
         # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
         # tendency and publish it (rank-local, matching the rank-local state the
         # MPI-voronoi coupler already sees).  Without this the coupled MPI-voronoi
@@ -1053,9 +1054,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
+            # CMOR TOA + surface turbulent-flux extras — mirror the serial
+            # producer's 8-slot contract (primitive_eq_mpas.step) EXACTLY so the
+            # one-rank MPI-voronoi coupled lane exports rlut/rsut/rsdt/hfss/hfls
+            # too. Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
+            # sw_down_toa, shflx, lhflx) — the consumer (model_driver
+            # _feed_mpas_cmip_accumulators) reads slots 3-7 by this order.
+            _extras = tuple(getattr(_pt, _k, None) for _k in (
+                "lw_up_toa", "sw_up_toa", "sw_down_toa",
+                "shflx_sfc", "lhflx_sfc"))
             if (_sw_sfc is not None or _lw_sfc is not None
-                    or _pr_sfc is not None):
-                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
+                    or _pr_sfc is not None
+                    or any(_e is not None for _e in _extras)):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
@@ -1132,7 +1143,15 @@ def make_voronoi_mpi_step(
             # (post-jit), same as the serial ``self._sfc_diag``.
             if not any(isinstance(leaf, jax.core.Tracer)
                        for leaf in jax.tree_util.tree_leaves(_sfc)):
-                _prev = getattr(model, "_sfc_diag", None) or (None, None, None)
+                # Pad the shorter of (prev, new) so a length mismatch (a
+                # held-radiation step that returns the 3-slot default vs an
+                # 8-slot published prev, or a mid-session contract growth) merges
+                # slot-wise instead of truncating via zip — mirrors the serial
+                # primitive_eq_mpas merge.
+                _prev = getattr(model, "_sfc_diag", None) or ()
+                _n = max(len(_sfc), len(_prev))
+                _prev = _prev + (None,) * (_n - len(_prev))
+                _sfc = _sfc + (None,) * (_n - len(_sfc))
                 model._sfc_diag = tuple(
                     new if new is not None else old
                     for new, old in zip(_sfc, _prev))

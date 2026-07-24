@@ -1004,6 +1004,8 @@ def apply_microphysics_experiment_flags(
     nc_from_aerosol: bool = False,
     subgrid_autoconversion: bool = False,
     hard_saturation_adjustment: bool = False,
+    hard_sat_adjust_threshold: float | None = None,
+    hard_sat_max_heating_K: float | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1026,10 +1028,14 @@ def apply_microphysics_experiment_flags(
         Scheme name, used only in the error message.
     nc_from_aerosol, subgrid_autoconversion, hard_saturation_adjustment : bool
         ExperimentConfig switches; when True the matching field is set on
-        ``scheme_config`` (raising if the field is absent).  The hard
-        saturation-adjustment TRIGGER (``hard_sat_adjust_threshold``) is a
-        per-scheme float default (overridable via ``--params``), so only the
-        boolean enable switch is threaded here.
+        ``scheme_config`` (raising if the field is absent).
+    hard_sat_adjust_threshold, hard_sat_max_heating_K : float or None
+        Optional overrides of the hard saturation-adjustment RH trigger and
+        per-step latent-heating cap [K] (ExperimentConfig flat scalars /
+        ``--hard-sat-*`` CLI flags).  ``None`` (default) keeps the per-scheme
+        ``__param_spec__`` defaults; a value raises if the scheme lacks the
+        field (no silently-inert override).  Bounds are enforced upstream by
+        ``ExperimentConfig.validate_strict`` (spec bounds (1, 2) / (0.5, 50)).
 
     Returns
     -------
@@ -1063,4 +1069,17 @@ def apply_microphysics_experiment_flags(
                 "morrison, thompson, p3) or drop --hard-saturation-adjustment."
             )
         scheme_config = scheme_config._replace(hard_saturation_adjustment=True)
+    for _field, _val in (("hard_sat_adjust_threshold", hard_sat_adjust_threshold),
+                         ("hard_sat_max_heating_K", hard_sat_max_heating_K)):
+        if _val is None:
+            continue
+        if _field not in fields:
+            raise ValueError(
+                f"{_field}={_val!r} is not supported by the {scheme!r} "
+                "microphysics scheme (no warm-rain hard saturation "
+                "adjustment); use a warm-rain scheme (kessler, "
+                "seifert_beheng, morrison, thompson, p3) or drop the "
+                "override."
+            )
+        scheme_config = scheme_config._replace(**{_field: float(_val)})
     return scheme_config

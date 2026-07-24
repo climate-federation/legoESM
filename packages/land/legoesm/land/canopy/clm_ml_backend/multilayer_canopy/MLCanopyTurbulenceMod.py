@@ -1016,7 +1016,9 @@ def _ObuFuncPure(
         zref_p, ztop_p, zdisp_val, obu_cur, beta_val, PrSc_val
     )
 
-    zlog = math.log((zref_p - zdisp_val) / (ztop_p - zdisp_val))
+    # Clamp log args to a positive floor (see _WindProfile note): a below-
+    # displacement-height geometry otherwise makes math.log raise and abort the run.
+    zlog = math.log(max(zref_p - zdisp_val, 1e-30) / max(ztop_p - zdisp_val, 1e-30))
     ustar_val = uref_p * vkc / (zlog + psim)
     tstar = (thref_p - taf_p) * vkc / (zlog + psic)
     qstar = (qref_p - qaf_p) * vkc / (zlog + psic)
@@ -1746,7 +1748,13 @@ def _WindProfile(
     for ic in range(_ntop + 1, _ncan + 1):
         zs_ic = float(_zs_p[ic])
         psim, _, _, _ = _GetPsiRSL_scalar(zs_ic, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
-        zlog_m = math.log((zs_ic - zdisp_p) / (ztop_p - zdisp_p))
+        # Clamp the log arguments to a positive floor exactly like the JAX twin
+        # (_WindProfile_jax): a raw math.log raises a *Python exception* (not a
+        # NaN) when a layer height drops below the displacement height on a tall/
+        # ill-posed canopy, which aborts the whole eager site run instead of being
+        # caught by the NaN-revert guard.
+        _hcd = max(ztop_p - zdisp_p, 1e-30)
+        zlog_m = math.log(max((zs_ic - zdisp_p) / _hcd, 1e-30))
         _wind_new[ic] = ustar_p / vkc * (zlog_m + psim)
 
     # Wind at canopy top — Fortran line 549
@@ -1907,7 +1915,7 @@ def _AerodynamicConductance(
         _, psic1, _, _ = _GetPsiRSL_scalar(zs_lo, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
         _, psic2, _, _ = _GetPsiRSL_scalar(zs_hi, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
         psic = psic2 - psic1
-        zlog_c = math.log((zs_hi - zdisp_p) / (zs_lo - zdisp_p))
+        zlog_c = math.log(max(zs_hi - zdisp_p, 1e-30) / max(zs_lo - zdisp_p, 1e-30))
         _gac_new[ic] = rhomol_p * vkc * ustar_p / (zlog_c + psic)
 
     # Top layer to reference height — Fortran lines 606-612
@@ -1916,7 +1924,7 @@ def _AerodynamicConductance(
     _, psic1, _, _ = _GetPsiRSL_scalar(zs_lo, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
     _, psic2, _, _ = _GetPsiRSL_scalar(zref_p, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
     psic = psic2 - psic1
-    zlog_c = math.log((zref_p - zdisp_p) / (zs_lo - zdisp_p))
+    zlog_c = math.log(max(zref_p - zdisp_p, 1e-30) / max(zs_lo - zdisp_p, 1e-30))
     _gac_new[ic] = rhomol_p * vkc * ustar_p / (zlog_c + psic)
 
     # ztop to zs(ntop+1) — Fortran lines 614-620
@@ -1924,7 +1932,8 @@ def _AerodynamicConductance(
     _, psic1, _, _ = _GetPsiRSL_scalar(ztop_p, ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
     _, psic2, _, _ = _GetPsiRSL_scalar(float(_zs_p[ic + 1]), ztop_p, zdisp_p, obu_p, beta_p, PrSc_p)
     psic = psic2 - psic1
-    zlog_c = math.log((float(_zs_p[ic + 1]) - zdisp_p) / (ztop_p - zdisp_p))
+    zlog_c = math.log(
+        max(float(_zs_p[ic + 1]) - zdisp_p, 1e-30) / max(ztop_p - zdisp_p, 1e-30))
     gac_above_foliage = rhomol_p * vkc * ustar_p / (zlog_c + psic)
 
     # Consistency check — Fortran lines 622-626

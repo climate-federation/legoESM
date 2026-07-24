@@ -63,18 +63,21 @@ def _patch_land_loaders(monkeypatch):
             jnp.asarray(grid.grid_lat).shape, 0.5))
 
 
-def _build_driver(tmpdir: str, days: float) -> ModelDriver:
+def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
+                  beta_soil: bool = False,
+                  use_multilayer: bool = True) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
                         nlev=MPAS_NLEV, vertical_coord="hybrid"),
         dycore=DycoreConfig(discretization="mpas", dt=DT),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
         days=days, dataset="analytical", radiation="gray",
-        convection="none", turbulence="none", precision="fp64",
+        convection="none", turbulence=turbulence, precision="fp64",
         distributed=False,
         land_mask_path="synthetic.nc",      # truthy -> land block (loader patched)
-        use_multilayer_land=True,
+        use_multilayer_land=use_multilayer,
         multilayer_n_layers=4, multilayer_soil_depth=2.0,
+        mpas_land_beta_soil=beta_soil,
     )
     d = ModelDriver(cfg, output_dir=tmpdir)
     d.setup()
@@ -126,6 +129,54 @@ def test_tendencies_carry_downwelling_fields():
     # Defaults are None so every positional constructor stays valid.
     assert HydrostaticTendencies._field_defaults["sw_down_sfc"] is None
     assert HydrostaticTendencies._field_defaults["lw_down_sfc"] is None
+
+
+def test_traced_beta_soil_reaches_turbulence(monkeypatch, tmp_path):
+    """#1312 phase 2b: mpas_land_beta_soil threads a per-cell root-zone
+    beta_soil into the turbulence surface humidity (forcing['beta_land']).
+
+    The synthetic map cold-starts the soil BETWEEN wilting and field capacity
+    (theta ~ 0.5*theta_sat = 0.225, wp 0.12, fc 0.30) so beta_soil is strictly
+    inside (beta_min, 1) — the throttle must CHANGE the integrated state
+    relative to the same run without the flag (which runs the land fraction
+    saturated, beta = 1)."""
+    _patch_land_loaders(monkeypatch)
+    d_off = _build_driver(str(tmp_path / "off"), FOUR_STEPS_DAYS,
+                          turbulence="louis")
+    assert d_off.run() == "COMPLETED"
+
+    d_on = _build_driver(str(tmp_path / "on"), FOUR_STEPS_DAYS,
+                         turbulence="louis", beta_soil=True)
+    assert d_on.run() == "COMPLETED"
+
+    # The seeded traced beta exists, has cell shape, and is a REAL throttle
+    # (strictly below 1 somewhere: the soil is between wp and fc).
+    from legoesm.land.multilayer_land import land_tile_beta_soil
+    beta = np.asarray(land_tile_beta_soil(
+        d_on._land_ml_state.theta_soil, d_on.physics.land_ml_cfg,
+        d_on.physics.land_ml_params))
+    ncell = int(np.asarray(d_on.grid.latCell).size)
+    assert beta.shape == (ncell,)
+    assert np.all((beta >= 0.0) & (beta <= 1.0))
+    assert float(beta.min()) < 0.999, "soil between wp and fc must throttle"
+
+    dq = np.max(np.abs(np.asarray(d_on.state.tracers["q_v"].data)
+                       - np.asarray(d_off.state.tracers["q_v"].data)))
+    assert np.isfinite(np.asarray(d_on.state.T.data)).all()
+    assert dq > 0.0, (
+        "mpas_land_beta_soil=True left q_v bit-identical to the saturated "
+        "run — forcing['beta_land'] is not reaching the turbulence "
+        "surface flux")
+
+
+def test_beta_soil_without_multilayer_land_is_refused(monkeypatch, tmp_path):
+    """Inert-corner rejection: the flag without the multilayer land has no
+    soil moisture to derive beta from — refused FAIL-EARLY at config
+    validation (driver construction), not silently ignored."""
+    _patch_land_loaders(monkeypatch)
+    with pytest.raises(ValueError, match="mpas_land_beta_soil"):
+        _build_driver(str(tmp_path), FOUR_STEPS_DAYS, turbulence="louis",
+                      beta_soil=True, use_multilayer=False)
 
 
 def test_checkpoint_roundtrips_land_state(monkeypatch, tmp_path):

@@ -636,9 +636,26 @@ def _step_multilayer_land_impl(
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 
+        # Wind-speed floor PARITY with the two-leaf arm: the CLM-ML backend takes
+        # uref = sqrt(u^2 + v^2) with NO floor, so in calm/stable (night) air it
+        # sees wind -> 0, collapsing u*/aerodynamic conductance and under-predicting
+        # H.  Scale (u, v) direction-preserving so their magnitude equals the same
+        # sqrt(u^2 + v^2 + U_min^2) floor the two-leaf arm applies above.
+        _wsp_floored = jnp.sqrt(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2)
+        _wsp_raw = jnp.sqrt(forcing.u_lowest ** 2 + forcing.v_lowest ** 2)
+        _calm = _wsp_raw > 1e-6
+        # Direction-preserving rescale to the floored magnitude; at (near-)calm the
+        # direction is undefined, so fall back to (U_min, 0) — a nonzero magnitude
+        # (=U_min) with an arbitrary but definite direction, so CLM-ML's
+        # sqrt(u^2+v^2) never collapses to 0 the way the raw wind would.
+        _sc = jnp.where(_calm, _wsp_floored / jnp.maximum(_wsp_raw, 1e-6), 0.0)
+        clmml_forcing = forcing._replace(
+            u_lowest=jnp.where(_calm, forcing.u_lowest * _sc, U_min),
+            v_lowest=jnp.where(_calm, forcing.v_lowest * _sc, 0.0))
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,
-            forcing=forcing,
+            forcing=clmml_forcing,
             canopy_config=config.surface_scheme,
             land_config=config,
             land_params=lp,

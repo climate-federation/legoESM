@@ -162,9 +162,14 @@ def beta_limited_surface_humidity(
     q_sat_sfc: jax.Array,
     q_air: jax.Array,
     f_land: jax.Array,
-    beta_land: float,
+    beta_land: float | jax.Array,
 ) -> jax.Array:
     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
+
+    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
+    from the interactive multilayer land, #1312 phase 2b) — the formula below
+    is elementwise either way.
 
     On a non-tiled surface the bulk latent flux is
     ``LH ∝ (q_sfc - q_air)``.  Using the saturated ``q_sat_sfc`` everywhere
@@ -175,8 +180,12 @@ def beta_limited_surface_humidity(
         q_sfc = q_air + (1 - f_land * (1 - beta_land)) * (q_sat_sfc - q_air)
 
     so the land-fraction latent flux is ``beta_land`` times its wet-surface
-    potential — the same alpha-method form the tiled pipeline applies per
-    tile (``physics_pipeline._tiled_surface_flux``).  ``beta_land = 1``
+    potential — a first-order analogue of the tiled pipeline's per-tile
+    alpha method (``physics_pipeline._tiled_surface_flux``).  The
+    decomposition is exact only for a fixed shared transfer coefficient; a
+    stability-dependent MOST/COARE bulk scheme recomputes ``C_E`` from the
+    throttled ``q_sfc``, so this is approximate, not a true mosaic.
+    ``beta_land = 1``
     returns ``q_sat_sfc`` exactly (byte-identical wet surface);
     ``beta_land = 0`` zeroes the land-fraction humidity gradient in both
     directions (no land evaporation and no land dew — a closed surface).

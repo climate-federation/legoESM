@@ -712,6 +712,34 @@ def _make_hydrostatic_convection(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 )
+            # Convective-activity diagnostic for the Slingo (1987) cumulus
+            # cloud fraction on this standalone path: the column-integrated
+            # in-updraft RAIN PRODUCTION rate [kg/m^2/s],
+            #     P_conv = (1/g) * sum_k max(dq_r_conv, 0) * dp_k,
+            # published into the ``PhysicsState.conv_precip`` lag carry
+            # (radiation runs before convection in the module chain and
+            # reads the previous step's value — the FV pipeline's lagged
+            # ``conv_precip`` convention).  DIAGNOSTIC ONLY: the rain MASS
+            # still rides the ``q_r`` tracer route above (microphysics
+            # sediments it), so total surface precip (``pr``) is NOT
+            # double-counted.  Schemes with no rain split (``_dq_r_conv is
+            # None``) publish nothing and the carry stays zero — their
+            # convective cloud fraction is honestly zero here.
+            # SIGN/UNITS: dq_r_conv >= 0 is a condensate source [kg/kg/s];
+            # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
+            if _dq_r_conv is not None:
+                _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+                _p_conv_diag = jnp.sum(
+                    jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
+                    * _dp_col, axis=-1) / constants.g
+                if isinstance(conv_prog_out, dict):
+                    conv_prog_out = {**conv_prog_out,
+                                     "conv_precip": _p_conv_diag}
+                elif conv_prog_out is not None:
+                    conv_prog_out = {"conv_prog_profile": conv_prog_out,
+                                     "conv_precip": _p_conv_diag}
+                else:
+                    conv_prog_out = {"conv_precip": _p_conv_diag}
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,

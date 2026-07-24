@@ -255,3 +255,82 @@ def distribute_column_aod_to_layers(
     dp = jnp.clip(p_half_col[:, 1:] - p_half_col[:, :-1], 1.0e-12, None)
     w = dp / jnp.sum(dp, axis=1, keepdims=True)
     return jnp.clip(aod_col, 0.0, None)[:, None] * w
+
+
+def place_stratospheric_aod_profile_to_layers(
+    aod_profile: jnp.ndarray,
+    p_edges: jnp.ndarray,
+    p_half_col: jnp.ndarray,
+) -> jnp.ndarray:
+    """Conservatively remap a fixed-pressure-edge AOD profile onto model layers.
+
+    Volcanic stratospheric aerosol is supplied as a per-layer absorption
+    optical depth on the forcing file's OWN (altitude -> pressure) grid.  This
+    bins it onto the model's pressure layers by fractional pressure overlap,
+    so the aerosol lands at its true stratospheric pressure -- unlike
+    :func:`distribute_column_aod_to_layers`, which spreads a single column AOD
+    by full-column pressure mass and thus dumps ~90 % of a stratospheric layer
+    into the troposphere.
+
+    Method: the cumulative-OD curve is sampled at each model half level and the
+    per-layer OD is the difference of the cumulative at the layer's two edges.
+    The cumulative is interpolated in LOG-pressure, because the source OD is
+    ``ext*dz`` -- uniform in geometric height (~ log-pressure) within a source
+    layer, NOT uniform in pressure; a linear-pressure CDF would misallocate ~1 %
+    of a 0.5 km source layer's OD across a cutting model interface (Codex review
+    iter-1).  The remap is exact at source-layer edges and conserves the total
+    column OD that falls within the model's pressure range (OD above the model
+    top or below the surface edge is dropped -- it cannot be represented).
+
+    The op set (searchsorted / gather / clip / min / max) is piecewise-linear:
+    a.e.-differentiable in both ``aod_profile`` and ``p_half_col`` with
+    well-defined one-sided gradients (kinks at source/model edges), and
+    JIT/vmap-safe.
+
+    Sign/units: optical depth is >= 0 and additive; pressure [Pa].
+
+    Parameters
+    ----------
+    aod_profile : array, shape (ncol, nsrc)
+        Per-source-layer absorption optical depth [-] (>= 0).
+    p_edges : array, shape (nsrc+1,)
+        Source-layer pressure edges [Pa], ASCENDING (index 0 = top / lowest
+        pressure), aligned so ``aod_profile[:, j]`` occupies
+        ``[p_edges[j], p_edges[j+1]]``.
+    p_half_col : array, shape (ncol, nlev+1)
+        Model half-level pressures [Pa] (index 0 = top).
+
+    Returns
+    -------
+    aod_layers : array, shape (ncol, nlev)
+        Layer absorption optical depth [-].
+    """
+    pe = jnp.asarray(p_edges)                                   # (nsrc+1,)
+    aod = jnp.clip(jnp.asarray(aod_profile), 0.0, None)         # (ncol, nsrc)
+    # Cumulative OD from the top: cum[:, k] = OD in source layers 0..k-1, so
+    # cum aligns to the nsrc+1 source edges ``pe``.
+    cum = jnp.concatenate(
+        [jnp.zeros((aod.shape[0], 1), aod.dtype), jnp.cumsum(aod, axis=1)],
+        axis=1,
+    )                                                          # (ncol, nsrc+1)
+    # Interpolate the CDF in log-pressure (source OD is uniform in geometric
+    # height ~ log-pressure within a layer).
+    l_edges = jnp.log(jnp.clip(pe, 1.0e-12, None))             # (nsrc+1,)
+
+    ph = jnp.asarray(p_half_col)
+    p_lo = jnp.minimum(ph[:, :-1], ph[:, 1:])                  # (ncol, nlev)
+    p_hi = jnp.maximum(ph[:, :-1], ph[:, 1:])
+
+    def _cdf_at(p):
+        # Per-column log-pressure interp of the shared-edge cumulative at
+        # pressures ``p``; clamps to [0, total] outside [pe[0], pe[-1]].
+        lp = jnp.log(jnp.clip(p, 1.0e-12, None))
+        idx = jnp.clip(jnp.searchsorted(l_edges, lp) - 1, 0, pe.shape[0] - 2)
+        l0 = l_edges[idx]
+        l1 = l_edges[idx + 1]
+        frac = jnp.clip((lp - l0) / jnp.clip(l1 - l0, 1.0e-12, None), 0.0, 1.0)
+        c0 = jnp.take_along_axis(cum, idx, axis=1)
+        c1 = jnp.take_along_axis(cum, idx + 1, axis=1)
+        return c0 + frac * (c1 - c0)
+
+    return jnp.clip(_cdf_at(p_hi) - _cdf_at(p_lo), 0.0, None)
