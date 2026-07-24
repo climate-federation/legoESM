@@ -8,15 +8,15 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 
 **§5 INFRASTRUCTURE: COMPLETE** (all les_suite modules built, tested, codex-CLEAN).
 
-| Deliverable | Status (2026-07-24, iter 10) |
+| Deliverable | Status (2026-07-24, iter 13) |
 |---|---|
 | §5 infrastructure (registry…scorecard, gate-0) | **DONE** (codex-CLEAN) |
 | Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
 | Q1b skill threshold (dry CBL, prognostic) | **DONE** — nonlocal beats local every flux; NOT significant vs σ_LES (wind-dominated, Ug=0) |
-| Q2 nine-closure roster + per-flux ranking | **WIRED (9/9)**; 8-closure campaign running; clubb tuning deferred (nlev=24 OOM) |
-| Q3 inter-regime coefficient spread | **PENDING** — needs ≥2 regimes tuned (U_g axis wired; stable/moist not) |
-| D4 AD path (+ AD-vs-DF) | **not built** (the per-candidate-recompile perf fix) |
-| D7 σ_LES | **DONE for dry CBL anchor** (σ_LES=0.3186 real); sheared/other-regime + 2×-res remain |
+| Q2 nine-closure ranking | **5/9 fully tuned** (holtslag<smag<louis<ysu<mynn25); tke 1/5 fluxes, clubb_lite/edmf running (campaign resumed), clubb nlev=24 deferred (OOM) |
+| Q3 inter-regime coefficient spread | **regimes ready** (CBL + sheared + SBL wired/validated); needs the SBL tuned (SBL 4 h emit running) |
+| D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
+| D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
 
 ## Durable science results (dry-convective CBL; see LES_SUITE.md §7.1 for the full write-up)
 - **Q1a (structural ceiling)** — a counter-gradient layer is present at **every** flux
