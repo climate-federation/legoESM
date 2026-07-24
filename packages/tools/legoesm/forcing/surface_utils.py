@@ -16,7 +16,7 @@ from legoesm import constants
 def blend_surface_temperature(
     sst: jnp.ndarray,
     sic: jnp.ndarray,
-    T_ice: float,
+    T_ice: "float | jnp.ndarray",
 ) -> jnp.ndarray:
     """Blend ocean SST and sea-ice temperature by ice concentration.
 
@@ -26,8 +26,10 @@ def blend_surface_temperature(
         Sea surface temperature [K].
     sic : array
         Sea-ice concentration [0, 1].
-    T_ice : float
-        Sea-ice temperature [K].
+    T_ice : float or array
+        Sea-ice temperature [K].  A scalar constant (prescribed-ice default)
+        or a per-cell array (the prognostic ice skin); broadcasts against
+        ``sst``/``sic`` either way.
 
     Returns
     -------
@@ -334,3 +336,109 @@ def place_stratospheric_aod_profile_to_layers(
         return c0 + frac * (c1 - c0)
 
     return jnp.clip(_cdf_at(p_hi) - _cdf_at(p_lo), 0.0, None)
+
+
+# --- prognostic sea-ice skin temperature (Semtner 1976 zero-layer + thermal
+#     inertia; conductivity Untersteiner 1961 via constants.k_ice_default) ---
+
+# Numerics floor for the skin update [K]: below the coldest observed polar
+# surface (~185 K is the terrestrial record, Antarctic plateau) — a guard
+# against a pathological flux spike, never active in normal operation.
+_ICE_SKIN_FLOOR_K = 185.0
+
+
+def prognostic_ice_skin_temperature(
+    T_skin: jnp.ndarray,
+    F_net_down_W_m2: jnp.ndarray,
+    sic: jnp.ndarray,
+    dt_s: float,
+    h_ice_m: float,
+    T_freeze_K: float = constants.T_freeze_ocean,
+    k_ice_W_m_K: float = constants.k_ice_default,
+    T_melt_surface_K: float = constants.T_freeze,
+) -> jnp.ndarray:
+    """Advance a prescribed-ice AMIP skin temperature one integration step.
+
+    Semtner (1976) zero-layer thermodynamics — conductive flux through a
+    climatological ice slab of thickness ``h_ice_m`` toward the seawater
+    freezing point ``T_freeze_K`` at the BASE (ice/ocean interface) — plus
+    the slab's half thermal inertia (``C = rho_ice * c_pi * h/2``), which
+    turns the diagnostic zero-layer balance into a stably integrable
+    prognostic skin:
+
+        C dT_s/dt = F_net_down(atm) + (k_i / h) * (T_base - T_s)
+
+    Signs (surface conventions of the exported ``_sfc_diag`` fluxes):
+    ``F_net_down_W_m2 = sw_net_sfc + lw_net_sfc - shflx - lhflx`` — sw/lw net
+    positive INTO the surface, turbulent fluxes positive UPWARD out of it, so
+    ``F_net_down`` is the net energy gain of the skin from the atmosphere.
+    Winter polar night: F_net_down < 0, the skin cools below ``T_freeze_K``
+    until conduction from the ocean balances the loss — the equilibrium
+    ``T_s = T_base + F_net_down * h / k_i`` of the classic zero-layer model.
+
+    Discretization: backward-Euler in the CONDUCTIVE term (unconditionally
+    stable for any ``dt_s``; the atmospheric flux is the lagged explicit
+    forcing, refreshed by the physics each step):
+
+        T_new = (T_s + (dt/C)*(F_net + (k_i/h)*T_base)) / (1 + (dt/C)*k_i/h)
+
+    The FULL coupled system (skin + atmosphere recomputing F_net at the new
+    skin) is only CONDITIONALLY stable, and the threshold depends on WHEN the
+    atmosphere sees the new skin.  If the caller refreshes the surface anchor
+    at the SAME cadence as this advance — the MPAS driver re-blends T_sfc every
+    model step — the per-step amplification is ``|1 - r*lambda|/(1 + r*g)`` for
+    a surface-flux feedback ``lambda = -dF_net/dT_s > 0`` (LW + sensible),
+    ``r = dt/C``, ``g = k_i/h``; at the short model step ``dt_s = DT`` this
+    keeps ``r*lambda << 1``, stable and monotone for any realistic ``lambda``.
+    If instead the anchor is HELD while the skin advances sub-cadence (e.g.
+    per-step advance under a once-daily anchor), the effective map reverts to
+    the coarse-cadence thresholds (order tens of W/m^2/K, tightening as h
+    shrinks) and the melt cap only BOUNDS — does not cure — a cap/floor
+    oscillation.  Advance and anchor-refresh cadence MUST match.
+
+    Bounds: melt cap ``T_new <= T_melt_surface_K`` — the FRESH-ICE SURFACE
+    melting point (``constants.T_freeze``, i.e. 0 C), NOT the basal seawater
+    freezing point ``T_freeze_K`` (``constants.T_freeze_ocean``).  Distinct
+    boundary conditions: conduction is toward the warmer seawater-freezing
+    base, the surface melts at 0 C (mirrors ``ice/sea_ice.py`` ``T_base`` vs
+    ``T_melt_surface``).  A melting skin sheds energy at 0 C — Semtner's melt
+    branch, whose meltwater bookkeeping a prescribed-ice run does not carry.
+    ``_ICE_SKIN_FLOOR_K`` guards a pathological cold spike.  Open water
+    (``sic <= 0``) snaps to ``T_freeze_K`` (seawater freezing) so a cell
+    freezing later starts from the freezing point, not a stale skin.
+
+    Limitations. (1) Single-tile: ``F_net_down`` is the BLENDED-cell surface
+    flux (computed at ``sic*T_skin + (1-sic)*sst``), used here as the ice-tile
+    forcing.  Exact only at ``sic=1``; at marginal ice the true ice-tile
+    LW/turbulent flux differs — a documented closure error, most consequential
+    during seasonal advance/retreat, second-order because the skin enters the
+    anchor weighted by ``sic``.  (2) ``h_ice_m`` is a single global
+    climatological thickness (no Arctic~2 m / Antarctic~1 m asymmetry).
+    (3) Differentiability: the interior is smooth (``dT_new/dF = r/(1+r*g)``,
+    exact), but ``clip`` has zero gradient AT the two caps and ``where(sic>0)``
+    zeroes the flux gradient over open water — the physically correct
+    dead-gradient of a saturated cap / inactive mask, not a defect.
+
+    Parameters
+    ----------
+    T_skin : (ncol,) current skin temperature [K].
+    F_net_down_W_m2 : (ncol,) net downward atmospheric energy flux [W/m^2].
+    sic : (ncol,) sea-ice concentration [0-1].
+    dt_s : integration step [s] (the model step DT in the MPAS AMIP loop).
+    h_ice_m : climatological slab thickness [m] (tunable; ~2 m Arctic mean).
+    T_freeze_K : basal seawater freezing point [K] (conduction base +
+        open-water snap).
+    k_ice_W_m_K : ice thermal conductivity [W/m/K].
+    T_melt_surface_K : fresh-ice surface melting point [K] (upper cap).
+
+    Returns
+    -------
+    (ncol,) updated skin temperature [K].
+    """
+    C_areal = 0.5 * constants.rho_ice * constants.c_pi * h_ice_m  # [J/m^2/K]
+    g_cond = k_ice_W_m_K / h_ice_m                                # [W/m^2/K]
+    r = dt_s / C_areal
+    T_new = (T_skin + r * (F_net_down_W_m2 + g_cond * T_freeze_K)) \
+        / (1.0 + r * g_cond)
+    T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    return jnp.where(sic > 0.0, T_new, T_freeze_K)

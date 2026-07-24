@@ -4257,6 +4257,25 @@ class ModelDriver:
                 _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
                 for _k in trc_d:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
+            # Prognostic ice skin (mpas_ice_skin_prognostic): persist so a
+            # 12h chain link resumes the equilibrated skin instead of
+            # re-running the ~weeks-long spin-up from T_freeze_ocean every
+            # restart.  Gated on THIS run's config so a driver reused
+            # feature-on -> feature-off (without a load, which clears the
+            # field) cannot launder a stale skin into an off-feature
+            # checkpoint (codex-1 finding 6).  Absent on runs without the
+            # feature (byte-identical restart).
+            if getattr(self.config, "mpas_ice_skin_prognostic", False):
+                _skin = getattr(self, "_ice_T_skin", None)
+                if _skin is None and isinstance(self._carry_aux, dict):
+                    # Loaded-but-not-yet-adopted: load_checkpoint stages the
+                    # skin into _carry_aux and clears the live field until
+                    # _run_mpas overlays it.  A save BEFORE that run (load ->
+                    # save with no step) must persist the staged value, not
+                    # strip it (codex-2 finding 3).
+                    _skin = self._carry_aux.get("ice_T_skin")
+                if _skin is not None:
+                    _save["ice_T_skin"] = np.asarray(_skin)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             self._save_cmor_accumulator_sidecar(day)
@@ -4848,6 +4867,14 @@ class ModelDriver:
             for _stale in [k for k in self._carry_aux
                            if k.startswith("physstate_")]:
                 del self._carry_aux[_stale]
+            # Ice skin: same stale-persistence rule — drop any prior staging,
+            # then stage this checkpoint's skin (if present) for the
+            # _run_mpas seed overlay.  Serial-only (the skin feature refuses
+            # the MPI-voronoi lane at setup).
+            self._carry_aux.pop("ice_T_skin", None)
+            self._ice_T_skin = None
+            if "ice_T_skin" in d.files:
+                self._carry_aux["ice_T_skin"] = np.asarray(d["ice_T_skin"])
             # ...and clear the SAVE channel (``_mpas_phys_state``, read by
             # save_checkpoint) so a stale carry from a PRIOR run on a
             # reused driver cannot leak.  It is left None until a run
@@ -5574,9 +5601,17 @@ class ModelDriver:
                     _sst, _sic = _get_sst_sic(day)
                     _sst = jnp.asarray(_sst).reshape(-1)
                     _sic = jnp.asarray(_sic).reshape(-1)
+                    # Report tas off the SAME ice surface the radiation +
+                    # turbulence saw: the per-cell prognostic skin when the
+                    # feature is on, else the constant T_ice.  Otherwise the
+                    # scorecard's 2 m extrapolation uses a 271.35 K ice surface
+                    # while the model cooled the skin (codex-1 finding 3).
+                    _tas_ice = getattr(self.config, "T_ice", None)
+                    if (getattr(self.config, "mpas_ice_skin_prognostic", False)
+                            and getattr(self, "_ice_T_skin", None) is not None):
+                        _tas_ice = self._ice_T_skin
                     tas = diag._tas_2m(
-                        state, q_v, _sst, _sic,
-                        getattr(self.config, "T_ice", None),
+                        state, q_v, _sst, _sic, _tas_ice,
                         u_low=u_east[..., -1], v_low=v_north[..., -1])
                 except Exception as exc:
                     if not getattr(self, "_logged_tas2m_fallback", False):
@@ -6164,6 +6199,19 @@ class ModelDriver:
             )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
+        _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
+        if _ice_skin_on and not _sst_forcing:
+            raise ValueError(
+                "mpas_ice_skin_prognostic needs the prescribed SST/SIC "
+                "surface forcing (radiation != 'none' and an SST source) — "
+                "there is no ice fraction to carry a skin on."
+            )
+        if _ice_skin_on and self._voronoi_layout is not None:
+            raise ValueError(
+                "mpas_ice_skin_prognostic is not wired for the distributed "
+                "Voronoi (MPI) lane yet — the skin carry and its checkpoint "
+                "persistence are serial-only. Run single-process or disable."
+            )
         if _sst_forcing:
             from legoesm.forcing.surface_utils import (
                 blend_surface_temperature,
@@ -6171,6 +6219,52 @@ class ModelDriver:
             )
             _T_ice = cfg.T_ice
             _ncell = int(self.state.T.data.shape[0])
+            # Prognostic ice skin (Semtner zero-layer + slab inertia): the
+            # anchor's ice component becomes the per-cell skin array instead
+            # of the constant cfg.T_ice.  Seeded at the seawater freezing
+            # point; a checkpoint that carried a skin (staged by
+            # load_checkpoint) resumes it so 12h chain links do not re-run
+            # the multi-week conductive equilibration (C/g ~ 3 weeks at
+            # h=2 m) every restart.  A FRESH run's first ~2 months are
+            # therefore biased warm toward the old constant-T_ice behaviour
+            # (30 d ~6 K, 60 d ~1.7 K, 90 d ~0.4 K residual under a steady
+            # -25 W/m^2) — declare the spin-up in experiment metadata; the
+            # scorecard's month-3-onward window clears it.
+            if _ice_skin_on:
+                from legoesm.forcing.surface_utils import (
+                    prognostic_ice_skin_temperature,
+                )
+                _h_ice = float(cfg.mpas_ice_thickness_m)
+                _staged_skin = None
+                if isinstance(self._carry_aux, dict):
+                    _staged_skin = self._carry_aux.get("ice_T_skin")
+                if _staged_skin is not None:
+                    _skin = jnp.asarray(_staged_skin).reshape(-1)
+                    if _skin.shape != (_ncell,):
+                        raise ValueError(
+                            f"checkpoint ice_T_skin shape {_skin.shape} != "
+                            f"(nCells={_ncell},) — mesh mismatch."
+                        )
+                    # Refuse a non-finite restored skin BEFORE it reaches the
+                    # anchor blend: a NaN poisons even open-water cells there
+                    # (sic*skin with sic=0 is 0*NaN = NaN), corrupting every
+                    # T_sfc, not only ice cells (codex-3).
+                    if not bool(jnp.all(jnp.isfinite(_skin))):
+                        raise ValueError(
+                            "checkpoint ice_T_skin has non-finite values — "
+                            "refusing to resume from a corrupt skin.")
+                    self._ice_T_skin = _skin
+                    logger.info(
+                        "  MPAS ice skin: resumed from checkpoint "
+                        f"(min {float(jnp.min(_skin)):.1f} K)")
+                else:
+                    self._ice_T_skin = jnp.full(
+                        _ncell, constants.T_freeze_ocean)
+                    logger.info(
+                        "  MPAS ice skin ON (Semtner zero-layer, h=%.2f m): "
+                        "seeded at T_freeze_ocean; conductive relaxation "
+                        "C/g ~ 3 weeks (fresh-run spin-up ~2 months)",
+                        _h_ice)
             # Land anchor lapse correction: the AMIP loader fills land cells
             # with the NEAREST-OCEAN SST (sea-level temperature); anchoring
             # elevated land at that value overheats its surface by lapse*z.
@@ -6181,13 +6275,28 @@ class ModelDriver:
                 _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
                             / constants.g)
 
-            def _compute_T_sfc(day):
-                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
-                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
-                # data), sea-ice-blended, as a (nCells,) surface temperature.
-                _sst, _sic = self.get_sst_sic(day)
+            def _blend_T_sfc(_sst, _sic):
+                # Blend prescribed SST with the ice component (constant T_ice,
+                # or the per-cell prognostic skin READ AT CALL TIME) and apply
+                # the land-lapse correction.  Split out of _compute_T_sfc so
+                # the per-step loop can RE-ANCHOR from the cached daily SST/SIC
+                # against the freshly advanced skin every model step — the
+                # physics must consume the CURRENT skin, not the day-start
+                # value, or the surface-flux feedback stays daily-lagged
+                # (conditional-stability, codex-2 finding 2) and a mid-day
+                # restart re-exposes the advanced skin early, branching the run
+                # (codex-2 finding 1).
+                # Flatten SST/SIC to (nCells,) FIRST so a (nCells,1)-shaped
+                # source broadcasts ELEMENTWISE against the (nCells,) skin
+                # rather than to (nCells,nCells) — the scalar-T_ice blend
+                # tolerated (nCells,1) via a trailing reshape; the array skin
+                # must not (codex-4).
+                _sst = jnp.asarray(_sst).reshape(-1)
+                _sic = jnp.asarray(_sic).reshape(-1)
+                _ice_component = (
+                    self._ice_T_skin if _ice_skin_on else _T_ice)
                 _ts = blend_surface_temperature(
-                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+                    _sst, _sic, _ice_component).reshape(-1)
                 if _lapse_z is not None:
                     # Cast the storage-dtype (possibly f32) statics to the
                     # anchor dtype so the correction is formed at anchor
@@ -6200,9 +6309,30 @@ class ModelDriver:
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return _blend_T_sfc(_sst, _sic)
+
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.
-            _ts0 = _compute_T_sfc(START_DAY)
+            # Validate the RAW SST and SIC shapes, NOT only the blended output:
+            # with the prognostic skin an (nCells,) ice component, a SCALAR or
+            # mis-counted SST/SIC would BROADCAST to (nCells,) and silently pass
+            # an output-only check (giving every cell the same SST) — the check
+            # the old scalar-T_ice blend used to catch (codex-3).
+            _sst0, _sic0 = self.get_sst_sic(START_DAY)
+            for _nm, _arr in (("SST", _sst0), ("SIC", _sic0)):
+                if tuple(jnp.asarray(_arr).reshape(-1).shape) != (_ncell,):
+                    raise ValueError(
+                        f"MPAS {_nm} forcing shape "
+                        f"{tuple(jnp.asarray(_arr).shape)} has "
+                        f"{jnp.asarray(_arr).size} values != nCells={_ncell}; "
+                        f"get_sst_sic must return per-cell arrays on the MPAS "
+                        f"mesh (grid.grid_lat = latCell).")
+            _ts0 = _blend_T_sfc(_sst0, _sic0)
             if _ts0.shape != (_ncell,):
                 raise ValueError(
                     f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
@@ -6564,6 +6694,11 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
+        # Current forcing day's SST/SIC, cached at each daily boundary for the
+        # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
+        # the first boundary / when the skin feature is off).
+        _ice_sst_cur = None
+        _ice_sic_cur = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -6636,8 +6771,37 @@ class ModelDriver:
                     _force_day_canonical = float(_fd_int)
                     _forcing_daily = {}
                     if _sst_forcing:
-                        _forcing_daily["T_sfc"] = _compute_T_sfc(
-                            _force_day_canonical)
+                        # Prognostic ice skin: cache THIS forcing day's SST+SIC
+                        # for the PER-STEP re-anchor + advance in the step loop.
+                        # The skin is advanced every model step (dt=DT) with the
+                        # freshly exported fluxes, AND the anchor T_sfc is
+                        # re-blended every step from these cached fields against
+                        # the advanced skin.  Consequences:
+                        #  - the physics consumes the CURRENT skin, so the
+                        #    surface-flux feedback is per-step (r*lambda =
+                        #    DT*lambda/C << 1), not daily-lagged (codex-2
+                        #    finding 2 / codex-1 finding 7),
+                        #  - a mid-day restart re-blends from the SAME restored
+                        #    skin the straight run held, so it does not branch
+                        #    the surface boundary (codex-2 finding 1),
+                        #  - per-step flux use resolves the diurnal SW/turbulent
+                        #    cycle a once-daily snapshot aliased (codex-1
+                        #    finding 1),
+                        #  - restart-exact: the checkpoint holds a fully
+                        #    advanced skin, no pending daily advance to drop or
+                        #    double-count (codex-1 finding 2).
+                        # SST is daily piecewise-constant (prescribed); only the
+                        # ice fraction of T_sfc evolves sub-daily with the skin.
+                        if _ice_skin_on:
+                            _sst_now, _sic_now = self.get_sst_sic(
+                                _force_day_canonical)
+                            _ice_sst_cur = jnp.asarray(_sst_now).reshape(-1)
+                            _ice_sic_cur = jnp.asarray(_sic_now).reshape(-1)
+                            _forcing_daily["T_sfc"] = _blend_T_sfc(
+                                _ice_sst_cur, _ice_sic_cur)
+                        else:
+                            _forcing_daily["T_sfc"] = _compute_T_sfc(
+                                _force_day_canonical)
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -6685,6 +6849,44 @@ class ModelDriver:
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+                # Prognostic ice skin: advance ONE model step (dt=DT) with the
+                # freshly exported surface energy fluxes (sfc_diag slots
+                # 0 sw_net, 1 lw_net [W/m^2, +into surface]; 6 shflx, 7 lhflx
+                # [+upward]).  F_net_down = sw + lw - sh - lh (net downward gain
+                # of the skin).  Requires slots 0,1 present — radiation != none
+                # is enforced at setup, so they exist after the first (always
+                # full-radiation) step of each run/link.  Eager, serial-only
+                # (the feature refuses the MPI/voronoi lane, so this else branch
+                # is the only path).  See the daily-boundary note for why the
+                # advance is per-step rather than a once-daily snapshot.
+                if _ice_skin_on and _ice_sic_cur is not None:
+                    _sd = getattr(self.model, "_sfc_diag", None)
+                    _swn = (_sd[0].data if (_sd is not None and len(_sd) > 0
+                                            and _sd[0] is not None) else None)
+                    _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
+                                            and _sd[1] is not None) else None)
+                    if _swn is not None and _lwn is not None:
+                        _f_net = (jnp.asarray(_swn).reshape(-1)
+                                  + jnp.asarray(_lwn).reshape(-1))
+                        if len(_sd) > 6 and _sd[6] is not None:
+                            _f_net = _f_net - jnp.asarray(
+                                _sd[6].data).reshape(-1)
+                        if len(_sd) > 7 and _sd[7] is not None:
+                            _f_net = _f_net - jnp.asarray(
+                                _sd[7].data).reshape(-1)
+                        self._ice_T_skin = prognostic_ice_skin_temperature(
+                            self._ice_T_skin, _f_net, _ice_sic_cur,
+                            dt_s=DT, h_ice_m=_h_ice)
+                    # Re-anchor the NEXT step's T_sfc from the cached daily
+                    # SST/SIC against the (advanced) skin, so the physics
+                    # consumes the CURRENT skin every step (per-step feedback,
+                    # codex-2 finding 2) and a mid-day restart reproduces the
+                    # straight run's surface boundary (codex-2 finding 1).  Runs
+                    # every step the feature is active (even one that skipped
+                    # the advance for missing fluxes) so T_sfc stays consistent
+                    # with self._ice_T_skin.
+                    _forcing_daily["T_sfc"] = _blend_T_sfc(
+                        _ice_sst_cur, _ice_sic_cur)
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.
