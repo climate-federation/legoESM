@@ -54,6 +54,11 @@ def main():
                          "halos) next to --out as <out>_lat_dayD.npz — "
                          "feeds the corner-wedge sharp-state "
                          "capture-compare (codex deficiency-r1 endgame)")
+    ap.add_argument("--ic-perturb", type=float, default=0.0,
+                    help="relative IC wind kick (chaos discriminator): "
+                         "if day-5 max|V| moves wildly vs the "
+                         "unperturbed run, case-8 is Lyapunov-chaotic "
+                         "and the vertex escape is not a localizable bug")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -156,6 +161,22 @@ def main():
         st = dict(st)
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)
+
+    if args.ic_perturb:
+        # chaos discriminator: a tiny relative kick to the D winds; if
+        # a bulk metric (e.g. day-5 max|V|) moves WILDLY vs the
+        # unperturbed run, the near-inviscid case-8 is Lyapunov-chaotic
+        # and pointwise divergence from the oracle is expected, not a
+        # localizable bug.  DETERMINISTIC per (n, seed) via index hash.
+        eps = args.ic_perturb
+        for t, st in enumerate(states):
+            for k in ("u", "v"):
+                a = np.asarray(st[k])
+                # index-varying sign so it is not a uniform rescale
+                ii = np.arange(a.size).reshape(a.shape)
+                st[k] = a * (1.0 + eps * (((ii + t) % 2) * 2 - 1))
+        print(f"IC perturbed by rel eps={eps:g} (chaos discriminator)",
+              flush=True)
 
     nmap = build_nearest_map(ctx)
     n, ng = ctx["n"], ctx["ng"]
