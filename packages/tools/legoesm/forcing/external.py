@@ -46,6 +46,115 @@ _BY_DATE_MAPPED_CALENDARS = frozenset(
 )
 
 
+# --- Volcanic stratospheric LW aerosol placement / band collapse ---------------
+# The CMIP6 ``bc_aeropt_cmip6_volc_lw_b16_sw_b14`` file is HEIGHT-RESOLVED
+# (altitude 5-40 km) and carries per-band single-scattering albedo, so the LW
+# volcanic aerosol is fed to RRTMGP as an ABSORPTION optical depth
+# (ext*(1-omega)) placed at its true stratospheric pressure.
+#
+# US Standard Atmosphere 1976 base-layer table (NOAA-S/T 76-1562): geopotential
+# base altitude [m], base temperature [K], lapse rate [K/m].  Used ONLY to map
+# the file's GEOMETRIC altitude axis to pressure for placement.  The file
+# altitude is geometric; ``_ussa1976_pressure`` converts to geopotential first
+# (the height difference is ~0.5 % at 30 km but the PRESSURE effect is ~2 % at
+# 30 km / ~3 % at 40 km, so the conversion IS applied).  The 5-40 km band the
+# volcanic file occupies lies in the 11-47 km stratospheric layers.
+_USSA1976_LAYERS = (
+    (0.0, 288.15, -0.0065),
+    (11000.0, 216.65, 0.0),
+    (20000.0, 216.65, 0.001),
+    (32000.0, 228.65, 0.0028),
+    (47000.0, 270.65, 0.0),
+)
+# US Std Atm 1976 sea-level reference pressure [Pa] (definition of the profile).
+_USSA1976_P_SEALEVEL_PA = 101325.0
+# Representative lower-stratosphere temperature [K] for the Planck-emission-
+# weighted gray collapse of the 16 terrestrial bands (B3).  Volcanic sulfate
+# sits at ~16-30 km where US Std Atm 1976 T ~ 217-227 K.  This is a documented
+# approximation, NOT the exact gray equivalent (which would fold in the full
+# spectral radiative kernel): on the real 1979 file a +/-10 K change moves the
+# Planck-weighted gray column OD by ~+/-4.7 % via the band-varying OD (Codex
+# review iter-1).
+_VOLC_LW_PLANCK_TEMP_K = 220.0
+# Sub-samples per band for the Planck-weight quadrature (numerics only).
+_PLANCK_QUAD_NSUB = 16
+
+
+def _ussa1976_pressure(z_m: np.ndarray) -> np.ndarray:
+    """US Standard Atmosphere 1976 pressure [Pa] at GEOMETRIC altitude ``z_m`` [m].
+
+    Piecewise-analytic hydrostatic integral of :data:`_USSA1976_LAYERS`
+    (constant-lapse power law / isothermal exponential), anchored at
+    :data:`_USSA1976_P_SEALEVEL_PA`.  Monotone decreasing in height.  Used only
+    to map the CMIP6 volcanic file's altitude axis onto pressure for
+    stratospheric aerosol placement.
+
+    The CMIP6 file altitude is GEOMETRIC, but the USSA base heights are
+    GEOPOTENTIAL; the input is converted ``h = R_e z / (R_e + z)`` before the
+    table lookup.  Skipping this leaves the mapped pressure low by ~1 % at
+    20 km and ~3 % at 40 km (Codex review iter-1).
+    """
+    z = np.asarray(z_m, dtype=np.float64)
+    r_e = float(constants.R_earth)
+    z = r_e * z / (r_e + z)          # geometric -> geopotential height [m]
+    g = float(constants.g)
+    r_d = float(constants.R_d)
+
+    def _layer_p(p_b, z_b, t_b, lapse, z_eval):
+        # Hydrostatic pressure within one constant-lapse layer.
+        if lapse == 0.0:
+            return p_b * np.exp(-g * (z_eval - z_b) / (r_d * t_b))
+        return p_b * (t_b / (t_b + lapse * (z_eval - z_b))) ** (g / (r_d * lapse))
+
+    # Base pressures at each layer boundary (integrate upward from sea level).
+    p_base = [_USSA1976_P_SEALEVEL_PA]
+    for (z_b, t_b, lapse), (z_t, _, _) in zip(
+        _USSA1976_LAYERS, _USSA1976_LAYERS[1:]
+    ):
+        p_base.append(_layer_p(p_base[-1], z_b, t_b, lapse, z_t))
+
+    n = len(_USSA1976_LAYERS)
+    p = np.full_like(z, np.nan)
+    for i, (z_b, t_b, lapse) in enumerate(_USSA1976_LAYERS):
+        z_t = _USSA1976_LAYERS[i + 1][0] if i + 1 < n else np.inf
+        z_lo = -np.inf if i == 0 else z_b  # first layer also covers z < 0
+        in_layer = (z >= z_lo) & (z < z_t)
+        p = np.where(in_layer, _layer_p(p_base[i], z_b, t_b, lapse, z), p)
+    return p
+
+
+def _planck_band_weights(
+    wl1_um: np.ndarray, wl2_um: np.ndarray, temp_k: float,
+) -> np.ndarray:
+    """Un-normalised Planck-emission weight per spectral band at ``temp_k``.
+
+    Integrates the Planck function ``B_nu(T)`` over each band's wavenumber
+    interval (band bounds given as wavelengths [um]).  The emission-weighted
+    mean ``sum_b W_b*tau_b / sum_b W_b`` is a physically-motivated HEURISTIC
+    gray value (better-motivated than a flat band mean, which overweights the
+    ~zero-flux near-IR bands) when a per-band optical depth is collapsed to one
+    value applied to every g-point (B3) -- NOT the exact gray equivalent, which
+    would fold in the full spectral radiative kernel.  Only relative weights
+    matter, so the result is un-normalised.
+    """
+    h = float(constants.h_planck)
+    c = float(constants.c_light)
+    k_b = float(constants.k_B)
+    t = float(temp_k)
+    w1 = np.asarray(wl1_um, dtype=np.float64) * 1.0e-6  # -> m
+    w2 = np.asarray(wl2_um, dtype=np.float64) * 1.0e-6
+    nu_lo = 1.0 / np.maximum(w1, w2)  # smaller wavenumber [1/m]
+    nu_hi = 1.0 / np.minimum(w1, w2)  # larger wavenumber [1/m]
+    _trapz = getattr(np, "trapezoid", None) or np.trapz
+    weights = np.empty(nu_lo.shape[0], dtype=np.float64)
+    for b in range(nu_lo.shape[0]):
+        nu = np.linspace(nu_lo[b], nu_hi[b], _PLANCK_QUAD_NSUB)
+        x = h * c * nu / (k_b * t)
+        b_nu = 2.0 * h * c**2 * nu**3 / np.expm1(x)
+        weights[b] = _trapz(b_nu, nu)
+    return weights
+
+
 # ==============================================================================
 # Data loading helpers (Zarr-first, NetCDF fallback via xarray)
 # ==============================================================================
@@ -597,15 +706,142 @@ def _load_volcanic_cmip6_anchored(
     return _load_volcanic_extinction_anchored(path, "ext_sun", "SW")
 
 
-def _load_volcanic_lw_cmip6_anchored(
+@lru_cache(maxsize=8)
+def _load_volcanic_lw_absorption_profile(
     path: str,
-) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
-    """LONGWAVE volcanic extinction (``ext_earth``, gap #9); see
-    :func:`_load_volcanic_extinction_anchored`.  Raises ``ValueError`` if
-    the file has no ``ext_earth`` band; the caller
-    (``get_aerosol_lw_at_time``) treats that as "no LW source" and returns
-    zeros so the run stays byte-identical."""
-    return _load_volcanic_extinction_anchored(path, "ext_earth", "LW")
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray, np.ndarray]:
+    """CMIP6 volcanic LW aerosol as a PRESSURE-RESOLVED absorption-OD profile.
+
+    Fixes three defects in feeding ``bc_aeropt_cmip6_volc_lw_b16`` to the
+    RRTMGP longwave ABSORPTION optical-depth slot:
+
+    * **B1 extinction -> absorption.**  ``ext_earth`` is EXTINCTION; the LW slot
+      wants ABSORPTION (single-scattering albedo 0).  Scaled per band by the
+      co-located ``omega_earth``: ``abs = ext*(1-omega)``.  ``omega_earth``
+      reaches ~0.4 in the window bands, so feeding raw extinction overstates
+      the absorption OD by up to that factor.  If the file lacks
+      ``omega_earth`` the sulfate LW ``omega ~ 0`` approximation is used
+      (``abs == ext``) and documented.
+    * **B2 stratospheric placement.**  The file is HEIGHT-RESOLVED (altitude
+      5-40 km).  The per-layer profile is retained and each file layer tagged
+      with a US-Std-Atm-1976 pressure edge, so the driver places the aerosol
+      at its true stratospheric pressure instead of spreading a column AOD by
+      tropospheric pressure mass (which lands ~90 % of it below the
+      tropopause).
+    * **B3 spectral collapse.**  The 16 terrestrial bands ARE collapsed to one
+      gray value (the LW slot is applied to every g-point), but via a
+      Planck-emission-weighted mean at :data:`_VOLC_LW_PLANCK_TEMP_K` rather
+      than a flat band mean.  This is better-motivated than a flat mean (which
+      overweights the near-IR bands that carry ~no LW flux at stratospheric
+      temperature) but is a HEURISTIC, not the exact gray equivalent -- the
+      exact single-tau response would fold in the full spectral radiative
+      kernel (surface/gas/cloud transmission + local emission), not Planck
+      emission alone.  Residual per-band spread is a documented approximation;
+      threading true per-band tau through the g-point loop is deferred as
+      disproportionate for this background-magnitude forcing.
+
+    Returns ``(mid_days, first_date, lat, aod_profile, p_edges)``:
+
+    * ``aod_profile`` ``(ntime, nlat, nlayer)`` per-layer absorption OD [-];
+    * ``p_edges`` ``(nlayer+1,)`` [Pa] layer pressure edges, ASCENDING (index 0
+      = top / lowest pressure), aligned so ``aod_profile[..., j]`` occupies
+      ``[p_edges[j], p_edges[j+1]]``.
+
+    Raises ``ValueError`` if the file lacks ``ext_earth`` (caller treats as no
+    LW source and stays byte-identical to no volcanic LW aerosol).
+    """
+    ds = _open_forcing_dataset(path)
+    if "ext_earth" not in ds.data_vars:
+        ds.close()
+        raise ValueError(
+            f"No CMIP6 volcanic LW extinction 'ext_earth' in {path!r}.",
+        )
+    var = ds["ext_earth"]
+    ext = np.asarray(var.values, dtype=np.float64)  # [1/km]
+    dims = list(var.dims)
+
+    # B1: single-scattering albedo -> absorption fraction (1-omega) per band.
+    if "omega_earth" in ds.data_vars:
+        omega = np.clip(
+            np.asarray(ds["omega_earth"].values, dtype=np.float64), 0.0, 1.0,
+        )
+    else:
+        omega = np.zeros_like(ext)  # sulfate LW omega ~ 0 approximation
+    abs_ext = ext * (1.0 - omega)  # absorption extinction [1/km]
+
+    alt_name = next(
+        (v for v in ("altitude", "alt", "height", "lev") if v in ds), None,
+    )
+    if alt_name is None:
+        ds.close()
+        raise ValueError(f"No altitude coordinate in volcanic file {path!r}")
+    alt_km = np.asarray(ds[alt_name].values, dtype=np.float64)
+
+    if "lat" in ds:
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+        lat_name = "lat"
+    elif "latitude" in ds:
+        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
+        lat_name = "latitude"
+    else:
+        ds.close()
+        raise ValueError(f"No 'lat'/'latitude' in volcanic file {path!r}")
+
+    if "time" in dims:
+        time_name = "time"
+        mid_days, first_date = _read_time_axis(ds)
+    elif "month" in dims:
+        time_name = "month"
+        nm = ext.shape[dims.index("month")]
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
+        first_date = None
+    else:
+        ds.close()
+        raise ValueError(f"No time/month dimension in volcanic file {path!r}")
+
+    # B3: Planck-emission-weighted collapse of the terrestrial-band axis.
+    band_name = next(
+        (d for d in dims
+         if d not in (time_name, lat_name, alt_name)),
+        None,
+    )
+    if band_name is not None:
+        band_axis = dims.index(band_name)
+        if "wl1_earth" in ds and "wl2_earth" in ds:
+            weights = _planck_band_weights(
+                np.asarray(ds["wl1_earth"].values),
+                np.asarray(ds["wl2_earth"].values),
+                _VOLC_LW_PLANCK_TEMP_K,
+            )
+        else:
+            weights = np.ones(abs_ext.shape[band_axis], dtype=np.float64)
+        # Weighted mean over bands (band axis -> gray).
+        abs_ext = np.tensordot(
+            weights, np.moveaxis(abs_ext, band_axis, 0), axes=(0, 0),
+        ) / weights.sum()
+        dims = [d for d in dims if d != band_name]
+    ds.close()
+
+    # Canonical (time, lat, altitude) order.
+    order = [dims.index(time_name), dims.index(lat_name), dims.index(alt_name)]
+    prof = np.transpose(abs_ext, order)  # (ntime, nlat, nalt) [1/km]
+
+    # Altitude layer edges (midpoints, outer half-steps) and thickness [km].
+    edges_km = np.empty(alt_km.size + 1, dtype=np.float64)
+    edges_km[1:-1] = 0.5 * (alt_km[:-1] + alt_km[1:])
+    edges_km[0] = alt_km[0] - 0.5 * (alt_km[1] - alt_km[0])
+    edges_km[-1] = alt_km[-1] + 0.5 * (alt_km[-1] - alt_km[-2])
+    dz_km = np.abs(np.diff(edges_km))  # (nalt,)
+
+    # Per-layer AOD [-] = absorption extinction [1/km] * dz [km].
+    aod_profile = prof * dz_km[None, None, :]
+    p_edges = _ussa1976_pressure(edges_km * 1000.0)  # [Pa]
+
+    # Return ASCENDING pressure (top first): altitude ascending -> pressure
+    # descending, so flip the layer axis and the edges together.
+    aod_profile = aod_profile[..., ::-1]
+    p_edges = p_edges[::-1]
+    return mid_days, first_date, lat, aod_profile, p_edges
 
 
 @lru_cache(maxsize=16)
@@ -1842,15 +2078,17 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
 
 def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
                            lat_grid: jnp.ndarray | None = None):
-    """Return the LONGWAVE volcanic aerosol optical depth at a sim day (gap #9).
+    """Return the LONGWAVE volcanic aerosol as a pressure-resolved profile.
 
     Mirrors :func:`get_aerosol_at_time` but returns the volcanic
-    stratospheric LW (terrestrial-IR) column absorption optical depth,
+    stratospheric LW (terrestrial-IR) ABSORPTION optical-depth profile,
     loaded from the ``ext_earth`` band of the CMIP6
-    ``bc_aeropt_cmip6_volc_*`` file.  There is no background LW aerosol
-    climatology (only the volcanic stratospheric LW matters for the
-    longwave budget), so the baseline is zero and the result is the
-    volcanic LW AOD alone.
+    ``bc_aeropt_cmip6_volc_*`` file via
+    :func:`_load_volcanic_lw_absorption_profile` (extinction -> absorption via
+    ``1-omega``, Planck-weighted gray band collapse, and the file's native
+    altitude axis mapped to pressure).  There is no background LW aerosol
+    climatology, so the baseline is zero and the result is the volcanic LW
+    absorption alone.
 
     Parameters
     ----------
@@ -1858,21 +2096,22 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
     day : float
         Day of year (fractional).
     lat_grid : jax array or None
-        If provided, interpolates LW AOD to model grid latitudes and
-        returns a jax array of that shape.  Otherwise returns a dict with
-        "lat"/"aod".
+        If provided, interpolates the profile to model grid latitudes.
 
     Returns
     -------
     None
-        If LW aerosol is disabled (``volcanic_lw_enabled`` False), or
-        enabled with no ``volcanic_path``, or the file carries no
-        ``ext_earth`` LW band.  Callers default a None to zeros, so the
-        run stays byte-identical to no volcanic LW aerosol.
-    jax array
-        If ``lat_grid`` provided: per-latitude column LW AOD (>= 0).
+        If LW aerosol is disabled (``volcanic_lw_enabled`` False), or enabled
+        with no ``volcanic_path``, or the file carries no ``ext_earth`` LW
+        band.  Callers default a None to zeros, so the run stays
+        byte-identical to no volcanic LW aerosol.
+    tuple ``(aod_profile, p_edges)``
+        If ``lat_grid`` provided: ``aod_profile`` ``(ncol, nlayer)`` per-file-
+        layer absorption OD (>= 0) and ``p_edges`` ``(nlayer+1,)`` [Pa]
+        ascending layer pressure edges, ready for
+        :func:`legoesm.forcing.surface_utils.place_stratospheric_aod_profile_to_layers`.
     dict
-        Otherwise ``{"lat": ..., "aod": ...}``.
+        Otherwise ``{"lat": ..., "aod_profile": ..., "p_edges": ...}``.
     """
     # Default OFF: only the explicit LW switch + a real volcanic file with
     # an ``ext_earth`` band produces nonzero LW aerosol.  Anything else
@@ -1881,43 +2120,40 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
         return None
 
     try:
-        mid_days_v, first_date_v, lat_v, data_v = (
-            _load_volcanic_lw_cmip6_anchored(config.volcanic_path)
+        mid_days_v, first_date_v, lat_v, prof_v, p_edges = (
+            _load_volcanic_lw_absorption_profile(config.volcanic_path)
         )
     except ValueError:
         # File has no LW (``ext_earth``) band — treat as "no LW source".
         return None
 
+    # Interpolate the (ntime, nlat, nlayer) profile in time -> (nlat, nlayer).
     if len(mid_days_v) > 12:
-        file_day_v = _simday_to_file_day(
-            day, config.start_year, first_date_v,
-        )
-        aod_v = (
-            _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
-            * config.volcanic_scale
-        )
+        file_day_v = _simday_to_file_day(day, config.start_year, first_date_v)
+        prof_t = _interp_monthly_noncyclic(mid_days_v, prof_v, file_day_v)
     else:
-        mid_anchored_v, data_anchored_v = _cyclic_phase_anchor(
-            mid_days_v, data_v, first_date_v,
+        mid_anchored_v, prof_anchored_v = _cyclic_phase_anchor(
+            mid_days_v, prof_v, first_date_v,
         )
-        aod_v = (
-            _interp_monthly_cyclic(mid_anchored_v, data_anchored_v, day)
-            * config.volcanic_scale
-        )
+        prof_t = _interp_monthly_cyclic(mid_anchored_v, prof_anchored_v, day)
+    prof_t = prof_t * config.volcanic_scale  # (nlat, nlayer)
 
     if lat_grid is not None:
-        volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
-        # Sum any trailing dims for multi-dimensional volcanic files,
-        # mirroring the SW path (the band axis is already collapsed in
-        # the loader, but guard defensively).
-        while volc.ndim > lat_grid.ndim:
-            volc = jnp.sum(volc, axis=-1)
-        return jnp.clip(volc, 0.0, None)
+        # (nlat, nlayer) -> (*lat_grid.shape, nlayer); the driver hands a
+        # raveled column-latitude grid, so flatten leading dims to
+        # (ncol, nlayer).  The nlayer axis is the vertical PROFILE and is
+        # intentionally NOT summed away (unlike the gray SW/column path).
+        prof_col = _interp_zonal_to_grid(lat_v, prof_t, lat_grid)
+        prof_col = jnp.reshape(
+            jnp.clip(prof_col, 0.0, None), (-1, prof_t.shape[-1]),
+        )
+        return prof_col, jnp.asarray(p_edges)
 
-    aod_v_flat = aod_v
-    while aod_v_flat.ndim > 1:
-        aod_v_flat = np.sum(aod_v_flat, axis=-1)
-    return {"lat": lat_v, "aod": np.clip(aod_v_flat, 0.0, None)}
+    return {
+        "lat": lat_v,
+        "aod_profile": np.clip(prof_t, 0.0, None),
+        "p_edges": np.asarray(p_edges),
+    }
 
 
 # ==============================================================================

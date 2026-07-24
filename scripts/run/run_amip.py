@@ -956,11 +956,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smooth path cannot.  Applied POST-STEP on the MPAS "
                              "path (the validated placement) and in-scheme on "
                              "the spectral/coupled path.  Default off (moist "
-                             "path byte-identical).  The threshold + cap use the "
-                             "scheme-config defaults (matching the validated "
-                             "configuration); like all atmosphere microphysics "
-                             "params they are calibratable via the SCM-RCE "
-                             "training path, not the run_amip --params loader.")
+                             "path byte-identical).  The threshold + cap default "
+                             "to the scheme-config values (matching the "
+                             "validated configuration); override via "
+                             "--hard-sat-adjust-threshold / "
+                             "--hard-sat-max-heating-k or --params.")
+    parser.add_argument("--hard-sat-adjust-threshold", type=float, default=None,
+                        dest="hard_sat_adjust_threshold",
+                        help="Override the hard-saturation-adjustment RH "
+                             "trigger (drain where q_v > threshold * q_sat). "
+                             "Requires --hard-saturation-adjustment; bounds "
+                             "[1, 2] per the scheme __param_spec__ (scheme "
+                             "default 1.1).")
+    parser.add_argument("--hard-sat-max-heating-k", type=float, default=None,
+                        dest="hard_sat_max_heating_K",
+                        help="Override the hard-saturation-adjustment per-step "
+                             "latent-heating cap [K]. Requires "
+                             "--hard-saturation-adjustment; bounds [0.5, 50] "
+                             "per the scheme __param_spec__ (scheme default "
+                             "5 K; 10 K = the day-137 summer-regime tuning "
+                             "arm).")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=None,
                         help="Convective in-updraft precipitation efficiency "
@@ -1229,6 +1244,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
+    parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
+                        dest="mpas_qv_smooth_del2_m2s",
+                        help="MPAS lane only: horizontal q_v del2 (unweighted "
+                             "SCVT Laplacian) smoothing diffusivity [m^2/s], "
+                             "applied post-step + a q>=0 floor (~1e5-1e6 "
+                             "typical at 240 km; 0=off, default). Conserves "
+                             "(to roundoff) the per-level mixing-ratio integral "
+                             "but NOT column water vapour (non-conservative "
+                             "filter). "
+                             "Setup refuses coefficients above the explicit "
+                             "monotonicity bound for the mesh+dt.")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1631,6 +1657,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
         hard_saturation_adjustment=args.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=args.hard_sat_max_heating_K,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
@@ -1702,6 +1730,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_land_beta=(args.mpas_land_beta
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
+        mpas_qv_smooth_del2_m2s=(
+            args.mpas_qv_smooth_del2_m2s
+            if args.mpas_qv_smooth_del2_m2s is not None
+            else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

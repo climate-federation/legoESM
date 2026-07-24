@@ -18,6 +18,7 @@ jnp = pytest.importorskip("jax.numpy")
 pytest.importorskip("mpi4py")
 
 from legoesm.driver.model_driver import ModelDriver
+from legoesm.grids.vertical import create_sigma_coordinate
 
 
 class _Partition:
@@ -32,15 +33,25 @@ class _VLayout:
         self.partition = _Partition(n_owned_cells)
 
 
-def _make_stub(n_cells=6, n_owned=4, n_edges=5, n_owned_edges=3):
+def _make_stub(n_cells=6, n_owned=4, n_edges=5, n_owned_edges=3, nlev=3):
     """A bare ModelDriver instance (no __init__) with just the attrs
-    ``_mpas_global_diag`` reads."""
+    ``_mpas_global_diag`` reads (incl. ``sigma`` for the pressure-weighted
+    mean T, 2026-07-23)."""
     drv = ModelDriver.__new__(ModelDriver)
     om_c = jnp.asarray(np.arange(n_cells) < n_owned)
     om_e = jnp.asarray(np.arange(n_edges) < n_owned_edges)
     drv._voronoi_layout = _VLayout(om_c, om_e, n_owned)
     drv._mpas_g_n_cells = None
+    drv.sigma = create_sigma_coordinate(nlev)
     return drv, np.asarray(om_c), np.asarray(om_e)
+
+
+def _expected_mean_T(drv, T, ps, om_c):
+    """Pressure-weighted owned-cell mean, mirroring the fixed convention."""
+    p_half = np.asarray(drv.sigma.pressure_at_half(jnp.asarray(ps)))
+    dp = p_half[..., 1:] - p_half[..., :-1]
+    own = om_c == 1
+    return (T[own] * dp[own]).sum() / dp[own].sum()
 
 
 def test_owned_masked_means_and_extrema_single_rank():
@@ -63,7 +74,7 @@ def test_owned_masked_means_and_extrema_single_rank():
                               jnp.asarray(u), jnp.asarray(cwv)))
 
     T_own = T[om_c == 1]
-    assert mean_T == pytest.approx(T_own.sum() / (om_c.sum() * nlev))
+    assert mean_T == pytest.approx(_expected_mean_T(drv, T, ps, om_c))
     assert mean_ps == pytest.approx(ps[om_c == 1].mean())
     assert max_u == pytest.approx(np.abs(u[om_e == 1]).max())
     assert T_min == pytest.approx(T_own.min())
@@ -73,16 +84,26 @@ def test_owned_masked_means_and_extrema_single_rank():
 
 
 def test_finite_flag_owned_only():
-    drv, om_c, _ = _make_stub()
+    drv, om_c, _ = _make_stub(nlev=2)
     T = np.full((6, 2), 280.0)
     ps = np.full((6,), 1.0e5)
     u = np.zeros((5, 2))
-    # NaN in a HALO cell only: owned field is finite -> flag stays True.
+    # NaN in a HALO cell only: owned field is finite -> flag stays True,
+    # and the pressure-weighted mean must not be poisoned through the
+    # T*dp product (codex F-B6: the where() wraps the product).
     T_halo_nan = T.copy()
     T_halo_nan[int(np.argmax(om_c == 0)), 0] = np.nan
-    *_, finite, _ = drv._mpas_global_diag(
+    mean_T_h, *_, finite, _ = drv._mpas_global_diag(
         jnp.asarray(T_halo_nan), jnp.asarray(ps), jnp.asarray(u), None)
     assert finite is True
+    assert np.isfinite(mean_T_h) and mean_T_h == pytest.approx(280.0)
+    # Non-finite HALO p_s must not leak either (0*NaN trap).
+    ps_halo_nan = ps.copy()
+    ps_halo_nan[int(np.argmax(om_c == 0))] = np.nan
+    mean_T_p, *_, finite_p, _ = drv._mpas_global_diag(
+        jnp.asarray(T), jnp.asarray(ps_halo_nan), jnp.asarray(u), None)
+    assert finite_p is True
+    assert np.isfinite(mean_T_p) and mean_T_p == pytest.approx(280.0)
     # NaN in an OWNED cell -> False.
     T_owned_nan = T.copy()
     T_owned_nan[0, 0] = np.nan
@@ -92,7 +113,7 @@ def test_finite_flag_owned_only():
 
 
 def test_cwv_none_returns_nan():
-    drv, _, _ = _make_stub()
+    drv, _, _ = _make_stub(nlev=2)
     out = drv._mpas_global_diag(
         jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
         jnp.zeros((5, 2)), None)
@@ -100,7 +121,7 @@ def test_cwv_none_returns_nan():
 
 
 def test_n_cells_cache_populated_once():
-    drv, _, _ = _make_stub(n_owned=4)
+    drv, _, _ = _make_stub(n_owned=4, nlev=2)
     args = (jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
             jnp.zeros((5, 2)), None)
     assert drv._mpas_g_n_cells is None

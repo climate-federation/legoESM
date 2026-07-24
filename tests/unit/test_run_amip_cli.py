@@ -472,6 +472,43 @@ def test_sponge_flags_flow_to_config():
     assert cfg.sponge_sigma_top == 0.2
 
 
+def test_hard_sat_override_flags_flow_and_validate():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip;
+    gate + spec-bounds enforcement (day-137 drain-capacity lever)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "10.0",
+        "--hard-sat-adjust-threshold", "1.05",
+    ]), parser))
+    assert cfg.hard_sat_max_heating_K == 10.0
+    assert cfg.hard_sat_adjust_threshold == 1.05
+    cfg.validate_strict()
+
+    # Override without the boolean gate -> refused (silently-inert config).
+    cfg_nogate = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_saturation_adjustment=True"):
+        cfg_nogate.validate_strict()
+
+    # Spec bounds enforced.
+    cfg_oob = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "80.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg_oob.validate_strict()
+
+
 def test_mpas_land_boundary_flags_flow_to_config():
     """--mpas-land-lapse-k-per-km / --mpas-land-beta round-trip (MPAS land
     surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
@@ -488,7 +525,26 @@ def test_mpas_land_boundary_flags_flow_to_config():
     ]), parser))
     assert cfg.mpas_land_lapse_K_per_km == 6.5
     assert cfg.mpas_land_beta == 0.6
-    cfg.validate_strict()
+    # validate_strict is exercised in test_mpas_land_boundary (the bare CLI
+    # invocation here has topography='flat', which the inert-corner guard
+    # correctly refuses).
+
+
+def test_mpas_qv_smoothing_flag_flows_to_config():
+    """--mpas-qv-smooth-del2-m2s round-trip (MPAS horizontal moisture
+    smoothing, 2026-07-23 speckle fix); default byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_qv_smooth_del2_m2s == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-qv-smooth-del2-m2s", "2e5",
+    ]), parser))
+    assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
+    # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -3106,3 +3162,67 @@ def test_spectral_fallback_rejects_dependent_option_silent_noop():
     args = _postprocess_args(p.parse_args(argv), p)
     with pytest.raises(SystemExit):
         _apply_spectral_scheme_fallback(args, argv, p)
+
+
+def test_hard_sat_override_flags_flow_to_config():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip onto
+    the ExperimentConfig flat scalars (day-137 summer-regime drain tuning);
+    defaults None keep the per-scheme __param_spec__ values."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-adjust-threshold", "1.2",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    assert cfg.hard_sat_adjust_threshold == 1.2
+    assert cfg.hard_sat_max_heating_K == 10.0
+    cfg.validate_strict()
+
+
+def test_hard_sat_override_without_gate_is_refused():
+    """An override without --hard-saturation-adjustment would be silently
+    inert (the floats are only read where the boolean gate fires) —
+    validate_strict must refuse it."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg.validate_strict()
+
+
+def test_hard_sat_override_bounds_enforced():
+    """Out-of-spec-bounds overrides are refused (threshold (1,2) /
+    heating (0.5,50) per the warm-rain __param_spec__)."""
+    parser = build_arg_parser()
+    for flags, match in (
+            (["--hard-sat-adjust-threshold", "0.9"], "hard_sat_adjust_threshold"),
+            (["--hard-sat-max-heating-k", "100.0"], "hard_sat_max_heating_K")):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", "morrison",
+            "--hard-saturation-adjustment", *flags,
+        ]), parser))
+        with pytest.raises(ValueError, match=match):
+            cfg.validate_strict()
+
+
+def test_hard_saturation_adjustment_requires_warm_rain_scheme():
+    """--hard-saturation-adjustment with a non-warm-rain microphysics scheme
+    (default sundqvist, or none) is silently inert at runtime
+    (_resolve_microphysics / the MPAS post-step drain early-return before the
+    flag is read) — validate_strict must refuse it (codex F3)."""
+    parser = build_arg_parser()
+    for micro in ("sundqvist", "none"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", micro,
+            "--hard-saturation-adjustment",
+        ]), parser))
+        with pytest.raises(ValueError, match="warm-rain microphysics"):
+            cfg.validate_strict()

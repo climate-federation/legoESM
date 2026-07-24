@@ -51,14 +51,14 @@ def test_lapse_ocean_fraction_unchanged():
 
 
 def test_lapse_land_cooling_matches_rate():
-    # full land at 2 km with 6.5 K/km -> exactly -13 K
+    # full land at 1 km with 6.5 K/km -> exactly -6.5 K
     out = land_lapse_adjusted_surface_temperature(
-        jnp.array([300.0]), jnp.array([1.0]), jnp.array([2000.0]), 6.5e-3)
-    np.testing.assert_allclose(np.asarray(out), [300.0 - 13.0], rtol=1e-12)
+        jnp.array([300.0]), jnp.array([1.0]), jnp.array([1000.0]), 6.5e-3)
+    np.testing.assert_allclose(np.asarray(out), [300.0 - 6.5], rtol=1e-12)
     # fractional land scales linearly
     out_half = land_lapse_adjusted_surface_temperature(
-        jnp.array([300.0]), jnp.array([0.5]), jnp.array([2000.0]), 6.5e-3)
-    np.testing.assert_allclose(np.asarray(out_half), [300.0 - 6.5], rtol=1e-12)
+        jnp.array([300.0]), jnp.array([0.5]), jnp.array([1000.0]), 6.5e-3)
+    np.testing.assert_allclose(np.asarray(out_half), [300.0 - 3.25], rtol=1e-12)
 
 
 def test_lapse_below_sea_level_clipped_not_warmed():
@@ -223,12 +223,17 @@ def _mpas_cfg(**kw):
     from legoesm.driver.config import (
         DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
     )
+    # turbulence + non-flat topography on by default so the land-boundary
+    # knobs are non-inert (the inert corners are tested explicitly below).
+    kw.setdefault("turbulence", "louis")
+    kw.setdefault("topography", "gaussian")
+    kw.setdefault("radiation", "gray")
     return ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=1, nlev=8,
                         vertical_coord="sigma"),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
         output=OutputConfig(diag_days=1),
-        days=1, dataset="analytical", radiation="gray",
+        days=1, dataset="analytical",
         **kw,
     )
 
@@ -268,6 +273,42 @@ def test_validate_cdgrid_refuses_mpas_knobs():
         _cdgrid_cfg(mpas_land_beta=0.6).validate_strict()
     with pytest.raises(ValueError, match="MPAS-lane"):
         _cdgrid_cfg(mpas_land_lapse_K_per_km=6.5).validate_strict()
+
+
+def test_validate_refuses_inert_corners():
+    """Codex F1-F3: a knob whose machinery is off must be refused, not
+    silently accepted."""
+    with pytest.raises(ValueError, match="silently inert"):
+        _mpas_cfg(mpas_land_lapse_K_per_km=6.5,
+                  radiation="none").validate_strict()
+    with pytest.raises(ValueError, match="silently inert"):
+        _mpas_cfg(mpas_land_beta=0.6, turbulence="none").validate_strict()
+    with pytest.raises(ValueError, match="all-zero"):
+        _mpas_cfg(mpas_land_beta=0.6, topography="flat").validate_strict()
+    # beta without radiation is fine (the turbulence anchor falls back but
+    # the humidity throttle still applies).
+    _mpas_cfg(mpas_land_beta=0.6, radiation="none").validate_strict()
+
+
+def test_validate_lane_guard_keys_on_grid_type_too():
+    """Codex F4: _run_mpas dispatch keys on grid_type; a grid_type='mpas'
+    config with the default discretization must still be treated as the
+    MPAS lane by the guard (pipeline land flags refused with the
+    MPAS-lane message, not the wrong-lane one)."""
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+    )
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=1, nlev=8,
+                        vertical_coord="sigma"),
+        dycore=DycoreConfig(dt=600.0),   # default discretization
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical", radiation="gray",
+        turbulence="louis", topography="gaussian",
+        slab_land_active=True,
+    )
+    with pytest.raises(ValueError, match="silently inert on the MPAS lane"):
+        cfg.validate_strict()
 
 
 def test_validate_bounds():
