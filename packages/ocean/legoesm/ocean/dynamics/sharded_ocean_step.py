@@ -514,15 +514,30 @@ def make_sharded_ocean_step(model, mesh):
     # replicated pytree the body indexes by axis_index.  Replicate (P()) so every
     # device holds the whole small grid stack.
     rep = NamedSharding(mesh, P())
+
+    def _replicated_put(arr):
+        # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
+        # value is bit-identical on every process. The band-geometry arrays
+        # are (re)computed per process and can differ in their last ULPs
+        # (per-process XLA autotuning on device-derived grid fields), which
+        # trips that assert at larger sizes (job 26450848: LL576 np=4,
+        # area-scale fields differing at 1e-7 relative). Broadcast process
+        # 0's bytes so every controller puts the SAME replicated value —
+        # geometry is static metadata, so process 0 is authoritative.
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+
+            arr = multihost_utils.broadcast_one_to_all(np.asarray(arr))
+        return jax.device_put(jnp.asarray(arr), rep)
+
     geom_stacks = {
-        name: jax.device_put(
+        name: _replicated_put(
             jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
-                      axis=0),
-            rep)
+                      axis=0))
         for name in array_field_names
     }
-    vmask_stack = jax.device_put(
-        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0), rep)
+    vmask_stack = _replicated_put(
+        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0))
 
     # Static perms for the v north-boundary-row ppermute (band r receives band
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).

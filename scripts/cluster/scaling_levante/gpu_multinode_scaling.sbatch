@@ -104,7 +104,7 @@ N_TIMING="${N_TIMING:-30}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"   # first run: check for NET/IB
 
 STAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_multinode_${STAMP}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_multinode_${STAMP}_j${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUTDIR"
 
 echo "=== HOSTS ==="; scontrol show hostnames "$SLURM_JOB_NODELIST"; date

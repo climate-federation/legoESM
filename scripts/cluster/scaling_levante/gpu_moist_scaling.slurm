@@ -102,7 +102,7 @@ NNODES="${SLURM_NNODES:-1}"
 MAX_RANKS="${MAX_RANKS:-$(( NNODES * GPUS_PER_NODE ))}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_moist_levante_${STAMP}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_moist_levante_${STAMP}_j${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUTDIR"
 exec > >(tee -a "$OUTDIR/run.log") 2>&1
 CASE_FILE="$OUTDIR/cases.jsonl"

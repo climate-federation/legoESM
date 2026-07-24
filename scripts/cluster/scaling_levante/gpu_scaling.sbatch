@@ -62,7 +62,7 @@ N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_${STAMP}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_${STAMP}_j${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUTDIR"
 
 echo "=== HOST ==="; hostname; date
