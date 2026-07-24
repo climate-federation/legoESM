@@ -34,6 +34,41 @@ OUTDIR="${ROOT}/${NAME}"
 : "${PY:=${REPO}/.venv/bin/python}"
 PKG="${REPO}/packages"
 
+# --- Century transient deck (opt-in: CENTURY_DECK=1) ------------------------
+# Select the era-correct OZONE (50-yr CMIP6 chunks) and VOLCANIC (per-year
+# CMIP6 files) for THIS link's simulated year, computed from the newest
+# checkpoint day + START_YEAR, BEFORE sourcing amip_production.sh (whose
+# `: "${VAR:=default}"` respects pre-set env).  Approximations, documented:
+# the file is pinned per LINK (<= ~1 sim-year timing error at link
+# boundaries), volcanic clamps to the available 1850-2014 range (post-2014
+# holds 2014 background), ozone holds the ssp-era file after 2014 if
+# present else the last historical chunk.  Off (default) = byte-identical.
+if [[ "${CENTURY_DECK:-0}" == "1" ]]; then
+    : "${START_YEAR:=1923}"
+    _ICONP=/pool/data/ICON/grids/public/mpim
+    _PRE_CKPT=$(ls -1 "${OUTDIR}"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1 || true)
+    _PRE_DAY=0
+    [[ -n "${_PRE_CKPT}" ]] && _PRE_DAY=$(basename "${_PRE_CKPT}" | sed -E 's/checkpoint_day_0*([0-9]+)\.npz/\1/')
+    SIM_YEAR=$(( START_YEAR + _PRE_DAY / 365 ))
+    _VOLC_YEAR=${SIM_YEAR}
+    (( _VOLC_YEAR < 1850 )) && _VOLC_YEAR=1850
+    (( _VOLC_YEAR > 2014 )) && _VOLC_YEAR=2014
+    export VOLCANIC="${_ICONP}/common/aerosol_volcanic_cmip6/bc_aeropt_cmip6_volc_lw_b16_sw_b14_${_VOLC_YEAR}.nc"
+    _OZDIR="${_ICONP}/common/ozone_cmip6_forcing"
+    if   (( SIM_YEAR < 1900 )); then _OZF="historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_185001-189912.nc"
+    elif (( SIM_YEAR < 1950 )); then _OZF="historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_190001-194912.nc"
+    elif (( SIM_YEAR < 2000 )); then _OZF="historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_195001-199912.nc"
+    else                             _OZF="historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_200001-201412.nc"
+    fi
+    if (( SIM_YEAR > 2014 )); then
+        _SSP=$(ls -1 "${_OZDIR}/ssp370"/vmro3_*.nc 2>/dev/null | head -1 || true)
+        [[ -n "${_SSP}" ]] && _OZF="ssp370/$(basename "${_SSP}")"
+    fi
+    export OZONE="${_OZDIR}/${_OZF}"
+    [[ -f "${VOLCANIC}" ]] || { echo "CENTURY_DECK: missing volcanic file ${VOLCANIC}" >&2; exit 3; }
+    [[ -f "${OZONE}"    ]] || { echo "CENTURY_DECK: missing ozone file ${OZONE}"    >&2; exit 3; }
+    echo "CENTURY_DECK: sim year ${SIM_YEAR} -> volcanic ${_VOLC_YEAR}, ozone $(basename "${_OZF}")"
+fi
 # shellcheck source=/dev/null
 source "${REPO}/config/amip/amip_production.sh"
 mkdir -p "${OUTDIR}"

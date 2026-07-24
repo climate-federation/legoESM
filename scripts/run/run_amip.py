@@ -1266,6 +1266,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "filter). "
                              "Setup refuses coefficients above the explicit "
                              "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--hard-sat-ice-curve",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="hard_sat_ice_curve",
+                        help="Mixed-phase hard-saturation drain: gate and "
+                             "land on the w(T)-blended liquid/ice saturation "
+                             "curve below freezing (blended latent heat, "
+                             "cold condensate to cloud ice). Fixes the "
+                             "TTL ice-supersaturation vapour bias. Requires "
+                             "--hard-saturation-adjustment.")
     parser.add_argument("--mpas-ice-skin-prognostic",
                         action=argparse.BooleanOptionalAction, default=False,
                         dest="mpas_ice_skin_prognostic",
@@ -1760,6 +1769,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
+        hard_sat_ice_curve=args.hard_sat_ice_curve,
         mpas_ice_skin_prognostic=args.mpas_ice_skin_prognostic,
         mpas_ice_thickness_m=(
             args.mpas_ice_thickness_m

@@ -58,6 +58,11 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature 
                                 # to avoid division by near-zero T in clear-sky columns.
                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+T_hom_freeze = 233.15           # Homogeneous freezing threshold [K] (~-40 C): all
+                                # condensate is ice below; standard mixed-phase
+                                # partition ramp spans [T_hom_freeze, T_freeze]
+                                # (Pruppacher & Klett 1997; Morrison/IFS-style
+                                # linear liquid fraction).
 S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
 S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
 mu_ice_freeze = 0.054           # Liquidus slope / freezing-point depression [degC/PSU] (Bitz-Lipscomb 1999, CICE)
