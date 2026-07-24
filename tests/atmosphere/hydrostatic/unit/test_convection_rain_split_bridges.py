@@ -121,9 +121,17 @@ def _firing_T_qv(sigma_full, horiz_shape):
     return t_grid, q_v_grid
 
 
-def _bechtold_bridge(pe, model_type, dt=_DT_S):
+def _bechtold_bridge(pe, model_type, dt=_DT_S, inplume=True):
+    # ``inplume`` toggles ``use_ifs_inplume_precip`` (production default True):
+    # the IFS in-plume precipitation generates rain INDEPENDENTLY of
+    # ``precip_efficiency``, so a PE=0 firing column still emits ``dq_r`` under
+    # the default.  The legacy-premise bridge tests below ("PE=0 => no rain")
+    # therefore pass ``inplume=False`` to isolate the ``precip_efficiency``
+    # split from the in-plume source (#1322).
     cfg = ConvectionConfig(
-        scheme="bechtold", bechtold=BechtoldConfig(precip_efficiency=pe),
+        scheme="bechtold",
+        bechtold=BechtoldConfig(precip_efficiency=pe,
+                                use_ifs_inplume_precip=inplume),
     )
     return make_convection_physics(cfg, model_type=model_type, dt=dt)
 
@@ -137,7 +145,7 @@ def _total_routed_condensate(field_stack):
 # Hydrostatic bridge (tracers = name-keyed dict; q_c always emitted)
 # ---------------------------------------------------------------------------
 
-def _run_hydrostatic(pe, with_qr):
+def _run_hydrostatic(pe, with_qr, inplume=True):
     grid = create_cubed_sphere(_N_CUBE)
     sigma = create_sigma_coordinate(_N_LEV)
     state = held_suarez_init(grid, sigma)
@@ -157,7 +165,8 @@ def _run_hydrostatic(pe, with_qr):
     state = state._replace(
         T=state.T.replace(data=t_grid.astype(dtype)), tracers=tracers,
     )
-    tend, _ = _bechtold_bridge(pe, "hydrostatic")(state, grid, sigma)
+    tend, _ = _bechtold_bridge(pe, "hydrostatic", inplume=inplume)(
+        state, grid, sigma)
     return tend.tracer_tendencies
 
 
@@ -190,13 +199,30 @@ def test_hydrostatic_bridge_conserves_condensate_qr_tracer():
 
 
 def test_hydrostatic_bridge_routes_rain_to_qr_only_when_split_on():
-    """PE=0 emits no ``q_r`` tendency (legacy, dq_r None); PE=0.7 with a ``q_r``
-    tracer routes a strictly-positive rain tendency there (not folded)."""
-    tt0 = _run_hydrostatic(0.0, with_qr=True)
-    assert "q_r" not in tt0, "PE=0 must not emit a convective rain tendency"
+    """PE=0 (in-plume OFF) emits no ``q_r`` tendency (legacy, dq_r None); PE=0.7
+    with a ``q_r`` tracer routes a strictly-positive rain tendency there (not
+    folded).  ``inplume=False`` isolates the precip_efficiency split: with the
+    production default ``use_ifs_inplume_precip=True`` a PE=0 column DOES rain
+    (see ``test_inplume_default_rains_at_pe0``) — #1322."""
+    tt0 = _run_hydrostatic(0.0, with_qr=True, inplume=False)
+    assert "q_r" not in tt0, "PE=0 (in-plume off) must not emit a rain tendency"
     tt7 = _run_hydrostatic(0.7, with_qr=True)
     assert "q_r" in tt7, "PE=0.7 must route rain to the q_r tracer"
     assert _total_routed_condensate(tt7["q_r"].data) > 0.0
+
+
+def test_inplume_default_rains_at_pe0():
+    """Companion to the legacy-premise tests (#1322): with the PRODUCTION
+    default ``use_ifs_inplume_precip=True``, the IFS in-plume precipitation
+    generates rain INDEPENDENTLY of ``precip_efficiency``, so a PE=0 firing
+    column DOES emit a strictly-positive ``dq_r`` — the invariant the three
+    ``inplume=False`` bridge tests deliberately switch off.  Pins the default
+    so a future flip back to ``precip_efficiency``-gated rain is caught."""
+    tt0 = _run_hydrostatic(0.0, with_qr=True, inplume=True)
+    assert "q_r" in tt0, (
+        "in-plume default (use_ifs_inplume_precip=True) must emit convective "
+        "rain even at precip_efficiency=0")
+    assert _total_routed_condensate(tt0["q_r"].data) > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +392,8 @@ def test_nonhydrostatic_bridge_no_raise_when_split_off():
     pe=0.0 Bechtold emits dq_r=None, so the SAME vapor-only state (n_tracers=1)
     does NOT raise (byte-identical to the pre-#929 sbm/dca/kuo path)."""
     state, grid, hc, tm = _build_nonhydrostatic_firing_state(n_tracers=1)
-    tend, _ = _bechtold_bridge(0.0, "nonhydrostatic")(state, grid, hc, tm)
+    tend, _ = _bechtold_bridge(0.0, "nonhydrostatic", inplume=False)(
+        state, grid, hc, tm)
     assert tend is not None  # reached — no raise
 
 
@@ -400,5 +427,6 @@ def test_spectral_bridge_tracers_none_no_raise_when_split_off():
     state, grid, sigma = _build_spectral_firing_state(
         include_qc=False, include_qr=False)
     state = state._replace(tracers=None)
-    tend, _ = _bechtold_bridge(0.0, "spectral_pe")(state, grid, sigma)
+    tend, _ = _bechtold_bridge(0.0, "spectral_pe", inplume=False)(
+        state, grid, sigma)
     assert tend is not None  # reached — no raise
