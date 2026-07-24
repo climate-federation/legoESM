@@ -816,11 +816,14 @@ class BarotropicConfig(NamedTuple):
     # min-rule applied to H_bathy alone) PLUS an e1e2-area-weighted 2-point
     # average of the dynamic ssh at the two adjacent T-cells (r1_e1e2u ==
     # 1/(e1u*e2u), the u-/v-point's OWN metric area — verified against
-    # domhgr.F90:146-160, NOT a sum of the two T-cell areas).  CAVEAT: lego's
-    # min-rule is load-bearing for a Hallberg-Adcroft column-sum invariant
-    # elsewhere in the tracer step; selecting "nemo_ssh_avg" may break that
-    # invariant at topographic steps (expected/accepted for this oracle-fidelity
-    # experiment — NEMO itself does not satisfy lego's invariant either).
+    # domhgr.F90:146-160, NOT a sum of the two T-cell areas).  Conservation
+    # (#1226 zero-deviation item 2, verified 2026-07-23): the tracer step's
+    # Hallberg-Adcroft delta_U correction enforces the column-sum invariant
+    # sum_k(h_u*u_corr) == Hu_avg identically for ANY face-depth mode (the
+    # min-rule h_u weights only set the vertical distribution), and Hu_avg is
+    # accumulated from the SAME gated flux that updates eta each substep — so
+    # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
+    # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
     barotropic_face_depth: str = "min_rule"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the

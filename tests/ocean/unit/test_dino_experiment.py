@@ -355,6 +355,11 @@ class TestDINORecipes:
             # NEMO dynspg_ts has no eta-diffusion term; alpha=0 is the
             # NEMO-true composition (see dino.py card comment).
             "barotropic_diffusion_alpha": 0.0,
+            # Zero-deviation item 2 (#1226): NEMO zhup2_e/zhvp2_e ssh-average
+            # face depths (dynspg_ts.F90:568-592), pair-consistent with the
+            # tracer continuity; conservation gate
+            # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate.
+            "barotropic_face_depth": "nemo_ssh_avg",
         }
         for field, want in nemo.items():
             assert getattr(c, field) == want, f"{field}: {getattr(c, field)} != {want}"
@@ -369,8 +374,10 @@ class TestDINORecipes:
         # zdf_baroclinic_only + barotropic_drag_substep) is ON for BOTH kamm
         # cards (MLF inherits from the base nemo_dino_kamm dict — see
         # DINO_RECIPES["nemo_dino_kamm_mlf"]), together with alpha=0 (no NEMO
-        # eta-diffusion counterpart) and face_depth="min_rule" (conservation-
-        # load-bearing, measured inert — see the dino.py card comment).
+        # eta-diffusion counterpart) and face_depth="nemo_ssh_avg" (zero-
+        # deviation item 2, pair-consistent with the tracer continuity;
+        # conservation gate test_partial_cells_phase7.py::
+        # TestNemoSshAvgFaceDepthGate — see the dino.py card comment).
         # Assert these propagate through to the model config unchanged on both.
         for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             c = dino_config_for_recipe(recipe)
@@ -378,13 +385,14 @@ class TestDINORecipes:
             assert c.zdf_baroclinic_only is True, recipe
             assert c.barotropic_drag_substep is True, recipe
             assert c.barotropic_diffusion_alpha == 0.0, recipe
+            assert c.barotropic_face_depth == "nemo_ssh_avg", recipe
             grid = dino_lat_lon_grid(c, n_lon=10)
             mc, _ = dino_lat_lon_model_config(grid, c, physics=True)
             assert mc.zdf_drag_in_matrix is True, recipe
             assert mc.zdf_baroclinic_only is True, recipe
             assert mc.barotropic_drag_substep is True, recipe
             assert mc.barotropic.barotropic_diffusion_alpha == 0.0, recipe
-            assert mc.barotropic.barotropic_face_depth == "min_rule", recipe
+            assert mc.barotropic.barotropic_face_depth == "nemo_ssh_avg", recipe
 
     def test_zdf_flags_default_false_on_other_recipes(self):
         # Every non-kamm recipe (veros/mitgcm/oceananigans/legoesm_default/
@@ -399,6 +407,9 @@ class TestDINORecipes:
             # #1226: alpha=0 is a kamm-only override; every other recipe
             # keeps the legoESM 2Δx stability-crutch default (0.01).
             assert c.barotropic_diffusion_alpha == 0.01, recipe
+            # #1226: nemo_ssh_avg face depths are a kamm-only override; every
+            # other recipe keeps the bit-identical min-rule default.
+            assert c.barotropic_face_depth == "min_rule", recipe
 
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The

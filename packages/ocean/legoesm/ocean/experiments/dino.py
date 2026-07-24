@@ -522,6 +522,12 @@ class DINOConfig:
     # stability crutch. Default here (0.01) keeps every non-kamm recipe
     # bit-identical; the kamm cards override to 0.0 (see DINO_RECIPES).
     barotropic_diffusion_alpha: float = 0.01
+    # LatLonCGridOceanConfig.barotropic.barotropic_face_depth (#1226), threaded
+    # 1:1 via from_flat/BarotropicConfig.  "min_rule" (default, bit-identical
+    # legacy) | "nemo_ssh_avg" (NEMO dynspg_ts.F90 zhup2_e/zhvp2_e ssh-average
+    # face depths).  The kamm cards override to "nemo_ssh_avg" (zero-deviation
+    # track item 2 — see the card comment in DINO_RECIPES).
+    barotropic_face_depth: str = "min_rule"
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -894,13 +900,19 @@ DINO_RECIPES: dict[str, dict] = {
         # oracle tendency comparisons). dynspg_ts.F90 has no eta-diffusion
         # term at all; set to 0 for the NEMO-true composition.
         "barotropic_diffusion_alpha": 0.0,
-        # barotropic_face_depth stays "min_rule" (the LatLonCGridOceanConfig
-        # default): NEMO uses the e1e2-weighted ssh average for the substep
-        # flux (zhup2_e, dynspg_ts.F90:581-592), but lego's min-rule is
-        # load-bearing for the tracer-step column-sum conservation invariant
-        # and the deviation is MEASURED INERT for the checkerboard mode
-        # (2026-07-23 config-D experiment, <=0.1% on pump + 90-day twin).
-        # Truth tiers outrank oracle-matching (CLAUDE.md precedence).
+        # Zero-deviation track item 2 (#1226): NEMO's e1e2-weighted ssh-average
+        # face depth for the substep flux AND drag/update depth (zhup2_e,
+        # dynspg_ts.F90:568-592,658-666).  Pair-consistent with the tracer
+        # continuity by construction: the substep loop builds the eta-update
+        # divergence and the Hu_avg accumulation from the SAME gated flux
+        # (mirroring NEMO's zhU -> ssh + un_adv, dynspg_ts.F90:604-643), and
+        # the tracer step's Hallberg-Adcroft delta_U correction enforces
+        # sum_k(h_u*u_corr) == Hu_avg for ANY face-depth mode (the lego
+        # analogue of NEMO's barotropic-component replacement, :984-988).
+        # Conservation gate: test_partial_cells_phase7.py::
+        # TestNemoSshAvgFaceDepthGate (volume + tracer conserved; mode
+        # measured conservation-inert vs min_rule at machine precision).
+        "barotropic_face_depth": "nemo_ssh_avg",
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -2480,9 +2492,10 @@ def dino_lat_lon_model_config(
         barotropic_time_filter=cfg.barotropic_time_filter,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
-        # BarotropicConfig field (#1226; see DINOConfig.barotropic_diffusion_alpha
-        # docstring). Routed by from_flat into config.barotropic.
+        # BarotropicConfig fields (#1226; see the DINOConfig docstrings).
+        # Routed by from_flat into config.barotropic.
         barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
+        barotropic_face_depth=cfg.barotropic_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
@@ -2615,11 +2628,13 @@ def dino_mpas_model_config(
             "DINO path (the Redi-only iso-neutral recipe is wired for the "
             "lat-lon C-grid). Override lateral_tracer_mixing="
             "'geopotential' to run on MPAS.")
-    if cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0:
+    if (cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0
+            or cfg.barotropic_face_depth != "min_rule"):
         raise ValueError(
             "DINOConfig.barotropic_time_filter="
             f"{cfg.barotropic_time_filter!r} / barotropic_auto_cmax="
-            f"{cfg.barotropic_auto_cmax!r}: the MPAS DINO builder does not "
+            f"{cfg.barotropic_auto_cmax!r} / barotropic_face_depth="
+            f"{cfg.barotropic_face_depth!r}: the MPAS DINO builder does not "
             "thread these (it would silently run different barotropic "
             "numerics — codex r9 P2). The centred split-explicit recipe is "
             "lat-lon only; override barotropic_time_filter='cosine' and "
