@@ -559,22 +559,32 @@ def profile_halo_exchange(
         ("vector_4d", (6, n, n, nlev, 2)),  # e.g., u,v stacked
     ]:
         try:
-            data = jax.random.normal(key, shape, dtype=jnp.float64)
+            # Dtype must follow the x64 setting: requesting float64 with x64
+            # OFF silently truncates to float32, and the byte accounting
+            # below would then be 2x wrong (2026-07-24 Levante campaign).
+            dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+            dtype_bytes = jnp.dtype(dtype).itemsize
+            data = jax.random.normal(key, shape, dtype=dtype)
             data_bytes = data.nbytes
 
             from legoesm.grids.halo import pad_halo, pad_halo_4d
 
             if label == "scalar_3d":
-                fn = lambda d: pad_halo(d, halo=halo)
+                _raw = lambda d: pad_halo(d, halo=halo)
             elif label == "scalar_4d":
-                fn = lambda d: pad_halo_4d(d, halo=halo)
+                _raw = lambda d: pad_halo_4d(d, halo=halo)
             else:
                 # Vector: pad each component
-                fn = lambda d: jnp.stack([
+                _raw = lambda d: jnp.stack([
                     pad_halo_4d(d[..., i], halo=halo) for i in range(d.shape[-1])
                 ], axis=-1)
+            # JIT once. Timing the EAGER path measured op-by-op Python
+            # dispatch (~20 s per "exchange" on the Levante GPU node),
+            # not the exchange — production always runs these inside a
+            # compiled step, so the eager number is meaningless here.
+            fn = jax.jit(_raw)
 
-            # Warmup
+            # Warmup (also absorbs the one-time compile)
             for _ in range(n_warmup):
                 _ = fn(data)
             jax.block_until_ready(jax.tree.leaves(fn(data)))
@@ -604,7 +614,6 @@ def profile_halo_exchange(
             # Each face edge: n * halo * dtype_bytes (for 3D)
             # or n * nlev * halo * dtype_bytes (for 4D)
             # 4 edges per face, 6 faces, but only edges on rank boundaries
-            dtype_bytes = 8  # float64
             if label == "scalar_3d":
                 bytes_per_edge = n * halo * dtype_bytes
                 n_edges = 4 * 6 if world_size == 1 else 4  # per-rank
@@ -617,9 +626,21 @@ def profile_halo_exchange(
 
             bytes_per_exchange = bytes_per_edge * n_edges
             bw_gb_s = (bytes_per_exchange / (mean_us / 1e6)) / 1e9 if mean_us > 0 else 0
+            # At world_size == 1 nothing crosses a rank boundary: this is a
+            # LOCAL pad (device-memory shuffle), so a "halo bandwidth" label
+            # would be a category error. Report the time, refuse the BW.
+            local_only = world_size == 1
+            if local_only:
+                bw_gb_s = None
 
             results[label] = {
                 "shape": list(shape),
+                "dtype_bytes": dtype_bytes,
+                "jitted": True,
+                "local_pad_only": local_only,
+                "bandwidth_reason": (
+                    "world_size==1: local device-memory pad, no inter-rank "
+                    "transfer — bandwidth undefined" if local_only else None),
                 "data_bytes": data_bytes,
                 "mean_us": round(mean_us, 1),
                 "median_us": round(sorted_us[len(sorted_us) // 2], 1),
@@ -630,7 +651,8 @@ def profile_halo_exchange(
                     (sum((v - mean_us) ** 2 for v in per_exchange_us) /
                      len(per_exchange_us)) ** 0.5, 1),
                 "bytes_per_exchange": bytes_per_exchange,
-                "bandwidth_gb_s": round(bw_gb_s, 3),
+                "bandwidth_gb_s": (round(bw_gb_s, 3)
+                                   if bw_gb_s is not None else None),
                 "n_edges": n_edges,
             }
         except Exception as e:
