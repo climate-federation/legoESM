@@ -194,6 +194,14 @@ class DINOConfig:
     # runs the forward branch, ln_bt_fw=T, which is already what lego's
     # uncentred F_slow matches). Default False = bit-identical.
     barotropic_forcing_centred: bool = False
+    # EEN barotropic-Coriolis coefficient seed level (#1226 item 4): see
+    # BarotropicConfig.barotropic_een_seed docstring. "window_start"
+    # (default, bit-identical) = lego's legacy freeze at the integration's
+    # own seed thickness (Nbb under the MLF before-level seed); "nemo_kmm" =
+    # NEMO's dyn_cor_2D_init(Kmm) NOW-thickness freeze (dynspg_ts.F90:355 +
+    # :1349-1379). Only differs from the default under the MLF leapfrog, so
+    # only the nemo_dino_kamm_mlf card flips it.
+    barotropic_een_seed: str = "window_start"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -1038,6 +1046,13 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # the FE nemo_dino_kamm card (which matches NEMO's ln_bt_fw=T forward
     # branch, already uncentred).
     "barotropic_forcing_centred": True,
+    # Zero-deviation item 4 (#1226): NEMO seeds the FROZEN in-window EEN
+    # barotropic-Coriolis coefficients at Kmm=NOW (dyn_cor_2D_init(Kmm),
+    # dynspg_ts.F90:355 + :1349-1379), while lego's legacy "window_start"
+    # under the MLF before-level seed freezes them at Nbb.  Only differs
+    # under the leapfrog's Nbb seed, so it lands on THIS card only (under
+    # FE the window seed IS Kmm and the options coincide byte-identically).
+    "barotropic_een_seed": "nemo_kmm",
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2490,6 +2505,9 @@ def dino_lat_lon_model_config(
         # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
         # see DINOConfig.barotropic_forcing_centred docstring).
         barotropic_forcing_centred=cfg.barotropic_forcing_centred,
+        # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
+        # DINOConfig.barotropic_een_seed docstring).
+        barotropic_een_seed=cfg.barotropic_een_seed,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

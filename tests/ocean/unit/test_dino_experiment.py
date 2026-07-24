@@ -431,6 +431,22 @@ class TestDINORecipes:
         mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
         assert mc.barotropic_forcing_centred is True
 
+    def test_barotropic_een_seed_mlf_card_only(self):
+        # #1226 zero-deviation item 4 (NEMO dyn_cor_2D_init(Kmm) EEN
+        # coefficient seed, dynspg_ts.F90:355 + :1349-1379): only differs
+        # from the legacy window-start freeze under the MLF before-level
+        # seed, so "nemo_kmm" lands ONLY on nemo_dino_kamm_mlf; every other
+        # recipe keeps the bit-identical "window_start" default.
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.barotropic_een_seed == "nemo_kmm"
+        for recipe in ("nemo_dino_kamm", "legoesm_default", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            assert (dino_config_for_recipe(recipe).barotropic_een_seed
+                    == "window_start"), recipe
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.barotropic.barotropic_een_seed == "nemo_kmm"
+
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
         # legoESM sigmoid default leaks enhanced mixing into weakly-stable water

@@ -850,6 +850,24 @@ class BarotropicConfig(NamedTuple):
     # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
     # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
     barotropic_face_depth: str = "min_rule"
+    # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
+    # coefficients (#1226 zero-deviation item 4; only read when
+    # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D
+    # coefficients over the whole substep window (dyn_cor_2D_init docstring:
+    # "these are however frozen although they should be updated in the
+    # variable volume case") — the deviation is only WHICH level the freeze is
+    # built from.  "window_start" (DEFAULT, bit-identical legacy): the
+    # thickness of the barotropic integration's own seed state — the NOW eta
+    # under FE/AB2, but the BEFORE (Nbb) eta under the MLF leapfrog's
+    # before-level seed (_barotropic_before_state).  "nemo_kmm": NEMO's level —
+    # dyn_cor_2D_init(Kmm) (dynspg_ts.F90:355, recomputed every step under
+    # vvl) builds every thickness at Kmm=NOW (e3u/e3v/r1_hu/r1_hv all Kmm,
+    # :1349-1379), so the coefficients are built from the NOW eta even though
+    # the fast integration starts from Nbb.  Identical whenever the window
+    # seed IS the NOW state (FE/AB2, or MLF's first Euler step) — the two
+    # options only differ under the MLF before-level seed.  Unknown value
+    # raises at the substep entry (dispatch hardening).
+    barotropic_een_seed: str = "window_start"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the

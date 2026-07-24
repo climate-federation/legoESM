@@ -1181,13 +1181,32 @@ def barotropic_substeps_latlon_cgrid(
         raise ValueError(
             "unknown barotropic_coriolis scheme "
             f"{_bt_cor!r}: must be one of ('avg', 'een', 'een_metric').")
+    # EEN coefficient seed level (#1226 zero-deviation item 4).  NEMO freezes
+    # the dyn_cor_2D coefficients over the substep window at Kmm=NOW
+    # (dyn_cor_2D_init(Kmm), dynspg_ts.F90:355 + :1349-1379 — every e3u/e3v/
+    # r1_hu/r1_hv at Kmm); lego's legacy "window_start" freezes them at the
+    # integration's OWN seed thickness (h_k — the Nbb eta under the MLF
+    # before-level seed).  "nemo_kmm" selects the NOW thickness (_h_k_corr,
+    # already built for the 3-D depth-mean correction / drag rate) under the
+    # seed override; without an override the two coincide (h_k IS the NOW
+    # thickness) — byte-identical.  Validated here on the static config value
+    # (dispatch hardening, same pattern as barotropic_coriolis above).
+    _een_seed = getattr(config.barotropic, "barotropic_een_seed",
+                        "window_start")
+    if _een_seed not in ("window_start", "nemo_kmm"):
+        raise ValueError(
+            "unknown barotropic_een_seed "
+            f"{_een_seed!r}: must be one of ('window_start', 'nemo_kmm').")
     _een_pre = None
     if _bt_cor in ("een", "een_metric") and add_barotropic_coriolis:
         # "een_metric" (node-16 finale) folds NEMO's e1v/r1_e1u (u) and e2u/
         # r1_e2v (v) horizontal metrics into the EEN coefficients — the factors
         # the per-unit-width "een" operator drops (dynspg_ts.F90:1349-1379).
+        _h_k_een = (_h_k_corr
+                    if (_een_seed == "nemo_kmm" and _seed_override)
+                    else h_k)
         _een_pre = _build_een_barotropic_inputs(
-            h_k, grid, mask, u_mask, v_mask, eta.dtype,
+            _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
             metric_complete=(_bt_cor == "een_metric"))
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)

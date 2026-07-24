@@ -746,3 +746,66 @@ def test_barotropic_forcing_centred_drag_residual_uses_before_level():
         barotropic_solver="explicit_substep")
     s_off = model_now.step(s1_pert, dt=_DT)
     assert np.max(np.abs(np.asarray(s_on.u.data) - np.asarray(s_off.u.data))) > 1e-8
+
+
+# ---------------------------------------------------------------------------
+# #1226 item 4: barotropic_een_seed (NEMO dyn_cor_2D_init(Kmm),
+# dynspg_ts.F90:355 + :1349-1379 — the frozen in-window EEN Coriolis
+# coefficients are built from the Kmm=NOW thickness, not the window seed's)
+# ---------------------------------------------------------------------------
+
+def test_barotropic_een_seed_default_and_unknown_raises():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert (LatLonCGridOceanConfig.from_flat()
+            .barotropic.barotropic_een_seed == "window_start")
+    # unknown value raises at the substep entry (dispatch hardening) —
+    # reached via a step on the explicit_substep path.
+    state, model = _leapfrog_channel(barotropic_een_seed="bogus")
+    with pytest.raises(ValueError, match="barotropic_een_seed"):
+        model.step(state, dt=_DT)
+
+
+def _een_mlf(seed):
+    return _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_een_seed=seed)
+
+
+def test_barotropic_een_seed_options_identical_when_before_equals_now():
+    """With eta_before == eta (before==now), the window-start thickness IS the
+    NOW thickness, so 'window_start' and 'nemo_kmm' must be BIT-IDENTICAL —
+    proves nemo_kmm changes nothing except the thickness time level."""
+    state, m_ws = _een_mlf("window_start")
+    _, m_kmm = _een_mlf("nemo_kmm")
+    s1 = m_ws.step(state, dt=_DT)          # Euler start populates *_before
+    # Force before == now exactly (both eta and velocity/tracers).
+    s1_eq = s1._replace(u_before=s1.u, v_before=s1.v, T_before=s1.T,
+                        S_before=s1.S, eta_before=s1.eta)
+    s_ws = m_ws.step(s1_eq, dt=_DT)
+    s_kmm = m_kmm.step(s1_eq, dt=_DT)
+    np.testing.assert_allclose(np.asarray(s_ws.u.data),
+                               np.asarray(s_kmm.u.data), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(s_ws.eta.data),
+                               np.asarray(s_kmm.eta.data), rtol=0, atol=0)
+
+
+def test_barotropic_een_seed_sensitivity_nbb_vs_kmm():
+    """With eta_before != eta (spatially varying difference), the two seeds
+    build the EEN coefficients from DIFFERENT thicknesses (Nbb vs Kmm), so
+    the stepped states must differ — the deviation the option closes is
+    real, and the option actually switches the thickness."""
+    state, m_ws = _een_mlf("window_start")
+    _, m_kmm = _een_mlf("nemo_kmm")
+    s1 = m_ws.step(state, dt=_DT)
+    # Spatially-varying before-eta perturbation (a uniform shift would nearly
+    # cancel in the EEN f/h·h structure); mask-safe, small vs H.
+    rng = np.random.default_rng(11)
+    eta_b = (np.asarray(s1.eta_before.data)
+             + 2.0 * rng.standard_normal(s1.eta.data.shape)
+             * np.asarray(s1.land_mask.data))
+    s1_pert = s1._replace(
+        eta_before=s1.eta_before.replace(data=jnp.asarray(eta_b)))
+    s_ws = m_ws.step(s1_pert, dt=_DT)
+    s_kmm = m_kmm.step(s1_pert, dt=_DT)
+    assert np.max(np.abs(np.asarray(s_ws.u.data)
+                         - np.asarray(s_kmm.u.data))) > 1e-10

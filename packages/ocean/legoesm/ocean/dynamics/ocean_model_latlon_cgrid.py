@@ -3129,6 +3129,14 @@ class LatLonCGridOceanModel:
                     # Kbb), not a double-count.  Under forward_euler the seed IS Nnn
                     # so it cancels exactly.  cor_v already carries the -f*U sign, so
                     # both are SUBTRACTED (unlike the 4-pt branch's explicit +f*U).
+                    # COEFFICIENT time level (#1226 item 4): this subtraction's EEN
+                    # coefficients are built from h_k_pre (Kmm/NOW).  NEMO uses the
+                    # SAME dyn_cor_2D_init(Kmm) coefficients for BOTH the :359
+                    # subtraction and the :689 live substep application; lego's
+                    # in-substep coefficients match only under
+                    # barotropic_een_seed="nemo_kmm" (the legacy "window_start"
+                    # builds them from the Nbb seed thickness under the MLF
+                    # before-level seed — an operator mismatch NEMO doesn't have).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                         barotropic_coriolis_een_pre_step,
                     )
