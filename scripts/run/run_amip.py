@@ -1308,6 +1308,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
+    parser.add_argument("--mpas-land-beta-soil",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_land_beta_soil",
+                        help="MPAS lane only (#1312 phase 2b): thread the "
+                             "interactive multilayer land's per-cell "
+                             "root-zone beta_soil into the turbulence "
+                             "surface humidity (traced forcing['beta_land'], "
+                             "one-step lag) — the land latent flux is then "
+                             "throttled by the soil's own moisture state, "
+                             "REPLACING the static --mpas-land-beta over "
+                             "land. Requires --use-multilayer-land.")
     parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
                         dest="mpas_qv_smooth_del2_m2s",
                         help="MPAS lane only: horizontal q_v del2 (unweighted "
@@ -1801,6 +1812,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_land_beta=(args.mpas_land_beta
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
+        mpas_land_beta_soil=args.mpas_land_beta_soil,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None

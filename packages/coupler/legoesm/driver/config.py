@@ -1137,6 +1137,14 @@ class ExperimentConfig(NamedTuple):
     # knobs are refused there (validate_strict).
     mpas_land_lapse_K_per_km: float = 0.0  # land anchor lapse [K/km]; 0=off, 6.5=ICAO std
     mpas_land_beta: float = 1.0            # land evaporation efficiency [0-1]; 1=wet swamp
+    # Phase 2b (#1312): traced per-cell root-zone beta_soil from the
+    # interactive multilayer land -> the MPAS turbulence surface humidity
+    # (forcing["beta_land"], one-step lag like the skin-T blend).  Replaces
+    # the STATIC mpas_land_beta over land when on (the land latent flux is
+    # then throttled by the soil's own moisture state — the same
+    # land_tile_beta_soil the coupled pipeline applies).  Requires
+    # use_multilayer_land on the MPAS lane; default OFF = byte-identical.
+    mpas_land_beta_soil: bool = False
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -1854,6 +1862,23 @@ class ExperimentConfig(NamedTuple):
                     "humidity; turbulence='none' has no surface latent flux "
                     "to throttle — the knob would be silently inert."
                 )
+            if self.mpas_land_beta_soil:
+                # Traced beta_soil needs the multilayer land producing it and
+                # the turbulence surface flux consuming it (inert-corner
+                # rejection, same doctrine as the static knobs above).
+                if not self.use_multilayer_land:
+                    errors.append(
+                        "mpas_land_beta_soil threads the multilayer land's "
+                        "root-zone beta_soil into the turbulence surface "
+                        "humidity; it requires use_multilayer_land=True."
+                    )
+                if self.turbulence == "none":
+                    errors.append(
+                        "mpas_land_beta_soil throttles the turbulence "
+                        "surface humidity; turbulence='none' has no surface "
+                        "latent flux to throttle — the flag would be "
+                        "silently inert."
+                    )
             # flat topography yields all-zero f_land UNLESS an explicit land
             # mask overrides it (codex F-B2); the driver's runtime all-zero
             # guard remains authoritative for degenerate mask files.
@@ -1874,6 +1899,14 @@ class ExperimentConfig(NamedTuple):
                     f"knobs; discretization={d.discretization!r} has its own "
                     "land tile (slab_land_active / use_multilayer_land) and "
                     "would silently ignore them."
+                )
+            if self.mpas_land_beta_soil:
+                errors.append(
+                    "mpas_land_beta_soil is an MPAS-lane flag; "
+                    f"discretization={d.discretization!r} threads beta_soil "
+                    "through its own tiled land pipeline "
+                    "(physics_pipeline._land_tile_q_sfc) and would silently "
+                    "ignore it."
                 )
             if self.mpas_qv_smooth_del2_m2s != 0.0:
                 errors.append(

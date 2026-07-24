@@ -183,7 +183,8 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
-def _standalone_cloud_config(cfg, cloud_scheme: str):
+def _standalone_cloud_config(cfg, cloud_scheme: str,
+                             allow_convective_cloud: bool = False):
     """Tuned ``CloudConfig`` for the standalone (MPAS/spectral) radiation path.
 
     Mirrors the FV pipeline's ``build_cloud_config`` call (#689) so the tuned
@@ -191,33 +192,44 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
     / Xu-Randall knobs) reach the standalone backends too (#870 Phase 1) —
     previously these paths silently ran ``CloudConfig`` defaults.
 
-    ``convective_cloud`` stays OFF here: the standalone radiation call
-    (``radiation/integration.py``) does not thread ``conv_precip`` into
-    ``compute_cloud_properties``, and ``convective_cloud=True`` without it
-    trips that function's loud misconfiguration guard by design.  Returns
-    ``None`` (=> scheme-default config) when the scheme is "none".
+    ``convective_cloud``: honoured on the MPAS path
+    (``allow_convective_cloud=True`` — 2026-07-24: the hydrostatic radiation
+    fn reads the LAGGED ``PhysicsState.conv_precip`` carry the convection
+    module publishes, closing the old "does not thread conv_precip" gap);
+    still FORCED OFF on the spectral path, whose lean loop refuses stateful
+    physics and therefore has no ``conv_precip`` carry to read — enabling it
+    there would trip ``compute_cloud_properties``' loud misconfiguration
+    guard by design.  Returns ``None`` (=> scheme-default config) when the
+    scheme is "none".
     """
     if cloud_scheme == "none":
         return None
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
 
-    # LOUD, not silent (repo doctrine): a user/YAML requesting
-    # convective_cloud=True on a standalone backend would otherwise get
-    # different physics with no trace (pre-merge codex review).  The lane
-    # still runs (the production YAML sets it true for the FV path); the
-    # forced drop is now visible in the log.
-    if bool(getattr(cfg, "convective_cloud", False)):
+    _conv_cloud = bool(getattr(cfg, "convective_cloud", False))
+    if _conv_cloud and allow_convective_cloud:
+        logger.info(
+            "convective_cloud=True ACTIVE on the MPAS standalone path: "
+            "Slingo cumulus fraction driven by the one-step-lagged "
+            "PhysicsState.conv_precip carry (the convection module's "
+            "column-integrated in-updraft rain production). Schemes with "
+            "no rain split publish zero — their cumulus fraction is zero."
+        )
+    elif _conv_cloud:
+        # LOUD, not silent (repo doctrine): the spectral lean loop refuses
+        # stateful physics, so there is no conv_precip carry to read — the
+        # forced drop stays visible in the log.
         logger.warning(
-            "convective_cloud=True is FORCED OFF on the standalone "
-            "(MPAS/spectral) radiation path: it does not thread conv_precip, "
-            "and convective_cloud without it trips compute_cloud_properties' "
-            "misconfiguration guard. The FV (cubed-sphere/latlon) pipeline "
-            "honours the setting."
+            "convective_cloud=True is FORCED OFF on the spectral "
+            "standalone radiation path: its lean loop carries no "
+            "PhysicsState, so there is no conv_precip for the Slingo "
+            "fraction. The FV pipeline and the MPAS lane honour the "
+            "setting."
         )
 
     return build_cloud_config(
         cloud_scheme,
-        convective_cloud=False,
+        convective_cloud=(_conv_cloud and allow_convective_cloud),
         rh_crit=getattr(cfg, "cloud_rh_crit", None),
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
@@ -5707,6 +5719,21 @@ class ModelDriver:
         ``range(start_step, n_steps_total)`` and treat ``--days`` as total;
         do not copy their launcher convention here.
         """
+        # --budget-ledger is a compiled-segment (SegmentCarry) diagnostic —
+        # the per-process attribution hooks live in the FV segment loops and
+        # are NOT wired into this lean loop.  It used to be SILENTLY inert
+        # here (#1311: chains passed the flag and got no ledger, so the
+        # conv-pairing gate quietly never ran); refuse loudly until the
+        # attribution port lands.
+        if bool(getattr(self.config.output, "budget_ledger", False)):
+            raise ValueError(
+                "--budget-ledger is not implemented on the MPAS lean loop "
+                "(#1311): the per-process ledger accumulates inside the FV "
+                "compiled segments (SegmentCarry), which this path does not "
+                "use.  Run without the flag, or use the FV lanes for "
+                "ledger-attributed budget runs, until the MPAS attribution "
+                "port lands."
+            )
         import time
 
         cfg = self.config
@@ -5903,7 +5930,10 @@ class ModelDriver:
                 cloud_scheme=_cloud_scheme,
                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
                 # reach the MPAS radiation clouds too (#870 Phase 1).
-                cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
+                # convective_cloud honoured here (2026-07-24): the lagged
+                # PhysicsState.conv_precip carry exists on this path.
+                cloud_config=_standalone_cloud_config(
+                    cfg, _cloud_scheme, allow_convective_cloud=True),
                 diurnal_cycle=cfg.diurnal_cycle,
                 orbit=_orbit_params,
                 # CLUBB sub-grid cloud fraction -> radiation (marine-Sc albedo
@@ -5975,6 +6005,10 @@ class ModelDriver:
         # turbulence factory (closure const); the lapse adjusts the T_sfc
         # forcing anchor below.  Both default OFF => byte-identical builds.
         _land_beta = float(getattr(cfg, "mpas_land_beta", 1.0))
+        # Phase 2b (#1312): traced per-cell beta_soil replaces the static
+        # knob over land; the turbulence factory then needs f_land even when
+        # the static knob is at its neutral 1.0.
+        _land_beta_soil_on = bool(getattr(cfg, "mpas_land_beta_soil", False))
         _land_lapse_K_m = (
             float(getattr(cfg, "mpas_land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -6009,7 +6043,9 @@ class ModelDriver:
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
-                                          if _land_beta != 1.0 else None),
+                                          if (_land_beta != 1.0
+                                              or _land_beta_soil_on)
+                                          else None),
                                   land_beta=_land_beta)
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
@@ -6032,7 +6068,9 @@ class ModelDriver:
             make_physics(phys_cfg, model_type="mpas", dt=DT,
                          column_mesh=_column_mesh, need_rad=False,
                          f_land=(_f_land_cells
-                                 if _land_beta != 1.0 else None),
+                                 if (_land_beta != 1.0
+                                     or _land_beta_soil_on)
+                                 else None),
                          land_beta=_land_beta)
             if _subcycle_rad else None
         )
@@ -6227,8 +6265,18 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
+        if _land_beta_soil_on and not _land_ml_on:
+            raise ValueError(
+                "mpas_land_beta_soil=True requires the interactive "
+                "multilayer land on the MPAS lane (use_multilayer_land with "
+                "a built land state); without it there is no soil moisture "
+                "to derive beta_soil from — the flag would be silently "
+                "inert."
+            )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
+        _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
+        _land_beta_cells = None        # (nCells,) traced beta of the last step
         if _land_ml_on:
             if not _sst_forcing:
                 raise ValueError(
@@ -6263,6 +6311,26 @@ class ModelDriver:
                     land_state, a2s, _lml_cfg, _lml_umin, DT,
                     lat=_lml_lat, doy=doy, land_params=_lml_params)
                 return new_state, resp.T_sfc
+
+            # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
+            # ``forcing["beta_land"]`` the turbulence surface flux consumes.
+            # Same helper (land_tile_beta_soil) and thresholds the coupled
+            # pipeline's land tile applies — one formula, one place.
+            _land_beta_fn = None
+            if _land_beta_soil_on:
+                from legoesm.land.multilayer_land import land_tile_beta_soil
+
+                @jax.jit
+                def _land_beta_fn(land_state):
+                    return jnp.clip(
+                        land_tile_beta_soil(
+                            land_state.theta_soil, _lml_cfg, _lml_params),
+                        0.0, 1.0)
+                if _land_beta != 1.0:
+                    logger.info(
+                        "  mpas_land_beta_soil: traced per-cell beta_soil "
+                        "REPLACES the static mpas_land_beta=%.2f over land",
+                        _land_beta)
 
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
@@ -6562,7 +6630,13 @@ class ModelDriver:
             # prognostic-aerosol tracer is opt-in and zero before the feature
             # existed).  Any OTHER missing field is still a partial/corrupted
             # carry and must fail loudly (issue #405/#413).
-            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
+            _NEW_OPTIONAL_PS_FIELDS = frozenset({
+                "aerosol_number",
+                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+                # is the correct pre-feature state (no convective cloud was
+                # diagnosed before it existed).
+                "conv_precip",
+            })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
                     PHYSSTATE_INPUT_FIELDS,
@@ -6677,6 +6751,15 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
+        # Phase 2b (#1312): seed the traced per-cell beta from the CURRENT
+        # land state (cold-start or checkpoint-restored — beta is a pure
+        # function of the restored soil moisture, so restarts are exact
+        # without a new checkpoint field).  Seeding BEFORE the loop keeps
+        # the ``beta_land`` forcing key structurally present from step 0 —
+        # adding it mid-run would change the forcing pytree and retrace
+        # ``model.step``.
+        if _land_beta_fn is not None:
+            _land_beta_cells = _land_beta_fn(self._land_ml_state)
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -6808,6 +6891,11 @@ class ModelDriver:
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
                         + _f_land_cells * _land_T_skin)
+                # Phase 2b (#1312): traced per-cell beta_soil (same one-step
+                # lag as the skin T above; seeded pre-loop so the key is
+                # structurally stable — no retrace).
+                if _land_beta_cells is not None:
+                    _forcing["beta_land"] = _land_beta_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -6838,6 +6926,8 @@ class ModelDriver:
                     self._land_ml_state, _land_T_skin = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    if _land_beta_fn is not None:
+                        _land_beta_cells = _land_beta_fn(self._land_ml_state)
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.

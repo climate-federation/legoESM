@@ -593,13 +593,36 @@ def _make_mpas_turbulence(
             T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
         # MPAS land surface boundary: throttle the LAND fraction's surface
-        # humidity gradient by ``land_beta`` (soil-moisture availability)
-        # instead of the saturated infinite-swamp value the nearest-ocean
-        # SST fill otherwise implies.  Static feature gate (Python ``if`` on
-        # build-time config, the JAX feature-gating exception): defaults
-        # (f_land None / beta 1) keep this branch out of the trace entirely,
-        # byte-identical to the pre-knob path.
-        if f_land is not None and land_beta != 1.0:
+        # humidity gradient by a soil-moisture availability beta instead of
+        # the saturated infinite-swamp value the nearest-ocean SST fill
+        # otherwise implies.  Two sources, traced wins:
+        #   1. ``forcing["beta_land"]`` — TRACED per-cell root-zone beta_soil
+        #      from the interactive multilayer land (#1312 phase 2b; one-step
+        #      lag, updated by the driver loop each step without retrace).
+        #   2. the STATIC ``land_beta`` build-time knob (mpas_land_beta).
+        # Both gates are static Python ``if``s (dict-key membership is part
+        # of the forcing pytree structure; the knob is a build-time closure
+        # const — the JAX feature-gating exception): defaults keep these
+        # branches out of the trace entirely, byte-identical to before.
+        _beta_traced = (forcing.get("beta_land")
+                        if forcing is not None else None)
+        if _beta_traced is not None:
+            if f_land is None:
+                raise ValueError(
+                    "forcing['beta_land'] (traced per-cell beta_soil) "
+                    "requires the land fraction to be threaded into the "
+                    "turbulence factory (make_physics f_land=...); the "
+                    "driver must pass f_land whenever mpas_land_beta_soil "
+                    "is enabled."
+                )
+            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                beta_limited_surface_humidity,
+            )
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            q_sfc = beta_limited_surface_humidity(
+                q_sfc, q_v_col[:, -1], _f_land_col,
+                jnp.asarray(_beta_traced, dtype=q_sfc.dtype).reshape(nCells))
+        elif f_land is not None and land_beta != 1.0:
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 beta_limited_surface_humidity,
             )
