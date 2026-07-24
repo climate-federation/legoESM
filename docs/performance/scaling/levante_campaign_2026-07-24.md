@@ -212,6 +212,34 @@ not fit cache; not instrumented here), 0.88@8,
 ocean case (one rank exit-3 → kill-on-bad-exit) before the weak tail —
 np128 ocean + weak ladders and the rank-failure attribution remain open.
 
+## Atm ICOSAHEDRAL CPU-MPI (job 26452579, 1 node, f64 moist, L26)
+
+The last measurement gap, and the healthiest strong-scaling curve in the
+campaign. Efficiency t1/(n*tn) by subdivision:
+
+| subdiv | np2 | np4 | np8 | np16 | np32 | np64 |
+|---|---|---|---|---|---|---|
+| 6 | 1.02 | 0.88 | 1.07 | 0.51 | 0.54 | 0.57 |
+| 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
+| 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
+
+Shape: ~1.0 through np8, one step down, then FLAT 0.5 from np16 to np64 —
+4x more ranks with no further loss, the signature of a fixed per-rank cost
+rather than growing communication. (The >1 points at np8 are the same
+base-leg-working-set effect noted for the cube; read as "at ideal".)
+
+Against the 4-node SPREAD lat-lon ladder (job 26452578) at high rank
+counts the contrast is large: ico holds 0.52 at np64 where lat-lon r128/r256
+is at 0.12/0.16. That matches the documented expectation that a 2-D cell
+partition beats a 1-D latitude band on perimeter/area. CAVEAT: ico ran
+PACKED on one node and lat-lon SPREAD over four, so this compares
+decomposition AND placement together, not decomposition alone.
+
+The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
+0.48 / 0.46 / 0.22 / 0.45 at np 1..64) — the per-rank problem size is not
+held constant cleanly across that sweep's subdivision steps, so no weak
+claim is made from it.
+
 ## Infrastructure defects found + fixed (each with a receipt)
 
 1. py3.14 argparse eager help validation — both ocean benches crashed at
