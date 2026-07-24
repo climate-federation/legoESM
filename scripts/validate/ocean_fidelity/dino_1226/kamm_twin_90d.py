@@ -19,13 +19,27 @@ that runs before any integration and is unit-tested directly (see
 ``tests/ocean/unit/test_dino_1226_instruments.py``): a rest-state start must be
 IMPOSSIBLE to smuggle through un-flagged.
 
-INTEGRATOR-MEMORY HANDSHAKE CAVEAT: the bridge carries now-level prognostic
-fields (T/S/eta/u/v) but NOT NEMO's internal integrator memory (before-level
-fields for the leapfrog/AB2 filter, TKE closure state, etc). Days 1-4 of a
-twin therefore run on a legoESM-native "cold start" for that memory while NEMO
-continues from its own warmed-up state -- expect the two trajectories to
-diverge fastest during this handshake window before settling into a slower,
-scheme-driven drift. Do not read days 1-4 as a scheme-fidelity signal.
+INTEGRATOR-MEMORY HANDSHAKE CAVEAT: by default the bridge carries only
+now-level prognostic fields (T/S/eta/u/v), NOT NEMO's internal integrator
+memory (before-level leapfrog fields, TKE closure state). Days 1-4 of a
+default twin therefore run on a legoESM-native "cold start" for that memory
+while NEMO continues from its own warmed-up state -- expect the two
+trajectories to diverge fastest during this handshake window before settling
+into a slower, scheme-driven drift. Do not read days 1-4 as a
+scheme-fidelity signal for a default (non-bridged) run.
+
+``--bridge-before`` (#1317) REMOVES this caveat for the leap-frog before-level
+state: it seeds ``state.{T,S,u,v,eta}_before`` from the NEMO restart's own
+``tb/sb/ub/vb``/``sshb`` (the Modified-Leap-Frog integrator's third time
+level), so the twin's step-0 entry state is EXACTLY NEMO's -- a real leap-frog
+continuation, not a forward-Euler-from-now start. Required (not merely
+optional) for ``nemo_dino_kamm_mlf``'s ``tke_n2_time_level="nemo_before"`` /
+``tke_shear_production="nemo_burchard"`` axes: without it, ``model.step``
+raises ``ValueError`` at step 0 (``state.T_before``/``S_before`` are ``None``
+until the model's own Euler-start populates them AFTER step 1 -- too late for
+a card that reads them every step from step 0). ``--bridge-tke`` (TKE closure
+memory) is a SEPARATE, independent caveat/flag -- still cold-start by
+default.
 
 Usage
 -----
@@ -55,9 +69,13 @@ from legoesm.core.field import Field
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
+    read_nemo_restart_before,
     read_nemo_restart_en,
 )
-from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
+from legoesm.ocean.fidelity.nemo_state_bridge import (
+    bridge_before_state_topo,
+    bridge_nemo_to_legoesm_topo,
+)
 
 # NEMO oracle-build artifact roots (mesh/restart donors). Override via env var
 # or --run-traj/--run-stepdump for a different machine/build layout.
@@ -160,8 +178,34 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
                                   dims=("lat", "lon", "level"), units="m^2/s^2"))
 
 
+def _print_before_bridge_verify(st, before, grid) -> None:
+    """Print max|d_tb|/max|d_sb|/max|d_ub|/max|d_vb| vs the raw restart
+    before-level (wet cells) -- the --bridge-before day-0 gate companion to
+    ``verify_day0_matches_restart``'s now-level check.
+
+    T/S use the FULL 3-D ``tmask`` (not the 2-D surface ``land_mask``): under
+    full-step topography a wet surface column still has dry cells below
+    ``k_bot``, where NEMO stores a raw 0.0 but the bridge's Neumann-fill
+    extrapolates a nonzero value (matches the now-level bridge's own T/S
+    fill) -- indexing those cells with the 2-D mask would spuriously flag
+    the intentional fill as a mismatch.
+    """
+    tmask3 = np.asarray(grid.tmask) > 0.5
+    d_tb = float(np.max(np.abs(np.asarray(st.T_before.data)[tmask3] - before.T[tmask3])))
+    d_sb = float(np.max(np.abs(np.asarray(st.S_before.data)[tmask3] - before.S[tmask3])))
+    umask3 = np.asarray(grid.umask) > 0.5
+    vmask3 = np.asarray(grid.vmask) > 0.5
+    d_ub = float(np.max(np.abs(
+        np.asarray(st.u_before.data)[:, 1:, :][umask3] - before.u[umask3])))
+    d_vb = float(np.max(np.abs(
+        np.asarray(st.v_before.data)[1:, :, :][vmask3] - before.v[vmask3])))
+    print(f"BEFORE-LEVEL BRIDGE VERIFY vs NEMO restart tb/sb/ub/vb (wet cells): "
+          f"max|d_tb|={d_tb:.3e}  max|d_sb|={d_sb:.3e}  max|d_ub|={d_ub:.3e}  "
+          f"max|d_vb|={d_vb:.3e}", flush=True)
+
+
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
-                       bridge_tke: bool = False):
+                       bridge_tke: bool = False, bridge_before: bool = False):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
@@ -179,6 +223,20 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     st = br.state
     print("twin from developed NEMO state (br.state, NOT dino_lat_lon_state)")
     verify_day0_matches_restart(st, s, br.land_mask)
+
+    # OPTIONAL: bridge NEMO's leap-frog BEFORE-level state (tb/sb/ub/vb, the
+    # MLF integrator's THIRD time level) onto state.{T,S,u,v,eta}_before, so
+    # the twin's leapfrog entry state is EXACTLY NEMO's -- not a
+    # forward-Euler cold start (see kamm_twin_90d.py module docstring: this
+    # removes the integrator-memory caveat for tracers/velocities).
+    # nemo_dino_kamm_mlf sets tke_n2_time_level="nemo_before" +
+    # tke_shear_production="nemo_burchard", both of which READ these fields
+    # every step -- bridging is what makes those axes correct from step 0
+    # instead of only after the model's own Euler-start populates them.
+    if bridge_before:
+        before = read_nemo_restart_before(f"{run_stepdump}/{RESTART_FILE}", nn_hls=0)
+        st = bridge_before_state_topo(br._replace(state=st), g, before, periodic_i=True)
+        _print_before_bridge_verify(st, before, g)
 
     # OPTIONAL: bridge NEMO's developed TKE closure memory (`en`) onto lego's
     # cold-start `state.tke` -- isolates whether the TKE cold-start (vs the
@@ -214,10 +272,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
-             bridge_tke: bool = False) -> bool:
+             bridge_tke: bool = False, bridge_before: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable."""
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
-        recipe, run_traj, run_stepdump, bridge_tke=bridge_tke)
+        recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
+        bridge_before=bridge_before)
     nsteps = STEPS_PER_DAY * n_days
 
     dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
@@ -320,6 +379,14 @@ def _parse_args(argv=None):
     p.add_argument("--bridge-tke", action="store_true",
                     help="seed state.tke from the NEMO restart's en (#1317 TKE "
                          "cold-start isolation experiment); default off (cold start)")
+    p.add_argument("--bridge-before", action="store_true",
+                    help="seed state.{T,S,u,v,eta}_before from the NEMO restart's "
+                         "tb/sb/ub/vb/sshb (#1317 leap-frog before-level bridge); "
+                         "required for nemo_dino_kamm_mlf's "
+                         "tke_n2_time_level=nemo_before / "
+                         "tke_shear_production=nemo_burchard to read a real "
+                         "before-state from step 0 (else ValueError). Default "
+                         "off (matches the module docstring's cold-start caveat)")
     return p.parse_args(argv)
 
 
@@ -327,7 +394,7 @@ def main(argv=None):
     args = _parse_args(argv)
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
-              bridge_tke=args.bridge_tke)
+              bridge_tke=args.bridge_tke, bridge_before=args.bridge_before)
 
 
 if __name__ == "__main__":

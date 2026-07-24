@@ -171,6 +171,53 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
     )
 
 
+class NemoBeforeState(NamedTuple):
+    """Halo-stripped NEMO leap-frog BEFORE-level (Nbb, ``tb/sb/ub/vb``) state.
+
+    Same shape/axis conventions as :class:`NemoState`. Separate from
+    :class:`NemoState` (not every caller needs the before level — only the
+    MLF twin bridging NEMO's leap-frog integrator memory, #1317
+    ``--bridge-before``). ``ssh``/``tau_x``/``tau_y`` are ``None`` when the
+    restart does not carry ``sshb``/``utau_b``/``vtau_b`` (older NEMO
+    restarts write only the tracer/velocity before-fields).
+    """
+    T: np.ndarray
+    S: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    ssh: np.ndarray | None
+    tau_x: np.ndarray | None   # utau_b, T-point wind stress [Pa], before-level
+    tau_y: np.ndarray | None   # vtau_b
+
+
+def read_nemo_restart_before(path: str, *, nn_hls: int = 1) -> NemoBeforeState:
+    """Read + halo-strip NEMO's leap-frog BEFORE-level fields (Nbb).
+
+    Uses ``tb/sb/ub/vb`` (+ ``sshb``/``utau_b``/``vtau_b`` when present) --
+    the modified-leap-frog integrator's THIRD time level, one full step
+    behind the ``tn/sn/un/vn`` (Kbb) read by :func:`read_nemo_restart`. Only
+    meaningful for a restart written under ``outer_integrator="leapfrog"``
+    (NEMO ``stp_MLF``/key_qco); a forward-Euler/AB2 restart still writes
+    these fields (NEMO always carries a before-level in the restart file)
+    but a legoESM twin only reads them via ``--bridge-before``
+    (``kamm_twin_90d.py``), which requires the leapfrog card.
+    """
+    r = xr.open_dataset(path, decode_times=False)
+
+    def m3(name: str) -> np.ndarray:
+        return _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
+
+    def h2(name: str) -> np.ndarray:
+        return _strip_halo_2d(np.asarray(r[name].values).squeeze(), nn_hls)
+
+    return NemoBeforeState(
+        T=m3("tb"), S=m3("sb"), u=m3("ub"), v=m3("vb"),
+        ssh=(h2("sshb") if "sshb" in r else None),
+        tau_x=(h2("utau_b") if "utau_b" in r else None),
+        tau_y=(h2("vtau_b") if "vtau_b" in r else None),
+    )
+
+
 def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
     """Read + halo-strip NEMO's TKE restart field ``en`` (w-levels, T-points).
 
@@ -193,5 +240,5 @@ def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
     return _to_latlon_lev(np.asarray(r["en"].values).squeeze(), nn_hls)
 
 
-__all__ = ("NemoGrid", "NemoState", "read_nemo_mesh_mask", "read_nemo_restart",
-           "read_nemo_restart_en")
+__all__ = ("NemoGrid", "NemoState", "NemoBeforeState", "read_nemo_mesh_mask",
+           "read_nemo_restart", "read_nemo_restart_before", "read_nemo_restart_en")

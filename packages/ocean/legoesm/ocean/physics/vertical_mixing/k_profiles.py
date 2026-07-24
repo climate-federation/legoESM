@@ -531,7 +531,16 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         if _shear_disc == "nemo_burchard":
             u_before_data = state.u_before.data
             v_before_data = state.v_before.data
-            if _staggered:
+            # Independent staggering check: some callers pre-center ``state.u``/
+            # ``.v`` into a ``cc_state`` copy (cell-centred u/v, shape ==
+            # T_data) while leaving ``state.u_before``/``.v_before`` at their
+            # ORIGINAL face shape (the model never rebuilds a before-level
+            # cc_state) -- so ``_staggered`` (derived from the possibly
+            # already-centered ``u_data``) can be False while
+            # ``u_before_data`` is still face-staggered. Check u_before_data's
+            # OWN shape against T_data, don't reuse ``_staggered``.
+            _staggered_before = u_before_data.shape[1] != T_data.shape[1]
+            if _staggered_before:
                 u_before_data = 0.5 * (u_before_data[:, :-1, :]
                                       + u_before_data[:, 1:, :])
                 v_before_data = 0.5 * (v_before_data[:-1, :, :]
@@ -766,6 +775,15 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             T_n2=T_n2, S_n2=S_n2,
             t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
             ice_frac=_tke_ice_fr,
+            # T8/T13 (tke_n2_time_level="nemo_before") + T4
+            # (tke_shear_production="nemo_burchard"): Mode A (prognostic)
+            # already threads these; Mode B (this diagnostic/quasi-steady
+            # path) was silently dropping them (#1317 gap -- discovered
+            # running the --bridge-before acceptance twin with
+            # tke_prognostic=False) even though they were computed above.
+            # None when the respective flag is off ⇒ unchanged behaviour.
+            T_n2b=T_n2b, S_n2b=S_n2b,
+            u_before_cell=u_before_data, v_before_cell=v_before_data,
         )
         return tke_out.K_H, tke_out.K_M, None
 

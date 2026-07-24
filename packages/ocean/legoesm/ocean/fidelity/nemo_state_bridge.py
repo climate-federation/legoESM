@@ -44,7 +44,7 @@ from legoesm.grids.latlon import (
     create_latlon_geometry,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
-from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
+from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
@@ -417,8 +417,74 @@ def bridge_nemo_to_legoesm_topo(
     )
 
 
+def bridge_before_state_topo(
+    br: NemoBridgeOutput,
+    grid: NemoGrid,
+    before: NemoBeforeState,
+    *,
+    periodic_i: bool = True,
+) -> LatLonCGridOceanState:
+    """Populate ``br.state``'s leap-frog BEFORE fields (Nbb) from a NEMO restart.
+
+    NEMO's Modified-Leap-Frog restart always carries a THIRD time level
+    (``tb/sb/ub/vb`` (+``sshb``/``utau_b``/``vtau_b``)), one full step behind
+    the now-level (``tn/sn/...``) fields :func:`bridge_nemo_to_legoesm_topo`
+    already bridges onto ``br.state``. This populates
+    ``state.{T,S,u,v,eta}_before`` (+ ``tau_x_prev``/``tau_y_prev`` when the
+    restart carries ``utau_b``/``vtau_b``) with the SAME face-staggering /
+    Neumann-land-fill conventions as the now-level bridge, so a twin using
+    this state is an EXACT leap-frog entry state (matches NEMO's own three
+    time levels), not a forward-Euler cold start.
+
+    Must be called with the SAME ``grid``/``periodic_i`` used to build
+    ``br`` (no independent re-derivation of the mesh/mask).
+
+    Parameters
+    ----------
+    br : NemoBridgeOutput
+        Output of :func:`bridge_nemo_to_legoesm_topo` on the SAME ``grid``.
+    grid : NemoGrid
+        The mesh_mask this ``br`` was bridged from (for ``tmask``).
+    before : NemoBeforeState
+        From :func:`nemo_io.read_nemo_restart_before` on the SAME restart
+        file ``br.state`` was bridged from.
+    """
+    tmask = np.asarray(grid.tmask) > 0.5
+    mask3 = jnp.asarray(tmask)
+    umap = _u_east_to_face_periodic if periodic_i else _u_east_to_face
+
+    T_fill = neumann_fill_cgrid(jnp.asarray(before.T), mask3, br.geometry)
+    S_fill = neumann_fill_cgrid(jnp.asarray(before.S), mask3, br.geometry)
+    u_face = umap(np.asarray(before.u))
+    v_face = _v_north_to_face(np.asarray(before.v))
+
+    st = br.state
+    replacements = dict(
+        T_before=st.T.replace(data=T_fill),
+        S_before=st.S.replace(data=S_fill),
+        u_before=st.u.replace(data=jnp.asarray(u_face)),
+        v_before=st.v.replace(data=jnp.asarray(v_face)),
+        eta_before=st.eta.replace(
+            data=jnp.asarray(before.ssh if before.ssh is not None else st.eta.data)),
+    )
+    # utau_b/vtau_b (T-point, before-level wind stress): only set when the
+    # restart carries them. When absent (older NEMO builds without these
+    # fields), leave tau_x_prev/tau_y_prev at their None default --
+    # ``_leapfrog_step``'s own forward-Euler-start branch (state.u_before is
+    # the ONLY None-gate it checks) then seeds "before := now" on step 1
+    # (NEMO nit000 convention, sbcmod.F90:568-573) exactly as an un-bridged
+    # cold start would, so barotropic_forcing_centred=True still gets a
+    # defined ½(before+now) average rather than an AttributeError.
+    if before.tau_x is not None:
+        replacements["tau_x_prev"] = jnp.asarray(before.tau_x)
+    if before.tau_y is not None:
+        replacements["tau_y_prev"] = jnp.asarray(before.tau_y)
+    return st._replace(**replacements)
+
+
 __all__ = (
     "NemoBridgeOutput",
     "bridge_nemo_to_legoesm",
     "bridge_nemo_to_legoesm_topo",
+    "bridge_before_state_topo",
 )

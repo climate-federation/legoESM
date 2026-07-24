@@ -4399,9 +4399,16 @@ class LatLonCGridOceanModel:
 
         ``entry_state`` MUST be the step-entry state (before rebinding to
         ``state_new``), matching ``_n2_before_advection_tracers``'s
-        convention. Construction already guarantees ``entry_state.T_before``
-        is not None when this flag is set (the leapfrog-integrator raise
-        above).
+        convention. Construction guarantees ``outer_integrator="leapfrog"``
+        (the fields EXIST as NamedTuple slots) but NOT that they are
+        POPULATED: a state bridged straight from a NEMO restart (a twin's
+        step-0 entry state) has ``T_before=None`` until the model's own
+        Euler-start branch (``_leapfrog_step``) populates it after step 1 —
+        so this predicate can still see ``None`` on a genuinely-leapfrog
+        config. Raise loudly rather than crash on ``NoneType.data``
+        (AttributeError) or silently fall back to ``entry_state.T``/``.S``
+        (a silent no-op that would defeat the whole point of
+        ``tke_n2_time_level="nemo_before"``).
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4409,6 +4416,20 @@ class LatLonCGridOceanModel:
             return None
         if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
             return None
+        if entry_state.T_before is None or entry_state.S_before is None:
+            raise ValueError(
+                'vertical_mixing.tke.tke_n2_time_level="nemo_before" requires '
+                "before-level tracers (state.T_before/S_before) to be "
+                "populated, but they are None. A bridged/twin state must "
+                "seed the leap-frog before-level fields before stepping — "
+                "see kamm_twin_90d.py's --bridge-before (bridges NEMO's "
+                "restart tb/sb/ub/vb onto state.{T,S,u,v}_before). A "
+                "from-rest / non-bridged leapfrog run instead relies on the "
+                "model's own forward-Euler-start seeding, which only "
+                "populates these AFTER step 1 -- so this error firing on "
+                "step 0 means the caller must bridge the before-level state "
+                "itself, not silently fall back to entry_state.T/.S."
+            )
         return (entry_state.T_before.data, entry_state.S_before.data)
 
     def _tke_bottom_dirichlet(self, cc_state):

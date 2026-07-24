@@ -670,3 +670,137 @@ class TestLeapfrogConstructionGuards:
         self._model("leapfrog", TKEConfig(
             tke_shear_production="nemo_burchard",
             tke_n2_time_level="nemo_before"))
+
+    def test_n2_nemo_before_tracers_raises_loudly_when_unpopulated(self):
+        """#1317: outer_integrator='leapfrog' construction guarantees
+        T_before/S_before EXIST as NamedTuple slots, but a state bridged
+        straight from a NEMO restart (a twin's step-0 entry state, before
+        the model's own Euler-start populates them) still has them as
+        None. _n2_nemo_before_tracers must raise ValueError (not the old
+        AttributeError: 'NoneType' object has no attribute 'data', and not
+        a silent fallback to entry_state.T/.S)."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+        model = self._model("leapfrog", TKEConfig(tke_n2_time_level="nemo_before"))
+        grid = create_latlon_grid(8, 16)
+        z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        assert state.T_before is None   # the rest-state / bridged-twin default
+
+        with pytest.raises(ValueError, match="before-level tracers"):
+            model._n2_nemo_before_tracers(state)
+
+    def test_n2_nemo_before_tracers_returns_populated_before_state(self):
+        """Sibling to the above: once T_before/S_before ARE populated (e.g.
+        via kamm_twin_90d --bridge-before, or after the model's own
+        Euler-start), the predicate returns them — not None, not a raise."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+        model = self._model("leapfrog", TKEConfig(tke_n2_time_level="nemo_before"))
+        grid = create_latlon_grid(8, 16)
+        z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        state = state._replace(T_before=state.T, S_before=state.S)
+
+        out = model._n2_nemo_before_tracers(state)
+        assert out is not None
+        t_before, s_before = out
+        assert jnp.array_equal(t_before, state.T.data)
+        assert jnp.array_equal(s_before, state.S.data)
+
+
+class TestNemoBurchardPreCenteredCcState:
+    """#1317 regression: ``_apply_implicit_vertical_mixing``'s fallback path
+    builds a ``cc_state`` with u/v ALREADY cell-centered (``state._replace(
+    u=u_cell, v=v_cell)``) but leaves ``u_before``/``v_before`` untouched at
+    their ORIGINAL face-staggered shape (the model never builds a
+    before-level cc_state). ``k_profiles.py``'s old ``_staggered`` flag was
+    derived from ``u_data.shape`` (already centered by the caller) and reused
+    for ``u_before_data`` too, so it stayed False and skipped centering
+    ``u_before_data`` — the (n_lat, n_lon+1, nlev) face array then hit
+    ``_vertical_shear_burchard``'s ``(du_now)*(du_before)`` product against a
+    (n_lat, n_lon, nlev) ``du_now``, a broadcasting TypeError caught running
+    the #1317 --bridge-before acceptance twin. Fixed by checking
+    ``u_before_data.shape`` independently of the (possibly pre-centered)
+    ``u_data.shape``."""
+
+    def test_precentered_u_v_with_staggered_before_does_not_crash(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            TKEConfig, VerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+            compute_vertical_K_profiles,
+        )
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+
+        grid = create_latlon_grid(n_lat=8, n_lon=12)
+        z = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+
+        # Simulate the caller's cc_state: u/v pre-centered to T's width
+        # (n_lon), u_before/v_before left at the ORIGINAL face width
+        # (n_lon+1) -- the exact mismatch the model's own fallback path
+        # produces.
+        n_lat, n_lon_face, nlev = state.u.data.shape
+        u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+        v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+        rng = np.random.default_rng(0)
+        u_before_face = jnp.asarray(
+            rng.normal(scale=0.1, size=state.u.data.shape))
+        v_before_face = jnp.asarray(
+            rng.normal(scale=0.1, size=state.v.data.shape))
+        cc_state = state._replace(
+            u=state.u.replace(data=u_cell),
+            v=state.v.replace(data=v_cell),
+            u_before=state.u.replace(data=u_before_face),
+            v_before=state.v.replace(data=v_before_face),
+            T_before=state.T, S_before=state.S,
+        )
+        assert cc_state.u.data.shape[1] != cc_state.u_before.data.shape[1]
+
+        # Mode B (diagnostic, prognostic=False -- the TKEConfig default):
+        # exercises the SAME cc_state shape mismatch on the diagnostic path,
+        # which had its own separate bug (u_before_cell/v_before_cell were
+        # not threaded to tke_vertical_mixing at all in Mode B -- fixed
+        # alongside the shape bug).
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke",
+                tke=TKEConfig(tke_shear_production="nemo_burchard")))
+        K_v, A_v = compute_vertical_K_profiles(cc_state, z, None, physics)
+        assert bool(jnp.isfinite(K_v).all())
+        assert bool(jnp.isfinite(A_v).all())
+
+        # Mode A (prognostic=True -- nemo_dino_kamm_mlf's actual runtime
+        # config, the path the #1317 acceptance twin exercises): same
+        # cc_state shape mismatch, the ORIGINAL crash site
+        # (_vertical_shear_burchard's du_now*du_before broadcasting
+        # TypeError, (n_lat,n_lon+1,nlev-1) vs (n_lat,n_lon,nlev-1)).
+        physics_prog = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke",
+                tke=TKEConfig(tke_shear_production="nemo_burchard",
+                              prognostic=True)))
+        K_v_p, A_v_p, tke_new = compute_vertical_K_profiles(
+            cc_state, z, None, physics_prog, dt_tke=2700.0, return_tke=True)
+        assert bool(jnp.isfinite(K_v_p).all())
+        assert bool(jnp.isfinite(A_v_p).all())
+        assert bool(jnp.isfinite(tke_new).all())
