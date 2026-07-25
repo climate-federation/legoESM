@@ -1,0 +1,25 @@
+# classical: MOST surface closure + LONGER curriculum (surface params converge).
+#
+# In the 7-epoch curriculum+MOST run the trainable surface knobs (global MOST
+# gamma/beta, z0h/z0, local z0) barely moved the headline WB2 skill. This run
+# gives them ~1.5x the epochs per phase so they have time to converge, holding
+# everything else identical to suite_curriculum_most.yaml. Controlled vs
+# results/aimip_ace2curr_most: the only variable is the epoch budget.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  # ~1.5x epochs/phase vs suite_curriculum_most (2/2/2/1 -> 3/3/3/2 = 11).
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_ace2curr_most_long

@@ -1,0 +1,25 @@
+# ACE2 curriculum loss with SHARPER short-range weighting.
+#
+# The v1 curriculum bought long-lead stability but softened short-range
+# (column_nn t850 24h 2.26->2.76). This preset up-weights the fields whose
+# short-range sharpness we want to recover (temperature/geopotential proxy
+# w_T, surface pressure w_ps) relative to winds/moisture — the closest
+# LossConfig analogue to ACE2's x10 Z500 / x5 T850 channel weighting — while
+# keeping the residual-normalization, the light bias penalties, and the
+# rollout curriculum (leads set by aimip_rollout_curriculum). Pair with a
+# curriculum that adds a 6h phase + more short-lead epochs.
+loss:
+  residual_normalize: true
+  normalize_by_scale: false
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  w_T: 1.0          # up from 0.5 — sharpen T / geopotential-proxy short range
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.5
+  w_ps: 0.5         # up from 0.3
+  level_weighting: pressure
+  w_bias_T: 2.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
