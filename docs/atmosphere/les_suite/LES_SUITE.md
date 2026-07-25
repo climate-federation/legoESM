@@ -545,6 +545,22 @@ a turbulence-closure statement, not a cloud-PDF artifact.
   buoyancy (not just the tracer) — the shared-cloud CONTROL (all arms identical tracer cloud)
   already removes the confound; the native-vs-forced-shared PAIR is a bounded refinement.
 
+### 7.6 D9 status — shared-cloud control DONE; CLUBB dual-report scientifically MOOT here
+
+The D9 deliverable has two parts. (a) **Shared-cloud control — DONE.** All 9 closures (incl.
+CLUBB) run the SAME Sundqvist tracer condensation in every moist tuning, so any Q2 ranking
+difference is the turbulence closure, not the cloud scheme. This is the confound-remover and the
+scientifically load-bearing half. (b) **CLUBB native-vs-forced-shared dual-report — NOT produced,
+and MOOT for the actual result.** D9's stated purpose (§7 Q2) is "so 'higher-order wins' isn't a
+cloud-PDF artifact." But higher-order does NOT win in EITHER moist regime (BOMEX: clubb tied
+3rd within σ_LES; DYCOMS: clubb 4th, whole field null) — there is no higher-order win to
+attribute to CLUBB's cloud PDF, so the dual-report cannot change any conclusion. Implementing it
+literally needs a turbulence-interface change (cloud `q_c` into `clubb_turbulence`, which today
+takes `q_v` only, cascading to all 9 scheme signatures + the dispatch), or the smaller
+clubb-internal `cloud_buoyancy` on/off toggle (native-vs-no-cloud, ~30 LOC) — both dedicated
+efforts behind the physics-validator + codex loop. **Verdict: D9's purpose is satisfied by the
+control; the dual-report is a scoped, currently-unnecessary refinement.**
+
 ---
 
 ## 8. Immediate next steps (D10 sequencing)
