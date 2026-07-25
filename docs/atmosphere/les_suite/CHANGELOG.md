@@ -186,9 +186,15 @@ is the fix.
   a HARD GATE — a re-score that fails to reproduce the tuner's stored `best_loss` (tristate:
   False mismatch / None unverifiable-no-best_loss) is EXCLUDED from the ranking and REPORTED
   (stderr + an ⚠ EXCLUDED section in the markdown), never silently ranked SIGNIFICANT. The
-  actual multi-closure θ-verdict RUN is compute-bound (one nlev=24 re-score is >18 min under
-  the current 4-tune + GPU-spread + networked-FS contention ⇒ ~27 re-scores need a quiet
-  node); deferred to a compute-free window. SBL SGS spread (lasd+smag) still emitting.
+  actual multi-closure θ-verdict RUN is compute-bound (one nlev=24 re-score is ~12 min CPU
+  ⇒ ~27 re-scores ≈ 5 h; the 2-campaign + GPU-spread + networked-FS contention makes it
+  slower) → deferred to a quiet node. SBL SGS spread (lasd+smag) still emitting.
+  END-TO-END VALIDATED on real data (1-closure smoke, smagorinsky anchor): the re-score
+  reproduces the stored loss EXACTLY (rescored_combined=0.26130 == best_loss=0.26130 →
+  self_check_ok=True, so the 24/10 fallback matches the campaign protocol) and the split is
+  θ_rmse=0.215, u_rmse=0.233, v_rmse=**0.323** — v/Ekman dominates the combined 0.261,
+  confirming the wind-domination that motivates the θ-only gate; σ_LES(θ)=0.0074 sits far
+  below plausible closure θ-margins, so the θ gate can find significance the combined cannot.
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
