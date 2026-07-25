@@ -137,16 +137,26 @@ throughput is 304-340 Mc/s/GPU vs 220-248 at np4.
 The same improved config (wide-halo + vmix-f32, multicontroller NCCL/IB,
 f32 L20) run at two tile sizes, 4 -> 16 GPUs:
 
-| grid | cells/GPU @16 | np4 -> np16 | eff | aggregate @16 |
-|---|---|---|---|---|
-| LL576x1152 (13.3M) | 0.83M | 12.81 -> 8.63 ms | 0.37 | 1.53 GCells/s |
-| LL1152x2304 (53.1M) | 3.3M | 43.47 -> 17.24 ms | **0.63** | **3.08 GCells/s** |
+| grid | cells/GPU @16 | np4 / np8 / np16 ms | eff @8 | eff @16 | aggregate @16 |
+|---|---|---|---|---|---|
+| LL576x1152 (13.3M) | 0.83M | 12.81 / 11.05 / 8.63 | 0.58 | 0.37 | 1.53 GCells/s |
+| LL1152x2304 (53.1M) | 3.3M | 43.47 / 27.79 / 17.24 | **0.78** | **0.63** | **3.08 GCells/s** |
+
+Both ladders are monotone; the bigger tile is uniformly better at every
+device count (jobs 26456334 / 26457693 / 26456337 vs 26452804-06).
 
 So the ocean shows the SAME tile-size dependence the cube does: the 2.01x
 multinode improvement measured at LL576 was partly a floor effect, and at
 a production tile the identical code scales substantially better (0.37 ->
 0.63). Per-device throughput also rises (259 -> 305 Mc/s/GPU at np4).
 Config is byte-identical between the two rows; only the grid changes.
+
+REFUTED EN ROUTE: the np8 leg timed out twice (>90 min still tracing) while
+np4 — a LARGER per-device tile — finished in ~25 min, which looked like a
+compile-time cliff at that device count. It is not: the third attempt ran
+the identical configuration in **99 seconds** with a 21.6 s compile (job
+26457693). The earlier hangs were transient/environmental, not
+reproducible, and no compile-time defect is claimed.
 
 ## Weak scaling at production per-device size (job 26453523)
 
