@@ -3220,6 +3220,8 @@ def _resolve_microphysics(config):
             micro_config, scheme,
             hard_sat_adjust_threshold=_hs_thr,
             hard_sat_max_heating_K=_hs_cap,
+            homogeneous_ice_nucleation=getattr(
+                config, "homogeneous_ice_nucleation", False),
         )
 
     if scheme == "ml_emulator":
