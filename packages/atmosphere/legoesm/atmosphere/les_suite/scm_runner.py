@@ -31,7 +31,6 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 from jax import lax
-from legoesm import constants
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.atmosphere.physics import (
@@ -42,8 +41,24 @@ from legoesm.atmosphere.physics import (
     RadiationConfig,
     TurbulenceConfig,
 )
+from legoesm.atmosphere.physics._shared import (
+    compute_heights_from_sigma,
+    compute_rho,
+    exner_function,
+)
+from legoesm.atmosphere.physics.turbulence.integration import (
+    get_turbulence_fn,
+    turbulence_scheme_traits,
+)
 
-from .bridge import LESReferenceArtifact, LESTruth, prognostic_truth
+from legoesm import constants
+
+from .bridge import (
+    LESReferenceArtifact,
+    LESTruth,
+    diagnostic_truth,
+    prognostic_truth,
+)
 from .scm_coupling import (
     T_from_theta,
     interp_profile,
@@ -81,6 +96,7 @@ class SCMGridSpec:
 
     z_scm_m: Array       # (nlev,) heights [m], top-to-bottom (decreasing)
     p_full_pa: Array     # (nlev,) full-level pressure [Pa]
+    p_half_pa: Array     # (nlev+1,) half-level pressure [Pa], TOA-first
     nlev: int
 
 
@@ -89,8 +105,9 @@ def _scm_grid(nlev: int, sigma_top: float) -> SCMGridSpec:
 
     sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top)
     p_full = sigma_coord.sigma_full * _P_S_PA
+    p_half = sigma_coord.sigma_half * _P_S_PA
     z_scm = -_H_SCALE_M * jnp.log(jnp.maximum(p_full / _P_S_PA, 1e-6))
-    return SCMGridSpec(z_scm_m=z_scm, p_full_pa=p_full, nlev=nlev)
+    return SCMGridSpec(z_scm_m=z_scm, p_full_pa=p_full, p_half_pa=p_half, nlev=nlev)
 
 
 def _dry_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
@@ -262,6 +279,172 @@ def _to_increasing(profile: Array, z: Array) -> tuple[Array, Array]:
     if bool(z[0] < z[-1]):
         return jnp.asarray(profile), z
     return jnp.asarray(profile)[::-1], z[::-1]
+
+
+# The diagnostic flux F = -Kh·(∂θ/∂z − γ) is a pure state functional: Kh and γ depend
+# only on the mean-state gradients/stability, NOT on dt (dt enters only the implicit
+# flux-DIVERGENCE solve, which the diagnostic ignores).  Any positive dt yields the same
+# wtheta_flux, so this placeholder is passed purely to satisfy the scheme signature.
+_DIAG_DT_S = 1.0
+# Secant tolerance / cap for the surface-flux calibration below.  A dry CBL surface
+# kinematic heat flux ~0.02–0.10 K m/s; matching it to 1e-4 K m/s (~0.1 W/m²) is far
+# tighter than the σ_LES flux spread the score is gated against.
+_KHFS_TOL = 1.0e-4
+_KHFS_MAX_ITERS = 40
+_TSFC_EXCESS_CAP_K = 60.0  # a super-adiabatic surface excess ceiling (fail loud beyond)
+
+
+def _surface_theta_flux(
+    fn, cfg, base_inputs, rho_sfc: float, exner_sfc: float, dtheta_sfc_K: float
+) -> float:
+    """The scheme's diagnosed surface kinematic POTENTIAL-temperature flux ⟨w'θ'⟩ [K m/s].
+
+    ``base_inputs`` is the frozen ``(u,v,T,q_v,p_full,p_half,z_full,z_half,rho)`` tuple;
+    only the surface temperature varies. Two fidelity points (codex #1/#2):
+      * ``q_sfc = q_v`` at the lowest level (dry air ⇒ 0) SUPPRESSES surface latent
+        exchange, so the closure sees ONLY the dry sensible forcing the LES prescribed —
+        otherwise a saturated ``q_sfc`` injects a moisture-buoyancy flux the artifact never
+        had, which HB/YSU fold into ``kbfs`` and which would corrupt the margin.
+      * ``shflx/(ρ c_pd)`` is the kinematic *temperature* flux ⟨w'T'⟩; the LES target
+        ``w_theta_s`` is a *potential-temperature* flux, so divide by the surface Exner
+        ``Π_sfc`` to convert ⟨w'T'⟩ → ⟨w'θ'⟩.
+    Host-side float — runs on a diagnostic snapshot, never in a traced loop.
+    """
+    (u2, v2, T2, qv2, pf2, ph2, z_full, z_half, rho) = base_inputs
+    T_sfc = T2[:, -1] + dtheta_sfc_K
+    q_sfc = qv2[:, -1]  # dry: q_sfc = q_v_air ⇒ no latent surface flux
+    out = fn(u2, v2, T2, qv2, pf2, ph2, z_full, z_half, T_sfc, q_sfc, rho, _DIAG_DT_S, cfg)
+    return float(out.shflx[0]) / (rho_sfc * constants.c_pd * exner_sfc)
+
+
+def _calibrate_surface_excess(
+    fn, cfg, base_inputs, rho_sfc: float, exner_sfc: float, target_wtheta: float
+) -> float:
+    """Solve the T_sfc excess [K] making the scheme's surface ⟨w'θ'⟩ = ``target_wtheta``.
+
+    The LES prescribed a surface *kinematic heat flux* (``artifact.w_theta_s``); the bulk
+    turbulence surface layer instead diagnoses it from ``T_sfc − T_air``. To evaluate a
+    closure's INTERIOR flux under the SAME surface forcing the LES had (the controlled
+    variable held fixed across closures), secant-solve the surface excess so the diagnosed
+    ⟨w'θ'⟩ matches the LES value. The bulk sensible flux ``∝ Ch·|U|·(T_sfc − T_air)`` is
+    monotone increasing in the excess for the constant-exchange surface layer the CBL SCM
+    uses, so the secant converges in a few steps; a non-convergent / capped case raises
+    rather than silently returning a mismatched surface BC.
+    """
+    a, b = 0.0, 8.0
+    fa = _surface_theta_flux(fn, cfg, base_inputs, rho_sfc, exner_sfc, a) - target_wtheta
+    fb = _surface_theta_flux(fn, cfg, base_inputs, rho_sfc, exner_sfc, b) - target_wtheta
+    for _ in range(_KHFS_MAX_ITERS):
+        if abs(fb) < _KHFS_TOL:
+            return b
+        denom = fb - fa
+        if denom == 0.0:
+            break
+        c = b - fb * (b - a) / denom
+        c = min(max(c, 0.0), _TSFC_EXCESS_CAP_K)
+        a, fa = b, fb
+        b = c
+        fb = _surface_theta_flux(fn, cfg, base_inputs, rho_sfc, exner_sfc, c) - target_wtheta
+    if abs(fb) < _KHFS_TOL:
+        return b
+    raise ValueError(
+        f"surface-flux calibration did not converge to w'θ'={target_wtheta:.4g} K m/s "
+        f"(residual {fb:.3g} after {_KHFS_MAX_ITERS} secant steps, excess capped at "
+        f"{_TSFC_EXCESS_CAP_K} K) — the mean-state wind/gustiness may be too weak to carry "
+        "this surface flux (free-convective CBL with ~zero mean wind is not calibratable)")
+
+
+def diagnostic_scheme_flux(
+    artifact: LESReferenceArtifact,
+    turbulence: TurbulenceConfig,
+    *,
+    nlev: int = 32,
+    sigma_top: float | None = None,
+) -> Array:
+    """One closure's diagnosed heat flux ``⟨w'θ'⟩`` at the LES mean state, on the LES grid.
+
+    The D6 *diagnostic* score (LES_SUITE.md Q1b): set the SCM column to the LES
+    most-equilibrated snapshot (``bridge.diagnostic_truth`` — θ→T on the σ grid, u/v
+    interpolated, dry ``q_v=0``), impose the SAME surface kinematic heat flux the LES had
+    (``artifact.w_theta_s``, via a T_sfc excess calibrated through the shared bulk surface
+    layer — see :func:`_calibrate_surface_excess`; the prescribed-flux CBL otherwise runs
+    the turbulence surface layer at ``Ch=0`` and STARVES the nonlocal counter-gradient of
+    its driving buoyancy flux, which would make the margin a wiring artifact, not physics),
+    call the closure ONCE, and read its ``TurbulenceOutput.wtheta_flux``
+    (``F = −Kh·(∂θ/∂z − γ)``; ``γ=0`` for a local closure, the scheme's counter-gradient
+    for a nonlocal one). The flux is regridded to the LES height grid so
+    ``score.diagnostic_flux_score`` can compare it to the LES total flux at the same instant.
+
+    A local down-gradient closure can only oppose the resolved gradient, so through a
+    well-mixed CBL (``∂θ/∂z ≈ 0``) it carries ≈0 interior flux however strong the surface
+    forcing; a nonlocal closure's counter-gradient carries the surface flux up through the
+    mixed layer. The measured local-vs-nonlocal RMSE gap this feeds is the Q1b diagnostic
+    margin (the counter-gradient structural ceiling of Q1a, now quantified against the LES).
+
+    Interior flux is a pure state functional (dt-independent — see ``_DIAG_DT_S``). Dry
+    prescribed-flux regimes only (CBL / sheared CBL / SBL): the counter-gradient ceiling is
+    a dry-CBL notion, so a moist artifact is rejected. Restricted to the four K-closures
+    that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville/ysu nonlocal); a
+    TKE-carrying or non-exposing scheme raises.
+    """
+    if artifact.w_theta_s is None:
+        raise ValueError(
+            f"{artifact.case_name}: the Q1 diagnostic flux needs a dry prescribed-flux "
+            "artifact (artifact.w_theta_s); this regime is not wired")
+    truth = diagnostic_truth(artifact)  # final snapshot: θ/u/v/wtheta on increasing z
+    if truth.wqt is not None:
+        raise ValueError(
+            f"{artifact.case_name}: the Q1 counter-gradient diagnostic is dry-only; a "
+            "moist artifact (wqt set) is not supported")
+    z_les = jnp.asarray(truth.heights_m)
+    if sigma_top is None:
+        sigma_top = _auto_sigma_top(float(z_les[-1]))
+    grid = _scm_grid(nlev, sigma_top)
+    z_scm, p_full, p_half = grid.z_scm_m, grid.p_full_pa, grid.p_half_pa
+
+    theta_scm = interp_profile(jnp.asarray(truth.theta), z_les, z_scm)
+    u_scm = interp_profile(jnp.asarray(truth.u), z_les, z_scm)
+    v_scm = interp_profile(jnp.asarray(truth.v), z_les, z_scm)
+    T = T_from_theta(theta_scm, p_full)
+
+    # Model-convention (1, nlev) columns, TOA-first, matching the scheme signature.
+    T2 = T[None]
+    qv2 = jnp.zeros_like(T2)          # dry CBL
+    u2, v2 = u_scm[None], v_scm[None]
+    pf2, ph2 = p_full[None], p_half[None]
+    z_full, z_half = compute_heights_from_sigma(T2, ph2)
+    rho = compute_rho(T2, pf2)
+
+    name, fn, cfg = get_turbulence_fn(turbulence)
+    if fn is None:
+        raise ValueError("turbulence scheme 'none' exposes no diagnostic flux")
+    if turbulence_scheme_traits(name).carries_energy:
+        raise ValueError(
+            f"{name}: TKE-carrying schemes are not wired for the Q1 diagnostic flux "
+            "(only the four K-closures expose wtheta_flux)")
+
+    # Impose the LES surface kinematic heat flux (the controlled variable) on this closure.
+    base_inputs = (u2, v2, T2, qv2, pf2, ph2, z_full, z_half, rho)
+    rho_sfc = float(rho[0, -1])
+    exner_sfc = float(exner_function(pf2[:, -1])[0])  # Π at the lowest full level
+    target_wtheta = float(jnp.asarray(artifact.w_theta_s)[-1])
+    excess = _calibrate_surface_excess(
+        fn, cfg, base_inputs, rho_sfc, exner_sfc, target_wtheta)
+    T_sfc = T2[:, -1] + excess
+    q_sfc = qv2[:, -1]  # dry: suppress latent surface exchange (matches the calibration)
+
+    out = fn(
+        u2, v2, T2, qv2, pf2, ph2, z_full, z_half,
+        T_sfc, q_sfc, rho, _DIAG_DT_S, cfg,
+    )
+    if out.wtheta_flux is None:
+        raise ValueError(
+            f"{name}: does not expose TurbulenceOutput.wtheta_flux; the Q1 diagnostic "
+            "flux is wired only for smagorinsky/louis/holtslag_boville/ysu")
+    # Regrid on the SAME hydrostatic heights z_full the scheme computed the flux on
+    # (NOT the isothermal z_scm proxy used for the θ IC interp — codex #3).
+    flux_inc, z_inc = _to_increasing(out.wtheta_flux[0], z_full[0])  # → increasing height
+    return interp_profile(flux_inc, z_inc, z_les)  # on the LES grid, for scoring
 
 
 def scm_scan_final_state(scm: SingleColumnModel, nsteps: int):

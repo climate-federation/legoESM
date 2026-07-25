@@ -116,6 +116,67 @@ def test_build_scm_from_artifact():
     assert np.all(T0 > 200.0) and np.all(T0 < 340.0)
 
 
+def _windy_cbl_artifact(**over):
+    """A well-mixed dry CBL with a light mean wind — so the bulk surface layer can carry
+    the prescribed heat flux (the Q1b diagnostic-flux margin fixture)."""
+    z = np.linspace(10.0, 1500.0, NZ)
+    theta_col = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
+    theta = np.broadcast_to(theta_col, (NT, NZ)).copy()
+    base = dict(
+        case_name="cbl_windy",
+        sgs="lasd",
+        heights_m=z,
+        times_s=np.linspace(0.0, 1800.0, NT),
+        theta=theta,
+        u=np.full((NT, NZ), 5.0),
+        v=np.zeros((NT, NZ)),
+        wtheta_resolved=np.broadcast_to(
+            0.06 * np.clip(1.0 - z / 900.0, -0.2, 1.0), (NT, NZ)).copy(),
+        wtheta_sgs=np.zeros((NT, NZ)),
+        prescribe="fluxes",
+        w_theta_s=np.full(NT, 0.06),
+        f_c=0.0,
+    )
+    base.update(over)
+    return LESReferenceArtifact(**base)
+
+
+def test_diagnostic_scheme_flux_nonlocal_beats_local():
+    # Q1b measured diagnostic margin: at the well-mixed CBL mean state, driven by the SAME
+    # LES surface heat flux, a LOCAL closure (F=-Kh·∂θ/∂z, ∂θ/∂z≈0) carries ~0 interior
+    # flux while a NONLOCAL closure's counter-gradient carries the surface flux up. So the
+    # nonlocal flux RMSE vs the LES flux is materially BELOW the local one.
+    from legoesm.atmosphere.les_suite.bridge import diagnostic_truth
+    from legoesm.atmosphere.les_suite.score import diagnostic_flux_score
+    from legoesm.atmosphere.les_suite.scm_runner import diagnostic_scheme_flux
+
+    art = _windy_cbl_artifact()
+    truth = diagnostic_truth(art)
+    rmse = {}
+    for sch in ("smagorinsky", "louis", "holtslag_boville", "ysu"):
+        flux = diagnostic_scheme_flux(art, TurbulenceConfig(scheme=sch), nlev=32)
+        assert flux.shape == truth.heights_m.shape
+        assert bool(jnp.all(jnp.isfinite(flux)))
+        rmse[sch] = float(diagnostic_flux_score(truth, flux).wtheta_rmse)
+
+    local_worst = max(rmse["smagorinsky"], rmse["louis"])
+    nonlocal_best = min(rmse["holtslag_boville"], rmse["ysu"])
+    # Local closures carry ≈0 flux through the mixed layer (structural ceiling) ⇒ their
+    # RMSE ≈ the LES flux magnitude; nonlocal beats them by a clear margin.
+    assert nonlocal_best < local_worst - 0.1
+
+
+def test_diagnostic_scheme_flux_rejects_moist_and_tke():
+    from legoesm.atmosphere.les_suite.scm_runner import diagnostic_scheme_flux
+
+    # Moist artifact → rejected (counter-gradient ceiling is a dry-CBL notion).
+    with pytest.raises(ValueError, match="dry-only"):
+        diagnostic_scheme_flux(_moist_artifact(), TurbulenceConfig(scheme="smagorinsky"))
+    # TKE-carrying scheme → rejected (no wtheta_flux exposure).
+    with pytest.raises(ValueError, match="TKE-carrying"):
+        diagnostic_scheme_flux(_windy_cbl_artifact(), _mynn_config())
+
+
 def test_scm_final_profile_finite_on_eval_grid():
     art = _cbl_artifact()
     scm, grid = build_cbl_scm_from_artifact(

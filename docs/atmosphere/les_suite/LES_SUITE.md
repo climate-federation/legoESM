@@ -1,7 +1,8 @@
 # LES_SUITE — an LES-truth suite for tuning and comparing SCM turbulence closures
 
 Status (2026-07-25): **DRY SUITE COMPLETE + FIRST MOIST REGIME (BOMEX) DELIVERED.** Dry:
-Q1a, Q1b (free + sheared, θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
+Q1a, Q1b (free + sheared, θ-consistent, PLUS a MEASURED closure-vs-closure diagnostic-flux
+margin = 0.875 ± 0.072 σ_LES on the sheared CBL, §7.1), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
 (AD-vs-DF 9/9), D7 (σ_LES all dry regimes), dry-regime partial-D9. Moist: the **moist SCM is
 built + validated + codex-CLEAN** (θ_l/q_t scoring, diagnostic Sundqvist condensation, DF+AD),
 and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned, θ_l-corrected, D7-gated by
@@ -295,18 +296,33 @@ The full machinery is built + validated; these are the first real numbers, for t
   lowest sampled flux — the SAME verdict as the prognostic Q1b above. Q1(b) is thus reported in
   BOTH scorings: prognostic via the tuned free-run margins, diagnostic via the Q1a structural
   counter-gradient result (D6 maps Q1's diagnostic-scoring contribution to exactly this
-  diagnostic). **An explicit per-flux diagnostic-flux-RMSE MARGIN (nonlocal-vs-local, closure-vs-
-  closure) is NOT produced, and codex established it CANNOT be shortcut:** (i) a one-step
-  tendency→flux reconstruction is physically unsound for the prescribed-flux SCM (surface flux
-  injected as a separate dT/dt term, Exner mismatch, non-conservative operator); (ii) the
-  counter-gradient flux magnitude `|⟨w'θ'⟩|` is only a LOWER BOUND on a local closure's pointwise
-  error (`|L−F| = F+|Kh∂θ/∂z| ≥ F`) and says nothing about the nonlocal error `|N−F|`, so it is
-  not the closure-vs-closure margin. Both were reverted. The measured margin genuinely requires
-  evaluating BOTH closures' diagnosed fluxes through `score.diagnostic_flux_score`, i.e. exposing
-  the turbulent flux across the 9 schemes (a `TurbulenceOutput.wtheta_flux` field populated per
-  scheme; the nonlocal γ is internal) — a scoped interface change. It is NOT required for the
-  Q1(b) THRESHOLD, which the structural argument already fixes < 0.02; it would only QUANTIFY the
-  gap.
+  diagnostic).
+- **Q1b (skill threshold, DIAGNOSTIC scoring) — MEASURED closure-vs-closure margin (2026-07-25).**
+  The explicit per-closure diagnostic-flux-RMSE margin is now **produced** (superseding the earlier
+  "cannot be shortcut" note; two invalid shortcuts — a tendency→flux reconstruction and the
+  CG-flux-magnitude lower bound — were codex-rejected and reverted). Mechanism: the four K-closures
+  now expose `TurbulenceOutput.wtheta_flux` = `−Kh·(∂θ/∂z − γ)` (γ≡0 local; the scheme's own
+  counter-gradient for nonlocal) via the ONE shared reduction `vertical_diffusion.diagnostic_heat_flux_full`
+  (pure diagnostic — never feeds a tendency, so no run changes); `scm_runner.diagnostic_scheme_flux`
+  evaluates each closure at the LES mean state and scores it with `score.diagnostic_flux_score`.
+  **Crucial fidelity point:** the prescribed-flux CBL SCM injects the surface heat flux as a
+  bottom-cell tendency with the turbulence surface layer at `Ch=0`, which STARVES the nonlocal
+  counter-gradient of its driving buoyancy flux — evaluating at `T_sfc=T_air` gives a VACUOUS ~0
+  for all closures (a wiring artifact, not physics). The harness therefore imposes the LES surface
+  kinematic **θ**-flux on each closure (secant-calibrated T_sfc excess through the shared bulk;
+  dry `q_sfc` so no spurious latent-buoyancy contamination; Exner-consistent T↔θ) as the controlled
+  variable held fixed across closures. **Result on the real sheared CBL** (`cbl_nieuwstadt` Ug=8,
+  Q0=+0.06 K m/s), normalized flux-RMSE vs the LES total flux, across the 3 LES SGS closures
+  {lasd, smagorinsky, vreman}: local (smagorinsky/louis) **1.08–1.21** vs nonlocal
+  (holtslag_boville/ysu) **0.28–0.46** → **margin = 0.875 ± 0.072 (σ_LES over SGS), min 0.774**.
+  The local closures carry ≈0 flux through the well-mixed layer (structural ceiling: `F=−Kh·∂θ/∂z`
+  with `∂θ/∂z≈0`) while nonlocal carry the surface flux upward — so the diagnostic margin EXCEEDS
+  the σ_LES flux spread by ~12×, i.e. nonlocal beats local "by > a stated margin, in diagnostic
+  scoring" (Q1b, satisfied). **Scope limit (honest):** the calibration needs enough mean wind to
+  carry the bulk surface flux, so the FREE-convective CBL (Ug≈0) and the STABLE SBL (negative
+  surface flux, outside the positive secant bracket) correctly RAISE rather than report a number —
+  the sheared CBL is the calibratable vehicle for the measured margin. The Q1a structural ceiling
+  (tuning-independent, all regimes) remains the general answer; this quantifies it where drivable.
 - **Q1b D7 SIGNIFICANCE (2026-07-24, real SGS spread):** emitted the {lasd, smagorinsky,
   vreman} SGS spread for `cbl_nieuwstadt` on GPU and computed **σ_LES = 0.3186** (combined
   loss units, `compute_sigma_les`). Gated on it, **NONE of the Q1b margins are

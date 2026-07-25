@@ -43,6 +43,20 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   monotone). **D7 gate:** σ_LES(cbl_nieuwstadt)=0.3186 ⇒ NONE of the margins are
   significant — but σ_LES(combined) is wind-dominated (σ_θ=0.0074 ≪ σ_u=0.43/σ_v=0.34)
   and ill-conditioned for the Ug=0 CBL ⇒ a defensible threshold needs the sheared cases.
+- **Q1b (MEASURED diagnostic-flux margin, 2026-07-25, iter 32)** — the explicit closure-vs-
+  closure diagnostic margin is now PRODUCED (superseded the earlier "not produced" note).
+  The 4 K-closures expose `TurbulenceOutput.wtheta_flux = −Kh·(∂θ/∂z−γ)` via the shared
+  `vertical_diffusion.diagnostic_heat_flux_full` (pure diagnostic; no run changes);
+  `scm_runner.diagnostic_scheme_flux` evaluates each at the LES mean state, imposing the LES
+  surface θ-flux (secant-calibrated T_sfc excess; dry q_sfc; Exner-consistent) to avoid the
+  Ch=0 prescribed-flux STARVATION that would make the margin a wiring artifact. On the real
+  sheared CBL (`cbl_nieuwstadt` Ug8, Q0=0.06), normalized flux-RMSE vs LES over {lasd,smag,
+  vreman}: local 1.08–1.21 vs nonlocal 0.28–0.46 ⇒ **margin 0.875 ± 0.072 (σ_LES), min 0.774
+  — ~12× the σ_LES flux spread** ⇒ nonlocal beats local "by > a stated margin, in diagnostic
+  scoring" (Q1b satisfied). Local closures carry ≈0 mixed-layer flux (F=−Kh·∂θ/∂z, ∂θ/∂z≈0);
+  nonlocal carry the surface flux up. Scope: free-conv (Ug≈0) + stable SBL (negative flux)
+  correctly RAISE (uncalibratable). Codex iterate-to-CLEAN (2 rounds: fixed a latent-flux
+  contamination + a T-vs-θ-flux + a regrid-coordinate bug). 22 les_suite tests + 3 helper.
 
 ## Conventions locked during the build
 - LES reference artifacts are **self-describing**: each carries both the truth profiles
