@@ -92,6 +92,7 @@ from legoesm.forcing.time_utils import (
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
     apply_conservative_regrid,
+    check_axis_span,
     compute_overlap_weights,
 )
 from legoesm.ocean.freshwater import FreshwaterForcing
@@ -103,6 +104,17 @@ from legoesm.ocean.freshwater import FreshwaterForcing
 
 #: Records per noleap day on the cache time axis (3-hourly).
 RECORDS_PER_DAY: int = 8
+
+#: Least polar coverage a destination row may have and still be shipped, matching
+#: the OMIP2 applicator's value (kept as a named constant in both places rather
+#: than a bare literal, since it is a physics policy).  JRA55-do is Gaussian with
+#: outermost centre ~+-89.570 deg -> inferred outer edge ~+-89.849 deg, a 0.151 deg
+#: polar gap -- 3.4x narrower than CORE-II's -- so the outermost destination row
+#: keeps 0.977 coverage at 1 deg and still 0.633 at 0.25 deg.  0.5 therefore leaves
+#: ample margin here; it starts to bite only finer than ~0.21 deg.  Weights are not
+#: renormalised, so coverage f returns f x field: the floor is how much dilution is
+#: acceptable, not a numerical epsilon.
+_POLAR_COVERAGE_FLOOR: float = 0.5
 
 #: Variables this module reads / regrids / caches.  Exactly the set
 #: needed to populate AtmToSurface and the freshwater path for tropical
@@ -524,6 +536,12 @@ def build_jra55_cache(
     # has edges [-0.28°, 359.72°] which leaves a 0.28° gap at the
     # wrap point).  Fix by appending one ghost column at +360°.
     # The ghost column's data will be the first column's data (wrap).
+    # PRECONDITION the wrap-pad relies on, checked BEFORE padding: the RAW source
+    # must tile the full 360 deg.  The +360 ghost below would turn a partial
+    # source into one cell spanning the whole missing sector, which then reports
+    # COMPLETE longitude coverage to the weight builder.
+    check_axis_span(src_lon_edges, 2.0 * np.pi,
+                    name="JRA55-do source longitude")
     src_lon_edges_deg = np.degrees(src_lon_edges)
     target_lon_max = np.degrees(config.target_lon_edges[-1])
     if src_lon_edges_deg[-1] < target_lon_max - 1e-6:
@@ -536,14 +554,17 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
-    # NO require_full_coverage here: JRA55-do is Gaussian (outermost centre
-    # ~+-89.57 deg), so the polar destination row legitimately under-covers --
-    # same reason as the OMIP2 remapper.  Reverted on geometry, not on a
-    # measurement: no cached JRA55 was available to reproduce the CORE-II
-    # failure.  See regrid_polar_coverage_2026-07-24.md
+    # require_attainable_coverage=True: the check compares against what the
+    # source CAN supply, so JRA55-do's physical polar shortfall (Gaussian,
+    # outermost centre ~+-89.57 deg) no longer aborts the cache build, while a
+    # longitude seam/ghost deficit still raises.  The raw-longitude precondition
+    # the wrap-pad above relies on is asserted before that pad.
+    # See regrid_polar_coverage_2026-07-24.md
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         target_lat_edges, config.target_lon_edges,
+        require_attainable_coverage=True,
+        lat_shortfall_floor=_POLAR_COVERAGE_FLOOR,
     )
 
     # Allocate output arrays on the cache axis.

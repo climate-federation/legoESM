@@ -136,6 +136,18 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
 _REGRID_WEIGHTS_CACHE: dict = {}
 
+# Least polar coverage a destination row may have and still be shipped.  Real
+# forcing stops short of the pole (CORE-II NYF's inferred outer edge is +-89.486
+# deg, a 0.514 deg gap), so the outermost destination row is partly covered and
+# -- weights being unrenormalised -- returns coverage x field.  Measured outer-row
+# coverage for CORE-II: 0.997 at 10 deg, 0.934 at 2 deg, 0.736 at 1 deg (the
+# production 180x360), 0.531 at 0.75 deg, and 0 at 0.5 deg and finer, where the
+# row falls entirely beyond the source.  0.5 keeps production comfortably inside
+# while rejecting the badly diluted rows (a 250 K air temperature arriving as a
+# few K is the bulk-flux / 10-m-pressure NaN hazard).  Targets finer than ~0.75
+# deg raise: they need a renormalising or pole-filling remap, not a looser floor.
+_POLAR_COVERAGE_FLOOR = 0.5
+
 
 def _edges_from_centers_deg(centers_deg):
     """Derive uniform-spaced cell edges (radians) from cell centres.
@@ -163,7 +175,7 @@ def _conservative_regrid_to_latlon(
     (src_shape, dst_shape) pair; subsequent calls are a sparse matmul.
     """
     from legoesm.grids.conservative_regrid import (
-        compute_overlap_weights, apply_conservative_regrid,
+        check_axis_span, compute_overlap_weights, apply_conservative_regrid,
     )
     import jax.numpy as jnp_local
     key = (
@@ -185,6 +197,14 @@ def _conservative_regrid_to_latlon(
         # resulting garbage air temperature).
         src_lon = np.asarray(src_lon_deg, dtype=np.float64)
         n_src_lon = src_lon.size
+        # PRECONDITION the wrap-pad relies on, checked BEFORE padding: the RAW
+        # source must tile the full 360 deg.  The +-360 ghosts below would turn a
+        # partial-longitude source into one enormous cell spanning the whole
+        # missing sector, which then reports COMPLETE longitude coverage to the
+        # weight builder -- so this is the only point where the difference is
+        # still visible.
+        check_axis_span(_edges_from_centers_deg(src_lon), 2.0 * np.pi,
+                        name="omip2 forcing source longitude")
         ds = abs(float(src_lon[1] - src_lon[0]))
         dd = abs(float(np.asarray(dst_lon_deg)[1] - np.asarray(dst_lon_deg)[0]))
         n_ghost = max(1, int(np.ceil(dd / ds)))
@@ -199,17 +219,19 @@ def _conservative_regrid_to_latlon(
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
-        # NO require_full_coverage here: real forcing sources stop short of the
-        # pole (CORE-II NYF outermost CENTRE +-88.542 deg -> inferred outer EDGE
-        # ~+-89.5 deg; the edge is what sets the deficit), so the polar dst ROW
-        # legitimately under-covers and the flag would ABORT production
-        # preprocessing; the remap averages the source that DOES overlap.  The
-        # clamp above and the ceil(dd/ds) ghosts stay -- they fix real defects
-        # (edge past the pole; 0/360 seam).  Measurements + the deferred
-        # helper-side fix: regrid_polar_coverage_2026-07-24.md
+        # require_attainable_coverage=True: the check now compares against what
+        # the source CAN supply, so the physical polar shortfall (real forcing
+        # stops short of the pole -- CORE-II NYF outermost CENTRE +-88.542 deg ->
+        # inferred outer EDGE ~+-89.5 deg, the edge is what sets the deficit) no
+        # longer aborts preprocessing, while a lon seam/ghost deficit still
+        # raises.  That is the defect worth guarding: a single ghost once left the
+        # seam column HALVED and the 10-m pressure iteration NaN'd on it.
+        # See regrid_polar_coverage_2026-07-24.md
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
+            require_attainable_coverage=True,
+            lat_shortfall_floor=_POLAR_COVERAGE_FLOOR,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
     # Ghost-column count matches the weight build below (width ratio, NOT

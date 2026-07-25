@@ -160,38 +160,159 @@ def cell_edges_1d(
     return edges
 
 
-_COVERAGE_TOL = 1e-6  # relative |sum(weights) - 1| tolerance for a remap that is
-# REQUIRED to fully cover every destination cell.  float64 area-ratio roundoff is
-# ~1e-14 (~4 adds/cell), so 1e-6 sits ~1e8x above noise yet flags a single
-# missing 0.25deg source cell in a 1deg destination or a ~12.5% seam deficit.
+_COVERAGE_TOL = 1e-6  # |sum(weights) - attainable| tolerance for a remap that is
+# REQUIRED to cover every destination cell as fully as its source allows.
+# float64 area-ratio roundoff is ~1e-14 (~4 adds/cell), so 1e-6 sits ~1e8x above
+# noise yet flags a single missing 0.25deg source cell in a 1deg destination or a
+# ~12.5% seam deficit.  Deliberately NOT loosened to swallow the polar deficit
+# (measured 6.6e-2 for CORE-II -> 2deg/90x180; 2.6e-1 at 1deg): a tolerance wide
+# enough for that would also swallow a genuinely half-covered seam cell.  Relax
+# the REFERENCE instead (see lat_shortfall_floor).
 
 
-def _validate_full_coverage(dst_idx, weights, n_dst_cells, *, tol, name):
-    """Raise if any destination cell's summed overlap weights depart from 1.
+# Axis-span floor tolerance (radians).  float64 edge inference is exact to ~1e-15,
+# but grid coordinates are STORED at the precision policy's dtype (float32 by
+# default for LatLonGrid), which alone reaches ~2.2e-7 rad of span error at
+# n_lon = 720 -- only ~4.5x under a flat 1e-6.  So the effective tolerance also
+# scales with the cell width (see check_axis_span): a genuine missing column is a
+# whole cell wide, so 1% of a cell separates the two by ~100x at any resolution.
+_SPAN_TOL = 1e-6
+_SPAN_CELL_FRAC = 0.01
+
+# Smallest ENFORCEABLE lat_shortfall_floor.  Must stay comfortably above
+# _COVERAGE_TOL: the guard fires on `lat_frac < floor - _COVERAGE_TOL`, so a floor
+# at or below the tolerance drives that threshold to <= 0 and an all-zero row
+# passes -- the guard would silently invert.  1e-3 is also the point below which a
+# floor stops being a defensible policy: at 0.1% coverage a 250 K air temperature
+# arrives as 0.25 K, which is not a field anyone means to ship.
+_MIN_LAT_FLOOR = 1e-3
+
+
+def check_axis_span(edges, expected_span, *, name):
+    """Raise unless ``edges`` span ``expected_span`` radians end to end.
+
+    Use this to state a caller's geometric PRECONDITION explicitly, before any
+    ghost padding hides it.  ``compute_overlap_weights`` cannot recover the
+    precondition itself: a caller that wrap-pads its source longitude with
+    +/-2pi shifts of its own end columns turns a partial-longitude source into
+    one enormous ghost cell spanning the whole missing sector, which then reports
+    complete longitude coverage.  Checking the RAW axis is the only place the
+    difference is still visible.
+    """
+    edges = np.asarray(edges, dtype=np.float64)
+    if edges.size < 2:
+        raise ValueError(
+            f"{name}: need >= 2 edges to measure a span, got {edges.size}."
+        )
+    span = float(edges[-1] - edges[0])
+    # Scale with the narrowest cell so float32-stored coordinates cannot trip the
+    # check, while a whole missing cell still does (~100x margin).
+    atol = max(_SPAN_TOL, _SPAN_CELL_FRAC * float(np.min(np.diff(edges))))
+    if abs(span - float(expected_span)) > atol:
+        raise ValueError(
+            f"{name}: axis spans {span:.12g} rad ({np.degrees(span):.6g} deg) but "
+            f"{float(expected_span):.12g} rad ({np.degrees(expected_span):.6g} deg) "
+            f"is required (off by {span - float(expected_span):.3e} rad, "
+            f"tol {atol:.3e})."
+        )
+
+
+def _attainable_lat_coverage(src_sin, dst_sin, dst_lat_area):
+    """Fraction of each destination lat band the source CAN supply, in [0, 1].
+
+    CONVENTION: coverage is a non-negative AREA fraction, computed in the
+    ``sin(lat)`` coordinate where a spherical band's area is linear, with both
+    axes ascending (south -> north).  Source cells are contiguous, so their union
+    is the single band ``[src_sin[0], src_sin[-1]]``; the attainable fraction is
+    that band's overlap with the destination cell over the destination cell's own
+    extent.  1.0 means the source reaches at least as far poleward as this
+    destination row; < 1.0 means it physically cannot fill it.
+    """
+    covered = np.clip(
+        np.minimum(dst_sin[1:], src_sin[-1])
+        - np.maximum(dst_sin[:-1], src_sin[0]), 0.0, None)
+    # No epsilon clamp on the denominator: it would have to differ from the
+    # `max(dst_cell_area, 1e-30)` used for the weights themselves (that one is a
+    # lat*lon PRODUCT and so binds at a different threshold), and a mismatched
+    # pair produces a spurious raise blaming a longitude seam.  A zero-area
+    # destination row cannot be covered at all, so report it as 0 and let the
+    # zero-coverage guard reject it explicitly.
+    frac = np.zeros_like(covered)
+    ok = dst_lat_area > 0.0
+    frac[ok] = covered[ok] / dst_lat_area[ok]
+    return frac
+
+
+def _required_lat_coverage(src_sin, dst_sin, *, floor):
+    """Per-row minimum acceptable latitude coverage, in [floor, 1].
+
+    A destination row that pokes outside the source's latitude band may be
+    covered as little as ``floor``; every other row must be complete.
+
+    ``floor = 1.0`` (the default everywhere) reproduces the original hard-1.0
+    check exactly. Only a caller whose source is a real dataset with a physical
+    polar gap should relax it, and only as far as it can defend: the weights are
+    NOT renormalised (``weights = overlap_area / dst_cell_area``), so a row with
+    coverage ``f`` returns ``f * field`` -- a REDUCED value, not an average. At
+    ``f = 0.0024`` (CORE-II onto 350 lat rows) a 250 K air temperature arrives as
+    0.61 K, which is the bulk-flux / 10-m-pressure NaN this guard exists to
+    prevent. ``floor`` is
+    therefore how much dilution the caller is willing to ship, not a numerical
+    epsilon; 1e-6 would be no line at all.
+
+    NOTE the geometry, which bounds how much this can ever buy: a contiguous
+    source band's outer edge cuts EXACTLY ONE destination row, so at most one row
+    per pole is partial and every row beyond it is exactly zero-covered. Relaxing
+    the floor therefore cannot admit a destination finer than the polar gap -- the
+    outermost rows there have no source data at all and no floor above 0 accepts
+    them. Making those rows usable needs a renormalising or pole-filling remap,
+    which is a change to the WEIGHTS, not to this check.
+    """
+    reaches_beyond = (dst_sin[:-1] < src_sin[0]) | (dst_sin[1:] > src_sin[-1])
+    return np.where(reaches_beyond, float(floor), 1.0)
+
+
+def _validate_attainable_coverage(
+    dst_idx, weights, n_dst_lat, n_dst_lon, *, expected, tol, name,
+):
+    """Raise if any destination cell's weights depart from its ATTAINABLE coverage.
 
     HOST-SIDE (numpy) check on the STATIC weights BEFORE they become a jnp
     constant -- zero autodiff / JIT / trace impact (the traced apply is an
     unchanged ``segment_sum`` over these compile-time weights).  A destination
-    cell only PARTIALLY covered by the source silently gets ``sum(weights) < 1``
-    -- a physically REDUCED field (seam/ghost deficit, or a source that does not
-    reach the pole fabricating polar data); a fully-uncovered cell gets 0.  Per
-    dispatch-hardening, fail LOUDLY rather than emit a reduced field.
+    cell covered less than the source can supply silently gets a physically
+    REDUCED field (seam/ghost deficit, wrong edges, an interior hole); a
+    fully-uncovered cell gets 0.  Fail LOUDLY rather than emit a reduced field.
+
+    Compared against ``expected`` rather than a hard 1.0 because ``sum == 1`` is
+    not attainable for every destination cell: a source whose outermost latitude
+    row stops short of the pole (i.e. every real forcing dataset) legitimately
+    under-covers the polar destination row, and demanding 1.0 there aborts valid
+    preprocessing.  ``expected`` relaxes LATITUDE only -- longitude is required
+    complete, so a source that does not span the destination in longitude still
+    raises.
     """
+    n_dst_cells = int(n_dst_lat) * int(n_dst_lon)
     row_sum = np.bincount(
         np.asarray(dst_idx).ravel(),
         weights=np.asarray(weights).ravel(),
-        minlength=int(n_dst_cells),
+        minlength=n_dst_cells,
     )
-    dev = np.abs(row_sum - 1.0)
+    dev = np.abs(row_sum - expected)
     bad = np.nonzero(dev > tol)[0]
     if bad.size:
         worst = int(bad[int(dev[bad].argmax())])
+        j, i = divmod(worst, int(n_dst_lon))
         raise ValueError(
             f"{name}: {bad.size} destination cell(s) have summed remap weights "
-            f"off 1 by > {tol:g} (worst |sum-1| = {float(dev.max()):.3e} at flat "
-            f"dst index {worst}); the source does not fully cover the destination "
-            "(seam/ghost deficit or a source that does not reach the pole). This "
-            "would silently produce a reduced field."
+            f"off their ATTAINABLE coverage by > {tol:g} (worst deviation "
+            f"{float(dev.max()):.3e} at dst lat_row {j}, lon_col {i}: sum = "
+            f"{float(row_sum[worst]):.12g}, attainable = "
+            f"{float(expected[worst]):.12g}); the source does not fully cover the "
+            "destination there. Latitude shortfall at the poles is already "
+            "allowed for, so this is a real deficit -- a longitude seam/ghost "
+            "gap, wrong edges, or an interior hole. It would silently produce a "
+            "reduced field."
         )
 
 
@@ -201,7 +322,8 @@ def compute_overlap_weights(
     dst_lat_edges: np.ndarray,
     dst_lon_edges: np.ndarray,
     *,
-    require_full_coverage: bool = False,
+    require_attainable_coverage: bool = False,
+    lat_shortfall_floor: float = 1.0,
 ) -> ConservativeRegridWeights:
     """Compute conservative overlap weights between two regular lat-lon grids.
 
@@ -219,6 +341,23 @@ def compute_overlap_weights(
         Target latitude cell edges, radians, ascending.
     dst_lon_edges : np.ndarray, shape (n_dst_lon + 1,)
         Target longitude cell edges, radians, ascending.
+    require_attainable_coverage : bool, default False
+        Raise if any destination cell's summed weights fall short of what the
+        source can supply. LONGITUDE is always required complete, so a source that
+        does not span the destination in longitude raises. Callers that wrap-pad
+        their source longitude must ALSO assert the raw axis spans the globe (see
+        :func:`check_axis_span`) -- padding makes a partial-longitude source look
+        complete to this check. Host-side only; no AD/JIT impact.
+    lat_shortfall_floor : float, default 1.0
+        Minimum acceptable latitude coverage for a destination row that extends
+        beyond the source's latitude band. The default 1.0 demands complete
+        coverage everywhere, i.e. exactly the original hard-1.0 behaviour -- keep
+        it for model-to-model remaps, where both grids are global and any
+        shortfall is a bug. A caller whose source is a real dataset with a
+        physical polar gap (CORE-II NYF, JRA55-do) relaxes it to the amount of
+        dilution it is willing to ship: weights are NOT renormalised, so a row
+        with coverage ``f`` returns ``f * field``. See
+        :func:`_required_lat_coverage`.
 
     Returns
     -------
@@ -313,10 +452,49 @@ def compute_overlap_weights(
     src_idx = j_src_flat * n_src_lon + i_src_flat
     dst_idx = j_dst_flat * n_dst_lon + i_dst_flat
 
-    if require_full_coverage:
-        _validate_full_coverage(
-            dst_idx, weights, n_dst_lat * n_dst_lon,
-            tol=_COVERAGE_TOL, name="compute_overlap_weights",
+    if not _MIN_LAT_FLOOR <= float(lat_shortfall_floor) <= 1.0:
+        raise ValueError(
+            f"lat_shortfall_floor must lie in [{_MIN_LAT_FLOOR:g}, 1] -- 1.0 "
+            "demands complete coverage, a smaller value is how much dilution the "
+            "caller accepts on a destination row that extends past the source's "
+            "latitude band. It is a physical policy, not a numerical epsilon: a "
+            f"floor at or below the coverage tolerance ({_COVERAGE_TOL:g}) is not "
+            "even enforceable, since the comparison threshold would go negative "
+            "and an ALL-ZERO row would pass. Got "
+            f"{lat_shortfall_floor!r}."
+        )
+    if require_attainable_coverage:
+        # Relax LATITUDE to what the source can supply; keep LONGITUDE at 1.0 so
+        # a lon seam/ghost gap still raises.  Separable weights make the product
+        # exact: row_sum[j, i] = lat_frac[j] * lon_frac[i], and np.repeat matches
+        # the dst_idx = j * n_dst_lon + i flattening used above.
+        lat_frac = _attainable_lat_coverage(src_sin, dst_sin, dst_lat_area)
+        # Qualify the reference BEFORE trusting it: a row matches its own
+        # attainable coverage by construction, so without this a source that
+        # cannot reach a row passes while emitting a reduced or all-zero field.
+        required = _required_lat_coverage(
+            src_sin, dst_sin, floor=lat_shortfall_floor)
+        under = np.nonzero(lat_frac < required - _COVERAGE_TOL)[0]
+        if under.size:
+            worst = int(under[int(np.argmin(lat_frac[under] - required[under]))])
+            raise ValueError(
+                f"compute_overlap_weights: destination lat_row {worst} is only "
+                f"{float(lat_frac[worst]):.6g} covered by the source but "
+                f"{float(required[worst]):.6g} is required "
+                f"({under.size} such row(s) of {n_dst_lat}). Weights are NOT "
+                "renormalised, so that row would return coverage x field -- a "
+                "REDUCED field (at forcing scale, an air temperature of a few K). "
+                "The source spans "
+                f"asin({float(src_sin[0]):.9g})..asin({float(src_sin[-1]):.9g}) "
+                "rad. Either the destination is finer than the source's polar gap "
+                "(coarsen it, or fill the source poleward), or the source is "
+                "regionally limited where a global one was expected."
+            )
+        expected = np.repeat(lat_frac, n_dst_lon)
+        _validate_attainable_coverage(
+            dst_idx, weights, n_dst_lat, n_dst_lon,
+            expected=expected, tol=_COVERAGE_TOL,
+            name="compute_overlap_weights",
         )
 
     return ConservativeRegridWeights(
