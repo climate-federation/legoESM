@@ -303,7 +303,12 @@ The full machinery is built + validated; these are the first real numbers, for t
   NOT a tuned-coefficient requirement. Across BOTH axes (stability + shear) the σ_LES gate
   refuses coefficient-portability-breaking: at this coarse tier-1 depth + these LES error
   bars, one tuned coefficient set transfers across configurations within σ_LES; what changes
-  is the best closure, not its calibration.
+  is the best closure, not its calibration. (The sheared tuned records live in
+  `results/les_suite/tuned/sheared_analysis/`, NOT the main `tuned/` — the scorecard keys
+  slices on `(regime, q0)` and the sheared CBL shares `(dry_convective, 0.06)` with the free
+  anchor, so keeping them separate avoids a silent slice-key conflation in the Q2/Q3 tables.
+  CONVENTION: any variant sharing a `(regime, q0)` key with a main-suite case goes in a
+  sibling subdir, not the scorecard's `tuned/` scan.)
 - **θ-CONSISTENT D7 VERDICT — CLOSURE ORDER BUYS SKILL ON θ (2026-07-24, FULL 9×5 grid,
   `theta_significance.py`).** With the scan rollout the ENTIRE nine-closure × five-flux grid
   (45/45 cells) is tuned at nlev=24 — including full CLUBB (previously OOM-deferred). Re-score
