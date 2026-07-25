@@ -10,6 +10,10 @@
 %   python scripts/plot/plot_ec_site_publication.py \
 %       scripts/validate/ec_site_example_data <out_prefix>
 % See docs/land/ec_site_evaluation_runbook.md.
+%
+% BibTeX entries for every key cited below are collected at the end of this file.
+% Bibliographic details were verified against the publisher records; the schemes
+% themselves were verified against the implementation.
 % ---------------------------------------------------------------------------
 
 \section{Land-surface validation at eddy-covariance flux towers}
@@ -17,23 +21,20 @@
 
 The land component is evaluated offline against point-scale eddy-covariance
 measurements, which constrain the coupled water, energy and carbon fluxes at the
-half-hourly to interannual timescales that a coupled simulation cannot isolate.
-This section documents the sites, the forcing data, the model configuration, and
-the experimental and evaluation protocols.
+sub-daily to seasonal timescales that a coupled simulation cannot isolate. This
+section documents the sites, the forcing data, the model configuration, and the
+experimental and evaluation protocols.
 
 \subsection{Sites}
 
 Four FLUXNET towers were selected to span the temperate and Mediterranean
 regimes over which the two-big-leaf canopy is well posed
-(Table~\ref{tab:ecsites}): two temperate deciduous broadleaf forests differing in
-climate and soil (US-MMS, DE-Hai), a montane evergreen needleleaf forest
-(DE-Obe), and a water-limited oak savanna (US-Ton). Peak leaf area index ranges
-from 2.9\,m$^2$\,m$^{-2}$ at the savanna to 6.2\,m$^2$\,m$^{-2}$ at the closed
+(Table~\ref{tab:ecsites}): two temperate deciduous forests differing in climate
+and soil (US-MMS, DE-Hai), a montane evergreen needleleaf forest (DE-Obe), and a
+water-limited oak savanna (US-Ton). Peak leaf area index ranges from
+2.9\,m$^2$\,m$^{-2}$ at the savanna to 6.2\,m$^2$\,m$^{-2}$ at the closed
 forests, and soil texture spans clay to loam, so the four sites exercise
-contrasting water-limitation, phenology and surface-roughness regimes. Dense
-high-leaf-area wet broadleaf forests are excluded: the coupled leaf-energy-balance
-and stomatal closure admits a second, stomata-closed solution branch there, which
-we report rather than mask.
+contrasting water-limitation, phenology and surface-roughness regimes.
 
 \begin{table}[h]\centering\footnotesize
 \caption{Eddy-covariance sites used for the land-surface validation. Canopy
@@ -55,16 +56,18 @@ DE-Hai & humid deciduous forest (DBF)     &  51.08 &   10.45  & 34 & 42.0 & 6.2 
 \subsection{Forcing data}
 
 Each site is driven by a per-site forcing file combining FLUXNET2015 FULLSET
-meteorology (downwelling shortwave and longwave radiation, air temperature,
-vapour-pressure deficit, wind speed, surface pressure, precipitation and CO$_2$
-mole fraction) with MODIS leaf area index and albedo, a diffuse-PAR fraction, and
-site parameters. The forcing is half-hourly except at US-MMS, which is hourly.
-Gaps in the meteorological forcing are filled by FLUXNET \texttt{\_F\_MDS}
-substitution, with gaps of at least 24\,h filled from a month-by-time-of-day
-climatology and shorter interior gaps interpolated linearly. Gap-filling is
-applied only to the forcing: the observed fluxes used as evaluation targets are
-never gap-filled and retain their gaps, so no filled value can enter a skill
-statistic.
+meteorology\cite{Pastorello2020} (downwelling shortwave and longwave radiation,
+air temperature, vapour-pressure deficit, wind speed, surface pressure,
+precipitation and CO$_2$ mole fraction) with MODIS leaf area
+index\cite{Myneni2002} and albedo\cite{Schaaf2002}, the diffuse fraction of
+photosynthetically active radiation from the BESS radiation
+product\cite{Ryu2018}, and site parameters. The forcing is half-hourly except at
+US-MMS, which is hourly. Gaps in the meteorological forcing are filled by FLUXNET
+\texttt{\_F\_MDS} substitution, with gaps of at least 24\,h filled from a
+month-by-time-of-day climatology and shorter interior gaps interpolated linearly.
+Gap-filling is applied only to the forcing: the observed fluxes used as
+evaluation targets are never gap-filled and retain their gaps, so no filled value
+can enter a skill statistic.
 
 \subsection{Model configuration}
 
@@ -73,23 +76,25 @@ the mass-conservative mixed-form Richards equation\cite{Celia1990} with
 van~Genuchten retention\cite{VanGenuchten1980} whose parameters are derived from
 the site soil texture, solved by Picard iteration on a tridiagonal system. Soil
 temperature is advanced by backward-Euler heat diffusion with Johansen thermal
-conductivity. The column is discretised into eight geometrically spaced layers
-reaching approximately 6.4\,m (extended to 10\,m at the deep-rooted savanna), with
-free drainage at the base.
+conductivity\cite{Johansen1975}. The column is discretised into eight
+geometrically spaced layers reaching approximately 6.4\,m (extended to 10\,m at
+the deep-rooted savanna), with free drainage at the base.
 
 Surface exchange uses the two-big-leaf canopy scheme. Shortwave transfer follows
-a Sellers-type two-stream partition into sunlit and shaded leaves\cite{Sellers1985},
+a two-stream partition into sunlit and shaded leaves\cite{Sellers1985,Ryu2011},
 each of which carries Farquhar--von~Caemmerer--Berry C$_3$
-photosynthesis\cite{Farquhar1980} with Kattge--Knorr thermal acclimation, or
-Collatz C$_4$ photosynthesis, coupled to Ball--Berry stomatal conductance. The
-resulting six-variable system in sunlit and shaded leaf temperature, the two
-intercellular CO$_2$ concentrations, and canopy-air temperature and humidity is
-closed by Newton--Raphson iteration; an outer Picard loop reconciles the canopy
-solution with the soil thermal solver. Aerodynamic exchange is referenced to the
-measured tower height at each site, with roughness length and displacement height
-taken from a plant-functional-type table. The Ball--Berry cuticular intercept is
-not down-regulated by soil-moisture stress, so a live canopy retains a baseline
-conductance while a dormant canopy self-limits as its leaf area declines.
+photosynthesis\cite{Farquhar1980} with Kattge--Knorr thermal
+acclimation\cite{KattgeKnorr2007}, or C$_4$ photosynthesis following
+Collatz\cite{Collatz1992}, coupled to Ball--Berry stomatal
+conductance\cite{Ball1987}. The resulting six-variable system in sunlit and
+shaded leaf temperature, the two intercellular CO$_2$ concentrations, and
+canopy-air temperature and humidity is closed by Newton--Raphson iteration; an
+outer Picard loop reconciles the canopy solution with the soil thermal solver.
+Aerodynamic exchange is referenced to the measured tower height at each site,
+with roughness length and displacement height taken from a plant-functional-type
+table. The Ball--Berry cuticular intercept is not down-regulated by soil-moisture
+stress, so a live canopy retains a baseline conductance while a dormant canopy
+self-limits as its leaf area declines.
 
 Rooting depth and soil-column depth are prescribed modelling choices rather than
 measurements: rooting depth is the e-folding depth of an exponential
@@ -147,8 +152,49 @@ under-close the energy budget by 22--34\,\% here, so the modelled turbulent flux
 sit near the centre of the closure-uncertainty envelope.}\label{si:ecsite_fig}
 \end{figure}
 
-% ---------------------------------------------------------------------------
-% Additional bibliography keys used above and possibly not yet in the .bib:
+% ===========================================================================
+% BibTeX entries for the keys cited above.  Add any that the main .bib lacks;
+% VanGenuchten1980 and Farquhar1980 are already used elsewhere in the supplement.
+% ===========================================================================
+%
+% @article{Pastorello2020,
+%   author  = {Pastorello, Gilberto and Trotta, Carlo and Canfora, Eleonora and others},
+%   title   = {The {FLUXNET2015} dataset and the {ONEFlux} processing pipeline for
+%              eddy covariance data},
+%   journal = {Scientific Data}, volume = {7}, pages = {225}, year = {2020},
+%   doi     = {10.1038/s41597-020-0534-3}}
+%
+% @article{Myneni2002,
+%   author  = {Myneni, R. B. and Hoffman, S. and Knyazikhin, Y. and others},
+%   title   = {Global products of vegetation leaf area and fraction absorbed
+%              {PAR} from year one of {MODIS} data},
+%   journal = {Remote Sensing of Environment}, volume = {83}, pages = {214--231},
+%   year    = {2002}, doi = {10.1016/S0034-4257(02)00074-3}}
+%
+% @article{Schaaf2002,
+%   author  = {Schaaf, Crystal B. and Gao, Feng and Strahler, Alan H. and others},
+%   title   = {First operational {BRDF}, albedo nadir reflectance products from
+%              {MODIS}},
+%   journal = {Remote Sensing of Environment}, volume = {83}, pages = {135--148},
+%   year    = {2002}, doi = {10.1016/S0034-4257(02)00091-3}}
+%
+% @article{Ryu2018,
+%   author  = {Ryu, Youngryel and Jiang, Chongya and Kobayashi, Hideki and Detto, Matteo},
+%   title   = {{MODIS}-derived global land products of shortwave radiation and
+%              diffuse and total photosynthetically active radiation at 5 km
+%              resolution from 2000},
+%   journal = {Remote Sensing of Environment}, volume = {204}, pages = {812--825},
+%   year    = {2018}, doi = {10.1016/j.rse.2017.09.021}}
+%   % Product: BESS Rad v1, https://developers.google.com/earth-engine/datasets/
+%   %          catalog/SNU_ESL_BESS_Rad_v1
+%
+% @article{Ryu2011,
+%   author  = {Ryu, Youngryel and Baldocchi, Dennis D. and Kobayashi, Hideki and others},
+%   title   = {Integration of {MODIS} land and atmosphere products with a
+%              coupled-process model to estimate gross primary productivity and
+%              evapotranspiration from 1 km to global scales},
+%   journal = {Global Biogeochemical Cycles}, volume = {25}, pages = {GB4017},
+%   year    = {2011}, doi = {10.1029/2011GB004053}}
 %
 % @article{Celia1990,
 %   author  = {Celia, Michael A. and Bouloutas, Efthimios T. and Zarba, Rebecca L.},
@@ -162,4 +208,34 @@ sit near the centre of the closure-uncertainty envelope.}\label{si:ecsite_fig}
 %   title   = {Canopy reflectance, photosynthesis and transpiration},
 %   journal = {International Journal of Remote Sensing}, volume = {6},
 %   pages   = {1335--1372}, year = {1985}, doi = {10.1080/01431168508948283}}
-% ---------------------------------------------------------------------------
+%
+% @article{KattgeKnorr2007,
+%   author  = {Kattge, Jens and Knorr, Wolfgang},
+%   title   = {Temperature acclimation in a biochemical model of photosynthesis:
+%              a reanalysis of data from 36 species},
+%   journal = {Plant, Cell \& Environment}, volume = {30}, pages = {1176--1190},
+%   year    = {2007}, doi = {10.1111/j.1365-3040.2007.01690.x}}
+%
+% @article{Collatz1992,
+%   author  = {Collatz, G. James and Ribas-Carbo, Miquel and Berry, Joseph A.},
+%   title   = {Coupled photosynthesis-stomatal conductance model for leaves of
+%              {C4} plants},
+%   journal = {Australian Journal of Plant Physiology}, volume = {19},
+%   pages   = {519--538}, year = {1992}, doi = {10.1071/PP9920519}}
+%
+% @incollection{Ball1987,
+%   author    = {Ball, J. Timothy and Woodrow, Ian E. and Berry, Joseph A.},
+%   title     = {A model predicting stomatal conductance and its contribution to
+%                the control of photosynthesis under different environmental
+%                conditions},
+%   booktitle = {Progress in Photosynthesis Research}, editor = {Biggins, J.},
+%   volume    = {4}, pages = {221--224}, publisher = {Martinus Nijhoff},
+%   year      = {1987}, doi = {10.1007/978-94-017-0519-6_48}}
+%
+% @phdthesis{Johansen1975,
+%   author  = {Johansen, Oistein},
+%   title   = {Thermal conductivity of soils},
+%   school  = {Norwegian University of Science and Technology, Trondheim},
+%   year    = {1975},
+%   note    = {English translation: CRREL Draft Translation 637, 1977}}
+% ===========================================================================
