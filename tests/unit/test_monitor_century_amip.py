@@ -31,13 +31,30 @@ def test_parses_fields(tmp_path):
     np.testing.assert_allclose(arr[0], [1.0, 188.0, 299.0, 250.0, 40.0, 24.0])
 
 
-def test_stitches_link_restarts(tmp_path):
-    """Link 2 restarts at day 1 — absolute days must stay monotone."""
+def test_absolute_day_from_the_resume_line(tmp_path):
+    """A continuing link reports in-link days; absolute day = resume + in-link."""
     (tmp_path / "slurm-1.out").write_text(_log([1.0, 2.0, 3.0]))
-    (tmp_path / "slurm-2.out").write_text(_log([1.0, 2.0]))
+    (tmp_path / "slurm-2.out").write_text(
+        "  Resuming from /x/checkpoint_day_0003.npz (day 3/36500)\n"
+        + _log([1.0, 2.0]))
     day = parse_day_lines(tmp_path)[:, 0]
     np.testing.assert_allclose(day, [1.0, 2.0, 3.0, 4.0, 5.0])
-    assert np.all(np.diff(day) > 0)
+
+
+def test_restart_after_blowup_does_not_inflate_the_day(tmp_path):
+    """REGRESSION: after a blow-up the chain resumes from an EARLIER
+    checkpoint.  A cumulative stitch added the failed attempt on top and
+    reported day 204 for a run genuinely at 182 (2026-07-25)."""
+    # First attempt ran to day 32 then died.
+    (tmp_path / "slurm-1.out").write_text(_log(np.arange(1.0, 33.0)))
+    # Restart from day 20, so day 2 of the link is absolute day 22 — NOT 34.
+    (tmp_path / "slurm-2.out").write_text(
+        "  Resuming from /x/checkpoint_day_0020.npz (day 20/36500)\n"
+        + _log([1.0, 2.0]))
+    day = parse_day_lines(tmp_path)[:, 0]
+    assert day.max() == 32.0, day.max()      # the failed attempt's high-water
+    assert 22.0 in set(day)                  # the restart's real absolute day
+    assert 34.0 not in set(day)              # the inflated value
 
 
 def test_no_logs_is_empty_not_error(tmp_path):

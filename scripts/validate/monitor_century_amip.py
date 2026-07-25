@@ -30,35 +30,44 @@ import numpy as np
 
 # Major stratospheric eruptions in the CMIP6 volcanic deck, for the watch list.
 VOLCANOES = {"Agung": 1963, "El Chichon": 1982, "Pinatubo": 1991}
+_RESUME_RE = re.compile(r"Resuming from .*?checkpoint_day_0*(\d+)\.npz")
 _DAY_RE = re.compile(
     r"^\s*Day\s+([\d.]+):\s*T=\[([\d.]+),([\d.]+)\]K\s+mean=([\d.]+)K"
     r".*?\|u\|_max=([\d.]+)m/s\s+CWV=([\d.]+)")
 
 
 def parse_day_lines(run_dir: Path):
-    """(day, T_min, T_max, T_mean, u_max, CWV) from every link log, ordered."""
+    """(day, T_min, T_max, T_mean, u_max, CWV) from every link log, ordered.
+
+    Each link restarts its in-link day counter at 1, so the absolute day is
+    ``resume_day + in_link_day``.  The resume day is read from the launcher's
+    own ``Resuming from ... checkpoint_day_NNNN.npz`` line rather than
+    accumulated across links: a link that RESTARTS FROM AN EARLIER CHECKPOINT
+    (what happens after a blow-up — the century resumed at day 180 after
+    dying at 182) would otherwise be added on top of the failed attempt and
+    the run would appear further along than it is.  A cumulative stitch
+    reported day 204 for a run genuinely at 182.
+    """
     rows = []
-    for log in sorted(run_dir.glob("slurm-*.out")):
-        for line in log.read_text(errors="replace").splitlines():
+    for log in sorted(run_dir.glob("slurm-*.out"),
+                      key=lambda p: p.stat().st_mtime):
+        text = log.read_text(errors="replace")
+        m_resume = _RESUME_RE.search(text)
+        base = float(m_resume.group(1)) if m_resume else 0.0
+        for line in text.splitlines():
             m = _DAY_RE.match(line)
             if m:
-                rows.append(tuple(float(g) for g in m.groups()))
+                vals = [float(g) for g in m.groups()]
+                vals[0] += base                # absolute day
+                rows.append(tuple(vals))
     if not rows:
         return np.empty((0, 6))
     arr = np.array(rows)
-    # Links restart the in-link day counter; the absolute day is monotone
-    # only per link, so stitch on cumulative maxima across link boundaries.
-    day = arr[:, 0].copy()
-    offset = 0.0
-    stitched = np.empty_like(day)
-    prev = -np.inf
-    for i, d in enumerate(day):
-        if d < prev:                       # new link began at day 1 again
-            offset = stitched[i - 1]
-        stitched[i] = offset + d
-        prev = d
-    arr[:, 0] = stitched
-    return arr
+    # Order by absolute day; a re-run of an already-simulated stretch
+    # (post-blow-up restart) legitimately repeats days, so keep the LAST
+    # value seen for each day rather than assuming monotonicity.
+    order = np.argsort(arr[:, 0], kind="stable")
+    return arr[order]
 
 
 def era_switches(run_dir: Path):
