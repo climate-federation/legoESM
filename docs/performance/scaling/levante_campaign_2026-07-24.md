@@ -484,7 +484,12 @@ Same-precision f32 ladder, both arms, LL576:
 | 2 | 24.09 | 22.48 | wide (1.07x) |
 | 4 | 14.69 | 12.84 | wide (1.14x) |
 | 8 | **15.89** | 11.04 | wide (**1.44x**) |
-| 16 | — | 8.71 | wide |
+| 16 | 15.36 | 8.71 | wide (**1.76x**) |
+
+Control at nd16 (job 26460877): standard PCG 17.57 ms, so the nd16 ordering
+is wide 8.71 < single_reduce 15.36 < standard 17.57. The implicit variants
+PLATEAU past 4 GPUs (single_reduce 14.69 -> 15.89 -> 15.36) and never
+recover, while wide-halo improves monotonically (12.84 -> 11.04 -> 8.71).
 
 Two things this shows that the f64 <=4-GPU ladder could not:
 1. **single_reduce ANTI-SCALES past 4 GPUs in f32** (14.69 -> 15.89 ms from
@@ -607,6 +612,25 @@ visible. Validated on CPU virtual devices: 275 us -> 26 us.
 
 Quote the lane that matches the plot: intra-node NVLink and inter-node IB
 differ by ~3x in bandwidth, so using the wrong one is its own confound.
+
+## OPERATIONAL NOTE: transient multi-node hangs (3 occurrences)
+
+Three times this campaign a multi-node GPU job consumed its entire
+walltime without emitting a timed row, then ran normally on retry with the
+IDENTICAL configuration:
+
+| job | config | hung for | retry |
+|---|---|---|---|
+| 26457000 / 26456335 | ocean LL1152 np8 | 90 min x2 | 99 s (job 26457693) |
+| 26460447 | ocean LL576 np16 single_reduce | 50 min | 67 s (job 26460876) |
+
+Each time the log stops during tracing/compile with no error. Twice I
+suspected a real compile-time defect (a chunk-heuristic cliff, then a
+16-device solver problem) and twice the retry refuted it. TREAT A SINGLE
+MULTI-NODE HANG AS TRANSIENT until a second occurrence with the same
+config; budget a retry rather than a diagnosis. Root cause not
+established — it is not reproducible enough to bisect, and it has never
+produced a WRONG number, only a missing one.
 
 ## Infrastructure defects found + fixed (each with a receipt)
 
