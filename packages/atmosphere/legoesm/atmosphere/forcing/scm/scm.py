@@ -957,6 +957,28 @@ class SingleColumnModel:
         # active-physics config (Louis / gray rad / MYNN).
         return self.state
 
+    def pure_step(self, state, phys_state, t_seconds):
+        """One integration step returning ``(new_state, new_phys_or_None)`` — exactly what
+        :meth:`step` applies for the same stage time — WITHOUT mutating ``self`` or calling
+        the calendar ``set_time``. Intended as the body of a ``lax.scan`` free-run (one
+        compiled program instead of an ``nsteps`` Python loop; also tractable under
+        ``jax.grad``, which UNROLLS the Python loop).
+
+        Reproducibility caveat: it is a pure function of its three arguments ONLY when the
+        configured physics + forcing are themselves stateless/JAX-pure — i.e. no
+        time-dependent radiation reading ``set_time`` (skipped here), and no
+        externally-stateful forcing callable (iterators/counters, or a ``T_s`` override that
+        mutates a physics closure via ``set_T_sfc_override``). That holds for the LES-suite
+        idealized regimes (constant surface flux, radiation off); a caller outside that
+        contract must use :meth:`step`/:meth:`run`. AB2 threads ``_ab2_prev_tend``
+        statefully, so it is not a pure step and is rejected (use a single-stage integrator
+        for scan)."""
+        if self.time_integrator == "ab2":
+            raise ValueError(
+                "pure_step is undefined for the AB2 integrator (it threads prev_tend "
+                "statefully); use forward_euler/rk2/rk4 for a scan rollout.")
+        return self._step_fn(state, phys_state, self._tend_fn, self.dt, t_seconds)
+
     def run(
         self,
         nsteps: int,

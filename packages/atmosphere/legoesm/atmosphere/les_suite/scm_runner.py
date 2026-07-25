@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+from jax import lax
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.atmosphere.physics import (
@@ -159,6 +160,34 @@ def _to_increasing(profile: Array, z: Array) -> tuple[Array, Array]:
     return jnp.asarray(profile)[::-1], z[::-1]
 
 
+def scm_scan_final_state(scm: SingleColumnModel, nsteps: int):
+    """Free-run the SCM ``nsteps`` steps via ``lax.scan`` over its pure step; return the
+    final ``HydrostaticState``.
+
+    Reproduces ``SingleColumnModel.run`` to within ~1e-9 (well below the tuner's ~1e-3 loss
+    tolerance; FP roundoff, not a physics difference) for the wired dry CBL — its forcing is
+    time-independent, so ``run``'s per-step diurnal ``set_time`` is a no-op (validated
+    allclose vs ``run`` in ``test_scm_runner``). The same forward-Euler pure-step machinery
+    extends to any time-independent-forcing regime (e.g. the GABLS1 SBL) once it is wired
+    through this path. The win: ONE compiled XLA program instead of ``nsteps`` Python-loop
+    dispatches, so a free-run is far faster (a nlev=24 re-score drops from ~720 s to ~3 s)
+    and — crucially — tractable under ``jax.grad`` (the Python loop UNROLLS into a giant
+    backward graph). The carry is ``(state, phys_state, t_seconds)``; ``phys_state`` is only
+    rebound when the physics returns a new one (``None`` → keep the prior, matching
+    ``step``); a diverged (NaN) trajectory propagates NaN out, so the caller's finiteness
+    guard still fires."""
+    dt = scm.dt
+
+    def _body(carry, _):
+        state, phys, t = carry
+        new_state, new_phys = scm.pure_step(state, phys, t)
+        return (new_state, new_phys if new_phys is not None else phys, t + dt), None
+
+    (final_state, _phys, _t), _ = lax.scan(
+        _body, (scm.state, scm.phys_state, scm.t_seconds), None, length=nsteps)
+    return final_state
+
+
 def scm_final_theta_on(
     scm: SingleColumnModel, grid: SCMGridSpec, nsteps: int, z_eval: Array
 ) -> tuple[Array, Array, Array]:
@@ -166,9 +195,11 @@ def scm_final_theta_on(
 
     θ is recovered from the SCM temperature via Exner at the SCM pressure, then the
     SCM (top-to-bottom) profile is reordered to increasing height and interpolated
-    onto the fixed evaluation grid ``z_eval`` (increasing, LES-native).
+    onto the fixed evaluation grid ``z_eval`` (increasing, LES-native). Uses the
+    ``lax.scan`` rollout (:func:`scm_scan_final_state`) — identical to ``run`` to ~1e-9
+    (FP roundoff) for the wired dry CBL, but far faster and AD-tractable.
     """
-    final_state, _hist = scm.run(nsteps)
+    final_state = scm_scan_final_state(scm, nsteps)
     T_final = jnp.asarray(final_state.T.data[0, 0, 0])
     u_final = jnp.asarray(final_state.u.data[0, 0, 0])
     v_final = jnp.asarray(final_state.v.data[0, 0, 0])

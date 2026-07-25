@@ -8,11 +8,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.atmosphere.les_suite.bridge import LESReferenceArtifact
+from legoesm.atmosphere.les_suite.scm_coupling import (
+    interp_profile,
+    theta_from_temperature,
+)
 from legoesm.atmosphere.les_suite.scm_runner import (
     build_cbl_scm_from_artifact,
     scm_final_theta_on,
     scm_les_final_loss,
     scm_les_final_score,
+    scm_scan_final_state,
 )
 from legoesm.atmosphere.physics import TurbulenceConfig
 from legoesm.atmosphere.physics.turbulence.config import (
@@ -128,6 +133,54 @@ def test_final_score_none_on_divergence(monkeypatch):
                         lambda *a, **k: (nan, nan, nan))
     art = _cbl_artifact()
     assert scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=20.0) is None
+
+
+def test_scan_final_state_matches_run():
+    # The lax.scan rollout MUST reproduce the Python-loop run() to FP roundoff (~1e-9, well
+    # below the tuner's ~1e-3 loss tolerance) for these time-independent-forcing regimes
+    # (set_time is a no-op) — this is the guard that lets scm_final_theta_on use scan (far
+    # faster + AD-tractable) instead of run(). Asserted at the STATE level (T/u/v) AND, since
+    # the score is a deterministic function of the state, at the θ EVAL-grid level (θ is the
+    # variable that undergoes Exner conversion + reorder + interpolation; u/v use the same
+    # deterministic post-processing, so their state-level match carries through).
+    art = _cbl_artifact()
+    N = 40
+    scm_a, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    final_run, _hist = scm_a.run(N)
+    scm_b, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    final_scan = scm_scan_final_state(scm_b, N)
+    for name in ("T", "u", "v"):
+        a = np.asarray(getattr(final_run, name).data[0, 0, 0])
+        b = np.asarray(getattr(final_scan, name).data[0, 0, 0])
+        assert np.allclose(a, b, atol=1e-9, rtol=0), (
+            f"{name}: scan vs run max|Δ|={np.max(np.abs(a - b)):.2e}")
+
+    # θ/u/v on the LES eval grid (the scored quantity) via each final state — same helpers
+    # scm_final_theta_on uses. Match ⇒ the DF loss + θ-score are equivalent scan-vs-run.
+    def _theta_eval(fs):
+        th = theta_from_temperature(jnp.asarray(fs.T.data[0, 0, 0]), grid.p_full_pa)
+        z = grid.z_scm_m
+        order = z if bool(z[0] < z[-1]) else z[::-1]
+        thi = th if bool(z[0] < z[-1]) else th[::-1]
+        return np.asarray(interp_profile(thi, order, jnp.asarray(art.heights_m)))
+
+    assert np.allclose(_theta_eval(final_run), _theta_eval(final_scan), atol=1e-9, rtol=0)
+
+
+def test_pure_step_matches_step_and_rejects_ab2():
+    art = _cbl_artifact()
+    scm_a, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    # pure_step(state, phys, t) equals what step() applies for the same stage time
+    s0, p0, t0 = scm_a.state, scm_a.phys_state, scm_a.t_seconds
+    new_state, _new_phys = scm_a.pure_step(s0, p0, t0)
+    scm_a.step()
+    assert np.allclose(np.asarray(new_state.T.data[0, 0, 0]),
+                       np.asarray(scm_a.state.T.data[0, 0, 0]), atol=0, rtol=0)
+    # AB2 is stateful → pure_step must reject it (no silent wrong rollout)
+    scm_ab2, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    scm_ab2.time_integrator = "ab2"
+    with pytest.raises(ValueError):
+        scm_ab2.pure_step(scm_ab2.state, scm_ab2.phys_state, scm_ab2.t_seconds)
 
 
 def test_diverged_scm_scores_infinite_not_zero(monkeypatch):
