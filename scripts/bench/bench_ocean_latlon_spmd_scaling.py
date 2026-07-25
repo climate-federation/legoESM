@@ -221,6 +221,11 @@ def main() -> int:
                         "nd=1 strong-scaling reference leg times the SAME "
                         "solver the nd>1 SPMD legs run (the dispatch "
                         "otherwise routes nd=1 to adaptive stock CG).")
+    p.add_argument("--seed", type=int, default=0,
+                   help="IC perturbation seed. Repeats across seeds give a "
+                        "variance estimate, without which a single-run "
+                        "difference between two arms cannot be called an "
+                        "ordering (codex round-8).")
     p.add_argument("--pcg-fixed-iters", type=int, default=0,
                    help="Iterations of the fixed-M implicit_cn PCG "
                         "(0 = scheme default, 60). Each iteration carries "
@@ -369,7 +374,7 @@ def main() -> int:
         os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
     model, s0 = build_model_and_state(
-        n_lat, args.n_lon, args.nlev,
+        n_lat, args.n_lon, args.nlev, seed=args.seed,
         wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
         tripole=args.tripole, baro_solver=args.baro_solver,
         force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
