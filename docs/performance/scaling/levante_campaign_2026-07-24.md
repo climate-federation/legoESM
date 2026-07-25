@@ -249,6 +249,35 @@ The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
 held constant cleanly across that sweep's subdivision steps, so no weak
 claim is made from it.
 
+## Measured fabric constants for the roofline lines (job 26457495)
+
+`scripts/bench/bench_ppermute_microbench.py` (new) times the SAME collective
+the sharded steps use — `lax.ppermute` on a ring inside `shard_map` — over a
+message-size sweep, so the SPMD benches can stop reporting
+`bound_calibrated=false`:
+
+| lane | devices | latency | bandwidth | vs line rate |
+|---|---|---|---|---|
+| NVLink (1 process) | 2 | 18.0 us | 53.98 GB/s | — |
+| NVLink (1 process) | 4 | 17.8 us | 64.22 GB/s | — |
+| NCCL over IB (8 procs, 2 nodes) | 8 | 26.3 us | 23.53 GB/s | **94 % of HDR200's 25 GB/s** |
+
+The IB number landing at 94 % of line rate is the independent check that the
+collective itself — not something else — is being timed.
+
+HOST DISPATCH MUST BE SUBTRACTED, and this was nearly a self-inflicted
+error: the FIRST version timed one jit call per exchange and reported
+287-518 us "latency" (job 26457469) — two orders above what these fabrics
+do, because dispatch dominates a single call. Feeding that into `t_bound`
+would have produced a confidently WRONG roofline, strictly worse than the
+uncalibrated generic line it was meant to replace. The tool now times 1 rep
+vs n reps inside one jit and differences them; the removed dispatch
+(287-529 us) is still reported alongside so the contamination stays
+visible. Validated on CPU virtual devices: 275 us -> 26 us.
+
+Quote the lane that matches the plot: intra-node NVLink and inter-node IB
+differ by ~3x in bandwidth, so using the wrong one is its own confound.
+
 ## Infrastructure defects found + fixed (each with a receipt)
 
 1. py3.14 argparse eager help validation — both ocean benches crashed at
