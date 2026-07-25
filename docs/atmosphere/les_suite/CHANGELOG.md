@@ -12,7 +12,7 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 |---|---|
 | §5 infrastructure (registry…scorecard, gate-0) | **DONE** (codex-CLEAN) |
 | Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
-| Q1b skill threshold (dry CBL, prognostic) | **DONE** — nonlocal beats local every flux; NOT significant vs σ_LES (wind-dominated, Ug=0) |
+| Q1b skill threshold (dry CBL, prognostic) | **DONE** — combined-gate NOT significant (wind-dominated); **θ-consistent gate: SIGNIFICANT at every flux** (margins ≫ σ_LES(θ)=0.0074) ⇒ closures distinguishable on θ |
 | Q2 nine-closure ranking | **7/9 tuned at the anchor** (clubb_lite 0.231 BEATS holtslag 0.241 at q0=0.06; +tke); edmf tuning, clubb nlev=24 deferred (OOM); flux-sweep for closures 6–9 pending |
 | Q3 inter-regime coefficient spread | **regimes ready + SBL validated at 4 h** (stable/stratified/Ekman, jet emerging weak — peaks ~9 h); needs SBL SGS spread → σ_LES(SBL), then SBL tuning |
 | D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
@@ -195,6 +195,22 @@ is the fix.
   θ_rmse=0.215, u_rmse=0.233, v_rmse=**0.323** — v/Ekman dominates the combined 0.261,
   confirming the wind-domination that motivates the θ-only gate; σ_LES(θ)=0.0074 sits far
   below plausible closure θ-margins, so the θ gate can find significance the combined cannot.
+
+- **Iter 17 (this commit) — lax.scan SCM rollout (~250× faster) → θ-CONSISTENT D7 VERDICT.**
+  Built the `lax.scan` free-run (`SingleColumnModel.pure_step` + `scm_scan_final_state`,
+  wired into `scm_final_theta_on`): the Python 720-step loop → ONE compiled XLA program, so a
+  nlev=24 re-score drops **~720 s → ~2.8 s** (loss bit-reproduced 0.26130==0.26130) and is
+  AD-tractable (the loop UNROLLED under jax.grad). Machine-precision (~1e-9) vs `run()` for
+  the dry CBL, validated at state AND θ-eval level. Codex: 2 rounds, LOGIC CLEAN, overclaim
+  wording fixed. This unblocked the deferred θ-verdict: it ran in **~25 s** (was ~5 h). RESULT
+  (`theta_significance.py`, gated on σ_LES(θ)=0.0074): **at EVERY dry-CBL flux the closures
+  are SIGNIFICANTLY distinguishable on θ** (top margins 0.032–0.181 ≫ 0.0074) — FLIPS the
+  wind-dominated combined-gate "not significant" verdict. Ranking: nonlocal `holtslag` best
+  at 4/5 fluxes, higher-order `clubb_lite` best at the anchor, 1.5-order `mynn25` worst
+  everywhere ⇒ "closure order buys skill" is nuanced — structural nonlocal/PDF win, raw order
+  does not (full write-up LES_SUITE.md §7.1). All self-checks passed (scan reproduces the
+  tuner exactly for the whole roster). Also: put idle GPU 1 to work (SBL smagorinsky emit
+  parallel to lasd → σ_LES(SBL) ~50 min sooner). See [[les-suite-compute-gpu]].
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for

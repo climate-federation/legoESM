@@ -284,6 +284,31 @@ The full machinery is built + validated; these are the first real numbers, for t
   score BOTH the closure loss AND σ_LES on θ alone (comparing a combined-margin to a
   θ-only σ would mix metrics, the exact error the σ_LES design guards). That θ-focused
   gate + the sheared Q1b margins (tune the closures on the sheared case) is the next step.
+- **θ-CONSISTENT D7 VERDICT — Q1b/Q2 DISTINGUISHABLE ON θ (2026-07-24, `theta_significance.py`).**
+  The θ-focused gate above, now DONE: re-score each tuned closure's `best_overrides` (via the
+  scan rollout, self-checked to reproduce the stored loss EXACTLY for all closures), recover
+  the θ-ONLY profile RMSE, and gate the per-flux best-vs-2nd margin on **σ_LES(θ)=0.0074**
+  (the robust, metric-invariant θ floor) instead of the wind-dominated σ_LES(combined)=0.319.
+  **Result: at EVERY flux the top margin is SIGNIFICANT** (0.032, 0.064, 0.050, 0.121, 0.181
+  for Q0=0.02→0.12, all ≫ 0.0074) — this FLIPS the combined-gate "not significant" verdict:
+  on θ (the field a convective-BL closure is judged on) **the closures ARE robustly
+  distinguishable.** Per-flux θ_rmse ranking:
+  | Q0 | best | 2nd | worst |
+  |---|---|---|---|
+  | 0.02 | holtslag 0.048 | smag 0.081 | mynn25 0.151 |
+  | 0.04 | holtslag 0.084 | smag 0.148 | mynn25 0.314 |
+  | 0.06† | **clubb_lite 0.034** | tke 0.083 | mynn25 0.490 |
+  | 0.08 | holtslag 0.157 | smag 0.278 | mynn25 0.677 |
+  | 0.12 | holtslag 0.231 | smag 0.412 | mynn25 1.095 |
+  Findings: **nonlocal `holtslag_boville` is the best K-closure at 4/5 fluxes**; the
+  higher-order PDF **`clubb_lite` wins the anchor** (0.034, where it is tuned); **1.5-order
+  `mynn25` is WORST at every flux**, nonlocal `ysu` second-worst. So "closure order buys
+  skill" is NUANCED on θ: nonlocal-diffusivity (holtslag) + higher-order-PDF (clubb_lite) beat
+  local (smag/louis), but the 1.5-order TKE schemes (mynn25, and ysu's counter-gradient) do
+  NOT — order alone is not monotone; the *structural* nonlocal/PDF closures win. †Only the
+  anchor (0.06) has tke/clubb_lite tuned; the other fluxes are the 5-closure roster (the
+  flux-sweep tunes for closures 6–9 are the running campaign) — so `holtslag`-best at
+  non-anchor fluxes is a 5-closure statement, to be revisited once the grid completes.
 - **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
   is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
   Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <
