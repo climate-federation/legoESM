@@ -361,14 +361,37 @@ already had it) and swept at LL576 f64:
 | 20 | 59.08 | 18.60 | 0.79 | 1.26x | 1.3e-02 |
 | 10 | 57.99 | 17.31 | **0.84** | **1.36x** | 4.1e-02 |
 
-QUANTITATIVE CONFIRMATION OF THE MECHANISM. The marginal cost per PCG
-iteration is 111 us at nd1 but 123 us at nd4 — and at nd4 each device holds
-a QUARTER of the rows, so its compute share is only ~28 us. The remaining
-**~95 us per iteration is dependent sync**, and 60 x 95 us = **5.7 ms**,
-which is essentially the whole non-compute budget at nd4 (measured residual
-4.28 ms + modelled reduction 2.19 ms = 6.47 ms). The dependent-sync
-mechanism is not merely the last hypothesis standing; it accounts for the
-observed magnitude.
+QUANTIFICATION — and codex round-7 rates the strong form OVERSTATED, which
+is recorded here rather than argued away. Regressing T(N) = intercept +
+N x slope over the five iteration counts:
+
+| | intercept | slope | R^2 |
+|---|---|---|---|
+| nd=1 | 56.87 +- 0.04 ms | 111.4 +- 1.0 us/iter | 0.99994 |
+| nd=4 | 16.11 +- 0.09 ms | 123.8 +- 2.4 us/iter | 0.99972 |
+
+WHAT THIS ESTABLISHES (codex objection (c), answered): the fit is
+essentially exact and the intercept is tightly determined, so the cost is
+genuinely PER-ITERATION, not a constant misattributed to iterations. But
+the nd4 intercept EXCEEDS the measured 144-row compute term (14.63 ms) by
+**1.48 ms**, so a fixed non-PCG overhead does exist and the 60 iterations
+do NOT explain the entire residual.
+
+WHAT REMAINS AN ESTIMATE (codex objections (a) and (b)): splitting the
+123.8 us/iter at nd4 into compute + sync uses compute = 111.4/4 = 27.8 us,
+i.e. an assumption that per-device compute is LINEAR in rows. This
+campaign's own tile-size law says small tiles are LESS efficient, so the
+true 144-row per-iteration compute is probably HIGHER and the sync share
+correspondingly LOWER than the 95 us/iter (5.75 ms) that assumption yields.
+A direct measurement of the per-iteration slope at 144 and 288 rows on ONE
+device (job 26459817) removes the division; until it lands the sync figure
+is an UPPER BOUND, not a separation.
+
+HONEST STATUS: dependent PCG synchronisation is the dominant term in the
+roofline residual — supported by the 60->N slope, the scheduler nulls and
+the byte-census null — but "~95 us/iter" is an estimate resting on an
+unvalidated linearity assumption, and ~1.5 ms of the residual is provably
+NOT PCG iterations.
 
 STRONG-SCALING CONSEQUENCE: cutting iterations raises 4-GPU efficiency from
 0.68 to 0.84, because what is being removed is precisely the part that does
