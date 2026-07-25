@@ -822,40 +822,68 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     np.testing.assert_allclose(out, 1.0, atol=1e-6)
 
 
-def test_conservative_regrid_allows_real_non_polar_source():
-    """A source whose outermost latitude row stops short of +-90 -- i.e. every
-    real forcing dataset (CORE-II +-88.5, JRA55-do ~+-89.6) -- must regrid
-    finitely, not raise, even though this caller sets
-    ``require_attainable_coverage=True`` -- the reference is what the source CAN
-    supply, so the physical polar taper is allowed while a real deficit raises.
-    Fully-covered interior rows still reproduce a constant exactly, while the
-    polar rows come back REDUCED, which is the physical answer.
-    See regrid_polar_coverage_2026-07-24.md."""
+def test_conservative_regrid_preserves_constant_through_the_polar_gap():
+    """A source whose outermost latitude row stops short of +-90 -- i.e. every real
+    forcing dataset (CORE-II +-88.5, JRA55-do ~+-89.6) -- must reproduce a constant
+    field on EVERY destination row, polar rows included.
+
+    This caller sets ``require_full_coverage=True`` with ``fracarea`` +
+    ``polar_fill``, so the polar row gets the area-weighted mean of the source that
+    overlaps (or the source's edge row where nothing overlaps) rather than
+    ``coverage x field``. Earlier iterations shipped 0.948 x the constant here and,
+    at finer targets, exact zeros. See regrid_polar_coverage_2026-07-24.md.
+    """
     from legoesm.ocean.coupler.omip2_applicator import (
         _REGRID_WEIGHTS_CACHE, _conservative_regrid_to_latlon,
     )
-    # The pin is that the WEIGHT BUILD does not raise, so it must actually run:
-    # a warm cache entry under a colliding (shape, first-centre) key would make
-    # this test vacuous.
+    # The pin is on the WEIGHT BUILD, so it must actually run: a warm cache entry
+    # under a colliding (shape, first-centre) key would make this test vacuous.
     _REGRID_WEIGHTS_CACHE.clear()
-    # src cells tile [-80, 80] only, so the reconstructed src edges stop 10 deg
-    # short of the pole and the lat clamp is a no-op -- the dst polar rows
-    # ([-90, -45] and [45, 90]) are then genuinely under-covered.
+    # src cells tile [-89.5, 89.5], a 0.5 deg polar gap -- REALISTIC (CORE-II's is
+    # 0.514, JRA55-do's 0.151) and inside the 2 deg extrapolation budget.
+    #
+    # 600 destination rows (0.3 deg), NOT 720: at 720 the source edge lands
+    # bit-exactly on a destination edge, so every row is either fully covered or
+    # fully empty, `fracarea` becomes a no-op, and the test would pass with
+    # normalization='dstarea' -- pinning only half the caller's contract. At 600
+    # there are 2 filled AND 2 partial rows per pole, so both treatments are live.
     n_src_lat, n_src_lon = 8, 16
-    src_lat = _uniform_centres(n_src_lat, -80.0, 80.0)
+    src_lat = _uniform_centres(n_src_lat, -89.5, 89.5)
     src_lon = _uniform_centres(n_src_lon, 0.0, 360.0)
-    n_dst_lat, n_dst_lon = 4, 8
+    n_dst_lat, n_dst_lon = 600, 8
     dst_lat = _uniform_centres(n_dst_lat, -90.0, 90.0)
     dst_lon = _uniform_centres(n_dst_lon, 0.0, 360.0)
-    field = np.ones((n_src_lat, n_src_lon))
+    field = np.full((n_src_lat, n_src_lon), 290.0)
     out = _conservative_regrid_to_latlon(
         field, src_lat, src_lon, dst_lat, dst_lon,
     )
     assert np.all(np.isfinite(out))
-    np.testing.assert_allclose(out[1:-1, :], 1.0, atol=1e-6)
-    # Pins that the geometry actually exercises the premise: without a genuine
-    # polar deficit this test would pass even with the flag re-enabled.
-    assert np.all(out[[0, -1], :] < 0.99), out[[0, -1], :]
+    # Every row, not just the interior: that is the whole point of the treatment.
+    np.testing.assert_allclose(out, 290.0, atol=1e-9)
+    # Anti-vacuity, BEHAVIOURAL rather than arithmetic: the SAME geometry built
+    # untreated must come back reduced in the polar rows. So this test goes red if
+    # the caller ever stops passing fracarea/polar_fill.
+    from legoesm.grids.conservative_regrid import (
+        apply_conservative_regrid, compute_overlap_weights,
+    )
+    untreated = np.asarray(apply_conservative_regrid(
+        field,
+        compute_overlap_weights(
+            np.deg2rad(np.linspace(-89.5, 89.5, n_src_lat + 1)),   # same src band
+            np.deg2rad(np.linspace(0.0, 360.0, n_src_lon + 1)),
+            np.deg2rad(np.linspace(-90.0, 90.0, n_dst_lat + 1)),
+            np.deg2rad(np.linspace(0.0, 360.0, n_dst_lon + 1)),
+        ),
+    ))
+    np.testing.assert_allclose(untreated[2:-2, :], 290.0, atol=1e-9)
+    # The OUTERMOST row at each pole has no source data untreated -> exact zeros,
+    # which only polar_fill removes...
+    np.testing.assert_array_equal(untreated[0, :], 0.0)
+    np.testing.assert_array_equal(untreated[-1, :], 0.0)
+    # ...and the NEXT row in is partially covered (0.4074) -> reduced to ~118 K,
+    # which only fracarea removes. Both legs together are what make this test go
+    # red if the caller drops either treatment, rather than only polar_fill.
+    np.testing.assert_allclose(untreated[[1, -2], :], 290.0 * 0.4074, rtol=1e-3)
 
 
 def test_conservative_regrid_rejects_partial_longitude_source():
