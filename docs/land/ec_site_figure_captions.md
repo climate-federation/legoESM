@@ -11,7 +11,7 @@ figures are checked in alongside this file:
 
 All fluxes are the offline
 prognostic multilayer land model with the **two-leaf canopy** surface scheme,
-forced by half-hourly FLUXNET/DifferBESS drivers at four eddy-covariance sites:
+forced by FLUXNET/DifferBESS drivers (half-hourly; hourly at US-MMS) at four eddy-covariance sites:
 
 | site | biome | period |
 |------|-------|--------|

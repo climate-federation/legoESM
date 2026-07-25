@@ -70,7 +70,7 @@ The rendered high-resolution figure is also checked in at
 
 The trimmed driver NetCDFs are **checked in** under
 `scripts/validate/ec_site_example_drivers/` — each is the analysis-window subset of
-the DifferBESS half-hourly driver, keeping only the variables the model drives on
+the DifferBESS driver (half-hourly; hourly at US-MMS), keeping only the variables the model drives on
 and is evaluated against (forcing + observed targets + closure band + gap-fill
 flags), at the source float64 precision, fully annotated (units / long_name /
 description + FLUXNET/DifferBESS provenance). So the model itself re-runs from the
