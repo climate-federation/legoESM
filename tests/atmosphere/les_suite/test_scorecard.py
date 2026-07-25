@@ -24,6 +24,27 @@ def _rec(case, scheme, regime, best_loss, default_loss=1.0, overrides=None, q0=N
     return rec
 
 
+def test_conflation_warning_on_mixed_artifacts_in_one_slice(capsys):
+    # Guard: two DIFFERENT configs (free vs sheared CBL) share (dry_convective, q0=0.06) but
+    # have distinct artifact stems. The slice must warn LOUDLY (else the per-scheme dedup
+    # silently keeps the lower loss, dropping/replacing a config in the Q2 ranking).
+    free = {**_rec("cbl", "louis", "dry_convective", 0.24, q0=0.06),
+            "artifact": "cbl_nieuwstadt__lasd"}
+    sheared = {**_rec("cbl", "louis", "dry_convective", 0.80, q0=0.06),
+               "artifact": "cbl_nieuwstadt__lasd__ug8"}
+    rank_closures_per_flux([free, sheared])
+    err = capsys.readouterr().err
+    assert "mixes" in err and "cbl_nieuwstadt__lasd__ug8" in err
+
+
+def test_no_conflation_warning_single_artifact_per_slice(capsys):
+    # A normal flux sweep (one artifact per (regime, q0)) must NOT warn.
+    recs = [{**_rec("cbl", s, "dry_convective", 0.2, q0=0.06),
+             "artifact": "cbl_nieuwstadt__lasd"} for s in ("louis", "ysu")]
+    rank_closures_per_flux(recs)
+    assert "mixes" not in capsys.readouterr().err
+
+
 def test_ranking_orders_by_best_loss():
     recs = [
         _rec("c1", "louis", "dry_convective", 0.30),

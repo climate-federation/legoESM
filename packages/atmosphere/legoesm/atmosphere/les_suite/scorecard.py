@@ -21,6 +21,7 @@ by the CLI).
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from dataclasses import field as _dc_field  # aliased: ``field`` is a loop var below
 
@@ -163,10 +164,22 @@ def rank_closures_per_flux(records: list[dict]) -> list[ClosureRanking]:
         default = float(default) if default is not None else float(r["best_loss"])
         gkey, label, q0 = _flux_group(r)
         g = groups.setdefault(
-            (r["regime"], gkey), {"label": label, "q0": q0, "rows": []})
+            (r["regime"], gkey), {"label": label, "q0": q0, "rows": [], "artifacts": set()})
         g["rows"].append((r["scheme"], float(r["best_loss"]), default))
+        g["artifacts"].add(str(r.get("artifact") or r.get("case") or "?"))
     rankings: list[ClosureRanking] = []
     for (regime, _gkey), g in groups.items():
+        # A (regime, q0) slice must come from ONE artifact/config. >1 distinct artifact means
+        # DIFFERENT configs (e.g. free vs sheared CBL, both dry_convective @ q0=0.06) are being
+        # conflated into one slice — the per-scheme dedup then silently keeps the lowest loss,
+        # which can DROP or REPLACE a config in the Q2 ranking. Surface it loudly (keep variant
+        # records in a sibling dir, not the scorecard's tuned/ scan — see LES_SUITE.md §7.1).
+        if len(g["artifacts"]) > 1:
+            print(f"[scorecard WARN] slice (regime={regime}, {g['label']}) mixes "
+                  f"{len(g['artifacts'])} distinct artifacts {sorted(g['artifacts'])} — these "
+                  "are DIFFERENT configs conflated into one (regime,q0) slice; the dedup keeps "
+                  "the lowest loss per scheme and may silently drop/replace a config.",
+                  file=sys.stderr)
         rows = _dedup_by_scheme(g["rows"])
         rows.sort(key=lambda t: t[1])  # ascending best_loss = best first
         rankings.append(ClosureRanking(
