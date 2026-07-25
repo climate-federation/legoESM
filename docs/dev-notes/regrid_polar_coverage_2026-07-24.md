@@ -241,3 +241,38 @@ Scope of the claim, deliberately narrow:
   only for `latlon`/`latlon_regional`, while the tripole and MPAS runs use
   `_nn_interp_to_points`, untouched by any of this. At 1° the affected row is also
   only 0.26% of Arctic ice area.
+
+### Second confirmation: the full OMIP `host` configuration, and what the HANG was not
+
+The blow-up reproduces and clears in the full production-shaped configuration too,
+not just the reduced polarcap one. Re-running the `host` variant of
+`_diag_llh_hang.sbatch` (polar filter + geothermal + runoff + SSS restoring +
+`--prognostic-sea-ice --prognostic-ice-dynamics free_drift`) at 360×720, one
+variable — the forcing polar treatment — and no `--mask-polar-cap-lat`:
+
+| arm | job | outcome |
+|---|---|---|
+| pre-fix (`dstarea`, no `polar_fill`, check off) | 9190293 | **NaN at step 3**, `finite: False`, rc=1 |
+| shipped (`fracarea` + `polar_fill`) | 9190223 | **rc=0**, ran to completion, `max\|u\|` ≈ 1.05 m/s, `umax` in the tropics |
+
+Step 3 is exactly where `_diag_llh_polarcap.sbatch` recorded the original failure.
+Base drift between the two arms was checked and is inert (a docs commit and an
+unrelated Levante submit script; no executed code differs).
+
+**The HANG is a separate matter and remains unexplained.** `_diag_llh_hang.sbatch`
+described a first-step *hang* (`TotalCPU=0`, a GPU/sync deadlock or stalled CUDA
+alloc), and it did **not reproduce in any arm** — `min`, `pf` and `host` all
+completed with `rc=0`, and even the pre-fix arm NaN'd rather than hung. So:
+
+- **CONFIRMED** — the ½° NaN/blow-up at step 3, in both the reduced and the full
+  `host` configuration, was the zero-coverage polar row; it is fixed.
+- **NOT reproduced, NOT attributed** — the `TotalCPU=0` hang. Nothing here explains
+  it; it may have been transient (node/driver) or fixed by something unrelated.
+  Do not credit this change with it.
+
+The original hypothesis in that script — that the polar-filter FFT or the host-loop
+device-sync at 720 longitudes was the culprit — is not supported: both now run.
+
+The three `--mask-polar-cap-lat 89.0` uses are all in untracked `_diag_llh_*`
+probes, so there is nothing to revert in tree; the flag is simply no longer needed
+for this failure.
