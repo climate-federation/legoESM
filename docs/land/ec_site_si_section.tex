@@ -1,0 +1,165 @@
+% ---------------------------------------------------------------------------
+% Supplementary Information: land-surface validation at eddy-covariance towers.
+%
+% Drop-in section for the legoESM supplement.  Uses only packages the supplement
+% already loads (graphicx, subcaption, booktabs, natbib, amsmath).  The figure
+% expects ec_site_combined.png in the manuscript figure directory; it is checked
+% in at docs/land/figures/ec_site/ec_site_combined.png.
+%
+% Regenerate the figure with
+%   python scripts/plot/plot_ec_site_publication.py \
+%       scripts/validate/ec_site_example_data <out_prefix>
+% See docs/land/ec_site_evaluation_runbook.md.
+% ---------------------------------------------------------------------------
+
+\section{Land-surface validation at eddy-covariance flux towers}
+\label{si:ecsite}
+
+The land component is evaluated offline against point-scale eddy-covariance
+measurements, which constrain the coupled water, energy and carbon fluxes at the
+half-hourly to interannual timescales that a coupled simulation cannot isolate.
+This section documents the sites, the forcing data, the model configuration, and
+the experimental and evaluation protocols.
+
+\subsection{Sites}
+
+Four FLUXNET towers were selected to span the temperate and Mediterranean
+regimes over which the two-big-leaf canopy is well posed
+(Table~\ref{tab:ecsites}): two temperate deciduous broadleaf forests differing in
+climate and soil (US-MMS, DE-Hai), a montane evergreen needleleaf forest
+(DE-Obe), and a water-limited oak savanna (US-Ton). Peak leaf area index ranges
+from 2.9\,m$^2$\,m$^{-2}$ at the savanna to 6.2\,m$^2$\,m$^{-2}$ at the closed
+forests, and soil texture spans clay to loam, so the four sites exercise
+contrasting water-limitation, phenology and surface-roughness regimes. Dense
+high-leaf-area wet broadleaf forests are excluded: the coupled leaf-energy-balance
+and stomatal closure admits a second, stomata-closed solution branch there, which
+we report rather than mask.
+
+\begin{table}[h]\centering\footnotesize
+\caption{Eddy-covariance sites used for the land-surface validation. Canopy
+height and tower height are site metadata; the tower height sets the reference
+level of the surface-layer profile in the model.}\label{tab:ecsites}
+\begin{tabular}{@{}llrrrrrl@{}}
+\toprule
+Site & Biome (PFT) & Lat. & Lon. & $h_c$ & $z_{\mathrm{ref}}$ & LAI$_{\max}$ & Period \\
+     &             & ($^\circ$) & ($^\circ$) & (m) & (m) & (m$^2$\,m$^{-2}$) & \\
+\midrule
+US-MMS & temperate deciduous forest (DBF) &  39.32 & $-86.41$ & 27 & 46.0 & 6.2 & 2015--2018 \\
+DE-Obe & montane needleleaf forest (ENF)  &  50.79 &   13.72  & 20 & 30.0 & 5.2 & 2015--2018 \\
+US-Ton & Mediterranean oak savanna (SAV)  &  38.43 & $-120.97$ & 10 & 23.5 & 2.9 & 2015--2018 \\
+DE-Hai & humid deciduous forest (DBF)     &  51.08 &   10.45  & 34 & 42.0 & 6.2 & 2010--2013 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Forcing data}
+
+Each site is driven by a per-site forcing file combining FLUXNET2015 FULLSET
+meteorology (downwelling shortwave and longwave radiation, air temperature,
+vapour-pressure deficit, wind speed, surface pressure, precipitation and CO$_2$
+mole fraction) with MODIS leaf area index and albedo, a diffuse-PAR fraction, and
+site parameters. The forcing is half-hourly except at US-MMS, which is hourly.
+Gaps in the meteorological forcing are filled by FLUXNET \texttt{\_F\_MDS}
+substitution, with gaps of at least 24\,h filled from a month-by-time-of-day
+climatology and shorter interior gaps interpolated linearly. Gap-filling is
+applied only to the forcing: the observed fluxes used as evaluation targets are
+never gap-filled and retain their gaps, so no filled value can enter a skill
+statistic.
+
+\subsection{Model configuration}
+
+The land column is run in its multi-layer configuration. Soil moisture follows
+the mass-conservative mixed-form Richards equation\cite{Celia1990} with
+van~Genuchten retention\cite{VanGenuchten1980} whose parameters are derived from
+the site soil texture, solved by Picard iteration on a tridiagonal system. Soil
+temperature is advanced by backward-Euler heat diffusion with Johansen thermal
+conductivity. The column is discretised into eight geometrically spaced layers
+reaching approximately 6.4\,m (extended to 10\,m at the deep-rooted savanna), with
+free drainage at the base.
+
+Surface exchange uses the two-big-leaf canopy scheme. Shortwave transfer follows
+a Sellers-type two-stream partition into sunlit and shaded leaves\cite{Sellers1985},
+each of which carries Farquhar--von~Caemmerer--Berry C$_3$
+photosynthesis\cite{Farquhar1980} with Kattge--Knorr thermal acclimation, or
+Collatz C$_4$ photosynthesis, coupled to Ball--Berry stomatal conductance. The
+resulting six-variable system in sunlit and shaded leaf temperature, the two
+intercellular CO$_2$ concentrations, and canopy-air temperature and humidity is
+closed by Newton--Raphson iteration; an outer Picard loop reconciles the canopy
+solution with the soil thermal solver. Aerodynamic exchange is referenced to the
+measured tower height at each site, with roughness length and displacement height
+taken from a plant-functional-type table. The Ball--Berry cuticular intercept is
+not down-regulated by soil-moisture stress, so a live canopy retains a baseline
+conductance while a dormant canopy self-limits as its leaf area declines.
+
+Rooting depth and soil-column depth are prescribed modelling choices rather than
+measurements: rooting depth is the e-folding depth of an exponential
+root-density profile, set between 1 and 5\,m according to the plant functional
+type and soil profile, deepest at the phreatophytic savanna.
+
+\subsection{Experimental protocol}
+
+Each site is integrated as an independent offline single column at the native
+forcing timestep over the full analysis window, with soil moisture and soil
+temperature carried prognostically. The soil state is initialised from the first
+observed soil temperature and volumetric water content; no separate spin-up cycle
+is performed, so the earliest part of each record reflects adjustment away from
+the observed initial state.
+
+\subsection{Evaluation protocol}
+
+A timestep enters the evaluation only if every required forcing field was
+genuinely observed before gap-filling, which retains 63, 83, 96 and 60\,\% of
+timesteps at US-MMS, DE-Obe, US-Ton and DE-Hai respectively. Model and
+observations are additionally co-sampled, that is, compared only on timesteps at
+which both are available, so that a model--observation difference cannot arise
+from the two being averaged over different samples. Sub-daily values are
+aggregated to daily means wherever at least 30\,\% of a day is present, and skill
+is summarised by the Nash--Sutcliffe efficiency, the coefficient of determination
+and the mean bias.
+
+Raw eddy-covariance fluxes under-close the surface energy budget by 22--34\,\% at
+these sites, whereas the model closes it by construction. Skill is therefore
+reported against both the raw and the energy-balance-closure-corrected
+observations, which bracket the true flux. Pooled across sites, the modelled
+turbulent fluxes are biased $+17$\,\% against the raw observations and $-17$\,\%
+against the corrected observations, and so lie near the centre of the
+closure-uncertainty envelope; the remaining bias in gross primary productivity,
+which carries no closure ambiguity, is $+6$\,\%. Interannual variability is not
+assessed: with two to four years per site, year-to-year means are dominated by
+sampling noise.
+
+\begin{figure}[h]\centering
+\includegraphics[width=\textwidth]{ec_site_combined.png}
+\caption{\textbf{Land-surface validation against eddy-covariance flux towers.}
+The offline land model with the two-big-leaf canopy scheme at four FLUXNET sites:
+US-MMS (mesic deciduous forest), DE-Obe (montane needleleaf forest), US-Ton (oak
+savanna) and DE-Hai (humid deciduous forest). One row per site (a--t): the mean
+summer diurnal cycle and the seasonal cycle of latent (orange) and sensible (blue)
+heat; the GPP seasonal cycle; the modelled latent-heat partition into
+transpiration (green) and soil evaporation (orange) with the observed total; and
+soil moisture at the observed sensor depth and two deeper model layers. Lines are
+modelled, markers are raw eddy-covariance observations, and shaded bands span up
+to the energy-balance-closure-corrected value; model and observations are compared
+only on matched timesteps. Pooled daily Nash--Sutcliffe efficiency against raw
+observations is 0.58 (latent heat), 0.57 (sensible heat) and 0.80 (GPP), and 0.68
+for both energy fluxes against the closure-corrected observations. Raw fluxes
+under-close the energy budget by 22--34\,\% here, so the modelled turbulent fluxes
+sit near the centre of the closure-uncertainty envelope.}\label{si:ecsite_fig}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+% Additional bibliography keys used above and possibly not yet in the .bib:
+%
+% @article{Celia1990,
+%   author  = {Celia, Michael A. and Bouloutas, Efthimios T. and Zarba, Rebecca L.},
+%   title   = {A general mass-conservative numerical solution for the unsaturated
+%              flow equation},
+%   journal = {Water Resources Research}, volume = {26}, pages = {1483--1496},
+%   year    = {1990}, doi = {10.1029/WR026i007p01483}}
+%
+% @article{Sellers1985,
+%   author  = {Sellers, P. J.},
+%   title   = {Canopy reflectance, photosynthesis and transpiration},
+%   journal = {International Journal of Remote Sensing}, volume = {6},
+%   pages   = {1335--1372}, year = {1985}, doi = {10.1080/01431168508948283}}
+% ---------------------------------------------------------------------------
