@@ -284,6 +284,18 @@ The full machinery is built + validated; these are the first real numbers, for t
   score BOTH the closure loss AND σ_LES on θ alone (comparing a combined-margin to a
   θ-only σ would mix metrics, the exact error the σ_LES design guards). That θ-focused
   gate + the sheared Q1b margins (tune the closures on the sheared case) is the next step.
+- **SHEARED CBL θ-verdict (Ug=8, 2026-07-24) — the closure ranking is SHEAR-DEPENDENT.**
+  Tuned all 9 closures on `cbl_nieuwstadt__lasd__ug8` (via the geostrophic wiring; validates
+  it end-to-end on the CBL beyond the SBL) and ran the θ-consistent gate (σ_LES(θ)=0.0073).
+  θ_rmse ranking: clubb_lite 0.039 ≈ clubb 0.041 ≈ **mynn25 0.042** < tke 0.067 < edmf ≈
+  holtslag 0.105 < louis 0.149 < ysu 0.156 < **smagorinsky 0.196 (worst)**. **KEY: vs the
+  FREE CBL (mynn25 WORST, smag mid, higher-order best), shear REORDERS the mid/low tier —
+  `mynn25` (1.5-order MYNN, built for shear production) jumps from worst to 3rd-best, and
+  local `smagorinsky` drops to worst.** The higher-order clubb/clubb_lite stay robustly on
+  top in BOTH. ⇒ "closure order buys skill" holds for the higher-order family across shear,
+  but the mid-tier ranking is shear-sensitive — a single ranking does not transfer between
+  free-convective and sheared BLs. Significance: across-family gaps (0.039 vs 0.196) are
+  ≫ σ_LES(θ)=0.0073 (highly significant); the top two are near-tied (top margin 0.0023).
 - **θ-CONSISTENT D7 VERDICT — CLOSURE ORDER BUYS SKILL ON θ (2026-07-24, FULL 9×5 grid,
   `theta_significance.py`).** With the scan rollout the ENTIRE nine-closure × five-flux grid
   (45/45 cells) is tuned at nlev=24 — including full CLUBB (previously OOM-deferred). Re-score
