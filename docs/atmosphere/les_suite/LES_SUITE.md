@@ -537,8 +537,16 @@ sub-σ_LES.
      is already moist-ready (`LESReferenceArtifact.qt`/`wqt_resolved`/`wqt_sgs`/`w_qv_s`,
      `is_moist()`; θ carries θ_l for moist; `score.qt_rmse` exists) — so the gap is the moist
      SCM PHYSICS (q_t IC + condensation/latent-heating + a moist microphysics config in
-     `build_cbl_scm_from_artifact`), which must be built AND validated against the real moist
-     LES (fidelity can't be checked without a BOMEX artifact — don't build it blind). NOTE the
+     `build_cbl_scm_from_artifact`), built + validated against the real moist LES.
+     **VERIFIED FEASIBLE (2026-07-24): the BOMEX moist LES emits with the cached deck**
+     (`run_bomex_les.py --nx 32 --hours 0.3`: morrison micro, LASD SGS, SHF/LHF=9.5/153.4 W/m²,
+     wall=26 s; a full 64³ 6 h run is validating the cloud layer vs Siebesma cc 10–15 %). The
+     state carries `st.u/v/w/theta/tracers[qv,qc,qr]` ⇒ the moist-artifact fields are computable
+     (θ_l=θ−(L_v/c_p)·q_c/Π, q_t=q_v+q_c+q_r, planar means + resolved ⟨w'θ_l'⟩/⟨w'q_t'⟩). PLAN
+     (least-duplication): add `--emit-suite-artifact` to `run_bomex_les` (reuse its validated
+     Eulerian-morrison loop, hook the per-frame profiles at `_save`, build a moist
+     `LESReferenceArtifact`) rather than re-implement the 832-line moist emission in
+     `run_les_suite`; then moist SCM (condensation) → tune → moist Q1/Q2/Q3 + full D9. NOTE the
      doable WITHOUT external data only because GABLS1 is an ANALYTIC case with an existing
      `run_spectral_sbl.py` to reuse; BOMEX/DYCOMS are NOT in `ANALYTIC_CASES` and have NO
      analytic builder — an analytic route would require implementing the Siebesma (2003) /
