@@ -193,17 +193,46 @@ def test_no_surface_tiled_overrides_yaml_default():
     assert cfg.surface_tiled is False
 
 
-def test_multilayer_land_rejected_on_mpas():
-    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
-    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
-    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+def test_multilayer_land_accepted_on_mpas():
+    """use_multilayer_land + MPAS grid parses (MPAS port,
+    tasks/mpas_land_port.md): the tile is stepped in the MPAS driver loop with
+    skin-T feedback via forcing['T_sfc'].  The old early argparse rejection
+    (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "mpas", "--discretization", "mpas",
+        "--use-multilayer-land",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.use_multilayer_land is True
+    cfg.validate_strict()
+
+
+def test_multilayer_land_still_rejected_on_spectral():
+    """The SPECTRAL standalone path keeps the early rejection (passive land
+    tile, no soil-column stepping wired there)."""
     parser = build_arg_parser()
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
             "--dataset", "analytical",
-            "--grid-type", "mpas", "--discretization", "mpas",
+            "--truncation", "21", "--discretization", "spectral",
             "--use-multilayer-land",
         ]), parser)
+
+
+def test_canopy_schemes_rejected_on_mpas():
+    """Canopy surface schemes (two_leaf/clm_ml) need the coupled pipeline's
+    clm_ml threading — only simple_seb is wired on the MPAS lane; a canopy
+    selection must fail early, not silently run simple_seb."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical",
+                "--grid-type", "mpas", "--discretization", "mpas",
+                "--use-multilayer-land", "--land-surface-scheme", scheme,
+            ]), parser)
 
 
 def test_clm_surfdata_path_flows_to_config():
@@ -516,6 +545,31 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     ]), parser))
     assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
     # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
+
+
+def test_mpas_land_beta_soil_flag_flows_to_config():
+    """--mpas-land-beta-soil round-trip (#1312 phase 2b traced beta_soil);
+    default byte-identical OFF, --no- form revertible from a YAML True."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_beta_soil is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--use-multilayer-land", "--mpas-land-beta-soil",
+    ]), parser))
+    assert cfg.mpas_land_beta_soil is True
+
+    parser2 = build_arg_parser()
+    parser2.set_defaults(mpas_land_beta_soil=True)   # simulates a YAML pin
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-mpas-land-beta-soil",
+    ]), parser2))
+    assert cfg_off.mpas_land_beta_soil is False
+    # validate_strict inert-corner guards live in
+    # test_mpas_multilayer_land_port (refusal without multilayer land).
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

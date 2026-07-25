@@ -64,6 +64,14 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
+    # nlev (grids/vertical.tropopause_refined_sigma_half).  1.0 = the uniform
+    # grid, bit-identical.  Uniform sigma gives ~33 hPa layers everywhere at
+    # nlev=30, so the tropical tropopause is spanned by ~4 levels and no cold
+    # point forms; refine=3 doubles the levels in 70-200 hPa, paid for by the
+    # mid-troposphere (the lowest layer coarsens ~30%, measured).  Ignored by
+    # the hybrid coordinate, which has its own `stretching`.
+    tropopause_refine: float = 1.0
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -627,6 +635,13 @@ class ExperimentConfig(NamedTuple):
     # configuration); bounds follow the scheme __param_spec__.
     hard_sat_adjust_threshold: float | None = None   # RH trigger, q_v > thr*q_sat
     hard_sat_max_heating_K: float | None = None      # per-step latent-heating cap [K]
+    # Mixed-phase (ice-curve) drain: gate + land on the w(T)-blended
+    # liquid/ice saturation curve with the blended latent heat below
+    # freezing, and route cold condensate to cloud ice.  The liquid-only
+    # drain leaves permanent ~60% ice-supersaturation at TTL temperatures —
+    # the 20x-ERA5 TTL vapour bias (+17.8 K warm bias at 100 hPa) of the
+    # first ClimateEval scorecard.  Requires hard_saturation_adjustment.
+    hard_sat_ice_curve: bool = False
 
     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
     # updraft precipitation).  A value >0 diverts that fraction of the
@@ -976,8 +991,16 @@ class ExperimentConfig(NamedTuple):
     louis_z0: float = 1.0e-4                    # SurfaceLayerConfig.z0 [m]
     louis_Ch_neutral: float = 1.5e-3            # SurfaceLayerConfig.Ch_neutral
     louis_Cd_neutral: float = 1.5e-3            # SurfaceLayerConfig.Cd_neutral
-    mcfarlane_k_wave: float = 6.283185307e-5    # McFarlaneConfig.k_wave [1/m]
-    mcfarlane_N_ref: float = 0.01               # McFarlaneConfig.N_ref [1/s]
+    # Exact 2*pi/100 km — MUST equal McFarlaneConfig.k_wave's own
+    # expression: gwd_config_for overlays this onto the leaf, so a
+    # truncated literal would silently perturb the default kernel.
+    mcfarlane_k_wave: float = 2.0 * math.pi / 100e3  # McFarlaneConfig.k_wave [1/m]
+    # INERT: no McFarlaneConfig field of this name exists — the scheme derives
+    # N from the column state (mcfarlane.py).  Kept only for the positional ABI
+    # + serialized-config compatibility; gwd_config_for deliberately does not
+    # wire it, and it was dropped from the ml/tuning.py catalog so it can no
+    # longer be advertised as a live knob (codex round 1, finding 5).
+    mcfarlane_N_ref: float = 0.01               # INERT (no leaf field)
     mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
     mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
     # Morrison ice-microphysics tunables (active when microphysics='morrison'
@@ -1099,6 +1122,14 @@ class ExperimentConfig(NamedTuple):
     # knobs are refused there (validate_strict).
     mpas_land_lapse_K_per_km: float = 0.0  # land anchor lapse [K/km]; 0=off, 6.5=ICAO std
     mpas_land_beta: float = 1.0            # land evaporation efficiency [0-1]; 1=wet swamp
+    # Phase 2b (#1312): traced per-cell root-zone beta_soil from the
+    # interactive multilayer land -> the MPAS turbulence surface humidity
+    # (forcing["beta_land"], one-step lag like the skin-T blend).  Replaces
+    # the STATIC mpas_land_beta over land when on (the land latent flux is
+    # then throttled by the soil's own moisture state — the same
+    # land_tile_beta_soil the coupled pipeline applies).  Requires
+    # use_multilayer_land on the MPAS lane; default OFF = byte-identical.
+    mpas_land_beta_soil: bool = False
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -1257,6 +1288,14 @@ class ExperimentConfig(NamedTuple):
     # surface temperature).
     mpas_ice_skin_prognostic: bool = False
     mpas_ice_thickness_m: float = 2.0      # climatological ice slab thickness [m]
+    # Hines (1997) non-orographic GWD launch amplitude + saturation flux cap.
+    # Reached through gwd_config_for on EVERY lane (like the mcfarlane_*
+    # scalars above, which were silently inert on every production path until
+    # that resolver existed).  The low-level extratropical westerlies are the
+    # observable lever: hines deposits momentum that decelerates them.
+    # Appended at the tuple END to preserve the positional ABI.
+    hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
+    hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1273,6 +1312,32 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"grid.nlev must be > 0, got {g.nlev}")
         if g.p_top_Pa <= 0:
             errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
+        # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
+        # vertical-CFL limit — the first-order-upwind vertical advective CFL
+        # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
+        # refine=6, the index-space nu_vert4_T filter does not scale with
+        # dsigma at all, and both GWD schemes cap acceleration
+        # thickness-independently (measured 2026-07-25).  The binding
+        # criterion is GRID SMOOTHNESS: the max adjacent-layer thickness ratio
+        # is 1.00 at refine=1, 1.62 at refine=3 and 2.41 at refine=6, whereas
+        # every grid this model has run successfully is <= 1.07 and
+        # operational practice keeps it <~ 1.2.  A sharp stretch transition
+        # reflects resolved vertical waves and worsens the (pre-existing)
+        # mismatch between the Simmons-Burridge pressure at which Phi_k is
+        # defined and the arithmetic midpoint at which T/q/physics live.
+        # 3.0 is the largest value with an actual stability arm behind it;
+        # raising this bound requires a new one, not a wider constant.
+        if not (1.0 <= g.tropopause_refine <= 3.0
+                and math.isfinite(g.tropopause_refine)):
+            errors.append(
+                f"grid.tropopause_refine must be finite in [1, 3] "
+                f"(1 = uniform); got {g.tropopause_refine}")
+        if g.tropopause_refine != 1.0 and g.vertical_coord != "sigma":
+            errors.append(
+                f"grid.tropopause_refine={g.tropopause_refine} only applies "
+                f"to the sigma coordinate; vertical_coord="
+                f"{g.vertical_coord!r} has its own `stretching` and would "
+                "silently ignore it.")
         if d.dt <= 0:
             errors.append(f"dycore.dt must be > 0, got {d.dt}")
         if d.hyperdiff_scale < 0:
@@ -1806,6 +1871,23 @@ class ExperimentConfig(NamedTuple):
                     "humidity; turbulence='none' has no surface latent flux "
                     "to throttle — the knob would be silently inert."
                 )
+            if self.mpas_land_beta_soil:
+                # Traced beta_soil needs the multilayer land producing it and
+                # the turbulence surface flux consuming it (inert-corner
+                # rejection, same doctrine as the static knobs above).
+                if not self.use_multilayer_land:
+                    errors.append(
+                        "mpas_land_beta_soil threads the multilayer land's "
+                        "root-zone beta_soil into the turbulence surface "
+                        "humidity; it requires use_multilayer_land=True."
+                    )
+                if self.turbulence == "none":
+                    errors.append(
+                        "mpas_land_beta_soil throttles the turbulence "
+                        "surface humidity; turbulence='none' has no surface "
+                        "latent flux to throttle — the flag would be "
+                        "silently inert."
+                    )
             # flat topography yields all-zero f_land UNLESS an explicit land
             # mask overrides it (codex F-B2); the driver's runtime all-zero
             # guard remains authoritative for degenerate mask files.
@@ -1826,6 +1908,14 @@ class ExperimentConfig(NamedTuple):
                     f"knobs; discretization={d.discretization!r} has its own "
                     "land tile (slab_land_active / use_multilayer_land) and "
                     "would silently ignore them."
+                )
+            if self.mpas_land_beta_soil:
+                errors.append(
+                    "mpas_land_beta_soil is an MPAS-lane flag; "
+                    f"discretization={d.discretization!r} threads beta_soil "
+                    "through its own tiled land pipeline "
+                    "(physics_pipeline._land_tile_q_sfc) and would silently "
+                    "ignore it."
                 )
             if self.mpas_qv_smooth_del2_m2s != 0.0:
                 errors.append(
@@ -1887,6 +1977,38 @@ class ExperimentConfig(NamedTuple):
                 f"mpas_ice_thickness_m (climatological ice slab [m]) must be "
                 f"finite in [0.1, 10]; got {self.mpas_ice_thickness_m!r}."
             )
+        # Ice-curve drain preconditions (fail-fast: every one is a silent no-op
+        # or an unphysical deposition otherwise).  It is a Morrison-on-MPAS
+        # post-step correction that gates+lands on the blended liquid/ice curve
+        # and DEPOSITS to prognostic cloud ice q_i (seeding ice number N_i):
+        #   (a) needs the boolean drain gate it modifies (else inert);
+        #   (b) is only wired into the MPAS post-step hook (else inert on other
+        #       lanes — the in-scheme liquid adjustment is untouched);
+        #   (c) needs Morrison's prognostic q_i + N_i + nucleation mass (other
+        #       schemes lack a cloud-ice reservoir, so the drain would deposit
+        #       LIQUID at ice saturation — re-evaporating, energy-inconsistent).
+        if self.hard_sat_ice_curve:
+            if not self.hard_saturation_adjustment:
+                errors.append(
+                    "hard_sat_ice_curve=True requires "
+                    "hard_saturation_adjustment=True (the mixed-phase curve "
+                    "only modifies the active drain — it would be silently "
+                    "inert)."
+                )
+            if normalize_grid_type(self.grid.grid_type) != "mpas":
+                errors.append(
+                    "hard_sat_ice_curve=True requires an MPAS grid (the "
+                    "ice-curve drain is only wired into the MPAS post-step "
+                    "hook; on grid_type="
+                    f"{self.grid.grid_type!r} it would be silently inert)."
+                )
+            if self.microphysics != "morrison":
+                errors.append(
+                    "hard_sat_ice_curve=True requires microphysics='morrison' "
+                    "(the drain deposits to prognostic cloud ice q_i and seeds "
+                    "ice number N_i from Morrison's nucleation mass; "
+                    f"microphysics={self.microphysics!r} has no such reservoir)."
+                )
         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
         # The float overrides only act when the boolean gate is on; bounds
         # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,
@@ -2020,6 +2142,25 @@ class ExperimentConfig(NamedTuple):
                     f"gravity_wave_drag={self.gravity_wave_drag!r} (an override "
                     "refines the same scheme's sub-config, it does not switch "
                     "schemes)"
+                )
+        # GWD scalars that ``gwd_config_for`` overlays onto the kernel leaves.
+        # Every one is a strictly-positive physical quantity (a wavenumber, a
+        # spreading factor, a stress/flux cap, an rms launch wind), and none is
+        # bounds-checked anywhere else on the CLI/--config route (the
+        # ``__param_spec__`` bounds only gate the ``--params`` loader).  Silent
+        # failure modes without this guard: ``hines_Fmax < 0`` makes
+        # ``jnp.clip(drag, 0.0, Fmax)`` return the NEGATIVE cap at every level
+        # (constant spurious drag, no error), and ``hines_total_rms_wind <= 0``
+        # zeroes the amplitude growth so the scheme silently does nothing.
+        # Positivity + finiteness only — the calibratable RANGE stays in
+        # ``__param_spec__`` so it is not maintained twice.
+        for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
+                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax"):
+            _v = getattr(self, _f)
+            if not math.isfinite(_v) or _v <= 0.0:
+                errors.append(
+                    f"{_f} must be a positive, finite gravity-wave-drag "
+                    f"parameter, got {_v!r}"
                 )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
@@ -2284,6 +2425,7 @@ class ExperimentConfig(NamedTuple):
             vertical_coord=amip_cfg.vertical_coord,
             p_top_Pa=amip_cfg.p_top_Pa,
             stretching=amip_cfg.stretching,
+            tropopause_refine=getattr(amip_cfg, 'tropopause_refine', 1.0),
         )
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
@@ -2404,7 +2546,14 @@ class ExperimentConfig(NamedTuple):
             louis_z0=getattr(amip_cfg, 'louis_z0', 1.0e-4),
             louis_Ch_neutral=getattr(amip_cfg, 'louis_Ch_neutral', 1.5e-3),
             louis_Cd_neutral=getattr(amip_cfg, 'louis_Cd_neutral', 1.5e-3),
-            mcfarlane_k_wave=getattr(amip_cfg, 'mcfarlane_k_wave', 6.283185307e-5),
+            # Default from the live field default (NOT a re-typed literal): the
+            # truncated 6.283185307e-5 that used to sit here is ~3e-11 off the
+            # exact 2*pi/100 km, which gwd_config_for now overlays onto the
+            # kernel — a legacy-checkpoint upconvert would silently run a
+            # different default k_wave (codex round 1, finding 6).
+            mcfarlane_k_wave=getattr(
+                amip_cfg, 'mcfarlane_k_wave',
+                ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_N_ref=getattr(amip_cfg, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
@@ -2499,6 +2648,7 @@ class ExperimentConfig(NamedTuple):
             vertical_coord=self.grid.vertical_coord,
             p_top_Pa=self.grid.p_top_Pa,
             stretching=self.grid.stretching,
+            tropopause_refine=self.grid.tropopause_refine,
             start_day=self.start_day,
             days=self.days,
             diag_days=self.output.diag_days,
@@ -2580,7 +2730,9 @@ class ExperimentConfig(NamedTuple):
             louis_z0=getattr(self, 'louis_z0', 1.0e-4),
             louis_Ch_neutral=getattr(self, 'louis_Ch_neutral', 1.5e-3),
             louis_Cd_neutral=getattr(self, 'louis_Cd_neutral', 1.5e-3),
-            mcfarlane_k_wave=getattr(self, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_k_wave=getattr(
+                self, 'mcfarlane_k_wave',
+                ExperimentConfig._field_defaults['mcfarlane_k_wave']),
             mcfarlane_N_ref=getattr(self, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),

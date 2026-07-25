@@ -783,6 +783,16 @@ def test_no_full_host_convert_guard_is_not_vacuous():
     assert child.shape == (4, 5)
 
 
+def _uniform_centres(n, lo, hi):
+    """Centres of ``n`` uniform cells tiling ``[lo, hi]`` degrees.
+
+    ``_edges_from_centers_deg`` re-derives the edges as ``c -/+ dc/2``, so the
+    reconstructed outermost edges land exactly on ``lo``/``hi``.
+    """
+    half = 0.5 * (hi - lo) / n
+    return np.linspace(lo + half, hi - half, n)
+
+
 def test_conservative_regrid_seam_full_coverage_high_ratio():
     """A coarse dst cell that STRADDLES the 0/360 seam (dst 8x wider than
     src in lon, so a single ghost cannot span its half-width) must get full
@@ -797,15 +807,12 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     # Latitudes ASCENDING (south->north): compute_overlap_weights requires
     # strictly-increasing edges (see _check_edges).
     n_src_lat, n_src_lon = 8, 64
-    half = 90.0 / n_src_lat
-    src_lat = np.linspace(-90.0 + half, 90.0 - half, n_src_lat)
-    half_lon = 180.0 / n_src_lon
-    src_lon = np.linspace(half_lon, 360.0 - half_lon, n_src_lon)
+    src_lat = _uniform_centres(n_src_lat, -90.0, 90.0)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 360.0)
     # dst centred ON the seam: first centre at 0 -> cell [-22.5, 22.5]
     # straddles the 360/0 wrap. dd = 45, ds = 5.625 -> dd/ds = 8.
     n_dst_lat, n_dst_lon = 4, 8
-    dhalf = 90.0 / n_dst_lat
-    dst_lat = np.linspace(-90.0 + dhalf, 90.0 - dhalf, n_dst_lat)
+    dst_lat = _uniform_centres(n_dst_lat, -90.0, 90.0)
     dd = 360.0 / n_dst_lon
     dst_lon = np.linspace(0.0, 360.0 - dd, n_dst_lon)
     field = np.ones((n_src_lat, n_src_lon))
@@ -815,21 +822,35 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     np.testing.assert_allclose(out, 1.0, atol=1e-6)
 
 
-def test_conservative_regrid_raises_on_partial_source():
-    """A genuinely non-global source (spans only ~180 deg lon) must RAISE
-    via require_full_coverage rather than silently under-cover."""
+def test_conservative_regrid_allows_real_non_polar_source():
+    """A source whose outermost latitude row stops short of +-90 -- i.e. every
+    real forcing dataset (CORE-II +-88.5, JRA55-do ~+-89.6) -- must regrid
+    finitely, not raise: this caller must NOT set ``require_full_coverage``.
+    Fully-covered interior rows still reproduce a constant exactly, while the
+    polar rows come back REDUCED, which is the physical answer.
+    See regrid_polar_coverage_2026-07-24.md."""
     from legoesm.ocean.coupler.omip2_applicator import (
-        _conservative_regrid_to_latlon,
+        _REGRID_WEIGHTS_CACHE, _conservative_regrid_to_latlon,
     )
+    # The pin is that the WEIGHT BUILD does not raise, so it must actually run:
+    # a warm cache entry under a colliding (shape, first-centre) key would make
+    # this test vacuous.
+    _REGRID_WEIGHTS_CACHE.clear()
+    # src cells tile [-80, 80] only, so the reconstructed src edges stop 10 deg
+    # short of the pole and the lat clamp is a no-op -- the dst polar rows
+    # ([-90, -45] and [45, 90]) are then genuinely under-covered.
     n_src_lat, n_src_lon = 8, 16
-    half = 90.0 / n_src_lat
-    src_lat = np.linspace(90.0 - half, -90.0 + half, n_src_lat)
-    # centres only across [5, 175] -> source cannot cover a global dst
-    src_lon = np.linspace(5.0, 175.0, n_src_lon)
-    dst_lat = np.linspace(67.5, -67.5, 4)
-    dst_lon = np.linspace(22.5, 337.5, 8)
+    src_lat = _uniform_centres(n_src_lat, -80.0, 80.0)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 360.0)
+    n_dst_lat, n_dst_lon = 4, 8
+    dst_lat = _uniform_centres(n_dst_lat, -90.0, 90.0)
+    dst_lon = _uniform_centres(n_dst_lon, 0.0, 360.0)
     field = np.ones((n_src_lat, n_src_lon))
-    with pytest.raises(ValueError):
-        _conservative_regrid_to_latlon(
-            field, src_lat, src_lon, dst_lat, dst_lon,
-        )
+    out = _conservative_regrid_to_latlon(
+        field, src_lat, src_lon, dst_lat, dst_lon,
+    )
+    assert np.all(np.isfinite(out))
+    np.testing.assert_allclose(out[1:-1, :], 1.0, atol=1e-6)
+    # Pins that the geometry actually exercises the premise: without a genuine
+    # polar deficit this test would pass even with the flag re-enabled.
+    assert np.all(out[[0, -1], :] < 0.99), out[[0, -1], :]

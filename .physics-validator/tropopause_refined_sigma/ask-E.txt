@@ -1,0 +1,79 @@
+You have NO repository access. Do NOT use tools. Answer from this text alone,
+in <= 35 lines. ROUND 3: I applied your round-2 findings. Check for regressions
+I introduced and say whether anything is still open. Label CONFIRMED-BUG / OK /
+CONCERN. End with one line: "ROUND 3 VERDICT: <no substantive findings | N open
+findings>".
+
+You previously found two CONFIRMED-BUGs in my round-1 fixes:
+ (i)  the hybrid coordinate's `dsigma` (= dA + dB) is not the true layer mass;
+ (ii) `sigma_half` alone cannot identify a hybrid grid.
+Both were correct. I verified (ii) analytically: with B = eta**n and
+A = eta - B + (p_top/p_ref)*(1-eta), the sum A + B = eta + (p_top/p_ref)*(1-eta)
+is INDEPENDENT of the transition exponent n, so two physically different hybrid
+grids share one sigma_half. Here is what I changed.
+
+CHANGE 1 (for your finding i). The filter's third argument was renamed
+`dsigma` -> `layer_mass` and now takes either `(nlev,)` or per-column
+`(..., nlev)`. Body:
+
+    tend = -nu_vert4_T * bih
+    if layer_mass is None:
+        return tend
+    _w = layer_mass.astype(tend.dtype)
+    return tend - ((tend * _w).sum(axis=-1, keepdims=True)
+                   / _w.sum(axis=-1, keepdims=True))
+
+(Both reductions now keepdims, so a per-column weight normalises by its OWN
+column sum instead of a scalar sum over all cells.)
+The call sites select the weight ONCE:
+
+    _filter_weight = dp if _hybrid else sigma_coord.dsigma
+
+where `dp = dp_from_hybrid(sigma_coord, p_s)` = `dA*p_ref + dB*p_s`, shape
+(nCells, nlev), already computed in the hybrid branch; and in the sigma branch
+`dp_k = p_s * dsigma_k` so p_s cancels between numerator and denominator and
+`dsigma` is exact and cheaper. The T call passes `_filter_weight` directly;
+the tracer call closes over it inside
+`jax.vmap(lambda qk: filter(qk, nu, _filter_weight), in_axes=-1, out_axes=-1)`
+applied to q of shape (nCells, nlev, ntracers) -- so `_filter_weight` is a
+CLOSED-OVER constant, not a mapped argument.
+
+Verified numerically (float64): the mass-weighted column residual is < 1e-9
+W/m2 on uniform-sigma L30, refined-sigma L30, refined-sigma L40, and hybrid
+L40 stretching=2 evaluated at p_s = 620 hPa; on a uniform grid the projected
+result differs from the legacy unprojected result by < 1e-18 K/s; and a
+negative control confirms that using `dA + dB` as the hybrid weight instead of
+the true dp leaves a residual > 1e-2 W/m2 (i.e. the new test is not vacuous).
+
+CHANGE 2 (for your finding ii). The MPAS checkpoint now stores
+`meta_vgrid = np.stack([A_half, B_half])` (float64), using A_half = zeros and
+B_half = sigma_half for the pure-sigma coordinate, since pure sigma is the
+A = 0, B = sigma member of the same p_half = A*p_ref + B*p_s family. The loader
+rebuilds the same pair from the live coordinate and raises ValueError unless
+`np.allclose(rtol=0, atol=5e-7)`. atol reasoning: the coordinate is regenerated
+deterministically from the config, so an fp32-vs-fp64 run differs by at most
+one float32 ulp near B = 1, i.e. 6e-8; 5e-7 leaves ~8 ulps of margin and is
+still 2000x smaller than the smallest real level move (>= 1e-3 in sigma).
+Missing key => skip (pre-guard checkpoints stay loadable).
+
+Q1. Any bug in CHANGE 1? Specifically: the vmap closure over a (nCells, nlev)
+weight; the keepdims broadcast against a (nCells, nlev) tendency; whether
+`.astype(tend.dtype)` can now DOWNCAST a float64 dp to float32 and lose the
+closure it guarantees; and whether p_ref is a per-column or global constant.
+
+Q2. Any bug in CHANGE 2? Does storing A=0/B=sigma for the pure-sigma case
+create a false MATCH against some hybrid grid, or a false REJECT? Does it need
+p_ref stored too?
+
+Q3. `_filter_weight = dp if _hybrid else sigma_coord.dsigma` is evaluated
+unconditionally but `dp` only exists inside the hybrid branch. Is that a latent
+NameError on any path?
+
+Q4. Anything still open from rounds 1-2 that I have NOT addressed? For
+reference, I also: tightened the config bound to [1,3] with a grid-smoothness
+justification replacing a wrong vertical-CFL one; switched the level-placement
+quadrature mesh from linspace to geomspace (worst-case placement error 3.1e-5
+-> 2.0e-7 in sigma); carried `tropopause_refine` through the AMIP config
+adapter that was silently dropping it; and removed a docstring claim that the
+refinement is "safer than the L40 run that blew up" (it is 42% thinner than
+L40 inside the same failure band).

@@ -140,10 +140,10 @@ def cell_edges_1d(
     -----
     Two legacy degree-based private copies still exist
     (``forcing/jra55_do.py:_grid_edges_from_centers`` and
-    ``ocean/coupler/omip2_applicator.py:_edges_from_centers_deg``); the latter's
-    ``periodic`` flag is a no-op and it instead pads the source with ghost
-    columns, so they are NOT drop-in replaceable by this helper without changing
-    their behaviour — unify them in a dedicated, separately-validated PR rather
+    ``ocean/coupler/omip2_applicator.py:_edges_from_centers_deg``); the latter
+    has no periodic mode at all and instead pads the source with ghost columns,
+    so they are NOT drop-in replaceable by this helper without changing their
+    behaviour — unify them in a dedicated, separately-validated PR rather
     than here.  For latitude prefer a grid's pole-clamped v-face coordinates
     (e.g. ``LatLonGrid.lat_v``) over this helper, which would otherwise
     extrapolate the first/last edge past +/-pi/2.

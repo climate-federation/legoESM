@@ -145,7 +145,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
 # Tendency computation
 # ============================================================================
 
-def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
+def vertical_del4_T_tendency(
+    T_3d: jax.Array, nu_vert4_T: float, layer_mass: jax.Array | None = None,
+) -> jax.Array:
     """Scale-selective vertical biharmonic damping of the grid-scale T mode.
 
     Returns the tendency ``-nu · ∂⁴T/∂σ⁴`` (a discrete fourth-difference on the
@@ -159,9 +161,22 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
     the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
     ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
     worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
-    (zero-gradient) padded (a no-flux boundary → the column-integrated tendency
-    is ZERO to machine precision for ANY profile, so the filter dissipates
-    grid-scale variance WITHOUT spurious column heating/cooling).  Discrete 2Δσ
+    (zero-gradient) padded (a no-flux boundary → the INDEX-space sum
+    ``Σ_k tendency_k`` is ZERO to machine precision for ANY profile).
+    That is NOT the same as column conservation: the conserved quantity is the
+    MASS-weighted ``Σ_k tendency_k · Δσ_k``, and the two coincide only when
+    ``Δσ`` is constant.  On a stretched grid the unweighted-zero operator is a
+    spurious column source/sink — measured on the tropopause-refined σ grid
+    (``grids.vertical.tropopause_refined_sigma_half``, refine=3, nlev=30) at
+    -7.86 W/m² of column enthalpy and -0.135 mm/day of column water for a
+    ±5 K / ±1 g/kg 2Δσ checkerboard, and -0.99 W/m² on the shipped stretched
+    HYBRID L40 grid.  Pass ``dsigma`` to remove it: the mass-weighted mean of
+    the tendency is subtracted, which is the minimum-norm conservative
+    projection (it leaves every vertical DIFFERENCE — hence the filter's
+    variance damping — untouched and only cancels the spurious column mean).
+    On a uniform grid the correction is identically zero to round-off
+    (measured ≤1.4e-20 K/s, far below the float32 ULP of the tendency), so the
+    uniform and ``dsigma=None`` paths stay bit-identical.  Discrete 2Δσ
     ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
     (½ the interior rate — a boundary no-flux constraint of any conservative
     biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
@@ -173,6 +188,16 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
         Temperature, shape ``(..., nlev)``.
     nu_vert4_T : float
         Biharmonic filter rate [1/s].  ``0.0`` ⇒ exact zero tendency.
+    layer_mass : jax.Array or None
+        Per-layer mass weight, either ``(nlev,)`` or per-column
+        ``(..., nlev)``.  Any positive multiple of the true layer mass works
+        (it is normalised): in σ pass ``Δσ`` — ``dp_k = p_s·Δσ_k`` and p_s
+        cancels — but in HYBRID pass the actual ``dp = dA·p_ref + dB·p_s``,
+        NOT ``dA + dB``, which is the thickness only at ``p_s = p_ref``.
+        When given, the mass-weighted column mean is removed so
+        ``Σ_k tendency_k · dp_k == 0`` to machine precision on ANY grid.
+        ``None`` keeps the legacy index-space-only behaviour (correct only for
+        a uniform grid).
 
     Returns
     -------
@@ -189,7 +214,25 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
     # exactly (flux form), so the filter conserves column-integrated T.
     lap_p = jnp.pad(lap, (*pad_axes, (1, 1)), mode="edge")
     bih = lap_p[..., :-2] - 2.0 * lap_p[..., 1:-1] + lap_p[..., 2:]  # ∂⁴/∂σ⁴ (>0 at 2Δσ)
-    return -nu_vert4_T * bih
+    tend = -nu_vert4_T * bih
+    if layer_mass is None:
+        return tend
+    # Conservative projection onto the mass-weighted zero-mean subspace.
+    # Sign convention: ``tend`` is a source term added to dX/dt, so removing
+    # its mass-weighted mean makes the filter a pure REDISTRIBUTOR of X within
+    # the column — no net column source or sink, either sign.
+    # ``keepdims`` on BOTH reductions so a per-column weight (..., nlev) and a
+    # coordinate-constant weight (nlev,) both normalise by their OWN column
+    # sum; a scalar ``.sum()`` would silently sum over cells for the former.
+    # PRECISION: the weight is cast DOWN to the tendency dtype, so the closure
+    # is exact only to that dtype's reduction round-off — measured residual
+    # 4e-14 W/m² in fp64 and 3.6e-5 W/m² in fp32, against the 7.9 W/m² leak
+    # this replaces.  fp32 is therefore 2e5x better than the status quo and
+    # 4 orders below the <1 W/m² TOA-imbalance target, not an exact fp64
+    # guarantee (codex round 3).
+    _w = layer_mass.astype(tend.dtype)
+    return tend - ((tend * _w).sum(axis=-1, keepdims=True)
+                   / _w.sum(axis=-1, keepdims=True))
 
 
 def mpas_hydrostatic_tendencies(
@@ -539,8 +582,18 @@ def mpas_hydrostatic_tendencies(
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
     # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
     # vertical operator in this dycore opposes.  Zero when nu_vert4_T == 0.
+    # Mass weight for the filter's conservative projection.  Must be the TRUE
+    # layer mass dp_k, not a coordinate proxy: in σ, dp_k = p_s·Δσ_k and p_s
+    # cancels between numerator and denominator, so Δσ is EXACT and cheaper;
+    # in hybrid, dp_k = dA_k·p_ref + dB_k·p_s varies by column and
+    # ``sigma_coord.dsigma`` (= dA + dB) is the thickness only at p_s = p_ref
+    # — using it would leave the filter conservative only to the p_s/p_ref
+    # departure (~50% of the dB share at p_s = 500 hPa).  ``dp`` is already
+    # built above in the hybrid branch, so this is free.
+    _filter_weight = dp if _hybrid else sigma_coord.dsigma
     if config.nu_vert4_T > 0.0 and T_3d.shape[-1] > 2:
-        dT_dt_3d = dT_dt_3d + vertical_del4_T_tendency(T_3d, config.nu_vert4_T)
+        dT_dt_3d = dT_dt_3d + vertical_del4_T_tendency(
+            T_3d, config.nu_vert4_T, _filter_weight)
 
     # --- 6. Add physics tendencies ---
     if physics_tendency is not None:
@@ -578,12 +631,15 @@ def mpas_hydrostatic_tendencies(
         # is the TRACER field: tracer vertical transport reuses the
         # checkerboard-prone ``vertical_advection`` form (only T got the #962
         # θ-form rewrite), so damping T alone cannot stabilize the coupled
-        # q↔latent-heating mode.  Column-integral ZERO by the same no-flux
-        # outer-Laplacian padding as the T filter → conserves column moisture
-        # to machine precision.  Zero when nu_vert4_T == 0 (bit-identical).
+        # q↔latent-heating mode.  ``dsigma`` is passed so the MASS-weighted
+        # column integral (not merely the index-space sum) is zero to machine
+        # precision → conserves column moisture on the stretched hybrid and
+        # tropopause-refined σ grids too, not just on a uniform grid.
+        # Zero when nu_vert4_T == 0 (bit-identical).
         if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
             dq = dq + jax.vmap(
-                lambda qk: vertical_del4_T_tendency(qk, config.nu_vert4_T),
+                lambda qk: vertical_del4_T_tendency(
+                    qk, config.nu_vert4_T, _filter_weight),
                 in_axes=-1, out_axes=-1)(q)
         _phys_tt = (physics_tendency.tracer_tendencies
                     if physics_tendency is not None else None)
@@ -869,10 +925,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # + surface turbulent fluxes (every step). Slot ORDER is the
             # sfc_diag tuple contract shared with the driver feed:
             # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
-            #  shflx, lhflx).
+            #  shflx, lhflx, sw_down_sfc, lw_down_sfc).
+            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
+            # interactive multilayer land forcing (AtmToSurface.sw_down/
+            # lw_down; model_driver._marshal_land_forcing reads these slots).
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc"))
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

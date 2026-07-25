@@ -769,7 +769,8 @@ def test_cache_polar_coverage_after_lat_clamp(tmp_path):
     covered: without the lat clamp the polar rows regrid the constant to
     LESS than its value. RED before the clamp (polar tas ~279.8 K != 290);
     GREEN after np.clip(src/target lat edges, +/- pi/2) restores full
-    coverage (and require_full_coverage then passes)."""
+    coverage.  Pins the CLAMP only; this caller does not set
+    ``require_full_coverage`` (see regrid_polar_coverage_2026-07-24.md)."""
     pytest.importorskip("dask")
     src_path = tmp_path / "gaussianish_jra55.zarr"
     n_lat, n_lon = 8, 16
