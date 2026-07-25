@@ -825,7 +825,9 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
 def test_conservative_regrid_allows_real_non_polar_source():
     """A source whose outermost latitude row stops short of +-90 -- i.e. every
     real forcing dataset (CORE-II +-88.5, JRA55-do ~+-89.6) -- must regrid
-    finitely, not raise: this caller must NOT set ``require_full_coverage``.
+    finitely, not raise, even though this caller sets
+    ``require_attainable_coverage=True`` -- the reference is what the source CAN
+    supply, so the physical polar taper is allowed while a real deficit raises.
     Fully-covered interior rows still reproduce a constant exactly, while the
     polar rows come back REDUCED, which is the physical answer.
     See regrid_polar_coverage_2026-07-24.md."""
@@ -854,3 +856,35 @@ def test_conservative_regrid_allows_real_non_polar_source():
     # Pins that the geometry actually exercises the premise: without a genuine
     # polar deficit this test would pass even with the flag re-enabled.
     assert np.all(out[[0, -1], :] < 0.99), out[[0, -1], :]
+
+
+def test_conservative_regrid_rejects_partial_longitude_source():
+    """The raw-longitude PRECONDITION must be wired into this caller, not just
+    available in the helper.
+
+    The +-360 ghost pad below it would turn a source tiling only half the circle
+    into one enormous cell spanning the whole missing sector, which then reports
+    COMPLETE longitude coverage to the weight builder -- so the check has to run on
+    the RAW axis, before the pad. Without this test, deleting that call leaves the
+    whole suite green.
+    """
+    from legoesm.ocean.coupler.omip2_applicator import (
+        _REGRID_WEIGHTS_CACHE, _conservative_regrid_to_latlon,
+    )
+    _REGRID_WEIGHTS_CACHE.clear()
+    n_src_lat, n_src_lon = 8, 16
+    src_lat = _uniform_centres(n_src_lat, -90.0, 90.0)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 180.0)      # HALF the circle
+    dst_lat = _uniform_centres(4, -90.0, 90.0)
+    dst_lon = _uniform_centres(8, 0.0, 360.0)
+    field = np.ones((n_src_lat, n_src_lon))
+    with pytest.raises(ValueError, match="source longitude"):
+        _conservative_regrid_to_latlon(
+            field, src_lat, src_lon, dst_lat, dst_lon,
+        )
+    # Anti-vacuity: the same call with a globe-tiling source builds fine.
+    _REGRID_WEIGHTS_CACHE.clear()
+    out = _conservative_regrid_to_latlon(
+        field, src_lat, _uniform_centres(n_src_lon, 0.0, 360.0), dst_lat, dst_lon,
+    )
+    assert np.all(np.isfinite(out))
