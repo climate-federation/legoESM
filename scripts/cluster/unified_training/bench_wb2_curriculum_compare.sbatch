@@ -35,14 +35,16 @@ declare -A ENTRY=(
   [classical_base]="config/aimip/ace2/suite.yaml|results/aimip_ace2loss/classical"
   [classical_curr]="config/aimip/ace2/suite_curriculum.yaml|results/aimip_ace2curr/classical"
   [classical_curr_most]="config/aimip/ace2/suite_curriculum_most.yaml|results/aimip_ace2curr_most/classical"
+  [classical_most_long]="config/aimip/ace2/suite_curriculum_most_long.yaml|results/aimip_ace2curr_most_long/classical"
   [column_nn_base]="config/aimip/ace2/suite.yaml|results/aimip_ace2loss/column_nn"
   [column_nn_curr]="config/aimip/ace2/suite_curriculum.yaml|results/aimip_ace2curr/column_nn"
+  [column_nn_v2]="config/aimip/ace2/suite_curriculum_v2.yaml|results/aimip_ace2curr_v2/column_nn"
 )
-# variant token for --variant (strip the _base/_curr/_curr_most suffix).
+# variant token for --variant (strip the label suffix).
 _variant_of() { case "$1" in classical_*) echo classical;; column_nn_*) echo column_nn;; esac; }
 
 SCORECARD_ARGS=()
-for label in classical_base classical_curr classical_curr_most column_nn_base column_nn_curr; do
+for label in classical_base classical_curr classical_curr_most classical_most_long column_nn_base column_nn_curr column_nn_v2; do
   suite="${ENTRY[$label]%%|*}"; dir="${ENTRY[$label]##*|}"
   ck="$dir/params.eqx"; ema="$dir/params_ema.eqx"
   [ -f "$ema" ] && ck="$ema"
