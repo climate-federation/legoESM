@@ -1289,6 +1289,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "__param_spec__ entry yet (bounds undecided), so "
                              "this flag is its ONLY route -- --params cannot "
                              "reach it.")
+    parser.add_argument("--homogeneous-ice-nucleation",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="homogeneous_ice_nucleation",
+                        help="Morrison only: Koop/Ren-MacKenzie homogeneous "
+                             "cirrus ice nucleation, which pins RH over ice "
+                             "near 1.45-1.6 instead of letting it run away "
+                             "(the model reached 288%% at 228 K). Treats the "
+                             "cause of the supersaturation pile-up rather "
+                             "than draining it after the fact.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -1803,6 +1812,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
         hard_sat_ice_curve=args.hard_sat_ice_curve,
+        homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

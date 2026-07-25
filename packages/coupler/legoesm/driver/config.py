@@ -642,6 +642,16 @@ class ExperimentConfig(NamedTuple):
     # the 20x-ERA5 TTL vapour bias (+17.8 K warm bias at 100 hPa) of the
     # first ClimateEval scorecard.  Requires hard_saturation_adjustment.
     hard_sat_ice_curve: bool = False
+    # Homogeneous (Koop 2000 / Ren-MacKenzie 2005) cirrus ice nucleation in
+    # Morrison.  The scheme's M2005 deposition needs PRE-EXISTING ice to
+    # consume supersaturation, so with this off nothing caps RH_ice in
+    # ice-free cirrus air: the century reached RH_ice = 288% at 228 K /
+    # 222 hPa in mid-latitude storm tracks (2026-07-25 autopsy), which the
+    # rate-limited drain then could not remove -> detonation.  Enabling it
+    # adds the supersaturation-gated ice-NUMBER source that pins RH_ice near
+    # S_hom ~ 1.45-1.6, i.e. treats the CAUSE rather than the symptom.
+    # Morrison only; default OFF = byte-identical.
+    homogeneous_ice_nucleation: bool = False
 
     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
     # updraft precipitation).  A value >0 diverts that fraction of the
@@ -2009,6 +2019,20 @@ class ExperimentConfig(NamedTuple):
                     "ice number N_i from Morrison's nucleation mass; "
                     f"microphysics={self.microphysics!r} has no such reservoir)."
                 )
+        # Homogeneous (Koop/Ren-MacKenzie) cirrus nucleation is implemented ONLY
+        # in MorrisonConfig (no other scheme carries the field), and
+        # microphysics="none" early-returns in _resolve_microphysics / skips the
+        # MPAS applier entirely, so the flag would be silently inert there.
+        # Reject at CONFIG time rather than deep in the applier (same contract as
+        # hard_sat_ice_curve above and hard_saturation_adjustment below).
+        if (self.homogeneous_ice_nucleation
+                and self.microphysics != "morrison"):
+            errors.append(
+                "homogeneous_ice_nucleation=True requires "
+                "microphysics='morrison' (only MorrisonConfig implements the "
+                "Koop/Ren-MacKenzie cirrus nucleation); got microphysics="
+                f"{self.microphysics!r}."
+            )
         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
         # The float overrides only act when the boolean gate is on; bounds
         # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,

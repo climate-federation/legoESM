@@ -1006,6 +1006,7 @@ def apply_microphysics_experiment_flags(
     hard_saturation_adjustment: bool = False,
     hard_sat_adjust_threshold: float | None = None,
     hard_sat_max_heating_K: float | None = None,
+    homogeneous_ice_nucleation: bool = False,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1069,6 +1070,15 @@ def apply_microphysics_experiment_flags(
                 "morrison, thompson, p3) or drop --hard-saturation-adjustment."
             )
         scheme_config = scheme_config._replace(hard_saturation_adjustment=True)
+    if homogeneous_ice_nucleation:
+        if "homogeneous_ice_nucleation" not in fields:
+            raise ValueError(
+                f"homogeneous_ice_nucleation=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no Koop/Ren-MacKenzie "
+                "cirrus nucleation); use --microphysics morrison or drop "
+                "--homogeneous-ice-nucleation."
+            )
+        scheme_config = scheme_config._replace(homogeneous_ice_nucleation=True)
     for _field, _val in (("hard_sat_adjust_threshold", hard_sat_adjust_threshold),
                          ("hard_sat_max_heating_K", hard_sat_max_heating_K)):
         if _val is None:

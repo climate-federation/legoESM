@@ -6088,6 +6088,8 @@ class ModelDriver:
                     _msub, cfg.microphysics,
                     nc_from_aerosol=cfg.nc_from_aerosol,
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
+                    homogeneous_ice_nucleation=getattr(
+                        cfg, "homogeneous_ice_nucleation", False),
                     # NOTE: hard_saturation_adjustment is INTENTIONALLY NOT
                     # threaded in-scheme on the MPAS path.  The integration
                     # trial showed the in-scheme placement cannot correct the

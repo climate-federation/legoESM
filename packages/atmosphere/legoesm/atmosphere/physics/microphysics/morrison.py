@@ -412,8 +412,19 @@ def morrison_microphysics(
                 config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
         )
         n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, _RHO_FLOOR)  # per-mass
+        # Top up to n_hom_target counting the COOPER crystals nucleated in this
+        # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's
+        # ``gate_ice`` opens at RH_ice >= 1.08, which is ALWAYS satisfied when the
+        # homogeneous gate (RH_ice >= S_hom ~ 1.47) is open, so both sources fire
+        # together: subtracting only N_i summed the two targets and landed N_i at
+        # ~1.5x hom_ice_nuc_N (measured 4.419e6 = 2.948e6 + 1.474e6 /kg at
+        # 228 K/222 hPa).  Same "count what is already there" logic as Cooper's
+        # own N_frozen subtraction at :372-376.
         dN_i_hom = (
-            jnp.clip(n_hom_target - jnp.clip(N_i, 0.0), 0.0)
+            jnp.clip(
+                n_hom_target - jnp.clip(N_i, 0.0) - dN_i_nuc * jnp.clip(dt, 1.0),
+                0.0,
+            )
             / jnp.clip(dt, 1.0) * hom_gate
         )
         dq_i_hom = dN_i_hom * mi0
@@ -507,6 +518,21 @@ def morrison_microphysics(
             jnp.minimum(dep_raw, 0.0),
             -jnp.clip(q_i, 0.0) / jnp.clip(dt, 1.0),
         )
+        if config.homogeneous_ice_nucleation:
+            # SYMMETRIC partner of the dep_pos cap above (ON-path only => OFF
+            # graph unchanged).  Sublimation physically halts at ice saturation
+            # just as deposition does, so it cannot exceed the available vapour
+            # DEFICIT (q_sat_i - q_v)/dt.  Without this the cap is one-sided and
+            # the boosted-EPSI stiff regime becomes a 2-step limit cycle:
+            # deposit the whole excess -> strongly ice-subsaturated -> sublimate
+            # the fresh ice straight back (measured RH_ice 2.88 -> 0.27 -> 2.22
+            # -> 0.61 ... at 228 K, dt=240 s), a spurious +/-1 K/step latent-
+            # heating sawtooth.  The q_i donor clamp above bounds the OTHER side
+            # (cannot sublimate more ice than exists); both bounds are needed.
+            subl_neg = jnp.maximum(
+                subl_neg,
+                -jnp.maximum(q_sat_i - q_v, 0.0) / jnp.clip(dt, 1.0),
+            )
         dq_i_dep = dep_pos + subl_neg
         # PRCI: ice→snow autoconversion — depositional growth of the cloud-ice
         # PSD across the snow-size threshold DCS (module_mp_graupel.f90:
@@ -877,10 +903,25 @@ def morrison_microphysics(
         homo_target_N = jnp.minimum(
             jnp.clip(N_c_eff, 0.0), config.N_i_nuc_max
         ) / jnp.clip(rho, _RHO_FLOOR)
+        # Count the crystals nucleated THIS step against the same ceiling.  In
+        # cold cloudy air (T < homogeneous_freeze_T = 233 K with q_c > 0, so
+        # RH_liq ~ 1 => RH_ice ~ 1.54 > S_hom(228 K) = 1.47) droplet freezing
+        # and cirrus nucleation BOTH fire, and both relaxed toward their target
+        # from the OLD N_i, stacking to ~1.5x the intended ice-number ceiling
+        # (same double-count class as the Cooper/homogeneous one fixed at :414).
+        # ``dN_i_nuc`` here already carries Cooper + homogeneous (folded at
+        # :587).  ON-path only so the default graph is byte-identical; the same
+        # correction is warranted for Cooper alone on the default path but that
+        # is a compatibility-sensitive change for in-flight runs, deferred.
+        if config.homogeneous_ice_nucleation:
+            _homo_deficit = jnp.clip(
+                homo_target_N - jnp.clip(N_i, 0.0)
+                - dN_i_nuc * jnp.clip(dt, 1.0), 0.0)
+        else:
+            _homo_deficit = jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
         homo_freeze_N = jnp.where(
             jnp.clip(q_c, 0.0) > 1.0e-14,
-            homo_frac * jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
-            / jnp.maximum(dt, 1.0e-10),
+            homo_frac * _homo_deficit / jnp.maximum(dt, 1.0e-10),
             0.0,
         )
     else:
@@ -959,6 +1000,36 @@ def morrison_microphysics(
             q_v, q_g, q_sat_i, T, p_full, rho, config, dt=dt, N_g=N_g_arg)
     else:
         prdg = jnp.zeros_like(jnp.clip(q_g, 0.0))
+    if config.homogeneous_ice_nucleation:
+        # === JOINT ICE-PHASE DEPOSITION BOUND === (ON-path only => the OFF
+        # operation graph is unchanged.)
+        # Cloud-ice deposition, snow PRDS and graupel PRDG all deposit vapour
+        # onto ICE and all relax toward the SAME equilibrium q_sat_i, so their
+        # SUM cannot exceed the available ice supersaturation in one explicit
+        # step.  The per-branch cap at :502 bounds only cloud ice; with
+        # pre-existing snow/graupel the parallel sinks push the total past it
+        # (measured 228 K/222 hPa, dt=240 s, q_g = 1 g/kg: one step took
+        # RH_ice 2.88 -> 0.52, a 48 % undershoot below ice saturation that the
+        # next step partly sublimated back).  Liquid ``condensation`` is
+        # deliberately EXCLUDED: it targets the LIQUID curve q_sat_l > q_sat_i,
+        # so it is a physically distinct equilibrium, not part of this budget.
+        # This is the ice-phase analogue of the q_c / q_i / q_v donor clamps and
+        # uses the same AD-safe helper.
+        # SCOPE (do not overstate): this is a FIXED-TEMPERATURE limiter on those
+        # THREE deposition terms, NOT a guarantee that the step ends at
+        # RH_ice >= 1.  The MI0 nucleation seed mass is a separate sink, liquid
+        # condensation relaxes to a DIFFERENT curve, and the L_s release moves
+        # q_sat_i itself (+1.24 K / +15.7 % q_sat_i in the q_g = 1 g/kg case).
+        _ice_dep_total = (jnp.maximum(dq_i_dep, 0.0) + jnp.maximum(prds, 0.0)
+                          + jnp.maximum(prdg, 0.0))
+        _ice_dep_scale = donor_clamp_scale(
+            jnp.maximum(q_v - q_sat_i, 0.0), _ice_dep_total, dt)
+        # Scale ONLY the positive (deposition) branches; the negative
+        # (sublimation) branches are condensate-limited, not vapour-limited,
+        # and cloud-ice sublimation already carries its own symmetric bound.
+        dq_i_dep = jnp.where(dq_i_dep > 0.0, dq_i_dep * _ice_dep_scale, dq_i_dep)
+        prds = jnp.where(prds > 0.0, prds * _ice_dep_scale, prds)
+        prdg = jnp.where(prdg > 0.0, prdg * _ice_dep_scale, prdg)
     cond_pos = jnp.maximum(condensation, 0.0)
     # Nucleation mass source dq_i_nuc also consumes vapor (deposition onto
     # new crystals), so include it among the positive vapor sinks.
