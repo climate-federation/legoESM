@@ -16,8 +16,11 @@ cases). θ↔T uses the canonical Exner conversions; regridding uses
 :mod:`~legoesm.atmosphere.les_suite.scm_coupling`. Scoring is done on the LES
 (increasing) grid held byte-identical across closures (controlled-comparison rule).
 
-Currently wired for the **dry free-convective CBL** (prescribed surface heat flux,
-no geostrophic/subsidence profile to regrid) — the gate-0-validated regime.
+Wired for the dry prescribed-surface-flux regimes: the free-convective CBL (``f_c=0``,
+gate-0-validated) and — when the artifact carries a geostrophic wind (``f_c!=0``,
+``u_geo``) — the sheared CBL and stable SBL, whose Coriolis + geostrophic-pressure-gradient
+forcing is applied so the Ekman/jet dynamics reproduce the LES. No subsidence/large-scale
+advection profile is regridded yet (moist regimes remain to be wired).
 """
 from __future__ import annotations
 
@@ -91,6 +94,12 @@ def _dry_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
     )
 
 
+def _const_profile(profile):
+    """A time-constant SCMForcing ``ProfileFn`` returning ``profile`` for every ``t`` — used
+    for the steady geostrophic wind of the sheared CBL / stable SBL."""
+    return lambda _t: profile
+
+
 def build_cbl_scm_from_artifact(
     artifact: LESReferenceArtifact,
     turbulence: TurbulenceConfig,
@@ -104,8 +113,14 @@ def build_cbl_scm_from_artifact(
     The SCM is placed on a σ grid (``nlev``, ``sigma_top``), its temperature IC
     interpolated from the LES θ(t=0) (θ→T via Exner at the SCM pressure), its u/v IC
     from LES(t=0), and driven by the prescribed surface heat flux ``Q0`` the LES
-    received (``prescribe='fluxes'``, no geostrophic/subsidence for the free-convective
-    CBL). Raises on a non-dry-CBL artifact (no surface flux).
+    received (``prescribe='fluxes'``). For the free-convective CBL (``f_c=0``) there is no
+    geostrophic/subsidence forcing; for the sheared CBL / stable SBL (``f_c!=0``) the
+    artifact's geostrophic wind ``u_geo``/``v_geo`` is applied as the Coriolis +
+    geostrophic-pressure-gradient tendency (SCMForcing convention ``du/dt=+f_c(v-v_g)``,
+    ``dv/dt=-f_c(u-u_g)``) so the Ekman/jet dynamics are reproduced. Raises on an artifact
+    with no prescribed surface flux, or on ``f_c!=0`` with no ``u_geo`` (a malformed
+    sheared/stable artifact — the wind would otherwise spin down toward zero, not the LES
+    geostrophic balance).
 
     ``sigma_top=None`` (default) auto-sizes the SCM domain to sit ~30% above the LES
     domain top — a domain that ends at/below the LES top lets the CBL hit the model
@@ -132,10 +147,34 @@ def build_cbl_scm_from_artifact(
     T_profile = T_from_theta(theta_scm, p_full)
 
     q0 = float(jnp.asarray(artifact.w_theta_s)[0])
+    # Geostrophic wind forcing (sheared CBL / stable SBL). SCMForcing's Coriolis convention
+    # du/dt=+f_c(v-v_g), dv/dt=-f_c(u-u_g) matches the LES emission, and it disables the
+    # Coriolis+geostrophic term ENTIRELY when f_c=0 — so a free-convective CBL (f_c=0,
+    # Ug=0) is byte-unchanged by this block. u_geo/v_geo are the artifact's LES-grid
+    # geostrophic profiles interpolated onto the SCM grid, held constant in time.
+    geo_kwargs: dict = {}
+    if float(artifact.f_c) != 0.0:
+        # f_c != 0 means Coriolis is ON; the geostrophic wind MUST be supplied, else
+        # SCMForcing would rotate the wind toward u_g=v_g=0 (a silent wrong physics — the
+        # Ekman balance is against the geostrophic wind, not zero). A sheared/stable artifact
+        # always records u_geo; its absence is a malformed artifact → fail loudly.
+        if artifact.u_geo is None:
+            raise ValueError(
+                f"{artifact.case_name}: f_c={artifact.f_c:g} != 0 (Coriolis on) but the "
+                "artifact has no u_geo. A sheared CBL / stable SBL must record its "
+                "geostrophic wind; without it the SCM would spin down toward zero wind, "
+                "not the LES geostrophic balance.")
+        u_geo_scm = interp_profile(jnp.asarray(artifact.u_geo), z_les, z_scm)
+        v_geo_src = (artifact.v_geo if artifact.v_geo is not None
+                     else jnp.zeros_like(jnp.asarray(artifact.u_geo)))
+        v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
+        geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
+                      "v_geo": _const_profile(v_geo_scm)}
     forcing = SCMForcing(
         f_c=float(artifact.f_c),
         prescribe="fluxes",
         w_th_s=lambda _t: jnp.asarray(q0),
+        **geo_kwargs,
     )
     scm = SingleColumnModel.create(
         physics_config=_dry_cbl_physics(turbulence),

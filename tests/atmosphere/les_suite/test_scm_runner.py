@@ -135,6 +135,38 @@ def test_final_score_none_on_divergence(monkeypatch):
     assert scm_les_final_score(art, _mynn_config(), nlev=NZ, dt=20.0) is None
 
 
+def test_geostrophic_forcing_wired_for_sheared_not_free_cbl():
+    # Q3 enabler: build_cbl_scm_from_artifact must apply the artifact's geostrophic wind for
+    # f_c!=0 (sheared CBL / SBL) so the Ekman/jet dynamics exist, but leave the free CBL
+    # (f_c=0) untouched (SCMForcing disables Coriolis+geostrophic when f_c=0).
+    free = _cbl_artifact()  # f_c=0.0
+    scm_free, _ = build_cbl_scm_from_artifact(free, _mynn_config(), nlev=NZ, dt=5.0)
+    assert scm_free.forcing.u_geo is None and scm_free.forcing.v_geo is None
+
+    Ug = 8.0
+    sheared = _cbl_artifact(
+        f_c=1.0e-4, u_geo=np.full(NZ, Ug), v_geo=np.zeros(NZ),
+        u=np.full((NT, NZ), Ug), v=np.zeros((NT, NZ)))
+    scm_sh, _ = build_cbl_scm_from_artifact(sheared, _mynn_config(), nlev=NZ, dt=5.0)
+    assert scm_sh.forcing.u_geo is not None
+    ug = np.asarray(scm_sh.forcing.u_geo(0.0))
+    assert np.allclose(ug, Ug, atol=1e-6)  # constant geostrophic wind on the SCM grid
+    # Ekman SIGN (NH, f>0): convention du/dt=+f(v-v_g), dv/dt=-f(u-u_g). At init (u=Ug, v=0,
+    # v_g=0) both tendencies are zero; surface DRAG then pulls u below u_g, so dv/dt=-f(u-Ug)
+    # becomes POSITIVE and a positive cross-isobar ageostrophic v develops. A mirror-image
+    # (wrong-sign) forcing would give v<0 — so assert the MAX v is positive, not just |v|>0.
+    s = scm_scan_final_state(scm_sh, 60)
+    v_final = np.asarray(s.v.data[0, 0, 0])
+    assert np.max(v_final) > 1e-4, (
+        f"expected positive NH Ekman v; got max v={np.max(v_final):.2e}")
+
+    # A malformed sheared artifact (f_c!=0 but no u_geo) must FAIL LOUDLY, not spin the wind
+    # toward zero (SCMForcing would treat u_g=v_g=0).
+    bad = _cbl_artifact(f_c=1.0e-4, u_geo=None)
+    with pytest.raises(ValueError, match="geostrophic"):
+        build_cbl_scm_from_artifact(bad, _mynn_config(), nlev=NZ, dt=5.0)
+
+
 def test_scan_final_state_matches_run():
     # The lax.scan rollout MUST reproduce the Python-loop run() to FP roundoff (~1e-9, well
     # below the tuner's ~1e-3 loss tolerance) for these time-independent-forcing regimes
