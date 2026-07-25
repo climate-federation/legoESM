@@ -235,16 +235,19 @@ campaign. Efficiency t1/(n*tn) by subdivision:
 | 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
 | 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
 
-THE TILE-SIZE LAW, THIRD INDEPENDENT COMPONENT: the np64 column collapses
+THE TILE-SIZE PATTERN, THIRD LANE (cube and ico are both atmosphere:
+two components, three decomposition lanes): the np64 column collapses
 on coarse grids (0.15 at subdiv4, 0.30 at subdiv5) and holds on fine ones
-(0.52-0.57 at subdiv6-7). Same pattern as the cube (0.23 -> 1.04 across
-tile sizes) and the ocean (0.37 -> 0.63) — now on a third component and a
-different transport (CPU-MPI, not NCCL). This is the campaign's most
-reproducible finding.
+(0.52-0.57 at subdiv6-7). Same pattern as the cube (0.23 -> 1.04) and the ocean (0.37 -> 0.63), now
+on a third lane and a different transport (CPU-MPI, not NCCL). It is the
+campaign's most reproducible ASSOCIATION — but changing C-resolution, LL
+size or ico subdivision also changes the global problem, so tile size is
+not causally isolated.
 
 Shape: ~1.0 through np8, one step down, then FLAT 0.5 from np16 to np64 —
-4x more ranks with no further loss, the signature of a fixed per-rank cost
-rather than growing communication. (The >1 points at np8 are the same
+4x more ranks with no further loss. CONSISTENT with a fixed per-rank cost
+rather than growing communication, but flat efficiency alone does not
+identify which; that needs phase-level timing. (The >1 points at np8 are the same
 base-leg-working-set effect noted for the cube; read as "at ideal".)
 
 Against the 4-node SPREAD lat-lon ladder (job 26452578) at high rank
@@ -322,8 +325,10 @@ behind, DISABLING XLA's latency-hiding scheduler would hurt. It does not:
 Turning overlap OFF is free (marginally faster), and no scheduling flag
 moves the step. The scheduler has nothing to hide the comm behind.
 
-**MECHANISM (all three alternatives eliminated by measurement): the
-residual is EXPOSED, DEPENDENCY-SERIALIZED SYNCHRONISATION.** Not bytes
+**MECHANISM (the three tested alternatives are not dominant): the
+residual is best explained by EXPOSED, DEPENDENCY-SERIALIZED
+SYNCHRONISATION.** These are eliminations of the TESTED implementations,
+not of every possible communication explanation. Not bytes
 (7.2x more = +0.22 ms), not sharded-formulation work (0 ms), not
 hideable-by-scheduling (0 ms). It is the unavoidable cost of sync points
 that sit on a dependent chain.
@@ -393,13 +398,14 @@ in rows (the PCG iteration is a bandwidth-bound stencil+reduction, so it
 scales with data even where the FULL step does not). The sync figure barely
 moves: **95.7 us/iter measured** vs 96.3 assumed.
 
-FULLY-MEASURED DECOMPOSITION OF THE nd=4 STEP — no inferences left:
+DECOMPOSITION OF THE nd=4 STEP (both terms from measured slopes; the
+remainder is left UNATTRIBUTED):
 
 | term | ms | note |
 |---|---|---|
 | same-tile single-device step (144 rows) | 14.65 | measured |
 | + PCG dependent sync (60 x 95.7 us) | **5.74** | **65 % of the distributed overhead** |
-| + other distributed overhead | 3.13 | 35 % |
+| + iteration-independent remainder | 3.13 | 35 % — NOT attributed; may include fixed PCG/setup work |
 | = total | 23.52 | measured 23.52 |
 
 So of the 8.87 ms the step pays for being distributed across 4 GPUs, TWO
@@ -442,10 +448,14 @@ reduction batches should have halved the 89.8 us/iter of sync; it fell only
 to 66.9 (25 %). Backing out the arithmetic (and correcting for the +4.6
 us/iter of extra local work at this tile) decomposes per-iteration sync:
 
-| component | us/iter | behaviour |
+| component (MODEL-DERIVED, not separately timed) | us/iter | behaviour |
 |---|---|---|
-| reduction sync | 45.7 | HALVED by single_reduce |
-| halo sync | 44.1 | UNCHANGED — the matvec's own halo |
+| reduction sync | 45.7 | assumed HALVED by single_reduce |
+| halo sync | 44.1 | assumed UNCHANGED — the matvec's own halo |
+
+This split assumes exactly two sync categories and a linear single_reduce
+local overhead; the 120->4 census corroborates the COUNT reduction, not
+this particular halo-time value.
 
 (check: 45.7/2 + 44.1 = 66.9, exactly the measured single_reduce value)
 
@@ -503,10 +513,17 @@ Two things this shows that the f64 <=4-GPU ladder could not:
 
 RECOMMENDATION (a decision table, not a winner):
 
-| regime | config | why |
+| regime (all TESTED on LL576 only) | config | why |
 |---|---|---|
-| f64, <=4 GPUs | `pcg_variant="single_reduce"` | fastest there, BIT-IDENTICAL residual, one-line change, no scheme review |
-| f32, or >=2 GPUs, or scaling out | explicit + wide-halo | wins from nd2 in f32 and the margin grows to 1.44x at nd8; the only arm that keeps scaling to 16 — but it CHANGES THE BAROTROPIC SCHEME and needs the stability gates under open items |
+| f64, 1 GPU | standard PCG | single_reduce is SLOWER here (64.81 vs 63.54 ms) — its extra local vector ops only pay once sync exists |
+| f64, **2-4** GPUs | `pcg_variant="single_reduce"` | fastest in that range, residual bit-identical, one-line change, no scheme review |
+| f32, **2-16** GPUs | explicit + wide-halo | wins from nd2 and the margin grows to 1.76x at nd16; the only arm still improving at 16 — CHANGES THE BAROTROPIC SCHEME, stability-gated |
+| anything else | benchmark it | the flip depends on precision AND device count AND tile; do not extrapolate off this grid |
+
+CORRECTION (codex round-8): an earlier revision said "f64 <=4 GPUs" and
+"f32 OR >=2 GPUs", which was wrong at nd1 (standard is fastest in f64
+there) and self-contradictory. "Bit-identical residual" is also a
+convergence check, NOT full trajectory validation.
 
 A single "best ocean config" claim would be wrong in one regime or the
 other; the earlier campaign arms disagreed precisely because they sampled
@@ -525,12 +542,14 @@ ask for: 600 steps at nd4, f32, conservation-gated, both arms same job.
 | implicit_cn (reference) | 6.01e-11 | 1.272e-05 | 4.878e-06 |
 | explicit + wide-halo | 3.72e-10 | **1.248e-05** | **4.190e-06** |
 
-Wide-halo's heat drift is 1.9 % LOWER and salt 14 % LOWER than the implicit
-reference; the eta difference sits at 1e-10 m, numerically irrelevant. No
-blow-up, and per-step time is flat from 100 to 600 steps (12.81 -> 12.74
-ms), so nothing degrades over the longer integration. Both arms' heat drift
-grows ~linearly with step count and is IDENTICAL between them, which points
-at the shared baroclinic/tracer path rather than the barotropic solver.
+What this shows, stated narrowly: NO OBSERVED FAILURE over 600 unforced
+steps from one IC, and both arms pass the 1e-4 gate. Wide-halo's heat and
+salt drift came out lower in this single run and its eta drift higher; with
+n=1, no forcing and no repeats, that ORDERING is not established — the
+supportable claim is "comparable, no blow-up", not "conserves better".
+Per-step time is flat 100 -> 600 steps (12.81 -> 12.74 ms). Both arms' heat
+drift grows ~linearly and is similar between them, consistent with the
+shared baroclinic/tracer path dominating it.
 
 MECHANISM CONFIRMED FROM A THIRD ANGLE. The wide-halo arm records its own
 message census: **120 standard barotropic messages/step -> 4** (n_loop=30
