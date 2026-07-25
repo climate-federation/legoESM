@@ -174,7 +174,29 @@ is the fix.
   extracts q_t=Σ(q_v,q_c,q_r) from the SCM state + scores via `score.qt_rmse`. Then tune →
   moist Q1/Q2/Q3 + D9.
 
-**NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
-Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
-full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
-(5) clubb tuning at nlev=24 (memory); the 2×-resolution σ_LES.
+- **Iter 27 — MOIST SCM BUILT + VALIDATED + BOMEX Q2 DELIVERED (codex-CLEAN).** Wired the
+  moist regime end-to-end (`scm_runner.py`): `_moist_cbl_physics` (Sundqvist condensation),
+  moist branch in `build_cbl_scm_from_artifact` (q_v IC=q_t(t0); subsidence/θ-adv/q_v-adv/
+  w_qv_s forcing, all +up = SCMForcing convention, sign-checked), `scm_final_moist_on` →
+  (θ_l,u,v,q_t) with θ_l=θ−(L_v/(c_pd·Π))·q_c (helper `_liquid_water_theta`), q_t=q_v+q_c+q_r.
+  BOTH DF (`scm_les_final_score`) AND AD (`scm_les_loss_jax`) branch on `is_moist`. `scm.py`
+  create() now pre-allocates q_g UNCONDITIONALLY for active microphysics (shared
+  MicrophysicsOutput always emits dq_g_dt) → fixes lax.scan carry-pytree stability.
+  Codex adversarial review: found+fixed ONE high-sev defect (AD path missing scm_qt →
+  ValueError on moist), added regression tests (θ_l sign+decrement, combined-folds-qt, moist
+  jax.grad); round-2 VERDICT CLEAN. 17 scm_runner tests + 117 CPU-suite green. Aligned the
+  BOMEX emit case-label to the registry name `bomex_cu` (scorecard get_case resolution).
+  **BOMEX shallow-cumulus Q2 (9 closures tuned, shared Sundqvist cloud = D9 shared-cloud
+  control): holtslag_boville 0.212 > louis 0.229 > clubb 0.239 > edmf 0.248 > ysu 0.250 >
+  mynn25 0.276 > smag 0.304 > clubb_lite 0.308 > tke 0.351.** VERDICT: "order buys skill"
+  does NOT hold in shallow Cu (nonlocal+local lead, higher-order bunched) — regime-specific,
+  NOT a cloud-PDF artifact (cloud held fixed across arms). CAVEATS: different metric than dry
+  (compare within-BOMEX only); wind-weighted; σ_LES(shallow_cumulus) not yet available (1 SGS
+  variant) → margins UNGATED/PLAUSIBLE. See LES_SUITE.md §7.4.
+
+**NEXT (remaining for DONE):** (1) BOMEX SGS spread ({smagorinsky,vreman} variants) → σ_LES
+(shallow_cumulus) → gate the moist Q2/Q3 margins. (2) DYCOMS (stratocumulus) 2nd moist anchor:
+add `--emit-suite-artifact` to `run_dycoms_les.py`, emit, tune 9. (3) full-D9 NATIVE leg:
+expose CLUBB ADG1 rcm/cloud_frac via `TurbulenceOutput` (output.py) → SCM consumes it as q_c
+when cloud_scheme=clubb → CLUBB native-vs-shared gap (clubb.py:400 computes it; contract
+change + codex + test). (4) clubb 2×-resolution σ_LES.

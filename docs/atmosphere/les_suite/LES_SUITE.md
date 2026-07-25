@@ -1,12 +1,15 @@
 # LES_SUITE — an LES-truth suite for tuning and comparing SCM turbulence closures
 
-Status (2026-07-24): **DRY-REGIME SUITE COMPLETE + VALIDATED** — Q1a, Q1b (free + sheared,
-θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4 (AD-vs-DF 9/9), D7
-(σ_LES all dry regimes), and a dry-regime partial-D9 are all produced, reviewed, and pass
-224 les_suite tests. The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked
-the compute wall. **REMAINING: the MOIST regimes (BOMEX/DYCOMS) + full D9 — IN PROGRESS**
-(the forcing decks ARE present in the repo cache `data/les_cases/{BOMEX,DYCOMS_RF01,...}`;
-an earlier note wrongly called this blocked after mis-checking the cache path — CORRECTED).
+Status (2026-07-25): **DRY SUITE COMPLETE + FIRST MOIST REGIME (BOMEX) DELIVERED.** Dry:
+Q1a, Q1b (free + sheared, θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
+(AD-vs-DF 9/9), D7 (σ_LES all dry regimes), dry-regime partial-D9. Moist: the **moist SCM is
+built + validated + codex-CLEAN** (θ_l/q_t scoring, diagnostic Sundqvist condensation, DF+AD),
+and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned)** is produced — every arm on the
+SHARED Sundqvist cloud scheme, so the ranking isolates the turbulence closure (D9 shared-cloud
+control). The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked the compute
+wall. **REMAINING: DYCOMS (2nd moist anchor) + the full-D9 native-CLUBB-cloud leg** (needs
+`TurbulenceOutput` to expose CLUBB's ADG1 rcm/cloud_frac — the shared leg is done, the native
+leg is contract plumbing). Forcing decks present in `data/les_cases/{BOMEX,DYCOMS_RF01,...}`.
 Author: A. Connolly. Started 2026-07-10.
 Home: `docs/atmosphere/les_suite/LES_SUITE.md` (root-hygiene rule → docs/, mirrors the
 ocean `oracle_recipe_strategy.md` living-doc convention).
@@ -429,6 +432,48 @@ assert. A significant Q3 result would need finer tuning (less noise), a tighter 
 better SGS variants, excluding over-diffusive static Smag), and the peaked-jet 9 h SBL.
 CONFIRMED (cross-transfer scored on the SBL); the coefficient-diff magnitudes are real but
 sub-σ_LES.
+
+### 7.4 Moist regime 1 (BOMEX shallow cumulus) — Q2, cloud-PDF-controlled (2026-07-25)
+
+The **moist SCM** is built + validated + codex-CLEAN (commit history `feat(les-suite): moist
+SCM`). It drives the dycore-free column with the LES's large-scale forcing (subsidence + θ/q_v
+advective tendencies + surface moisture flux, all +up per `SCMForcing`), runs diagnostic
+Sundqvist condensation, and scores in the SAME variables the moist LES records: liquid-water
+potential temperature θ_l = θ − (L_v/(c_pd·Π))·q_c and total water q_t = q_v+q_c+q_r. Both the
+derivative-free and the AD loss branch on `is_moist`. Validated vs the real BOMEX artifact
+(`bomex_cu__lasd.npz`, 75 lev, 12 frames): q_c forms (0.15 g/kg cumulus), θ_l 298.9→311.7 (LES
+298.8→311.8), q_t 0.0183→0.0030 (LES 0.0174→0.0030).
+
+**D9 shared-cloud control (the confound remover): all 9 closures run the SAME Sundqvist cloud
+scheme**, so any Q2 ranking difference is the TURBULENCE closure, not the cloud PDF.
+
+**Q2 (BOMEX shallow cumulus, all 9 tuned tier-1, combined θ_l/u/v/q_t, nlev=24/dt=10):**
+
+| rank | closure | tuned loss | class |
+|---|---|---|---|
+| 1 | holtslag_boville | 0.2124 | nonlocal K |
+| 2 | louis            | 0.2289 | local |
+| 3 | clubb            | 0.2387 | higher-order |
+| 4 | edmf             | 0.2476 | mass-flux |
+| 5 | ysu              | 0.2496 | nonlocal K |
+| 6 | mynn25           | 0.2762 | 1.5-order |
+| 7 | smagorinsky      | 0.3041 | local |
+| 8 | clubb_lite       | 0.3075 | higher-order |
+| 9 | tke              | 0.3511 | 1.5-order |
+
+**VERDICT — "closure order buys skill" does NOT hold in shallow cumulus.** Unlike the dry CBL
+(where clubb/edmf/higher-order led), the moist ranking is led by a nonlocal-K (holtslag) and a
+LOCAL (louis) scheme, with clubb only 3rd and clubb_lite 8th; the closures bunch tightly
+(0.21–0.35, ~1.65× spread vs the dry CBL's wider ordering). With the cloud PDF held fixed
+(shared Sundqvist), the higher-order machinery does not clearly out-skill simpler closures on
+BOMEX — a genuinely different regime verdict, and evidence the dry-CBL higher-order win is
+regime-specific, not universal. CAVEATS (do NOT over-read): (i) the loss is a DIFFERENT metric
+than the dry regimes (adds q_t) — compare ONLY within BOMEX, never a BOMEX number to a dry
+number; (ii) BOMEX winds are trade-wind-driven (u_g≈−8.75), so the u/v terms carry weight and
+the ordering is partly wind-mixing, not purely thermodynamic; (iii) **σ_LES(shallow_cumulus)
+is not yet available** (only the `lasd` SGS variant is emitted; the D7 gate needs ≥2), so these
+margins are UNGATED — the tight bunching may be within LES uncertainty. PLAUSIBLE pending the
+BOMEX SGS spread + the native-CLUBB-cloud leg.
 
 ---
 
