@@ -102,8 +102,11 @@ def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
     dtype=None,
+    tropopause_refine: float = 1.0,
+    sigma_refine: float = 0.12,
+    refine_width: float = 0.45,
 ) -> SigmaCoordinate:
-    """Create a uniformly spaced sigma coordinate.
+    """Create a sigma coordinate (uniform by default).
 
     Parameters
     ----------
@@ -117,6 +120,14 @@ def create_sigma_coordinate(
         Dtype for coordinate arrays. If None, uses the precision
         policy's compute dtype (defaults to float32 when no policy
         is active). Explicit dtype overrides the policy.
+    tropopause_refine : float
+        Peak density ratio for the tropopause refinement (see
+        :func:`tropopause_refined_sigma_half`).  ``1.0`` (default) is the
+        UNIFORM grid, bit-identical to the pre-refinement behaviour.
+        Values > 1 redistribute layers toward ``sigma_refine`` at the SAME
+        level count — the fix for the unresolved tropical cold point.
+    sigma_refine, refine_width : float
+        Centre (in sigma) and log-sigma half-width of the refinement.
 
     Returns
     -------
@@ -133,7 +144,16 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    if tropopause_refine == 1.0:
+        # Uniform (default) — kept as the literal linspace so the untouched
+        # path stays bit-identical to the pre-refinement code.
+        sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    else:
+        sigma_half = jnp.asarray(
+            tropopause_refined_sigma_half(
+                n_levels, sigma_top=sigma_top, sigma_refine=sigma_refine,
+                refine=tropopause_refine, width=refine_width),
+            dtype=dtype)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
     dsigma = sigma_half[1:] - sigma_half[:-1]
 
@@ -161,6 +181,117 @@ def create_sigma_coordinate(
         fractional_sigma=fractional_sigma,
         dsigma_full=dsigma_full,
     )
+
+
+def tropopause_refined_sigma_half(
+    n_levels: int,
+    sigma_top: float = 0.01,
+    sigma_refine: float = 0.12,
+    refine: float = 3.0,
+    width: float = 0.45,
+) -> np.ndarray:
+    """Half-level sigma with layers REDISTRIBUTED toward the tropopause.
+
+    The uniform-in-sigma default (:func:`create_sigma_coordinate`) spaces
+    every layer by the same ``dp = dsigma * p_s`` — about 33 hPa at 30
+    levels — so the tropical tropopause layer, whose structure is a
+    10-20 hPa affair, is spanned by ~3 levels and the model forms no cold
+    point (its coldest tropical level lands at the ~26 hPa top instead of
+    ~100 hPa; measured 2026-07-25).  Adding levels does NOT fix this: at
+    40 levels the TTL still gets 4 levels, and that L40 run (uniform σ,
+    24.4 hPa in EVERY layer) blew up at day 46 with dt=60.  The L40 failure
+    mode is NOT attributed here — it appeared across levels 0-11 (10-302 hPa)
+    and no mechanism has been instrumented; "thin layers destabilise" is an
+    untested hypothesis, so it is not used as a design argument below.
+
+    So redistribute at FIXED count instead.  Levels are placed by the
+    standard equidistribution principle: they are the quantiles of a
+    density ``d(sigma)`` in SIGMA space, so a flat density reproduces the
+    uniform default exactly and the refinement only steals layers from the
+    (over-resolved) mid-troposphere::
+
+        d(sigma) = 1 + (refine - 1) * exp(-0.5 * ((ln sigma - ln sigma_refine) / width)^2)
+
+    The bump is Gaussian in LOG sigma because atmospheric structure scales
+    with log-pressure; ``width`` is therefore in log-sigma units (0.45 ~ a
+    factor e^0.45 = 1.6 in pressure either side of the centre).  Working in
+    sigma (not log-sigma) for the equidistribution is deliberate: a pure
+    log-sigma grid would put 166 hPa between the lowest levels at 30
+    levels and destroy the boundary layer.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of layers (returns ``n_levels + 1`` half levels).
+    sigma_top : float
+        Sigma of the model top (same meaning as in
+        :func:`create_sigma_coordinate`).
+    sigma_refine : float
+        Centre of the refinement, in sigma (0.12 ~ 120 hPa at p_s = 1000
+        hPa — the tropical cold point).
+    refine : float
+        Peak density ratio.  ``refine = 1`` reproduces the uniform grid
+        EXACTLY (the identity case, pinned by a test).
+    width : float
+        Gaussian half-width of the bump in log-sigma units.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_levels + 1,)``
+        Monotone increasing half-level sigma from ``sigma_top`` to 1.
+    """
+    if not (refine >= 1.0 and width > 0.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need refine >= 1 and width > 0; "
+            f"got refine={refine!r}, width={width!r}")
+    if not (0.0 < sigma_top < sigma_refine < 1.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need 0 < sigma_top < "
+            f"sigma_refine < 1; got sigma_top={sigma_top!r}, "
+            f"sigma_refine={sigma_refine!r}")
+    # Fine auxiliary QUADRATURE grid; the quantile inversion below is a 1-D
+    # interp, so resolution here only sets the placement accuracy (not a
+    # runtime cost: this runs once at setup, on the host, in float64).
+    # LOG-spaced, matching the density's own log-σ structure: a σ-uniform mesh
+    # has constant Δσ ≈ 5e-5 and therefore CANNOT resolve a narrow bump placed
+    # near the lid (``width`` 0.02 at ``sigma_refine`` ≈ ``sigma_top`` = 1e-5
+    # spans Δσ ~ 2e-7, i.e. zero mesh points), giving a worst-case placement
+    # error of 3.1e-5 in σ over the allowed parameter box.  The log mesh
+    # resolves every allowed bump uniformly: worst case 2.0e-7 (155x better),
+    # and it moves the DEFAULT grid by only 7.8e-9 in σ (8e-6 hPa) — toward
+    # the exact answer, not away.  ``refine == 1`` stays exact either way
+    # (a constant integrand is exact under the trapezoid on any mesh).
+    s = np.geomspace(sigma_top, 1.0, 20001, dtype=np.float64)
+    _ln = np.log(s)
+    dens = 1.0 + (refine - 1.0) * np.exp(
+        -0.5 * ((_ln - np.log(sigma_refine)) / width) ** 2)
+    # DELIBERATELY single-bump.  A matching surface bump was tried and
+    # rejected (measured 2026-07-25, 30 levels, refine=3): it does protect
+    # the lowest layer (42 -> 23 hPa) but it is very WIDE in sigma (it spans
+    # sigma ~ 0.6-1.0), so it starves the tropopause back to 5 levels from 8
+    # and thickens the TOP layer to 57 hPa.  At 30 levels the grid cannot
+    # refine both ends; the tropopause is the identified defect, so it wins.
+    # ACCEPTED COSTS, both measured at nlev=30 / refine=3, both real:
+    #   (a) the lowest layer coarsens ~30% (33 -> 42 hPa);
+    #   (b) the thinnest layer is 14.2 hPa at ~113 hPa — 42% THINNER than
+    #       anything the L40 run that blew up ever had, and inside the same
+    #       10-302 hPa band where that failure appeared.  The top layer k=0
+    #       does thicken (33 -> 40 hPa), but that covers ONE level of a
+    #       twelve-level failure, so it is NOT a safety argument.
+    #   (c) the max adjacent-layer thickness ratio rises 1.00 -> 1.62,
+    #       vs <= 1.07 on every grid this model has run successfully.
+    # Equidistribution: place levels at equal increments of the cumulative
+    # density, so spacing ~ 1/d — fine where d is large.
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1])
+                                           * np.diff(s))])
+    cum /= cum[-1]
+    targets = np.linspace(0.0, 1.0, n_levels + 1)
+    half = np.interp(targets, cum, s)
+    # Pin the ends exactly (interp round-off would otherwise move the lid
+    # and the surface by ~1e-16, which the hydrostatic integration and the
+    # p_s = sigma=1 identity both assume).
+    half[0], half[-1] = sigma_top, 1.0
+    return half
 
 
 def pressure_from_sigma(
