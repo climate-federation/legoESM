@@ -66,6 +66,12 @@ def main():
                     help="glob for our lattice dumps (…_lat_dayN.npz)")
     ap.add_argument("--n", type=int, default=36)
     ap.add_argument("--ng", type=int, default=3)
+    ap.add_argument("--oracle-cadence", choices=("days", "hours"),
+                    default="days",
+                    help="output interval of the oracle file: frame k is "
+                         "day k+1 ('days') or hour k+1 ('hours').  Using "
+                         "the wrong one silently compares different "
+                         "times (a real bug this script had).")
     args = ap.parse_args()
     n, ng = args.n, args.ng
 
@@ -118,7 +124,9 @@ def main():
     print("# 2dx content near cube vertices (A-grid winds, native cube)")
     print("# day    ORACLE      OURS       ratio")
     for day in sorted(ours):
-        oi = int(round(day)) - 1
+        # frame k holds day k+1 (daily) or hour k+1 (hourly)
+        oi = (int(round(day)) - 1 if args.oracle_cadence == "days"
+              else int(round(day * 24.0)) - 1)
         ov = o_g[oi] if o_g is not None and 0 <= oi < len(o_g) else np.nan
         r = ours[day] / ov if ov and np.isfinite(ov) else float("nan")
         print(f"{day:5.1f} {ov:11.4e} {ours[day]:11.4e} {r:9.2f}")
