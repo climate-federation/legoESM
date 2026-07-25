@@ -4,7 +4,7 @@
 **What it does:** runs the prognostic multilayer land model with the two-leaf canopy
 surface scheme at four FLUXNET eddy-covariance sites and compares modelled vs observed
 latent heat, sensible heat, gross primary productivity, and soil moisture across the
-mean daily cycle, the seasonal cycle, and year to year.
+mean daily cycle and the seasonal cycle.
 
 The four sites span climate regimes:
 
@@ -35,34 +35,34 @@ as tunable modeling inputs, not observations.
 ## A. Reproduce the figures (self-contained — no external data)
 
 The processed model+obs outputs for the four sites are checked in (compressed, ~14 MB
-total) under `scripts/validate/ec_site_example_data/`, so the three publication figures
-regenerate from the repo alone:
+total) under `scripts/validate/ec_site_example_data/`, so the publication figure
+regenerates from the repo alone:
 
 ```bash
 pip install -e ".[dev]"          # once, if not already installed
 JAX_ENABLE_X64=1 python scripts/plot/plot_ec_site_publication.py \
     scripts/validate/ec_site_example_data \
     /tmp/ecsite            # output prefix
-# -> /tmp/ecsite_energy.png, _carbon.png, _summary.png
+# -> /tmp/ecsite_combined.png
 ```
 
-- **`_energy.png`** — rows = sites; the mean summer daily cycle and the seasonal cycle
-  of latent heat (orange) and sensible heat (blue). Markers = raw eddy-covariance
-  observations; the shaded band spans up to the energy-balance-closure-corrected value.
-- **`_carbon.png`** — gross primary productivity, the latent-heat partition into plant
-  transpiration and bare-soil evaporation, and near-surface soil moisture.
-- **`_summary.png`** — pooled model–observation scatter (skill vs raw and vs corrected
-  obs) and year-to-year means.
+- **`_combined.png`** — one figure, panels (a)–(w): (a)–(c) pooled model–observation
+  skill scatter (latent heat, sensible heat, GPP); then one row per site with the mean
+  summer daily cycle and seasonal cycle of latent/sensible heat, the GPP seasonal
+  cycle, the latent-heat partition into transpiration and bare-soil evaporation, and
+  soil moisture. Markers = raw eddy-covariance observations; shaded bands span up to
+  the energy-balance-closure-corrected value. Interannual panels are deliberately
+  omitted (2–4 years per site is too few to validate interannual variability).
 
 Expected pooled daily skill (Nash–Sutcliffe vs raw obs, on co-sampled timesteps —
 model and observations compared only where both are available): LE ≈ 0.58,
-H ≈ 0.57, GPP ≈ 0.80 (LE / H are 0.65 / 0.68 vs the closure-corrected obs). The
-interannual means are co-sampled and month-stratified (each year is an equal-weight
-mean of monthly means) so a season-heavy sample does not bias the annual value.
+H ≈ 0.57, GPP ≈ 0.80 (LE / H are 0.65 / 0.68 vs the closure-corrected obs). Model and
+observations are co-sampled everywhere (compared only where both are available), so a
+discrepancy reflects model error rather than a sampling mismatch.
 
-The rendered high-resolution figures are also checked in under
-`docs/land/figures/ec_site/` (`ec_site_energy.png`, `ec_site_carbon.png`,
-`ec_site_summary.png`); see `docs/land/ec_site_figure_captions.md` for captions.
+The rendered high-resolution figure is also checked in at
+`docs/land/figures/ec_site/ec_site_combined.png`; see
+`docs/land/ec_site_figure_captions.md` for the caption.
 
 ---
 
@@ -133,8 +133,7 @@ window.
 - **⚠ Observed soil moisture (`SWC`) has gap-fill artifacts at some sites** — US-MMS
   (a constant-filled 2018 tail + step), US-Ton (blocky flat segments), DE-Obe (a 2018
   step). `SWC` is used *only* for the prognostic soil initial condition (the first
-  finite value, before any artifact) and the observed soil-moisture panel of
-  `_carbon.png`; it does **not** drive the fluxes (soil moisture is prognostic). So these
+  finite value, before any artifact) and the observed soil-moisture panels; it does **not** drive the fluxes (soil moisture is prognostic). So these
   artifacts affect only the soil-moisture comparison for those sites/years, not the
   LE/H/GPP skill. Treat the `SWC` panel qualitatively at US-MMS/US-Ton/DE-Obe.
 
@@ -144,7 +143,7 @@ window.
    (`{"z_ref": <BADM Reference_height_v>, "root_depth": <m>[, "soil_depth_m": <m>]}`).
 2. Run section B for the new site → a NetCDF.
 3. Add the site ID to `SITES` (and `SWC_SENSOR_CM` / `PFT_COL`) in
-   `scripts/plot/plot_ec_site_publication.py`, then plot.
+   `scripts/plot/plot_ec_site_publication.py`, then plot (the figure grows by one row).
 
 Note: the model under-predicts GPP/latent heat at **dense, high-LAI wet broadleaf
 forests** (a documented coupled-closure bistability — see

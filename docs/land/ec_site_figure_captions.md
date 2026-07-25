@@ -1,15 +1,13 @@
 # EC-site validation figures — captions
 
-Publication captions for the three figures produced by
+Publication caption for the figure produced by
 `scripts/plot/plot_ec_site_publication.py` (see
 `ec_site_evaluation_runbook.md` to regenerate). The rendered high-resolution
 figures are checked in alongside this file:
 
 | figure | file |
 |--------|------|
-| 1 — turbulent energy fluxes | `figures/ec_site/ec_site_energy.png` |
-| 2 — carbon, water partition, soil moisture | `figures/ec_site/ec_site_carbon.png` |
-| 3 — pooled skill + interannual means | `figures/ec_site/ec_site_summary.png` |
+| combined validation figure | `figures/ec_site/ec_site_combined.png` |
 
 All fluxes are the offline
 prognostic multilayer land model with the **two-leaf canopy** surface scheme,
@@ -31,52 +29,36 @@ applied.
 
 ---
 
-## Figure 1 — `*_energy.png`: turbulent energy fluxes
+## The combined figure — `*_combined.png`
 
-**Modelled and observed latent (orange) and sensible (blue) heat flux at four
-FLUXNET sites.** Rows are sites; the left column is the mean summer (JJA) diurnal
-cycle and the right column is the mean seasonal cycle. Lines are the two-leaf
-canopy model; markers are raw half-hourly eddy-covariance observations averaged
-into the same composite; the shaded band spans up to the energy-balance-closure-
-corrected value. The model reproduces the amplitude and phase of the daytime
-latent- and sensible-heat partition across the mesic (US-MMS, DE-Hai),
-needleleaf (DE-Obe) and water-limited savanna (US-Ton) regimes, with the raw
-observations sitting inside — or just below — the modelled curve as expected from
-the closure deficit.
+**Land-surface validation against eddy-covariance flux towers.** Panels are
+labelled (a)–(w). **(a)–(c)** Pooled model–observation skill: daily-mean scatter
+across all four sites for latent heat, sensible heat and GPP against the raw
+observations, with the 1:1 line, R², Nash–Sutcliffe efficiency (vs raw and, for the
+energy fluxes, vs the closure-corrected obs) and mean bias annotated; points are
+coloured by site. **Remaining rows, one per site** (US-MMS, DE-Obe, US-Ton,
+DE-Hai), each with five panels: the mean summer (JJA) **diurnal cycle** and the
+mean **seasonal cycle** of latent (orange) and sensible (blue) heat; the **GPP**
+seasonal cycle; the modelled **latent-heat partition** into canopy transpiration
+(green) and bare-soil evaporation (orange) with the observed total; and **soil
+moisture** at the observed sensor depth and two deeper model layers.
 
-## Figure 2 — `*_carbon.png`: carbon, water partition and soil moisture
-
-**Gross primary productivity, the latent-heat partition, and near-surface soil
-moisture.** Rows are sites. Column 1: modelled vs observed GPP (mean seasonal
-cycle); column 2: the modelled latent-heat flux split into canopy transpiration
-(green) and bare-soil evaporation (orange), showing that the model routes water
-loss predominantly through stomatal transpiration in the growing season with a
-soil-evaporation background; column 3: modelled vs observed volumetric soil
-moisture at the shallowest observed sensor depth. GPP phenology and magnitude
-track the observations at the temperate forests; at the Mediterranean savanna the
-model captures the spring green-up and summer down-regulation set by soil-moisture
-stress.
-
-## Figure 3 — `*_summary.png`: pooled skill and interannual means
-
-**Pooled model–observation skill (top) and per-site year-to-year means
-(bottom).** Top row: daily-mean model-vs-observation scatter pooled across all
-four sites for latent heat, sensible heat and GPP, against the raw observations.
-Model and observations are **co-sampled** (compared only on timesteps where both
-are available) so a discrepancy reflects model error and not a sampling mismatch;
-the 1:1 line and the Nash–Sutcliffe efficiency (vs raw and, for LE/H, vs the
-closure-corrected obs) are annotated. Bottom row: **one panel per site**, each on
-its own year axis so that sites with different observational coverage are not
-forced onto a shared timeline. Each panel shows annual-mean latent heat (orange)
-and sensible heat (blue) on the left axis and GPP (green) on the right axis;
-annual means are co-sampled and **month-stratified** (equal weight per month) so a
-season-heavy sample does not bias them; dashed open markers are observations, solid
-filled markers are the model, and the shaded band is the energy-balance-closure
-envelope on the energy fluxes.
+Model and observations are **co-sampled** throughout — compared only on timesteps
+where both are available — so a model–observation discrepancy reflects model error
+rather than a sampling mismatch.
 
 Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs, co-sampled):
 **LE ≈ 0.58**, **H ≈ 0.57**, **GPP ≈ 0.80** (LE / H are 0.65 / 0.68 vs the
-closure-corrected obs).
+closure-corrected obs). Raw eddy-covariance fluxes under-close the surface energy
+budget by ~22–34 % at these sites; the model closes it by construction, so its LE/H
+bias is **+17 %** against the raw obs and **−17 %** against the closure-corrected
+obs — i.e. the model sits inside, and near the centre of, the closure-uncertainty
+envelope. GPP has no closure ambiguity and carries a **+6 %** pooled bias.
+
+**Interannual variability is deliberately not shown.** With only two to four years
+per site, year-to-year means are dominated by sampling noise and cannot validate
+interannual variability; the defensible claims here are the diurnal, seasonal and
+pooled-daily skill.
 
 ---
 
