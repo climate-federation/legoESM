@@ -475,6 +475,26 @@ is not yet available** (only the `lasd` SGS variant is emitted; the D7 gate need
 margins are UNGATED — the tight bunching may be within LES uncertainty. PLAUSIBLE pending the
 BOMEX SGS spread + the native-CLUBB-cloud leg.
 
+**CRITICAL MOIST CONVENTIONS (record + honour; codex-caught 2026-07-25).**
+- **The spectral moist LES prognoses ACTUAL θ, not θ_l** (`state.theta`; the IC
+  saturation-adjusts (θ_l,q_t)→(θ,q_v,q_c)). The suite scores in **liquid-water potential
+  temperature θ_l** (the standard LES-intercomparison variable, conserved under condensation),
+  so θ_l MUST be DERIVED at record time from θ and the LES cloud liquid q_c —
+  `scm_coupling.liquid_water_theta(θ,q_c,Π)=θ−(L_v/c_pd)·q_c/Π`, the ONE canonical reduction
+  the SCM ALSO uses (via `_liquid_water_theta`). **q_c ONLY (cloud, not rain)** in the
+  reduction, identical on both sides. Recording raw θ (the first BOMEX Q2 did) compares LES θ
+  to SCM θ_l — a confound. `_record_theta_l` in both LES drivers enforces this; the first §7.4
+  numbers were recomputed after the fix.
+- **D9 condensation-invariance (why the CLUBB native-vs-shared gap is expected SMALL).** θ_l
+  AND q_t are BOTH conserved under condensation, so the cloud scheme changes the *scored*
+  θ_l/q_t only INDIRECTLY, via the latent-heat→buoyancy→turbulent-mixing feedback over time.
+  The full `clubb` turbulence ALREADY uses its own ADG1 PDF cloud (`rcm`) for its buoyancy
+  flux `wpthvp` — so the "CLUBB-on-shared-Sundqvist" arm is native for buoyancy and shared
+  only for the (θ_l/q_t-invariant) tracer condensation. A TRUE "forced-shared" CLUBB arm
+  therefore requires a `clubb.cloud_source` toggle that feeds Sundqvist's q_c into CLUBB's
+  buoyancy (not just the tracer) — the shared-cloud CONTROL (all arms identical tracer cloud)
+  already removes the confound; the native-vs-forced-shared PAIR is a bounded refinement.
+
 ---
 
 ## 8. Immediate next steps (D10 sequencing)
