@@ -31,34 +31,28 @@ applied.
 
 ## The combined figure — `*_combined.png`
 
-**Land-surface validation against eddy-covariance flux towers.** Panels are
-labelled (a)–(w). **(a)–(c)** Pooled model–observation skill: daily-mean scatter
-across all four sites for latent heat, sensible heat and GPP against the raw
-observations, with the 1:1 line, R², Nash–Sutcliffe efficiency (vs raw and, for the
-energy fluxes, vs the closure-corrected obs) and mean bias annotated; points are
-coloured by site. **Remaining rows, one per site** (US-MMS, DE-Obe, US-Ton,
-DE-Hai), each with five panels: the mean summer (JJA) **diurnal cycle** and the
-mean **seasonal cycle** of latent (orange) and sensible (blue) heat; the **GPP**
-seasonal cycle; the modelled **latent-heat partition** into canopy transpiration
-(green) and bare-soil evaporation (orange) with the observed total; and **soil
-moisture** at the observed sensor depth and two deeper model layers.
+Publication caption, exactly as used in the manuscript:
 
-Model and observations are **co-sampled** throughout — compared only on timesteps
-where both are available — so a model–observation discrepancy reflects model error
-rather than a sampling mismatch.
-
-Pooled daily skill (Nash–Sutcliffe efficiency vs **raw** obs, co-sampled):
-**LE ≈ 0.58**, **H ≈ 0.57**, **GPP ≈ 0.80** (LE / H are 0.65 / 0.68 vs the
-closure-corrected obs). Raw eddy-covariance fluxes under-close the surface energy
-budget by ~22–34 % at these sites; the model closes it by construction, so its LE/H
-bias is **+17 %** against the raw obs and **−17 %** against the closure-corrected
-obs — i.e. the model sits inside, and near the centre of, the closure-uncertainty
-envelope. GPP has no closure ambiguity and carries a **+6 %** pooled bias.
-
-**Interannual variability is deliberately not shown.** With only two to four years
-per site, year-to-year means are dominated by sampling noise and cannot validate
-interannual variability; the defensible claims here are the diurnal, seasonal and
-pooled-daily skill.
+> **Land-surface validation against eddy-covariance flux towers.** The offline land
+> model with the two-big-leaf canopy scheme (sunlit/shaded) at four FLUXNET sites
+> spanning temperate and Mediterranean regimes: US-MMS (mesic deciduous forest),
+> DE-Obe (montane needleleaf forest), US-Ton (oak savanna) and DE-Hai (humid
+> deciduous forest). **(a–c)** Pooled daily model–observation scatter for latent
+> heat, sensible heat and GPP, coloured by site, with the 1:1 line, R²,
+> Nash–Sutcliffe efficiency and mean bias. **(d–w)** One row per site: the mean
+> summer (JJA) diurnal cycle and the mean seasonal cycle of latent (orange) and
+> sensible (blue) heat; the GPP seasonal cycle; the modelled latent-heat partition
+> into canopy transpiration (green) and bare-soil evaporation (orange) with the
+> observed total; and soil moisture at the observed sensor depth and two deeper
+> model layers. Lines are modelled, markers are raw eddy-covariance observations,
+> and shaded bands span up to the energy-balance-closure-corrected value. Model and
+> observations are co-sampled, i.e. compared only on timesteps where both are
+> available. Pooled daily Nash–Sutcliffe efficiency against the raw observations is
+> 0.58 (latent heat), 0.57 (sensible heat) and 0.80 (GPP); against the
+> closure-corrected observations the energy fluxes score 0.65 and 0.68. Raw
+> eddy-covariance fluxes under-close the surface energy budget by 22–34 % at these
+> sites, so the modelled turbulent fluxes lie near the centre of the
+> closure-uncertainty envelope (+17 % against raw, −17 % against corrected).
 
 ---
 
