@@ -1,6 +1,12 @@
 # LES_SUITE — an LES-truth suite for tuning and comparing SCM turbulence closures
 
-Status: **scope + design (living doc)**. Author: A. Connolly. Started 2026-07-10.
+Status (2026-07-24): **DRY-REGIME SUITE COMPLETE + VALIDATED** — Q1a, Q1b (free + sheared,
+θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4 (AD-vs-DF 9/9), D7
+(σ_LES all dry regimes), and a dry-regime partial-D9 are all produced, reviewed, and pass
+224 les_suite tests. The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked
+the compute wall. **REMAINING: the MOIST regimes (BOMEX/DYCOMS) + full D9 — hard-blocked on
+the external gSAM forcing decks absent from this environment** (see §8; `LEGOESM_GSAM_ROOT`
+must be supplied). Author: A. Connolly. Started 2026-07-10.
 Home: `docs/atmosphere/les_suite/LES_SUITE.md` (root-hygiene rule → docs/, mirrors the
 ocean `oracle_recipe_strategy.md` living-doc convention).
 
