@@ -36,25 +36,37 @@ def select_heights(z, Lz):
     return out, z[out]
 
 
-def _profiles(z, u3, v3, wc3, theta3, z0, case):
+def _profiles(z, u3, v3, wc3, theta3, z0, case, qt3=None):
     """Planar-mean profiles + resolved second moments (matches the layout of
-    ``run_les_plane._resolved_profiles``)."""
+    ``run_les_plane._resolved_profiles``).
+
+    Always includes the resolved kinematic heat flux ``wtheta`` = ⟨w'θ'⟩ (for moist runs
+    ``theta3`` is θ_l, so this is ⟨w'θ_l'⟩). When ``qt3`` (total-water mixing ratio, same
+    (ny,nx,nz) shape) is given, also the total-water profile ``qt`` and its resolved flux
+    ``wqt`` = ⟨w'q_t'⟩ — the fields a moist ``LESReferenceArtifact`` needs beyond the dry set.
+    """
     um = u3.mean((0, 1)); vm = v3.mean((0, 1)); wm = wc3.mean((0, 1))
     up, vp, wp = u3 - um, v3 - vm, wc3 - wm
     uw = (up * wp).mean((0, 1)); vw = (vp * wp).mean((0, 1))
     uu = (up * up).mean((0, 1)); vv = (vp * vp).mean((0, 1)); ww = (wp * wp).mean((0, 1))
     tke = 0.5 * (uu + vv + ww)
     theta = theta3.mean((0, 1))
+    wtheta = (wp * (theta3 - theta)).mean((0, 1))          # ⟨w'θ'⟩ (θ_l for moist)
     spd = np.sqrt(um ** 2 + vm ** 2)
     u_star = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)
-    return dict(z=z, theta=theta, u=um, v=vm, spd=spd, wvar=ww,
-                uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw,
-                u_star=u_star, z0=z0, case=case)
+    out = dict(z=z, theta=theta, u=um, v=vm, spd=spd, wvar=ww,
+               uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw, wtheta=wtheta,
+               u_star=u_star, z0=z0, case=case)
+    if qt3 is not None:
+        qt = qt3.mean((0, 1))
+        out["qt"] = qt
+        out["wqt"] = (wp * (qt3 - qt)).mean((0, 1))        # ⟨w'q_t'⟩
+    return out
 
 
 def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
                  Lx, Ly, h_idx, h_z, z0, qc3=None, rho_z=None, qr3=None,
-                 surface_precip=None):
+                 surface_precip=None, qv3=None):
     """Save one snapshot npz (height cross-sections) + one profile npz.
 
     ``u3, v3, wc3, theta3`` are host (numpy) arrays of shape (ny, nx, nz);
@@ -92,6 +104,15 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
         v=np.stack([v3[:, :, k] for k in h_idx]),
         **extra,
     )
-    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case)
+    # Total water q_t = q_v + q_c + q_r for the moist profile flux (⟨w'q_t'⟩); only when the
+    # moist caller supplies q_v (dry runs pass none → the dry profile set is unchanged).
+    qt3 = None
+    if qv3 is not None:
+        qt3 = np.asarray(qv3)
+        if qc3 is not None:
+            qt3 = qt3 + np.asarray(qc3)
+        if qr3 is not None:
+            qt3 = qt3 + np.asarray(qr3)
+    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case, qt3=qt3)
     np.savez(prof_dir / f"prof_{frame:03d}.npz", t_hours=t_hours,
              **prof, **prof_extra)
