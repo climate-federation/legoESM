@@ -11,9 +11,12 @@
 %       scripts/validate/ec_site_example_data <out_prefix>
 % See docs/land/ec_site_evaluation_runbook.md.
 %
-% BibTeX entries for every key cited below are collected at the end of this file.
-% Bibliographic details were verified against the publisher records; the schemes
-% themselves were verified against the implementation.
+% The section is self-contained: its reference list is included at the end as a
+% thebibliography block, so the keys resolve without the main bibliography.  The
+% same entries are also provided as BibTeX in ec_site_si_refs.bib if you prefer
+% to merge them into the supplement's .bib and drop the block.  Bibliographic
+% details were verified against the publisher records; the schemes themselves were
+% verified against the implementation.
 % ---------------------------------------------------------------------------
 
 \section{Land-surface validation at eddy-covariance flux towers}
@@ -152,90 +155,96 @@ under-close the energy budget by 22--34\,\% here, so the modelled turbulent flux
 sit near the centre of the closure-uncertainty envelope.}\label{si:ecsite_fig}
 \end{figure}
 
-% ===========================================================================
-% BibTeX entries for the keys cited above.  Add any that the main .bib lacks;
-% VanGenuchten1980 and Farquhar1980 are already used elsewhere in the supplement.
-% ===========================================================================
-%
-% @article{Pastorello2020,
-%   author  = {Pastorello, Gilberto and Trotta, Carlo and Canfora, Eleonora and others},
-%   title   = {The {FLUXNET2015} dataset and the {ONEFlux} processing pipeline for
-%              eddy covariance data},
-%   journal = {Scientific Data}, volume = {7}, pages = {225}, year = {2020},
-%   doi     = {10.1038/s41597-020-0534-3}}
-%
-% @article{Myneni2002,
-%   author  = {Myneni, R. B. and Hoffman, S. and Knyazikhin, Y. and others},
-%   title   = {Global products of vegetation leaf area and fraction absorbed
-%              {PAR} from year one of {MODIS} data},
-%   journal = {Remote Sensing of Environment}, volume = {83}, pages = {214--231},
-%   year    = {2002}, doi = {10.1016/S0034-4257(02)00074-3}}
-%
-% @article{Schaaf2002,
-%   author  = {Schaaf, Crystal B. and Gao, Feng and Strahler, Alan H. and others},
-%   title   = {First operational {BRDF}, albedo nadir reflectance products from
-%              {MODIS}},
-%   journal = {Remote Sensing of Environment}, volume = {83}, pages = {135--148},
-%   year    = {2002}, doi = {10.1016/S0034-4257(02)00091-3}}
-%
-% @article{Ryu2018,
-%   author  = {Ryu, Youngryel and Jiang, Chongya and Kobayashi, Hideki and Detto, Matteo},
-%   title   = {{MODIS}-derived global land products of shortwave radiation and
-%              diffuse and total photosynthetically active radiation at 5 km
-%              resolution from 2000},
-%   journal = {Remote Sensing of Environment}, volume = {204}, pages = {812--825},
-%   year    = {2018}, doi = {10.1016/j.rse.2017.09.021}}
-%   % Product: BESS Rad v1, https://developers.google.com/earth-engine/datasets/
-%   %          catalog/SNU_ESL_BESS_Rad_v1
-%
-% @article{Ryu2011,
-%   author  = {Ryu, Youngryel and Baldocchi, Dennis D. and Kobayashi, Hideki and others},
-%   title   = {Integration of {MODIS} land and atmosphere products with a
-%              coupled-process model to estimate gross primary productivity and
-%              evapotranspiration from 1 km to global scales},
-%   journal = {Global Biogeochemical Cycles}, volume = {25}, pages = {GB4017},
-%   year    = {2011}, doi = {10.1029/2011GB004053}}
-%
-% @article{Celia1990,
-%   author  = {Celia, Michael A. and Bouloutas, Efthimios T. and Zarba, Rebecca L.},
-%   title   = {A general mass-conservative numerical solution for the unsaturated
-%              flow equation},
-%   journal = {Water Resources Research}, volume = {26}, pages = {1483--1496},
-%   year    = {1990}, doi = {10.1029/WR026i007p01483}}
-%
-% @article{Sellers1985,
-%   author  = {Sellers, P. J.},
-%   title   = {Canopy reflectance, photosynthesis and transpiration},
-%   journal = {International Journal of Remote Sensing}, volume = {6},
-%   pages   = {1335--1372}, year = {1985}, doi = {10.1080/01431168508948283}}
-%
-% @article{KattgeKnorr2007,
-%   author  = {Kattge, Jens and Knorr, Wolfgang},
-%   title   = {Temperature acclimation in a biochemical model of photosynthesis:
-%              a reanalysis of data from 36 species},
-%   journal = {Plant, Cell \& Environment}, volume = {30}, pages = {1176--1190},
-%   year    = {2007}, doi = {10.1111/j.1365-3040.2007.01690.x}}
-%
-% @article{Collatz1992,
-%   author  = {Collatz, G. James and Ribas-Carbo, Miquel and Berry, Joseph A.},
-%   title   = {Coupled photosynthesis-stomatal conductance model for leaves of
-%              {C4} plants},
-%   journal = {Australian Journal of Plant Physiology}, volume = {19},
-%   pages   = {519--538}, year = {1992}, doi = {10.1071/PP9920519}}
-%
-% @incollection{Ball1987,
-%   author    = {Ball, J. Timothy and Woodrow, Ian E. and Berry, Joseph A.},
-%   title     = {A model predicting stomatal conductance and its contribution to
-%                the control of photosynthesis under different environmental
-%                conditions},
-%   booktitle = {Progress in Photosynthesis Research}, editor = {Biggins, J.},
-%   volume    = {4}, pages = {221--224}, publisher = {Martinus Nijhoff},
-%   year      = {1987}, doi = {10.1007/978-94-017-0519-6_48}}
-%
-% @phdthesis{Johansen1975,
-%   author  = {Johansen, Oistein},
-%   title   = {Thermal conductivity of soils},
-%   school  = {Norwegian University of Science and Technology, Trondheim},
-%   year    = {1975},
-%   note    = {English translation: CRREL Draft Translation 637, 1977}}
-% ===========================================================================
+% ---------------------------------------------------------------------------
+% References for this section.  Kept with the section so it is self-contained:
+% the keys resolve on their own when this file is compiled or dropped in.
+% If the supplement's main bibliography already defines a key (VanGenuchten1980
+% and Farquhar1980 are used elsewhere in the supplement), delete the duplicate
+% \bibitem below, or delete this whole block and use the companion BibTeX file
+% ec_site_si_refs.bib instead.
+% ---------------------------------------------------------------------------
+
+\begin{thebibliography}{99}
+
+\bibitem{Pastorello2020}
+Pastorello, G., Trotta, C., Canfora, E., \emph{et al.}
+The FLUXNET2015 dataset and the ONEFlux processing pipeline for eddy covariance
+data. \emph{Scientific Data} \textbf{7}, 225 (2020).
+\url{https://doi.org/10.1038/s41597-020-0534-3}
+
+\bibitem{Myneni2002}
+Myneni, R. B., Hoffman, S., Knyazikhin, Y., \emph{et al.}
+Global products of vegetation leaf area and fraction absorbed PAR from year one
+of MODIS data. \emph{Remote Sensing of Environment} \textbf{83}, 214--231 (2002).
+\url{https://doi.org/10.1016/S0034-4257(02)00074-3}
+
+\bibitem{Schaaf2002}
+Schaaf, C. B., Gao, F., Strahler, A. H., \emph{et al.}
+First operational BRDF, albedo nadir reflectance products from MODIS.
+\emph{Remote Sensing of Environment} \textbf{83}, 135--148 (2002).
+\url{https://doi.org/10.1016/S0034-4257(02)00091-3}
+
+\bibitem{Ryu2018}
+Ryu, Y., Jiang, C., Kobayashi, H. \& Detto, M.
+MODIS-derived global land products of shortwave radiation and diffuse and total
+photosynthetically active radiation at 5\,km resolution from 2000.
+\emph{Remote Sensing of Environment} \textbf{204}, 812--825 (2018).
+\url{https://doi.org/10.1016/j.rse.2017.09.021}
+
+\bibitem{Ryu2011}
+Ryu, Y., Baldocchi, D. D., Kobayashi, H., \emph{et al.}
+Integration of MODIS land and atmosphere products with a coupled-process model to
+estimate gross primary productivity and evapotranspiration from 1\,km to global
+scales. \emph{Global Biogeochemical Cycles} \textbf{25}, GB4017 (2011).
+\url{https://doi.org/10.1029/2011GB004053}
+
+\bibitem{Celia1990}
+Celia, M. A., Bouloutas, E. T. \& Zarba, R. L.
+A general mass-conservative numerical solution for the unsaturated flow equation.
+\emph{Water Resources Research} \textbf{26}, 1483--1496 (1990).
+\url{https://doi.org/10.1029/WR026i007p01483}
+
+\bibitem{VanGenuchten1980}
+van Genuchten, M. Th.
+A closed-form equation for predicting the hydraulic conductivity of unsaturated
+soils. \emph{Soil Science Society of America Journal} \textbf{44}, 892--898 (1980).
+\url{https://doi.org/10.2136/sssaj1980.03615995004400050002x}
+
+\bibitem{Johansen1975}
+Johansen, O.
+\emph{Thermal conductivity of soils}. PhD thesis, Norwegian University of Science
+and Technology, Trondheim (1975). English translation: CRREL Draft Translation
+637 (1977).
+
+\bibitem{Sellers1985}
+Sellers, P. J.
+Canopy reflectance, photosynthesis and transpiration.
+\emph{International Journal of Remote Sensing} \textbf{6}, 1335--1372 (1985).
+\url{https://doi.org/10.1080/01431168508948283}
+
+\bibitem{Farquhar1980}
+Farquhar, G. D., von Caemmerer, S. \& Berry, J. A.
+A biochemical model of photosynthetic CO$_2$ assimilation in leaves of C$_3$
+species. \emph{Planta} \textbf{149}, 78--90 (1980).
+\url{https://doi.org/10.1007/BF00386231}
+
+\bibitem{KattgeKnorr2007}
+Kattge, J. \& Knorr, W.
+Temperature acclimation in a biochemical model of photosynthesis: a reanalysis of
+data from 36 species. \emph{Plant, Cell \& Environment} \textbf{30}, 1176--1190
+(2007). \url{https://doi.org/10.1111/j.1365-3040.2007.01690.x}
+
+\bibitem{Collatz1992}
+Collatz, G. J., Ribas-Carbo, M. \& Berry, J. A.
+Coupled photosynthesis-stomatal conductance model for leaves of C$_4$ plants.
+\emph{Australian Journal of Plant Physiology} \textbf{19}, 519--538 (1992).
+\url{https://doi.org/10.1071/PP9920519}
+
+\bibitem{Ball1987}
+Ball, J. T., Woodrow, I. E. \& Berry, J. A.
+A model predicting stomatal conductance and its contribution to the control of
+photosynthesis under different environmental conditions. In \emph{Progress in
+Photosynthesis Research} (ed. Biggins, J.) \textbf{4}, 221--224 (Martinus
+Nijhoff, 1987). \url{https://doi.org/10.1007/978-94-017-0519-6_48}
+
+\end{thebibliography}
