@@ -32,6 +32,21 @@ br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
     lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)   # bridge-frame lon fix
+if os.environ.get("DINO_VMIX"):
+    # Swap-the-subsystem discriminator: "constant" uses cfg.A_v_bg/K_v_bg
+    # directly, which for the kamm card are 1.2e-4 / 1.2e-5 -- byte-identical
+    # to NEMO's rn_avm0/rn_avt0 under ln_zdfcst=T. Running BOTH models on this
+    # zero-transcription-risk closure asks whether the growth gap is OWNED by
+    # the vertical mixing scheme or merely survives it.
+    cfg = dataclasses.replace(cfg, vmix_scheme=os.environ["DINO_VMIX"])
+    print(f"ABLATION: vmix_scheme={cfg.vmix_scheme}")
+if os.environ.get("DINO_NO_GM"):
+    # Ablation / instrument-POWER control: GM is a first-order ACC lever, so a
+    # run with it off bounds how much a 1-year window can move ACC at all. If
+    # ACC barely shifts here, a 1-year matched-state ACC comparison has no
+    # discriminating power and only the multi-year curve can be trusted.
+    cfg = dataclasses.replace(cfg, use_gm_redi=False)
+    print("ABLATION: use_gm_redi=False")
 if INIT_RESTART:
     st = br.state          # the bridged NEMO state itself, NOT the analytic rest IC
     print(f"INIT from developed NEMO restart: {INIT_RESTART}")
@@ -65,19 +80,30 @@ print(f"tau_x[Pa] min/max = {float(jnp.min(sf.tau_x)):.3f}/{float(jnp.max(sf.tau
 
 dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))  # sf constant (annual tau)
 
-acc = {k: jnp.zeros_like(getattr(st, k).data) for k in ("T", "S", "eta", "u", "v")}
-for k in range(NSTEPS):
-    st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT)
-    st = dyn(st)
-    if k >= ACC0:
-        for f in acc: acc[f] = acc[f] + getattr(st, f).data
-    if (k + 1) % 960 == 0:
-        Td = np.asarray(st.T.data); m = np.asarray(st.land_mask.data) > 0.5
-        us = np.asarray(st.u.data[..., 0])
-        print(f"  day {(k+1)*DT/86400:5.1f}  T[{Td[m].min():.1f},{Td[m].max():.1f}] "
-              f"usurf[{us.min():.3f},{us.max():.3f}] finite={np.isfinite(Td[m]).all()}", flush=True)
-mean = {f: np.asarray(acc[f]) / (NSTEPS - ACC0) for f in acc}
-mean["land_mask"] = np.asarray(st.land_mask.data)
-np.savez(OUT, **mean)
-Td = np.asarray(st.T.data); m = mean["land_mask"] > 0.5
-print(f"DONE nsteps={NSTEPS} ({NSTEPS*DT/86400:.1f}d) STABLE={np.isfinite(Td[m]).all() and Td[m].max()<45} -> {OUT}")
+# DINO_YEARS>1 runs consecutive years and writes ONE annual mean per year
+# (suffix _y2, _y3, ...), so a multi-year run reproduces exactly what NEMO's
+# yearly output gives -- a growth CURVE, not just an endpoint. Single-year
+# behaviour and the output filename are unchanged when DINO_YEARS is unset.
+YEARS = int(os.environ.get("DINO_YEARS", "1"))
+kglob = 0
+for year in range(1, YEARS + 1):
+    acc = {k: jnp.zeros_like(getattr(st, k).data) for k in ("T", "S", "eta", "u", "v")}
+    for k in range(NSTEPS):
+        kglob += 1
+        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
+                                                t_seconds=kglob * DT)
+        st = dyn(st)
+        if k >= ACC0:
+            for f in acc: acc[f] = acc[f] + getattr(st, f).data
+        if (k + 1) % 960 == 0:
+            Td = np.asarray(st.T.data); m = np.asarray(st.land_mask.data) > 0.5
+            us = np.asarray(st.u.data[..., 0])
+            print(f"  y{year} day {(k+1)*DT/86400:5.1f}  T[{Td[m].min():.1f},{Td[m].max():.1f}] "
+                  f"usurf[{us.min():.3f},{us.max():.3f}] finite={np.isfinite(Td[m]).all()}", flush=True)
+    mean = {f: np.asarray(acc[f]) / (NSTEPS - ACC0) for f in acc}
+    mean["land_mask"] = np.asarray(st.land_mask.data)
+    out_year = OUT if year == 1 else OUT.replace(".npz", f"_y{year}.npz")
+    np.savez(out_year, **mean)
+    Td = np.asarray(st.T.data); m = mean["land_mask"] > 0.5
+    print(f"DONE year {year}/{YEARS} ({kglob*DT/86400:.1f}d cumulative) "
+          f"STABLE={np.isfinite(Td[m]).all() and Td[m].max()<45} -> {out_year}", flush=True)
