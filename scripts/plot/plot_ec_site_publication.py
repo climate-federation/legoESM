@@ -139,8 +139,7 @@ def _diurnal(a, v, t, dt, season):
 
 
 def _r2box(a, val):
-    a.text(0.04, 0.95, f"R$^2$={val:.2f}", transform=a.transAxes, va="top", fontsize=8,
-           bbox=dict(boxstyle="round,pad=0.2", fc="w", ec="0.8", alpha=0.85))
+    a.text(0.04, 0.95, f"R$^2$={val:.2f}", transform=a.transAxes, va="top", fontsize=8)
 
 
 def _row_label(a, site):
