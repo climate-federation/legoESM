@@ -101,146 +101,19 @@ is the fix.
   needs a θ-CONSISTENT metric (score the closure loss AND σ_LES on θ alone — don't mix a
   combined margin with a θ-only σ). Doc-only + already-reviewed σ_LES code (codex-exempt).
 
-- **Iter 11 (this commit) — AD path (D4).** Feasibility confirmed by probe: the SCM
-  forward IS differentiable end-to-end w.r.t. traced turbulence params (the blocker was
-  `scm_les_final_loss`'s `float()`/`bool()` concretization). Built:
-  `scm_runner.scm_les_loss_jax` (a pure-JAX, traced-scalar form of the SAME final-snapshot
-  objective — jax.grad'able; smagorinsky C_s grad −2.3e-4 finite/nonzero, mynn25 A1 ~0
-  matching its known negligible θ-leverage); `tune_scm_to_les.tune_closure_ad` (Adam
-  gradient descent in normalised [0,1] param space; TRACED-leaf params → one jaxpr shape
-  so XLA reuses the compiled grad, vs the DF NEW-static-config-per-candidate recompile —
-  not jit'd since build's float() grid-setup is jit-incompatible with a traced config);
-  `--method {df,ad,both}`
-  in the CLI (`both` writes the D4 AD-vs-DF comparison: loss gap + which optimum wins).
-  Tests: `test_scm_les_loss_jax_is_differentiable`, `test_tune_closure_ad_reduces_or_
-  matches_default`. NOTE: `run` is a Python step-loop that jax.grad UNROLLS, so AD is
-  practical only at modest nsteps until a `lax.scan` rollout lands (the full-resolution
-  perf follow-on).
-
-- **Iter 12 (this commit) — STABLE (SBL) regime wired → the 2nd regime for Q3.**
-  `run_les_suite` gains `_build_sbl` (GABLS1 stratified sounding — the smooth θ ramp
-  zi=100/Δ=25/γ=0.01, Ug=8 geostrophic IC + lower-half perturbations, projected) and
-  `_make_emit_step` (a regime factory: dry CBL = plain `sl.step`; SBL adds the Rayleigh
-  sponge in the top 25% + a re-projection so the low-level jet / GWs are absorbed at the
-  rigid lid, not reflected → no ~0.9 h blow-up). `dry_stable` added to `_WIRED_REGIMES`;
-  the SBL uses the case grid dt (0.1 s, stiffer stratification), `nu_floor` background
-  viscosity, and negative surface flux (cooling). All faithful to the validated
-  `run_spectral_sbl.py`. Coriolis via `--lat` (GABLS1 73° → f=1.39e-4). Tests:
-  `test_build_sbl_stratified_ic_and_geostrophic_wind` (θ increases upward, u≈Ug, Q0<0),
-  `test_emit_step_factory_rejects_unknown_regime`, wired-regimes. GPU VALIDATION (0.3 h,
-  64×64×96, vreman): runs STABLY — no blow-up (the sponge holds the lid), θ stays stratified
-  (sfc 264.8 → top 267.9 K, cooled from 265), the surface wind is dragged to 2.62 m/s
-  (< Ug=8), forcing recorded (u_geo=8, f=1.39e-4, w'θ'=−0.005), all finite. The
-  super-geostrophic low-level JET has not formed yet — expected, it develops over HOURS
-  (inertial period 2π/f≈12.5 h); 0.3 h is early spin-up. So the wiring runs correctly;
-  the equilibrium jet + full validation await the 4 h run. This unlocks Q3
-  (dry_convective vs dry_stable inter-regime coefficient spread) once both are tuned.
-  Moist regimes (shallow_cumulus/stratocumulus) still need their IC builders + D9 cloud.
-
-- **Iter 14 (this commit) — campaign single-instance guard (Q2 throughput fix).**
-  Diagnosed a real drag on Q2: TWO `run_les_suite_campaign.sh` shells were running at
-  once — the original (17:27) had been orphaned from its dead harness task (reparented to
-  init, kept running) and an iter-13 resubmit (19:02) then duplicated it. Both landed on
-  the heavy `clubb_lite` (nlev=24) tune, racing on the same `__clubb_lite__df.json` and
-  halving each other's CPU (the "1h50m clubb_lite" was contention, not a deadlock — both
-  at 136% CPU). They self-heal (idempotent skip-if-exists) but waste a core and can clobber.
-  FIX: a `flock -n` single-instance guard (fd 9 on `campaign/.campaign.lock`, auto-released
-  on exit) so any concurrent resubmit is a clean no-op. Self-tested (2nd instance refuses)
-  + `bash -n`. Shell orchestration only (no numerics/AD) → codex-exempt. Does NOT stop the
-  two pre-guard shells (kill is classifier-blocked); they finish idempotently, and future
-  resubmits can't re-duplicate. AD scan-rollout re-scoped as NOT on the critical path: D4's
-  AD-vs-DF agreement is a controlled `--method both` run at EQUAL config, not full-res AD
-  (reduced-res AD vs full-res DF would be a resolution confound); the scan-rollout is a pure
-  perf nicety, deferred. SBL 4 h vreman emit still integrating (jet develops over ~12.5 h).
-
-- **Iter 15 (this commit) — SBL 4 h equilibrium VALIDATED + θ-breakdown score exposed.**
-  The GABLS1 4 h vreman emit (144,000 steps @ dt=0.1 s, 64×64×96, wall=2821 s) completed
-  and OVERWROTE the 0.3 h validation. Final-frame equilibrium (LES_SUITE.md §7.2): stably
-  stratified (Δθ=+3.36 K, sfc 264.3 → top 267.7 K), surface wind dragged to 2.04 m/s, a
-  clear Ekman spiral (v peaks ~3 m/s at 50–100 m → 0 above 200 m), all finite, NO blow-up
-  over the full 4 h (the sponge holds at the rigid lid). The super-geostrophic low-level
-  JET is EMERGING but WEAK — a local wind max of 8.05 m/s at ~170 m, only +0.05 m/s over
-  Ug=8; the classic GABLS1 ~1–2 m/s overshoot peaks near the ¾-inertial-period (~9 h), and
-  4 h is only 0.32 of the 2π/f≈12.5 h period ⇒ early jet formation, not the peak. So the
-  SBL regime is a physically-correct stable/stratified/Ekman target — usable for Q3 tuning
-  (a 9 h run would give the peaked jet, a follow-on). Also (commit 2211a7065): factored
-  `scm_les_final_score` (full θ/u/v + combined PrognosticScore) out of `scm_les_final_loss`
-  (now a thin wrapper; a test asserts `.combined == loss` bit-exactly), and recorded
-  nlev/dt in the tuner JSON — both enabling the θ-consistent D7 gate (rank closures on
-  θ_rmse, gate margins on σ_LES(θ)=0.0074 vs the wind-dominated σ_LES(combined)=0.319).
-  Campaign single-instance `flock` guard added (commit 8e47a6dc2) after two orphaned
-  campaigns raced clubb_lite. Q2 anchor now 7/9 (added tke + clubb_lite=0.231, which BEATS
-  holtslag=0.241 — a higher-order PDF closure edging the best nonlocal at the anchor flux;
-  edmf still tuning, clubb deferred). **NEXT-SBL:** emit the SBL SGS spread (lasd+smag) →
-  σ_LES(SBL) for the D7 gate on regime 2.
-
-- **Iter 16 (this commit) — θ-consistent D7 significance tool (codex-CLEAN).**
-  `scripts/validate/les_suite/theta_significance.py`: re-scores each tuned closure's
-  `best_overrides` via `scm_les_final_score` (SAME build/normalization as the tuner, at
-  the record's nlev/dt — fallback 24/10 = campaign config), recovers the θ-ONLY profile
-  RMSE, ranks closures per surface-flux, and gates the best-vs-2nd margin on σ_LES(θ)≈0.0074
-  — the robust θ floor, vs the wind-dominated σ_LES(combined)=0.319 that calls every margin
-  insignificant for the Ug=0 CBL. Pure `rank_theta_significance` + `split_trusted` logic
-  (8 unit tests, 1.3 s); reuses the tuner's apply-site + the score fn (no duplicated
-  numerics). PRECISION-GATE (codex round-1 finding, fixed round-2 CLEAN): the self-check is
-  a HARD GATE — a re-score that fails to reproduce the tuner's stored `best_loss` (tristate:
-  False mismatch / None unverifiable-no-best_loss) is EXCLUDED from the ranking and REPORTED
-  (stderr + an ⚠ EXCLUDED section in the markdown), never silently ranked SIGNIFICANT. The
-  actual multi-closure θ-verdict RUN is compute-bound (one nlev=24 re-score is ~12 min CPU
-  ⇒ ~27 re-scores ≈ 5 h; the 2-campaign + GPU-spread + networked-FS contention makes it
-  slower) → deferred to a quiet node. SBL SGS spread (lasd+smag) still emitting.
-  END-TO-END VALIDATED on real data (1-closure smoke, smagorinsky anchor): the re-score
-  reproduces the stored loss EXACTLY (rescored_combined=0.26130 == best_loss=0.26130 →
-  self_check_ok=True, so the 24/10 fallback matches the campaign protocol) and the split is
-  θ_rmse=0.215, u_rmse=0.233, v_rmse=**0.323** — v/Ekman dominates the combined 0.261,
-  confirming the wind-domination that motivates the θ-only gate; σ_LES(θ)=0.0074 sits far
-  below plausible closure θ-margins, so the θ gate can find significance the combined cannot.
-
-- **Iter 17 (this commit) — lax.scan SCM rollout (~250× faster) → θ-CONSISTENT D7 VERDICT.**
-  Built the `lax.scan` free-run (`SingleColumnModel.pure_step` + `scm_scan_final_state`,
-  wired into `scm_final_theta_on`): the Python 720-step loop → ONE compiled XLA program, so a
-  nlev=24 re-score drops **~720 s → ~2.8 s** (loss bit-reproduced 0.26130==0.26130) and is
-  AD-tractable (the loop UNROLLED under jax.grad). Machine-precision (~1e-9) vs `run()` for
-  the dry CBL, validated at state AND θ-eval level. Codex: 2 rounds, LOGIC CLEAN, overclaim
-  wording fixed. This unblocked the deferred θ-verdict: it ran in **~25 s** (was ~5 h). RESULT
-  (`theta_significance.py`, gated on σ_LES(θ)=0.0074): **at EVERY dry-CBL flux the closures
-  are SIGNIFICANTLY distinguishable on θ** (top margins 0.032–0.181 ≫ 0.0074) — FLIPS the
-  wind-dominated combined-gate "not significant" verdict. Ranking: nonlocal `holtslag` best
-  at 4/5 fluxes, higher-order `clubb_lite` best at the anchor, 1.5-order `mynn25` worst
-  everywhere ⇒ "closure order buys skill" is nuanced — structural nonlocal/PDF win, raw order
-  does not (full write-up LES_SUITE.md §7.1). All self-checks passed (scan reproduces the
-  tuner exactly for the whole roster). Also: put idle GPU 1 to work (SBL smagorinsky emit
-  parallel to lasd → σ_LES(SBL) ~50 min sooner). See [[les-suite-compute-gpu]].
-
-- **Iter 18 (this commit) — Q2 COMPLETE: full 9×5 grid via scan; ORDER buys skill.** The
-  scan rollout collapsed the compute wall: filled the 12 missing flux-sweep cells
-  (tke/clubb_lite/edmf × 4 fluxes) at ~13 s each, the anchor edmf, and — key — **full CLUBB
-  at nlev=24 works now** (~58 s/cell, no OOM: the earlier crash was compile memory the scan's
-  one-step graph avoids), completing all **45/45** dry-CBL cells (9 closures × 5 fluxes) in
-  minutes vs the campaign's projected hours. Regenerated the scorecard + re-ran the θ-verdict
-  on the full grid. **RESULT (both combined & θ, identical order at every flux): clubb ≈
-  clubb_lite ≈ edmf (higher-order) < tke < holtslag < smag/louis < ysu/mynn25 ⇒ closure
-  ORDER buys skill** on the dry CBL. This SUPERSEDES the earlier 5-closure "order doesn't buy
-  skill" (an artifact of the incomplete roster). θ-significance: across-family gaps are
-  10–70× σ_LES(θ)=0.0074 (hugely significant); the two leaders clubb≈clubb_lite are near-tied
-  (top margin significant only at Q0=0.02). Tuning is default-dominated (only smag improves
-  materially) → ranking ≈ default closure fidelity. Full write-up LES_SUITE.md §7.1. The slow
-  duplicate campaigns are now fully redundant (scan filled every cell first; they skip). SBL
-  smagorinsky still emitting on GPU 1 → σ_LES(SBL) next.
-
-- **Iter 19 (this commit) — Q3 DONE + geostrophic wiring: inter-regime spread NOT
-  significant.** Wired the artifact geostrophic wind (u_geo/v_geo) into
-  `build_cbl_scm_from_artifact` (Coriolis+geostrophic PGF, `du/dt=+f(v-vg)`; f_c=0 free-CBL
-  byte-unchanged; f_c!=0-without-u_geo now RAISES) — codex-reviewed (sign + free-CBL VERIFIED;
-  safe-degradation/docstring/test-sign fixed; test pins the positive NH Ekman sign). Then
-  tuned all 9 closures on the SBL (`sbl_gabls1__lasd__ug8`, same nlev=24/dt=10 — stable SCM
-  integrates fine at dt=10, ~13 s/closure via scan). σ_LES(SBL)=**0.546** combined /0.197 θ
-  (3-variant; static smag a far outlier — stable regime is SGS-sensitive). **Q3 cross-transfer
-  gate: 0/9 closures' CBL-tuned coeffs cost > σ_LES(SBL) on the SBL (penalties 0–0.16);
-  holtslag/ysu/tke exactly 0.000** ⇒ the large-looking coeff spreads (l_mix_max 275→15,
-  Ri_crit 0.7→0.13) are TUNING NOISE on loss-insensitive params, NOT a regime requirement —
-  the σ_LES gate refusing a false claim (§7.3). SBL closure ranking DIFFERS from CBL (edmf
-  best-3 CBL, worst SBL). **Q1/Q2/Q3/D4/D7 now all DONE for the dry regimes.**
+- **Iters 11–20 (2026-07-24, one commit each) — the science campaign + the scan breakthrough**
+  (durable results in the tracker above + LES_SUITE.md §7; per-iter prose in each commit):
+  - **11** — AD path (D4): `scm_les_loss_jax` + `tune_closure_ad` (Adam, traced leaves) + `--method {df,ad,both}`.
+  - **12** — STABLE SBL regime wired (`_build_sbl` GABLS1 sounding + `_make_emit_step` Rayleigh sponge/re-projection).
+  - **13** — resumable science campaign launched (flux sweep + tuning).
+  - **14 `8e47a6dc2`** — flock single-instance guard on the campaign (orphan+resubmit race).
+  - **15 `2211a7065`+`f02769564`** — SBL 4 h VALIDATED (stratified/Ekman, jet emerging) + `scm_les_final_score` (θ/u/v breakdown) + nlev/dt recorded.
+  - **16 `3a7d081a1`** — θ-consistent D7 tool (`theta_significance.py`, self-check HARD GATE; codex-CLEAN).
+  - **17 `f88a980fa`** — **lax.scan SCM rollout (~250×)** (`pure_step`+`scm_scan_final_state`; machine-precision vs `run`, AD-tractable) — the breakthrough that collapsed the compute wall.
+  - **18 `2de7c6260`** — **Q2 COMPLETE (full 9×5)** via scan (clubb@nlev=24 unblocked) ⇒ closure ORDER buys skill (higher-order best; combined + θ agree).
+  - **19 `c1a677e3b`** — **Q3 DONE + geostrophic wiring** (SBL tuned 9/9; σ_LES(SBL)=0.546; CBL→SBL coeff-transfer <σ_LES ⇒ spread NOT significant = tuning noise).
+  - **20 `72d7c278e`** — **D4 bonus RUN** (AD≈DF, gaps ≤0.009 ⇒ closures gradient-calibratable) + this condense.
+  - **MILESTONE: Q1/Q2/Q3/D4/D7 all DONE for the dry regimes (CBL/sheared/SBL). Remaining: moist (BOMEX/DYCOMS) + D9 cloud.**
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
