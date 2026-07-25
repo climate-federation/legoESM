@@ -456,6 +456,34 @@ explicit solver — which is why wide-halo was the larger win in the earlier
 arms, and it now has a mechanistic reason rather than just an empirical
 ranking.
 
+## MATCHED CONFIG HEAD-TO-HEAD — the production recommendation (job 26460365)
+
+All three arms in ONE job on ONE node, back to back, conservation-gated
+(LL576x1152 L20 f64):
+
+| arm | nd1 | nd2 | nd4 | eff@2 | eff@4 | residual |
+|---|---|---|---|---|---|---|
+| implicit + standard PCG (production) | 63.54 | 42.57 | 23.48 ms | 0.75 | 0.68 | 2.079e-04 |
+| implicit + **single_reduce** | 64.81 | 41.63 | **22.09** | 0.78 | 0.73 | 2.079e-04 |
+| explicit + wide-halo | 71.52 | 43.65 | 23.28 | 0.82 | **0.77** | n/a (different solver) |
+
+THE TWO METRICS DISAGREE, and the distinction drives the recommendation:
+`single_reduce` is FASTEST in absolute time at every count above 1 (1.063x
+vs production, 1.054x vs wide-halo at nd4), while wide-halo has the BEST
+EFFICIENCY — but only because it starts 10 % SLOWER at nd1, which flatters
+a ratio normalised to its own single-device time. Efficiency is not speed.
+
+RECOMMENDATION for <=4 GPUs in f64: **`barotropic_implicit_pcg_variant =
+"single_reduce"`**. It is the fastest arm measured, its residual is
+BIT-IDENTICAL to production (2.079e-04 both), and it is a one-line config
+change requiring no scheme-stability review — unlike wide-halo, which
+changes the barotropic scheme and needs the stability gates listed under
+open items.
+
+NOT EXTRAPOLATED: wide-halo's steeper efficiency curve may overtake in
+absolute time at 8-16 GPUs, where sync dominates further. That is a real
+open question and this ladder (<=4 GPUs, single node) cannot answer it.
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
