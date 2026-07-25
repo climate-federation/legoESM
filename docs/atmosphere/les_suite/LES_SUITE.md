@@ -354,9 +354,33 @@ physically-correct stable equilibrium:
   early jet formation, not the peak. A 9 h run would give the peaked jet (a follow-on);
   the 4 h stable/stratified/Ekman state is already a valid Q3 tuning target.
 
-Remaining for Q3: emit the SBL SGS spread (lasd + smagorinsky at this exact config) →
-σ_LES(SBL) for the D7 gate on regime 2, then tune the closures on the SBL and compare the
-tuned coefficients CBL-vs-SBL.
+### 7.3 Q3 — inter-regime coefficient spread: NOT significant vs σ_LES (2026-07-24)
+
+Both regimes now have all 9 closures tuned (CBL: `cbl_nieuwstadt__lasd`; SBL: `sbl_gabls1__
+lasd__ug8`, at the SAME nlev=24/dt=10 — controlled). The tuner reproduces the SBL via the
+geostrophic-wind wiring (`f_c`+`u_geo`, Coriolis+geostrophic PGF); the stable SCM integrates
+stably at dt=10, and the SBL closure ranking DIFFERS from the CBL (e.g. edmf is best-3 on the
+CBL but WORST on the SBL, 0.82) — closures are not equally skilful across regimes.
+
+**σ_LES(SBL) = 0.546 (combined, 3-variant), 0.197 (θ)** — much larger than the CBL's 0.319 /
+0.0074. The stable regime is HIGHLY SGS-sensitive: vreman↔lasd agree (0.14) but static
+**smagorinsky is a far outlier** (0.54–0.79 from both) — expected (static Smag over-mixes a
+stable BL). So the SBL LES's own uncertainty is large.
+
+**Q3 VERDICT (D7-gated cross-transfer): the inter-regime coefficient spread is NOT
+significant.** The tuned coefficients LOOK very different between regimes (louis `l_mix_max`
+275→15, `Ri_crit` 0.63→0.13; holtslag `Ri_crit` 0.7→0.13; edmf `l_mix_max` 168→22), BUT
+applying each closure's CBL-tuned coefficients to the SBL costs a loss penalty of only
+0.00–0.16 — **0/9 exceed σ_LES(SBL)=0.546** (and only louis's 0.16 would clear even the
+smag-excluded 2-variant floor 0.14). Decisively, holtslag/ysu/tke show a penalty of EXACTLY
+0.000 — their CBL coefficients give the identical SBL loss — so their apparent "spread" is
+**tuning noise on loss-insensitive parameters** from the coarse tier-1 random search, not a
+real regime requirement. This is the σ_LES gate working as designed: it refuses a false
+"closures need regime-specific coefficients" claim that a naive coefficient-diff table would
+assert. A significant Q3 result would need finer tuning (less noise), a tighter σ_LES (more/
+better SGS variants, excluding over-diffusive static Smag), and the peaked-jet 9 h SBL.
+CONFIRMED (cross-transfer scored on the SBL); the coefficient-diff magnitudes are real but
+sub-σ_LES.
 
 ---
 

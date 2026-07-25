@@ -14,7 +14,7 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
 | Q1b skill threshold (dry CBL, prognostic) | **DONE** — combined-gate NOT significant (wind-dominated); **θ-consistent gate: SIGNIFICANT at every flux** (margins ≫ σ_LES(θ)=0.0074) ⇒ closures distinguishable on θ |
 | Q2 nine-closure ranking | **DONE — FULL 9×5 grid** (45/45 tuned via scan, incl. clubb@nlev=24). Higher-order clubb/clubb_lite/edmf best at every flux > tke > holtslag > smag/louis > ysu/mynn25 ⇒ **closure ORDER buys skill** (both combined & θ) |
-| Q3 inter-regime coefficient spread | **regimes ready + SBL validated at 4 h** (stable/stratified/Ekman, jet emerging weak — peaks ~9 h); needs SBL SGS spread → σ_LES(SBL), then SBL tuning |
+| Q3 inter-regime coefficient spread | **DONE — NOT significant vs σ_LES** (both regimes tuned 9/9; σ_LES(SBL)=0.546; CBL→SBL coeff-transfer penalty 0–0.16 < σ_LES ⇒ apparent spread is tuning noise on loss-insensitive params). §7.3 |
 | D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
 | D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
 
@@ -227,6 +227,20 @@ is the fix.
   materially) → ranking ≈ default closure fidelity. Full write-up LES_SUITE.md §7.1. The slow
   duplicate campaigns are now fully redundant (scan filled every cell first; they skip). SBL
   smagorinsky still emitting on GPU 1 → σ_LES(SBL) next.
+
+- **Iter 19 (this commit) — Q3 DONE + geostrophic wiring: inter-regime spread NOT
+  significant.** Wired the artifact geostrophic wind (u_geo/v_geo) into
+  `build_cbl_scm_from_artifact` (Coriolis+geostrophic PGF, `du/dt=+f(v-vg)`; f_c=0 free-CBL
+  byte-unchanged; f_c!=0-without-u_geo now RAISES) — codex-reviewed (sign + free-CBL VERIFIED;
+  safe-degradation/docstring/test-sign fixed; test pins the positive NH Ekman sign). Then
+  tuned all 9 closures on the SBL (`sbl_gabls1__lasd__ug8`, same nlev=24/dt=10 — stable SCM
+  integrates fine at dt=10, ~13 s/closure via scan). σ_LES(SBL)=**0.546** combined /0.197 θ
+  (3-variant; static smag a far outlier — stable regime is SGS-sensitive). **Q3 cross-transfer
+  gate: 0/9 closures' CBL-tuned coeffs cost > σ_LES(SBL) on the SBL (penalties 0–0.16);
+  holtslag/ysu/tke exactly 0.000** ⇒ the large-looking coeff spreads (l_mix_max 275→15,
+  Ri_crit 0.7→0.13) are TUNING NOISE on loss-insensitive params, NOT a regime requirement —
+  the σ_LES gate refusing a false claim (§7.3). SBL closure ranking DIFFERS from CBL (edmf
+  best-3 CBL, worst SBL). **Q1/Q2/Q3/D4/D7 now all DONE for the dry regimes.**
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
