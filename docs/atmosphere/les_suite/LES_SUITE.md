@@ -480,11 +480,22 @@ sub-σ_LES.
      (untrusted re-scores excluded + reported). Validated end-to-end on real data (1-closure
      smoke: self-check exact; v/Ekman dominates the combined). The full ranked verdict RUN is
      compute-bound (~5 h for 27 closures) → a quiet-node step.
-   - Remaining (all COMPUTE runs; machinery complete): finish the Q2 flux grid + the SBL
-     SGS spread (emitting) → σ_LES(SBL) → SBL tuning → Q3 inter-regime spread; the θ-verdict
-     run; the D4 `--method both` AD-vs-DF run; `clubb` tuning at nlev=24 (memory headroom);
-     the MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme; the AD scan-rollout (full-res
-     perf); the 2×-resolution σ_LES runs.
+   - **DRY-REGIME SUITE COMPLETE (2026-07-24)**: the `lax.scan` rollout (§7.1/D4; ~250×
+     faster free-run, AD-tractable) unblocked the whole compute wall — Q2 full 9×5 grid
+     (incl. clubb@nlev=24), the θ-consistent verdict, σ_LES(SBL), SBL tuning, Q3, and the
+     D4 AD-vs-DF run all landed. Q1/Q2/Q3/D4/D7 are DONE for the CBL/sheared/SBL regimes.
+   - **REMAINING — MOIST regimes (the one un-done deliverable), a fresh-session build.**
+     Foundations EXIST: the moist LES core `dynamics/les/spectral_les_moist.py` (moist
+     diagnostics, positive-definite moisture conservation, Sundqvist/SBK89 diagnostic
+     condensation) + standalone `run_bomex_les.py`/`run_dycoms_les.py`, and the registry
+     cases `bomex_cu` (shallow_cumulus) + `dycoms_rf01_sc` (stratocumulus). GAPS to fill:
+     (1) wire the moist regimes into `run_les_suite` (`_build_bomex`/`_build_dycoms` IC +
+     moist emit step, add to `_WIRED_REGIMES` — analogous to the SBL wiring); (2) the moist
+     SCM coupling — extend `build_cbl_scm_from_artifact` with a `q_t` IC + condensation so
+     the SCM reproduces the moist BL (score.py already computes `qt_rmse`); (3) the D9 cloud
+     scheme = the CLUBB native-vs-shared-cloud pair (so Q2's "higher-order wins" is not a
+     cloud-PDF artifact). Then re-run Q1/Q2/Q3 including the moist regimes. Also optional:
+     the 2×-resolution σ_LES runs; the 9 h peaked-jet SBL.
    See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
