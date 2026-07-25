@@ -473,16 +473,39 @@ vs production, 1.054x vs wide-halo at nd4), while wide-halo has the BEST
 EFFICIENCY — but only because it starts 10 % SLOWER at nd1, which flatters
 a ratio normalised to its own single-device time. Efficiency is not speed.
 
-RECOMMENDATION for <=4 GPUs in f64: **`barotropic_implicit_pcg_variant =
-"single_reduce"`**. It is the fastest arm measured, its residual is
-BIT-IDENTICAL to production (2.079e-04 both), and it is a one-line config
-change requiring no scheme-stability review — unlike wide-halo, which
-changes the barotropic scheme and needs the stability gates listed under
-open items.
+THE CROSSOVER, MEASURED (jobs 26460444/45/48 + 26460501) — and my
+first recommendation was right only for the corner I had measured.
 
-NOT EXTRAPOLATED: wide-halo's steeper efficiency curve may overtake in
-absolute time at 8-16 GPUs, where sync dominates further. That is a real
-open question and this ladder (<=4 GPUs, single node) cannot answer it.
+Same-precision f32 ladder, both arms, LL576:
+
+| nd | single_reduce | explicit+wide | winner |
+|---|---|---|---|
+| 1 | 35.01 | 36.45 ms | single_reduce (1.04x) |
+| 2 | 24.09 | 22.48 | wide (1.07x) |
+| 4 | 14.69 | 12.84 | wide (1.14x) |
+| 8 | **15.89** | 11.04 | wide (**1.44x**) |
+| 16 | — | 8.71 | wide |
+
+Two things this shows that the f64 <=4-GPU ladder could not:
+1. **single_reduce ANTI-SCALES past 4 GPUs in f32** (14.69 -> 15.89 ms from
+   4 to 8) — it hits the sync wall, while wide-halo keeps improving all the
+   way to 16.
+2. **PRECISION FLIPS THE WINNER at nd=4**: single_reduce is 1.05x faster in
+   f64, wide-halo is 1.14x faster in f32. Coherent with the mechanism —
+   f64 carries more compute per iteration so sync is a smaller fraction and
+   the low-extra-compute solver wins; f32 shrinks compute until sync
+   dominates and wide-halo's zero-solver-sync takes over.
+
+RECOMMENDATION (a decision table, not a winner):
+
+| regime | config | why |
+|---|---|---|
+| f64, <=4 GPUs | `pcg_variant="single_reduce"` | fastest there, BIT-IDENTICAL residual, one-line change, no scheme review |
+| f32, or >=2 GPUs, or scaling out | explicit + wide-halo | wins from nd2 in f32 and the margin grows to 1.44x at nd8; the only arm that keeps scaling to 16 — but it CHANGES THE BAROTROPIC SCHEME and needs the stability gates under open items |
+
+A single "best ocean config" claim would be wrong in one regime or the
+other; the earlier campaign arms disagreed precisely because they sampled
+different precisions and device counts.
 
 ## Using the calibrated bound correctly (a trap worth documenting)
 
