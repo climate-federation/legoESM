@@ -528,7 +528,12 @@ sub-σ_LES.
      produced in this environment** — the user must provide a gSAM checkout via
      `LEGOESM_GSAM_ROOT=<dir containing CASES/>` (or `--gsam-root`), then
      `python scripts/data/fetch_les_forcing.py --only BOMEX DYCOMSII`. Once the forcing is
-     available, the code path below is the build (a fresh-session task). NOTE the SBL was
+     available, the code path below is the build (a fresh-session task). The artifact SCHEMA
+     is already moist-ready (`LESReferenceArtifact.qt`/`wqt_resolved`/`wqt_sgs`/`w_qv_s`,
+     `is_moist()`; θ carries θ_l for moist; `score.qt_rmse` exists) — so the gap is the moist
+     SCM PHYSICS (q_t IC + condensation/latent-heating + a moist microphysics config in
+     `build_cbl_scm_from_artifact`), which must be built AND validated against the real moist
+     LES (fidelity can't be checked without a BOMEX artifact — don't build it blind). NOTE the
      doable WITHOUT external data only because GABLS1 is an ANALYTIC case with an existing
      `run_spectral_sbl.py` to reuse; BOMEX/DYCOMS are NOT in `ANALYTIC_CASES` and have NO
      analytic builder — an analytic route would require implementing the Siebesma (2003) /
