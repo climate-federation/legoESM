@@ -6,12 +6,14 @@ Q1a, Q1b (free + sheared, θ-consistent), Q2 (full 9×5 grid), Q3 (stability + s
 built + validated + codex-CLEAN** (θ_l/q_t scoring, diagnostic Sundqvist condensation, DF+AD),
 and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned, θ_l-corrected, D7-gated by
 σ_LES=0.053)** is COMPLETE — every arm on the SHARED Sundqvist cloud scheme, so the ranking
-isolates the turbulence closure (D9 shared-cloud control). Gated verdict: "order buys skill"
-does NOT hold in shallow Cu (nonlocal+local lead, top-5 tied within σ_LES, weak tail resolved).
-The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked the compute wall.
-**REMAINING: DYCOMS (2nd moist anchor, validation emitting) + the full-D9 native-CLUBB-cloud
-leg** (a CLUBB turbulence-interface change; the shared-cloud control is done + the gap is
-expected small by condensation-invariance — see §7.4). Decks in `data/les_cases/{BOMEX,DYCOMS_RF01}`.
+isolates the turbulence closure (D9 shared-cloud control). **DYCOMS-II RF01 stratocumulus Q2 (2nd moist anchor, θ_l, D7-gated
+σ_LES=0.231)** is also produced — a σ_LES-gated NULL (whole closure spread < σ_LES → nothing
+distinguishable; resolution-limited thin Sc). COMBINED MOIST VERDICT: higher-order does NOT win
+in the moist regimes (BOMEX top-tier tied, DYCOMS all tied), contrasting the dry-CBL higher-order
+win. The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked the compute wall.
+**REMAINING: the full-D9 native-CLUBB-cloud leg** (a CLUBB turbulence-interface change; the
+shared-cloud control is done + the gap is expected small by condensation-invariance — see §7.4/
+§7.5) + optional higher-res DYCOMS. Decks in `data/les_cases/{BOMEX,DYCOMS_RF01}`.
 Author: A. Connolly. Started 2026-07-10.
 Home: `docs/atmosphere/les_suite/LES_SUITE.md` (root-hygiene rule → docs/, mirrors the
 ocean `oracle_recipe_strategy.md` living-doc convention).
@@ -483,6 +485,45 @@ harder target) — the confound fix moved the scale, not the science. CAVEATS: w
 only (never compare to a dry number); winds are trade-wind-driven so u/v carry weight. The
 native-vs-forced-shared CLUBB pair (D9 full) is the remaining refinement, expected small
 (condensation-invariance; see the moist-conventions note below).
+
+### 7.5 Moist regime 2 (DYCOMS-II RF01 stratocumulus) — Q2, σ_LES-gated NULL (2026-07-25)
+
+The DYCOMS SCM pipeline is validated end-to-end: the RF01 driver's parameterized LW cooling
+(`make_stevens_lw`) is recorded as the artifact's prescribed `theta_adv`, and the moist SCM runs
+stably against it (radiative cooling + subsidence + strong geostrophic wind), forming cloud. All
+9 closures tuned on `dycoms_rf01_sc__lasd`, D7-gated by **σ_LES(stratocumulus)=0.231** from the
+{lasd,smag,vreman} spread (64²×96):
+
+| rank | closure | tuned loss | class |
+|---|---|---|---|
+| 1 | mynn25 | 0.8253 | 1.5-order |
+| 2 | louis | 0.8354 | local |
+| 3 | clubb_lite | 0.8364 | higher-order |
+| 4 | clubb | 0.9089 | higher-order |
+| 5 | holtslag_boville | 0.9118 | nonlocal K |
+| 6 | tke | 0.9170 | 1.5-order |
+| 7 | edmf | 0.9293 | mass-flux |
+| 8 | smagorinsky | 0.9382 | local |
+| 9 | ysu | 0.9558 | nonlocal K |
+
+**VERDICT — σ_LES-gated NULL: no closure is distinguishable in stratocumulus.** The ENTIRE
+ranking spread (mynn25 0.825 → ysu 0.956 = 0.131) is SMALLER than σ_LES=0.231, so every closure
+is statistically tied — including higher-order clubb (4th) vs 1.5-order mynn25 (1st). The Q1b
+local-vs-nonlocal margin (−0.076) is likewise sub-σ_LES. Two reasons drive the null: (i) the
+coarse 64²×96 Sc is highly SGS-sensitive (large σ_LES — the LES's own SGS spread is ~1.8× the
+whole closure spread); (ii) absolute losses are HIGH (0.83–0.96 vs BOMEX's 0.31–0.47) — the SCM
+reproduces the radiatively-driven, strong-geostrophic Sc poorly (winds dominate). **CAVEAT
+(prominent): the DYCOMS Sc is RESOLUTION-LIMITED** — at 64²×96 the deck thins to LWP ~9 g/m² (ref
+50–80) as cloud-top entrainment is under-resolved, so this is a controlled but NOT realistic Sc;
+a higher-resolution (≈96²×192) run would tighten σ_LES and lower the absolute losses, and is the
+refinement needed before any DYCOMS closure claim beyond "indistinguishable at this resolution".
+
+**Combined moist verdict (BOMEX + DYCOMS): higher-order does NOT win in the moist regimes.** In
+BOMEX the top tier (incl. clubb) is tied and higher-order does not lead; in DYCOMS nothing is
+resolved at all. Both moist anchors contrast with the dry CBL (where clubb/edmf led), and the
+"best" moist closure is regime-dependent (holtslag in BOMEX, mynn25 in DYCOMS) AND within σ_LES —
+i.e. NOT a robust ordering. With the cloud held fixed (shared Sundqvist across all arms), this is
+a turbulence-closure statement, not a cloud-PDF artifact.
 
 **CRITICAL MOIST CONVENTIONS (record + honour; codex-caught 2026-07-25).**
 - **The spectral moist LES prognoses ACTUAL θ, not θ_l** (`state.theta`; the IC

@@ -214,7 +214,21 @@ is the fix.
   scoped (clubb `cloud_source` toggle; CONFIRMED it's a turbulence-interface change since
   clubb_turbulence takes q_v not q_c; gap expected small by condensation-invariance).
 
-**NEXT (remaining for DONE):** (1) DYCOMS (stratocumulus) — validation lasd artifact emitting
-(64²×96, 2h); if physical, emit SGS spread + tune 9 → moist Q2/Q3 regime 2. (2) full-D9 NATIVE
-leg — the CLUBB turbulence-interface change (add cloud q_c to the scheme input + `cloud_source`
-toggle + validator loop; scoped in memory `les-suite-moist-status`). (3) clubb 2×-res σ_LES.
+- **Iter 29 — DYCOMS (moist regime 2) DELIVERED, σ_LES-gated NULL.** DYCOMS pipeline validated
+  end-to-end: RF01 LW cooling (make_stevens_lw) → artifact theta_adv; moist SCM runs stably
+  (radiative + subsidence + strong geostrophic), forms cloud. Emitted 3 SGS artifacts (64²×96,
+  θ_l sfc~289.4 top~306 tight) → tuned 9 → σ_LES(stratocumulus)=0.231. **DYCOMS Q2: mynn25 0.825 >
+  louis 0.835 > clubb_lite 0.836 > clubb 0.909 > holtslag 0.912 > tke 0.917 > edmf 0.929 > smag
+  0.938 > ysu 0.956.** GATED VERDICT: NULL — whole spread 0.131 < σ_LES 0.231 → NO closure
+  distinguishable (higher-order clubb 4th, tied with everything). High absolute losses (SCM
+  reproduces the radiative/geostrophic Sc poorly; winds dominate). CAVEAT: RESOLUTION-LIMITED —
+  64²×96 Sc thins to LWP ~9 (ref 50-80); 96²×192 is the refinement. **COMBINED MOIST VERDICT
+  (BOMEX+DYCOMS): higher-order does NOT win in moist regimes** (BOMEX top-tier tied, DYCOMS all
+  tied), contrasting the dry-CBL higher-order win; best moist closure is regime-dependent
+  (holtslag/mynn25) AND within σ_LES. Cloud held fixed (shared Sundqvist) → turbulence statement,
+  not cloud-PDF. See LES_SUITE.md §7.5.
+
+**NEXT (remaining for DONE):** (1) full-D9 NATIVE leg — the CLUBB turbulence-interface change (add
+cloud q_c to the scheme input + `cloud_source` toggle + validator loop; OR the smaller
+clubb-internal `cloud_buoyancy` toggle; scoped in memory `les-suite-moist-status`). (2) OPTIONAL
+higher-res DYCOMS (96²×192) for a realistic Sc + tighter σ_LES. (3) clubb 2×-res σ_LES.
