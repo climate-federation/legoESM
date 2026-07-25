@@ -55,6 +55,7 @@ class SigmaLES:
     sigma_theta: float         # per-variable RMS over pairs (θ_l)
     sigma_u: float
     sigma_v: float
+    sigma_qt: float | None     # per-variable RMS over pairs (q_t); None for a dry case
     per_pair: tuple            # ((truth_label, candidate_label, combined), ...)
 
 
@@ -69,7 +70,10 @@ def _require_finite(a: LESReferenceArtifact) -> None:
     # These are TRUTH artifacts; a non-finite value is corruption. safe_sqrt inside the
     # score maps NaN→0 (a "perfect" fit), so a corrupt variant would SILENTLY LOWER
     # σ_LES — reject loudly instead (mirrors scm_les_final_loss's finite guard intent).
-    for name in ("heights_m", "times_s", "theta", "u", "v"):
+    names = ["heights_m", "times_s", "theta", "u", "v"]
+    if a.is_moist:
+        names.append("qt")   # q_t is scored for a moist case; a NaN would silently lower σ_LES
+    for name in names:
         arr = jnp.asarray(getattr(a, name))
         if not bool(jnp.all(jnp.isfinite(arr))):
             raise SigmaLESError(f"{a.case_name}: artifact {a.sgs!r} has non-finite {name}")
@@ -100,8 +104,9 @@ def sigma_les_prognostic(
     B_final regridded to A's heights).combined`` (the tuner's final-snapshot objective);
     σ_LES is their RMS (and per-variable RMS). Artifacts must be the SAME case, share the
     output-time schedule, and share vertical extent (so a 2×-resolution run — finer nz,
-    same domain — compares to a coarse one WITHOUT extrapolating past either top). Rejects
-    <2 / mixed-case / moist / non-finite / mismatched-time / mismatched-extent inputs.
+    same domain — compares to a coarse one WITHOUT extrapolating past either top). A moist
+    case scores θ_l,u,v,q_t (the moist tuner objective); a dry case θ,u,v. Rejects <2 /
+    mixed-case / mixed moist+dry / non-finite / mismatched-time / mismatched-extent inputs.
     """
     if len(artifacts) < 2:
         raise SigmaLESError(
@@ -109,13 +114,16 @@ def sigma_les_prognostic(
     cases = {a.case_name for a in artifacts}
     if len(cases) != 1:
         raise SigmaLESError(f"all artifacts must be the SAME case; got {sorted(cases)}")
-    if any(a.is_moist for a in artifacts):
+    moists = {a.is_moist for a in artifacts}
+    if len(moists) != 1:
         raise SigmaLESError(
-            "sigma_les_prognostic is dry-only (θ,u,v); a moist artifact was passed")
+            "cannot mix moist and dry artifacts in one σ_LES set; scored variables differ "
+            "(θ_l,u,v,q_t vs θ,u,v)")
+    is_moist = moists.pop()
     for a in artifacts:
         _require_finite(a)
 
-    comb, th_terms, u_terms, v_terms = [], [], [], []
+    comb, th_terms, u_terms, v_terms, qt_terms = [], [], [], [], []
     per_pair: list[tuple] = []
     for i, a in enumerate(artifacts):
         z_a = jnp.asarray(a.heights_m)
@@ -135,11 +143,19 @@ def sigma_les_prognostic(
             scm_theta = interp_profile(jnp.asarray(b.theta)[-1], z_b, z_a)
             scm_u = interp_profile(jnp.asarray(b.u)[-1], z_b, z_a)
             scm_v = interp_profile(jnp.asarray(b.v)[-1], z_b, z_a)
-            s = prognostic_profile_score(truth, scm_theta, scm_u, scm_v, weights=weights)
+            # For a moist case B's q_t is scored against A's (truth.qt is set by
+            # final_prognostic_truth), so prognostic_profile_score REQUIRES scm_qt — matching
+            # the moist tuner loss (θ_l,u,v,q_t combined). Dry: scm_qt=None (θ,u,v only).
+            scm_qt = (interp_profile(jnp.asarray(b.qt)[-1], z_b, z_a)
+                      if is_moist else None)
+            s = prognostic_profile_score(
+                truth, scm_theta, scm_u, scm_v, scm_qt=scm_qt, weights=weights)
             comb.append(float(s.combined))
             th_terms.append(float(s.theta_rmse))
             u_terms.append(float(s.u_rmse))
             v_terms.append(float(s.v_rmse))
+            if is_moist:
+                qt_terms.append(float(s.qt_rmse))
             per_pair.append((a.sgs, b.sgs, float(s.combined)))  # (truth, candidate, d)
     return SigmaLES(
         case_name=next(iter(cases)),
@@ -149,5 +165,6 @@ def sigma_les_prognostic(
         sigma_theta=_rms(th_terms),
         sigma_u=_rms(u_terms),
         sigma_v=_rms(v_terms),
+        sigma_qt=_rms(qt_terms) if is_moist else None,
         per_pair=tuple(per_pair),
     )

@@ -53,3 +53,25 @@ def test_emit_suite_artifact_builds_valid_moist_artifact(tmp_path):
     assert np.isclose(a.f_c, mod._FCOR) and np.isclose(float(a.w_theta_s[0]), 0.00806)
     assert np.isclose(float(a.w_qv_s[0]), 5.27e-5)
     assert a.u_geo is not None and float(a.subsidence_w[0]) < 0.0  # subsidence is downward
+
+
+def test_record_theta_l_derives_thetal_not_theta():
+    # The spectral moist LES prognoses ACTUAL θ; the artifact must record θ_l = θ −
+    # (L_v/c_pd)·q_c/Π derived from θ + cloud q_c (slot 1), else the score compares LES θ to
+    # SCM θ_l. Verify _record_theta_l applies exactly that reduction (q_c only, not rain).
+    import numpy as np
+    from types import SimpleNamespace
+    from legoesm import constants
+    mod = _load_converter()
+    ny, nx, nz = 2, 2, 6
+    theta = np.full((ny, nx, nz), 300.0)
+    tr = np.zeros((ny, nx, nz, 4))
+    tr[..., 1] = 1.0e-3          # q_c (cloud liquid)
+    tr[..., 2] = 5.0e-4          # q_r (rain) — must NOT enter θ_l
+    exner = np.linspace(1.0, 0.9, nz)
+    st = SimpleNamespace(theta=theta, tracers=tr)
+    ref = SimpleNamespace(exner_c=exner)
+    thl = mod._record_theta_l(st, ref)
+    expect = 300.0 - (constants.L_v / constants.c_pd) * 1.0e-3 / exner
+    assert np.allclose(thl[0, 0], expect, rtol=1e-12)   # q_c only, rain excluded
+    assert np.all(thl < theta)                          # cloud ⇒ θ_l < θ (correct sign)

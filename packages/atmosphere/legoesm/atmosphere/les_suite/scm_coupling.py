@@ -20,6 +20,7 @@ extrapolation of turbulence beyond the resolved column).
 from __future__ import annotations
 
 import jax.numpy as jnp
+from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import (
     potential_temperature_from_temperature,
     temperature_from_theta,
@@ -34,6 +35,20 @@ Array = jnp.ndarray
 # do not re-derive the Exner factor here.
 theta_from_temperature = potential_temperature_from_temperature
 T_from_theta = temperature_from_theta
+
+
+def liquid_water_theta(theta: Array, q_c: Array, exner: Array) -> Array:
+    """Liquid-water potential temperature θ_l = θ − (L_v/(c_pd·Π))·q_c (Betts 1973).
+
+    THE canonical θ_l reduction for the whole LES-suite pipeline — used both when RECORDING
+    LES truth (the moist LES prognoses actual θ; θ_l is derived from θ + its liquid q_c) and
+    when reducing the SCM state, so the moist score compares θ_l(LES) to θ_l(SCM) rather than
+    mixing θ and θ_l. Exner Π (=(p/p_ref)^κ) is passed in — the LES supplies its anelastic
+    reference Π, the SCM computes Π from its pressure — so this one formula is not re-derived.
+    The reduction is NEGATIVE where cloud (q_c>0) exists (condensation released latent heat
+    that raised θ above the cloud-conserved θ_l); units (L_v[J/kg]/c_pd[J/kg/K])·q_c/Π = K.
+    """
+    return theta - (constants.L_v / constants.c_pd) * q_c / exner
 
 
 def interp_profile(values: Array, z_src: Array, z_dst: Array) -> Array:

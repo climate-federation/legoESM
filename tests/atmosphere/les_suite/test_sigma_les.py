@@ -70,9 +70,26 @@ def test_mismatched_times_rejected():
         sigma_les_prognostic([a, b])
 
 
-def test_moist_rejected():
+def test_moist_scored_with_qt():
+    # moist artifacts are now handled: q_t is scored (sigma_qt populated), and a q_t-only
+    # spread shows there but not in θ. dry sigma_qt stays None.
+    a = _artifact("lasd", moist=True)
+    b = _artifact("vreman", moist=True)
+    # perturb only q_t on b so the spread lands in sigma_qt
+    from dataclasses import replace
+    b = replace(b, qt=b.qt + 5.0e-4)
+    s = sigma_les_prognostic([a, b])
+    assert s.sigma_qt is not None and s.sigma_qt > 0.0
+    assert s.sigma_theta == pytest.approx(0.0, abs=1e-9)  # θ_l identical → no θ spread
+    assert s.sigma_combined > 0.0
+    # a dry set leaves sigma_qt None
+    dry = sigma_les_prognostic([_artifact("lasd"), _artifact("vreman", dtheta=0.3)])
+    assert dry.sigma_qt is None
+
+
+def test_mixed_moist_and_dry_rejected():
     with pytest.raises(SigmaLESError):
-        sigma_les_prognostic([_artifact("lasd", moist=True), _artifact("vreman", moist=True)])
+        sigma_les_prognostic([_artifact("lasd", moist=True), _artifact("vreman")])
 
 
 def test_non_finite_artifact_rejected():

@@ -44,7 +44,13 @@ from legoesm.atmosphere.physics import (
 )
 
 from .bridge import LESReferenceArtifact, LESTruth, prognostic_truth
-from .scm_coupling import T_from_theta, interp_profile, regrid_truth, theta_from_temperature
+from .scm_coupling import (
+    T_from_theta,
+    interp_profile,
+    liquid_water_theta,
+    regrid_truth,
+    theta_from_temperature,
+)
 from .score import PrognosticScore, prognostic_profile_score
 
 Array = jnp.ndarray
@@ -128,16 +134,11 @@ def _const_scalar(value):
 
 
 def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
-    """Liquid-water potential temperature θ_l = θ − (L_v/(c_pd·Π))·q_c (Betts 1973).
-
-    Π=(p/p_ref)^κ is the Exner function. The reduction is NEGATIVE where cloud (q_c>0)
-    exists — condensation released latent heat that raised θ above the cloud-conserved θ_l,
-    so θ_l ≤ θ with equality only in cloud-free air. Units:
-    (L_v[J/kg]/c_pd[J/kg/K])·q_c[kg/kg]/Π[–] = K. The moist LES records θ_l as its ``theta``
-    channel (``les_record``), so the SCM must be reduced to θ_l for an apples-to-apples score.
-    """
+    """SCM-side θ_l: compute the Exner factor from the SCM pressure, then apply the ONE
+    canonical reduction :func:`scm_coupling.liquid_water_theta` (shared with the LES recorder
+    so θ_l(SCM) and θ_l(LES) use the same formula — no re-derivation). Π=(p/p_ref)^κ."""
     exner = (jnp.asarray(p) / constants.p_ref) ** constants.kappa
-    return theta - (constants.L_v / constants.c_pd) * q_c / exner
+    return liquid_water_theta(theta, q_c, exner)
 
 
 def build_cbl_scm_from_artifact(

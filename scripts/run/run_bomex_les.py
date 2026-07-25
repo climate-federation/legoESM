@@ -81,6 +81,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.les_suite.scm_coupling import liquid_water_theta  # noqa: E402
+
+
+def _record_theta_l(st, ref):
+    """The 3D liquid-water potential temperature θ_l field to RECORD as the moist LES's
+    thermodynamic truth. The spectral moist LES prognoses ACTUAL θ (``state.theta``; the IC
+    saturation-adjusts θ_l→θ), so θ_l must be DERIVED from θ and the LES's own cloud liquid
+    q_c (tracer slot 1) for the artifact — otherwise the score would compare LES θ to SCM θ_l.
+    q_c only (not q_r), matching the SCM reduction in ``scm_final_moist_on``."""
+    exner = np.asarray(ref.exner_c)[None, None, :]
+    return np.asarray(liquid_water_theta(
+        np.asarray(st.theta), np.asarray(st.tracers[..., 1]), exner))
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
@@ -358,8 +370,10 @@ def _emit_suite_artifact(args, forc, out_path):
     u, v) + resolved fluxes ⟨w'θ_l'⟩/⟨w'q_t'⟩ from the prof series, AND the exact forcing the
     LES received (surface kinematic fluxes, Coriolis + geostrophic wind, large-scale
     subsidence + advective tendencies) from ``forc`` — so the SCM and LES share byte-identical
-    forcing (the controlled-comparison rule). ``theta`` in the moist prof IS θ_l (the LES
-    prognostic). Signs follow the artifact convention (fluxes +up; subsidence_w +up).
+    forcing (the controlled-comparison rule). ``theta`` in the moist prof IS θ_l — DERIVED at
+    record time from the LES's prognostic actual θ and its cloud liquid q_c (``_record_theta_l``;
+    the spectral moist LES prognoses θ, not θ_l), so it matches the SCM's θ_l. Signs follow the
+    artifact convention (fluxes +up; subsidence_w +up).
     """
     from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
         LESReferenceArtifact, save_artifact)
@@ -573,7 +587,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
             les_record.record_frame(
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
-                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
                 qr3=np.asarray(st.tracers[..., 2]),
@@ -827,7 +841,7 @@ def main():
             les_record.record_frame(
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
-                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
                 qr3=np.asarray(st.tracers[..., 2]),
