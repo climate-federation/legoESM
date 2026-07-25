@@ -308,12 +308,39 @@ versus **17.8 us** for the same collective measured in isolation — an in-
 context cost 4-5x the best case. That is consistent with EXPOSED,
 un-overlapped communication rather than raw wire time.
 
-TENSION, stated rather than smoothed: if plain per-message latency were the
-whole story, the fused-halo arm (fewer, larger messages) should have won,
-and it measured NULL on this config. That points at DEPENDENCY
-SERIALIZATION — messages sitting on a critical chain the scheduler cannot
-overlap — which aggregation does not fix. Confirming that needs a timeline
-profile, not another ladder.
+THIRD CANDIDATE REFUTED, AND IT IDENTIFIES THE MECHANISM (job 26458930).
+If the residual were communication the scheduler is currently hiding work
+behind, DISABLING XLA's latency-hiding scheduler would hurt. It does not:
+
+| arm | nd2 | nd4 | vs default |
+|---|---|---|---|
+| default (LHS on) | 42.69 | 23.53 ms | — |
+| `latency_hiding_scheduler=false` | 42.44 | 23.49 | **+0.6 % / +0.2 %** |
+| `enable_pipelined_p2p=true` | 42.76 | 23.54 | -0.2 % / -0.1 % |
+| CP combining @32 MiB | 42.55 | 23.59 | +0.3 % / -0.3 % |
+
+Turning overlap OFF is free (marginally faster), and no scheduling flag
+moves the step. The scheduler has nothing to hide the comm behind.
+
+**MECHANISM (all three alternatives eliminated by measurement): the
+residual is EXPOSED, DEPENDENCY-SERIALIZED SYNCHRONISATION.** Not bytes
+(7.2x more = +0.22 ms), not sharded-formulation work (0 ms), not
+hideable-by-scheduling (0 ms). It is the unavoidable cost of sync points
+that sit on a dependent chain.
+
+This retro-explains every earlier arm in the campaign, which is the check
+that the mechanism is right rather than merely last-standing:
+- fused-halo NULL — aggregation reduces message COUNT but not chain DEPTH;
+- `single_reduce` HELPED (0.49 -> 0.53) — Chronopoulos-Gear restructures
+  the recurrence into fewer DEPENDENT reduction batches;
+- wide-halo HELPED MOST (-> 0.73) — it deletes the barotropic solver's sync
+  points outright;
+- the f64/f32 flip — more compute per sync point dilutes a fixed sync cost.
+
+ACTIONABLE CONSEQUENCE: the lever for this lane is reducing the NUMBER OF
+DEPENDENT SYNCHRONISATION POINTS, not message aggregation, byte
+compression, or XLA scheduling flags — three families this campaign has
+now measured to be null here.
 
 Honest answer to "how far from the theoretical limit are we": 72-81 % of a
 now-calibrated floor, with the shortfall attributable to neither bandwidth
