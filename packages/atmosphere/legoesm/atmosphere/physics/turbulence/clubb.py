@@ -8,45 +8,45 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 6013)
+Table of contents (sections, in order; flag reference table at line 6051)
 -----------------------------------------------------------------------------
   1.  [line   328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  [line   420] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  2.  [line   445] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3.  [line   654] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3.  [line   692] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4.  [line   985] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4.  [line  1023] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5.  [line  1039] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5.  [line  1077] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6.  [line  1213] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6.  [line  1251] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7.  [line  1648] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8.  [line  1776] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7.  [line  1686] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8.  [line  1814] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9.  [line  1957] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9.  [line  1995] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2143] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2224] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2181] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2262] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2546] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2584] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  13. [line  2790] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  2828] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3615] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3653] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  3676] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  3714] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4334] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4372] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4614] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4652] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  4988] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5026] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  5384] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  5422] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -399,13 +399,38 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
     rcm, cloud_frac = calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
 
+    # D9 cloud-source dispatch (static config value; raises on unknown — dispatch hardening).
+    # "native" keeps the ADG1 assumed-PDF rcm/cloud_frac above; "shared" REPLACES them with a
+    # crude grid-scale all-or-nothing saturation control (a simple non-PDF cloud, NOT the exact
+    # delta-PDF limit) so CLUBB sees the SAME kind of grid-mean-only cloud as the other closures
+    # — the literal D9 forced-shared arm.
+    if config.cloud_source not in ("native", "shared"):
+        raise ValueError(
+            f"CLUBBConfig.cloud_source={config.cloud_source!r} unknown; "
+            "expected 'native' (ADG1 PDF) or 'shared' (grid-scale saturation).")
+    if config.cloud_source == "shared":
+        # CRUDE grid-scale (non-PDF) saturation control: T≈θ_l·Π (cloud-free first guess),
+        # r_sat via the canonical Flatau sat_mixrat_liq; rcm = max(rt − r_sat, 0). This is a
+        # NON-PDF cloud that sees only the grid-MEAN saturation (no sub-grid saturation-deficit
+        # variance) — the D9 contrast against the ADG1 PDF, which forms cloud in its saturated
+        # tail even when the grid mean is subsaturated. It is a FIRST-GUESS (no latent-heat
+        # correction) so it mildly over-condenses AT grid-mean saturation — acceptable for a
+        # control arm, and immaterial in these BLs where the grid mean is subsaturated (so the
+        # grid-scale cloud is ~0, isolating the PDF cloud). cloud_frac is all-or-nothing
+        # (1 where condensate forms, 0 else — the non-PDF limit; NaN-free, no 0/0). This
+        # OVERRIDES the ADG1 rcm/cloud_frac for this arm.
+        t_gridscale = thlm * exner
+        rsat_gridscale = sat_mixrat_liq(p_in_Pa, t_gridscale)
+        rcm = jnp.maximum(rtm - rsat_gridscale, 0.0)
+        cloud_frac = jnp.where(rcm > 0.0, 1.0, 0.0)
+
     # Moist buoyancy flux: wpthvp = wpthlp + ep1*thv_ds*wprtp + rc_coef*wprcp,
     # with a down-gradient cloud-water flux wprcp (rc_coef = Lv/(exner*Cp) - ep2*thv).
-    # The cloud-liquid term rc_coef*wprcp is CLUBB's assumed-PDF cloud buoyancy — gated by
-    # the static ``cloud_buoyancy`` feature flag (Python if on the static config bool, NOT
-    # jnp.where: the D9 control needs one branch compiled, matching the fix_mass/fix_moisture
-    # doctrine). cloud_frac/rcm diagnostics are UNCHANGED (still the native PDF); only their
-    # feedback into the buoyancy-production of TKE is removed when disabled.
+    # The cloud-liquid term rc_coef*wprcp is CLUBB's cloud buoyancy — gated by the static
+    # ``cloud_buoyancy`` feature flag (Python if on the static config bool, NOT jnp.where: the
+    # D9 control needs one branch compiled, matching the fix_mass/fix_moisture doctrine). It
+    # uses whichever rcm was selected above (ADG1 PDF for cloud_source='native', grid-scale
+    # for 'shared'); disabling it drops the term entirely (dry buoyancy).
     wprtp_term = _EP1 * thv_ds * wprtp
     if config.cloud_buoyancy:
         wprcp = -Kh * _grad_zt(rcm, gr)
@@ -604,6 +629,18 @@ class CLUBBConfig(NamedTuple):
         control that isolates how much CLUBB's assumed-PDF cloud buys in skill vs a
         cloud-blind buoyancy (see LES_SUITE.md §7.6). A static feature-gate bool
         (Python ``if`` on the static config value), not traced.
+    cloud_source : str
+        Which cloud CLUBB uses for its liquid ``rcm``/``cloud_frac`` and hence its
+        buoyancy: ``"native"`` (default) = the ADG1 double-Gaussian assumed-PDF
+        closure (the distinctive CLUBB feature); ``"shared"`` = a CRUDE grid-scale
+        all-or-nothing saturation control (``rcm = max(rtm − r_sat(T,p), 0)`` via the
+        canonical Flatau ``sat_mixrat_liq``, a cloud-free first guess with no
+        latent-heat correction — a simple NON-PDF cloud, not the exact delta-PDF
+        limit) — the SAME kind of grid-mean-only cloud the other closures see. Tuning ``native`` vs
+        ``shared`` is the LITERAL D9 native-vs-shared-cloud pair (LES_SUITE.md §7.6),
+        isolating CLUBB's PDF-cloud advantage from its higher-order closure. Static
+        dispatch: validated at ``diagnose_cloud_and_buoyancy`` entry (raises on
+        unknown), never a traced branch.
     """
 
     params: CLUBBParams = CLUBBParams()
@@ -617,6 +654,7 @@ class CLUBBConfig(NamedTuple):
     T0: float = 300.0
     prognostic: bool = False
     cloud_buoyancy: bool = True
+    cloud_source: str = "native"
 
 
 # Derived parameters (recomputed from base config, never stored as magic

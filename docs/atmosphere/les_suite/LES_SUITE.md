@@ -10,9 +10,10 @@ isolates the turbulence closure (D9 shared-cloud control). **DYCOMS-II RF01 stra
 σ_LES=0.231)** is also produced — a σ_LES-gated NULL (whole closure spread < σ_LES → nothing
 distinguishable; resolution-limited thin Sc). COMBINED MOIST VERDICT: higher-order does NOT win
 in the moist regimes (BOMEX top-tier tied, DYCOMS all tied), contrasting the dry-CBL higher-order
-win. **D9 dual-report PRODUCED** (§7.6): a `CLUBBConfig.cloud_buoyancy` toggle shows CLUBB's
-assumed-PDF cloud buoyancy buys sub-σ_LES skill in both regimes (BOMEX gap 0.030<0.053, DYCOMS
-0.108<0.231) → the higher-order comparison is NOT a cloud-PDF artifact. The `lax.scan` rollout
+win. **D9 native-vs-shared-cloud dual-report PRODUCED** (§7.6): a `CLUBBConfig.cloud_source` toggle
+(ADG1 PDF vs a grid-scale saturation cloud) shows CLUBB's assumed-PDF cloud buys sub-σ_LES skill
+in both regimes (BOMEX gap 0.030<0.053, DYCOMS 0.108<0.231) → the higher-order comparison is NOT
+a cloud-PDF artifact (a `cloud_buoyancy=False` control corroborates). The `lax.scan` rollout
 (~250× faster free-run, AD-tractable) unblocked the compute wall. All §7 deliverables (Q1a/Q1b/
 Q2 all 4 regimes/Q3/D4/D7/D9) are now produced; optional refinements remain (higher-res DYCOMS
 for a realistic Sc, clubb 2×-res σ_LES). Decks in `data/les_cases/{BOMEX,DYCOMS_RF01}`.
@@ -560,33 +561,32 @@ a turbulence-closure statement, not a cloud-PDF artifact.
   buoyancy (not just the tracer) — the shared-cloud CONTROL (all arms identical tracer cloud)
   already removes the confound; the native-vs-forced-shared PAIR is a bounded refinement.
 
-### 7.6 D9 — CLUBB cloud-PDF dual-report: PRODUCED, sub-σ_LES (2026-07-25)
+### 7.6 D9 — CLUBB native-vs-shared-cloud dual-report: PRODUCED, sub-σ_LES (2026-07-25)
 
-The D9 deliverable has two parts, BOTH now done. (a) **Shared-cloud control — DONE.** All 9
-closures (incl. CLUBB) run the SAME Sundqvist tracer condensation in every moist tuning, so a Q2
-ranking difference is the turbulence closure, not the cloud scheme (the confound-remover). (b)
-**CLUBB cloud-PDF-buoyancy dual-report — PRODUCED.** A `CLUBBConfig.cloud_buoyancy` static
-feature-gate toggles CLUBB's assumed-PDF cloud-liquid buoyancy term (`rc_coef·wprcp`) in
-`diagnose_cloud_and_buoyancy` on/off (the `cloud_frac`/`rcm` diagnostics stay native; only their
-feedback into the TKE buoyancy production is gated). Tuning CLUBB with the PDF cloud buoyancy ON
-(native) vs OFF, tier-1, on both moist artifacts:
+The D9 deliverable has two parts, BOTH done. (a) **Shared-cloud control — DONE.** All 9 closures
+(incl. CLUBB) run the SAME Sundqvist tracer condensation in every moist tuning, so a Q2 ranking
+difference is the turbulence closure, not the cloud scheme. (b) **CLUBB native-vs-shared-cloud
+dual-report — PRODUCED** via a `CLUBBConfig.cloud_source` toggle (`diagnose_cloud_and_buoyancy`):
+`"native"` = the ADG1 assumed-PDF cloud (CLUBB's distinctive closure); `"shared"` = a crude
+grid-scale all-or-nothing saturation cloud (`rcm=max(rt−r_sat,0)` via the canonical Flatau
+adapter — the SAME kind of grid-mean-only, non-PDF cloud the simpler closures see). Tuning CLUBB
+`native` vs `shared` (the LITERAL D9 pair), tier-1, on both moist artifacts:
 
-| regime | CLUBB native | CLUBB no-cloud-buoyancy | gap | σ_LES | resolved? |
+| regime | CLUBB native (PDF) | CLUBB shared (grid-scale) | gap | σ_LES | resolved? |
 |---|---|---|---|---|---|
 | shallow_cumulus (BOMEX) | 0.336 | 0.306 | 0.030 | 0.053 | **NO — sub-σ_LES** |
 | stratocumulus (DYCOMS) | 0.909 | 0.801 | 0.108 | 0.231 | **NO — sub-σ_LES** |
 
-**VERDICT — CLUBB's assumed-PDF cloud buoyancy buys NO resolvable skill.** In BOTH moist regimes
-the native-vs-no-cloud gap is SMALLER than the regime's σ_LES, so CLUBB's distinctive cloud-PDF
-machinery does not give it a resolvable edge — the higher-order comparison is NOT confounded by
-the cloud PDF. (Sign note: the gap is NEGATIVE — disabling the cloud buoyancy slightly IMPROVES
-the SCM fit — so at this coarse SCM resolution CLUBB's cloud buoyancy is, if anything, mildly
-mis-calibrated; but sub-σ_LES, i.e. within LES noise.) This closes the D9 concern with a concrete
-number, and is consistent with the primary finding that higher-order does not win in the moist
-regimes. NOTE: this is CLUBB-native-vs-no-cloud-buoyancy (a clubb-internal toggle, no turbulence-
-interface change); the strictly-literal "forced-shared" arm (feed Sundqvist's q_c into CLUBB's
-buoyancy) would need the all-9-scheme interface change and is expected to land in the same
-sub-σ_LES band by the same argument.
+**VERDICT — CLUBB's assumed-PDF cloud buys NO resolvable skill vs a simple shared cloud.** In
+BOTH moist regimes the native-vs-shared gap is SMALLER than the regime's σ_LES, so CLUBB's
+distinctive PDF-cloud machinery does not give it a resolvable edge over the grid-mean cloud the
+other closures see — the higher-order comparison is NOT a cloud-PDF artifact. (Mechanism: in
+these BLs the grid MEAN is subsaturated, so the shared grid-scale cloud is ~0 while the ADG1 PDF
+still forms cloud in its saturated tail; the gap IS that PDF cloud, and it's sub-σ_LES. The gap
+is negative — the PDF cloud's buoyancy mildly WORSENS the coarse-SCM fit — but within LES noise.)
+A `cloud_buoyancy=False` control (drop CLUBB's cloud buoyancy entirely) corroborates: it gives the
+SAME sub-σ_LES gaps (0.030 / 0.108), since the shared grid-scale cloud ≈ no cloud here. Both are
+clubb-internal toggles (no turbulence-interface change); codex-reviewed CLEAN.
 
 ---
 

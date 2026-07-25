@@ -84,8 +84,14 @@ def test_clubb_no_cloud_buoyancy_flag_builds_control_arm():
     base_off, _ = m._base_turbulence("clubb", clubb_cloud_buoyancy=False)
     assert base_on.clubb.cloud_buoyancy is True
     assert base_off.clubb.cloud_buoyancy is False
-    # non-clubb schemes ignore the kwarg (no cloud_buoyancy field to set)
-    base_mynn, _ = m._base_turbulence("mynn25", clubb_cloud_buoyancy=False)
+    # the literal D9 forced-shared arm: cloud_source native vs shared
+    base_native, _ = m._base_turbulence("clubb", clubb_cloud_source="native")
+    base_shared, _ = m._base_turbulence("clubb", clubb_cloud_source="shared")
+    assert base_native.clubb.cloud_source == "native"
+    assert base_shared.clubb.cloud_source == "shared"
+    # non-clubb schemes ignore the kwargs (no cloud_buoyancy/cloud_source field to set)
+    base_mynn, _ = m._base_turbulence("mynn25", clubb_cloud_buoyancy=False,
+                                      clubb_cloud_source="shared")
     assert base_mynn.scheme == "mynn25"
 
 

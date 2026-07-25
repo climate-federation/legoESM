@@ -300,13 +300,15 @@ def _cbl_scheme_table():
     }
 
 
-def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True):
+def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True,
+                     clubb_cloud_source: str = "native"):
     """A CBL-appropriate base TurbulenceConfig + its registry scheme_key.
 
-    ``clubb_cloud_buoyancy=False`` (only meaningful for ``scheme='clubb'``) builds the D9
-    control arm: CLUBB with its assumed-PDF cloud-liquid buoyancy DISABLED (see LES_SUITE.md
-    §7.6). Tuning both arms and comparing the best losses quantifies how much CLUBB's PDF cloud
-    buys in skill vs a cloud-blind buoyancy."""
+    The two clubb-only D9 knobs (LES_SUITE.md §7.6): ``clubb_cloud_buoyancy=False`` DISABLES
+    CLUBB's PDF cloud-liquid buoyancy (native-vs-no-cloud control); ``clubb_cloud_source=
+    'shared'`` swaps CLUBB's ADG1 assumed-PDF cloud for a grid-scale saturation cloud (the
+    LITERAL native-vs-shared-cloud pair). Tuning each vs native quantifies CLUBB's PDF-cloud
+    skill contribution."""
     from legoesm.atmosphere.physics import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 
@@ -318,7 +320,8 @@ def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True):
     config_cls, scheme_key = table[scheme]
     surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
     if scheme == "clubb":
-        sub = config_cls(surface=surf, cloud_buoyancy=clubb_cloud_buoyancy)
+        sub = config_cls(surface=surf, cloud_buoyancy=clubb_cloud_buoyancy,
+                         cloud_source=clubb_cloud_source)
     else:
         sub = config_cls(surface=surf)
     turb = TurbulenceConfig(scheme=scheme, **{scheme: sub})
@@ -351,6 +354,11 @@ def main(argv: list[str] | None = None) -> int:
                         "DISABLED (cloud_buoyancy=False). Compare the best loss to the native "
                         "clubb arm to quantify the PDF cloud's skill contribution (LES_SUITE.md "
                         "§7.6). No effect for non-clubb schemes.")
+    p.add_argument("--clubb-shared-cloud", action="store_true",
+                   help="D9 LITERAL forced-shared arm: tune `clubb` with cloud_source='shared' "
+                        "(grid-scale saturation cloud instead of the ADG1 assumed-PDF cloud). "
+                        "Compare to native to isolate CLUBB's PDF-cloud advantage (LES_SUITE.md "
+                        "§7.6). No effect for non-clubb schemes.")
     args = p.parse_args(argv)
 
     if not args.artifact.exists():
@@ -358,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     artifact = load_artifact(args.artifact)
     base, scheme_key = _base_turbulence(
-        args.scheme, clubb_cloud_buoyancy=not args.clubb_no_cloud_buoyancy)
+        args.scheme, clubb_cloud_buoyancy=not args.clubb_no_cloud_buoyancy,
+        clubb_cloud_source="shared" if args.clubb_shared_cloud else "native")
 
     results: dict = {}
     if args.method in ("df", "both"):

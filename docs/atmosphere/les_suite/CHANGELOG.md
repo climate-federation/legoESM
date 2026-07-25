@@ -228,7 +228,13 @@ is the fix.
   (holtslag/mynn25) AND within σ_LES. Cloud held fixed (shared Sundqvist) → turbulence statement,
   not cloud-PDF. See LES_SUITE.md §7.5.
 
-- **Iter 30 — D9 CLUBB cloud-PDF dual-report PRODUCED (codex-CLEAN). ALL §7 DELIVERABLES DONE.**
+- **Iter 30 — D9 CLUBB native-vs-shared-cloud dual-report PRODUCED (codex-CLEAN). ALL §7 DELIVERABLES DONE.**
+  LITERAL forced-shared arm: `CLUBBConfig.cloud_source` toggle (ADG1 PDF vs grid-scale saturation
+  cloud via canonical Flatau) + tuner `--clubb-shared-cloud`. Tuned native-vs-shared: BOMEX 0.336 vs
+  0.306 (gap 0.030<σ_LES 0.053); DYCOMS 0.909 vs 0.801 (gap 0.108<σ_LES 0.231) — both sub-σ_LES ⇒
+  CLUBB's PDF cloud buys no resolvable skill vs a simple shared cloud. A `cloud_buoyancy=False`
+  control corroborates (same gaps). New dispatch guard (raise on unknown cloud_source) registered
+  in test_dispatch_hardening. Codex CLEAN (fixed cloud_frac 0/0 NaN + delta-PDF wording). Below:
   Added `CLUBBConfig.cloud_buoyancy: bool=True` static feature-gate (like `prognostic`): when
   False, `diagnose_cloud_and_buoyancy` drops the ADG1 cloud-liquid buoyancy term `rc_coef·wprcp`
   from `wpthvp` (cloud_frac/rcm diagnostics unchanged; only the TKE-buoyancy feedback gated).

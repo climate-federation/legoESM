@@ -76,6 +76,28 @@ def test_cloud_buoyancy_toggle_removes_cloud_liquid_term_only():
     assert jnp.allclose(w_dry_on, w_dry_off, atol=1e-10)
 
 
+def test_cloud_source_shared_uses_gridscale_saturation_and_differs_from_native():
+    # D9 literal forced-shared: cloud_source="shared" replaces the ADG1 PDF cloud with a
+    # grid-scale all-or-nothing saturation adjustment (rcm=max(rt−r_sat,0)); it must DIFFER
+    # from the native PDF cloud in a saturated column, stay nonneg + finite, and feed buoyancy.
+    kw = _inputs(rtm_scale=1.0)
+    cf_n, rcm_n, w_n = diagnose_cloud_and_buoyancy(**kw)
+    kw_s = dict(kw, config=CLUBBConfig(cloud_source="shared"))
+    cf_s, rcm_s, w_s = diagnose_cloud_and_buoyancy(**kw_s)
+    assert jnp.all(rcm_s >= 0.0) and jnp.all(jnp.isfinite(w_s))
+    assert jnp.all(cf_s >= 0.0) and jnp.all(cf_s <= 1.0)
+    # PDF vs grid-scale differ where cloud exists (the whole point of the D9 contrast)
+    assert float(jnp.max(jnp.abs(rcm_s - rcm_n))) > 0.0
+    assert float(jnp.max(jnp.abs(w_s - w_n))) > 0.0
+
+
+def test_cloud_source_unknown_raises():
+    # nested scheme-Config dispatch hardening: an unknown cloud_source must raise, not
+    # silently run a default cloud.
+    with pytest.raises(ValueError):
+        diagnose_cloud_and_buoyancy(**dict(_inputs(), config=CLUBBConfig(cloud_source="bogus")))
+
+
 def test_jit_and_grad():
     kw = _inputs()
 
