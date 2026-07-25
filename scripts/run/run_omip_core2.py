@@ -600,7 +600,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
-                  tke_mxl_choice=None, tke_prognostic=None):
+                  tke_mxl_choice=None, tke_prognostic=None,
+                  gm_treguier=False, gm_aei0=1800.0):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -685,6 +686,29 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # constructor rejects the combination.
         _ovr["gm_redi"] = None
         print("[setup] tripole GM/Redi DISABLED (--no-gm-redi)")
+    elif gm_treguier:
+        # NEMO-faithful eddy-induced-velocity coefficient.  NEMO ORCA1 runs
+        # &namtra_eiv with ln_ldfeiv=.true. and nn_aei_ijk_t=21 -> aeiu/aeiv =
+        # F(growth rate of baroclinic instability), a 2-D time-varying field
+        # capped at aei0 = rn_Ue*rn_Le = 0.018 * 100e3 = 1800 m^2/s
+        # (ldftra.F90:386).  legoESM's TreguierConfig IS that scaling (already
+        # used by the DINO oracle card).  The tripole default
+        # (run_omip._DEFAULT_BATHY_GM_REDI) instead runs the VISBECK adaptive
+        # coefficient (kappa_GM=800, alpha=0.015, kappa in [200,2000]) -- a
+        # different closure.  Visbeck and Treguier are mutually exclusive
+        # (gm_redi_latlon_cgrid raises), so this swaps one for the other and
+        # leaves kappa_Redi / S_max at the proven tripole values.
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            GMRediConfig as _GMRediConfig, TreguierConfig as _TreguierConfig,
+            VisbeckConfig as _VisbeckConfig,
+        )
+        _base = run_omip._DEFAULT_BATHY_GM_REDI
+        _ovr["gm_redi"] = _base._replace(
+            visbeck=_VisbeckConfig(enabled=False),
+            treguier=_TreguierConfig(enabled=True, aei0=float(gm_aei0)),
+        )
+        print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
+              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s) — Visbeck OFF")
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -3945,6 +3969,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "+ wind TKE that mixes the tropical ML (the candidate for "
                         "the tropical warm the mixing-length levers can't touch). "
                         "Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--gm-treguier", action="store_true",
+                   help="Use the NEMO-faithful flow-dependent GM coefficient "
+                        "(TreguierConfig = NEMO &namtra_eiv nn_aei_ijk_t=21: "
+                        "aeiu/aeiv = F(growth rate of baroclinic instability), "
+                        "capped at aei0) INSTEAD of the tripole default's "
+                        "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
+                        "(rn_Ue=0.018, rn_Le=100e3 => aei0=1800 m^2/s); the two "
+                        "are mutually exclusive. --grid tripole only.")
+    p.add_argument("--gm-aei0", type=float, default=1800.0,
+                   help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
+                        "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
     p.add_argument("--freshwater-salinity", type=str, default="s_ref",
                    choices=["s_ref", "local"],
                    help="Salinity multiplying the freshwater flux in the "
@@ -4288,6 +4323,17 @@ def main() -> int:
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
                             args.tke_prognostic)
+    # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
+    # other grid (or with GM disabled) it would be silently discarded.
+    if args.gm_treguier and args.grid != "tripole":
+        raise SystemExit(
+            f"--gm-treguier is wired for --grid tripole only (the GM/Redi "
+            f"override lives in build_tripole); got --grid {args.grid!r}.")
+    if args.gm_treguier and args.no_gm_redi:
+        raise SystemExit(
+            "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
+            "selects the NEMO ldf_eiv kappa_GM scheme, the latter disables "
+            "GM/Redi entirely.")
     if args.river_mouth_restoring_gate and not args.runoff:
         raise ValueError(
             "--river-mouth-restoring-gate requires --runoff (the gate masks "
@@ -4404,6 +4450,8 @@ def main() -> int:
             tke_surface_bc=args.tke_surface_bc,
             tke_mxl_choice=args.tke_mxl_choice,
             tke_prognostic=args.tke_prognostic,
+            gm_treguier=args.gm_treguier,
+            gm_aei0=args.gm_aei0,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
