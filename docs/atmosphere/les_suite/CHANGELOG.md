@@ -15,7 +15,7 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | Q1b skill threshold (dry CBL, prognostic) | **DONE** — combined-gate NOT significant (wind-dominated); **θ-consistent gate: SIGNIFICANT at every flux** (margins ≫ σ_LES(θ)=0.0074) ⇒ closures distinguishable on θ |
 | Q2 nine-closure ranking | **DONE — FULL 9×5 grid** (45/45 tuned via scan, incl. clubb@nlev=24). Higher-order clubb/clubb_lite/edmf best at every flux > tke > holtslag > smag/louis > ysu/mynn25 ⇒ **closure ORDER buys skill** (both combined & θ) |
 | Q3 inter-regime coefficient spread | **DONE — NOT significant vs σ_LES** (both regimes tuned 9/9; σ_LES(SBL)=0.546; CBL→SBL coeff-transfer penalty 0–0.16 < σ_LES ⇒ apparent spread is tuning noise on loss-insensitive params). §7.3 |
-| D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
+| D4 AD path (+ AD-vs-DF) | **DONE + AD-vs-DF RUN** — scan rollout makes jax.grad tractable at full res; AD reproduces the DF optimum (gaps ≤0.009, AD occasionally better) ⇒ closures gradient-calibratable |
 | D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
 
 ## Durable science results (dry-convective CBL; see LES_SUITE.md §7.1 for the full write-up)
