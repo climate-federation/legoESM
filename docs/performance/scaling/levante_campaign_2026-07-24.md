@@ -259,6 +259,31 @@ The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
 held constant cleanly across that sweep's subdivision steps, so no weak
 claim is made from it.
 
+## DISTANCE TO THE THEORETICAL LIMIT, measured (job 26457977)
+
+With all three ingredients measured on this machine — fabric constants
+(17.82 us, 64.22 GB/s) and the per-tile single-device compute term — the
+ocean LL576 f64 implicit ladder finally has a real roofline:
+
+| nd | measured | calibrated bound | measured/bound | at % of floor |
+|---|---|---|---|---|
+| 2 | 42.71 ms | 34.77 ms | 1.228 | 81 % |
+| 4 | 23.53 ms | 16.82 ms | 1.398 | 72 % |
+
+Bound = per-device compute (32.58 / 14.63 ms) + modelled comm (2.21) +
+modelled reduction (2.19). The unmodelled gap is **~5 ms/step and roughly
+FLAT** with device count (7.9 ms at nd2, 6.7 at nd4), which is why the
+ratio worsens as compute shrinks.
+
+WHAT THE GAP IS NOT YET SHOWN TO BE: the bench's own `comm_scope_note`
+states the byte census is "barotropic implicit-CN PCG scope only …
+baroclinic 3-D pads NOT counted — bytes are a lower census". So the bound
+UNDERCOUNTS communication by construction, and an unknown part of the 5 ms
+is real traffic the model omits rather than inefficiency. Separating
+"unmodelled traffic" from "recoverable overhead" needs the per-phase
+profile, not another ladder. This is the honest answer to "how far from the
+theoretical limit are we": 72-81 % of a floor that is itself a lower bound.
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
