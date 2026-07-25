@@ -69,22 +69,12 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
     dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
 
     acc = BoxHeatBudgetAccumulator(
-        br.geometry, br.z_coord, mc, cfg, forcing, DT,
+        br.geometry, br.z_coord, mc, cfg, forcing, DT, model,
         row_slice=row_slice, depth_bands_m=DEPTH_BANDS_M,
     )
-    # Per-interval (not just cumulative) Joules, so early/mid/late windows
-    # can be sliced after the fact -- accum_W_series[term][band_i] is a list
-    # of this interval's Joules (append the DELTA of the running accumulator
-    # each sample, since BoxHeatBudgetAccumulator only tracks the total).
-    accum_W_series = {term: [[] for _ in DEPTH_BANDS_M] for term in TERM_NAMES}
-    prev_total = {term: [0.0] * len(DEPTH_BANDS_M) for term in TERM_NAMES}
-
-    def _record_interval_delta():
-        for term in TERM_NAMES:
-            for i in range(len(DEPTH_BANDS_M)):
-                cur = acc.accum_W[term][i]
-                accum_W_series[term][i].append(cur - prev_total[term][i])
-                prev_total[term][i] = cur
+    # Per-interval Joules for early/mid/late re-windowing: the accumulator
+    # itself now stores these (acc.time_series_term_J / .time_series_residual_J,
+    # #1226) -- no local re-derivation needed.
 
     t_seconds = 0.0
     acc.sample(st, dt_step=STEPS_PER_DAY * DT, t_seconds=t_seconds)
@@ -95,7 +85,6 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
         st = dyn(st, jnp.asarray(t_seconds))
         if (k + 1) % STEPS_PER_DAY == 0:
             acc.sample(st, dt_step=STEPS_PER_DAY * DT, t_seconds=t_seconds)
-            _record_interval_delta()
             Td = np.asarray(st.T.data)
             m = np.asarray(st.land_mask.data) > 0.5
             if not np.isfinite(Td[m]).all():
@@ -105,6 +94,8 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
 
     total_seconds = t_seconds
     summary = acc.summary(total_seconds)
+    accum_W_series = acc.time_series_term_J
+    residual_series = acc.time_series_residual_J
     conv_ratio = (RHO0_NEMO * CP_NEMO) / (acc.rho0 * acc.cp)
 
     # Day of each recorded interval (interval k closes at day k+1, since the
@@ -131,14 +122,24 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
                 w_m2 = J / window_seconds / summary["box_area_m2"] if n_sel else float("nan")
                 row[term] = w_m2
                 print(f"    {term:10s}  {w_m2:+9.3f} W/m^2  (NEMO-conv {w_m2 * conv_ratio:+9.3f})")
+            resid_J = float(np.sum(np.array(residual_series[band_i])[sel])) if n_sel else float("nan")
+            resid_w_m2 = resid_J / window_seconds / summary["box_area_m2"] if n_sel else float("nan")
+            row["residual"] = resid_w_m2
+            print(f"    {'residual':10s}  {resid_w_m2:+9.3f} W/m^2  (NEMO-conv {resid_w_m2 * conv_ratio:+9.3f})"
+                  "  <- closure diagnostic, not a physical term")
             window_reports[band][wname] = row
         b = summary["terms"][band]
-        print(f"  [full 90d] closure_residual = {b['closure_residual_W_per_m2']:+.3e} W/m^2")
+        print(f"  [full 90d] residual = {b['residual']['W_per_m2']:+.3e} W/m^2")
 
     print("\nCAVEAT: early(0-10d) is the causally-clean window (states still "
           "nearly identical to NEMO's day-180 restart) -- an anomaly present "
           "there is an OPERATOR signal. late(30-90d) reflects both the "
           "operator AND accumulated state divergence -- not operator-only.")
+    print("VERTMIX is now DIRECTLY MEASURED (#1226 instrument fix: the "
+          "realized implicit-mixing increment, not a residual). RESIDUAL "
+          "(reported separately below, per band) is the closure diagnostic "
+          "-- should be small relative to the other terms; large values "
+          "indicate instrument error for that band/window, not physics.")
 
     np.savez(
         out_path,
@@ -152,13 +153,21 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
             for term in TERM_NAMES for i in range(len(DEPTH_BANDS_M))
         },
         **{
+            f"residual_band{i}_interval_J": np.array(residual_series[i])
+            for i in range(len(DEPTH_BANDS_M))
+        },
+        **{
             f"{term}_band{i}_full90d_J": summary["terms"][band][term]["J"]
             for i, band in enumerate(DEPTH_BANDS_M) for term in TERM_NAMES
         },
         **{
+            f"residual_band{i}_full90d_J": summary["terms"][band]["residual"]["J"]
+            for i, band in enumerate(DEPTH_BANDS_M)
+        },
+        **{
             f"window_{wname}_band{i}_{term}_W_per_m2": window_reports[band][wname][term]
             for i, band in enumerate(DEPTH_BANDS_M)
-            for wname, _, _ in WINDOWS for term in TERM_NAMES
+            for wname, _, _ in WINDOWS for term in TERM_NAMES + ("residual",)
         },
     )
     print(f"\nSAVED {out_path}")

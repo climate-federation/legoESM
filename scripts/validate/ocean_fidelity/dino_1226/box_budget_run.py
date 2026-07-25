@@ -97,7 +97,7 @@ def run(recipe: str, n_years: int, out_path: str, row_slice: slice):
     dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
 
     acc = BoxHeatBudgetAccumulator(
-        br.geometry, br.z_coord, mc, cfg, forcing, DT,
+        br.geometry, br.z_coord, mc, cfg, forcing, DT, model,
         row_slice=row_slice, depth_bands_m=DEPTH_BANDS_M,
     )
     sample_dt = STEPS_PER_DAY * DT
@@ -129,10 +129,10 @@ def run(recipe: str, n_years: int, out_path: str, row_slice: slice):
     print("\n" + "=" * 90)
     print(f"BOX HEAT BUDGET -- {recipe}, {n_years}yr, rows {row_slice}, "
           f"box_area={summary['box_area_m2']:.4e} m^2, n_samples={summary['n_samples']}")
-    print("CAVEAT: ADV_H/ADV_V/ISO_REDI/FORCING are endpoint-rate daily samples "
-          "(box_heat_budget.py docstring); VERTMIX is the residual and also "
-          "absorbs their sampling error -- only the 4 explicit terms are "
-          "directly attributable.")
+    print("CAVEAT: all 5 terms (incl. VERTMIX, #1226 direct-measurement fix) "
+          "are endpoint-rate daily samples (box_heat_budget.py docstring); "
+          "RESIDUAL is now the closure diagnostic (should be ~0; a nonzero "
+          "value is instrument error, not an unattributed physical term).")
     print("=" * 90)
     for band in DEPTH_BANDS_M:
         b = summary["terms"][band]

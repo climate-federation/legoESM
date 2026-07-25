@@ -9,45 +9,69 @@ at daily cadence instead of one twin step).
 
 Terms (mirrors ``tracer_tendency_compare.py``'s bucket split exactly, reusing
 the SAME production functions — no re-derived numerics):
-  ADV_H   — horizontal advection (incl. GM-bolus-through-FCT fold, this
-            recipe's ``gm_bolus_advection="through_fct"``)
-  ADV_V   — vertical advection
+  ADV_H    — horizontal advection (incl. GM-bolus-through-FCT fold, this
+             recipe's ``gm_bolus_advection="through_fct"``)
+  ADV_V    — vertical advection
   ISO_REDI — GM/Redi tracer tendency (``gm_redi_tracer_tendency_latlon``,
-            the same call ``tendency_probe.probe_latlon_cgrid`` makes,
-            evaluated on the state's own T/S — the online run has no NEMO
-            before-level twin, unlike ``tracer_tendency_compare.py``)
-  FORCING — surface restoring + Jerlov SW penetration (the SAME functions
-            ``apply_dino_lat_lon_surface_forcing`` calls)
-  VERTMIX — NOT computed directly (the production vertical-mixing
-            diffusivity comes from the model's own prognostic TKE closure,
-            which lives in the run-loop carry, not on a bare
-            ``LatLonCGridOceanState`` — recomputing it here would duplicate
-            the TKE closure's numerics). Instead VERTMIX is the residual
-            TOTAL - (ADV_H + ADV_V + ISO_REDI + FORCING), where TOTAL is the
-            actual box heat-content tendency computed from consecutive
-            state samples. This is EXACT by construction (closes the
-            budget trivially for the box's total) and isolates the sampling
-            error in the four directly-computed terms into one number
-            instead of hiding it inside a re-derived vertmix estimate.
+             the same call ``tendency_probe.probe_latlon_cgrid`` makes,
+             evaluated on the state's own T/S — the online run has no NEMO
+             before-level twin, unlike ``tracer_tendency_compare.py``)
+  FORCING  — surface restoring + Jerlov SW penetration (the SAME functions
+             ``apply_dino_lat_lon_surface_forcing`` calls)
+  VERTMIX  — DIRECTLY MEASURED (#1226 instrument fix): the model's own
+             ``LatLonCGridOceanModel._apply_implicit_vertical_mixing``
+             (T-only, ``do_momentum=False``) is called on the SAMPLED state
+             with its own dt_model, and the REALIZED increment
+             ``(T_after - T_before) / dt_model`` is box-integrated. This is
+             NOT the explicit flux ``-rho0*cp*K*dT/dz`` — legoESM applies
+             K_v IMPLICITLY (one backward-Euler solve per step), and when
+             the implicit diffusion number ``K*dt/dz^2 >> 1`` (true for the
+             convective-adjustment K~100 m^2/s case) that solve SATURATES:
+             it drives the column toward homogeneity rather than moving the
+             explicit flux, so the explicit formula overstates the realized
+             heat transfer by an order of magnitude (measured 18x on this
+             recipe: explicit -108 vs realized -5.93 W/m^2). The K-profile
+             recompute reuses ``compute_vertical_K_profiles`` via the SAME
+             fallback branch ``_apply_implicit_vertical_mixing`` already
+             takes when ``K_v_phys is None`` (no re-derived closure
+             numerics) — this is the identical fallback the online run
+             loop itself takes whenever the K profile isn't threaded
+             through from the step's own tendency computation, so it is
+             the production closure, evaluated on the sampled state rather
+             than an in-step intermediate (the same convention ISO_REDI
+             already uses for GM/Redi above).
+
+  RESIDUAL — TOTAL − (ADV_H + ADV_V + ISO_REDI + FORCING + VERTMIX), where
+             TOTAL is the actual box heat-content tendency computed from
+             consecutive state samples. With VERTMIX now measured directly,
+             this is a genuine CLOSURE DIAGNOSTIC — it should be ≈0 if
+             every term is measured correctly, and a nonzero value signals
+             INSTRUMENT ERROR (endpoint-rate sampling bias, an operator
+             gap, or a masking mismatch between the direct terms and the
+             box integrator), not a real, unattributed physical process. A
+             signal in VERTMIX is now attributable to vertical mixing
+             itself; a signal in RESIDUAL means "something the four+1
+             direct terms are not capturing" and should be investigated as
+             an instrument gap, not folded silently into any physical term.
 
 Sampling: intended for a daily cadence inside a multi-year run loop (the
 caller decides N steps/sample). Diagnostics only — never mutates the
-model state fed to ``model.step()``.
+model state fed to ``model.step()`` (the implicit-mixing probe solves on a
+COPY of the sampled state's T field; its result is read, never written
+back).
 
 CAVEAT (endpoint-rate sampling, stated not hidden): each interval's ADV_H/
-ADV_V/ISO_REDI/FORCING rate is evaluated ONCE, at the state CLOSING that
-interval (not a midpoint or trapezoidal average), then multiplied by the
-whole interval length. For a slowly-varying (multi-year-mean) signal this
-is negligible; for the SEASONAL cycle DINO's forcing runs (nn_ann_cyc) a
-daily endpoint sample carries a same-order-as-the-day's-drift bias
+ADV_V/ISO_REDI/FORCING/VERTMIX rate is evaluated ONCE, at the state CLOSING
+that interval (not a midpoint or trapezoidal average), then multiplied by
+the whole interval length. For a slowly-varying (multi-year-mean) signal
+this is negligible; for the SEASONAL cycle DINO's forcing runs (nn_ann_cyc)
+a daily endpoint sample carries a same-order-as-the-day's-drift bias
 (bounded by day-length / forcing-timescale, ~0.2% of tau_T=11.85 days for
-DINO — small, but real). Because VERTMIX is the residual, this sampling
-error (along with the true vertical mixing and any intra-day
-nonlinearity) all land in the VERTMIX bucket — a signal appearing in
-VERTMIX is "vertmix + all fourth-term sampling/endpoint error," not proof
-of vertical-mixing causation on its own. Only the four EXPLICIT terms
-(ADV_H, ADV_V, ISO_REDI, FORCING) are directly attributable; use VERTMIX
-as "everything else," consistent with its residual definition above.
+DINO — small, but real). This sampling error, plus any residual operator
+gap, now lands in the RESIDUAL bucket (not VERTMIX) — use RESIDUAL as the
+instrument's own error bar, and treat a RESIDUAL that is NOT small relative
+to the band's other terms as a reason to distrust the decomposition for
+that band/window, not as evidence of an unmodeled physical process.
 """
 
 from __future__ import annotations
@@ -235,6 +259,59 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     }
 
 
+def compute_box_vertmix_dT(state, model, surface_forcing, dt_model: float):
+    """Per-cell dT/dt [degC/s] for VERTMIX — the REALIZED implicit-mixing
+    increment, T-only (``do_momentum=False``).
+
+    legoESM applies vertical diffusivity via ONE backward-Euler solve per
+    step (:meth:`LatLonCGridOceanModel._apply_implicit_vertical_mixing`),
+    not an explicit flux — so the tendency actually realized on the
+    prognostic state is ``(T_after_solve - T_before_solve) / dt_model``,
+    NOT ``-rho0*cp*K*dT/dz`` (that explicit formula overstates the
+    realized transfer by up to ~18x when the implicit diffusion number
+    ``K*dt/dz^2 >> 1`` saturates the solve).
+
+    Calls the model's OWN method (no re-derived K-profile/solver numerics):
+    ``K_v_phys=None``/``A_v_phys=None``/``K33_iso=None`` take the SAME
+    fallback branch (``compute_vertical_K_profiles`` recomputed from the
+    sampled state) the online run loop itself takes whenever the K
+    profile isn't threaded through from an in-step tendency computation —
+    the identical convention ``compute_box_heat_dT_terms`` already uses
+    for ISO_REDI (recomputed from the state's own T/S, not an in-step
+    carry). ``surface_forcing`` (the ``OceanSurfaceForcing`` the run loop
+    passes to ``model.step()``) is threaded through so the wind-driven TKE
+    surface production term is real, not silently zeroed.
+    ``tke_source=None`` (the additive TKE energy-recycling source, an
+    in-step-only intermediate) is the one input NOT reconstructable from a
+    bare state; its omission means the PROGNOSTIC TKE budget itself sees
+    no recycled dissipation for this one-off probe call, while the
+    returned diffusivity/mixing (what heats/cools T) is otherwise the
+    production closure evaluated on the sampled state.
+
+    Read-only: solves on ``state``'s own T (a fresh JAX value), returns the
+    tendency array — never mutates or feeds back into ``model.step()``.
+
+    Returns
+    -------
+    (n_lat, n_lon, nlev) array, degC/s, land-masked.
+    """
+    mask = state.land_mask.data
+    tke_prognostic = model._tke_prognostic_active()
+    tke_old = (state.tke.data if (tke_prognostic and state.tke is not None)
+               else None)
+    result = model._apply_implicit_vertical_mixing(
+        state, dt_model, surface_forcing,
+        do_tracers=True, do_momentum=False,
+        tke_old=tke_old, tke_source=None,
+        return_tke=tke_prognostic,
+        n2_tracers=model._n2_before_advection_tracers(state),
+        n2_tracers_before=model._n2_nemo_before_tracers(state),
+    )
+    state_new = result[0] if tke_prognostic else result
+    dT_dt = (state_new.T.data - state.T.data) / dt_model
+    return dT_dt * mask[:, :, jnp.newaxis]
+
+
 class BoxHeatBudgetAccumulator:
     """Accumulates box-integrated per-term heat tendency [W] by depth band
     over a multi-year run, sampled at whatever cadence the caller calls
@@ -245,12 +322,18 @@ class BoxHeatBudgetAccumulator:
     grid, z_coord, config, dino_cfg, forcing
         Same objects the run loop already built (``dino_lat_lon_model_config``,
         ``dino_config_for_recipe``, ``dino_lat_lon_surface_forcing_arrays``).
+    model : LatLonCGridOceanModel
+        The SAME model instance the run loop steps with. Required for the
+        direct VERTMIX measurement — ``compute_box_vertmix_dT`` calls
+        ``model._apply_implicit_vertical_mixing`` (the model's own
+        production vertical-mixing solve) on each sampled state.
     dt_model : float
         The MODEL's own dynamical timestep [s] (e.g. 2700 for
         ``nemo_dino_kamm_mlf``) — passed to the physics operators
         (``restoring_surface_forcing``, the FCT advection limiter,
-        ``gm_redi_tracer_tendency_latlon``'s MSC clamp) inside
-        ``compute_box_heat_dT_terms``. This is DELIBERATELY separate from
+        ``gm_redi_tracer_tendency_latlon``'s MSC clamp, and now the
+        implicit vertical-mixing solve) inside ``compute_box_heat_dT_terms``
+        / ``compute_box_vertmix_dT``. This is DELIBERATELY separate from
         the (much longer) sampling interval passed to ``sample()`` —
         every one of those operators is dt-sensitive in a way that does
         NOT simply rescale with dt (see ``compute_box_heat_dT_terms``
@@ -270,7 +353,8 @@ class BoxHeatBudgetAccumulator:
         apples-to-apples comparison against the NEMO multi-year residual.
     """
 
-    def __init__(self, grid, z_coord, config, dino_cfg, forcing, dt_model: float, *,
+    def __init__(self, grid, z_coord, config, dino_cfg, forcing, dt_model: float,
+                 model=None, *,
                  row_slice: slice = slice(12, 47),
                  depth_bands_m=((0.0, 200.0), (200.0, 1000.0), (1000.0, None)),
                  rho0: float = constants.rho_ocean, cp: float = constants.c_sw):
@@ -279,11 +363,18 @@ class BoxHeatBudgetAccumulator:
         self.config = config
         self.dino_cfg = dino_cfg
         self.forcing = forcing
+        self.model = model
         self.dt_model = float(dt_model)
         self.row_slice = row_slice
         self.depth_bands_m = tuple(depth_bands_m)
         self.rho0 = float(rho0)
         self.cp = float(cp)
+
+        if model is not None:
+            from legoesm.ocean.experiments.dino import dino_step_surface_forcing
+            self._sf = dino_step_surface_forcing(forcing)
+        else:
+            self._sf = None
 
         dz_ref = np.asarray(z_coord.dz_ref)
         z_cum = np.cumsum(dz_ref) - 0.5 * dz_ref  # cell-centre depth, positive down
@@ -300,9 +391,18 @@ class BoxHeatBudgetAccumulator:
         self.n_samples = 0
         self.time_series_t = []
         self.time_series_H = {i: [] for i in range(len(self.depth_bands_m))}
+        # Cumulative totals (existing npz-key convention: backward compat).
         self.accum_W = {
             term: [0.0] * len(self.depth_bands_m) for term in TERM_NAMES
         }
+        self.accum_residual_J = [0.0] * len(self.depth_bands_m)
+        # Per-interval time series (NEW, #1226): each entry is the Joules
+        # accumulated in the ONE interval closing at time_series_t[k] (k>=1)
+        # -- lets a caller re-window (early/mid/late) without re-running.
+        self.time_series_term_J = {
+            term: [[] for _ in range(len(self.depth_bands_m))] for term in TERM_NAMES
+        }
+        self.time_series_residual_J = [[] for _ in range(len(self.depth_bands_m))]
         self._prev_H = None
 
     def _box_integral_W(self, dT_dt, mask, area, h_k):
@@ -357,16 +457,31 @@ class BoxHeatBudgetAccumulator:
                 state, self.grid, self.z_coord, self.config, self.dino_cfg,
                 self.forcing, self.dt_model, t_seconds,
             )
-            interval_explicit_J = []
-            for term in ("adv_h", "adv_v", "iso_redi", "forcing"):
+            if self.model is None:
+                raise ValueError(
+                    "BoxHeatBudgetAccumulator: VERTMIX is now measured "
+                    "DIRECTLY (#1226) via the model's own implicit-mixing "
+                    "solve -- construct with model=<LatLonCGridOceanModel "
+                    "instance used for model.step()>."
+                )
+            terms["vertmix"] = compute_box_vertmix_dT(
+                state, self.model, self._sf, self.dt_model,
+            )
+
+            interval_term_J = {}
+            for term in TERM_NAMES:
                 per_band_W = self._box_integral_W(terms[term], mask, area, h_k)
-                interval_explicit_J.append(per_band_W)
+                interval_term_J[term] = [w * dt_step for w in per_band_W]
+
             for i in range(len(self.depth_bands_m)):
                 dH = H[i] - self._prev_H[i]
-                d_explicit = sum(interval_explicit_J[j][i] for j in range(4)) * dt_step
-                for j, term in enumerate(("adv_h", "adv_v", "iso_redi", "forcing")):
-                    self.accum_W[term][i] += interval_explicit_J[j][i] * dt_step
-                self.accum_W["vertmix"][i] += (dH - d_explicit)
+                term_sum = sum(interval_term_J[term][i] for term in TERM_NAMES)
+                residual = dH - term_sum
+                for term in TERM_NAMES:
+                    self.accum_W[term][i] += interval_term_J[term][i]
+                    self.time_series_term_J[term][i].append(interval_term_J[term][i])
+                self.accum_residual_J[i] += residual
+                self.time_series_residual_J[i].append(residual)
 
         self._prev_H = H
         self.n_samples += 1
@@ -389,9 +504,12 @@ class BoxHeatBudgetAccumulator:
 
         Returns
         -------
-        dict with per-band, per-term W and W/m^2, plus the closure residual
-        (sum of terms vs measured dH/dt) as the instrument's own validation
-        gate.
+        dict with per-band, per-term W and W/m^2 (all 5 terms, VERTMIX now
+        DIRECTLY measured), plus the RESIDUAL (sum of the 5 measured terms
+        vs measured dH/dt) — now a genuine closure DIAGNOSTIC: a nonzero
+        value signals instrument error (endpoint-rate sampling bias,
+        an operator gap, or a masking mismatch), not an unattributed
+        physical process (see module docstring).
         """
         if total_seconds is None:
             total_seconds = self.time_series_t[-1] - self.time_series_t[0]
@@ -412,12 +530,23 @@ class BoxHeatBudgetAccumulator:
                     "W_mean": J / total_seconds,
                     "W_per_m2": J / total_seconds / self._box_area,
                 }
-            residual_J = dH_total_J[i] - term_sum_J
+            residual_J = self.accum_residual_J[i]
             band_out["dH_J"] = dH_total_J[i]
+            band_out["residual"] = {
+                "J": residual_J,
+                "W_mean": residual_J / total_seconds,
+                "W_per_m2": residual_J / total_seconds / self._box_area,
+            }
+            # Backward-compat aliases (pre-#1226 key names): closure_residual_*
+            # was the ONLY residual before VERTMIX was measured directly; now
+            # it is identical to "residual" above (both = dH - sum(5 terms)).
             band_out["closure_residual_J"] = residual_J
             band_out["closure_residual_W_per_m2"] = (
                 residual_J / total_seconds / self._box_area
             )
+            assert abs((term_sum_J + residual_J) - dH_total_J[i]) < (
+                1e-6 * max(abs(dH_total_J[i]), 1.0)
+            ), f"budget accounting bug for band {band}"
             out["terms"][band] = band_out
         return out
 
@@ -426,4 +555,5 @@ __all__ = (
     "TERM_NAMES",
     "BoxHeatBudgetAccumulator",
     "compute_box_heat_dT_terms",
+    "compute_box_vertmix_dT",
 )
