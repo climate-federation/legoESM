@@ -153,6 +153,14 @@ is the fix.
   θ=298.7/q_v=17 g/kg/ug=−10). `run_bomex_les` reads them via `resolve_sam_case_dir`. Starting
   the moist build: wire moist into `run_les_suite` → emit BOMEX/DYCOMS → moist SCM q_t coupling
   → moist Q1/Q2/Q3 + full D9.
+- **Iter 25 — moist build PROGRESSING (emission validated; artifact fields wired).** (a) Full
+  64³ 6 h BOMEX validated: a cumulus layer forms (cc≈0.067 2nd-half-mean, LWP≈2.4 g/m²,
+  qc_max~1e-3; under Siebesma cc 10–15 % as expected at coarse 200 m res). (b) Extended the
+  shared `les_record._profiles` to emit ⟨w'θ'⟩ (=⟨w'θ_l'⟩ moist) always + q_t/⟨w'q_t'⟩ when
+  q_v is passed (4 tests; dry set unchanged). (c) `run_bomex_les` both _save paths now pass
+  qv3 → prof_NNN.npz carry qt/wqt/wtheta (verified end-to-end). NEXT: the prof→
+  `LESReferenceArtifact` converter (`build()` exposes ug/vg/sfc-fluxes/f_c) via an
+  `--emit-suite-artifact` flag → moist SCM (condensation) → tune → moist Q1/Q2/Q3 + D9.
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
