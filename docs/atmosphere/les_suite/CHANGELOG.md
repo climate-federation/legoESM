@@ -51,9 +51,10 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
   surface θ-flux (secant-calibrated T_sfc excess; dry q_sfc; Exner-consistent) to avoid the
   Ch=0 prescribed-flux STARVATION that would make the margin a wiring artifact. On the real
   sheared CBL (`cbl_nieuwstadt` Ug8, Q0=0.06), normalized flux-RMSE vs LES over {lasd,smag,
-  vreman}: local 1.08–1.21 vs nonlocal 0.28–0.46 ⇒ **margin 0.875 ± 0.072 (σ_LES), min 0.774
-  — ~12× the σ_LES flux spread** ⇒ nonlocal beats local "by > a stated margin, in diagnostic
-  scoring" (Q1b satisfied). Local closures carry ≈0 mixed-layer flux (F=−Kh·∂θ/∂z, ∂θ/∂z≈0);
+  vreman}, BEST-TUNED closures (Q2 tier-1 params, literal Q1b protocol): local 1.15–1.37 vs
+  nonlocal 0.28–0.47 ⇒ **margin 0.958 ± 0.122 (σ_LES), min 0.795 — ~8× σ_LES** (untuned 0.875
+  ± 0.072; tuning-robust) ⇒ best-tuned nonlocal beats best-tuned local "by > a stated margin, in
+  diagnostic scoring" (Q1b literally satisfied in BOTH scorings). Local closures carry ≈0 mixed-layer flux (F=−Kh·∂θ/∂z, ∂θ/∂z≈0);
   nonlocal carry the surface flux up. Scope: free-conv (Ug≈0) + stable SBL (negative flux)
   correctly RAISE (uncalibratable). Codex iterate-to-CLEAN (2 rounds: fixed a latent-flux
   contamination + a T-vs-θ-flux + a regrid-coordinate bug). 22 les_suite tests + 3 helper.

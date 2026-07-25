@@ -1,8 +1,8 @@
 # LES_SUITE — an LES-truth suite for tuning and comparing SCM turbulence closures
 
 Status (2026-07-25): **DRY SUITE COMPLETE + FIRST MOIST REGIME (BOMEX) DELIVERED.** Dry:
-Q1a, Q1b (free + sheared, θ-consistent, PLUS a MEASURED closure-vs-closure diagnostic-flux
-margin = 0.875 ± 0.072 σ_LES on the sheared CBL, §7.1), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
+Q1a, Q1b (free + sheared, θ-consistent, PLUS a MEASURED best-tuned closure-vs-closure diagnostic-flux
+margin = 0.958 ± 0.122 σ_LES on the sheared CBL, §7.1), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
 (AD-vs-DF 9/9), D7 (σ_LES all dry regimes), dry-regime partial-D9. Moist: the **moist SCM is
 built + validated + codex-CLEAN** (θ_l/q_t scoring, diagnostic Sundqvist condensation, DF+AD),
 and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned, θ_l-corrected, D7-gated by
@@ -312,13 +312,16 @@ The full machinery is built + validated; these are the first real numbers, for t
   kinematic **θ**-flux on each closure (secant-calibrated T_sfc excess through the shared bulk;
   dry `q_sfc` so no spurious latent-buoyancy contamination; Exner-consistent T↔θ) as the controlled
   variable held fixed across closures. **Result on the real sheared CBL** (`cbl_nieuwstadt` Ug=8,
-  Q0=+0.06 K m/s), normalized flux-RMSE vs the LES total flux, across the 3 LES SGS closures
-  {lasd, smagorinsky, vreman}: local (smagorinsky/louis) **1.08–1.21** vs nonlocal
-  (holtslag_boville/ysu) **0.28–0.46** → **margin = 0.875 ± 0.072 (σ_LES over SGS), min 0.774**.
+  Q0=+0.06 K m/s), normalized flux-RMSE vs the LES total flux, scored against the 3 LES SGS
+  closures {lasd, smagorinsky, vreman} for the σ_LES error bar. Using the **BEST-TUNED** closures
+  (the Q2 tier-1 tuned params, applied consistently — the literal Q1b protocol): local
+  (smagorinsky/louis) **1.15–1.37** vs nonlocal (holtslag_boville/ysu) **0.28–0.47** →
+  **margin = 0.958 ± 0.122 (σ_LES over SGS), min 0.795** (untuned closures give 0.875 ± 0.072 —
+  the margin is TUNING-ROBUST, since tuning a local Kh cannot fix a ≈0 mixed-layer gradient).
   The local closures carry ≈0 flux through the well-mixed layer (structural ceiling: `F=−Kh·∂θ/∂z`
   with `∂θ/∂z≈0`) while nonlocal carry the surface flux upward — so the diagnostic margin EXCEEDS
-  the σ_LES flux spread by ~12×, i.e. nonlocal beats local "by > a stated margin, in diagnostic
-  scoring" (Q1b, satisfied). **Scope limit (honest):** the calibration needs enough mean wind to
+  the σ_LES flux spread by ~8×, i.e. best-tuned nonlocal beats best-tuned local "by > a stated
+  margin, in diagnostic scoring" (Q1b, literally satisfied — and the prognostic half via §7.1 above). **Scope limit (honest):** the calibration needs enough mean wind to
   carry the bulk surface flux, so the FREE-convective CBL (Ug≈0) and the STABLE SBL (negative
   surface flux, outside the positive secant bracket) correctly RAISE rather than report a number —
   the sheared CBL is the calibratable vehicle for the measured margin. The Q1a structural ceiling
