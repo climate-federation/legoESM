@@ -3,16 +3,21 @@
 #SBATCH --partition=gpu
 #SBATCH --nodes=6
 #SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-task=1
-#SBATCH --gpu-bind=single:1
+#SBATCH --gpus-per-node=4
+#SBATCH --gpu-bind=none
 #SBATCH --time=01:30:00
 #SBATCH --output=cube_tiled_%j.log
 # ===========================================================================
 # Sub-face TILED cube hydrostatic step on Levante: 24 GPUs (6 x 4 A100),
 # kt=2 -> (6,2,2) mesh — the >6-GPU strong-scaling lane (audit item 5).
-# Stage A: CPU-virtual parity gate; Stage B: multicontroller timed run
-# (SLURM auto-detected jax.distributed; --gpu-bind=single:1 pins one GPU
-# per task so local_device_ids=[0] is the pinned device).
+# Stage A: CPU-virtual parity gate; Stage B: multicontroller timed run.
+# GPU binding: all 4 node GPUs visible per task (--gpu-bind=none); bare
+# jax.distributed.initialize() under SLURM derives
+# local_device_ids=[SLURM_LOCALID], so each task binds the LOCALID-th GPU.
+# Do NOT pin one GPU per task (--gpu-bind=single:1 / CVD shims): the pinned
+# device renumbers to index 0 while jax still asks for index LOCALID ->
+# CUDA_ERROR_INVALID_DEVICE on every localid!=0 task (observed 26446699;
+# same double-pin failure as gpu_multinode_scaling.sbatch job 26447612).
 # See scripts/cluster/scaling_derecho/cube_tiled_step.pbs for the lane's
 # contract (dynamics-only envelope; HLO anti-replication refusals).
 # ===========================================================================
@@ -33,10 +38,18 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
-OUT="${OUT:-results/a1/cube_tiled_scaling_levante.jsonl}"
+# Job-id-suffixed default: concurrent tiled jobs must not append to one
+# JSONL (codex round-3 finding 4; same class as the OUTDIR stamp collision).
+OUT="${OUT:-results/a1/cube_tiled_scaling_levante_j${SLURM_JOB_ID:-local}.jsonl}"
 RES="${RES:-192}"
 NLEV="${NLEV:-60}"
 KT="${KT:-2}"
+# CFL-scaled timestep: the bench default dt=60 s is stable at C192-C384 but
+# NOT at C768 (~13 km) — the closed-loop trajectory went non-finite there
+# (job 26453524; the single-shot leg, which re-feeds pristine inputs, was
+# unaffected and is a valid throughput row). Halve dt per resolution
+# doubling from the C192 anchor.
+DT="${DT:-$(awk -v r="$RES" 'BEGIN{printf "%.4f", 60.0*192.0/r}')}"
 # This job reserves EXACTLY 24 GPUs; a different kt needs its own
 # --nodes/--ntasks allocation (see the PBS twin's refusal note).
 if [ "${KT}" != "2" ]; then
@@ -65,13 +78,13 @@ export JAX_PLATFORMS=cuda
 # cube_tiled_step.pbs for the full rationale + bisection).
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
 timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" --dt "${DT}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
 echo "== single-shot done"
 # Closed-loop production lane (state resident tile-sharded across steps).
 echo "== closed-loop start"
 timeout 1800 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" --dt "${DT}" \
     --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 
 echo "done: ${OUT}"
