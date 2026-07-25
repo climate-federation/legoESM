@@ -275,14 +275,29 @@ modelled reduction (2.19). The unmodelled gap is **~5 ms/step and roughly
 FLAT** with device count (7.9 ms at nd2, 6.7 at nd4), which is why the
 ratio worsens as compute shrinks.
 
-WHAT THE GAP IS NOT YET SHOWN TO BE: the bench's own `comm_scope_note`
-states the byte census is "barotropic implicit-CN PCG scope only …
-baroclinic 3-D pads NOT counted — bytes are a lower census". So the bound
-UNDERCOUNTS communication by construction, and an unknown part of the 5 ms
-is real traffic the model omits rather than inefficiency. Separating
-"unmodelled traffic" from "recoverable overhead" needs the per-phase
-profile, not another ladder. This is the honest answer to "how far from the
-theoretical limit are we": 72-81 % of a floor that is itself a lower bound.
+WHAT THE GAP IS NOT — the omitted-traffic explanation is REFUTED
+(`scripts/tmp/probe_ocean_halo_bytes.py`, HLO byte census on CPU virtual
+devices). The bench's `comm_scope_note` correctly warns that its census is
+"barotropic implicit-CN PCG scope only … baroclinic 3-D pads NOT counted",
+and the true volume IS much larger: **16.22 MB/step across 110
+collective-permutes vs the censused 2.25 MB — a 7.2x undercount**. But
+completing the census moves the bound by only **0.22 ms**, because the
+comm term is LATENCY-dominated: at 122 messages x 17.82 us the latency part
+is 2.174 ms while even 16 MB at 64.22 GB/s is just 0.253 ms.
+
+So with the byte census completed the unexplained residual is still 5.5 ms (nd2)
+and 4.3 ms (nd4). It is NOT communication under any calibration of this
+model. The remaining candidates — none yet demonstrated — are extra work
+the SHARDED formulation performs that the single-device reference does not
+(halo padding, band-edge stencils, the v-row reconstruction) and per-kernel
+launch overhead from a longer program. Distinguishing those needs a
+per-phase profile of the sharded step, which the SPMD bench does not yet
+have (`bench_ocean_mpi_scaling.py` has `--profile-phases`; the SPMD twin
+does not).
+
+Honest answer to "how far from the theoretical limit are we": 72-81 % of a
+now-calibrated floor, with the shortfall attributable to neither bandwidth
+nor byte volume.
 
 ## Using the calibrated bound correctly (a trap worth documenting)
 
