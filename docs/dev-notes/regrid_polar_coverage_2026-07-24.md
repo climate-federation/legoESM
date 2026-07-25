@@ -193,3 +193,51 @@ miniature. Checked on the source geometry alone, so `polar_fill=True` can never
 pass where `polar_fill=False` fails. Real sources are far inside it (CORE-II 0.51°,
 JRA55-do 0.15°); a ±10° regional band, or a latitude axis misread as radians
 (±1.57°), is refused.
+
+## CONFIRMED downstream: this was the ½° latlon polar blow-up
+
+The zero-forcing regime was not hypothetical — it was crashing a real configuration,
+and the crash had been worked around rather than diagnosed.
+
+`scripts/cluster/omip_nemo/_diag_llh_polarcap.sbatch` records a half-degree
+(`--latlon-res 360x720`) `latlon_bathy` run failing at step 3, `max|u|` going
+`0.08 → 0.86 → 177` **at lat 89.75**, and the response was
+`--mask-polar-cap-lat 89.0` — masking the offending cell out.
+
+That latitude is exactly the row this note is about. At 360×720 the destination
+rows are 0.5° and CORE-II's inferred outer edge is 89.4863°, so:
+
+| dst row | centre | `lat_frac` |
+|---|---|---|
+| [89.5, 90] | **89.75** | **0.000000** |
+| [89.0, 89.5] | 89.25 | 0.981540 |
+| [88.5, 89.0] | 88.75 | 1.000000 |
+
+The blow-up sat on the *only* row with zero coverage — which under `dstarea`
+returns `0 × field`, i.e. `T_air = 0 K`, zero winds, zero radiation, against an
+SST near 271 K. Its neighbour at 89.25 was 98% covered and behaved.
+
+**Controlled A/B** (jobs 9188278 / 9188279), same tree, same command, one variable
+— the forcing polar treatment — and `--mask-polar-cap-lat` REMOVED so the cell is
+live:
+
+| arm | polar row | outcome |
+|---|---|---|
+| A: `dstarea`, no `polar_fill`, check off (pre-fix) | zeros | **NaN at step 1**, `finite: False`, rc=1 |
+| B: `fracarea` + `polar_fill` (shipped) | real values | **210 steps stable**, peak `max\|u\|` 1.089 m/s, SST 13.03 °C, SSS 33.86, `umax` never leaves the tropics (lat −15.3) |
+
+Arm B is 70× past the step-3 failure point with no polar excursion, so
+**`--mask-polar-cap-lat` is no longer required for this configuration.** Eight
+launchers use `--latlon-res 360x720`; all were exposed.
+
+Scope of the claim, deliberately narrow:
+- **CONFIRMED** — the ½° polar NaN/blow-up at lat 89.75 was caused by the
+  zero-coverage polar row, and is fixed.
+- **NOT claimed** — the separate first-step HANG investigated in
+  `_diag_llh_hang.sbatch` (`TotalCPU=0`, a GPU/sync deadlock) is a different
+  symptom and was not tested here.
+- **REFUTED** — an earlier guess of mine that this bore on the Arctic halocline /
+  excess-ice-growth work. It cannot: `_conservative_regrid_to_latlon` is reached
+  only for `latlon`/`latlon_regional`, while the tripole and MPAS runs use
+  `_nn_interp_to_points`, untouched by any of this. At 1° the affected row is also
+  only 0.26% of Arctic ice area.
