@@ -327,7 +327,14 @@ The full machinery is built + validated; these are the first real numbers, for t
   **Finding: on θ, closure ORDER buys skill** — the higher-order PDF/mass-flux family
   (clubb, clubb_lite, edmf) beats 1.5-order tke, which beats nonlocal-K holtslag, which beats
   local-K (smag/louis); ysu (counter-gradient) and mynn25 are worst. A clean, structurally
-  sensible ordering by closure sophistication, robust across the whole buoyancy axis. This
+  sensible ordering by closure sophistication, robust across the whole buoyancy axis.
+  **D9 (partial) — the higher-order win is NOT a cloud-PDF artifact.** D9 asks whether
+  CLUBB's advantage is its cloud PDF vs its higher-order closure. These are DRY regimes (no
+  condensation), so CLUBB's cloud PDF is INACTIVE — yet clubb/clubb_lite/edmf still dominate
+  by 3–4× on θ. ⇒ in cloud-free flow the higher-order MOMENT closure ITSELF carries the
+  skill, not the cloud PDF. The full D9 (moist native-vs-shared-cloud, to check the MOIST
+  win) remains blocked on the gSAM forcing, but the cloud-free result already refutes the
+  "it's only the cloud PDF" concern for the dry regimes. This
   SUPERSEDES the earlier 5-closure read (holtslag "best") — holtslag was only best among the
   first five; the higher-order closures dominate it by 3–4×. SIGNIFICANCE (vs σ_LES(θ)): the
   BEST-vs-2nd margin is significant only at Q0=0.02 (0.0091>0.0074) — because the two leaders
