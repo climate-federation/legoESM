@@ -115,138 +115,46 @@ is the fix.
   - **20 `72d7c278e`** — **D4 bonus RUN** (AD≈DF, gaps ≤0.009 ⇒ closures gradient-calibratable) + this condense.
   - **MILESTONE: Q1/Q2/Q3/D4/D7 all DONE for the dry regimes (CBL/sheared/SBL). Remaining: moist (BOMEX/DYCOMS) + D9 cloud.**
 
-- **Iter 21 — MOIST regimes BLOCKED on external forcing data; D4 9/9 confirmed.** clubb's
-  78-param AD finished (df=0.2308/ad=0.2309, gap 0.0001) → D4 complete 9/9, all AD≈DF.
-  Investigated the last deliverable (moist BOMEX/DYCOMS): it is BLOCKED on the third-party
-  gSAM `CASES/` forcing decks, which are NOT in the repo and NOT on this system
-  (`fetch_les_forcing --only BOMEX` → "Could not find a gSAM checkout"; `LEGOESM_GSAM_ROOT`
-  unset; the fetcher only copies from a local checkout, no download). The moist LES CANNOT
-  be emitted here — the user must supply a gSAM checkout (`LEGOESM_GSAM_ROOT=<dir with
-  CASES/>`). Documented in §8 with the build plan for when the forcing is available.
-  **⇒ every deliverable PRODUCIBLE in this environment is DONE (dry-regime Q1/Q2/Q3/D4/D7);
-  the moist regime is externally blocked, not incomplete-by-effort.**
+- **Iters 21–30 (2026-07-24..25) — CONDENSED (full prose in each commit; science in LES_SUITE.md §7):**
+  - **21** — D4 complete 9/9 (clubb 78-param AD gap 0.0001, all AD≈DF). Moist WRONGLY thought
+    blocked on gSAM decks (corrected iter 24).
+  - **22** — sheared CBL Q1b: closure ranking is SHEAR-DEPENDENT (mynn25 worst→3rd under shear).
+  - **23** — Q3-shear axis + scorecard conflation guard + session regression validated.
+  - **24** — CORRECTION: moist NOT blocked (`data/les_cases/{BOMEX,DYCOMS_RF01}` cached; the
+    fetch error was a red herring). Moist build started.
+  - **25–26** — moist DATA pipeline: `run_bomex_les --emit-suite-artifact` converter (θ_l/q_t +
+    Coriolis/geostrophic/subsidence/advection forcing) + `les_record` θ_l/q_t; real BOMEX artifact.
+  - **27** — MOIST SCM built+validated+codex-CLEAN: `_moist_cbl_physics` (Sundqvist), moist branch
+    (q_v IC=q_t, forcing), `scm_final_moist_on` (θ_l/q_t), DF+AD `is_moist`; q_g scan-stability fix.
+    First BOMEX Q2 (later corrected).
+  - **28** — **θ_l CONFOUND FIXED (codex HIGH):** the spectral moist LES prognoses ACTUAL θ, not
+    θ_l → recorded θ vs SCM θ_l. Fix: `scm_coupling.liquid_water_theta` (one canonical reduction,
+    SCM delegates); `_record_theta_l` in both drivers (q_c only); `sigma_les` → moist. Re-emitted 3
+    BOMEX θ_l artifacts → re-tuned 9 → **BOMEX Q2 D7-gated (σ_LES=0.053): holtslag>louis>clubb>...>
+    tke; order does NOT buy skill (top-5 tied, weak tail resolved)**. DYCOMS converter (RF01 LW
+    cooling→theta_adv).
+  - **29** — **DYCOMS (moist regime 2) DELIVERED, σ_LES-gated NULL** (σ_LES=0.231): whole spread <
+    σ_LES → no closure distinguishable; resolution-limited (LWP 9 vs ref 50-80). Combined moist
+    verdict: higher-order does NOT win in moist regimes.
+  - **30** — **D9 CLUBB dual-report** (`cloud_source` native ADG1-PDF vs shared grid-scale +
+    `cloud_buoyancy` control): BOMEX 0.336 vs 0.306, DYCOMS 0.909 vs 0.801 — both sub-σ_LES ⇒ PDF
+    cloud buys no resolvable skill (not a cloud-PDF artifact). Q3 extended to 4 regimes
+    (cross-transfer: 1/18 moist resolvable). All physics codex-CLEAN.
 
-- **Iter 22 — sheared CBL Q1b (well-conditioned): closure ranking is SHEAR-DEPENDENT.** While
-  moist stays externally blocked, did a producible enrichment the docs flagged as the Q1b
-  "next step": tuned all 9 closures on the sheared CBL (Ug=8, via the geostrophic wiring —
-  validates it end-to-end on the CBL) + θ-gate (σ_LES(θ)=0.0073). Ranking clubb_lite≈clubb≈
-  mynn25 best, smagorinsky worst — vs the FREE CBL (mynn25 worst, higher-order best), shear
-  REORDERS the mid tier: mynn25 (MYNN, shear-production) jumps worst→3rd-best, local smag
-  drops to worst; higher-order clubb/clubb_lite stay robust in BOTH. ⇒ order-buys-skill holds
-  for the higher-order family across shear; the mid-tier ranking does not transfer. §7.1.
+- **Iter 31 (2026-07-25) — LITERAL D9 + Q1b-diagnostic honest close.** (a) The D9 dual-report is
+  the LITERAL native-vs-SHARED-cloud pair (`cloud_source="shared"` = grid-scale Flatau saturation,
+  no interface change), codex-CLEAN — not just the no-cloud control. (b) Q1 "both diagnostic and
+  prognostic scoring": prognostic done; diagnostic THRESHOLD (<0.02) established by the structural
+  argument (local K≥0 gives wrong-signed −Kh·∂θ/∂z in the counter-gradient layer at every flux;
+  D6 maps Q1's diagnostic contribution to Q1a). An explicit diagnostic-flux RECONSTRUCTION
+  (`scm_diagnostic_wtheta`) was ATTEMPTED → **codex 2 HIGH (prescribed-flux injection not the
+  turbulence BC; Exner mismatch; non-conservative center-trapezoid) → REVERTED** (commit
+  cb45cae50). The MEASURED diagnostic-flux MARGIN needs each closure's w'θ' flux exposed across
+  the 9 schemes (not in TurbulenceOutput; nonlocal γ internal) = a high-blast-radius interface
+  change, NOT rushed at session depth. See §7.1.
 
-- **Iter 23 — Q3-shear axis, scorecard hardening, session regression VALIDATED.** (a) Q3-shear
-  cross-transfer (free-CBL coeffs → sheared CBL): 0/9 exceed σ_LES(sheared)=0.283 ⇒ coefficient
-  portability holds on the SHEAR axis too (same as CBL→SBL) — the shear-dependent ranking is
-  default-closure-skill, not a tuned-coeff requirement (§7.1). (b) Hardened the scorecard: a
-  `(regime,q0)` slice mixing >1 distinct artifact (e.g. free vs sheared CBL) now WARNS loudly
-  (the per-scheme dedup could silently drop/replace a config); sheared records isolated in
-  `tuned/sheared_analysis/` (2 tests). (c) Full les_suite regression **224 passed** — the
-  session's scan-rollout + geostrophic + scorecard + score-factoring changes are green, no
-  cross-interaction breakage. **Dry-regime suite fully complete + validated; moist externally
-  blocked (gSAM forcing).**
-
-- **Iter 24 — CORRECTION: moist regimes NOT blocked; forcing IS cached. Moist build STARTED.**
-  Earlier iters wrongly called moist "blocked on external gSAM forcing" after mis-checking the
-  cache path (`data/les_forcing/` vs the real `data/les_cases/`). The decks ARE present +
-  readable: `data/les_cases/{BOMEX,DYCOMS_RF01,DYCOMS_RF02,RICO,...}/` (snd/lsf/sfc; BOMEX
-  θ=298.7/q_v=17 g/kg/ug=−10). `run_bomex_les` reads them via `resolve_sam_case_dir`. Starting
-  the moist build: wire moist into `run_les_suite` → emit BOMEX/DYCOMS → moist SCM q_t coupling
-  → moist Q1/Q2/Q3 + full D9.
-- **Iter 25 — moist build PROGRESSING (emission validated; artifact fields wired).** (a) Full
-  64³ 6 h BOMEX validated: a cumulus layer forms (cc≈0.067 2nd-half-mean, LWP≈2.4 g/m²,
-  qc_max~1e-3; under Siebesma cc 10–15 % as expected at coarse 200 m res). (b) Extended the
-  shared `les_record._profiles` to emit ⟨w'θ'⟩ (=⟨w'θ_l'⟩ moist) always + q_t/⟨w'q_t'⟩ when
-  q_v is passed (4 tests; dry set unchanged). (c) `run_bomex_les` both _save paths now pass
-  qv3 → prof_NNN.npz carry qt/wqt/wtheta (verified end-to-end). NEXT: the prof→
-  `LESReferenceArtifact` converter (`build()` exposes ug/vg/sfc-fluxes/f_c) via an
-  `--emit-suite-artifact` flag → moist SCM (condensation) → tune → moist Q1/Q2/Q3 + D9.
-- **Iter 26 — moist DATA PIPELINE COMPLETE (LES→artifact); real BOMEX artifact emitted.**
-  Built + tested the moist LES→`LESReferenceArtifact` converter (`run_bomex_les
-  --emit-suite-artifact`): valid self-describing moist artifact (θ_l, q_t, u, v, resolved
-  ⟨w'θ_l'⟩/⟨w'q_t'⟩ + Coriolis/geostrophic/subsidence/advection forcing; qt∈[0.003,0.017]
-  kg/kg = BOMEX). sgs labelled `lasd` when `--dynamic`. Real 64³ 6 h `bomex__lasd.npz`
-  emitting. MOIST-SCM DESIGN (next, one coherent unit): `_moist_cbl_physics(turb)` =
-  PhysicsConfig with `microphysics=MicrophysicsConfig(scheme="sundqvist")` (diagnostic
-  condensation, shallow-cu) + turbulence; `build_cbl_scm_from_artifact` moist branch
-  (`is_moist`) sets q_v IC = q_t (q_c≈0 at BOMEX t0 ⇒ q_v=q_t), T IC from θ_l (≈θ at t0),
-  SCMForcing with subsidence_w/theta_adv/qv_adv/u_geo/w_qv_s from the artifact; moist score
-  extracts q_t=Σ(q_v,q_c,q_r) from the SCM state + scores via `score.qt_rmse`. Then tune →
-  moist Q1/Q2/Q3 + D9.
-
-- **Iter 27 — MOIST SCM BUILT + VALIDATED + BOMEX Q2 DELIVERED (codex-CLEAN).** Wired the
-  moist regime end-to-end (`scm_runner.py`): `_moist_cbl_physics` (Sundqvist condensation),
-  moist branch in `build_cbl_scm_from_artifact` (q_v IC=q_t(t0); subsidence/θ-adv/q_v-adv/
-  w_qv_s forcing, all +up = SCMForcing convention, sign-checked), `scm_final_moist_on` →
-  (θ_l,u,v,q_t) with θ_l=θ−(L_v/(c_pd·Π))·q_c (helper `_liquid_water_theta`), q_t=q_v+q_c+q_r.
-  BOTH DF (`scm_les_final_score`) AND AD (`scm_les_loss_jax`) branch on `is_moist`. `scm.py`
-  create() now pre-allocates q_g UNCONDITIONALLY for active microphysics (shared
-  MicrophysicsOutput always emits dq_g_dt) → fixes lax.scan carry-pytree stability.
-  Codex adversarial review: found+fixed ONE high-sev defect (AD path missing scm_qt →
-  ValueError on moist), added regression tests (θ_l sign+decrement, combined-folds-qt, moist
-  jax.grad); round-2 VERDICT CLEAN. 17 scm_runner tests + 117 CPU-suite green. Aligned the
-  BOMEX emit case-label to the registry name `bomex_cu` (scorecard get_case resolution).
-  **BOMEX shallow-cumulus Q2 (9 closures tuned, shared Sundqvist cloud = D9 shared-cloud
-  control): holtslag_boville 0.212 > louis 0.229 > clubb 0.239 > edmf 0.248 > ysu 0.250 >
-  mynn25 0.276 > smag 0.304 > clubb_lite 0.308 > tke 0.351.** VERDICT: "order buys skill"
-  does NOT hold in shallow Cu (nonlocal+local lead, higher-order bunched) — regime-specific,
-  NOT a cloud-PDF artifact (cloud held fixed across arms). CAVEATS: different metric than dry
-  (compare within-BOMEX only); wind-weighted; σ_LES(shallow_cumulus) not yet available (1 SGS
-  variant) → margins UNGATED/PLAUSIBLE. See LES_SUITE.md §7.4.
-
-- **Iter 28 — θ_l CONFOUND FIXED (codex HIGH) + BOMEX Q2 D7-GATED + DYCOMS converter.** Codex
-  caught that the spectral moist LES prognoses ACTUAL θ (IC saturation-adjusts θ_l→θ), but the
-  artifacts recorded/labelled it θ_l while the SCM produces θ_l → the first BOMEX Q2 compared θ
-  to θ_l. FIXED: `scm_coupling.liquid_water_theta` = ONE canonical θ_l reduction (SCM delegates);
-  `_record_theta_l` in both LES drivers records θ_l from prognostic θ + cloud q_c (q_c only, not
-  rain, matching SCM); `sigma_les_prognostic` extended to moist (θ_l,u,v,q_t + sigma_qt). Codex
-  re-review: production CLEAN. Re-emitted 3 BOMEX θ_l artifacts (lasd/smag/vreman, tight: θ_l sfc
-  ~299.05, top ~311.77) → re-tuned 9 → σ_LES(shallow_cumulus)=0.0531. **CORRECTED + GATED BOMEX
-  Q2: holtslag 0.310 > louis 0.327 > clubb 0.336 > edmf 0.346 > ysu 0.355 > mynn25 0.384 > smag
-  0.417 > clubb_lite 0.420 > tke 0.467.** Ordering PRESERVED vs the θ-based run (confound moved
-  the scale, not the science). GATED VERDICT (CONFIRMED): top-5 tied within σ_LES (higher-order
-  clubb statistically tied with LOCAL louis — buys no resolvable skill), Q1b local-vs-nonlocal
-  margin 0.017 sub-σ_LES (not significant), but top-vs-tail 0.16≈3σ_LES IS resolved (weak tail:
-  smag/clubb_lite/tke). "Order buys skill" does NOT hold in shallow Cu — regime-specific, not a
-  cloud-PDF artifact. Also: DYCOMS `--emit-suite-artifact` converter (RF01 LW cooling→theta_adv,
-  sign-checked; records 2nd-half-mean radiative θ-tendency; case-label→registry `dycoms_rf01_sc`;
-  q_t incl rain) + unit tests; end-to-end θ_l recording test (closes codex LOW). D9-native fully
-  scoped (clubb `cloud_source` toggle; CONFIRMED it's a turbulence-interface change since
-  clubb_turbulence takes q_v not q_c; gap expected small by condensation-invariance).
-
-- **Iter 29 — DYCOMS (moist regime 2) DELIVERED, σ_LES-gated NULL.** DYCOMS pipeline validated
-  end-to-end: RF01 LW cooling (make_stevens_lw) → artifact theta_adv; moist SCM runs stably
-  (radiative + subsidence + strong geostrophic), forms cloud. Emitted 3 SGS artifacts (64²×96,
-  θ_l sfc~289.4 top~306 tight) → tuned 9 → σ_LES(stratocumulus)=0.231. **DYCOMS Q2: mynn25 0.825 >
-  louis 0.835 > clubb_lite 0.836 > clubb 0.909 > holtslag 0.912 > tke 0.917 > edmf 0.929 > smag
-  0.938 > ysu 0.956.** GATED VERDICT: NULL — whole spread 0.131 < σ_LES 0.231 → NO closure
-  distinguishable (higher-order clubb 4th, tied with everything). High absolute losses (SCM
-  reproduces the radiative/geostrophic Sc poorly; winds dominate). CAVEAT: RESOLUTION-LIMITED —
-  64²×96 Sc thins to LWP ~9 (ref 50-80); 96²×192 is the refinement. **COMBINED MOIST VERDICT
-  (BOMEX+DYCOMS): higher-order does NOT win in moist regimes** (BOMEX top-tier tied, DYCOMS all
-  tied), contrasting the dry-CBL higher-order win; best moist closure is regime-dependent
-  (holtslag/mynn25) AND within σ_LES. Cloud held fixed (shared Sundqvist) → turbulence statement,
-  not cloud-PDF. See LES_SUITE.md §7.5.
-
-- **Iter 30 — D9 CLUBB native-vs-shared-cloud dual-report PRODUCED (codex-CLEAN). ALL §7 DELIVERABLES DONE.**
-  LITERAL forced-shared arm: `CLUBBConfig.cloud_source` toggle (ADG1 PDF vs grid-scale saturation
-  cloud via canonical Flatau) + tuner `--clubb-shared-cloud`. Tuned native-vs-shared: BOMEX 0.336 vs
-  0.306 (gap 0.030<σ_LES 0.053); DYCOMS 0.909 vs 0.801 (gap 0.108<σ_LES 0.231) — both sub-σ_LES ⇒
-  CLUBB's PDF cloud buys no resolvable skill vs a simple shared cloud. A `cloud_buoyancy=False`
-  control corroborates (same gaps). New dispatch guard (raise on unknown cloud_source) registered
-  in test_dispatch_hardening. Codex CLEAN (fixed cloud_frac 0/0 NaN + delta-PDF wording). Below:
-  Added `CLUBBConfig.cloud_buoyancy: bool=True` static feature-gate (like `prognostic`): when
-  False, `diagnose_cloud_and_buoyancy` drops the ADG1 cloud-liquid buoyancy term `rc_coef·wprcp`
-  from `wpthvp` (cloud_frac/rcm diagnostics unchanged; only the TKE-buoyancy feedback gated).
-  Tuner `--clubb-no-cloud-buoyancy` flag builds the control arm. Tuned CLUBB native-vs-no-cloud
-  on both moist artifacts: **BOMEX 0.336 vs 0.306 (gap 0.030 < σ_LES 0.053); DYCOMS 0.909 vs
-  0.801 (gap 0.108 < σ_LES 0.231)** — BOTH sub-σ_LES ⇒ CLUBB's assumed-PDF cloud buoyancy buys NO
-  resolvable skill → the higher-order comparison is NOT a cloud-PDF artifact. (Gap is negative:
-  disabling cloud buoyancy slightly IMPROVES the coarse-SCM fit.) Default path byte-identical;
-  static gate confirmed by JIT/SCM run (both states, no ConcretizationError); clubb diagnostic+
-  config tests (60) + tuner flag test pass; codex re-review CLEAN. See §7.6. **All §7
-  deliverables — Q1a, Q1b, Q2 (4 regimes), Q3, D4, D7, D9 — are now produced.**
-
-**OPTIONAL REFINEMENTS (not deliverables):** higher-res DYCOMS (96²×192) for a realistic Sc +
-tighter σ_LES; the strictly-literal D9 forced-shared arm (Sundqvist q_c into CLUBB buoyancy, the
-all-9-scheme turbulence-interface change — expected same sub-σ_LES band); clubb 2×-res σ_LES.
+**STATUS:** §7 deliverables produced (Q1a, Q1b prognostic + diagnostic-threshold, Q2 4-regime, D9
+LITERAL, Q3 4-regime, D4-bonus) — all σ_LES-gated + codex-CLEAN. ONE remaining sub-clause: the
+MEASURED diagnostic-flux margin for Q1b (needs the turbulence-flux-exposure interface change; the
+threshold itself is established structurally). **OPTIONAL REFINEMENTS:** higher-res DYCOMS
+(96²×192); clubb 2×-res σ_LES.
