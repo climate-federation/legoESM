@@ -37,10 +37,8 @@ Publication caption, exactly as used in the manuscript:
 > model with the two-big-leaf canopy scheme (sunlit/shaded) at four FLUXNET sites
 > spanning temperate and Mediterranean regimes: US-MMS (mesic deciduous forest),
 > DE-Obe (montane needleleaf forest), US-Ton (oak savanna) and DE-Hai (humid
-> deciduous forest). **(a–c)** Pooled daily model–observation scatter for latent
-> heat, sensible heat and GPP, coloured by site, with the 1:1 line, R²,
-> Nash–Sutcliffe efficiency and mean bias. **(d–w)** One row per site: the mean
-> summer (JJA) diurnal cycle and the mean seasonal cycle of latent (orange) and
+> deciduous forest). One row per site (**a–t**): the mean summer (JJA) diurnal
+> cycle and the mean seasonal cycle of latent (orange) and
 > sensible (blue) heat; the GPP seasonal cycle; the modelled latent-heat partition
 > into canopy transpiration (green) and bare-soil evaporation (orange) with the
 > observed total; and soil moisture at the observed sensor depth and two deeper
@@ -49,7 +47,7 @@ Publication caption, exactly as used in the manuscript:
 > observations are co-sampled, i.e. compared only on timesteps where both are
 > available. Pooled daily Nash–Sutcliffe efficiency against the raw observations is
 > 0.58 (latent heat), 0.57 (sensible heat) and 0.80 (GPP); against the
-> closure-corrected observations the energy fluxes score 0.65 and 0.68. Raw
+> closure-corrected observations the energy fluxes score 0.68 and 0.68. Raw
 > eddy-covariance fluxes under-close the surface energy budget by 22–34 % at these
 > sites, so the modelled turbulent fluxes lie near the centre of the
 > closure-uncertainty envelope (+17 % against raw, −17 % against corrected).

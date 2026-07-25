@@ -46,17 +46,17 @@ JAX_ENABLE_X64=1 python scripts/plot/plot_ec_site_publication.py \
 # -> /tmp/ecsite_combined.png
 ```
 
-- **`_combined.png`** — one figure, panels (a)–(w): (a)–(c) pooled model–observation
-  skill scatter (latent heat, sensible heat, GPP); then one row per site with the mean
+- **`_combined.png`** — one figure, panels (a)–(t): one row per site with the mean
   summer daily cycle and seasonal cycle of latent/sensible heat, the GPP seasonal
   cycle, the latent-heat partition into transpiration and bare-soil evaporation, and
   soil moisture. Markers = raw eddy-covariance observations; shaded bands span up to
-  the energy-balance-closure-corrected value. Interannual panels are deliberately
+  the energy-balance-closure-corrected value. The pooled skill numbers below are
+  printed by the plotter. Interannual and pooled-scatter panels are deliberately
   omitted (2–4 years per site is too few to validate interannual variability).
 
 Expected pooled daily skill (Nash–Sutcliffe vs raw obs, on co-sampled timesteps —
 model and observations compared only where both are available): LE ≈ 0.58,
-H ≈ 0.57, GPP ≈ 0.80 (LE / H are 0.65 / 0.68 vs the closure-corrected obs). Model and
+H ≈ 0.57, GPP ≈ 0.80 (LE / H are both 0.68 vs the closure-corrected obs). Model and
 observations are co-sampled everywhere (compared only where both are available), so a
 discrepancy reflects model error rather than a sampling mismatch.
 

@@ -164,20 +164,12 @@ def _hour_axis(a, bottom):
 # ---------------------------------------------------------------------------
 # One combined figure: pooled skill (top) + per-site process panels
 # ---------------------------------------------------------------------------
-def fig_combined():
-    fig = plt.figure(figsize=(17, 18.5))
-    # 15-col grid: the top row holds 3 scatter panels (width 5); each site row
-    # holds 5 process panels (width 3): energy diurnal, energy seasonal, GPP,
-    # latent-heat partition, soil moisture.
-    gs = fig.add_gridspec(5, 15, hspace=0.62, wspace=1.75,
-                          height_ratios=[1.3, 1, 1, 1, 1])
-    labs = iter(f"({c})" for c in "abcdefghijklmnopqrstuvwxyz")
+def _pooled_skill():
+    """Pooled co-sampled daily skill, printed for the caption (not plotted).
 
-    def _tag(a):
-        a.annotate(next(labs), xy=(0, 1.05), xycoords="axes fraction",
-                   ha="left", va="bottom", fontweight="bold", fontsize=10)
-
-    # ---- Row 0: pooled model-obs skill scatter (co-sampled daily) ----
+    Model and observations are aggregated with the SAME co-sampling mask, so every
+    statistic is computed on matched timesteps only.
+    """
     data = {}
     for site in SITES:
         ds = _load(site)
@@ -186,60 +178,62 @@ def fig_combined():
         lm, lo = np.asarray(ds.le_mod), _obs_le(ds)
         hm, ho = np.asarray(ds.h_mod), _obs_h(ds)
         gm, go = np.asarray(ds.gpp_mod), np.asarray(ds.gpp_obs)
+        # the closure-corrected band edge is co-sampled against ITS OWN finite mask
+        # as well, so the corrected statistic is also a matched-timestep comparison
         bLE, bH, bG = _pair(lm, lo, v), _pair(hm, ho, v), _pair(gm, go, v)
+        bLEc, bHc = _pair(lm, _obs_le_corr(ds), v), _pair(hm, _obs_h_corr(ds), v)
         data[site] = dict(
             LE=(_daily(lm, bLE, dt), _daily(lo, bLE, dt)),
             H=(_daily(hm, bH, dt), _daily(ho, bH, dt)),
             GPP=(_daily(gm, bG, dt), _daily(go, bG, dt)),
-            LE_c=_daily(_obs_le_corr(ds), bLE, dt), H_c=_daily(_obs_h_corr(ds), bH, dt))
-    for i, (key, lab, unit) in enumerate(
-            [("LE", "Latent heat", "W m$^{-2}$"), ("H", "Sensible heat", "W m$^{-2}$"),
-             ("GPP", "GPP", "µmol m$^{-2}$ s$^{-1}$")]):
-        a = fig.add_subplot(gs[0, 5 * i:5 * i + 5])
-        M, O, C = [], [], []
-        for s in data:
-            m, o = data[s][key]; g = np.isfinite(m) & np.isfinite(o)
-            M.append(m[g]); O.append(o[g]); C += [PFT_COL[s]] * int(g.sum())
-        M, O = np.concatenate(M), np.concatenate(O)
-        a.scatter(O, M, s=6, c=C, alpha=0.4, edgecolors="none", rasterized=True)
-        lo_, hi_ = np.nanpercentile(np.r_[O, M], 1), np.nanpercentile(np.r_[O, M], 99)
-        a.plot([lo_, hi_], [lo_, hi_], "--", color="0.4", lw=1)
-        a.set_xlim(lo_, hi_); a.set_ylim(lo_, hi_); a.set_aspect("equal")
-        # skill vs raw (primary); for the energy fluxes also vs closure-corrected
+            LE_c=(_daily(lm, bLEc, dt), _daily(_obs_le_corr(ds), bLEc, dt)),
+            H_c=(_daily(hm, bHc, dt), _daily(_obs_h_corr(ds), bHc, dt)))
+    for key in ("LE", "H", "GPP"):
+        M = np.concatenate([data[s][key][0] for s in data])
+        O = np.concatenate([data[s][key][1] for s in data])
         st = _nse(M, O); stc = np.nan
-        txt = f"R$^2$={st['r2']:.2f}\nNSE={st['nse']:.2f}\nbias={st['bias']:+.2g}"
         if key in ("LE", "H"):
-            Mc, Oc = [], []
-            for s in data:
-                mc, oc = data[s][key][0], data[s][f"{key}_c"]
-                g = np.isfinite(mc) & np.isfinite(oc); Mc.append(mc[g]); Oc.append(oc[g])
-            stc = _nse(np.concatenate(Mc), np.concatenate(Oc))["nse"]
-            txt += f"\nNSE$_{{corr}}$={stc:.2f}"
+            Mc = np.concatenate([data[s][f"{key}_c"][0] for s in data])
+            Oc = np.concatenate([data[s][f"{key}_c"][1] for s in data])
+            stc = _nse(Mc, Oc)["nse"]
         print(f"  pooled {key:3s}: NSE_raw={st['nse']:.3f} NSE_corr={stc:.3f} "
-              f"bias={st['bias']:+.2g} n={st['n']} (co-sampled)")
-        a.text(0.05, 0.95, txt, transform=a.transAxes, va="top", fontsize=8,
-               bbox=dict(boxstyle="round,pad=0.3", fc="w", ec="0.7", alpha=0.9))
-        a.set_xlabel(f"Observed {lab} ({unit})", fontsize=8)
-        a.set_ylabel(f"Modelled {lab} ({unit})", fontsize=8)
-        a.spines[["top", "right"]].set_visible(False); _tag(a)
+              f"R2={st['r2']:.3f} bias={st['bias']:+.2g} n={st['n']} (co-sampled)")
 
-    # ---- Rows 1-4: per-site process panels ----
+
+def fig_combined():
+    _pooled_skill()
+    fig = plt.figure(figsize=(17, 14.5))
+    # 15-col grid: one row per site, each holding 5 process panels (width 3):
+    # energy diurnal, energy seasonal, GPP, latent-heat partition, soil moisture.
+    gs = fig.add_gridspec(len(SITES), 15, hspace=0.5, wspace=1.75)
+    labs = iter(f"({c})" for c in "abcdefghijklmnopqrstuvwxyz")
+
+    def _tag(a):
+        a.annotate(next(labs), xy=(0, 1.05), xycoords="axes fraction",
+                   ha="left", va="bottom", fontweight="bold", fontsize=10)
+
+    # ---- one row of process panels per site ----
     for r, site in enumerate(SITES):
         ds = _load(site)
         if ds is None: continue
-        dt = float(ds.attrs["dt_s"]); v = _valid(ds); gr = r + 1
+        dt = float(ds.attrs["dt_s"]); v = _valid(ds); gr = r
         t = pd.DatetimeIndex(ds.time.values); jja = np.isin(t.month.values, [6, 7, 8])
         td = t[::int(round(86400 / dt))]; bot = r == len(SITES) - 1
         hm, ho, ho_c = np.asarray(ds.h_mod), _obs_h(ds), _obs_h_corr(ds)
         lm, lo, lo_c = np.asarray(ds.le_mod), _obs_le(ds), _obs_le_corr(ds)
 
-        # energy — mean summer daily cycle (model and obs co-sampled)
+        # energy — mean summer daily cycle.  Matched-timestep comparisons throughout:
+        # the model line and the raw-obs markers use the model+raw co-sampled mask
+        # (b), and the closure band is drawn between the raw and corrected composites
+        # over their own shared mask (bc), so raw-vs-corrected is matched too.  The
+        # band is a secondary uncertainty envelope, so it is masked separately rather
+        # than shrinking the primary model-vs-observation sample.
         a = fig.add_subplot(gs[gr, 0:3]); _row_label(a, site); hrs = range(24)
         for mmod, om, oc, col in [(lm, lo, lo_c, C_LE), (hm, ho, ho_c, C_H)]:
-            b = _pair(mmod, om, v)
-            od, ocd = _diurnal(om, b, t, dt, jja), _diurnal(oc, b, t, dt, jja)
-            a.fill_between(hrs, od, ocd, color=col, alpha=0.18, lw=0)
-            a.plot(hrs, od, "o", color=col, ms=2.5, mfc="white")
+            b = _pair(mmod, om, v); bc = b & np.isfinite(np.asarray(oc))
+            a.fill_between(hrs, _diurnal(om, bc, t, dt, jja),
+                           _diurnal(oc, bc, t, dt, jja), color=col, alpha=0.18, lw=0)
+            a.plot(hrs, _diurnal(om, b, t, dt, jja), "o", color=col, ms=2.5, mfc="white")
             a.plot(hrs, _diurnal(mmod, b, t, dt, jja), "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _hour_axis(a, bot)
         if r == 0:
@@ -259,9 +253,10 @@ def fig_combined():
             mo, mm, _ = _monthly(dd, dd, td[:len(dd)].month)
             return mo, mm
         for mmod, om, oc, col in [(lm, lo, lo_c, C_LE), (hm, ho, ho_c, C_H)]:
-            b = _pair(mmod, om, v)
-            mo, raw = _mon(om, b); _, cor = _mon(oc, b); _, mln = _mon(mmod, b)
-            a.fill_between(mo, raw, cor, color=col, alpha=0.18, lw=0)
+            b = _pair(mmod, om, v); bc = b & np.isfinite(np.asarray(oc))
+            mo, raw = _mon(om, b); _, mln = _mon(mmod, b)     # model vs raw: matched
+            mo_c, raw_c = _mon(om, bc); _, cor = _mon(oc, bc)  # raw vs corr: matched
+            a.fill_between(mo_c, raw_c, cor, color=col, alpha=0.18, lw=0)
             a.plot(mo, raw, "o", color=col, ms=2.5, mfc="white")
             a.plot(mo, mln, "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
@@ -281,17 +276,21 @@ def fig_combined():
 
         # latent-heat partition (transpiration vs soil evaporation)
         a = fig.add_subplot(gs[gr, 9:12])
-        lmf, lof = np.asarray(ds.le_mod), _obs_le(ds); bLE = _pair(lmf, lof, v)
+        lmf, lof = np.asarray(ds.le_mod), _obs_le(ds)
+        # matched timesteps: the modelled partition and the observed total share the
+        # model+raw mask; the corrected whisker uses the raw+corrected shared mask
+        bLE = _pair(lmf, lof, v); bLEc = bLE & np.isfinite(_obs_le_corr(ds))
         lec = _daily(np.asarray(ds.le_canopy), bLE, dt)
         les = _daily(np.asarray(ds.le_soil), bLE, dt)
-        leo = _daily(lof, bLE, dt); leo_c = _daily(_obs_le_corr(ds), bLE, dt)
+        leo = _daily(lof, bLE, dt)
+        leo_w = _daily(lof, bLEc, dt); leo_c = _daily(_obs_le_corr(ds), bLEc, dt)
         n = min(len(lec), len(td)); mon = td.month[:n]
-        df = pd.DataFrame({"c": lec[:n], "s": les[:n], "o": leo[:n],
+        df = pd.DataFrame({"c": lec[:n], "s": les[:n], "o": leo[:n], "ow": leo_w[:n],
                            "oc": leo_c[:n], "m": mon}).groupby("m").mean()
         mx = df.index.values
         a.bar(mx, df.c, color=C_CAN, width=0.85, label="Transpiration")
         a.bar(mx, df.s, bottom=df.c, color=C_SOIL, width=0.85, label="Soil evaporation")
-        a.vlines(mx, np.minimum(df.o, df.oc), np.maximum(df.o, df.oc),
+        a.vlines(mx, np.minimum(df.ow, df.oc), np.maximum(df.ow, df.oc),
                  color=C_OBS, lw=1.0, alpha=0.6)
         a.plot(mx, df.o, "o", color=C_OBS, ms=3, mfc="white", label="Observed total")
         a.set_ylabel("Latent heat (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
