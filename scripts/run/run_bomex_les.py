@@ -250,7 +250,7 @@ def parse_args():
                    help="after the run, assemble the les_record prof_NNN.npz series into a "
                         "moist LESReferenceArtifact (bridge format) at this path for the "
                         "SCM-tuning suite. Requires --record-frames > 0.")
-    p.add_argument("--case-label", type=str, default="bomex")
+    p.add_argument("--case-label", type=str, default="bomex_cu")
     p.add_argument("--output", type=Path, default=Path("results/les_bomex"))
     return p.parse_args()
 
