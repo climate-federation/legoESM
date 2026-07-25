@@ -346,6 +346,41 @@ Honest answer to "how far from the theoretical limit are we": 72-81 % of a
 now-calibrated floor, with the shortfall attributable to neither bandwidth
 nor byte volume.
 
+## The mechanism's prediction, TESTED — and the lever it exposes (job 26459382)
+
+If exposed dependent sync is the cost, PCG iteration count is the most
+direct lever on it (each iteration carries dependent reduction batches).
+`--pcg-fixed-iters` was wired onto the SPMD bench for this (the MPI twin
+already had it) and swept at LL576 f64:
+
+| iters | nd1 ms | nd4 ms | eff@4 | speedup@4 | residual (nd4) |
+|---|---|---|---|---|---|
+| 60 (default) | 63.55 | 23.52 | 0.68 | 1.00x | 2.1e-04 |
+| 40 | 61.33 | 21.05 | 0.73 | 1.12x | 1.6e-03 |
+| 30 | 60.24 | 19.89 | 0.76 | 1.18x | 4.6e-03 |
+| 20 | 59.08 | 18.60 | 0.79 | 1.26x | 1.3e-02 |
+| 10 | 57.99 | 17.31 | **0.84** | **1.36x** | 4.1e-02 |
+
+QUANTITATIVE CONFIRMATION OF THE MECHANISM. The marginal cost per PCG
+iteration is 111 us at nd1 but 123 us at nd4 — and at nd4 each device holds
+a QUARTER of the rows, so its compute share is only ~28 us. The remaining
+**~95 us per iteration is dependent sync**, and 60 x 95 us = **5.7 ms**,
+which is essentially the whole non-compute budget at nd4 (measured residual
+4.28 ms + modelled reduction 2.19 ms = 6.47 ms). The dependent-sync
+mechanism is not merely the last hypothesis standing; it accounts for the
+observed magnitude.
+
+STRONG-SCALING CONSEQUENCE: cutting iterations raises 4-GPU efficiency from
+0.68 to 0.84, because what is being removed is precisely the part that does
+NOT shrink with device count.
+
+THE CATCH, WHICH IS NOT MINE TO WAIVE: the speed is bought with solver
+convergence — the zero-forcing probe residual degrades 200x from 2.1e-04 to
+4.1e-02. 40 iterations (1.12x, 8x residual) and 30 (1.18x, 22x) are the
+plausible operating points, but whether that residual is acceptable for the
+free surface is an OCEAN-SCIENCE decision, not a performance one. Reported
+as a trade curve; no default changed.
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
