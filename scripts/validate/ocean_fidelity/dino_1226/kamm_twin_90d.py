@@ -205,16 +205,41 @@ def _print_before_bridge_verify(st, before, grid) -> None:
 
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
-                       bridge_tke: bool = False, bridge_before: bool = False):
+                       bridge_tke: bool = False, bridge_before: bool = False,
+                       vmix_scheme: str | None = None,
+                       use_gm_redi: bool | None = None,
+                       restart_file: str = RESTART_FILE):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
+
+    ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
+    inside ``run_stepdump``. Default is the day-180 spin-up state; pass e.g.
+    "DINO_00057600_restart.nc" to twin from NEMO's *year-5* state, which turns
+    the twin into a matched-state GROWTH-RATE test (same developed state, same
+    window, one variable = the model) rather than a from-rest comparison.
+
+    ``vmix_scheme``: optional override of ``DINOConfig.vmix_scheme`` (e.g.
+    "constant" for the #1317 TKE-vs-constant-mixing discriminator). ``None``
+    (default) leaves the recipe's own vmix_scheme untouched.
+
+    ``use_gm_redi``: optional override of ``DINOConfig.use_gm_redi`` (GM
+    ablation discriminator: False zeroes the eddy-induced/bolus coefficient
+    -- kappa_GM and the Treguier/Visbeck adaptive-kappa diagnostics -- while
+    leaving kappa_Redi / the isoneutral slope machinery untouched and active,
+    since dino.py's isoneutral GMRediConfig branch builds Redi unconditionally
+    and only gates kappa_GM/treguier.enabled/visbeck.enabled on this flag;
+    see dino.py:2437-2503). ``None`` (default) leaves the recipe's own value.
 
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
     """
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
-    s = read_nemo_restart(f"{run_stepdump}/{RESTART_FILE}", nn_hls=0)
+    s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+    if vmix_scheme is not None:
+        cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
+    if use_gm_redi is not None:
+        cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which
@@ -234,7 +259,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # every step -- bridging is what makes those axes correct from step 0
     # instead of only after the model's own Euler-start populates them.
     if bridge_before:
-        before = read_nemo_restart_before(f"{run_stepdump}/{RESTART_FILE}", nn_hls=0)
+        before = read_nemo_restart_before(f"{run_stepdump}/{restart_file}", nn_hls=0)
         st = bridge_before_state_topo(br._replace(state=st), g, before, periodic_i=True)
         _print_before_bridge_verify(st, before, g)
 
@@ -245,7 +270,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # docstring's documented cold-start caveat) so `--bridge-tke` is additive,
     # not a silent behavior change.
     if bridge_tke:
-        en_restart = read_nemo_restart_en(f"{run_stepdump}/{RESTART_FILE}", nn_hls=0)
+        en_restart = read_nemo_restart_en(f"{run_stepdump}/{restart_file}", nn_hls=0)
         st = bridge_tke_from_restart(st, en_restart, br.land_mask)
         wet = np.asarray(br.land_mask) > 0.5
         d_en = float(np.max(np.abs(
@@ -272,11 +297,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
-             bridge_tke: bool = False, bridge_before: bool = False) -> bool:
+             bridge_tke: bool = False, bridge_before: bool = False,
+             vmix_scheme: str | None = None,
+             use_gm_redi: bool | None = None) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable."""
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
-        bridge_before=bridge_before)
+        bridge_before=bridge_before, vmix_scheme=vmix_scheme,
+        use_gm_redi=use_gm_redi)
     nsteps = STEPS_PER_DAY * n_days
 
     dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
@@ -387,14 +415,52 @@ def _parse_args(argv=None):
                          "tke_shear_production=nemo_burchard to read a real "
                          "before-state from step 0 (else ValueError). Default "
                          "off (matches the module docstring's cold-start caveat)")
+    p.add_argument("--vmix-scheme", default=None,
+                    help="override DINOConfig.vmix_scheme (e.g. 'constant' for "
+                         "the #1317 TKE-vs-constant-mixing discriminator); "
+                         "default None leaves the recipe's own scheme untouched")
+    p.add_argument("--use-gm-redi", dest="use_gm_redi", default=None,
+                    action=argparse.BooleanOptionalAction,
+                    help="override DINOConfig.use_gm_redi (GM ablation "
+                         "discriminator: --no-use-gm-redi zeroes kappa_GM / "
+                         "disables the Treguier/Visbeck adaptive-kappa "
+                         "diagnostics while leaving kappa_Redi / isoneutral "
+                         "slopes untouched -- see dino.py:2437-2503); "
+                         "default None leaves the recipe's own value")
     return p.parse_args(argv)
+
+
+def _smoke_check_vmix_scheme_override():
+    """Runnable check: --vmix-scheme actually overrides cfg.vmix_scheme.
+
+    No NEMO bridge/restart required -- exercises the same
+    dataclasses.replace path _build_twin_state uses.
+    """
+    base = dino_config_for_recipe("nemo_dino_kamm_mlf")
+    assert base.vmix_scheme == "tke", (
+        f"expected nemo_dino_kamm_mlf default vmix_scheme='tke', got {base.vmix_scheme!r}")
+    overridden = dataclasses.replace(base, vmix_scheme="constant")
+    assert overridden.vmix_scheme == "constant"
+    assert base.vmix_scheme == "tke", "override must not mutate the original cfg"
+    print("OK: --vmix-scheme override changes cfg.vmix_scheme (tke -> constant)")
+
+    assert base.use_gm_redi is True, (
+        f"expected nemo_dino_kamm_mlf default use_gm_redi=True, got {base.use_gm_redi!r}")
+    gm_off = dataclasses.replace(base, use_gm_redi=False)
+    assert gm_off.use_gm_redi is False
+    assert base.use_gm_redi is True, "override must not mutate the original cfg"
+    print("OK: --use-gm-redi override changes cfg.use_gm_redi (True -> False)")
 
 
 def main(argv=None):
     args = _parse_args(argv)
+    if args.recipe == "smoke-check":
+        _smoke_check_vmix_scheme_override()
+        return
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
-              bridge_tke=args.bridge_tke, bridge_before=args.bridge_before)
+              bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
+              vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi)
 
 
 if __name__ == "__main__":

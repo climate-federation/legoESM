@@ -8,7 +8,7 @@ Everything else byte-identical to kamm_run180.py.
 
 Usage: kamm_run180_v2.py <nsteps> <out.npz>   (nsteps=5760 for full 180d)
 """
-import sys, dataclasses, numpy as np, jax, jax.numpy as jnp
+import os, sys, dataclasses, numpy as np, jax, jax.numpy as jnp
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -19,13 +19,24 @@ from legoesm.ocean.experiments.dino import (dino_config_for_recipe, dino_lat_lon
 RECIPE = sys.argv[1]; OUT = sys.argv[2]; DT = 2700.0
 NSTEPS = 11520; ACC0 = 0  # 1-year screen: full year-1 mean (matched to NEMO annual mean)
 RUN = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+# MATCHED-STATE GROWTH TEST: set DINO_INIT_RESTART=<rebuilt single-file NEMO
+# restart> to start from a *developed* NEMO state instead of the analytic
+# rest IC. Everything else (window, forcing, annual-mean output, metric) is
+# held byte-identical to the from-rest screen, so the only variable is the
+# initial state -- which makes lego's 1-year ACC growth directly comparable
+# to NEMO's own growth over the same year from the same state.
+INIT_RESTART = os.environ.get("DINO_INIT_RESTART")
 g = read_nemo_mesh_mask(f"{RUN}/mesh_mask.nc", nn_hls=0)
-s = read_nemo_restart(f"{RUN}/DINO_00000320_restart.nc", nn_hls=0)  # geometry donor only
+s = read_nemo_restart(INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc", nn_hls=0)
 br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
     lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)   # bridge-frame lon fix
-st = dino_lat_lon_state(br.geometry, br.z_coord, cfg, land_mask_override=br.land_mask)
+if INIT_RESTART:
+    st = br.state          # the bridged NEMO state itself, NOT the analytic rest IC
+    print(f"INIT from developed NEMO restart: {INIT_RESTART}")
+else:
+    st = dino_lat_lon_state(br.geometry, br.z_coord, cfg, land_mask_override=br.land_mask)
 # --- HARD topo census gate: legoESM wet cells must equal NEMO tmask exactly ---
 import netCDF4 as _nc
 _mm = _nc.Dataset(f"{RUN}/mesh_mask.nc")   # FULL frame: NEMO 5 files are haloless
@@ -40,6 +51,11 @@ _vmL = np.asarray(st.v_mask.data)[1:200, :] > 0.5    # lego face j+1 = north fac
 if not (np.array_equal(_umL, _umN) and np.array_equal(_vmL, _vmN)):
     raise SystemExit("FACE-MASK CENSUS FAIL: u/v masks differ from NEMO umask/vmask")
 print(f"census OK (FULL 199x52): {int(_tm.sum())} wet cells + u/v face masks EXACT")          # analytic IC == NEMO usrdef_istate
+if INIT_RESTART:
+    # Same hard day-0 gate as kamm_twin_90d: a "twin" that silently ran from
+    # rest on NEMO topography is the defect this gate exists to prevent.
+    from kamm_twin_90d import verify_day0_matches_restart
+    verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
