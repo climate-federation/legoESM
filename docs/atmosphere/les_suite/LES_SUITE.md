@@ -439,6 +439,19 @@ better SGS variants, excluding over-diffusive static Smag), and the peaked-jet 9
 CONFIRMED (cross-transfer scored on the SBL); the coefficient-diff magnitudes are real but
 sub-σ_LES.
 
+**Q3 EXTENDED TO THE MOIST REGIMES (all 4 regimes; 2026-07-25).** The tuned-coefficient table now
+spans dry_convective, dry_stable, shallow_cumulus (BOMEX) and stratocumulus (DYCOMS) — scorecard
+§Q3, 9 closures. The moist cross-transfer (apply one moist regime's tuned coeffs to the other,
+penalty vs that regime's σ_LES) confirms the dry verdict: **BOMEX-tuned→DYCOMS 0/9 exceed
+σ_LES(DYCOMS)=0.231; DYCOMS-tuned→BOMEX 1/9** (only `clubb`, penalty 0.077 > σ_LES(BOMEX)=0.053;
+its 8 params are the only ones sensitive enough to travel resolvably). Every OTHER closure's moist
+cross-transfer penalty is ≤0.012 (most exactly 0.000 — the tuned coeffs are loss-insensitive and
+identical across regimes). **Q3 VERDICT across all 4 regimes: the inter-regime coefficient travel
+is overwhelmingly sub-σ_LES (1 of 18 moist cross-transfers, 0 of the dry ones, resolvable) — the
+apparent coefficient spread is tuning noise on loss-insensitive parameters, NOT a real
+regime-specific requirement.** Only CLUBB's high-dimensional coefficient vector travels resolvably,
+and only where σ_LES is smallest (BOMEX). CONFIRMED (cross-transfer scored on the target regime).
+
 ### 7.4 Moist regime 1 (BOMEX shallow cumulus) — Q2, cloud-PDF-controlled (2026-07-25)
 
 The **moist SCM** is built + validated + codex-CLEAN (commit history `feat(les-suite): moist
