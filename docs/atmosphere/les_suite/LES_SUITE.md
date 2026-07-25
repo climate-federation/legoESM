@@ -336,9 +336,9 @@ The full machinery is built + validated; these are the first real numbers, for t
   The `lax.scan` rollout made `jax.grad` tractable at full resolution (it no longer unrolls
   the 720-step loop), so `--method both` now runs the AD (Adam on traced-leaf params in
   normalised space) and DF optimisers at the SAME nlev=24/dt=10 config (controlled). Result
-  (dry CBL anchor, 8/9 closures — clubb's 78-param AD still running): the two optima AGREE
-  across the ENTIRE closure-order ladder — **every gap ≤ 0.009**: holtslag/louis/mynn25/ysu/
-  clubb_lite = 0.0000, edmf 0.0005, tke 0.0016, smagorinsky 0.0090 (AD found a marginally
+  (dry CBL anchor, ALL 9/9 closures): the two optima AGREE across the ENTIRE closure-order
+  ladder — **every gap ≤ 0.009**: holtslag/louis/mynn25/ysu/clubb_lite ≈ 0.0000, clubb
+  (78-param AD) 0.0001, edmf 0.0005, tke 0.0016, smagorinsky 0.0090 (AD found a marginally
   better optimum). ⇒ legoESM's closures are differentiable end-to-end and
   **gradient-calibratable**: reverse-mode AD reproduces (and occasionally beats) the
   derivative-free optimum for local, nonlocal, 1.5-order, higher-order-PDF and mass-flux
