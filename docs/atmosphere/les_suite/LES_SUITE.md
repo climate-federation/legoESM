@@ -284,38 +284,48 @@ The full machinery is built + validated; these are the first real numbers, for t
   score BOTH the closure loss AND σ_LES on θ alone (comparing a combined-margin to a
   θ-only σ would mix metrics, the exact error the σ_LES design guards). That θ-focused
   gate + the sheared Q1b margins (tune the closures on the sheared case) is the next step.
-- **θ-CONSISTENT D7 VERDICT — Q1b/Q2 DISTINGUISHABLE ON θ (2026-07-24, `theta_significance.py`).**
-  The θ-focused gate above, now DONE: re-score each tuned closure's `best_overrides` (via the
-  scan rollout, self-checked to reproduce the stored loss EXACTLY for all closures), recover
-  the θ-ONLY profile RMSE, and gate the per-flux best-vs-2nd margin on **σ_LES(θ)=0.0074**
-  (the robust, metric-invariant θ floor) instead of the wind-dominated σ_LES(combined)=0.319.
-  **Result: at EVERY flux the top margin is SIGNIFICANT** (0.032, 0.064, 0.050, 0.121, 0.181
-  for Q0=0.02→0.12, all ≫ 0.0074) — this FLIPS the combined-gate "not significant" verdict:
-  on θ (the field a convective-BL closure is judged on) **the closures ARE robustly
-  distinguishable.** Per-flux θ_rmse ranking:
-  | Q0 | best | 2nd | worst |
-  |---|---|---|---|
-  | 0.02 | holtslag 0.048 | smag 0.081 | mynn25 0.151 |
-  | 0.04 | holtslag 0.084 | smag 0.148 | mynn25 0.314 |
-  | 0.06† | **clubb_lite 0.034** | tke 0.083 | mynn25 0.490 |
-  | 0.08 | holtslag 0.157 | smag 0.278 | mynn25 0.677 |
-  | 0.12 | holtslag 0.231 | smag 0.412 | mynn25 1.095 |
-  Findings: **nonlocal `holtslag_boville` is the best K-closure at 4/5 fluxes**; the
-  higher-order PDF **`clubb_lite` wins the anchor** (0.034, where it is tuned); **1.5-order
-  `mynn25` is WORST at every flux**, nonlocal `ysu` second-worst. So "closure order buys
-  skill" is NUANCED on θ: nonlocal-diffusivity (holtslag) + higher-order-PDF (clubb_lite) beat
-  local (smag/louis), but the 1.5-order TKE schemes (mynn25, and ysu's counter-gradient) do
-  NOT — order alone is not monotone; the *structural* nonlocal/PDF closures win. †Only the
-  anchor (0.06) has tke/clubb_lite tuned; the other fluxes are the 5-closure roster (the
-  flux-sweep tunes for closures 6–9 are the running campaign) — so `holtslag`-best at
-  non-anchor fluxes is a 5-closure statement, to be revisited once the grid completes.
-- **Q2 (tuned ranking, coarse tier-1), flux-robust** — `holtslag_boville` (nonlocal)
-  is best and `mynn25` (1.5-order) worst at **every** flux point (best tuned loss,
-  Q0=0.06 anchor shown): holtslag 0.241 < smagorinsky (tuned) 0.261 < louis 0.269 <
-  ysu 0.363 < mynn25 0.365; the ordering is identical at 0.02/0.04/0.08/0.12 (see the
-  per-flux scorecard). Finding: **closure order does NOT buy skill here** — consistent
-  with Q1a. Coarse search; only smagorinsky responds to tuning (+8–19%), the rest
-  ~0% (default-dominated); single case/regime/metric — not definitive.
+- **θ-CONSISTENT D7 VERDICT — CLOSURE ORDER BUYS SKILL ON θ (2026-07-24, FULL 9×5 grid,
+  `theta_significance.py`).** With the scan rollout the ENTIRE nine-closure × five-flux grid
+  (45/45 cells) is tuned at nlev=24 — including full CLUBB (previously OOM-deferred). Re-score
+  each `best_overrides` (self-checked to reproduce the stored loss EXACTLY for all 45),
+  recover the θ-ONLY profile RMSE, rank per flux, and read the best-vs-2nd margin against
+  **σ_LES(θ)=0.0074** (the robust, metric-invariant θ floor) vs the wind-dominated
+  σ_LES(combined)=0.319. **Full-grid θ_rmse ranking (identical order at every flux):**
+  | rank | closure (type) | θ_rmse @ 0.02→0.12 |
+  |---|---|---|
+  | 1–2 | **clubb / clubb_lite** (higher-order PDF) | 0.017/0.025/0.031/0.041/0.056 |
+  | 3 | **edmf** (mass-flux) | 0.026→0.077 |
+  | 4 | tke (1.5-order k-l) | 0.037→0.155 |
+  | 5 | holtslag_boville (nonlocal K) | 0.048→0.231 |
+  | 6–7 | smagorinsky / louis (local K) | 0.081/0.084 → 0.41/0.50 |
+  | 8–9 | ysu / mynn25 (nonlocal-CG / 1.5-order MYNN) | 0.15 → 1.09 |
+  **Finding: on θ, closure ORDER buys skill** — the higher-order PDF/mass-flux family
+  (clubb, clubb_lite, edmf) beats 1.5-order tke, which beats nonlocal-K holtslag, which beats
+  local-K (smag/louis); ysu (counter-gradient) and mynn25 are worst. A clean, structurally
+  sensible ordering by closure sophistication, robust across the whole buoyancy axis. This
+  SUPERSEDES the earlier 5-closure read (holtslag "best") — holtslag was only best among the
+  first five; the higher-order closures dominate it by 3–4×. SIGNIFICANCE (vs σ_LES(θ)): the
+  BEST-vs-2nd margin is significant only at Q0=0.02 (0.0091>0.0074) — because the two leaders
+  clubb≈clubb_lite are near-tied (margins 0.001–0.004 above 0.02); but every ACROSS-FAMILY
+  gap (higher-order vs K-closure, e.g. clubb 0.031 vs holtslag 0.122 vs mynn25 0.490 at 0.06)
+  is 10–70× σ_LES(θ) — hugely significant. So: the closure *families* are robustly separated
+  on θ; the two best higher-order schemes are statistically indistinguishable from each other.
+  Caveat: single case (Nieuwstadt CBL), coarse tier-1 search, lasd SGS truth.
+- **Q2 (FULL 9×5 grid, tuned tier-1) — CLOSURE ORDER BUYS SKILL, both metrics.** The
+  complete nine-closure combined-loss ranking is IDENTICAL at every flux (Q0=0.06 shown):
+  clubb 0.231 ≈ clubb_lite 0.231 ≈ edmf 0.232 (higher-order) < tke 0.235 (1.5-order) <
+  holtslag 0.241 (nonlocal K) < smagorinsky 0.261 ≈ louis 0.269 (local K) < ysu 0.363 ≈
+  mynn25 0.365 (worst). **Finding: closure order DOES buy skill** — the higher-order
+  PDF/mass-flux family clearly beats the K-closures across the whole buoyancy axis, on BOTH
+  the combined loss AND θ (§ θ-verdict above). This SUPERSEDES the earlier 5-closure read
+  ("order does not buy skill"): that was an artifact of the incomplete roster (among only
+  {smag,louis,holtslag,ysu,mynn25}, nonlocal-holtslag beat 1.5-order-mynn25, which looked
+  non-monotone); adding {clubb,clubb_lite,edmf,tke} restores the monotone order-vs-skill
+  picture. Note the tuning is default-dominated (only smagorinsky improves materially, +8–19%;
+  the rest ~0–3%), so the ranking largely reflects DEFAULT closure fidelity, not tuning
+  headroom. Q1b's best-LOCAL-vs-best-NONLOCAL slice (holtslag>smag every flux) is a narrower
+  question the full ranking subsumes. Single case (Nieuwstadt CBL), coarse search — not the
+  final word, but a clean, metric-consistent, flux-robust ordering.
 - **Q3 (machinery)** — the tuned-coefficient scorecard assembles; the inter-regime
   spread is still 0 (one regime). σ_LES need the other regimes and the SGS-spread runs.
 - **Scorecard now reports per surface-flux** (not one regime-mean) and de-duplicates

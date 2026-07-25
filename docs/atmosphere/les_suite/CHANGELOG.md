@@ -13,7 +13,7 @@ Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
 | §5 infrastructure (registry…scorecard, gate-0) | **DONE** (codex-CLEAN) |
 | Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
 | Q1b skill threshold (dry CBL, prognostic) | **DONE** — combined-gate NOT significant (wind-dominated); **θ-consistent gate: SIGNIFICANT at every flux** (margins ≫ σ_LES(θ)=0.0074) ⇒ closures distinguishable on θ |
-| Q2 nine-closure ranking | **7/9 tuned at the anchor** (clubb_lite 0.231 BEATS holtslag 0.241 at q0=0.06; +tke); edmf tuning, clubb nlev=24 deferred (OOM); flux-sweep for closures 6–9 pending |
+| Q2 nine-closure ranking | **DONE — FULL 9×5 grid** (45/45 tuned via scan, incl. clubb@nlev=24). Higher-order clubb/clubb_lite/edmf best at every flux > tke > holtslag > smag/louis > ysu/mynn25 ⇒ **closure ORDER buys skill** (both combined & θ) |
 | Q3 inter-regime coefficient spread | **regimes ready + SBL validated at 4 h** (stable/stratified/Ekman, jet emerging weak — peaks ~9 h); needs SBL SGS spread → σ_LES(SBL), then SBL tuning |
 | D4 AD path (+ AD-vs-DF) | **DONE** (`scm_les_loss_jax` + `tune_closure_ad` + `--method both`); full-res needs the lax.scan rollout |
 | D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
@@ -211,6 +211,22 @@ is the fix.
   does not (full write-up LES_SUITE.md §7.1). All self-checks passed (scan reproduces the
   tuner exactly for the whole roster). Also: put idle GPU 1 to work (SBL smagorinsky emit
   parallel to lasd → σ_LES(SBL) ~50 min sooner). See [[les-suite-compute-gpu]].
+
+- **Iter 18 (this commit) — Q2 COMPLETE: full 9×5 grid via scan; ORDER buys skill.** The
+  scan rollout collapsed the compute wall: filled the 12 missing flux-sweep cells
+  (tke/clubb_lite/edmf × 4 fluxes) at ~13 s each, the anchor edmf, and — key — **full CLUBB
+  at nlev=24 works now** (~58 s/cell, no OOM: the earlier crash was compile memory the scan's
+  one-step graph avoids), completing all **45/45** dry-CBL cells (9 closures × 5 fluxes) in
+  minutes vs the campaign's projected hours. Regenerated the scorecard + re-ran the θ-verdict
+  on the full grid. **RESULT (both combined & θ, identical order at every flux): clubb ≈
+  clubb_lite ≈ edmf (higher-order) < tke < holtslag < smag/louis < ysu/mynn25 ⇒ closure
+  ORDER buys skill** on the dry CBL. This SUPERSEDES the earlier 5-closure "order doesn't buy
+  skill" (an artifact of the incomplete roster). θ-significance: across-family gaps are
+  10–70× σ_LES(θ)=0.0074 (hugely significant); the two leaders clubb≈clubb_lite are near-tied
+  (top margin significant only at Q0=0.02). Tuning is default-dominated (only smag improves
+  materially) → ranking ≈ default closure fidelity. Full write-up LES_SUITE.md §7.1. The slow
+  duplicate campaigns are now fully redundant (scan filled every cell first; they skip). SBL
+  smagorinsky still emitting on GPU 1 → σ_LES(SBL) next.
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
