@@ -126,6 +126,15 @@ is the fix.
   **⇒ every deliverable PRODUCIBLE in this environment is DONE (dry-regime Q1/Q2/Q3/D4/D7);
   the moist regime is externally blocked, not incomplete-by-effort.**
 
+- **Iter 22 — sheared CBL Q1b (well-conditioned): closure ranking is SHEAR-DEPENDENT.** While
+  moist stays externally blocked, did a producible enrichment the docs flagged as the Q1b
+  "next step": tuned all 9 closures on the sheared CBL (Ug=8, via the geostrophic wiring —
+  validates it end-to-end on the CBL) + θ-gate (σ_LES(θ)=0.0073). Ranking clubb_lite≈clubb≈
+  mynn25 best, smagorinsky worst — vs the FREE CBL (mynn25 worst, higher-order best), shear
+  REORDERS the mid tier: mynn25 (MYNN, shear-production) jumps worst→3rd-best, local smag
+  drops to worst; higher-order clubb/clubb_lite stay robust in BOTH. ⇒ order-buys-skill holds
+  for the higher-order family across shear; the mid-tier ranking does not transfer. §7.1.
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
