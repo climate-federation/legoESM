@@ -14,6 +14,7 @@ from legoesm.atmosphere.les_suite.scm_coupling import (
 )
 from legoesm.atmosphere.les_suite.scm_runner import (
     build_cbl_scm_from_artifact,
+    scm_final_moist_on,
     scm_final_theta_on,
     scm_les_final_loss,
     scm_les_final_score,
@@ -59,6 +60,47 @@ def _mynn_config():
             surface=SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
         ),
     )
+
+
+def _moist_artifact(**over) -> LESReferenceArtifact:
+    """A BOMEX-like MOIST artifact (θ_l + q_t + moisture flux + large-scale forcing).
+
+    Coarse + short so the unit test is cheap; the physically-faithful cumulus-forming
+    validation is the real-BOMEX-artifact smoke, not this fixture. Carries the full moist
+    field set the bridge requires (qt ⇒ wqt_resolved; w_qv_s + qv_adv) plus the Coriolis /
+    geostrophic wind (BOMEX f_c=0.376e-4) so build_cbl_scm_from_artifact takes both the
+    geostrophic and the moist branch.
+    """
+    z = np.linspace(10.0, 2500.0, NZ)
+    thl_col = 298.5 + np.clip((z - 500.0) / 1000.0, 0.0, None) * 6.0   # θ_l [K]
+    qt_col = np.clip(0.0165 - 6.0e-6 * z, 0.003, None)                 # q_t [kg/kg]
+    base = dict(
+        case_name="bomex_run",
+        sgs="lasd",
+        heights_m=z,
+        times_s=np.linspace(0.0, 1800.0, NT),
+        theta=np.broadcast_to(thl_col, (NT, NZ)).copy(),
+        u=np.full((NT, NZ), -8.0),
+        v=np.zeros((NT, NZ)),
+        wtheta_resolved=np.broadcast_to(
+            0.008 * np.clip(1.0 - z / 600.0, -0.3, 1.0), (NT, NZ)).copy(),
+        wtheta_sgs=np.zeros((NT, NZ)),
+        qt=np.broadcast_to(qt_col, (NT, NZ)).copy(),
+        wqt_resolved=np.broadcast_to(
+            5.0e-5 * np.clip(1.0 - z / 1500.0, -0.2, 1.0), (NT, NZ)).copy(),
+        wqt_sgs=np.zeros((NT, NZ)),
+        prescribe="fluxes",
+        w_theta_s=np.full(NT, 0.008),
+        w_qv_s=np.full(NT, 5.2e-5),
+        f_c=0.376e-4,
+        u_geo=np.full(NZ, -8.0),
+        v_geo=np.zeros(NZ),
+        subsidence_w=np.full(NZ, -0.005),   # large-scale subsidence [m/s], +up ⇒ downward
+        theta_adv=np.full(NZ, -2.0e-5),     # radiative-cooling θ tendency [K/s]
+        qv_adv=np.full(NZ, -1.0e-8),        # drying advective tendency [(kg/kg)/s]
+    )
+    base.update(over)
+    return LESReferenceArtifact(**base)
 
 
 def test_build_scm_from_artifact():
@@ -228,3 +270,103 @@ def test_diverged_scm_scores_infinite_not_zero(monkeypatch):
     art = _cbl_artifact()
     loss = scm_les_final_loss(art, _mynn_config(), nlev=NZ, dt=20.0)
     assert not np.isfinite(loss)  # +inf, NOT 0.0
+
+
+def test_moist_scm_builds_scan_safe_with_condensate_tracers():
+    # A moist artifact must build an SCM whose tracer registry already carries the full
+    # condensate/precip set (incl. q_g), so the lax.scan free-run's carry pytree is FIXED —
+    # otherwise microphysics auto-materialises a key mid-scan and the scan raises.
+    art = _moist_artifact()
+    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=10.0)
+    keys = set(scm.state.tracers)
+    assert {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"} <= keys
+    # q_v IC = q_t (q_c≈0 at t0), interpolated onto the SCM grid → physical range
+    q_v0 = np.asarray(scm.state.tracers["q_v"].data[0, 0, 0])
+    assert np.all(np.isfinite(q_v0)) and q_v0.min() >= 0.0 and q_v0.max() < 0.05
+    # the scan itself must not raise on the fixed-pytree requirement
+    final = scm_scan_final_state(scm, nsteps=30)
+    assert np.all(np.isfinite(np.asarray(final.tracers["q_c"].data[0, 0, 0])))
+
+
+def test_moist_final_moist_on_returns_thetal_uv_qt():
+    # scm_final_moist_on returns (θ_l, u, v, q_t) — four finite profiles on the LES grid.
+    art = _moist_artifact()
+    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=10.0)
+    z_eval = jnp.asarray(art.heights_m)
+    thl, u, v, qt = scm_final_moist_on(scm, grid, nsteps=30, z_eval=z_eval)
+    for arr in (thl, u, v, qt):
+        assert arr.shape == z_eval.shape and bool(jnp.all(jnp.isfinite(arr)))
+    assert float(qt.min()) >= 0.0 and float(qt.max()) < 0.05     # physical total water
+    assert 250.0 < float(thl.min()) and float(thl.max()) < 340.0  # physical θ_l
+
+
+def test_moist_score_includes_qt_dry_does_not():
+    # A moist artifact is scored in θ_l + q_t (qt_rmse populated + folded into combined); a
+    # dry artifact leaves qt_rmse=None. This is the contrast that proves the moist channel
+    # is actually wired into the objective, not silently dropped.
+    moist = scm_les_final_score(_moist_artifact(), _mynn_config(), nlev=NZ, dt=10.0)
+    assert moist is not None and moist.qt_rmse is not None
+    assert bool(jnp.isfinite(moist.qt_rmse)) and float(moist.qt_rmse) >= 0.0
+    assert bool(jnp.isfinite(moist.combined))
+
+    dry = scm_les_final_score(_cbl_artifact(), _mynn_config(), nlev=NZ, dt=20.0)
+    assert dry is not None and dry.qt_rmse is None
+
+
+def test_liquid_water_theta_sign_and_exact_decrement():
+    # θ_l = θ − (L_v/(c_pd·Π))·q_c: STRICTLY below θ where cloud exists (q_c>0), by exactly
+    # the latent-heat decrement. A flipped sign (θ+…) would raise θ_l above θ — this is the
+    # guard the broad-bounds test can't catch.
+    from legoesm import constants
+    from legoesm.atmosphere.les_suite.scm_runner import _liquid_water_theta
+
+    theta = jnp.array([300.0, 305.0, 310.0])
+    q_c = jnp.array([0.0, 1.0e-3, 2.0e-3])       # cloud water [kg/kg]
+    p = jnp.array([1.0e5, 9.0e4, 8.0e4])
+    thl = _liquid_water_theta(theta, q_c, p)
+    exner = (p / constants.p_ref) ** constants.kappa
+    expect = theta - (constants.L_v / constants.c_pd) * q_c / exner
+    assert np.allclose(np.asarray(thl), np.asarray(expect), rtol=1e-12)
+    assert float(thl[0]) == float(theta[0])                 # cloud-free ⇒ θ_l = θ
+    assert float(thl[1]) < float(theta[1])                  # cloud ⇒ θ_l < θ (NOT above)
+    assert float(thl[2]) < float(thl[1] - theta[1] + theta[2])  # bigger q_c ⇒ bigger drop
+
+
+def test_moist_combined_folds_in_qt():
+    # The moist combined score must be the RMS over (θ_l, u, v, q_t) — so a q_t-only error
+    # moves `combined` even when θ_l/u/v match. Feed truth=SCM for θ_l/u/v and a controlled
+    # q_t error; combined = sqrt((0+0+0+qt_rmse²)/4) = qt_rmse/2.
+    from legoesm.atmosphere.les_suite.bridge import LESTruth
+    from legoesm.atmosphere.les_suite.score import prognostic_profile_score
+
+    z = jnp.linspace(10.0, 1500.0, NZ)
+    theta = 300.0 + 0.003 * z
+    qt_truth = 0.010 + jnp.zeros_like(z)
+    truth = LESTruth(case_name="m", heights_m=z, times_s=jnp.array([1800.0]),
+                     theta=theta, u=jnp.zeros_like(z), v=jnp.zeros_like(z),
+                     wtheta=jnp.zeros_like(z), qt=qt_truth)
+    # θ_l/u/v exact ⇒ their rmse 0; q_t offset ⇒ only qt_rmse nonzero
+    sc = prognostic_profile_score(truth, theta, jnp.zeros_like(z), jnp.zeros_like(z),
+                                  scm_qt=qt_truth + 5.0e-4)
+    assert float(sc.theta_rmse) < 1e-9 and sc.qt_rmse is not None
+    assert np.isclose(float(sc.combined), 0.5 * float(sc.qt_rmse), rtol=1e-6)
+
+
+def test_moist_scm_les_loss_jax_differentiable():
+    # The AD path (scm_les_loss_jax) must handle a MOIST artifact — final_prognostic_truth
+    # now carries qt, so the score REQUIRES scm_qt; a dry reducer here raises. jax.grad must
+    # return a finite gradient w.r.t. a traced closure param (the D4 moist-AD enabler).
+    import jax
+    from legoesm.atmosphere.les_suite import scm_runner as scmr
+
+    art = _moist_artifact()
+
+    def loss(cd):
+        surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=cd, Ch_neutral=0.0)
+        turb = TurbulenceConfig(scheme="mynn25", mynn25=MYNN25Config(surface=surf))
+        return scmr.scm_les_loss_jax(art, turb, nlev=NZ, dt=20.0)
+
+    val = float(loss(jnp.asarray(1.5e-3)))
+    assert np.isfinite(val) and val >= 0.0
+    g = float(jax.grad(loss)(jnp.asarray(1.5e-3)))
+    assert np.isfinite(g)

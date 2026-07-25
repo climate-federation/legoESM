@@ -19,8 +19,11 @@ cases). θ↔T uses the canonical Exner conversions; regridding uses
 Wired for the dry prescribed-surface-flux regimes: the free-convective CBL (``f_c=0``,
 gate-0-validated) and — when the artifact carries a geostrophic wind (``f_c!=0``,
 ``u_geo``) — the sheared CBL and stable SBL, whose Coriolis + geostrophic-pressure-gradient
-forcing is applied so the Ekman/jet dynamics reproduce the LES. No subsidence/large-scale
-advection profile is regridded yet (moist regimes remain to be wired).
+forcing is applied so the Ekman/jet dynamics reproduce the LES. Moist regimes (BOMEX
+shallow cumulus / DYCOMS stratocumulus) are wired too: an ``is_moist`` artifact drives the
+SCM with its large-scale subsidence + θ/q_v advective tendencies + surface moisture flux,
+runs diagnostic (Sundqvist) condensation, and is scored in liquid-water potential
+temperature θ_l + total water q_t (the variables the LES stores).
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 from jax import lax
+from legoesm import constants
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
 from legoesm.atmosphere.physics import (
@@ -94,10 +98,46 @@ def _dry_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
     )
 
 
+def _moist_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
+    """Turbulence + diagnostic (Sundqvist) condensation for a moist shallow-cumulus SCM.
+
+    Sundqvist is the large-scale diagnostic condensation scheme (subgrid RH>RH_crit
+    partial-cloud-fraction) appropriate at the SCM's coarse column resolution — it converts
+    supersaturated q_v to q_c with the latent-heating feedback on T, so the SCM reproduces a
+    cloud-topped moist BL (BOMEX/DYCOMS). Radiation/convection/GWD stay off (the tuned
+    turbulence closure is the object under study, per the dry regimes)."""
+    return PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=turbulence,
+        microphysics=MicrophysicsConfig(scheme="sundqvist"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+
+
 def _const_profile(profile):
     """A time-constant SCMForcing ``ProfileFn`` returning ``profile`` for every ``t`` — used
     for the steady geostrophic wind of the sheared CBL / stable SBL."""
     return lambda _t: profile
+
+
+def _const_scalar(value):
+    """A time-constant SCMForcing ``ScalarFn`` returning ``value`` for every ``t`` (moist
+    surface moisture flux ``w_qv_s``)."""
+    return lambda _t: jnp.asarray(value)
+
+
+def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
+    """Liquid-water potential temperature θ_l = θ − (L_v/(c_pd·Π))·q_c (Betts 1973).
+
+    Π=(p/p_ref)^κ is the Exner function. The reduction is NEGATIVE where cloud (q_c>0)
+    exists — condensation released latent heat that raised θ above the cloud-conserved θ_l,
+    so θ_l ≤ θ with equality only in cloud-free air. Units:
+    (L_v[J/kg]/c_pd[J/kg/K])·q_c[kg/kg]/Π[–] = K. The moist LES records θ_l as its ``theta``
+    channel (``les_record``), so the SCM must be reduced to θ_l for an apples-to-apples score.
+    """
+    exner = (jnp.asarray(p) / constants.p_ref) ** constants.kappa
+    return theta - (constants.L_v / constants.c_pd) * q_c / exner
 
 
 def build_cbl_scm_from_artifact(
@@ -170,17 +210,41 @@ def build_cbl_scm_from_artifact(
         v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
         geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
                       "v_geo": _const_profile(v_geo_scm)}
+    # Moist regime (BOMEX/DYCOMS shallow-cumulus / stratocumulus). q_t IC (q_c≈0 at t=0 ⇒
+    # q_v(t0)=q_t(t0)), plus the artifact's large-scale forcing: subsidence_w [m/s, +up],
+    # the prescribed θ/q_v advective tendencies, and the surface moisture flux w_qv_s
+    # [(kg/kg) m/s, +up]. These are the SAME sign conventions SCMForcing documents
+    # (subsidence_w +up, prescribe='fluxes' fluxes +up), which is how the moist artifact
+    # stores them — no sign flip here. Diagnostic Sundqvist condensation (_moist_cbl_physics)
+    # then forms q_c so the SCM reproduces a cloud-topped moist BL. A dry artifact skips this
+    # block entirely (byte-unchanged).
+    q_v_scm = None
+    moist_kwargs: dict = {}
+    if artifact.is_moist:
+        qt0 = jnp.asarray(artifact.qt)[0]
+        q_v_scm = interp_profile(qt0, z_les, z_scm)
+        moist_kwargs["w_qv_s"] = _const_scalar(
+            float(jnp.asarray(artifact.w_qv_s)[0]))
+        for fld in ("subsidence_w", "theta_adv", "qv_adv"):
+            prof = getattr(artifact, fld)
+            if prof is not None:
+                moist_kwargs[fld] = _const_profile(
+                    interp_profile(jnp.asarray(prof), z_les, z_scm))
+    physics = (_moist_cbl_physics(turbulence) if artifact.is_moist
+               else _dry_cbl_physics(turbulence))
     forcing = SCMForcing(
         f_c=float(artifact.f_c),
         prescribe="fluxes",
         w_th_s=lambda _t: jnp.asarray(q0),
         **geo_kwargs,
+        **moist_kwargs,
     )
     scm = SingleColumnModel.create(
-        physics_config=_dry_cbl_physics(turbulence),
+        physics_config=physics,
         nlev=nlev,
         dt=dt,
         T_profile=T_profile,
+        q_v_profile=q_v_scm,
         u=u_scm,
         v=v_scm,
         p_s=_P_S_PA,
@@ -254,6 +318,51 @@ def scm_final_theta_on(
     return theta_eval, u_eval, v_eval
 
 
+def scm_final_moist_on(
+    scm: SingleColumnModel, grid: SCMGridSpec, nsteps: int, z_eval: Array
+) -> tuple[Array, Array, Array, Array]:
+    """Free-run a MOIST SCM ``nsteps`` steps; return final (θ_l, u, v, q_t) on ``z_eval``.
+
+    The moist LES stores its thermodynamic profile as liquid-water potential temperature θ_l
+    and total water q_t (``les_record``), so the SCM must be reduced to the SAME variables for
+    an apples-to-apples score (controlled-comparison rule). From the SCM's temperature/tracer
+    state:
+
+      θ_l = θ − (L_v / (c_pd · Π)) · q_c      (Betts 1973; Π = (p/p_ref)^κ, the Exner function)
+      q_t = q_v + q_c + q_r                   (the water species the LES q_t sums)
+
+    Sign of the θ_l reduction: condensation RELEASES latent heat and raises θ above θ_l, so
+    θ_l = θ − (positive) < θ wherever cloud (q_c>0) exists — θ_l is the cloud-conserved
+    variable the LES reports. Units: (L_v[J/kg]/c_pd[J/kg/K])·q_c[kg/kg]/Π[–] = K. The SCM
+    (top-to-bottom) profiles are reordered to increasing height and interpolated onto the
+    fixed LES eval grid. Uses the same ``lax.scan`` rollout as the dry path.
+    """
+    final_state = scm_scan_final_state(scm, nsteps)
+    T_final = jnp.asarray(final_state.T.data[0, 0, 0])
+    u_final = jnp.asarray(final_state.u.data[0, 0, 0])
+    v_final = jnp.asarray(final_state.v.data[0, 0, 0])
+    theta_final = theta_from_temperature(T_final, grid.p_full_pa)
+
+    tracers = final_state.tracers
+    q_v = jnp.asarray(tracers["q_v"].data[0, 0, 0])
+    q_c = (jnp.asarray(tracers["q_c"].data[0, 0, 0])
+           if "q_c" in tracers else jnp.zeros_like(q_v))
+    q_r = (jnp.asarray(tracers["q_r"].data[0, 0, 0])
+           if "q_r" in tracers else jnp.zeros_like(q_v))
+    theta_l_final = _liquid_water_theta(theta_final, q_c, grid.p_full_pa)
+    qt_final = q_v + q_c + q_r
+
+    z_eval = jnp.asarray(z_eval)
+    thl_inc, z_inc = _to_increasing(theta_l_final, grid.z_scm_m)
+    u_inc, _ = _to_increasing(u_final, grid.z_scm_m)
+    v_inc, _ = _to_increasing(v_final, grid.z_scm_m)
+    qt_inc, _ = _to_increasing(qt_final, grid.z_scm_m)
+    return (interp_profile(thl_inc, z_inc, z_eval),
+            interp_profile(u_inc, z_inc, z_eval),
+            interp_profile(v_inc, z_inc, z_eval),
+            interp_profile(qt_inc, z_inc, z_eval))
+
+
 def final_prognostic_truth(artifact: LESReferenceArtifact, z_eval) -> LESTruth:
     """The single-time LES prognostic truth at the artifact's LAST output time, on the
     ``z_eval`` grid. This is the exact target :func:`scm_les_final_loss` scores against
@@ -269,6 +378,7 @@ def final_prognostic_truth(artifact: LESReferenceArtifact, z_eval) -> LESTruth:
         u=jnp.asarray(truth_series.u)[-1],
         v=jnp.asarray(truth_series.v)[-1],
         wtheta=jnp.asarray(truth_series.wtheta)[-1],
+        qt=None if truth_series.qt is None else jnp.asarray(truth_series.qt)[-1],
     )
     return regrid_truth(final_truth, jnp.asarray(z_eval))
 
@@ -296,17 +406,27 @@ def scm_les_final_score(
     nsteps = max(1, int(round(t_end / dt)))
 
     z_eval = jnp.asarray(artifact.heights_m)
-    theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
+    # Moist artifacts are scored in θ_l + q_t (the LES thermodynamic variables); dry artifacts
+    # in θ only. The dry path keeps calling scm_final_theta_on unchanged (its divergence
+    # monkeypatch test keys off that symbol).
+    if artifact.is_moist:
+        theta_eval, u_eval, v_eval, qt_eval = scm_final_moist_on(
+            scm, grid, nsteps, z_eval)
+    else:
+        theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
+        qt_eval = None
 
     # A DIVERGED SCM (NaN/Inf θ) must NOT score as a perfect fit. The score's safe_sqrt
     # maps NaN -> 0, so a non-finite SCM output would otherwise be selected as best.
     if not (bool(jnp.all(jnp.isfinite(theta_eval)))
             and bool(jnp.all(jnp.isfinite(u_eval)))
-            and bool(jnp.all(jnp.isfinite(v_eval)))):
+            and bool(jnp.all(jnp.isfinite(v_eval)))
+            and (qt_eval is None or bool(jnp.all(jnp.isfinite(qt_eval))))):
         return None
 
     final_truth = final_prognostic_truth(artifact, z_eval)
-    return prognostic_profile_score(final_truth, theta_eval, u_eval, v_eval)
+    return prognostic_profile_score(
+        final_truth, theta_eval, u_eval, v_eval, scm_qt=qt_eval)
 
 
 def scm_les_final_loss(
@@ -341,7 +461,9 @@ def scm_les_loss_jax(
     objective (D4). Returns a TRACED scalar (no ``float()``/``bool()`` concretization),
     so it can be ``jax.grad``'d w.r.t. traced turbulence-config leaves (params spliced
     in via ``apply_param_overrides`` as jnp arrays). SAME objective as the DF loss (the
-    final-snapshot θ/u/v ``prognostic_profile_score.combined`` on the LES eval grid).
+    final-snapshot ``prognostic_profile_score.combined`` on the LES eval grid) — θ/u/v for a
+    dry artifact, θ_l/u/v/q_t for a moist one (same is_moist branch as
+    :func:`scm_les_final_score`).
 
     A DIVERGED SCM must NOT score as a perfect (0) fit: the score's ``safe_sqrt`` maps
     NaN→0, so a non-finite θ/u/v would otherwise yield a FINITE ZERO loss the AD optimiser
@@ -358,12 +480,23 @@ def scm_les_loss_jax(
     t_end = float(jnp.asarray(artifact.times_s)[-1])  # concrete artifact data → static
     nsteps = max(1, int(round(t_end / dt)))
     z_eval = jnp.asarray(artifact.heights_m)
-    theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
-    finite = (jnp.isfinite(theta_eval).all() & jnp.isfinite(u_eval).all()
-              & jnp.isfinite(v_eval).all())
+    # Mirror the DF branch: moist artifacts are reduced to θ_l/u/v/q_t (final_prognostic_truth
+    # now carries qt for them, so prognostic_profile_score REQUIRES scm_qt or raises). finite
+    # stays a TRACED jnp predicate (& not Python bool) so this remains jax.grad-able.
+    if artifact.is_moist:
+        theta_eval, u_eval, v_eval, qt_eval = scm_final_moist_on(
+            scm, grid, nsteps, z_eval)
+        qt_safe = jnp.nan_to_num(qt_eval)
+        finite = (jnp.isfinite(theta_eval).all() & jnp.isfinite(u_eval).all()
+                  & jnp.isfinite(v_eval).all() & jnp.isfinite(qt_eval).all())
+    else:
+        theta_eval, u_eval, v_eval = scm_final_theta_on(scm, grid, nsteps, z_eval)
+        qt_safe = None
+        finite = (jnp.isfinite(theta_eval).all() & jnp.isfinite(u_eval).all()
+                  & jnp.isfinite(v_eval).all())
     final_truth = final_prognostic_truth(artifact, z_eval)
     combined = prognostic_profile_score(
         final_truth, jnp.nan_to_num(theta_eval), jnp.nan_to_num(u_eval),
-        jnp.nan_to_num(v_eval)).combined
+        jnp.nan_to_num(v_eval), scm_qt=qt_safe).combined
     return jnp.where(finite, combined,
                      jnp.asarray(_AD_DIVERGE_PENALTY, combined.dtype))

@@ -852,9 +852,14 @@ class SingleColumnModel:
         # consistent tracer registry rather than relying on the
         # auto-materialisation path in _apply_tendencies.
         if state.tracers is not None and physics_config.microphysics.scheme != "none":
-            extra_keys = ("q_c", "q_r", "q_i", "q_s")
-            if microphysics_substeps > 1:
-                extra_keys = extra_keys + ("q_g",)
+            # q_g included unconditionally: the shared MicrophysicsOutput always carries a
+            # dq_g_dt channel, so _apply_tendencies auto-materialises q_g on the FIRST step
+            # regardless of microphysics_substeps. Pre-allocating it here (not only for the
+            # substeps>1 graupel path) keeps the tracer registry fixed from construction —
+            # required for a lax.scan free-run (scm_runner.scm_scan_final_state), whose carry
+            # pytree must not gain a key mid-loop. This does not add a tracer the run() path
+            # lacked; it only moves the materialisation to t=0.
+            extra_keys = ("q_c", "q_r", "q_i", "q_s", "q_g")
             new_tracers = dict(state.tracers)
             for k in extra_keys:
                 if k not in new_tracers:
