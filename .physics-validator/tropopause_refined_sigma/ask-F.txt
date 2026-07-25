@@ -1,0 +1,30 @@
+You have NO repository access. Do NOT use tools. Answer in <= 20 lines.
+ROUND 4, final. You raised exactly 2 CONCERNs in round 3. Here is how each was
+closed. Say whether each is now settled, then give one line:
+"FINAL VERDICT: <no substantive findings | N open findings>".
+
+CONCERN 1 (fp32 downcast of the mass weight). Measured and documented in the
+code, not hand-waved. The mass-weighted column residual of the filter is:
+  float64  sigma refine=3 L30 : -3.8e-14 W/m2
+  float64  hybrid L40 p_s=620 : -1.7e-14 W/m2
+  float32  sigma refine=3 L30 : +3.6e-05 W/m2
+  float32  hybrid L40 p_s=620 : -2.7e-05 W/m2
+against the 7.86 W/m2 leak this replaces, and against a <1 W/m2 TOA-imbalance
+target. So fp32 is 2.2e5 x better than the status quo and 4 orders of magnitude
+below the target. The docstring now states it is a dtype-round-off closure, not
+an exact fp64 guarantee.
+
+CONCERN 2 (p_ref not stored in the checkpoint vertical-grid guard). Verified:
+`p_ref` is a global invariant on every driver path. The only coordinate
+construction in the driver is
+`make_hybrid_levels(gc.nlev, p_top_Pa=gc.p_top_Pa, stretching=gc.stretching)`,
+which does not pass `p_ref`, and `make_hybrid_levels` defaults it to
+`constants.p_ref`. No config field exposes it. A code comment now records the
+invariant and states that p_ref MUST join the stored array if it ever becomes
+configurable.
+
+Q1. Is CONCERN 1 settled, or does the fp32 number need to be a test assertion
+rather than a docstring number?
+Q2. Is CONCERN 2 settled by "verified invariant + comment", or does it need a
+runtime assertion?
+Q3. Anything else open?

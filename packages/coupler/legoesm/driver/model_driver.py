@@ -1012,7 +1012,9 @@ class ModelDriver:
             )
         else:
             from legoesm.grids.vertical import create_sigma_coordinate
-            self.sigma = create_sigma_coordinate(gc.nlev)
+            self.sigma = create_sigma_coordinate(
+                gc.nlev,
+                tropopause_refine=getattr(gc, "tropopause_refine", 1.0))
 
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord})")
@@ -4335,6 +4337,34 @@ class ModelDriver:
                 p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
+            # Vertical level POSITIONS travel with the state.  nlev alone no
+            # longer identifies the grid: a uniform-σ L30 and a
+            # tropopause-refined L30 (grid.tropopause_refine) have identical
+            # SHAPES, so the shape guard on load cannot tell them apart and
+            # would silently reinterpret every profile on the wrong levels.
+            # Same reasoning as ``physstate_meta_conv_scheme`` below.
+            # Stored as the (A, B) half-level pair, i.e. p_half = A·p_ref +
+            # B·p_s, because that is what actually fixes the pressures.
+            # ``p_ref`` is NOT stored: no driver path overrides it (the sole
+            # constructor call below passes only nlev/p_top_Pa/stretching, and
+            # ``make_hybrid_levels`` defaults to ``constants.p_ref``), so it is
+            # a global invariant and equal (A, B) implies equal pressures.
+            # If p_ref ever becomes configurable it MUST join this array
+            # (codex round 3).
+            # ``sigma_half`` ALONE is NOT sufficient for the hybrid: with
+            # B = eta**n, A = eta - B + (p_top/p_ref)(1-eta), the sum
+            # A + B = eta + (p_top/p_ref)(1-eta) is INDEPENDENT of the
+            # transition exponent, so two physically different hybrid grids
+            # share one sigma_half (codex round 2).  Pure σ is the A = 0,
+            # B = σ member of the same family, so one array covers both.
+            _vg = getattr(self.sigma, "A_half", None)
+            _save["meta_vgrid"] = np.stack([
+                (np.zeros_like(np.asarray(self.sigma.sigma_half,
+                                          dtype=np.float64))
+                 if _vg is None else np.asarray(_vg, dtype=np.float64)),
+                np.asarray(getattr(self.sigma, "B_half", self.sigma.sigma_half),
+                           dtype=np.float64),
+            ])
             # Stateful-physics carry (#413): persisted under
             # ``physstate_<field>`` so a chained restart resumes the
             # prognostic physics memory instead of silently reseeding.
@@ -4898,6 +4928,41 @@ class ModelDriver:
             from legoesm.core.state import HydrostaticState
             from legoesm.core.field import Field
             d = np.load(path)
+            # Vertical LEVEL-POSITION guard.  The shape guards below only see
+            # nlev, and nlev no longer identifies the σ grid: a uniform L30 and
+            # a tropopause-refined L30 (grid.tropopause_refine) are the same
+            # shape.  Restarting one on the other silently reinterprets every
+            # T/q profile on the wrong pressures — a silent physics error, not
+            # a crash.  Compares the (A, B) half-level pair (see the save side
+            # for why A+B alone is blind to the hybrid transition exponent).
+            # ``atol`` is a float32-STORAGE allowance, not a physics one: the
+            # coordinate is regenerated deterministically from the config, so
+            # an fp32-vs-fp64 run differs by at most one float32 ulp near
+            # B = 1, i.e. 6e-8 — 5e-7 leaves ~8 ulps of margin while still
+            # rejecting any real level move (>= 1e-3 in σ, 2000x larger).
+            # Absent on pre-guard checkpoints (skip, stay backward-compatible).
+            if "meta_vgrid" in getattr(d, "files", ()):
+                _ck_vg = np.asarray(d["meta_vgrid"], dtype=np.float64)
+                _A = getattr(self.sigma, "A_half", None)
+                _cur_vg = np.stack([
+                    (np.zeros(self.sigma.n_levels + 1) if _A is None
+                     else np.asarray(_A, dtype=np.float64)),
+                    np.asarray(getattr(self.sigma, "B_half",
+                                       self.sigma.sigma_half),
+                               dtype=np.float64),
+                ])
+                if (_ck_vg.shape != _cur_vg.shape
+                        or not np.allclose(_ck_vg, _cur_vg, rtol=0.0,
+                                           atol=5e-7)):
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written on a "
+                        f"DIFFERENT vertical grid: checkpoint (A,B)_half[:, :3]"
+                        f"={_ck_vg[:, :3]} vs current {_cur_vg[:, :3]} "
+                        f"(nlev {_ck_vg.shape[-1] - 1} vs "
+                        f"{_cur_vg.shape[-1] - 1}). Restarting would "
+                        "reinterpret every profile on the wrong levels. "
+                        "Rebuild with the same --nlev / --vertical-coord / "
+                        "--p-top / --stretching / --tropopause-refine.")
             # Under MPAS cell-partition MPI the checkpoint is GLOBAL but
             # ``self.state`` is this rank's local (owned+halo) band, so scatter
             # the global arrays to local cells/edges (mirror of the save-side

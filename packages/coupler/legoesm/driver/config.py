@@ -64,6 +64,14 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    # SIGMA-coordinate layer redistribution toward the tropopause, at FIXED
+    # nlev (grids/vertical.tropopause_refined_sigma_half).  1.0 = the uniform
+    # grid, bit-identical.  Uniform sigma gives ~33 hPa layers everywhere at
+    # nlev=30, so the tropical tropopause is spanned by ~4 levels and no cold
+    # point forms; refine=3 doubles the levels in 70-200 hPa, paid for by the
+    # mid-troposphere (the lowest layer coarsens ~30%, measured).  Ignored by
+    # the hybrid coordinate, which has its own `stretching`.
+    tropopause_refine: float = 1.0
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -1304,6 +1312,32 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"grid.nlev must be > 0, got {g.nlev}")
         if g.p_top_Pa <= 0:
             errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
+        # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
+        # vertical-CFL limit — the first-order-upwind vertical advective CFL
+        # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
+        # refine=6, the index-space nu_vert4_T filter does not scale with
+        # dsigma at all, and both GWD schemes cap acceleration
+        # thickness-independently (measured 2026-07-25).  The binding
+        # criterion is GRID SMOOTHNESS: the max adjacent-layer thickness ratio
+        # is 1.00 at refine=1, 1.62 at refine=3 and 2.41 at refine=6, whereas
+        # every grid this model has run successfully is <= 1.07 and
+        # operational practice keeps it <~ 1.2.  A sharp stretch transition
+        # reflects resolved vertical waves and worsens the (pre-existing)
+        # mismatch between the Simmons-Burridge pressure at which Phi_k is
+        # defined and the arithmetic midpoint at which T/q/physics live.
+        # 3.0 is the largest value with an actual stability arm behind it;
+        # raising this bound requires a new one, not a wider constant.
+        if not (1.0 <= g.tropopause_refine <= 3.0
+                and math.isfinite(g.tropopause_refine)):
+            errors.append(
+                f"grid.tropopause_refine must be finite in [1, 3] "
+                f"(1 = uniform); got {g.tropopause_refine}")
+        if g.tropopause_refine != 1.0 and g.vertical_coord != "sigma":
+            errors.append(
+                f"grid.tropopause_refine={g.tropopause_refine} only applies "
+                f"to the sigma coordinate; vertical_coord="
+                f"{g.vertical_coord!r} has its own `stretching` and would "
+                "silently ignore it.")
         if d.dt <= 0:
             errors.append(f"dycore.dt must be > 0, got {d.dt}")
         if d.hyperdiff_scale < 0:
@@ -2391,6 +2425,7 @@ class ExperimentConfig(NamedTuple):
             vertical_coord=amip_cfg.vertical_coord,
             p_top_Pa=amip_cfg.p_top_Pa,
             stretching=amip_cfg.stretching,
+            tropopause_refine=getattr(amip_cfg, 'tropopause_refine', 1.0),
         )
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
@@ -2613,6 +2648,7 @@ class ExperimentConfig(NamedTuple):
             vertical_coord=self.grid.vertical_coord,
             p_top_Pa=self.grid.p_top_Pa,
             stretching=self.grid.stretching,
+            tropopause_refine=self.grid.tropopause_refine,
             start_day=self.start_day,
             days=self.days,
             diag_days=self.output.diag_days,

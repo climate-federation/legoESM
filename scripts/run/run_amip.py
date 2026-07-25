@@ -1289,6 +1289,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "__param_spec__ entry yet (bounds undecided), so "
                              "this flag is its ONLY route -- --params cannot "
                              "reach it.")
+    parser.add_argument("--tropopause-refine", type=float, default=None,
+                        dest="tropopause_refine",
+                        help="Sigma-coordinate layer redistribution toward "
+                             "the tropopause at FIXED nlev (1.0 = uniform, "
+                             "bit-identical; 3.0 doubles the levels in "
+                             "70-200 hPa, paid for by the mid-troposphere). "
+                             "Fixes the unresolved tropical cold point "
+                             "without adding levels. Sigma coordinate only.")
     parser.add_argument("--hard-sat-ice-curve",
                         action=argparse.BooleanOptionalAction, default=False,
                         dest="hard_sat_ice_curve",
@@ -1590,6 +1598,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top if args.p_top is not None else 200.0,
         stretching=args.stretching if args.stretching is not None else 2.0,
+        tropopause_refine=(args.tropopause_refine
+                           if args.tropopause_refine is not None else 1.0),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 

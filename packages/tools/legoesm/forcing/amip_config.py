@@ -32,6 +32,11 @@ class AMIPExperimentConfig(NamedTuple):
     vertical_coord: str = "hybrid"  # "sigma" or "hybrid"
     p_top_Pa: float = 200.0  # model top pressure [Pa] (hybrid only)
     stretching: float = 2.0  # sinh stretching for BL resolution (hybrid only)
+    # sigma-only tropopause layer redistribution (1.0 = uniform).  Carried
+    # here so the ExperimentConfig <-> AMIP round trip at the checkpoint /
+    # legacy-factory boundary cannot silently launder a refined grid back to
+    # uniform — the profiles would be reinterpreted on the wrong levels.
+    tropopause_refine: float = 1.0
 
     # Integration
     start_day: float = 0.0
