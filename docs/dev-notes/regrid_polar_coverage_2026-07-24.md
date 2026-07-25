@@ -1,7 +1,8 @@
-# Conservative-regrid polar coverage: the attainable-coverage reference
+# Conservative-regrid polar coverage: fracarea + polar-fill weights
 
-**Date:** 2026-07-24 (updated 2026-07-25) · **Status:** shipped — the check now
-compares against attainable coverage and is ON at all three callers
+**Date:** 2026-07-24 (updated 2026-07-25) · **Status:** shipped — the polar gap is
+fixed in the WEIGHTS (`fracarea` + `polar_fill` at the forcing callers); the
+coverage check is strict `sum == 1` again and on at all three callers
 
 ## The invariant
 
@@ -9,7 +10,7 @@ A conservative lat-lon remap normalises each destination cell by its **own**
 area (`weights = overlap_area / dst_cell_area`, no renormalisation by the
 weight sum), so a destination cell the source only partially covers gets
 `sum(weights) < 1` and the field comes back **reduced**.
-`compute_overlap_weights(..., require_attainable_coverage=True)` raises on that.
+`compute_overlap_weights(..., require_full_coverage=True)` raises on that.
 
 The catch: `sum(weights) == 1` is only *attainable* when the source truly spans
 the destination. **Every real forcing dataset stops short of the pole**, so its
@@ -34,7 +35,8 @@ Model→model remaps (`coupler/grid_remap.py`) use pole-clamped v-faces, so for
 **global** model grids `sum == 1` *is* attainable and the check stays strict. Note
 this does not hold for every grid that path accepts: a regional Mercator/DINO frame
 also satisfies `_is_regular_latlon`, its outer row against a global destination is
-*not* fully coverable, and it is correctly rejected — see caveat 2.
+*not* fully coverable, and it is correctly rejected (that path takes neither
+`fracarea` nor `polar_fill`, so nothing papers over it).
 
 ## What happened
 
@@ -72,176 +74,122 @@ measurement: no cached JRA55 was available at the time to reproduce it.
   uniform-spacing inference overshoots by degrees, as in the 8-row test fixture
   (outer centre 86° → inferred edge ≈98°). Pinned by
   `tests/unit/test_jra55_do.py::test_cache_polar_coverage_after_lat_clamp`
-  (RED without it: polar `tas` ~279.8 K instead of 290 K).
+  (still RED without it, though now via the polar-gap budget: the unclamped 8-row
+  fixture infers edges at ±98.3°, a 8.3° gap, which the treatments refuse to
+  extrapolate across).
 - The **`ceil(dd/ds)` ghost columns** in `omip2_applicator`. That fix is correct
   and closes the genuine 0/360 seam deficit (a single ghost left the
   seam-straddling column HALVED, and the 10-m pressure iteration then NaN'd).
 
-## SHIPPED: the check now compares against attainable coverage
+## SHIPPED (final): fix the WEIGHTS, and the check goes back to being strict
 
-Turning the flag off at the call site also lost the **seam/ghost** guard, which is
-the failure mode that already caused the NaN above. That is fixed:
-`require_full_coverage` is now **`require_attainable_coverage`**, it compares the
-row sum against what the source can actually supply, and **all three callers have
-the guard on again** (`omip2_applicator`, `jra55_do`, `grid_remap`).
+The coverage check is `require_full_coverage` again and compares each destination
+cell against a hard **1.0**, exactly as it originally did. That is possible because
+the polar gap is now handled where it always belonged — in the weights:
 
-The weight construction is separable (`row_sum[j,i] = lat_frac[j]·lon_frac[i]`
-exactly, since `weights = (lat_ov·lon_ov)/(dst_lat_area·dst_lon_area)`), so the
-reference is a latitude factor with the longitude factor held at 1.0:
+| option | fixes | mechanism |
+|---|---|---|
+| `normalization='fracarea'` | a **partly** covered row | divide by the covered **latitude fraction** — never by the row sum → the area-weighted mean of the overlapping source |
+| `polar_fill=True` | a row with **no** overlap | give it the source's outermost row, zonally resolved (zeroth-order poleward extrapolation), bounded by `polar_fill_max_gap_deg` (default 2°) |
 
-```python
-# _attainable_lat_coverage(), called from compute_overlap_weights
-covered = np.clip(np.minimum(dst_sin[1:], src_sin[-1])
-                  - np.maximum(dst_sin[:-1], src_sin[0]), 0.0, None)
-frac = np.zeros_like(covered)          # masked divide, NOT an epsilon clamp:
-ok = dst_lat_area > 0.0                # max(dst_lat_area, 1e-30) would bind at a
-frac[ok] = covered[ok] / dst_lat_area[ok]   # different threshold than the weights'
-expected = np.repeat(frac, n_dst_lon)  # own max(dst_cell_area, 1e-30) (a lat*lon
-                                       # PRODUCT), and a mismatched pair raises
-                                       # spuriously, blaming a longitude seam.
-```
+Both are on at the two forcing callers; `coupler/grid_remap.py` takes neither.
+With them, every destination cell sums to 1, a constant field survives on **every**
+row at **any** resolution, and a longitude seam/ghost deficit still raises.
 
-`np.repeat` matches the `dst_idx = j*n_dst_lon + i` flattening. The validator took
-a new `expected=` parameter, since `dst_sin`/`src_sin`/`dst_lat_area`/`n_dst_lon`
-all live in `compute_overlap_weights`, not in it; failures now report
-`(lat_row, lon_col)` via `divmod` instead of a flat index.
+`normalization` is ESMF's vocabulary (`DSTAREA` vs `FRACAREA`), deliberately, so the
+choice is recognisable rather than bespoke. Default is `dstarea` — unchanged,
+strictly conservative behaviour for every existing caller.
 
-### Relaxing latitude is not enough on its own — the reference needs a FLOOR
+### The trade-off, stated plainly
 
-Relaxing the reference alone is strictly **worse** than the bug it fixes: a row
-matches its own attainable coverage *by construction*, so a row the source cannot
-touch has `expected = 0` matched by `row_sum = 0`, passes, and silently emits a
-field of **zeros**. At 1° with a ±89° source band that is `T_air = 0 K` in the
-polar model rows — the very bulk-flux / 10-m-pressure NaN this guard exists to
-prevent.
+Both operations **break strict global conservation**: they fill the uncovered
+fraction with real values instead of zero, so the remapped integral exceeds the
+source's by exactly the uncovered cap. For a band symmetric about the equator
+carrying a constant field that excess is `1/sin(band) − 1` (pinned by
+`test_treatment_trades_strict_conservation_for_correct_magnitude`); for a band
+`[a, b]` it is `2/(sin b − sin a) − 1`, and for a non-constant field only the sign
+is guaranteed.
 
-**Two attempts failed before the shipped one. Both were caught by adversarial
-review, with numbers, and are recorded because each looks obviously right.**
+That is the right trade for **forcing**, where every channel is INTENSIVE (`tas`,
+`huss`, `psl`, winds, and the radiative/precip flux **densities**) and the shortfall
+is a DATA GAP rather than a region of genuine zero flux — a diluted air temperature
+is simply wrong. It is the WRONG trade for the conservative **flux** direction,
+which is why `grid_remap.py` keeps `dstarea` and no fill: the ESM energy and
+freshwater budgets depend on that path conserving.
 
-*Attempt 1 — bound shortfall POSITIONALLY* ("only the outermost destination row
-may be short"). It assumes the polar gap is narrower than one destination row.
-CORE-II's gap is **0.514°**, which spans 4 rows of a 0.5° target and 6 of a 0.25°
-target, so it hard-aborts `--latlon-res 360x720` (first failing `n_dst_lat = 351`;
-JRA55-do's 0.151° gap fails from 1189, i.e. `--target-resolution-deg 0.125`). It
-also never bounded *magnitude*, so the all-zero hole above survived untouched.
+### What this deleted
 
-*Attempt 2 — bound it GEOMETRICALLY* (short only where the row pokes past the
-source band, `(dst_sin[:-1] < src_sin[0]) | (dst_sin[1:] > src_sin[-1])`, and
-`lat_frac > tol`). This is **algebraically identical to attempt 1**, which is
-worth internalising: for a *contiguous* source band the outer edge cuts **exactly
-one** destination row, and every row beyond it is exactly zero-covered. So
-"reaches beyond and retains overlap" ≡ "is the row containing the source edge" ≡
-the positional rule. Same abort at `n_dst_lat = 351`. Its own regression test
-failed, which is how it was caught.
+Fixing the weights made the previous iteration's machinery unnecessary, so it is
+gone: `lat_shortfall_floor`, `_MIN_LAT_FLOOR`, `_required_lat_coverage` and the
+per-row floor guard. `_attainable_lat_coverage` **stays** — it is now load-bearing
+for the safety property below: `fracarea` scales by `1 / lat_frac[j]`, NEVER by the
+row sum. Those existed only to
+decide *how much dilution to tolerate* — a question that stops being asked once the
+row carries the correct value. Two consequences worth noting:
 
-**Shipped: an explicit, caller-chosen floor.** `_required_lat_coverage` returns
-`lat_shortfall_floor` for a row extending past the source band and `1.0`
-elsewhere; the guard fires on `lat_frac < required - tol`.
+- The production 1° polar rows no longer ship at 0.736 coverage (`T_air ≈ 184 K`).
+  They now carry the field's own value. The earlier note recorded that dilution as
+  disclosed-but-blessed; it is now simply fixed.
+- The fine-resolution abort is gone. A destination finer than the source's polar
+  gap (CORE-II below ~0.51°, JRA55-do below ~0.15°) used to raise because its
+  outermost rows had no data; `polar_fill` supplies them, so `--latlon-res 360x720`
+  and finer now build.
 
-- `lat_shortfall_floor = 1.0` (**the default**) reproduces the original hard-1.0
-  check exactly. `coupler/grid_remap.py` keeps it — model→model, any shortfall is
-  a bug. Relaxing latitude unconditionally there had made a non-global Mercator
-  source return `coverage × field` in its outer rows instead of raising: for a
-  `lat_max = 70°` source into any global lat-lon destination the measured coverage
-  there is **0.0**, i.e. a constant 290 K SST arriving as **0 K**.
-- The forcing callers opt in at **0.5**. Weights are *not* renormalised, so a row
-  with coverage `f` returns `f × field`; the floor is therefore how much dilution
-  the caller ships, **not a numerical epsilon**. Measured CORE-II outer-row
-  coverage: 0.997 @ 10°, 0.934 @ 2°, **0.736 @ 1° (production `180x360`)**, 0.531 @
-  0.75°, 0 @ 0.5° and finer. JRA55-do's gap is 3× narrower: 0.977 @ 1°, still
-  0.633 @ 0.25°.
-- Valid range is `[1e-3, 1]`, not `(0, 1]`. A floor at or below `_COVERAGE_TOL`
-  drives the comparison threshold negative and the guard **inverts** — an all-zero
-  row passes. (Found by a red test at `floor = 1e-9`.) 1e-3 is also where a floor
-  stops being a defensible policy: 0.1% coverage turns 250 K into 0.25 K.
+### Iteration history — three designs were rejected before this one
 
-**Known limit, not fixed here — two distinct regimes, don't conflate them.** For
-CORE-II onto a global target at the shipped floor 0.5:
+Recorded because each looked obviously right, and the first two shipped:
 
-| `n_dst_lat` | res | outer coverage | why it raises |
-|---|---|---|---|
-| ≤ 247 | ≥ 0.729° | ≥ 0.500 | passes |
-| 248 – 350 | 0.726° – 0.514° | 0.499 → 0.0024 | **floor** violation — data *is* present; a lower floor would accept it |
-| ≥ 351 | ≤ 0.513° | exactly 0 | **no source data at all** — no floor above zero can accept it |
+1. **Relax the reference to attainable coverage.** A row matches its own attainable
+   value by construction, so a regionally-limited source passed while emitting
+   zeros — strictly worse than the bug being fixed.
+2. **Bound the shortfall POSITIONALLY** ("only the outermost row may be short").
+   Assumes the polar gap is narrower than one destination row; CORE-II's 0.514° gap
+   spans 4 rows at 0.5°, so it hard-aborted legitimate targets.
+3. **Bound it GEOMETRICALLY.** Algebraically *identical* to (2): a contiguous source
+   band's outer edge cuts exactly ONE destination row and every row beyond is
+   exactly zero-covered. Its own regression test failed, which is how it was caught.
 
-So the first abort is at 0.726° (not ~0.75°: 0.75°/240 rows passes at 0.531), and it
-is a *policy* abort; only below 0.513° does the row become genuinely empty. JRA55-do
-first aborts at `n_dst_lat = 841` (0.214°). This is a behaviour change — such
-configurations previously emitted fabricated (or reduced) values there. Making them
-usable needs a renormalising or pole-filling remap, i.e. a change to the
-**weights**, not to this check. That is the natural follow-up, and it is worth an
-issue rather than a sentence here: at production 1° the two polar rows already ship
-at 0.736 coverage (`T_air ≈ 184 K`, `slp ≈ 74.6 kPa`), unchanged by this PR — the
-weights are byte-identical to `main`, which simply never checked — but the guard now
-*blesses* it.
+Then a floor (`lat_shortfall_floor`), which worked but only ever chose how much
+wrongness to accept. The lesson the sequence teaches: **a check cannot repair a
+representation defect.** Every attempt to express "this row is allowed to be wrong"
+either admitted something worse or aborted something valid. Fixing the weights
+removed the question.
 
-Pinned by `tests/unit/test_conservative_regrid.py`:
-`test_default_floor_is_strict_and_reproduces_the_hard_unit_check`,
-`test_polar_taper_within_floor_passes_and_is_reduced_not_zero`,
-`test_row_below_the_floor_raises_instead_of_shipping_a_diluted_field` (±50° source
-→ 0.201 coverage, so it straddles the floor rather than retesting the zero case),
-`test_row_entirely_outside_source_raises_at_every_valid_floor` and
-`test_floor_outside_valid_range_is_rejected` (which pins `_MIN_LAT_FLOOR >
-_COVERAGE_TOL` directly, so the inversion above cannot be reintroduced by lowering
-the constant), plus `test_lon_deficit_still_raises_with_a_relaxed_lat_floor` —
-relaxing latitude must never relax longitude, tested on a ±50° source so the floor
-is genuinely in play. The two caller-level span preconditions are pinned by
-`tests/ocean/unit/test_omip2_applicator.py::test_conservative_regrid_rejects_partial_longitude_source`;
-without it, deleting the `check_axis_span` call leaves the suite green.
+Two further defects caught in review of the weight fix itself:
 
-### Two caveats that a first draft of this note got wrong
-
-1. **This does NOT restore a partial-longitude-source guard at the forcing call
-   sites.** The tempting claim is "relax latitude only, so a source that does not
-   span 360° still raises". False here: both forcing callers *pad the source
-   longitude before* calling, with ±360 shifts of the source's own end columns.
-   For a source that does not tile 360° that manufactures one enormous ghost
-   cell spanning the whole missing sector — measured on a 16-cell source tiling
-   only `[0, 180]`: OMIP2 (`n_ghost = ceil(dd/ds) = 4`) yields padded edges
-   `[-225, 405]` with two 191.25°-wide cells, and JRA55's single `+360` ghost
-   yields a 191.25° final cell. Both give `lon_frac = 1` everywhere, pass
-   `_check_edges`, and do **not** raise. The seam/ghost guard itself survives (an
-   under-sized `n_ghost` still leaves `lon_frac = 0.625`, the original bug), but
-   the partial-lon guarantee does not. If that guard is wanted, it belongs in the
-   callers as an explicit pre-pad assertion that the raw source tiles 360°
-   (`abs(n_src_lon*ds - 360) < tol`) — which would also make the ghost padding's
-   own uniform-spacing assumption (`dc = c[1] - c[0]`) explicit rather than
-   implicit. Latent today, since production forcing is global.
-   **Now done:** `check_axis_span(raw_lon_edges, 2π)` runs in both forcing callers
-   *before* the pad — in the two FORCING callers only, whose sources are global
-   datasets. Deliberately **not** in `grid_remap`: a longitude-span assertion
-   there rejects DINO's regional-longitude Mercator frame (span 0.84 rad) that
-   passes today. Note `cell_edges_1d(...,
-   periodic_lon=True)` sets `edges[-1] = edges[0] + 2π` by construction, so the
-   span must be inferred with `periodic_lon=False` or the assertion is vacuous —
-   a mistake made and caught while writing this.
-2. **"`grid_remap.py` is bit-identical" holds only for a latitude-global source.**
-   For a global grid `lat_v[0]/[-1]` give `sin = ∓1.0` exactly, so `lat_frac` is
-   IEEE-exactly 1.0 and nothing changes. But `make_latlon_remapper` gates only on
-   `_is_regular_latlon`, never on global-ness, and `compute_v_face_coords`
-   half-cell-extrapolates whatever band it is given — so a regional/nested source
-   that **raises today** would silently pass under the sketch. Either qualify the
-   claim or assert the source band is global in `grid_remap.py`.
-   **Now resolved by keeping `grid_remap` STRICT, not by asserting a global band.**
-   It passes no span assertions and takes the default `lat_shortfall_floor = 1.0`,
-   which is the original hard-1.0 check — so its strength is preserved exactly,
-   whatever band the grids happen to have. Span assertions there were tried and
-   reverted, both being *stronger* than the old behaviour: `_is_regular_latlon`
-   duck-types on `lat_v`/`lon`/`n_lat`/`n_lon`, which the non-global
-   **Mercator/DINO** grids also satisfy (`lat_v` bounded by `lat_max_deg`, never
-   ±π/2 — measured span residual −0.74 rad at `lat_max=70°`), so a `lat = π`
-   assertion rejects legitimate Mercator→Mercator pairs and a `lon = 2π` one
-   rejects DINO's regional frame (span 0.84 rad). Getting this wrong was not
-   hypothetical: with the floor relaxed unconditionally and the assert removed, a
-   `lat_max = 70°` Mercator source into a global lat-lon destination returned its
-   outer rows at 0.0 coverage — a constant 290 K SST as **0 K** — instead of
-   raising. (Measured `lat_v` there is ±69.85° for `n_lon ≥ 120`, ±68.79° for
-   `n_lon ≤ 90`; span residual −0.70 to −0.74 rad depending on `n_lon`.)
+- `fracarea` was **not** the no-op on a fully covered remap that its docstring
+  claimed: a full cell can sum to `1 ± 1 ulp`, and `1/(1+ε) ≠ 1` perturbed an
+  already-correct weight. Now only cells deviating by more than `_COVERAGE_TOL` are
+  rescaled, which makes the claim true. Caught only because the test asserted
+  `assert_array_equal` rather than `allclose`.
+- `polar_fill` must reproduce the source's edge row **column by column**, not its
+  zonal mean, or it would smear away polar longitude structure
+  (`test_polar_fill_gives_uncovered_rows_the_outermost_source_row_zonally`).
 
 ## Related
 
 - `packages/core/legoesm/grids/conservative_regrid.py` — the helper
 - `packages/ocean/legoesm/ocean/coupler/omip2_applicator.py` — OMIP2 forcing
 - `packages/tools/legoesm/forcing/jra55_do.py` — JRA55-do cache build
-- `packages/coupler/legoesm/coupler/grid_remap.py` — model→model remap; keeps the
-  strict default floor (1.0), i.e. the original hard-1.0 check, and asserts no spans
+- `packages/coupler/legoesm/coupler/grid_remap.py` — model→model remap; keeps
+  `dstarea` and no `polar_fill` (the conservative flux direction), strict check
+
+### The safety property, stated once
+
+`fracarea` scales a short row by `1 / lat_frac[j]` — the **latitude** factor —
+never by the row sum. The weights are separable (`row_sum[j,i] = lat_frac[j] ·
+lon_frac[i]` exactly), so dividing by the row sum would normalise a **longitude**
+deficit away too, silently repairing the seam/ghost gap this module's coverage
+check exists to catch. That is not theoretical: it shipped in the first draft of
+this change, and measured, the historical single-ghost bug (`lon_frac = 0.625`,
+the one that left a forcing column HALVED and NaN'd the 10-m pressure iteration)
+came back at 1.000 and passed the strict check, while two pre-existing regression
+tests went green-but-vacuous.
+
+The polar-gap budget (`max_polar_gap_deg`, default 2°) applies to **both**
+treatments, not just `polar_fill`: `fracarea` spreads a partly covered row's data
+over the part the source never reached, which is the same extrapolation in
+miniature. Checked on the source geometry alone, so `polar_fill=True` can never
+pass where `polar_fill=False` fails. Real sources are far inside it (CORE-II 0.51°,
+JRA55-do 0.15°); a ±10° regional band, or a latitude axis misread as radians
+(±1.57°), is refused.

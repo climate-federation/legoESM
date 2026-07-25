@@ -136,17 +136,25 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
 _REGRID_WEIGHTS_CACHE: dict = {}
 
-# Least polar coverage a destination row may have and still be shipped.  Real
-# forcing stops short of the pole (CORE-II NYF's inferred outer edge is +-89.486
-# deg, a 0.514 deg gap), so the outermost destination row is partly covered and
-# -- weights being unrenormalised -- returns coverage x field.  Measured outer-row
-# coverage for CORE-II: 0.997 at 10 deg, 0.934 at 2 deg, 0.736 at 1 deg (the
-# production 180x360), 0.531 at 0.75 deg, and 0 at 0.5 deg and finer, where the
-# row falls entirely beyond the source.  0.5 keeps production comfortably inside
-# while rejecting the badly diluted rows (a 250 K air temperature arriving as a
-# few K is the bulk-flux / 10-m-pressure NaN hazard).  Targets finer than ~0.75
-# deg raise: they need a renormalising or pole-filling remap, not a looser floor.
-_POLAR_COVERAGE_FLOOR = 0.5
+# Real forcing stops short of the pole (CORE-II NYF's inferred outer edge is
+# +-89.486 deg, a 0.514 deg gap), so the polar destination row is partly covered --
+# or, once the target is finer than the gap, not covered at all.  Under the default
+# 'dstarea' normalisation that returns coverage x field: measured outer-row coverage
+# for CORE-II is 0.736 at the production 1 deg (a 250 K air temperature arriving as
+# 184 K) and exactly 0 at 0.5 deg and finer.  Every channel on this path is
+# INTENSIVE -- T_air, q_air, slp, winds, and the radiative/precip flux DENSITIES --
+# and the shortfall is a DATA GAP, not a region of zero flux, so the correct
+# treatment is the field's own value, not a diluted one:
+#   * 'fracarea' renormalises a partly covered row to the area-weighted mean of the
+#     source that does overlap;
+#   * polar_fill gives a row beyond the source's band its outermost row, zonally
+#     resolved (a zeroth-order poleward extrapolation).
+# Together they make every destination cell sum to 1, so the coverage check is back
+# to the strict invariant and a real seam/ghost deficit still raises.  Both
+# deliberately trade strict global conservation for correct magnitude; that trade is
+# right here and WRONG for flux coupling, which is why coupler/grid_remap.py keeps
+# 'dstarea'.  See regrid_polar_coverage_2026-07-24.md.
+_FORCING_NORMALIZATION = "fracarea"
 
 
 def _edges_from_centers_deg(centers_deg):
@@ -219,19 +227,18 @@ def _conservative_regrid_to_latlon(
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
-        # require_attainable_coverage=True: the check now compares against what
-        # the source CAN supply, so the physical polar shortfall (real forcing
-        # stops short of the pole -- CORE-II NYF outermost CENTRE +-88.542 deg ->
-        # inferred outer EDGE ~+-89.5 deg, the edge is what sets the deficit) no
-        # longer aborts preprocessing, while a lon seam/ghost deficit still
-        # raises.  That is the defect worth guarding: a single ghost once left the
-        # seam column HALVED and the 10-m pressure iteration NaN'd on it.
-        # See regrid_polar_coverage_2026-07-24.md
+        # fracarea + polar_fill treat the physical polar gap (see the constant's
+        # rationale above), after which every destination cell sums to 1 and
+        # require_full_coverage is the STRICT invariant again -- so a longitude
+        # seam/ghost deficit still raises.  That is the defect worth guarding: a
+        # single ghost once left the seam column HALVED and the 10-m pressure
+        # iteration NaN'd on it.  See regrid_polar_coverage_2026-07-24.md
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
-            require_attainable_coverage=True,
-            lat_shortfall_floor=_POLAR_COVERAGE_FLOOR,
+            require_full_coverage=True,
+            normalization=_FORCING_NORMALIZATION,
+            polar_fill=True,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
     # Ghost-column count matches the weight build below (width ratio, NOT

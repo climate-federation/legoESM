@@ -30,9 +30,6 @@ import pytest
 
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
-    _COVERAGE_TOL,
-    _MIN_LAT_FLOOR,
-    _attainable_lat_coverage,
     apply_conservative_regrid,
     check_axis_span,
     compute_overlap_weights,
@@ -296,23 +293,76 @@ def _row_sums(w):
                        minlength=w.n_dst_cells)
 
 
+def _polar_gap_grids(n_dst_lat=720, n_dst_lon=8, src_lat_max=89.5, n_src_lat=60):
+    """A source with a CORE-II-like polar gap and a destination finer than it.
+
+    ``src_lat_max=89.5`` leaves a 0.5 deg gap (CORE-II's is 0.514); 0.25 deg
+    destination rows mean the two outermost rows per pole get NO source overlap at
+    all, which is the regime renormalisation alone cannot fix.
+    """
+    src_lat = np.deg2rad(np.linspace(-src_lat_max, src_lat_max, n_src_lat + 1))
+    src_lon = np.deg2rad(np.linspace(0, 360, n_dst_lon + 1))
+    dst_lat = np.deg2rad(np.linspace(-90, 90, n_dst_lat + 1))
+    dst_lon = np.deg2rad(np.linspace(0, 360, n_dst_lon + 1))
+    return src_lat, src_lon, dst_lat, dst_lon
+
+
 def test_partial_lon_coverage_raises_when_required():
     # Source covers only the WESTERN half [0, 180deg]; destination spans the full
-    # circle -> its eastern cells are UNCOVERED (sum(weights) 0 or < 1).
-    # LONGITUDE is required complete, so relaxing the latitude reference must NOT
-    # let this through.
+    # circle -> its eastern cells are UNCOVERED. A longitude deficit is never
+    # "treated": neither fracarea nor polar_fill is allowed to paper over it.
     src_lat = np.deg2rad(np.linspace(-90, 90, 5))
     src_lon = np.deg2rad(np.linspace(0, 180, 5))   # half circle only
     dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
     dst_lon = np.deg2rad(np.linspace(0, 360, 9))   # full circle
-    # Default (require_attainable_coverage=False): silently reduced, documents
-    # the hazard.
+    # Default (require_full_coverage=False): silently reduced, documents the hazard.
     w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
-    assert _row_sums(w).min() < 1.0 - 1e-6  # at least one dst cell under-covered
-    # Required coverage: must RAISE loudly instead of emitting a reduced field.
+    assert _row_sums(w).min() < 1.0 - 1e-6
     with pytest.raises(ValueError, match="does not fully cover"):
         compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                require_attainable_coverage=True)
+                                require_full_coverage=True)
+    # polar_fill only ever touches rows beyond the source's LATITUDE band, so it
+    # cannot rescue a longitude gap either.
+    with pytest.raises(ValueError, match="does not fully cover"):
+        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True,
+                                normalization="fracarea", polar_fill=True)
+
+
+def test_fracarea_does_not_repair_a_partial_longitude_column():
+    """REGRESSION: renormalising by the ROW SUM would silently fix a longitude
+    seam/ghost deficit as well, destroying the guard this module exists for.
+
+    A row sum is ``lat_frac[j] * lon_frac[i]``, so ``1/row_sum`` cannot tell a
+    polar latitude gap from a seam gap and normalises BOTH to 1. Measured with
+    that (wrong) scaling, a seam column at ``lon_frac = 0.625`` -- the historical
+    single-ghost bug that left a forcing column HALVED and NaN'd the 10-m pressure
+    iteration -- came back at 1.000 and PASSED the strict check. Scaling by
+    ``lat_frac`` alone keeps the deficit visible.
+
+    Unlike the fully-uncovered case above, this column is PARTIALLY covered, which
+    is precisely the regime renormalisation acts on.
+    """
+    # Source lon tiles [0, 337.5]; destination has 8 cells of 45 deg, so its LAST
+    # column [315, 360] is covered only over [315, 337.5] -> lon_frac = 0.5, while
+    # every other column is complete. PARTIAL, not empty: ending the source at 315
+    # would leave that column at exactly 0 and retest the uncovered case instead.
+    # Latitude is global, so lat_frac == 1 throughout and any shortfall is longitude.
+    src_lat = np.deg2rad(np.linspace(-90, 90, 9))
+    src_lon = np.deg2rad(np.linspace(0.0, 337.5, 9))
+    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
+    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
+    w_raw = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
+    row = _row_sums(w_raw).reshape(4, 8)
+    # Anti-vacuity: the deficit is PARTIAL (strictly between 0 and 1), which is the
+    # regime renormalisation acts on -- an empty column would prove nothing here.
+    np.testing.assert_allclose(row[:, -1], 0.5, atol=1e-12)
+    np.testing.assert_allclose(row[:, :-1], 1.0, atol=1e-12)
+    for mode in ("dstarea", "fracarea"):
+        with pytest.raises(ValueError, match="does not fully cover"):
+            compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                    require_full_coverage=True,
+                                    normalization=mode, polar_fill=True)
 
 
 def test_full_coverage_passes_when_required():
@@ -323,146 +373,208 @@ def test_full_coverage_passes_when_required():
     dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
     dst_lon = np.deg2rad(np.linspace(0, 360, 9))
     w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                require_attainable_coverage=True)
+                                require_full_coverage=True)
     np.testing.assert_allclose(_row_sums(w), 1.0, atol=1e-12)
 
 
-def test_default_floor_is_strict_and_reproduces_the_hard_unit_check():
-    """``lat_shortfall_floor`` defaults to 1.0, so a caller that does not opt in
-    (notably coupler/grid_remap.py, model->model) keeps the original behaviour:
-    ANY latitude shortfall raises. Pins the regression where relaxing latitude
-    unconditionally let a non-global Mercator source return coverage x field --
-    a constant 290 K SST arriving as ~99 K -- instead of raising."""
-    src_lon = np.deg2rad(np.linspace(0, 360, 17))
-    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
-    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
-    # Source band +-80 deg into a global destination: outermost rows are partial.
-    src_lat = np.deg2rad(np.linspace(-80, 80, 9))
-    with pytest.raises(ValueError, match="is required"):
-        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                require_attainable_coverage=True)
-    # Opting in to a floor the row clears lets exactly that case through.
-    compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                            require_attainable_coverage=True,
-                            lat_shortfall_floor=0.5)
-
-
-def test_polar_taper_within_floor_passes_and_is_reduced_not_zero():
-    """With the floor opted into, the physical polar taper is accepted and the
-    outermost rows come back REDUCED (never fabricated zeros), while every
-    interior row is exactly full."""
-    src_lat = np.deg2rad(np.linspace(-80, 80, 9))
-    src_lon = np.deg2rad(np.linspace(0, 360, 17))
-    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
-    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
-    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                require_attainable_coverage=True,
-                                lat_shortfall_floor=0.5)
-    row = _row_sums(w).reshape(4, 8)
-    np.testing.assert_allclose(row[1:-1, :], 1.0, atol=1e-12)
-    expected_polar = ((np.sin(np.deg2rad(-45.0)) - np.sin(np.deg2rad(-80.0)))
-                      / (np.sin(np.deg2rad(-45.0)) - np.sin(np.deg2rad(-90.0))))
-    assert 0.5 < expected_polar < 0.99          # partial, and clears the floor
-    np.testing.assert_allclose(row[[0, -1], :], expected_polar, atol=1e-12)
-
-
-def test_row_below_the_floor_raises_instead_of_shipping_a_diluted_field():
-    """A floor is a physical statement, not an epsilon: a row retaining only a few
-    per-mille of real data would return a few K of air temperature. The old
-    `> 1e-6` rule accepted exactly that (measured 2.4e-3 coverage for CORE-II at
-    350 rows -> 0.61 K from 250 K); the floor must reject it."""
-    # Source band +-50 deg: the outermost dst rows ([-90,-45], [45,90]) keep only
-    # (sin 50 - sin 45)/(1 - sin 45) = 0.201 of their area -- small but NOT zero,
-    # so this exercises the floor itself rather than the zero-coverage case.
-    src_lat = np.deg2rad(np.linspace(-50, 50, 9))
-    src_lon = np.deg2rad(np.linspace(0, 360, 17))
-    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
-    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
-    with pytest.raises(ValueError, match="is required"):
-        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                require_attainable_coverage=True,
-                                lat_shortfall_floor=0.5)
-    # Anti-vacuity: the smallest ACCEPTED floor still lets this through, which is
-    # why the floor has to be chosen as a policy rather than left near zero.
-    compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                            require_attainable_coverage=True,
-                            lat_shortfall_floor=1e-3)
-
-
-def test_row_entirely_outside_source_raises_at_every_valid_floor():
-    """A row the source cannot touch has coverage 0, so no floor in (0, 1] accepts
-    it -- the deviation check alone would match 0 == 0 and emit ZEROS. A
-    destination finer than the source's polar gap therefore raises; fixing that
-    needs a renormalising/pole-filling remap, not a looser floor."""
-    src_lat = np.deg2rad(np.linspace(-89.0, 89.0, 45))
-    src_lon = np.deg2rad(np.linspace(0, 360, 33))
-    dst_lat = np.deg2rad(np.linspace(-90, 90, 181))   # rows [-90,-89], [89,90]
-    dst_lon = np.deg2rad(np.linspace(0, 360, 33))
-    # Anti-vacuity: with the check off those rows really are exact zeros.
-    row_off = _row_sums(
-        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
-    ).reshape(180, 32)
-    np.testing.assert_array_equal(row_off[0, :], 0.0)
-    np.testing.assert_array_equal(row_off[-1, :], 0.0)
-    for floor in (1.0, 0.5, 1e-3):     # 1e-3 is the smallest floor accepted
-        with pytest.raises(ValueError, match="is required"):
-            compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
-                                    require_attainable_coverage=True,
-                                    lat_shortfall_floor=floor)
-
-
-def test_floor_outside_valid_range_is_rejected():
-    """Dispatch hardening, and a pin on _MIN_LAT_FLOOR itself.
-
-    The floor must stay strictly above _COVERAGE_TOL: the guard fires on
-    ``lat_frac < floor - tol``, so a floor at or below the tolerance drives that
-    threshold to <= 0 and an ALL-ZERO row passes -- the guard silently inverts.
-    Rejecting only 0 / negatives / >1 would leave that unpinned, so 1e-6 and 1e-9
-    are checked explicitly and the invariant is asserted directly.
-    """
-    assert _MIN_LAT_FLOOR > _COVERAGE_TOL
+def test_unknown_normalization_raises():
+    """Dispatch hardening: a typo must not silently select 'dstarea'."""
     lat = np.deg2rad(np.linspace(-90, 90, 5))
     lon = np.deg2rad(np.linspace(0, 360, 9))
-    for bad in (0.0, -0.5, 1.5, _COVERAGE_TOL, 1e-9,
-                _MIN_LAT_FLOOR - 1e-9):
-        with pytest.raises(ValueError, match="lat_shortfall_floor"):
-            compute_overlap_weights(lat, lon, lat, lon,
-                                    lat_shortfall_floor=bad)
+    for bad in ("fracarea ", "FRACAREA", "frac_area", "dst_area", "none", ""):
+        with pytest.raises(ValueError, match="Unknown normalization"):
+            compute_overlap_weights(lat, lon, lat, lon, normalization=bad)
+    # Anti-vacuity: both real modes are accepted.
+    for good in ("dstarea", "fracarea"):
+        compute_overlap_weights(lat, lon, lat, lon, normalization=good)
 
 
-def test_lon_deficit_still_raises_with_a_relaxed_lat_floor():
-    """Relaxing LATITUDE must not relax longitude.
-
-    The source band is +-50 deg, NOT global, so the outermost destination rows
-    really do have their latitude requirement relaxed to the floor (coverage
-    0.201) -- otherwise ``required == 1.0`` everywhere and the floor plays no part,
-    leaving the named interaction untested.
-    """
-    src_lat = np.deg2rad(np.linspace(-50, 50, 9))
-    dst_lat = np.deg2rad(np.linspace(-90, 90, 5))
-    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
-    with pytest.raises(ValueError, match="does not fully cover"):
-        compute_overlap_weights(src_lat, np.deg2rad(np.linspace(0, 180, 5)),
-                                dst_lat, dst_lon,
-                                require_attainable_coverage=True,
-                                lat_shortfall_floor=_MIN_LAT_FLOOR)
+# A REALISTIC polar gap for the partial-row pair below: the source stops 0.5 deg
+# short of each pole (CORE-II's real gap is 0.514, JRA55-do's 0.151), which is
+# inside the 2 deg extrapolation budget. Onto 1 deg destination rows the polar row
+# is 0.75 covered -- partial and visibly so, with no row left entirely empty, so
+# these two isolate `fracarea` without `polar_fill`.
+_GAP_SRC_LAT = np.deg2rad(np.linspace(-89.5, 89.5, 9))
+_GAP_SRC_LON = np.deg2rad(np.linspace(0, 360, 17))
+_GAP_DST_LAT = np.deg2rad(np.linspace(-90, 90, 181))
+_GAP_DST_LON = np.deg2rad(np.linspace(0, 360, 9))
+_GAP_POLAR_FRAC = 0.749995        # (sin -89 - sin -89.5) / (sin -89 - sin -90)
 
 
-def test_attainable_lat_coverage_is_a_fraction_in_unit_interval():
-    """CONVENTION guard: coverage is a non-negative area fraction <= 1."""
+def test_dstarea_default_reduces_a_partly_covered_polar_row():
+    """The hazard the treatment exists to fix, pinned as the DEFAULT behaviour:
+    'dstarea' divides by the FULL destination cell area, so a partly covered polar
+    row returns coverage x field -- 0.75 x the constant here, not the constant."""
+    w = compute_overlap_weights(_GAP_SRC_LAT, _GAP_SRC_LON,
+                                _GAP_DST_LAT, _GAP_DST_LON)
+    out = np.asarray(apply_conservative_regrid(
+        jnp.full((8, 16), 290.0, dtype=jnp.float64), w))
+    np.testing.assert_allclose(out[1:-1, :], 290.0, atol=1e-10)
+    np.testing.assert_allclose(out[[0, -1], :], 290.0 * _GAP_POLAR_FRAC,
+                               rtol=1e-5)
+    assert out[0, 0] < 220.0          # visibly wrong for an intensive field
+
+
+def test_fracarea_preserves_a_constant_through_a_partly_covered_polar_row():
+    """The fix for a PARTLY covered row: dividing by the covered LATITUDE fraction
+    returns the area-weighted mean of the overlapping source, so the constant
+    survives. No row is empty here, so `polar_fill` plays no part -- this isolates
+    the renormalisation."""
+    w = compute_overlap_weights(_GAP_SRC_LAT, _GAP_SRC_LON,
+                                _GAP_DST_LAT, _GAP_DST_LON,
+                                require_full_coverage=True,
+                                normalization="fracarea")
+    np.testing.assert_allclose(_row_sums(w), 1.0, atol=1e-12)
+    out = np.asarray(apply_conservative_regrid(
+        jnp.full((8, 16), 290.0, dtype=jnp.float64), w))
+    np.testing.assert_allclose(out, 290.0, atol=1e-10)
+
+
+def test_fracarea_is_a_noop_when_every_cell_is_fully_covered():
+    """Renormalising must not perturb a fully covered remap: scale is exactly 1
+    there, so the weights are bit-identical to 'dstarea'."""
+    src_lat = np.deg2rad(np.linspace(-90, 90, 19))
+    src_lon = np.deg2rad(np.linspace(0, 360, 37))
     dst_lat = np.deg2rad(np.linspace(-90, 90, 7))
-    dst_sin = np.sin(dst_lat)
-    dst_area = dst_sin[1:] - dst_sin[:-1]
-    for lo, hi in [(-90.0, 90.0), (-80.0, 80.0), (-10.0, 10.0), (30.0, 60.0)]:
-        src_sin = np.sin(np.deg2rad(np.array([lo, hi])))
-        frac = _attainable_lat_coverage(src_sin, dst_sin, dst_area)
-        assert np.all(frac >= 0.0) and np.all(frac <= 1.0 + 1e-12), (lo, hi, frac)
-    # Full-sphere source attains exactly 1 on every row (bit-exact: sin(+-pi/2)).
-    src_sin = np.sin(np.deg2rad(np.array([-90.0, 90.0])))
-    np.testing.assert_array_equal(
-        _attainable_lat_coverage(src_sin, dst_sin, dst_area),
-        np.ones(dst_lat.size - 1),
-    )
+    dst_lon = np.deg2rad(np.linspace(0, 360, 13))
+    a = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                normalization="dstarea")
+    b = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                normalization="fracarea")
+    np.testing.assert_array_equal(np.asarray(a.weights), np.asarray(b.weights))
+    np.testing.assert_array_equal(np.asarray(a.dst_idx_flat),
+                                  np.asarray(b.dst_idx_flat))
+
+
+def test_fracarea_alone_cannot_fix_an_entirely_uncovered_row():
+    """Renormalisation rescales; it cannot create. A row with NO overlap sums to
+    exactly 0, there is nothing to scale, and the strict check must still raise --
+    pointing at polar_fill."""
+    src_lat, src_lon, dst_lat, dst_lon = _polar_gap_grids()
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                normalization="fracarea")
+    row = _row_sums(w).reshape(720, 8)
+    np.testing.assert_array_equal(row[:2, :], 0.0)     # still empty
+    np.testing.assert_allclose(row[2:-2, :], 1.0, atol=1e-12)
+    with pytest.raises(ValueError, match="polar_fill=True"):
+        compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True,
+                                normalization="fracarea")
+
+
+def test_polar_fill_gives_uncovered_rows_the_outermost_source_row_zonally():
+    """polar_fill must reproduce the source's outermost row COLUMN BY COLUMN, not
+    its zonal mean -- otherwise it would smear away the polar lon structure."""
+    n_lon = 8
+    src_lat, src_lon, dst_lat, dst_lon = _polar_gap_grids(n_dst_lon=n_lon)
+    n_src_lat = src_lat.size - 1
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True,
+                                normalization="fracarea", polar_fill=True)
+    # The field MUST vary in latitude as well as longitude. With a lat-constant
+    # field, swapping the two hemispheres (south <- src[-1], north <- src[0]) is
+    # bit-for-bit invisible -- an orientation bug the whole suite would miss.
+    profile = np.arange(n_lon, dtype=np.float64) * 3.0 + 250.0
+    lat_ramp = 10.0 * np.arange(n_src_lat, dtype=np.float64)[:, None]
+    src_field = profile[None, :] + lat_ramp
+    out = np.asarray(apply_conservative_regrid(jnp.asarray(src_field), w))
+    # South-polar rows take the source's SOUTHERNMOST row, north the NORTHERNMOST.
+    for j in (0, 1):
+        np.testing.assert_allclose(out[j, :], src_field[0, :], atol=1e-10)
+    for j in (-1, -2):
+        np.testing.assert_allclose(out[j, :], src_field[-1, :], atol=1e-10)
+    # Anti-vacuity: the two ends differ by the full ramp, so a hemisphere swap
+    # would move each filled row by 590 K.
+    assert abs(src_field[-1, 0] - src_field[0, 0]) > 500.0
+    assert out[0, :].std() > 1.0          # zonal structure kept, not a zonal mean
+
+
+def test_fracarea_plus_polar_fill_preserves_a_constant_at_every_row():
+    """Headline: a source with a polar gap onto a destination FINER than that gap
+    now reproduces a constant field exactly on every row, and the STRICT coverage
+    check passes. Previously this configuration either raised or emitted zeros."""
+    src_lat, src_lon, dst_lat, dst_lon = _polar_gap_grids()
+    n_src_lat = src_lat.size - 1
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                require_full_coverage=True,
+                                normalization="fracarea", polar_fill=True)
+    np.testing.assert_allclose(_row_sums(w), 1.0, atol=1e-12)
+    out = np.asarray(apply_conservative_regrid(
+        jnp.full((n_src_lat, 8), 250.0, dtype=jnp.float64), w))
+    assert out.shape == (720, 8)
+    np.testing.assert_allclose(out, 250.0, atol=1e-10)
+    # Anti-vacuity: with the treatment off, those rows are exactly zero.
+    w_off = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
+    out_off = np.asarray(apply_conservative_regrid(
+        jnp.full((n_src_lat, 8), 250.0, dtype=jnp.float64), w_off))
+    np.testing.assert_array_equal(out_off[:2, :], 0.0)
+
+
+def test_treatment_trades_strict_conservation_for_correct_magnitude():
+    """The trade-off, quantified and pinned rather than left implicit.
+
+    'dstarea' conserves the global integral of a constant field exactly (the
+    uncovered polar caps contribute zero on both sides). fracarea + polar_fill fill
+    those caps with real values, so the destination integral EXCEEDS the source's by
+    the cap area -- that is the price of correct magnitude, and it is why
+    coupler/grid_remap.py (the conservative flux direction) keeps 'dstarea'.
+    """
+    src_lat, src_lon, dst_lat, dst_lon = _polar_gap_grids()
+    n_src_lat = src_lat.size - 1
+    field = jnp.full((n_src_lat, 8), 250.0, dtype=jnp.float64)
+    src_area = _spherical_areas(src_lat, src_lon)
+    dst_area = _spherical_areas(dst_lat, dst_lon)
+    src_total = float(np.sum(np.asarray(field) * src_area))
+
+    w_cons = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon)
+    out_cons = np.asarray(apply_conservative_regrid(field, w_cons))
+    assert abs(np.sum(out_cons * dst_area) - src_total) / src_total < 1e-12
+
+    w_treat = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                      normalization="fracarea", polar_fill=True)
+    out_treat = np.asarray(apply_conservative_regrid(field, w_treat))
+    excess = np.sum(out_treat * dst_area) / src_total - 1.0
+    # The treated destination carries the constant over the WHOLE sphere while the
+    # source only ever covered the band, so the ratio is sphere/band:
+    #   dst = C * 4pi,  src = C * 4pi * sin(89.5deg)  ->  excess = 1/sin - 1.
+    # (Not 1 - sin: that would normalise by the sphere, not by the source.)
+    # This closed form holds for THIS geometry only -- a band symmetric about the
+    # equator carrying a CONSTANT field. For a band [a, b] it is
+    # 2/(sin b - sin a) - 1, and for a non-constant field there is no closed form,
+    # only the sign: the treated integral always exceeds the source's.
+    band_frac = np.sin(np.deg2rad(89.5))
+    assert excess > 0.0
+    np.testing.assert_allclose(excess, 1.0 / band_frac - 1.0, rtol=1e-9)
+
+
+def test_polar_fill_weights_stay_differentiable():
+    """Weights are compile-time constants and the apply stays linear, so gradients
+    must flow through a filled remap exactly as through an untreated one."""
+    # 720 dst rows (0.25 deg) so rows really do fall BEYOND the source band --
+    # at 180 rows (1 deg) the polar row merely clips it, polar_fill never engages,
+    # and the comparison below would be vacuously equal.
+    src_lat, src_lon, dst_lat, dst_lon = _polar_gap_grids()
+    n_src_lat = src_lat.size - 1
+    w = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                normalization="fracarea", polar_fill=True)
+
+    def loss(f):
+        return jnp.sum(apply_conservative_regrid(f, w) ** 2)
+
+    g = jax.grad(loss)(jnp.full((n_src_lat, 8), 250.0, dtype=jnp.float64))
+    assert bool(jnp.all(jnp.isfinite(g)))
+    assert not bool(jnp.allclose(g, 0.0))
+    # The source's EDGE rows feed the filled destination rows, so they must carry
+    # strictly more sensitivity than they would without the fill.
+    w_nofill = compute_overlap_weights(src_lat, src_lon, dst_lat, dst_lon,
+                                       normalization="fracarea")
+
+    def loss_nofill(f):
+        return jnp.sum(apply_conservative_regrid(f, w_nofill) ** 2)
+
+    g_nofill = jax.grad(loss_nofill)(
+        jnp.full((n_src_lat, 8), 250.0, dtype=jnp.float64))
+    assert float(jnp.abs(g[0]).sum()) > float(jnp.abs(g_nofill[0]).sum())
 
 
 def test_check_axis_span_accepts_globe_and_rejects_partial():
@@ -480,3 +592,38 @@ def test_check_axis_span_accepts_globe_and_rejects_partial():
     # Too few edges to measure a span: clear message, not a numpy reduction error.
     with pytest.raises(ValueError, match="need >= 2 edges"):
         check_axis_span(np.array([0.0]), 2.0 * np.pi, name="probe")
+
+
+def test_polar_fill_refuses_to_extrapolate_beyond_its_gap_budget():
+    """polar_fill must fill a GAP, not spread a regional source over the globe.
+
+    Without a budget the same code path happily extrapolates a +-10 deg band across
+    all 180 rows of a 1 deg destination and passes the strict check. That is not
+    hypothetical in this pipeline: a latitude axis silently read in the wrong units
+    turns a global grid into a +-1.57 deg "band", which must stay LOUD.
+    """
+    src_lon = np.deg2rad(np.linspace(0, 360, 9))
+    dst_lat = np.deg2rad(np.linspace(-90, 90, 181))
+    dst_lon = np.deg2rad(np.linspace(0, 360, 9))
+    for band in (10.0, 50.0, 80.0, 1.57):
+        with pytest.raises(ValueError, match="beyond the .* budget"):
+            compute_overlap_weights(
+                np.deg2rad(np.linspace(-band, band, 9)), src_lon,
+                dst_lat, dst_lon,
+                require_full_coverage=True,
+                normalization="fracarea", polar_fill=True,
+            )
+    # A REAL polar gap (CORE-II's is 0.514 deg, JRA55-do's 0.151) is well inside.
+    for band in (89.486, 89.849, 88.5):
+        compute_overlap_weights(
+            np.deg2rad(np.linspace(-band, band, 9)), src_lon, dst_lat, dst_lon,
+            require_full_coverage=True,
+            normalization="fracarea", polar_fill=True,
+        )
+    # Widening the budget deliberately is allowed -- the guard is a default, not a
+    # prohibition.
+    compute_overlap_weights(
+        np.deg2rad(np.linspace(-80.0, 80.0, 9)), src_lon, dst_lat, dst_lon,
+        require_full_coverage=True, normalization="fracarea", polar_fill=True,
+        max_polar_gap_deg=15.0,
+    )

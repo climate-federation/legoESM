@@ -105,16 +105,18 @@ from legoesm.ocean.freshwater import FreshwaterForcing
 #: Records per noleap day on the cache time axis (3-hourly).
 RECORDS_PER_DAY: int = 8
 
-#: Least polar coverage a destination row may have and still be shipped, matching
-#: the OMIP2 applicator's value (kept as a named constant in both places rather
-#: than a bare literal, since it is a physics policy).  JRA55-do is Gaussian with
-#: outermost centre ~+-89.570 deg -> inferred outer edge ~+-89.849 deg, a 0.151 deg
-#: polar gap -- 3.4x narrower than CORE-II's -- so the outermost destination row
-#: keeps 0.977 coverage at 1 deg and still 0.633 at 0.25 deg.  0.5 therefore leaves
-#: ample margin here; it starts to bite only finer than ~0.21 deg.  Weights are not
-#: renormalised, so coverage f returns f x field: the floor is how much dilution is
-#: acceptable, not a numerical epsilon.
-_POLAR_COVERAGE_FLOOR: float = 0.5
+#: Normalisation for the forcing remap, matching the OMIP2 applicator (kept as a
+#: named constant in both places rather than a bare literal, since it is a physics
+#: policy).  JRA55-do is Gaussian with outermost centre ~+-89.570 deg -> inferred
+#: outer edge ~+-89.849 deg, a 0.151 deg polar gap (3.4x narrower than CORE-II's),
+#: so the polar destination row is partly covered: 0.977 at 1 deg, 0.633 at 0.25
+#: deg, and uncovered entirely below ~0.15 deg.  Every cached channel is INTENSIVE
+#: (tas, huss, psl, winds, radiative and precip flux densities) and the shortfall is
+#: a DATA GAP, so 'fracarea' returns the mean of the overlapping source rather than
+#: coverage x field, and polar_fill covers rows beyond the source's band.  Not
+#: strictly conservative by construction -- correct magnitude is what matters for an
+#: intensive field.  See regrid_polar_coverage_2026-07-24.md.
+_FORCING_NORMALIZATION: str = "fracarea"
 
 #: Variables this module reads / regrids / caches.  Exactly the set
 #: needed to populate AtmToSurface and the freshwater path for tropical
@@ -554,17 +556,18 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
-    # require_attainable_coverage=True: the check compares against what the
-    # source CAN supply, so JRA55-do's physical polar shortfall (Gaussian,
-    # outermost centre ~+-89.57 deg) no longer aborts the cache build, while a
-    # longitude seam/ghost deficit still raises.  The raw-longitude precondition
-    # the wrap-pad above relies on is asserted before that pad.
+    # fracarea + polar_fill treat JRA55-do's physical polar gap (see the constant's
+    # rationale above), after which every destination cell sums to 1 and
+    # require_full_coverage is the STRICT invariant again -- so a longitude
+    # seam/ghost deficit still raises.  The raw-longitude precondition the wrap-pad
+    # above relies on is asserted before that pad.
     # See regrid_polar_coverage_2026-07-24.md
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         target_lat_edges, config.target_lon_edges,
-        require_attainable_coverage=True,
-        lat_shortfall_floor=_POLAR_COVERAGE_FLOOR,
+        require_full_coverage=True,
+        normalization=_FORCING_NORMALIZATION,
+        polar_fill=True,
     )
 
     # Allocate output arrays on the cache axis.

@@ -51,7 +51,8 @@ _MSG_RE = re.compile(
 _DISP_RE = re.compile(
     r"(scheme|model_type|discretization|integrator|grid_type|eos|advection|limiter"
     r"|drag|micro|cloud|radiation|convection|turbulence|method|formula|variant|pgf"
-    r"|entity|partition|parameterization|dycore|kernel|registry|backend|solver|preset)",
+    r"|entity|partition|parameterization|dycore|kernel|registry|backend|solver|preset"
+    r"|normali[sz]ation)",
     re.I,
 )
 # NB: deliberately NOT including very common words (mode/source/profile/transform)
@@ -185,6 +186,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
+        # normalization guard: a typo must not silently select 'dstarea', which
+        # returns coverage x field on a partly covered polar row instead of the
+        # area-weighted mean ('fracarea').
+        ("packages/core/legoesm/grids/conservative_regrid.py", "compute_overlap_weights"),
         ("packages/core/legoesm/grids/cubed_sphere.py", "gnomonic_grids"),
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
         ("packages/core/legoesm/grids/factory.py", "create_regional_grid"),

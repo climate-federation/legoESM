@@ -138,25 +138,28 @@ def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     )
     src_lon_e_padded = cell_edges_1d(src_lon_padded, periodic_lon=False)
 
-    # STRICT coverage (lat_shortfall_floor defaults to 1.0): this is a
-    # model-grid -> model-grid remap, so every destination cell must be fully
-    # covered and any shortfall is a bug -- identical in strength to the original
-    # check.  Do NOT relax the floor here: without renormalisation a partly
-    # covered row returns coverage x field.  Mercator/DINO satisfy
-    # `_is_regular_latlon` too (their lat_v is bounded by lat_max_deg, not
-    # +-pi/2), so with the floor relaxed a lat_max=70 deg Mercator source into a
-    # global lat-lon destination returns coverage x field in its outer rows --
-    # measured coverage 0.0 there, i.e. a constant 290 K SST arriving as 0 K --
-    # instead of raising.
+    # DEFAULT 'dstarea' normalisation and NO polar_fill, deliberately.  This path
+    # carries the conservative FLUX direction (the ESM energy / freshwater budgets
+    # depend on it), and both 'fracarea' and polar_fill trade strict conservation
+    # for correct magnitude -- the right trade for intensive forcing fields, the
+    # wrong one here.  So every destination cell must be fully covered and any
+    # shortfall is a bug: require_full_coverage is the strict invariant, identical
+    # in strength to the original check.
     #
-    # No span assertions here either: a lat assertion would newly reject
-    # legitimate Mercator -> Mercator pairs, and a lon assertion would reject
-    # DINO's regional-longitude frame (span 0.84 rad) that passes today.  Those
+    # This does reject a non-global source band, which is correct rather than
+    # incidental: Mercator/DINO satisfy `_is_regular_latlon` too (their lat_v is
+    # bounded by lat_max_deg, not +-pi/2), and a lat_max=70 deg Mercator source into
+    # a global lat-lon destination has 0.0 coverage in its outer rows -- a constant
+    # 290 K SST would arrive as 0 K.
+    #
+    # No span assertions here: a lat assertion would newly reject legitimate
+    # Mercator -> Mercator pairs, and a lon assertion would reject DINO's
+    # regional-longitude frame (span 0.84 rad) that passes today.  Those
     # preconditions belong to the forcing callers, whose sources are global
     # datasets and whose ghost padding would otherwise mask a partial axis.
     w = compute_overlap_weights(
         src_lat_e, src_lon_e_padded, dst_lat_e, dst_lon_e,
-        require_attainable_coverage=True,
+        require_full_coverage=True,
     )
 
     # Fold padded-source longitude indices back onto the real (unpadded) columns:
