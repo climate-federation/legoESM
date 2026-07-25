@@ -194,9 +194,27 @@ is the fix.
   (compare within-BOMEX only); wind-weighted; σ_LES(shallow_cumulus) not yet available (1 SGS
   variant) → margins UNGATED/PLAUSIBLE. See LES_SUITE.md §7.4.
 
-**NEXT (remaining for DONE):** (1) BOMEX SGS spread ({smagorinsky,vreman} variants) → σ_LES
-(shallow_cumulus) → gate the moist Q2/Q3 margins. (2) DYCOMS (stratocumulus) 2nd moist anchor:
-add `--emit-suite-artifact` to `run_dycoms_les.py`, emit, tune 9. (3) full-D9 NATIVE leg:
-expose CLUBB ADG1 rcm/cloud_frac via `TurbulenceOutput` (output.py) → SCM consumes it as q_c
-when cloud_scheme=clubb → CLUBB native-vs-shared gap (clubb.py:400 computes it; contract
-change + codex + test). (4) clubb 2×-resolution σ_LES.
+- **Iter 28 — θ_l CONFOUND FIXED (codex HIGH) + BOMEX Q2 D7-GATED + DYCOMS converter.** Codex
+  caught that the spectral moist LES prognoses ACTUAL θ (IC saturation-adjusts θ_l→θ), but the
+  artifacts recorded/labelled it θ_l while the SCM produces θ_l → the first BOMEX Q2 compared θ
+  to θ_l. FIXED: `scm_coupling.liquid_water_theta` = ONE canonical θ_l reduction (SCM delegates);
+  `_record_theta_l` in both LES drivers records θ_l from prognostic θ + cloud q_c (q_c only, not
+  rain, matching SCM); `sigma_les_prognostic` extended to moist (θ_l,u,v,q_t + sigma_qt). Codex
+  re-review: production CLEAN. Re-emitted 3 BOMEX θ_l artifacts (lasd/smag/vreman, tight: θ_l sfc
+  ~299.05, top ~311.77) → re-tuned 9 → σ_LES(shallow_cumulus)=0.0531. **CORRECTED + GATED BOMEX
+  Q2: holtslag 0.310 > louis 0.327 > clubb 0.336 > edmf 0.346 > ysu 0.355 > mynn25 0.384 > smag
+  0.417 > clubb_lite 0.420 > tke 0.467.** Ordering PRESERVED vs the θ-based run (confound moved
+  the scale, not the science). GATED VERDICT (CONFIRMED): top-5 tied within σ_LES (higher-order
+  clubb statistically tied with LOCAL louis — buys no resolvable skill), Q1b local-vs-nonlocal
+  margin 0.017 sub-σ_LES (not significant), but top-vs-tail 0.16≈3σ_LES IS resolved (weak tail:
+  smag/clubb_lite/tke). "Order buys skill" does NOT hold in shallow Cu — regime-specific, not a
+  cloud-PDF artifact. Also: DYCOMS `--emit-suite-artifact` converter (RF01 LW cooling→theta_adv,
+  sign-checked; records 2nd-half-mean radiative θ-tendency; case-label→registry `dycoms_rf01_sc`;
+  q_t incl rain) + unit tests; end-to-end θ_l recording test (closes codex LOW). D9-native fully
+  scoped (clubb `cloud_source` toggle; CONFIRMED it's a turbulence-interface change since
+  clubb_turbulence takes q_v not q_c; gap expected small by condensation-invariance).
+
+**NEXT (remaining for DONE):** (1) DYCOMS (stratocumulus) — validation lasd artifact emitting
+(64²×96, 2h); if physical, emit SGS spread + tune 9 → moist Q2/Q3 regime 2. (2) full-D9 NATIVE
+leg — the CLUBB turbulence-interface change (add cloud q_c to the scheme input + `cloud_source`
+toggle + validator loop; scoped in memory `les-suite-moist-status`). (3) clubb 2×-res σ_LES.

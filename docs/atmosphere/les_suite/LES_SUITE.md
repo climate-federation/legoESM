@@ -4,12 +4,14 @@ Status (2026-07-25): **DRY SUITE COMPLETE + FIRST MOIST REGIME (BOMEX) DELIVERED
 Q1a, Q1b (free + sheared, θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4
 (AD-vs-DF 9/9), D7 (σ_LES all dry regimes), dry-regime partial-D9. Moist: the **moist SCM is
 built + validated + codex-CLEAN** (θ_l/q_t scoring, diagnostic Sundqvist condensation, DF+AD),
-and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned)** is produced — every arm on the
-SHARED Sundqvist cloud scheme, so the ranking isolates the turbulence closure (D9 shared-cloud
-control). The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked the compute
-wall. **REMAINING: DYCOMS (2nd moist anchor) + the full-D9 native-CLUBB-cloud leg** (needs
-`TurbulenceOutput` to expose CLUBB's ADG1 rcm/cloud_frac — the shared leg is done, the native
-leg is contract plumbing). Forcing decks present in `data/les_cases/{BOMEX,DYCOMS_RF01,...}`.
+and the **BOMEX shallow-cumulus Q2 (all 9 closures, tuned, θ_l-corrected, D7-gated by
+σ_LES=0.053)** is COMPLETE — every arm on the SHARED Sundqvist cloud scheme, so the ranking
+isolates the turbulence closure (D9 shared-cloud control). Gated verdict: "order buys skill"
+does NOT hold in shallow Cu (nonlocal+local lead, top-5 tied within σ_LES, weak tail resolved).
+The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked the compute wall.
+**REMAINING: DYCOMS (2nd moist anchor, validation emitting) + the full-D9 native-CLUBB-cloud
+leg** (a CLUBB turbulence-interface change; the shared-cloud control is done + the gap is
+expected small by condensation-invariance — see §7.4). Decks in `data/les_cases/{BOMEX,DYCOMS_RF01}`.
 Author: A. Connolly. Started 2026-07-10.
 Home: `docs/atmosphere/les_suite/LES_SUITE.md` (root-hygiene rule → docs/, mirrors the
 ocean `oracle_recipe_strategy.md` living-doc convention).
@@ -447,33 +449,40 @@ derivative-free and the AD loss branch on `is_moist`. Validated vs the real BOME
 **D9 shared-cloud control (the confound remover): all 9 closures run the SAME Sundqvist cloud
 scheme**, so any Q2 ranking difference is the TURBULENCE closure, not the cloud PDF.
 
-**Q2 (BOMEX shallow cumulus, all 9 tuned tier-1, combined θ_l/u/v/q_t, nlev=24/dt=10):**
+**Q2 (BOMEX shallow cumulus, all 9 tuned tier-1, combined θ_l/u/v/q_t, nlev=24/dt=10;
+θ_l-corrected artifacts, D7-gated by σ_LES(shallow_cumulus)=0.0531 from the {lasd,smag,vreman}
+spread):**
 
 | rank | closure | tuned loss | class |
 |---|---|---|---|
-| 1 | holtslag_boville | 0.2124 | nonlocal K |
-| 2 | louis            | 0.2289 | local |
-| 3 | clubb            | 0.2387 | higher-order |
-| 4 | edmf             | 0.2476 | mass-flux |
-| 5 | ysu              | 0.2496 | nonlocal K |
-| 6 | mynn25           | 0.2762 | 1.5-order |
-| 7 | smagorinsky      | 0.3041 | local |
-| 8 | clubb_lite       | 0.3075 | higher-order |
-| 9 | tke              | 0.3511 | 1.5-order |
+| 1 | holtslag_boville | 0.3095 | nonlocal K |
+| 2 | louis            | 0.3266 | local |
+| 3 | clubb            | 0.3355 | higher-order |
+| 4 | edmf             | 0.3461 | mass-flux |
+| 5 | ysu              | 0.3554 | nonlocal K |
+| 6 | mynn25           | 0.3835 | 1.5-order |
+| 7 | smagorinsky      | 0.4167 | local |
+| 8 | clubb_lite       | 0.4201 | higher-order |
+| 9 | tke              | 0.4673 | 1.5-order |
 
-**VERDICT — "closure order buys skill" does NOT hold in shallow cumulus.** Unlike the dry CBL
-(where clubb/edmf/higher-order led), the moist ranking is led by a nonlocal-K (holtslag) and a
-LOCAL (louis) scheme, with clubb only 3rd and clubb_lite 8th; the closures bunch tightly
-(0.21–0.35, ~1.65× spread vs the dry CBL's wider ordering). With the cloud PDF held fixed
-(shared Sundqvist), the higher-order machinery does not clearly out-skill simpler closures on
-BOMEX — a genuinely different regime verdict, and evidence the dry-CBL higher-order win is
-regime-specific, not universal. CAVEATS (do NOT over-read): (i) the loss is a DIFFERENT metric
-than the dry regimes (adds q_t) — compare ONLY within BOMEX, never a BOMEX number to a dry
-number; (ii) BOMEX winds are trade-wind-driven (u_g≈−8.75), so the u/v terms carry weight and
-the ordering is partly wind-mixing, not purely thermodynamic; (iii) **σ_LES(shallow_cumulus)
-is not yet available** (only the `lasd` SGS variant is emitted; the D7 gate needs ≥2), so these
-margins are UNGATED — the tight bunching may be within LES uncertainty. PLAUSIBLE pending the
-BOMEX SGS spread + the native-CLUBB-cloud leg.
+**VERDICT — "closure order buys skill" does NOT hold in shallow cumulus (D7-gated CONFIRMED).**
+The ranking is led by a nonlocal-K (holtslag) and a LOCAL (louis) scheme, with clubb only 3rd
+and clubb_lite 8th — the OPPOSITE of the dry CBL, where clubb/edmf/higher-order led. σ_LES(shallow
+_cumulus)=0.0531 (loss units) makes this quantitative: (i) the TOP FIVE (holtslag 0.310, louis
+0.327, clubb 0.336, edmf 0.346, ysu 0.355) all sit WITHIN ~1 σ_LES of the leader → **not
+individually distinguishable** — in particular the higher-order clubb is statistically tied with
+the LOCAL louis and the nonlocal holtslag, so its machinery buys NO resolvable skill here; (ii)
+the local-vs-nonlocal Q1b margin (louis−holtslag = 0.017) is **sub-σ_LES → NOT significant**;
+(iii) BUT the top-vs-tail spread IS real — holtslag 0.310 vs tke 0.467 is 0.16 ≈ 3σ_LES, and the
+tail (smag 0.417 / clubb_lite 0.420 / tke 0.467) is distinguishably WORSE than the leaders. So in
+shallow Cu the verdict is "a broad middle tier is tied, a weak tail is resolved, and higher-order
+does NOT lead" — genuinely regime-specific, and NOT a cloud-PDF artifact (all 9 arms share the
+Sundqvist cloud). **Robustness:** these θ_l-corrected numbers PRESERVE the θ-based ordering (same
+rank sequence; absolute scale shifted from ~0.21–0.35 to ~0.31–0.47 because θ_l is the correct,
+harder target) — the confound fix moved the scale, not the science. CAVEATS: within-BOMEX metric
+only (never compare to a dry number); winds are trade-wind-driven so u/v carry weight. The
+native-vs-forced-shared CLUBB pair (D9 full) is the remaining refinement, expected small
+(condensation-invariance; see the moist-conventions note below).
 
 **CRITICAL MOIST CONVENTIONS (record + honour; codex-caught 2026-07-25).**
 - **The spectral moist LES prognoses ACTUAL θ, not θ_l** (`state.theta`; the IC
