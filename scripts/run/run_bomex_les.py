@@ -379,8 +379,11 @@ def _emit_suite_artifact(args, forc, out_path):
     nt = len(frames)
     wtheta = stack("wtheta")
     wqt = stack("wqt")
+    # LASD dynamic SGS (``--dynamic``, default on) overrides the static ``--sgs-model``;
+    # label the artifact with what actually ran so it matches the CBL/SBL sgs variants.
+    sgs = "lasd" if getattr(args, "dynamic", False) else args.sgs_model
     art = LESReferenceArtifact(
-        case_name=args.case_label, sgs=args.sgs_model,
+        case_name=args.case_label, sgs=sgs,
         heights_m=z, times_s=times,
         theta=stack("theta"),                 # θ_l for the moist prognostic
         u=stack("u"), v=stack("v"),
@@ -398,7 +401,7 @@ def _emit_suite_artifact(args, forc, out_path):
         qv_adv=np.asarray(forc["qls"], np.float64))
     save_artifact(art, out_path)
     print(f"[emit-suite-artifact] moist LESReferenceArtifact "
-          f"({nt} frames, nz={len(z)}, sgs={args.sgs_model}) -> {out_path}", flush=True)
+          f"({nt} frames, nz={len(z)}, sgs={sgs}) -> {out_path}", flush=True)
 
 
 def make_forcing_fn(g, ref, forc, dtype):
