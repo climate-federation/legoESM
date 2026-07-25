@@ -116,10 +116,17 @@ type and soil profile, deepest at the phreatophytic savanna.
 
 Each site is integrated as an independent offline single column at the native
 forcing timestep over the full analysis window, with soil moisture and soil
-temperature carried prognostically. The soil state is initialised from the first
-observed soil temperature and volumetric water content; no separate spin-up cycle
-is performed, so the earliest part of each record reflects adjustment away from
-the observed initial state.
+temperature carried prognostically. The column is initialised to a vertically
+uniform profile: every layer takes the first available prescribed soil
+temperature and volumetric water content at the start of the window, the matric
+potential is then derived from that water content through the van~Genuchten
+retention curve, and the snow, ponding and runoff stores start empty. The
+initial water content is clipped to the hydraulic range of the site soil,
+which binds only at US-MMS, where the measured water content (0.43\,m$^3$\,m$^{-3}$)
+exceeds the porosity implied by its clay texture (0.38\,m$^3$\,m$^{-3}$). No
+separate spin-up cycle is performed, so the earliest part of each record reflects
+adjustment away from this initial state; all four windows begin on 1 January, so
+that adjustment falls in the dormant season.
 
 \subsection{Evaluation protocol}
 
