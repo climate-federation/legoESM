@@ -42,14 +42,23 @@ import netCDF4 as nc
 REPO = Path(__file__).resolve().parents[3]
 
 
-def gridscale(field, k=4):
-    """mean |f - 4-neighbour-average| in (2k+1)^2 corner boxes, max over
-    the four corners of the tile."""
+def gridscale(field, k=4, region="corner"):
+    """2dx amplitude = mean |f - 4-neighbour-average|.
+
+    region="corner": max over the four tile-corner boxes (vertex-local).
+    region="global": whole-tile mean.  The GLOBAL variant is the control
+    for a real failure mode of the corner metric -- a feature simply
+    advecting out of the corner box also makes the corner value drop,
+    which would mimic damping.  If ours grows globally while the
+    oracle's does not, the divergence is not an advection artifact.
+    """
     f = np.asarray(field, dtype=float)
     sm = np.copy(f)
     sm[1:-1, 1:-1] = 0.25 * (f[:-2, 1:-1] + f[2:, 1:-1]
                              + f[1:-1, :-2] + f[1:-1, 2:])
     r = np.abs(f - sm)
+    if region == "global":
+        return float(np.nanmean(r[1:-1, 1:-1]))
     n = f.shape[0]
     b = min(k, n // 4)
     return max(float(np.nanmean(r[1:1 + b, 1:1 + b])),
@@ -66,6 +75,10 @@ def main():
                     help="glob for our lattice dumps (…_lat_dayN.npz)")
     ap.add_argument("--n", type=int, default=36)
     ap.add_argument("--ng", type=int, default=3)
+    ap.add_argument("--region", choices=("corner", "global"),
+                    default="corner",
+                    help="corner = vertex-local (the signal); global = "
+                         "whole-tile control against advection artifacts")
     ap.add_argument("--oracle-cadence", choices=("days", "hours"),
                     default="days",
                     help="output interval of the oracle file: frame k is "
@@ -90,7 +103,8 @@ def main():
         if o_g is None:
             o_g = np.zeros(nt)
         for t in range(nt):
-            o_g[t] = max(o_g[t], gridscale(u[t]), gridscale(v[t]))
+            o_g[t] = max(o_g[t], gridscale(u[t], region=args.region),
+                         gridscale(v[t], region=args.region))
         d.close()
 
     # ---- ours: c2l on the raw six-face dumps -----------------------
@@ -118,10 +132,11 @@ def main():
             ua, va = c2l_ord2_face(np.asarray(d[f"u_t{t}"]),
                                    np.asarray(d[f"v_t{t}"]),
                                    gs["dx"], gs["dy"], amat, n, ng)
-            g = max(g, gridscale(ua[sl, sl]), gridscale(va[sl, sl]))
+            g = max(g, gridscale(ua[sl, sl], region=args.region),
+                    gridscale(va[sl, sl], region=args.region))
         ours[day] = g
 
-    print("# 2dx content near cube vertices (A-grid winds, native cube)")
+    print(f"# 2dx content ({args.region}) A-grid winds, native cube")
     print("# day    ORACLE      OURS       ratio")
     for day in sorted(ours):
         # frame k holds day k+1 (daily) or hour k+1 (hourly)
