@@ -507,6 +507,40 @@ A single "best ocean config" claim would be wrong in one regime or the
 other; the earlier campaign arms disagreed precisely because they sampled
 different precisions and device counts.
 
+## Wide-halo stability: evidence toward the gate (job 26460729)
+
+Wide-halo is the campaign's fastest arm for f32 / scale-out but is BLOCKED
+on stability review (the averaging filter under stale-halo substepping).
+This does NOT clear that gate — a gate needs the filter analysis plus an
+ocean-science sign-off — but it supplies the first thing a reviewer would
+ask for: 600 steps at nd4, f32, conservation-gated, both arms same job.
+
+| arm | eta drift [m] | heat_rel | salt_rel |
+|---|---|---|---|
+| implicit_cn (reference) | 6.01e-11 | 1.272e-05 | 4.878e-06 |
+| explicit + wide-halo | 3.72e-10 | **1.248e-05** | **4.190e-06** |
+
+Wide-halo's heat drift is 1.9 % LOWER and salt 14 % LOWER than the implicit
+reference; the eta difference sits at 1e-10 m, numerically irrelevant. No
+blow-up, and per-step time is flat from 100 to 600 steps (12.81 -> 12.74
+ms), so nothing degrades over the longer integration. Both arms' heat drift
+grows ~linearly with step count and is IDENTICAL between them, which points
+at the shared baroclinic/tracer path rather than the barotropic solver.
+
+MECHANISM CONFIRMED FROM A THIRD ANGLE. The wide-halo arm records its own
+message census: **120 standard barotropic messages/step -> 4** (n_loop=30
+substeps, stencil reach 3, one fixed wide exchange per chunk). A 30x cut in
+barotropic exchanges is precisely why it wins where sync dominates, and it
+is the SAME quantity the single_reduce analysis isolated as the half it
+could not touch (44.1 us/iter of matvec halo). Three independent
+measurements — the iteration sweep, the single_reduce decomposition and
+this census — now agree on what the cost is.
+
+REMAINING FOR THE GATE (not done here): filter-stability analysis under
+stale halos, longer/realistic-forcing integration, and the science
+sign-off. What is now on record is that 600 steps conserve at least as well
+as the production solver.
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
