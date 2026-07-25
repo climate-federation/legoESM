@@ -259,6 +259,25 @@ The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
 held constant cleanly across that sweep's subdivision steps, so no weak
 claim is made from it.
 
+## Using the calibrated bound correctly (a trap worth documenting)
+
+With the fabric constants supplied the bench flips `bound_calibrated=true`,
+but `t_bound` stays null until a THIRD ingredient arrives:
+`--single-dev-fused-ms`. Its contract is the nd=1 time **at the same
+PER-DEVICE size** — for a strong ladder at nd=4 on LL576 that is a
+144-row single-device run, not the 576-row one.
+
+Passing the GLOBAL-size time (job 26457946) makes the compute term nd times
+too large and yields `measured_over_bound` of 0.647 at nd2 and 0.358 at nd4
+— i.e. the measurement beating its own lower bound, which is impossible and
+is the tell that the ingredient was wrong. The bench computed exactly what
+it was told; the misuse was the caller's.
+
+Correct procedure (job 26457977): phase 1 measures nd=1 at each per-device
+tile (576 / 288 / 144 rows), phase 2 feeds each ladder rung its MATCHING
+compute term. Sanity rule for any future roofline: if measured/bound < 1,
+the bound is wrong, not the code.
+
 ## Precision changes which ocean config wins (job 26457919)
 
 The solver A/Bs that produced the "wide-halo wins" conclusion ran **f32**
