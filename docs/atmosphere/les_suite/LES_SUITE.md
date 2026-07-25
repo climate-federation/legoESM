@@ -295,10 +295,18 @@ The full machinery is built + validated; these are the first real numbers, for t
   lowest sampled flux — the SAME verdict as the prognostic Q1b above. Q1(b) is thus reported in
   BOTH scorings: prognostic via the tuned free-run margins, diagnostic via the Q1a structural
   counter-gradient result (D6 maps Q1's diagnostic-scoring contribution to exactly this
-  diagnostic). (An explicit per-flux diagnostic-flux-RMSE margin would additionally quantify the
-  gap; a first reconstruction attempt was reverted as physically unsound for the prescribed-flux
-  SCM — codex — and a faithful version needs a bulk-surface-flux SCM + the discrete face operator;
-  it is NOT required for the Q1(b) threshold, which the structural argument already fixes < 0.02.)
+  diagnostic). **An explicit per-flux diagnostic-flux-RMSE MARGIN (nonlocal-vs-local, closure-vs-
+  closure) is NOT produced, and codex established it CANNOT be shortcut:** (i) a one-step
+  tendency→flux reconstruction is physically unsound for the prescribed-flux SCM (surface flux
+  injected as a separate dT/dt term, Exner mismatch, non-conservative operator); (ii) the
+  counter-gradient flux magnitude `|⟨w'θ'⟩|` is only a LOWER BOUND on a local closure's pointwise
+  error (`|L−F| = F+|Kh∂θ/∂z| ≥ F`) and says nothing about the nonlocal error `|N−F|`, so it is
+  not the closure-vs-closure margin. Both were reverted. The measured margin genuinely requires
+  evaluating BOTH closures' diagnosed fluxes through `score.diagnostic_flux_score`, i.e. exposing
+  the turbulent flux across the 9 schemes (a `TurbulenceOutput.wtheta_flux` field populated per
+  scheme; the nonlocal γ is internal) — a scoped interface change. It is NOT required for the
+  Q1(b) THRESHOLD, which the structural argument already fixes < 0.02; it would only QUANTIFY the
+  gap.
 - **Q1b D7 SIGNIFICANCE (2026-07-24, real SGS spread):** emitted the {lasd, smagorinsky,
   vreman} SGS spread for `cbl_nieuwstadt` on GPU and computed **σ_LES = 0.3186** (combined
   loss units, `compute_sigma_les`). Gated on it, **NONE of the Q1b margins are
