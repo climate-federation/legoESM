@@ -321,7 +321,9 @@ The full machinery is built + validated; these are the first real numbers, for t
   The local closures carry ≈0 flux through the well-mixed layer (structural ceiling: `F=−Kh·∂θ/∂z`
   with `∂θ/∂z≈0`) while nonlocal carry the surface flux upward — so the diagnostic margin EXCEEDS
   the σ_LES flux spread by ~8×, i.e. best-tuned nonlocal beats best-tuned local "by > a stated
-  margin, in diagnostic scoring" (Q1b, literally satisfied — and the prognostic half via §7.1 above). **Scope limit (honest):** the calibration needs enough mean wind to
+  margin, in diagnostic scoring" (Q1b, literally satisfied — and the prognostic half via §7.1 above).
+  Reproducible via `scripts/validate/les_suite/q1b_diagnostic_margin.py` (→ `q1b_diagnostic_margin.json`),
+  the Q1b analogue of the `q1_counter_gradient_sweep.py` Q1a validator. **Scope limit (honest):** the calibration needs enough mean wind to
   carry the bulk surface flux, so the FREE-convective CBL (Ug≈0) and the STABLE SBL (negative
   surface flux, outside the positive secant bracket) correctly RAISE rather than report a number —
   the sheared CBL is the calibratable vehicle for the measured margin. The Q1a structural ceiling
