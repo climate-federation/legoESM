@@ -259,6 +259,25 @@ The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
 held constant cleanly across that sweep's subdivision steps, so no weak
 claim is made from it.
 
+## Precision changes which ocean config wins (job 26457919)
+
+The solver A/Bs that produced the "wide-halo wins" conclusion ran **f32**
+(with vmix-f32). Re-running the LL576 ladder in **f64** narrows the gap
+sharply:
+
+| arm | nd1 | nd2 | nd4 | eff@2 | eff@4 |
+|---|---|---|---|---|---|
+| implicit_cn fixed-PCG | 63.56 | 42.71 | 23.61 ms | 0.74 | 0.67 |
+| explicit + wide-halo | 71.54 | 43.69 | 23.31 ms | 0.82 | 0.77 |
+
+Wide-halo still scales better (0.77 vs 0.67 at nd4) but is only 1.3 % faster
+in absolute time there, versus the large margin measured in the f32 arm —
+and it starts 12 % SLOWER at nd1. So the winning config is REGIME-DEPENDENT
+(precision, tile size, device count), not universal. Anyone promoting the
+improved config should pick the arm for the production precision, not
+inherit the f32 verdict. These f64 rows are NOT comparable to the f32
+multinode ladder quoted earlier; only their internal comparison is valid.
+
 ## Measured fabric constants for the roofline lines (job 26457495)
 
 `scripts/bench/bench_ppermute_microbench.py` (new) times the SAME collective
