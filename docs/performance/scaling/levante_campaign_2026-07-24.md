@@ -418,6 +418,44 @@ plausible operating points, but whether that residual is acceptable for the
 free surface is an OCEAN-SCIENCE decision, not a performance one. Reported
 as a trade curve; no default changed.
 
+## The accuracy-free lever, and what it reveals (job 26460113)
+
+Cutting PCG iterations trades accuracy. `single_reduce`
+(Chronopoulos-Gear) attacks the SAME sync at unchanged iteration count by
+halving the DEPENDENT reduction batches per iteration, so it should be
+free. Measured at LL576 f64, slopes from a 60-vs-20-iteration difference:
+
+| variant | nd | us/iter | step @60 | residual |
+|---|---|---|---|---|
+| standard | 1 | 111.0 | 63.54 ms | 2.079e-04 |
+| standard | 4 | 117.9 | 23.40 ms | 2.079e-04 |
+| single_reduce | 1 | 129.6 | 64.78 ms | 2.079e-04 |
+| single_reduce | 4 | **99.7** | **22.21 ms** | **2.079e-04** |
+
+**1.053x at 4 GPUs with a BIT-IDENTICAL residual** — a genuinely free win,
+unlike the iteration cut. Note it is SLOWER at nd1 (129.6 vs 111.0 us/iter):
+Chronopoulos-Gear buys fewer reductions with extra local vector ops, so it
+only pays where sync dominates.
+
+PREDICTION PARTLY WRONG, AND THE MISS IS THE INTERESTING PART. Halving the
+reduction batches should have halved the 89.8 us/iter of sync; it fell only
+to 66.9 (25 %). Backing out the arithmetic (and correcting for the +4.6
+us/iter of extra local work at this tile) decomposes per-iteration sync:
+
+| component | us/iter | behaviour |
+|---|---|---|
+| reduction sync | 45.7 | HALVED by single_reduce |
+| halo sync | 44.1 | UNCHANGED — the matvec's own halo |
+
+(check: 45.7/2 + 44.1 = 66.9, exactly the measured single_reduce value)
+
+So per-iteration sync is almost exactly half global-reduction and half
+nearest-neighbour halo. `single_reduce` can only ever address the first
+half. The second half is the same quantity wide-halo removes for the
+explicit solver — which is why wide-halo was the larger win in the earlier
+arms, and it now has a mechanistic reason rather than just an empirical
+ranking.
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
