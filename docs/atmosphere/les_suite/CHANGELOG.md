@@ -174,6 +174,22 @@ is the fix.
   edmf still tuning, clubb deferred). **NEXT-SBL:** emit the SBL SGS spread (lasd+smag) →
   σ_LES(SBL) for the D7 gate on regime 2.
 
+- **Iter 16 (this commit) — θ-consistent D7 significance tool (codex-CLEAN).**
+  `scripts/validate/les_suite/theta_significance.py`: re-scores each tuned closure's
+  `best_overrides` via `scm_les_final_score` (SAME build/normalization as the tuner, at
+  the record's nlev/dt — fallback 24/10 = campaign config), recovers the θ-ONLY profile
+  RMSE, ranks closures per surface-flux, and gates the best-vs-2nd margin on σ_LES(θ)≈0.0074
+  — the robust θ floor, vs the wind-dominated σ_LES(combined)=0.319 that calls every margin
+  insignificant for the Ug=0 CBL. Pure `rank_theta_significance` + `split_trusted` logic
+  (8 unit tests, 1.3 s); reuses the tuner's apply-site + the score fn (no duplicated
+  numerics). PRECISION-GATE (codex round-1 finding, fixed round-2 CLEAN): the self-check is
+  a HARD GATE — a re-score that fails to reproduce the tuner's stored `best_loss` (tristate:
+  False mismatch / None unverifiable-no-best_loss) is EXCLUDED from the ranking and REPORTED
+  (stderr + an ⚠ EXCLUDED section in the markdown), never silently ranked SIGNIFICANT. The
+  actual multi-closure θ-verdict RUN is compute-bound (one nlev=24 re-score is >18 min under
+  the current 4-tune + GPU-spread + networked-FS contention ⇒ ~27 re-scores need a quiet
+  node); deferred to a compute-free window. SBL SGS spread (lasd+smag) still emitting.
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
