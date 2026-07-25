@@ -135,6 +135,17 @@ is the fix.
   drops to worst; higher-order clubb/clubb_lite stay robust in BOTH. ⇒ order-buys-skill holds
   for the higher-order family across shear; the mid-tier ranking does not transfer. §7.1.
 
+- **Iter 23 — Q3-shear axis, scorecard hardening, session regression VALIDATED.** (a) Q3-shear
+  cross-transfer (free-CBL coeffs → sheared CBL): 0/9 exceed σ_LES(sheared)=0.283 ⇒ coefficient
+  portability holds on the SHEAR axis too (same as CBL→SBL) — the shear-dependent ranking is
+  default-closure-skill, not a tuned-coeff requirement (§7.1). (b) Hardened the scorecard: a
+  `(regime,q0)` slice mixing >1 distinct artifact (e.g. free vs sheared CBL) now WARNS loudly
+  (the per-scheme dedup could silently drop/replace a config); sheared records isolated in
+  `tuned/sheared_analysis/` (2 tests). (c) Full les_suite regression **224 passed** — the
+  session's scan-rollout + geostrophic + scorecard + score-factoring changes are green, no
+  cross-interaction breakage. **Dry-regime suite fully complete + validated; moist externally
+  blocked (gSAM forcing).**
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
