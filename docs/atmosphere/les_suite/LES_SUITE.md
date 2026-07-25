@@ -296,6 +296,14 @@ The full machinery is built + validated; these are the first real numbers, for t
   but the mid-tier ranking is shear-sensitive — a single ranking does not transfer between
   free-convective and sheared BLs. Significance: across-family gaps (0.039 vs 0.196) are
   ≫ σ_LES(θ)=0.0073 (highly significant); the top two are near-tied (top margin 0.0023).
+  Q3-SHEAR cross-transfer (free-CBL coeffs → sheared CBL, gated on σ_LES(sheared,combined)=
+  0.283): penalties 0.00–0.09, **0/9 exceed σ_LES** ⇒ shear-specific TUNED coefficients are
+  NOT required — same verdict as the stability axis (CBL→SBL). So the shear-dependent ranking
+  reflects DEFAULT closure skill (which closure to pick — mynn25's default handles shear),
+  NOT a tuned-coefficient requirement. Across BOTH axes (stability + shear) the σ_LES gate
+  refuses coefficient-portability-breaking: at this coarse tier-1 depth + these LES error
+  bars, one tuned coefficient set transfers across configurations within σ_LES; what changes
+  is the best closure, not its calibration.
 - **θ-CONSISTENT D7 VERDICT — CLOSURE ORDER BUYS SKILL ON θ (2026-07-24, FULL 9×5 grid,
   `theta_significance.py`).** With the scan rollout the ENTIRE nine-closure × five-flux grid
   (45/45 cells) is tuned at nlev=24 — including full CLUBB (previously OOM-deferred). Re-score
