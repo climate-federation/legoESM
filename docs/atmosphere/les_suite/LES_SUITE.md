@@ -496,7 +496,12 @@ sub-σ_LES.
      produced in this environment** — the user must provide a gSAM checkout via
      `LEGOESM_GSAM_ROOT=<dir containing CASES/>` (or `--gsam-root`), then
      `python scripts/data/fetch_les_forcing.py --only BOMEX DYCOMSII`. Once the forcing is
-     available, the code path below is the build (a fresh-session task).
+     available, the code path below is the build (a fresh-session task). NOTE the SBL was
+     doable WITHOUT external data only because GABLS1 is an ANALYTIC case with an existing
+     `run_spectral_sbl.py` to reuse; BOMEX/DYCOMS are NOT in `ANALYTIC_CASES` and have NO
+     analytic builder — an analytic route would require implementing the Siebesma (2003) /
+     Stevens (2005) sounding+forcing spec from scratch (authoritative source needed; not to
+     be reconstructed from memory), so the gSAM deck is the practical unblock.
    - **MOIST build plan (once forcing is available).**
      Foundations EXIST: the moist LES core `dynamics/les/spectral_les_moist.py` (moist
      diagnostics, positive-definite moisture conservation, Sundqvist/SBK89 diagnostic
