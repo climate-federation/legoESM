@@ -161,6 +161,18 @@ is the fix.
   qv3 → prof_NNN.npz carry qt/wqt/wtheta (verified end-to-end). NEXT: the prof→
   `LESReferenceArtifact` converter (`build()` exposes ug/vg/sfc-fluxes/f_c) via an
   `--emit-suite-artifact` flag → moist SCM (condensation) → tune → moist Q1/Q2/Q3 + D9.
+- **Iter 26 — moist DATA PIPELINE COMPLETE (LES→artifact); real BOMEX artifact emitted.**
+  Built + tested the moist LES→`LESReferenceArtifact` converter (`run_bomex_les
+  --emit-suite-artifact`): valid self-describing moist artifact (θ_l, q_t, u, v, resolved
+  ⟨w'θ_l'⟩/⟨w'q_t'⟩ + Coriolis/geostrophic/subsidence/advection forcing; qt∈[0.003,0.017]
+  kg/kg = BOMEX). sgs labelled `lasd` when `--dynamic`. Real 64³ 6 h `bomex__lasd.npz`
+  emitting. MOIST-SCM DESIGN (next, one coherent unit): `_moist_cbl_physics(turb)` =
+  PhysicsConfig with `microphysics=MicrophysicsConfig(scheme="sundqvist")` (diagnostic
+  condensation, shallow-cu) + turbulence; `build_cbl_scm_from_artifact` moist branch
+  (`is_moist`) sets q_v IC = q_t (q_c≈0 at BOMEX t0 ⇒ q_v=q_t), T IC from θ_l (≈θ at t0),
+  SCMForcing with subsidence_w/theta_adv/qv_adv/u_geo/w_qv_s from the artifact; moist score
+  extracts q_t=Σ(q_v,q_c,q_r) from the SCM state + scores via `score.qt_rmse`. Then tune →
+  moist Q1/Q2/Q3 + D9.
 
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
