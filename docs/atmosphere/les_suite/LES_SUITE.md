@@ -4,9 +4,10 @@ Status (2026-07-24): **DRY-REGIME SUITE COMPLETE + VALIDATED** — Q1a, Q1b (fre
 θ-consistent), Q2 (full 9×5 grid), Q3 (stability + shear axes), D4 (AD-vs-DF 9/9), D7
 (σ_LES all dry regimes), and a dry-regime partial-D9 are all produced, reviewed, and pass
 224 les_suite tests. The `lax.scan` rollout (~250× faster free-run, AD-tractable) unblocked
-the compute wall. **REMAINING: the MOIST regimes (BOMEX/DYCOMS) + full D9 — hard-blocked on
-the external gSAM forcing decks absent from this environment** (see §8; `LEGOESM_GSAM_ROOT`
-must be supplied). Author: A. Connolly. Started 2026-07-10.
+the compute wall. **REMAINING: the MOIST regimes (BOMEX/DYCOMS) + full D9 — IN PROGRESS**
+(the forcing decks ARE present in the repo cache `data/les_cases/{BOMEX,DYCOMS_RF01,...}`;
+an earlier note wrongly called this blocked after mis-checking the cache path — CORRECTED).
+Author: A. Connolly. Started 2026-07-10.
 Home: `docs/atmosphere/les_suite/LES_SUITE.md` (root-hygiene rule → docs/, mirrors the
 ocean `oracle_recipe_strategy.md` living-doc convention).
 
@@ -524,17 +525,15 @@ sub-σ_LES.
      faster free-run, AD-tractable) unblocked the whole compute wall — Q2 full 9×5 grid
      (incl. clubb@nlev=24), the θ-consistent verdict, σ_LES(SBL), SBL tuning, Q3, and the
      D4 AD-vs-DF run all landed. Q1/Q2/Q3/D4/D7 are DONE for the CBL/sheared/SBL regimes.
-   - **REMAINING — MOIST regimes: BLOCKED on external forcing data (2026-07-24).** The moist
-     LES emission (`run_bomex_les.py`/`run_dycoms_les.py`) requires the third-party gSAM
-     `CASES/BOMEX` + `CASES/DYCOMS_RF01` decks (Khairoutdinov SAM input: snd/lsf/sfc),
-     which are NOT bundled in the repo (correct — third-party) and are NOT present on this
-     system: `fetch_les_forcing.py --only BOMEX` → "Could not find a gSAM checkout";
-     `LEGOESM_GSAM_ROOT` is unset and neither autodetect path exists; the fetcher only
-     COPIES from a local gSAM checkout (no download). **⇒ the moist LES artifacts cannot be
-     produced in this environment** — the user must provide a gSAM checkout via
-     `LEGOESM_GSAM_ROOT=<dir containing CASES/>` (or `--gsam-root`), then
-     `python scripts/data/fetch_les_forcing.py --only BOMEX DYCOMSII`. Once the forcing is
-     available, the code path below is the build (a fresh-session task). The artifact SCHEMA
+   - **REMAINING — MOIST regimes: IN PROGRESS (forcing IS available; 2026-07-24 CORRECTION).**
+     An earlier note wrongly called this blocked after mis-checking the cache path (looked at
+     `data/les_forcing/`, but `resolve_sam_case_dir` uses `data/les_cases/`). The decks ARE
+     present + readable: `data/les_cases/{BOMEX,DYCOMS_RF01,DYCOMS_RF02,RICO,...}/` with
+     snd/lsf/sfc (verified: BOMEX snd θ=298.7 K, q_v=17 g/kg, lsf ug=−10 — the Siebesma-2003
+     sounding). `run_bomex_les.py`/`run_dycoms_les.py` read them via `resolve_sam_case_dir`;
+     the `fetch_les_forcing` error is a red herring (it only fails to find a SOURCE gSAM
+     checkout to COPY from — moot when the cache is already populated). ⇒ the moist LES CAN
+     be emitted here. Build (below). The artifact SCHEMA
      is already moist-ready (`LESReferenceArtifact.qt`/`wqt_resolved`/`wqt_sgs`/`w_qv_s`,
      `is_moist()`; θ carries θ_l for moist; `score.qt_rmse` exists) — so the gap is the moist
      SCM PHYSICS (q_t IC + condensation/latent-heating + a moist microphysics config in

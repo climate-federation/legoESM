@@ -146,6 +146,14 @@ is the fix.
   cross-interaction breakage. **Dry-regime suite fully complete + validated; moist externally
   blocked (gSAM forcing).**
 
+- **Iter 24 — CORRECTION: moist regimes NOT blocked; forcing IS cached. Moist build STARTED.**
+  Earlier iters wrongly called moist "blocked on external gSAM forcing" after mis-checking the
+  cache path (`data/les_forcing/` vs the real `data/les_cases/`). The decks ARE present +
+  readable: `data/les_cases/{BOMEX,DYCOMS_RF01,DYCOMS_RF02,RICO,...}/` (snd/lsf/sfc; BOMEX
+  θ=298.7/q_v=17 g/kg/ug=−10). `run_bomex_les` reads them via `resolve_sam_case_dir`. Starting
+  the moist build: wire moist into `run_les_suite` → emit BOMEX/DYCOMS → moist SCM q_t coupling
+  → moist Q1/Q2/Q3 + full D9.
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
