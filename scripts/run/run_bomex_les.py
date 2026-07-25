@@ -520,7 +520,8 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
                 qr3=np.asarray(st.tracers[..., 2]),
-                surface_precip=np.asarray(sdm.surface_precip))
+                surface_precip=np.asarray(sdm.surface_precip),
+                qv3=np.asarray(st.tracers[..., 0]))
             frame += 1
 
     x0 = np.asarray(sdm.x)
@@ -771,7 +772,9 @@ def main():
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
                 np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qc3=np.asarray(st.tracers[..., 1]),
-                rho_z=np.asarray(ref.rho_c))
+                rho_z=np.asarray(ref.rho_c),
+                qr3=np.asarray(st.tracers[..., 2]),
+                qv3=np.asarray(st.tracers[..., 0]))
             frame += 1
 
     dt = jnp.asarray(dt0, dtype)
