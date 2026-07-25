@@ -76,6 +76,19 @@ def test_unknown_scheme_rejected():
         m._base_turbulence("not_a_scheme")
 
 
+def test_clubb_no_cloud_buoyancy_flag_builds_control_arm():
+    # D9 control: --clubb-no-cloud-buoyancy → the base clubb config disables the PDF cloud
+    # buoyancy; default (True) keeps it; the flag is a no-op for non-clubb schemes.
+    m = _tuner()
+    base_on, _ = m._base_turbulence("clubb", clubb_cloud_buoyancy=True)
+    base_off, _ = m._base_turbulence("clubb", clubb_cloud_buoyancy=False)
+    assert base_on.clubb.cloud_buoyancy is True
+    assert base_off.clubb.cloud_buoyancy is False
+    # non-clubb schemes ignore the kwarg (no cloud_buoyancy field to set)
+    base_mynn, _ = m._base_turbulence("mynn25", clubb_cloud_buoyancy=False)
+    assert base_mynn.scheme == "mynn25"
+
+
 def test_scm_les_loss_jax_is_differentiable():
     # the AD path's objective must be a pure-JAX (traced) scalar, differentiable w.r.t.
     # a traced turbulence param — smagorinsky C_s has real θ-leverage → nonzero grad.

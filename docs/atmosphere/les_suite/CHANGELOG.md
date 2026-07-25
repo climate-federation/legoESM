@@ -228,7 +228,19 @@ is the fix.
   (holtslag/mynn25) AND within σ_LES. Cloud held fixed (shared Sundqvist) → turbulence statement,
   not cloud-PDF. See LES_SUITE.md §7.5.
 
-**NEXT (remaining for DONE):** (1) full-D9 NATIVE leg — the CLUBB turbulence-interface change (add
-cloud q_c to the scheme input + `cloud_source` toggle + validator loop; OR the smaller
-clubb-internal `cloud_buoyancy` toggle; scoped in memory `les-suite-moist-status`). (2) OPTIONAL
-higher-res DYCOMS (96²×192) for a realistic Sc + tighter σ_LES. (3) clubb 2×-res σ_LES.
+- **Iter 30 — D9 CLUBB cloud-PDF dual-report PRODUCED (codex-CLEAN). ALL §7 DELIVERABLES DONE.**
+  Added `CLUBBConfig.cloud_buoyancy: bool=True` static feature-gate (like `prognostic`): when
+  False, `diagnose_cloud_and_buoyancy` drops the ADG1 cloud-liquid buoyancy term `rc_coef·wprcp`
+  from `wpthvp` (cloud_frac/rcm diagnostics unchanged; only the TKE-buoyancy feedback gated).
+  Tuner `--clubb-no-cloud-buoyancy` flag builds the control arm. Tuned CLUBB native-vs-no-cloud
+  on both moist artifacts: **BOMEX 0.336 vs 0.306 (gap 0.030 < σ_LES 0.053); DYCOMS 0.909 vs
+  0.801 (gap 0.108 < σ_LES 0.231)** — BOTH sub-σ_LES ⇒ CLUBB's assumed-PDF cloud buoyancy buys NO
+  resolvable skill → the higher-order comparison is NOT a cloud-PDF artifact. (Gap is negative:
+  disabling cloud buoyancy slightly IMPROVES the coarse-SCM fit.) Default path byte-identical;
+  static gate confirmed by JIT/SCM run (both states, no ConcretizationError); clubb diagnostic+
+  config tests (60) + tuner flag test pass; codex re-review CLEAN. See §7.6. **All §7
+  deliverables — Q1a, Q1b, Q2 (4 regimes), Q3, D4, D7, D9 — are now produced.**
+
+**OPTIONAL REFINEMENTS (not deliverables):** higher-res DYCOMS (96²×192) for a realistic Sc +
+tighter σ_LES; the strictly-literal D9 forced-shared arm (Sundqvist q_c into CLUBB buoyancy, the
+all-9-scheme turbulence-interface change — expected same sub-σ_LES band); clubb 2×-res σ_LES.

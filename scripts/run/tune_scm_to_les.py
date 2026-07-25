@@ -300,8 +300,13 @@ def _cbl_scheme_table():
     }
 
 
-def _base_turbulence(scheme: str):
-    """A CBL-appropriate base TurbulenceConfig + its registry scheme_key."""
+def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True):
+    """A CBL-appropriate base TurbulenceConfig + its registry scheme_key.
+
+    ``clubb_cloud_buoyancy=False`` (only meaningful for ``scheme='clubb'``) builds the D9
+    control arm: CLUBB with its assumed-PDF cloud-liquid buoyancy DISABLED (see LES_SUITE.md
+    §7.6). Tuning both arms and comparing the best losses quantifies how much CLUBB's PDF cloud
+    buys in skill vs a cloud-blind buoyancy."""
     from legoesm.atmosphere.physics import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 
@@ -312,7 +317,11 @@ def _base_turbulence(scheme: str):
             f"available: {sorted(table)}")
     config_cls, scheme_key = table[scheme]
     surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
-    turb = TurbulenceConfig(scheme=scheme, **{scheme: config_cls(surface=surf)})
+    if scheme == "clubb":
+        sub = config_cls(surface=surf, cloud_buoyancy=clubb_cloud_buoyancy)
+    else:
+        sub = config_cls(surface=surf)
+    turb = TurbulenceConfig(scheme=scheme, **{scheme: sub})
     return turb, scheme_key
 
 
@@ -337,13 +346,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", type=Path, default=None,
                    help="write the tuned result JSON here (default: results/les_suite/tuned)")
+    p.add_argument("--clubb-no-cloud-buoyancy", action="store_true",
+                   help="D9 control: tune `clubb` with its assumed-PDF cloud-liquid buoyancy "
+                        "DISABLED (cloud_buoyancy=False). Compare the best loss to the native "
+                        "clubb arm to quantify the PDF cloud's skill contribution (LES_SUITE.md "
+                        "§7.6). No effect for non-clubb schemes.")
     args = p.parse_args(argv)
 
     if not args.artifact.exists():
         print(f"error: {args.artifact} does not exist", file=sys.stderr)
         return 2
     artifact = load_artifact(args.artifact)
-    base, scheme_key = _base_turbulence(args.scheme)
+    base, scheme_key = _base_turbulence(
+        args.scheme, clubb_cloud_buoyancy=not args.clubb_no_cloud_buoyancy)
 
     results: dict = {}
     if args.method in ("df", "both"):

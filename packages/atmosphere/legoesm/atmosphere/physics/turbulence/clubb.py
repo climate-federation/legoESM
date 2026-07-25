@@ -8,45 +8,45 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 5995)
+Table of contents (sections, in order; flag reference table at line 6013)
 -----------------------------------------------------------------------------
   1.  [line   328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  [line   411] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  2.  [line   420] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3.  [line   636] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3.  [line   654] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4.  [line   967] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4.  [line   985] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5.  [line  1021] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5.  [line  1039] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6.  [line 1195] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6.  [line  1213] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7.  [line 1630] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8.  [line 1758] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7.  [line  1648] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8.  [line  1776] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9.  [line 1939] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9.  [line  1957] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line 2125] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line 2206] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2143] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2224] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line 2528] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2546] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  13. [line 2772] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  2790] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line 3597] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3615] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line 3658] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  3676] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line 4316] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4334] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line 4596] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4614] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line 4970] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  4988] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line 5366] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  5384] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -401,9 +401,18 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
     # Moist buoyancy flux: wpthvp = wpthlp + ep1*thv_ds*wprtp + rc_coef*wprcp,
     # with a down-gradient cloud-water flux wprcp (rc_coef = Lv/(exner*Cp) - ep2*thv).
-    wprcp = -Kh * _grad_zt(rcm, gr)
-    rc_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
-    wpthvp = wpthlp + _EP1 * thv_ds * wprtp + rc_coef * wprcp
+    # The cloud-liquid term rc_coef*wprcp is CLUBB's assumed-PDF cloud buoyancy — gated by
+    # the static ``cloud_buoyancy`` feature flag (Python if on the static config bool, NOT
+    # jnp.where: the D9 control needs one branch compiled, matching the fix_mass/fix_moisture
+    # doctrine). cloud_frac/rcm diagnostics are UNCHANGED (still the native PDF); only their
+    # feedback into the buoyancy-production of TKE is removed when disabled.
+    wprtp_term = _EP1 * thv_ds * wprtp
+    if config.cloud_buoyancy:
+        wprcp = -Kh * _grad_zt(rcm, gr)
+        rc_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
+        wpthvp = wpthlp + wprtp_term + rc_coef * wprcp
+    else:
+        wpthvp = wpthlp + wprtp_term
     return cloud_frac, rcm, wpthvp
 
 
@@ -587,6 +596,14 @@ class CLUBBConfig(NamedTuple):
         in (default ``False``) so existing ``scheme="clubb"`` runs are unchanged.
         Read only at setup/dispatch time (a static Python branch), never in
         traced code, so it stays a valid plain pytree-leaf field.
+    cloud_buoyancy : bool
+        Whether CLUBB's ADG1 assumed-PDF cloud water contributes to the moist
+        buoyancy flux ``wpthvp`` (the ``rc_coef·wprcp`` cloud-liquid term). Default
+        ``True`` = the native CLUBB closure. Set ``False`` to DISABLE the PDF-cloud
+        buoyancy (dry buoyancy: ``wpthvp = wpthlp + ε1·θv·wprtp`` only) — the D9
+        control that isolates how much CLUBB's assumed-PDF cloud buys in skill vs a
+        cloud-blind buoyancy (see LES_SUITE.md §7.6). A static feature-gate bool
+        (Python ``if`` on the static config value), not traced.
     """
 
     params: CLUBBParams = CLUBBParams()
@@ -599,6 +616,7 @@ class CLUBBConfig(NamedTuple):
     tke_min: float = 1.0e-6
     T0: float = 300.0
     prognostic: bool = False
+    cloud_buoyancy: bool = True
 
 
 # Derived parameters (recomputed from base config, never stored as magic
