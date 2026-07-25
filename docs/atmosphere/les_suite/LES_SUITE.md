@@ -285,6 +285,21 @@ The full machinery is built + validated; these are the first real numbers, for t
   +0.0196, +0.0257) — generally widening with flux but NOT strictly monotonic (a slight
   dip at 0.08). So the local→nonlocal skill crossover lies **below the lowest sampled
   flux** (nonlocal already wins at 0.02), consistent with the Q1a structural ceiling.
+- **Q1b (skill threshold, DIAGNOSTIC scoring)** — per the D6 mapping (§6/§7 Q1 note), the
+  DIAGNOSTIC-scoring contribution to Q1 IS the Q1a structural counter-gradient diagnostic: in
+  diagnostic mode (SCM mean state ← LES snapshot) a local K≥0 closure's flux `−Kh·∂θ/∂z` has the
+  WRONG SIGN over the counter-gradient layer present at every swept flux, i.e. it structurally
+  cannot reproduce the LES flux there, while nonlocal closures carry the counter-gradient term.
+  So Q1(b) is reported in both scorings: prognostic via the tuned free-run margins above,
+  diagnostic via Q1a's counter-gradient ceiling. (NOTE 2026-07-25: an explicit diagnostic-flux
+  RECONSTRUCTION `scm_diagnostic_wtheta` was attempted — one-step SCM tendency → ∫ flux
+  divergence — but codex adversarial review found it physically unsound for THIS SCM path: the
+  prescribed-flux forcing injects `w'θ'ₛ` into the lowest cell as a separate dT/dt term (not the
+  turbulence bottom BC), and the center-trapezoid does not invert the SCM's discrete face-flux
+  operator, so the reconstructed quantity is neither the closure's turbulent flux nor a
+  conservative total flux. It was REVERTED rather than shipped. A faithful diagnostic-flux score
+  needs a BULK-surface-flux SCM that diagnoses the flux from the mean state + the discrete
+  face-based operator — a scoped follow-up; the Q1 diagnostic requirement is met by Q1a per D6.)
 - **Q1b D7 SIGNIFICANCE (2026-07-24, real SGS spread):** emitted the {lasd, smagorinsky,
   vreman} SGS spread for `cbl_nieuwstadt` on GPU and computed **σ_LES = 0.3186** (combined
   loss units, `compute_sigma_les`). Gated on it, **NONE of the Q1b margins are
