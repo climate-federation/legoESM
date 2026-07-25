@@ -285,15 +285,35 @@ completing the census moves the bound by only **0.22 ms**, because the
 comm term is LATENCY-dominated: at 122 messages x 17.82 us the latency part
 is 2.174 ms while even 16 MB at 64.22 GB/s is just 0.253 ms.
 
-So with the byte census completed the unexplained residual is still 5.5 ms (nd2)
-and 4.3 ms (nd4). It is NOT communication under any calibration of this
-model. The remaining candidates — none yet demonstrated — are extra work
-the SHARDED formulation performs that the single-device reference does not
-(halo padding, band-edge stencils, the v-row reconstruction) and per-kernel
-launch overhead from a longer program. Distinguishing those needs a
-per-phase profile of the sharded step, which the SPMD bench does not yet
-have (`bench_ocean_mpi_scaling.py` has `--profile-phases`; the SPMD twin
-does not).
+So with the byte census completed the unexplained residual is still 5.5 ms
+(nd2) and 4.3 ms (nd4).
+
+SECOND CANDIDATE ALSO REFUTED (`scripts/tmp/probe_sharded_overhead.py`,
+job 26458553): the sharded formulation does NOT do measurably more work.
+Timing the SHARDED step on a 1-device mesh (all the padding, band-edge and
+v-row-reconstruction machinery present, ppermutes self-to-self so no real
+traffic) against the UNSHARDED step at the identical tile:
+
+| tile | unsharded | sharded on 1 device | overhead |
+|---|---|---|---|
+| 288x1152x20 | 33.13 ms | 32.79 ms | **-0.34 ms (-1.0 %)** |
+| 144x1152x20 | 15.88 ms | 15.92 ms | **+0.04 ms (+0.2 %)** |
+
+Zero within noise at both tiles, so the bound's compute term is the RIGHT
+reference and extra sharded work is not the gap.
+
+WHERE THAT LEAVES IT (quantified, one candidate standing): the residual
+divided by the message count is **83 us/message at nd2 and 73 us at nd4**,
+versus **17.8 us** for the same collective measured in isolation — an in-
+context cost 4-5x the best case. That is consistent with EXPOSED,
+un-overlapped communication rather than raw wire time.
+
+TENSION, stated rather than smoothed: if plain per-message latency were the
+whole story, the fused-halo arm (fewer, larger messages) should have won,
+and it measured NULL on this config. That points at DEPENDENCY
+SERIALIZATION — messages sitting on a critical chain the scheduler cannot
+overlap — which aggregation does not fix. Confirming that needs a timeline
+profile, not another ladder.
 
 Honest answer to "how far from the theoretical limit are we": 72-81 % of a
 now-calibrated floor, with the shortfall attributable to neither bandwidth
