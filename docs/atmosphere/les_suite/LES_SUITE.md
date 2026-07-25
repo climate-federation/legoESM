@@ -253,7 +253,13 @@ config next to every number.
 - **Q1** — (a) counter-gradient map: the `w'θ'ₛ` (and `-h/L`) value at which the LES flux first
   goes counter-gradient over a finite layer → the *structural* ceiling on any local closure;
   (b) skill threshold: the flux at which best-tuned nonlocal beats best-tuned local by > a
-  stated margin, in both diagnostic and prognostic scoring.
+  stated margin, in both diagnostic and prognostic scoring. **(Per D6, the DIAGNOSTIC-scoring
+  contribution to Q1 IS the structural counter-gradient diagnostic (a) — in diagnostic mode a
+  local K≥0 closure's flux `−Kh·∂θ/∂z` has the WRONG SIGN in the counter-gradient layer, i.e.
+  it structurally cannot match the LES flux there, at every swept flux 0.02–0.12 — while
+  nonlocal closures carry the counter-gradient term; the PROGNOSTIC-scoring contribution is the
+  free-run threshold (b). Both scorings are thus reported: diagnostic via §7.1 Q1a, prognostic
+  via §7.1 Q1b.)**
 - **Q2** — per-regime ranking of all nine closures **after** each is properly tuned (D5), with
   the CLUBB native-vs-shared-cloud pair (D9) so "higher-order wins" isn't a cloud-PDF artifact.
 - **Q3** — tuned-coefficient table per closure across regimes, with `σ_LES` error bars; the
