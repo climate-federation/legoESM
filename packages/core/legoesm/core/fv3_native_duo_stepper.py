@@ -39,6 +39,20 @@ from legoesm.grids.fv3_native_gridstruct import (
 # screens-r1 F6).  Default OFF = faithful.
 _PG_BVERTEX_MEAN2 = os.environ.get("LEGOESM_DUO_PG_BVERTEX", "") == "mean2"
 
+# Entry A-scalar exchange gating (marginal-stability probe).  Upstream
+# runs the ENTRY ext_scalar(delp,pt) only on the first acoustic step of
+# each dt_atmos block (dyn_core.F90:432-439 `if (it==1)`), while the
+# TAIL refresh (:1336-1337) runs every step; our stepper has no n_split
+# structure and so runs BOTH every step -- two A-scalar wedge
+# applications per step where upstream averages ~1.3.  The exchange is
+# idempotent on an unchanged field, so this should be a no-op; with a
+# faithful ~300x corner-wedge amplifier sitting in a near-cancellation
+# against del-6 (measured per-step excess gain only ~1.0033), "should
+# be" is worth measuring.  "off" drops the entry refresh, keeping the
+# tail one.
+_ENTRY_ASCALAR_OFF = (
+    os.environ.get("LEGOESM_DUO_ENTRY_ASCALAR", "") == "off")
+
 
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
@@ -523,7 +537,9 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
             ext_vector_dgrid_sixface,
         )
 
-        if "ascalar" in ctx.get("ext_exclude", ()):
+        if _ENTRY_ASCALAR_OFF:
+            pass          # probe: upstream gates this on it==1
+        elif "ascalar" in ctx.get("ext_exclude", ()):
             for t in range(1, 7):
                 exchange_agrid_scalar_halos(delp6, t, n, ng)
                 exchange_agrid_scalar_halos(pt6, t, n, ng)
