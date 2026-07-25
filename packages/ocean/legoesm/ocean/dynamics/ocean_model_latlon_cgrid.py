@@ -4401,14 +4401,21 @@ class LatLonCGridOceanModel:
         ``state_new``), matching ``_n2_before_advection_tracers``'s
         convention. Construction guarantees ``outer_integrator="leapfrog"``
         (the fields EXIST as NamedTuple slots) but NOT that they are
-        POPULATED: a state bridged straight from a NEMO restart (a twin's
-        step-0 entry state) has ``T_before=None`` until the model's own
-        Euler-start branch (``_leapfrog_step``) populates it after step 1 —
-        so this predicate can still see ``None`` on a genuinely-leapfrog
-        config. Raise loudly rather than crash on ``NoneType.data``
+        POPULATED on every possible caller: ``_leapfrog_step``'s Euler-start
+        branch (#1317 fix) now seeds a LOCAL before:=now copy before its
+        first ``_step_impl`` call — matching NEMO's own cold-start
+        convention (``istate.F90:97-99``/``135-137``: ``ts(:,:,:,:,Kmm) =
+        ts(:,:,:,:,Kbb)`` before ``stp_MLF`` is ever entered, so Nbb==Nnn
+        identically on the first step; ``stpmlf.F90:114-117``
+        ``l_1st_euler -> rDt=rn_Dt`` then makes the leap-frog combine
+        degenerate exactly to forward-Euler) — so a fresh/from-rest state
+        never reaches this predicate with ``T_before=None``. A state that
+        DOES still reach here with ``T_before=None`` is a genuinely
+        mis-wired caller (e.g. ``_step_impl`` invoked directly, bypassing
+        ``_leapfrog_step``, on a hand-built state that was never seeded or
+        bridged) — raise loudly rather than crash on ``NoneType.data``
         (AttributeError) or silently fall back to ``entry_state.T``/``.S``
-        (a silent no-op that would defeat the whole point of
-        ``tke_n2_time_level="nemo_before"``).
+        (which would mask that mis-wiring).
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4420,14 +4427,16 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 'vertical_mixing.tke.tke_n2_time_level="nemo_before" requires '
                 "before-level tracers (state.T_before/S_before) to be "
-                "populated, but they are None. A bridged/twin state must "
-                "seed the leap-frog before-level fields before stepping — "
-                "see kamm_twin_90d.py's --bridge-before (bridges NEMO's "
-                "restart tb/sb/ub/vb onto state.{T,S,u,v}_before). A "
-                "from-rest / non-bridged leapfrog run instead relies on the "
-                "model's own forward-Euler-start seeding, which only "
-                "populates these AFTER step 1 -- so this error firing on "
-                "step 0 means the caller must bridge the before-level state "
+                "populated, but they are None. A from-rest run through "
+                "model.step()/_leapfrog_step already seeds before:=now on "
+                "the Euler-start step (NEMO istate.F90 Kmm:=Kbb convention); "
+                "a bridged/twin state must seed the leap-frog before-level "
+                "fields before stepping — see kamm_twin_90d.py's "
+                "--bridge-before (bridges NEMO's restart tb/sb/ub/vb onto "
+                "state.{T,S,u,v}_before). This error firing means "
+                "_step_impl was called directly on a state that was never "
+                "seeded/bridged -- the caller must go through "
+                "_leapfrog_step/step() or bridge the before-level state "
                 "itself, not silently fall back to entry_state.T/.S."
             )
         return (entry_state.T_before.data, entry_state.S_before.data)
@@ -6648,8 +6657,28 @@ class LatLonCGridOceanModel:
         # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
         #     Populate Nbb with the pre-step now-fields for the next step.
         if state.u_before is None:
+            # NEMO's cold-start Euler step does NOT run with an undefined
+            # before-level: istate.F90:97-99/135-137 sets Kmm := Kbb (ts/uu/vv
+            # copied onto BOTH time-level array slots) before stp_MLF is ever
+            # called, so Nbb==Nnn identically on this very first step; combined
+            # with stpmlf.F90:114-117 (l_1st_euler -> rDt=rn_Dt) this makes the
+            # leap-frog combine degenerate exactly to forward-Euler. The
+            # rn2b/Burchard-shear consumers inside _step_impl (nemo_before N²,
+            # nemo_burchard shear production) read entry_state.T_before/
+            # S_before/u_before/v_before unconditionally, so they need this same
+            # before==now seed on THIS call only -- a LOCAL copy, not written
+            # back onto ``state``/``naa`` below, which must keep the ``None``
+            # sentinel so this branch still fires (single-dt, no RA filter) and
+            # the real Nbb seed at :6656 still runs from the true pre-step now-
+            # fields. A bridged/restart state never reaches this branch (its
+            # u_before is already populated), so this seed only ever applies to
+            # a genuine from-rest / no-history state -- exactly NEMO's case.
+            _entry = state._replace(
+                u_before=state.u, v_before=state.v, T_before=state.T,
+                S_before=state.S, eta_before=state.eta,
+            )
             naa = self._step_impl(
-                state, dt, freshwater=freshwater,
+                _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds)
             naa = naa._replace(
