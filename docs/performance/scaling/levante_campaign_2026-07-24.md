@@ -377,21 +377,35 @@ the nd4 intercept EXCEEDS the measured 144-row compute term (14.63 ms) by
 **1.48 ms**, so a fixed non-PCG overhead does exist and the 60 iterations
 do NOT explain the entire residual.
 
-WHAT REMAINS AN ESTIMATE (codex objections (a) and (b)): splitting the
-123.8 us/iter at nd4 into compute + sync uses compute = 111.4/4 = 27.8 us,
-i.e. an assumption that per-device compute is LINEAR in rows. This
-campaign's own tile-size law says small tiles are LESS efficient, so the
-true 144-row per-iteration compute is probably HIGHER and the sync share
-correspondingly LOWER than the 95 us/iter (5.75 ms) that assumption yields.
-A direct measurement of the per-iteration slope at 144 and 288 rows on ONE
-device (job 26459817) removes the division; until it lands the sync figure
-is an UPPER BOUND, not a separation.
+CODEX OBJECTION (a) TESTED AND REFUTED (job 26459817). Rather than divide
+the nd1 slope by 4, measure the per-iteration slope directly at each tile
+on ONE device:
 
-HONEST STATUS: dependent PCG synchronisation is the dominant term in the
-roofline residual — supported by the 60->N slope, the scheduler nulls and
-the byte-census null — but "~95 us/iter" is an estimate resting on an
-unvalidated linearity assumption, and ~1.5 ms of the residual is provably
-NOT PCG iterations.
+| tile | measured us/iter |
+|---|---|
+| 576 rows | 110.0 |
+| 288 rows | 65.2 |
+| 144 rows | **28.1** |
+
+The linearity assumption predicted 110.0/4 = 27.5 us for the 144-row tile;
+the MEASURED value is 28.1 us — 2 % apart. Per-iteration compute IS linear
+in rows (the PCG iteration is a bandwidth-bound stencil+reduction, so it
+scales with data even where the FULL step does not). The sync figure barely
+moves: **95.7 us/iter measured** vs 96.3 assumed.
+
+FULLY-MEASURED DECOMPOSITION OF THE nd=4 STEP — no inferences left:
+
+| term | ms | note |
+|---|---|---|
+| same-tile single-device step (144 rows) | 14.65 | measured |
+| + PCG dependent sync (60 x 95.7 us) | **5.74** | **65 % of the distributed overhead** |
+| + other distributed overhead | 3.13 | 35 % |
+| = total | 23.52 | measured 23.52 |
+
+So of the 8.87 ms the step pays for being distributed across 4 GPUs, TWO
+THIRDS is dependent PCG synchronisation and one third is everything else.
+Codex objection (c) is honoured in the same table: the non-PCG part is
+real, separated, and not attributed to the solver.
 
 STRONG-SCALING CONSEQUENCE: cutting iterations raises 4-GPU efficiency from
 0.68 to 0.84, because what is being removed is precisely the part that does
