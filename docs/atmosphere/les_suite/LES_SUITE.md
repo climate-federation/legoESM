@@ -486,7 +486,18 @@ sub-σ_LES.
      faster free-run, AD-tractable) unblocked the whole compute wall — Q2 full 9×5 grid
      (incl. clubb@nlev=24), the θ-consistent verdict, σ_LES(SBL), SBL tuning, Q3, and the
      D4 AD-vs-DF run all landed. Q1/Q2/Q3/D4/D7 are DONE for the CBL/sheared/SBL regimes.
-   - **REMAINING — MOIST regimes (the one un-done deliverable), a fresh-session build.**
+   - **REMAINING — MOIST regimes: BLOCKED on external forcing data (2026-07-24).** The moist
+     LES emission (`run_bomex_les.py`/`run_dycoms_les.py`) requires the third-party gSAM
+     `CASES/BOMEX` + `CASES/DYCOMS_RF01` decks (Khairoutdinov SAM input: snd/lsf/sfc),
+     which are NOT bundled in the repo (correct — third-party) and are NOT present on this
+     system: `fetch_les_forcing.py --only BOMEX` → "Could not find a gSAM checkout";
+     `LEGOESM_GSAM_ROOT` is unset and neither autodetect path exists; the fetcher only
+     COPIES from a local gSAM checkout (no download). **⇒ the moist LES artifacts cannot be
+     produced in this environment** — the user must provide a gSAM checkout via
+     `LEGOESM_GSAM_ROOT=<dir containing CASES/>` (or `--gsam-root`), then
+     `python scripts/data/fetch_les_forcing.py --only BOMEX DYCOMSII`. Once the forcing is
+     available, the code path below is the build (a fresh-session task).
+   - **MOIST build plan (once forcing is available).**
      Foundations EXIST: the moist LES core `dynamics/les/spectral_les_moist.py` (moist
      diagnostics, positive-definite moisture conservation, Sundqvist/SBK89 diagnostic
      condensation) + standalone `run_bomex_les.py`/`run_dycoms_les.py`, and the registry

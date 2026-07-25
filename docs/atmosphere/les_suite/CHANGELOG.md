@@ -115,6 +115,17 @@ is the fix.
   - **20 `72d7c278e`** — **D4 bonus RUN** (AD≈DF, gaps ≤0.009 ⇒ closures gradient-calibratable) + this condense.
   - **MILESTONE: Q1/Q2/Q3/D4/D7 all DONE for the dry regimes (CBL/sheared/SBL). Remaining: moist (BOMEX/DYCOMS) + D9 cloud.**
 
+- **Iter 21 — MOIST regimes BLOCKED on external forcing data; D4 9/9 confirmed.** clubb's
+  78-param AD finished (df=0.2308/ad=0.2309, gap 0.0001) → D4 complete 9/9, all AD≈DF.
+  Investigated the last deliverable (moist BOMEX/DYCOMS): it is BLOCKED on the third-party
+  gSAM `CASES/` forcing decks, which are NOT in the repo and NOT on this system
+  (`fetch_les_forcing --only BOMEX` → "Could not find a gSAM checkout"; `LEGOESM_GSAM_ROOT`
+  unset; the fetcher only copies from a local checkout, no download). The moist LES CANNOT
+  be emitted here — the user must supply a gSAM checkout (`LEGOESM_GSAM_ROOT=<dir with
+  CASES/>`). Documented in §8 with the build plan for when the forcing is available.
+  **⇒ every deliverable PRODUCIBLE in this environment is DONE (dry-regime Q1/Q2/Q3/D4/D7);
+  the moist regime is externally blocked, not incomplete-by-effort.**
+
 **NEXT:** (1) emit the SBL SGS spread + tune the closures on it → Q3 inter-regime spread +
 Q2 per-regime (SBL vs CBL). (2) the θ-consistent D7 metric. (3) AD scan-rollout for
 full-resolution AD tuning. (4) MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme.
