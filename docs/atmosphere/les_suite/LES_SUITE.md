@@ -402,13 +402,23 @@ tuned coefficients CBL-vs-SBL.
      {df,ad,both}` (the AD-vs-DF comparison). Traced-leaf params reuse one compiled grad
      (vs DF's per-candidate recompile); caveat — the Python step-loop UNROLLS under
      jax.grad, so full-resolution AD awaits a `lax.scan` rollout.
-   - **STABLE (SBL) regime DONE**: `run_les_suite` wires `dry_stable` via `_build_sbl`
-     (GABLS1 stratified IC) + `_make_emit_step` (Rayleigh sponge + re-projection). GPU
-     0.3 h validation runs stably (stratified, surface-dragged, cooled, finite; the
-     equilibrium jet needs the 4 h run). This is the 2nd regime → Q3 once tuned.
-   - Remaining: emit the SBL 4 h SGS spread + tune → Q3 inter-regime spread; the MOIST
-     (BOMEX/DYCOMS) IC builders + D9 cloud scheme; the AD scan-rollout (full-res perf);
-     the θ-consistent D7 metric; the 2×-resolution σ_LES runs.
+   - **STABLE (SBL) regime DONE + 4 h VALIDATED** (§7.2): `run_les_suite` wires
+     `dry_stable` via `_build_sbl` (GABLS1 stratified IC) + `_make_emit_step` (Rayleigh
+     sponge + re-projection). The 4 h vreman run (144k steps) reaches a physical stable
+     equilibrium — stratified (Δθ=+3.36 K), surface-dragged (2.04 m/s), Ekman spiral, no
+     blow-up; the super-geostrophic jet is emerging but weak at 4 h (+0.05 m/s @ ~170 m;
+     peaks ~9 h). A valid Q3 tuning target. 2nd regime → Q3 once tuned.
+   - **θ-consistent D7 metric DONE (codex-CLEAN)**: `theta_significance.py` re-scores each
+     tuned closure for its θ-only RMSE and gates the per-flux margin on σ_LES(θ)≈0.0074 (the
+     robust θ floor) vs the wind-dominated σ_LES(combined)=0.319. Self-check is a HARD GATE
+     (untrusted re-scores excluded + reported). Validated end-to-end on real data (1-closure
+     smoke: self-check exact; v/Ekman dominates the combined). The full ranked verdict RUN is
+     compute-bound (~5 h for 27 closures) → a quiet-node step.
+   - Remaining (all COMPUTE runs; machinery complete): finish the Q2 flux grid + the SBL
+     SGS spread (emitting) → σ_LES(SBL) → SBL tuning → Q3 inter-regime spread; the θ-verdict
+     run; the D4 `--method both` AD-vs-DF run; `clubb` tuning at nlev=24 (memory headroom);
+     the MOIST (BOMEX/DYCOMS) IC builders + D9 cloud scheme; the AD scan-rollout (full-res
+     perf); the 2×-resolution σ_LES runs.
    See `CHANGELOG.md`.
 
 Each code step follows CLAUDE.md: pre-impl grep, a direct unit test per new `.py`, and — for
