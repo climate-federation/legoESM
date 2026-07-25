@@ -87,6 +87,60 @@ class TestThresholdPhysics:
         assert MorrisonConfig().hom_freeze_T_max <= 240.0
 
 
+class TestPipelineReachability:
+    """The applier being correct is NOT enough -- the LANES must call it.
+    ``_resolve_microphysics`` nested the call inside a hard-saturation-override
+    guard whose two scalars both default to None, so the flag was SILENTLY
+    INERT on the FV lane: the helper tests above all passed while no FV run
+    could ever enable the physics."""
+
+    def _fv(self, **kw):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        cfg = ExperimentConfig(microphysics="morrison", **kw)
+        _fn, micro = _resolve_microphysics(cfg)
+        return micro
+
+    def test_fv_lane_threads_the_flag_at_default_settings(self):
+        got = self._fv(homogeneous_ice_nucleation=True)
+        assert got.homogeneous_ice_nucleation is True, (
+            "flag lost between ExperimentConfig and MorrisonConfig on the FV "
+            "lane (the hard-sat-override guard swallowed it)")
+
+    def test_fv_lane_default_off(self):
+        assert self._fv().homogeneous_ice_nucleation is False
+
+    def test_fv_lane_still_threads_the_hard_sat_overrides(self):
+        got = self._fv(homogeneous_ice_nucleation=True,
+                       hard_saturation_adjustment=True,
+                       hard_sat_adjust_threshold=1.05)
+        assert got.homogeneous_ice_nucleation is True
+        assert got.hard_sat_adjust_threshold == 1.05
+
+
+class TestValidateStrict:
+    """Only MorrisonConfig carries the field, and microphysics='none'
+    early-returns before either lane's applier -- so a bad combination must be
+    refused at CONFIG time, not silently ignored (or raised deep in a run)."""
+
+    def _cfg(self, micro):
+        from legoesm.driver.config import ExperimentConfig
+        return ExperimentConfig(microphysics=micro,
+                                homogeneous_ice_nucleation=True)
+
+    def test_morrison_is_accepted(self):
+        self._cfg("morrison").validate_strict()
+
+    @pytest.mark.parametrize("micro", ["kessler", "thompson", "none"])
+    def test_non_morrison_is_refused(self, micro):
+        with pytest.raises(Exception, match="homogeneous_ice_nucleation"):
+            self._cfg(micro).validate_strict()
+
+    def test_default_off_accepts_any_scheme(self):
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(microphysics="kessler").validate_strict()
+
+
 def test_cli_and_config_round_trip():
     from scripts.run.run_amip import (
         _postprocess_args, build_arg_parser, build_config_from_args,
@@ -107,29 +161,35 @@ def test_cli_and_config_round_trip():
 def test_scheme_actually_consumes_supersaturation():
     """End-to-end on the leaf: at cirrus conditions ABOVE the threshold the
     flag must produce a vapour sink the off-state lacks.  Without this the
-    wiring could be inert and every other test would still pass."""
+    wiring could be inert and every other test would still pass.
+
+    NOTE this previously called ``morrison_microphysics`` with a keyword form
+    that does not exist and SKIPPED on the resulting TypeError, i.e. the
+    commit's physics was untested.  The real signature is positional:
+    ``(T, q_v, HydrometeorState, p_full, p_half, rho, dz, dt, config)``.
+    The full leaf battery (thresholds, number budget, boundedness, multi-step
+    relaxation, conservation, AD) lives in
+    ``test_homogeneous_ice_nucleation_leaf.py``.
+    """
     from legoesm.atmosphere.physics.microphysics.morrison import (
         morrison_microphysics,
     )
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
     from legoesm.thermo import saturation_mixing_ratio_ice
 
-    ncol, nlev = 1, 1
-    T = jnp.full((ncol, nlev), 220.0)          # cirrus, below the cold gate
-    p = jnp.full((ncol, nlev), 20000.0)        # 200 hPa
+    T = jnp.full((1, 1), 220.0)                # cirrus, below the cold gate
+    p = jnp.full((1, 1), 20000.0)              # 200 hPa
     q_v = 2.5 * saturation_mixing_ratio_ice(T, p)   # RH_ice 250% >> S_hom
-    zeros = jnp.zeros((ncol, nlev))
-    rho = p / (constants.R_d * T)
-    common = dict(q_c=zeros, q_r=zeros, q_i=zeros, q_s=zeros, q_g=zeros,
-                  N_c=zeros, N_r=zeros, N_i=zeros)
+    z = jnp.zeros((1, 1))
+    hm = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
+                          N_c=z, N_r=z, N_i=z)
     out = {}
     for label, flag in (("off", False), ("on", True)):
         cfg = MorrisonConfig()._replace(homogeneous_ice_nucleation=flag)
-        try:
-            out[label] = morrison_microphysics(
-                T=T, q_v=q_v, p=p, rho=rho, dt=75.0, config=cfg, **common)
-        except TypeError:
-            pytest.skip("morrison_microphysics signature differs here; the "
-                        "leaf physics is covered by the scheme's own tests")
+        out[label] = morrison_microphysics(
+            T, q_v, hm, p, jnp.full((1, 2), 20000.0),
+            p / (constants.R_d * T), jnp.full((1, 1), 400.0), 240.0, cfg)
     dqv_off = float(jnp.sum(out["off"].dq_v_dt))
     dqv_on = float(jnp.sum(out["on"].dq_v_dt))
-    assert dqv_on < dqv_off, (dqv_off, dqv_on)
+    assert dqv_off < 0.0                       # Cooper seed mass alone
+    assert dqv_on < 2.0 * dqv_off, (dqv_off, dqv_on)

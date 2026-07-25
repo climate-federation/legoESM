@@ -1986,6 +1986,20 @@ class ExperimentConfig(NamedTuple):
                     "ice number N_i from Morrison's nucleation mass; "
                     f"microphysics={self.microphysics!r} has no such reservoir)."
                 )
+        # Homogeneous (Koop/Ren-MacKenzie) cirrus nucleation is implemented ONLY
+        # in MorrisonConfig (no other scheme carries the field), and
+        # microphysics="none" early-returns in _resolve_microphysics / skips the
+        # MPAS applier entirely, so the flag would be silently inert there.
+        # Reject at CONFIG time rather than deep in the applier (same contract as
+        # hard_sat_ice_curve above and hard_saturation_adjustment below).
+        if (self.homogeneous_ice_nucleation
+                and self.microphysics != "morrison"):
+            errors.append(
+                "homogeneous_ice_nucleation=True requires "
+                "microphysics='morrison' (only MorrisonConfig implements the "
+                "Koop/Ren-MacKenzie cirrus nucleation); got microphysics="
+                f"{self.microphysics!r}."
+            )
         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
         # The float overrides only act when the boolean gate is on; bounds
         # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,

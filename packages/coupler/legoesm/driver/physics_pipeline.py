@@ -3210,9 +3210,17 @@ def _resolve_microphysics(config):
     # so the fail-loud "scheme lacks the field" contract is written once
     # (mirrors the model_driver MPAS call site); validate_strict has already
     # refused an override without the boolean gate.
+    # ``homogeneous_ice_nucleation`` shares this call but is INDEPENDENT of the
+    # hard-sat overrides: both of those default to None, so gating the call on
+    # them alone made the cirrus-nucleation flag SILENTLY INERT on this lane
+    # unless the user happened to also pass --hard-sat-adjust-threshold /
+    # --hard-sat-max-heating-k (measured: morrison.homogeneous_ice_nucleation
+    # stayed False for ExperimentConfig(homogeneous_ice_nucleation=True)).
+    # Include it in the guard so the flag reaches the scheme on its own.
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
-    if _hs_thr is not None or _hs_cap is not None:
+    _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
+    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
         from legoesm.atmosphere.physics.microphysics.config import (
             apply_microphysics_experiment_flags,
         )
@@ -3220,8 +3228,7 @@ def _resolve_microphysics(config):
             micro_config, scheme,
             hard_sat_adjust_threshold=_hs_thr,
             hard_sat_max_heating_K=_hs_cap,
-            homogeneous_ice_nucleation=getattr(
-                config, "homogeneous_ice_nucleation", False),
+            homogeneous_ice_nucleation=_hom_nuc,
         )
 
     if scheme == "ml_emulator":
