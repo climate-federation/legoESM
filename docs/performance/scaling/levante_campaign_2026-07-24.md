@@ -785,17 +785,20 @@ revisited.
    equal-shard sharding would need padding to the max band, which returns
    exactly the imbalance being removed.
 
-   *Expensive half — gather/scatter compaction* (pack wet cells, ~0.71 wet
-   fraction on real bathymetry → ideal ceiling ~1.4x, NOT the audit's
-   "~2x", which assumed ~40% land IN THE PARTITION): converts the
-   structured grid's direct-sliced stencils into indirect gathers. The
-   campaign's own MPAS lane is the existing evidence on what
-   indirect-addressed stencils cost on GPU (the ocean-MPAS profiler's
-   stated aim: indirect-addressing gather bound). Ceiling 1.4x minus an
-   unmeasured gather penalty of plausibly comparable size = NOT worth
-   building on spec. IF ever pursued: a ~30-line microbench (slice-stencil
-   vs gather-stencil Laplacian at LL576 tile sizes on one A100) settles
-   the sign BEFORE any model code is written.
+   *Expensive half — gather/scatter compaction: MEASURED, and the audit's
+   "~2x" is REFUTED* (`bench_gather_vs_slice_stencil.py`, job 26479884,
+   A100 f32, correctness self-checked). Per-cell gather penalty for a
+   5-point Laplacian vs the dense sliced version: **1.40-1.77x**, so
+   compaction wins only when wet_fraction < 0.56-0.72 (size-dependent).
+   At the REAL global-ocean wet fraction (~0.71), packed-gather is a net
+   LOSS on the full LL576 grid (ratio 1.16) and a wash at the nd4 tile
+   (1.03). SCOPE: this prices the WORST case — a pure horizontal stencil
+   op. Column-local work (vmix, EOS) carries no gather penalty and would
+   scale with wet cells alone (ideal 1.41x at 0.71 wet), so a real step
+   lands between 0.86x and 1.41x depending on its stencil-vs-column mix —
+   far from the audit's 2x, which assumed the ideal with zero indirection
+   cost. VERDICT: do not build compaction for the global latlon ocean;
+   revisit only for a configuration that is genuinely <~55% wet.
 5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
    ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
    quantifies the prize.

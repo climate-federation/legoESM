@@ -116,9 +116,12 @@ def main() -> int:
     for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         interior &= idx_of[(wet[:, 0] + di) % args.n_lat,
                            (wet[:, 1] + dj) % args.n_lon] >= 0
+    # atol matters: the Laplacian of O(1) noise cancels toward zero, where
+    # pure-rtol comparison of two f32 summation orders always fails.
     np.testing.assert_allclose(
         lap_g[interior], lap_d[wet[interior, 0], wet[interior, 1]],
-        rtol=1e-6 if args.dtype == "float32" else 1e-12)
+        rtol=1e-5 if args.dtype == "float32" else 1e-12,
+        atol=1e-5 if args.dtype == "float32" else 1e-13)
 
     t_slice = _time_ms(_laplacian_slice, f, args.n_warmup, args.n_iters,
                        args.n_reps)
