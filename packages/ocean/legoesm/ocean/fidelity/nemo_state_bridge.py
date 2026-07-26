@@ -201,6 +201,63 @@ def bridge_nemo_to_legoesm(
     )
 
 
+def effective_vertical_scale_factors(grid, tmask):
+    """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
+
+    NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
+    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO they agree
+    in the upper ocean and diverge below ~2000 m by up to 12.9%: ``e3t_1d`` sums
+    to 4506.375 m while ``e3t_0`` is stretched so the deepest wet column is
+    exactly the 4000 m domain depth. Building legoESM's grid from ``e3t_1d`` put
+    its abyssal layers 7-13% off and its water columns ~22 m too deep --
+    precisely where #1226's ACC deficit is sourced (80% of the missing thermal
+    wind below 2000 m), and thermal wind integrates density x THICKNESS.
+
+    Falls back to the 1-D ladder when the mesh_mask predates ``e3t_0`` (GYRE,
+    ``key_linssh``, where the two coincide -- which is why this went unnoticed).
+
+    Raises
+    ------
+    ValueError
+        If ``e3t_0`` varies horizontally over wet cells, i.e. the config has
+        PARTIAL CELLS (``ln_zps``), which this bridge does not support. Silently
+        averaging a thinned bottom cell into a full one would yield a
+        plausible-looking but wrong bathymetry.
+    """
+    e3t = np.asarray(grid.e3t_1d).ravel().astype(np.float64)
+    t_depth = np.asarray(grid.gdept_1d).ravel().astype(np.float64)
+    e3t3 = getattr(grid, "e3t_0", None)
+    if e3t3 is None:
+        return e3t, t_depth, "e3t_1d"
+    e3t3 = np.asarray(e3t3)
+    nlev = e3t3.shape[-1]
+    spread = np.zeros(nlev)
+    for k in range(nlev):
+        w = tmask[:, :, k]
+        if w.any():
+            v = e3t3[:, :, k][w]
+            spread[k] = float(v.max() - v.min())
+    if spread.max() > 1.0e-6:
+        raise ValueError(
+            f"mesh_mask e3t_0 varies horizontally (max spread {spread.max():.3e} "
+            "m over wet cells): this is a PARTIAL-CELL (ln_zps) grid, which "
+            "bridge_nemo_to_legoesm_topo does not support."
+        )
+    lev_any = tmask.any(axis=(0, 1))
+    out_e3t = e3t.copy()
+    for k in range(nlev):
+        if lev_any[k]:
+            out_e3t[k] = float(e3t3[:, :, k][tmask[:, :, k]].mean())
+    gd3 = getattr(grid, "gdept_0", None)
+    out_td = t_depth.copy()
+    if gd3 is not None:
+        gd3 = np.asarray(gd3)
+        for k in range(nlev):
+            if lev_any[k]:
+                out_td[k] = float(gd3[:, :, k][tmask[:, :, k]].mean())
+    return out_e3t, out_td, "e3t_0"
+
+
 def bridge_nemo_to_legoesm_topo(
     grid: NemoGrid,
     state: NemoState,
@@ -352,12 +409,16 @@ def bridge_nemo_to_legoesm_topo(
             "full-step-z. NB partial cells (ln_zps) are NOT detectable from the "
             "mask — the caller must guarantee ln_zps=F."
         )
+    # NEMO integrates with e3t_0, not the 1-D ladder e3t_1d -- see
+    # effective_vertical_scale_factors for why this matters (#1226).
+    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(grid, tmask)
+
     depth_cum = np.cumsum(e3t_1d)                        # bottom-interface depth
     H_bathy = np.where(
         k_bot > 0, depth_cum[np.clip(k_bot - 1, 0, len(e3t_1d) - 1)], 0.0)
 
     z_coord = create_z_star_from_thicknesses(
-        e3t_1d, t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
+        e3t_1d, t_depth_ref_m=_t_depth,
     )
 
     # NEMO ln_zco FULL-STEP-z: fixed reference levels everywhere + a

@@ -52,6 +52,16 @@ class NemoGrid(NamedTuple):
     # V-point latitude (north cell faces) [deg] (n_lat, n_lon) — only needed by
     # the Mercator/topography bridge for exact meridional cell faces; optional so
     # existing flat-bottom NemoGrid constructors (GYRE) stay valid.
+    # NEMO's ACTUAL 3-D vertical scale factors (key_vco_3d). NEMO integrates
+    # with THESE, not with the 1-D reference ladder above: for DINO, e3t_1d is
+    # the unstretched analytic ladder (sums to 4506.375 m) while e3t_0 is
+    # stretched so the deepest wet column is exactly the domain depth
+    # (4000.000 m). They agree in the upper ocean and diverge below ~2000 m by
+    # up to 12.9% (#1226). Optional so existing GYRE constructors stay valid --
+    # GYRE is key_linssh where the two coincide, which is why this went
+    # unnoticed.
+    e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    gdept_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
     gphiv: np.ndarray | None = None
     # Partial-periodic seam-wall profile, shape ``(n_lat,)``, 1.0 = the
     # zonal periodic-seam u-face is WALLED at that latitude row, 0.0 =
@@ -148,6 +158,8 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         ff_t=h2("ff_t"), ff_f=h2("ff_f"),
         e3t_1d=v1("e3t_1d"), gdept_1d=v1("gdept_1d"), gdepw_1d=v1("gdepw_1d"),
         tmask=m3("tmask"), umask=m3("umask"), vmask=m3("vmask"),
+        e3t_0=(m3("e3t_0") if "e3t_0" in m else None),
+        gdept_0=(m3("gdept_0") if "gdept_0" in m else None),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
         seam_wall_rows=_seam_wall,
     )
