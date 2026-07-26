@@ -95,6 +95,73 @@ def config():
 
 
 # ---------------------------------------------------------------------------
+# 0. Vertical-mixing (NEMO zdf) tracer tendency — the field the NEMO
+#    tendency-match compares against ``ttrd_zdf``
+# ---------------------------------------------------------------------------
+
+
+def test_zdf_tendency_zero_without_vertical_mixing(state, grid, z_coord, config):
+    """scheme="none" (the Veros-ACC probe default) leaves dT_zdf/dS_zdf exactly
+    zero, so the existing tier-2 comparisons are unchanged by the new field."""
+    result = probe_latlon_cgrid(state, grid, z_coord, config)
+    assert jnp.all(result.dT_zdf == 0.0)
+    assert jnp.all(result.dS_zdf == 0.0)
+    assert result.dT_zdf.shape == state.T.data.shape
+    assert result.dS_zdf.shape == state.S.data.shape
+
+
+def test_zdf_tendency_active_with_constant_closure(state, grid, z_coord):
+    """With an ACTIVE vertical-mixing closure the probe returns a finite,
+    non-trivial dT_zdf — the legoESM analogue of NEMO ``ttrd_zdf`` — and it
+    equals the shared implicit-diffusion increment (T_new-T_old)/dt, i.e. the
+    SAME helper the production solve uses (no re-derived numerics)."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing import (
+        build_dz_half, compute_vertical_K_profiles,
+        implicit_vertical_diffusion_ocean,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig, ConstantVerticalMixingConfig,
+    )
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+
+    # DISTINGUISHABLE K_v vs A_v: if compute_vertical_K_profiles' (K_v, A_v)
+    # return order were swapped, the probe would diffuse tracers with the
+    # VISCOSITY and the reconstruction below would not match (codex LOW).
+    vm = VerticalMixingConfig(
+        scheme="constant",
+        constant=ConstantVerticalMixingConfig(K_v=1.0e-3, A_v=7.0e-2))
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, A_v=1.0e-3, bottom_drag_r=0.0,
+        implicit_vertical_mixing=False,
+        physics=OceanPhysicsConfig(vertical_mixing=vm),
+    )
+    dt_tr = 300.0
+    result = probe_latlon_cgrid(state, grid, z_coord, cfg, dt=dt_tr)
+    assert jnp.all(jnp.isfinite(result.dT_zdf))
+    # non-trivial: the initial state has vertical structure -> mixing acts
+    assert float(jnp.max(jnp.abs(result.dT_zdf))) > 0.0
+    # matches the shared-helper construction exactly — for BOTH T and S, and
+    # with K_v (1e-3) != A_v (7e-2) a swapped return order would fail here.
+    K_v, A_v = compute_vertical_K_profiles(state, z_coord, None, cfg.physics)
+    assert float(jnp.max(K_v)) == pytest.approx(1.0e-3, rel=1e-6), (
+        "compute_vertical_K_profiles must return (K_v, A_v) in that order")
+    assert float(jnp.max(A_v)) == pytest.approx(7.0e-2, rel=1e-6)
+    J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+    dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
+    dz_half = build_dz_half(dz_cell)
+    mask3 = state.land_mask.data[:, :, None]
+    T_new = implicit_vertical_diffusion_ocean(
+        state.T.data, K_v, dz_cell, dz_half, dt_tr)
+    S_new = implicit_vertical_diffusion_ocean(
+        state.S.data, K_v, dz_cell, dz_half, dt_tr)
+    want_T = (T_new - state.T.data) / dt_tr * mask3
+    want_S = (S_new - state.S.data) / dt_tr * mask3
+    assert jnp.allclose(result.dT_zdf, want_T, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(result.dS_zdf, want_S, rtol=1e-10, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
 # 1. End-to-end probe runs and returns finite arrays
 # ---------------------------------------------------------------------------
 

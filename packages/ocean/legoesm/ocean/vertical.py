@@ -822,8 +822,14 @@ def compute_ocean_jacobian(
             min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
             water_col = jnp.maximum(water_col, min_col)
     if isinstance(z_coord, OceanPartialCellCoordinate):
+        # Fully-DRY columns (H_bathy == 0, e.g. the DINO land-wall continent
+        # on the true 199x52 frame) get the inert reference J = 1, not
+        # eta/1e-10: J -> 0 there makes every downstream 1/(dz*J) a 0/0 NaN
+        # (N^2 -> Treguier/EKE chain, #1226 full-frame). All cells of a dry
+        # column are masked, so the value is physically inert; wet columns
+        # (H_bathy > 0) are bit-identical.
         H_safe = jnp.maximum(H_bathy, 1.0e-10)
-        return water_col / H_safe
+        return jnp.where(H_bathy > 0.0, water_col / H_safe, 1.0)
     return water_col / z_coord.H_max
 
 

@@ -195,7 +195,9 @@ class TestDispatchAndWiring:
         mc2, _ = dino_lat_lon_model_config(g, treg, physics=True)
         assert mc2.gm_redi.visbeck.enabled is False
         assert mc2.gm_redi.treguier.enabled is True
-        assert mc2.gm_redi.treguier.aei0 == pytest.approx(3000.0)
+        # DINOConfig.treguier_aei0 default = 0.5*rn_Ue*rn_Le (ldftra.F90:332
+        # explicit 1/2 factor) = 1500, not the un-halved rn_Ue*rn_Le = 3000.
+        assert mc2.gm_redi.treguier.aei0 == pytest.approx(1500.0)
 
     def test_dino_unknown_scheme_raises(self):
         from legoesm.ocean.experiments.dino import (

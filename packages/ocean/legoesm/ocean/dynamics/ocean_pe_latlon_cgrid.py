@@ -2941,6 +2941,91 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
+def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
+    """NEMO zdfdrg non-linear/log-layer bottom-drag rate at u/v faces,
+    PLUS the partial-cell bottom-level indicator mask at those faces.
+
+    Factored out of :func:`_bc_bottom_drag` (#1226) so the implicit
+    vertical-mixing stage (``ocean_model_latlon_cgrid._apply_implicit_vertical_mixing``,
+    ``zdf_drag_in_matrix``) can reuse the IDENTICAL NEMO ``rCdU_bot``-at-faces
+    transcription instead of re-deriving it — the two sites would otherwise
+    silently drift apart (CLAUDE.md "no duplicate numerics").
+
+    Transcribes zdfdrg.F90 zdf_drg_nonlin (rCdU_bot at t-points) + dynzdf.F90
+    "zCdu = 0.5*(rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj))" (t-point -> u/v face
+    2-point average).  Requires ``z_coord`` to be an
+    :class:`OceanPartialCellCoordinate` (DINO's ``masked_zco`` always is) —
+    the non-partial flat-bottom case is not needed by any drag-in-matrix
+    caller today and is intentionally NOT covered here (``_bc_bottom_drag``
+    keeps its own flat-bottom ``[..., -1]`` branch for that case).
+
+    Returns
+    -------
+    r_eff_u, r_eff_v : jax.Array, shape (n_lat, n_lon+1) / (n_lat+1, n_lon)
+        NEMO's ``+Cd·|U|`` bottom-drag rate [m/s] at u/v faces (2-D, no
+        level axis — the caller broadcasts/selects the bottom level).
+    is_bot_u_3d, is_bot_v_3d : jax.Array, shape (..., nlev)
+        1.0 at each face-column's partial-cell bottom level, 0 elsewhere.
+    """
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "nemo_bottom_drag_rate_faces requires an OceanPartialCellCoordinate "
+            "(the flat-bottom case is not covered by this helper)."
+        )
+    _scheme = validate_bottom_drag_scheme(
+        str(getattr(config.bottom_drag, "bottom_drag_scheme", "legacy")))
+    if _scheme == "legacy":
+        raise ValueError(
+            "nemo_bottom_drag_rate_faces requires a NEMO bottom_drag_scheme "
+            "('nemo_quadratic' or 'nemo_loglayer'), got 'legacy'."
+        )
+    if h_k is None:
+        raise ValueError(
+            "nemo_bottom_drag_rate_faces requires the cell-centre layer "
+            "thickness h_k (NEMO e3t).")
+    u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
+    v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    _bl = jnp.maximum(z_coord.bottom_level, 0)   # -1 (land) -> 0
+    _bl_idx = _bl[..., jnp.newaxis]
+    u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
+    v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
+    h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+    r_t = nemo_effective_bottom_drag_r(
+        u_bot, v_bot, h_bot,
+        scheme=_scheme,
+        cd0=float(config.bottom_drag.bottom_drag_cd0),
+        cd_max=float(config.bottom_drag.bottom_drag_cdmax),
+        z0=float(config.bottom_drag.bottom_drag_z0),
+        ke0=float(config.bottom_drag.bottom_drag_ke0),
+        von_karman=constants.kappa_von_karman,
+    )
+    # t-point -> face 2-point averages (NEMO dynzdf:
+    # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are lon-periodic
+    # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring
+    # the bot_lev_u construction below); v walls take the adjacent
+    # interior value (v=0 there, so the coefficient is inert).
+    r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
+    r_eff_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
+    r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
+    r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+
+    # Partial-cell bottom-level indicator at u/v faces (face's bottom level
+    # is the SHALLOWER of the two adjacent columns — see _bc_bottom_drag).
+    n_lev = u.shape[-1]
+    level_idx = jnp.arange(n_lev)
+    bot_lev_cell = z_coord.bottom_level
+    bot_lev_u_inner = jnp.minimum(jnp.roll(bot_lev_cell, 1, axis=1), bot_lev_cell)
+    bot_lev_u = jnp.concatenate(
+        [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1)
+    bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
+    bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0)
+    is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                    == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
+    is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                    == bot_lev_v[..., jnp.newaxis]).astype(v.dtype)
+    return r_eff_u, r_eff_v, is_bot_u_3d, is_bot_v_3d
+
+
 def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
                     h_k=None):
     """Bottom drag: linear or quadratic-with-floor (DRAG_BG_VEL), NEMO
@@ -2973,37 +3058,30 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
                 raise ValueError(
                     "bottom_drag_scheme='nemo_*' requires the cell-centre "
                     "layer thickness h_k to be passed to _bc_bottom_drag.")
-            u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
-            v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
             if isinstance(z_coord, OceanPartialCellCoordinate):
-                _bl = jnp.maximum(z_coord.bottom_level, 0)   # -1 (land) -> 0
-                _bl_idx = _bl[..., jnp.newaxis]
-                u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
-                v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
-                h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+                # Shared NEMO transcription (#1226 dedup) — see
+                # nemo_bottom_drag_rate_faces docstring.
+                r_u, r_v, _, _ = nemo_bottom_drag_rate_faces(
+                    u, v, h_k, z_coord, config, grid)
             else:
+                u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
+                v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
                 u_bot = u_c[..., -1]
                 v_bot = v_c[..., -1]
                 h_bot = h_k[..., -1]
-            r_t = nemo_effective_bottom_drag_r(
-                u_bot, v_bot, h_bot,
-                scheme=_scheme,
-                cd0=float(config.bottom_drag.bottom_drag_cd0),
-                cd_max=float(config.bottom_drag.bottom_drag_cdmax),
-                z0=float(config.bottom_drag.bottom_drag_z0),
-                ke0=float(config.bottom_drag.bottom_drag_ke0),
-                von_karman=constants.kappa_von_karman,
-            )
-            # t-point -> face 2-point averages (NEMO dynzdf:
-            # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are
-            # lon-periodic (face l couples cells l-1, l; face n_lon
-            # repeats face 0, mirroring the bot_lev_u construction
-            # below); v walls take the adjacent interior value (v=0
-            # there, so the coefficient is inert).
-            r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
-            r_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
-            r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
-            r_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+                r_t = nemo_effective_bottom_drag_r(
+                    u_bot, v_bot, h_bot,
+                    scheme=_scheme,
+                    cd0=float(config.bottom_drag.bottom_drag_cd0),
+                    cd_max=float(config.bottom_drag.bottom_drag_cdmax),
+                    z0=float(config.bottom_drag.bottom_drag_z0),
+                    ke0=float(config.bottom_drag.bottom_drag_ke0),
+                    von_karman=constants.kappa_von_karman,
+                )
+                r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
+                r_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
+                r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
+                r_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
             # Broadcast over the level axis: the coefficient is a
             # bottom-speed property (NEMO applies it to the bottom cell;
             # the H_BBL>0 branch spreads the same stress over the K&E99
@@ -3940,9 +4018,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + _bs_v
 
     # --- Bottom drag. ---
-    du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v = _bc_bottom_drag(
-        du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid, h_k=h_k,
-    )
+    # Single-owner guard (#1226 zdf_drag_in_matrix): when the implicit
+    # vertical-mixing stage adds NEMO's semi-implicit bottom friction
+    # directly into the tridiagonal diagonal (dynzdf.F90 ln_drgimp), this
+    # EXPLICIT-RHS application (NEMO's zdf_drg_exp, the ln_drgimp=.false.
+    # path) must be SKIPPED — applying both would double the intended drag.
+    # Default False -> this call is unconditional -> BIT-IDENTICAL.
+    if getattr(config, "zdf_drag_in_matrix", False):
+        diag_botdrag_u = jnp.zeros_like(du_dt)
+        diag_botdrag_v = jnp.zeros_like(dv_dt)
+    else:
+        du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v = _bc_bottom_drag(
+            du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid, h_k=h_k,
+        )
 
     # --- Explicit background vertical viscosity (A_v). ---
     du_dt, dv_dt, diag_Av_vert_u, diag_Av_vert_v = _bc_explicit_vertical_viscosity(

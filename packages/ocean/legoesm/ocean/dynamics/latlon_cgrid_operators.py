@@ -4072,7 +4072,7 @@ def pv_flux_al81_partial_cell(
         q = neumann_fill_vertex(q, vtx_mask)
     elif q_boundary != "nemo_live":
         raise ValueError(
-            f"pv_flux_al81_partial_cell: unknown q_boundary={q_boundary!r} "
+            f"pv_flux_al81_partial_cell: unknown q_boundary variant {q_boundary!r} "
             "(expected 'neumann_fill' or 'nemo_live').")
 
     # --- 2. Mass fluxes at u/v faces -------------------------------

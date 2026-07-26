@@ -48,6 +48,12 @@ def main():
     ap.add_argument("--d-ext", type=float, default=None,
                     help="override the preset's external-mode filter "
                          "coefficient (seam-ringing discriminator)")
+    ap.add_argument("--dump-lattice-days", default=None,
+                    help="comma list of frame days at which to savez the "
+                         "raw six-face lattice states (delp/pt/u/v full "
+                         "halos) next to --out as <out>_lat_dayD.npz — "
+                         "feeds the corner-wedge sharp-state "
+                         "capture-compare (codex deficiency-r1 endgame)")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -191,6 +197,16 @@ def main():
                                                 d_ext=d_ext,
                                                 sw_cfg=sw_cfg)
         day = fr * args.frame_days
+        if args.dump_lattice_days and any(
+                abs(day - float(x)) < 1e-9
+                for x in args.dump_lattice_days.split(",")):
+            dump = {}
+            for t in range(6):
+                for k in ("delp", "pt", "u", "v"):
+                    dump[f"{k}_t{t + 1}"] = np.asarray(states[t][k])
+            dpath = args.out.replace(".npz", f"_lat_day{day:g}.npz")
+            np.savez_compressed(dpath, **dump)
+            print(f"day {day:g}: lattice dump {dpath}", flush=True)
         u_ll, v_ll = sample_uv(states)
         times.append(day)
         uf.append(u_ll)

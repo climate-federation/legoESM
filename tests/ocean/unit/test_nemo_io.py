@@ -76,3 +76,30 @@ def test_restart_without_rhd(tmp_path):
     _write_restart(p, with_rhd=False)
     s = read_nemo_restart(str(p), nn_hls=1)
     assert s.rhd is None
+
+
+class TestHalolessFiles:
+    """NEMO 4.2+/5.x files are compute-domain WITHOUT halos: nn_hls=0 must be
+    a no-op strip (#1226 root cause: stripping a phantom halo discarded the
+    DINO land-wall + ridge columns)."""
+
+    def test_strip_halo_2d_zero_is_noop(self):
+        import numpy as np
+        from legoesm.ocean.fidelity.nemo_io import _strip_halo_2d
+        a = np.arange(12.0).reshape(3, 4)
+        out = _strip_halo_2d(a, 0)
+        assert out.shape == (3, 4)
+        assert np.array_equal(out, a)
+
+    def test_to_latlon_lev_zero_keeps_domain(self):
+        import numpy as np
+        from legoesm.ocean.fidelity.nemo_io import _to_latlon_lev
+        a = np.arange(24.0).reshape(2, 3, 4)          # (z, y, x)
+        out = _to_latlon_lev(a, 0)
+        assert out.shape == (3, 4, 2)                  # (y, x, z), nothing cut
+
+    def test_negative_hls_rejected(self):
+        import pytest
+        from legoesm.ocean.fidelity.nemo_io import _check_hls
+        with pytest.raises(ValueError, match="nn_hls"):
+            _check_hls(-1)

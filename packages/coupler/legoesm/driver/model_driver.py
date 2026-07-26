@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     convection_config_for,
     build_physics_pipeline,
+    gwd_config_for,
     required_microphysics_tracer_slots,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
@@ -282,7 +283,8 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
 
 
 def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
-                                   hard_threshold, hard_max_heating_K):
+                                   hard_threshold, hard_max_heating_K,
+                                   ice_curve=False, q_i=None):
     """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
 
     Applies the reviewed hard-saturation-adjustment DRAIN
@@ -313,28 +315,107 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
     hard_threshold, hard_max_heating_K : float
         RH trigger and per-step latent-heating cap [K] from the scheme config.
 
+    ice_curve : bool, default False
+        Mixed-phase drain (TTL dehydration fix): gate + land on the
+        w(T)-blended liquid/ice saturation curve with the matching blended
+        latent heat (frozen at the pre-adjustment T — the SAME array the
+        drain's internal solve uses, so ``c_pd*T + L_eff(T0)*q_v`` is
+        conserved exactly), and route each cell's condensate by phase:
+        the liquid fraction w(T0) to ``q_c``, the ice fraction to ``q_i``
+        when that tracer exists (else everything to ``q_c`` — Morrison's
+        own freezing then handles the phase, documented approximation).
+    q_i : array or None
+        Cloud-ice tracer [kg/kg] (ncol, nlev) — the cold-cell condensate
+        recipient under ``ice_curve``.  Ignored when ``ice_curve`` is off.
+
     Returns
     -------
-    (T_new, q_v_new, q_c_new, dq) : tuple of arrays
+    (T_new, q_v_new, q_c_new, q_i_new, dq) : tuple of arrays
         Updated fields and the per-step condensed increment ``dq`` [kg/kg]
-        (>= 0), for diagnostics.  All inputs are returned unchanged (dq = 0) when
-        ``q_c is None`` -- total water is conserved.
+        (>= 0), for diagnostics.  ``q_i_new`` is None when no q_i was given.
+        All inputs are returned unchanged (dq = 0) when ``q_c is None`` --
+        total water is conserved.
     """
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
         hard_saturation_drain,
+        mixed_phase_l_over_cp,
+        mixed_phase_liquid_fraction,
     )
     if q_c is None:
         # No condensate reservoir -> cannot conserve total water by draining;
         # do nothing (the moist path always has q_c).
-        return T, q_v, None, jnp.zeros_like(q_v)
+        return T, q_v, None, q_i, jnp.zeros_like(q_v)
     p_full = p_s[:, None] * jnp.asarray(sigma_full)[None, :]
+    # The ice curve DEPOSITS to cloud ice; without a q_i reservoir it cannot do
+    # so, and heating with the blended (L_s-weighted) latent heat while binning
+    # the condensate as LIQUID q_c would inject (1-w)*L_f*dq of spurious energy.
+    # So degrade FULLY to the energy-exact liquid drain when q_i is absent (the
+    # rate AND the heating both liquid).  validate_strict forbids ice_curve
+    # without Morrison (q_i present), so this is a defensive fallback only.
+    _use_ice = bool(ice_curve) and (q_i is not None)
     rate = hard_saturation_drain(T, q_v, p_full, dt, hard_threshold,
-                                 hard_max_heating_K)
+                                 hard_max_heating_K, ice_curve=_use_ice)
     dq = rate * dt
-    T_new = T + (constants.L_v / constants.c_pd) * dq
+    if _use_ice:
+        # Heating with the SAME frozen-at-T0 blended latent heat the solve
+        # used; condensate split by the same w(T0) -> cloud water / cloud ice.
+        # (Landing q_c below the LIQUID curve at cold T would re-evaporate, so
+        # the ice fraction MUST go to q_i for the drain to stick; the caller
+        # seeds N_i for that ice mass.)
+        _l_cp = mixed_phase_l_over_cp(T).astype(T.dtype)
+        T_new = T + _l_cp * dq
+        w_liq = mixed_phase_liquid_fraction(T).astype(q_v.dtype)
+        q_c_new = q_c + w_liq * dq
+        q_i_new = q_i + (1.0 - w_liq) * dq
+    else:
+        # Liquid path (ice_curve off, or requested without a cloud-ice
+        # reservoir): condense to q_c with L_v -> c_pd*T + L_v*q_v exact.
+        T_new = T + (constants.L_v / constants.c_pd) * dq
+        q_c_new = q_c + dq
+        q_i_new = q_i
     q_v_new = q_v - dq
-    q_c_new = q_c + dq
-    return T_new, q_v_new, q_c_new, dq
+    return T_new, q_v_new, q_c_new, q_i_new, dq
+
+
+# Air-density floor for the Cooper ice-number/mass conversion, matching
+# Morrison's ``_RHO_FLOOR`` (module_mp_graupel density floor in divisions) so the
+# seed ceiling is Morrison-consistent at low density (without floors the p/(R_dT)
+# ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
+_ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
+
+
+def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
+    """Seed cloud-ice NUMBER [1/kg] for freshly deposited ice mass ``dq_i``.
+
+    A two-moment scheme (Morrison) needs a matching NUMBER for the deposited ice
+    or the new mass is ill-posed: M2005 diffusional growth self-gates as
+    ``EPSI ~ N_i^(2/3)`` (orphan ice with ``N_i = 0`` can neither grow nor
+    sublimate), and the fall-speed PSD slope ``lambda_i=(rho_ci pi N_i/q_i)^1/3``
+    is degenerate at ``N_i = 0`` (ice cannot sediment out).  Give each new
+    crystal the Morrison nucleation mass ``mi0 = 4/3 pi rho_ci r_nuc^3`` (mean
+    size = the nucleation radius), i.e. ``dN_i = dq_i / mi0`` -- the SAME
+    mass<->number closure Morrison's Cooper nucleation uses
+    (``dq_i_nuc = dN_i_nuc * mi0``).
+
+    The added number is CAPPED at Morrison's Cooper ice-number ceiling
+    ``N_i_nuc_max`` [1/m^3], converted to per-mass via
+    ``rho_air = p/(R_d T)`` floored at ``_ICE_SEED_RHO_FLOOR`` (0.1 kg/m^3) --
+    exactly Morrison's own Cooper target conversion
+    (``kc2 = min(...) / clip(rho, 0.1)``): a large (heating-cap-sized) deposit
+    then GROWS the crystals (bigger mean size)
+    rather than over-populating number -- an uncapped ``dq_i/mi0`` at the ~2 g/kg
+    cap seeds ~1e8 m^-3, ~300x the 5e5 m^-3 (500/L) ceiling, which would perturb
+    deposition and sedimentation.  Number is additive and carries no latent heat,
+    so this does not affect the water/energy budgets the drain already conserves.
+    ``rho_air`` uses dry ``p/(R_d T)``; Morrison's diagnostic uses moist/virtual-T
+    density, so above the floor this cap is marginally TIGHTER (~0.6%, i.e.
+    conservative -- fewer crystals) and at the low-density floor the two coincide.
+    """
+    rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
+    n_i_max_perkg = n_i_nuc_max / jnp.maximum(rho_air, _ICE_SEED_RHO_FLOOR)
+    d_n_raw = jnp.maximum(dq_i, 0.0) / jnp.maximum(ice_nuc_mass, 1.0e-30)
+    headroom = jnp.maximum(n_i_max_perkg - N_i, 0.0)   # 0 if already at ceiling
+    return N_i + jnp.minimum(d_n_raw, headroom)
 
 
 class ModelDriver:
@@ -931,7 +1012,9 @@ class ModelDriver:
             )
         else:
             from legoesm.grids.vertical import create_sigma_coordinate
-            self.sigma = create_sigma_coordinate(gc.nlev)
+            self.sigma = create_sigma_coordinate(
+                gc.nlev,
+                tropopause_refine=getattr(gc, "tropopause_refine", 1.0))
 
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord})")
@@ -4255,6 +4338,34 @@ class ModelDriver:
                 p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
+            # Vertical level POSITIONS travel with the state.  nlev alone no
+            # longer identifies the grid: a uniform-σ L30 and a
+            # tropopause-refined L30 (grid.tropopause_refine) have identical
+            # SHAPES, so the shape guard on load cannot tell them apart and
+            # would silently reinterpret every profile on the wrong levels.
+            # Same reasoning as ``physstate_meta_conv_scheme`` below.
+            # Stored as the (A, B) half-level pair, i.e. p_half = A·p_ref +
+            # B·p_s, because that is what actually fixes the pressures.
+            # ``p_ref`` is NOT stored: no driver path overrides it (the sole
+            # constructor call below passes only nlev/p_top_Pa/stretching, and
+            # ``make_hybrid_levels`` defaults to ``constants.p_ref``), so it is
+            # a global invariant and equal (A, B) implies equal pressures.
+            # If p_ref ever becomes configurable it MUST join this array
+            # (codex round 3).
+            # ``sigma_half`` ALONE is NOT sufficient for the hybrid: with
+            # B = eta**n, A = eta - B + (p_top/p_ref)(1-eta), the sum
+            # A + B = eta + (p_top/p_ref)(1-eta) is INDEPENDENT of the
+            # transition exponent, so two physically different hybrid grids
+            # share one sigma_half (codex round 2).  Pure σ is the A = 0,
+            # B = σ member of the same family, so one array covers both.
+            _vg = getattr(self.sigma, "A_half", None)
+            _save["meta_vgrid"] = np.stack([
+                (np.zeros_like(np.asarray(self.sigma.sigma_half,
+                                          dtype=np.float64))
+                 if _vg is None else np.asarray(_vg, dtype=np.float64)),
+                np.asarray(getattr(self.sigma, "B_half", self.sigma.sigma_half),
+                           dtype=np.float64),
+            ])
             # Stateful-physics carry (#413): persisted under
             # ``physstate_<field>`` so a chained restart resumes the
             # prognostic physics memory instead of silently reseeding.
@@ -4294,6 +4405,25 @@ class ModelDriver:
                 for _f, _v in self._land_ml_state._asdict().items():
                     if _v is not None:
                         _save[f"land_ml_{_f}"] = np.asarray(_v)
+            # Prognostic ice skin (mpas_ice_skin_prognostic): persist so a
+            # 12h chain link resumes the equilibrated skin instead of
+            # re-running the ~weeks-long spin-up from T_freeze_ocean every
+            # restart.  Gated on THIS run's config so a driver reused
+            # feature-on -> feature-off (without a load, which clears the
+            # field) cannot launder a stale skin into an off-feature
+            # checkpoint (codex-1 finding 6).  Absent on runs without the
+            # feature (byte-identical restart).
+            if getattr(self.config, "mpas_ice_skin_prognostic", False):
+                _skin = getattr(self, "_ice_T_skin", None)
+                if _skin is None and isinstance(self._carry_aux, dict):
+                    # Loaded-but-not-yet-adopted: load_checkpoint stages the
+                    # skin into _carry_aux and clears the live field until
+                    # _run_mpas overlays it.  A save BEFORE that run (load ->
+                    # save with no step) must persist the staged value, not
+                    # strip it (codex-2 finding 3).
+                    _skin = self._carry_aux.get("ice_T_skin")
+                if _skin is not None:
+                    _save["ice_T_skin"] = np.asarray(_skin)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             self._save_cmor_accumulator_sidecar(day)
@@ -4328,6 +4458,26 @@ class ModelDriver:
                 _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
                 for _k in s.tracers:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            # #1310: persist the anchored mass-fixer target.  With
+            # ``fix_mass + anchor_mass_to_initial`` the spectral model snapshots
+            # ``_target_mass`` from the FIRST state it sees; on restart a fresh
+            # model would re-anchor to the LOADED (mid-run) state — a target
+            # ~1e-15 off the original epoch mass — so the per-step lnps rescale
+            # pins the resumed trajectory to a different mass, breaking bitwise
+            # continuation (uniform ~1e-8 drift by day 2).  Save the concrete
+            # target and restore it via ``set_target_mass`` so the resumed run
+            # anchors to the IDENTICAL mass.
+            _tmass = getattr(self.model, "_target_mass", None)
+            if _tmass is not None:
+                _save["target_mass"] = np.asarray(_tmass, dtype=np.float64)
+            # SCOPE (bit-exact restart): the state (*_hat + trc_*) and the
+            # mass-fixer anchor (target_mass) are the full checkpoint for the
+            # self-starting integrators (ssp_rk3/34/54 — the spectral default).
+            # The opt-in ``leapfrog_si`` path additionally holds 3-time-level
+            # history (``_state_prev``/``_prev_phys_tend``) that is NOT
+            # persisted here, so a leapfrog_si resume re-bootstraps via the
+            # forward-Euler startup branch and is NOT bitwise (a separate,
+            # pre-existing gap; checkpointing that history is the follow-up).
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
             self._save_cmor_accumulator_sidecar(day)
@@ -4779,6 +4929,41 @@ class ModelDriver:
             from legoesm.core.state import HydrostaticState
             from legoesm.core.field import Field
             d = np.load(path)
+            # Vertical LEVEL-POSITION guard.  The shape guards below only see
+            # nlev, and nlev no longer identifies the σ grid: a uniform L30 and
+            # a tropopause-refined L30 (grid.tropopause_refine) are the same
+            # shape.  Restarting one on the other silently reinterprets every
+            # T/q profile on the wrong pressures — a silent physics error, not
+            # a crash.  Compares the (A, B) half-level pair (see the save side
+            # for why A+B alone is blind to the hybrid transition exponent).
+            # ``atol`` is a float32-STORAGE allowance, not a physics one: the
+            # coordinate is regenerated deterministically from the config, so
+            # an fp32-vs-fp64 run differs by at most one float32 ulp near
+            # B = 1, i.e. 6e-8 — 5e-7 leaves ~8 ulps of margin while still
+            # rejecting any real level move (>= 1e-3 in σ, 2000x larger).
+            # Absent on pre-guard checkpoints (skip, stay backward-compatible).
+            if "meta_vgrid" in getattr(d, "files", ()):
+                _ck_vg = np.asarray(d["meta_vgrid"], dtype=np.float64)
+                _A = getattr(self.sigma, "A_half", None)
+                _cur_vg = np.stack([
+                    (np.zeros(self.sigma.n_levels + 1) if _A is None
+                     else np.asarray(_A, dtype=np.float64)),
+                    np.asarray(getattr(self.sigma, "B_half",
+                                       self.sigma.sigma_half),
+                               dtype=np.float64),
+                ])
+                if (_ck_vg.shape != _cur_vg.shape
+                        or not np.allclose(_ck_vg, _cur_vg, rtol=0.0,
+                                           atol=5e-7)):
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written on a "
+                        f"DIFFERENT vertical grid: checkpoint (A,B)_half[:, :3]"
+                        f"={_ck_vg[:, :3]} vs current {_cur_vg[:, :3]} "
+                        f"(nlev {_ck_vg.shape[-1] - 1} vs "
+                        f"{_cur_vg.shape[-1] - 1}). Restarting would "
+                        "reinterpret every profile on the wrong levels. "
+                        "Rebuild with the same --nlev / --vertical-coord / "
+                        "--p-top / --stretching / --tropopause-refine.")
             # Under MPAS cell-partition MPI the checkpoint is GLOBAL but
             # ``self.state`` is this rank's local (owned+halo) band, so scatter
             # the global arrays to local cells/edges (mirror of the save-side
@@ -4883,6 +5068,14 @@ class ModelDriver:
             for _stale in [k for k in self._carry_aux
                            if k.startswith("physstate_")]:
                 del self._carry_aux[_stale]
+            # Ice skin: same stale-persistence rule — drop any prior staging,
+            # then stage this checkpoint's skin (if present) for the
+            # _run_mpas seed overlay.  Serial-only (the skin feature refuses
+            # the MPI-voronoi lane at setup).
+            self._carry_aux.pop("ice_T_skin", None)
+            self._ice_T_skin = None
+            if "ice_T_skin" in d.files:
+                self._carry_aux["ice_T_skin"] = np.asarray(d["ice_T_skin"])
             # ...and clear the SAVE channel (``_mpas_phys_state``, read by
             # save_checkpoint) so a stale carry from a PRIOR run on a
             # reused driver cannot leak.  It is left None until a run
@@ -4993,6 +5186,16 @@ class ModelDriver:
             with np.load(path) as d:
                 self.state, step, day = reconstruct_spectral_state_from_npz(
                     d, template=self.state)
+                # #1310: restore the anchored mass-fixer target so the resumed
+                # run pins to the SAME mass as the straight run (see the save
+                # branch).  set_target_mass pre-seeds it, so the model's
+                # first-step _maybe_snapshot_target_mass (which only fires when
+                # _target_mass is None) does NOT re-anchor to the loaded state.
+                if "target_mass" in (d.files if hasattr(d, "files") else d) \
+                        and hasattr(self.model, "set_target_mass"):
+                    import jax.numpy as _jnp
+                    self.model.set_target_mass(
+                        _jnp.asarray(d["target_mass"], dtype=_jnp.float64))
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
@@ -5599,9 +5802,17 @@ class ModelDriver:
                     _sst, _sic = _get_sst_sic(day)
                     _sst = jnp.asarray(_sst).reshape(-1)
                     _sic = jnp.asarray(_sic).reshape(-1)
+                    # Report tas off the SAME ice surface the radiation +
+                    # turbulence saw: the per-cell prognostic skin when the
+                    # feature is on, else the constant T_ice.  Otherwise the
+                    # scorecard's 2 m extrapolation uses a 271.35 K ice surface
+                    # while the model cooled the skin (codex-1 finding 3).
+                    _tas_ice = getattr(self.config, "T_ice", None)
+                    if (getattr(self.config, "mpas_ice_skin_prognostic", False)
+                            and getattr(self, "_ice_T_skin", None) is not None):
+                        _tas_ice = self._ice_T_skin
                     tas = diag._tas_2m(
-                        state, q_v, _sst, _sic,
-                        getattr(self.config, "T_ice", None),
+                        state, q_v, _sst, _sic, _tas_ice,
                         u_low=u_east[..., -1], v_low=v_north[..., -1])
                 except Exception as exc:
                     if not getattr(self, "_logged_tas2m_fallback", False):
@@ -5803,7 +6014,6 @@ class ModelDriver:
         from legoesm.atmosphere.physics.microphysics.config import (
             MicrophysicsConfig, apply_microphysics_experiment_flags,
         )
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
         from legoesm.atmosphere.physics.radiation.config import (
             RRTMGPConfig, OzoneProfileConfig,
         )
@@ -5884,6 +6094,8 @@ class ModelDriver:
                     _msub, cfg.microphysics,
                     nc_from_aerosol=cfg.nc_from_aerosol,
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
+                    homogeneous_ice_nucleation=getattr(
+                        cfg, "homogeneous_ice_nucleation", False),
                     # NOTE: hard_saturation_adjustment is INTENTIONALLY NOT
                     # threaded in-scheme on the MPAS path.  The integration
                     # trial showed the in-scheme placement cannot correct the
@@ -5901,6 +6113,17 @@ class ModelDriver:
                     hard_sat_max_heating_K=getattr(
                         cfg, "hard_sat_max_heating_K", None),
                 )
+            })
+            # Morrison ice-process flat scalars — same shared threading as
+            # the FV lane (codex 2026-07-26: this lane previously ignored all
+            # five, so a morrison_* override affected FV but not MPAS).
+            from legoesm.driver.physics_pipeline import (
+                _thread_morrison_scalars,
+            )
+            _micro_cfg = _micro_cfg._replace(**{
+                cfg.microphysics: _thread_morrison_scalars(
+                    cfg, cfg.microphysics,
+                    getattr(_micro_cfg, cfg.microphysics)),
             })
         # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
         # threshold + per-step heating cap from the (unmodified) scheme config,
@@ -5928,6 +6151,27 @@ class ModelDriver:
             _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
         _hard_sat_max_heating = (
             _hsub.hard_sat_max_heating_K if _hsub_has_field else None)
+        # Mixed-phase (ice-curve) drain: TTL dehydration fix — gate + land on
+        # the blended liquid/ice curve below freezing (validate_strict requires
+        # hard_saturation_adjustment + grid_type='mpas' + microphysics='morrison'
+        # when set).
+        _hard_sat_ice_curve = bool(
+            getattr(cfg, "hard_sat_ice_curve", False)) and _hard_sat_on
+        # Morrison nucleation crystal mass mi0 = 4/3 pi rho_ci r_nuc^3 [kg] — the
+        # mass<->number closure used to seed N_i for the ice the drain deposits
+        # (else orphan q_i is deposition-inert and cannot sediment).  Read from
+        # the (Morrison) micro sub-config; None disables number seeding.
+        # ``_n_i_nuc_max`` [1/m^3] caps the seeded number at Morrison's Cooper
+        # ceiling (per mass via rho_air) so a large deposit grows crystals.
+        _ice_nuc_mass = None
+        _n_i_nuc_max = None
+        if _hard_sat_ice_curve and _hsub is not None:
+            _rho_ci = getattr(_hsub, "rho_cloud_ice", None)
+            _r_nuc = getattr(_hsub, "ice_nuc_radius", None)
+            _n_i_nuc_max = getattr(_hsub, "N_i_nuc_max", None)
+            if _rho_ci is not None and _r_nuc is not None:
+                _ice_nuc_mass = (4.0 / 3.0) * jnp.pi * float(_rho_ci) \
+                    * float(_r_nuc) ** 3
         from legoesm.atmosphere.physics.radiation.solar import earth_orbit
         _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
@@ -5975,7 +6219,7 @@ class ModelDriver:
                 grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
-            gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
+            gravity_wave_drag=gwd_config_for(cfg),
         )
         # Phase D perf: shard the per-column RRTMGP workload across all local
         # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
@@ -6220,6 +6464,19 @@ class ModelDriver:
             )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _compute_T_sfc = None
+        _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
+        if _ice_skin_on and not _sst_forcing:
+            raise ValueError(
+                "mpas_ice_skin_prognostic needs the prescribed SST/SIC "
+                "surface forcing (radiation != 'none' and an SST source) — "
+                "there is no ice fraction to carry a skin on."
+            )
+        if _ice_skin_on and self._voronoi_layout is not None:
+            raise ValueError(
+                "mpas_ice_skin_prognostic is not wired for the distributed "
+                "Voronoi (MPI) lane yet — the skin carry and its checkpoint "
+                "persistence are serial-only. Run single-process or disable."
+            )
         if _sst_forcing:
             from legoesm.forcing.surface_utils import (
                 blend_surface_temperature,
@@ -6227,6 +6484,52 @@ class ModelDriver:
             )
             _T_ice = cfg.T_ice
             _ncell = int(self.state.T.data.shape[0])
+            # Prognostic ice skin (Semtner zero-layer + slab inertia): the
+            # anchor's ice component becomes the per-cell skin array instead
+            # of the constant cfg.T_ice.  Seeded at the seawater freezing
+            # point; a checkpoint that carried a skin (staged by
+            # load_checkpoint) resumes it so 12h chain links do not re-run
+            # the multi-week conductive equilibration (C/g ~ 3 weeks at
+            # h=2 m) every restart.  A FRESH run's first ~2 months are
+            # therefore biased warm toward the old constant-T_ice behaviour
+            # (30 d ~6 K, 60 d ~1.7 K, 90 d ~0.4 K residual under a steady
+            # -25 W/m^2) — declare the spin-up in experiment metadata; the
+            # scorecard's month-3-onward window clears it.
+            if _ice_skin_on:
+                from legoesm.forcing.surface_utils import (
+                    prognostic_ice_skin_temperature,
+                )
+                _h_ice = float(cfg.mpas_ice_thickness_m)
+                _staged_skin = None
+                if isinstance(self._carry_aux, dict):
+                    _staged_skin = self._carry_aux.get("ice_T_skin")
+                if _staged_skin is not None:
+                    _skin = jnp.asarray(_staged_skin).reshape(-1)
+                    if _skin.shape != (_ncell,):
+                        raise ValueError(
+                            f"checkpoint ice_T_skin shape {_skin.shape} != "
+                            f"(nCells={_ncell},) — mesh mismatch."
+                        )
+                    # Refuse a non-finite restored skin BEFORE it reaches the
+                    # anchor blend: a NaN poisons even open-water cells there
+                    # (sic*skin with sic=0 is 0*NaN = NaN), corrupting every
+                    # T_sfc, not only ice cells (codex-3).
+                    if not bool(jnp.all(jnp.isfinite(_skin))):
+                        raise ValueError(
+                            "checkpoint ice_T_skin has non-finite values — "
+                            "refusing to resume from a corrupt skin.")
+                    self._ice_T_skin = _skin
+                    logger.info(
+                        "  MPAS ice skin: resumed from checkpoint "
+                        f"(min {float(jnp.min(_skin)):.1f} K)")
+                else:
+                    self._ice_T_skin = jnp.full(
+                        _ncell, constants.T_freeze_ocean)
+                    logger.info(
+                        "  MPAS ice skin ON (Semtner zero-layer, h=%.2f m): "
+                        "seeded at T_freeze_ocean; conductive relaxation "
+                        "C/g ~ 3 weeks (fresh-run spin-up ~2 months)",
+                        _h_ice)
             # Land anchor lapse correction: the AMIP loader fills land cells
             # with the NEAREST-OCEAN SST (sea-level temperature); anchoring
             # elevated land at that value overheats its surface by lapse*z.
@@ -6237,13 +6540,28 @@ class ModelDriver:
                 _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
                             / constants.g)
 
-            def _compute_T_sfc(day):
-                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
-                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
-                # data), sea-ice-blended, as a (nCells,) surface temperature.
-                _sst, _sic = self.get_sst_sic(day)
+            def _blend_T_sfc(_sst, _sic):
+                # Blend prescribed SST with the ice component (constant T_ice,
+                # or the per-cell prognostic skin READ AT CALL TIME) and apply
+                # the land-lapse correction.  Split out of _compute_T_sfc so
+                # the per-step loop can RE-ANCHOR from the cached daily SST/SIC
+                # against the freshly advanced skin every model step — the
+                # physics must consume the CURRENT skin, not the day-start
+                # value, or the surface-flux feedback stays daily-lagged
+                # (conditional-stability, codex-2 finding 2) and a mid-day
+                # restart re-exposes the advanced skin early, branching the run
+                # (codex-2 finding 1).
+                # Flatten SST/SIC to (nCells,) FIRST so a (nCells,1)-shaped
+                # source broadcasts ELEMENTWISE against the (nCells,) skin
+                # rather than to (nCells,nCells) — the scalar-T_ice blend
+                # tolerated (nCells,1) via a trailing reshape; the array skin
+                # must not (codex-4).
+                _sst = jnp.asarray(_sst).reshape(-1)
+                _sic = jnp.asarray(_sic).reshape(-1)
+                _ice_component = (
+                    self._ice_T_skin if _ice_skin_on else _T_ice)
                 _ts = blend_surface_temperature(
-                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+                    _sst, _sic, _ice_component).reshape(-1)
                 if _lapse_z is not None:
                     # Cast the storage-dtype (possibly f32) statics to the
                     # anchor dtype so the correction is formed at anchor
@@ -6256,9 +6574,30 @@ class ModelDriver:
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return _blend_T_sfc(_sst, _sic)
+
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.
-            _ts0 = _compute_T_sfc(START_DAY)
+            # Validate the RAW SST and SIC shapes, NOT only the blended output:
+            # with the prognostic skin an (nCells,) ice component, a SCALAR or
+            # mis-counted SST/SIC would BROADCAST to (nCells,) and silently pass
+            # an output-only check (giving every cell the same SST) — the check
+            # the old scalar-T_ice blend used to catch (codex-3).
+            _sst0, _sic0 = self.get_sst_sic(START_DAY)
+            for _nm, _arr in (("SST", _sst0), ("SIC", _sic0)):
+                if tuple(jnp.asarray(_arr).reshape(-1).shape) != (_ncell,):
+                    raise ValueError(
+                        f"MPAS {_nm} forcing shape "
+                        f"{tuple(jnp.asarray(_arr).shape)} has "
+                        f"{jnp.asarray(_arr).size} values != nCells={_ncell}; "
+                        f"get_sst_sic must return per-cell arrays on the MPAS "
+                        f"mesh (grid.grid_lat = latCell).")
+            _ts0 = _blend_T_sfc(_sst0, _sic0)
             if _ts0.shape != (_ncell,):
                 raise ValueError(
                     f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
@@ -6784,6 +7123,11 @@ class ModelDriver:
         # ``model.step``.
         if _land_beta_fn is not None:
             _land_beta_cells = _land_beta_fn(self._land_ml_state)
+        # Current forcing day's SST/SIC, cached at each daily boundary for the
+        # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
+        # the first boundary / when the skin feature is off).
+        _ice_sst_cur = None
+        _ice_sic_cur = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -6857,8 +7201,37 @@ class ModelDriver:
                     _force_day_canonical = float(_fd_int)
                     _forcing_daily = {}
                     if _sst_forcing:
-                        _forcing_daily["T_sfc"] = _compute_T_sfc(
-                            _force_day_canonical)
+                        # Prognostic ice skin: cache THIS forcing day's SST+SIC
+                        # for the PER-STEP re-anchor + advance in the step loop.
+                        # The skin is advanced every model step (dt=DT) with the
+                        # freshly exported fluxes, AND the anchor T_sfc is
+                        # re-blended every step from these cached fields against
+                        # the advanced skin.  Consequences:
+                        #  - the physics consumes the CURRENT skin, so the
+                        #    surface-flux feedback is per-step (r*lambda =
+                        #    DT*lambda/C << 1), not daily-lagged (codex-2
+                        #    finding 2 / codex-1 finding 7),
+                        #  - a mid-day restart re-blends from the SAME restored
+                        #    skin the straight run held, so it does not branch
+                        #    the surface boundary (codex-2 finding 1),
+                        #  - per-step flux use resolves the diurnal SW/turbulent
+                        #    cycle a once-daily snapshot aliased (codex-1
+                        #    finding 1),
+                        #  - restart-exact: the checkpoint holds a fully
+                        #    advanced skin, no pending daily advance to drop or
+                        #    double-count (codex-1 finding 2).
+                        # SST is daily piecewise-constant (prescribed); only the
+                        # ice fraction of T_sfc evolves sub-daily with the skin.
+                        if _ice_skin_on:
+                            _sst_now, _sic_now = self.get_sst_sic(
+                                _force_day_canonical)
+                            _ice_sst_cur = jnp.asarray(_sst_now).reshape(-1)
+                            _ice_sic_cur = jnp.asarray(_sic_now).reshape(-1)
+                            _forcing_daily["T_sfc"] = _blend_T_sfc(
+                                _ice_sst_cur, _ice_sic_cur)
+                        else:
+                            _forcing_daily["T_sfc"] = _compute_T_sfc(
+                                _force_day_canonical)
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -6937,6 +7310,44 @@ class ModelDriver:
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+                # Prognostic ice skin: advance ONE model step (dt=DT) with the
+                # freshly exported surface energy fluxes (sfc_diag slots
+                # 0 sw_net, 1 lw_net [W/m^2, +into surface]; 6 shflx, 7 lhflx
+                # [+upward]).  F_net_down = sw + lw - sh - lh (net downward gain
+                # of the skin).  Requires slots 0,1 present — radiation != none
+                # is enforced at setup, so they exist after the first (always
+                # full-radiation) step of each run/link.  Eager, serial-only
+                # (the feature refuses the MPI/voronoi lane, so this else branch
+                # is the only path).  See the daily-boundary note for why the
+                # advance is per-step rather than a once-daily snapshot.
+                if _ice_skin_on and _ice_sic_cur is not None:
+                    _sd = getattr(self.model, "_sfc_diag", None)
+                    _swn = (_sd[0].data if (_sd is not None and len(_sd) > 0
+                                            and _sd[0] is not None) else None)
+                    _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
+                                            and _sd[1] is not None) else None)
+                    if _swn is not None and _lwn is not None:
+                        _f_net = (jnp.asarray(_swn).reshape(-1)
+                                  + jnp.asarray(_lwn).reshape(-1))
+                        if len(_sd) > 6 and _sd[6] is not None:
+                            _f_net = _f_net - jnp.asarray(
+                                _sd[6].data).reshape(-1)
+                        if len(_sd) > 7 and _sd[7] is not None:
+                            _f_net = _f_net - jnp.asarray(
+                                _sd[7].data).reshape(-1)
+                        self._ice_T_skin = prognostic_ice_skin_temperature(
+                            self._ice_T_skin, _f_net, _ice_sic_cur,
+                            dt_s=DT, h_ice_m=_h_ice)
+                    # Re-anchor the NEXT step's T_sfc from the cached daily
+                    # SST/SIC against the (advanced) skin, so the physics
+                    # consumes the CURRENT skin every step (per-step feedback,
+                    # codex-2 finding 2) and a mid-day restart reproduces the
+                    # straight run's surface boundary (codex-2 finding 1).  Runs
+                    # every step the feature is active (even one that skipped
+                    # the advance for missing fluxes) so T_sfc stays consistent
+                    # with self._ice_T_skin.
+                    _forcing_daily["T_sfc"] = _blend_T_sfc(
+                        _ice_sst_cur, _ice_sic_cur)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -6992,21 +7403,43 @@ class ModelDriver:
             if (_hard_sat_on and _trc is not None
                     and "q_v" in _trc and "q_c" in _trc):
                 _qc_fld = _trc["q_c"]
-                _T_hs, _qv_hs, _qc_hs, _dq_hs = _mpas_hard_saturation_poststep(
+                _qi_fld = _trc.get("q_i") if _hard_sat_ice_curve else None
+                (_T_hs, _qv_hs, _qc_hs, _qi_hs,
+                 _dq_hs) = _mpas_hard_saturation_poststep(
                     self.state.T.data, _trc["q_v"].data, _qc_fld.data,
                     self.state.p_s.data, self.sigma.sigma_full, DT,
-                    _hard_sat_threshold, _hard_sat_max_heating)
+                    _hard_sat_threshold, _hard_sat_max_heating,
+                    ice_curve=_hard_sat_ice_curve,
+                    q_i=None if _qi_fld is None else _qi_fld.data)
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
                     _n_hs = int(jnp.sum(_dq_hs > _HARD_SAT_LOG_QV_EPS))
                     if _n_hs > 0:
                         logger.warning(
-                            "hard saturation adjustment (post-step): drained "
+                            "hard saturation adjustment (post-step%s): drained "
                             "%d points (max dq_v %.2f g/kg, <= %.1f K) at "
-                            "step %d", _n_hs, float(jnp.max(_dq_hs)) * 1e3,
+                            "step %d",
+                            ", ice curve" if _hard_sat_ice_curve else "",
+                            _n_hs, float(jnp.max(_dq_hs)) * 1e3,
                             float(_hard_sat_max_heating), step)
                 _new_trc = dict(_trc)
                 _new_trc["q_v"] = _trc["q_v"].replace(data=_qv_hs)
                 _new_trc["q_c"] = _qc_fld.replace(data=_qc_hs)
+                if _qi_fld is not None and _qi_hs is not None:
+                    _new_trc["q_i"] = _qi_fld.replace(data=_qi_hs)
+                    # Seed cloud-ice NUMBER for the deposited ice mass so the
+                    # two-moment scheme sees a physical crystal count (orphan
+                    # q_i with N_i=0 is deposition-inert and cannot sediment),
+                    # capped at Morrison's Cooper ceiling N_i_nuc_max/rho_air.
+                    _ni_fld = _trc.get("N_i")
+                    if (_ni_fld is not None and _ice_nuc_mass is not None
+                            and _n_i_nuc_max is not None):
+                        _dq_i_dep = _qi_hs - _qi_fld.data
+                        _pf = self.state.p_s.data[:, None] * jnp.asarray(
+                            self.sigma.sigma_full)[None, :]
+                        _new_trc["N_i"] = _ni_fld.replace(
+                            data=_seed_nucleated_ice_number(
+                                _ni_fld.data, _dq_i_dep, _ice_nuc_mass,
+                                _n_i_nuc_max, _pf, _T_hs))
                 self.state = self.state._replace(
                     T=self.state.T.replace(data=_T_hs), tracers=_new_trc)
             # Keep the persisted-carry handle fresh for save_checkpoint
@@ -7466,10 +7899,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.microphysics.config import (
                 MicrophysicsConfig,
             )
-            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-                GravityWaveDragConfig,
-            )
-
             # Normalize the CLI radiation alias ("rrtmg") to the
             # physics-layer scheme name — see the _run_mpas rationale.
             _rad_scheme = ("rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
@@ -7516,8 +7945,7 @@ class ModelDriver:
                 convection=convection_config_for(cfg),
                 turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
-                gravity_wave_drag=GravityWaveDragConfig(
-                    scheme=cfg.gravity_wave_drag),
+                gravity_wave_drag=gwd_config_for(cfg),
             )
             _combined_fn = make_physics(
                 phys_cfg, model_type="spectral_pe", dt=DT,
@@ -9339,9 +9767,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.turbulence import (
                 TurbulenceConfig,
             )
-            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-                GravityWaveDragConfig,
-            )
             from legoesm.atmosphere.physics.physics_state import (
                 init_physics_state,
             )
@@ -9357,9 +9782,15 @@ class ModelDriver:
                 conv_ncol, _nlev,
                 PhysicsConfig(
                     turbulence=TurbulenceConfig(scheme=cfg.turbulence),
-                    gravity_wave_drag=GravityWaveDragConfig(
-                        scheme=cfg.gravity_wave_drag,
-                    ),
+                    # MUST be the SAME resolved config the pipeline kernel gets
+                    # (_resolve_gwd -> gwd_config_for): init_physics_state sizes
+                    # and fills the gwd_spectrum carry from
+                    # ``prognostic_spectral.n_azimuths/.n_wavenumbers/
+                    # .launch_flux``, and a gravity_wave_drag_override may set
+                    # all three.  A bare config here seeded (ncol,4,20) at the
+                    # default launch flux while the kernel expected the
+                    # override's shape/amplitude (codex round 1, finding 2).
+                    gravity_wave_drag=gwd_config_for(cfg),
                 ),
                 dtype=_seed_dtype,
             )

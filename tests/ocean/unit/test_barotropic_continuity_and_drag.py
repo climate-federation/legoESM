@@ -16,6 +16,13 @@ factor`` on top of the depth-mean bottom drag already carried in ``F_slow``;
 doing so doubled the effective barotropic-mode drag to ~2r/H.  The substep now
 owns no drag, so a barotropic mode forced ONLY by ``F_slow_u = -r*U/H`` decays
 at the single rate ``r/H``.
+
+#1226 ``barotropic_face_depth="nemo_ssh_avg"`` — the NEMO ``dynspg_ts.F90``
+``zhup2_e``/``zhvp2_e`` (flux depth, :568-592) and ``zsshu_a``/``hu_e`` (drag/
+update depth, :658-666,771-778) face-depth rule: a fixed still-water reference
+depth plus an e1e2-area-weighted 2-point average of the dynamic ssh, in place
+of lego's default min-rule.  Gated by ``BarotropicConfig.barotropic_face_depth``
+(default ``"min_rule"``, bit-identical legacy).
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -179,3 +186,99 @@ class TestBottomDragSingleOwner:
         assert abs(u_mean - expected_mean) < abs(u_mean - double_mean), (
             "barotropic drag closer to the DOUBLE-counted rate than the "
             "single-owner rate (finding #6 regression)")
+
+
+class TestBarotropicFaceDepthNemoSshAvg:
+    """#1226 ``barotropic_face_depth="nemo_ssh_avg"`` (dynspg_ts.F90:568-592
+    flux depth; :658-666,771-778 drag/update depth)."""
+
+    def test_unknown_face_depth_raises(self):
+        grid, z, state = _flat_basin()
+        cfg = _cfg(barotropic_face_depth="bogus_scheme")
+        with pytest.raises(ValueError, match="barotropic_face_depth"):
+            barotropic_substeps_latlon_cgrid(
+                state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
+
+    def test_default_min_rule_byte_identical_to_pre_change(self):
+        """Default is "min_rule" — must reproduce the pre-#1226-field
+        min-rule face depth exactly (the field is purely additive)."""
+        grid, z, state = _flat_basin()
+        key = jax.random.PRNGKey(3)
+        u0 = 0.05 * jax.random.normal(key, state.u.data.shape) * state.u_mask.data[..., None]
+        v0 = 0.05 * jax.random.normal(
+            jax.random.split(key)[0], state.v.data.shape) * state.v_mask.data[..., None]
+        state = state._replace(u=state.u.replace(data=u0), v=state.v.replace(data=v0))
+        cfg_default = _cfg(barotropic_time_filter="cosine")
+        cfg_explicit = _cfg(barotropic_time_filter="cosine",
+                             barotropic_face_depth="min_rule")
+        assert cfg_default.barotropic.barotropic_face_depth == "min_rule"
+        sn_a, (Hu_a, Hv_a) = barotropic_substeps_latlon_cgrid(
+            state, 60.0, 30, grid, z, cfg_default, add_barotropic_coriolis=True)
+        sn_b, (Hu_b, Hv_b) = barotropic_substeps_latlon_cgrid(
+            state, 60.0, 30, grid, z, cfg_explicit, add_barotropic_coriolis=True)
+        np.testing.assert_array_equal(np.asarray(sn_a.eta.data), np.asarray(sn_b.eta.data))
+        np.testing.assert_array_equal(np.asarray(sn_a.u.data), np.asarray(sn_b.u.data))
+        np.testing.assert_array_equal(np.asarray(sn_a.v.data), np.asarray(sn_b.v.data))
+        np.testing.assert_array_equal(np.asarray(Hu_a), np.asarray(Hu_b))
+        np.testing.assert_array_equal(np.asarray(Hv_a), np.asarray(Hv_b))
+
+    def test_nemo_ssh_avg_matches_analytic_uface_formula(self):
+        """Flat bottom + a longitude ssh ramp: the u-face flux depth returned
+        after ONE box-filtered substep must equal NEMO's own formula
+        ``hu_0 + 0.5 * r1_e1e2u * (area[W]*eta[W] + area[E]*eta[E])``
+        (dynspg_ts.F90:583-586), evaluated from the SAME grid metrics the
+        solver uses (``area`` = the exact spherical T-cell area,
+        ``dx_u*dy_u`` = the u-point's own metric area — these two area
+        conventions differ by O(dlat^2), so the expected value is derived
+        from the actual metrics, not assumed to be a bit-exact plain mean)."""
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16, H=1000.0, lat_cap_deg=90.0)
+        i = np.arange(grid.n_lon)
+        eta_ramp = 0.01 + 0.001 * i
+        eta0 = jnp.asarray(np.broadcast_to(eta_ramp, (grid.n_lat, grid.n_lon)).copy())
+        state = state._replace(eta=state.eta.replace(data=eta0))
+        u1 = jnp.ones_like(state.u.data) * state.u_mask.data[..., None]
+        state = state._replace(u=state.u.replace(data=u1))
+
+        cfg = _cfg(barotropic_time_filter="box",
+                   barotropic_face_depth="nemo_ssh_avg")
+        sn, (Hu, Hv) = barotropic_substeps_latlon_cgrid(
+            state, 1.0, 1, grid, z, cfg, add_barotropic_coriolis=False)
+        Hu = np.asarray(Hu)
+
+        geom = ensure_geometry(grid)
+        area = np.asarray(grid.area)
+        r1_e1e2u = 1.0 / np.asarray(geom.dx_u * geom.dy_u)
+        area_w = np.roll(area, 1, axis=1)
+        eta_w = np.roll(eta0, 1, axis=1)
+        ssh_avg_u = 0.5 * r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta0)
+        ssh_avg_u = np.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
+        expected = 1000.0 + ssh_avg_u
+        np.testing.assert_allclose(Hu, expected, rtol=0, atol=1e-9)
+
+    def test_nemo_ssh_avg_equals_min_rule_at_rest(self):
+        """At eta=0 (rest state) the ssh-average term is identically zero, so
+        BOTH face-depth rules must reduce to the SAME still-water reference
+        depth (the min-rule of H_bathy alone) — including at a bathymetric
+        step, where they are provably equal (the coordinator's more general
+        "min_rule <= nemo_ssh_avg away from rest" claim is NOT provable in
+        general from the formula alone, since a nonzero, non-uniform eta can
+        push the average either above or below the min-rule value depending
+        on which side is shallower and which side's eta is larger — so this
+        test asserts the one direction the formula DOES guarantee: exact
+        equality at rest, not an inequality away from it)."""
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16, H=1000.0, lat_cap_deg=90.0)
+        H_bathy = np.full((grid.n_lat, grid.n_lon), 1000.0)
+        H_bathy[:, 8] = 200.0  # a shallow step at column 8
+        state = state._replace(H_bathy=state.H_bathy.replace(data=jnp.asarray(H_bathy)))
+        u1 = jnp.ones_like(state.u.data) * state.u_mask.data[..., None]
+        state = state._replace(u=state.u.replace(data=u1))
+
+        results = {}
+        for mode in ("min_rule", "nemo_ssh_avg"):
+            cfg = _cfg(barotropic_time_filter="box", barotropic_face_depth=mode)
+            sn, (Hu, Hv) = barotropic_substeps_latlon_cgrid(
+                state, 1.0, 1, grid, z, cfg, add_barotropic_coriolis=False)
+            results[mode] = np.asarray(Hu)
+        np.testing.assert_array_equal(results["min_rule"], results["nemo_ssh_avg"])
+        # Sanity: the step is actually visible in the returned face depth.
+        assert results["min_rule"][0, 8] == pytest.approx(200.0)

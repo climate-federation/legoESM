@@ -1,0 +1,1536 @@
+diff --git a/packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py b/packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py
+index f11122b6b..1ce0d1183 100644
+--- a/packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py
++++ b/packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py
+@@ -869,14 +869,10 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
+             # + surface turbulent fluxes (every step). Slot ORDER is the
+             # sfc_diag tuple contract shared with the driver feed:
+             # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
+-            #  shflx, lhflx, sw_down_sfc, lw_down_sfc).
+-            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
+-            # interactive multilayer land forcing (AtmToSurface.sw_down/
+-            # lw_down; model_driver._marshal_land_forcing reads these slots).
++            #  shflx, lhflx).
+             _extras = tuple(getattr(_pt, _k, None) for _k in (
+                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
+-                "shflx_sfc", "lhflx_sfc",
+-                "sw_down_sfc", "lw_down_sfc"))
++                "shflx_sfc", "lhflx_sfc"))
+             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
+             # advances every step even on a held-radiation sub-step or a
+             # radiation=none run where sw/lw are None, so gating on sw/lw would
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/combined.py b/packages/atmosphere/legoesm/atmosphere/physics/combined.py
+index 092957398..d6b902690 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/combined.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/combined.py
+@@ -657,8 +657,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
+             # coupled loop can export sw/lw net to the coupler (_build_combined
+             # constructs a fresh tendency that drops these diagnostic fields).
+             combined = combined._replace(
+-                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc,
+-                sw_down_sfc=first.sw_down_sfc, lw_down_sfc=first.lw_down_sfc)
++                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
+         # Same for surface precip (from microphysics; _build_combined drops it)
+         # and the TOA/turbulent-flux diagnostic extras.
+         combined = _attach_sfc_precip(combined, first, precip_accum)
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py b/packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py
+index 5fa4b9bca..e01166102 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py
+@@ -712,34 +712,6 @@ def _make_hydrostatic_convection(
+                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
+                     dims=dims_3d, units="kg/kg/s",
+                 )
+-            # Convective-activity diagnostic for the Slingo (1987) cumulus
+-            # cloud fraction on this standalone path: the column-integrated
+-            # in-updraft RAIN PRODUCTION rate [kg/m^2/s],
+-            #     P_conv = (1/g) * sum_k max(dq_r_conv, 0) * dp_k,
+-            # published into the ``PhysicsState.conv_precip`` lag carry
+-            # (radiation runs before convection in the module chain and
+-            # reads the previous step's value — the FV pipeline's lagged
+-            # ``conv_precip`` convention).  DIAGNOSTIC ONLY: the rain MASS
+-            # still rides the ``q_r`` tracer route above (microphysics
+-            # sediments it), so total surface precip (``pr``) is NOT
+-            # double-counted.  Schemes with no rain split (``_dq_r_conv is
+-            # None``) publish nothing and the carry stays zero — their
+-            # convective cloud fraction is honestly zero here.
+-            # SIGN/UNITS: dq_r_conv >= 0 is a condensate source [kg/kg/s];
+-            # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
+-            if _dq_r_conv is not None:
+-                _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+-                _p_conv_diag = jnp.sum(
+-                    jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
+-                    * _dp_col, axis=-1) / constants.g
+-                if isinstance(conv_prog_out, dict):
+-                    conv_prog_out = {**conv_prog_out,
+-                                     "conv_precip": _p_conv_diag}
+-                elif conv_prog_out is not None:
+-                    conv_prog_out = {"conv_prog_profile": conv_prog_out,
+-                                     "conv_precip": _p_conv_diag}
+-                else:
+-                    conv_prog_out = {"conv_precip": _p_conv_diag}
+ 
+         # Convective momentum transport (CMT): use the scheme's optional
+         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py b/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
+index c6e98da05..a6910a668 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py
+@@ -12,10 +12,7 @@ import jax
+ import jax.numpy as jnp
+ 
+ from legoesm import constants
+-from legoesm.thermo import (
+-    saturation_mixing_ratio,
+-    saturation_mixing_ratio_ice,
+-)
++from legoesm.thermo import saturation_mixing_ratio
+ 
+ # Default condensation/autoconversion sigmoid sharpness (used in signatures).
+ _DEFAULT_SAT_SHARPNESS = 50.0
+@@ -179,48 +176,7 @@ def _air_transport_props(T, p, rho):
+     return dv, mu, sc
+ 
+ 
+-def mixed_phase_liquid_fraction(T):
+-    """Liquid fraction w(T) of the standard mixed-phase partition ramp.
+-
+-    Linear in T over ``[T_hom_freeze, T_freeze]`` (all-ice below -40 C,
+-    all-liquid above 0 C) — the Morrison/IFS-style weight used to blend
+-    liquid/ice saturation and latent heat consistently.
+-    """
+-    return jnp.clip(
+-        (T - constants.T_hom_freeze)
+-        / (constants.T_freeze - constants.T_hom_freeze), 0.0, 1.0)
+-
+-
+-def mixed_phase_saturation_mixing_ratio(T, p_full):
+-    """w(T)-blended liquid/ice saturation mixing ratio [kg/kg].
+-
+-    Below the mixed-phase ramp this is the ICE curve — at TTL temperatures
+-    (~195 K) the liquid curve sits ~60% above it, so gating/draining on the
+-    liquid curve leaves permanent ice-supersaturation (the 20x-ERA5 TTL
+-    vapour bias of the first ClimateEval scorecard).
+-    """
+-    w = mixed_phase_liquid_fraction(T)
+-    return (w * saturation_mixing_ratio(T, p_full)
+-            + (1.0 - w) * saturation_mixing_ratio_ice(T, p_full))
+-
+-
+-def mixed_phase_l_over_cp(T):
+-    """Blended latent heat / c_pd [K per kg/kg] at the mixed-phase weight.
+-
+-    ``L_eff = w(T)*L_v + (1-w(T))*L_s`` — deposition releases the
+-    sublimation latent heat where the target curve is ice.  Evaluated at
+-    the PRE-adjustment temperature and held constant through the on-curve
+-    solve (per-cell frozen linearization: the solve then conserves
+-    ``c_pd*T + L_eff(T0)*q_v`` exactly, mirroring the scalar-L_v contract
+-    of the liquid-only path).
+-    """
+-    w = mixed_phase_liquid_fraction(T)
+-    return (w * constants.L_v + (1.0 - w) * constants.L_s) / constants.c_pd
+-
+-
+-def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
+-                                  sat_fn=saturation_mixing_ratio,
+-                                  l_over_cp=None):
++def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat):
+     """Hard-saturation-adjustment condensation rate [kg/kg/s].
+ 
+     Solves for the equilibrium vapour ``q_eq`` on the LIQUID saturation curve
+@@ -266,18 +222,14 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
+     array
+         Condensation rate ``(q_v - q_eq)/dt`` [kg/kg/s], >= 0.
+     """
+-    # Scalar L_v/c_pd by default (byte-identical liquid path); the mixed-phase
+-    # caller injects a per-cell frozen L_eff(T0)/c_pd array (broadcasts through
+-    # the same expressions; monotonicity of the residual needs only L > 0).
+-    if l_over_cp is None:
+-        l_over_cp = constants.L_v / constants.c_pd
++    l_over_cp = constants.L_v / constants.c_pd
+     q_v_pos = jnp.maximum(q_v, 0.0)
+     lo = jnp.clip(q_sat, 0.0, q_v_pos)     # f(lo) <= 0 (bracket lower bound)
+     hi = q_v_pos                           # f(hi) >= 0 (bracket upper bound)
+     for _ in range(_HARD_SAT_BISECT_ITERS):
+         mid = 0.5 * (lo + hi)
+         t_new = T + l_over_cp * (q_v_pos - mid)
+-        f_mid = mid - sat_fn(t_new, p_full)
++        f_mid = mid - saturation_mixing_ratio(t_new, p_full)
+         hi = jnp.where(f_mid > 0.0, mid, hi)
+         lo = jnp.where(f_mid > 0.0, lo, mid)
+     q_eq = jax.lax.stop_gradient(0.5 * (lo + hi))
+@@ -289,7 +241,7 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
+     # second-order term.
+     t_new = T + l_over_cp * (q_v_pos - q_eq)
+     q_sat_new, dqsat_dt = jax.jvp(
+-        lambda t: sat_fn(t, p_full),
++        lambda t: saturation_mixing_ratio(t, p_full),
+         (t_new,), (jnp.ones_like(t_new),))
+     psychrometric = jax.lax.stop_gradient(1.0 + dqsat_dt * l_over_cp)
+     q_eq = q_eq - (q_eq - q_sat_new) / psychrometric
+@@ -302,32 +254,19 @@ def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
+     return (q_v_pos - q_eq) / dt
+ 
+ 
+-def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K,
+-                                l_over_cp=None):
++def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K):
+     """Bound the per-step POSITIVE condensation (shared by both entry points).
+ 
+-    Caps the per-step condensed ``Delta q_v = cond*dt`` so the per-step latent
+-    heating ``l_over_cp * Delta q_v <= hard_max_heating_K`` (a large pool drains
+-    over MANY steps not one) AND ``Delta q_v <= q_v`` (mass-positivity: never
+-    condense more than the column holds; also guards the tiny-NEGATIVE q_sat the
+-    smooth cap returns near 150 K).  The evaporation branch (rate < 0) is
+-    untouched.  ``minimum`` has a dead gradient only where a cap binds, where the
+-    per-step condensation is constant (correctly zero sensitivity).
+-
+-    ``l_over_cp`` is the latent-heat / c_pd the CALLER heats with, so the K cap
+-    bounds the ACTUAL heating.  Default ``None`` -> the scalar liquid
+-    ``L_v / c_pd`` (the exact prior expression, byte-identical liquid path); the
+-    mixed-phase ice-curve drain injects its per-cell frozen ``L_eff(T0) / c_pd``
+-    array so the cap is exact on the ICE branch too (deposition releases L_s >
+-    L_v, which would otherwise heat ~13% past the stated cap for a given dq).
++    Caps the per-step condensed ``Delta q_v = cond*dt`` at
++    ``hard_max_heating_K * c_pd / L_v`` (per-step latent heating <=
++    ``hard_max_heating_K``, so a large pool drains over MANY steps not one) AND
++    at the available vapour ``q_v`` (mass-positivity: never condense more than
++    the column holds; also guards the tiny-NEGATIVE q_sat the smooth cap returns
++    near 150 K).  The evaporation branch (rate < 0) is untouched.  ``minimum``
++    has a dead gradient only where a cap binds, where the per-step condensation
++    is constant (correctly zero sensitivity).
+     """
+-    if l_over_cp is None:
+-        # Scalar liquid path -- keep the exact prior expression (bit-identical).
+-        dqv_cap = hard_max_heating_K * constants.c_pd / constants.L_v
+-    else:
+-        # Per-cell L_eff(T0)/c_pd the ice-curve caller deposits with: the
+-        # heating l_over_cp*dq is then bounded by hard_max_heating_K exactly.
+-        dqv_cap = hard_max_heating_K / l_over_cp
++    dqv_cap = hard_max_heating_K * constants.c_pd / constants.L_v
+     cond_cap = jnp.minimum(dqv_cap, jnp.maximum(q_v, 0.0)) \
+         / jnp.maximum(dt, 1.0e-10)
+     return jnp.where(
+@@ -381,8 +320,7 @@ def _hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
+ 
+ def hard_saturation_drain(T, q_v, p_full, dt,
+                           hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
+-                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K,
+-                          ice_curve=False):
++                          hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
+     """HARD-gated hard-saturation DRAIN rate [kg/kg/s] (>= 0).
+ 
+     The condensation the hard saturation adjustment applies to drain
+@@ -424,51 +362,29 @@ def hard_saturation_drain(T, q_v, p_full, dt,
+     hard_max_heating_K : float, default 5.0
+         Per-step latent-heating cap [K] (~ 2 g/kg per step); a large pool drains
+         over many steps rather than detonating.
+-    ice_curve : bool, default False
+-        Gate AND land on the mixed-phase w(T)-blended liquid/ice saturation
+-        curve with the blended latent heat (frozen at the pre-adjustment T)
+-        instead of liquid-only.  At TTL temperatures (~195 K) the liquid
+-        curve sits ~60% above the ice curve, so the liquid-only drain leaves
+-        permanent ice-supersaturation — the 20x-ERA5 TTL vapour bias.
+-        Default False is byte-identical to the reviewed liquid-only drain.
+-        The caller applying the drained vapour MUST use the matching latent
+-        heat (:func:`mixed_phase_l_over_cp` at the SAME pre-adjustment T)
+-        and route cold-cell condensate to CLOUD ICE where available.
+ 
+     Returns
+     -------
+     array
+         Drain rate [kg/kg/s], >= 0.
+     """
+-    sat_fn = (mixed_phase_saturation_mixing_ratio if ice_curve
+-              else saturation_mixing_ratio)
+     if jax.config.jax_enable_x64:
+-        T64 = T.astype(jnp.float64)
+-        l_over_cp = mixed_phase_l_over_cp(T64) if ice_curve else None
+-        q_sat = sat_fn(
+-            T64, p_full.astype(jnp.float64)).astype(q_v.dtype)
++        q_sat = saturation_mixing_ratio(
++            T.astype(jnp.float64), p_full.astype(jnp.float64)).astype(q_v.dtype)
+         cond_hard = _hard_saturation_condensation(
+-            T64, q_v.astype(jnp.float64),
++            T.astype(jnp.float64), q_v.astype(jnp.float64),
+             p_full.astype(jnp.float64), dt,
+-            q_sat.astype(jnp.float64),
+-            sat_fn=sat_fn, l_over_cp=l_over_cp).astype(q_v.dtype)
++            q_sat.astype(jnp.float64)).astype(q_v.dtype)
+     else:
+-        l_over_cp = mixed_phase_l_over_cp(T) if ice_curve else None
+-        q_sat = sat_fn(T, p_full)
+-        cond_hard = _hard_saturation_condensation(
+-            T, q_v, p_full, dt, q_sat, sat_fn=sat_fn, l_over_cp=l_over_cp)
++        q_sat = saturation_mixing_ratio(T, p_full)
++        cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat)
+     # HARD RH gate (matches the validated post-step cap): drain ONLY where
+     # q_v > hard_threshold * q_sat; no sub-threshold leakage.  ``cond_hard`` is
+     # the on-curve drain, so the gated rate never overshoots.
+     drain = jnp.where(
+         q_v > hard_threshold * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR),
+         cond_hard, 0.0)
+-    # Cap the per-step heating with the SAME per-cell latent heat the caller
+-    # deposits with (frozen L_eff(T0)/c_pd under ice_curve; None -> scalar
+-    # L_v/c_pd, byte-identical liquid path) so the K cap bounds ACTUAL heating.
+-    lcp_cap = None if l_over_cp is None else l_over_cp.astype(q_v.dtype)
+-    return _hard_saturation_rate_limit(drain, q_v, dt, hard_max_heating_K,
+-                                       l_over_cp=lcp_cap)
++    return _hard_saturation_rate_limit(drain, q_v, dt, hard_max_heating_K)
+ 
+ 
+ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None,
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/physics_state.py b/packages/atmosphere/legoesm/atmosphere/physics/physics_state.py
+index b89bbdd26..e625ba2c9 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/physics_state.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/physics_state.py
+@@ -187,16 +187,6 @@ class PhysicsState(NamedTuple):
+     # unaffected.
+     dyn_tendency_T: jnp.ndarray = None
+     dyn_tendency_qv: jnp.ndarray = None
+-    # CONVECTIVE surface precipitation [kg/m^2/s], shape (ncol,), written by
+-    # the convection module each step (the combined-physics accumulator
+-    # captures the convection slot's ``precip`` tendency field).  Consumed
+-    # one step LAGGED by the radiation module's cloud-fraction call
+-    # (Slingo-1987 ``convective_cloud``) on the standalone (MPAS) path —
+-    # the same lagged-carry convention the FV pipeline uses for its
+-    # ``conv_precip`` threading.  Always materialised as zeros (uniform
+-    # pytree; byte-identical for runs that never read it).  Appended LAST
+-    # with a default so existing direct constructors are unaffected.
+-    conv_precip: jnp.ndarray = None
+ 
+ 
+ # Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
+@@ -368,9 +358,6 @@ def init_physics_state(
+         # docstrings).
+         dyn_tendency_T=None,
+         dyn_tendency_qv=None,
+-        # Lagged convective surface precip for the standalone-path Slingo
+-        # cumulus cloud fraction; zeros before the first convection step.
+-        conv_precip=jnp.zeros((ncol,), dtype=dtype),
+     )
+ 
+ 
+@@ -428,8 +415,4 @@ def update_physics_state(phys_state, updates):
+         # r2).  A driver re-populates them before every convection call.
+         dyn_tendency_T=updates.get("dyn_tendency_T", None),
+         dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
+-        # Evolving lag carry (convection writes, radiation reads next step):
+-        # carried forward unchanged when the step's convection published
+-        # nothing (schemes without a rain split).
+-        conv_precip=updates.get("conv_precip", phys_state.conv_precip),
+     )
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py b/packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py
+index 69a51ee88..eebb37068 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py
+@@ -455,8 +455,7 @@ def _get_grid_lat_lon(grid_or_mesh, shape_2d):
+ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
+                                  sw_net_sfc=None, lw_net_sfc=None,
+                                  sw_up_toa=None, lw_up_toa=None,
+-                                 sw_down_toa=None,
+-                                 sw_down_sfc=None, lw_down_sfc=None):
++                                 sw_down_toa=None):
+     """Pack column heating rate into a HydrostaticTendencies.
+ 
+     Returns a HydrostaticTendencies with only dT_dt non-zero.
+@@ -504,15 +503,6 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
+         return Field(data=arr.reshape(shape_2d).astype(_ps_dtype),
+                      name=name, dims=dims_2d, units="W/m^2")
+ 
+-    # Downwelling counterparts (+down): forcing for an interactive land tile on
+-    # the lean MPAS loop (AtmToSurface.sw_down/lw_down); NOT derivable from the
+-    # net fields at the consumer without re-assuming sfc albedo/emissivity.
+-    swd_field = None if sw_down_sfc is None else Field(
+-        data=sw_down_sfc.reshape(shape_2d).astype(_ps_dtype),
+-        name="sw_down_sfc_rad", dims=dims_2d, units="W/m^2")
+-    lwd_field = None if lw_down_sfc is None else Field(
+-        data=lw_down_sfc.reshape(shape_2d).astype(_ps_dtype),
+-        name="lw_down_sfc_rad", dims=dims_2d, units="W/m^2")
+     return HydrostaticTendencies(
+         du_dt=Field(
+             data=jnp.zeros(du_shape, dtype=_u_dtype), name="du_dt_rad",
+@@ -533,8 +523,6 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
+         sw_up_toa=_toa_field(sw_up_toa, "sw_up_toa_rad"),
+         lw_up_toa=_toa_field(lw_up_toa, "lw_up_toa_rad"),
+         sw_down_toa=_toa_field(sw_down_toa, "sw_down_toa_rad"),
+-        sw_down_sfc=swd_field,
+-        lw_down_sfc=lwd_field,
+     )
+ 
+ 
+@@ -565,7 +553,6 @@ def _call_radiation_backend(
+     solar_spectral_fraction: jnp.ndarray | None = None,
+     eccf: float | jnp.ndarray = 1.0,
+     cloud_fraction_override: jnp.ndarray | None = None,
+-    conv_precip: jnp.ndarray | None = None,
+ ):
+     """Call configured radiation backend with a unified integration interface.
+ 
+@@ -687,7 +674,6 @@ def _call_radiation_backend(
+             q_ice=q_ice,
+             n_ice=n_ice,
+             n_cloud=n_cloud,
+-            conv_precip=conv_precip,
+             cloud_fraction_override=cloud_fraction_override,
+         )
+         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
+@@ -971,12 +957,6 @@ def _make_hydrostatic_radiation(
+     column count ``ncol = ∏ shape_2d`` divides the mesh's device
+     count.
+ 
+-    When the attached cloud config enables ``convective_cloud``, the fn
+-    reads the LAGGED ``phys_state.conv_precip`` carry (published by the
+-    convection module the previous step) and threads it into the Slingo
+-    cumulus cloud fraction — the standalone-path analogue of the FV
+-    pipeline's ``conv_precip`` threading.
+-
+     When ``nc_from_aerosol`` is True AND the scheme is ``rrtmgp`` the
+     cloud-optics droplet number is overridden with the per-column Andreae
+     (2009) AOD->CCN diagnostic (``forcing["aerosol_od"]``) so the radiation
+@@ -989,15 +969,6 @@ def _make_hydrostatic_radiation(
+     """
+     _time, set_time = _make_time_state()
+     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
+-    # Static build-time gate for the Slingo convective-cloud carry read:
+-    # only a cloud config that ENABLES convective_cloud makes the fn a
+-    # phys_state consumer (byte-identical otherwise).
+-    _conv_cloud_active = (
+-        radiation_config.cloud_scheme != "none"
+-        and radiation_config.cloud_config is not None
+-        and bool(getattr(radiation_config.cloud_config,
+-                         "convective_cloud", False))
+-    )
+ 
+     def physics_fn(state, grid_or_mesh, sigma_coord,
+                    forcing=None, phys_state=None) -> HydrostaticTendencies:
+@@ -1057,15 +1028,6 @@ def _make_hydrostatic_radiation(
+             _doy = forcing["day_of_year"]
+         if forcing is not None and forcing.get("seconds_of_day") is not None:
+             _sod = forcing["seconds_of_day"]
+-        # Transient solar (CMIP6 TSI + optional per-g-point spectral weights):
+-        # traced per-step forcing, same channel as T_sfc/o3/ghg above, so a
+-        # multi-year MPAS/standalone run follows the solar file WITHOUT
+-        # retracing (the coupled cube/lat-lon pipeline threads the equivalent
+-        # via SegmentForcing/current_s_0).  Absent keys -> the configured
+-        # static S_0 and the solver's default spectrum, byte-identical.
+-        _tsi_ext = forcing.get("tsi") if forcing is not None else None
+-        _ssf_ext = (forcing.get("solar_spectral_fraction")
+-                    if forcing is not None else None)
+ 
+         insol, cos_sza, f_day, eccf = _compute_insolation(
+             lat, radiation_config,
+@@ -1073,15 +1035,6 @@ def _make_hydrostatic_radiation(
+             day_of_year=_doy,
+             seconds_of_day=_sod,
+         )
+-        if _tsi_ext is not None:
+-            # insolation is EXACTLY linear in S_0 in both the diurnal and
+-            # daily-mean branches of _compute_insolation, so a post-scale by
+-            # tsi/S_0_config is the transient-TSI application with no second
+-            # orbital computation.
+-            _S0_cfg = (radiation_config.rrtmgp.S_0
+-                       if radiation_config.scheme == "rrtmgp"
+-                       else radiation_config.gray.S_0)
+-            insol = insol * (_tsi_ext / _S0_cfg)
+ 
+         # Flatten to column-major (ncol, nlev)
+         T_col = T.reshape(ncol, nlev)
+@@ -1158,20 +1111,6 @@ def _make_hydrostatic_radiation(
+             if _cf_ovr is not None:
+                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
+ 
+-        # Convective-precip READ (standalone-path Slingo cumulus fraction):
+-        # the convection module published its column-integrated in-updraft
+-        # rain-production rate [kg/m^2/s] into ``phys_state.conv_precip``
+-        # LAST step (radiation runs first in the module chain — one-step
+-        # lag, the FV pipeline's ``conv_precip`` convention).  Gated by the
+-        # cloud config's ``convective_cloud`` so every other run keeps
+-        # ``None`` (byte-identical; compute_cloud_properties' misconfig
+-        # guard still fires if convective_cloud is on with no carry).
+-        _conv_precip_col = None
+-        if _conv_cloud_active and phys_state is not None:
+-            _conv_precip_col = getattr(phys_state, "conv_precip", None)
+-            if _conv_precip_col is not None:
+-                _conv_precip_col = _conv_precip_col.reshape(ncol)
+-
+         # Issue #273 follow-up: optionally shard the per-column radiation
+         # workload across ``column_mesh`` so a 4×A100 (or any device
+         # count that fails cubed-sphere face-divisibility) keeps every
+@@ -1216,8 +1155,6 @@ def _make_hydrostatic_radiation(
+                 _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
+             if _cf_ovr is not None:
+                 _cf_ovr = shard_columns(_cf_ovr, column_mesh)
+-            if _conv_precip_col is not None:
+-                _conv_precip_col = shard_columns(_conv_precip_col, column_mesh)
+ 
+         rad_out = _call_radiation_backend(
+             radiation_config=radiation_config,
+@@ -1243,8 +1180,6 @@ def _make_hydrostatic_radiation(
+             aerosol_lw_od=_aer_lw_ext,
+             ghg_vmr_override=_ghg_ext,
+             cloud_fraction_override=_cf_ovr,
+-            conv_precip=_conv_precip_col,
+-            solar_spectral_fraction=_ssf_ext,
+         )
+ 
+         dT_dt = rad_out.heating_rate.reshape(shape_3d)
+@@ -1272,9 +1207,7 @@ def _make_hydrostatic_radiation(
+             lw_up_toa=rad_out.lw_flux_up[:, 0],
+             sw_down_toa=(rad_out.toa_insolation
+                          if rad_out.toa_insolation is not None
+-                         else rad_out.sw_flux_down[:, 0]),
+-            sw_down_sfc=rad_out.sw_flux_down[:, -1],
+-            lw_down_sfc=rad_out.lw_flux_down[:, -1])
++                         else rad_out.sw_flux_down[:, 0]))
+ 
+     physics_fn.set_time = set_time
+     physics_fn.set_T_sfc_override = set_T_sfc_override
+@@ -1290,7 +1223,7 @@ def _make_hydrostatic_radiation(
+     # ``phys_state`` to accepts_ps=False fns that advertise this flag.  Only set
+     # when the feature is active (byte-identical otherwise: unmarked => not
+     # forwarded => the RH grid-scale cloud path is unchanged).
+-    if use_clubb_cloud_fraction or _conv_cloud_active:
++    if use_clubb_cloud_fraction:
+         physics_fn._wants_phys_state_ro = True
+     return physics_fn
+ 
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py b/packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py
+index 2d62f80fe..e101e04cb 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py
+@@ -593,36 +593,13 @@ def _make_mpas_turbulence(
+             T_sfc = _resolve_T_sfc(T_col, phys_state)
+         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+         # MPAS land surface boundary: throttle the LAND fraction's surface
+-        # humidity gradient by a soil-moisture availability beta instead of
+-        # the saturated infinite-swamp value the nearest-ocean SST fill
+-        # otherwise implies.  Two sources, traced wins:
+-        #   1. ``forcing["beta_land"]`` — TRACED per-cell root-zone beta_soil
+-        #      from the interactive multilayer land (#1312 phase 2b; one-step
+-        #      lag, updated by the driver loop each step without retrace).
+-        #   2. the STATIC ``land_beta`` build-time knob (mpas_land_beta).
+-        # Both gates are static Python ``if``s (dict-key membership is part
+-        # of the forcing pytree structure; the knob is a build-time closure
+-        # const — the JAX feature-gating exception): defaults keep these
+-        # branches out of the trace entirely, byte-identical to before.
+-        _beta_traced = (forcing.get("beta_land")
+-                        if forcing is not None else None)
+-        if _beta_traced is not None:
+-            if f_land is None:
+-                raise ValueError(
+-                    "forcing['beta_land'] (traced per-cell beta_soil) "
+-                    "requires the land fraction to be threaded into the "
+-                    "turbulence factory (make_physics f_land=...); the "
+-                    "driver must pass f_land whenever mpas_land_beta_soil "
+-                    "is enabled."
+-                )
+-            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+-                beta_limited_surface_humidity,
+-            )
+-            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+-            q_sfc = beta_limited_surface_humidity(
+-                q_sfc, q_v_col[:, -1], _f_land_col,
+-                jnp.asarray(_beta_traced, dtype=q_sfc.dtype).reshape(nCells))
+-        elif f_land is not None and land_beta != 1.0:
++        # humidity gradient by ``land_beta`` (soil-moisture availability)
++        # instead of the saturated infinite-swamp value the nearest-ocean
++        # SST fill otherwise implies.  Static feature gate (Python ``if`` on
++        # build-time config, the JAX feature-gating exception): defaults
++        # (f_land None / beta 1) keep this branch out of the trace entirely,
++        # byte-identical to the pre-knob path.
++        if f_land is not None and land_beta != 1.0:
+             from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                 beta_limited_surface_humidity,
+             )
+diff --git a/packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py b/packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py
+index 788c70c00..29942a6e7 100644
+--- a/packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py
++++ b/packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py
+@@ -162,15 +162,10 @@ def beta_limited_surface_humidity(
+     q_sat_sfc: jax.Array,
+     q_air: jax.Array,
+     f_land: jax.Array,
+-    beta_land: float | jax.Array,
++    beta_land: float,
+ ) -> jax.Array:
+     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
+ 
+-    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+-    per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
+-    from the interactive multilayer land, #1312 phase 2b) — the formula below
+-    is elementwise either way.
+-
+     On a non-tiled surface the bulk latent flux is
+     ``LH ∝ (q_sfc - q_air)``.  Using the saturated ``q_sat_sfc`` everywhere
+     makes every land cell an infinite swamp (beta = 1).  This throttles the
+diff --git a/packages/core/legoesm/constants.py b/packages/core/legoesm/constants.py
+index faf082d4f..06b4c8147 100644
+--- a/packages/core/legoesm/constants.py
++++ b/packages/core/legoesm/constants.py
+@@ -58,11 +58,6 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature
+                                 # to avoid division by near-zero T in clear-sky columns.
+                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
+ T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+-T_hom_freeze = 233.15           # Homogeneous freezing threshold [K] (~-40 C): all
+-                                # condensate is ice below; standard mixed-phase
+-                                # partition ramp spans [T_hom_freeze, T_freeze]
+-                                # (Pruppacher & Klett 1997; Morrison/IFS-style
+-                                # linear liquid fraction).
+ S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
+ S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
+ mu_ice_freeze = 0.054           # Liquidus slope / freezing-point depression [degC/PSU] (Bitz-Lipscomb 1999, CICE)
+diff --git a/packages/core/legoesm/core/state.py b/packages/core/legoesm/core/state.py
+index 2e47258df..3580247f4 100644
+--- a/packages/core/legoesm/core/state.py
++++ b/packages/core/legoesm/core/state.py
+@@ -140,15 +140,6 @@ class HydrostaticTendencies(NamedTuple):
+     # turbulence is off or a scheme computes no surface fluxes.
+     shflx_sfc: Field | None = None
+     lhflx_sfc: Field | None = None
+-    # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
+-    # radiation tendency for the lean MPAS/spectral loops: an interactive land
+-    # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
+-    # NET fluxes above cannot be inverted for them without assuming the
+-    # radiation code's surface albedo/emissivity at the consumer.  None on
+-    # non-radiation tendencies; appended at the end with None defaults so every
+-    # existing (incl. positional) constructor is unaffected.
+-    sw_down_sfc: Field | None = None
+-    lw_down_sfc: Field | None = None
+ 
+ 
+ class FV3HydrostaticState(NamedTuple):
+diff --git a/packages/coupler/legoesm/driver/config.py b/packages/coupler/legoesm/driver/config.py
+index 734faacc0..c68c2b3fd 100644
+--- a/packages/coupler/legoesm/driver/config.py
++++ b/packages/coupler/legoesm/driver/config.py
+@@ -627,13 +627,6 @@ class ExperimentConfig(NamedTuple):
+     # configuration); bounds follow the scheme __param_spec__.
+     hard_sat_adjust_threshold: float | None = None   # RH trigger, q_v > thr*q_sat
+     hard_sat_max_heating_K: float | None = None      # per-step latent-heating cap [K]
+-    # Mixed-phase (ice-curve) drain: gate + land on the w(T)-blended
+-    # liquid/ice saturation curve with the blended latent heat below
+-    # freezing, and route cold condensate to cloud ice.  The liquid-only
+-    # drain leaves permanent ~60% ice-supersaturation at TTL temperatures —
+-    # the 20x-ERA5 TTL vapour bias (+17.8 K warm bias at 100 hPa) of the
+-    # first ClimateEval scorecard.  Requires hard_saturation_adjustment.
+-    hard_sat_ice_curve: bool = False
+ 
+     # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+     # updraft precipitation).  A value >0 diverts that fraction of the
+@@ -1106,14 +1099,6 @@ class ExperimentConfig(NamedTuple):
+     # knobs are refused there (validate_strict).
+     mpas_land_lapse_K_per_km: float = 0.0  # land anchor lapse [K/km]; 0=off, 6.5=ICAO std
+     mpas_land_beta: float = 1.0            # land evaporation efficiency [0-1]; 1=wet swamp
+-    # Phase 2b (#1312): traced per-cell root-zone beta_soil from the
+-    # interactive multilayer land -> the MPAS turbulence surface humidity
+-    # (forcing["beta_land"], one-step lag like the skin-T blend).  Replaces
+-    # the STATIC mpas_land_beta over land when on (the land latent flux is
+-    # then throttled by the soil's own moisture state — the same
+-    # land_tile_beta_soil the coupled pipeline applies).  Requires
+-    # use_multilayer_land on the MPAS lane; default OFF = byte-identical.
+-    mpas_land_beta_soil: bool = False
+ 
+     # Held-Suarez forcing
+     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
+@@ -1821,23 +1806,6 @@ class ExperimentConfig(NamedTuple):
+                     "humidity; turbulence='none' has no surface latent flux "
+                     "to throttle — the knob would be silently inert."
+                 )
+-            if self.mpas_land_beta_soil:
+-                # Traced beta_soil needs the multilayer land producing it and
+-                # the turbulence surface flux consuming it (inert-corner
+-                # rejection, same doctrine as the static knobs above).
+-                if not self.use_multilayer_land:
+-                    errors.append(
+-                        "mpas_land_beta_soil threads the multilayer land's "
+-                        "root-zone beta_soil into the turbulence surface "
+-                        "humidity; it requires use_multilayer_land=True."
+-                    )
+-                if self.turbulence == "none":
+-                    errors.append(
+-                        "mpas_land_beta_soil throttles the turbulence "
+-                        "surface humidity; turbulence='none' has no surface "
+-                        "latent flux to throttle — the flag would be "
+-                        "silently inert."
+-                    )
+             # flat topography yields all-zero f_land UNLESS an explicit land
+             # mask overrides it (codex F-B2); the driver's runtime all-zero
+             # guard remains authoritative for degenerate mask files.
+@@ -1859,14 +1827,6 @@ class ExperimentConfig(NamedTuple):
+                     "land tile (slab_land_active / use_multilayer_land) and "
+                     "would silently ignore them."
+                 )
+-            if self.mpas_land_beta_soil:
+-                errors.append(
+-                    "mpas_land_beta_soil is an MPAS-lane flag; "
+-                    f"discretization={d.discretization!r} threads beta_soil "
+-                    "through its own tiled land pipeline "
+-                    "(physics_pipeline._land_tile_q_sfc) and would silently "
+-                    "ignore it."
+-                )
+             if self.mpas_qv_smooth_del2_m2s != 0.0:
+                 errors.append(
+                     "mpas_qv_smooth_del2_m2s is an MPAS-lane knob; "
+@@ -1927,38 +1887,6 @@ class ExperimentConfig(NamedTuple):
+                 f"mpas_ice_thickness_m (climatological ice slab [m]) must be "
+                 f"finite in [0.1, 10]; got {self.mpas_ice_thickness_m!r}."
+             )
+-        # Ice-curve drain preconditions (fail-fast: every one is a silent no-op
+-        # or an unphysical deposition otherwise).  It is a Morrison-on-MPAS
+-        # post-step correction that gates+lands on the blended liquid/ice curve
+-        # and DEPOSITS to prognostic cloud ice q_i (seeding ice number N_i):
+-        #   (a) needs the boolean drain gate it modifies (else inert);
+-        #   (b) is only wired into the MPAS post-step hook (else inert on other
+-        #       lanes — the in-scheme liquid adjustment is untouched);
+-        #   (c) needs Morrison's prognostic q_i + N_i + nucleation mass (other
+-        #       schemes lack a cloud-ice reservoir, so the drain would deposit
+-        #       LIQUID at ice saturation — re-evaporating, energy-inconsistent).
+-        if self.hard_sat_ice_curve:
+-            if not self.hard_saturation_adjustment:
+-                errors.append(
+-                    "hard_sat_ice_curve=True requires "
+-                    "hard_saturation_adjustment=True (the mixed-phase curve "
+-                    "only modifies the active drain — it would be silently "
+-                    "inert)."
+-                )
+-            if normalize_grid_type(self.grid.grid_type) != "mpas":
+-                errors.append(
+-                    "hard_sat_ice_curve=True requires an MPAS grid (the "
+-                    "ice-curve drain is only wired into the MPAS post-step "
+-                    "hook; on grid_type="
+-                    f"{self.grid.grid_type!r} it would be silently inert)."
+-                )
+-            if self.microphysics != "morrison":
+-                errors.append(
+-                    "hard_sat_ice_curve=True requires microphysics='morrison' "
+-                    "(the drain deposits to prognostic cloud ice q_i and seeds "
+-                    "ice number N_i from Morrison's nucleation mass; "
+-                    f"microphysics={self.microphysics!r} has no such reservoir)."
+-                )
+         # --- hard-saturation-adjustment overrides (fail-fast, no silent no-op)
+         # The float overrides only act when the boolean gate is on; bounds
+         # mirror the warm-rain schemes' __param_spec__ ((1, 2) trigger,
+diff --git a/packages/coupler/legoesm/driver/model_driver.py b/packages/coupler/legoesm/driver/model_driver.py
+index f43f809e6..a259c38f9 100644
+--- a/packages/coupler/legoesm/driver/model_driver.py
++++ b/packages/coupler/legoesm/driver/model_driver.py
+@@ -183,8 +183,7 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
+     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+ 
+ 
+-def _standalone_cloud_config(cfg, cloud_scheme: str,
+-                             allow_convective_cloud: bool = False):
++def _standalone_cloud_config(cfg, cloud_scheme: str):
+     """Tuned ``CloudConfig`` for the standalone (MPAS/spectral) radiation path.
+ 
+     Mirrors the FV pipeline's ``build_cloud_config`` call (#689) so the tuned
+@@ -192,44 +191,33 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
+     / Xu-Randall knobs) reach the standalone backends too (#870 Phase 1) —
+     previously these paths silently ran ``CloudConfig`` defaults.
+ 
+-    ``convective_cloud``: honoured on the MPAS path
+-    (``allow_convective_cloud=True`` — 2026-07-24: the hydrostatic radiation
+-    fn reads the LAGGED ``PhysicsState.conv_precip`` carry the convection
+-    module publishes, closing the old "does not thread conv_precip" gap);
+-    still FORCED OFF on the spectral path, whose lean loop refuses stateful
+-    physics and therefore has no ``conv_precip`` carry to read — enabling it
+-    there would trip ``compute_cloud_properties``' loud misconfiguration
+-    guard by design.  Returns ``None`` (=> scheme-default config) when the
+-    scheme is "none".
++    ``convective_cloud`` stays OFF here: the standalone radiation call
++    (``radiation/integration.py``) does not thread ``conv_precip`` into
++    ``compute_cloud_properties``, and ``convective_cloud=True`` without it
++    trips that function's loud misconfiguration guard by design.  Returns
++    ``None`` (=> scheme-default config) when the scheme is "none".
+     """
+     if cloud_scheme == "none":
+         return None
+     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+ 
+-    _conv_cloud = bool(getattr(cfg, "convective_cloud", False))
+-    if _conv_cloud and allow_convective_cloud:
+-        logger.info(
+-            "convective_cloud=True ACTIVE on the MPAS standalone path: "
+-            "Slingo cumulus fraction driven by the one-step-lagged "
+-            "PhysicsState.conv_precip carry (the convection module's "
+-            "column-integrated in-updraft rain production). Schemes with "
+-            "no rain split publish zero — their cumulus fraction is zero."
+-        )
+-    elif _conv_cloud:
+-        # LOUD, not silent (repo doctrine): the spectral lean loop refuses
+-        # stateful physics, so there is no conv_precip carry to read — the
+-        # forced drop stays visible in the log.
++    # LOUD, not silent (repo doctrine): a user/YAML requesting
++    # convective_cloud=True on a standalone backend would otherwise get
++    # different physics with no trace (pre-merge codex review).  The lane
++    # still runs (the production YAML sets it true for the FV path); the
++    # forced drop is now visible in the log.
++    if bool(getattr(cfg, "convective_cloud", False)):
+         logger.warning(
+-            "convective_cloud=True is FORCED OFF on the spectral "
+-            "standalone radiation path: its lean loop carries no "
+-            "PhysicsState, so there is no conv_precip for the Slingo "
+-            "fraction. The FV pipeline and the MPAS lane honour the "
+-            "setting."
++            "convective_cloud=True is FORCED OFF on the standalone "
++            "(MPAS/spectral) radiation path: it does not thread conv_precip, "
++            "and convective_cloud without it trips compute_cloud_properties' "
++            "misconfiguration guard. The FV (cubed-sphere/latlon) pipeline "
++            "honours the setting."
+         )
+ 
+     return build_cloud_config(
+         cloud_scheme,
+-        convective_cloud=(_conv_cloud and allow_convective_cloud),
++        convective_cloud=False,
+         rh_crit=getattr(cfg, "cloud_rh_crit", None),
+         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
+         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
+@@ -282,8 +270,7 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+ 
+ 
+ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
+-                                   hard_threshold, hard_max_heating_K,
+-                                   ice_curve=False, q_i=None):
++                                   hard_threshold, hard_max_heating_K):
+     """MPAS POST-STEP hard-saturation-adjustment drain (array-level, testable).
+ 
+     Applies the reviewed hard-saturation-adjustment DRAIN
+@@ -314,107 +301,28 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
+     hard_threshold, hard_max_heating_K : float
+         RH trigger and per-step latent-heating cap [K] from the scheme config.
+ 
+-    ice_curve : bool, default False
+-        Mixed-phase drain (TTL dehydration fix): gate + land on the
+-        w(T)-blended liquid/ice saturation curve with the matching blended
+-        latent heat (frozen at the pre-adjustment T — the SAME array the
+-        drain's internal solve uses, so ``c_pd*T + L_eff(T0)*q_v`` is
+-        conserved exactly), and route each cell's condensate by phase:
+-        the liquid fraction w(T0) to ``q_c``, the ice fraction to ``q_i``
+-        when that tracer exists (else everything to ``q_c`` — Morrison's
+-        own freezing then handles the phase, documented approximation).
+-    q_i : array or None
+-        Cloud-ice tracer [kg/kg] (ncol, nlev) — the cold-cell condensate
+-        recipient under ``ice_curve``.  Ignored when ``ice_curve`` is off.
+-
+     Returns
+     -------
+-    (T_new, q_v_new, q_c_new, q_i_new, dq) : tuple of arrays
++    (T_new, q_v_new, q_c_new, dq) : tuple of arrays
+         Updated fields and the per-step condensed increment ``dq`` [kg/kg]
+-        (>= 0), for diagnostics.  ``q_i_new`` is None when no q_i was given.
+-        All inputs are returned unchanged (dq = 0) when ``q_c is None`` --
+-        total water is conserved.
++        (>= 0), for diagnostics.  All inputs are returned unchanged (dq = 0) when
++        ``q_c is None`` -- total water is conserved.
+     """
+     from legoesm.atmosphere.physics.microphysics._warm_rain import (
+         hard_saturation_drain,
+-        mixed_phase_l_over_cp,
+-        mixed_phase_liquid_fraction,
+     )
+     if q_c is None:
+         # No condensate reservoir -> cannot conserve total water by draining;
+         # do nothing (the moist path always has q_c).
+-        return T, q_v, None, q_i, jnp.zeros_like(q_v)
++        return T, q_v, None, jnp.zeros_like(q_v)
+     p_full = p_s[:, None] * jnp.asarray(sigma_full)[None, :]
+-    # The ice curve DEPOSITS to cloud ice; without a q_i reservoir it cannot do
+-    # so, and heating with the blended (L_s-weighted) latent heat while binning
+-    # the condensate as LIQUID q_c would inject (1-w)*L_f*dq of spurious energy.
+-    # So degrade FULLY to the energy-exact liquid drain when q_i is absent (the
+-    # rate AND the heating both liquid).  validate_strict forbids ice_curve
+-    # without Morrison (q_i present), so this is a defensive fallback only.
+-    _use_ice = bool(ice_curve) and (q_i is not None)
+     rate = hard_saturation_drain(T, q_v, p_full, dt, hard_threshold,
+-                                 hard_max_heating_K, ice_curve=_use_ice)
++                                 hard_max_heating_K)
+     dq = rate * dt
+-    if _use_ice:
+-        # Heating with the SAME frozen-at-T0 blended latent heat the solve
+-        # used; condensate split by the same w(T0) -> cloud water / cloud ice.
+-        # (Landing q_c below the LIQUID curve at cold T would re-evaporate, so
+-        # the ice fraction MUST go to q_i for the drain to stick; the caller
+-        # seeds N_i for that ice mass.)
+-        _l_cp = mixed_phase_l_over_cp(T).astype(T.dtype)
+-        T_new = T + _l_cp * dq
+-        w_liq = mixed_phase_liquid_fraction(T).astype(q_v.dtype)
+-        q_c_new = q_c + w_liq * dq
+-        q_i_new = q_i + (1.0 - w_liq) * dq
+-    else:
+-        # Liquid path (ice_curve off, or requested without a cloud-ice
+-        # reservoir): condense to q_c with L_v -> c_pd*T + L_v*q_v exact.
+-        T_new = T + (constants.L_v / constants.c_pd) * dq
+-        q_c_new = q_c + dq
+-        q_i_new = q_i
++    T_new = T + (constants.L_v / constants.c_pd) * dq
+     q_v_new = q_v - dq
+-    return T_new, q_v_new, q_c_new, q_i_new, dq
+-
+-
+-# Air-density floor for the Cooper ice-number/mass conversion, matching
+-# Morrison's ``_RHO_FLOOR`` (module_mp_graupel density floor in divisions) so the
+-# seed ceiling is Morrison-consistent at low density (without floors the p/(R_dT)
+-# ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
+-_ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
+-
+-
+-def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
+-    """Seed cloud-ice NUMBER [1/kg] for freshly deposited ice mass ``dq_i``.
+-
+-    A two-moment scheme (Morrison) needs a matching NUMBER for the deposited ice
+-    or the new mass is ill-posed: M2005 diffusional growth self-gates as
+-    ``EPSI ~ N_i^(2/3)`` (orphan ice with ``N_i = 0`` can neither grow nor
+-    sublimate), and the fall-speed PSD slope ``lambda_i=(rho_ci pi N_i/q_i)^1/3``
+-    is degenerate at ``N_i = 0`` (ice cannot sediment out).  Give each new
+-    crystal the Morrison nucleation mass ``mi0 = 4/3 pi rho_ci r_nuc^3`` (mean
+-    size = the nucleation radius), i.e. ``dN_i = dq_i / mi0`` -- the SAME
+-    mass<->number closure Morrison's Cooper nucleation uses
+-    (``dq_i_nuc = dN_i_nuc * mi0``).
+-
+-    The added number is CAPPED at Morrison's Cooper ice-number ceiling
+-    ``N_i_nuc_max`` [1/m^3], converted to per-mass via
+-    ``rho_air = p/(R_d T)`` floored at ``_ICE_SEED_RHO_FLOOR`` (0.1 kg/m^3) --
+-    exactly Morrison's own Cooper target conversion
+-    (``kc2 = min(...) / clip(rho, 0.1)``): a large (heating-cap-sized) deposit
+-    then GROWS the crystals (bigger mean size)
+-    rather than over-populating number -- an uncapped ``dq_i/mi0`` at the ~2 g/kg
+-    cap seeds ~1e8 m^-3, ~300x the 5e5 m^-3 (500/L) ceiling, which would perturb
+-    deposition and sedimentation.  Number is additive and carries no latent heat,
+-    so this does not affect the water/energy budgets the drain already conserves.
+-    ``rho_air`` uses dry ``p/(R_d T)``; Morrison's diagnostic uses moist/virtual-T
+-    density, so above the floor this cap is marginally TIGHTER (~0.6%, i.e.
+-    conservative -- fewer crystals) and at the low-density floor the two coincide.
+-    """
+-    rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
+-    n_i_max_perkg = n_i_nuc_max / jnp.maximum(rho_air, _ICE_SEED_RHO_FLOOR)
+-    d_n_raw = jnp.maximum(dq_i, 0.0) / jnp.maximum(ice_nuc_mass, 1.0e-30)
+-    headroom = jnp.maximum(n_i_max_perkg - N_i, 0.0)   # 0 if already at ceiling
+-    return N_i + jnp.minimum(d_n_raw, headroom)
++    q_c_new = q_c + dq
++    return T_new, q_v_new, q_c_new, dq
+ 
+ 
+ class ModelDriver:
+@@ -2012,40 +1920,22 @@ class ModelDriver:
+                 "expected 'simple_seb', 'two_leaf', or 'clm_ml'."
+             )
+ 
+-        # Unstructured (Voronoi/MPAS) meshes carry per-cell 1-D coordinates and
+-        # per-cell (nCells, ...) state — already the flattened (ncol,) column
+-        # order the land tile wants; the structured paths go through the
+-        # pipeline adapter.  ``_flat_cols`` is the one flattener both branches
+-        # share so every consumer below stays layout-agnostic.
+-        _unstructured = hasattr(self.grid, "latCell")
+-        if _unstructured:
+-            ad = None
+-            lat_rad = _np.asarray(self.grid.latCell).reshape(-1)
+-            lon_rad = _np.asarray(self.grid.lonCell).reshape(-1)
+-
+-            def _flat_cols(x):
+-                return jnp.asarray(getattr(x, "data", x)).reshape(-1)
+-        else:
+-            ad = self.physics.adapter
+-
+-            def _flat_cols(x):
+-                return jnp.asarray(
+-                    ad.flatten_2d(getattr(x, "data", x))).reshape(-1)
+-            # column-order latitude / longitude in RADIANS, flattened to (ncol,).
+-            # Cubed-sphere stores per-cell (6,n,n) lat/lon; the LAT-LON grid stores
+-            # 1-D axes (lat (n_lat,), lon (n_lon,)) — flatten_2d on those raised
+-            # "cannot reshape (n_lat,) into ncol" and killed every latlon
+-            # use_multilayer_land run at setup (#837 follow-up / #869 lane).
+-            # Prefer the grid's own 2-D fields when present, else broadcast the
+-            # 1-D axes to the (n_lat, n_lon) cell grid (same convention as
+-            # run_lmip_smoke.grid_latlon_rad).  The CLM map regrids onto DEGREE
+-            # coordinates; the land tile consumes radians.
+-            _glat = _np.asarray(getattr(self.grid, "lat2d", self.grid.lat))
+-            _glon = _np.asarray(getattr(self.grid, "lon2d", self.grid.lon))
+-            if _glat.ndim == 1 and _glon.ndim == 1:
+-                _glon, _glat = _np.meshgrid(_glon, _glat)   # -> (n_lat, n_lon)
+-            lat_rad = _np.asarray(ad.flatten_2d(_glat)).reshape(-1)
+-            lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
++        ad = self.physics.adapter
++        # column-order latitude / longitude in RADIANS, flattened to (ncol,).
++        # Cubed-sphere stores per-cell (6,n,n) lat/lon; the LAT-LON grid stores
++        # 1-D axes (lat (n_lat,), lon (n_lon,)) — flatten_2d on those raised
++        # "cannot reshape (n_lat,) into ncol" and killed every latlon
++        # use_multilayer_land run at setup (#837 follow-up / #869 lane).
++        # Prefer the grid's own 2-D fields when present, else broadcast the
++        # 1-D axes to the (n_lat, n_lon) cell grid (same convention as
++        # run_lmip_smoke.grid_latlon_rad).  The CLM map regrids onto DEGREE
++        # coordinates; the land tile consumes radians.
++        _glat = _np.asarray(getattr(self.grid, "lat2d", self.grid.lat))
++        _glon = _np.asarray(getattr(self.grid, "lon2d", self.grid.lon))
++        if _glat.ndim == 1 and _glon.ndim == 1:
++            _glon, _glat = _np.meshgrid(_glon, _glat)   # -> (n_lat, n_lon)
++        lat_rad = _np.asarray(ad.flatten_2d(_glat)).reshape(-1)
++        lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
+         lat_deg = _np.degrees(lat_rad)
+         lon_deg = _np.degrees(lon_rad)
+         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
+@@ -2132,7 +2022,8 @@ class ModelDriver:
+             )
+ 
+         ncol = lat_deg.shape[0]
+-        T_init = _flat_cols(self.state.T.data[..., -1]).astype(storage_dtype)
++        T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
++            storage_dtype)
+         # Aridity-aware cold-start soil moisture (#730 / #837).  Seed theta from
+         # the near-surface RH of the IC atmosphere, mapped into the per-column
+         # plant-available range [theta_wp, theta_fc] the tile's beta reads
+@@ -2148,9 +2039,11 @@ class ModelDriver:
+         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
+         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
+         if _qv is not None:
+-            q_v_low = _flat_cols(
+-                getattr(_qv, "data", _qv)[..., -1]).astype(storage_dtype)
+-            p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
++            q_v_low = ad.flatten_2d(
++                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
++            p_s = ad.flatten_2d(
++                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
++                    storage_dtype)
+             rh_low = q_v_low / jnp.maximum(
+                 saturation_mixing_ratio(T_init, p_s), 1e-12)
+             theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
+@@ -4364,15 +4257,6 @@ class ModelDriver:
+                 _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
+                 for _k in trc_d:
+                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
+-            # Multilayer (Richards) land columns (MPAS port): same namespaced
+-            # ``land_ml_<field>`` payload as the coupled carry_aux channel
+-            # (_checkpoint_carry_aux), so the loader can reuse the shared
+-            # fail-loud restore (#730 contract).  None fields are skipped on
+-            # save; restore validates the field-set exactly.
+-            if self._land_ml_state is not None:
+-                for _f, _v in self._land_ml_state._asdict().items():
+-                    if _v is not None:
+-                        _save[f"land_ml_{_f}"] = np.asarray(_v)
+             # Prognostic ice skin (mpas_ice_skin_prognostic): persist so a
+             # 12h chain link resumes the equilibrated skin instead of
+             # re-running the ~weeks-long spin-up from T_freeze_ocean every
+@@ -4966,24 +4850,6 @@ class ModelDriver:
+                         name=_k, dims=("nCells", "nlev"), units="kg/kg")
+                     for _k in _names
+                 })
+-            # Multilayer (Richards) land columns (MPAS port): stage the
+-            # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
+-            # fail-loud restore (#730 exact-field-set contract).  Single-
+-            # process only (matches the run-side phase-1 guard): under MPI the
+-            # writer's columns are the full mesh and cannot be band-scattered.
+-            _lml_keys = [k for k in d.files if k.startswith("land_ml_")]
+-            if _lml_keys:
+-                if _mpi:
+-                    raise ValueError(
+-                        "Checkpoint carries multilayer-land (land_ml_*) "
+-                        "columns, which cannot be scattered under MPI "
+-                        "(multilayer land is single-process only on the "
+-                        "MPAS lane); restart single-process.")
+-                if not isinstance(self._carry_aux, dict):
+-                    self._carry_aux = {}
+-                for _k in _lml_keys:
+-                    self._carry_aux[_k] = jnp.asarray(d[_k])
+-                self._restore_land_ml_from_carry_aux()
+             # Restore the stateful-physics carry (#413): stash the
+             # ``physstate_<field>`` arrays into carry_aux for the
+             # _run_mpas seed overlay.  Cell-dimensioned fields scatter to
+@@ -5882,21 +5748,6 @@ class ModelDriver:
+         ``range(start_step, n_steps_total)`` and treat ``--days`` as total;
+         do not copy their launcher convention here.
+         """
+-        # --budget-ledger is a compiled-segment (SegmentCarry) diagnostic —
+-        # the per-process attribution hooks live in the FV segment loops and
+-        # are NOT wired into this lean loop.  It used to be SILENTLY inert
+-        # here (#1311: chains passed the flag and got no ledger, so the
+-        # conv-pairing gate quietly never ran); refuse loudly until the
+-        # attribution port lands.
+-        if bool(getattr(self.config.output, "budget_ledger", False)):
+-            raise ValueError(
+-                "--budget-ledger is not implemented on the MPAS lean loop "
+-                "(#1311): the per-process ledger accumulates inside the FV "
+-                "compiled segments (SegmentCarry), which this path does not "
+-                "use.  Run without the flag, or use the FV lanes for "
+-                "ledger-attributed budget runs, until the MPAS attribution "
+-                "port lands."
+-            )
+         import time
+ 
+         cfg = self.config
+@@ -6067,27 +5918,6 @@ class ModelDriver:
+             _hsub.hard_sat_adjust_threshold if _hsub_has_field else None)
+         _hard_sat_max_heating = (
+             _hsub.hard_sat_max_heating_K if _hsub_has_field else None)
+-        # Mixed-phase (ice-curve) drain: TTL dehydration fix — gate + land on
+-        # the blended liquid/ice curve below freezing (validate_strict requires
+-        # hard_saturation_adjustment + grid_type='mpas' + microphysics='morrison'
+-        # when set).
+-        _hard_sat_ice_curve = bool(
+-            getattr(cfg, "hard_sat_ice_curve", False)) and _hard_sat_on
+-        # Morrison nucleation crystal mass mi0 = 4/3 pi rho_ci r_nuc^3 [kg] — the
+-        # mass<->number closure used to seed N_i for the ice the drain deposits
+-        # (else orphan q_i is deposition-inert and cannot sediment).  Read from
+-        # the (Morrison) micro sub-config; None disables number seeding.
+-        # ``_n_i_nuc_max`` [1/m^3] caps the seeded number at Morrison's Cooper
+-        # ceiling (per mass via rho_air) so a large deposit grows crystals.
+-        _ice_nuc_mass = None
+-        _n_i_nuc_max = None
+-        if _hard_sat_ice_curve and _hsub is not None:
+-            _rho_ci = getattr(_hsub, "rho_cloud_ice", None)
+-            _r_nuc = getattr(_hsub, "ice_nuc_radius", None)
+-            _n_i_nuc_max = getattr(_hsub, "N_i_nuc_max", None)
+-            if _rho_ci is not None and _r_nuc is not None:
+-                _ice_nuc_mass = (4.0 / 3.0) * jnp.pi * float(_rho_ci) \
+-                    * float(_r_nuc) ** 3
+         from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+         _orbit_params = earth_orbit() if cfg.orbital_insolation else None
+         phys_cfg = PhysicsConfig(
+@@ -6109,10 +5939,7 @@ class ModelDriver:
+                 cloud_scheme=_cloud_scheme,
+                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
+                 # reach the MPAS radiation clouds too (#870 Phase 1).
+-                # convective_cloud honoured here (2026-07-24): the lagged
+-                # PhysicsState.conv_precip carry exists on this path.
+-                cloud_config=_standalone_cloud_config(
+-                    cfg, _cloud_scheme, allow_convective_cloud=True),
++                cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
+                 diurnal_cycle=cfg.diurnal_cycle,
+                 orbit=_orbit_params,
+                 # CLUBB sub-grid cloud fraction -> radiation (marine-Sc albedo
+@@ -6184,10 +6011,6 @@ class ModelDriver:
+         # turbulence factory (closure const); the lapse adjusts the T_sfc
+         # forcing anchor below.  Both default OFF => byte-identical builds.
+         _land_beta = float(getattr(cfg, "mpas_land_beta", 1.0))
+-        # Phase 2b (#1312): traced per-cell beta_soil replaces the static
+-        # knob over land; the turbulence factory then needs f_land even when
+-        # the static knob is at its neutral 1.0.
+-        _land_beta_soil_on = bool(getattr(cfg, "mpas_land_beta_soil", False))
+         _land_lapse_K_m = (
+             float(getattr(cfg, "mpas_land_lapse_K_per_km", 0.0)) * 1.0e-3)
+         _f_land_cells = None
+@@ -6222,9 +6045,7 @@ class ModelDriver:
+         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                   column_mesh=_column_mesh,
+                                   f_land=(_f_land_cells
+-                                          if (_land_beta != 1.0
+-                                              or _land_beta_soil_on)
+-                                          else None),
++                                          if _land_beta != 1.0 else None),
+                                   land_beta=_land_beta)
+ 
+         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
+@@ -6247,9 +6068,7 @@ class ModelDriver:
+             make_physics(phys_cfg, model_type="mpas", dt=DT,
+                          column_mesh=_column_mesh, need_rad=False,
+                          f_land=(_f_land_cells
+-                                 if (_land_beta != 1.0
+-                                     or _land_beta_soil_on)
+-                                 else None),
++                                 if _land_beta != 1.0 else None),
+                          land_beta=_land_beta)
+             if _subcycle_rad else None
+         )
+@@ -6526,143 +6345,6 @@ class ModelDriver:
+                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+             )
+ 
+-        # ---- Interactive multilayer (Richards) land tile — MPAS port -------
+-        # Phase-1 coupling contract (tasks/mpas_land_port.md): the land is
+-        # stepped OUTSIDE the jitted atmosphere step, once per dt, forced by
+-        # the surface radiation/precip export the physics stashed on the
+-        # PREVIOUS step (``model._sfc_diag``: sw/lw down refresh on radiation
+-        # steps, precip every step) plus the current lowest-level state; the
+-        # land skin temperature feeds back through the existing traced
+-        # ``forcing["T_sfc"]`` channel (explicit flux coupling, one-step lag,
+-        # no retrace).  The static ``mpas_land_beta`` humidity throttle still
+-        # applies inside the turbulence factory; a traced per-cell beta is the
+-        # phase-2b follow-up (see the port plan).
+-        _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
+-                       and self._land_ml_state is not None)
+-        if _land_beta_soil_on and not _land_ml_on:
+-            raise ValueError(
+-                "mpas_land_beta_soil=True requires the interactive "
+-                "multilayer land on the MPAS lane (use_multilayer_land with "
+-                "a built land state); without it there is no soil moisture "
+-                "to derive beta_soil from — the flag would be silently "
+-                "inert."
+-            )
+-        _land_step_fn = None
+-        _land_T_skin = None            # (nCells,) land skin T of the last step
+-        _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
+-        _land_beta_cells = None        # (nCells,) traced beta of the last step
+-        if _land_ml_on:
+-            if not _sst_forcing:
+-                raise ValueError(
+-                    "use_multilayer_land on the MPAS lane requires the SST "
+-                    "surface-forcing channel (radiation != 'none' with SST "
+-                    "data): the land skin temperature feeds back through "
+-                    "forcing['T_sfc'], which only exists on that path.")
+-            if _f_land_cells is None:
+-                raise ValueError(
+-                    "use_multilayer_land on the MPAS lane requires a land "
+-                    "fraction (--topography / --land-mask-file); none was "
+-                    "loaded — the land tile would be silently inert.")
+-            if (self._device_config is not None
+-                    and self._device_config.is_distributed):
+-                # Land columns are rank-local under MPI while the setup built
+-                # them on the full mesh — scatter wiring is the follow-up
+-                # (multilayer land is single-rank-only on every lane, #769).
+-                raise ValueError(
+-                    "use_multilayer_land on the MPAS lane is single-process "
+-                    "only (phase 1); run without MPI or drop the flag.")
+-            from legoesm.land.multilayer_land import step_multilayer_land
+-            from legoesm.core.coupling_fields import AtmToSurface
+-            from legoesm.grids.voronoi import reconstruct_cell_velocity
+-            _lml_cfg = self.physics.land_ml_cfg
+-            _lml_params = self.physics.land_ml_params
+-            _lml_lat = self.physics.land_ml_lat
+-            _lml_umin = float(getattr(self.physics, "land_ml_u_min", 1.0))
+-
+-            @jax.jit
+-            def _land_step_fn(land_state, a2s, doy):
+-                new_state, resp, _carbon = step_multilayer_land(
+-                    land_state, a2s, _lml_cfg, _lml_umin, DT,
+-                    lat=_lml_lat, doy=doy, land_params=_lml_params)
+-                return new_state, resp.T_sfc
+-
+-            # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
+-            # ``forcing["beta_land"]`` the turbulence surface flux consumes.
+-            # Same helper (land_tile_beta_soil) and thresholds the coupled
+-            # pipeline's land tile applies — one formula, one place.
+-            _land_beta_fn = None
+-            if _land_beta_soil_on:
+-                from legoesm.land.multilayer_land import land_tile_beta_soil
+-
+-                @jax.jit
+-                def _land_beta_fn(land_state):
+-                    return jnp.clip(
+-                        land_tile_beta_soil(
+-                            land_state.theta_soil, _lml_cfg, _lml_params),
+-                        0.0, 1.0)
+-                if _land_beta != 1.0:
+-                    logger.info(
+-                        "  mpas_land_beta_soil: traced per-cell beta_soil "
+-                        "REPLACES the static mpas_land_beta=%.2f over land",
+-                        _land_beta)
+-
+-            def _marshal_land_forcing():
+-                """AtmToSurface from the last radiation export + current state.
+-
+-                Returns None until the first radiation solve has populated the
+-                downwelling fluxes (step 0 pre-physics) — the land holds its
+-                initial state for that single step.  Mirrors the coupled
+-                pipeline's ``_step_multilayer_land_tile`` marshalling
+-                (physics_pipeline.py) field-for-field.
+-                """
+-                _sd = getattr(self.model, "_sfc_diag", None)
+-                # Slot contract (primitive_eq_mpas #1318 CMOR feed +
+-                # land port union): (sw_net, lw_net, precip, lw_up_toa,
+-                # sw_up_toa, sw_down_toa, shflx, lhflx,
+-                # sw_down_sfc, lw_down_sfc) — the DOWNWELLING surface
+-                # fluxes the land needs are slots 8/9 (NOT 3/4, which are
+-                # now TOA fields).
+-                if (_sd is None or len(_sd) < 10
+-                        or _sd[8] is None or _sd[9] is None):
+-                    return None
+-                sw_down = jnp.asarray(_sd[8].data).reshape(-1)
+-                lw_down = jnp.asarray(_sd[9].data).reshape(-1)
+-                precip = (jnp.asarray(_sd[2].data).reshape(-1)
+-                          if _sd[2] is not None else jnp.zeros_like(sw_down))
+-                T_air = self.state.T.data[:, -1]
+-                _qv_tr = (self.state.tracers or {}).get("q_v")
+-                q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
+-                         else jnp.zeros_like(T_air))
+-                p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
+-                u_c, v_c = reconstruct_cell_velocity(
+-                    self.state.u.data[:, -1], self.grid)
+-                # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
+-                # ideal-gas rho at the lowest level, snow split at T_freeze,
+-                # fixed cos_zenith=0.5 for the non-canopy schemes (the real
+-                # zenith already drives RRTMGP; the land uses it only for
+-                # canopy radiation, which is coupled-pipeline-only here).
+-                return AtmToSurface(
+-                    sw_down=sw_down, lw_down=lw_down,
+-                    precip_total=precip,
+-                    precip_snow=jnp.where(
+-                        T_air < constants.T_freeze, precip, 0.0),
+-                    T_lowest=T_air, q_lowest=q_air,
+-                    u_lowest=u_c, v_lowest=v_c,
+-                    p_lowest=0.99 * p_s, p_surface=p_s,
+-                    rho_lowest=p_s / (constants.R_d * T_air),
+-                    cos_zenith=jnp.full_like(T_air, 0.5),
+-                    co2_ppmv=jnp.full_like(T_air, float(
+-                        getattr(cfg, "co2_ppmv", 412.0))),
+-                    has_radiation=jnp.ones_like(T_air),
+-                    has_precipitation=jnp.ones_like(T_air),
+-                )
+-            logger.info(
+-                "  Interactive multilayer land (MPAS): %d columns, "
+-                "f_land mean=%.3f — skin T -> forcing['T_sfc'] blend, "
+-                "one-step-lag explicit coupling",
+-                int(_lml_lat.shape[0]), float(jnp.mean(_f_land_cells)),
+-            )
+-
+         # Wrap with Held-Suarez forcing when enabled.  Factored into a helper
+         # so the SAME wrap applies to BOTH radiation sub-cycle variants (the
+         # full ``physics_fn`` and the held ``physics_fn_norad``).
+@@ -6777,18 +6459,6 @@ class ModelDriver:
+             self._ozone_ext_active, self._aerosol_active,
+             self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
+         )
+-        # Transient solar file (CMIP6 TSI + optional 14-band spectral):
+-        # sampled DAILY like SST/ozone, threaded as traced
+-        # ``forcing["tsi"]``/["solar_spectral_fraction"] into the radiation
+-        # physics (the previously-inert channel of the MPAS deck — the
+-        # run_amip channel table used to print "solar file not threaded").
+-        # Spectral weights only reach the rrtmg/rrtmgp solver; gray consumes
+-        # the TSI scaling alone.
+-        _solar_ext = (cfg.radiation != "none"
+-                      and cfg.solar_source in ("file", "spectral_file"))
+-        _solar_spectral = (_solar_ext
+-                           and cfg.solar_source == "spectral_file"
+-                           and cfg.radiation in ("rrtmg", "rrtmgp"))
+         # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
+         # MICROPHYSICS step regardless of the radiation scheme (the second
+         # indirect / KK2000 ``Nc^-1.79`` effect is independent of how
+@@ -6909,13 +6579,7 @@ class ModelDriver:
+             # prognostic-aerosol tracer is opt-in and zero before the feature
+             # existed).  Any OTHER missing field is still a partial/corrupted
+             # carry and must fail loudly (issue #405/#413).
+-            _NEW_OPTIONAL_PS_FIELDS = frozenset({
+-                "aerosol_number",
+-                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+-                # is the correct pre-feature state (no convective cloud was
+-                # diagnosed before it existed).
+-                "conv_precip",
+-            })
++            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
+             if _any_physstate:
+                 from legoesm.atmosphere.physics.physics_state import (
+                     PHYSSTATE_INPUT_FIELDS,
+@@ -7030,15 +6694,6 @@ class ModelDriver:
+             )
+ 
+         _forcing_daily: dict = {}
+-        # Phase 2b (#1312): seed the traced per-cell beta from the CURRENT
+-        # land state (cold-start or checkpoint-restored — beta is a pure
+-        # function of the restored soil moisture, so restarts are exact
+-        # without a new checkpoint field).  Seeding BEFORE the loop keeps
+-        # the ``beta_land`` forcing key structurally present from step 0 —
+-        # adding it mid-run would change the forcing pytree and retrace
+-        # ``model.step``.
+-        if _land_beta_fn is not None:
+-            _land_beta_cells = _land_beta_fn(self._land_ml_state)
+         # Current forcing day's SST/SIC, cached at each daily boundary for the
+         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
+         # the first boundary / when the skin feature is off).
+@@ -7050,8 +6705,7 @@ class ModelDriver:
+             # is present, so the ocean/land still steps even on a coupled run with
+             # radiation=none (where _sst_forcing is False) — else coupling would
+             # silently freeze. SST re-sampling below stays gated on _sst_forcing.
+-            if (_sst_forcing or _ext_forcing or _solar_ext
+-                    or self._segment_callback is not None):
++            if _sst_forcing or _ext_forcing or self._segment_callback is not None:
+                 _force_day = START_DAY + step * DT / 86400.0
+                 # floor, not int() — see daily_forcing_bucket (negative
+                 # fractional days land in the wrong bucket under
+@@ -7167,21 +6821,6 @@ class ModelDriver:
+                             _forcing_daily["ghg_vmr"] = {
+                                 k: jnp.asarray(v) for k, v in _ghg.items()
+                             }
+-                    if _solar_ext:
+-                        # Same canonical-day sampling as SST/ozone
+-                        # (FIX_RESTART_TIME: bit-exact restart continuation).
+-                        from legoesm.forcing.external import (
+-                            get_solar_forcing_at_time,
+-                        )
+-                        _sol = get_solar_forcing_at_time(
+-                            self._solar_config, _force_day_canonical)
+-                        _forcing_daily["tsi"] = jnp.asarray(
+-                            float(_sol["tsi"]))
+-                        if (_solar_spectral
+-                                and _sol.get("solar_fraction_by_gpt")
+-                                is not None):
+-                            _forcing_daily["solar_spectral_fraction"] = (
+-                                jnp.asarray(_sol["solar_fraction_by_gpt"]))
+                     _last_force_day = _fd_int
+                 # Per-STEP traced calendar time: the radiation factory
+                 # closure (``set_time``) is baked at trace time inside the
+@@ -7193,22 +6832,6 @@ class ModelDriver:
+                 _forcing = dict(_forcing_daily)
+                 _forcing["day_of_year"] = jnp.asarray(_doy)
+                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+-                # Interactive land skin T (one-step lag): blend the multilayer
+-                # tile's last skin temperature into the surface anchor over the
+-                # land fraction.  Ocean/ice keep the prescribed SST/SIC blend;
+-                # before the first land step (_land_T_skin None) the anchor is
+-                # the unmodified SST field (incl. the lapse fallback) — the
+-                # cold-start value the land tile itself was initialized from.
+-                if (_land_ml_on and _land_T_skin is not None
+-                        and "T_sfc" in _forcing):
+-                    _forcing["T_sfc"] = (
+-                        (1.0 - _f_land_cells) * _forcing["T_sfc"]
+-                        + _f_land_cells * _land_T_skin)
+-                # Phase 2b (#1312): traced per-cell beta_soil (same one-step
+-                # lag as the skin T above; seeded pre-loop so the key is
+-                # structurally stable — no retrace).
+-                if _land_beta_cells is not None:
+-                    _forcing["beta_land"] = _land_beta_cells
+             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
+             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
+             # heating (PhysicsState.rad_heating) in between.  ``step`` is
+@@ -7264,21 +6887,6 @@ class ModelDriver:
+                     # with self._ice_T_skin.
+                     _forcing_daily["T_sfc"] = _blend_T_sfc(
+                         _ice_sst_cur, _ice_sic_cur)
+-            # Interactive multilayer land step (MPAS port): advance the soil/
+-            # snow columns with the surface fluxes this step just exported
+-            # (sw/lw down refresh on radiation steps; precip every step) and
+-            # the post-step lowest-level state.  Jitted closure, device-only —
+-            # no host sync; its skin T enters next step's forcing blend above.
+-            # Skipped (state held) only until the first radiation solve
+-            # populates the downwelling export.
+-            if _land_ml_on:
+-                _a2s = _marshal_land_forcing()
+-                if _a2s is not None:
+-                    self._land_ml_state, _land_T_skin = _land_step_fn(
+-                        self._land_ml_state, _a2s,
+-                        jnp.asarray(_doy, dtype=jnp.float64))
+-                    if _land_beta_fn is not None:
+-                        _land_beta_cells = _land_beta_fn(self._land_ml_state)
+             # Top sponge (#836): per-step Rayleigh decay of the edge winds
+             # toward rest above sigma_top (see profile construction above).
+             # Pure device elementwise multiply — no host sync, no retrace.
+@@ -7319,43 +6927,21 @@ class ModelDriver:
+             if (_hard_sat_on and _trc is not None
+                     and "q_v" in _trc and "q_c" in _trc):
+                 _qc_fld = _trc["q_c"]
+-                _qi_fld = _trc.get("q_i") if _hard_sat_ice_curve else None
+-                (_T_hs, _qv_hs, _qc_hs, _qi_hs,
+-                 _dq_hs) = _mpas_hard_saturation_poststep(
++                _T_hs, _qv_hs, _qc_hs, _dq_hs = _mpas_hard_saturation_poststep(
+                     self.state.T.data, _trc["q_v"].data, _qc_fld.data,
+                     self.state.p_s.data, self.sigma.sigma_full, DT,
+-                    _hard_sat_threshold, _hard_sat_max_heating,
+-                    ice_curve=_hard_sat_ice_curve,
+-                    q_i=None if _qi_fld is None else _qi_fld.data)
++                    _hard_sat_threshold, _hard_sat_max_heating)
+                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                     _n_hs = int(jnp.sum(_dq_hs > _HARD_SAT_LOG_QV_EPS))
+                     if _n_hs > 0:
+                         logger.warning(
+-                            "hard saturation adjustment (post-step%s): drained "
++                            "hard saturation adjustment (post-step): drained "
+                             "%d points (max dq_v %.2f g/kg, <= %.1f K) at "
+-                            "step %d",
+-                            ", ice curve" if _hard_sat_ice_curve else "",
+-                            _n_hs, float(jnp.max(_dq_hs)) * 1e3,
++                            "step %d", _n_hs, float(jnp.max(_dq_hs)) * 1e3,
+                             float(_hard_sat_max_heating), step)
+                 _new_trc = dict(_trc)
+                 _new_trc["q_v"] = _trc["q_v"].replace(data=_qv_hs)
+                 _new_trc["q_c"] = _qc_fld.replace(data=_qc_hs)
+-                if _qi_fld is not None and _qi_hs is not None:
+-                    _new_trc["q_i"] = _qi_fld.replace(data=_qi_hs)
+-                    # Seed cloud-ice NUMBER for the deposited ice mass so the
+-                    # two-moment scheme sees a physical crystal count (orphan
+-                    # q_i with N_i=0 is deposition-inert and cannot sediment),
+-                    # capped at Morrison's Cooper ceiling N_i_nuc_max/rho_air.
+-                    _ni_fld = _trc.get("N_i")
+-                    if (_ni_fld is not None and _ice_nuc_mass is not None
+-                            and _n_i_nuc_max is not None):
+-                        _dq_i_dep = _qi_hs - _qi_fld.data
+-                        _pf = self.state.p_s.data[:, None] * jnp.asarray(
+-                            self.sigma.sigma_full)[None, :]
+-                        _new_trc["N_i"] = _ni_fld.replace(
+-                            data=_seed_nucleated_ice_number(
+-                                _ni_fld.data, _dq_i_dep, _ice_nuc_mass,
+-                                _n_i_nuc_max, _pf, _T_hs))
+                 self.state = self.state._replace(
+                     T=self.state.T.replace(data=_T_hs), tracers=_new_trc)
+             # Keep the persisted-carry handle fresh for save_checkpoint
+diff --git a/packages/ocean/legoesm/ocean/dynamics/sharded_ocean_step.py b/packages/ocean/legoesm/ocean/dynamics/sharded_ocean_step.py
+index 3c7349377..da607e587 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/sharded_ocean_step.py
++++ b/packages/ocean/legoesm/ocean/dynamics/sharded_ocean_step.py
+@@ -514,15 +514,74 @@ def make_sharded_ocean_step(model, mesh):
+     # replicated pytree the body indexes by axis_index.  Replicate (P()) so every
+     # device holds the whole small grid stack.
+     rep = NamedSharding(mesh, P())
++
++    def _replicated_put(arr, name):
++        # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
++        # value is bit-identical on every process. The band-geometry arrays
++        # are (re)computed per process and can differ in their last ULPs
++        # (per-process XLA autotuning on device-derived grid fields), which
++        # trips that assert at larger sizes (job 26450848: LL576 np=4,
++        # area-scale fields differing at 1e-7 relative). Broadcast process
++        # 0's bytes so every controller puts the SAME replicated value.
++        # GUARD (codex round-3): process 0 must not silently mask REAL
++        # cross-process divergence. Compare an allgathered fingerprint:
++        # structural entries exactly; value entries EXACTLY for integer/bool
++        # arrays (masks are comparison results — bit-reproducible, and an
++        # exact compare is the only way to catch a two-cell flip that cancels
++        # in the sum, codex round-4) and to rtol 1e-5 for float arrays (only
++        # ULP autotune drift is expected there; quantize-then-assert-equal
++        # false-positived on a rounding boundary, job 26453240).
++        # NO DEADLOCK RISK: every process fingerprints the same fields in the
++        # same order and derives the verdict from the SAME gathered array, so
++        # the refusal is symmetric — all raise or none.
++        # Residual (documented): a float-geometry divergence preserving sum,
++        # sum-of-squares AND absmax to 1e-5 is not detected; band grids are
++        # analytic in lat/lon, so any real inconsistency moves those moments.
++        host = np.asarray(arr)
++        if jax.process_count() > 1:
++            from jax.experimental import multihost_utils
++
++            flat = host.ravel()
++            is_exact = host.dtype.kind in "biu"
++            finite = flat if is_exact else flat[np.isfinite(flat)]
++            struct = np.array(
++                [float(host.ndim), *map(float, host.shape),
++                 float(np.dtype(host.dtype).num),
++                 float(flat.size - finite.size)], dtype=np.float64)
++            f64 = finite.astype(np.float64)
++            vals = np.array(
++                [float(f64.sum()) if f64.size else 0.0,
++                 float((f64 * f64).sum()) if f64.size else 0.0,
++                 float(np.abs(f64).max()) if f64.size else 0.0],
++                dtype=np.float64)
++            g_struct = multihost_utils.process_allgather(struct)
++            g_vals = multihost_utils.process_allgather(vals)
++            struct_ok = bool(np.all(g_struct == g_struct[0]))
++            if is_exact:
++                vals_ok = bool(np.all(g_vals == g_vals[0]))
++            else:
++                vals_ok = bool(np.allclose(g_vals, g_vals[0],
++                                           rtol=1e-5, atol=0.0))
++            if not (struct_ok and vals_ok):
++                raise RuntimeError(
++                    f"make_sharded_ocean_step: band-geometry field {name!r} "
++                    f"DIVERGES across processes (struct_ok={struct_ok}, "
++                    f"vals_ok={vals_ok}, exact_dtype={is_exact}, "
++                    f"gathered={g_vals.tolist()}) — a real config/grid "
++                    f"inconsistency, not autotune noise; refusing to "
++                    f"broadcast process 0 over it.")
++            host = multihost_utils.broadcast_one_to_all(host)
++        return jax.device_put(jnp.asarray(host), rep)
++
+     geom_stacks = {
+-        name: jax.device_put(
++        name: _replicated_put(
+             jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
+-                      axis=0),
+-            rep)
++                      axis=0), name)
+         for name in array_field_names
+     }
+-    vmask_stack = jax.device_put(
+-        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0), rep)
++    vmask_stack = _replicated_put(
++        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0),
++        "vertex_mask")
+ 
+     # Static perms for the v north-boundary-row ppermute (band r receives band
+     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).

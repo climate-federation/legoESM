@@ -372,7 +372,8 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
 
 
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
-                        mxl_choice: int | None = None):
+                        mxl_choice: int | None = None,
+                        prognostic: bool | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -448,7 +449,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         c_eps=rn_ediss,
         tke_background=1.0e-6,          # rn_emin
         tke_surface_min=1.0e-4,         # rn_emin0
-        tke_mxl_choice=2,               # nn_mxl=2 (closest; see docstring gaps)
+        # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
+        # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
+        # (ln_mxl0=T).  choice=2 (Veros Bougeault-Lacarrere, no ln_mxl0) was the
+        # flagged fidelity gap; =3 closes it.  See the A/B campaign (2026-07-24).
+        tke_mxl_choice=3,
+        # NEMO nn_bc_surf=1: en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0) Dirichlet surface
+        # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
+        # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.
+        surface_bc="nemo_dirichlet",
+        # NEMO integrates `en` PROGNOSTICALLY (one backward-Euler step/model-step
+        # carrying OceanState.tke).  The quasi-steady diagnostic Mode-B was the
+        # flagged gap; prognostic accumulates the tropical mixing energy and
+        # RECOVERS the tropical SST (+0.55→+0.12; SST rmse 1.44→0.90, MLD 74→38 in
+        # the controlled tripole d30 A/B) — the faithful tropical fix.  Revert any
+        # lever via --tke-surface-bc/--tke-mxl-choice/--tke-prognostic.
+        prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
         lc=True,                        # ln_lc
@@ -487,11 +503,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "expected 2 (Veros Bougeault-Lacarrere) or 3 (NEMO nn_mxl=3 "
                 "+ ln_mxl0 anchor).")
         _cfg = _cfg._replace(tke_mxl_choice=int(mxl_choice))
+    # Prognostic vs diagnostic TKE (``--tke-prognostic``).  DEFAULT keeps the
+    # card value (False = the DINO-validated quasi-steady Mode-B diagnostic, 3
+    # backward-Euler iters).  True selects NEMO's PROGNOSTIC en integration
+    # (Mode-A, one backward-Euler step/model-step carrying OceanState.tke) — the
+    # closure ACCUMULATES the diurnal-SW + wind TKE that mixes the tropical ML,
+    # the candidate for the tropical warm that the mixing-length levers can't
+    # touch.  The tripole implicit path carries state.tke
+    # (_tke_prognostic_active gates it) so this is live.
+    if prognostic is not None:
+        _cfg = _cfg._replace(prognostic=bool(prognostic))
     return _cfg
 
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
-                              tke_surface_bc=None, tke_mxl_choice=None):
+                              tke_surface_bc=None, tke_mxl_choice=None,
+                              tke_prognostic=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -519,7 +546,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         KPPConfig, VerticalMixingConfig,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
-                    ("--tke-mxl-choice", tke_mxl_choice)):
+                    ("--tke-mxl-choice", tke_mxl_choice),
+                    ("--tke-prognostic", tke_prognostic)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -529,7 +557,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         vm = VerticalMixingConfig(scheme="none")
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
-                                   mxl_choice=tke_mxl_choice)
+                                   mxl_choice=tke_mxl_choice,
+                                   prognostic=tke_prognostic)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -571,7 +600,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
-                  tke_mxl_choice=None):
+                  tke_mxl_choice=None, tke_prognostic=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -714,7 +743,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
-            tke_mxl_choice=tke_mxl_choice)
+            tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -1736,7 +1765,8 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
 
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
-                            tke_surface_bc=None, tke_mxl_choice=None):
+                            tke_surface_bc=None, tke_mxl_choice=None,
+                            tke_prognostic=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -1756,7 +1786,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     """
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
-                        ("--tke-mxl-choice", tke_mxl_choice)):
+                        ("--tke-mxl-choice", tke_mxl_choice),
+                        ("--tke-prognostic", tke_prognostic)):
         if _val is not None and not (grid == "tripole"
                                      and tripole_vmix == "tke"):
             raise SystemExit(
@@ -3904,6 +3935,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "mixing length -> more mixed-layer mixing -> cooler SST; "
                         "the tropical-warm fix candidate). Requires "
                         "--tripole-vmix tke (else raises).")
+    p.add_argument("--tke-prognostic", action="store_const", const=True,
+                   default=None,
+                   help="Prognostic TKE for --tripole-vmix tke. Unset (default) "
+                        "keeps the card value (quasi-steady Mode-B diagnostic, 3 "
+                        "backward-Euler iters). Set = NEMO's prognostic en "
+                        "integration (Mode-A, one step/model-step carrying "
+                        "OceanState.tke) — the closure accumulates the diurnal-SW "
+                        "+ wind TKE that mixes the tropical ML (the candidate for "
+                        "the tropical warm the mixing-length levers can't touch). "
+                        "Requires --tripole-vmix tke (else raises).")
     p.add_argument("--freshwater-salinity", type=str, default="s_ref",
                    choices=["s_ref", "local"],
                    help="Salinity multiplying the freshwater flux in the "
@@ -4245,7 +4286,8 @@ def main() -> int:
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
-                            args.tke_surface_bc, args.tke_mxl_choice)
+                            args.tke_surface_bc, args.tke_mxl_choice,
+                            args.tke_prognostic)
     if args.river_mouth_restoring_gate and not args.runoff:
         raise ValueError(
             "--river-mouth-restoring-gate requires --runoff (the gate masks "
@@ -4361,6 +4403,7 @@ def main() -> int:
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
             tke_mxl_choice=args.tke_mxl_choice,
+            tke_prognostic=args.tke_prognostic,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":

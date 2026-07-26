@@ -859,6 +859,32 @@ def _thickness_weighted_asselin(now, before, after,
     return jnp.where(mask > 0, ztc_f / e3_f_safe, now)
 
 
+def _seed_centred_forcing_carry(surface_forcing, freshwater, rho_0, land_mask):
+    """Seed ``state.{tau_x,tau_y}_prev``/``freshwater_eta_prev`` for
+    ``barotropic_forcing_centred`` (#1226 item 3) from THIS step's forcing.
+
+    Called (a) after the leap-frog forward-Euler start step (NEMO nit000,
+    ``sbcmod.F90:568-573`` — no-restart "before := now" rule: the step-1
+    ``_step_impl`` call already ran with ``tau_x_prev=None`` so its wind/emp
+    was unaveraged NOW, matching NEMO's degenerate first-step average) and
+    (b) after every subsequent leap-frog step, so the NEXT step's ½
+    (before+now) average has a real before-value.  A plain module-level
+    helper (not a closure) per the "no helper fns rebuilt inside the hot
+    loop" rule — called once per step, not per-substep.
+    """
+    out = {}
+    if surface_forcing is not None:
+        _tx = getattr(surface_forcing, "tau_x", None)
+        _ty = getattr(surface_forcing, "tau_y", None)
+        if _tx is not None and _ty is not None:
+            out["tau_x_prev"] = _tx
+            out["tau_y_prev"] = _ty
+    if freshwater is not None:
+        out["freshwater_eta_prev"] = (
+            freshwater_eta_tendency(freshwater, rho_0) * land_mask)
+    return out
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -1663,6 +1689,102 @@ class LatLonCGridOceanModel:
                 f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
                 'barotropic_time_filter="nemo_boxcar_centred" for the '
                 "forward-frame boxcar.")
+        # zdf_drag_in_matrix (#1226 dynzdf.F90:293-305): the diagonal term is
+        # NEMO's rCdU_bot (zdfdrg zdf_drg_nonlin/loglayer), so it requires a
+        # NEMO bottom-drag scheme (the legacy linear / MOM6 DRAG_BG_VEL rate
+        # is not what NEMO's ln_drgimp path uses) AND the implicit vmix solve
+        # itself (there is no matrix to add the diagonal term into otherwise).
+        if getattr(config, "zdf_drag_in_matrix", False):
+            if not getattr(config, "implicit_vertical_mixing", False):
+                raise ValueError(
+                    "zdf_drag_in_matrix=True requires "
+                    "implicit_vertical_mixing=True (NEMO ln_drgimp adds the "
+                    "drag into the implicit vertical-friction tridiagonal "
+                    "matrix; there is no matrix without the implicit solve).")
+            _bd_scheme = getattr(config.bottom_drag, "bottom_drag_scheme",
+                                  "legacy")
+            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer"):
+                raise ValueError(
+                    "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
+                    '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
+                    f"rCdU_bot rate); got {_bd_scheme!r}.")
+            # zdf_drag_in_matrix skips the explicit _bc_bottom_drag RHS kick
+            # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
+            # counting drag in the 3-D momentum tendency. But under
+            # barotropic_solver="explicit_substep", _bc_bottom_drag is ALSO
+            # the barotropic substep's ONLY default drag source in F_slow
+            # (barotropic_latlon_cgrid.py substep-loop drag comment) — the
+            # implicit-matrix diagonal built here never reaches the
+            # barotropic mode. NEMO covers the split-explicit barotropic
+            # with its OWN in-subcycle drag under ln_dynspg_ts (dyn_drg,
+            # dynspg_ts.F90:700-706 + dyn_drg_init :1584-1642), transcribed
+            # as barotropic_drag_substep — required here so the barotropic
+            # mode is never silently undamped.
+            if (config.barotropic.barotropic_solver == "explicit_substep"
+                    and not getattr(config, "barotropic_drag_substep",
+                                    False)):
+                raise ValueError(
+                    "zdf_drag_in_matrix=True with "
+                    'barotropic_solver="explicit_substep" requires '
+                    "barotropic_drag_substep=True: zdf_drag_in_matrix skips "
+                    "_bc_bottom_drag's RHS kick (single-owner guard, no "
+                    "double-count in the 3-D matrix), which is the "
+                    "explicit_substep barotropic loop's ONLY default drag "
+                    "source in F_slow — without the in-subcycle substep "
+                    "drag (NEMO dyn_drg, dynspg_ts.F90:700-706 + 1584-1642) "
+                    "the barotropic mode would run completely undamped. "
+                    "Enable barotropic_drag_substep=True (NEMO's DINO "
+                    "composition), use a different barotropic_solver, or "
+                    "leave zdf_drag_in_matrix=False.")
+        # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
+        # explicit barotropic drag + pu_RHSi slow-forcing correction.
+        if getattr(config, "barotropic_drag_substep", False):
+            if not getattr(config, "zdf_drag_in_matrix", False):
+                raise ValueError(
+                    "barotropic_drag_substep=True requires "
+                    "zdf_drag_in_matrix=True: with the default explicit 3-D "
+                    "drag kick (_bc_bottom_drag) active, F_slow already "
+                    "carries the depth-mean of drag on the FULL bottom "
+                    "velocity into every substep — adding the in-subcycle "
+                    "substep drag + the dyn_drg_init pu_RHSi correction on "
+                    "top would double-count the barotropic drag. NEMO's "
+                    "DINO composition (ln_drgimp=T + ln_dynspg_ts=T) maps "
+                    "to zdf_drag_in_matrix=True + zdf_baroclinic_only=True "
+                    "+ barotropic_drag_substep=True.")
+            # NEMO dynzdf.F90:147-159 UNCONDITIONALLY (under ln_drgimp +
+            # ln_dynspg_ts) removes the barotropic mean uu_b/vv_b from the
+            # 3-D implicit solve, so the in-matrix drag diagonal acts on the
+            # baroclinic residual only and the barotropic mode is dragged
+            # ONCE — by dynspg_ts's in-subcycle drag.  In lego that removal
+            # is the zdf_baroclinic_only / nemo_stage_mean_imposition
+            # machinery; without it the extra_diag drags the FULL bottom
+            # velocity (barotropic included, surviving into the 3-D depth
+            # mean) AND the substep drag damps the barotropic mode again —
+            # a double count (adversarial-review finding 1).
+            if not (getattr(config, "zdf_baroclinic_only", False)
+                    or getattr(config.barotropic,
+                               "nemo_stage_mean_imposition", False)):
+                raise ValueError(
+                    "barotropic_drag_substep=True requires "
+                    "zdf_baroclinic_only=True (or "
+                    "barotropic.nemo_stage_mean_imposition=True): NEMO "
+                    "removes the barotropic mean from the 3-D implicit "
+                    "solve unconditionally under ln_drgimp + ln_dynspg_ts "
+                    "(dynzdf.F90:147-159), so the in-matrix drag acts on "
+                    "the baroclinic residual only. Without that removal "
+                    "the matrix diagonal drags the FULL bottom velocity "
+                    "(barotropic included) and the in-subcycle substep "
+                    "drag double-counts the barotropic mode.")
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    "barotropic_drag_substep=True is the explicit_substep "
+                    "in-subcycle drag (NEMO dyn_drg, dynspg_ts.F90:700-706); "
+                    "under barotropic_solver="
+                    f"{config.barotropic.barotropic_solver!r} it would be a "
+                    "partial mechanism (only the F_slow pu_RHSi correction "
+                    "would apply). Use "
+                    'barotropic_solver="explicit_substep" or leave the flag '
+                    "False.")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -1732,6 +1854,17 @@ class LatLonCGridOceanModel:
                     "the flow after the barotropic/implicit solves, unlike "
                     "_step_impl/_ab2_step). Use forward_euler or ab2 with "
                     "prescribed_flow.")
+        if (getattr(config, "barotropic_forcing_centred", False)
+                and _outer_int != "leapfrog"):
+            raise ValueError(
+                'barotropic_forcing_centred=True requires '
+                'outer_integrator="leapfrog": the ½(before+now) forcing '
+                "average (NEMO ln_bt_fw=.FALSE., dynspg_ts.F90:392-421) and "
+                "the drag-residual BEFORE level (:1623-1636) both read the "
+                "state's u_before/v_before/tau_x_prev/tau_y_prev/"
+                "freshwater_eta_prev carry fields, which only exist under "
+                "the leapfrog (NEMO Modified-Leap-Frog) time integrator. "
+                f"Got outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -2439,6 +2572,36 @@ class LatLonCGridOceanModel:
         # lever existed.  Never jnp.where/lax.cond here.
         _pflow = getattr(self.config, "prescribed_flow", None)
 
+        # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+        # dynspg_ts.F90:392-401 wind + :415-421 emp): rebind ``surface_forcing``
+        # to the ½(before+now) TAU average BEFORE it reaches
+        # ``self.tendencies()`` — lego deposits wind stress as a SINGLE explicit
+        # top-cell kick (``_bc_external_surface_forcing``, always-on) that plays
+        # BOTH of NEMO's separately-centred wind consumers at once (the 2D
+        # zu_frc barotropic RHS AND the dynzdf top-cell implicit-solve BC, which
+        # under MLF both average utau_b+utauU) — so centring the single lego
+        # deposit reproduces both NEMO terms together. Freshwater is NOT
+        # rebound here (only the eta/ssh_frc channel is centred, done
+        # surgically at the F_slow_eta call site below; the virtual-salt-flux
+        # tracer deposit stays at NOW). NEMO nit000 seeding (sbcmod.F90:
+        # 568-573): ``state.tau_x_prev`` is None on the very first leapfrog
+        # step (before ``u_before`` exists) -- that step takes the
+        # forward-Euler branch in ``_leapfrog_step`` before this function
+        # ever runs with centring on, so no seeding branch is needed here;
+        # every step this function runs under centring has a real
+        # ``tau_x_prev`` (seeded to the pre-step NOW value by
+        # ``_leapfrog_step``, matching NEMO's "before := now" nit000 rule).
+        if (getattr(self.config, "barotropic_forcing_centred", False)
+                and surface_forcing is not None
+                and getattr(surface_forcing, "tau_x", None) is not None
+                and getattr(surface_forcing, "tau_y", None) is not None
+                and getattr(state, "tau_x_prev", None) is not None
+                and getattr(state, "tau_y_prev", None) is not None):
+            surface_forcing = surface_forcing._replace(
+                tau_x=0.5 * (state.tau_x_prev + surface_forcing.tau_x),
+                tau_y=0.5 * (state.tau_y_prev + surface_forcing.tau_y),
+            )
+
         # Asynchronous ("distorted-physics") time stepping: the public ``dt`` IS
         # dt_tracer (the clock; Veros advances vs.time by dt_tracer). Momentum + the
         # barotropic solve + implicit vertical FRICTION use the shorter dt_mom; the
@@ -2573,6 +2736,52 @@ class LatLonCGridOceanModel:
         # on U_bar, not on the perturbation u' = u - U_bar.
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
         dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
+
+        # NEMO dyn_drg_init baroclinic-residual drag correction (#1226;
+        # dynspg_ts.F90:1614-1643, DINO branch ln_isfcav=F/ln_drgice_imp=F):
+        #   pCdU_u  = r1_2*(rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj))        (:1616)
+        #   zu_i    = puu(ji,jj,ikbu,Kmm) - puu_b(ji,jj,Kmm)          (:1627)
+        #   pu_RHSi += r1_hu(ji,jj,Kmm) * pCdU_u * zu_i               (:1642)
+        # SIGN WALK (positive-r convention here): NEMO rCdU_bot <= 0 ⇒
+        # pCdU_u = -r_eff (r_eff >= 0, the shared nemo_bottom_drag_rate_faces
+        # 0.5-average), so the term is  -r_eff/H_u · (u_bot − U_bar): it
+        # DAMPS the bottom-cell baroclinic residual's projection onto the
+        # barotropic RHS (F_slow = NEMO's zu_frc).  Placed AFTER the
+        # du_dt_pert split above because NEMO removes the vertical mean from
+        # puu(Krhs) at :344-347 BEFORE dyn_drg_init runs — the correction
+        # lives ONLY in the barotropic forcing, never in the 3-D residual.
+        # Time level: NOW (:1627, ln_bt_fw=T form) by default.  DINO's
+        # namelist runs ln_bt_fw=F (CENTRED → Kbb residual, :1634 — NOT a
+        # before/now AVERAGE like the wind/emp terms above; the ln_bt_fw=F
+        # branch reads puu(Kbb)/puu_b(Kbb) OUTRIGHT, pure BEFORE). Under
+        # ``barotropic_forcing_centred=True`` the velocity source switches to
+        # ``state.u_before``/``v_before`` (Kbb) to match; the drag RATE +
+        # thickness scaling stay at NOW (h_k_pre/H_u_pre, matching NEMO's
+        # r1_hu(Kmm) at :1642 — only the velocity residual is Kbb-gated, not
+        # the geometry/rate). Default False -> the NOW form (bit-identical).
+        if getattr(self.config, "barotropic_drag_substep", False):
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_bottom_drag_rate_faces,
+            )
+            _centred_drag = (
+                getattr(self.config, "barotropic_forcing_centred", False)
+                and getattr(state, "u_before", None) is not None
+                and getattr(state, "v_before", None) is not None)
+            _u_src = state.u_before.data if _centred_drag else state.u.data
+            _v_src = state.v_before.data if _centred_drag else state.v.data
+            _r_u_bt, _r_v_bt, _isb_u, _isb_v = nemo_bottom_drag_rate_faces(
+                state.u.data, state.v.data, h_k_pre, self.z_coord,
+                self.config, _grid)
+            _u_bot = jnp.sum(_u_src * _isb_u, axis=-1)
+            _v_bot = jnp.sum(_v_src * _isb_v, axis=-1)
+            _U_bar_now = jnp.sum(_u_src * h_u_pre, axis=-1) / H_u_pre
+            _V_bar_now = jnp.sum(_v_src * h_v_pre, axis=-1) / H_v_pre
+            F_slow_u = (F_slow_u
+                        - _r_u_bt.astype(F_slow_u.dtype) / H_u_pre
+                        * (_u_bot - _U_bar_now)) * state.u_mask.data
+            F_slow_v = (F_slow_v
+                        - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
+                        * (_v_bot - _V_bar_now)) * state.v_mask.data
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -2797,6 +3006,21 @@ class LatLonCGridOceanModel:
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
+            # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+            # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
+            # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's
+            # emp_b/rnf_b enter ssh_frc, never the separate tra_sbc tracer
+            # deposit (lego's virtual_salt_flux, called later from the SAME
+            # ``freshwater`` arg, stays at NOW/uncentred). Surgical (not a
+            # ``freshwater`` rebind) so the tracer channel is untouched.
+            # ``freshwater_eta_prev`` is the ALREADY-REDUCED previous
+            # F_slow_eta rate (same reduction, so the average is linear-exact
+            # vs averaging the raw FreshwaterForcing first). None seeding:
+            # same nit000 rule as the wind term above.
+            if (getattr(self.config, "barotropic_forcing_centred", False)
+                    and getattr(state, "freshwater_eta_prev", None)
+                    is not None):
+                F_slow_eta = 0.5 * (state.freshwater_eta_prev + F_slow_eta)
 
         # ab2_scope="advective": the dissipative momentum tendencies (lateral
         # friction + bottom drag) are withheld from du_dt for weight-1.0
@@ -2905,6 +3129,14 @@ class LatLonCGridOceanModel:
                     # Kbb), not a double-count.  Under forward_euler the seed IS Nnn
                     # so it cancels exactly.  cor_v already carries the -f*U sign, so
                     # both are SUBTRACTED (unlike the 4-pt branch's explicit +f*U).
+                    # COEFFICIENT time level (#1226 item 4): this subtraction's EEN
+                    # coefficients are built from h_k_pre (Kmm/NOW).  NEMO uses the
+                    # SAME dyn_cor_2D_init(Kmm) coefficients for BOTH the :359
+                    # subtraction and the :689 live substep application; lego's
+                    # in-substep coefficients match only under
+                    # barotropic_een_seed="nemo_kmm" (the legacy "window_start"
+                    # builds them from the Nbb seed thickness under the MLF
+                    # before-level seed — an operator mismatch NEMO doesn't have).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                         barotropic_coriolis_een_pre_step,
                     )
@@ -4104,9 +4336,12 @@ class LatLonCGridOceanModel:
         the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
         N² on the post-advection state ⇒ BIT-IDENTICAL.
 
-        Only the ``adiabatic`` N² path reads the T/S contrast; ``n2_mode !=
-        "adiabatic"`` with the flag set would be a SILENT no-op, so raise
-        (dispatch hardening — a mis-wired flag must fail loudly).
+        Both the ``adiabatic`` (Veros parcel-displacement) and ``nemo_bn2``
+        (NEMO eosbn2 S-EOS) N² paths read the T/S contrast — the
+        ``nemo_dino_kamm`` card's actual N² source (see
+        ``compute_N2``/``_shared.py``); any OTHER ``n2_mode`` with the flag
+        set would be a SILENT no-op, so raise (dispatch hardening — a
+        mis-wired flag must fail loudly).
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4114,12 +4349,70 @@ class LatLonCGridOceanModel:
             return None
         if not getattr(vmix.tke, "n2_before_advection", False):
             return None
-        if getattr(vmix.tke, "n2_mode", "insitu") != "adiabatic":
+        if getattr(vmix.tke, "n2_mode", "insitu") not in (
+                "adiabatic", "nemo_bn2"):
             raise ValueError(
                 "vertical_mixing.tke.n2_before_advection=True requires "
-                "n2_mode='adiabatic' (the only N² path that reads the T/S "
-                f"contrast); got n2_mode={vmix.tke.n2_mode!r}.")
+                "n2_mode='adiabatic' or 'nemo_bn2' (the only N² paths that "
+                f"read the T/S contrast); got n2_mode={vmix.tke.n2_mode!r}.")
         return (entry_state.T.data, entry_state.S.data)
+
+    def _tke_bottom_dirichlet(self, cc_state):
+        """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
+
+        Static Python predicate: returns the Dirichlet TKE value when
+        ``vertical_mixing.scheme=="tke"`` and ``tke.bottom_tke_bc`` is set;
+        ``None`` (default) ⇒ BIT-IDENTICAL (no bottom BC).
+
+        Reuses the SAME NEMO bottom-drag rate + partial-cell bottom-level
+        machinery as ``zdf_drag_in_matrix``
+        (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
+        :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
+        re-derived drag coefficient. ``cc_state`` must already carry
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "bottom_tke_bc", False):
+            return None
+        if not isinstance(self.z_coord, OceanPartialCellCoordinate):
+            raise ValueError(
+                "vertical_mixing.tke.bottom_tke_bc=True requires a "
+                "partial-cell z-coordinate (bottom_level) — the flat-bottom "
+                "case is not covered.")
+        from legoesm import constants
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            nemo_effective_bottom_drag_r, validate_bottom_drag_scheme,
+        )
+        _scheme = validate_bottom_drag_scheme(
+            str(getattr(self.config.bottom_drag, "bottom_drag_scheme",
+                        "legacy")))
+        if _scheme == "legacy":
+            raise ValueError(
+                "vertical_mixing.tke.bottom_tke_bc=True requires a NEMO "
+                "bottom_drag_scheme ('nemo_quadratic' or 'nemo_loglayer'), "
+                f"got 'legacy'.")
+        h_k = self.z_coord.h_partial
+        _bl = jnp.maximum(self.z_coord.bottom_level, 0)
+        _bl_idx = _bl[..., jnp.newaxis]
+        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+        r_t = nemo_effective_bottom_drag_r(
+            u_bot, v_bot, h_bot,
+            scheme=_scheme,
+            cd0=float(self.config.bottom_drag.bottom_drag_cd0),
+            cd_max=float(self.config.bottom_drag.bottom_drag_cdmax),
+            z0=float(self.config.bottom_drag.bottom_drag_z0),
+            ke0=float(self.config.bottom_drag.bottom_drag_ke0),
+            von_karman=constants.kappa_von_karman,
+        )
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            nemo_bottom_tke_dirichlet,
+        )
+        return nemo_bottom_tke_dirichlet(r_t, u_bot, v_bot, vmix.tke)
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -4837,6 +5130,7 @@ class LatLonCGridOceanModel:
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
+                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(cc_state),
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -5042,6 +5336,103 @@ class LatLonCGridOceanModel:
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 
+        # ---- #1226 NEMO dynzdf composition options (u/v ONLY) ----
+        # zdf_baroclinic_only: split u_solve_in/v_solve_in into (baroclinic
+        # residual, barotropic depth mean) BEFORE the solve, so the implicit
+        # friction acts on the residual only (dynzdf.F90:148-150 "remove
+        # barotropic velocities"); the depth mean is re-added UNCHANGED to
+        # u_new/v_new after the solve (mlf_baro_corr's later re-splice is
+        # already how legoESM's barotropic mode re-enters u/v elsewhere in
+        # the step, so re-adding here — rather than leaving it out — is what
+        # keeps this stage a no-op on the barotropic mode).  Zero-flux BCs
+        # make the solve exactly conservative on the residual (Σ residual·dz
+        # invariant), so round-tripping the mean is exact at A_v=0 (test 3).
+        _zdf_baroclinic_only = (
+            do_momentum and getattr(self.config, "zdf_baroclinic_only", False))
+        if _zdf_baroclinic_only:
+            _u_bt_mean = depth_mean(
+                u_solve_in, dz_u, self.config.min_water_column_m,
+                keepdims=True)
+            _v_bt_mean = depth_mean(
+                v_solve_in, dz_v, self.config.min_water_column_m,
+                keepdims=True)
+            u_solve_in = u_solve_in - _u_bt_mean
+            v_solve_in = v_solve_in - _v_bt_mean
+
+        # zdf_drag_in_matrix: NEMO's semi-implicit bottom friction goes INTO
+        # the tridiagonal diagonal at each face-column's deepest wet cell
+        # (dynzdf.F90:293-305) instead of the explicit RHS kick
+        # (_bc_bottom_drag, disabled at the tendency stage when this flag is
+        # on — see the ocean_pe_latlon_cgrid single-owner guard).  Sign:
+        # NEMO's rCdU_bot <= 0 and the diagonal SUBTRACTS the SUM of the two
+        # T-point rates (zwd -= zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u),
+        # which ADDS positive definiteness (damping); legoESM's r_eff =
+        # -rCdU_bot >= 0 is the 0.5-AVERAGE of those same two rates, so
+        # extra_diag = +2*dt_mom*r_eff/h at the bottom cell reproduces
+        # NEMO's sum (see the factor-of-2 comment at the extra_diag_u/v
+        # assignment below).  This flag requires a NEMO bottom-drag scheme,
+        # and under barotropic_solver="explicit_substep" it additionally
+        # requires barotropic_drag_substep=True (validated at construction):
+        # skipping ``_bc_bottom_drag`` here removes the barotropic
+        # substep's default F_slow drag source, so the NEMO dyn_drg
+        # in-subcycle drag (dynspg_ts.F90:700-706 + dyn_drg_init :1584-1642,
+        # transcribed as barotropic_drag_substep) must take over.
+        # Under ln_dynspg_ts (NEMO's split-explicit barotropic), NEMO ALSO
+        # adds a barotropic-drag RHS correction at the bottom cell using the
+        # AFTER barotropic velocity (dynzdf.F90:148-171): "add bottom stress
+        # due to barotropic component only", zDt_2*(rCdU_bot sum)*uu_b(Kaa)
+        # /e3u(Kaa), with rCdU_bot <= 0 so this term OPPOSES (damps) uu_b —
+        # see the sign walk at the u_solve_in/v_solve_in correction below.
+        # With zdf_baroclinic_only ALSO on, u_solve_in's bottom cell already
+        # had the barotropic mean subtracted out; the drag correction below
+        # re-applies that same damping at the bottom cell (using the SAME
+        # depth mean this stage just removed), so the two flags compose
+        # into NEMO's full ln_dynspg_ts treatment. Without
+        # zdf_baroclinic_only, the barotropic mode is already inside
+        # u_solve_in, so no separate correction is added (nothing missing).
+        extra_diag_u = 0.0
+        extra_diag_v = 0.0
+        if do_momentum and getattr(self.config, "zdf_drag_in_matrix", False):
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_bottom_drag_rate_faces,
+            )
+            _r_eff_u, _r_eff_v, _is_bot_u, _is_bot_v = (
+                nemo_bottom_drag_rate_faces(
+                    state.u.data, state.v.data, dz_cell, self.z_coord,
+                    self.config, _grid))
+            _r_eff_u = _r_eff_u.astype(state.u.data.dtype)
+            _r_eff_v = _r_eff_v.astype(state.v.data.dtype)
+            # NEMO dynzdf.F90:293-296: zwd(iku) -= zDt_2*(rCdU_bot(i+1,j)
+            # + rCdU_bot(i,j))/e3u(iku) -- a SUM of the two T-point rates
+            # (no 1/2), with zDt_2 = the physical timestep (not the 2*dt
+            # leapfrog form despite the name). ``_r_eff_{u,v}`` is
+            # ``nemo_bottom_drag_rate_faces``'s 0.5*(...) AVERAGE of those
+            # same two T-point rates (the shared helper used elsewhere for
+            # the RHS drag kick), so reproducing NEMO's sum from the
+            # average requires the explicit factor of 2 here.
+            extra_diag_u = (
+                2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
+                / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
+            extra_diag_v = (
+                2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
+                / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
+            if _zdf_baroclinic_only:
+                # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
+                # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
+                # convention -- so this RHS term is NEGATIVE (it damps the
+                # barotropic bottom velocity uu_b/vv_b, opposing it, not
+                # reinforcing it). legoESM's r_eff = -rCdU_bot >= 0, so the
+                # sign-translated term SUBTRACTS from the solve input:
+                # the barotropic-mode bottom cell loses ``2*dt_mom*r_eff
+                # /e3u * u_bt_mean`` before the solve, matching NEMO's
+                # damping direction.
+                u_solve_in = u_solve_in - (
+                    2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
+                    / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
+                v_solve_in = v_solve_in - (
+                    2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
+                    / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
+
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static
         # Python `if`, baked into the compiled graph — flip BEFORE the
@@ -5054,9 +5445,16 @@ class LatLonCGridOceanModel:
             implicit_vertical_diffusion_ocean,
             implicit_vertical_diffusion_ocean_pair,
         )
+        # #1226: the batched entry point has no extra_diag slot (it shares
+        # ONE coefficient-build code path across all 4 fields); the
+        # drag-in-matrix diagonal term is momentum-only, so batched mode is
+        # incompatible with it — fall through to the per-field solves
+        # instead of silently dropping the term (LEGOESM_VMIX_BATCHED is
+        # opt-in perf-only, so this never regresses correctness).
         _vmix_batched = (
             os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1"
             and do_tracers and do_momentum
+            and not getattr(self.config, "zdf_drag_in_matrix", False)
         )
         # Double-diffusion salinity diffusivity: K_v (heat) + (avs - avt).
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
@@ -5101,14 +5499,23 @@ class LatLonCGridOceanModel:
             if do_momentum:
                 u_new = implicit_vertical_diffusion_ocean(
                     u_solve_in, A_v_u, dz_u, dz_half_u, dt_mom,
+                    extra_diag=extra_diag_u,
                 )
                 v_new = implicit_vertical_diffusion_ocean(
                     v_solve_in, A_v_v, dz_v, dz_half_v, dt_mom,
+                    extra_diag=extra_diag_v,
                 )
         if do_tracers:
             T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
             S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
         if do_momentum:
+            if _zdf_baroclinic_only:
+                # Re-add the SAME depth mean that was subtracted before the
+                # solve (dynzdf.F90's barotropic component re-enters via
+                # mlf_baro_corr AFTER dyn_zdf) — exactly conservative at
+                # A_v=0 (test 3: strip + re-add round-trips to the input).
+                u_new = u_new + _u_bt_mean
+                v_new = v_new + _v_bt_mean
             u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
             v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
             if self._tke_realized_kdiss_active() and (
@@ -6145,10 +6552,16 @@ class LatLonCGridOceanModel:
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds)
-            return naa._replace(
+            naa = naa._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+            if getattr(self.config, "barotropic_forcing_centred", False):
+                naa = naa._replace(
+                    **_seed_centred_forcing_carry(
+                        surface_forcing, freshwater, self.config.rho_0,
+                        state.land_mask.data))
+            return naa
 
         # --- LEAP-FROG + Asselin.
         rdt = 2.0 * dt
@@ -6383,13 +6796,24 @@ class LatLonCGridOceanModel:
             state.S.data, state.S_before.data, naa.S.data,
             e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
 
-        return naa._replace(
+        naa = naa._replace(
             u_before=state.u.replace(data=u_f),
             v_before=state.v.replace(data=v_f),
             T_before=state.T.replace(data=T_f),
             S_before=state.S.replace(data=S_f),
             eta_before=state.eta.replace(data=eta_f),
         )
+        # barotropic_forcing_centred (#1226 item 3): swap THIS step's
+        # now-forcing into the carry for the NEXT step's before-value —
+        # mirrors NEMO's sbcmod.F90:382-386 ``utau_b(:,:) = utauU(:,:)``
+        # end-of-step swap (done every step except nit000, which this
+        # function's forward-Euler-start branch above handles separately).
+        if getattr(self.config, "barotropic_forcing_centred", False):
+            naa = naa._replace(
+                **_seed_centred_forcing_carry(
+                    surface_forcing, freshwater, self.config.rho_0,
+                    state.land_mask.data))
+        return naa
 
     def _unsplit_ab2_step(self, state: LatLonCGridOceanState, dt: float,
                           freshwater=None, surface_forcing=None, sponge=None,
@@ -6803,6 +7227,32 @@ class LatLonCGridOceanModel:
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+
+        # barotropic_forcing_centred (#1226 item 3): seed tau_x_prev/
+        # tau_y_prev/freshwater_eta_prev from THIS step's forcing (NEMO
+        # nit000 rule, sbcmod.F90:568-573 -- "before" set equal to "now" on
+        # the very first call, no restart) so a scan driver's first
+        # centred step degenerates to plain NOW exactly like the eager
+        # ``_leapfrog_step`` forward-Euler-start branch. Reads
+        # ``surface_forcing``/``freshwater`` out of ``step_kwargs`` (the
+        # SAME forcing the scan will pass to ``step()``); a driver that
+        # varies forcing per scan iteration (xs=...) rather than a fixed
+        # kwarg must seed these fields itself before the scan starts.
+        # No-op when the flag is off or already seeded (idempotent re-seed).
+        if (getattr(self.config, "barotropic_forcing_centred", False)
+                and (state.tau_x_prev is None
+                     or state.freshwater_eta_prev is None)):
+            _seed = _seed_centred_forcing_carry(
+                step_kwargs.get("surface_forcing"),
+                step_kwargs.get("freshwater"),
+                self.config.rho_0, state.land_mask.data)
+            if state.tau_x_prev is None and "tau_x_prev" in _seed:
+                state = state._replace(tau_x_prev=_seed["tau_x_prev"],
+                                       tau_y_prev=_seed["tau_y_prev"])
+            if (state.freshwater_eta_prev is None
+                    and "freshwater_eta_prev" in _seed):
+                state = state._replace(
+                    freshwater_eta_prev=_seed["freshwater_eta_prev"])
 
         # Barotropic slow-forcing AB2 carry (Gᵁ time-centering): seed the prev
         # F_slow Fields to ZERO so the scan carry pytree is stable from step 1
