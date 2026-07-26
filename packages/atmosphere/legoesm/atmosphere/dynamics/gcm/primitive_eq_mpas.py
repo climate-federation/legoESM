@@ -28,6 +28,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
@@ -84,6 +85,12 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
+    # Column-conserving tracer positivity clamp (borrow the clipped deficit
+    # from the positives) instead of the mass-CREATING plain max(q, 0).  See
+    # the "--- 3. Floors ---" note: the naive clamp invents ~+30 kg/m2/yr of
+    # water on the AMIP century.  Default False keeps existing MPAS results
+    # bit-identical; flip after validation.
+    conservative_tracer_clamp: bool = False
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -959,6 +966,22 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     for k in state_new.tracers
                 })
 
+        # --- 3a. Dry-mass fix BEFORE the floors (codex 2026-07-26 round 2,
+        # finding 5).  The fixer touches ONLY p_s and the floors touch ONLY
+        # T/tracers, so the two stages commute and this order is bit-identical
+        # for p_s and T.  What changes is the water bookkeeping: diagnosed
+        # column water is sum(q*p_s*dsigma)/g, so a p_s correction AFTER the
+        # conserving tracer clamp shifted water by c*B/g (uncapped — a cold
+        # start or large transport error makes c large).  With p_s finalised
+        # FIRST, the clamp preserves B against the final p_s and end-of-step
+        # column water is conserved exactly, no empirical bound needed.
+        if self.config.fix_mass:
+            state_new = _fix_mass_mpas_hydro(
+                state_new, state, self.mesh,
+                total_area=self._total_area,
+                target_mass=target_mass,
+            )
+
         # --- 3. Floors ---
         # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
         # damps the 2Δσ mode so this floor is dead in normal operation — the
@@ -972,24 +995,67 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     data=jnp.maximum(state_new.T.data, self.config.T_min)))
         # Tracer non-negativity: advection is not positive-definite and
         # microphysics can leave tiny undershoots; clamp before they feed
-        # saturation calculations.  (Negligible mass impact vs the donor
-        # clamps inside the schemes.)
+        # saturation calculations.
+        #
+        # The plain ``maximum(f, 0.0)`` below is NOT mass-neutral, contrary to
+        # the "negligible mass impact" this comment used to claim.  MEASURED
+        # 2026-07-26 on the AMIP century (checkpoint day 520, dt=75 s):
+        # horizontal advection ALONE leaves enough undershoot that the clamp
+        # invents **7.13e-5 kg/m2/step = +0.0822 kg/m2/day = +30 kg/m2/yr** of
+        # water — 96% of it from the spiky ``q_i`` (42773 cells) and ``q_c``
+        # (26214 cells) fields, vs only 23 cells of ``q_v``.  That is 2.2x the
+        # +0.0367 kg/m2/day total-water residual measured from the checkpoints,
+        # and it compounded into column water 23->42 kg/m2, OLR 199->109 W/m2
+        # and +10 K/yr of warming.
+        #
+        # ``conservative_tracer_clamp`` swaps the naive clamp for the
+        # column-conserving borrow (shared with the LES lane).  Default False
+        # so existing MPAS results are bit-identical until the flag is set;
+        # the default is known-wrong and should flip once validated.
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                k: f.replace(data=jnp.maximum(f.data, 0.0))
-                for k, f in state_new.tracers.items()
-            })
+            if self.config.conservative_tracer_clamp:
+                # ONLY the water MASS tracers get the conserving borrow.
+                # Number concentrations (N_c/N_i/N_r) are NOT conserved
+                # quantities — rescaling them to preserve a column integral is
+                # unphysical and perturbs the microphysics directly (M2005 ice
+                # deposition goes as N_i^(2/3)).  The LES reference makes the
+                # same split ("number slots clip freely; their conservation is
+                # not physically required"), so keep the two lanes consistent.
+                _dsig = jnp.asarray(self.sigma_coord.dsigma)
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=(
+                        conservative_positive_clip(f.data, _dsig, axis=-1)[0]
+                        if _is_water_mass_tracer(k)
+                        else jnp.maximum(f.data, 0.0)))
+                    for k, f in state_new.tracers.items()
+                })
+            else:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
 
-        if self.config.fix_mass:
-            state_new = _fix_mass_mpas_hydro(
-                state_new, state, self.mesh,
-                total_area=self._total_area,
-                target_mass=target_mass,
-            )
+        # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
+        # there; running it after the tracer clamp shifted diagnosed column
+        # water by c*B/g, codex round-2 finding 5.)
 
         return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
+
+
+#: Water MASS mixing ratios [kg/kg] — the only tracers whose column integral
+#: is a conserved quantity.  Number concentrations (``N_c``/``N_i``/``N_r``)
+#: and any non-water tracer are deliberately excluded: rescaling a number to
+#: preserve an integral is unphysical and feeds straight into the microphysics
+#: (M2005 deposition ~ N_i^(2/3)).  Mirrors the LES lane's ``n_water`` split.
+_WATER_MASS_TRACERS = frozenset(
+    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"})
+
+
+def _is_water_mass_tracer(name: str) -> bool:
+    """True for a water mass mixing ratio, tolerating a ``trc_`` prefix."""
+    return str(name).removeprefix("trc_") in _WATER_MASS_TRACERS
 
 
 def _fix_mass_mpas_hydro(

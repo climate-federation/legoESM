@@ -65,9 +65,23 @@ if [[ "${CENTURY_DECK:-0}" == "1" ]]; then
         [[ -n "${_SSP}" ]] && _OZF="ssp370/$(basename "${_SSP}")"
     fi
     export OZONE="${_OZDIR}/${_OZF}"
+    # SST/SIC must span the century too.  amip_production.sh defaults to the
+    # ICON pool bc_sst_1979_2016.nc, which (a) does not cover 1923 and (b)
+    # stores KELVIN under a units='degC' attribute — so a CENTURY_DECK run
+    # left on the default got era-correct ozone+volcanic bolted onto
+    # 1979-2016 SST, a silently mismatched deck.  Default to the PCMDI
+    # 1870-2022 AMIP boundary condition (Celsius, hence SST_OFFSET 273.15)
+    # and keep them env-overridable like every other path here.
+    _PCMDI=/pool/data/INPUT4MIP/data/input4MIPs/CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10
+    _V=v20250807
+    : "${SST:=${_PCMDI}/ocean/mon/tosbcs/gn/${_V}/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc}"
+    : "${SIC:=${_PCMDI}/seaIce/mon/siconcbcs/gn/${_V}/siconcbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc}"
+    export SST SIC
     [[ -f "${VOLCANIC}" ]] || { echo "CENTURY_DECK: missing volcanic file ${VOLCANIC}" >&2; exit 3; }
     [[ -f "${OZONE}"    ]] || { echo "CENTURY_DECK: missing ozone file ${OZONE}"    >&2; exit 3; }
-    echo "CENTURY_DECK: sim year ${SIM_YEAR} -> volcanic ${_VOLC_YEAR}, ozone $(basename "${_OZF}")"
+    [[ -f "${SST}"      ]] || { echo "CENTURY_DECK: missing SST file ${SST}"        >&2; exit 3; }
+    [[ -f "${SIC}"      ]] || { echo "CENTURY_DECK: missing SIC file ${SIC}"        >&2; exit 3; }
+    echo "CENTURY_DECK: sim year ${SIM_YEAR} -> volcanic ${_VOLC_YEAR}, ozone $(basename "${_OZF}"), sst $(basename "${SST}")"
 fi
 # shellcheck source=/dev/null
 source "${REPO}/config/amip/amip_production.sh"

@@ -224,6 +224,15 @@ class DycoreConfig(NamedTuple):
     # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
+    # Column-CONSERVING tracer positivity clamp in the MPAS floors stage.
+    # The default plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
+    # ``tracer_transport_mpas``, horizontal advection undershoot alone made it
+    # invent +0.0822 kg/m2/day (+30 kg/m2/yr) of water on the AMIP century
+    # (measured 2026-07-26, 96% from q_i/q_c), driving column water 23->42
+    # kg/m2, OLR 199->109 W/m2 and +10 K/yr warming.  True borrows the clipped
+    # deficit back from the positives (10.4x less spurious mass, measured).
+    # Default False keeps every existing MPAS result bit-identical.
+    mpas_conservative_tracer_clamp: bool = False
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default OFF — the

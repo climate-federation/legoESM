@@ -811,6 +811,19 @@ def make_voronoi_mpi_step(
     # forwards to ``mpas_hydrostatic_tendencies(state, mesh, sigma_coord, config)``
     # with the matching defaults (physics_tendency=None, dt=0.0).
     local_model = type(model)(local_mesh, sigma_coord, config)
+    # The floors' conserving tracer clamp weights columns by THIS
+    # sigma_coord's dsigma while the serial path uses model.sigma_coord — a
+    # direct caller passing a mismatched coordinate would silently conserve
+    # against the wrong thickness (codex 2026-07-26 round 2, finding 6 nit).
+    # Setup-time host check, zero hot-path cost.
+    import numpy as _np
+    if not _np.array_equal(_np.asarray(sigma_coord.dsigma),
+                           _np.asarray(model.sigma_coord.dsigma)):
+        raise ValueError(
+            "make_voronoi_mpi_step: sigma_coord.dsigma differs from "
+            "model.sigma_coord.dsigma — the MPI floors would conserve "
+            "tracers against the wrong layer thicknesses. Pass the model's "
+            "own vertical coordinate.")
 
     # Pre-compute the owned-area mask and the global total area once at
     # setup time.  Both are state-independent constants:
@@ -1089,6 +1102,19 @@ def make_voronoi_mpi_step(
                     for k in state_new.tracers
                 })
 
+        # Global mass fixer BEFORE the floors, mirroring the serial ordering
+        # (codex 2026-07-26 round 2, finding 5): the fixer touches ONLY p_s
+        # and the floors touch ONLY T/tracers, so the stages commute — but
+        # diagnosed column water is sum(q*p_s*dsigma)/g, so correcting p_s
+        # AFTER the conserving tracer clamp shifted water by c*B/g.  With p_s
+        # finalised first, the clamp conserves against the final p_s exactly.
+        # (Owned cells + allreduce — correct under the cell partition, unlike
+        # the model's internal fixer which would double-count halo cells.)
+        if config.fix_mass:
+            state_new = _fix_mass_mpi(
+                state_new, state, _owned_area, _total_area_global,
+            )
+
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
         if config.T_min > 0:
@@ -1096,18 +1122,34 @@ def make_voronoi_mpi_step(
             state_new = state_new._replace(
                 T=state_new.T.replace(data=T_clipped))
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                k: f.replace(data=jnp.maximum(f.data, 0.0))
-                for k, f in state_new.tracers.items()
-            })
+            # Mirror the serial floors EXACTLY (codex 2026-07-26 review of
+            # fc7e7dce8: this block previously hard-coded the plain clamp, so
+            # ``conservative_tracer_clamp`` was SILENTLY INERT under MPI — the
+            # repo's recurring dropped-flag defect class).  The borrow is
+            # column-local, so it needs no halo/allreduce and is identical on
+            # owned and halo cells.
+            if getattr(config, "conservative_tracer_clamp", False):
+                from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+                    _is_water_mass_tracer,
+                )
+                from legoesm.core.conservation import (
+                    conservative_positive_clip,
+                )
+                _dsig = jnp.asarray(sigma_coord.dsigma)
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=(
+                        conservative_positive_clip(f.data, _dsig)[0]
+                        if _is_water_mass_tracer(k)
+                        else jnp.maximum(f.data, 0.0)))
+                    for k, f in state_new.tracers.items()
+                })
+            else:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
 
-        # Global mass fixer (owned cells + allreduce — correct under the
-        # cell partition, unlike the model's internal fixer which would
-        # double-count halo cells and gates MPI on jax.process_count()).
-        if config.fix_mass:
-            state_new = _fix_mass_mpi(
-                state_new, state, _owned_area, _total_area_global,
-            )
+        # (mass fixer moved above the floors — codex round-2 finding 5.)
 
         return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
