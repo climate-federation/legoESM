@@ -311,3 +311,52 @@ class TestCodexFindings:
         assert "conservative_tracer_clamp" in src
         assert "conservative_positive_clip" in src
         assert "_is_water_mass_tracer" in src
+
+
+class TestRound2Findings:
+    """Codex round-2 (review-2.md): the two remaining blockers."""
+
+    def test_float16_is_refused(self):
+        """sqrt(tiny_f16) = 7.8e-3 is a LARGE mixing ratio: the degenerate
+        branch could invent ~10 kg/m2 per column.  Must refuse, not corrupt."""
+        q = jnp.asarray([[5e-3, -1e-3]], dtype=jnp.float16)
+        with pytest.raises(ValueError, match="too coarse"):
+            conservative_positive_clip(q, jnp.ones(2, jnp.float16))
+
+    def test_bfloat16_is_accepted(self):
+        """bf16 shares float32's exponent range — sqrt(tiny) ~ 1e-19, fine."""
+        q = jnp.asarray([[5e-3, -1e-3]], dtype=jnp.bfloat16)
+        out, _ = conservative_positive_clip(q, jnp.ones(2, jnp.bfloat16))
+        assert out.dtype == jnp.bfloat16
+
+    def test_mass_fixer_runs_before_the_floors_serial(self):
+        """Finding 5: the p_s fix must precede the tracer clamp so end-of-step
+        column water sum(q*p_s*dsigma)/g is conserved exactly.  Order in the
+        SOURCE of the method that runs (_step_jit)."""
+        import inspect
+
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+        )
+        src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
+        assert (src.index("_fix_mass_mpas_hydro")
+                < src.index("conservative_tracer_clamp")), (
+            "p_s mass fix must run BEFORE the tracer floors")
+
+    def test_mass_fixer_runs_before_the_floors_mpi(self):
+        import inspect
+
+        from legoesm.parallel import voronoi_mpi
+        src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
+        assert src.index("_fix_mass_mpi(") < src.index(
+            "conservative_tracer_clamp"), (
+            "MPI p_s mass fix must run BEFORE the tracer floors")
+
+    def test_mpi_factory_rejects_mismatched_sigma_coord(self):
+        """Finding 6 nit: a direct caller passing a foreign vertical
+        coordinate must fail at build, not silently mis-conserve."""
+        import inspect
+
+        from legoesm.parallel import voronoi_mpi
+        src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
+        assert "differs from" in src and "model.sigma_coord.dsigma" in src

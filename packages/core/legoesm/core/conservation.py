@@ -163,6 +163,16 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     # Host-side math: dtype is static under jit, so eps_eff is a trace-time
     # Python float (jnp.sqrt here would make it a tracer and break jit).
     eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
+    # float16's narrow exponent range makes sqrt(tiny) = 7.8e-3 — a LARGE
+    # mixing ratio, so the degenerate keep-the-clip branch could invent up to
+    # ~10 kg/m2 of column water per column (codex 2026-07-26 round 2).  bf16
+    # shares float32's exponent range and is fine; refuse anything coarser.
+    if eps_eff > 1e-6:
+        raise ValueError(
+            f"conservative_positive_clip: dtype {q.dtype} has "
+            f"sqrt(finfo.tiny) = {eps_eff:.2e}, too coarse for mixing-ratio "
+            "conservation (degenerate columns could create O(g/kg) mass). "
+            "Use float32/bfloat16 or wider.")
     q_clip = jnp.maximum(q, 0.0)
     before = jnp.sum(q * w, axis=axis, keepdims=True)
     after = jnp.sum(q_clip * w, axis=axis, keepdims=True)

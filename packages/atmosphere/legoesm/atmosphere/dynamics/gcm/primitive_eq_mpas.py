@@ -966,6 +966,22 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     for k in state_new.tracers
                 })
 
+        # --- 3a. Dry-mass fix BEFORE the floors (codex 2026-07-26 round 2,
+        # finding 5).  The fixer touches ONLY p_s and the floors touch ONLY
+        # T/tracers, so the two stages commute and this order is bit-identical
+        # for p_s and T.  What changes is the water bookkeeping: diagnosed
+        # column water is sum(q*p_s*dsigma)/g, so a p_s correction AFTER the
+        # conserving tracer clamp shifted water by c*B/g (uncapped — a cold
+        # start or large transport error makes c large).  With p_s finalised
+        # FIRST, the clamp preserves B against the final p_s and end-of-step
+        # column water is conserved exactly, no empirical bound needed.
+        if self.config.fix_mass:
+            state_new = _fix_mass_mpas_hydro(
+                state_new, state, self.mesh,
+                total_area=self._total_area,
+                target_mass=target_mass,
+            )
+
         # --- 3. Floors ---
         # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
         # damps the 2Δσ mode so this floor is dead in normal operation — the
@@ -1019,22 +1035,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     for k, f in state_new.tracers.items()
                 })
 
-        # NOTE (codex 2026-07-26 finding 5): this p_s correction runs AFTER
-        # the tracer clamp, and diagnosed column water is sum(q*p_s*dsigma)/g,
-        # so a nonzero correction c changes water by c*B/g even though the
-        # clamp preserved B = sum(q*dsigma).  Pre-existing interaction (any q
-        # field x any p_s fixer), not introduced by the conservative clamp;
-        # bounded empirically: the clamp-on arm's end-to-end water residual
-        # (+3.10 kg/m2/yr, WITH this fixer active) matches the net-negative-
-        # column prediction (+2.9), so the p_s term contributes <~0.2 kg/m2/yr
-        # here.  A moisture-aware dry-mass fixer (correct p_d = p_s - water
-        # instead of total p_s) is the principled close-out — follow-up.
-        if self.config.fix_mass:
-            state_new = _fix_mass_mpas_hydro(
-                state_new, state, self.mesh,
-                total_area=self._total_area,
-                target_mass=target_mass,
-            )
+        # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
+        # there; running it after the tracer clamp shifted diagnosed column
+        # water by c*B/g, codex round-2 finding 5.)
 
         return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
