@@ -138,10 +138,12 @@ kernels. CONFIRMED: (1) the dip reproduces under nsys with matched
 protocol (L8, padded-16 mesh: 21.01/17.78/7.17 ms at np2/4/8 vs campaign
 19.90/17.09/6.92 — ~5% profiler overhead); (2) at np4 ONLY, giant
 serialized "loop fusion" kernels appear — loop_add_fusion_1/2 at 3.6 ms
-per launch (vs ~3 us for ordinary elementwise kernels) — and the sqlite
-timeline places 12 instances of each EXACTLY one per timed step at the
+per launch (vs ~3 us for ordinary elementwise kernels) plus a THIRD
+once-per-step group (the unsuffixed loop_add_fusion: 12 of its 44
+instances are >1 ms at ~3.3 ms, the rest are the ordinary us-scale adds)
+— and the sqlite timeline places all three groups' big instances at the
 17.8 ms step cadence (stddev 78 us: deterministic compute, not comm
-wait), totalling ~10.9 ms/step = the np4 excess; (3) in the optimized
+wait): 3.6 + 3.6 + 3.3 ~= 10.5-10.9 ms/step = the np4 excess; (3) in the optimized
 step HLO these are mega-fusions ON THE HALO PATH: `%loop_add_fusion =
 f32[491520,26]` (edge-tendency add chain, 22 operands incl. an
 input_scatter_fusion) and `%loop_add_fusion.4 = f32[163844,26]` (cell
@@ -162,7 +164,10 @@ FIX ATTEMPTS, both measured (base 19.90 / 17.09 / 6.92 ms at np2/4/8):
 | barrier placement | np2 | np4 | np8 | verdict |
 |---|---|---|---|---|
 | tendency INPUT side (job 26480261) | 21.40 | 16.58 | 7.01 | null at np4, -7.5% np2 — REVERTED |
-| tendency OUTPUT side (job 26480310) | 22.03 | **14.09** | 7.04 | **+17.6% np4**, -10.7% np2 — REVERTED |
+| tendency OUTPUT side (job 26480310) | 22.03 | **14.09** | 7.04 | **-17.6% time np4** (1.21x), +10.7% time np2 — REVERTED |
+
+(Single runs per arm; the campaign's np4 repeat spread (+-0.3%) supports
+an informal ~+-1 pp error on these percentages, not a formal CI.)
 
 The HLO frame table pinpointed the fusion: the 3.6 ms kernels resolve to
 `pytree_ops.py:10` (`pytree_axpy.<locals>.<lambda>`) — the RK stage
@@ -839,33 +844,41 @@ revisited.
    compaction wins only when wet_fraction < 0.56-0.72 (size-dependent).
    At the REAL global-ocean wet fraction (~0.71), packed-gather is a net
    LOSS on the full LL576 grid (ratio 1.16) and a wash at the nd4 tile
-   (1.03). SCOPE: this prices the WORST case — a pure horizontal stencil
-   op. Column-local work (vmix, EOS) carries no gather penalty and would
-   scale with wet cells alone (ideal 1.41x at 0.71 wet), so a real step
-   lands between 0.86x and 1.41x depending on its stencil-vs-column mix —
-   far from the audit's 2x, which assumed the ideal with zero indirection
-   cost. VERDICT: do not build compaction for the global latlon ocean;
+   (1.03). SCOPE (codex round-10): the two numbers are END-MEMBER ESTIMATES, not
+   a bound — 0.86x is the pure-stencil member (measured), 1.41x the
+   pure-column ideal; a real step also pays packing/scattering at the
+   interface, sees real wet topology (not banded), richer stencils, and
+   communication, none of which the microbench prices. What survives
+   regardless: the audit's 2x assumed zero indirection cost and is
+   refuted; at ~0.71 wet the measured stencil member is a net LOSS. VERDICT: do not build compaction for the global latlon ocean;
    revisit only for a configuration that is genuinely <~55% wet.
 5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
    ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
    quantifies the prize.
-6. ~~Milan np16 anomaly~~ **RESOLVED 2026-07-26 (job 26479904): NUMA
-   placement.** Discriminator at FIXED np16, r128 moist f64, only the
-   srun rank distribution varied: `block:block` (ranks fill socket 0)
-   186.83 ms vs `block:cyclic` (ranks alternate sockets) **87.59 ms —
-   2.13x from placement alone.** Per-socket DRAM bandwidth saturation on
-   the 2x Milan 7763 node, exactly what the spread-ladder reduction
-   suggested. FIX: `--distribution=block:cyclic --cpu-bind=cores` on
-   every packed CPU lane (np32 spans both sockets anyway and needs
-   nothing).
+6. ~~Milan np16 anomaly~~ **RESOLVED 2026-07-26 (job 26479904): rank
+   placement.** Discriminator at FIXED np16, r128 moist f64 — the script
+   holds resolution/physics/precision/levels/timing fixed and varies ONLY
+   the srun distribution: `block:block` 186.83 ms vs `block:cyclic`
+   **87.59 ms — 2.13x from the distribution flag alone.** Leading
+   interpretation (codex round-10 scoping): per-socket memory-bandwidth
+   contention on the 2x Milan 7763 node, consistent with the
+   spread-ladder reduction — but per-rank NUMA-binding receipts and
+   bandwidth counters were NOT captured, so the mechanism is inferred
+   from the placement swing, not instrumented. (Note 32 single-core ranks
+   FIT in one 64-core socket, so np32 is not automatically two-socket.)
+   FIX regardless of mechanism: `--distribution=block:cyclic
+   --cpu-bind=cores` on packed CPU lanes.
 
-7. **1-D bands vs 2-D pencils at np64 — MEASURED (job 26479904): pencils
-   win 1.37x** (latlon r256 moist f64, same dt: 253.93 -> 185.03
-   ms/step). The `--latlon-2d` path already existed; this is its first
-   head-to-head receipt. The 1-D perimeter ceiling at high rank counts is
-   real and the 2-D decomposition is the working mitigation. Remaining:
-   ladder it (np32-128) and check the ocean lane's pencil refusal
-   (`test_2d_pencil_layout_refused` — wide-halo is 1-D-only by design).
+7. **1-D bands vs 2-D pencils at np64 (job 26479904): the pencil path
+   is 1.37x faster** (latlon r256 moist f64, same dt: 253.93 -> 185.03
+   ms/step) — BUT this is NOT a pure decomposition A/B (codex round-10):
+   `--latlon-2d` selects the wall-pole 2-D path while the band path
+   keeps the atmospheric pole-fold, so boundary semantics change along
+   with the decomposition. Report as a regular-vs-wall-pole path
+   throughput result; attributing the 1.37x to decomposition alone would
+   need a pole-matched A/B. Remaining: pole-matched ladder (np32-128);
+   ocean lane pencil refusal stands (`test_2d_pencil_layout_refused` —
+   wide-halo is 1-D-only by design).
 7. Route-A CUDA-aware mpi4jax lane (`gpu_moist_scaling.slurm`) — only if a
    route-A-vs-B A/B is ever wanted; route-B beat every route-A reference
    available here.
