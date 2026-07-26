@@ -805,41 +805,12 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "LWP 0.18->0.06 at eps=0.5 in probe 25237929)."
         ),
     ),
-    "cloud_rh_ice_crit": TuningParameter(
-        name="cloud_rh_ice_crit",
-        default=0.95,
-        min_val=0.85,
-        max_val=1.05,
-        units="1",
-        description="RH_i cirrus onset threshold (cloud_fraction RH_i branch)",
-        category="clouds",
-        sensitivity="high",
-        notes=(
-            "cf_ice = clamp((RH_i - rh_ice_crit) / (rh_ice_sat - "
-            "rh_ice_crit), 0, 1); total cf = max(cf_warm, cf_ice).  Lower "
-            "= more cirrus area, more LW trapping (lower OLR, higher "
-            "LW_CRE).  Lopez-Coelho (1996) uses ~0.95 for heterogeneous "
-            "cirrus onset; ECMWF/Slingo-Ritter band 0.85-1.05.  Direct "
-            "lever on OLR / LW_CRE via cold-cloud area."
-        ),
-    ),
-    "cloud_rh_ice_sat": TuningParameter(
-        name="cloud_rh_ice_sat",
-        default=1.30,
-        min_val=1.20,
-        max_val=1.50,
-        units="1",
-        description="RH_i value at which cf_ice saturates to 1 (full cirrus)",
-        category="clouds",
-        sensitivity="medium",
-        notes=(
-            "Upper end of the RH_i cirrus ramp; sets the width.  Karcher-"
-            "Lohmann 2002 homogeneous freezing threshold is ~1.40-1.65, "
-            "below which heterogeneous nucleation dominates.  Tighter "
-            "(closer to rh_ice_crit) = sharper cirrus onset; wider = more "
-            "gradual area growth.  Pairs with rh_ice_crit."
-        ),
-    ),
+    # (cloud_rh_ice_crit / cloud_rh_ice_sat catalog entries DELETED
+    # 2026-07-26: the ExperimentConfig fields documented a CloudConfig
+    # RH_i cirrus ramp that was never implemented — no
+    # CloudConfig.rh_ice_crit/rh_ice_sat exists (flag-reachability audit
+    # cause 3, codex-verified).  Advertising tuning ranges for
+    # nonexistent physics invited wasted calibration campaigns.)
 }
 
 

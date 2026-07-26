@@ -1039,15 +1039,12 @@ class ExperimentConfig(NamedTuple):
     # SBM convective precip efficiency: fraction of column-net drying that
     # precipitates directly as rain (rest is detrained as condensate).
     sbm_precip_efficiency: float = 0.5          # SBMConfig.precip_efficiency
-    # Morrison phase-aware saturation_adjustment (P7).  Default False to
-    # preserve legacy calibration baselines; set True to let condensation
-    # target q_sat_ice at T < phase_T_cold (235 K), routing cold-T
-    # condensate directly to q_i with the matching L_s release.
-    morrison_phase_aware_sat_adj: bool = False
-    # Cirrus cf branch (CloudConfig RH_i ramp).  Linear from cf=0 at
-    # rh_ice_crit to cf=1 at rh_ice_sat; max with warm Sundqvist cf.
-    cloud_rh_ice_crit: float = 0.95             # CloudConfig.rh_ice_crit
-    cloud_rh_ice_sat: float = 1.30              # CloudConfig.rh_ice_sat
+    # (morrison_phase_aware_sat_adj / cloud_rh_ice_crit / cloud_rh_ice_sat
+    # DELETED 2026-07-26: their comments documented physics that was NEVER
+    # implemented — no MorrisonConfig.phase_aware_sat_adj, no
+    # CloudConfig.rh_ice_crit/rh_ice_sat exist anywhere (flag-reachability
+    # audit cause 3, codex-verified).  Old serialized configs carrying them
+    # load fine: the known-field filter drops unknown keys.)
     # Bechtold deep-convection CAPE trigger threshold [J/kg].  Deep convection
     # fires only above this CAPE; lowering it lets convection trigger more
     # readily at coarse resolution (where CAPE is under-resolved), which is

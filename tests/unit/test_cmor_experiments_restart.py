@@ -967,9 +967,15 @@ class TestTuningParameters(unittest.TestCase):
         from legoesm.tuning import TUNING_PARAMETERS
 
         categories = {p.category for p in TUNING_PARAMETERS.values()}
+        # "clouds" left this set 2026-07-26: its only two catalog entries
+        # (cloud_rh_ice_crit/sat) advertised a CloudConfig RH_i cirrus ramp
+        # that was never implemented (flag-reachability audit cause 3) and
+        # were deleted with their ExperimentConfig fields.  The REAL cloud
+        # tunables (cloud_rh_crit, ...) are wired via --config/--params, not
+        # this catalog.
         expected = {
             "dynamics", "radiation", "convection", "diffusion", "surface",
-            "turbulence", "gwd", "clouds",
+            "turbulence", "gwd",
         }
         self.assertEqual(expected, categories)
 
