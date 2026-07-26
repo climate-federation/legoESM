@@ -184,6 +184,14 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
+    # morrison ice-process scalars -> _thread_morrison_scalars
+    # (physics_pipeline; shared with the MPAS lane) — wired 2026-07-26 after
+    # the flag-reachability audit found all five dangling.
+    "atm.micro.MorrisonConfig.bergeron_rate": "morrison_bergeron_rate",
+    "atm.micro.MorrisonConfig.rime_coeff": "morrison_rime_coeff",
+    "atm.micro.MorrisonConfig.dep_coeff": "morrison_dep_coeff",
+    "atm.micro.MorrisonConfig.agg_coeff": "morrison_agg_coeff",
+    "atm.micro.MorrisonConfig.k_au": "morrison_k_au",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",

@@ -193,3 +193,247 @@ def test_scheme_actually_consumes_supersaturation():
     dqv_on = float(jnp.sum(out["on"].dq_v_dt))
     assert dqv_off < 0.0                       # Cooper seed mass alone
     assert dqv_on < 2.0 * dqv_off, (dqv_off, dqv_on)
+
+
+class TestMorrisonScalarOverlay:
+    """The five morrison_* ExperimentConfig scalars, unwired since their
+    introduction (flag-reachability audit cause 1/2, 2026-07-25): the overlay
+    in ``_resolve_microphysics`` must map each onto its MorrisonConfig leaf,
+    stay byte-identical at defaults, and fail loudly on non-Morrison schemes.
+    ``morrison_dep_coeff``'s declaration was corrected 1e-8 -> 1e-3 (it was
+    1e5 OFF the leaf default while unwired) BEFORE wiring, so rest state is a
+    no-op."""
+
+    def _leaf(self, **kw):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        return _resolve_microphysics(
+            ExperimentConfig(microphysics="morrison", **kw))[1]
+
+    def test_defaults_are_byte_identical(self):
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        assert self._leaf() == MorrisonConfig()
+
+    def test_declared_default_matches_the_leaf(self):
+        """The cause-2 defect: 1e-8 declared vs 1e-3 real.  Locked equal so
+        the overlay can never silently re-tune a run at rest."""
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        from legoesm.driver.config import ExperimentConfig
+        e = ExperimentConfig()
+        m = MorrisonConfig()
+        for exp, leaf in (("morrison_bergeron_rate", "bergeron_rate"),
+                          ("morrison_rime_coeff", "rime_coeff"),
+                          ("morrison_dep_coeff", "dep_coeff"),
+                          ("morrison_agg_coeff", "agg_coeff"),
+                          ("morrison_k_au", "k_au")):
+            assert getattr(e, exp) == getattr(m, leaf), (exp, leaf)
+
+    @pytest.mark.parametrize("exp,leaf,val", [
+        ("morrison_bergeron_rate", "bergeron_rate", 2.5e-3),
+        ("morrison_rime_coeff", "rime_coeff", 0.5),
+        ("morrison_dep_coeff", "dep_coeff", 3e-4),
+        ("morrison_agg_coeff", "agg_coeff", 5e-3),
+        ("morrison_k_au", "k_au", 1.2e3),
+    ])
+    def test_each_scalar_reaches_its_leaf(self, exp, leaf, val):
+        got = self._leaf(**{exp: val})
+        assert getattr(got, leaf) == val, (
+            f"{exp} did not reach MorrisonConfig.{leaf} — the audit's "
+            "cause-1 wiring gap has reopened")
+
+    @pytest.mark.parametrize("scheme", ["kessler", "thompson", "p3"])
+    def test_non_morrison_scheme_raises_on_override(self, scheme):
+        """HARD scheme gate, not field presence: Thompson carries all five
+        same-named leaves and P3 four, with DIFFERENT defaults (P3
+        rime_coeff=0.5 vs 1.0) — a presence-keyed overlay silently retuned
+        them (codex 2026-07-26 Critical)."""
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        cfg = ExperimentConfig(microphysics=scheme,
+                               morrison_dep_coeff=3e-4)
+        with pytest.raises(ValueError, match="morrison"):
+            _resolve_microphysics(cfg)
+
+    @pytest.mark.parametrize("scheme", ["kessler", "thompson", "p3"])
+    def test_non_morrison_scheme_default_is_untouched(self, scheme):
+        """Fresh defaults on ANY other scheme must resolve byte-identical to
+        the bare scheme config — the codex-reproduced defect was a default
+        P3 run whose rime_coeff changed 0.5 -> 1.0."""
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig,
+        )
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        _fn, leaf = _resolve_microphysics(
+            ExperimentConfig(microphysics=scheme))
+        bare = getattr(MicrophysicsConfig(scheme=scheme), scheme)
+        assert leaf == bare, (
+            f"default {scheme} run altered by the morrison overlay")
+
+    def test_legacy_serialized_1e8_is_migrated_on_load(self):
+        """An old JSON carries the then-inert morrison_dep_coeff=1e-8; loading
+        it verbatim would now retune deposition 1e5 down (or raise on
+        non-Morrison).  The loader migrates the OLD DEFAULT to the new one —
+        preserving what the old run actually did (nothing)."""
+        from legoesm.driver.config import (
+            ExperimentConfig, experiment_config_from_dict,
+        )
+        d = ExperimentConfig(microphysics="morrison")._asdict()
+        d["morrison_dep_coeff"] = 1e-8
+        d = {k: v for k, v in d.items() if not hasattr(v, "_asdict")}
+        with pytest.warns(UserWarning, match="Migrating to 1e-3"):
+            got = experiment_config_from_dict(d)
+        assert got.morrison_dep_coeff == 1e-3
+
+    def test_explicit_non_default_value_is_kept_on_load(self):
+        from legoesm.driver.config import experiment_config_from_dict
+        got = experiment_config_from_dict(
+            {"microphysics": "morrison", "morrison_dep_coeff": 5e-4})
+        assert got.morrison_dep_coeff == 5e-4
+
+    def test_validate_strict_rejects_nan_and_out_of_bounds(self):
+        from legoesm.driver.config import ExperimentConfig
+        for bad in (float("nan"), 1e-8, 1.0):
+            with pytest.raises(Exception, match="morrison_dep_coeff"):
+                ExperimentConfig(microphysics="morrison",
+                                 morrison_dep_coeff=bad).validate_strict()
+
+    def test_params_map_carries_all_five(self):
+        """--params routing (codex finding: the map was never extended, so
+        calibration files could not use the wiring).  End-to-end threading of
+        every map entry is machine-verified by the canonical
+        ``test_atm_scalar_map_is_pipeline_threaded``; this pins membership."""
+        from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP as M
+        for leaf, flat in (("bergeron_rate", "morrison_bergeron_rate"),
+                           ("rime_coeff", "morrison_rime_coeff"),
+                           ("dep_coeff", "morrison_dep_coeff"),
+                           ("agg_coeff", "morrison_agg_coeff"),
+                           ("k_au", "morrison_k_au")):
+            assert M[f"atm.micro.MorrisonConfig.{leaf}"] == flat
+
+    def test_tuning_catalog_agrees_with_the_leaf_default(self):
+        """tuning.py advertised default=1e-8 range 3e-9..3e-8 — five orders
+        below the real leaf.  Locked to bracket the true default."""
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        from legoesm.tuning import TUNING_PARAMETERS
+        t = TUNING_PARAMETERS["morrison_dep_coeff"]
+        d = MorrisonConfig().dep_coeff
+        assert t.default == d
+        assert t.min_val < d < t.max_val
+
+
+class TestRound2Findings:
+    """Codex morrison-wiring round 2 (review-2.md): the four STILL-OPEN."""
+
+    def test_none_scheme_refuses_touched_scalar_at_config_time(self):
+        """Item 3: microphysics='none' early-returns before either lane's
+        overlay, so the resolver gate never fires — validate_strict must
+        refuse instead (the silent-drop class this wiring exists to close)."""
+        from legoesm.driver.config import ExperimentConfig
+        cfg = ExperimentConfig(microphysics="none", morrison_dep_coeff=3e-4)
+        with pytest.raises(ValueError, match="microphysics='morrison'"):
+            cfg.validate_strict()
+
+    def test_none_scheme_defaults_accepted(self):
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(microphysics="none").validate_strict()
+
+    def test_fresh_explicit_1e8_is_refused_by_bounds(self):
+        """Item 2: 1e-8 is OUTSIDE [1e-4, 1e-2], so no modern config can mean
+        it — which is what makes the load-time migration coherent (any config
+        carrying it must be legacy)."""
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="morrison_dep_coeff"):
+            ExperimentConfig(microphysics="morrison",
+                             morrison_dep_coeff=1e-8).validate_strict()
+
+    def test_sub_tolerance_perturbation_is_uniformly_the_default(self):
+        """Item 4: touched-ness and application share ONE rel_tol=1e-6, so a
+        below-noise perturbation resolves byte-identical to the default —
+        never half-recognised."""
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        got = _resolve_microphysics(ExperimentConfig(
+            microphysics="morrison",
+            morrison_dep_coeff=1e-3 * (1 + 4.7e-8)))[1]   # f32 storage noise
+        assert got == MorrisonConfig()
+
+    def test_above_tolerance_retune_is_applied(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        got = _resolve_microphysics(ExperimentConfig(
+            microphysics="morrison",
+            morrison_dep_coeff=1e-3 * 1.01))[1]
+        assert got.dep_coeff == pytest.approx(1.01e-3)
+
+    def test_tuning_catalog_within_strict_bounds(self):
+        """Item 6: the catalog advertised rime_coeff to 5.0 and agg_coeff to
+        1e-5 while validate_strict enforces [0,2] / [1e-4,1e-2] — advertised
+        proposals would be rejected.  Catalog must sit inside the gates."""
+        from legoesm.tuning import TUNING_PARAMETERS
+        gates = {"morrison_bergeron_rate": (1e-4, 1e-2),
+                 "morrison_rime_coeff": (0.0, 2.0),
+                 "morrison_dep_coeff": (1e-4, 1e-2),
+                 "morrison_agg_coeff": (1e-4, 1e-2),
+                 "morrison_k_au": (50.0, 5000.0)}
+        for name, (lo, hi) in gates.items():
+            t = TUNING_PARAMETERS[name]
+            assert lo <= t.min_val <= t.max_val <= hi, (
+                f"{name}: catalog [{t.min_val}, {t.max_val}] outside "
+                f"validate_strict [{lo}, {hi}]")
+
+
+class TestRound3Findings:
+    """Codex morrison-wiring round 3: strict/resolver tolerance unity and the
+    schema-version migration gate."""
+
+    def test_strict_accepts_f32_noise_on_any_scheme(self):
+        """Item 4: a float32-noise perturbation must be 'default' in BOTH the
+        resolver AND validate_strict — previously strict rejected it on
+        kessler/none while the resolver would have applied nothing."""
+        from legoesm.driver.config import ExperimentConfig
+        noisy = 1e-3 * (1 + 4.7e-8)
+        for scheme in ("kessler", "none", "morrison"):
+            ExperimentConfig(microphysics=scheme,
+                             morrison_dep_coeff=noisy).validate_strict()
+
+    def test_marked_modern_dict_is_not_migrated(self):
+        """Item 2: a dict carrying config_schema_version >= 2 with 1e-8 is a
+        DELIBERATE modern value — loaded verbatim, then refused by strict
+        bounds, never silently rewritten."""
+        import warnings as _w
+
+        from legoesm.driver.config import experiment_config_from_dict
+        d = {"microphysics": "morrison", "morrison_dep_coeff": 1e-8,
+             "config_schema_version": 2}
+        with _w.catch_warnings():
+            _w.simplefilter("error")          # any warning -> failure
+            got = experiment_config_from_dict(d)
+        assert got.morrison_dep_coeff == 1e-8
+        with pytest.raises(ValueError, match="morrison_dep_coeff"):
+            got.validate_strict()
+
+    def test_unmarked_legacy_dict_still_migrates(self):
+        from legoesm.driver.config import experiment_config_from_dict
+        with pytest.warns(UserWarning, match="Migrating to 1e-3"):
+            got = experiment_config_from_dict(
+                {"microphysics": "morrison", "morrison_dep_coeff": 1e-8})
+        assert got.morrison_dep_coeff == 1e-3
+
+    def test_codec_round_trip_carries_the_marker(self):
+        from legoesm.driver.config import (
+            ExperimentConfig, config_to_dict, experiment_config_from_dict,
+        )
+        d = config_to_dict(ExperimentConfig(microphysics="morrison"))
+        assert d["config_schema_version"] == 2
+        got = experiment_config_from_dict(d)
+        assert got.morrison_dep_coeff == 1e-3

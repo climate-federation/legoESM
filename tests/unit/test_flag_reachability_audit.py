@@ -429,21 +429,11 @@ def test_every_resolver_read_reaches_the_leaf():
 # true (there is no McFarlaneConfig.N_ref, no SBMConfig.precip_efficiency).
 # SHRINK-ONLY.
 DANGLING_FIELDS = {
-    # --- Cause 1: leaf field EXISTS, defaults agree -> pure wiring gap.
-    # Wiring these is behaviour-preserving at defaults (the overlay writes the
-    # value the leaf already has); they are simply unreachable knobs today.
-    "morrison_bergeron_rate": (
-        "wiring gap; MorrisonConfig.bergeron_rate=1e-3 agrees",
-        (MorrisonConfig, "bergeron_rate", True)),
-    "morrison_rime_coeff": (
-        "wiring gap; MorrisonConfig.rime_coeff=1.0 agrees",
-        (MorrisonConfig, "rime_coeff", True)),
-    "morrison_agg_coeff": (
-        "wiring gap; MorrisonConfig.agg_coeff=1e-3 agrees",
-        (MorrisonConfig, "agg_coeff", True)),
-    "morrison_k_au": (
-        "wiring gap; MorrisonConfig.k_au=6e2 agrees",
-        (MorrisonConfig, "k_au", True)),
+    # (2026-07-26: the five morrison_* scalars were WIRED — an overlay in
+    # ``_resolve_microphysics`` maps them onto the MorrisonConfig leaves with
+    # a fail-loud guard on non-Morrison schemes — and ``morrison_dep_coeff``'s
+    # declaration was corrected 1e-8 -> 1e-3 to match the leaf BEFORE wiring,
+    # so the overlay is a no-op at defaults.  Entries removed per exact-match.)
     # Case 4 in the module docstring, found by the adversarial review OF this
     # audit: BechtoldConfig/ZhangMcFarlaneConfig.buoyancy_death_memory exists
     # and is consumed by bechtold.py / zhang_mcfarlane.py, but nothing maps the
@@ -453,15 +443,6 @@ DANGLING_FIELDS = {
     "convective_buoyancy_death_memory": (
         "wiring gap; BechtoldConfig.buoyancy_death_memory=False agrees",
         (BechtoldConfig, "buoyancy_death_memory", True)),
-    # --- Cause 2: leaf EXISTS but the declared default is WRONG.  Wiring this
-    # naively is a 1e5 CUT to depositional ice growth, not a no-op: the
-    # ExperimentConfig default (1e-8) and tuning.py's declared range
-    # (3e-9..3e-8, sensitivity="high") sit five orders of magnitude below the
-    # MorrisonConfig.dep_coeff default of 1e-3 that every Morrison run uses.
-    # Fix the DECLARATION before wiring. Load-bearing for ice supersaturation.
-    "morrison_dep_coeff": (
-        "DEFAULT MISMATCH 1e-8 vs MorrisonConfig.dep_coeff=1e-3",
-        (MorrisonConfig, "dep_coeff", True)),
     # --- Cause 3: the leaf field does not exist ANYWHERE.  The config comment
     # documents physics that was never implemented; these are fiction and the
     # honest fix is deletion (or implementing the described behaviour).

@@ -155,7 +155,7 @@
   "moisture_advection": false,
   "morrison_agg_coeff": 0.001,
   "morrison_bergeron_rate": 0.001,
-  "morrison_dep_coeff": 1e-08,
+  "morrison_dep_coeff": 0.001,
   "morrison_k_au": 600.0,
   "morrison_phase_aware_sat_adj": false,
   "morrison_rime_coeff": 1.0,
