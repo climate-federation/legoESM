@@ -86,6 +86,69 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     return q_v_out, T_out
 
 
+def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
+    """Clip ``q`` to zero WITHOUT creating mass: borrow the deficit back.
+
+    A plain ``max(q, 0)`` on a tracer left negative by non-monotone transport
+    deletes the negative values and thereby ADDS their magnitude as spurious
+    mass — a continuous, compounding source.  This clips, then rescales the
+    remaining POSITIVE values so the weighted integral along ``axis`` is
+    unchanged (hole-filling / borrowing; standard for positive-definite-but-
+    non-monotone scalar transport)::
+
+        integral(q_out) == integral(q_in)      (to roundoff)
+
+    Measured motivation (2026-07-26, MPAS AMIP century): the MPAS floors stage
+    clamped every water tracer with a plain ``maximum(f, 0.0)`` while
+    ``tracer_transport_mpas`` carries no limiter.  Horizontal advection alone
+    created **+0.0822 kg/m2/day (+30 kg/m2/yr)** of water, 96% of it from the
+    spiky condensate fields ``q_i``/``q_c``.  That drove column water 23->42
+    kg/m2, collapsed OLR 199->109 W/m2 and warmed the atmosphere +10 K/yr.
+    The LES lane already had this fixer
+    (``spectral_les_moist.conserving_positive``); this is the shared form so
+    the numerics are not re-derived per dycore.
+
+    Borrowing is LOCAL to ``axis`` (per column when ``axis`` is the vertical),
+    so no global reduction is needed and the result is identical serial,
+    sharded and under MPI.  Pure ``jnp``; differentiable.
+
+    Parameters
+    ----------
+    q : jax.Array
+        Tracer field, may contain negatives.
+    weight : jax.Array
+        Per-element integration weight broadcast against ``q`` along ``axis``
+        (e.g. ``dsigma``).  Factors common to the whole column (``p_s/g``)
+        cancel in the ratio and may be omitted.
+    axis : int
+        Axis to conserve along (the vertical for a column fixer).
+    eps : float
+        Positive-mass floor below which a slab is left at zero rather than
+        rescaled (an all-nonpositive column has nothing to borrow from).
+
+    Returns
+    -------
+    (q_out, created) : tuple
+        ``q_out`` clipped and rescaled; ``created`` is the weighted mass the
+        NAIVE clip WOULD have invented — a monotonicity diagnostic that is
+        zero for a monotone scheme.
+    """
+    w = jnp.asarray(weight, dtype=q.dtype)
+    q_clip = jnp.maximum(q, 0.0)
+    before = jnp.sum(q * w, axis=axis, keepdims=True)
+    after = jnp.sum(q_clip * w, axis=axis, keepdims=True)
+    created = jnp.sum(jnp.maximum(-q, 0.0) * w)
+    # factor <= 1 removes the borrowed mass from the positives.  An
+    # all-nonpositive column (after ~ 0) has nothing to borrow from and is
+    # left at zero; clipping the factor to [0, 1] keeps a column whose
+    # integral was itself negative from flipping sign.  The inner ``where``
+    # keeps the disabled branch's denominator at 1.0 so the reverse-mode
+    # gradient never sees a 0/0 (NaN would poison the whole column).
+    safe_after = jnp.where(after > eps, after, 1.0)
+    factor = jnp.where(after > eps, before / safe_after, 0.0)
+    return q_clip * jnp.clip(factor, 0.0, 1.0), created
+
+
 def _accumulation_dtype():
     """Return the dtype for accumulation in conservation fixers.
 
