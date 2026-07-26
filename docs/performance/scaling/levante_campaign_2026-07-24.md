@@ -837,13 +837,24 @@ revisited.
    need dt<=150 at LL96, which I had not read; the isolated-basin
    hypothesis tested along the way was refuted (`fill_isolated_basins`
    made no difference, consistent with dt being the real cause).
-   The measured row-partition
-   imbalance it targets: wet max/mean 1.125 at nd4 even on the IDEALIZED
-   mask (bench metadata `wet_cell_levels_per_device_min/max`); real
-   continents concentrate land in bands, so the recoverable factor is
-   larger there. NOT portable to the single-controller SPMD lane: jax
-   equal-shard sharding would need padding to the max band, which returns
-   exactly the imbalance being removed.
+   MEASURED (job 26480448, r128 ETOPO
+   CFL dt=100s, f64, np16/np32, single runs): wet-balancing LOSES —
+   equal-rows 37.89 / 30.50 ms vs wet-balanced **47.39 / 44.20 ms**
+   (25-45 % SLOWER). The mechanism is coherent with the gather
+   microbench's finding: this lane computes DENSE arrays (a land cell
+   costs the same as a wet one), so per-rank cost tracks TOTAL ROWS, and
+   equalizing WET cells makes total rows uneven — it balances the wrong
+   quantity. Wet-balancing could only pay on an implementation whose cost
+   tracks wet cells (i.e. compacted), and the expensive-half measurement
+   below shows compaction itself does not pay at real wet fractions.
+
+   VERDICT on the audit's item 4 as a whole: BOTH halves measured, BOTH
+   negative on this codebase — the "~2x on ~40%-land grids" projection is
+   refuted twice over (gather penalty eats the compaction saving at 0.71
+   wet; wet-balanced bands worsen dense-compute balance). The item is
+   CLOSED as not-worth-building, with receipts. (Also moot for the SPMD
+   lane: jax equal-shard sharding would need padding to the max band,
+   returning exactly the imbalance removed.)
 
    *Expensive half — gather/scatter compaction: MEASURED, and the audit's
    "~2x" is REFUTED* (`bench_gather_vs_slice_stencil.py`, job 26479884,
