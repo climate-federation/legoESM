@@ -40,6 +40,15 @@ if os.environ.get("DINO_VMIX"):
     # the vertical mixing scheme or merely survives it.
     cfg = dataclasses.replace(cfg, vmix_scheme=os.environ["DINO_VMIX"])
     print(f"ABLATION: vmix_scheme={cfg.vmix_scheme}")
+if os.environ.get("DINO_U_T") is not None:
+    # Redi ablation. kappa_Redi = K_h_base = 0.5*U_T*R*dlon, the SAME formula
+    # as NEMO's aht = 0.5*rn_Ud*dx, and the card's U_T (0.027) equals NEMO's
+    # rn_Ud exactly -- so DINO_U_T=0 is byte-equivalent to rn_Ud=0.0.
+    # Combined with DINO_NO_GM this removes the ENTIRE lateral isoneutral
+    # package (bolus + Redi), which is the stronger elimination test: if the
+    # growth gap survives that, the whole subsystem is exonerated at once.
+    cfg = dataclasses.replace(cfg, U_T=float(os.environ["DINO_U_T"]))
+    print(f"ABLATION: U_T={cfg.U_T} (kappa_Redi scales with this)")
 if os.environ.get("DINO_NO_GM"):
     # Ablation / instrument-POWER control: GM is a first-order ACC lever, so a
     # run with it off bounds how much a 1-year window can move ACC at all. If
