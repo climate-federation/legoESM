@@ -577,10 +577,48 @@ could not touch (44.1 us/iter of matvec halo). Three independent
 measurements — the iteration sweep, the single_reduce decomposition and
 this census — now agree on what the cost is.
 
-REMAINING FOR THE GATE (not done here): filter-stability analysis under
-stale halos, longer/realistic-forcing integration, and the science
-sign-off. What is now on record is that 600 steps conserve at least as well
-as the production solver.
+THE GATE, RE-EXAMINED AGAINST THE CODE (2026-07-26) — the campaign's
+framing was backwards. "Wide-halo needs stability gates" conflated the two
+things the arm changed:
+
+1. **wide-halo is the SAME explicit-substep operators with
+   tolerance-parity coverage at every transport tier** (codex round-9
+   wording), not an untested scheme variant. Coverage:
+   serial `tests/ocean/unit/test_barotropic_wide_halo.py` — parity atol
+   1e-12 f64 across four configs (div-damp, power-law filter, multi-chunk),
+   volume-drift parity 1e-15, NaN-sentinel stencil-reach pin; re-run
+   2026-07-26: 11 passed, 1 skipped (mpi4jax-gated dispatch test).
+   Distributed: `tests/ocean/distributed/test_ocean_mpi_wide_halo_parity.py`
+   (MPI gathered-vs-serial, 1e-10, incl. rank-cut/v-face/chunk cases) and
+   `tests/parallel/test_latlon_ocean_spmd_wide_halo.py` (4-device SPMD,
+   2e-4/1e-3). These are TOLERANCE parity, not bit identity — "the filter
+   sees bit-identical inputs" is too strong; differences are XLA
+   re-association at the serial tier and larger at the distributed tiers.
+   ONE REAL BEHAVIOURAL DELTA to disclose: wide-halo requires LOCAL
+   subcycle clamping, and with an active `eta_floor` the clamp/
+   redistribution schedule differs from the standard path — a reviewer
+   should check that config interaction, not filter stability in general.
+
+2. **The scheme choice — explicit_substep vs implicit_cn — is a choice
+   between two EXISTING schemes, not validation of a new one.**
+   `barotropic_solver = "explicit_substep"` is the MODEL DEFAULT
+   (`ocean/state.py:910`), the NEMO-standard split-explicit free surface
+   (dynspg_ts-style filter, shared `barotropic_common.py` weights). NOTE
+   the bench does NOT consume that default — `bench_ocean_latlon_spmd_
+   scaling.py` explicitly defaults to `implicit_cn`, and the OMIP
+   global-overturning drivers explicitly set `implicit_cn` too. The
+   default supports "explicit_substep is an established scheme", nothing
+   more. The promotion question remains experiment-level: "may the OMIP
+   config switch that field for scale-out runs".
+
+WHAT ACTUALLY REMAINS (scoped to that question): the OMIP override to
+implicit_cn presumably encodes a preference (dt headroom / stiffness at
+depth on that config). The remaining sign-off is experiment-level: run the
+OMIP case with explicit_substep+wide at production dt and confirm the
+3-seed conservation result (heat 7.1 SE, salt 15.2 SE lower than
+implicit_cn at 600 steps unforced) holds under forcing. That is a science
+review of ONE config field on ONE experiment, not a scheme-stability
+program.
 
 ## Using the calibrated bound correctly (a trap worth documenting)
 
@@ -718,21 +756,46 @@ revisited.
 
 ## Still open (ranked) — refreshed at campaign close
 
-1. **Wide-halo stability gates** → the blocker to promoting the improved
-   ocean config (wide-halo + vmix-f32) beyond benches. It is worth 2.01x
-   multinode and +0.15 weak efficiency, so this is the highest-value
-   remaining item. Needs: averaging-filter stability under stale-halo
-   substeps, plus a science sign-off on the f32 vmix solve.
+1. **OMIP config sign-off for explicit_substep+wide** (formerly "wide-halo
+   stability gates" — reframed 2026-07-26 after codex round-9). Wide-halo
+   has tolerance-parity coverage at all three transport tiers (serial
+   1e-12, MPI 1e-10, SPMD 2e-4/1e-3) and explicit_substep is an
+   established scheme (the model default; benches and OMIP explicitly
+   choose implicit_cn). Remaining: the eta_floor x local-clamp config
+   interaction, the OMIP case at production dt under forcing, and a
+   science sign-off on the f32 vmix solve. Worth 2.01x multinode.
 2. **MPAS ico np4 per-device dip** — five hypotheses refuted by
    measurement (see above); needs a GPU op-level profile (nsys / XLA op
    profile of np4 vs np8). A scoped instrumentation project, not a knob.
-3. **Calibrated theoretical-limit lines on every plot.** The ocean bench
-   already computes a `t_bound` from a latency/bandwidth model but reports
-   `bound_calibrated=false` because the latency and bandwidth inputs are
-   placeholders. A dependency-matched comm microbenchmark would turn every
-   ideal line from "linear" into a machine-specific roofline.
-4. **Ocean wet-cell compaction + wet-balanced partitions** (~2x on
-   ~40%-land grids, per `SCALING_STATUS_AUDIT.md` item 4) — untouched here.
+3. ~~Calibrated theoretical-limit lines~~ **DONE later in this campaign**:
+   `bench_ppermute_microbench.py` measured the fabric constants (NVLink
+   17.8 us / 64.2 GB/s, IB 26.3 us / 23.5 GB/s) and the roofline sections
+   above use them. Kept here only so the list's numbering stays stable.
+4. **Ocean wet-cell compaction + wet-balanced partitions** — SPLIT
+   2026-07-26 into a cheap half and an expensive half:
+
+   *Cheap half — wet-BALANCED bands* (no indirection, uneven band heights
+   equalizing OCEAN cells per rank): already implemented on the MPI lane
+   (`bench_ocean_mpi_scaling.py --wet-balance`, ETOPO continents); A/B at
+   np16/np32 submitted (job 26479815). The measured row-partition
+   imbalance it targets: wet max/mean 1.125 at nd4 even on the IDEALIZED
+   mask (bench metadata `wet_cell_levels_per_device_min/max`); real
+   continents concentrate land in bands, so the recoverable factor is
+   larger there. NOT portable to the single-controller SPMD lane: jax
+   equal-shard sharding would need padding to the max band, which returns
+   exactly the imbalance being removed.
+
+   *Expensive half — gather/scatter compaction* (pack wet cells, ~0.71 wet
+   fraction on real bathymetry → ideal ceiling ~1.4x, NOT the audit's
+   "~2x", which assumed ~40% land IN THE PARTITION): converts the
+   structured grid's direct-sliced stencils into indirect gathers. The
+   campaign's own MPAS lane is the existing evidence on what
+   indirect-addressed stencils cost on GPU (the ocean-MPAS profiler's
+   stated aim: indirect-addressing gather bound). Ceiling 1.4x minus an
+   unmeasured gather penalty of plausibly comparable size = NOT worth
+   building on spec. IF ever pursued: a ~30-line microbench (slice-stencil
+   vs gather-stencil Laplacian at LL576 tile sizes on one A100) settles
+   the sign BEFORE any model code is written.
 5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
    ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
    quantifies the prize.
