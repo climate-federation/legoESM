@@ -62,6 +62,24 @@ cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
                           lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
 if GAMMA is not None:
     cfg = dataclasses.replace(cfg, asselin_gamma=GAMMA)
+# Bisect switches: isolate which operator still leaks content.
+import os as _os
+if _os.environ.get("DINO_NO_GM"):
+    cfg = dataclasses.replace(cfg, use_gm_redi=False)
+    print("ABLATION: use_gm_redi=False")
+if _os.environ.get("DINO_U_T") is not None:
+    cfg = dataclasses.replace(cfg, U_T=float(_os.environ["DINO_U_T"]))
+    print(f"ABLATION: U_T={cfg.U_T}")
+if _os.environ.get("DINO_NOMIX"):
+    # Zero the vertical diffusivities and use the constant scheme, so the
+    # implicit backward-Euler solve becomes the identity. What remains is the
+    # ADVECTIVE path alone.
+    cfg = dataclasses.replace(cfg, vmix_scheme="constant",
+                              K_v_bg=0.0, A_v_bg=0.0)
+    print("ABLATION: vmix constant, K_v_bg=A_v_bg=0 (implicit solve ~identity)")
+if _os.environ.get("DINO_COMBINE"):
+    cfg = dataclasses.replace(cfg, tracer_combine=_os.environ["DINO_COMBINE"])
+print(f"tracer_combine = {cfg.tracer_combine}")
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 print(f"asselin_gamma = {mc.asselin_gamma}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)

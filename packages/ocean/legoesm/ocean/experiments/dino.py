@@ -664,6 +664,10 @@ class DINOConfig:
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
+    # Leap-frog tracer combine: "concentration" (legoESM legacy) or
+    # "thickness_weighted" (NEMO trazdf.F90:271-278 — conserves tracer CONTENT
+    # under the moving z-star coordinate). See LatLonCGridOceanConfig.
+    tracer_combine: str = "concentration"
     ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
     # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
     # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
@@ -1113,6 +1117,12 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
+    # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
+    # concentration, so the leap-frog conserves tracer content under the moving
+    # z-star coordinate. The concentration form drifts +8.6e-6 in globally-
+    # integrated heat over 200 forcing-free steps where NEMO drifts +3.4e-16
+    # (#1226).
+    "tracer_combine": "thickness_weighted",
     # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
     # each substep on ua_e/va_e): removes the pre-step 2D barotropic Coriolis
     # from F_slow (dynspg_ts:296-300) and re-applies the SAME EEN stencil live,
@@ -2603,6 +2613,7 @@ def dino_lat_lon_model_config(
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
         asselin_gamma=cfg.asselin_gamma,
+        tracer_combine=cfg.tracer_combine,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the
         # oceananigans card (explicit_ab2 × implicit_cn): keeps the

@@ -804,6 +804,57 @@ def _static_kappa_redi_override(gm_cfg, grid):
         (1, n_lon), dtype=cos_lat.dtype)
 
 
+def thickness_weighted_tracer_combine(t_before, t_now, t_expl, d_diss,
+                                      h_before, h_now, h_after, mask,
+                                      h_floor=1.0e-10):
+    """NEMO thickness-weighted leap-frog tracer combine (``trazdf.F90:271-278``).
+
+    NEMO advances tracer CONTENT, not concentration::
+
+        e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+
+    Mapping onto this model's intermediates: ``_step_impl`` already builds the
+    flux-form content update (``hT = h_now·T_now − dt·div``, then
+    ``T_expl = hT / h_after``), so the RAW advective content increment is
+    exactly ``h_after·T_expl − h_now·T_now`` ( = −2·rdt·div ) with no
+    reweighting — matching NEMO's ``2·rdt·e3t(Kmm)·RHS_adv``, whose trends are
+    each divided by e3t(Kmm) before being multiplied by it again.  The
+    dissipative increment arrives as a CONCENTRATION tendency and therefore
+    takes the Kmm ("now") thickness, which is the weight NEMO gives every trend
+    in ``ts(:,:,:,:,Nrhs)`` — including ``tra_ldf``, which it evaluates at Kbb
+    but still weights by e3t(Kmm).
+
+    Why this matters: the bare-concentration form
+    ``T(Naa) = T(Nbb) + (T_expl − T(Nnn)) + diss`` does NOT conserve tracer
+    content under a moving (z-star/vvl) coordinate.  Measured on the DINO
+    oracle (#1226): +8.6e-6 relative drift in globally-integrated heat over 200
+    forcing-free steps, linear in step count, where NEMO drifts +3.4e-16.
+    Switching to this form removes half of that leak.
+
+    Parameters
+    ----------
+    t_before, t_now, t_expl : array
+        Tracer at Nbb, Nnn, and the explicit (post-``_step_impl``) state.
+    d_diss : array or float
+        Dissipative CONCENTRATION increment from the Nbb pass.
+    h_before, h_now, h_after : array
+        Layer thickness at Nbb, Nnn, Naa.
+    mask : array
+        Wet mask; dry cells hold ``t_now`` (never 0 — writing 0 below the
+        seafloor is the #480 masked-cold-cell poison).
+    h_floor : float
+        Division guard for dry columns.
+
+    Returns
+    -------
+    array : tracer at Naa.
+    """
+    content = (h_before * t_before
+               + (h_after * t_expl - h_now * t_now)
+               + h_now * d_diss)
+    return jnp.where(mask > 0, content / jnp.maximum(h_after, h_floor), t_now)
+
+
 def _thickness_weighted_asselin(now, before, after,
                                 e3_now, e3_before, e3_after, e3_f,
                                 gamma, mask):
@@ -3473,6 +3524,15 @@ class LatLonCGridOceanModel:
         # mass_flux_u/v are thickness-weighted (h*u), so flux_div_k
         # is div(h*u) [m/s] and already includes layer thickness.
         flux_div_k = divergence_cgrid(mass_flux_u, mass_flux_v, _grid)
+        # NOTE (#1226, verified numerically 2026-07-26): the sigma-correction
+        # form below and NEMO's literal continuity form (sshwzv.F90:198-206,
+        # which folds the ACTUAL per-layer thickness tendency
+        # (h_new - h_old)/dt into the integrand) give IDENTICAL results here to
+        # 4 significant figures on the content-conservation probe.  That means
+        # legoESM's split-explicit barotropic eta IS already consistent with the
+        # column-integrated div(h*u), so the inferred deta_dt = w_euler[...,0]
+        # equals the actual increment.  A `dh_dt=` path was implemented, tested,
+        # found inert, and removed rather than carried as dead weight.
         w_baro = diagnose_w_from_flux_div(
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
@@ -6839,6 +6899,44 @@ class LatLonCGridOceanModel:
             mask3 > 0,
             state.S_before.data + (state_expl.S.data - state.S.data) + dS_diss_bb,
             state.S.data)
+        _combine = getattr(self.config, "tracer_combine", "concentration")
+        if _combine not in ("concentration", "thickness_weighted"):
+            raise ValueError(
+                f"unknown tracer_combine {_combine!r}; expected "
+                '"concentration" or "thickness_weighted"')
+        if _combine == "thickness_weighted":
+            # NEMO trazdf.F90:271-278 —
+            #     e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+            # Combine CONTENT, not concentration.  The bare-concentration form
+            # above does not conserve tracer content under a moving (z-star)
+            # coordinate: +8.6e-6 drift in globally-integrated heat over 200
+            # forcing-free steps vs NEMO's +3.4e-16 (#1226).
+            #
+            # Mapping onto this routine's intermediates: ``_step_impl`` already
+            # builds the flux-form content update (hT = h_now·T_now − dt·div,
+            # then T_expl = hT / h_naa), so the RAW advective content increment
+            # is exactly
+            #     h_naa·T_expl − h_now·T_now        ( = −2·rdt·div )
+            # with no reweighting — matching NEMO's 2·rdt·e3t(Kmm)·RHS_adv,
+            # whose trends are each divided by e3t(Kmm) before being multiplied
+            # by it again.  The dissipative increment arrives as a CONCENTRATION
+            # tendency from the Nbb pass, so it takes the Kmm ("now") thickness
+            # — the weight NEMO gives every trend in ts(:,:,:,:,Nrhs), including
+            # tra_ldf, which it evaluates at Kbb but still weights by e3t(Kmm).
+            # ``h_k`` (computed above) is the Nnn thickness; eta_naa comes from
+            # the barotropic solve, so h at state_expl.eta is the Kaa thickness.
+            h_bef = compute_layer_thickness(
+                state.eta_before.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            h_naa = compute_layer_thickness(
+                state_expl.eta.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            T_naa = thickness_weighted_tracer_combine(
+                state.T_before.data, state.T.data, state_expl.T.data,
+                dT_diss_bb, h_bef, h_k, h_naa, mask3)
+            S_naa = thickness_weighted_tracer_combine(
+                state.S_before.data, state.S.data, state_expl.S.data,
+                dS_diss_bb, h_bef, h_k, h_naa, mask3)
         eta_naa = state_expl.eta.data * cmask   # from the barotropic solve
         naa_expl = state_expl._replace(
             u=state_expl.u.replace(data=u_naa),
