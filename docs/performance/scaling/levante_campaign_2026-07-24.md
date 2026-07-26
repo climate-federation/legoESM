@@ -829,7 +829,15 @@ revisited.
    *Cheap half — wet-BALANCED bands* (no indirection, uneven band heights
    equalizing OCEAN cells per rank): already implemented on the MPI lane
    (`bench_ocean_mpi_scaling.py --wet-balance`, ETOPO continents); A/B at
-   np16/np32 submitted (job 26479815). The measured row-partition
+   np16/np32 running (job 26480448, r128/r256 at CFL-scaled dt 100/50s).
+   OPERATIONAL TRAIL kept for honesty: four earlier submissions failed —
+   wrong venv (26479815), then non-finite at dt 600 and 300 (26479904/
+   26480203/26480298), briefly mis-read as a lane defect until the
+   bench's own WARNING surfaced: realistic coastlines are documented to
+   need dt<=150 at LL96, which I had not read; the isolated-basin
+   hypothesis tested along the way was refuted (`fill_isolated_basins`
+   made no difference, consistent with dt being the real cause).
+   The measured row-partition
    imbalance it targets: wet max/mean 1.125 at nd4 even on the IDEALIZED
    mask (bench metadata `wet_cell_levels_per_device_min/max`); real
    continents concentrate land in bands, so the recoverable factor is
