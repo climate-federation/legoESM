@@ -162,9 +162,14 @@ def beta_limited_surface_humidity(
     q_sat_sfc: jax.Array,
     q_air: jax.Array,
     f_land: jax.Array,
-    beta_land: float,
+    beta_land: float | jax.Array,
 ) -> jax.Array:
     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
+
+    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
+    from the interactive multilayer land, #1312 phase 2b) — the formula below
+    is elementwise either way.
 
     On a non-tiled surface the bulk latent flux is
     ``LH ∝ (q_sfc - q_air)``.  Using the saturated ``q_sat_sfc`` everywhere

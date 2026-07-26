@@ -783,6 +783,16 @@ def test_no_full_host_convert_guard_is_not_vacuous():
     assert child.shape == (4, 5)
 
 
+def _uniform_centres(n, lo, hi):
+    """Centres of ``n`` uniform cells tiling ``[lo, hi]`` degrees.
+
+    ``_edges_from_centers_deg`` re-derives the edges as ``c -/+ dc/2``, so the
+    reconstructed outermost edges land exactly on ``lo``/``hi``.
+    """
+    half = 0.5 * (hi - lo) / n
+    return np.linspace(lo + half, hi - half, n)
+
+
 def test_conservative_regrid_seam_full_coverage_high_ratio():
     """A coarse dst cell that STRADDLES the 0/360 seam (dst 8x wider than
     src in lon, so a single ghost cannot span its half-width) must get full
@@ -797,15 +807,12 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     # Latitudes ASCENDING (south->north): compute_overlap_weights requires
     # strictly-increasing edges (see _check_edges).
     n_src_lat, n_src_lon = 8, 64
-    half = 90.0 / n_src_lat
-    src_lat = np.linspace(-90.0 + half, 90.0 - half, n_src_lat)
-    half_lon = 180.0 / n_src_lon
-    src_lon = np.linspace(half_lon, 360.0 - half_lon, n_src_lon)
+    src_lat = _uniform_centres(n_src_lat, -90.0, 90.0)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 360.0)
     # dst centred ON the seam: first centre at 0 -> cell [-22.5, 22.5]
     # straddles the 360/0 wrap. dd = 45, ds = 5.625 -> dd/ds = 8.
     n_dst_lat, n_dst_lon = 4, 8
-    dhalf = 90.0 / n_dst_lat
-    dst_lat = np.linspace(-90.0 + dhalf, 90.0 - dhalf, n_dst_lat)
+    dst_lat = _uniform_centres(n_dst_lat, -90.0, 90.0)
     dd = 360.0 / n_dst_lon
     dst_lon = np.linspace(0.0, 360.0 - dd, n_dst_lon)
     field = np.ones((n_src_lat, n_src_lon))
@@ -815,21 +822,97 @@ def test_conservative_regrid_seam_full_coverage_high_ratio():
     np.testing.assert_allclose(out, 1.0, atol=1e-6)
 
 
-def test_conservative_regrid_raises_on_partial_source():
-    """A genuinely non-global source (spans only ~180 deg lon) must RAISE
-    via require_full_coverage rather than silently under-cover."""
+def test_conservative_regrid_preserves_constant_through_the_polar_gap():
+    """A source whose outermost latitude row stops short of +-90 -- i.e. every real
+    forcing dataset (CORE-II +-88.5, JRA55-do ~+-89.6) -- must reproduce a constant
+    field on EVERY destination row, polar rows included.
+
+    This caller sets ``require_full_coverage=True`` with ``fracarea`` +
+    ``polar_fill``, so the polar row gets the area-weighted mean of the source that
+    overlaps (or the source's edge row where nothing overlaps) rather than
+    ``coverage x field``. Earlier iterations shipped 0.948 x the constant here and,
+    at finer targets, exact zeros. See regrid_polar_coverage_2026-07-24.md.
+    """
     from legoesm.ocean.coupler.omip2_applicator import (
-        _conservative_regrid_to_latlon,
+        _REGRID_WEIGHTS_CACHE, _conservative_regrid_to_latlon,
     )
+    # The pin is on the WEIGHT BUILD, so it must actually run: a warm cache entry
+    # under a colliding (shape, first-centre) key would make this test vacuous.
+    _REGRID_WEIGHTS_CACHE.clear()
+    # src cells tile [-89.5, 89.5], a 0.5 deg polar gap -- REALISTIC (CORE-II's is
+    # 0.514, JRA55-do's 0.151) and inside the 2 deg extrapolation budget.
+    #
+    # 600 destination rows (0.3 deg), NOT 720: at 720 the source edge lands
+    # bit-exactly on a destination edge, so every row is either fully covered or
+    # fully empty, `fracarea` becomes a no-op, and the test would pass with
+    # normalization='dstarea' -- pinning only half the caller's contract. At 600
+    # there are 2 filled AND 2 partial rows per pole, so both treatments are live.
     n_src_lat, n_src_lon = 8, 16
-    half = 90.0 / n_src_lat
-    src_lat = np.linspace(90.0 - half, -90.0 + half, n_src_lat)
-    # centres only across [5, 175] -> source cannot cover a global dst
-    src_lon = np.linspace(5.0, 175.0, n_src_lon)
-    dst_lat = np.linspace(67.5, -67.5, 4)
-    dst_lon = np.linspace(22.5, 337.5, 8)
+    src_lat = _uniform_centres(n_src_lat, -89.5, 89.5)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 360.0)
+    n_dst_lat, n_dst_lon = 600, 8
+    dst_lat = _uniform_centres(n_dst_lat, -90.0, 90.0)
+    dst_lon = _uniform_centres(n_dst_lon, 0.0, 360.0)
+    field = np.full((n_src_lat, n_src_lon), 290.0)
+    out = _conservative_regrid_to_latlon(
+        field, src_lat, src_lon, dst_lat, dst_lon,
+    )
+    assert np.all(np.isfinite(out))
+    # Every row, not just the interior: that is the whole point of the treatment.
+    np.testing.assert_allclose(out, 290.0, atol=1e-9)
+    # Anti-vacuity, BEHAVIOURAL rather than arithmetic: the SAME geometry built
+    # untreated must come back reduced in the polar rows. So this test goes red if
+    # the caller ever stops passing fracarea/polar_fill.
+    from legoesm.grids.conservative_regrid import (
+        apply_conservative_regrid, compute_overlap_weights,
+    )
+    untreated = np.asarray(apply_conservative_regrid(
+        field,
+        compute_overlap_weights(
+            np.deg2rad(np.linspace(-89.5, 89.5, n_src_lat + 1)),   # same src band
+            np.deg2rad(np.linspace(0.0, 360.0, n_src_lon + 1)),
+            np.deg2rad(np.linspace(-90.0, 90.0, n_dst_lat + 1)),
+            np.deg2rad(np.linspace(0.0, 360.0, n_dst_lon + 1)),
+        ),
+    ))
+    np.testing.assert_allclose(untreated[2:-2, :], 290.0, atol=1e-9)
+    # The OUTERMOST row at each pole has no source data untreated -> exact zeros,
+    # which only polar_fill removes...
+    np.testing.assert_array_equal(untreated[0, :], 0.0)
+    np.testing.assert_array_equal(untreated[-1, :], 0.0)
+    # ...and the NEXT row in is partially covered (0.4074) -> reduced to ~118 K,
+    # which only fracarea removes. Both legs together are what make this test go
+    # red if the caller drops either treatment, rather than only polar_fill.
+    np.testing.assert_allclose(untreated[[1, -2], :], 290.0 * 0.4074, rtol=1e-3)
+
+
+def test_conservative_regrid_rejects_partial_longitude_source():
+    """The raw-longitude PRECONDITION must be wired into this caller, not just
+    available in the helper.
+
+    The +-360 ghost pad below it would turn a source tiling only half the circle
+    into one enormous cell spanning the whole missing sector, which then reports
+    COMPLETE longitude coverage to the weight builder -- so the check has to run on
+    the RAW axis, before the pad. Without this test, deleting that call leaves the
+    whole suite green.
+    """
+    from legoesm.ocean.coupler.omip2_applicator import (
+        _REGRID_WEIGHTS_CACHE, _conservative_regrid_to_latlon,
+    )
+    _REGRID_WEIGHTS_CACHE.clear()
+    n_src_lat, n_src_lon = 8, 16
+    src_lat = _uniform_centres(n_src_lat, -90.0, 90.0)
+    src_lon = _uniform_centres(n_src_lon, 0.0, 180.0)      # HALF the circle
+    dst_lat = _uniform_centres(4, -90.0, 90.0)
+    dst_lon = _uniform_centres(8, 0.0, 360.0)
     field = np.ones((n_src_lat, n_src_lon))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="source longitude"):
         _conservative_regrid_to_latlon(
             field, src_lat, src_lon, dst_lat, dst_lon,
         )
+    # Anti-vacuity: the same call with a globe-tiling source builds fine.
+    _REGRID_WEIGHTS_CACHE.clear()
+    out = _conservative_regrid_to_latlon(
+        field, src_lat, _uniform_centres(n_src_lon, 0.0, 360.0), dst_lat, dst_lon,
+    )
+    assert np.all(np.isfinite(out))
