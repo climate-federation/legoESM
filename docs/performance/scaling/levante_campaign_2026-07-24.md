@@ -826,8 +826,23 @@ revisited.
 5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
    ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
    quantifies the prize.
-6. **Milan np16 anomaly** in the packed CPU ladder (np16 slower than np8,
-   recovering by np32) — spread ladder reduced but did not remove it.
+6. ~~Milan np16 anomaly~~ **RESOLVED 2026-07-26 (job 26479904): NUMA
+   placement.** Discriminator at FIXED np16, r128 moist f64, only the
+   srun rank distribution varied: `block:block` (ranks fill socket 0)
+   186.83 ms vs `block:cyclic` (ranks alternate sockets) **87.59 ms —
+   2.13x from placement alone.** Per-socket DRAM bandwidth saturation on
+   the 2x Milan 7763 node, exactly what the spread-ladder reduction
+   suggested. FIX: `--distribution=block:cyclic --cpu-bind=cores` on
+   every packed CPU lane (np32 spans both sockets anyway and needs
+   nothing).
+
+7. **1-D bands vs 2-D pencils at np64 — MEASURED (job 26479904): pencils
+   win 1.37x** (latlon r256 moist f64, same dt: 253.93 -> 185.03
+   ms/step). The `--latlon-2d` path already existed; this is its first
+   head-to-head receipt. The 1-D perimeter ceiling at high rank counts is
+   real and the 2-D decomposition is the working mitigation. Remaining:
+   ladder it (np32-128) and check the ocean lane's pencil refusal
+   (`test_2d_pencil_layout_refused` — wide-halo is 1-D-only by design).
 7. Route-A CUDA-aware mpi4jax lane (`gpu_moist_scaling.slurm`) — only if a
    route-A-vs-B A/B is ever wanted; route-B beat every route-A reference
    available here.
