@@ -152,9 +152,32 @@ the expensive scatter+add chain inside each consumer fusion, which is why
 the cost multiplies. WHY np4: fusion cost-model decisions depend on the
 shard shape; at np2/np8 the mega-fusion is not built. This also explains
 why the earlier env-knob sweep missed it — autotune/latency-hiding flags
-do not change fusion-pass decisions. Fusion-pass flag A/B at np4
-submitted (job 26480162); if a flag recovers np4, the fix is an XLA_FLAGS
-line in the MPAS lane, worth ~2.5x at np4.
+do not change fusion-pass decisions. Fusion-pass flag A/B at np4 ran
+(job 26480162): flag route CLOSED — three of four candidate fusion flags
+no longer exist in this XLA (upstream removals), the fourth is null, and
+the GPU plugin does not list its flags via --help.
+
+FIX ATTEMPTS, both measured (base 19.90 / 17.09 / 6.92 ms at np2/4/8):
+
+| barrier placement | np2 | np4 | np8 | verdict |
+|---|---|---|---|---|
+| tendency INPUT side (job 26480261) | 21.40 | 16.58 | 7.01 | null at np4, -7.5% np2 — REVERTED |
+| tendency OUTPUT side (job 26480310) | 22.03 | **14.09** | 7.04 | **+17.6% np4**, -10.7% np2 — REVERTED |
+
+The HLO frame table pinpointed the fusion: the 3.6 ms kernels resolve to
+`pytree_ops.py:10` (`pytree_axpy.<locals>.<lambda>`) — the RK stage
+combine mega-fused with the tendency graph's tail. An output-side
+optimization_barrier recovers 3 ms of the ~10.9 at np4 but costs np2
+10.7% (it also blocks fusion that HELPS there), so neither barrier ships
+unconditionally. Parity + conservation smoke passed on both attempts.
+
+STATUS: root-caused to a named source line and a shape-dependent XLA
+fusion-cost-model decision; a clean fix is either shape-conditional
+fusion control (not expressible via current flags on this stack) or
+restructuring how the integrator applies pytree_axpy — a scoped
+follow-up with its own review, not a campaign patch. Practical
+mitigation stands: run MPAS at np2 or np>=8 tiles, where the pathology
+does not form.
 
 ## Ocean strong scaling vs TILE SIZE (jobs 26456334/37 vs 26452804-06)
 
