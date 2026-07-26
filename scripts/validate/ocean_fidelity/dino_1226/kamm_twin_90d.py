@@ -240,6 +240,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
     if use_gm_redi is not None:
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
+    _ba = os.environ.get("DINO_BOLUS_ADV")
+    if _ba:
+        # #1226: "through_fct" folds the GM bolus into the ADVECTING MASS FLUX;
+        # "centred" applies it as a tendency instead. On NEMO's true vertical
+        # grid the bolus transport is 37% larger, so this isolates whether the
+        # instability arrives through the advecting velocity.
+        cfg = dataclasses.replace(cfg, gm_bolus_advection=_ba)
+        print(f"ABLATION: gm_bolus_advection={_ba}")
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which
