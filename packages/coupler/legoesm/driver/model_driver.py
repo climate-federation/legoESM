@@ -6088,6 +6088,8 @@ class ModelDriver:
                     _msub, cfg.microphysics,
                     nc_from_aerosol=cfg.nc_from_aerosol,
                     subgrid_autoconversion=cfg.subgrid_autoconversion,
+                    homogeneous_ice_nucleation=getattr(
+                        cfg, "homogeneous_ice_nucleation", False),
                     # NOTE: hard_saturation_adjustment is INTENTIONALLY NOT
                     # threaded in-scheme on the MPAS path.  The integration
                     # trial showed the in-scheme placement cannot correct the
@@ -6105,6 +6107,17 @@ class ModelDriver:
                     hard_sat_max_heating_K=getattr(
                         cfg, "hard_sat_max_heating_K", None),
                 )
+            })
+            # Morrison ice-process flat scalars — same shared threading as
+            # the FV lane (codex 2026-07-26: this lane previously ignored all
+            # five, so a morrison_* override affected FV but not MPAS).
+            from legoesm.driver.physics_pipeline import (
+                _thread_morrison_scalars,
+            )
+            _micro_cfg = _micro_cfg._replace(**{
+                cfg.microphysics: _thread_morrison_scalars(
+                    cfg, cfg.microphysics,
+                    getattr(_micro_cfg, cfg.microphysics)),
             })
         # Post-step hard-saturation-adjustment guard (opt-in), MPAS: read its
         # threshold + per-step heating cap from the (unmodified) scheme config,

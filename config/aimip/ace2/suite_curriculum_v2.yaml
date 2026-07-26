@@ -1,0 +1,27 @@
+# column_nn: richer/longer rollout curriculum + sharper short-range loss (v2).
+#
+# The v1 curriculum (12->24->72->120) roughly halved column_nn's long-lead
+# drift (ws10 240h 12.8->7.2, t850 240h 10.8->7.4) but softened short range.
+# v2 adds a 6 h phase + more short-lead epochs (sharpness) AND an extra 120 h
+# epoch (further long-lead consolidation), with the sharper w_T/w_ps loss
+# preset. Controlled vs suite_curriculum.yaml (results/aimip_ace2curr): the
+# variables under test are the richer curriculum + the sharper weights.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  # 6h+12h short-lead phases (sharpen) + 24/72/120 (stability), 120h x2
+  # consolidation. dt=600s: 6h=36, 12h=72, 24h=144, 72h=432, 120h=720 steps.
+  # Total epochs = 2+3+2+2+2 = 11.
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+output_dir: results/aimip_ace2curr_v2

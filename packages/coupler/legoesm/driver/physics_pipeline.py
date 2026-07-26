@@ -3133,6 +3133,54 @@ def validate_microphysics_tracer_slots(
     return need_slots
 
 
+def _thread_morrison_scalars(config, scheme, micro_config):
+    """Forward user-touched ``morrison_*`` flat scalars to the shared applier.
+
+    Explicit attribute reads (not getattr-with-a-variable) so the
+    flag-reachability AST audit can SEE them — a dynamic read is exactly the
+    blind spot its review documented.  Values equal to the ExperimentConfig
+    default are NOT forwarded: the defaults are locked equal to the
+    MorrisonConfig leaves by test, so an untouched config is byte-identical
+    on Morrison and silent on every other scheme.  Shared by the FV
+    (``_resolve_microphysics``) and MPAS (``model_driver``) lanes.
+    """
+    import math
+
+    from legoesm.driver.config import ExperimentConfig as _ExpCfg
+
+    # ONE tolerance for both touched-ness (here, vs the flat default) and
+    # application (in the applier, vs the current leaf): float32-host storage
+    # noise is ~1.2e-7 relative (2^-23), so differences below 1e-6 relative
+    # are treated as THE DEFAULT everywhere — never half-recognised as
+    # "touched" but then not applied (codex 2026-07-26 round 2, item 4).
+    # These are order-of-magnitude process coefficients; a deliberate retune
+    # below 1e-6 relative is physically meaningless.
+    _touched = {}
+    for _exp_name, _leaf_name, _val in (
+        ("morrison_bergeron_rate", "bergeron_rate",
+         getattr(config, "morrison_bergeron_rate", None)),
+        ("morrison_rime_coeff", "rime_coeff",
+         getattr(config, "morrison_rime_coeff", None)),
+        ("morrison_dep_coeff", "dep_coeff",
+         getattr(config, "morrison_dep_coeff", None)),
+        ("morrison_agg_coeff", "agg_coeff",
+         getattr(config, "morrison_agg_coeff", None)),
+        ("morrison_k_au", "k_au",
+         getattr(config, "morrison_k_au", None)),
+    ):
+        if _val is not None and not math.isclose(
+                float(_val), float(_ExpCfg._field_defaults[_exp_name]),
+                rel_tol=1e-6, abs_tol=0.0):
+            _touched[_leaf_name] = float(_val)
+    if not _touched:
+        return micro_config
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    return apply_microphysics_experiment_flags(
+        micro_config, scheme, morrison_scalars=_touched)
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
@@ -3210,9 +3258,17 @@ def _resolve_microphysics(config):
     # so the fail-loud "scheme lacks the field" contract is written once
     # (mirrors the model_driver MPAS call site); validate_strict has already
     # refused an override without the boolean gate.
+    # ``homogeneous_ice_nucleation`` shares this call but is INDEPENDENT of the
+    # hard-sat overrides: both of those default to None, so gating the call on
+    # them alone made the cirrus-nucleation flag SILENTLY INERT on this lane
+    # unless the user happened to also pass --hard-sat-adjust-threshold /
+    # --hard-sat-max-heating-k (measured: morrison.homogeneous_ice_nucleation
+    # stayed False for ExperimentConfig(homogeneous_ice_nucleation=True)).
+    # Include it in the guard so the flag reaches the scheme on its own.
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
-    if _hs_thr is not None or _hs_cap is not None:
+    _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
+    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
         from legoesm.atmosphere.physics.microphysics.config import (
             apply_microphysics_experiment_flags,
         )
@@ -3220,7 +3276,19 @@ def _resolve_microphysics(config):
             micro_config, scheme,
             hard_sat_adjust_threshold=_hs_thr,
             hard_sat_max_heating_K=_hs_cap,
+            homogeneous_ice_nucleation=_hom_nuc,
         )
+
+    # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
+    # scalars, declared with "MorrisonConfig.<field>" comments but NEVER
+    # wired — the flag-reachability audit's cause-1/2 gap).  Threaded through
+    # the SAME shared helper as the flags above so the hard
+    # scheme=="morrison" gate lives in ONE place (Thompson/P3 share leaf
+    # NAMES with different defaults — a presence-keyed overlay here silently
+    # retuned them; codex 2026-07-26 Critical).  Only user-touched values are
+    # forwarded, so a non-Morrison scheme with untouched defaults stays
+    # silent and a Morrison config at defaults is byte-identical.
+    micro_config = _thread_morrison_scalars(config, scheme, micro_config)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (

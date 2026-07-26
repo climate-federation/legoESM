@@ -724,7 +724,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         name="morrison_rime_coeff",
         default=1.0,
         min_val=0.1,
-        max_val=5.0,
+        max_val=2.0,
         units="1",
         description="Morrison riming collection efficiency (ice/snow capture q_c)",
         category="convection",
@@ -737,9 +737,13 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "morrison_dep_coeff": TuningParameter(
         name="morrison_dep_coeff",
-        default=1e-8,
-        min_val=3e-9,
-        max_val=3e-8,
+        # Was default=1e-8, range 3e-9..3e-8 — FIVE ORDERS below the real
+        # MorrisonConfig.dep_coeff default (1e-3) that every run uses; the
+        # scalar was unwired so nothing ever noticed (flag-reachability audit
+        # 2026-07-25).  Range re-centred on the true default, same ~3x span.
+        default=1e-3,
+        min_val=3e-4,
+        max_val=3e-3,
         units="1",
         description="Morrison depositional ice growth coefficient (vapor -> q_i)",
         category="convection",
@@ -756,7 +760,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     "morrison_agg_coeff": TuningParameter(
         name="morrison_agg_coeff",
         default=1e-3,
-        min_val=1e-5,
+        min_val=1e-4,
         max_val=5e-3,
         units="1/s",
         description="Morrison ice-to-snow aggregation rate",
@@ -801,41 +805,12 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "LWP 0.18->0.06 at eps=0.5 in probe 25237929)."
         ),
     ),
-    "cloud_rh_ice_crit": TuningParameter(
-        name="cloud_rh_ice_crit",
-        default=0.95,
-        min_val=0.85,
-        max_val=1.05,
-        units="1",
-        description="RH_i cirrus onset threshold (cloud_fraction RH_i branch)",
-        category="clouds",
-        sensitivity="high",
-        notes=(
-            "cf_ice = clamp((RH_i - rh_ice_crit) / (rh_ice_sat - "
-            "rh_ice_crit), 0, 1); total cf = max(cf_warm, cf_ice).  Lower "
-            "= more cirrus area, more LW trapping (lower OLR, higher "
-            "LW_CRE).  Lopez-Coelho (1996) uses ~0.95 for heterogeneous "
-            "cirrus onset; ECMWF/Slingo-Ritter band 0.85-1.05.  Direct "
-            "lever on OLR / LW_CRE via cold-cloud area."
-        ),
-    ),
-    "cloud_rh_ice_sat": TuningParameter(
-        name="cloud_rh_ice_sat",
-        default=1.30,
-        min_val=1.20,
-        max_val=1.50,
-        units="1",
-        description="RH_i value at which cf_ice saturates to 1 (full cirrus)",
-        category="clouds",
-        sensitivity="medium",
-        notes=(
-            "Upper end of the RH_i cirrus ramp; sets the width.  Karcher-"
-            "Lohmann 2002 homogeneous freezing threshold is ~1.40-1.65, "
-            "below which heterogeneous nucleation dominates.  Tighter "
-            "(closer to rh_ice_crit) = sharper cirrus onset; wider = more "
-            "gradual area growth.  Pairs with rh_ice_crit."
-        ),
-    ),
+    # (cloud_rh_ice_crit / cloud_rh_ice_sat catalog entries DELETED
+    # 2026-07-26: the ExperimentConfig fields documented a CloudConfig
+    # RH_i cirrus ramp that was never implemented — no
+    # CloudConfig.rh_ice_crit/rh_ice_sat exists (flag-reachability audit
+    # cause 3, codex-verified).  Advertising tuning ranges for
+    # nonexistent physics invited wasted calibration campaigns.)
 }
 
 
