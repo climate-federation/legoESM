@@ -235,16 +235,19 @@ campaign. Efficiency t1/(n*tn) by subdivision:
 | 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
 | 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
 
-THE TILE-SIZE LAW, THIRD INDEPENDENT COMPONENT: the np64 column collapses
+THE TILE-SIZE PATTERN, THIRD LANE (cube and ico are both atmosphere:
+two components, three decomposition lanes): the np64 column collapses
 on coarse grids (0.15 at subdiv4, 0.30 at subdiv5) and holds on fine ones
-(0.52-0.57 at subdiv6-7). Same pattern as the cube (0.23 -> 1.04 across
-tile sizes) and the ocean (0.37 -> 0.63) — now on a third component and a
-different transport (CPU-MPI, not NCCL). This is the campaign's most
-reproducible finding.
+(0.52-0.57 at subdiv6-7). Same pattern as the cube (0.23 -> 1.04) and the ocean (0.37 -> 0.63), now
+on a third lane and a different transport (CPU-MPI, not NCCL). It is the
+campaign's most reproducible ASSOCIATION — but changing C-resolution, LL
+size or ico subdivision also changes the global problem, so tile size is
+not causally isolated.
 
 Shape: ~1.0 through np8, one step down, then FLAT 0.5 from np16 to np64 —
-4x more ranks with no further loss, the signature of a fixed per-rank cost
-rather than growing communication. (The >1 points at np8 are the same
+4x more ranks with no further loss. CONSISTENT with a fixed per-rank cost
+rather than growing communication, but flat efficiency alone does not
+identify which; that needs phase-level timing. (The >1 points at np8 are the same
 base-leg-working-set effect noted for the cube; read as "at ideal".)
 
 Against the 4-node SPREAD lat-lon ladder (job 26452578) at high rank
@@ -258,6 +261,364 @@ The ico WEAK ladder from the same job is non-monotone (1.00 / 0.47 / 0.81 /
 0.48 / 0.46 / 0.22 / 0.45 at np 1..64) — the per-rank problem size is not
 held constant cleanly across that sweep's subdivision steps, so no weak
 claim is made from it.
+
+## DISTANCE TO THE THEORETICAL LIMIT, measured (job 26457977)
+
+With all three ingredients measured on this machine — fabric constants
+(17.82 us, 64.22 GB/s) and the per-tile single-device compute term — the
+ocean LL576 f64 implicit ladder finally has a real roofline:
+
+| nd | measured | calibrated bound | measured/bound | at % of floor |
+|---|---|---|---|---|
+| 2 | 42.71 ms | 34.77 ms | 1.228 | 81 % |
+| 4 | 23.53 ms | 16.82 ms | 1.398 | 72 % |
+
+Bound = per-device compute (32.58 / 14.63 ms) + modelled comm (2.21) +
+modelled reduction (2.19). The unmodelled gap is **~5 ms/step and roughly
+FLAT** with device count (7.9 ms at nd2, 6.7 at nd4), which is why the
+ratio worsens as compute shrinks.
+
+WHAT THE GAP IS NOT — the omitted-traffic explanation is REFUTED
+(`scripts/tmp/probe_ocean_halo_bytes.py`, HLO byte census on CPU virtual
+devices). The bench's `comm_scope_note` correctly warns that its census is
+"barotropic implicit-CN PCG scope only … baroclinic 3-D pads NOT counted",
+and the true volume IS much larger: **16.22 MB/step across 110
+collective-permutes vs the censused 2.25 MB — a 7.2x undercount**. But
+completing the census moves the bound by only **0.22 ms**, because the
+comm term is LATENCY-dominated: at 122 messages x 17.82 us the latency part
+is 2.174 ms while even 16 MB at 64.22 GB/s is just 0.253 ms.
+
+So with the byte census completed the unexplained residual is still 5.5 ms
+(nd2) and 4.3 ms (nd4).
+
+SECOND CANDIDATE ALSO REFUTED (`scripts/tmp/probe_sharded_overhead.py`,
+job 26458553): the sharded formulation does NOT do measurably more work.
+Timing the SHARDED step on a 1-device mesh (all the padding, band-edge and
+v-row-reconstruction machinery present, ppermutes self-to-self so no real
+traffic) against the UNSHARDED step at the identical tile:
+
+| tile | unsharded | sharded on 1 device | overhead |
+|---|---|---|---|
+| 288x1152x20 | 33.13 ms | 32.79 ms | **-0.34 ms (-1.0 %)** |
+| 144x1152x20 | 15.88 ms | 15.92 ms | **+0.04 ms (+0.2 %)** |
+
+Zero within noise at both tiles, so the bound's compute term is the RIGHT
+reference and extra sharded work is not the gap.
+
+WHERE THAT LEAVES IT (quantified, one candidate standing): the residual
+divided by the message count is **83 us/message at nd2 and 73 us at nd4**,
+versus **17.8 us** for the same collective measured in isolation — an in-
+context cost 4-5x the best case. That is consistent with EXPOSED,
+un-overlapped communication rather than raw wire time.
+
+THIRD CANDIDATE REFUTED, AND IT IDENTIFIES THE MECHANISM (job 26458930).
+If the residual were communication the scheduler is currently hiding work
+behind, DISABLING XLA's latency-hiding scheduler would hurt. It does not:
+
+| arm | nd2 | nd4 | vs default |
+|---|---|---|---|
+| default (LHS on) | 42.69 | 23.53 ms | — |
+| `latency_hiding_scheduler=false` | 42.44 | 23.49 | **+0.6 % / +0.2 %** |
+| `enable_pipelined_p2p=true` | 42.76 | 23.54 | -0.2 % / -0.1 % |
+| CP combining @32 MiB | 42.55 | 23.59 | +0.3 % / -0.3 % |
+
+Turning overlap OFF is free (marginally faster), and no scheduling flag
+moves the step. The scheduler has nothing to hide the comm behind.
+
+**MECHANISM (the three tested alternatives are not dominant): the
+residual is best explained by EXPOSED, DEPENDENCY-SERIALIZED
+SYNCHRONISATION.** These are eliminations of the TESTED implementations,
+not of every possible communication explanation. Not bytes
+(7.2x more = +0.22 ms), not sharded-formulation work (0 ms), not
+hideable-by-scheduling (0 ms). It is the unavoidable cost of sync points
+that sit on a dependent chain.
+
+This retro-explains every earlier arm in the campaign, which is the check
+that the mechanism is right rather than merely last-standing:
+- fused-halo NULL — aggregation reduces message COUNT but not chain DEPTH;
+- `single_reduce` HELPED (0.49 -> 0.53) — Chronopoulos-Gear restructures
+  the recurrence into fewer DEPENDENT reduction batches;
+- wide-halo HELPED MOST (-> 0.73) — it deletes the barotropic solver's sync
+  points outright;
+- the f64/f32 flip — more compute per sync point dilutes a fixed sync cost.
+
+ACTIONABLE CONSEQUENCE: the lever for this lane is reducing the NUMBER OF
+DEPENDENT SYNCHRONISATION POINTS, not message aggregation, byte
+compression, or XLA scheduling flags — three families this campaign has
+now measured to be null here.
+
+Honest answer to "how far from the theoretical limit are we": 72-81 % of a
+now-calibrated floor, with the shortfall attributable to neither bandwidth
+nor byte volume.
+
+## The mechanism's prediction, TESTED — and the lever it exposes (job 26459382)
+
+If exposed dependent sync is the cost, PCG iteration count is the most
+direct lever on it (each iteration carries dependent reduction batches).
+`--pcg-fixed-iters` was wired onto the SPMD bench for this (the MPI twin
+already had it) and swept at LL576 f64:
+
+| iters | nd1 ms | nd4 ms | eff@4 | speedup@4 | residual (nd4) |
+|---|---|---|---|---|---|
+| 60 (default) | 63.55 | 23.52 | 0.68 | 1.00x | 2.1e-04 |
+| 40 | 61.33 | 21.05 | 0.73 | 1.12x | 1.6e-03 |
+| 30 | 60.24 | 19.89 | 0.76 | 1.18x | 4.6e-03 |
+| 20 | 59.08 | 18.60 | 0.79 | 1.26x | 1.3e-02 |
+| 10 | 57.99 | 17.31 | **0.84** | **1.36x** | 4.1e-02 |
+
+QUANTIFICATION — and codex round-7 rates the strong form OVERSTATED, which
+is recorded here rather than argued away. Regressing T(N) = intercept +
+N x slope over the five iteration counts:
+
+| | intercept | slope | R^2 |
+|---|---|---|---|
+| nd=1 | 56.87 +- 0.04 ms | 111.4 +- 1.0 us/iter | 0.99994 |
+| nd=4 | 16.11 +- 0.09 ms | 123.8 +- 2.4 us/iter | 0.99972 |
+
+WHAT THIS ESTABLISHES (codex objection (c), answered): the fit is
+essentially exact and the intercept is tightly determined, so the cost is
+genuinely PER-ITERATION, not a constant misattributed to iterations. But
+the nd4 intercept EXCEEDS the measured 144-row compute term (14.63 ms) by
+**1.48 ms**, so a fixed non-PCG overhead does exist and the 60 iterations
+do NOT explain the entire residual.
+
+CODEX OBJECTION (a) TESTED AND REFUTED (job 26459817). Rather than divide
+the nd1 slope by 4, measure the per-iteration slope directly at each tile
+on ONE device:
+
+| tile | measured us/iter |
+|---|---|
+| 576 rows | 110.0 |
+| 288 rows | 65.2 |
+| 144 rows | **28.1** |
+
+The linearity assumption predicted 110.0/4 = 27.5 us for the 144-row tile;
+the MEASURED value is 28.1 us — 2 % apart. Per-iteration compute IS linear
+in rows (the PCG iteration is a bandwidth-bound stencil+reduction, so it
+scales with data even where the FULL step does not). The sync figure barely
+moves: **95.7 us/iter measured** vs 96.3 assumed.
+
+DECOMPOSITION OF THE nd=4 STEP (both terms from measured slopes; the
+remainder is left UNATTRIBUTED):
+
+| term | ms | note |
+|---|---|---|
+| same-tile single-device step (144 rows) | 14.65 | measured |
+| + PCG dependent sync (60 x 95.7 us) | **5.74** | **65 % of the distributed overhead** |
+| + iteration-independent remainder | 3.13 | 35 % — NOT attributed; may include fixed PCG/setup work |
+| = total | 23.52 | measured 23.52 |
+
+So of the 8.87 ms the step pays for being distributed across 4 GPUs, TWO
+THIRDS is dependent PCG synchronisation and one third is everything else.
+Codex objection (c) is honoured in the same table: the non-PCG part is
+real, separated, and not attributed to the solver.
+
+STRONG-SCALING CONSEQUENCE: cutting iterations raises 4-GPU efficiency from
+0.68 to 0.84, because what is being removed is precisely the part that does
+NOT shrink with device count.
+
+THE CATCH, WHICH IS NOT MINE TO WAIVE: the speed is bought with solver
+convergence — the zero-forcing probe residual degrades 200x from 2.1e-04 to
+4.1e-02. 40 iterations (1.12x, 8x residual) and 30 (1.18x, 22x) are the
+plausible operating points, but whether that residual is acceptable for the
+free surface is an OCEAN-SCIENCE decision, not a performance one. Reported
+as a trade curve; no default changed.
+
+## The accuracy-free lever, and what it reveals (job 26460113)
+
+Cutting PCG iterations trades accuracy. `single_reduce`
+(Chronopoulos-Gear) attacks the SAME sync at unchanged iteration count by
+halving the DEPENDENT reduction batches per iteration, so it should be
+free. Measured at LL576 f64, slopes from a 60-vs-20-iteration difference:
+
+| variant | nd | us/iter | step @60 | residual |
+|---|---|---|---|---|
+| standard | 1 | 111.0 | 63.54 ms | 2.079e-04 |
+| standard | 4 | 117.9 | 23.40 ms | 2.079e-04 |
+| single_reduce | 1 | 129.6 | 64.78 ms | 2.079e-04 |
+| single_reduce | 4 | **99.7** | **22.21 ms** | **2.079e-04** |
+
+**1.053x at 4 GPUs with a BIT-IDENTICAL residual** — a genuinely free win,
+unlike the iteration cut. Note it is SLOWER at nd1 (129.6 vs 111.0 us/iter):
+Chronopoulos-Gear buys fewer reductions with extra local vector ops, so it
+only pays where sync dominates.
+
+PREDICTION PARTLY WRONG, AND THE MISS IS THE INTERESTING PART. Halving the
+reduction batches should have halved the 89.8 us/iter of sync; it fell only
+to 66.9 (25 %). Backing out the arithmetic (and correcting for the +4.6
+us/iter of extra local work at this tile) decomposes per-iteration sync:
+
+| component (MODEL-DERIVED, not separately timed) | us/iter | behaviour |
+|---|---|---|
+| reduction sync | 45.7 | assumed HALVED by single_reduce |
+| halo sync | 44.1 | assumed UNCHANGED — the matvec's own halo |
+
+This split assumes exactly two sync categories and a linear single_reduce
+local overhead; the 120->4 census corroborates the COUNT reduction, not
+this particular halo-time value.
+
+(check: 45.7/2 + 44.1 = 66.9, exactly the measured single_reduce value)
+
+So per-iteration sync is almost exactly half global-reduction and half
+nearest-neighbour halo. `single_reduce` can only ever address the first
+half. The second half is the same quantity wide-halo removes for the
+explicit solver — which is why wide-halo was the larger win in the earlier
+arms, and it now has a mechanistic reason rather than just an empirical
+ranking.
+
+## MATCHED CONFIG HEAD-TO-HEAD — the production recommendation (job 26460365)
+
+All three arms in ONE job on ONE node, back to back, conservation-gated
+(LL576x1152 L20 f64):
+
+| arm | nd1 | nd2 | nd4 | eff@2 | eff@4 | residual |
+|---|---|---|---|---|---|---|
+| implicit + standard PCG (production) | 63.54 | 42.57 | 23.48 ms | 0.75 | 0.68 | 2.079e-04 |
+| implicit + **single_reduce** | 64.81 | 41.63 | **22.09** | 0.78 | 0.73 | 2.079e-04 |
+| explicit + wide-halo | 71.52 | 43.65 | 23.28 | 0.82 | **0.77** | n/a (different solver) |
+
+THE TWO METRICS DISAGREE, and the distinction drives the recommendation:
+`single_reduce` is FASTEST in absolute time at every count above 1 (1.063x
+vs production, 1.054x vs wide-halo at nd4), while wide-halo has the BEST
+EFFICIENCY — but only because it starts 10 % SLOWER at nd1, which flatters
+a ratio normalised to its own single-device time. Efficiency is not speed.
+
+THE CROSSOVER, MEASURED (jobs 26460444/45/48 + 26460501) — and my
+first recommendation was right only for the corner I had measured.
+
+Same-precision f32 ladder, both arms, LL576:
+
+| nd | single_reduce | explicit+wide | winner |
+|---|---|---|---|
+| 1 | 35.01 | 36.45 ms | single_reduce (1.04x) |
+| 2 | 24.09 | 22.48 | wide (1.07x) |
+| 4 | 14.69 | 12.84 | wide (1.14x) |
+| 8 | **15.89** | 11.04 | wide (**1.44x**) |
+| 16 | 15.36 | 8.71 | wide (**1.76x**) |
+
+Control at nd16 (job 26460877): standard PCG 17.57 ms, so the nd16 ordering
+is wide 8.71 < single_reduce 15.36 < standard 17.57. The implicit variants
+PLATEAU past 4 GPUs (single_reduce 14.69 -> 15.89 -> 15.36) and never
+recover, while wide-halo improves monotonically (12.84 -> 11.04 -> 8.71).
+
+Two things this shows that the f64 <=4-GPU ladder could not:
+1. **single_reduce ANTI-SCALES past 4 GPUs in f32** (14.69 -> 15.89 ms from
+   4 to 8) — it hits the sync wall, while wide-halo keeps improving all the
+   way to 16.
+2. **PRECISION FLIPS THE WINNER at nd=4**: single_reduce is 1.05x faster in
+   f64, wide-halo is 1.14x faster in f32. Coherent with the mechanism —
+   f64 carries more compute per iteration so sync is a smaller fraction and
+   the low-extra-compute solver wins; f32 shrinks compute until sync
+   dominates and wide-halo's zero-solver-sync takes over.
+
+RECOMMENDATION (a decision table, not a winner):
+
+| regime (all TESTED on LL576 only) | config | why |
+|---|---|---|
+| f64, 1 GPU | standard PCG | single_reduce is SLOWER here (64.81 vs 63.54 ms) — its extra local vector ops only pay once sync exists |
+| f64, **2-4** GPUs | `pcg_variant="single_reduce"` | fastest in that range, residual bit-identical, one-line change, no scheme review |
+| f32, **2-16** GPUs | explicit + wide-halo | wins from nd2 and the margin grows to 1.76x at nd16; the only arm still improving at 16 — CHANGES THE BAROTROPIC SCHEME, stability-gated |
+| anything else | benchmark it | the flip depends on precision AND device count AND tile; do not extrapolate off this grid |
+
+CORRECTION (codex round-8): an earlier revision said "f64 <=4 GPUs" and
+"f32 OR >=2 GPUs", which was wrong at nd1 (standard is fastest in f64
+there) and self-contradictory. "Bit-identical residual" is also a
+convergence check, NOT full trajectory validation.
+
+A single "best ocean config" claim would be wrong in one regime or the
+other; the earlier campaign arms disagreed precisely because they sampled
+different precisions and device counts.
+
+## Wide-halo stability: evidence toward the gate (job 26460729)
+
+Wide-halo is the campaign's fastest arm for f32 / scale-out but is BLOCKED
+on stability review (the averaging filter under stale-halo substepping).
+This does NOT clear that gate — a gate needs the filter analysis plus an
+ocean-science sign-off — but it supplies the first thing a reviewer would
+ask for: 600 steps at nd4, f32, conservation-gated, both arms same job.
+
+| arm | eta drift [m] | heat_rel | salt_rel |
+|---|---|---|---|
+| implicit_cn (reference) | 6.01e-11 | 1.272e-05 | 4.878e-06 |
+| explicit + wide-halo | 3.72e-10 | **1.248e-05** | **4.190e-06** |
+
+REPEATED ACROSS THREE SEEDS (job 26464790) — the n=1 objection answered.
+`--seed` was added to the bench for this; 3 independent IC perturbations
+per arm, 600 steps each:
+
+| metric | implicit_cn | explicit+wide | separation |
+|---|---|---|---|
+| heat_rel | 1.2693e-05 +-4.6e-08 | **1.2427e-05** +-4.6e-08 | **7.1 SE** (wide 2.1 % lower) |
+| salt_rel | 4.8570e-06 +-3.6e-08 | **4.1483e-06** +-7.2e-08 | **15.2 SE** (wide 14.6 % lower) |
+| eta drift | 7.72e-10 +-1.1e-09 m | 6.75e-10 +-6.6e-10 | 0.1 SE — INDISTINGUISHABLE |
+
+With a variance estimate the heat and salt ordering IS established (7 and
+15 standard errors — small effects, but far outside the seed spread), so
+wide-halo genuinely conserves those two better in this configuration. It
+also CORRECTS the single-run report above: wide-halo's apparently WORSE eta
+drift was noise, and vanishes at n=3.
+
+SCOPE, still: one grid, one base stratification (seeds vary only the IC
+perturbation), UNFORCED, 600 steps, f32, nd4. This does not clear the
+stability gate — that needs the filter analysis under stale halos and a
+science sign-off — but "no observed failure" has become "marginally better
+conservation with a measured variance estimate".
+
+Per-step time is flat 100 -> 600 steps (12.81 -> 12.74 ms). Both arms' heat
+drift grows ~linearly and is similar between them, consistent with the
+shared baroclinic/tracer path dominating it.
+
+MECHANISM CONFIRMED FROM A THIRD ANGLE. The wide-halo arm records its own
+message census: **120 standard barotropic messages/step -> 4** (n_loop=30
+substeps, stencil reach 3, one fixed wide exchange per chunk). A 30x cut in
+barotropic exchanges is precisely why it wins where sync dominates, and it
+is the SAME quantity the single_reduce analysis isolated as the half it
+could not touch (44.1 us/iter of matvec halo). Three independent
+measurements — the iteration sweep, the single_reduce decomposition and
+this census — now agree on what the cost is.
+
+REMAINING FOR THE GATE (not done here): filter-stability analysis under
+stale halos, longer/realistic-forcing integration, and the science
+sign-off. What is now on record is that 600 steps conserve at least as well
+as the production solver.
+
+## Using the calibrated bound correctly (a trap worth documenting)
+
+With the fabric constants supplied the bench flips `bound_calibrated=true`,
+but `t_bound` stays null until a THIRD ingredient arrives:
+`--single-dev-fused-ms`. Its contract is the nd=1 time **at the same
+PER-DEVICE size** — for a strong ladder at nd=4 on LL576 that is a
+144-row single-device run, not the 576-row one.
+
+Passing the GLOBAL-size time (job 26457946) makes the compute term nd times
+too large and yields `measured_over_bound` of 0.647 at nd2 and 0.358 at nd4
+— i.e. the measurement beating its own lower bound, which is impossible and
+is the tell that the ingredient was wrong. The bench computed exactly what
+it was told; the misuse was the caller's.
+
+Correct procedure (job 26457977): phase 1 measures nd=1 at each per-device
+tile (576 / 288 / 144 rows), phase 2 feeds each ladder rung its MATCHING
+compute term. Sanity rule for any future roofline: if measured/bound < 1,
+the bound is wrong, not the code.
+
+## Precision changes which ocean config wins (job 26457919)
+
+The solver A/Bs that produced the "wide-halo wins" conclusion ran **f32**
+(with vmix-f32). Re-running the LL576 ladder in **f64** narrows the gap
+sharply:
+
+| arm | nd1 | nd2 | nd4 | eff@2 | eff@4 |
+|---|---|---|---|---|---|
+| implicit_cn fixed-PCG | 63.56 | 42.71 | 23.61 ms | 0.74 | 0.67 |
+| explicit + wide-halo | 71.54 | 43.69 | 23.31 ms | 0.82 | 0.77 |
+
+Wide-halo still scales better (0.77 vs 0.67 at nd4) but is only 1.3 % faster
+in absolute time there, versus the large margin measured in the f32 arm —
+and it starts 12 % SLOWER at nd1. So the winning config is REGIME-DEPENDENT
+(precision, tile size, device count), not universal. Anyone promoting the
+improved config should pick the arm for the production precision, not
+inherit the f32 verdict. These f64 rows are NOT comparable to the f32
+multinode ladder quoted earlier; only their internal comparison is valid.
 
 ## Measured fabric constants for the roofline lines (job 26457495)
 
@@ -287,6 +648,25 @@ visible. Validated on CPU virtual devices: 275 us -> 26 us.
 
 Quote the lane that matches the plot: intra-node NVLink and inter-node IB
 differ by ~3x in bandwidth, so using the wrong one is its own confound.
+
+## OPERATIONAL NOTE: transient multi-node hangs (3 occurrences)
+
+Three times this campaign a multi-node GPU job consumed its entire
+walltime without emitting a timed row, then ran normally on retry with the
+IDENTICAL configuration:
+
+| job | config | hung for | retry |
+|---|---|---|---|
+| 26457000 / 26456335 | ocean LL1152 np8 | 90 min x2 | 99 s (job 26457693) |
+| 26460447 | ocean LL576 np16 single_reduce | 50 min | 67 s (job 26460876) |
+
+Each time the log stops during tracing/compile with no error. Twice I
+suspected a real compile-time defect (a chunk-heuristic cliff, then a
+16-device solver problem) and twice the retry refuted it. TREAT A SINGLE
+MULTI-NODE HANG AS TRANSIENT until a second occurrence with the same
+config; budget a retry rather than a diagnosis. Root cause not
+established — it is not reproducible enough to bisect, and it has never
+produced a WRONG number, only a missing one.
 
 ## Infrastructure defects found + fixed (each with a receipt)
 

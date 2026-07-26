@@ -81,7 +81,8 @@ SPMD_PARITY_MAX_STEPS = 8
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
                           tripole=False, baro_solver="implicit_cn",
-                          force_pcg=False, pcg_variant="standard"):
+                          force_pcg=False, pcg_variant="standard",
+                          pcg_fixed_iters=0):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -130,6 +131,16 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                 "--force-pcg only affects the implicit_cn barotropic solve; "
                 "drop it for explicit_substep arms.")
         flat["barotropic_implicit_force_pcg"] = True
+    if pcg_fixed_iters:
+        # Each PCG iteration contributes DEPENDENT reduction batches, and
+        # the campaign's mechanism finding (job 26458930) is that exposed
+        # dependent sync — not bytes, not schedulable overlap — is what the
+        # step pays above its roofline. Iteration count is therefore the
+        # most direct sync-point lever available in config.
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-fixed-iters only affects the implicit_cn fixed-M PCG.")
+        flat["barotropic_implicit_pcg_fixed_iters"] = int(pcg_fixed_iters)
     if pcg_variant != "standard":
         if baro_solver != "implicit_cn":
             raise SystemExit(
@@ -210,6 +221,20 @@ def main() -> int:
                         "nd=1 strong-scaling reference leg times the SAME "
                         "solver the nd>1 SPMD legs run (the dispatch "
                         "otherwise routes nd=1 to adaptive stock CG).")
+    p.add_argument("--seed", type=int, default=0,
+                   help="IC perturbation seed. Repeats across seeds give a "
+                        "variance estimate, without which a single-run "
+                        "difference between two arms cannot be called an "
+                        "ordering (codex round-8).")
+    p.add_argument("--pcg-fixed-iters", type=int, default=0,
+                   help="Iterations of the fixed-M implicit_cn PCG "
+                        "(0 = scheme default, 60). Each iteration carries "
+                        "DEPENDENT reduction batches, so this is the most "
+                        "direct lever on the exposed-sync cost that "
+                        "dominates this step above its roofline. Lowering "
+                        "it trades solver convergence for sync points — "
+                        "check zero_forcing_probe_residual in the output "
+                        "before believing any speedup.")
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
                    default="standard",
                    help="Fixed-M PCG recurrence for the implicit_cn "
@@ -349,10 +374,11 @@ def main() -> int:
         os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
     model, s0 = build_model_and_state(
-        n_lat, args.n_lon, args.nlev,
+        n_lat, args.n_lon, args.nlev, seed=args.seed,
         wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
         tripole=args.tripole, baro_solver=args.baro_solver,
-        force_pcg=args.force_pcg, pcg_variant=args.pcg_variant)
+        force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
+        pcg_fixed_iters=args.pcg_fixed_iters)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
