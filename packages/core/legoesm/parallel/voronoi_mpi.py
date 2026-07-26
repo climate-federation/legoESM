@@ -1096,10 +1096,32 @@ def make_voronoi_mpi_step(
             state_new = state_new._replace(
                 T=state_new.T.replace(data=T_clipped))
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                k: f.replace(data=jnp.maximum(f.data, 0.0))
-                for k, f in state_new.tracers.items()
-            })
+            # Mirror the serial floors EXACTLY (codex 2026-07-26 review of
+            # fc7e7dce8: this block previously hard-coded the plain clamp, so
+            # ``conservative_tracer_clamp`` was SILENTLY INERT under MPI — the
+            # repo's recurring dropped-flag defect class).  The borrow is
+            # column-local, so it needs no halo/allreduce and is identical on
+            # owned and halo cells.
+            if getattr(config, "conservative_tracer_clamp", False):
+                from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+                    _is_water_mass_tracer,
+                )
+                from legoesm.core.conservation import (
+                    conservative_positive_clip,
+                )
+                _dsig = jnp.asarray(sigma_coord.dsigma)
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=(
+                        conservative_positive_clip(f.data, _dsig)[0]
+                        if _is_water_mass_tracer(k)
+                        else jnp.maximum(f.data, 0.0)))
+                    for k, f in state_new.tracers.items()
+                })
+            else:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
 
         # Global mass fixer (owned cells + allreduce — correct under the
         # cell partition, unlike the model's internal fixer which would

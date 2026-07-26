@@ -123,8 +123,26 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     axis : int
         Axis to conserve along (the vertical for a column fixer).
     eps : float
-        Positive-mass floor below which a slab is left at zero rather than
-        rescaled (an all-nonpositive column has nothing to borrow from).
+        Positive-mass floor below which a column is DEGENERATE: no rescale is
+        attempted (nothing meaningful to borrow from).  The effective
+        threshold is ``max(eps, sqrt(finfo(q.dtype).tiny))`` so that
+        ``after**2`` in the quotient VJP can never underflow — with the raw
+        1e-30 a float32 column just above threshold squares to ~1e-60 -> 0 and
+        the backward pass emits Inf (codex 2026-07-26 finding 3).
+
+    Contract
+    --------
+    * Inputs are assumed FINITE; NaN/Inf propagate (the floors stage runs
+      before the driver's bounds guards, which are the NaN tripwire).
+    * ``weight`` must be positive (true for every MPAS ``dsigma``, pure-sigma
+      and hybrid).  With mixed-sign weights ``before > after`` is possible and
+      the factor clip would silently under-restore — out of scope.
+    * Conservation is exact (to roundoff) for columns with
+      ``after > eps_eff``.  Degenerate columns: a net-POSITIVE one keeps its
+      plain-clipped values (error bounded by ``eps_eff`` per column — for
+      float32 ~1e-19 kg/kg, ~1e-14 kg/m2 column water, 15 orders below the
+      +30 kg/m2/yr defect this fixes); a net-negative one is zeroed (the
+      minimum-creation choice).
 
     Returns
     -------
@@ -133,19 +151,33 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
         NAIVE clip WOULD have invented — a monotonicity diagnostic that is
         zero for a monotone scheme.
     """
+    # Trailing axis only: the weight broadcast ``q * w`` aligns on the LAST
+    # dimension, so a non-trailing ``axis`` would pair weights with the wrong
+    # dimension and silently mis-conserve (codex 2026-07-26 finding 1).
+    if axis != -1 and axis != q.ndim - 1:
+        raise ValueError(
+            f"conservative_positive_clip conserves along the TRAILING axis "
+            f"only (weight broadcasts on the last dim); got axis={axis} for "
+            f"ndim={q.ndim}. Move the conserved dim last.")
     w = jnp.asarray(weight, dtype=q.dtype)
+    # Host-side math: dtype is static under jit, so eps_eff is a trace-time
+    # Python float (jnp.sqrt here would make it a tracer and break jit).
+    eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
     q_clip = jnp.maximum(q, 0.0)
     before = jnp.sum(q * w, axis=axis, keepdims=True)
     after = jnp.sum(q_clip * w, axis=axis, keepdims=True)
     created = jnp.sum(jnp.maximum(-q, 0.0) * w)
-    # factor <= 1 removes the borrowed mass from the positives.  An
-    # all-nonpositive column (after ~ 0) has nothing to borrow from and is
-    # left at zero; clipping the factor to [0, 1] keeps a column whose
-    # integral was itself negative from flipping sign.  The inner ``where``
-    # keeps the disabled branch's denominator at 1.0 so the reverse-mode
-    # gradient never sees a 0/0 (NaN would poison the whole column).
-    safe_after = jnp.where(after > eps, after, 1.0)
-    factor = jnp.where(after > eps, before / safe_after, 0.0)
+    # factor <= 1 removes the borrowed mass from the positives.  Degenerate
+    # columns (after <= eps_eff): keep the plain clip when the integral is
+    # positive (a tiny-but-real column must NOT be zeroed — conservation error
+    # bounded by eps_eff), zero when it is not (nothing to borrow from; the
+    # minimum-creation choice).  The inner ``where`` keeps the disabled
+    # branch's denominator at 1.0 so reverse-mode never sees 0/0, and eps_eff
+    # keeps ``after**2`` in the quotient VJP above the underflow floor.
+    live = after > eps_eff
+    safe_after = jnp.where(live, after, 1.0)
+    factor = jnp.where(live, before / safe_after,
+                       jnp.where(before > 0.0, 1.0, 0.0))
     return q_clip * jnp.clip(factor, 0.0, 1.0), created
 
 

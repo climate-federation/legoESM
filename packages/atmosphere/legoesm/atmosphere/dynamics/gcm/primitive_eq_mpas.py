@@ -1019,6 +1019,16 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     for k, f in state_new.tracers.items()
                 })
 
+        # NOTE (codex 2026-07-26 finding 5): this p_s correction runs AFTER
+        # the tracer clamp, and diagnosed column water is sum(q*p_s*dsigma)/g,
+        # so a nonzero correction c changes water by c*B/g even though the
+        # clamp preserved B = sum(q*dsigma).  Pre-existing interaction (any q
+        # field x any p_s fixer), not introduced by the conservative clamp;
+        # bounded empirically: the clamp-on arm's end-to-end water residual
+        # (+3.10 kg/m2/yr, WITH this fixer active) matches the net-negative-
+        # column prediction (+2.9), so the p_s term contributes <~0.2 kg/m2/yr
+        # here.  A moisture-aware dry-mass fixer (correct p_d = p_s - water
+        # instead of total p_s) is the principled close-out — follow-up.
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(
                 state_new, state, self.mesh,

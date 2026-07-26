@@ -253,3 +253,61 @@ class TestWaterMassOnly:
         src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
         assert "_is_water_mass_tracer" in src, (
             "the conserving borrow must be restricted to water mass tracers")
+
+
+class TestCodexFindings:
+    """Regression tests for the codex 2026-07-26 FIX-FIRST findings."""
+
+    def test_tiny_positive_column_is_preserved_not_zeroed(self):
+        """Finding 1: a finite positive column below eps must keep its values
+        (plain clip), never be zeroed."""
+        q = jnp.asarray([[5e-31, 3e-31]])
+        out, _ = conservative_positive_clip(q, jnp.ones(2))
+        np.testing.assert_allclose(np.asarray(out), np.asarray(q))
+
+    def test_monotone_tiny_column_is_an_exact_no_op(self):
+        q = jnp.asarray([[1e-25, 2e-25, 5e-26]])
+        out, created = conservative_positive_clip(q, jnp.ones(3))
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(q))
+        assert float(created) == 0.0
+
+    def test_non_trailing_axis_raises(self):
+        """Finding 1: weight broadcasts on the trailing dim; a non-trailing
+        axis would silently mis-conserve, so it must refuse."""
+        q = jnp.ones((2, 3))
+        with pytest.raises(ValueError, match="TRAILING"):
+            conservative_positive_clip(q, jnp.ones(2), axis=0)
+
+    def test_float32_gradient_finite_near_threshold(self):
+        """Finding 3: with eps=1e-30 raw, a float32 column just above
+        threshold has after**2 ~ 1e-60 -> underflow -> Inf in the quotient
+        VJP.  The dtype-aware eps_eff = sqrt(tiny) must keep it finite."""
+        q32 = jnp.asarray([[2e-30, -5e-31]], dtype=jnp.float32)
+        w32 = jnp.ones(2, dtype=jnp.float32)
+
+        def loss(x):
+            return jnp.sum(conservative_positive_clip(x, w32)[0] ** 2)
+
+        g = jax.grad(loss)(q32)
+        assert np.isfinite(np.asarray(g)).all(), (
+            "float32 VJP emitted non-finite gradients near the eps threshold")
+
+    def test_float32_conserves_above_its_effective_threshold(self):
+        q32 = jnp.asarray([[1e-3, -2e-4, 5e-4]], dtype=jnp.float32)
+        w32 = jnp.ones(3, dtype=jnp.float32)
+        out, _ = conservative_positive_clip(q32, w32)
+        np.testing.assert_allclose(float(jnp.sum(out * w32)),
+                                   float(jnp.sum(q32 * w32)), rtol=2e-6)
+
+    def test_mpi_floors_thread_the_flag(self):
+        """Finding 6: distributed MPAS runs ``make_voronoi_mpi_step``'s OWN
+        floors block, not ``_step_jit``.  It previously hard-coded the plain
+        clamp, silently ignoring ``conservative_tracer_clamp`` — the repo's
+        recurring dropped-flag defect.  Both branches must exist there."""
+        import inspect
+
+        from legoesm.parallel import voronoi_mpi
+        src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
+        assert "conservative_tracer_clamp" in src
+        assert "conservative_positive_clip" in src
+        assert "_is_water_mass_tracer" in src
