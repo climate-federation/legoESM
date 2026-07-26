@@ -176,13 +176,23 @@ optimization_barrier recovers 3 ms of the ~10.9 at np4 but costs np2
 10.7% (it also blocks fusion that HELPS there), so neither barrier ships
 unconditionally. Parity + conservation smoke passed on both attempts.
 
-STATUS: root-caused to a named source line and a shape-dependent XLA
-fusion-cost-model decision; a clean fix is either shape-conditional
-fusion control (not expressible via current flags on this stack) or
-restructuring how the integrator applies pytree_axpy — a scoped
-follow-up with its own review, not a campaign patch. Practical
-mitigation stands: run MPAS at np2 or np>=8 tiles, where the pathology
-does not form.
+STATUS: **FIXED, SHIPPED GATED** (codex rounds 11-12: strategy consult
+BEFORE implementing, then post-review). `_FUSION_BARRIER_WORKLOADS` in
+`sharded_dynamics.py` applies the tendency-output optimization_barrier
+only at the measured workload signature (n_dev, edge rows, cell rows,
+nlev) = (4, 1_966_080, 655_376, 26) — every operand trace-time static.
+Verification ladder (job 26486288 vs same-day dead-gate 26486123):
+np2 19.86 (campaign base 19.90 — at baseline), **np4 14.12 = -20.6%
+same-day / -17.4% vs campaign base**, np8 6.99 (base 6.92). Parity +
+conservation smoke green; 23 SPMD parity tests pass. Two instructive
+misfires on the way, both caught by measurement: the first gate keyed
+per-shard rows (never fired — the trace-time array is the GLOBAL view),
+and edge-rows-only was over-broad (L8 edges are unpadded and divisible
+several ways — codex round-12). The residual np4 gap to ideal (~14.1 vs
+~9.9 from np2/2) is the un-barriered remainder of the fusion; further
+recovery needs the integrator-level restructure (codex round-11 ranked
+it last on blast radius) or an upstream XLA fix — both remain
+follow-ups.
 
 ## Ocean strong scaling vs TILE SIZE (jobs 26456334/37 vs 26452804-06)
 
