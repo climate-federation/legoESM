@@ -668,6 +668,11 @@ class DINOConfig:
     # "thickness_weighted" (NEMO trazdf.F90:271-278 — conserves tracer CONTENT
     # under the moving z-star coordinate). See LatLonCGridOceanConfig.
     tracer_combine: str = "concentration"
+    # Global eta-volume projection (legoESM stabilizer). NEMO has no analogue --
+    # ssh_nxt is conservative by construction -- and the projection's uniform
+    # shift breaks flux-form constancy preservation, so the oracle cards set it
+    # False. Default True preserves existing legoESM behaviour.
+    fix_eta_drift: bool = True
     ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
     # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
     # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
@@ -1123,6 +1128,15 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # integrated heat over 200 forcing-free steps where NEMO drifts +3.4e-16
     # (#1226).
     "tracer_combine": "thickness_weighted",
+    # fix_eta_drift is left ON (measured 2026-07-26): NEMO has no analogue
+    # (ssh_nxt is conservative by construction), and switching it OFF does
+    # improve flux-form constancy 3.279e-05 -> 2.313e-05 because its uniform
+    # eta shift is invisible to the tracer mass fluxes. BUT heat drift is
+    # UNCHANGED (4.140e-06 -> 4.153e-06) while VOLUME drift degrades by four
+    # orders (1.3e-11 -> 2.55e-07). So the fixer is not the content leak -- it
+    # is MASKING a real volume non-conservation in the split-explicit
+    # barotropic solve. Removing the mask without fixing the solver trades
+    # exact volume for nothing. Fix the solver, then drop the fixer.
     # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
     # each substep on ua_e/va_e): removes the pre-step 2D barotropic Coriolis
     # from F_slow (dynspg_ts:296-300) and re-applies the SAME EEN stencil live,
@@ -2614,6 +2628,7 @@ def dino_lat_lon_model_config(
         een_q_boundary=cfg.een_q_boundary,
         asselin_gamma=cfg.asselin_gamma,
         tracer_combine=cfg.tracer_combine,
+        fix_eta_drift=cfg.fix_eta_drift,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the
         # oceananigans card (explicit_ab2 × implicit_cn): keeps the

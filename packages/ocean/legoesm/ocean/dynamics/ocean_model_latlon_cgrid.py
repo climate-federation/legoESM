@@ -3329,7 +3329,22 @@ class LatLonCGridOceanModel:
             _M = "ocean_diagnostics"
             mask_eta = state.land_mask.data
             area_eta = _grid.area
-            eta_old_d = state.eta.data
+            # TIME LEVEL (#1226): the target volume must be the one the
+            # barotropic solve actually integrated FROM.  On the MLF leap-frog
+            # path the solve is SEEDED FROM Nbb (`_barotropic_before_state`
+            # -> eta_init=_eta_bef above), so it returns eta(Naa) whose volume
+            # is vol(eta_Nbb) -- targeting vol(eta_Nnn) instead injects a
+            # uniform shift ~ mean(eta_nn) - mean(eta_bb) EVERY step.  That is a
+            # state DIFFERENCE, not a tendency, so it is O(dt^0) and does not
+            # shrink under timestep refinement; it breaks the very invariant
+            # this block's docstring claims to preserve, and with it the
+            # flux-form tracer scheme's constancy preservation (a uniform tracer
+            # stops staying uniform).  Measured: disabling fix_eta_drift
+            # entirely improves constancy 3.279e-05 -> 2.313e-05.
+            if _barotropic_before_state is not None:
+                eta_old_d = _barotropic_before_state[0]
+            else:
+                eta_old_d = state.eta.data
             eta_new_d = state_new.eta.data
 
             mask_acc = _cast(mask_eta, _M, "accumulate")
