@@ -446,16 +446,7 @@ DANGLING_FIELDS = {
     # --- Cause 3: the leaf field does not exist ANYWHERE.  The config comment
     # documents physics that was never implemented; these are fiction and the
     # honest fix is deletion (or implementing the described behaviour).
-    "morrison_phase_aware_sat_adj": (
-        "NO SUCH LEAF: MorrisonConfig.phase_aware_sat_adj absent",
-        (MorrisonConfig, "phase_aware_sat_adj", False)),
-    "cloud_rh_ice_crit": (
-        "NO SUCH LEAF: CloudConfig.rh_ice_crit absent (cirrus cf ramp unimplemented)",
-        (CloudConfig, "rh_ice_crit", False)),
-    "cloud_rh_ice_sat": (
-        "NO SUCH LEAF: CloudConfig.rh_ice_sat absent (cirrus cf ramp unimplemented)",
-        (CloudConfig, "rh_ice_sat", False)),
-    # The original baseline claimed an SBMConfig.precip_efficiency leaf;
+                # The original baseline claimed an SBMConfig.precip_efficiency leaf;
     # adversarial review (2026-07-25) refuted it — SBMConfig ends at
     # cloud_mask_sharpness.  Cause 3, not cause 1.
     "sbm_precip_efficiency": (
