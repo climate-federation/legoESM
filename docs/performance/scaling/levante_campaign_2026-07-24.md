@@ -542,11 +542,28 @@ ask for: 600 steps at nd4, f32, conservation-gated, both arms same job.
 | implicit_cn (reference) | 6.01e-11 | 1.272e-05 | 4.878e-06 |
 | explicit + wide-halo | 3.72e-10 | **1.248e-05** | **4.190e-06** |
 
-What this shows, stated narrowly: NO OBSERVED FAILURE over 600 unforced
-steps from one IC, and both arms pass the 1e-4 gate. Wide-halo's heat and
-salt drift came out lower in this single run and its eta drift higher; with
-n=1, no forcing and no repeats, that ORDERING is not established — the
-supportable claim is "comparable, no blow-up", not "conserves better".
+REPEATED ACROSS THREE SEEDS (job 26464790) — the n=1 objection answered.
+`--seed` was added to the bench for this; 3 independent IC perturbations
+per arm, 600 steps each:
+
+| metric | implicit_cn | explicit+wide | separation |
+|---|---|---|---|
+| heat_rel | 1.2693e-05 +-4.6e-08 | **1.2427e-05** +-4.6e-08 | **7.1 SE** (wide 2.1 % lower) |
+| salt_rel | 4.8570e-06 +-3.6e-08 | **4.1483e-06** +-7.2e-08 | **15.2 SE** (wide 14.6 % lower) |
+| eta drift | 7.72e-10 +-1.1e-09 m | 6.75e-10 +-6.6e-10 | 0.1 SE — INDISTINGUISHABLE |
+
+With a variance estimate the heat and salt ordering IS established (7 and
+15 standard errors — small effects, but far outside the seed spread), so
+wide-halo genuinely conserves those two better in this configuration. It
+also CORRECTS the single-run report above: wide-halo's apparently WORSE eta
+drift was noise, and vanishes at n=3.
+
+SCOPE, still: one grid, one base stratification (seeds vary only the IC
+perturbation), UNFORCED, 600 steps, f32, nd4. This does not clear the
+stability gate — that needs the filter analysis under stale halos and a
+science sign-off — but "no observed failure" has become "marginally better
+conservation with a measured variance estimate".
+
 Per-step time is flat 100 -> 600 steps (12.81 -> 12.74 ms). Both arms' heat
 drift grows ~linearly and is similar between them, consistent with the
 shared baroclinic/tracer path dominating it.
