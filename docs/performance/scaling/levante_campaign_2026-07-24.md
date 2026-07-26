@@ -132,6 +132,30 @@ cells/device), which is itself the clue to hand the profiler.
 PRACTICAL GUIDANCE MEANWHILE: run this grid at np>=8, where per-device
 throughput is 304-340 Mc/s/GPU vs 220-248 at np4.
 
+RESOLVED 2026-07-26 (nsys job 26479922 + HLO dump 26480096 + sqlite
+timeline): the dip is an XLA CODEGEN pathology, localized to named
+kernels. CONFIRMED: (1) the dip reproduces under nsys with matched
+protocol (L8, padded-16 mesh: 21.01/17.78/7.17 ms at np2/4/8 vs campaign
+19.90/17.09/6.92 — ~5% profiler overhead); (2) at np4 ONLY, giant
+serialized "loop fusion" kernels appear — loop_add_fusion_1/2 at 3.6 ms
+per launch (vs ~3 us for ordinary elementwise kernels) — and the sqlite
+timeline places 12 instances of each EXACTLY one per timed step at the
+17.8 ms step cadence (stddev 78 us: deterministic compute, not comm
+wait), totalling ~10.9 ms/step = the np4 excess; (3) in the optimized
+step HLO these are mega-fusions ON THE HALO PATH: `%loop_add_fusion =
+f32[491520,26]` (edge-tendency add chain, 22 operands incl. an
+input_scatter_fusion) and `%loop_add_fusion.4 = f32[163844,26]` (cell
+array), with the shard_map halo-pack concatenates taking the same adds +
+parameter lists as operands. PLAUSIBLE (inferred from kInput fusion
+semantics + operand lists, not separately timed): the emitter RECOMPUTES
+the expensive scatter+add chain inside each consumer fusion, which is why
+the cost multiplies. WHY np4: fusion cost-model decisions depend on the
+shard shape; at np2/np8 the mega-fusion is not built. This also explains
+why the earlier env-knob sweep missed it — autotune/latency-hiding flags
+do not change fusion-pass decisions. Fusion-pass flag A/B at np4
+submitted (job 26480162); if a flag recovers np4, the fix is an XLA_FLAGS
+line in the MPAS lane, worth ~2.5x at np4.
+
 ## Ocean strong scaling vs TILE SIZE (jobs 26456334/37 vs 26452804-06)
 
 The same improved config (wide-halo + vmix-f32, multicontroller NCCL/IB,
