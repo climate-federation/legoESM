@@ -83,6 +83,14 @@ if _os.environ.get("DINO_COMBINE"):
     cfg = dataclasses.replace(cfg, tracer_combine=_os.environ["DINO_COMBINE"])
 print(f"tracer_combine = {cfg.tracer_combine}")
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+if _os.environ.get("DINO_NO_ETAFIX"):
+    # S2 (adversarial review): fix_eta_drift targets vol(eta_Nnn) while the MLF
+    # barotropic solve is seeded from Nbb, so it injects a uniform eta shift
+    # ~ mean(eta_nn) - mean(eta_bb) EVERY step -- a state DIFFERENCE, not a
+    # tendency, hence O(dt^0) and dt-independent: exactly the measured
+    # signature of the residual leak. Lives on the model config, not DINOConfig.
+    mc = mc._replace(fix_eta_drift=False)
+    print("ABLATION: fix_eta_drift=False")
 print(f"asselin_gamma = {mc.asselin_gamma}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
