@@ -3144,8 +3144,17 @@ def _thread_morrison_scalars(config, scheme, micro_config):
     on Morrison and silent on every other scheme.  Shared by the FV
     (``_resolve_microphysics``) and MPAS (``model_driver``) lanes.
     """
+    import math
+
     from legoesm.driver.config import ExperimentConfig as _ExpCfg
 
+    # ONE tolerance for both touched-ness (here, vs the flat default) and
+    # application (in the applier, vs the current leaf): float32-host storage
+    # noise is ~1.2e-7 relative (2^-23), so differences below 1e-6 relative
+    # are treated as THE DEFAULT everywhere — never half-recognised as
+    # "touched" but then not applied (codex 2026-07-26 round 2, item 4).
+    # These are order-of-magnitude process coefficients; a deliberate retune
+    # below 1e-6 relative is physically meaningless.
     _touched = {}
     for _exp_name, _leaf_name, _val in (
         ("morrison_bergeron_rate", "bergeron_rate",
@@ -3159,8 +3168,9 @@ def _thread_morrison_scalars(config, scheme, micro_config):
         ("morrison_k_au", "k_au",
          getattr(config, "morrison_k_au", None)),
     ):
-        if _val is not None and float(_val) != float(
-                _ExpCfg._field_defaults[_exp_name]):
+        if _val is not None and not math.isclose(
+                float(_val), float(_ExpCfg._field_defaults[_exp_name]),
+                rel_tol=1e-6, abs_tol=0.0):
             _touched[_leaf_name] = float(_val)
     if not _touched:
         return micro_config

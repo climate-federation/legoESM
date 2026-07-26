@@ -285,7 +285,7 @@ class TestMorrisonScalarOverlay:
         d = ExperimentConfig(microphysics="morrison")._asdict()
         d["morrison_dep_coeff"] = 1e-8
         d = {k: v for k, v in d.items() if not hasattr(v, "_asdict")}
-        with pytest.warns(UserWarning, match="migrating to 1e-3"):
+        with pytest.warns(UserWarning, match="Migrating to 1e-3"):
             got = experiment_config_from_dict(d)
         assert got.morrison_dep_coeff == 1e-3
 
@@ -326,3 +326,67 @@ class TestMorrisonScalarOverlay:
         d = MorrisonConfig().dep_coeff
         assert t.default == d
         assert t.min_val < d < t.max_val
+
+
+class TestRound2Findings:
+    """Codex morrison-wiring round 2 (review-2.md): the four STILL-OPEN."""
+
+    def test_none_scheme_refuses_touched_scalar_at_config_time(self):
+        """Item 3: microphysics='none' early-returns before either lane's
+        overlay, so the resolver gate never fires — validate_strict must
+        refuse instead (the silent-drop class this wiring exists to close)."""
+        from legoesm.driver.config import ExperimentConfig
+        cfg = ExperimentConfig(microphysics="none", morrison_dep_coeff=3e-4)
+        with pytest.raises(ValueError, match="microphysics='morrison'"):
+            cfg.validate_strict()
+
+    def test_none_scheme_defaults_accepted(self):
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(microphysics="none").validate_strict()
+
+    def test_fresh_explicit_1e8_is_refused_by_bounds(self):
+        """Item 2: 1e-8 is OUTSIDE [1e-4, 1e-2], so no modern config can mean
+        it — which is what makes the load-time migration coherent (any config
+        carrying it must be legacy)."""
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="morrison_dep_coeff"):
+            ExperimentConfig(microphysics="morrison",
+                             morrison_dep_coeff=1e-8).validate_strict()
+
+    def test_sub_tolerance_perturbation_is_uniformly_the_default(self):
+        """Item 4: touched-ness and application share ONE rel_tol=1e-6, so a
+        below-noise perturbation resolves byte-identical to the default —
+        never half-recognised."""
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        got = _resolve_microphysics(ExperimentConfig(
+            microphysics="morrison",
+            morrison_dep_coeff=1e-3 * (1 + 4.7e-8)))[1]   # f32 storage noise
+        assert got == MorrisonConfig()
+
+    def test_above_tolerance_retune_is_applied(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        got = _resolve_microphysics(ExperimentConfig(
+            microphysics="morrison",
+            morrison_dep_coeff=1e-3 * 1.01))[1]
+        assert got.dep_coeff == pytest.approx(1.01e-3)
+
+    def test_tuning_catalog_within_strict_bounds(self):
+        """Item 6: the catalog advertised rime_coeff to 5.0 and agg_coeff to
+        1e-5 while validate_strict enforces [0,2] / [1e-4,1e-2] — advertised
+        proposals would be rejected.  Catalog must sit inside the gates."""
+        from legoesm.tuning import TUNING_PARAMETERS
+        gates = {"morrison_bergeron_rate": (1e-4, 1e-2),
+                 "morrison_rime_coeff": (0.0, 2.0),
+                 "morrison_dep_coeff": (1e-4, 1e-2),
+                 "morrison_agg_coeff": (1e-4, 1e-2),
+                 "morrison_k_au": (50.0, 5000.0)}
+        for name, (lo, hi) in gates.items():
+            t = TUNING_PARAMETERS[name]
+            assert lo <= t.min_val <= t.max_val <= hi, (
+                f"{name}: catalog [{t.min_val}, {t.max_val}] outside "
+                f"validate_strict [{lo}, {hi}]")

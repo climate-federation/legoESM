@@ -2133,6 +2133,7 @@ class ExperimentConfig(NamedTuple):
         # __param_spec__ so an out-of-range or non-finite knob fails at
         # config time, not deep in a run — codex 2026-07-26 morrison-wiring
         # review: validate_strict accepted NaN and out-of-spec values).
+        _morrison_touched = []
         for _f, _lo, _hi in (
             ("morrison_bergeron_rate", 1.0e-4, 1.0e-2),
             ("morrison_rime_coeff", 0.0, 2.0),
@@ -2145,6 +2146,19 @@ class ExperimentConfig(NamedTuple):
                 raise ValueError(
                     f"{_f}={_v} outside MorrisonConfig spec bounds "
                     f"[{_lo}, {_hi}] (or non-finite)")
+            if _v != ExperimentConfig._field_defaults[_f]:
+                _morrison_touched.append(_f)
+        # A touched morrison_* scalar on any OTHER scheme must be refused at
+        # CONFIG time: microphysics='none' early-returns before either lane's
+        # overlay, so the resolver-level hard gate never sees it and the knob
+        # would be silently inert (codex 2026-07-26 round 2, item 3 — the
+        # exact silent-drop class this wiring exists to close).
+        if _morrison_touched and self.microphysics != "morrison":
+            raise ValueError(
+                f"morrison_* overrides {_morrison_touched} require "
+                f"microphysics='morrison' (got {self.microphysics!r}); on "
+                "any other scheme they would be silently inert or retune a "
+                "foreign scheme. Drop them or switch schemes.")
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
         for _f, _lo, _hi in (
@@ -2918,9 +2932,11 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     if filtered.get("morrison_dep_coeff") == 1e-8:
         import warnings
         warnings.warn(
-            "legacy config carries morrison_dep_coeff=1e-8 (the old INERT "
-            "declaration default); migrating to 1e-3, the value the run "
-            "actually used. Set it explicitly to suppress.",
+            "legacy config carries morrison_dep_coeff=1e-8 — the old INERT "
+            "declaration default, which is also OUTSIDE the valid range "
+            "[1e-4, 1e-2] now that the scalar is wired (validate_strict "
+            "would refuse it), so no modern config can mean it. Migrating "
+            "to 1e-3, the value the legacy run actually used.",
             stacklevel=2,
         )
         filtered["morrison_dep_coeff"] = 1e-3

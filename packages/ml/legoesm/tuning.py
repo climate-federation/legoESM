@@ -724,7 +724,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         name="morrison_rime_coeff",
         default=1.0,
         min_val=0.1,
-        max_val=5.0,
+        max_val=2.0,
         units="1",
         description="Morrison riming collection efficiency (ice/snow capture q_c)",
         category="convection",
@@ -760,7 +760,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     "morrison_agg_coeff": TuningParameter(
         name="morrison_agg_coeff",
         default=1e-3,
-        min_val=1e-5,
+        min_val=1e-4,
         max_val=5e-3,
         units="1/s",
         description="Morrison ice-to-snow aggregation rate",
