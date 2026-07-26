@@ -638,8 +638,23 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act):
     dtype = rho.dtype
     nlat, nlon, nlev = rho.shape
     dz = jnp.asarray(z_coord.dz_ref, dtype=dtype)
-    gdept = jnp.cumsum(dz) - 0.5 * dz
-    e3w = jnp.concatenate([dz[:1], gdept[1:] - gdept[:-1]])      # NEMO e3w(k)
+    # T-point depth: prefer the coordinate's OWN t_depth_ref, which the NEMO
+    # bridge populates from NEMO's gdept_0.  Deriving it as the arithmetic
+    # midpoint cumsum(dz)-dz/2 is NOT what NEMO does: gdept_0 is the ANALYTIC
+    # mid-depth and differs from the arithmetic midpoint by up to 11.3 m on the
+    # DINO ladder (#1226).  That error feeds e3w, and e3w weights every column
+    # sum in ldf_eiv (zn, zah, zhw) -- so a wrong gdept mis-scales kappa_GM.
+    _td = getattr(z_coord, "t_depth_ref", None)
+    gdept = (jnp.asarray(_td, dtype=dtype) if _td is not None
+             else jnp.cumsum(dz) - 0.5 * dz)
+    # NEMO depth_to_e3: e3w(1) = 2*gdept(1); e3w(k) = gdept(k) - gdept(k-1).
+    # Bit-identical ONLY for coordinates carrying no t_depth_ref (there the
+    # arithmetic-midpoint fallback gives 2*gdept(1) == dz(1) identically).  On a
+    # NEMO-bridged coordinate this DOES change answers, by design: measured on
+    # the DINO twin, day-10 max|u| 0.6027 -> 0.6036 -- the old ladder's
+    # gdept_1d is not the arithmetic midpoint either (5.28 m apart), so the
+    # derived form was wrong in BOTH modes.
+    e3w = jnp.concatenate([2.0 * gdept[:1], gdept[1:] - gdept[:-1]])  # NEMO e3w(k)
 
     wmask3 = act * jnp.roll(act, +1, axis=2)
     wmask3 = wmask3.at[:, :, 0].set(act[:, :, 0])
