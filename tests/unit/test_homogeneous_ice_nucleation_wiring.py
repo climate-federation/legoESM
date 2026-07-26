@@ -390,3 +390,50 @@ class TestRound2Findings:
             assert lo <= t.min_val <= t.max_val <= hi, (
                 f"{name}: catalog [{t.min_val}, {t.max_val}] outside "
                 f"validate_strict [{lo}, {hi}]")
+
+
+class TestRound3Findings:
+    """Codex morrison-wiring round 3: strict/resolver tolerance unity and the
+    schema-version migration gate."""
+
+    def test_strict_accepts_f32_noise_on_any_scheme(self):
+        """Item 4: a float32-noise perturbation must be 'default' in BOTH the
+        resolver AND validate_strict — previously strict rejected it on
+        kessler/none while the resolver would have applied nothing."""
+        from legoesm.driver.config import ExperimentConfig
+        noisy = 1e-3 * (1 + 4.7e-8)
+        for scheme in ("kessler", "none", "morrison"):
+            ExperimentConfig(microphysics=scheme,
+                             morrison_dep_coeff=noisy).validate_strict()
+
+    def test_marked_modern_dict_is_not_migrated(self):
+        """Item 2: a dict carrying config_schema_version >= 2 with 1e-8 is a
+        DELIBERATE modern value — loaded verbatim, then refused by strict
+        bounds, never silently rewritten."""
+        import warnings as _w
+
+        from legoesm.driver.config import experiment_config_from_dict
+        d = {"microphysics": "morrison", "morrison_dep_coeff": 1e-8,
+             "config_schema_version": 2}
+        with _w.catch_warnings():
+            _w.simplefilter("error")          # any warning -> failure
+            got = experiment_config_from_dict(d)
+        assert got.morrison_dep_coeff == 1e-8
+        with pytest.raises(ValueError, match="morrison_dep_coeff"):
+            got.validate_strict()
+
+    def test_unmarked_legacy_dict_still_migrates(self):
+        from legoesm.driver.config import experiment_config_from_dict
+        with pytest.warns(UserWarning, match="Migrating to 1e-3"):
+            got = experiment_config_from_dict(
+                {"microphysics": "morrison", "morrison_dep_coeff": 1e-8})
+        assert got.morrison_dep_coeff == 1e-3
+
+    def test_codec_round_trip_carries_the_marker(self):
+        from legoesm.driver.config import (
+            ExperimentConfig, config_to_dict, experiment_config_from_dict,
+        )
+        d = config_to_dict(ExperimentConfig(microphysics="morrison"))
+        assert d["config_schema_version"] == 2
+        got = experiment_config_from_dict(d)
+        assert got.morrison_dep_coeff == 1e-3

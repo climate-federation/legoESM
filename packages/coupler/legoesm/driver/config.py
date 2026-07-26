@@ -2146,7 +2146,12 @@ class ExperimentConfig(NamedTuple):
                 raise ValueError(
                     f"{_f}={_v} outside MorrisonConfig spec bounds "
                     f"[{_lo}, {_hi}] (or non-finite)")
-            if _v != ExperimentConfig._field_defaults[_f]:
+            # SAME tolerance as the resolver threading (rel_tol=1e-6):
+            # a float32-noise value must be "default" in BOTH places, never
+            # rejected here while the resolver would apply nothing (codex
+            # 2026-07-26 round 3, item 4).
+            if not math.isclose(_v, ExperimentConfig._field_defaults[_f],
+                                rel_tol=1e-6, abs_tol=0.0):
                 _morrison_touched.append(_f)
         # A touched morrison_* scalar on any OTHER scheme must be refused at
         # CONFIG time: microphysics='none' early-returns before either lane's
@@ -2929,7 +2934,13 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     # run did (nothing).  Rewriting the old default to the new one preserves
     # the ACTUAL old behaviour (leaf stayed 1e-3).  Any other stored value is
     # kept: it was a deliberate (if then-inert) user choice.
-    if filtered.get("morrison_dep_coeff") == 1e-8:
+    # Schema-version gate (codex 2026-07-26 round 3, item 2): dicts written
+    # by the CURRENT codec carry ``config_schema_version`` >= 2 and are NOT
+    # migrated — a fresh JSON deliberately carrying 1e-8 is loaded verbatim
+    # and then REFUSED by validate_strict's bounds.  Only unmarked (legacy)
+    # dicts, which predate the wiring and where 1e-8 was inert, migrate.
+    _legacy = int(d.get("config_schema_version", 1)) < 2
+    if _legacy and filtered.get("morrison_dep_coeff") == 1e-8:
         import warnings
         warnings.warn(
             "legacy config carries morrison_dep_coeff=1e-8 — the old INERT "
@@ -2960,6 +2971,13 @@ def config_to_dict(config) -> dict:
     for key, val in d.items():
         if hasattr(val, "_asdict"):
             d[key] = val._asdict()
+    # Schema marker: dicts written by the current codec are exempt from
+    # legacy migrations on load (see experiment_config_from_dict — v2 gates
+    # the morrison_dep_coeff 1e-8 rewrite to UNMARKED legacy dicts, so a
+    # fresh JSON deliberately carrying an out-of-bounds value is refused by
+    # validate_strict instead of silently rewritten).  Unknown keys are
+    # dropped by the loader's field filter, so this is forward-compatible.
+    d["config_schema_version"] = 2
     return d
 
 
