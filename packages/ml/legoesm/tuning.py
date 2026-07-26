@@ -737,9 +737,13 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "morrison_dep_coeff": TuningParameter(
         name="morrison_dep_coeff",
-        default=1e-8,
-        min_val=3e-9,
-        max_val=3e-8,
+        # Was default=1e-8, range 3e-9..3e-8 — FIVE ORDERS below the real
+        # MorrisonConfig.dep_coeff default (1e-3) that every run uses; the
+        # scalar was unwired so nothing ever noticed (flag-reachability audit
+        # 2026-07-25).  Range re-centred on the true default, same ~3x span.
+        default=1e-3,
+        min_val=3e-4,
+        max_val=3e-3,
         units="1",
         description="Morrison depositional ice growth coefficient (vapor -> q_i)",
         category="convection",

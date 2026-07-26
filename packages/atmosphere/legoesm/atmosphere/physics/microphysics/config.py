@@ -1007,6 +1007,7 @@ def apply_microphysics_experiment_flags(
     hard_sat_adjust_threshold: float | None = None,
     hard_sat_max_heating_K: float | None = None,
     homogeneous_ice_nucleation: bool = False,
+    morrison_scalars: dict | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1092,4 +1093,35 @@ def apply_microphysics_experiment_flags(
                 "override."
             )
         scheme_config = scheme_config._replace(**{_field: float(_val)})
+    if morrison_scalars:
+        # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
+        # scalars).  HARD scheme gate, NOT field-presence: Thompson carries
+        # all five same-named leaves and P3 four, with DIFFERENT defaults
+        # (P3 rime_coeff=0.5 vs Morrison 1.0) — a presence-keyed overlay
+        # silently retuned those schemes and even changed a fresh default P3
+        # run (codex 2026-07-26 morrison-wiring review, Critical).
+        import math
+        if scheme != "morrison":
+            _named = {k: v for k, v in morrison_scalars.items()
+                      if v is not None}
+            raise ValueError(
+                f"morrison_* scalar overrides {sorted(_named)} are only "
+                f"supported by the morrison microphysics scheme (the "
+                f"{scheme!r} scheme shares some field NAMES but with its own "
+                "calibrated defaults); use --microphysics morrison or drop "
+                "the overrides."
+            )
+        _updates = {}
+        for _leaf, _val in morrison_scalars.items():
+            if _val is None:
+                continue
+            _cur = float(getattr(scheme_config, _leaf))
+            # rel_tol absorbs float32-host round-trip noise
+            # (float32(1e-3) != 1e-3 exactly) so a stored config that merely
+            # round-tripped through a narrower dtype does not force a
+            # pointless _replace (config-identity / retrace churn).
+            if not math.isclose(float(_val), _cur, rel_tol=1e-6, abs_tol=0.0):
+                _updates[_leaf] = float(_val)
+        if _updates:
+            scheme_config = scheme_config._replace(**_updates)
     return scheme_config

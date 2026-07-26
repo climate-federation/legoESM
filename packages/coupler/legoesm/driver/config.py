@@ -1026,7 +1026,13 @@ class ExperimentConfig(NamedTuple):
     # — silently filtered out by hasattr when Sundqvist/Kessler is active).
     morrison_bergeron_rate: float = 1e-3        # MorrisonConfig.bergeron_rate [1/s]
     morrison_rime_coeff: float = 1.0            # MorrisonConfig.rime_coeff
-    morrison_dep_coeff: float = 1e-8            # MorrisonConfig.dep_coeff
+    morrison_dep_coeff: float = 1e-3            # MorrisonConfig.dep_coeff
+                                                # (was 1e-8 — 1e5 OFF the real
+                                                # leaf default while unwired;
+                                                # flag-reachability audit
+                                                # 2026-07-25.  MUST equal the
+                                                # MorrisonConfig default so
+                                                # wiring is a no-op at rest.)
                                                  # (Morrison-2005 q_i^(1/3)·N_i^(2/3) form)
     morrison_agg_coeff: float = 1e-3            # MorrisonConfig.agg_coeff [1/s]
     morrison_k_au: float = 6e2                  # MorrisonConfig.k_au [1/(kg*s)]
@@ -2123,6 +2129,22 @@ class ExperimentConfig(NamedTuple):
                 "root-zone moisture availability instead (the stomata are threaded "
                 "into MultiLayerLandConfig.stomata, PR #715)."
             )
+        # Morrison ice-process scalar bounds (mirror MorrisonConfig's
+        # __param_spec__ so an out-of-range or non-finite knob fails at
+        # config time, not deep in a run — codex 2026-07-26 morrison-wiring
+        # review: validate_strict accepted NaN and out-of-spec values).
+        for _f, _lo, _hi in (
+            ("morrison_bergeron_rate", 1.0e-4, 1.0e-2),
+            ("morrison_rime_coeff", 0.0, 2.0),
+            ("morrison_dep_coeff", 1.0e-4, 1.0e-2),
+            ("morrison_agg_coeff", 1.0e-4, 1.0e-2),
+            ("morrison_k_au", 50.0, 5000.0),
+        ):
+            _v = getattr(self, _f)
+            if not math.isfinite(_v) or not (_lo <= _v <= _hi):
+                raise ValueError(
+                    f"{_f}={_v} outside MorrisonConfig spec bounds "
+                    f"[{_lo}, {_hi}] (or non-finite)")
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
         for _f, _lo, _hi in (
@@ -2884,6 +2906,24 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     known = set(ExperimentConfig._fields)
     filtered = {k: v for k, v in d.items() if k in known}
     filtered.update(sub_values)
+
+    # Legacy migration: ``morrison_dep_coeff`` was declared 1e-8 (1e5 OFF the
+    # real MorrisonConfig.dep_coeff=1e-3) while UNWIRED, so every serialized
+    # config from that era carries the inert 1e-8.  Now that the scalar is
+    # wired, loading it verbatim would (a) retune Morrison's deposition 1e5
+    # DOWN, or (b) raise on non-Morrison schemes — neither is what the old
+    # run did (nothing).  Rewriting the old default to the new one preserves
+    # the ACTUAL old behaviour (leaf stayed 1e-3).  Any other stored value is
+    # kept: it was a deliberate (if then-inert) user choice.
+    if filtered.get("morrison_dep_coeff") == 1e-8:
+        import warnings
+        warnings.warn(
+            "legacy config carries morrison_dep_coeff=1e-8 (the old INERT "
+            "declaration default); migrating to 1e-3, the value the run "
+            "actually used. Set it explicitly to suppress.",
+            stacklevel=2,
+        )
+        filtered["morrison_dep_coeff"] = 1e-3
 
     return ExperimentConfig(**filtered)
 
