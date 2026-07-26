@@ -601,7 +601,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
-                  gm_treguier=False, gm_aei0=1800.0):
+                  gm_treguier=False, gm_aei0=1800.0,
+                  gm_kappa_min=200.0):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -705,10 +706,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _base = run_omip._DEFAULT_BATHY_GM_REDI
         _ovr["gm_redi"] = _base._replace(
             visbeck=_VisbeckConfig(enabled=False),
-            treguier=_TreguierConfig(enabled=True, aei0=float(gm_aei0)),
+            treguier=_TreguierConfig(enabled=True, aei0=float(gm_aei0),
+                                     kappa_min=float(gm_kappa_min)),
         )
         print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
-              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s) — Visbeck OFF")
+              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
+              f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -3977,6 +3980,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
                         "(rn_Ue=0.018, rn_Le=100e3 => aei0=1800 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
+    p.add_argument("--gm-kappa-min", type=float, default=200.0,
+                   help="Floor on the Treguier kappa_GM [m^2/s] for "
+                        "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
+                        "sends kappa -> 0 AT THE EQUATOR (2.17%% of eORCA1 wet "
+                        "cells measured below taper 0.05), which destabilised a "
+                        "1-degree global run; Visbeck carries kappa_min=200 for "
+                        "the same reason. 0 disables the floor (raw NEMO form).")
     p.add_argument("--gm-aei0", type=float, default=1800.0,
                    help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
                         "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
@@ -4452,6 +4462,7 @@ def main() -> int:
             tke_prognostic=args.tke_prognostic,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
+            gm_kappa_min=args.gm_kappa_min,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":

@@ -33,5 +33,12 @@ sw = base._replace(visbeck=VisbeckConfig(enabled=False), treguier=TreguierConfig
 assert sw.visbeck.enabled is False and sw.treguier.enabled is True and sw.treguier.aei0==1800.0
 assert sw.kappa_Redi==base.kappa_Redi and sw.S_max==base.S_max, 'Redi/S_max must be untouched'
 print('[swap] treguier ON / visbeck OFF; kappa_Redi+S_max preserved OK')
+# kappa_min floor: default inert (0.0), and applied when set
+import jax.numpy as jnp, numpy as np
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import compute_treguier_kappa_gm
+assert TreguierConfig().kappa_min == 0.0, 'default floor must be inert'
+a2=p.parse_args(['--grid','tripole','--mesh','m.nc','--gm-treguier'])
+assert a2.gm_kappa_min==200.0, a2.gm_kappa_min
+print('[argparse] --gm-kappa-min default 200 OK (Visbeck-matched)')
 " 2>&1 | grep -vE "FutureWarning|warnings.warn|XLA|cuda|CUDA|Plugin|tensorflow"
 echo "=== DONE ==="

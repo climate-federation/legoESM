@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=glab1
-#SBATCH --job-name=trpsbc_gmtreg
+#SBATCH --job-name=trpsbc_gmtreg2
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=96G
@@ -47,18 +47,18 @@ P45="--bottom-drag-scheme nemo_quadratic \
 IC="--woa-init --woa-t $WTIC --woa-s $WSIC \
   --nemo-monthly-init $INITD/woce_temp_monthly_init_4p2.nc $INITD/woce_salt_monthly_init_4p2.nc \
   --sss-restore-file $SSSCLIM --tripole-vmix tke --ice-init $ICEIC"
-OUT=$ROOT/results/omip_nemo/nemolev_trpsbc_gmtreg
+OUT=$ROOT/results/omip_nemo/nemolev_trpsbc_gmtreg2
 mkdir -p $OUT
 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
-  $GA $COMMON $LEVERS $P45 $IC --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --gm-treguier --sw-rgb-chl --output $OUT 2>&1 | tail -70
+  $GA $COMMON $LEVERS $P45 $IC --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --gm-treguier --gm-kappa-min 200 --sw-rgb-chl --output $OUT 2>&1 | tail -70
 echo "run_rc=${PIPESTATUS[0]}"; date
 SNAP=$OUT/snapshot_day0030.npz
 if [ -f "$SNAP" ]; then
   echo "=== SCORE $SBC d30 vs NEMO m1 ==="
   $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
     --nemo-gridt "$GT" --nemo-month 1 --freeze-clamp-C -1.8 --sss-faithful \
-    --grid-label "trpsbc_gmtreg" \
-    --output-dir $ROOT/results/omip_nemo/compare_trpsbc_gmtreg_m01 2>&1 | tail -40
+    --grid-label "trpsbc_gmtreg2" \
+    --output-dir $ROOT/results/omip_nemo/compare_trpsbc_gmtreg2_m01 2>&1 | tail -40
   $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" "trpsbc_gmtreg d30" 1 2>&1 | tail -12
 else
   echo "[run] no day-30 snapshot -> check $OUT for blowup."
