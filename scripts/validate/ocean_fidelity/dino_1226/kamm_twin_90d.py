@@ -89,7 +89,7 @@ RUN_STEPDUMP = os.environ.get(
 )
 RESTART_FILE = "DINO_00005760_restart.nc"  # developed day-180 state
 
-DT = 2700.0
+DT = float(__import__("os").environ.get("DINO_DT", "2700.0"))
 STEPS_PER_DAY = 32  # 32 * 2700s = 86400s = 1 day
 SNAP_DAYS = (0, 30, 60, 90)  # full 3-D T/S snapshot days when --save-3d
 
