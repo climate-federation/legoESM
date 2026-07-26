@@ -164,6 +164,14 @@ def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
     mfu_tr = mass_flux_u + bolus_mfu
     mfv_tr = mass_flux_v + bolus_mfv
     flux_div_tr = divergence_cgrid(mfu_tr, mfv_tr, grid)
+    # NOTE (#1226): this re-diagnosis DISCARDS any w built by the caller, so a
+    # correction applied upstream has no effect while
+    # gm_bolus_advection="through_fct" -- and it runs even when kappa_GM = 0.
+    # Threading the barotropic thickness tendency in here is WRONG: the bolus is
+    # non-divergent, so its column integral is zero and mixing a bolus-inclusive
+    # divergence with a non-bolus thickness tendency is inconsistent (tested:
+    # constancy error 3.3e-05 -> 2.6e-01). The sigma form below is
+    # self-consistent because it derives deta_dt from the SAME divergence.
     w_tr = diagnose_w_from_flux_div(flux_div_tr, z_coord, thickness_weighted=True)
     return mfu_tr, mfv_tr, w_tr
 

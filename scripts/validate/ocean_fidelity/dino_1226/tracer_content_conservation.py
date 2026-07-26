@@ -32,6 +32,8 @@ import sys
 
 import numpy as np
 import jax
+import jax.numpy as jnp
+import os as _os
 
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
@@ -47,7 +49,7 @@ import dataclasses
 DINO = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO"
 RUN = f"{DINO}/RUN_TRAJ"
 RESTART = f"{DINO}/RUN_Y5_REBUILD/DINO_00057600_restart.nc"
-DT = 2700.0
+DT = float(_o.environ.get("DINO_DT", "2700.0")) if (_o:=__import__("os")) else 2700.0
 NSTEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 200
 # Optional asselin_gamma override: gamma=0 removes the Robert-Asselin filter
 # entirely, isolating whether the leak is the filter (which divides
@@ -87,6 +89,24 @@ forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)
 
 st = br.state
+if _os.environ.get("DINO_UNIFORM"):
+    # CONSTANCY PRESERVATION. With a UNIFORM tracer, a conservative flux-form
+    # scheme whose advecting transport satisfies discrete continuity with the
+    # thickness evolution must keep it EXACTLY uniform: the flux divergence of
+    # a constant is exactly the constant times the mass divergence, which the
+    # thickness tendency cancels. Any departure from uniformity is a direct,
+    # local measurement of the continuity inconsistency -- far sharper than a
+    # global integral, which can hide compensating errors.
+    _T0, _S0 = 10.0, 35.0
+    st = st._replace(
+        T=st.T.replace(data=jnp.full_like(st.T.data, _T0)),
+        S=st.S.replace(data=jnp.full_like(st.S.data, _S0)),
+        T_before=st.T_before.replace(data=jnp.full_like(st.T.data, _T0))
+        if st.T_before is not None else None,
+        S_before=st.S_before.replace(data=jnp.full_like(st.S.data, _S0))
+        if st.S_before is not None else None,
+    )
+    print(f"UNIFORM-TRACER constancy test: T={_T0} S={_S0} everywhere")
 if len(sys.argv) > 3 and sys.argv[3] == "f64":
     # Promote every float leaf of the state to float64 so the MODEL integrates
     # in double precision. If the content drift collapses when this is on, the
