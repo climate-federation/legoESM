@@ -201,7 +201,7 @@ def bridge_nemo_to_legoesm(
     )
 
 
-def effective_vertical_scale_factors(grid, tmask):
+def effective_vertical_scale_factors(grid, tmask, mode=None):
     """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
 
     NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
@@ -226,8 +226,29 @@ def effective_vertical_scale_factors(grid, tmask):
     """
     e3t = np.asarray(grid.e3t_1d).ravel().astype(np.float64)
     t_depth = np.asarray(grid.gdept_1d).ravel().astype(np.float64)
+    # DIAGNOSTIC (#1226, temporary): LEGOESM_NEMO_E3T isolates which half of
+    # NEMO's 3-D geometry drives a regression -- the thickness ladder or the
+    # T-depth ladder.  "both" (default) | "e3t_only" | "gdept_only" | "off"
+    import os as _os
+    # DEFAULT IS "off" -- i.e. the KNOWN-WRONG 1-D ladder. This is deliberate
+    # and temporary. Adopting NEMO's true e3t_0 thicknesses is CORRECT (it makes
+    # legoESM's geometry match NEMO to roundoff: volume 4.7e-03 -> 6.0e-09) but
+    # it DESTABILISES the model: from a bit-exact NEMO restart, max|u| grows
+    # 0.66 -> 2.2 m/s over 20 days and saturates near 3 m/s, where the 1-D
+    # ladder holds 0.60-0.69 indefinitely. Isolated to the THICKNESS ladder --
+    # "gdept_only" (NEMO T-depths, 1-D thicknesses) is stable at 0.61, so the
+    # depth ladder is innocent.
+    # => legoESM is UNSTABLE ON NEMO'S ACTUAL GRID and was stable only because
+    #    it ran on a wrong one. That second defect must be found before this can
+    #    default to "both". Do NOT flip this default to hide the instability.
+    _mode = (mode if mode is not None
+             else _os.environ.get("LEGOESM_NEMO_E3T", "off"))
+    if _mode not in ("off", "e3t_only", "gdept_only", "both"):
+        raise ValueError(
+            f"unknown vertical-scale-factor mode {_mode!r}; expected "
+            '"off", "e3t_only", "gdept_only" or "both"')
     e3t3 = getattr(grid, "e3t_0", None)
-    if e3t3 is None:
+    if e3t3 is None or _mode == "off":
         return e3t, t_depth, "e3t_1d"
     e3t3 = np.asarray(e3t3)
     nlev = e3t3.shape[-1]
@@ -248,9 +269,11 @@ def effective_vertical_scale_factors(grid, tmask):
     for k in range(nlev):
         if lev_any[k]:
             out_e3t[k] = float(e3t3[:, :, k][tmask[:, :, k]].mean())
+    if _mode == "gdept_only":
+        out_e3t = e3t.copy()            # keep the 1-D thickness ladder
     gd3 = getattr(grid, "gdept_0", None)
     out_td = t_depth.copy()
-    if gd3 is not None:
+    if gd3 is not None and _mode in ("both", "gdept_only"):
         gd3 = np.asarray(gd3)
         for k in range(nlev):
             if lev_any[k]:

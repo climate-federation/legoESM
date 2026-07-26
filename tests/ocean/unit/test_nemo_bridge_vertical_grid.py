@@ -69,13 +69,19 @@ def test_nemogrid_carries_e3t_0_optionally():
 
 
 def test_prefers_e3t_0_over_the_1d_ladder():
-    """The helper must return NEMO's ACTUAL scale factors, not the reference."""
+    """With mode="both" the helper returns NEMO's ACTUAL scale factors.
+
+    NOTE the shipped DEFAULT is mode="off" (the 1-D ladder): adopting e3t_0 is
+    geometrically correct but currently DESTABILISES the model (see the
+    docstring in nemo_state_bridge). These tests pin the correct behaviour so it
+    is ready the moment the instability is fixed.
+    """
     from legoesm.ocean.fidelity.nemo_state_bridge import (
         effective_vertical_scale_factors,
     )
     g, e3t_1d, e3t_0_1d, _ = _synthetic_grid()
     tmask = np.asarray(g.tmask) > 0.5
-    e3t, t_depth, src = effective_vertical_scale_factors(g, tmask)
+    e3t, t_depth, src = effective_vertical_scale_factors(g, tmask, mode="both")
     assert src == "e3t_0"
     # The two ladders must actually differ, or the test proves nothing.
     assert np.abs(e3t_0_1d - e3t_1d).max() > 1.0
@@ -90,7 +96,7 @@ def test_falls_back_to_e3t_1d_for_gyre_era_grids():
     )
     g, e3t_1d, _, _ = _synthetic_grid(with_e3t_0=False)
     tmask = np.asarray(g.tmask) > 0.5
-    e3t, _t, src = effective_vertical_scale_factors(g, tmask)
+    e3t, _t, src = effective_vertical_scale_factors(g, tmask, mode="both")
     assert src == "e3t_1d"
     np.testing.assert_allclose(e3t, e3t_1d, rtol=1e-12)
 
@@ -113,7 +119,7 @@ def test_partial_cell_grid_is_rejected_not_averaged():
     g = g._replace(e3t_0=e3t_0)
     tmask = np.asarray(g.tmask) > 0.5
     with pytest.raises(ValueError, match="PARTIAL-CELL"):
-        effective_vertical_scale_factors(g, tmask)
+        effective_vertical_scale_factors(g, tmask, mode="both")
 
 
 def test_bathymetry_from_e3t_0_gives_the_true_column_depth():
@@ -123,7 +129,7 @@ def test_bathymetry_from_e3t_0_gives_the_true_column_depth():
     )
     g, e3t_1d, e3t_0_1d, k_bot = _synthetic_grid()
     tmask = np.asarray(g.tmask) > 0.5
-    e3t, _t, _s = effective_vertical_scale_factors(g, tmask)
+    e3t, _t, _s = effective_vertical_scale_factors(g, tmask, mode="both")
     H = np.cumsum(e3t)[k_bot - 1]
     np.testing.assert_allclose(H, np.cumsum(e3t_0_1d)[k_bot - 1], rtol=1e-12)
     # and it is materially different from the e3t_1d answer
