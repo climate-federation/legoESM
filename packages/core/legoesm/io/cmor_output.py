@@ -2006,6 +2006,7 @@ class CFWriter:
         daily_data: Dict[str, Any],
         lat: Any,
         lon: Any,
+        extra_attrs_by_var: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> List[Path]:
         """Write daily-mean data from a ``SpatialDailyAccumulator`` to NetCDF.
 
@@ -2025,6 +2026,10 @@ class CFWriter:
             Output of ``SpatialDailyAccumulator.finalize()``.
         lat, lon : array-like
             1-D latitude / longitude of the output grid.
+        extra_attrs_by_var : dict, optional
+            Per-variable attribute overrides, ``{var_name: {attr: value}}``
+            (e.g. an honest ``cell_methods`` for snapshot-sampled fields —
+            issue #1353).  Variables not in the dict keep table defaults.
 
         Returns
         -------
@@ -2076,6 +2081,7 @@ class CFWriter:
                     lat=lat,
                     lon=lon,
                     table="day",
+                    extra_attrs=(extra_attrs_by_var or {}).get(var_name),
                 )
             if out_path is not None and out_path not in seen:
                 written.append(out_path)
