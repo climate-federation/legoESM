@@ -144,6 +144,9 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
         albedo_calibration=cfg.physics.get("albedo_calibration", "default"),
+        soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
+        soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
+        soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -417,12 +420,17 @@ def run(args) -> int:
             "(expected 'default' or 'amip_multilayer')")
 
     if args.land_mode == "multilayer":
-        # NOTE: the soil-layer count is set by the surfdata loader's remap grid
-        # (init_land_surface_data -> gsd), so the model SoilGrid must match it;
-        # we use the loader default (8-layer Richards).  Exact AMIP parity
-        # (10-layer/3 m via clm_multilayer_setup) is a documented follow-up.
+        # Vertical soil grid.  ``init_land_surface_data`` now remaps the surfdata
+        # soil profile onto THIS grid (it forwards it to the loader), so a
+        # non-default discretisation can no longer desync from the (ncol, n_layer)
+        # Cosby hydraulics.  Defaults reproduce SoilGridConfig(); AMIP parity is
+        # 10 layers / 3.0 m.
+        _soil_grid_cfg = SoilGridConfig(
+            n_layers=int(args.soil_n_layers),
+            growth_factor=float(args.soil_growth_factor),
+            total_depth=float(args.soil_depth_m))
         base_cfg = MultiLayerLandConfig(
-            surface_scheme=surf, soil_grid=SoilGridConfig(),
+            surface_scheme=surf, soil_grid=_soil_grid_cfg,
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
             stomata=stomata,
             land_albedo=_land_albedo,

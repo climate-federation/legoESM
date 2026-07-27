@@ -246,3 +246,40 @@ def test_albedo_calibration_rejects_unknown():
     bad["physics"]["albedo_calibration"] = "amip"          # plausible typo
     with pytest.raises(ValueError, match="albedo_calibration"):
         validate_config(bad)
+
+
+# --------------------------------------------------------------------------
+# Vertical soil grid
+# --------------------------------------------------------------------------
+def test_soil_grid_defaults_match_soilgridconfig():
+    """Schema defaults must track SoilGridConfig() so a config with no soil keys
+    reproduces the 8-layer / 6.375 m baseline exactly."""
+    from legoesm.land.soil_grid import SoilGridConfig
+    p = validate_config(_minimal()).physics
+    assert p["soil_n_layers"] == SoilGridConfig().n_layers
+    assert p["soil_depth_m"] == SoilGridConfig().total_depth
+    assert p["soil_growth_factor"] == SoilGridConfig().growth_factor
+
+
+def test_soil_grid_amip_parity_accepted():
+    cfg_in = _minimal()
+    cfg_in["physics"].update(soil_n_layers=10, soil_depth_m=3.0)
+    p = validate_config(cfg_in).physics
+    assert (p["soil_n_layers"], p["soil_depth_m"]) == (10, 3.0)
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("soil_n_layers", 0),          # a zero-layer column is not a column
+    ("soil_n_layers", 500),        # absurd
+    ("soil_n_layers", True),       # bool is not an int layer count
+    ("soil_n_layers", 8.5),        # non-integer
+    ("soil_depth_m", -1.0),        # negative depth
+    ("soil_depth_m", 0.05),        # implausibly shallow (0 means "default")
+    ("soil_growth_factor", 0.5),   # shrinking layers with depth
+    ("soil_growth_factor", 9.0),   # out of range
+])
+def test_soil_grid_rejects_nonsense(key, bad):
+    cfg_in = _minimal()
+    cfg_in["physics"][key] = bad
+    with pytest.raises(ValueError, match=key):
+        validate_config(cfg_in)
