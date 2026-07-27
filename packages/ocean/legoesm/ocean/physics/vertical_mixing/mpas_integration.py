@@ -809,6 +809,12 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             # channel ever reaches MPAS (codex MED, parity with k_profiles).
             lat_deg=lat_deg,
             ice_frac=ice_frac,
+            # e3t cell thicknesses (dz_ref · J) for the nn_mxl=3 lup/ldown
+            # |dl/dz| <= e3t sweeps — the SAME (dz_ref, jacobian) pair the
+            # C-grid k_profiles path threads.  Ignored by the kernel for
+            # mxl choices 1/2 (bit-identical there).
+            dz_ref=z_coord.dz_ref,
+            jacobian=J,
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0
