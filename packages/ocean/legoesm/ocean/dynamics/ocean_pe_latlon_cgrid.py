@@ -1819,6 +1819,7 @@ def _bc_pv_flux(
     reconstruct_zeta=False,
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
+    een_e3f_scheme="min",
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1830,6 +1831,13 @@ def _bc_pv_flux(
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
             f"'al81', 'ene', 'ene_total', or 'een_total'"
+        )
+    # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
+    # config value) — see the h_vtx construction below for the two rules.
+    if een_e3f_scheme not in ("min", "nemo_avg"):
+        raise ValueError(
+            f"unknown een_e3f_scheme {een_e3f_scheme!r}; expected "
+            f"'min' or 'nemo_avg'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1876,16 +1884,44 @@ def _bc_pv_flux(
     # 1e-10)`` floor doesn't matter because the surrounding face
     # masks already zero ``ζ`` there.  Mirrors MITgcm's
     # ``hFacZ = min over active hFacC`` convention.
+    #
+    # ``een_e3f_scheme`` (static config string) selects the F-point vertex
+    # thickness rule:
+    #   "min" (default, bit-identical legacy) — the MITgcm hFacZ convention
+    #     above.
+    #   "nemo_avg" — NEMO ``nn_e3f_typ=1`` (dynvor.F90 ``vor_een``,
+    #     src/OCE/DYN/dynvor.F90:733-745):
+    #       ze3f = ( e3t(ji,jj+1,jk)*tmask(ji,jj+1,jk) + e3t(ji+1,jj+1,jk)*tmask(ji+1,jj+1,jk) )
+    #            + ( e3t(ji,jj  ,jk)*tmask(ji,jj  ,jk) + e3t(ji+1,jj  ,jk)*tmask(ji+1,jj  ,jk) )
+    #       zmsk = tmask(ji,jj+1,jk) + tmask(ji+1,jj+1,jk) + tmask(ji,jj,jk) + tmask(ji+1,jj,jk)
+    #       IF (ze3f /= 0) THEN ; z1_e3f(ji,jj) = zmsk / ze3f ; ELSE ; z1_e3f(ji,jj) = 0 ; ENDIF
+    #     i.e. e3f = (masked sum of the 4 surrounding e3t) / (count of wet
+    #     surrounding cells) — the masked AVERAGE, not the min.  The two
+    #     coincide on a uniform-depth interior (all 4 e3t equal); at a step
+    #     vertex the min-rule is smaller (biased low, MITgcm hFacZ intent),
+    #     the average-rule is larger (NEMO intent) — see #1226 item 10.
+    #     ``z1_e3f = 0`` at a fully-dry vertex (``zmsk == 0``, division
+    #     skipped) is reproduced here with the same ``BIG_H`` sentinel used
+    #     by the min-rule (``h_vtx → BIG_H`` ⇒ ``1/h_vtx → 0``), so both
+    #     rules share the identical downstream dry-vertex handling.
     BIG_H = 1.0e30
     h_sw = jnp.roll(h_k, 1, axis=1)
     h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
     h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
+    # nemo_avg operands: masked e3t (== h_k already, zero on dry cells — no
+    # BIG_H sentinel needed for the sum) and the per-cell wet-count (tmask).
+    t_k = (h_k > 0.0).astype(h_k.dtype)
+    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
     # Cell-pad-first (PR357 Bug-2 pattern): pad the cell active-thickness
     # over latitude so the vertex min at a partition cut includes the
     # neighbour rank's adjacent T row (MPI halo exchange).  The pole pad
     # value is BIG_H so a physical-pole vertex reduces to the local two-cell
     # min (bit-identical to the previous boundary rows); interior partition
-    # cuts sendrecv the neighbour's real row instead.
+    # cuts sendrecv the neighbour's real row instead.  The nemo_avg operands
+    # (h_k, t_k, h_sw, t_sw) pad with 0.0 at the pole/boundary (an absent
+    # neighbour contributes zero mass and zero wet-count, matching NEMO's
+    # masked sum/count — no analogue of the min-rule's BIG_H sentinel is
+    # needed since summing zero is a no-op).
     # Thickness-weighted mass fluxes at faces — computed BEFORE the pad so
     # the Fu / u lat pads ride the SAME fused exchange as the two
     # active-thickness pads (audit lever O4: 4 pads -> 1 sendrecv pair per
@@ -1893,26 +1929,49 @@ def _bc_pv_flux(
     Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
     Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
-        (h_k_active, h_sw_active, Fu, u), halo=1,
-        south_values=(BIG_H, BIG_H, 0.0, 0.0),
-        north_values=(BIG_H, BIG_H, 0.0, 0.0),
-    )
-    h_vtx = jnp.minimum(
-        jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
-        jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
-    )                                                  # (n_lat+1, n_lon, nlev)
+    if een_e3f_scheme == "nemo_avg":
+        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
+         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+        e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
+        wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
+        h_vtx = jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), BIG_H)
+    else:  # "min" (validated at function entry)
+        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0),
+        )
+        h_vtx = jnp.minimum(
+            jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
+            jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
+        )                                              # (n_lat+1, n_lon, nlev)
     # At the fold, the vertex connects 4 cells: two local (fold row) and two
     # fold-partner cells.  Overwrite the north row only on the owning rank.
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        h_k_partner = h_k_active[-1:, fold.perm_T, :]
-        h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
-        h_vtx_north = jnp.minimum(
-            jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
-            jnp.minimum(h_k_partner, h_sw_partner),
-        )
+        if een_e3f_scheme == "nemo_avg":
+            h_k_partner = h_k[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw[-1:, fold.perm_T, :]
+            t_k_partner = t_k[-1:, fold.perm_T, :]
+            t_sw_partner = t_sw[-1:, fold.perm_T, :]
+            e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
+            wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
+            h_vtx_north = jnp.where(
+                wet_count_north > 0.0,
+                e3f_sum_north / jnp.maximum(wet_count_north, 1.0), BIG_H,
+            )
+        else:
+            h_k_partner = h_k_active[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
+            h_vtx_north = jnp.minimum(
+                jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
+                jnp.minimum(h_k_partner, h_sw_partner),
+            )
         h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
@@ -3850,6 +3909,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_e3f_scheme=config.een_e3f_scheme,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

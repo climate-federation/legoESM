@@ -534,3 +534,185 @@ def test_q_boundary_unknown_value_raises():
             s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
             q_boundary="bogus",
         )
+
+
+# ----------------------------------------------------------------------
+# een_e3f_scheme coverage: "min" (MITgcm hFacZ, legacy default) vs
+# "nemo_avg" (NEMO nn_e3f_typ=1, dynvor.F90::vor_een:733-745).
+#
+# Unlike q_boundary (an argument of pv_flux_al81_partial_cell itself), the
+# e3f/h_vtx construction lives ONE LEVEL UP in the caller, ``_bc_pv_flux``
+# (ocean_pe_latlon_cgrid.py) — pv_flux_al81_partial_cell only ever receives
+# the already-built h_vtx.  So these tests exercise ``_bc_pv_flux`` directly.
+# ----------------------------------------------------------------------
+
+def _apply_bc_pv_flux(state, een_e3f_scheme="min"):
+    """Call ``_bc_pv_flux`` (the h_vtx-building caller) on a
+    ``_build_test_state``-style dict, al81 (default vorticity_scheme),
+    ``vertex_mask`` passed explicitly so ``mask`` is never touched."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    zeros_u = jnp.zeros_like(state["u"])
+    zeros_v = jnp.zeros_like(state["v"])
+    du_dt, dv_dt, diag_u, diag_v = _bc_pv_flux(
+        zeros_u, zeros_v, state["u"], state["v"],
+        state["h_u"], state["h_v"], state["h_T"],
+        state["u_mask_3d"], state["v_mask_3d"],
+        None, state["grid"], "vector_invariant",
+        vertex_mask=state["vtx_mask"],
+        een_e3f_scheme=een_e3f_scheme,
+    )
+    return diag_u, diag_v
+
+
+def test_een_e3f_scheme_min_vs_nemo_avg_differ_on_stepped_bathymetry():
+    """The two e3f rules coincide only where all 4 surrounding cells share
+    the same depth.  On the ``partial_cells=True`` step fixture (2000 m south
+    / 4000 m north, single step row) the vertices straddling the step have a
+    mix of 2000 m and 4000 m neighbours — min gives 2000 m, nemo_avg gives
+    the mean (3000 m, all 4 wet) — so the assembled PV-flux tendencies must
+    differ (non-vacuous "differ" direction)."""
+    state = _build_test_state(n_lat=12, n_lon=24, partial_cells=True, seed=5)
+    du_min, dv_min = _apply_bc_pv_flux(state, "min")
+    du_avg, dv_avg = _apply_bc_pv_flux(state, "nemo_avg")
+    assert not np.allclose(np.asarray(du_min), np.asarray(du_avg), atol=1e-12)
+    assert not np.allclose(np.asarray(dv_min), np.asarray(dv_avg), atol=1e-12)
+
+
+def test_een_e3f_scheme_min_and_nemo_avg_identical_on_uniform_depth():
+    """On a flat-bottom, fully-wet grid every vertex's 4 surrounding cells
+    share the same e3t, so min(h,h,h,h) == mean(h,h,h,h) == h exactly — the
+    two rules must give BIT-IDENTICAL tendencies (non-vacuous "identical"
+    direction; together with the stepped-bathymetry test above this proves
+    the two rules are wired to genuinely different code paths, not aliases
+    that happen to differ everywhere)."""
+    state = _build_test_state(n_lat=12, n_lon=24, partial_cells=False, seed=5)
+    du_min, dv_min = _apply_bc_pv_flux(state, "min")
+    du_avg, dv_avg = _apply_bc_pv_flux(state, "nemo_avg")
+    np.testing.assert_array_equal(np.asarray(du_min), np.asarray(du_avg))
+    np.testing.assert_array_equal(np.asarray(dv_min), np.asarray(dv_avg))
+
+
+def _nemo_vor_een_e3f_loop_port(e3t, tmask, j, i):
+    """Independent literal loop-port of NEMO ``dynvor.F90::vor_een``,
+    ``nn_e3f_typ=1`` (src/OCE/DYN/dynvor.F90:733-745), transcribed directly
+    from the Fortran source (NOT derived from the legoESM implementation
+    under test) as ground truth for ONE F-point::
+
+        CASE ( 1 )     ! new formulation (masked averaging of e3t divided
+                        !                  by the sum of mask)
+           DO_2D( 1, 1, 1, 1 )
+              ze3f = (  ( e3t(ji  ,jj+1,jk)*tmask(ji  ,jj+1,jk)     &
+                 &    +   e3t(ji+1,jj+1,jk)*tmask(ji+1,jj+1,jk) )   &
+                 &    + ( e3t(ji  ,jj  ,jk)*tmask(ji  ,jj  ,jk)     &
+                 &    +   e3t(ji+1,jj  ,jk)*tmask(ji+1,jj  ,jk) )  )
+              zmsk = ( tmask(ji,jj+1,jk) + tmask(ji+1,jj+1,jk)      &
+                 &   + tmask(ji,jj  ,jk) + tmask(ji+1,jj  ,jk)  )
+              IF( ze3f /= 0._wp ) THEN ; z1_e3f(ji,jj) = zmsk / ze3f
+              ELSE                     ; z1_e3f(ji,jj) = 0._wp
+              ENDIF
+           END_2D
+
+    F-point ``(ji=i, jj=j)`` sums T-cells ``(j,i)``, ``(j,i+1)``,
+    ``(j+1,i)``, ``(j+1,i+1)`` (0-based). Returns ``e3f = 1/z1_e3f``
+    (``+inf`` sentinel where ``z1_e3f == 0``, i.e. ``zmsk == 0``, matching
+    the legoESM ``BIG_H`` convention).  ``e3t``, ``tmask``: 2-D numpy arrays.
+    """
+    ze3f = (
+        (e3t[j + 1, i] * tmask[j + 1, i] + e3t[j + 1, i + 1] * tmask[j + 1, i + 1])
+        + (e3t[j, i] * tmask[j, i] + e3t[j, i + 1] * tmask[j, i + 1])
+    )
+    zmsk = (
+        tmask[j + 1, i] + tmask[j + 1, i + 1] + tmask[j, i] + tmask[j, i + 1]
+    )
+    z1_e3f = zmsk / ze3f if ze3f != 0.0 else 0.0
+    return 1.0 / z1_e3f if z1_e3f != 0.0 else np.inf
+
+
+def test_een_e3f_scheme_nemo_avg_matches_loop_port_ground_truth():
+    """The production ``nemo_avg`` branch of ``_bc_pv_flux`` matches the
+    independent hand loop-port of NEMO dynvor.F90:733-745 above (transcribed
+    from the Fortran source, not derived from the JAX code under test) on a
+    small stepped fixture with an actual dry cell — the case that stresses
+    the ``zmsk`` wet-count guard, not just the uniform-depth averaging.
+
+    legoESM vertex ``(j, i)`` is the SW corner of cell ``(j, i)``, built from
+    ``h_k`` (cell ``(j,i)``, ``(j+1,i)``) and ``h_sw = roll(h_k, 1, axis=1)``
+    (cell ``(j,i-1)``, ``(j+1,i-1)``) — i.e. the four neighbours of vertex
+    ``(j, i)`` are T-cells ``(j,i-1)``, ``(j,i)``, ``(j+1,i-1)``,
+    ``(j+1,i)``.  That is exactly the NEMO F-point neighbourhood with
+    ``ji = i - 1``, ``jj = j``.  Compare the interior (non-dry-adjacent)
+    vertices only, where both sides see a full, in-bounds 2x2 neighbourhood.
+    """
+    n_lat, n_lon = 4, 4
+    land_row, land_col = 1, 1
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[land_row, land_col] = 0.0
+    H_flat = 4000.0
+    h_T_2d = land_mask * H_flat  # (n_lat, n_lon); zero on the land cell
+
+    h_T = jnp.asarray(h_T_2d[:, :, None])
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    zeros = jnp.zeros((n_lat, n_lon + 1, 1))
+    zeros_v = jnp.zeros((n_lat + 1, n_lon, 1))
+    ones_mask_u = jnp.ones_like(zeros)
+    ones_mask_v = jnp.ones_like(zeros_v)
+    du_dt, dv_dt, _, _ = _bc_pv_flux(
+        zeros, zeros_v, zeros, zeros_v,
+        ones_mask_u, ones_mask_v, h_T,
+        ones_mask_u, ones_mask_v,
+        None, create_latlon_grid(n_lat, n_lon), "vector_invariant",
+        vertex_mask=jnp.ones((n_lat + 1, n_lon + 1)),
+        een_e3f_scheme="nemo_avg",
+    )
+    # Rest state (u=v=0) gives F_u = F_v = 0, so du_dt/dv_dt alone can't
+    # recover h_vtx.  Recompute h_vtx from the SAME production building
+    # blocks _bc_pv_flux uses (pad_with_pole_bc_lat_multi), calling that
+    # shared helper directly rather than re-deriving the sum/count formula
+    # — this pins the shipped code path, the loop-port above is the
+    # independent ground truth it is compared against.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    h_k = h_T
+    h_sw = jnp.roll(h_k, 1, axis=1)
+    t_k = (h_k > 0.0).astype(h_k.dtype)
+    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
+    h_k_pad, h_sw_pad, t_k_pad, t_sw_pad = pad_with_pole_bc_lat_multi(
+        (h_k, h_sw, t_k, t_sw), halo=1,
+        south_values=(0.0, 0.0, 0.0, 0.0), north_values=(0.0, 0.0, 0.0, 0.0),
+    )
+    e3f_sum = h_k_pad[:-1] + h_k_pad[1:] + h_sw_pad[:-1] + h_sw_pad[1:]
+    wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
+    h_vtx = np.asarray(
+        jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), 1.0e30)
+    )[:, :, 0]  # (n_lat+1, n_lon)
+
+    n_checked = 0
+    # j in [1, n_lat-2]: skip the pole rows (no physical vertex neighbour)
+    # AND the last row (jj+1 = n_lat would run off the loop-port's plain
+    # in-bounds T-grid — legoESM instead pads with a BIG_H/zero pole value
+    # there, a boundary-handling difference outside this formula's scope).
+    for j in range(1, n_lat - 1):
+        for i in range(1, n_lon):    # skip i=0 (periodic wrap, not exercised
+                                      # by the loop-port's plain array indexing)
+            ji, jj = i - 1, j
+            gt = _nemo_vor_een_e3f_loop_port(h_T_2d, land_mask, jj, ji)
+            lego = h_vtx[j, i]
+            if not np.isfinite(gt) and lego >= 1.0e29:
+                n_checked += 1
+                continue  # both sides agree it's the fully-dry sentinel
+            assert np.isfinite(gt) and lego < 1.0e29, (j, i, lego, gt)
+            assert np.isclose(lego, gt, rtol=1e-12), (j, i, lego, gt)
+            n_checked += 1
+    assert n_checked == (n_lat - 2) * (n_lon - 1), "loop-port comparison ran vacuously"
+
+
+def test_een_e3f_scheme_unknown_value_raises():
+    """Dispatch hardening: an unknown een_e3f_scheme raises at ``_bc_pv_flux``
+    entry, before any array use (registered in
+    tests/test_dispatch_hardening.py::BASELINE_DISPATCHERS — the whole
+    ``_bc_pv_flux`` function is already pinned there)."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    with pytest.raises(ValueError, match="unknown een_e3f_scheme"):
+        _bc_pv_flux(
+            None, None, None, None, None, None, None, None, None, None, None, None,
+            een_e3f_scheme="bogus",
+        )

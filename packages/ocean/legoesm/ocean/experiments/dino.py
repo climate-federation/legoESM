@@ -685,6 +685,10 @@ class DINOConfig:
     # Boundary-q for the AL81/EEN PV flux: "neumann_fill" (legacy smooth fill)
     # or "nemo_live" (vor_een ln_dynvor_msk=F: coast shear-zeta live in triads).
     een_q_boundary: str = "neumann_fill"
+    # F-point vertex thickness (e3f) rule for the AL81/EEN PV flux: "min"
+    # (default, MITgcm hFacZ convention) or "nemo_avg" (NEMO nn_e3f_typ=1,
+    # dynvor.F90::vor_een masked average — #1226 item 10).
+    een_e3f_scheme: str = "min"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -1152,6 +1156,8 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     "vorticity_scheme": "een_total",      # ln_dynvor_een: (f+zeta) in the EEN triad
     "een_q_boundary": "nemo_live",        # vor_een keeps coast shear-zeta LIVE
                                           # (ln_dynvor_msk=F; no Neumann fill)
+    "een_e3f_scheme": "nemo_avg",         # nn_e3f_typ=1: masked AVERAGE e3f
+                                          # (dynvor.F90::vor_een, not min-rule)
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
@@ -2676,6 +2682,7 @@ def dino_lat_lon_model_config(
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
+        een_e3f_scheme=cfg.een_e3f_scheme,
         asselin_gamma=cfg.asselin_gamma,
         tracer_combine=cfg.tracer_combine,
         fix_eta_drift=cfg.fix_eta_drift,

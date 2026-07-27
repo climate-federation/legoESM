@@ -449,6 +449,20 @@ class TestDINORecipes:
         mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
         assert mc.barotropic.barotropic_een_seed == "nemo_kmm"
 
+    def test_een_e3f_scheme_mlf_card_only(self):
+        # #1226 item 10 (NEMO nn_e3f_typ=1, dynvor.F90::vor_een:733-745 —
+        # masked-average e3f, not the min-rule). Only the leapfrog/EEN-total
+        # card selects it; every other recipe keeps the bit-identical
+        # min-rule default (MITgcm hFacZ convention).
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.een_e3f_scheme == "nemo_avg"
+        for recipe in ("nemo_dino_kamm", "legoesm_default", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            assert dino_config_for_recipe(recipe).een_e3f_scheme == "min", recipe
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.een_e3f_scheme == "nemo_avg"
+
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
         # legoESM sigmoid default leaks enhanced mixing into weakly-stable water

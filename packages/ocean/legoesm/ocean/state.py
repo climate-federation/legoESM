@@ -1404,6 +1404,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
     # triads; select on NEMO-faithful cards). Unknown raises in the operator.
     een_q_boundary: str = "neumann_fill"
+    # F-point (vertex) layer-thickness rule for the AL81/EEN PV flux:
+    # "min" (default, bit-identical legacy) — MITgcm hFacZ convention, min
+    #   over the 4 surrounding ACTIVE cells (Adcroft-Hill-Marshall 1997 /
+    #   Pacanowski-Gnanadesikan 1998; see pv_flux_al81_partial_cell docstring).
+    # "nemo_avg" — NEMO nn_e3f_typ=1 (dynvor.F90::vor_een, masked AVERAGE:
+    #   sum of the 4 surrounding e3t·tmask / count of wet surrounding cells).
+    #   The two coincide on a uniform-depth interior; at step vertices the
+    #   min-rule undervalues e3f (biased low) while nemo_avg matches NEMO's
+    #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
+    #   value raises in the operator.
+    een_e3f_scheme: str = "min"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
