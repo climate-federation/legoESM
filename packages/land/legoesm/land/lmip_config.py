@@ -206,7 +206,7 @@ def validate_config(data: dict) -> LMIPConfig:
     physics.setdefault("soil_n_layers", _SOIL_N_LAYERS_DEFAULT)
     physics.setdefault("soil_depth_m", _SOIL_DEPTH_M_DEFAULT)
     _nl = physics["soil_n_layers"]
-    if not isinstance(_nl, int) or isinstance(_nl, bool) or not (1 <= _nl <= 50):
+    if not isinstance(_nl, int) or isinstance(_nl, bool) or not (1 <= _nl <= 50):  # coeff-ok: schema sanity bound on a layer COUNT, not a physics coefficient
         raise ValueError(
             f"physics.soil_n_layers must be an int in [1, 50] (got {_nl!r})")
     _sd = physics["soil_depth_m"]
@@ -214,7 +214,7 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.soil_depth_m must be a non-negative float "
             f"(0 = geometric default; got {_sd!r})")
-    if 0.0 < float(_sd) < 0.1:
+    if 0.0 < float(_sd) < 0.1:  # coeff-ok: schema sanity floor on column depth [m]; 0 means "geometric default"
         raise ValueError(
             f"physics.soil_depth_m={_sd} is implausibly shallow for a land column "
             "(< 0.1 m); use 0 for the geometric default.")
@@ -225,7 +225,7 @@ def validate_config(data: dict) -> LMIPConfig:
             f"not in {_ROOT_CALIBRATIONS}")
     physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
     _gf = physics["soil_growth_factor"]
-    if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):
+    if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):  # coeff-ok: schema sanity bound on a layer-thickness RATIO
         raise ValueError(
             f"physics.soil_growth_factor must be a float in [1.0, 4.0] (got {_gf!r})")
     physics["soil_growth_factor"] = float(_gf)
