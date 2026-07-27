@@ -127,6 +127,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
+    nemo_advective_vertical_momentum_advection as _nemo_advective_vertical_momentum_advection,
     compute_centroid_depth,
 )
 
@@ -168,10 +169,17 @@ VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 #     unlimited, dispersive) flux of the FULL velocity u, including the
 #     w*U_bar barotropic-redistribution part.  Stability rests on dt_mom +
 #     A_v/TKE friction like Veros (no limiter, no implicit viscosity).
+#   "nemo_advective" (NEMO-faithful, #1226) — transcription of dynzad.F90's
+#     ADVECTIVE form w*du/dz (a centered difference of u weighted by an
+#     e1e2t-area-weighted-interpolated w), NOT the flux-divergence form
+#     d(w*u)/dz that "centered_full" computes.  The two differ by u*dw/dz at
+#     every interior level — the #1226 stage-chain audit measured this as
+#     the WHOLE dyn_zad mismatch (predicted-vs-observed residual corr
+#     -0.9992, ratio 0.998).  See nemo_advective_vertical_momentum_advection.
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full"}
+    {"upwind_perturbation", "centered_full", "nemo_advective"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -2370,11 +2378,19 @@ def _bc_vertical_momentum_advection(
     - ``"upwind_perturbation"`` (default, bit-identical) — 1st-order
       interface upwind of the PERTURBATION velocity ``u_prime``/``v_prime``.
     - ``"centered_full"`` (Veros-faithful) — 2nd-order centered,
-      energy-conserving flux of the FULL velocity ``u_full``/``v_full``
+      energy-conserving FLUX of the FULL velocity ``u_full``/``v_full``
       (restoring the ``-d/dz(w*U_bar)`` barotropic-redistribution term and
       removing the upwind implicit vertical viscosity).  Requires
-      ``u_full``/``v_full`` to be passed.  The WENO momentum paths ignore
-      this field (they have their own vertical reconstruction).
+      ``u_full``/``v_full`` to be passed.
+    - ``"nemo_advective"`` (NEMO-faithful, #1226) — the ADVECTIVE form
+      ``w*du/dz`` transcribed from ``dynzad.F90``, with ``w``
+      e1e2t-area-weighted-interpolated to BOTH the u- and v-face (NEMO's
+      own interpolation; ``centered_full``'s FLUX form and the plain
+      unweighted face interpolation differ from this by ``u*dw/dz`` at
+      every level — the whole #1226 dyn_zad mismatch).  Also requires
+      ``u_full``/``v_full``.
+    The WENO momentum paths ignore this field (they have their own
+    vertical reconstruction).
 
     The ``adaptive_implicit_vertadv`` gate (Shchepetkin 2015 / NEMO
     ln_zad_Aimp) is applied here: when ``config.adaptive_implicit_vertadv``
@@ -2496,6 +2512,32 @@ def _bc_vertical_momentum_advection(
                     u_full, w_u, h_u_old, face_active=u_face_active)
                 diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
                     v_full, w_v, h_v_old, face_active=v_face_active)
+            elif _vert_mom_scheme == "nemo_advective":
+                # NEMO-faithful (#1226): dynzad.F90's ADVECTIVE form w*du/dz
+                # on the FULL velocity, with w e1e2t-AREA-WEIGHTED-
+                # interpolated to the u/v face (dynzad.F90:89-98) at BOTH
+                # faces — not the plain (unweighted) ``w_u``/``w_v`` the
+                # other branches use.  ``u_full``/``v_full`` MUST be
+                # supplied (same contract as ``centered_full``).
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='nemo_advective' requires "
+                        "u_full and v_full to be passed to "
+                        "_bc_vertical_momentum_advection.",
+                    )
+                area_w = grid.area_T[..., jnp.newaxis] * w
+                w_area_u = interp_cell_to_uface(area_w)
+                w_area_v = interp_cell_to_vface(area_w, grid=grid)
+                face_area_u = grid.dx_u * grid.dy_u
+                face_area_v = grid.dx_v * grid.dy_v
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _nemo_advective_vertical_momentum_advection(
+                    u_full, w_area_u, h_u_old, face_area_u[..., jnp.newaxis],
+                    face_active=u_face_active)
+                diag_vertadv_v = _nemo_advective_vertical_momentum_advection(
+                    v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
+                    face_active=v_face_active)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear

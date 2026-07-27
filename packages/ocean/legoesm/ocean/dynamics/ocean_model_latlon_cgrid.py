@@ -1602,19 +1602,20 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
-        # Reject centered_full + adaptive-implicit vertadv: the adaptive-
-        # implicit path (ln_zad_Aimp) replaces the explicit in-tendency
-        # vertical momentum advection ENTIRELY with an upwind backward-Euler
-        # solve at the step level, so "centered_full" (an explicit-stage
-        # option) would be a silent no-op.  Fail fast rather than mislead.
-        if (_vert_mom_scheme == "centered_full"
+        # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
+        # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
+        # in-tendency vertical momentum advection ENTIRELY with an upwind
+        # backward-Euler solve at the step level, so an explicit-stage
+        # option here would be a silent no-op.  Fail fast rather than mislead.
+        if (_vert_mom_scheme in ("centered_full", "nemo_advective")
                 and getattr(config, "adaptive_implicit_vertadv", False)):
             raise ValueError(
-                "vertical_momentum_scheme='centered_full' is incompatible "
-                "with adaptive_implicit_vertadv=True: the adaptive-implicit "
-                "scheme replaces the explicit vertical momentum advection "
-                "entirely (upwind backward-Euler at the step level), so the "
-                "centered explicit flux would never be applied. Choose one.",
+                f"vertical_momentum_scheme={_vert_mom_scheme!r} is "
+                "incompatible with adaptive_implicit_vertadv=True: the "
+                "adaptive-implicit scheme replaces the explicit vertical "
+                "momentum advection entirely (upwind backward-Euler at the "
+                "step level), so the explicit tendency would never be "
+                "applied. Choose one.",
             )
 
         # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY

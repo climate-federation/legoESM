@@ -1656,12 +1656,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     redistribution and removes the upwind implicit viscosity. UNLIMITED ⇒
     #     dispersive (no monotonicity, no implicit viscosity): stability rests on
     #     dt_mom + A_v/TKE friction, like Veros. The ACC recipe opts in.
+    #   "nemo_advective" (NEMO-FAITHFUL, #1226) — the ADVECTIVE form w·du/dz
+    #     transcribed from dynzad.F90, with w e1e2t-area-weighted-interpolated
+    #     to BOTH the u- and v-face (NEMO's own interpolation). Differs from
+    #     "centered_full"'s FLUX form d(w·u)/dz by u·dw/dz at every level —
+    #     measured as the WHOLE #1226 dyn_zad mismatch (residual corr -0.9992,
+    #     ratio 0.998 against NEMO's own dumped dyn_zad trend).
     # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
     # vertical reconstruction and ignore this field. Literal default -> safe
     # after `constants`. Validated at config construction; unknown -> ValueError.
     # REJECTED in combination with adaptive_implicit_vertadv=True (that path
     # replaces the explicit in-tendency vertical advection entirely with an
-    # upwind backward-Euler solve, so "centered_full" would be a silent no-op).
+    # upwind backward-Euler solve, so "centered_full"/"nemo_advective" would be
+    # a silent no-op).
     vertical_momentum_scheme: str = "upwind_perturbation"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:

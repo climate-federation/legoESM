@@ -681,6 +681,17 @@ class DINOConfig:
     # AB2-consistent — see ``rigid_lid_dt_mom_ratio``), overriding these last.
     momentum_advection: str = "vector_invariant"  # "flux_form" (MITgcm) | "weno7" (Oceananigans)
     momentum_flux_scheme: str = "upwind"          # "centered" (MITgcm flux-form advScheme=2)
+    # Vertical momentum advection (ZAD half of NEMO dyn_adv).  #1226
+    # stage-chain audit root cause: legoESM's non-default options
+    # ("upwind_perturbation", "centered_full") both compute the FLUX form
+    # d(w*u)/dz, but NEMO dynzad.F90 discretizes the ADVECTIVE form w*du/dz
+    # (NEMO's own comment: "w dz(u) = 1/(e1e2u*e3u)*mk+1[mi(e1e2t*ww)*dk(u)]").
+    # The two forms differ by u*dw/dz at EVERY interior level -- measured as
+    # the WHOLE ZAD mismatch (predicted-vs-observed residual corr -0.9992,
+    # ratio 0.998; ZAD corr was 0.62/0.35, |x| 2.6/3.3 before the fix).  The
+    # kamm card selects "nemo_advective" (the new transcription of
+    # dynzad.F90:86-118, area-weighted w interpolation at both u- and v-face).
+    vertical_momentum_scheme: str = "upwind_perturbation"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
     # Vector-invariant vorticity flux scheme (relative + optionally planetary).
@@ -1023,6 +1034,14 @@ DINO_RECIPES: dict[str, dict] = {
         # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
         "gm_redi_slope_n2": "nemo_bn2",
         "gm_bolus_kappa_face_average": True,
+        # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
+        # not the FLUX form d(w*u)/dz that "centered_full" (and the default
+        # "upwind_perturbation") compute -- the two differ by u*dw/dz at
+        # every level, which was the whole dyn_zad mismatch (see the
+        # DINOConfig.vertical_momentum_scheme comment above for the measured
+        # numbers).  "nemo_advective" is the literal transcription of
+        # dynzad.F90:86-118.
+        "vertical_momentum_scheme": "nemo_advective",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -2709,6 +2728,7 @@ def dino_lat_lon_model_config(
     _scheme = dict(
         momentum_advection=cfg.momentum_advection,
         momentum_flux_scheme=cfg.momentum_flux_scheme,
+        vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
