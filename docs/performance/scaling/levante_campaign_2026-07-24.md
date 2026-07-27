@@ -817,12 +817,38 @@ by the per-step fixed cost above.
 Scale-out receipts on this lane: LL1536x3072 at 64 GPUs = 4.97 ms (job
 26498266) and the LL2048 point above.
 
-WHAT THE FIXED TERM IS: not yet attributed. Candidates are per-step
-kernel-launch overhead (the L60 step issues many small kernels), the
-tiled path's serial halo exchange, and per-step host synchronisation —
-distinguishing them needs the same nsys treatment that cracked the MPAS
-np4 fusion. That profile is the highest-value next step for atmospheric
-strong scaling, and it is worth more than any further ladder.
+**WHAT THE FIXED TERM IS — ATTRIBUTED (nsys job 26504836): the halo
+exchange, scaling with tile PERIMETER.** Profiling both tiles at the
+SAME 24 GPUs isolates it by subtraction:
+
+| tile | NCCL time / 12 steps | launches | share of GPU time |
+|---|---|---|---|
+| C768, 147.5k cols/GPU | 498.7 ms | 1452 | 66.5 % |
+| C512, 65.5k cols/GPU | 280.7 ms | 1128 | 65.4 % |
+
+The comm term grows **1.78x for a 2.25x larger tile AREA** — close to the
+sqrt(2.25) = 1.50x a PERIMETER law predicts, and nowhere near the 2.25x
+an area law would give. That is the mechanism behind the fitted "fixed"
+11.27 ms: halo cost tracks the tile EDGE while compute tracks the tile
+AREA, so under strong scaling compute falls off faster than communication
+and the comm share rises until it dominates. It is NOT launch overhead
+and NOT host synchronisation.
+
+This also reconciles with the fixed-tile contrast (comm does not grow
+with DEVICE COUNT at constant tile, 1.06x for 2.25x devices): both
+statements are true because the comm cost is set by the tile geometry,
+not by how many devices exist.
+
+CAVEAT: under nsys the step inflates 19.33 -> 49.95 ms (2.6x) and
+collectives serialize, so the 66 % SHARE is indicative only. The robust
+result is the SCALING (1.78x measured vs 1.50x perimeter vs 2.25x area),
+which is a ratio between two runs under identical profiling conditions.
+
+CONSEQUENCE FOR REACHING THE LIMIT: the lever is halo-cost-per-tile, not
+device count. Options in order of expected value: (a) larger tiles
+(raise resolution — already shown to work), (b) fewer/fatter exchanges
+per step (the ocean's wide-halo trick, 120 -> 4 messages, applied to the
+cube), (c) overlapping halo exchange with interior compute.
 
 **A SECOND cube ceiling, memory:** the fixed-tile arm C1152 L60 @54
 wanted **105.7 GB per device** (rematerialization stuck at 96.6 GB)
