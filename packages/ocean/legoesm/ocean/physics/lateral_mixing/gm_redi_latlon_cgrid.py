@@ -471,11 +471,61 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
               * z_centers)[None, None, :] * jnp.ones_like(T_filled)
     J1 = jnp.ones(T_filled.shape[:-1], dtype=dtype)
-    n2_int = compute_buoyancy_frequency_adiabatic(
-        T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
-        rho_ref=rho_0, g=g)                           # (...,nlev-1)
+    # NEMO integrates rn2b, i.e. the LINEARISED alpha/beta bn2 (eosbn2.F90),
+    # not a parcel-displacement N^2.  Verified against NEMO's own dumped rn2b
+    # on the DINO y5 state (#1226): compute_buoyancy_frequency_nemo_bn2 gives
+    # corr 1.000000 / ratio 0.999970, the adiabatic form 0.999999 / 0.995994.
+    # Under a 1.0 fidelity bar that 0.4% amplitude deviation moves the MLD
+    # level in ~3% of columns, so use the NEMO form whenever the card runs the
+    # S-EOS; fall back to the adiabatic N^2 for any other EOS (nemo_bn2 is
+    # S-EOS-specific, being written in terms of the alpha/beta polynomial).
+    _use_nemo_bn2 = getattr(z_coord, "t_depth_ref", None) is not None
+    if _use_nemo_bn2:
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency_nemo_bn2, NemoSEOSConfig,
+        )
+        _gdept = jnp.asarray(z_coord.t_depth_ref, dtype=dtype)
+        # gdepw = the TRUE w-interface depths (z_iface), NOT the midpoint of the
+        # bracketing T-depths.  NEMO's zrw weight (eosbn2.F90:1459) is
+        #     zrw = ( gdepw(k) - gdept(k) ) / ( gdept(k-1) - gdept(k) )
+        # which is only 1/2 on a uniform ladder; on DINO's stretched grid gdept
+        # is NOT centred between its interfaces, so the midpoint biases the
+        # alpha/beta interpolation and puts ~4e-4 median error into N^2.
+        _gdepw_int = z_iface[:-1]
+        n2_int = compute_buoyancy_frequency_nemo_bn2(
+            T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g)
+    else:
+        n2_int = compute_buoyancy_frequency_adiabatic(
+            T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
+            rho_ref=rho_0, g=g)                       # (...,nlev-1)
     # e3w(jk) for interface m = spacing between the bracketing T-centres.
     e3w = z_centers[1:] - z_centers[:-1]             # (nlev-1,)
+    # The MLD CRITERION itself is thickness-free, and that is not an
+    # approximation -- it is an identity in NEMO.  eosbn2 divides by the live
+    # e3w and zdfmxl multiplies it straight back:
+    #     rn2b(jk) = grav*( alpha*dT - beta*dS ) / e3w(jk,Kmm)   (eosbn2.F90)
+    #     hmlp    += MAX( rn2b(jk), 0 ) * e3w(jk,Kmm)            (zdfmxl.F90:98)
+    #  => term    = MAX( grav*( alpha*dT - beta*dS ), 0 )
+    # so e3w cancels EXACTLY and no z-star stretch enters the integral (measured:
+    # applying one flips zero levels).  Reference spacing is therefore correct
+    # here as long as n2_int is built on that SAME spacing, which it is.
+    #
+    # The DEPTH is a different matter: hmlp = gdepw(nmln,Kmm) is the live w-depth
+    # and does carry the stretch.  Under key_qco the scale factor is a macro
+    # (domzgr_substitute.h90:131)  e3w(i,j,k,t) = E3w_0(i,j,k)*( 1 + r3t(i,j,t) )
+    # with r3t 2-D, so the stretch is UNIFORM down a column and is recoverable as
+    # H_live/H_ref from the live thicknesses the bridge already hangs on z_coord
+    # -- no need to thread eta through four signatures.
+    _hp = getattr(z_coord, "h_partial", None)
+    if _hp is not None:
+        _wet = (jnp.asarray(active_3d) > 0.5).astype(dtype) if active_3d is not None \
+            else jnp.asarray(mask, dtype)[..., None] * jnp.ones((nlev,), dtype)
+        _h_ref = jnp.sum(_wet * jnp.asarray(dz_ref, dtype), axis=-1)
+        _h_live = jnp.sum(_wet * jnp.asarray(_hp, dtype), axis=-1)
+        col_stretch = jnp.where(_h_ref > 0, _h_live / jnp.maximum(_h_ref, 1e-10),
+                                jnp.ones((), dtype))          # = 1 + r3t
+    else:
+        col_stretch = jnp.ones(T_filled.shape[:-1], dtype)
     # Reference w-level nlb10 = first interface at/below ~10 m; contributions
     # above it are excluded (the near-surface is mixed by definition), so the
     # MLD is floored at ~10 m exactly as NEMO's nmln>=nlb10 initialisation.
@@ -499,11 +549,36 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         contrib = jnp.where(iface_wet, contrib, jnp.zeros((), dtype))
     cum = jnp.cumsum(contrib, axis=-1)               # integral(N^2 dz) from nlb10
     thresh = jnp.asarray(g * rho_c / rho_0, dtype)   # zN2_c = g*rho_c/rho0
-    reached = cum >= thresh                           # (...,nlev-1)
-    has = jnp.any(reached, axis=-1)
-    m_base = jnp.argmax(reached.astype(jnp.int32), axis=-1)   # shallowest crossing
-    m_base = jnp.clip(jnp.where(has, m_base, nlev - 2), 0, nlev - 2)
-    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon)
+    # NEMO (zdfmxl.F90:96-101) does NOT record the crossing level directly; it
+    # advances nmln on every level that is STILL below threshold, bottom-capped:
+    #
+    #     DO jk = nlb10, jpkm1
+    #        hmlp += MAX( rn2b(jk), 0 ) * e3w(jk,Kmm)
+    #        IF( hmlp < zN2_c )   nmln = MIN( jk, mbkt ) + 1
+    #
+    # so nmln = MIN( last jk with cum < zN2_c , mbkt ) + 1.  A column that never
+    # reaches the threshold therefore ends at mbkt+1 -- the ML reaches the
+    # SEAFLOOR -- not at the deepest interface.  Omitting that cap put 339 of
+    # DINO's 9920 wet columns 1-5 levels too deep (#1226, 96% of all the level
+    # mismatches).  The integrand is MAX(N^2,0)*e3w >= 0, so cum is monotone and
+    # {cum < zN2_c} is a PREFIX: that "last jk" is just the count of
+    # sub-threshold levels, which vectorises without a scan.
+    # NEMO's loop stops at jpkm1, i.e. lego interfaces m <= nlev-3 (jk = m+2).
+    below = (cum[..., :nlev - 2] < thresh).astype(jnp.int32).sum(axis=-1)
+    if active_3d is not None:
+        # mbkt = deepest wet T-level (1-based) = count of wet cells in column.
+        mbkt = (jnp.asarray(active_3d) > 0.5).astype(jnp.int32).sum(axis=-1)
+    else:
+        mbkt = jnp.full(below.shape, nlev, dtype=jnp.int32)
+    # nmln = MIN(nlb10-1+below, mbkt) + 1 with nlb10 = iref+2, and the lego
+    # interface index is m_base = nmln - 2 (verified convention, #1226).
+    m_base = jnp.clip(jnp.minimum(1 + below, mbkt) - 1, 0, nlev - 2)
+    # hmlp = gdepw(nmln,Kmm) (zdfmxl.F90:104) -- the LIVE w-depth, carrying the
+    # same (1+r3t) stretch.  z_iface[m] = gdepw_0(m+2) and nmln = m_base+2, so
+    # take(z_iface, m_base) is gdepw_0(nmln); the product was verified EXACT
+    # against NEMO's own dumped hmlp on the DINO y5 state (max err 0.0 m,
+    # 9920 wet columns), which is what certifies this index convention.
+    hml = jnp.take(z_iface, m_base) * col_stretch     # (n_lat, n_lon)
     return hml, m_base
 
 
