@@ -3178,13 +3178,20 @@ def _thread_morrison_scalars(config, scheme, micro_config):
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
                 rel_tol=1e-6, abs_tol=0.0):
             _touched[_leaf_name] = float(_val)
-    if not _touched:
+    # Flavor is a string selector, not a float: forward only when it deviates
+    # from the leaf default ("mg"), mirroring the touched-scalar rule so a
+    # default config stays byte-identical on Morrison and silent elsewhere.
+    _flavor = getattr(config, "morrison_flavor", None)
+    if _flavor in (None, "mg"):
+        _flavor = None
+    if not _touched and _flavor is None:
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
     )
     return apply_microphysics_experiment_flags(
-        micro_config, scheme, morrison_scalars=_touched)
+        micro_config, scheme, morrison_scalars=_touched,
+        morrison_flavor=_flavor)
 
 
 def _resolve_microphysics(config):

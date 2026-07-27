@@ -3320,7 +3320,7 @@ class ModelDriver:
             return
         from legoesm.driver.restart import (
             RUN_MANIFEST_FILENAME,
-            compute_config_hash,
+            config_hash_matches,
             dataset_provenance_entry,
             read_run_manifest,
             validate_run_manifest,
@@ -3375,7 +3375,10 @@ class ModelDriver:
                 f"refusing to start a run without valid run-start provenance. "
                 f"Remove or repair it to continue."
             ) from exc
-        if existing["config"]["config_hash"] != compute_config_hash(self._input_config):
+        if not config_hash_matches(
+                existing["config"]["config_hash"],
+                existing["config"].get("resolved_config") or {},
+                self._input_config):
             raise RuntimeError(
                 f"Output directory {self._output_dir} already holds a run "
                 f"manifest written for a DIFFERENT config; refusing to mix two "

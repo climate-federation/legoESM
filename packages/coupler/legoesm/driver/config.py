@@ -1328,6 +1328,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    # Appended at the tuple END to preserve the positional ABI (codex
+    # 2026-07-27 flavor review, Major 1).
+    morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
+                                                # "mg" (E3SM MG, GCM default) |
+                                                # "sam" (gSAM M2005 anvil tune)
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2183,6 +2188,15 @@ class ExperimentConfig(NamedTuple):
                 "morrison_hom_ice_nuc_N override requires "
                 "homogeneous_ice_nucleation=True — the leaf is consumed only "
                 "by the hom-nucleation branch and would be silently inert.")
+        if self.morrison_flavor not in ("mg", "sam"):
+            raise ValueError(
+                f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
+                "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
+        if self.morrison_flavor != "mg" and self.microphysics != "morrison":
+            raise ValueError(
+                f"morrison_flavor={self.morrison_flavor!r} requires "
+                f"microphysics='morrison' (got {self.microphysics!r}); on any "
+                "other scheme the flavor would be silently inert.")
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
         for _f, _lo, _hi in (

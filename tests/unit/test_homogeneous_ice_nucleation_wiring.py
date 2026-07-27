@@ -314,6 +314,32 @@ class TestMorrisonScalarOverlay:
                 ExperimentConfig(microphysics="morrison",
                                  morrison_dep_coeff=bad).validate_strict()
 
+    def test_flavor_sam_reaches_the_leaf(self):
+        got = self._leaf(morrison_flavor="sam")
+        assert got.morrison_flavor == "sam"
+
+    def test_flavor_default_mg_is_byte_identical(self):
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        assert self._leaf(morrison_flavor="mg") == MorrisonConfig()
+
+    def test_flavor_on_non_morrison_raises(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            ExperimentConfig(microphysics="thompson",
+                             morrison_flavor="sam").validate_strict()
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            _resolve_microphysics(ExperimentConfig(
+                microphysics="thompson", morrison_flavor="sam"))
+
+    def test_flavor_membership_validated(self):
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            ExperimentConfig(microphysics="morrison",
+                             morrison_flavor="gcm").validate_strict()
+
     def test_hom_nuc_N_override_requires_the_flag(self):
         """morrison_hom_ice_nuc_N is read only inside the hom-nucleation
         branch — with the flag off the override would be silently inert
