@@ -784,6 +784,25 @@ measured 24->54 run already collected 1.39x. That single number explains
 the cube's efficiency 0.62, the empirical tile floor, and the plateau in
 the figure.
 
+**THE SAME STRUCTURE ON LAT-LON.** Two fixed-device (16 GPU) points —
+LL720 at 64.8k cols/GPU = 4.19 ms and LL1024 at 131k = 5.73 ms — give
+
+    t(tile) = 2.68 ms FIXED + 23.2 us per 1k columns
+
+so the fixed term is 64 % of the step at 64.8k and 47 % at 131k: the same
+fixed-cost-dominated structure as the cube, but roughly **4x smaller in
+absolute terms** (2.68 vs 11.27 ms). That is consistent with lat-lon
+scaling further before plateauing, and it makes the cube's 11.3 ms look
+like a lane-specific overhead rather than something intrinsic to the
+hardware or to SPMD. CAVEAT: these two points come from different jobs
+(26497323, 26498463) — same lane, protocol and day, but not the same-job
+contrast the cube pair enjoyed.
+
+Scale-out receipts on this lane: **LL1536x3072 ran on 64 GPUs at 4.97
+ms** (job 26498266) — the campaign's largest atmospheric SPMD run.
+LL2048x4096 at 64 GPUs is in flight (job 26502539) to complete the
+matched-tile pair with LL1024@16 (both 131k cols/GPU).
+
 WHAT THE FIXED TERM IS: not yet attributed. Candidates are per-step
 kernel-launch overhead (the L60 step issues many small kernels), the
 tiled path's serial halo exchange, and per-step host synchronisation —
