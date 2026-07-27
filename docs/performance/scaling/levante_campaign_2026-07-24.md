@@ -694,6 +694,77 @@ implicit_cn at 600 steps unforced) holds under forcing. That is a science
 review of ONE config field on ONE experiment, not a scheme-stability
 program.
 
+## Scale-out + the plateau question (2026-07-27)
+
+The figure showed plateaus at high device counts on several grids. Codex
+round-14 rejected the obvious "just run bigger ladders" plan — it MAPS a
+plateau without IDENTIFYING it — and prescribed matched pairs instead:
+at fixed device count vary the tile, and at fixed tile vary the device
+count. Only the second contrast can show a genuine comm/N effect.
+
+**CPU-MPI lane, first verdict (job 26495929, ico f64, block:cyclic
+throughout, 4 nodes, single runs).** Aligning both meshes by CELLS PER
+RANK rather than rank count:
+
+| cells/rank | subdiv-7 | subdiv-8 |
+|---|---|---|
+| 10 200 | — | np64 = 960 ms |
+| 5 100 | — | np128 = 526 |
+| **2 600** | **np64 = 165** | **np256 = 356** |
+| 1 300 | np128 = 92 | (np512 pending) |
+| 600 | np256 = 56 | — |
+| 300 | **np512 = 67 (REGRESSES)** | — |
+
+Both meshes still scale at 2 600 cells/rank; subdiv-7 keeps gaining down
+to 600 and only ANTI-SCALES at 300 (56 -> 67 ms). **The turnover tracks
+work per rank, not rank count** — the tile-floor hypothesis, confirmed
+on a lane where the two can be separated. Practical consequence: rank
+counts beyond the campaign's old 64 ceiling keep paying as long as
+resolution rises with them; subdiv-8 reaches 356 ms at 256 ranks, a
+count the campaign never previously tested.
+
+CAVEATS: single runs, no repeats. The np64 point here (165 ms) is FASTER
+than the same configuration measured on 1 node earlier (220.6 ms, job
+26495437) because this job spreads 64 ranks over 4 nodes — the
+node-spreading effect the campaign already documented; ladders are
+internally consistent but the two jobs are not interchangeable.
+The subdiv-8 np512 arm OOM-killed at 128 ranks/node (every rank derives
+the global mesh); rerun spread over 8 nodes as job 26497704.
+
+**GPU CEILING FOUND — the cubed-sphere cannot currently exceed 54 GPUs.**
+The tiled cube path is bit-identity-validated only at kt=2 (24 devices)
+and kt=3 (54) (`sharded_dynamics.py:754`); kt=4 (96) falls back to
+REPLICATING the global state, which is what killed the 96-GPU attempt
+(job 26495955: "byte size of input/output arguments (83247045120)
+exceeds the base limit"), and very likely the f64 cube retry that hit
+the walltime (26495388). This is a VALIDATION limit, not a hardware one,
+and it is the single biggest blocker to atmospheric scale-out: 28 idle
+GPU nodes were available and unusable by that lane. Matched triangle
+resubmitted inside the validated counts (job 26497294): C768@24 (147.5k
+cols/GPU anchor), C768@54 (65.5k), C1152@54 (147.5k — same tile as the
+anchor at 2.25x the devices).
+
+The lat-lon band decomposition has no such ceiling; its matched pair
+runs at 64 GPUs (job 26497323): LL720@16 and LL1440@64 both hold 64.8k
+columns/GPU, with LL720@64 (16.2k) as the sub-floor control.
+
+**Cube tile-floor arm, measured (job 26497294):** C768 L60 from 24 to 54
+GPUs = 19.33 -> 13.93 ms, **1.39x at 2.25x devices, efficiency 0.62** —
+and the tile only falls to 65.5k cols/GPU, still well ABOVE the ~30k
+floor. So unlike the CPU lane, the cube's loss here is NOT explained by
+the tile floor alone; there is real device-count cost to quantify.
+(Note the same-job C768@24 anchor reads 19.33 ms where the campaign's
+figure carries 14.09 ms for C768@24 — different lane/protocol between
+those jobs, so only the within-job 24-vs-54 contrast is used.)
+
+**A SECOND cube ceiling, memory:** the fixed-tile arm C1152 L60 @54
+wanted **105.7 GB per device** (rematerialization stuck at 96.6 GB)
+against 80 GB of A100 HBM — job 26497294. So cube scale-out is bounded
+twice over: validation caps tiles at kt=3 (54 GPUs) and HBM caps
+resolution at that tile count. The fixed-tile comm contrast is
+resubmitted at L30 for BOTH arms (job 26497736), which halves the
+working set while holding 147.5k cols/GPU on each side.
+
 ## Precision + grid-coverage verification (2026-07-27, user request)
 
 **Mixed precision — the production storage mode (f64 state + f32
