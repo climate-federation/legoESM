@@ -1803,9 +1803,11 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 # signature includes cell rows + nlev because L8's edge count
 # (1,966,080, unpadded — padding pads CELLS, e.g. 655,362 -> 655,376 for
 # 16) is divisible several ways and edge rows alone would fire on
-# unmeasured workloads (codex round-12). Grow ONLY with a measured
-# receipt for the exact signature.
-_FUSION_BARRIER_WORKLOADS = frozenset({(4, 1_966_080, 655_376, 26)})
+# unmeasured workloads (codex round-12). The dtype is part of the
+# signature for the same reason — fusion decisions depend on element
+# type, and the receipt is f32-only (f64 unmeasured as of 2026-07-27).
+# Grow ONLY with a measured receipt for the exact signature.
+_FUSION_BARRIER_WORKLOADS = frozenset({(4, 1_966_080, 655_376, 26, "float32")})
 
 _VORONOI_SPMD_STATE_FIELDS = frozenset(
     {"u", "T", "p_s", "phis", "v", "tracers"})
@@ -2373,7 +2375,8 @@ def make_voronoi_sharded_step(
                 # shapes) — no retrace; the barrier is an identity for
                 # numerics and AD.
                 _sig = (n_dev, s.u.data.shape[0],
-                        s.T.data.shape[0], s.T.data.shape[1])
+                        s.T.data.shape[0], s.T.data.shape[1],
+                        str(s.u.data.dtype))
                 if _sig in _FUSION_BARRIER_WORKLOADS:
                     du, dT, dps, dq = jax.lax.optimization_barrier(
                         (du, dT, dps, dq))
