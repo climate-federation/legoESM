@@ -434,3 +434,49 @@ def test_kappa_gm_to_faces_matches_a_literal_fortran_port():
     # non-vacuous: the wrap column must actually use the wrap neighbour.
     assert abs(ku[0, nlon - 1] - 0.5 * (kt[0, nlon - 1] + kt[0, 0]) * um[0, nlon - 1]) < 1e-12
     assert kt[0, 0] != kt[0, nlon - 1]
+
+
+def test_treguier_return_diagnostics_is_consistent_and_nonempty():
+    """The diagnostics path must return the SAME kappa plus the 5 NEMO terms.
+
+    Guards the oracle instrument: if the flag ever forked the computation, the
+    term-by-term comparison would silently measure something other than what
+    the model runs.
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes, compute_treguier_kappa_gm_nemo_native,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig, TreguierConfig,
+    )
+
+    nlat, nlon, nlev = 6, 5, 8
+    dz = np.geomspace(15.0, 300.0, nlev)
+    z = _z_coord(dz, nlat, nlon, np.full((nlat, nlon), nlev - 1))
+    rng = np.random.default_rng(6)
+    T = 8.0 + np.cumsum(rng.uniform(0.05, 0.4, (nlat, nlon, nlev)), axis=-1)[:, :, ::-1]
+    S = np.full((nlat, nlon, nlev), 35.0)
+    mask = jnp.ones((nlat, nlon))
+    u_mask = jnp.ones((nlat, nlon + 1)); v_mask = jnp.ones((nlat + 1, nlon))
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    rho = jnp.asarray(1026.0 + 0.2 * (10.0 - T))
+    cfg = GMRediConfig(slope_n2="nemo_bn2")
+    from legoesm.grids.latlon import create_latlon_grid
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+    slopes = compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, u_mask, v_mask, z, grid,
+        cfg, eos_fn, active_3d=z.is_active)
+    f_cor = jnp.full((nlat, nlon), -1e-4)
+    kw = dict(active_3d=z.is_active)
+    treg = TreguierConfig()
+    k_plain = compute_treguier_kappa_gm_nemo_native(
+        rho, jnp.asarray(T), jnp.asarray(S), slopes[2], slopes[3], mask, z,
+        grid, f_cor, treg, eos_fn, **kw)
+    k_diag, d = compute_treguier_kappa_gm_nemo_native(
+        rho, jnp.asarray(T), jnp.asarray(S), slopes[2], slopes[3], mask, z,
+        grid, f_cor, treg, eos_fn, return_diagnostics=True, **kw)
+    np.testing.assert_array_equal(np.asarray(k_plain), np.asarray(k_diag))
+    assert set(d) == {"zn", "zah", "zhw", "zRo", "zaeiw"}
+    assert all(np.asarray(v).shape == (nlat, nlon) for v in d.values())
+    assert float(jnp.max(d["zn"])) > 0.0, "zn identically zero -- fixture inert"

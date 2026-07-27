@@ -1021,6 +1021,7 @@ def compute_treguier_kappa_gm_nemo_native(
     g: float = constants.g,
     active_3d: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
+    return_diagnostics: bool = False,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1110,7 +1111,14 @@ def compute_treguier_kappa_gm_nemo_native(
     f20 = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
-    return jnp.where(mask > 0.5, kappa, 0.0)
+    kappa = jnp.where(mask > 0.5, kappa, 0.0)
+    if return_diagnostics:
+        # The intermediates, named as in NEMO ldf_eiv (ldftra.F90:664-707), so
+        # an oracle deficit in the final coefficient can be localised to ONE
+        # term against NEMO's own dumped zn/zah/zhw/zRo/zaeiw (#1226).
+        return kappa, {"zn": zn, "zah": zah, "zhw": zhw, "zRo": ro,
+                       "zaeiw": kappa}
+    return kappa
 
 
 def nemo_kappa_gm_to_faces(kappa_t, u_surf_mask, v_surf_mask):
