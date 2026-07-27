@@ -148,3 +148,19 @@ measured a number against this specific NEMO array).
 With these, every routine in the step chain is verified, attributed, or
 explicitly waived — the coverage gate closes. Follow-ups: the _step_impl hook
 for mlf_baro_corr; hu_0/hv_0 in nemo_io for r3u/r3v.
+
+
+## Runtime audit (2026-07-27, gdb rbreak trace of kt=57602 — 217 hits, 49 routines)
+
+Static inventory CONFIRMED: top-level order exact, zero stale waivers (all
+config-off routines runtime-absent), dynldf_lev_lap dispatch confirmed.
+Nested additions found one level below listed parents:
+| routine | parent | disposition |
+|---|---|---|
+| zdf_sh2 | zdf_phy | compared in the Prandtl work (avm-weighted p_sh2, ~4% med vs lego K*shear) |
+| zdf_mxl_turb | zdf_phy | UNVERIFIED (turbocline depth; check consumers) |
+| zdf_drg_nonlin + dyn_drg_init | zdf_phy / dyn_spg_ts | interface-covered by the verified barotropic outputs; not term-isolated |
+| dyn_cor_2d (69x/step) | dyn_spg_ts | interface-covered by verified barotropic outputs |
+mlf_baro_corr/finalize_lbc: inlined at -O3 (no symbol) — algebra-verified only,
+runtime isolation still requires the _step_impl hook.
+Full trace: scratchpad nemo_runtime_call_trace.md (session artifacts).
