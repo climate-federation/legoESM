@@ -133,9 +133,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--fort-dir", default=None)
     ap.add_argument("--control", default=None)
-    ap.add_argument("--ours", required=True)
+    ap.add_argument("--ours", default=None)
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
+    if not args.self_test and args.ours is None:
+        ap.error("--ours is required unless --self-test")
 
     if args.self_test:
         rng = np.random.default_rng(0)
