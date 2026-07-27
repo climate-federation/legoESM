@@ -507,7 +507,8 @@ def ext_scalar_sixface(f6: list, stag: str, ectx: dict):
 # geographic A-lattice halo treatment on the ng=4 lattice
 # ---------------------------------------------------------------------------
 
-def _geo_lattice_exchange(g6: list, ectx: dict):
+def _geo_lattice_exchange(g6: list, ectx: dict, dump=None,
+                          names: tuple = ("S4_ullp1", "S5_ullp1")):
     """Steps 3-4 of the vector flow on the _NG_P1 lattice: neighbour
     exchange, k2e ring remap (rings 1..4), Lagrange corner regions.
 
@@ -527,8 +528,16 @@ def _geo_lattice_exchange(g6: list, ectx: dict):
     for t in range(1, 7):
         exchange_agrid_scalar_halos(g6, t, n, ngp)
     k2e_remap_halo_rings(g6, "A", n, ngp)
+    if dump:
+        st, nm = names[0].split("_")     # post-k2e, pre-corner (cube_rmp)
+        for t in range(6):
+            dump(st, t, nm, g6[t])
     for t in range(6):
         ectx["corner_a4"][t].fill(g6[t])
+    if dump:
+        st, nm = names[1].split("_")     # post corner Lagrange (in-a2d fill)
+        for t in range(6):
+            dump(st, t, nm, g6[t])
 
 
 def _pack_p1(ua: np.ndarray, n: int, ng: int) -> np.ndarray:
@@ -628,23 +637,51 @@ def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
     vertex-attribution A/B).
     """
     n, ng = ectx["n"], ectx["ng"]
+    # optional oracle stage-dump hook: callable(stage, tile0, name, arr)
+    # invoked at the same pipeline points instrumented in the Zenodo
+    # model's ext_vector (fv3_recon ext_vector operand-diff harness);
+    # None (default) = byte-identical production behavior.
+    dump = ectx.get("stage_dump")
     for t in range(1, 7):
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    if dump:
+        for t in range(6):
+            dump("S1", t, "uin", u6[t])
+            dump("S1", t, "vin", v6[t])
     ug6, vg6 = [], []
     for t in range(6):
         ua, va = c2l_ord2_face(u6[t], v6[t], ectx["dx6"][t],
                                ectx["dy6"][t], ectx["amat6"][t],
                                n, ng)
+        if dump:
+            dump("S2", t, "ull", ua)
+            dump("S2", t, "vll", va)
         ug6.append(_pack_p1(ua, n, ng))
         vg6.append(_pack_p1(va, n, ng))
-    _geo_lattice_exchange(ug6, ectx)
-    _geo_lattice_exchange(vg6, ectx)
+    if dump:
+        ngp = _NG_P1
+        for g6, nm in ((ug6, "ullp1"), (vg6, "vllp1")):
+            g6x = [np.array(g, copy=True) for g in g6]
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(g6x, t, n, ngp)
+            for t in range(6):
+                dump("S3", t, nm, g6x[t])
+    _geo_lattice_exchange(ug6, ectx, dump=dump)
+    _geo_lattice_exchange(vg6, ectx, dump=dump,
+                          names=("S4_vllp1", "S5_vllp1"))
     for t in range(6):
         ud4, vd4 = _a2d_project(ug6[t], vg6[t], t, ectx)
+        if dump:
+            dump("S5", t, "up1", ud4)
+            dump("S5", t, "vp1", vd4)
         _write_d_strips(u6[t], v6[t], ud4, vd4, n, ng)
         if ectx.get("vector_corner", "lagrange") == "lagrange":
             ectx["corner_du3"][t].fill(u6[t])
             ectx["corner_dv3"][t].fill(v6[t])
+    if dump:
+        for t in range(6):
+            dump("S6", t, "uin", u6[t])
+            dump("S6", t, "vin", v6[t])
 
 
 def _write_c_strips(uc: np.ndarray, vc: np.ndarray, uc4: np.ndarray,
