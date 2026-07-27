@@ -15,8 +15,9 @@ These tests pin the MPAS-TKE *adapter* contract on a small
     for ``scheme="tke"`` under ``implicit_vertical_mixing=True`` (a); and the
     profiles function returns finite, non-negative, land-masked K profiles;
   * dispatch-hardening — ``catke`` / ``richardson`` on MPAS STILL raise, ``tke``
-    without implicit vmix raises, and the un-plumbed prognostic / adiabatic
-    options raise (b);
+    without implicit vmix raises, and the un-plumbed adiabatic-N² / Veros-slot
+    options raise (b); the PROGNOSTIC carry builds and is exercised in
+    ``TestPrognosticTKECarryOnMPAS``;
   * grid-agnostic-core equivalence — for a single wet column, the MPAS TKE
     profile equals a DIRECT ``tke_vertical_mixing`` call on that column's
     reconstructed inputs (no cross-cell leakage, no lat-lon assumption) (c).
@@ -205,24 +206,35 @@ class TestTKEDispatchHardening:
         with pytest.raises(ValueError, match="implicit_vertical_mixing"):
             make_mpas_ocean_physics(config, implicit_vertical_mixing=False)
 
-    def test_prognostic_tke_rejected_on_mpas(self):
-        """The prognostic carry is not wired on MPAS -> reject loudly."""
+    def test_prognostic_tke_builds_on_mpas(self):
+        """The prognostic carry IS wired on MPAS now — the bridge and the
+        physics factory must both ACCEPT prognostic=True (was a reject until
+        the MPASOceanState.tke carry landed)."""
         cfg = VerticalMixingConfig(
             scheme="tke", tke=TKEConfig(prognostic=True))
-        with pytest.raises(NotImplementedError, match="prognostic"):
-            make_tke_profiles_mpas(cfg)
-
-    def test_prognostic_tke_rejected_by_physics_factory_too(self):
-        """make_mpas_ocean_physics is the FIRST build step a config reaches —
-        it must reject prognostic TKE itself rather than defer the failure to
-        the later profiles build in the model step (codex MED 2026-07-27)."""
+        assert callable(make_tke_profiles_mpas(cfg))
         config = OceanPhysicsConfig(
-            vertical_mixing=VerticalMixingConfig(
-                scheme="tke", tke=TKEConfig(prognostic=True)),
+            vertical_mixing=cfg,
             surface_forcing=SurfaceForcingConfig(scheme="none"),
         )
-        with pytest.raises(NotImplementedError, match="prognostic"):
-            make_mpas_ocean_physics(config, implicit_vertical_mixing=True)
+        assert callable(
+            make_mpas_ocean_physics(config, implicit_vertical_mixing=True))
+
+    def test_prognostic_without_dt_raises(self, mesh, z_coord, state):
+        """Mode A needs the model dt — calling profiles_fn without dt_tke
+        must fail loud (never silently fall back to the diagnostic dt)."""
+        pf = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke", tke=TKEConfig(prognostic=True)))
+        with pytest.raises(ValueError, match="dt_tke"):
+            pf(state, mesh, z_coord, _wind_forcing(state))
+
+    def test_prognostic_bottom_tke_bc_rejected_on_mpas(self):
+        """The Veros T15 bottom Dirichlet row is not threaded on this bridge
+        -> reject rather than silently ignore."""
+        cfg = VerticalMixingConfig(
+            scheme="tke", tke=TKEConfig(prognostic=True, bottom_tke_bc=True))
+        with pytest.raises(NotImplementedError, match="bottom_tke_bc"):
+            make_tke_profiles_mpas(cfg)
 
     def test_adiabatic_n2_rejected_on_mpas(self):
         cfg = VerticalMixingConfig(
@@ -309,11 +321,10 @@ class TestNemoSurfaceTermsOnMPAS:
         from legoesm.ocean.physics.vertical_mixing.config import (
             VerticalMixingConfig,
         )
-        # prognostic=False: the ORCA1 card defaults to the prognostic carry
-        # (#1326), which MPAS rejects until MPASOceanState.tke lands — these
-        # adapter tests pin the DIAGNOSTIC Mode-B path MPAS actually runs
-        # (the rejection itself is pinned by
-        # test_prognostic_tke_rejected_on_mpas).
+        # prognostic=False: these adapter tests pin the DIAGNOSTIC Mode-B
+        # path (stateless per-call closure — no carry threading needed); the
+        # prognostic Mode-A carry has its own suite
+        # (TestPrognosticTKECarryOnMPAS).
         return VerticalMixingConfig(
             scheme="tke",
             tke=orca1_zdftke_config(prognostic=False)._replace(**over))
@@ -458,3 +469,251 @@ class TestNemoSurfaceTermsOnMPAS:
         # open interfaces above the ridge still mix.
         assert bool(jnp.any(below[ocean]))
         assert float(jnp.sum(K_v[ocean])) > 0.0
+
+
+class TestPrognosticTKECarryOnMPAS:
+    """Mode-A (NEMO prognostic en) on the Voronoi bridge: the 3-tuple
+    contract, carry evolution, dead-cell masking, and the model-step
+    seed/carry cycle (pytree-stable scan carry)."""
+
+    def _card(self, **over):
+        from scripts.run.run_omip_core2 import orca1_zdftke_config
+        return VerticalMixingConfig(
+            scheme="tke", tke=orca1_zdftke_config()._replace(**over))
+
+    def _forcing(self, state, ice=0.0, tau_x_pa=0.15):
+        n = state.T.data.shape[0]
+        return OceanSurfaceForcing(
+            tau_x=jnp.full((n,), tau_x_pa), tau_y=jnp.zeros((n,)),
+            ice_concentration=jnp.full((n,), ice))
+
+    def test_carry_evolves_and_feeds_back(self, mesh, z_coord, state):
+        """One Mode-A call must ADVANCE the seed (wind injects TKE), and a
+        second call from tke_new must differ from the first (the carry feeds
+        back) — the discriminator against a silently-diagnostic path."""
+        assert self._card().tke.prognostic is True  # the #1326 card default
+        pf = make_tke_profiles_mpas(self._card())
+        f = self._forcing(state)
+        A1, K1, tke1 = pf(state, mesh, z_coord, f, dt_tke=150.0)
+        assert tke1.shape == (state.T.data.shape[0],
+                              state.T.data.shape[1] - 1)
+        assert bool(jnp.all(jnp.isfinite(tke1))) and bool(jnp.all(tke1 >= 0))
+        bg = self._card().tke.tke_background
+        ocean = state.land_mask.data >= 0.5
+        assert float(jnp.max(jnp.abs(tke1[ocean] - bg))) > 0.0
+        from legoesm.core.field import Field
+        st2 = state._replace(tke=Field(
+            data=tke1, name="tke", dims=("nCells", "level"),
+            units="m^2/s^2"))
+        A2, K2, tke2 = pf(st2, mesh, z_coord, f, dt_tke=150.0)
+        assert not bool(jnp.allclose(tke2, tke1))
+
+    def test_carry_masked_on_land(self, mesh, z_coord, state):
+        pf = make_tke_profiles_mpas(self._card())
+        _, _, tke1 = pf(state, mesh, z_coord, self._forcing(state),
+                        dt_tke=150.0)
+        land = state.land_mask.data < 0.5
+        if bool(jnp.any(land)):
+            assert bool(jnp.all(tke1[land] == 0.0))
+
+    def test_model_seed_and_step_carry(self, mesh, z_coord):
+        """MPASOceanModel.seed_tke seeds background-on-wet once (idempotent),
+        and step() advances the carry with an UNCHANGED pytree structure —
+        the lax.scan stability contract."""
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0)
+        config = MPASOceanConfig(
+            physics=OceanPhysicsConfig(
+                vertical_mixing=self._card(),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+            ),
+            implicit_vertical_mixing=True,
+        )
+        model = MPASOceanModel(mesh, z_coord, config)
+        assert st.tke is None
+        st = model.seed_tke(st)
+        assert st.tke is not None
+        bg = self._card().tke.tke_background
+        wet = st.land_mask.data >= 0.5
+        assert bool(jnp.all(st.tke.data[wet] == bg))
+        assert bool(jnp.all(st.tke.data[~wet] == 0.0))
+        st_again = model.seed_tke(st)
+        assert st_again.tke is st.tke  # idempotent no-op when seeded
+        st1 = model.step(st, 150.0, surface_forcing=self._forcing(st))
+        assert st1.tke is not None
+        assert jax.tree_util.tree_structure(st1) == (
+            jax.tree_util.tree_structure(st))
+        st2 = model.step(st1, 150.0, surface_forcing=self._forcing(st1))
+        assert not bool(jnp.allclose(st2.tke.data, st1.tke.data))
+
+    def test_step_without_seed_raises(self, mesh, z_coord):
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0)
+        config = MPASOceanConfig(
+            physics=OceanPhysicsConfig(
+                vertical_mixing=self._card(),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+            ),
+            implicit_vertical_mixing=True,
+        )
+        model = MPASOceanModel(mesh, z_coord, config)
+        with pytest.raises(ValueError, match="seed_tke"):
+            model.step(st, 150.0, surface_forcing=self._forcing(st))
+
+    def test_diagnostic_mode_unchanged_two_tuple(self, mesh, z_coord, state):
+        """prognostic=False keeps the two-tuple diagnostic contract and needs
+        no dt (regression: the Mode-A plumbing must not disturb Mode-B)."""
+        pf = make_tke_profiles_mpas(self._card(prognostic=False))
+        out = pf(state, mesh, z_coord, self._forcing(state))
+        assert len(out) == 2
+
+
+class TestPrognosticCarryHardening:
+    """codex 2026-07-27 round-2: forced-land masking, partial-cell tke_new,
+    lax.scan pytree/dtype stability, and the restore paths that must
+    reconstruct the carry as a Field."""
+
+    def _card(self):
+        from scripts.run.run_omip_core2 import orca1_zdftke_config
+        return VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config())
+
+    def _forcing(self, n, dtype, ice=0.0):
+        return OceanSurfaceForcing(
+            tau_x=jnp.full((n,), 0.15, dtype=dtype),
+            tau_y=jnp.zeros((n,), dtype=dtype),
+            ice_concentration=jnp.full((n,), ice, dtype=dtype))
+
+    def test_carry_land_masking_forced_land(self, mesh, z_coord):
+        """land_lat_threshold=60 GUARANTEES land cells on the level-1 mesh
+        (polar vertices sit at +-90) — the 85-degree fixture could be
+        all-ocean, making the land assert vacuous (codex MED)."""
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=60.0)
+        land = st.land_mask.data < 0.5
+        assert bool(jnp.any(land)), "fixture must contain land"
+        pf = make_tke_profiles_mpas(self._card())
+        n = st.T.data.shape[0]
+        _, _, tke1 = pf(st, mesh, z_coord,
+                        self._forcing(n, st.T.data.dtype), dt_tke=150.0)
+        assert bool(jnp.all(tke1[land] == 0.0))
+        assert float(jnp.sum(tke1[~land])) > 0.0
+
+    def test_carry_partial_cell_subseafloor_zeroed(self, mesh, z_coord):
+        """Prognostic tke_new at interfaces below bottom_level must be
+        EXACTLY zero (the diagnostic partial-cell test does not cover the
+        Mode-A return; codex MED)."""
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        n = mesh.latCell.shape[0]
+        H = jnp.where(jnp.arange(n) % 2 == 0, 4000.0, 1500.0)
+        pc = create_partial_cell_coordinate(z_coord, H)
+        st = rest_state_mpas_ocean(
+            mesh, pc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0, bathymetry=H)
+        pf = make_tke_profiles_mpas(self._card())
+        _, _, tke1 = pf(st, mesh, pc,
+                        self._forcing(n, st.T.data.dtype), dt_tke=150.0)
+        k_idx = jnp.arange(tke1.shape[1])[None, :]
+        below = k_idx >= jnp.asarray(pc.bottom_level)[:, None]
+        ocean = st.land_mask.data >= 0.5
+        assert bool(jnp.any(below[ocean]))
+        assert bool(jnp.all(tke1[ocean][below[ocean]] == 0.0))
+
+    def test_scan_carry_stable_treedef_dtype_shape(self, mesh, z_coord):
+        """The production host loop is step-per-day, but the carry contract
+        is lax.scan-grade: run the step INSIDE lax.scan for 3 steps under
+        the PRODUCTION (uniform-f64) policy and assert the carry keeps an
+        identical treedef and identical leaf dtypes/shapes.  A SPLIT
+        f32-storage/f64-compute policy is a pre-existing model-wide scan
+        incompatibility (cast_pytree's storage cast does not downcast, so
+        u/T/S/eta ALL return f64 — nothing tke-specific); the tke pin under
+        that policy is covered by test_split_policy_tke_dtype_pinned."""
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0)
+        config = MPASOceanConfig(
+            physics=OceanPhysicsConfig(
+                vertical_mixing=self._card(),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+            ),
+            implicit_vertical_mixing=True,
+        )
+        model = MPASOceanModel(mesh, z_coord, config)
+        st = model.seed_tke(st)
+        sf = self._forcing(st.T.data.shape[0], st.T.data.dtype)
+
+        def body(carry, _):
+            return model._step_impl(carry, 150.0, surface_forcing=sf), None
+
+        out, _ = jax.lax.scan(body, st, None, length=3)
+        assert jax.tree_util.tree_structure(out) == (
+            jax.tree_util.tree_structure(st))
+        for a, b in zip(jax.tree_util.tree_leaves(st),
+                        jax.tree_util.tree_leaves(out)):
+            assert a.dtype == b.dtype and a.shape == b.shape
+        assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+
+    def test_split_policy_tke_dtype_pinned(self, mesh, z_coord):
+        """Under f32-storage/f64-compute, ONE step must return the tke carry
+        in the SEED dtype (the pre-compute-cast pin — codex r3 RED: pinning
+        to the post-cast dtype froze the carry at f64).  Single step only:
+        the split policy is scan-incompatible model-wide (u/T/S/eta return
+        f64 from the no-downcast storage cast — pre-existing, not carry-
+        specific), so the pin is asserted directly on the step output."""
+        import jax.numpy as _jnp
+        from legoesm.core.precision import (
+            PrecisionPolicy, get_policy, set_policy,
+        )
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        _orig = get_policy()
+        set_policy(PrecisionPolicy(
+            storage=_jnp.float32, compute=_jnp.float64,
+            accumulate=_jnp.float64, control=_jnp.float64))
+        try:
+            st = rest_state_mpas_ocean(
+                mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
+                S_uniform=35.0, H_max=4000.0, land_lat_threshold=85.0)
+            config = MPASOceanConfig(
+                physics=OceanPhysicsConfig(
+                    vertical_mixing=self._card(),
+                    surface_forcing=SurfaceForcingConfig(scheme="none"),
+                ),
+                implicit_vertical_mixing=True,
+            )
+            model = MPASOceanModel(mesh, z_coord, config)
+            st = model.seed_tke(st)
+            seed_dtype = st.tke.data.dtype
+            sf = self._forcing(st.T.data.shape[0], st.T.data.dtype)
+            out = model._step_impl(st, 150.0, surface_forcing=sf)
+            assert out.tke.data.dtype == seed_dtype
+        finally:
+            set_policy(_orig)
+
+    def test_restart_npz_reconstructs_none_carry_as_field(
+            self, mesh, z_coord, state, tmp_path):
+        """load_restart on a template with tke=None must reconstruct the
+        saved carry as a Field, not drop it (codex MED — a dropped carry
+        re-spins turbulence from background on restart)."""
+        import numpy as np
+        from legoesm.core.field import Field
+        from legoesm.ocean.restart import load_restart
+        n, nlev = state.T.data.shape
+        tke_arr = jnp.full((n, nlev - 1), 2.5e-4, dtype=state.T.data.dtype)
+        seeded = state._replace(tke=Field(
+            data=tke_arr, name="tke", dims=("nCells", "level"),
+            units="m^2/s^2"))
+        p = tmp_path / "restart.npz"
+        np.savez(p, **{f: np.asarray(getattr(seeded, f).data)
+                       for f in ("u", "T", "S", "eta", "tke")})
+        restored = load_restart(p, state)  # template carry is None
+        assert restored.tke is not None
+        assert bool(jnp.allclose(restored.tke.data, tke_arr))

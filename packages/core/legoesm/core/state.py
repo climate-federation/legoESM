@@ -594,6 +594,15 @@ class MPASOceanState(NamedTuple):
     H_bathy: Field
     land_mask: Field
     rho_ref_z: Field | None = None
+    # Prognostic TKE [m^2/s^2] at the interior interfaces, Field
+    # (nCells, nlev-1) — carried across model steps when the prognostic
+    # TKE vertical-mixing closure is active (vertical_mixing.tke.prognostic
+    # =True), mirroring LatLonCGridOceanState.tke: each step runs ONE
+    # backward-Euler TKE solve seeded from this field and stores the update
+    # back.  Default None -> inert (the diagnostic quasi-steady Mode-B
+    # chain): zero behaviour change for every existing MPAS run/restart.
+    # APPENDED LAST so positional/tuple consumers keep their field order.
+    tke: Field | None = None
 
 
 class MPASOceanTendencies(NamedTuple):
