@@ -5,11 +5,14 @@
 > "we need corr of 1, these minor differences will leak in as problems that we have
 > been trying to chase down for very long now"
 
-**1.0, not "close".** Today's evidence for why: N² is off by 54% at the top of the
-chain, yet κ_GM reads 0.985 (column integrals average the error out) and the
-slopes read 0.959 (N² sits in a denominator dominated by the slope cap). Three
-layers of plausible-looking agreement hiding a factor-1.5 error in the input.
-A term that "looks fine" downstream proves nothing about its inputs.
+**1.0, not "close".** NOTE the original motivating example here ("N² off by 54%")
+was RETRACTED — it was an index off-by-one in the comparison, not physics. The
+bar still stands, but on better evidence: the slopes really WERE biased by a
+wrong N² (parcel-displacement instead of NEMO's rn2b), and because that error
+grows with PRESSURE it was invisible in shallow water and reached 1.5% at depth.
+A term that "looks fine" downstream proves nothing about its inputs — and a
+metric that looks fine can hide the input error entirely (see the METRIC LESSON
+below, where a signed sum manufactured a 9% gap that did not exist).
 
 ## Why a loop NOW (and not before)
 
@@ -93,10 +96,11 @@ was corr 1.000000) and "hmlp 14% too deep" (unvalidated depth lookup).
 
 **NEXT (item 3 → 1.0)**: lego divides N² by the REFERENCE `e3w`; NEMO uses the
 LIVE `e3w(jk,Kmm) = e3w_0*(1+r3t)` (`domzgr_substitute.h90:131`). That is the
-3.0e-5 ratio deficit (ssh/H ~ 1e-4). It CANCELS in the MLD but NOT in the
-slopes, so fix it before item 5. `col_stretch` in
-`_nemo_mld_from_n2_integral` already shows how to recover `1+r3t` from
-`z_coord.h_partial` without threading eta through signatures.
+3.0e-5 ratio deficit (ssh/H ~ 1e-4).
+**CORRECTION**: `z_coord.h_partial` is NOT a route to `1+r3t` — it is the STATIC
+at-rest thickness (`vertical.py:42`) and measures identically 1.0x on every DINO
+column. `eta` must actually be threaded. See the unified root-cause section at
+the end of this file.
 
 Eliminated for the residual 14 columns (do NOT re-chase): `mbkt` (0 disagreements
 globally), `nlb10` (=2 on both sides), the level/index convention (validated).
