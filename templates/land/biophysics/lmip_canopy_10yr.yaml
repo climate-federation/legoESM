@@ -39,6 +39,18 @@ physics:
   # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
   # land cells over 10 yr).  Bit-identical to sensible-only heat when disabled.
   enable_freeze_thaw: true
+  # Surface-albedo parameter set.  "amip_multilayer" adopts the 2026-07 ERA5
+  # recalibration that `clm_multilayer_setup` injects for the coupled multilayer
+  # land: brighter fresh/aged snow, the Niu-Yang half-cover scale (15.4 vs the
+  # uncalibrated 50 kg/m2 — the uncalibrated value leaves a 20 kg/m2 seasonal
+  # pack only ~38% covered where the calibrated one gives ~86%), faster snow-age
+  # decay, stronger dry-soil brightening, and a brighter ice-sheet base.  The
+  # LMIP path builds params from the RAW PFT/biome tables, so it never saw this.
+  # Set to "default" to reproduce a pre-2026-07-27 baseline byte-for-byte.
+  # NOTE: this calibration was tuned under SimpleSEB (amip_sota's land surface
+  # scheme), not the two-leaf canopy; the albedo terms are scheme-independent
+  # but the pairing has not been re-validated at LMIP scale.
+  albedo_calibration: amip_multilayer
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)

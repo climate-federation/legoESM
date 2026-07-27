@@ -11,6 +11,7 @@ An experiment is fully described by a YAML file with this schema::
       surface_scheme: two_leaf_canopy | simple_seb
       bulk_scheme: most | constant
       enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
+      albedo_calibration: default | amip_multilayer   # surface-albedo parameter set
 
     forcing:
       source: cru_jra | synthetic
@@ -56,6 +57,14 @@ _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
 _STOMATA_MODELS = ("ball_berry", "medlyn")
 _SNOW_SCHEMES = ("single", "multilayer")
+# Surface-albedo parameter set.  "default" = the uncalibrated LandAlbedoConfig /
+# GLACIER_ALB_* module defaults (bit-identical to every pre-2026-07-27 LMIP run).
+# "amip_multilayer" = the 2026-07 AMIP recalibration that ``clm_multilayer_setup``
+# injects for the coupled multilayer land (snow bright/aged albedo, Niu-Yang
+# half-cover scale, snow-age decay, dry-soil brightening, ice-sheet base albedo),
+# tuned against ERA5.  The LMIP path builds its params from the raw PFT/biome
+# tables and so never saw this calibration.
+_ALBEDO_CALIBRATIONS = ("default", "amip_multilayer")
 _FORCING_SOURCES = ("cru_jra", "synthetic")
 
 _DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
@@ -137,6 +146,13 @@ def validate_config(data: dict) -> LMIPConfig:
     if physics["snow_scheme"] not in _SNOW_SCHEMES:
         raise ValueError(
             f"physics.snow_scheme={physics['snow_scheme']!r} not in {_SNOW_SCHEMES}")
+    # Surface-albedo calibration set (see _ALBEDO_CALIBRATIONS).  Defaults to
+    # "default" so an existing config reproduces its baseline byte-for-byte.
+    physics.setdefault("albedo_calibration", "default")
+    if physics["albedo_calibration"] not in _ALBEDO_CALIBRATIONS:
+        raise ValueError(
+            f"physics.albedo_calibration={physics['albedo_calibration']!r} "
+            f"not in {_ALBEDO_CALIBRATIONS}")
     if physics["snow_scheme"] == "multilayer" and physics["surface_scheme"] != "two_leaf_canopy":
         raise ValueError(
             "physics.snow_scheme='multilayer' requires surface_scheme='two_leaf_canopy' "

@@ -206,3 +206,27 @@ def test_apply_overrides_creates_new_key():
     base = _minimal()
     merged = apply_overrides(base, ["restart.from=/tmp/prev.npz"])
     assert merged["restart"]["from"] == "/tmp/prev.npz"
+
+
+# --------------------------------------------------------------------------
+# Surface-albedo calibration selector
+# --------------------------------------------------------------------------
+def test_albedo_calibration_defaults_to_uncalibrated():
+    """Default must stay 'default' so an EXISTING config reproduces its
+    baseline byte-for-byte — adopting the AMIP recalibration is opt-in."""
+    assert validate_config(_minimal()).physics["albedo_calibration"] == "default"
+
+
+def test_albedo_calibration_accepts_amip_multilayer():
+    cfg_in = _minimal()
+    cfg_in["physics"]["albedo_calibration"] = "amip_multilayer"
+    assert validate_config(cfg_in).physics["albedo_calibration"] == "amip_multilayer"
+
+
+def test_albedo_calibration_rejects_unknown():
+    """Dispatch hardening: a typo must raise, never silently pick a default —
+    it would run DIFFERENT surface physics than the config declares."""
+    bad = _minimal()
+    bad["physics"]["albedo_calibration"] = "amip"          # plausible typo
+    with pytest.raises(ValueError, match="albedo_calibration"):
+        validate_config(bad)

@@ -46,6 +46,15 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
+from legoesm.surface_albedo import LandAlbedoConfig
+from legoesm.land.clm_surface_map import (
+    TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+    TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+    TUNED_SNOW_DCRIT_MULTILAYER,
+    TUNED_SNOW_TAU_DAYS_MULTILAYER,
+    TUNED_SOIL_DRY_BOOST_MULTILAYER,
+)
+from legoesm.land.boundary_data import GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
@@ -134,6 +143,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
         snow_scheme=cfg.physics.get("snow_scheme", "single"),
+        albedo_calibration=cfg.physics.get("albedo_calibration", "default"),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -383,6 +393,29 @@ def run(args) -> int:
     if args.g1 is not None:
         _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
     stomata = StomataConfig(**_stom)
+
+    # --- Surface-albedo calibration ------------------------------------------
+    # "default" leaves LandAlbedoConfig() / GLACIER_ALB_* untouched (bit-identical
+    # to every pre-existing LMIP run).  "amip_multilayer" adopts the 2026-07 ERA5
+    # recalibration that ``clm_multilayer_setup`` injects for the coupled
+    # multilayer land — the LMIP path builds params from the RAW PFT/biome tables
+    # and so never saw it.  Values are imported, never re-typed, so the two paths
+    # cannot drift apart.
+    _glacier_alb = None
+    _land_albedo = LandAlbedoConfig()
+    if args.albedo_calibration == "amip_multilayer":
+        _land_albedo = _land_albedo._replace(
+            alpha_snow_max=TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+            alpha_snow_min=TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+            snow_depth_crit=TUNED_SNOW_DCRIT_MULTILAYER,
+            tau_snow_decay=TUNED_SNOW_TAU_DAYS_MULTILAYER * _SEC_PER_DAY,
+            soil_dry_albedo_boost=TUNED_SOIL_DRY_BOOST_MULTILAYER)
+        _glacier_alb = (GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED)
+    elif args.albedo_calibration != "default":
+        raise ValueError(
+            f"unknown albedo_calibration {args.albedo_calibration!r} "
+            "(expected 'default' or 'amip_multilayer')")
+
     if args.land_mode == "multilayer":
         # NOTE: the soil-layer count is set by the surfdata loader's remap grid
         # (init_land_surface_data -> gsd), so the model SoilGrid must match it;
@@ -393,6 +426,7 @@ def run(args) -> int:
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
             snow_scheme=args.snow_scheme,
             stomata=stomata,
+            land_albedo=_land_albedo,
             # Soil-water latent zero-curtain: off is bit-identical sensible-only
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
@@ -412,7 +446,7 @@ def run(args) -> int:
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
-        args.surfdata, grid, base_cfg, args.start_doy)
+        args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
     # Year range: --year-end defaults to --year (single-year, backward-compat).
@@ -540,7 +574,8 @@ def run(args) -> int:
             state = init_multilayer_land_state(ncol, config, T_init=288.0)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
-    update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
+    update_land_params = make_step_land_params_updater(
+        gsd, config.surface_scheme, glacier_alb=_glacier_alb)
 
     # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
     if getattr(args, "_cfg_output_tapes", None) is not None:

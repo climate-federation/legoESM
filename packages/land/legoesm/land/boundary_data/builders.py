@@ -332,7 +332,8 @@ def prescribed_canopy_structure(gsd, day_of_year, year=None):
             _wcol(gsd.htop_monthly))
 
 
-def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *, year=None):
+def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
+                                year=None, glacier_alb=None):
     """Dispatch to the right per-column land-params object for ``surface_scheme``.
 
     ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams` (built directly — land/dev
@@ -344,12 +345,26 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *, 
     as ``hbot_frac * htop`` inside the CLM-ML interface).  ``SimpleSEBConfig``
     (slab or multilayer) -> :class:`LandSurfaceParams` (albedo/PFT params only;
     it does not read the canopy-structure fields).
+
+    ``glacier_alb`` is an optional ``(vis, nir)`` ice-surface albedo pair that
+    overrides the uncalibrated :data:`GLACIER_ALB_VIS`/:data:`GLACIER_ALB_NIR`
+    default — pass :data:`GLACIER_ALB_VIS_TUNED`/:data:`GLACIER_ALB_NIR_TUNED`
+    for the AMIP-calibrated ice-sheet base.  ``None`` keeps the default (the
+    call is then bit-identical to the pre-override behaviour).
     """
     from legoesm.land.canopy import CanopyConfig
     from legoesm.land.canopy.config import CLMMLCanopyConfig
     if isinstance(surface_scheme, CanopyConfig):
-        return build_canopy_params(gsd, day_of_year, theta_top, year=year)
-    lp = surface_data_param_provider(gsd, day_of_year, theta_top, year=year)()
+        _gk = {} if glacier_alb is None else {
+            "glacier_alb_vis": float(glacier_alb[0]),
+            "glacier_alb_nir": float(glacier_alb[1])}
+        return build_canopy_params(gsd, day_of_year, theta_top, year=year, **_gk)
+    # SEB / CLM-ML path: the provider takes a single BROADBAND ice albedo, which
+    # is the 0.5/0.5 vis-NIR integral the canopy pair collapses to (see
+    # GLACIER_ALBEDO_DEFAULT == 0.5*(GLACIER_ALB_VIS + GLACIER_ALB_NIR)).
+    _bk = {} if glacier_alb is None else {
+        "glacier_albedo": 0.5 * (float(glacier_alb[0]) + float(glacier_alb[1]))}
+    lp = surface_data_param_provider(gsd, day_of_year, theta_top, year=year, **_bk)()
     if isinstance(surface_scheme, CLMMLCanopyConfig):
         lai, sai, htop = prescribed_canopy_structure(gsd, day_of_year, year)
         lp = lp._replace(LAI=lai, SAI=sai, htop=htop)
@@ -357,7 +372,7 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *, 
 
 
 def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
-                           theta_top=None, year=None):
+                           theta_top=None, year=None, glacier_alb=None):
     """Load the surfdata, regrid to ``grid``, and adapt to ``land_config``'s scheme.
 
     The single entry a driver calls at simulation start.  Returns
@@ -370,6 +385,13 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
     slice for the returned ``land_params`` (None -> the legacy year-mean); the
     returned ``gsd`` still carries the full ``pft_frac``/``years`` series so a
     driver can rebuild params at other years.
+    ``glacier_alb`` is an optional ``(vis, nir)`` ice-albedo override forwarded
+    to :func:`surface_data_to_land_params`; ``None`` = the uncalibrated default.
+
+    NOTE: a driver that also builds a PER-STEP params updater
+    (:func:`~legoesm.land.boundary_data.make_step_land_params_updater`) must pass
+    the SAME ``glacier_alb`` there — the updater rebuilds ``CanopyLandParams``
+    every step, so an override applied only here would be discarded after step 0.
     """
     from legoesm.land.config import MultiLayerLandConfig
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
@@ -385,5 +407,6 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
             hydraulics=build_soil_hydraulics(gsd, base=land_config.hydraulics))
 
     land_params = surface_data_to_land_params(
-        gsd, land_config.surface_scheme, day_of_year, theta_top, year=year)
+        gsd, land_config.surface_scheme, day_of_year, theta_top, year=year,
+        glacier_alb=glacier_alb)
     return land_config, land_params, gsd
