@@ -249,6 +249,12 @@ def test_slope_n2_dispatch_is_hardened_and_card_opts_in():
         "nemo_dino_kamm_mlf").gm_redi_slope_n2 == "nemo_bn2"
     assert dino_config_for_recipe(
         "legoesm_default").gm_redi_slope_n2 == "adiabatic"
+    # NEMO per-face kappa averaging (ldftra.F90:716-718): oracle card opts in,
+    # legacy default stays bit-identical.
+    assert dino_config_for_recipe(
+        "nemo_dino_kamm_mlf").gm_bolus_kappa_face_average is True
+    assert dino_config_for_recipe(
+        "legoesm_default").gm_bolus_kappa_face_average is False
 
     from legoesm.ocean.experiments.dino import (
         dino_lat_lon_grid, dino_lat_lon_model_config,

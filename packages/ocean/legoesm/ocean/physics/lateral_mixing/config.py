@@ -253,6 +253,13 @@ class GMRediConfig(NamedTuple):
     # velocity). Tracer advection only (never momentum/continuity/eta). Only read
     # by slope_scheme="nemo_iso_lap"; the lat-lon C-grid model honors it.
     gm_bolus_advection: str = "centred"
+    # NEMO ldf_eiv averages kappa onto EACH face before building the bolus
+    # streamfunction (ldftra.F90:716-718): zaeiu = 0.5*(zaeiw(i)+zaeiw(i+1)).
+    # False (default, bit-identical legacy) reuses the cell-centred kappa for
+    # both faces -- exact only for a CONSTANT kappa; the Treguier kappa is
+    # spatially 2-D, leaving a half-cell offset (#1226: eiv-transport rel err
+    # median 3.4% -> 0.16% with the NEMO averaging).  Oracle cards set True.
+    gm_bolus_kappa_face_average: bool = False
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # NEMO ln_traldf_msc (Method of Stabilizing Correction): when True the
     # nemo_iso_lap operator adds the akz-stabilized EXPLICIT K33 vertical

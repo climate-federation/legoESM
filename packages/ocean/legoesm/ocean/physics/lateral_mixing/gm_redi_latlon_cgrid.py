@@ -684,15 +684,22 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
     m = mask[:, :, None]                                  # (n_lat, n_lon, 1)
     # C-grid face masks from the T-mask: a face is wet iff both bracketing
     # cells are wet (NEMO umask/vmask = product of adjacent tmask).
-    wE = mask * jnp.pad(mask, ((0, 0), (0, 1)))[:, 1:]    # wet(i,j) & wet(i,j+1)
-    wW = mask * jnp.pad(mask, ((0, 0), (1, 0)))[:, :-1]   # wet(i,j) & wet(i,j-1)
+    # Lon neighbours are PERIODIC (roll), matching NEMO's lbc_lnk-filled halo
+    # (ldfslp.F90:319) and every other lon stencil in this module; zero-filling
+    # treated the seam as a wall (#1226 seam-column slope deficit).  Lat stays
+    # zero-filled: closed in j.
+    wE = mask * jnp.roll(mask, -1, axis=1)                # wet(i,j) & wet(i,j+1)
+    wW = mask * jnp.roll(mask, +1, axis=1)                # wet(i,j) & wet(i,j-1)
     wN = mask * jnp.pad(mask, ((0, 1), (0, 0)))[1:, :]    # wet(i,j) & wet(i+1,j)
     wS = mask * jnp.pad(mask, ((1, 0), (0, 0)))[:-1, :]   # wet(i,j) & wet(i-1,j)
     zcofw = (m / 16.0) * (wE + wW)[:, :, None] * (wN + wS)[:, :, None] * 0.25  # coeff-ok: 16 = (1+2+1)^2 binomial weight sum (NEMO ldfslp z1_16)
 
     w = (1.0, 2.0, 1.0)                                   # 1-D binomial kernel
     def smooth(f):
-        fp = jnp.pad(f * m, ((1, 1), (1, 1), (0, 0)))    # masked, zero ghost
+        # Periodic lon ghost, zero lat ghost -- same seam fix as _shap above.
+        fm = f * m                                        # masked
+        fp = jnp.pad(fm, ((0, 0), (1, 1), (0, 0)), mode="wrap")
+        fp = jnp.pad(fp, ((1, 1), (0, 0), (0, 0)))        # zero lat ghost
         acc = jnp.zeros_like(f)
         for a in range(3):
             for b in range(3):
@@ -981,7 +988,16 @@ def compute_nemo_native_slopes(
 
     # --- Shapiro 1/16 + coastal decrease, native mask factors ---
     def _shap(f, cof):
-        fp = jnp.pad(f, ((1, 1), (1, 1), (0, 0)))
+        # Lon (axis 1) ghost cells are PERIODIC: NEMO's zwz/zww working arrays
+        # carry an lbc_lnk-filled halo (ldfslp.F90:319; DINO ldIperio=.TRUE.),
+        # so the i-edge columns see their true wrap neighbours.  Zero-filling
+        # here treated the seam as a closed wall and deflated the two seam
+        # columns' slopes to ~0.75x (squaring to the 0.55 zah deficit, #1226)
+        # -- while every other stencil in this function already wraps via
+        # jnp.roll.  Lat (axis 0) stays zero-filled: the channel is closed in
+        # j on both sides, matching NEMO's masked halo there.
+        fp = jnp.pad(f, ((0, 0), (1, 1), (0, 0)), mode="wrap")
+        fp = jnp.pad(fp, ((1, 1), (0, 0), (0, 0)))
         w = (1.0, 2.0, 1.0)
         acc = jnp.zeros_like(f)
         for a in range(3):
@@ -3275,6 +3291,10 @@ def gm_redi_tracer_tendency_latlon(
         # monotone FCT limiter (NEMO traadv).  Validated on the static config here
         # (fn entry) so an unknown value fails loudly even when kappa_GM=0.
         _gm_bolus = getattr(cfg, "gm_bolus_advection", "centred")
+        # NEMO face-averages kappa onto U/V before building psi
+        # (ldftra.F90:716-718).  Selected by the oracle card; default False
+        # keeps legacy runs bit-identical.
+        _gm_kfa = getattr(cfg, "gm_bolus_kappa_face_average", False)
         if _gm_bolus not in ("centred", "through_fct"):
             raise ValueError(
                 "GMRediConfig.gm_bolus_advection must be 'centred' or "
@@ -3321,6 +3341,7 @@ def gm_redi_tracer_tendency_latlon(
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+                gm_bolus_kappa_face_average=_gm_kfa,
                 return_bolus=return_bolus_transport)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
@@ -3330,7 +3351,8 @@ def gm_redi_tracer_tendency_latlon(
                 S, S_x, S_y, mask, u_mask, v_mask,
                 z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_nat, msc_stabilize=_msc, dt=dt,
-                kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus)
+                kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+                gm_bolus_kappa_face_average=_gm_kfa)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             return dT_dt, dS_dt
@@ -3352,6 +3374,7 @@ def gm_redi_tracer_tendency_latlon(
             T, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
             kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+                gm_bolus_kappa_face_average=_gm_kfa,
             return_bolus=return_bolus_transport,
         )
         if return_bolus_transport:
@@ -3362,6 +3385,7 @@ def gm_redi_tracer_tendency_latlon(
             S, -S_x, -S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
             kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
+                gm_bolus_kappa_face_average=_gm_kfa,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus

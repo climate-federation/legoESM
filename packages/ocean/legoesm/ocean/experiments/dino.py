@@ -496,6 +496,10 @@ class DINOConfig:
     # mass flux so it passes through the monotone FCT limiter). The nemo_dino_kamm
     # card selects "through_fct"; only read with slope_scheme="nemo_iso_lap".
     gm_bolus_advection: str = "centred"
+    # NEMO ldftra.F90:716-718 per-face kappa averaging for the bolus psi.
+    # See GMRediConfig.gm_bolus_kappa_face_average; the kamm card sets True
+    # (eiv-transport rel err median 3.4% -> 0.16% vs NEMO's dumped transport).
+    gm_bolus_kappa_face_average: bool = False
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -1005,6 +1009,7 @@ DINO_RECIPES: dict[str, dict] = {
         # ldfslp consumes rn2b, not a parcel-displacement N^2 (eosbn2.F90:1455).
         # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
         "gm_redi_slope_n2": "nemo_bn2",
+        "gm_bolus_kappa_face_average": True,
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -2528,6 +2533,7 @@ def dino_lat_lon_model_config(
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
             gm_bolus_advection=cfg.gm_bolus_advection,
+            gm_bolus_kappa_face_average=cfg.gm_bolus_kappa_face_average,
             slope_density="neutral",
             slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
@@ -2577,6 +2583,7 @@ def dino_lat_lon_model_config(
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
             gm_bolus_advection=cfg.gm_bolus_advection,
+            gm_bolus_kappa_face_average=cfg.gm_bolus_kappa_face_average,
             mld_criterion=cfg.gm_redi_mld_criterion,
             slope_n2=cfg.gm_redi_slope_n2,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
