@@ -300,7 +300,7 @@ def main():
     blk_counter = [0]
 
     def _maybe_dump_state(states, b):
-        if (args.dump_state_out and b <= 200
+        if (args.dump_state_out and b <= 400
                 and (b <= 14 or b % 18 == 0)):
             for t in range(6):
                 for k in ("u", "v", "delp", "pt"):
