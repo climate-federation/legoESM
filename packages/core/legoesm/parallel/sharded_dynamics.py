@@ -1807,7 +1807,14 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 # signature for the same reason — fusion decisions depend on element
 # type, and the receipt is f32-only (f64 unmeasured as of 2026-07-27).
 # Grow ONLY with a measured receipt for the exact signature.
-_FUSION_BARRIER_WORKLOADS = frozenset({(4, 1_966_080, 655_376, 26, "float32")})
+# PROVISIONAL f64 np8 entry under test (job 26493638: f64 np4 is HEALTHY
+# at eff 0.95 while np8 ANTI-scales 20.10 -> 21.42 — the candidate
+# pathological shape shifts one rung with the doubled element size).
+# Receipt job decides whether this entry stays.
+_FUSION_BARRIER_WORKLOADS = frozenset({
+    (4, 1_966_080, 655_376, 26, "float32"),
+    (8, 1_966_080, 655_376, 26, "float64"),
+})
 
 _VORONOI_SPMD_STATE_FIELDS = frozenset(
     {"u", "T", "p_s", "phis", "v", "tracers"})
