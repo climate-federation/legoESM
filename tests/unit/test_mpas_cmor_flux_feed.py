@@ -1060,7 +1060,7 @@ class TestDriftingCadenceHonesty:
         import inspect
         from legoesm.driver.model_driver import ModelDriver
         src = inspect.getsource(ModelDriver._run_mpas)
-        assert "_rem = DIAG_INTERVAL - (start_step % DIAG_INTERVAL)" in src
+        assert "_rem = DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL)" in src
         # arithmetic: on-boundary start_step -> a full interval, never 0
         for start_step, interval in ((0, 8), (8, 8), (16, 8), (3, 8)):
             rem = interval - (start_step % interval)
@@ -1070,3 +1070,41 @@ class TestDriftingCadenceHonesty:
         dc, _ = _make_collector(mesh)
         dc.cmip_snapshot_phase_frac = 1.0 - 1e-7      # 8.6 ms before midnight
         assert dc._snapshot_phase_text() == "00 UTC"
+
+    @staticmethod
+    def _phase_frac(diag_days, start_day, start_step, interval, dt):
+        """Mirror of the driver's phase derivation (both branches)."""
+        diag_phase = start_step if diag_days > 0 else 0
+        rem = interval - (diag_phase % interval)
+        return (start_day + rem * dt / 86400.0) % 1.0
+
+    def test_sentinel_phase_matches_actual_sample_day(self):
+        """Codex-12: the sentinel's trigger is job-LOCAL, so its single
+        sample lands a full local interval after the restart — the phase
+        must say so, not derive from start_step.
+
+        2-day link, dt=6 h (interval=8), start_step=10, START_DAY=2.5:
+        the sample is at day 4.5 = 12:00 UTC.
+        """
+        dt, interval, start_day, start_step = 21600.0, 8, 2.5, 10
+        frac = self._phase_frac(0.0, start_day, start_step, interval, dt)
+        assert abs(frac - 0.5) < 1e-12, "sentinel sample is at 12:00 UTC"
+        # The pre-fix derivation (start_step-based) claimed 00 UTC.
+        stale = (start_day
+                 + (interval - (start_step % interval)) * dt / 86400.0) % 1.0
+        assert abs(stale - 0.0) < 1e-12
+
+    def test_periodic_phase_still_absolute(self):
+        """The periodic path keeps its absolute phase (DIAG_PHASE =
+        start_step): same 2-day/6-h layout, first sample at day 4.0."""
+        dt, interval, start_day, start_step = 21600.0, 8, 2.5, 10
+        frac = self._phase_frac(2.0, start_day, start_step, interval, dt)
+        assert abs(frac - 0.0) < 1e-12
+
+    def test_phase_text_of_sentinel_case(self, mesh):
+        dc, _ = _make_collector(mesh)
+        dc.cmip_snapshot_vars = {"tas"}
+        dc.cmip_snapshot_cadence_days = 2.0
+        dc.cmip_snapshot_phase_frac = self._phase_frac(
+            0.0, 2.5, 10, 8, 21600.0)
+        assert "12:00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]

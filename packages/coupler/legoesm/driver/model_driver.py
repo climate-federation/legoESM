@@ -6441,7 +6441,14 @@ class ModelDriver:
             # --restart-start-day moves it off 00 UTC — derive, never assert
             # (codex-10/11).
             if DIAG_INTERVAL > 0:
-                _rem = DIAG_INTERVAL - (start_step % DIAG_INTERVAL)
+                # Key the phase off DIAG_PHASE — the SAME variable the
+                # trigger uses — so the two can never disagree: the periodic
+                # path is absolute-phased (DIAG_PHASE = start_step), the
+                # sentinel is job-local (DIAG_PHASE = 0, one sample a full
+                # local interval after the restart).  Deriving from
+                # start_step unconditionally mis-stated the sentinel's phase
+                # on an off-boundary restart (codex-12).
+                _rem = DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL)
                 _first = START_DAY + _rem * DT / 86400.0
                 _diag.cmip_snapshot_phase_frac = float(_first) % 1.0
 
