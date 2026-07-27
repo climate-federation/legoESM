@@ -8,16 +8,15 @@
 #SBATCH --mem=96G
 #SBATCH --time=16:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas12_tke_%j.out
-# MPAS12 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
-# NEMO ORCA1 &namzdf_tke card — nn_mxl=3 + ln_mxl0 anchor, nemo_dirichlet
-# surface BC, lc, etau nn_etau=1 w/ nn_htau=1 latitude profile, eice=3 card
-# default; MPAS pins the DIAGNOSTIC Mode-B until the prognostic carry lands —
-# through the SAME grid-agnostic kernel the tripole runs).  Controlled A/B:
-# EVERYTHING identical to mpas9/mpas10 except the closure, so the day-30
-# Arctic delta is the TKE-vs-KPP scheme effect on MPAS.  The 2x2
-# (trp5/trp6/mpas10) put the scheme half at +0.78 Siberian / +36-50 m Arctic
-# MLD — mpas12-vs-tripole is the SAME-CARD cross-grid TKE pair (grid effect
-# only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
+# MPAS14 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
+# FULL post-#1326 NEMO ORCA1 &namzdf_tke card — PROGNOSTIC Mode-A en carry
+# (MPASOceanState.tke, seeded via model.seed_tke), nn_mxl=3 + ln_mxl0 anchor,
+# nemo_dirichlet surface BC, lc, etau nn_etau=1 w/ nn_htau=1 latitude
+# profile, eice=3 — through the SAME grid-agnostic kernel the tripole runs).
+# Controlled A/B: EVERYTHING identical to mpas9/mpas10 except the closure, so
+# the day-30 Arctic delta is the TKE-vs-KPP scheme effect on MPAS; and
+# mpas14-vs-trpsbc_ndir_mxl3_prog is the SAME-CARD cross-grid TKE pair (grid
+# effect only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
 set +e
 # Runs from the MAIN repo checkout (codex HIGH: this job previously ran the
 # vfs-tke-fix worktree, so a post-merge submission would validate stale code).
