@@ -16,6 +16,7 @@ from legoesm.land.canopy.config import (
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
 )
+from legoesm.land.clm_surface_map import TUNED_GLACIER_ALBEDO_MULTILAYER
 
 
 # Zone index into the 3-element biome lists: [boreal, temperate, tropical].
@@ -44,6 +45,21 @@ ALB_NIR_BARE = 0.3         # bare fallback NIR albedo [-]
 GLACIER_ALB_VIS = 0.70
 GLACIER_ALB_NIR = 0.50
 GLACIER_ALBEDO_DEFAULT = 0.6   # broadband for the SEB / slab path
+
+# --- AMIP-calibrated glacier albedo (2026-07 recalibration) ---
+# ``clm_multilayer_setup`` raises the snow-free ice-sheet base to
+# ``TUNED_GLACIER_ALBEDO_MULTILAYER`` (broadband) against ERA5, which the
+# uncalibrated pair above under-states (0.60).  The canopy two-stream consumes a
+# (visible, NIR) PAIR, and the broadband it integrates to is 0.5*(vis + NIR) —
+# PAR (0.48) and UV (0.02) ride the visible band, NIR is 0.50
+# (``radiative_transfer._PAR/_UV/_NIR_FRACTION``).  ``GLACIER_ALBEDO_DEFAULT``
+# = 0.5*(0.70 + 0.50) = 0.60 confirms that weighting in the existing constants.
+# So centre the calibrated pair on the tuned broadband while preserving the
+# vis-NIR contrast of the uncalibrated pair (ice is brighter in the visible).
+GLACIER_ALB_CONTRAST = GLACIER_ALB_VIS - GLACIER_ALB_NIR
+GLACIER_ALB_VIS_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER + 0.5 * GLACIER_ALB_CONTRAST
+GLACIER_ALB_NIR_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER - 0.5 * GLACIER_ALB_CONTRAST
+GLACIER_ALBEDO_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER   # broadband, SEB / slab path
 
 # --- Soil-texture fallback where HWSD has no soil (sandy default) ---
 FALLBACK_SAND_PCT = 92.0
