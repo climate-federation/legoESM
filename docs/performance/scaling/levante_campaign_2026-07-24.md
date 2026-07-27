@@ -720,18 +720,24 @@ entries have same-day receipts.
 
 **Grid coverage — first receipts for the two unmeasured ocean grids**
 (job 26493648, nd1/2/4, both precisions):
-- **Tripole (synthetic ORCA fold)**: f32 35.56/24.91/15.89 ms, f64
-  63.84/43.36/24.12 — within 2-8 % of the regular lat-lon ladder, BUT
-  that baseline is from a DIFFERENT job/day, so "fold is not a
-  bottleneck" is CONFOUNDED until the same-job matched A/B lands (job
-  26493837, submitted on codex round-13's objection).
-- **MPAS-ocean Voronoi (subdiv 6, L20)**: FLAT (f32 7.00/6.92/6.58; f64
-  ~7.0 throughout) at ~10k cells/GPU — CONSISTENT with the tile-size
-  latency floor, but a flat ladder alone cannot exclude a partition or
-  parallel-path defect (codex round-13): "hypothesis, not verdict". The
-  discriminating subdiv-7 ladder (~41k cells/GPU at nd4, above the
-  floor) is in job 26493837 — if it scales, floor confirmed; if it stays
-  flat, defect hunt.
+- **Tripole (synthetic ORCA fold): fold cost measured SAME-JOB (job
+  26493837, codex round-13's demanded protocol): +3.7 % / +1.2 % /
+  +1.2 % at nd1/2/4 vs the matched regular grid** (35.52/25.03/15.91 vs
+  34.25/24.73/15.73 f32) — the fold's cost SHRINKS with device count,
+  and "the fold is not a scaling bottleneck at these counts" is now
+  licensed by a controlled comparison. (Cross-day numbers from
+  26493648 retained above for the f64 points only.)
+- **MPAS-ocean Voronoi: RETRACTION — my "ladders" (subdiv 6 AND the
+  subdiv-7 discriminator, jobs 26493648/26493837) were INVALID.** The
+  bench's own metadata says it: `n_ranks: 1, cells_per_rank_achieved:
+  163842` — every arm ran ONE rank on the FULL mesh, because this bench
+  decomposes by MPI RANK (its docstring states the SPMD multi-device
+  path does not exist by design) and my CUDA_VISIBLE_DEVICES invocation
+  never created ranks. The flat curves were the SAME single-device run
+  repeated, not a latency floor and not a defect — codex round-13's
+  "hypothesis, not verdict" was righter than it knew. What survives:
+  single-device timings (s6 ~7 ms f32/f64, s7 ~21.9 ms f32). The REAL
+  lane (CPU-MPI, np1-16, s6+s7, block:cyclic) is job 26494036.
 - Remaining coverage gap, flagged not measured: atmosphere SPECTRAL has
   no scaling receipts on any transport (global-transform lane, x64 by
   policy).
