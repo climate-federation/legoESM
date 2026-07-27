@@ -839,10 +839,31 @@ with DEVICE COUNT at constant tile, 1.06x for 2.25x devices): both
 statements are true because the comm cost is set by the tile geometry,
 not by how many devices exist.
 
-CAVEAT: under nsys the step inflates 19.33 -> 49.95 ms (2.6x) and
-collectives serialize, so the 66 % SHARE is indicative only. The robust
-result is the SCALING (1.78x measured vs 1.50x perimeter vs 2.25x area),
-which is a ratio between two runs under identical profiling conditions.
+**LANE-MISMATCH CORRECTION (found while reading the kernel names).**
+That profile omitted `--closed-loop`, so it characterised the SINGLE-SHOT
+adapter lane (49.95 ms at C768), whereas the 11.27 ms fixed-cost model
+was fitted to CLOSED-LOOP runs (19.33 ms). I had attributed the 2.6x gap
+to nsys overhead; most of it is the lane difference. Consequences:
+* the perimeter ratio (1.78x for 2.25x area) is a within-lane ratio and
+  remains valid FOR THE SINGLE-SHOT LANE;
+* whether it explains the CLOSED-LOOP fixed term is NOT yet established.
+A matching closed-loop profile is running (job 26507936).
+
+WHAT THE KERNEL NAMES SHOW (single-shot lane, both tiles, 24 GPUs):
+
+| kernel | C768 | C512 | per step |
+|---|---|---|---|
+| `ncclDevKernel_SendRecv` (halo) | 311.8 ms / 1440 | 186.7 / 1116 | ~120 launches |
+| `AllReduce_Sum_f32_RING_LL` | 186.9 ms / **12** | 94.0 / **12** | **exactly 1** |
+
+The per-step all-reduce averages **15.6 ms at C768** and the psum it
+implements is SCALAR (`tiled_production_cdgrid.py` reshapes to `(1,)`).
+A scalar all-reduce over 24 GPUs is tens of microseconds of traffic, so
+~15 ms is not data movement — it is a GLOBAL BARRIER absorbing the rank
+skew accumulated during the step. It scales 1.99x with 2.25x tile area,
+consistent with skew growing with per-tile compute. NOTE this lane runs
+with the conservation fixer OFF, so the reduction is NOT the mass fixer;
+its origin still needs identifying in the closed-loop profile.
 
 CONSEQUENCE FOR REACHING THE LIMIT: the lever is halo-cost-per-tile, not
 device count. Options in order of expected value: (a) larger tiles
