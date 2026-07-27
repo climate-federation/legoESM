@@ -42,7 +42,16 @@ Waiving becomes a deliberate act that leaves a reason in the diff. See
 `scripts/validate/ocean_fidelity/dino_1226/nemo_geometry_gate.py` for a working
 example (45 arrays, 0 unaccounted).
 
-Apply this to the mesh, the restart, AND the namelist.
+Apply this to the mesh, the restart, the namelist, **AND the oracle's STEP CALL
+GRAPH**. Enumerate every `CALL` in the oracle's step routine (descending one
+level through dispatch wrappers to the concrete routine the config runs) and
+force a disposition per routine: VERIFIED (number + where), WAIVED (reason), or
+UNVERIFIED (listed loudly, ranked by climate leverage). A term list built from
+"terms we had reason to suspect" is a checklist, not coverage — the #1226 sweep
+verified 11 suspected terms to ~1.0 while the barotropic solver and momentum
+advection pieces sat unenumerated, and "verified in an earlier phase" served as
+an implicit, unwritten waiver. Prior-phase verification does NOT carry over a
+raised bar: re-certify or waive explicitly, in writing.
 
 ## Rule 2 — Know what each gate CANNOT see
 
