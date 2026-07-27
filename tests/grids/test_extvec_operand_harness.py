@@ -215,13 +215,16 @@ def test_twin_detects_seeded_corner_violation(twinmod, tmp_path):
                         for i in range(fa.shape[0]):
                             f.write(f"{ilo + i:8d}{jlo + j:8d}"
                                     f"{fa[i, j]:26.17E}\n")
+    ours["dt_atmos"] = np.array(1200.0)
+    ours["n_split"] = np.array(7)
     np.savez(tmp_path / "ours.npz", **ours)
     import contextlib
     import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = twinmod.main(["--fort-dir", str(tmp_path),
-                           "--ours", str(tmp_path / "ours.npz")])
+                           "--ours", str(tmp_path / "ours.npz"),
+                           "--expect-blocks", "0-1"])
     out = buf.getvalue()
     assert rc == 0
     # the seeded 7.0 corner-band hit at block 1 / tile 3 / (2,2) must
