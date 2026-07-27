@@ -294,3 +294,66 @@ def test_slope_n2_selector_changes_the_n2_that_reaches_the_slopes():
         _nemo_wpoint_e3w_wmask_n2(rho, jnp.asarray(T), jnp.asarray(S), z,
                                   eos_fn, 1026.0, 9.80665, act,
                                   slope_n2="typo")
+
+
+def test_nemo_bn2_requires_the_s_eos():
+    """`nemo_bn2` is S-EOS-specific; pairing it with another EOS must RAISE.
+
+    Otherwise the slopes are built from S-EOS alpha/beta derivatives while the
+    rest of the tendency uses a different density -- silently inconsistent.
+    """
+    import dataclasses
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe, dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+    bad = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
+                              eos="wright")
+    assert bad.gm_redi_slope_n2 == "nemo_bn2"      # the pairing under test
+    grid = dino_lat_lon_grid(bad, n_lon=8)
+    with pytest.raises(ValueError, match="requires eos='nemo_seos'"):
+        dino_lat_lon_model_config(grid, bad)
+
+
+def test_nemo_bn2_matches_an_independent_numpy_transcription():
+    """Ground truth, not just 'differs from the other branch'.
+
+    A pure-NumPy port of eosbn2.F90's bn2_t, written from the Fortran rather
+    than from the implementation under test.  This is what catches a swapped
+    zrw weight, which a 'the two options differ' assertion cannot.
+    """
+    from legoesm.ocean.eos import (
+        compute_buoyancy_frequency_nemo_bn2, nemo_seos_alpha_beta,
+        NemoSEOSConfig,
+    )
+    nlev = 10
+    dz = np.geomspace(12.0, 250.0, nlev)          # non-uniform => zrw != 1/2
+    gdept = np.cumsum(dz) - 0.5 * dz
+    gdepw = np.cumsum(dz)[:-1]                    # interior w-interfaces
+    rng = np.random.default_rng(5)
+    T = 10.0 + np.cumsum(rng.uniform(0.05, 0.5, (3, 2, nlev)), axis=-1)[:, :, ::-1]
+    S = 35.0 + rng.uniform(-0.2, 0.2, (3, 2, nlev))
+    grav = 9.80665
+
+    got = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        jnp.asarray(T), jnp.asarray(S), jnp.asarray(gdept),
+        jnp.asarray(gdepw), NemoSEOSConfig(), g=grav))
+
+    # --- independent port of eosbn2.F90:1459-1466 ---
+    a, b = nemo_seos_alpha_beta(jnp.asarray(T), jnp.asarray(S),
+                                jnp.broadcast_to(jnp.asarray(gdept), T.shape),
+                                NemoSEOSConfig())
+    a = np.asarray(a); b = np.asarray(b)
+    want = np.empty_like(got)
+    for m in range(nlev - 1):
+        ku, kl = m, m + 1                  # upper (jk-1) and lower (jk) T-cells
+        zrw = (gdepw[m] - gdept[kl]) / (gdept[ku] - gdept[kl])
+        zaw = a[..., kl] * (1.0 - zrw) + a[..., ku] * zrw
+        zbw = b[..., kl] * (1.0 - zrw) + b[..., ku] * zrw
+        e3w = gdept[kl] - gdept[ku]
+        want[..., m] = grav * (zaw * (T[..., ku] - T[..., kl])
+                               - zbw * (S[..., ku] - S[..., kl])) / e3w
+    # zrw must be genuinely off-centre or this proves nothing about the weight.
+    zrws = [(gdepw[m] - gdept[m + 1]) / (gdept[m] - gdept[m + 1])
+            for m in range(nlev - 1)]
+    assert max(abs(z - 0.5) for z in zrws) > 0.02, "ladder too uniform to test zrw"
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=0)

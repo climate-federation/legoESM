@@ -35,6 +35,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm import constants
+from legoesm.ocean.constants_config import (
+    NEMO_CONSTANTS_CONFIG as _NEMO_CONSTANTS,
+)
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
     shortwave_penetration_tendency,
@@ -86,6 +90,13 @@ class DINOConfig:
     # ------------------------------------------------------------------
     rho_0: float = 1026.0          # Boussinesq reference density [kg/m³]
     c_p: float = 3991.86           # Specific heat capacity [J/(kg·K)]
+    # Gravitational acceleration [m/s²].  Defaults to legoESM's canonical Earth
+    # value; the NEMO oracle cards pin NEMO's STANDARD gravity via
+    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:38).  The two
+    # differ by 5.0e-5 relative, which enters EVERY buoyancy term -- on the DINO
+    # y5 twin that single constant WAS the entire remaining N^2 residual against
+    # NEMO's own dumped rn2b (median rel err 4.95e-05 -> 6.96e-06, #1226).
+    g: float = constants.g
 
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
@@ -994,6 +1005,10 @@ DINO_RECIPES: dict[str, dict] = {
         # ldfslp consumes rn2b, not a parcel-displacement N^2 (eosbn2.F90:1455).
         # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
         "gm_redi_slope_n2": "nemo_bn2",
+        # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
+        # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
+        # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
+        "g": _NEMO_CONSTANTS.g,
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -2464,6 +2479,16 @@ def dino_lat_lon_model_config(
         raise ValueError(
             "unknown DINOConfig.gm_redi_slope_n2 "
             f"{cfg.gm_redi_slope_n2!r}; expected 'adiabatic' or 'nemo_bn2'")
+    if cfg.gm_redi_slope_n2 == "nemo_bn2" and cfg.eos != "nemo_seos":
+        # nemo_bn2 is written in terms of the S-EOS alpha/beta POLYNOMIAL, so
+        # pairing it with another EOS would build the slopes from derivative
+        # coefficients that do not match the density field the rest of the
+        # tendency uses -- a silent physics mismatch, not a small error.
+        raise ValueError(
+            "DINOConfig.gm_redi_slope_n2='nemo_bn2' requires eos='nemo_seos' "
+            f"(got eos={cfg.eos!r}): the NEMO bn2 uses the S-EOS alpha/beta "
+            "polynomial, so any other EOS would give slopes inconsistent with "
+            "the model's own density.")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -2668,6 +2693,7 @@ def dino_lat_lon_model_config(
 
     model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
+        g=cfg.g,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
