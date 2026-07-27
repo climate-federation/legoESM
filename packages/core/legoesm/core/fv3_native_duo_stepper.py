@@ -477,7 +477,8 @@ SW_CFG_CASE8 = {
 
 
 def acoustic_step_sixface(ctx: dict, states: list, dt: float,
-                          sw_cfg: dict | None = None) -> list:
+                          sw_cfg: dict | None = None,
+                          entry_ascalar: bool = True) -> list:
     """SB3: ONE full duo acoustic step on all six faces —
     c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
     -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
@@ -537,8 +538,8 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
             ext_vector_dgrid_sixface,
         )
 
-        if _ENTRY_ASCALAR_OFF:
-            pass          # probe: upstream gates this on it==1
+        if _ENTRY_ASCALAR_OFF or not entry_ascalar:
+            pass          # upstream gates the entry exchange on it==1
         elif "ascalar" in ctx.get("ext_exclude", ()):
             for t in range(1, 7):
                 exchange_agrid_scalar_halos(delp6, t, n, ng)
@@ -733,7 +734,8 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
                                d_ext: float = 0.02,
-                               sw_cfg: dict | None = None) -> list:
+                               sw_cfg: dict | None = None,
+                               entry_ascalar: bool = True) -> list:
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
@@ -753,7 +755,8 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     bd = ctx["bd"]
     npx = n + 1
 
-    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg)
+    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg,
+                                  entry_ascalar=entry_ascalar)
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
@@ -805,6 +808,29 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]
+
+
+def advance_duo_outer_step(ctx: dict, states: list, dt_atmos: float,
+                           n_split: int, d_ext: float = 0.02,
+                           sw_cfg: dict | None = None) -> list:
+    """One dt_atmos block = ``n_split`` acoustic steps at
+    dt = dt_atmos/n_split with the UPSTREAM exchange schedule: the
+    entry A-scalar ext_scalar(delp, pt) fires only on the FIRST inner
+    step of the block (dyn_core.F90:432-439 gates it on ``it == 1``),
+    while the D-vector entry (:468-472), the post-PG B/C exchanges
+    (:651-655) and the tail A-scalar refresh (:1335-1337) fire every
+    inner step.  Per 1200 s at n_split=7 this is the oracle's 8
+    A-scalar applications per field (1 entry + 7 tail); the flat
+    back-to-back stepper (entry every step) applies 14.
+    """
+    if n_split < 1:
+        raise ValueError(f"n_split must be >= 1, got {n_split}")
+    dt = dt_atmos / n_split
+    for it in range(n_split):
+        states = full_acoustic_step_sixface(ctx, states, dt,
+                                            d_ext=d_ext, sw_cfg=sw_cfg,
+                                            entry_ascalar=(it == 0))
+    return states
 
 
 def w2_six_face_state(ctx: dict, alpha: float = 0.0,

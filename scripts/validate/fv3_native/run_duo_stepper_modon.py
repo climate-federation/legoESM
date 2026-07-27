@@ -21,15 +21,44 @@ Usage: run_duo_stepper_modon.py --n 24 --dt 400 --days 60 --out m.npz
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 
 import numpy as np
 
 
+def _git_sha() -> str:
+    """Worktree HEAD sha (+ '-dirty') for artifact provenance."""
+    try:
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[3]
+        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                             capture_output=True, text=True,
+                             check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status",
+                                "--porcelain"], capture_output=True,
+                               text=True, check=True).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=24)
-    ap.add_argument("--dt", type=float, default=400.0)
+    ap.add_argument("--dt", type=float, default=None,
+                    help="flat inner acoustic step [s] (legacy cadence: "
+                         "entry A-scalar exchange every step). Mutually "
+                         "exclusive with --dt-atmos.")
+    ap.add_argument("--dt-atmos", type=float, default=None,
+                    help="outer dt_atmos block [s]; runs n_split inner "
+                         "steps of dt_atmos/n_split with the upstream "
+                         "exchange schedule (entry A-scalar only on the "
+                         "first inner step, dyn_core.F90:432-439). "
+                         "Zenodo C48 case-8: --dt-atmos 1200 --n-split 7.")
+    ap.add_argument("--n-split", type=int, default=7,
+                    help="inner acoustic steps per dt_atmos block "
+                         "(only with --dt-atmos)")
     ap.add_argument("--days", type=float, default=60.0)
     ap.add_argument("--frame-days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
@@ -84,6 +113,11 @@ def main():
                          "W2-tuned defaults (damp_v=0.2, dddmp=0.2, "
                          "d_ext=0.02, hord=6)")
     args = ap.parse_args()
+    if (args.dt is None) == (args.dt_atmos is None):
+        ap.error("exactly one of --dt (flat legacy cadence) or "
+                 "--dt-atmos [--n-split] (upstream schedule) is required")
+    if args.dt_atmos is not None and args.n_split < 1:
+        ap.error(f"--n-split must be >= 1, got {args.n_split}")
 
     from pathlib import Path
     here = Path(__file__).resolve()
@@ -100,6 +134,7 @@ def main():
     from legoesm import constants
     from legoesm.core.fv3_native_duo_stepper import (
         SW_CFG_CASE8,
+        advance_duo_outer_step,
         build_six_face_duo_context,
         full_acoustic_step_sixface,
     )
@@ -218,7 +253,27 @@ def main():
         av = np.concatenate([v.ravel() for v in v6])
         return au[nmap], av[nmap]
 
-    steps_per_frame = int(round(args.frame_days * 86400.0 / args.dt))
+    if args.dt_atmos is not None:
+        # upstream cadence: n_split inner steps per dt_atmos block,
+        # entry A-scalar only on the first inner step of each block
+        blocks_f = args.frame_days * 86400.0 / args.dt_atmos
+        steps_per_frame = int(round(blocks_f))
+        if abs(steps_per_frame - blocks_f) > 1e-9:
+            ap.error("frame-days*86400 must be an integer multiple of "
+                     f"dt-atmos (got {blocks_f} blocks/frame)")
+        dt_inner = args.dt_atmos / args.n_split
+
+        def step_frame_unit(states):
+            return advance_duo_outer_step(ctx, states, args.dt_atmos,
+                                          args.n_split, d_ext=d_ext,
+                                          sw_cfg=sw_cfg)
+    else:
+        steps_per_frame = int(round(args.frame_days * 86400.0 / args.dt))
+        dt_inner = args.dt
+
+        def step_frame_unit(states):
+            return full_acoustic_step_sixface(ctx, states, args.dt,
+                                              d_ext=d_ext, sw_cfg=sw_cfg)
     n_frames = int(round(args.days / args.frame_days))
 
     times = [0.0]
@@ -235,9 +290,7 @@ def main():
     w0 = float(np.max(np.hypot(u0f, v0f)))
     for fr in range(1, n_frames + 1):
         for _ in range(steps_per_frame):
-            states = full_acoustic_step_sixface(ctx, states, args.dt,
-                                                d_ext=d_ext,
-                                                sw_cfg=sw_cfg)
+            states = step_frame_unit(states)
         day = fr * args.frame_days
         if args.dump_lattice_days and any(
                 abs(day - float(x)) < 1e-9
@@ -278,8 +331,13 @@ def main():
         single_vortex=np.array(args.single_vortex or ""),
         nord_effective=np.array(nord_effective),
         d_ext_effective=np.array(d_ext),
+        d4_bg_effective=np.array(repr(d4_bg_effective)),
         diag_env=np.array(repr(diag_env)),
-        dt=args.dt, n=args.n,
+        dt=dt_inner, n=args.n,
+        dt_atmos=np.array(-1.0 if args.dt_atmos is None
+                          else args.dt_atmos),
+        n_split=np.array(0 if args.dt_atmos is None else args.n_split),
+        git_sha=np.array(_git_sha()),
         protocol="six-face duo stepper, " + ic_desc + " "
                  "(tests.test_cases.colliding_modons formulas, certified "
                  "edge-midpoint D projection), omega=0; c2l_ord2 lens + "
