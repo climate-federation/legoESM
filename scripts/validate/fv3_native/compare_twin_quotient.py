@@ -135,6 +135,9 @@ def main(argv=None):
     ap.add_argument("--control", default=None)
     ap.add_argument("--ours", default=None)
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--max-block", type=int, default=None,
+                    help="restrict to blocks <= this (e.g. compare a "
+                         "d2 ours npz against a d5 oracle dump dir)")
     args = ap.parse_args(argv)
     if not args.self_test and args.ours is None:
         ap.error("--ours is required unless --self-test")
@@ -164,6 +167,8 @@ def main(argv=None):
                 fort[(int(m.group(1)), m.group(2),
                       int(m.group(3)))] = read_fort(p)
         blocks = sorted({b for (b, _, _) in fort})
+        if args.max_block is not None:
+            blocks = [b for b in blocks if b <= args.max_block]
 
         def fort_get(b, k, t):
             return fort.get((b, k, t))
