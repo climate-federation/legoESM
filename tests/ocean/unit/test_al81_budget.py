@@ -651,39 +651,17 @@ def test_een_e3f_scheme_nemo_avg_matches_loop_port_ground_truth():
     h_T_2d = land_mask * H_flat  # (n_lat, n_lon); zero on the land cell
 
     h_T = jnp.asarray(h_T_2d[:, :, None])
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    # Call the SAME helper production uses (``_een_e3f_h_vtx``, factored out
+    # of ``_bc_pv_flux``) directly — no formula re-derived in the test.  This
+    # is what makes the comparison below non-vacuous: a mutation of the
+    # helper's divisor guard (#1226 adversarial-review finding) now shows up
+    # here, since the test reads the actual production output, not a copy.
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _een_e3f_h_vtx
     zeros = jnp.zeros((n_lat, n_lon + 1, 1))
-    zeros_v = jnp.zeros((n_lat + 1, n_lon, 1))
-    ones_mask_u = jnp.ones_like(zeros)
-    ones_mask_v = jnp.ones_like(zeros_v)
-    du_dt, dv_dt, _, _ = _bc_pv_flux(
-        zeros, zeros_v, zeros, zeros_v,
-        ones_mask_u, ones_mask_v, h_T,
-        ones_mask_u, ones_mask_v,
-        None, create_latlon_grid(n_lat, n_lon), "vector_invariant",
-        vertex_mask=jnp.ones((n_lat + 1, n_lon + 1)),
-        een_e3f_scheme="nemo_avg",
+    h_vtx, _, _ = _een_e3f_h_vtx(
+        h_T, zeros, zeros, create_latlon_grid(n_lat, n_lon), "nemo_avg",
     )
-    # Rest state (u=v=0) gives F_u = F_v = 0, so du_dt/dv_dt alone can't
-    # recover h_vtx.  Recompute h_vtx from the SAME production building
-    # blocks _bc_pv_flux uses (pad_with_pole_bc_lat_multi), calling that
-    # shared helper directly rather than re-deriving the sum/count formula
-    # — this pins the shipped code path, the loop-port above is the
-    # independent ground truth it is compared against.
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    h_k = h_T
-    h_sw = jnp.roll(h_k, 1, axis=1)
-    t_k = (h_k > 0.0).astype(h_k.dtype)
-    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
-    h_k_pad, h_sw_pad, t_k_pad, t_sw_pad = pad_with_pole_bc_lat_multi(
-        (h_k, h_sw, t_k, t_sw), halo=1,
-        south_values=(0.0, 0.0, 0.0, 0.0), north_values=(0.0, 0.0, 0.0, 0.0),
-    )
-    e3f_sum = h_k_pad[:-1] + h_k_pad[1:] + h_sw_pad[:-1] + h_sw_pad[1:]
-    wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
-    h_vtx = np.asarray(
-        jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), 1.0e30)
-    )[:, :, 0]  # (n_lat+1, n_lon)
+    h_vtx = np.asarray(h_vtx)[:, :, 0]  # (n_lat+1, n_lon+1)
 
     n_checked = 0
     # j in [1, n_lat-2]: skip the pole rows (no physical vertex neighbour)

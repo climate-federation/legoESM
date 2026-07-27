@@ -1811,6 +1811,78 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
+def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme):
+    """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
+    over latitude in the SAME fused halo exchange (MPI audit lever O4).
+
+    Single production code path for the two ``een_e3f_scheme`` rules —
+    factored out of ``_bc_pv_flux`` (#1226 item 10 adversarial-review finding:
+    a test re-deriving this formula inline let a mutated divisor guard
+    (``maximum(wet_count, 1.0)`` -> ``maximum(wet_count, 4.0)``) pass
+    undetected). See the rule description in ``_bc_pv_flux``'s docstring
+    comment for the NEMO ``vor_een``/MITgcm ``hFacZ`` derivation.
+
+    Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
+    ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
+    halo-padded fields ``_bc_pv_flux`` uses downstream to build ``Fu_at_v``.
+    """
+    BIG_H = 1.0e30
+    h_sw = jnp.roll(h_k, 1, axis=1)
+    h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
+    h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
+    t_k = (h_k > 0.0).astype(h_k.dtype)
+    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    if een_e3f_scheme == "nemo_avg":
+        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
+         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+        e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
+        wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
+        h_vtx = jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), BIG_H)
+    else:  # "min" (validated at caller entry)
+        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0),
+        )
+        h_vtx = jnp.minimum(
+            jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
+            jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
+        )                                              # (n_lat+1, n_lon, nlev)
+    # At the fold, the vertex connects 4 cells: two local (fold row) and two
+    # fold-partner cells.  Overwrite the north row only on the owning rank.
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        fold = grid.fold
+        if een_e3f_scheme == "nemo_avg":
+            h_k_partner = h_k[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw[-1:, fold.perm_T, :]
+            t_k_partner = t_k[-1:, fold.perm_T, :]
+            t_sw_partner = t_sw[-1:, fold.perm_T, :]
+            e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
+            wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
+            h_vtx_north = jnp.where(
+                wet_count_north > 0.0,
+                e3f_sum_north / jnp.maximum(wet_count_north, 1.0), BIG_H,
+            )
+        else:
+            h_k_partner = h_k_active[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
+            h_vtx_north = jnp.minimum(
+                jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
+                jnp.minimum(h_k_partner, h_sw_partner),
+            )
+        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+    h_vtx = jnp.concatenate(
+        [h_vtx, h_vtx[:, 0:1, :]], axis=1,
+    )  # (n_lat+1, n_lon+1, nlev)
+    return h_vtx, Fu_ext, u_ext
+
+
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
     weno_smoothness="split",
@@ -1904,78 +1976,18 @@ def _bc_pv_flux(
     #     skipped) is reproduced here with the same ``BIG_H`` sentinel used
     #     by the min-rule (``h_vtx → BIG_H`` ⇒ ``1/h_vtx → 0``), so both
     #     rules share the identical downstream dry-vertex handling.
-    BIG_H = 1.0e30
-    h_sw = jnp.roll(h_k, 1, axis=1)
-    h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
-    h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
-    # nemo_avg operands: masked e3t (== h_k already, zero on dry cells — no
-    # BIG_H sentinel needed for the sum) and the per-cell wet-count (tmask).
-    t_k = (h_k > 0.0).astype(h_k.dtype)
-    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
-    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell active-thickness
-    # over latitude so the vertex min at a partition cut includes the
-    # neighbour rank's adjacent T row (MPI halo exchange).  The pole pad
-    # value is BIG_H so a physical-pole vertex reduces to the local two-cell
-    # min (bit-identical to the previous boundary rows); interior partition
-    # cuts sendrecv the neighbour's real row instead.  The nemo_avg operands
-    # (h_k, t_k, h_sw, t_sw) pad with 0.0 at the pole/boundary (an absent
-    # neighbour contributes zero mass and zero wet-count, matching NEMO's
-    # masked sum/count — no analogue of the min-rule's BIG_H sentinel is
-    # needed since summing zero is a no-op).
     # Thickness-weighted mass fluxes at faces — computed BEFORE the pad so
-    # the Fu / u lat pads ride the SAME fused exchange as the two
-    # active-thickness pads (audit lever O4: 4 pads -> 1 sendrecv pair per
-    # cut; all four fields are independent inputs at this point).
+    # the Fu / u lat pads ride the SAME fused exchange as the h_vtx-building
+    # active-thickness pads (audit lever O4: fused pads -> 1 sendrecv pair
+    # per cut; all fields are independent inputs at this point).
     Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
     Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    if een_e3f_scheme == "nemo_avg":
-        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
-         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        )
-        e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
-        wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
-        h_vtx = jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), BIG_H)
-    else:  # "min" (validated at function entry)
-        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0),
-        )
-        h_vtx = jnp.minimum(
-            jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
-            jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
-        )                                              # (n_lat+1, n_lon, nlev)
-    # At the fold, the vertex connects 4 cells: two local (fold row) and two
-    # fold-partner cells.  Overwrite the north row only on the owning rank.
-    nmask = north_fold_mask(grid)
-    if fold_is_local(grid) or nmask is not None:
-        fold = grid.fold
-        if een_e3f_scheme == "nemo_avg":
-            h_k_partner = h_k[-1:, fold.perm_T, :]
-            h_sw_partner = h_sw[-1:, fold.perm_T, :]
-            t_k_partner = t_k[-1:, fold.perm_T, :]
-            t_sw_partner = t_sw[-1:, fold.perm_T, :]
-            e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
-            wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
-            h_vtx_north = jnp.where(
-                wet_count_north > 0.0,
-                e3f_sum_north / jnp.maximum(wet_count_north, 1.0), BIG_H,
-            )
-        else:
-            h_k_partner = h_k_active[-1:, fold.perm_T, :]
-            h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
-            h_vtx_north = jnp.minimum(
-                jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
-                jnp.minimum(h_k_partner, h_sw_partner),
-            )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
-    h_vtx = jnp.concatenate(
-        [h_vtx, h_vtx[:, 0:1, :]], axis=1,
-    )  # (n_lat+1, n_lon+1, nlev)
+    # h_vtx construction (both een_e3f_scheme rules + fold overwrite) and the
+    # matching fused Fu/u halo pad live in the single shared helper
+    # ``_een_e3f_h_vtx`` — the production code path, also called directly by
+    # the ground-truth test (test_al81_budget.py) so no formula is
+    # re-derived in the test.
+    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme)
 
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)
