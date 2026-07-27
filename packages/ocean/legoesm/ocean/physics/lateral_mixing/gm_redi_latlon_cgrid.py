@@ -422,7 +422,7 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
 
 
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
-                               active_3d=None):
+                               active_3d=None, jacobian=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -485,6 +485,12 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             compute_buoyancy_frequency_nemo_bn2, NemoSEOSConfig,
         )
         _gdept = jnp.asarray(z_coord.t_depth_ref, dtype=dtype)
+        # NEMO evaluates alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1+r3t)
+        # (eos_rab is called on the live grid).  The zrw weight is a RATIO of
+        # depth differences, hence invariant under the column-uniform stretch;
+        # only the alpha/beta pressure argument changes.  The 13 residual
+        # knife-edge MLD columns sit ~7e-4 from threshold, where alpha's
+        # ~1e-4 live-vs-static depth sensitivity has leverage (#1226).
         # gdepw = the TRUE w-interface depths (z_iface), NOT the midpoint of the
         # bracketing T-depths.  NEMO's zrw weight (eosbn2.F90:1459) is
         #     zrw = ( gdepw(k) - gdept(k) ) / ( gdept(k-1) - gdept(k) )
@@ -492,6 +498,10 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # is NOT centred between its interfaces, so the midpoint biases the
         # alpha/beta interpolation and puts ~4e-4 median error into N^2.
         _gdepw_int = z_iface[:-1]
+        if jacobian is not None:
+            _J = jnp.asarray(jacobian, dtype)[..., None]     # (nlat,nlon,1)
+            _gdept = _gdept[None, None, :] * _J
+            _gdepw_int = _gdepw_int[None, None, :] * _J
         n2_int = compute_buoyancy_frequency_nemo_bn2(
             T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g)
     else:
@@ -507,7 +517,10 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # and produced 14 mismatched MLD columns whose below-threshold decisions
     # were otherwise identical to NEMO's at every level (#1226).
     if _use_nemo_bn2:
-        e3w = _gdept[1:] - _gdept[:-1]               # (nlev-1,)
+        # axis=-1: _gdept may be (nlev,) or, with a live-grid jacobian,
+        # (nlat, nlon, nlev).  Either way this stays THE SAME ladder bn2
+        # divides by, preserving the exact cancellation.
+        e3w = jnp.diff(_gdept, axis=-1)              # (..., nlev-1)
     else:
         e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
     # The MLD CRITERION is thickness-free, and that is not an approximation --
@@ -539,7 +552,8 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     contrib = jnp.where(
         (m_arange < iref).reshape((1, 1, nlev - 1)),
         jnp.zeros((), dtype),
-        jnp.maximum(n2_int, jnp.zeros((), dtype)) * e3w[None, None, :])
+        jnp.maximum(n2_int, jnp.zeros((), dtype))
+        * jnp.broadcast_to(e3w, n2_int.shape))
     if active_3d is not None:
         # NEMO zdfmxl integrates nlb10..BOTTOM only (hard loop truncation on
         # 3-D tmask): zero the integrand at sub-seafloor interfaces. The
@@ -597,7 +611,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
-              g=constants.g, rho_0=_RHO_0, active_3d=None):
+              g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -610,7 +624,8 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
             T, S, mask, z_coord, eos_fn, rho_c, active_3d=active_3d)
     if criterion == "n2_integral":
         return _nemo_mld_from_n2_integral(
-            T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d)
+            T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
+            jacobian=jacobian)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -618,7 +633,7 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
 
 def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
                                mld_criterion="rho_c", *, active_3d=None,
-                               g=constants.g, rho_0=_RHO_0):
+                               g=constants.g, rho_0=_RHO_0, jacobian=None):
     """Linearly ramp interface slopes to 0 through the mixed layer (NEMO ldfslp).
 
     NEMO (``ldfslp.F90:284-297``, w-point branch): inside the mixed layer
@@ -648,7 +663,7 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
     nlev_m1 = S_x.shape[-1]
     hml, m_base = _nemo_mld(
         mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0,
-        active_3d=active_3d)
+        active_3d=active_3d, jacobian=jacobian)
     z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
     # wslp_base = slope one interface BELOW the ML base (NEMO nmln+1).
     m_ref = jnp.clip(m_base + 1, 0, nlev_m1 - 1)
@@ -896,7 +911,7 @@ def compute_nemo_native_slopes(
     # helper: ``first`` = first stratified cell = 0-based nmln).
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
-        g=g, rho_0=rho_0, active_3d=active_3d)
+        g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
     first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
     # zhmlpt = gdept(nmln-1) = depth of the last T-point inside the ML
     zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
@@ -1310,6 +1325,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
             S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
             cfg.mld_criterion, g=g, rho_0=rho_0,
             active_3d=getattr(z_coord, "is_active", None),
+            jacobian=jacobian,
         )
 
     # NEMO ldfslp horizontal Shapiro smoother (default OFF => byte-identical).
