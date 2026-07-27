@@ -684,10 +684,14 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
     m = mask[:, :, None]                                  # (n_lat, n_lon, 1)
     # C-grid face masks from the T-mask: a face is wet iff both bracketing
     # cells are wet (NEMO umask/vmask = product of adjacent tmask).
-    # Lon neighbours are PERIODIC (roll), matching NEMO's lbc_lnk-filled halo
-    # (ldfslp.F90:319) and every other lon stencil in this module; zero-filling
-    # treated the seam as a wall (#1226 seam-column slope deficit).  Lat stays
-    # zero-filled: closed in j.
+    # Lon neighbours are PERIODIC (roll): NEMO's smoother reads zwz/zww that
+    # the slope loops computed over the HALO columns too (DO_2D(1,1,1,1),
+    # ldfslp.F90:203,265) from lbc-filled inputs, so seam columns see true wrap
+    # neighbours.  Zero-filling treated the seam as a wall (#1226 seam-column
+    # slope deficit).  Lat stays zero-filled: closed in j.  INVARIANT: a domain
+    # with a CLOSED lon boundary must carry land at the i-edge columns (all
+    # current consumers do) -- a wet closed lon edge would wrap spuriously
+    # here, as it already would in every roll stencil of this module.
     wE = mask * jnp.roll(mask, -1, axis=1)                # wet(i,j) & wet(i,j+1)
     wW = mask * jnp.roll(mask, +1, axis=1)                # wet(i,j) & wet(i,j-1)
     wN = mask * jnp.pad(mask, ((0, 1), (0, 0)))[1:, :]    # wet(i,j) & wet(i+1,j)
@@ -988,8 +992,9 @@ def compute_nemo_native_slopes(
 
     # --- Shapiro 1/16 + coastal decrease, native mask factors ---
     def _shap(f, cof):
-        # Lon (axis 1) ghost cells are PERIODIC: NEMO's zwz/zww working arrays
-        # carry an lbc_lnk-filled halo (ldfslp.F90:319; DINO ldIperio=.TRUE.),
+        # Lon (axis 1) ghost cells are PERIODIC: NEMO's slope loops compute
+        # zwz/zww over the halo columns as well (DO_2D(1,1,1,1),
+        # ldfslp.F90:203,265) from lbc-filled inputs (DINO ldIperio=.TRUE.),
         # so the i-edge columns see their true wrap neighbours.  Zero-filling
         # here treated the seam as a closed wall and deflated the two seam
         # columns' slopes to ~0.75x (squaring to the 0.55 zah deficit, #1226)
@@ -3293,8 +3298,10 @@ def gm_redi_tracer_tendency_latlon(
         _gm_bolus = getattr(cfg, "gm_bolus_advection", "centred")
         # NEMO face-averages kappa onto U/V before building psi
         # (ldftra.F90:716-718).  Selected by the oracle card; default False
-        # keeps legacy runs bit-identical.
-        _gm_kfa = getattr(cfg, "gm_bolus_kappa_face_average", False)
+        # keeps legacy runs bit-identical.  Read DIRECTLY (no getattr default):
+        # a wrong config object must raise, not silently disable -- the same
+        # silent-fallback pattern hid the slope_n2 bug for a day (#1226).
+        _gm_kfa = cfg.gm_bolus_kappa_face_average
         if _gm_bolus not in ("centred", "through_fct"):
             raise ValueError(
                 "GMRediConfig.gm_bolus_advection must be 'centred' or "

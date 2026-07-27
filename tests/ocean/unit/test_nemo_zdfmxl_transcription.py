@@ -547,3 +547,88 @@ def test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes():
             active_3d=z.is_active, slope_n2=v))
     assert np.abs(out["adiabatic"] - out["nemo_bn2"]).max() > 1e-8, (
         "slope_n2 has no effect on kappa -- the parameter is not wired through")
+
+
+def test_shapiro_smoother_preserves_a_uniform_field_across_the_seam():
+    """A uniform slope field on a fully-wet PERIODIC band must stay uniform.
+
+    Weighting-free invariant (Rule 6): no thickness, no area, no mask enters.
+    The pre-fix zero-padded smoother deflated the two seam columns to 0.375x
+    (12/16 of the binomial sum times a halved zcofw), so this test discriminates
+    the seam bug directly; interior-lat rows are exact for both, which is why
+    only a seam-aware invariant catches it.
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _shapiro_smooth_slopes,
+    )
+    nlat, nlon, nlev = 7, 6, 4
+    c = 3.7e-4
+    S = jnp.full((nlat, nlon, nlev), c)
+    mask = jnp.ones((nlat, nlon))
+    Sx, Sy = _shapiro_smooth_slopes(S, S, mask)
+    # Interior LAT rows (lat is genuinely closed; edge rows legitimately taper).
+    interior = np.asarray(Sx)[1:-1, :, :]
+    np.testing.assert_allclose(interior, c, rtol=1e-13)
+    # And explicitly at the seam columns, where zero-padding broke it:
+    np.testing.assert_allclose(np.asarray(Sx)[1:-1, 0, :], c, rtol=1e-13)
+    np.testing.assert_allclose(np.asarray(Sx)[1:-1, -1, :], c, rtol=1e-13)
+
+
+def test_native_slopes_are_lon_translation_equivariant():
+    """slopes(roll(inputs, lon)) == roll(slopes(inputs), lon) on a periodic band.
+
+    The repo's equivariance doctrine: a genuinely periodic operator must
+    commute with translation around the ring.  Zero-padded ghosts break this at
+    the seam; wrap satisfies it.  Covers compute_nemo_native_slopes end to end
+    (slope stencils + mixed-layer ramp + Shapiro smoother).
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.grids.latlon import create_latlon_grid
+
+    nlat, nlon, nlev = 6, 8, 6
+    dz = np.geomspace(20.0, 200.0, nlev)
+    z = _z_coord(dz, nlat, nlon, np.full((nlat, nlon), nlev - 1))
+    rng = np.random.default_rng(12)
+    T = 8.0 + np.cumsum(rng.uniform(0.05, 0.4, (nlat, nlon, nlev)), axis=-1)[:, :, ::-1]
+    S = 35.0 + rng.uniform(-0.2, 0.2, (nlat, nlon, nlev))
+    mask = jnp.ones((nlat, nlon))
+    u_mask = jnp.ones((nlat, nlon + 1)); v_mask = jnp.ones((nlat + 1, nlon))
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    cfg = GMRediConfig(slope_n2="nemo_bn2")
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+
+    def run(Ta, Sa):
+        rho = jnp.asarray(1026.0 + 0.2 * (10.0 - Ta))
+        return compute_nemo_native_slopes(
+            rho, jnp.asarray(Ta), jnp.asarray(Sa), mask, u_mask, v_mask, z,
+            grid, cfg, eos_fn, active_3d=z.is_active)
+
+    base = run(T, S)
+    shifted = run(np.roll(T, 1, axis=1), np.roll(S, 1, axis=1))
+    labels = ("uslp", "vslp", "wslpi", "wslpj")
+    for name, b, sh in zip(labels, base, shifted):
+        np.testing.assert_allclose(
+            np.asarray(sh), np.roll(np.asarray(b), 1, axis=1),
+            rtol=1e-11, atol=1e-16,
+            err_msg=f"{name} is not lon-translation equivariant -- a seam "
+                    "(zero-ghost) dependence is back")
+
+
+def test_dispatcher_reads_kfa_directly_not_via_getattr_default():
+    """The dispatcher must read cfg.gm_bolus_kappa_face_average DIRECTLY.
+
+    A getattr default here silently disables the option when a wrong config
+    object is passed -- the exact pattern that hid the slope_n2 bug (#1226).
+    Direct attribute access raises AttributeError instead.
+    """
+    import inspect
+    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as m
+    src = inspect.getsource(m.gm_redi_tracer_tendency_latlon)
+    assert "cfg.gm_bolus_kappa_face_average" in src, (
+        "dispatcher no longer reads the field directly")
+    assert 'getattr(cfg, "gm_bolus_kappa_face_average"' not in src, (
+        "the silent getattr default is back")
