@@ -164,6 +164,14 @@ def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
     mfu_tr = mass_flux_u + bolus_mfu
     mfv_tr = mass_flux_v + bolus_mfv
     flux_div_tr = divergence_cgrid(mfu_tr, mfv_tr, grid)
+    # NOTE (#1226): this re-diagnosis DISCARDS any w built by the caller, so a
+    # correction applied upstream has no effect while
+    # gm_bolus_advection="through_fct" -- and it runs even when kappa_GM = 0.
+    # Threading the barotropic thickness tendency in here is WRONG: the bolus is
+    # non-divergent, so its column integral is zero and mixing a bolus-inclusive
+    # divergence with a non-bolus thickness tendency is inconsistent (tested:
+    # constancy error 3.3e-05 -> 2.6e-01). The sigma form below is
+    # self-consistent because it derives deta_dt from the SAME divergence.
     w_tr = diagnose_w_from_flux_div(flux_div_tr, z_coord, thickness_weighted=True)
     return mfu_tr, mfv_tr, w_tr
 
@@ -802,6 +810,57 @@ def _static_kappa_redi_override(gm_cfg, grid):
     n_lon = int(getattr(grid, "n_lon"))
     return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)
+
+
+def thickness_weighted_tracer_combine(t_before, t_now, t_expl, d_diss,
+                                      h_before, h_now, h_after, mask,
+                                      h_floor=1.0e-10):
+    """NEMO thickness-weighted leap-frog tracer combine (``trazdf.F90:271-278``).
+
+    NEMO advances tracer CONTENT, not concentration::
+
+        e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+
+    Mapping onto this model's intermediates: ``_step_impl`` already builds the
+    flux-form content update (``hT = h_now·T_now − dt·div``, then
+    ``T_expl = hT / h_after``), so the RAW advective content increment is
+    exactly ``h_after·T_expl − h_now·T_now`` ( = −2·rdt·div ) with no
+    reweighting — matching NEMO's ``2·rdt·e3t(Kmm)·RHS_adv``, whose trends are
+    each divided by e3t(Kmm) before being multiplied by it again.  The
+    dissipative increment arrives as a CONCENTRATION tendency and therefore
+    takes the Kmm ("now") thickness, which is the weight NEMO gives every trend
+    in ``ts(:,:,:,:,Nrhs)`` — including ``tra_ldf``, which it evaluates at Kbb
+    but still weights by e3t(Kmm).
+
+    Why this matters: the bare-concentration form
+    ``T(Naa) = T(Nbb) + (T_expl − T(Nnn)) + diss`` does NOT conserve tracer
+    content under a moving (z-star/vvl) coordinate.  Measured on the DINO
+    oracle (#1226): +8.6e-6 relative drift in globally-integrated heat over 200
+    forcing-free steps, linear in step count, where NEMO drifts +3.4e-16.
+    Switching to this form removes half of that leak.
+
+    Parameters
+    ----------
+    t_before, t_now, t_expl : array
+        Tracer at Nbb, Nnn, and the explicit (post-``_step_impl``) state.
+    d_diss : array or float
+        Dissipative CONCENTRATION increment from the Nbb pass.
+    h_before, h_now, h_after : array
+        Layer thickness at Nbb, Nnn, Naa.
+    mask : array
+        Wet mask; dry cells hold ``t_now`` (never 0 — writing 0 below the
+        seafloor is the #480 masked-cold-cell poison).
+    h_floor : float
+        Division guard for dry columns.
+
+    Returns
+    -------
+    array : tracer at Naa.
+    """
+    content = (h_before * t_before
+               + (h_after * t_expl - h_now * t_now)
+               + h_now * d_diss)
+    return jnp.where(mask > 0, content / jnp.maximum(h_after, h_floor), t_now)
 
 
 def _thickness_weighted_asselin(now, before, after,
@@ -1865,6 +1924,33 @@ class LatLonCGridOceanModel:
                 "freshwater_eta_prev carry fields, which only exist under "
                 "the leapfrog (NEMO Modified-Leap-Frog) time integrator. "
                 f"Got outer_integrator={_outer_int!r}.")
+        # TKE closure axes that read the leap-frog BEFORE (Nbb) state
+        # (T4 Burchard shear, T8/T13 rn2b Prandtl/Langmuir; Phase-2 #1317):
+        # both need state.u_before/v_before/T_before/S_before, which only
+        # exist under outer_integrator="leapfrog". Construction-time raise
+        # (dispatch hardening) rather than a silent no-op at model-step time.
+        _vmix_cfg_ctor = getattr(getattr(config, "physics", None),
+                                 "vertical_mixing", None)
+        if _vmix_cfg_ctor is not None and _vmix_cfg_ctor.scheme == "tke":
+            _tke_cfg_ctor = _vmix_cfg_ctor.tke
+            if (getattr(_tke_cfg_ctor, "tke_n2_time_level", "step_entry")
+                    == "nemo_before" and _outer_int != "leapfrog"):
+                raise ValueError(
+                    'vertical_mixing.tke.tke_n2_time_level="nemo_before" '
+                    'requires outer_integrator="leapfrog": the true rn2b '
+                    "(Nbb) tracers only exist as state.T_before/S_before "
+                    "under the leap-frog (NEMO Modified-Leap-Frog) time "
+                    f"integrator. Got outer_integrator={_outer_int!r}.")
+            if (getattr(_tke_cfg_ctor, "tke_shear_production",
+                        "squared_centered") == "nemo_burchard"
+                    and _outer_int != "leapfrog"):
+                raise ValueError(
+                    'vertical_mixing.tke.tke_shear_production='
+                    '"nemo_burchard" requires outer_integrator="leapfrog": '
+                    "the Burchard now×before shear cross term only exists "
+                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f"Modified-Leap-Frog) time integrator. Got "
+                    f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -3243,7 +3329,22 @@ class LatLonCGridOceanModel:
             _M = "ocean_diagnostics"
             mask_eta = state.land_mask.data
             area_eta = _grid.area
-            eta_old_d = state.eta.data
+            # TIME LEVEL (#1226): the target volume must be the one the
+            # barotropic solve actually integrated FROM.  On the MLF leap-frog
+            # path the solve is SEEDED FROM Nbb (`_barotropic_before_state`
+            # -> eta_init=_eta_bef above), so it returns eta(Naa) whose volume
+            # is vol(eta_Nbb) -- targeting vol(eta_Nnn) instead injects a
+            # uniform shift ~ mean(eta_nn) - mean(eta_bb) EVERY step.  That is a
+            # state DIFFERENCE, not a tendency, so it is O(dt^0) and does not
+            # shrink under timestep refinement; it breaks the very invariant
+            # this block's docstring claims to preserve, and with it the
+            # flux-form tracer scheme's constancy preservation (a uniform tracer
+            # stops staying uniform).  Measured: disabling fix_eta_drift
+            # entirely improves constancy 3.279e-05 -> 2.313e-05.
+            if _barotropic_before_state is not None:
+                eta_old_d = _barotropic_before_state[0]
+            else:
+                eta_old_d = state.eta.data
             eta_new_d = state_new.eta.data
 
             mask_acc = _cast(mask_eta, _M, "accumulate")
@@ -3446,6 +3547,15 @@ class LatLonCGridOceanModel:
         # mass_flux_u/v are thickness-weighted (h*u), so flux_div_k
         # is div(h*u) [m/s] and already includes layer thickness.
         flux_div_k = divergence_cgrid(mass_flux_u, mass_flux_v, _grid)
+        # NOTE (#1226, verified numerically 2026-07-26): the sigma-correction
+        # form below and NEMO's literal continuity form (sshwzv.F90:198-206,
+        # which folds the ACTUAL per-layer thickness tendency
+        # (h_new - h_old)/dt into the integrand) give IDENTICAL results here to
+        # 4 significant figures on the content-conservation probe.  That means
+        # legoESM's split-explicit barotropic eta IS already consistent with the
+        # column-integrated div(h*u), so the inferred deta_dt = w_euler[...,0]
+        # equals the actual increment.  A `dh_dt=` path was implemented, tested,
+        # found inert, and removed rather than carried as dead weight.
         w_baro = diagnose_w_from_flux_div(
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
@@ -4159,6 +4269,7 @@ class LatLonCGridOceanModel:
                 # set. ``state`` here is the step-entry state (never rebound;
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state)
+                _n2_tracers_before = self._n2_nemo_before_tracers(state)
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -4167,9 +4278,11 @@ class LatLonCGridOceanModel:
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
                     grid=_grid, n2_tracers=_n2_tracers,
+                    n2_tracers_before=_n2_tracers_before,
                 )
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state)
+                _n2_tracers_before = self._n2_nemo_before_tracers(state)
                 state_new = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -4177,6 +4290,7 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     grid=_grid, n2_tracers=_n2_tracers,
+                    n2_tracers_before=_n2_tracers_before,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -4357,6 +4471,59 @@ class LatLonCGridOceanModel:
                 f"read the T/S contrast); got n2_mode={vmix.tke.n2_mode!r}.")
         return (entry_state.T.data, entry_state.S.data)
 
+    def _n2_nemo_before_tracers(self, entry_state):
+        """TRUE leap-frog BEFORE (Nbb) T/S for the rn2b consumers (T8/T13).
+
+        Static Python predicate: returns ``(T_before, S_before)`` — the
+        carried leap-frog before-state, one FULL step behind
+        ``entry_state`` — when ``vertical_mixing.tke.tke_n2_time_level``
+        is "nemo_before"; ``None`` (default) ⇒ BIT-IDENTICAL (rn2b
+        consumers reuse the same N² as rn2, unchanged).
+
+        ``entry_state`` MUST be the step-entry state (before rebinding to
+        ``state_new``), matching ``_n2_before_advection_tracers``'s
+        convention. Construction guarantees ``outer_integrator="leapfrog"``
+        (the fields EXIST as NamedTuple slots) but NOT that they are
+        POPULATED on every possible caller: ``_leapfrog_step``'s Euler-start
+        branch (#1317 fix) now seeds a LOCAL before:=now copy before its
+        first ``_step_impl`` call — matching NEMO's own cold-start
+        convention (``istate.F90:97-99``/``135-137``: ``ts(:,:,:,:,Kmm) =
+        ts(:,:,:,:,Kbb)`` before ``stp_MLF`` is ever entered, so Nbb==Nnn
+        identically on the first step; ``stpmlf.F90:114-117``
+        ``l_1st_euler -> rDt=rn_Dt`` then makes the leap-frog combine
+        degenerate exactly to forward-Euler) — so a fresh/from-rest state
+        never reaches this predicate with ``T_before=None``. A state that
+        DOES still reach here with ``T_before=None`` is a genuinely
+        mis-wired caller (e.g. ``_step_impl`` invoked directly, bypassing
+        ``_leapfrog_step``, on a hand-built state that was never seeded or
+        bridged) — raise loudly rather than crash on ``NoneType.data``
+        (AttributeError) or silently fall back to ``entry_state.T``/``.S``
+        (which would mask that mis-wiring).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
+            return None
+        if entry_state.T_before is None or entry_state.S_before is None:
+            raise ValueError(
+                'vertical_mixing.tke.tke_n2_time_level="nemo_before" requires '
+                "before-level tracers (state.T_before/S_before) to be "
+                "populated, but they are None. A from-rest run through "
+                "model.step()/_leapfrog_step already seeds before:=now on "
+                "the Euler-start step (NEMO istate.F90 Kmm:=Kbb convention); "
+                "a bridged/twin state must seed the leap-frog before-level "
+                "fields before stepping — see kamm_twin_90d.py's "
+                "--bridge-before (bridges NEMO's restart tb/sb/ub/vb onto "
+                "state.{T,S,u,v}_before). This error firing means "
+                "_step_impl was called directly on a state that was never "
+                "seeded/bridged -- the caller must go through "
+                "_leapfrog_step/step() or bridge the before-level state "
+                "itself, not silently fall back to entry_state.T/.S."
+            )
+        return (entry_state.T_before.data, entry_state.S_before.data)
+
     def _tke_bottom_dirichlet(self, cc_state):
         """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
 
@@ -4413,6 +4580,27 @@ class LatLonCGridOceanModel:
             nemo_bottom_tke_dirichlet,
         )
         return nemo_bottom_tke_dirichlet(r_t, u_bot, v_bot, vmix.tke)
+
+    def _tke_bottom_level(self):
+        """Per-column T-point bottom-cell index for the T15-exact bottom TKE
+        Dirichlet placement, or None.
+
+        Static Python predicate mirroring ``_tke_bottom_dirichlet``'s gate:
+        only meaningful together with a held bottom value, and only when a
+        partial-cell coordinate actually carries a per-column
+        ``bottom_level`` (the flat-bottom / pure z-star case has none —
+        ``bottom_dirichlet``'s unconditional last-row pin is already exact
+        there, so ``None`` here keeps that path BIT-IDENTICAL).
+        """
+        vmix = getattr(getattr(self.config, "physics", None),
+                       "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return None
+        if not getattr(vmix.tke, "bottom_tke_bc", False):
+            return None
+        if not isinstance(self.z_coord, OceanPartialCellCoordinate):
+            return None
+        return self.z_coord.bottom_level
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -4916,6 +5104,7 @@ class LatLonCGridOceanModel:
         return_K_diss_v: bool = False,
         grid=None,
         n2_tracers=None,
+        n2_tracers_before=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -5131,6 +5320,8 @@ class LatLonCGridOceanModel:
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
                     tke_bottom_dirichlet=self._tke_bottom_dirichlet(cc_state),
+                    tke_bottom_level=self._tke_bottom_level(),
+                    n2_tracers_before=n2_tracers_before,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -5147,6 +5338,7 @@ class LatLonCGridOceanModel:
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
+                    n2_tracers_before=n2_tracers_before,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -6548,8 +6740,28 @@ class LatLonCGridOceanModel:
         # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
         #     Populate Nbb with the pre-step now-fields for the next step.
         if state.u_before is None:
+            # NEMO's cold-start Euler step does NOT run with an undefined
+            # before-level: istate.F90:97-99/135-137 sets Kmm := Kbb (ts/uu/vv
+            # copied onto BOTH time-level array slots) before stp_MLF is ever
+            # called, so Nbb==Nnn identically on this very first step; combined
+            # with stpmlf.F90:114-117 (l_1st_euler -> rDt=rn_Dt) this makes the
+            # leap-frog combine degenerate exactly to forward-Euler. The
+            # rn2b/Burchard-shear consumers inside _step_impl (nemo_before N²,
+            # nemo_burchard shear production) read entry_state.T_before/
+            # S_before/u_before/v_before unconditionally, so they need this same
+            # before==now seed on THIS call only -- a LOCAL copy, not written
+            # back onto ``state``/``naa`` below, which must keep the ``None``
+            # sentinel so this branch still fires (single-dt, no RA filter) and
+            # the real Nbb seed at :6656 still runs from the true pre-step now-
+            # fields. A bridged/restart state never reaches this branch (its
+            # u_before is already populated), so this seed only ever applies to
+            # a genuine from-rest / no-history state -- exactly NEMO's case.
+            _entry = state._replace(
+                u_before=state.u, v_before=state.v, T_before=state.T,
+                S_before=state.S, eta_before=state.eta,
+            )
             naa = self._step_impl(
-                state, dt, freshwater=freshwater,
+                _entry, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
                 vertex_mask=vertex_mask, t_seconds=t_seconds)
             naa = naa._replace(
@@ -6710,6 +6922,44 @@ class LatLonCGridOceanModel:
             mask3 > 0,
             state.S_before.data + (state_expl.S.data - state.S.data) + dS_diss_bb,
             state.S.data)
+        _combine = getattr(self.config, "tracer_combine", "concentration")
+        if _combine not in ("concentration", "thickness_weighted"):
+            raise ValueError(
+                f"unknown tracer_combine {_combine!r}; expected "
+                '"concentration" or "thickness_weighted"')
+        if _combine == "thickness_weighted":
+            # NEMO trazdf.F90:271-278 —
+            #     e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+            # Combine CONTENT, not concentration.  The bare-concentration form
+            # above does not conserve tracer content under a moving (z-star)
+            # coordinate: +8.6e-6 drift in globally-integrated heat over 200
+            # forcing-free steps vs NEMO's +3.4e-16 (#1226).
+            #
+            # Mapping onto this routine's intermediates: ``_step_impl`` already
+            # builds the flux-form content update (hT = h_now·T_now − dt·div,
+            # then T_expl = hT / h_naa), so the RAW advective content increment
+            # is exactly
+            #     h_naa·T_expl − h_now·T_now        ( = −2·rdt·div )
+            # with no reweighting — matching NEMO's 2·rdt·e3t(Kmm)·RHS_adv,
+            # whose trends are each divided by e3t(Kmm) before being multiplied
+            # by it again.  The dissipative increment arrives as a CONCENTRATION
+            # tendency from the Nbb pass, so it takes the Kmm ("now") thickness
+            # — the weight NEMO gives every trend in ts(:,:,:,:,Nrhs), including
+            # tra_ldf, which it evaluates at Kbb but still weights by e3t(Kmm).
+            # ``h_k`` (computed above) is the Nnn thickness; eta_naa comes from
+            # the barotropic solve, so h at state_expl.eta is the Kaa thickness.
+            h_bef = compute_layer_thickness(
+                state.eta_before.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            h_naa = compute_layer_thickness(
+                state_expl.eta.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            T_naa = thickness_weighted_tracer_combine(
+                state.T_before.data, state.T.data, state_expl.T.data,
+                dT_diss_bb, h_bef, h_k, h_naa, mask3)
+            S_naa = thickness_weighted_tracer_combine(
+                state.S_before.data, state.S.data, state_expl.S.data,
+                dS_diss_bb, h_bef, h_k, h_naa, mask3)
         eta_naa = state_expl.eta.data * cmask   # from the barotropic solve
         naa_expl = state_expl._replace(
             u=state_expl.u.replace(data=u_naa),
@@ -6736,6 +6986,7 @@ class LatLonCGridOceanModel:
                 tke_old=_tke_old, tke_source=tke_source,
                 return_tke=_tke_prog, grid=_grid,
                 n2_tracers=self._n2_before_advection_tracers(state),
+                n2_tracers_before=self._n2_nemo_before_tracers(state),
             )
             if _tke_prog:
                 naa, tke_new = _res

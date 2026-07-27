@@ -296,6 +296,74 @@ def test_leapfrog_first_step_is_euler():
         rtol=0, atol=0)
 
 
+def test_leapfrog_from_rest_nemo_before_and_burchard_do_not_crash():
+    """#1317 regression: a FRESH (unbridged, unseeded) from-rest state on the
+    nemo_dino_kamm_mlf combo (tke_n2_time_level="nemo_before" +
+    tke_shear_production="nemo_burchard") used to raise/AttributeError on
+    step 0 -- ``_leapfrog_step``'s Euler-start branch called ``_step_impl``
+    BEFORE seeding ``state.T_before``/``u_before``/``v_before``, and both
+    ``_n2_nemo_before_tracers`` and the Burchard-shear guard in
+    ``k_profiles.py`` read those fields unconditionally. The fix seeds a
+    LOCAL before:=now copy for that first ``_step_impl`` call only --
+    NEMO's own cold-start convention (istate.F90: ``ts(:,:,:,:,Kmm) =
+    ts(:,:,:,:,Kbb)`` before stp_MLF is ever entered, so Nbb==Nnn on the
+    first step). A from-rest run must now construct AND step at least twice
+    with no SystemExit/ValueError/NaN."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    _lateral_mixing_none = type(OceanPhysicsConfig().lateral_mixing)(
+        scheme="none")
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(tke_n2_time_level="nemo_before",
+                          tke_shear_production="nemo_burchard")),
+        convection=OceanConvectionConfig(scheme="none"),
+        lateral_mixing=_lateral_mixing_none,
+    )
+    state, model = _leapfrog_channel(
+        physics=physics, barotropic_forcing_centred=True,
+        barotropic_een_seed="nemo_kmm")
+    # Fresh from-rest state: no bridge, no before-fields populated.
+    assert state.T_before is None and state.u_before is None
+
+    s1 = model.step(state, dt=_DT)   # step 0: the crash site pre-fix
+    assert np.all(np.isfinite(np.asarray(s1.T.data)))
+    assert np.all(np.isfinite(np.asarray(s1.u.data)))
+    s2 = model.step(s1, dt=_DT)      # step 1: genuine leapfrog + Asselin
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+    assert np.all(np.isfinite(np.asarray(s2.u.data)))
+
+
+def test_n2_nemo_before_tracers_bridged_state_not_clobbered():
+    """Sibling regression: a state that ALREADY carries bridged/restart
+    before-level fields (kamm_twin_90d --bridge-before) must NOT be
+    overwritten by the from-rest Euler-start seed -- ``_leapfrog_step``'s
+    seed only fires inside the ``state.u_before is None`` branch, which a
+    bridged state never enters."""
+    state, model = _leapfrog_channel()
+    # Simulate a bridged/restart state: distinct before-level fields (NOT
+    # equal to now), which the fix must preserve untouched through step().
+    bridged = state._replace(
+        u_before=state.u.replace(data=state.u.data + 0.01),
+        v_before=state.v.replace(data=state.v.data + 0.01),
+        T_before=state.T.replace(data=state.T.data + 1.0),
+        S_before=state.S.replace(data=state.S.data),
+        eta_before=state.eta.replace(data=state.eta.data),
+    )
+    assert bridged.u_before is not None
+    s = model.step(bridged, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.T.data)))
+    # bridged path takes the FULL leapfrog branch (not the Euler-start
+    # branch), so it must not equal the from-rest Euler-start result.
+    s_fresh = model.step(state, dt=_DT)
+    assert not np.allclose(np.asarray(s.T.data), np.asarray(s_fresh.T.data))
+
+
 def test_leapfrog_second_step_shift():
     """After step 2, Nbb == the Asselin-filtered now of step 2 = state1 +
     gamma·(state1_before - 2·state1 + Naa).  Verify the stored before-field
