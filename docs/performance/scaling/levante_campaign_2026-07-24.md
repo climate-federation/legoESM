@@ -798,10 +798,24 @@ hardware or to SPMD. CAVEAT: these two points come from different jobs
 (26497323, 26498463) — same lane, protocol and day, but not the same-job
 contrast the cube pair enjoyed.
 
-Scale-out receipts on this lane: **LL1536x3072 ran on 64 GPUs at 4.97
-ms** (job 26498266) — the campaign's largest atmospheric SPMD run.
-LL2048x4096 at 64 GPUs is in flight (job 26502539) to complete the
-matched-tile pair with LL1024@16 (both 131k cols/GPU).
+**LAT-LON FIXED-TILE CONTRAST, MEASURED (job 26502539)** — 131.1k
+cols/GPU on both sides:
+
+| arm | devices | cells | ms/step |
+|---|---|---|---|
+| LL1024x2048 | 16 | 4.2 M | 5.73 |
+| **LL2048x4096** | **64** | **218.1 M** | **6.73** |
+
+4x the devices carrying 4x the problem costs **+17 %** — weak-scaling
+efficiency **0.85**, sustaining **32.4 GCells/s (506 Mcells/s/GPU) on
+218 million cells**, the campaign's largest atmospheric run by an order
+of magnitude. So communication grows only weakly with device count here
+too (the cube's equivalent contrast was free at 2.25x; lat-lon pays 17 %
+for 4x). Neither lane is comm-limited at these counts — both are limited
+by the per-step fixed cost above.
+
+Scale-out receipts on this lane: LL1536x3072 at 64 GPUs = 4.97 ms (job
+26498266) and the LL2048 point above.
 
 WHAT THE FIXED TERM IS: not yet attributed. Candidates are per-step
 kernel-launch overhead (the L60 step issues many small kernels), the
