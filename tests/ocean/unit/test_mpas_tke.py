@@ -136,15 +136,23 @@ class TestTKEDispatchBuilds:
             assert float(jnp.max(jnp.abs(A_v[land]))) == 0.0
             assert float(jnp.max(jnp.abs(K_v[land]))) == 0.0
 
-    def test_profiles_respect_cfl_cap(self, mesh, z_coord, state, tke_cfg):
-        """A_v, K_v never exceed the KPP MPAS CFL cap 0.25 min(dz)^2/cfl_dt."""
+    def test_profiles_have_no_cfl_post_cap(self, mesh, z_coord, state,
+                                           tke_cfg):
+        """The TKE bridge applies NO explicit-diffusion CFL post-cap (codex):
+        it is implicit-only (unconditionally stable backward-Euler), the
+        C-grid zdftke path and NEMO cap nothing — a 0.25·dz²/300s cap would
+        bind in convective columns (~0.08 m²/s at 10-m cells vs closure K of
+        O(1-10)) and break closure equivalence across grids.  The closure's
+        own kappaM_max remains the only ceiling."""
         profiles_fn = make_tke_profiles_mpas(tke_cfg)
         A_v, K_v = profiles_fn(state, mesh, z_coord, _wind_forcing(state))
-        dz = z_coord.dz_ref
-        Av_max = 0.25 * jnp.minimum(dz[:-1], dz[1:]) ** 2 / tke_cfg.tke.cfl_cap_dt_s
-        # allow a tiny fp slack on the <= comparison
-        assert bool(jnp.all(A_v <= Av_max[None, :] + 1e-9))
-        assert bool(jnp.all(K_v <= Av_max[None, :] + 1e-9))
+        assert bool(jnp.all(jnp.isfinite(A_v))) and bool(jnp.all(A_v >= 0.0))
+        assert bool(jnp.all(A_v <= tke_cfg.tke.kappaM_max + 1e-9))
+        # source-level tripwire: the cap code must not silently return
+        import inspect
+        from legoesm.ocean.physics.vertical_mixing import mpas_integration
+        src = inspect.getsource(mpas_integration.make_tke_profiles_mpas)
+        assert "_Av_max" not in src, "CFL post-cap re-appeared on the TKE bridge"
 
     def test_wind_spins_up_tke_mixing(self, mesh, z_coord, state, tke_cfg):
         """Surface wind stress drives near-surface A_v above the calm value.
@@ -276,3 +284,77 @@ class TestTKEGridAgnosticEquivalence:
         assert bool(jnp.all(out.tke_new >= 0.0))
         assert bool(jnp.all(out.K_M >= 0.0))
         assert bool(jnp.all(out.K_H >= 0.0))
+
+
+class TestNemoSurfaceTermsOnMPAS:
+    """The ORCA1 zdftke card's surface terms (lc / etau nn_htau=1 / eice) now
+    RUN on the MPAS bridge: profiles_fn threads lat_deg=degrees(mesh.latCell)
+    and (under the eice gate) surface_forcing.ice_concentration into the
+    grid-agnostic kernel — the same inputs the C-grid k_profiles path passes.
+    The closure numerics are covered by the TKE suite; these pin the ADAPTER
+    contract (threading, gating, fail-fast)."""
+
+    def _card(self, **over):
+        from scripts.run.run_omip_core2 import orca1_zdftke_config
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        return VerticalMixingConfig(
+            scheme="tke", tke=orca1_zdftke_config()._replace(**over))
+
+    def _ice_wind_forcing(self, state, ice=1.0, tau_x_pa=0.15):
+        n = state.T.data.shape[0]
+        return OceanSurfaceForcing(
+            tau_x=jnp.full((n,), tau_x_pa), tau_y=jnp.zeros((n,)),
+            ice_concentration=jnp.full((n,), ice))
+
+    def test_orca1_card_runs_on_mpas(self, mesh, z_coord, state):
+        """lc=True + etau latitude profile + eice=3 must BUILD AND RUN (no
+        NotImplementedError, no lat_deg-missing ValueError — the kernel raises
+        'lat_deg' if the latitude profile is requested without it, so a clean
+        run PROVES lat_deg reaches the kernel)."""
+        pf = make_tke_profiles_mpas(self._card())
+        A_v, K_v = pf(state, mesh, z_coord, self._ice_wind_forcing(state))
+        assert bool(jnp.all(jnp.isfinite(A_v))) and bool(jnp.all(A_v >= 0.0))
+        assert bool(jnp.all(jnp.isfinite(K_v))) and bool(jnp.all(K_v >= 0.0))
+
+    def test_eice_full_ice_attenuates_vs_eice0(self, mesh, z_coord, state):
+        """Full ice + eice=3 must reduce the wind-driven mixing vs eice=0 on
+        the SAME forcing (proves ice_concentration reaches the kernel)."""
+        f = self._ice_wind_forcing(state, ice=1.0)
+        _, K0 = make_tke_profiles_mpas(self._card(eice=0))(
+            state, mesh, z_coord, f)
+        _, K3 = make_tke_profiles_mpas(self._card(eice=3))(
+            state, mesh, z_coord, f)
+        ocean = state.land_mask.data >= 0.5
+        assert float(jnp.sum(K0[ocean])) > 0.0
+        assert float(jnp.sum(K3[ocean])) < float(jnp.sum(K0[ocean]))
+
+    def test_eice_without_ice_fails_fast(self, mesh, z_coord, state):
+        """eice!=0 with NO ice field must raise (the KPP-bridge contract) —
+        never silently run un-attenuated."""
+        pf = make_tke_profiles_mpas(self._card(eice=3))
+        f_noice = self._ice_wind_forcing(state)._replace(
+            ice_concentration=None)
+        with pytest.raises(ValueError, match="ice_concentration"):
+            pf(state, mesh, z_coord, f_noice)
+        with pytest.raises(ValueError, match="ice_concentration"):
+            pf(state, mesh, z_coord, None)
+
+    def test_unknown_eice_raises(self, mesh, z_coord, state):
+        pf = make_tke_profiles_mpas(self._card(eice=2))
+        with pytest.raises(ValueError, match="eice"):
+            pf(state, mesh, z_coord, self._ice_wind_forcing(state))
+
+    def test_eice0_no_ice_is_fine_and_default_card_unchanged(
+            self, mesh, z_coord, state, tke_cfg):
+        """eice=0 ignores ice entirely (no read, no raise without ice), and
+        the plain default TKEConfig path stays valid (regression: the new
+        gating must not disturb the pre-existing diagnostic bridge)."""
+        pf = make_tke_profiles_mpas(self._card(eice=0, lc=False,
+                                               etau_mode="none"))
+        A_v, K_v = pf(state, mesh, z_coord, _wind_forcing(state))
+        assert bool(jnp.all(jnp.isfinite(K_v)))
+        pf_default = make_tke_profiles_mpas(tke_cfg)
+        A_v2, K_v2 = pf_default(state, mesh, z_coord, _wind_forcing(state))
+        assert bool(jnp.all(jnp.isfinite(K_v2)))
