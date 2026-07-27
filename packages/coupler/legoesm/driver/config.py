@@ -1111,6 +1111,10 @@ class ExperimentConfig(NamedTuple):
     # Grid spacing [m] for the IFS ZTAURES turnover resolution factor
     # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
     # BechtoldConfig.dx_m.
+    # IFS in-plume conversion constants (anvil-source control, 2026-07-27):
+    # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
+    bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
+    bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
     # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
@@ -1533,6 +1537,8 @@ class ExperimentConfig(NamedTuple):
                 f"cutoff), got {self.bechtold_conv_top_pa}"
             )
         for _f, _lo, _hi in (
+            ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
