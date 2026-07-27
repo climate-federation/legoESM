@@ -879,6 +879,42 @@ resolution at that tile count. The fixed-tile comm contrast is
 resubmitted at L30 for BOTH arms (job 26497736), which halves the
 working set while holding 147.5k cols/GPU on each side.
 
+## Ocean MPAS Voronoi scale-out — and a lane that does NOT obey the tile law
+
+Controlled ladder, **32 ranks/node fixed** so nodes scale with ranks and
+per-rank bandwidth is constant (job 26505286, f64, block:cyclic):
+
+| ranks | subdiv-7 | cells/rank | subdiv-8 | cells/rank |
+|---|---|---|---|---|
+| 32 | 190.22 ms | 5 120 | 861.25 ms | 20 480 |
+| 64 | 147.65 | 2 560 | 494.89 | 10 240 |
+| 128 | 102.93 | 1 280 | 309.05 | 5 120 |
+| 256 | **65.71** | 640 | **254.41** | 2 560 |
+
+32->256 efficiency 0.36 (s7) and 0.42 (s8) — the lane reaches 256 ranks
+but does not approach the limit.
+
+A PROTOCOL FIX FIRST: the previous ladder (26504842) let srun fill nodes,
+so np32 ran half-full (32 ranks/node) while np64-256 ran full (64) —
+per-rank bandwidth changed along the ladder, and efficiency appeared to
+RISE as tiles shrank, which is impossible. Fixing ranks-per-node changed
+every number (s7 np32 159.67 -> 190.22 ms).
+
+**THIS LANE BREAKS THE CELLS/RANK LAW that the atmosphere obeys.** At the
+SAME 5 120 cells/rank, s7@np32 costs 190 ms but s8@np128 costs 309 ms —
+1.63x more for 4x the ranks at identical per-rank work. On the atmosphere
+icosahedral lane, per-doubling speedup depended on cells/rank ALONE. So
+ocean-MPAS carries a genuine device-count cost the atmosphere lane does
+not, and raising resolution will NOT rescue it the way it does elsewhere.
+
+UNEXPLAINED, flagged not resolved: s7's per-doubling speedup RISES
+(1.29 / 1.43 / 1.57) even in the controlled ladder. Efficiency improving
+as the tile shrinks has no physical mechanism I can name; the likeliest
+reading is that the np32 base point is anomalously slow (partition
+quality at low rank counts?) rather than the high-rank points being
+good. Under codex review (round 15) along with the discriminating
+experiment for device-count cost vs partition degradation.
+
 ## Precision + grid-coverage verification (2026-07-27, user request)
 
 **Mixed precision — the production storage mode (f64 state + f32
