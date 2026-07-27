@@ -60,6 +60,12 @@ def main():
                     help="inner acoustic steps per dt_atmos block "
                          "(only with --dt-atmos)")
     ap.add_argument("--days", type=float, default=60.0)
+    ap.add_argument("--dump-state-out", default=None,
+                    help="npz path for block-state twin dumps (requires "
+                         "--dt-atmos): full u/v/delp/pt lattices per tile "
+                         "at block 0 (IC) and after outer blocks b<=14 or "
+                         "b%%18==0 (cap 200) — the same schedule as the "
+                         "instrumented oracle dyn_core")
     ap.add_argument("--frame-days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--single-vortex", default=None,
@@ -99,6 +105,13 @@ def main():
                          "if day-5 max|V| moves wildly vs the "
                          "unperturbed run, case-8 is Lyapunov-chaotic "
                          "and the vertex escape is not a localizable bug")
+    ap.add_argument("--ic-perturb-mode", default="checker",
+                    choices=("checker", "uniform"),
+                    help="checker = index-alternating sign (grid-scale; "
+                         "del-6 removes it — underestimates the chaos "
+                         "floor, 2026-07-25 retraction); uniform = "
+                         "smooth (1+eps) wind rescale that survives "
+                         "damping — use for chaos-floor calibration")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -118,6 +131,9 @@ def main():
                  "--dt-atmos [--n-split] (upstream schedule) is required")
     if args.dt_atmos is not None and args.n_split < 1:
         ap.error(f"--n-split must be >= 1, got {args.n_split}")
+    if args.dump_state_out and args.dt_atmos is None:
+        ap.error("--dump-state-out requires --dt-atmos (block-indexed "
+                 "twin dumps are defined on the upstream cadence)")
 
     from pathlib import Path
     here = Path(__file__).resolve()
@@ -228,10 +244,16 @@ def main():
         for t, st in enumerate(states):
             for k in ("u", "v"):
                 a = np.asarray(st[k])
-                # index-varying sign so it is not a uniform rescale
-                ii = np.arange(a.size).reshape(a.shape)
-                st[k] = a * (1.0 + eps * (((ii + t) % 2) * 2 - 1))
-        print(f"IC perturbed by rel eps={eps:g} (chaos discriminator)",
+                if args.ic_perturb_mode == "uniform":
+                    # smooth rescale: survives del-6, so it actually
+                    # measures the chaos floor
+                    st[k] = a * (1.0 + eps)
+                else:
+                    # index-varying sign so it is not a uniform rescale
+                    ii = np.arange(a.size).reshape(a.shape)
+                    st[k] = a * (1.0 + eps * (((ii + t) % 2) * 2 - 1))
+        print(f"IC perturbed by rel eps={eps:g} "
+              f"mode={args.ic_perturb_mode} (chaos discriminator)",
               flush=True)
 
     nmap = build_nearest_map(ctx)
@@ -253,6 +275,17 @@ def main():
         av = np.concatenate([v.ravel() for v in v6])
         return au[nmap], av[nmap]
 
+    state_dumps = {}
+    blk_counter = [0]
+
+    def _maybe_dump_state(states, b):
+        if (args.dump_state_out and b <= 200
+                and (b <= 14 or b % 18 == 0)):
+            for t in range(6):
+                for k in ("u", "v", "delp", "pt"):
+                    state_dumps[f"b{b}_{k}_t{t + 1}"] = np.array(
+                        states[t][k], copy=True)
+
     if args.dt_atmos is not None:
         # upstream cadence: n_split inner steps per dt_atmos block,
         # entry A-scalar only on the first inner step of each block
@@ -264,9 +297,12 @@ def main():
         dt_inner = args.dt_atmos / args.n_split
 
         def step_frame_unit(states):
-            return advance_duo_outer_step(ctx, states, args.dt_atmos,
-                                          args.n_split, d_ext=d_ext,
-                                          sw_cfg=sw_cfg)
+            states = advance_duo_outer_step(ctx, states, args.dt_atmos,
+                                            args.n_split, d_ext=d_ext,
+                                            sw_cfg=sw_cfg)
+            blk_counter[0] += 1
+            _maybe_dump_state(states, blk_counter[0])
+            return states
     else:
         steps_per_frame = int(round(args.frame_days * 86400.0 / args.dt))
         dt_inner = args.dt
@@ -275,6 +311,9 @@ def main():
             return full_acoustic_step_sixface(ctx, states, args.dt,
                                               d_ext=d_ext, sw_cfg=sw_cfg)
     n_frames = int(round(args.days / args.frame_days))
+
+    if args.dump_state_out:
+        _maybe_dump_state(states, 0)      # IC = block 0
 
     times = [0.0]
     u0f, v0f = sample_uv(states)
@@ -345,6 +384,20 @@ def main():
                  + f", nord={nord_effective}, d_ext={d_ext}"
                  + (f", diag_env={diag_env}" if diag_env else ""))
     print("saved", args.out, flush=True)
+    if args.dump_state_out:
+        np.savez_compressed(
+            args.dump_state_out, **state_dumps,
+            n=np.array(args.n), ng=np.array(3),
+            dt_atmos=np.array(args.dt_atmos),
+            n_split=np.array(args.n_split),
+            git_sha=np.array(_git_sha()),
+            ic_perturb=np.array(args.ic_perturb),
+            protocol=np.array(
+                "block-state twin: full-lattice u/v/delp/pt per tile at "
+                "block 0 (IC) + after outer blocks b<=14 or b%18==0 "
+                "(cap 200); numpy [p,q] = Fortran (p+1-ng, q+1-ng)"))
+        print(f"saved {args.dump_state_out} "
+              f"({len(state_dumps)} arrays)", flush=True)
 
 
 if __name__ == "__main__":

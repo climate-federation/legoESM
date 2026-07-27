@@ -160,3 +160,76 @@ def test_stage_dump_hook_is_inert_and_complete():
     for t in range(6):
         np.testing.assert_array_equal(got[f"S6_t{t + 1}_uin"], u_b[t])
         np.testing.assert_array_equal(got[f"S6_t{t + 1}_vin"], v_b[t])
+
+
+@pytest.fixture(scope="module")
+def twinmod():
+    return _load("compare_state_twin")
+
+
+def test_twin_corner_band_and_crop(twinmod):
+    band = twinmod.corner_band_mask(48, 0, 0, 6)
+    assert band[0, 0] and band[5, 5] and not band[23, 23]
+    assert band[47, 0] and band[42, 5]
+    a = np.arange(54.0 * 55).reshape(54, 55)           # u lattice lo (-2,-2)
+    c = twinmod.compute_crop(a, -2, -2, 48, 0, 1)
+    assert c.shape == (48, 49) and c[0, 0] == a[3, 3]  # Fortran (1,1)
+
+
+def test_twin_sign_fit_and_fatal(twinmod, tmp_path):
+    a = np.random.default_rng(1).standard_normal((8, 8))
+    s, res = twinmod.fit_sign(a, -a)
+    assert s == -1.0 and res == 0.0
+    # end-to-end FATAL on empty inputs (fail-loud, never silent-clean)
+    np.savez(tmp_path / "o.npz", n=np.array(4), ng=np.array(3))
+    rc = twinmod.main(["--fort-dir", str(tmp_path),
+                       "--ours", str(tmp_path / "o.npz")])
+    assert rc == 1
+
+
+def test_twin_detects_seeded_corner_violation(twinmod, tmp_path):
+    """Synthetic violation: oracle and ours identical except one
+    corner-band cell at block 1 — table must report it in the corner
+    column with the right argmax (non-vacuous instrument)."""
+    n, ng = 12, 3
+    rng = np.random.default_rng(2)
+    ours = {"n": np.array(n), "ng": np.array(ng)}
+    for b in (0, 1):
+        for k, (si, sj) in twinmod.STAG.items():
+            for t in range(1, 7):
+                a = rng.standard_normal((n + 2 * ng + si,
+                                         n + 2 * ng + sj)) + 2.0
+                if k == "pt":
+                    a = np.ones_like(a)
+                ours[f"b{b}_{k}_t{t}"] = a
+                # oracle side: identical compute domain, sign +1
+                fa = a.copy()
+                if b == 1 and k == "u" and t == 3:
+                    fa[ng + 1, ng + 1] += 7.0           # Fortran (2,2)
+                p = tmp_path / f"dyncore_b{b}_{k}_t{t}.dat"
+                with open(p, "w") as f:
+                    ilo = jlo = 1 - ng
+                    f.write(f"{ilo:8d}{ilo + fa.shape[0] - 1:8d}"
+                            f"{jlo:8d}{jlo + fa.shape[1] - 1:8d}\n")
+                    for j in range(fa.shape[1]):
+                        for i in range(fa.shape[0]):
+                            f.write(f"{ilo + i:8d}{jlo + j:8d}"
+                                    f"{fa[i, j]:26.17E}\n")
+    np.savez(tmp_path / "ours.npz", **ours)
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = twinmod.main(["--fort-dir", str(tmp_path),
+                           "--ours", str(tmp_path / "ours.npz")])
+    out = buf.getvalue()
+    assert rc == 0
+    # the seeded 7.0 corner-band hit at block 1 / tile 3 / (2,2) must
+    # appear in the u row with the corner column carrying it
+    row = [ln for ln in out.splitlines()
+           if ln.strip().startswith("1") and " u " in f" {ln} "][0]
+    assert "7.0000e+00" in row and "(3, 2, 2)" in row
+    # block 0 must be clean (identical IC)
+    row0 = [ln for ln in out.splitlines()
+            if ln.strip().startswith("0") and " u " in f" {ln} "][0]
+    assert "0.0000e+00" in row0
