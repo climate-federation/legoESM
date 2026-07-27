@@ -34,7 +34,7 @@ SOURCES = {
     "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64)",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734",
-    "atm_ico_cpu": "26452579",
+    "atm_ico_cpu": "26495083 (f32, cyclic), 26452579 (f64, PACKED)",
     "oc_latlon": "26460444-501/26460365/26493592",
     "oc_tripole": "26493837/26493648",
     "oc_mpas": "26494036 (f64), 26494908 (f32)",
@@ -61,10 +61,13 @@ PANELS = [
     ),
     dict(
         key="atm_ico_cpu", title="icosahedral", sub="subdiv-7 L26 · Milan CPU–MPI",
-        series=[("float64", [(1, 10150.35), (2, 4929.97), (4, 2760.63),
-                             (8, 1245.45), (16, 1248.49), (32, 614.30),
-                             (64, 305.02)])],
-        note="",
+        series=[("float32", [(1, 7399.72), (2, 3250.27), (4, 1673.07),
+                             (8, 827.06), (16, 444.58), (32, 230.35),
+                             (64, 131.58)]),
+                ("float64 (packed)", [(1, 10150.35), (2, 4929.97), (4, 2760.63),
+                                      (8, 1245.45), (16, 1248.49), (32, 614.30),
+                                      (64, 305.02)])],
+        note="f64 placement differs — see caption",
     ),
     dict(
         key="oc_latlon", title="lat–lon", sub="576×1152 L20 · A100 NCCL",
@@ -90,9 +93,11 @@ PANELS = [
 ]
 
 COLORS = {"float32": "#0072B2", "float64": "#D55E00",
+          "float64 (packed)": "#E69F00",
           "mixed (f64 store)": "#009E73",
           "float32 (C768)": "#0072B2", "float32 (C384)": "#56B4E9"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
+           "float64 (packed)": "s",
            "float32 (C768)": "o", "float32 (C384)": "^"}
 
 
