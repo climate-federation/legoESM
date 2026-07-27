@@ -357,3 +357,49 @@ def test_nemo_bn2_matches_an_independent_numpy_transcription():
             for m in range(nlev - 1)]
     assert max(abs(z - 0.5) for z in zrws) > 0.02, "ladder too uniform to test zrw"
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=0)
+
+
+def test_bolus_kappa_face_average_matches_nemo_and_is_inert_for_constant_kappa():
+    """NEMO averages kappa onto EACH face before building psi (ldftra.F90:715-718).
+
+        zaeiu = 0.5*( zaeiw(ji,jj) + zaeiw(ji+1,jj) ) * ssumask
+        zaeiv = 0.5*( zaeiw(ji,jj) + zaeiw(ji,jj+1) ) * ssvmask
+
+    Reusing the cell-centred kappa for both faces is exact ONLY for constant
+    kappa; the Treguier kappa is spatially 2-D.  Both halves are asserted so the
+    option cannot be vacuously "on".
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        nemo_eiv_bolus_transport,
+    )
+    nlat, nlon, nlev = 6, 5, 4
+    shape = (nlat, nlon, nlev)
+    rng = np.random.default_rng(3)
+    wslpi = jnp.asarray(rng.normal(0, 1e-3, shape))
+    wslpj = jnp.asarray(rng.normal(0, 1e-3, shape))
+    e2u = jnp.ones((nlat, nlon)) * 1e4
+    e1v = jnp.ones((nlat, nlon)) * 1e4
+    u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    act = jnp.ones(shape)
+    kw = dict(out_shape=shape, dtype=jnp.float64)
+
+    def run(kappa, face_avg):
+        return nemo_eiv_bolus_transport(
+            kappa, wslpi, wslpj, e2u, e1v, u_mask, v_mask, act, act,
+            shape, jnp.float64, kappa_face_average=face_avg)
+
+    # (a) CONSTANT kappa: the two must agree exactly -- averaging a constant is
+    #     the identity, so switching the option on must change nothing.
+    kc = jnp.full((nlat, nlon), 800.0)
+    for a, b in zip(run(kc, False), run(kc, True)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                   rtol=1e-13, atol=0)
+
+    # (b) SPATIALLY-2-D kappa: the two must genuinely differ, or the option is
+    #     not doing anything.
+    k2d = jnp.asarray(rng.uniform(200.0, 2000.0, (nlat, nlon)))
+    off = run(k2d, False)
+    on = run(k2d, True)
+    assert max(float(jnp.max(jnp.abs(a - b))) for a, b in zip(off, on)) > 1.0, (
+        "face averaging had no effect on a 2-D kappa -- the flag is not wired")

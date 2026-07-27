@@ -499,7 +499,17 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             T_filled, S_filled, p_cell, dz_ref, J1, eos_fn=eos_fn,
             rho_ref=rho_0, g=g)                       # (...,nlev-1)
     # e3w(jk) for interface m = spacing between the bracketing T-centres.
-    e3w = z_centers[1:] - z_centers[:-1]             # (nlev-1,)
+    # It MUST be built from the SAME gdept ladder the N^2 was divided by, or the
+    # exact e3w cancellation below is broken.  compute_buoyancy_frequency_nemo_bn2
+    # divides by diff(t_depth_ref) (NEMO's gdept_0), whereas z_centers is the
+    # ARITHMETIC-midpoint ladder cumsum(dz)-dz/2 -- and on DINO those differ by
+    # up to 11.3 m.  Mixing them left a residual that survived every other fix
+    # and produced 14 mismatched MLD columns whose below-threshold decisions
+    # were otherwise identical to NEMO's at every level (#1226).
+    if _use_nemo_bn2:
+        e3w = _gdept[1:] - _gdept[:-1]               # (nlev-1,)
+    else:
+        e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
     # The MLD CRITERION is thickness-free, and that is not an approximation --
     # it is an identity in NEMO.  eosbn2 divides by the live e3w and zdfmxl
     # multiplies it straight back:
@@ -1420,6 +1430,7 @@ def nemo_eiv_bolus_transport(
     act_below: jnp.ndarray,
     out_shape: tuple,
     dtype,
+    kappa_face_average: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """NEMO ``ldf_eiv_trp_MLF`` eddy-induced (GM bolus) TRANSPORT, curl form.
 
@@ -1451,7 +1462,21 @@ def nemo_eiv_bolus_transport(
         aeiu = jnp.broadcast_to(kappa_GM[:, :, jnp.newaxis], out_shape)
     else:
         aeiu = jnp.broadcast_to(jnp.asarray(kappa_GM, dtype=dtype), out_shape)
-    aeiu_if = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_z))         # mk(aeiu) at iface below k
+    # NEMO averages kappa onto EACH FACE separately before building psi
+    # (ldftra.F90:715-718):
+    #     zaeiu(ji,jj) = 0.5*( zaeiw(ji,jj) + zaeiw(ji+1,jj) ) * ssumask
+    #     zaeiv(ji,jj) = 0.5*( zaeiw(ji,jj) + zaeiw(ji,jj+1) ) * ssvmask
+    # Reusing the cell-centred kappa for both faces (the legacy default) is
+    # EXACT only for a constant kappa; the Treguier kappa is spatially 2-D, so
+    # it leaves a half-cell offset in the bolus transport.  Opt-in so the
+    # legacy path stays bit-identical.
+    if kappa_face_average:
+        aeiu_u = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_x))       # -> u-face
+        aeiu_v = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_y))       # -> v-face
+    else:
+        aeiu_u = aeiu_v = aeiu
+    aeiu_if_u = 0.5 * (aeiu_u + jnp.roll(aeiu_u, -1, ax_z))   # mk() at iface below k
+    aeiu_if_v = 0.5 * (aeiu_v + jnp.roll(aeiu_v, -1, ax_z))
     wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
     wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
     act_kp1 = act_below
@@ -1459,8 +1484,8 @@ def nemo_eiv_bolus_transport(
                  * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
     wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
                  * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
-    psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if * wumask_uw)
-    psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if * wvmask_vw)
+    psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if_u * wumask_uw)
+    psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if_v * wvmask_vw)
     psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
     psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
     u_eiv = psi_uw - psi_uw_top
@@ -1606,6 +1631,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     dt: float | None = None,
     kappa_GM=None,
     gm_bolus_advection: str = "centred",
+    gm_bolus_kappa_face_average: bool = False,
     return_bolus: bool = False,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
@@ -1876,6 +1902,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         u_eiv, v_eiv, w_eiv_kp1 = nemo_eiv_bolus_transport(
             kappa_GM, wslpi_kp1, wslpj_kp1, e2u, e1v,
             u_mask, v_mask, act, act_below, q.shape, dtype,
+            kappa_face_average=gm_bolus_kappa_face_average,
         )
         bolus_transport = (u_eiv, v_eiv, w_eiv_kp1)
         if gm_bolus_advection == "centred":
