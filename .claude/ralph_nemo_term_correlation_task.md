@@ -62,7 +62,10 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 2 | `eos_rab` (α, β) | 1.000000 | 1.000007 | **PASS** |
 | 3 | `bn2` (`rn2b`) | 1.00000000 | 0.99997 | near — see below |
 | 4 | `zdf_mxl` (`nmln`/`hmlp`) | 99.859% levels | — | near — 14/9920 cols |
-| 5 | `ldf_slp` (`wslpi`) | **0.999177** | **0.998943** (\|·\|) | near — FIXED via slope_n2 |
+| 5 | `ldf_slp` `wslpi` | 0.999177 | 0.998943 | **CLOSED** (\|x\| ratio) |
+| 5 | `ldf_slp` `wslpj` | 0.998875 | 0.998447 | **CLOSED** |
+| 5 | `ldf_slp` `uslp`  | 0.999340 | 0.998697 | **CLOSED** |
+| 5 | `ldf_slp` `vslp`  | 0.999012 | 0.997594 | **CLOSED** |
 | 6 | `ldf_eiv` (`aeiu`) | 0.9847 | 1.002 | OPEN |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
@@ -197,3 +200,27 @@ so all four slope components can be checked, not just `wslpi`.
 - Full history: memory `project_dino_nemo_oracle.md` addenda 30–47.
 - Skill: `.claude/skills/oracle-fidelity/SKILL.md` (Rule 0 = read the oracle's
   source first; Rule 1 = coverage, not a checklist).
+
+
+## ★ ONE ROOT CAUSE BEHIND THE items-3/4 RESIDUAL: static vs LIVE vertical grid
+
+Checked lego's α/β against NEMO's own dumped `rab_b` (342,134 wet cells):
+- **β is BIT-EXACT** (rel err 0.00e+00)
+- α: median 4.70e-06, p99 1.11e-04
+⇒ the EOS is NOT the floor.
+
+`gdept` lego(static `t_depth_ref`) vs NEMO(live `gdept(Kmm)`):
+**median rel 1.03e-04, max 6.32e-04** — the same order as EVERY remaining
+residual (`bn2` ratio 3.0e-5, MLD integrand 4.95e-5, α p99 1.11e-4). It is all
+`r3t = ssh/H`.
+
+**NEXT for 1.0 on items 3/4**: thread `eta` so `gdept`/`e3w` are the LIVE
+`gdept_0*(1+r3t)`. The stretch is column-UNIFORM (r3t is 2-D) ⇒ a per-column
+scalar, not a new 3-D array. It CANCELS in the MLD criterion (thickness-free
+identity) except via α/β's depth dependence, so expect more gain in `bn2` and
+the slopes than in the 14 MLD columns.
+**DO NOT use `z_coord.h_partial`** — it is the STATIC at-rest thickness and is
+identically 1.0x (measured).
+
+The slope residual (0.15-0.25% low) EXCEEDS this 1e-4 effect ⇒ a second,
+unidentified contributor remains in `ldf_slp`.
