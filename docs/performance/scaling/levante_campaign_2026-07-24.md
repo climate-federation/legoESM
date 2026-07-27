@@ -132,6 +132,68 @@ cells/device), which is itself the clue to hand the profiler.
 PRACTICAL GUIDANCE MEANWHILE: run this grid at np>=8, where per-device
 throughput is 304-340 Mc/s/GPU vs 220-248 at np4.
 
+RESOLVED 2026-07-26 (nsys job 26479922 + HLO dump 26480096 + sqlite
+timeline): the dip is an XLA CODEGEN pathology, localized to named
+kernels. CONFIRMED: (1) the dip reproduces under nsys with matched
+protocol (L8, padded-16 mesh: 21.01/17.78/7.17 ms at np2/4/8 vs campaign
+19.90/17.09/6.92 — ~5% profiler overhead); (2) at np4 ONLY, giant
+serialized "loop fusion" kernels appear — loop_add_fusion_1/2 at 3.6 ms
+per launch (vs ~3 us for ordinary elementwise kernels) plus a THIRD
+once-per-step group (the unsuffixed loop_add_fusion: 12 of its 44
+instances are >1 ms at ~3.3 ms, the rest are the ordinary us-scale adds)
+— and the sqlite timeline places all three groups' big instances at the
+17.8 ms step cadence (stddev 78 us: deterministic compute, not comm
+wait): 3.6 + 3.6 + 3.3 ~= 10.5-10.9 ms/step = the np4 excess; (3) in the optimized
+step HLO these are mega-fusions ON THE HALO PATH: `%loop_add_fusion =
+f32[491520,26]` (edge-tendency add chain, 22 operands incl. an
+input_scatter_fusion) and `%loop_add_fusion.4 = f32[163844,26]` (cell
+array), with the shard_map halo-pack concatenates taking the same adds +
+parameter lists as operands. PLAUSIBLE (inferred from kInput fusion
+semantics + operand lists, not separately timed): the emitter RECOMPUTES
+the expensive scatter+add chain inside each consumer fusion, which is why
+the cost multiplies. WHY np4: fusion cost-model decisions depend on the
+shard shape; at np2/np8 the mega-fusion is not built. This also explains
+why the earlier env-knob sweep missed it — autotune/latency-hiding flags
+do not change fusion-pass decisions. Fusion-pass flag A/B at np4 ran
+(job 26480162): flag route CLOSED — three of four candidate fusion flags
+no longer exist in this XLA (upstream removals), the fourth is null, and
+the GPU plugin does not list its flags via --help.
+
+FIX ATTEMPTS, both measured (base 19.90 / 17.09 / 6.92 ms at np2/4/8):
+
+| barrier placement | np2 | np4 | np8 | verdict |
+|---|---|---|---|---|
+| tendency INPUT side (job 26480261) | 21.40 | 16.58 | 7.01 | null at np4, -7.5% np2 — REVERTED |
+| tendency OUTPUT side (job 26480310) | 22.03 | **14.09** | 7.04 | **-17.6% time np4** (1.21x), +10.7% time np2 — REVERTED |
+
+(Single runs per arm; the campaign's np4 repeat spread (+-0.3%) supports
+an informal ~+-1 pp error on these percentages, not a formal CI.)
+
+The HLO frame table pinpointed the fusion: the 3.6 ms kernels resolve to
+`pytree_ops.py:10` (`pytree_axpy.<locals>.<lambda>`) — the RK stage
+combine mega-fused with the tendency graph's tail. An output-side
+optimization_barrier recovers 3 ms of the ~10.9 at np4 but costs np2
+10.7% (it also blocks fusion that HELPS there), so neither barrier ships
+unconditionally. Parity + conservation smoke passed on both attempts.
+
+STATUS: **FIXED, SHIPPED GATED** (codex rounds 11-12: strategy consult
+BEFORE implementing, then post-review). `_FUSION_BARRIER_WORKLOADS` in
+`sharded_dynamics.py` applies the tendency-output optimization_barrier
+only at the measured workload signature (n_dev, edge rows, cell rows,
+nlev) = (4, 1_966_080, 655_376, 26) — every operand trace-time static.
+Verification ladder (job 26486288 vs same-day dead-gate 26486123):
+np2 19.86 (campaign base 19.90 — at baseline), **np4 14.12 = -20.6%
+same-day / -17.4% vs campaign base**, np8 6.99 (base 6.92). Parity +
+conservation smoke green; 23 SPMD parity tests pass. Two instructive
+misfires on the way, both caught by measurement: the first gate keyed
+per-shard rows (never fired — the trace-time array is the GLOBAL view),
+and edge-rows-only was over-broad (L8 edges are unpadded and divisible
+several ways — codex round-12). The residual np4 gap to ideal (~14.1 vs
+~9.9 from np2/2) is the un-barriered remainder of the fusion; further
+recovery needs the integrator-level restructure (codex round-11 ranked
+it last on blast radius) or an upstream XLA fix — both remain
+follow-ups.
+
 ## Ocean strong scaling vs TILE SIZE (jobs 26456334/37 vs 26452804-06)
 
 The same improved config (wide-halo + vmix-f32, multicontroller NCCL/IB,
@@ -577,10 +639,48 @@ could not touch (44.1 us/iter of matvec halo). Three independent
 measurements — the iteration sweep, the single_reduce decomposition and
 this census — now agree on what the cost is.
 
-REMAINING FOR THE GATE (not done here): filter-stability analysis under
-stale halos, longer/realistic-forcing integration, and the science
-sign-off. What is now on record is that 600 steps conserve at least as well
-as the production solver.
+THE GATE, RE-EXAMINED AGAINST THE CODE (2026-07-26) — the campaign's
+framing was backwards. "Wide-halo needs stability gates" conflated the two
+things the arm changed:
+
+1. **wide-halo is the SAME explicit-substep operators with
+   tolerance-parity coverage at every transport tier** (codex round-9
+   wording), not an untested scheme variant. Coverage:
+   serial `tests/ocean/unit/test_barotropic_wide_halo.py` — parity atol
+   1e-12 f64 across four configs (div-damp, power-law filter, multi-chunk),
+   volume-drift parity 1e-15, NaN-sentinel stencil-reach pin; re-run
+   2026-07-26: 11 passed, 1 skipped (mpi4jax-gated dispatch test).
+   Distributed: `tests/ocean/distributed/test_ocean_mpi_wide_halo_parity.py`
+   (MPI gathered-vs-serial, 1e-10, incl. rank-cut/v-face/chunk cases) and
+   `tests/parallel/test_latlon_ocean_spmd_wide_halo.py` (4-device SPMD,
+   2e-4/1e-3). These are TOLERANCE parity, not bit identity — "the filter
+   sees bit-identical inputs" is too strong; differences are XLA
+   re-association at the serial tier and larger at the distributed tiers.
+   ONE REAL BEHAVIOURAL DELTA to disclose: wide-halo requires LOCAL
+   subcycle clamping, and with an active `eta_floor` the clamp/
+   redistribution schedule differs from the standard path — a reviewer
+   should check that config interaction, not filter stability in general.
+
+2. **The scheme choice — explicit_substep vs implicit_cn — is a choice
+   between two EXISTING schemes, not validation of a new one.**
+   `barotropic_solver = "explicit_substep"` is the MODEL DEFAULT
+   (`ocean/state.py:910`), the NEMO-standard split-explicit free surface
+   (dynspg_ts-style filter, shared `barotropic_common.py` weights). NOTE
+   the bench does NOT consume that default — `bench_ocean_latlon_spmd_
+   scaling.py` explicitly defaults to `implicit_cn`, and the OMIP
+   global-overturning drivers explicitly set `implicit_cn` too. The
+   default supports "explicit_substep is an established scheme", nothing
+   more. The promotion question remains experiment-level: "may the OMIP
+   config switch that field for scale-out runs".
+
+WHAT ACTUALLY REMAINS (scoped to that question): the OMIP override to
+implicit_cn presumably encodes a preference (dt headroom / stiffness at
+depth on that config). The remaining sign-off is experiment-level: run the
+OMIP case with explicit_substep+wide at production dt and confirm the
+3-seed conservation result (heat 7.1 SE, salt 15.2 SE lower than
+implicit_cn at 600 steps unforced) holds under forcing. That is a science
+review of ONE config field on ONE experiment, not a scheme-stability
+program.
 
 ## Using the calibrated bound correctly (a trap worth documenting)
 
@@ -718,26 +818,96 @@ revisited.
 
 ## Still open (ranked) — refreshed at campaign close
 
-1. **Wide-halo stability gates** → the blocker to promoting the improved
-   ocean config (wide-halo + vmix-f32) beyond benches. It is worth 2.01x
-   multinode and +0.15 weak efficiency, so this is the highest-value
-   remaining item. Needs: averaging-filter stability under stale-halo
-   substeps, plus a science sign-off on the f32 vmix solve.
+1. **OMIP config sign-off for explicit_substep+wide** (formerly "wide-halo
+   stability gates" — reframed 2026-07-26 after codex round-9). Wide-halo
+   has tolerance-parity coverage at all three transport tiers (serial
+   1e-12, MPI 1e-10, SPMD 2e-4/1e-3) and explicit_substep is an
+   established scheme (the model default; benches and OMIP explicitly
+   choose implicit_cn). Remaining: the eta_floor x local-clamp config
+   interaction, the OMIP case at production dt under forcing, and a
+   science sign-off on the f32 vmix solve. Worth 2.01x multinode.
 2. **MPAS ico np4 per-device dip** — five hypotheses refuted by
    measurement (see above); needs a GPU op-level profile (nsys / XLA op
    profile of np4 vs np8). A scoped instrumentation project, not a knob.
-3. **Calibrated theoretical-limit lines on every plot.** The ocean bench
-   already computes a `t_bound` from a latency/bandwidth model but reports
-   `bound_calibrated=false` because the latency and bandwidth inputs are
-   placeholders. A dependency-matched comm microbenchmark would turn every
-   ideal line from "linear" into a machine-specific roofline.
-4. **Ocean wet-cell compaction + wet-balanced partitions** (~2x on
-   ~40%-land grids, per `SCALING_STATUS_AUDIT.md` item 4) — untouched here.
+3. ~~Calibrated theoretical-limit lines~~ **DONE later in this campaign**:
+   `bench_ppermute_microbench.py` measured the fabric constants (NVLink
+   17.8 us / 64.2 GB/s, IB 26.3 us / 23.5 GB/s) and the roofline sections
+   above use them. Kept here only so the list's numbering stays stable.
+4. **Ocean wet-cell compaction + wet-balanced partitions** — SPLIT
+   2026-07-26 into a cheap half and an expensive half:
+
+   *Cheap half — wet-BALANCED bands* (no indirection, uneven band heights
+   equalizing OCEAN cells per rank): already implemented on the MPI lane
+   (`bench_ocean_mpi_scaling.py --wet-balance`, ETOPO continents); A/B at
+   np16/np32 running (job 26480448, r128/r256 at CFL-scaled dt 100/50s).
+   OPERATIONAL TRAIL kept for honesty: four earlier submissions failed —
+   wrong venv (26479815), then non-finite at dt 600 and 300 (26479904/
+   26480203/26480298), briefly mis-read as a lane defect until the
+   bench's own WARNING surfaced: realistic coastlines are documented to
+   need dt<=150 at LL96, which I had not read; the isolated-basin
+   hypothesis tested along the way was refuted (`fill_isolated_basins`
+   made no difference, consistent with dt being the real cause).
+   MEASURED (job 26480448, r128 ETOPO
+   CFL dt=100s, f64, np16/np32, single runs): wet-balancing LOSES —
+   equal-rows 37.89 / 30.50 ms vs wet-balanced **47.39 / 44.20 ms**
+   (25-45 % SLOWER). The mechanism is coherent with the gather
+   microbench's finding: this lane computes DENSE arrays (a land cell
+   costs the same as a wet one), so per-rank cost tracks TOTAL ROWS, and
+   equalizing WET cells makes total rows uneven — it balances the wrong
+   quantity. Wet-balancing could only pay on an implementation whose cost
+   tracks wet cells (i.e. compacted), and the expensive-half measurement
+   below shows compaction itself does not pay at real wet fractions.
+
+   VERDICT on the audit's item 4 as a whole: BOTH halves measured, BOTH
+   negative on this codebase — the "~2x on ~40%-land grids" projection is
+   refuted twice over (gather penalty eats the compaction saving at 0.71
+   wet; wet-balanced bands worsen dense-compute balance). The item is
+   CLOSED as not-worth-building, with receipts. (Also moot for the SPMD
+   lane: jax equal-shard sharding would need padding to the max band,
+   returning exactly the imbalance removed.)
+
+   *Expensive half — gather/scatter compaction: MEASURED, and the audit's
+   "~2x" is REFUTED* (`bench_gather_vs_slice_stencil.py`, job 26479884,
+   A100 f32, correctness self-checked). Per-cell gather penalty for a
+   5-point Laplacian vs the dense sliced version: **1.40-1.77x**, so
+   compaction wins only when wet_fraction < 0.56-0.72 (size-dependent).
+   At the REAL global-ocean wet fraction (~0.71), packed-gather is a net
+   LOSS on the full LL576 grid (ratio 1.16) and a wash at the nd4 tile
+   (1.03). SCOPE (codex round-10): the two numbers are END-MEMBER ESTIMATES, not
+   a bound — 0.86x is the pure-stencil member (measured), 1.41x the
+   pure-column ideal; a real step also pays packing/scattering at the
+   interface, sees real wet topology (not banded), richer stencils, and
+   communication, none of which the microbench prices. What survives
+   regardless: the audit's 2x assumed zero indirection cost and is
+   refuted; at ~0.71 wet the measured stencil member is a net LOSS. VERDICT: do not build compaction for the global latlon ocean;
+   revisit only for a configuration that is genuinely <~55% wet.
 5. **2-D lat-lon decomposition** at >=64 ranks: the 1-D band's perimeter
    ceiling is now measured (0.12-0.16 at np64 spread, vs ico's 0.52), which
    quantifies the prize.
-6. **Milan np16 anomaly** in the packed CPU ladder (np16 slower than np8,
-   recovering by np32) — spread ladder reduced but did not remove it.
+6. ~~Milan np16 anomaly~~ **RESOLVED 2026-07-26 (job 26479904): rank
+   placement.** Discriminator at FIXED np16, r128 moist f64 — the script
+   holds resolution/physics/precision/levels/timing fixed and varies ONLY
+   the srun distribution: `block:block` 186.83 ms vs `block:cyclic`
+   **87.59 ms — 2.13x from the distribution flag alone.** Leading
+   interpretation (codex round-10 scoping): per-socket memory-bandwidth
+   contention on the 2x Milan 7763 node, consistent with the
+   spread-ladder reduction — but per-rank NUMA-binding receipts and
+   bandwidth counters were NOT captured, so the mechanism is inferred
+   from the placement swing, not instrumented. (Note 32 single-core ranks
+   FIT in one 64-core socket, so np32 is not automatically two-socket.)
+   FIX regardless of mechanism: `--distribution=block:cyclic
+   --cpu-bind=cores` on packed CPU lanes.
+
+7. **1-D bands vs 2-D pencils at np64 (job 26479904): the pencil path
+   is 1.37x faster** (latlon r256 moist f64, same dt: 253.93 -> 185.03
+   ms/step) — BUT this is NOT a pure decomposition A/B (codex round-10):
+   `--latlon-2d` selects the wall-pole 2-D path while the band path
+   keeps the atmospheric pole-fold, so boundary semantics change along
+   with the decomposition. Report as a regular-vs-wall-pole path
+   throughput result; attributing the 1.37x to decomposition alone would
+   need a pole-matched A/B. Remaining: pole-matched ladder (np32-128);
+   ocean lane pencil refusal stands (`test_2d_pencil_layout_refused` —
+   wide-halo is 1-D-only by design).
 7. Route-A CUDA-aware mpi4jax lane (`gpu_moist_scaling.slurm`) — only if a
    route-A-vs-B A/B is ever wanted; route-B beat every route-A reference
    available here.

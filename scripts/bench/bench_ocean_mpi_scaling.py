@@ -422,7 +422,14 @@ def _build_global_problem(
             BathymetryConfig,
             load_bathymetry_latlon_cgrid,
         )
-        _bcfg = BathymetryConfig(source="file", path=bathymetry_file)
+        # fill_isolated_basins: interpolating the 1-degree mask to finer
+        # grids leaves disconnected wet pools (inland seas, single-cell
+        # coastal ponds); with no outlet the rest-state perturbation has
+        # nowhere to go and the run goes non-finite (LL576 jobs
+        # 26479904/26480203). The A/B only needs the land DISTRIBUTION,
+        # so filling pools is strictly cleaner for the benchmark problem.
+        _bcfg = BathymetryConfig(source="file", path=bathymetry_file,
+                                 fill_isolated_basins=True)
         _, mask_override = load_bathymetry_latlon_cgrid(grid, _bcfg)
     elif land_mask != "none":
         raise SystemExit(
