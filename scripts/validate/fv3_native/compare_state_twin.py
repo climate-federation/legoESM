@@ -90,15 +90,42 @@ def main(argv=None):
                          "(chaos-floor calibration)")
     ap.add_argument("--ours", required=True)
     ap.add_argument("--corner-band", type=int, default=6)
+    ap.add_argument("--expect-blocks", default="0-14,18,36,54,72,90,108,126,144",
+                    help="REQUIRED inventory: every listed block must "
+                         "carry u/v/delp/pt x t1..t6 on BOTH sides or "
+                         "the verdict is refused (codex r2 P0: a run "
+                         "that died early must never read as clean)")
+    ap.add_argument("--expect-dt-atmos", type=float, default=1200.0)
+    ap.add_argument("--expect-n-split", type=int, default=7)
     args = ap.parse_args(argv)
     if (args.fort_dir is None) == (args.control is None):
         print("FATAL: exactly one of --fort-dir / --control required")
         return 1
 
+    expect_blocks = []
+    for tok in args.expect_blocks.split(","):
+        if "-" in tok:
+            a, b = tok.split("-")
+            expect_blocks.extend(range(int(a), int(b) + 1))
+        else:
+            expect_blocks.append(int(tok))
+
     ours = np.load(args.ours, allow_pickle=False)
     n = int(ours["n"])
     ng = int(ours["ng"])
     lo = 1 - ng
+    # provenance gate (codex r2 P1-2): a stale npz or wrong cadence
+    # makes every block after b0 a false "divergence"
+    for key, want in (("dt_atmos", args.expect_dt_atmos),
+                      ("n_split", args.expect_n_split)):
+        if key in ours.files:
+            got = float(ours[key])
+            if abs(got - want) > 1e-9:
+                print(f"FATAL: ours {key}={got} != expected {want}")
+                return 1
+        else:
+            print(f"FATAL: ours npz lacks {key} provenance")
+            return 1
 
     def our_block(b, k, t):
         key = f"b{b}_{k}_t{t}"
@@ -128,6 +155,25 @@ def main(argv=None):
         label = "OURS vs ORACLE"
 
     fatal = []
+    # ---- inventory gate: EVERY expected record on BOTH sides ----
+    missing = []
+    for b in expect_blocks:
+        for k in STAG:
+            for t in range(1, 7):
+                if ref_block(b, k, t) is None:
+                    missing.append(f"ref b{b} {k} t{t}")
+                if our_block(b, k, t) is None:
+                    missing.append(f"ours b{b} {k} t{t}")
+    if missing:
+        print(f"FATAL: incomplete twin inventory — {len(missing)} of "
+              f"{len(expect_blocks) * 24} expected records missing "
+              "(run died early or wrong schedule); first few:")
+        for m in missing[:8]:
+            print("  -", m)
+        return 1
+    blocks = [b for b in blocks if b in set(expect_blocks)]
+    print(f"inventory OK: {len(expect_blocks)} blocks x 24 records "
+          "on both sides")
     # ---- sign fit at block 0 ----
     signs = {}
     for fam, fields in (("wind", ("u", "v")), ("scalar", ("delp", "pt"))):
@@ -198,7 +244,7 @@ def main(argv=None):
                 if float(d.max()) > mx:
                     mx = float(d.max())
                     kk = np.unravel_index(np.argmax(d), d.shape)
-                    arg = (t, kk[0] + 1, kk[1] + 1)
+                    arg = (t, int(kk[0]) + 1, int(kk[1]) + 1)
                 mxc = max(mxc, float(d[band].max()))
                 if (~band).any():
                     mxi = max(mxi, float(d[~band].max()))
@@ -210,6 +256,14 @@ def main(argv=None):
                 print(f"{b:4d} {k:>5s} {mx:12.4e} {mxc:12.4e} "
                       f"{mxi:12.4e} {str(arg):>16s}{extra}")
                 curve.setdefault(k, []).append((b, mx, mxc, mxi))
+                if b == 0 and mx > 1e-9:
+                    fatal.append(f"block-0 {k} max_abs {mx:.3e} — IC "
+                                 "not equivalent (tile map / cadence / "
+                                 "constants)")
+            if k == "pt" and max(pt_o, pt_r) > 1e-9:
+                fatal.append(f"block {b}: pt constancy violated "
+                             f"(ours {pt_o:.3e} / ref {pt_r:.3e}) — "
+                             "transport invariant broken on a side")
 
     print("\n=== corner-band vs interior growth (u) ===")
     for b, mx, mxc, mxi in curve.get("u", []):

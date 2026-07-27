@@ -106,12 +106,15 @@ def main():
                          "unperturbed run, case-8 is Lyapunov-chaotic "
                          "and the vertex escape is not a localizable bug")
     ap.add_argument("--ic-perturb-mode", default="checker",
-                    choices=("checker", "uniform"),
+                    choices=("checker", "uniform", "burst"),
                     help="checker = index-alternating sign (grid-scale; "
                          "del-6 removes it — underestimates the chaos "
                          "floor, 2026-07-25 retraction); uniform = "
-                         "smooth (1+eps) wind rescale that survives "
-                         "damping — use for chaos-floor calibration")
+                         "smooth (1+eps) wind rescale; burst = scale "
+                         "only the westerly burst's Gaussian envelope "
+                         "(codex r2: a single smooth bulk direction "
+                         "under-samples seam-sensitive growth — use "
+                         "BOTH smooth modes for the chaos floor)")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -222,6 +225,24 @@ def main():
                                         FV3_RADIUS_M)
             return np.asarray(u_e), np.asarray(v_n)
 
+    if args.ic_perturb and args.ic_perturb_mode == "burst":
+        # perturb the ANALYTIC field (smooth, seam-agnostic): scale the
+        # winds by (1 + eps*g1) with g1 the westerly burst's Gaussian
+        # envelope at (90E, 0) — a second chaos-floor direction that is
+        # not a bulk rescale (codex r2)
+        from legoesm.grids.cubed_sphere import great_circle_distance
+        base_wind_fn = wind_fn
+
+        def wind_fn(ll):
+            u_e, v_n = base_wind_fn(ll)
+            r1 = great_circle_distance(ll[..., 0], ll[..., 1],
+                                       np.pi / 2, 0.0, FV3_RADIUS_M)
+            f = 1.0 + args.ic_perturb * np.exp(
+                -(np.asarray(r1) / _MODON_SIZE) ** 2)
+            return u_e * f, v_n * f
+        print(f"IC perturbed by rel eps={args.ic_perturb:g} "
+              "mode=burst (chaos discriminator)", flush=True)
+
     def scalars_fn(ll):
         delp = np.full(ll.shape[:-1], fv3_grav * _MODON_H0)
         return delp, np.ones_like(delp)
@@ -234,7 +255,7 @@ def main():
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)
 
-    if args.ic_perturb:
+    if args.ic_perturb and args.ic_perturb_mode != "burst":
         # chaos discriminator: a tiny relative kick to the D winds; if
         # a bulk metric (e.g. day-5 max|V|) moves WILDLY vs the
         # unperturbed run, the near-inviscid case-8 is Lyapunov-chaotic

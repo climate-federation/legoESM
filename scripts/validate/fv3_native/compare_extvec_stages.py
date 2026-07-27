@@ -120,7 +120,8 @@ def compare(ours, fort, ilo, jlo, n, sign, stag_i=0, stag_j=0,
     rel = np.where(both, d / scale, 0.0)
     k = np.unravel_index(np.argmax(rel), rel.shape)
     return (float(d.max()), float(rel.max()),
-            (k[0] + ilo, k[1] + jlo), cov_mismatch, int(both.sum()))
+            (int(k[0]) + ilo, int(k[1]) + jlo), cov_mismatch,
+            int(both.sum()))
 
 
 def _xyz(lon, lat):
@@ -234,11 +235,38 @@ def main(argv=None):
         # cubed_a2d projections (codex r1 P1-5): ours are inter-center
         # slots — rows at p1 centers (lo_p), columns at nodes whose
         # Fortran index j maps to col j - 2 + ng+1 => lo = 2-(ng+1)
-        ("S5", "up1", sign, (lo_p, 1 - ng), 0, 1, "ring4corners"),
-        ("S5", "vp1", sign, (1 - ng, lo_p), 1, 0, "ring4corners"),
+        ("S5", "up1", sign, (lo_p, 1 - ng), 0, 1, "corners"),
+        ("S5", "vp1", sign, (1 - ng, lo_p), 1, 0, "corners"),
         ("S6", "uin", sign, (lo_m, lo_m), 0, 1, None),
         ("S6", "vin", sign, (lo_m, lo_m), 1, 0, None),
     ]
+    # expected FORT dump windows + expected comparison-crop shapes
+    # (codex r2 P1-3: a truncated dump must FAIL, not silently shrink
+    # the comparison to whatever survived)
+    m_a, m_b, m_p = n + 6, n + 7, n + 8
+    exp_fort = {
+        ("S0", "a11"): (n + 2, n + 2), ("S0", "a12"): (n + 2, n + 2),
+        ("S0", "a21"): (n + 2, n + 2), ("S0", "a22"): (n + 2, n + 2),
+        ("S0", "sinsg5"): (n + 2, n + 2),
+        ("S0", "dy"): (m_b, m_a),
+        ("S1", "uin"): (m_a, m_b), ("S1", "vin"): (m_b, m_a),
+        ("S2", "ull"): (m_a, m_a), ("S2", "vll"): (m_a, m_a),
+        ("S3", "ullp1"): (m_p, m_p), ("S3", "vllp1"): (m_p, m_p),
+        ("S4", "ullp1"): (m_p, m_p), ("S4", "vllp1"): (m_p, m_p),
+        ("S5", "ullp1"): (m_p, m_p), ("S5", "vllp1"): (m_p, m_p),
+        ("S5", "up1"): (m_p, n + 9), ("S5", "vp1"): (n + 9, m_p),
+        ("S6", "uin"): (m_a, m_b), ("S6", "vin"): (m_b, m_a),
+    }
+    exp_crop = dict(exp_fort)
+    exp_crop[("S5", "up1")] = (m_p, m_b)     # ours lacks fort's j edges
+    exp_crop[("S5", "vp1")] = (m_b, m_p)
+    # live (copied-back) windows for the a2d projections (codex r2
+    # P1-1: rows/cols never copied back + wedge 3x3s overwritten by
+    # fill_corner_region are DEAD; the live remainder must match)
+    live = {
+        ("S5", "up1"): (1 - ng, n + ng, 1 - ng, n + ng + 1),
+        ("S5", "vp1"): (1 - ng, n + ng + 1, 1 - ng, n + ng),
+    }
     hdr = (f"{'stage':6s} {'name':7s} {'tile':4s} {'max_abs':>12s} "
            f"{'max_rel':>12s} {'argmax(i,j)':>14s} {'cov_mm':>7s} "
            f"{'ncmp':>8s}")
@@ -256,13 +284,29 @@ def main(argv=None):
                 fatal.append(f"missing {st} {nm} t{t}")
                 continue
             fa, ilo, jlo = fort[key]
+            if fa.shape != exp_fort[(st, nm)]:
+                print(f"{st:6s} {nm:7s} t{t}   TRUNCATED-FORT "
+                      f"{fa.shape} != {exp_fort[(st, nm)]}")
+                fatal.append(f"truncated fort {st} {nm} t{t}")
+                continue
             cr = overlap_crop(ours[okey], loi, loj, fa, ilo, jlo)
-            if cr is None:
-                print(f"{st:6s} {nm:7s} t{t}   NO-OVERLAP")
-                fatal.append(f"no-overlap {st} {nm} t{t}")
+            if cr is None or cr[0].shape != exp_crop[(st, nm)]:
+                got = None if cr is None else cr[0].shape
+                print(f"{st:6s} {nm:7s} t{t}   BAD-OVERLAP {got} != "
+                      f"{exp_crop[(st, nm)]}")
+                fatal.append(f"bad-overlap {st} {nm} t{t}")
                 continue
             oc, fc, i0, j0 = cr
+            if (st, nm) in live:
+                li, lih, lj, ljh = live[(st, nm)]
+                oc = oc[li - i0:lih - i0 + 1, lj - j0:ljh - j0 + 1]
+                fc = fc[li - i0:lih - i0 + 1, lj - j0:ljh - j0 + 1]
+                i0, j0 = li, lj
             r = compare(oc, fc, i0, j0, n, sg, sti, stj, excl)
+            if (st, nm) in live and r[0] != "EMPTY" and r[0] > 1e-12:
+                fatal.append(f"live-{nm} divergence {st} t{t} "
+                             f"max_abs {r[0]:.3e} > 1e-12 — real "
+                             "projection mismatch on copied slots")
             if r[0] == "EMPTY":
                 print(f"{st:6s} {nm:7s} t{t}   EMPTY-OVERLAP")
                 fatal.append(f"empty {st} {nm} t{t}")
