@@ -628,11 +628,11 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
       that KPP uses (single reconstruction on MPAS);
     * ``tke_vertical_mixing`` — the whole closure (shear/buoyancy production,
       dissipation, Bougeault-Lacarrère mixing lengths); NO new closure here;
-    * the KPP MPAS CFL cap ``A_v_max = 0.25·min(dz)²/cfl_cap_dt_s``
-      (``TKEConfig.cfl_cap_dt_s``) on both K_M and K_H (defense-in-depth: the
-      profiles feed the unconditionally-stable implicit solver, but a
-      convecting column can drive ``l_k`` — and K — large before ``kappaM_max``
-      binds).
+    * NO explicit-diffusion CFL post-cap (unlike the KPP MPAS bridge): this
+      path is implicit-only (unconditionally stable backward-Euler solve), the
+      C-grid zdftke path applies no cap, and NEMO has none — a cap would bind
+      in convective columns and break closure equivalence across grids.  The
+      closure's own ``kappaM_max`` remains the physical bound.
 
     DIAGNOSTIC (Mode B) only: the closure is seeded at ``tke_background`` and
     sub-iterated to quasi-steady each call (``tke_old=None``); NO prognostic TKE
@@ -676,14 +676,11 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             "is not wired on the MPAS ocean (the adiabatic/signed-N^2 path needs "
             "the cell-centre hydrostatic pressure that this bridge does not "
             "compute). MPAS supports n2_mode='insitu'.")
-    if int(getattr(cfg, "eice", 0)) != 0:
-        raise NotImplementedError(
-            f"vertical_mixing.tke.eice={int(getattr(cfg, 'eice', 0))} (under-ice "
-            "attenuation of the lc/etau TKE sources) is not wired on the MPAS "
-            "vertical-mixing bridge yet: this bridge receives no ice "
-            "concentration (mpas_physics passes tau/q only). Set eice=0 on "
-            "MPAS, or run the tke closure on the lat-lon/tripole C-grid where "
-            "surface_forcing.ice_concentration is threaded.")
+    # NOTE: eice (under-ice lc/etau attenuation) IS wired on this bridge —
+    # profiles_fn reads surface_forcing.ice_concentration under the shared
+    # static gate (mirroring _run_mpas_kpp) and threads ice_frac into
+    # tke_vertical_mixing.  Validated below: eice in {0,1,3}; eice!=0 with no
+    # ice field FAILS FAST (the KPP-bridge contract).
     if bool(getattr(cfg, "veros_dz_slots", False)):
         raise NotImplementedError(
             "vertical_mixing.tke.veros_dz_slots=True is not wired on the MPAS "
@@ -695,11 +692,11 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             f"{getattr(cfg, 'buoyancy_timing', 'pre_mixing')!r} is not wired on "
             "the MPAS ocean (post_mixing_veros needs the prognostic model-step "
             "ordering). MPAS supports buoyancy_timing='pre_mixing'.")
-    if bool(getattr(cfg, "lc", False)) or getattr(cfg, "etau_mode", "none") != "none":
-        raise NotImplementedError(
-            "vertical_mixing.tke NEMO surface terms (lc / etau_mode) are not "
-            "wired on the MPAS ocean (they need the etau latitude profile this "
-            "bridge does not plumb). Set lc=False and etau_mode='none'.")
+    # NOTE: the NEMO surface terms (lc / etau_mode incl. the nn_htau=1
+    # latitude profile) ARE wired — profiles_fn passes
+    # lat_deg=degrees(mesh.latCell) and the ice concentration into the
+    # grid-agnostic kernel (the same inputs the C-grid k_profiles path
+    # threads), so the ORCA1 zdftke card runs on the Voronoi mesh.
     if getattr(cfg, "advection_scheme", "none") != "none":
         raise NotImplementedError(
             "vertical_mixing.tke.advection_scheme="
@@ -744,6 +741,38 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
                  if surface_forcing is not None else None)
         tau_y = (getattr(surface_forcing, "tau_y", None)
                  if surface_forcing is not None else None)
+        # NEMO surface-term inputs (lc / etau / eice), mirroring the C-grid
+        # k_profiles threading + the _run_mpas_kpp gate discipline:
+        #  * lat_deg: the nn_htau=1 latitude profile (45·|sin φ| m) needs
+        #    degrees; mesh.latCell is RADIANS (Coriolis uses sin(latCell)).
+        #  * ice_frac: read ONLY when eice != 0 (eice=0 -> None -> the
+        #    bit-identical open-water path); eice requested with NO ice field
+        #    FAILS FAST (silent no-op forbidden — same contract as the MPAS
+        #    KPP bridge).  lc/etau run fine without ice (fi=0 open water).
+        _tke_eice = int(getattr(cfg, "eice", 0))
+        if _tke_eice not in (0, 1, 3):
+            raise ValueError(
+                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1 or 3.")
+        ice_frac = (getattr(surface_forcing, "ice_concentration", None)
+                    if (_tke_eice != 0 and surface_forcing is not None)
+                    else None)
+        if _tke_eice != 0 and ice_frac is None:
+            raise ValueError(
+                f"TKEConfig.eice={_tke_eice} (MPAS under-ice attenuation) "
+                "requires surface_forcing.ice_concentration, but none was "
+                "supplied. Provide sea-ice concentration (prognostic or "
+                "prescribed SIC) or set eice=0.")
+        if ice_frac is not None:
+            # Map the RAW sea-ice concentration onto the mode's EFFECTIVE ice
+            # fraction BEFORE the kernel — the lc/etau kernels apply
+            # (1 - ice_frac) internally, so mode 3 must pass min(4*fi, 1)
+            # (NEMO nn_eice=3: wave TKE fully killed at fi >= 0.25).  The
+            # SAME pre-mapping the C-grid k_profiles path does (k_profiles
+            # ~:533); passing raw fi under eice=3 would silently run the
+            # mode-1 (1-fi) law (codex HIGH).
+            ice_frac = (ice_frac if _tke_eice == 1
+                        else jnp.minimum(4.0 * ice_frac, 1.0))
+        lat_deg = jnp.degrees(mesh.latCell)
 
         # Veros tke_mxl_choice=1 distance-to-boundary cap (mirrors the lat-lon
         # k_profiles branch): the buoyancy mixing length may not exceed the
@@ -772,6 +801,20 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             n_iterations=_TKE_DIAGNOSTIC_N_ITER,
             z_interface=z_interface,
             boundary_cap=boundary_cap,
+            # NEMO surface terms (lc / etau nn_htau=1 / eice): the SAME
+            # kernel inputs the C-grid k_profiles path threads.
+            # taum_surface deliberately omitted: CORE-II supplies no wind-
+            # stress-modulus override (the kernel derives |tau| from
+            # tau_x/tau_y); thread surface_forcing.taum here if a modulus
+            # channel ever reaches MPAS (codex MED, parity with k_profiles).
+            lat_deg=lat_deg,
+            ice_frac=ice_frac,
+            # e3t cell thicknesses (dz_ref · J) for the nn_mxl=3 lup/ldown
+            # |dl/dz| <= e3t sweeps — the SAME (dz_ref, jacobian) pair the
+            # C-grid k_profiles path threads.  Ignored by the kernel for
+            # mxl choices 1/2 (bit-identical there).
+            dz_ref=z_coord.dz_ref,
+            jacobian=J,
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0
@@ -783,16 +826,15 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
         A_v_cells = jnp.where(m_half > 0.5, A_v_cells, 0.0)
         K_v_cells = jnp.where(m_half > 0.5, K_v_cells, 0.0)
 
-        # CFL cap (SAME as KPP MPAS): A_v_max = 0.25·min(dz_k, dz_k+1)^2 /
-        # cfl_cap_dt_s.  Applied to BOTH K_M and K_H (the explicit-diffusion
-        # stability bound is the same for momentum and tracer viscosity).  Only
-        # reduces K (>= 0 preserved); 0.25 for safety margin.
-        _dt_phys = cfg.cfl_cap_dt_s
-        _dz = z_coord.dz_ref            # (nlev,)
-        _dz_min_half = jnp.minimum(_dz[:-1], _dz[1:])   # (nlev-1,)
-        _Av_max = 0.25 * _dz_min_half ** 2 / _dt_phys   # (nlev-1,)
-        A_v_cells = jnp.minimum(A_v_cells, _Av_max[None, :])
-        K_v_cells = jnp.minimum(K_v_cells, _Av_max[None, :])
+        # NO explicit-diffusion CFL cap here (codex MED): this bridge is
+        # IMPLICIT-ONLY by construction (make_mpas_ocean_physics rejects TKE
+        # without implicit_vertical_mixing; the backward-Euler solve is
+        # unconditionally stable), the tripole/C-grid zdftke path applies no
+        # such cap, and NEMO has none — capping would silently bind in
+        # convective columns (0.25·dz²/300 s ≈ 0.08 m²/s at 10-m cells vs
+        # closure K of O(1-10)) and break the "same closure across grids"
+        # contract.  (The KPP MPAS bridge keeps ITS cap: KPP also has an
+        # explicit-tendency path.)
 
         # Sub-seafloor interface masking on partial cells: zero K at interfaces
         # below the deepest active full level (mirrors make_kpp_profiles_mpas).
