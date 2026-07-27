@@ -779,8 +779,13 @@ Solving the two fixed-device points for the per-device cost model:
 At the production 147.5k tile the fixed term is already **58 %** of the
 step, and at 65.5k it is **76 %**. This is an Amdahl ceiling, not a
 network one: from a 24-GPU C768 base the step can never beat ~11.3 ms
-**however many GPUs are added** — a hard cap of 1.72x, of which the
-measured 24->54 run already collected 1.39x. That single number explains
+**however many GPUs are added** — a cap of 1.72x, of which the measured
+24->54 run already collected 1.39x. CONDITIONAL (codex round-15): this
+comes from a TWO-POINT fit and assumes the 11.27 ms term is constant as
+tiles shrink and device count rises. A perimeter-like halo term would
+FALL with tile size while collective latency could RISE with rank count;
+the 2.25x fixed-tile contrast supports only "little growth over the
+tested range", not universality. That single number explains
 the cube's efficiency 0.62, the empirical tile floor, and the plateau in
 the figure.
 
@@ -856,14 +861,29 @@ WHAT THE KERNEL NAMES SHOW (single-shot lane, both tiles, 24 GPUs):
 | `ncclDevKernel_SendRecv` (halo) | 311.8 ms / 1440 | 186.7 / 1116 | ~120 launches |
 | `AllReduce_Sum_f32_RING_LL` | 186.9 ms / **12** | 94.0 / **12** | **exactly 1** |
 
-The per-step all-reduce averages **15.6 ms at C768** and the psum it
-implements is SCALAR (`tiled_production_cdgrid.py` reshapes to `(1,)`).
-A scalar all-reduce over 24 GPUs is tens of microseconds of traffic, so
-~15 ms is not data movement — it is a GLOBAL BARRIER absorbing the rank
-skew accumulated during the step. It scales 1.99x with 2.25x tile area,
-consistent with skew growing with per-tile compute. NOTE this lane runs
-with the conservation fixer OFF, so the reduction is NOT the mass fixer;
-its origin still needs identifying in the closed-loop profile.
+The per-step all-reduce averages **15.6 ms at C768** and scales 1.99x
+with 2.25x tile area.
+
+**SOURCE MIS-ATTRIBUTED — corrected (codex round-15).** I cited the
+`(1,)` reshape in `tiled_production_cdgrid.py:2508` as the psum behind
+it. That is WRONG: that reshape lives in the closed-loop communicator
+WARM-UP, and the single-shot adapter explicitly REFUSES the mass fixer
+(`tiled_step_adapter.py:102`). So the origin of the per-step all-reduce
+in the profiled lane is **unidentified**, and my "scalar psum, therefore
+pure barrier" chain does not hold as stated.
+
+What survives: a 15.6 ms all-reduce IS compatible with early ranks
+spinning until a late rank arrives, but that is a hypothesis, not a
+measurement. The discriminating test (codex round-15) is per collective
+instance:
+
+    arrival skew = latest NCCL-kernel start - earliest NCCL-kernel start
+
+ms-scale skew with microsecond-scale service time on the last-arriving
+rank confirms the barrier reading; aligned starts implicate the
+collective or the scheduler instead. That analysis runs on the
+closed-loop trace (job 26507936), which is also the lane the cost model
+was fitted to.
 
 CONSEQUENCE FOR REACHING THE LIMIT: the lever is halo-cost-per-tile, not
 device count. Options in order of expected value: (a) larger tiles
