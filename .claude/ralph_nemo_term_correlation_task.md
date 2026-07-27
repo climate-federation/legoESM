@@ -302,3 +302,22 @@ NEXT item 11 zdftke: avt/avm dumps already exist (8814/8815).
   **ACCEPTED AS-IS** (revisit if needed).
 - Open residuals: CHASE, order = item 11 composite (lead: face-averaged
   old-avm in sh2) -> interior slope +0.30% -> re-measure item 7 v after those.
+
+
+## FINAL BOARD (2026-07-27, residual chase complete)
+
+| # | term | final | class |
+|---|---|---|---|
+| 1 sbc | 1.000000 | EXACT |
+| 2 eos_rab | beta bit-exact, alpha 4.7e-6 | EXACT |
+| 3 bn2 | corr 1.0, med 6.96e-6 | EXACT |
+| 4 zdf_mxl | 99.88% | ACCEPTED (knife-edge, sub-precision) |
+| 5 ldf_slp x4 | >=0.9988; interior |x| 1.0011 | CLOSED (bottom row 1.0255 = irreducible amplification) |
+| 6 ldf_eiv kappa | corr 1.000000 | EXACT |
+| 7 eiv transport | u 0.9985 / v 0.9954, med 0.15% | residual diffuse, no lead — accepted-for-now |
+| 8 traadv_fct | fluxes 0.99994 | FAITHFUL |
+| 9 dyn_hpg | corr 1.000000 | MACHINE-EXACT |
+| 10 dyn_vor EEN | 0.9999, med 4e-4 | ACCEPTED (bottom levels unattributed) |
+| 11 zdftke | pdlr 0.998; composite 1.0 excl. 257 threshold-chatter cells | CLOSED |
+
+NEXT: 90-day twin re-run with the full fixed card (integration test), then push/PR.
