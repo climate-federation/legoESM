@@ -294,3 +294,11 @@ cycles): e3f avg rule (c6d34a20e, ~inert), dry-vertex e3f_0 fallback
 Bottom-4-level |x| 1.04-1.07 (~2.4% of mass) UNATTRIBUTED. Review fix
 d5ff9d15f (helper factoring, mutation-kill proven).
 NEXT item 11 zdftke: avt/avm dumps already exist (8814/8815).
+
+
+## USER DECISIONS (2026-07-27)
+
+- Items 4 (99.88%, 12 knife-edge cols) and 10 (0.9999, bottom-4-levels) —
+  **ACCEPTED AS-IS** (revisit if needed).
+- Open residuals: CHASE, order = item 11 composite (lead: face-averaged
+  old-avm in sh2) -> interior slope +0.30% -> re-measure item 7 v after those.
