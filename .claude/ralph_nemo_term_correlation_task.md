@@ -273,3 +273,13 @@ margin is below input precision."
 Instrument NEMO MY_SRC traadv_fct.F90 with first-call dumps (upstream flux,
 antidiffusive flux, limited flux, tendency), rebuild, run RUN_GDB, then
 lego-side comparison via the proven cycle.
+
+
+## Item 8 `traadv_fct` (2026-07-27): FAITHFUL — fluxes corr 0.99994
+
+Upstream fluxes 0.99994 / anti-correction 0.9991 / pure total tendency 0.9923
+(median rel-err 0.1%). Residual = cancellation amplification of known input
+diffs, not the scheme. TRAP: trd dumps contaminated (Krhs carries
+sbc/qsr/bbc/bbl/dmp accumulated BEFORE tra_adv, stpmlf.F90:342-363) — compare
+via flux-reconstructed pure tendency only, or re-instrument with a Krhs
+snapshot before tra_adv_fct.
