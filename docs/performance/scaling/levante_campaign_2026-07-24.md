@@ -736,8 +736,18 @@ entries have same-day receipts.
   never created ranks. The flat curves were the SAME single-device run
   repeated, not a latency floor and not a defect — codex round-13's
   "hypothesis, not verdict" was righter than it knew. What survives:
-  single-device timings (s6 ~7 ms f32/f64, s7 ~21.9 ms f32). The REAL
-  lane (CPU-MPI, np1-16, s6+s7, block:cyclic) is job 26494036.
+  single-device timings (s6 ~7 ms f32/f64, s7 ~21.9 ms f32).
+
+  **THE REAL LADDER (job 26494036, CPU-MPI f64, np1-16, block:cyclic,
+  ranks=N verified in metadata): MPAS-ocean SCALES.** s6 (41k cells):
+  814.46 / 316.71 / 159.27 / 92.85 / 90.51 ms; s7 (164k cells): 3944.43
+  / 1615.85 / 720.87 / 362.42 / 311.53 ms. The np1 base is
+  cache-disadvantaged (np1->2 superlinear, same pattern as the atm
+  spread ladder), so quoting np2-base efficiencies: s6 2->16 = 0.44,
+  **s7 2->16 = 0.65** — the tile-size pattern reproduces on a FOURTH
+  lane (bigger mesh holds efficiency deeper), and the np8->16 flattening
+  sits exactly where per-rank cells fall to 2.5k (s6) vs 10k (s7).
+  Single runs, no repeats; ordering claims only.
 - Remaining coverage gap, flagged not measured: atmosphere SPECTRAL has
   no scaling receipts on any transport (global-transform lane, x64 by
   policy).
