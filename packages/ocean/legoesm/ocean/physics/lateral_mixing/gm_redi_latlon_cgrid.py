@@ -791,7 +791,25 @@ def compute_nemo_native_slopes(
         jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=1)),
         jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
     zdepu = (gdept - 0.5 * dz[0])[None, None, :] * jnp.ones_like(zgru)
-    e3u_k = dz[None, None, :]                                     # flat: e3u=e3t
+    # NEMO's slope stability bound is -7e3/e3u(ji,jj,jk,Kmm)*|zau| (ldfslp.F90
+    # :133-134) and it uses the U-FACE / V-FACE thickness, NOT the cell value.
+    # At a staircase / partial-cell topography step the face thickness is the
+    # MIN of the two adjacent cells and is therefore MUCH smaller than e3t, so
+    # NEMO clamps the slope far harder exactly there -- at the topography that
+    # sets form stress and the sill. Using e3t (and the same array for BOTH the
+    # u- and v-slope) left legoESM's wslpi at corr 0.9585 vs NEMO's own dumped
+    # field, a PATTERN error concentrated at topography which the psi vertical
+    # difference then amplified into a 0.77 correlation on the eiv transport
+    # (#1226). h_partial carries the staircase; dz_ref does not.
+    _hp = getattr(z_coord, "h_partial", None)
+    if _hp is not None:
+        _h3 = jnp.asarray(_hp, dtype=dtype)
+        _floor = jnp.asarray(1.0e-10, dtype=dtype)
+        e3u_k = jnp.maximum(jnp.minimum(_h3, jnp.roll(_h3, -1, axis=1)), _floor)
+        e3v_k = jnp.maximum(jnp.minimum(_h3, jnp.roll(_h3, -1, axis=0)), _floor)
+    else:                                    # z-star / flat: e3u = e3v = e3t
+        e3u_k = dz[None, None, :]
+        e3v_k = dz[None, None, :]
     uslp = _uv_slp(zgru, zb_u, e1u, e3u_k, iku, r1_hmlu, zdepu, umask3)
 
     # --- vslp ---
@@ -800,7 +818,7 @@ def compute_nemo_native_slopes(
     r1_hmlv = 1.0 / jnp.maximum(
         jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=0)),
         jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
-    vslp = _uv_slp(zgrv, zb_v, e2v, e3u_k, ikv, r1_hmlv, zdepu, vmask3)
+    vslp = _uv_slp(zgrv, zb_v, e2v, e3v_k, ikv, r1_hmlv, zdepu, vmask3)
 
     # --- wslpi / wslpj (:265-297) ---
     zgru_im1 = jnp.roll(zgru, +1, axis=1)
