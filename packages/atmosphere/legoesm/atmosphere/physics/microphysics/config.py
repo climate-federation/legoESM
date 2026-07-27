@@ -1008,6 +1008,7 @@ def apply_microphysics_experiment_flags(
     hard_sat_max_heating_K: float | None = None,
     homogeneous_ice_nucleation: bool = False,
     morrison_scalars: dict | None = None,
+    morrison_flavor: str | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1093,6 +1094,19 @@ def apply_microphysics_experiment_flags(
                 "override."
             )
         scheme_config = scheme_config._replace(**{_field: float(_val)})
+    if morrison_flavor is not None:
+        # Same HARD scheme gate as the scalars below: the flavor selector is
+        # a Morrison-only concept; on any other scheme it would be silently
+        # inert (P3/Thompson have no morrison_flavor leaf to begin with, but
+        # the gate keys on the SCHEME, not field presence, for the same
+        # reason as the scalar gate).
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_flavor={morrison_flavor!r} is only supported by "
+                f"the morrison microphysics scheme (got {scheme!r}); use "
+                "--microphysics morrison or drop the override.")
+        scheme_config = scheme_config._replace(
+            morrison_flavor=morrison_flavor)
     if morrison_scalars:
         # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
         # scalars).  HARD scheme gate, NOT field-presence: Thompson carries

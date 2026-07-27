@@ -3251,3 +3251,30 @@ def test_hard_saturation_adjustment_requires_warm_rain_scheme():
         ]), parser))
         with pytest.raises(ValueError, match="warm-rain microphysics"):
             cfg.validate_strict()
+
+
+def test_morrison_flavor_round_trips():
+    """--morrison-flavor sam round-trips into ExperimentConfig; default mg."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-flavor", "sam",
+    ]), parser))
+    assert cfg.morrison_flavor == "sam"
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.morrison_flavor == "mg"
+
+
+def test_morrison_flavor_yaml_route():
+    """--config YAML route (keys become parser defaults): morrison_flavor: sam
+    must reach ExperimentConfig, and an explicit CLI flag must still win."""
+    parser = build_arg_parser()
+    parser.set_defaults(morrison_flavor="sam", microphysics="morrison")
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.morrison_flavor == "sam"
+    cfg_cli = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--morrison-flavor", "mg",
+    ]), parser))
+    assert cfg_cli.morrison_flavor == "mg"
