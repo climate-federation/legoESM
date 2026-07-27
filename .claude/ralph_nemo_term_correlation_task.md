@@ -44,43 +44,66 @@ established method — a loop then would have amplified false leads. It won't no
 Also available with NO rebuild: **gdb call tracing** (the binary is not stripped).
 `gdb -batch -x cfgs/DINO/RUN_GDB/trace.gdb ./nemo` gives the per-step call order.
 
-## Current scoreboard (all vs NEMO's own dumped arrays, same y5 restart state)
+## Work in NEMO's OWN EXECUTION ORDER (user directive)
 
-| term | corr | ratio | status |
-|---|---|---|---|
-| N² (`rn2b`) | **0.486–0.545** | **1.54–1.76** | OPEN — biggest gap, most upstream |
-| `wslpi` (slope) | 0.9585 | 0.975 | OPEN |
-| `aeiu` (κ_GM) | 0.9847 | 1.002 | OPEN (close, but not 1.0) |
-| eiv transport | 0.7727 | 1.040 | OPEN — amplified by ψ's vertical difference |
-| `e3w`, `gdept` ladders | ~1e-4 | 1.000 | **MATCHED** |
+> "this bit by bit fix approach should start right at the start of when a model
+> step cycle starts and fix every type of equation/terms it comes across...
+> jumping the middle of a model step may lead to issues from earlier in the step
+> that we didn't solve"
+> "Don't go to next routine till a routine is 1.0 corr and ratio 1."
 
-## N² — what is already eliminated (do NOT re-chase)
+Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 
-- **Formulation**: legoESM's adiabatic N² (0.5378/1.544) and its NEMO-faithful
-  linearised-α/β `compute_buoyancy_frequency_nemo_bn2` (0.5450/1.5366) agree with
-  EACH OTHER and disagree with NEMO identically. Not the α/β-vs-parcel choice.
-- **e3w divisor / gdept ladder**: match NEMO to ~1e-4 (dumped and compared).
-- **T/S time level**: identical result from `tn/sn` and `tb/sb` (0.486204 vs
-  0.486212) — and verified non-vacuous (the before-state genuinely differs:
-  max|ΔT| = 0.245 K).
-- **Vertical index offset**: k-shift scan gives −1→0.36, 0→0.54, +1→0.62. No
-  clean offset, but the sensitivity means **the level convention of the
-  comparison itself is the prime remaining suspect** — re-derive which interface
-  each side assigns N² to, from `eosbn2.F90` (NEMO computes only jk=2..jpkm1,
-  surface/bottom zeroed in `istate.F90`) and from legoESM's function.
+## Current scoreboard (vs NEMO's own dumped arrays, same y5 restart state)
 
-**START HERE**: settle the N² level convention. Everything downstream inherits it.
+| # | routine | corr | ratio | status |
+|---|---|---|---|---|
+| 1 | `sbc` (utau/qsr/qns/sfx) | 1.000000 | 1.000000 | **PASS** |
+| 2 | `eos_rab` (α, β) | 1.000000 | 1.000007 | **PASS** |
+| 3 | `bn2` (`rn2b`) | 1.00000000 | 0.99997 | near — see below |
+| 4 | `zdf_mxl` (`nmln`/`hmlp`) | 99.859% levels | — | near — 14/9920 cols |
+| 5 | `ldf_slp` (`wslpi`) | 0.9585 | 0.975 | OPEN |
+| 6 | `ldf_eiv` (`aeiu`) | 0.9847 | 1.002 | OPEN |
+| 10 | eiv transport | 0.7727 | 1.040 | OPEN |
+
+### Item 3/4 — fixed 2026-07-27 (commit `634ee4aee`)
+
+Two REAL transcription bugs, both found by reading the Fortran:
+
+- **`zdfmxl.F90:96-101` bottom cap** — NEMO advances `nmln` on every level still
+  BELOW threshold, clamped `MIN(jk,mbkt)+1`, so a never-reaching column ends at
+  the SEAFLOOR, not the deepest interface. We had no cap → 339 columns 1-5
+  levels too deep. **353 → 14 mismatched columns.**
+- **`eosbn2.F90:1459` zrw depth** — α/β are evaluated at T-points and
+  interpolated to the w-point using the TRUE `gdepw`, which equals the gdept
+  midpoint ONLY on a uniform ladder. We passed the midpoint → 3.7e-4 median N²
+  bias. MLD integrand: median rel err **3.66e-4 → 4.95e-5**, corr → **1.00000000**.
+
+Also settled: **`hmlp = gdepw_0[nmln-1] * (1 + ssh/H)`** — validated by a control
+test that reproduces NEMO's own dumped `hmlp` to **0.0 m** over 9920 columns.
+The criterion itself is THICKNESS-FREE (eosbn2 divides by `e3w`, zdfmxl
+multiplies it back — exact cancellation), so no z-star stretch belongs in the
+integral; only in the depth.
+
+**RETRACTED**: the earlier "N² off by 54%" (an off-by-one — correctly aligned it
+was corr 1.000000) and "hmlp 14% too deep" (unvalidated depth lookup).
+
+**NEXT (item 3 → 1.0)**: lego divides N² by the REFERENCE `e3w`; NEMO uses the
+LIVE `e3w(jk,Kmm) = e3w_0*(1+r3t)` (`domzgr_substitute.h90:131`). That is the
+3.0e-5 ratio deficit (ssh/H ~ 1e-4). It CANCELS in the MLD but NOT in the
+slopes, so fix it before item 5. `col_stretch` in
+`_nemo_mld_from_n2_integral` already shows how to recover `1+r3t` from
+`z_coord.h_partial` without threading eta through signatures.
+
+Eliminated for the residual 14 columns (do NOT re-chase): `mbkt` (0 disagreements
+globally), `nlb10` (=2 on both sides), the level/index convention (validated).
 
 ## Term list (work down; each is one cycle)
 
-1. N² `rn2b` ← in progress
-2. `wslpi` / `wslpj` slopes (after N² is 1.0 — it feeds them via `zdzr`)
-3. `aeiu` κ_GM
-4. eiv transport (should follow once 1–3 are 1.0)
-5. tracer advection fluxes (`traadv_fct`: upstream, high-order, limited)
-6. PGF (`hpg_sco`)
-7. Coriolis / EEN vorticity
-8. vertical mixing (`zdftke`), EVD trigger
+1. ~~`sbc`~~ PASS · 2. ~~`eos_rab`~~ PASS · 3. `bn2` ← live e3w divisor
+4. `zdf_mxl` (14 cols) · 5. `ldf_slp` · 6. `ldf_eiv` · 7. eiv transport
+8. tracer advection (`traadv_fct`) · 9. PGF (`hpg_sco`)
+10. Coriolis / EEN vorticity · 11. `zdftke`, EVD trigger
 
 ## Guardrails (each earned by a failure TODAY)
 
