@@ -1314,6 +1314,13 @@ def _prandtl_number(
         # the faithful cell-centred transcription (== P_s_curr at the
         # call site, tke.py:1932).
         p_sh2 = kappaM * shear_sq
+        # NB with NEMO's default rn_bshear = 1e-20 the kappaM factors cancel
+        # almost everywhere (bshear is ~9 decades below kappaM*shear_sq in any
+        # realistic regime), so zri ~= N2/shear_sq: nemo_ri is then
+        # NEAR-DEGENERATE with "richardson" up to the ri_cri-vs-6.6 scaling.
+        # The weighted form matters only where the floor competes (kappaM or
+        # shear ~ 0) — keep it for faithfulness, but do not expect materially
+        # different production behaviour (review of 4aeeb867d, #1226).
         zri = N2 * kappaM / jnp.maximum(p_sh2 + bshear, 1e-30)
         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
