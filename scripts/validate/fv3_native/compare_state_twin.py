@@ -241,7 +241,7 @@ def main(argv=None):
                         np.all(np.isfinite(oc))):
                     fatal.append(f"block {b} {k} t{t} non-finite")
                 d = np.abs(oc - sgn[k] * fc)
-                if float(d.max()) > mx:
+                if arg is None or float(d.max()) > mx:
                     mx = float(d.max())
                     kk = np.unravel_index(np.argmax(d), d.shape)
                     arg = (t, int(kk[0]) + 1, int(kk[1]) + 1)
