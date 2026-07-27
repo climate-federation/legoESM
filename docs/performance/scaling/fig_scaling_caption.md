@@ -31,6 +31,21 @@ best barotropic solver arm per precision; **f**, tripole grid with the
 ORCA fold, which costs only 1.2–3.7 % relative to the matched regular
 grid; **g**, MPAS Voronoi ocean, subdivision-7, CPU–MPI.
 
+**Precision speedup is not universal — it tracks what bounds the
+kernel.** Dense, bandwidth-bound lanes gain roughly what halving the
+element width predicts (atmosphere lat–lon: 7.72 ms in float32 vs
+16.11 ms in float64 at four GPUs, 2.1×; ocean lat–lon 1.8× at one GPU),
+whereas the gather-bound MPAS Voronoi ocean gains NOTHING (**g**: 3980
+vs 3944 ms at one rank, float32 marginally slower, and the two curves
+are indistinguishable at every rank count). Indirect-addressed Voronoi
+stencils are limited by scattered-access latency rather than by the
+bytes moved, so narrowing the element does not help — the same reason
+wet-cell compaction fails to pay on this code base. Note also that the
+float64 atmosphere lat–lon ladder STRONG-SCALES BETTER than its float32
+twin (2.87× vs 2.18× over 4→16 GPUs): the heavier per-device work keeps
+the tile above the saturation floor, the tile-size effect appearing
+along the precision axis.
+
 Where a measured curve lies below its dashed ideal (**g**, and **e** at
 one point), the single-device base leg holds the entire problem and is
 cache-disadvantaged; the apparent super-ideal speedup is a property of

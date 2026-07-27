@@ -31,20 +31,21 @@ from matplotlib.lines import Line2D
 # --- Measured data -------------------------------------------------------
 # (devices, ms/step). Job ids are the provenance for each series.
 SOURCES = {
-    "atm_latlon": "26450848/26453240/26449147",
+    "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64)",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734",
     "atm_ico_cpu": "26452579",
     "oc_latlon": "26460444-501/26460365/26493592",
     "oc_tripole": "26493837/26493648",
-    "oc_mpas": "26494036",
+    "oc_mpas": "26494036 (f64), 26494908 (f32)",
 }
 
 PANELS = [
     dict(
         key="atm_latlon", title="lat–lon", sub="720×1440 L26 · A100 NCCL",
-        series=[("float32", [(4, 7.72), (8, 5.40), (16, 3.54)])],
-        note="f64 pending",
+        series=[("float32", [(4, 7.72), (8, 5.40), (16, 3.54)]),
+                ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)])],
+        note="",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -80,9 +81,11 @@ PANELS = [
     ),
     dict(
         key="oc_mpas", title="MPAS Voronoi", sub="subdiv-7 164k cells · Milan CPU–MPI",
-        series=[("float64", [(1, 3944.43), (2, 1615.85), (4, 720.87),
+        series=[("float32", [(1, 3980.56), (2, 1646.00), (4, 745.73),
+                             (8, 363.58), (16, 318.06)]),
+                ("float64", [(1, 3944.43), (2, 1615.85), (4, 720.87),
                              (8, 362.42), (16, 311.53)])],
-        note="f32 pending",
+        note="f32 ≈ f64: gather-bound",
     ),
 ]
 
