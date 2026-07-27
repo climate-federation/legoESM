@@ -403,3 +403,34 @@ def test_bolus_kappa_face_average_matches_nemo_and_is_inert_for_constant_kappa()
     on = run(k2d, True)
     assert max(float(jnp.max(jnp.abs(a - b))) for a, b in zip(off, on)) > 1.0, (
         "face averaging had no effect on a 2-D kappa -- the flag is not wired")
+
+
+def test_kappa_gm_to_faces_matches_a_literal_fortran_port():
+    """`nemo_kappa_gm_to_faces` vs a loop port of ldftra.F90:716-717.
+
+    The loop port is written from the Fortran (ji+1 / jj+1 neighbours, face
+    masks), not from the vectorised implementation, so a flipped roll direction
+    or a swapped axis fails here.  Periodic wrap in i is asserted explicitly --
+    the wrap columns are exactly where the previous inline reconstruction was
+    wrong.
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        nemo_kappa_gm_to_faces,
+    )
+    rng = np.random.default_rng(8)
+    nlat, nlon = 5, 4
+    kt = rng.uniform(100.0, 1500.0, (nlat, nlon))
+    um = (rng.uniform(size=(nlat, nlon)) > 0.2).astype(float)
+    vm = (rng.uniform(size=(nlat, nlon)) > 0.2).astype(float)
+    ku, kv = nemo_kappa_gm_to_faces(jnp.asarray(kt), jnp.asarray(um),
+                                    jnp.asarray(vm))
+    ku = np.asarray(ku); kv = np.asarray(kv)
+    for j in range(nlat):
+        for i in range(nlon):
+            ip1 = (i + 1) % nlon               # periodic wrap (lbc_lnk)
+            jp1 = (j + 1) % nlat
+            assert abs(ku[j, i] - 0.5 * (kt[j, i] + kt[j, ip1]) * um[j, i]) < 1e-12
+            assert abs(kv[j, i] - 0.5 * (kt[j, i] + kt[jp1, i]) * vm[j, i]) < 1e-12
+    # non-vacuous: the wrap column must actually use the wrap neighbour.
+    assert abs(ku[0, nlon - 1] - 0.5 * (kt[0, nlon - 1] + kt[0, 0]) * um[0, nlon - 1]) < 1e-12
+    assert kt[0, 0] != kt[0, nlon - 1]

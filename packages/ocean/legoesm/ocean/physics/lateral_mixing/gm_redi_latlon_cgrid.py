@@ -1113,6 +1113,33 @@ def compute_treguier_kappa_gm_nemo_native(
     return jnp.where(mask > 0.5, kappa, 0.0)
 
 
+def nemo_kappa_gm_to_faces(kappa_t, u_surf_mask, v_surf_mask):
+    """NEMO's T-point -> U/V-face average of the eiv coefficient.
+
+    Transcribes ``ldftra.F90:716-717`` (NEMO 5.0.2)::
+
+        zaeiu(ji,jj) = 0.5 * ( zaeiw(ji,jj) + zaeiw(ji+1,jj) ) * ssumask(ji,jj)
+        zaeiv(ji,jj) = 0.5 * ( zaeiw(ji,jj) + zaeiw(ji,jj+1) ) * ssvmask(ji,jj)
+
+    with the subsequent ``lbc_lnk`` supplying the periodic wrap that
+    ``jnp.roll`` provides here.  NEMO's ``paeiu``/``paeiv`` are THESE face
+    fields broadcast in depth and 3-D-masked -- the T-point ``zaeiw`` never
+    reaches the tendency.  Exposed publicly so oracle comparisons measure the
+    ACTUAL NEMO quantity instead of re-implementing this average inline (a
+    reconstruction that previously corrupted the two periodic wrap columns and
+    confounded the aeiu comparison, #1226).
+
+    Parameters: ``kappa_t`` (n_lat, n_lon) T-point coefficient;
+    ``u_surf_mask`` (n_lat, n_lon) EAST-face surface mask aligned with
+    ``kappa_t`` columns; ``v_surf_mask`` (n_lat, n_lon) NORTH-face analogue.
+    Returns ``(kappa_u, kappa_v)``, each (n_lat, n_lon).
+    """
+    ax_y, ax_x = 0, 1
+    kappa_u = 0.5 * (kappa_t + jnp.roll(kappa_t, -1, ax_x)) * u_surf_mask
+    kappa_v = 0.5 * (kappa_t + jnp.roll(kappa_t, -1, ax_y)) * v_surf_mask
+    return kappa_u, kappa_v
+
+
 def compute_isopycnal_slopes_latlon_cgrid(
     rho: jnp.ndarray,
     mask: jnp.ndarray,
