@@ -1087,7 +1087,6 @@ class MPASOceanModel:
 
         return cast_pytree(state_new, None, "storage")
 
-    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def seed_tke(self, state: MPASOceanState) -> MPASOceanState:
         """Seed the prognostic TKE carry (``MPASOceanState.tke``) if needed.
 
@@ -1115,6 +1114,7 @@ class MPASOceanModel:
             tke=Field(data=tke0, name="tke", dims=("nCells", "level"),
                       units="m^2/s^2"))
 
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def step(
         self,
         state: MPASOceanState,
