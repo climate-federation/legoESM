@@ -35,6 +35,7 @@ OPS = {
     "transp": lambda a: np.transpose(a), "anti_T": lambda a: a[::-1, ::-1].T,
     "rot90": lambda a: np.rot90(a), "rot270": lambda a: np.rot90(a, 3),
 }
+PSEUDO = set(range(101, 108)) | set(range(201, 206))
 GS = {
     "Rz180": np.array([-1.0, -1.0, 1.0]),
     "Mx": np.array([-1.0, 1.0, 1.0]),
@@ -85,12 +86,17 @@ def derive_selfmap(ag, gvec, tol=1e-10):
     return out
 
 
-def sym_residual(fields, smap):
-    """fields: {t: (n,n) delp}; smap {t: (t', op)}.
-    max over tiles of |f(t) - op(f(t'))| + argmax."""
+def sym_residual(fields, smap, anti=False, href=None):
+    """fields: {t: (n,n) delp}; smap {t: (t', op)}.  max over tiles of
+    |f(t) - op(f(t'))| (anti=False) or |(f(t)-H) + (op(f(t'))-H)|
+    (anti=True, H=href: perturbation antisymmetry) + argmax."""
     worst = None
     for t, (t2, nm) in smap.items():
-        d = np.abs(fields[t] - OPS[nm](fields[t2]))
+        g = OPS[nm](fields[t2])
+        if anti:
+            d = np.abs((fields[t] - href) + (g - href))
+        else:
+            d = np.abs(fields[t] - g)
         mx = float(d.max())
         if worst is None or mx > worst[0]:
             k = np.unravel_index(np.argmax(d), d.shape)
@@ -145,7 +151,7 @@ def main(argv=None):
                         crop(np.asarray(gs["agrid_lat"]), lo, lo, n))
         blocks = sorted({int(m.group(1)) for f in ours.files
                          if (m := re.match(r"b(\d+)_delp", f))
-                         and not 101 <= int(m.group(1)) <= 205})
+                         and int(m.group(1)) not in PSEUDO})
 
         def get(b, t):
             return crop(ours[f"b{b}_delp_t{t}"], lo, lo, n)
@@ -170,7 +176,7 @@ def main(argv=None):
         avail = {}
         for p in sorted(fd.glob("dyncore_b*_delp_t*.dat")):
             m = re.match(r"dyncore_b(\d+)_delp_t(\d)\.dat", p.name)
-            if m and not (101 <= int(m.group(1)) <= 205):
+            if m and int(m.group(1)) not in PSEUDO:
                 avail.setdefault(int(m.group(1)), {})[
                     int(m.group(2))] = p
         blocks = sorted(b for b, d in avail.items() if len(d) == 6)
@@ -191,14 +197,24 @@ def main(argv=None):
         print(f"\n=== {label}: internal delp symmetry residuals ===")
         print("maps:", {g: {t: f"t{v[0]}:{v[1]}" for t, v in m.items()}
                         for g, m in smaps.items()})
+        # burst-swap maps (Rz180/Mx): delp PERTURBATION is
+        # antisymmetric (u flips sign -> dh/dt flips); report the
+        # ANTI residual for those, plain for My/Mz.  H = the exact
+        # uniform IC delp (block 0 is uniform).
+        f0 = get(blocks[0], 1) if blocks else None
+        href = float(f0[0, 0]) if f0 is not None else 0.0
+        anti_gs = {"Rz180", "Mx"}
         hdr = f"{'blk':>4s}" + "".join(
-            f" {g + '_max':>12s} {g + '_arg':>13s}" for g in smaps)
+            f" {g + ('_anti' if g in anti_gs else '_max'):>12s}"
+            f" {g + '_arg':>13s}" for g in smaps)
+        print(f"H_ref = {href!r}")
         print(hdr)
         for b in blocks:
             fields = {t: get(b, t) for t in range(1, 7)}
             row = f"{b:4d}"
             for g, sm in smaps.items():
-                mx, arg = sym_residual(fields, sm)
+                mx, arg = sym_residual(fields, sm,
+                                       anti=(g in anti_gs), href=href)
                 row += f" {mx:12.4e} {str(arg):>13s}"
             print(row)
     print("\nREADING: a faithful solver keeps every listed residual "
