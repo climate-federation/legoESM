@@ -297,8 +297,14 @@ class TestNemoSurfaceTermsOnMPAS:
         from legoesm.ocean.physics.vertical_mixing.config import (
             VerticalMixingConfig,
         )
+        # prognostic=False: the ORCA1 card defaults to the prognostic carry
+        # (#1326), which MPAS rejects until MPASOceanState.tke lands — these
+        # adapter tests pin the DIAGNOSTIC Mode-B path MPAS actually runs
+        # (the rejection itself is pinned by
+        # test_prognostic_tke_rejected_on_mpas).
         return VerticalMixingConfig(
-            scheme="tke", tke=orca1_zdftke_config()._replace(**over))
+            scheme="tke",
+            tke=orca1_zdftke_config(prognostic=False)._replace(**over))
 
     def _ice_wind_forcing(self, state, ice=1.0, tau_x_pa=0.15):
         n = state.T.data.shape[0]

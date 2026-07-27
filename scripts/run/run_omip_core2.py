@@ -4583,9 +4583,14 @@ def main() -> int:
             # historical — pure grid-agnostic config construction; its
             # closure-mismatch rejects also fire here); 'kpp' (default) keeps
             # the historical KPP + --kpp-* overrides.
+            # tke_prognostic=False: the ORCA1 card defaults to the prognostic
+            # TKE carry (#1326), but MPAS has no MPASOceanState.tke seed yet
+            # (make_mpas_ocean_physics raises on prognostic=True), so MPAS
+            # runs the diagnostic quasi-steady Mode-B until that lands.
             vertical_mixing=(
                 build_tripole_vmix_config("tke", iwm=None,
-                                          tke_eice=args.tke_eice)
+                                          tke_eice=args.tke_eice,
+                                          tke_prognostic=False)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
