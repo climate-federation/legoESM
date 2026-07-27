@@ -70,6 +70,65 @@ def vertical_shear_squared(
     return du * du + dv * dv
 
 
+def vertical_shear_burchard(
+    u_now: jnp.ndarray, v_now: jnp.ndarray,
+    u_before: jnp.ndarray, v_before: jnp.ndarray,
+    dz_half: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Burchard (2002) energy-conserving now×before shear cross term.
+
+    Faithful port of the TIME discretization NEMO's ``zdf_sh2`` uses
+    (zdfsh2.F90:44-92, the no-Stokes-drift branch):
+
+    .. math::
+
+        sh2 = \left(\frac{du_{now}}{dz}\right)\!
+              \left(\frac{du_{before}}{dz}\right)
+            + \left(\frac{dv_{now}}{dz}\right)\!
+              \left(\frac{dv_{before}}{dz}\right)
+
+    i.e. the shear production entering the TKE budget is linear in the
+    NOW gradient and linear in the BEFORE (leap-frog) gradient of the
+    SAME velocity component — not the squared now-only form
+    (:func:`vertical_shear_squared`). This is the energy-conserving
+    discretization consistent with the implicit-vertical-friction/
+    leap-frog time stepping (Burchard 2002): the shear production
+    entering the TKE budget is built from the SAME du/dz, dv/dz the
+    implicit friction solve actually applied between the before and now
+    states, so the KE removed by friction and the TKE produced by shear
+    balance exactly (to the implicit solve's own truncation).
+
+    NEMO additionally averages ``avm`` at u/v-points then face-interpolates
+    to the T-point before applying this shear (zdfsh2.F90:80-90, wet-only
+    2-2 coast masking) — a staggered-C-grid detail with no analog on
+    legoESM's cell-centred TKE closure (which already applies a SINGLE
+    per-interface ``K_M`` uniformly, exactly as
+    :func:`vertical_shear_squared`'s caller does); only the TIME
+    discretization (now×before vs now²) is transcribed here.
+
+    Parameters
+    ----------
+    u_now, v_now, u_before, v_before : (..., nlev) — cell-centre velocities
+        at the NOW and (leap-frog) BEFORE time levels.
+    dz_half : (..., nlev-1) — distance between cell centres.
+
+    Returns
+    -------
+    sh2 : (..., nlev-1) — Burchard shear production at interfaces. May be
+        NEGATIVE where the now/before gradients have opposite sign (a
+        genuine feature of the energy-conserving form, unlike the
+        squared-now form which is always >= 0); the caller (P_s = K_M·sh2)
+        should treat this as a signed production term, matching NEMO's
+        ``en += rn_Dt·p_sh2`` (zdftke.F90:414, no clipping).
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    du_now = (u_now[..., 1:] - u_now[..., :-1]) / dz_safe
+    dv_now = (v_now[..., 1:] - v_now[..., :-1]) / dz_safe
+    du_before = (u_before[..., 1:] - u_before[..., :-1]) / dz_safe
+    dv_before = (v_before[..., 1:] - v_before[..., :-1]) / dz_safe
+    return du_now * du_before + dv_now * dv_before
+
+
 def richardson_number(
     N2: jnp.ndarray,
     u_cell: jnp.ndarray,

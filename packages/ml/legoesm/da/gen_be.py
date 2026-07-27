@@ -10,7 +10,7 @@ where each operator is learned from an ensemble of background error samples:
   U_bal    : balance operator — regress psi vertical modes onto all other channels
   U_vert   : vertical EOF rotation: V diag(√λ)
   U_sigma  : pointwise standard-deviation scaling (surface pressure only)
-  U_wind   : stream function/velocity potential ↔ u/v  (optional; defaults off)
+  U_wind   : stream function/velocity potential ↔ u/v
 
 The control variable v lives in the whitened, debalanced, vertically-decorrelated,
 horizontally-uncorrelated space.  B^{1/2} v maps it to a physically-consistent
@@ -18,15 +18,16 @@ atmospheric increment.
 
 Grid-agnostic design
 --------------------
-The horizontal correlation uses area-weighted Laplacian diffusion (same
-mechanism as DiffusionB) rather than spherical harmonics, so it works on any
-GridProtocol implementation (cubed-sphere, Gaussian, lat-lon, Voronoi).
+The horizontal correlation uses spherical harmonics on Gaussian grids and
+neighbor-graph Laplacian diffusion on unstructured MPAS/Voronoi grids.  Generic
+grids without a spectral transform or neighbor connectivity use a conservative
+global-mean fallback.
 
 Variable ordering (internal GEN_BE channel indexing)
 ------------------------------------------------------
   channel 0          : p_s  (surface pressure, 1 channel)
-  channels 1..nlev   : psi  (= u in control space, vertical modes 0..nlev-1)
-  channels nlev+1..  : chi  (= v)
+  channels 1..nlev   : psi  (streamfunction on MPAS cell-vector winds)
+  channels nlev+1..  : chi  (velocity potential on MPAS cell-vector winds)
   channels 2*nlev+1..: T
   channels 3*nlev+1..: tracer_0, tracer_1, ...
 
@@ -44,11 +45,15 @@ import os
 from pathlib import Path
 from typing import NamedTuple, Sequence
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+_MPAS_HELMHOLTZ_POISSON_ITER = 240
+_MPAS_HELMHOLTZ_RELAX = 0.70
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +84,11 @@ class GenBEParams(NamedTuple):
         Names of tracer variables in channel order (not a JAX leaf).
     n_levels : int
         Number of vertical levels (static, not a JAX leaf).
+    wind_transform : str
+        Wind control transform. ``"mpas_helmholtz"`` means the first two
+        3D groups are streamfunction/velocity-potential and are converted to
+        cell-centered u/v at runtime. ``"identity"`` means those groups are
+        already physical u/v and no Helmholtz conversion is applied.
     """
     vert_eig_vec: jax.Array   # (n_3d_groups, nlev, nlev)
     vert_eig_val: jax.Array   # (n_3d_groups, nlev)
@@ -87,6 +97,7 @@ class GenBEParams(NamedTuple):
     len_scale: jax.Array      # (n_total_channels,) in metres
     tracer_names: tuple        # tuple of str — not a JAX leaf
     n_levels: int              # static
+    wind_transform: str = "mpas_helmholtz"  # static
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +221,12 @@ def _fit_len_scale(
 
     For GaussianGrid the spherical Laplacian is computed exactly via SH
     analysis (matching the original numpy GEN_BE implementation).
-    For other grids the Laplacian is approximated as the deviation from
-    the area-weighted global mean divided by the mean grid spacing squared.
+    For MPAS/Voronoi grids the Laplacian is approximated with the finite-volume
+    cell-centred operator
+    ``areaCell_i^-1 * sum_edges (dvEdge / dcEdge) * (f_neighbor - f_i)``,
+    using the same geometry as the runtime diffusion smoother.  Generic grids
+    without neighbor connectivity fall back to the default length scale instead
+    of fabricating a grid-scale estimate from a global-mean relaxation.
 
     Parameters
     ----------
@@ -256,25 +271,210 @@ def _fit_len_scale(
                 L = (8.0 * var_f / var_lap) ** 0.25
                 len_scale[ch] = float(np.clip(L, a * 0.001, a * np.pi))
     else:
-        area_col = np.array(grid.to_columns(grid.grid_area))
-        area_norm = area_col / area_col.sum()
         dx = float(grid.grid_radius) * np.sqrt(4 * np.pi / ncol)
 
-        for ch in range(n_ch):
-            f = err_static[:, :, ch]
-            var_f = float(np.var(f))
-            if var_f < 1e-30:
-                continue
-            f_mean = (f * area_norm[None, :]).sum(axis=1, keepdims=True)
-            lap_f = (f - f_mean) / dx**2
-            var_lap = float(np.var(lap_f))
-            if var_lap < 1e-30:
-                len_scale[ch] = dx * 20.0
-            else:
-                L = (8.0 * var_f / var_lap) ** 0.25
-                len_scale[ch] = float(np.clip(L, dx, 1e7))
+        has_mpas_laplacian = all(
+            hasattr(grid, name)
+            for name in (
+                "cellsOnCell",
+                "edgesOnCell",
+                "nEdgesOnCell",
+                "areaCell",
+                "dcEdge",
+                "dvEdge",
+            )
+        )
+
+        if has_mpas_laplacian:
+            neighbors = np.asarray(grid.cellsOnCell, dtype=np.int64)
+            edges = np.asarray(grid.edgesOnCell, dtype=np.int64)
+            n_edges = np.asarray(grid.nEdgesOnCell, dtype=np.int64)
+            area = np.asarray(grid.areaCell, dtype=np.float64)
+            dc_edge = np.asarray(grid.dcEdge, dtype=np.float64)
+            dv_edge = np.asarray(grid.dvEdge, dtype=np.float64)
+            if neighbors.ndim != 2 or neighbors.shape[1] != ncol:
+                raise ValueError(
+                    "grid.cellsOnCell must have shape (maxEdges, ncol) for "
+                    "GEN_BE neighbor Laplacian length-scale fitting."
+                )
+            if edges.shape != neighbors.shape:
+                raise ValueError(
+                    "grid.edgesOnCell must match cellsOnCell shape for GEN_BE "
+                    "MPAS Laplacian length-scale fitting."
+                )
+            if n_edges.shape != (ncol,):
+                raise ValueError(
+                    "grid.nEdgesOnCell must have shape (ncol,) for GEN_BE "
+                    "neighbor Laplacian length-scale fitting."
+                )
+            mask = np.arange(neighbors.shape[0])[:, None] < n_edges[None, :]
+            neighbors = np.clip(neighbors, 0, ncol - 1)
+            edges = np.clip(edges, 0, dc_edge.shape[0] - 1)
+            edge_weights = (
+                dv_edge[edges]
+                / np.maximum(dc_edge[edges], 1.0)
+                / np.maximum(area[None, :], 1.0)
+            )
+            edge_weights = np.where(mask, edge_weights, 0.0)
+
+            for ch in range(n_ch):
+                f = err_static[:, :, ch]  # (n_ens, ncol)
+                var_f = float(np.var(f))
+                if var_f < 1e-30:
+                    continue
+                neighbor_vals = f[:, neighbors]  # (n_ens, maxEdges, ncol)
+                lap_f = np.sum(
+                    edge_weights[None, :, :] * (neighbor_vals - f[:, None, :]),
+                    axis=1,
+                )
+                var_lap = float(np.var(lap_f))
+                if var_lap < 1e-30:
+                    len_scale[ch] = min(dx * 20.0, 1e7)
+                else:
+                    L = (8.0 * var_f / var_lap) ** 0.25
+                    len_scale[ch] = float(np.clip(L, dx, 1e7))
+        else:
+            logger.warning(
+                "GEN_BE length-scale fitting grid %s has no spectral transform "
+                "or cell-neighbor connectivity; using default %.0f km for all "
+                "channels.",
+                type(grid).__name__,
+                default_m / 1000.0,
+            )
 
     return len_scale
+
+
+def _has_mpas_cell_vector_wind(grid) -> bool:
+    """Return True when grid has enough MPAS cell geometry for wind Helmholtz."""
+    return all(
+        hasattr(grid, name)
+        for name in (
+            "cellsOnCell",
+            "nEdgesOnCell",
+            "latCell",
+            "lonCell",
+            "grid_radius",
+        )
+    )
+
+
+def _mpas_lsq_gradient_weights_np(grid) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Least-squares cell-neighbor gradient weights on an MPAS/Voronoi mesh.
+
+    The saved MPAS NMC wind samples used by this workflow are cell-centered
+    east/north winds, not native TRiSK edge-normal winds.  These weights provide
+    a local tangent-plane gradient operator for cell-centered scalars:
+
+      grad_x(f)_i = sum_n wx[n,i] * (f_neighbor - f_i)
+      grad_y(f)_i = sum_n wy[n,i] * (f_neighbor - f_i)
+    """
+    neighbors_raw = np.asarray(grid.cellsOnCell, dtype=np.int64)
+    n_edges = np.asarray(grid.nEdgesOnCell, dtype=np.int64)
+    ncol = int(grid.grid_n_columns)
+    if neighbors_raw.ndim != 2 or neighbors_raw.shape[1] != ncol:
+        raise ValueError("MPAS cellsOnCell must have shape (maxEdges, nCells)")
+
+    max_edges = neighbors_raw.shape[0]
+    mask = np.arange(max_edges)[:, None] < n_edges[None, :]
+    neighbors = np.clip(neighbors_raw, 0, ncol - 1)
+
+    lat = np.asarray(grid.latCell, dtype=np.float64)
+    lon = np.asarray(grid.lonCell, dtype=np.float64)
+    radius = float(grid.grid_radius)
+
+    dlon = lon[neighbors] - lon[None, :]
+    dlon = (dlon + np.pi) % (2.0 * np.pi) - np.pi
+    dlat = lat[neighbors] - lat[None, :]
+    dx = radius * np.cos(lat)[None, :] * dlon
+    dy = radius * dlat
+    dx = np.where(mask, dx, 0.0)
+    dy = np.where(mask, dy, 0.0)
+
+    sxx = np.sum(dx * dx, axis=0)
+    sxy = np.sum(dx * dy, axis=0)
+    syy = np.sum(dy * dy, axis=0)
+    det = np.maximum(sxx * syy - sxy * sxy, 1.0)
+
+    # [gx, gy] = inv(A^T A) A^T df.
+    wx = (syy[None, :] * dx - sxy[None, :] * dy) / det[None, :]
+    wy = (-sxy[None, :] * dx + sxx[None, :] * dy) / det[None, :]
+    wx = np.where(mask, wx, 0.0)
+    wy = np.where(mask, wy, 0.0)
+    return neighbors, wx, wy
+
+
+def _mpas_grad_np(
+    field: np.ndarray,
+    neighbors: np.ndarray,
+    wx: np.ndarray,
+    wy: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply MPAS LSQ gradient weights to (..., nCells) scalar fields."""
+    neighbor_vals = field[..., neighbors]  # (..., maxEdges, nCells)
+    diff = neighbor_vals - field[..., None, :]
+    gx = np.sum(wx[None, :, :] * diff, axis=-2)
+    gy = np.sum(wy[None, :, :] * diff, axis=-2)
+    return gx, gy
+
+
+def _mpas_laplace_np(
+    field: np.ndarray,
+    neighbors: np.ndarray,
+    wx: np.ndarray,
+    wy: np.ndarray,
+) -> np.ndarray:
+    """Cell-neighbor Laplacian proxy: div(grad(field))."""
+    gx, gy = _mpas_grad_np(field, neighbors, wx, wy)
+    gxx, _ = _mpas_grad_np(gx, neighbors, wx, wy)
+    _, gyy = _mpas_grad_np(gy, neighbors, wx, wy)
+    return gxx + gyy
+
+
+def _mpas_inverse_laplace_np(
+    rhs: np.ndarray,
+    neighbors: np.ndarray,
+    wx: np.ndarray,
+    wy: np.ndarray,
+    n_iter: int = _MPAS_HELMHOLTZ_POISSON_ITER,
+) -> np.ndarray:
+    """Approximate mean-zero inverse Laplacian with fixed Richardson steps."""
+    rhs = rhs - rhs.mean(axis=-1, keepdims=True)
+    phi = np.zeros_like(rhs)
+    radius2 = 1.0 / np.maximum(np.mean(wx * wx + wy * wy), 1e-20)
+    step = _MPAS_HELMHOLTZ_RELAX * radius2
+    for _ in range(n_iter):
+        residual = rhs - _mpas_laplace_np(phi, neighbors, wx, wy)
+        phi = phi - step * residual
+        phi = phi - phi.mean(axis=-1, keepdims=True)
+    return phi
+
+
+def _mpas_cell_wind_to_helmholtz_np(
+    u_cell: np.ndarray,
+    v_cell: np.ndarray,
+    grid,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert MPAS cell-centered east/north wind to streamfunction/potential.
+
+    Returns ``psi, chi`` with shape ``(n_ens, nCells, nlev)``.  Internally the
+    batched solve uses local tangent-plane div/vorticity and a mean-zero fixed
+    inverse-Laplacian approximation.  This is the MPAS analogue of AI-VarDA's
+    regular-grid ``uv2sfvp`` preprocessing for the current cell-vector sample
+    files.
+    """
+    neighbors, wx, wy = _mpas_lsq_gradient_weights_np(grid)
+    u_e_l_c = np.moveaxis(u_cell, 2, 1)  # (n_ens, nlev, nCells)
+    v_e_l_c = np.moveaxis(v_cell, 2, 1)
+
+    du_dx, du_dy = _mpas_grad_np(u_e_l_c, neighbors, wx, wy)
+    dv_dx, dv_dy = _mpas_grad_np(v_e_l_c, neighbors, wx, wy)
+    div = du_dx + dv_dy
+    vort = dv_dx - du_dy
+
+    chi = _mpas_inverse_laplace_np(div, neighbors, wx, wy)
+    psi = _mpas_inverse_laplace_np(vort, neighbors, wx, wy)
+    return np.moveaxis(psi, 1, 2), np.moveaxis(chi, 1, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +495,9 @@ def fit_gen_be(
     ensemble_errors : sequence of HydrostaticState
         Background error samples (ensemble forecasts minus truth / analysis).
         Each state must have fields: u, T, p_s, and optionally v, tracers.
-        Winds u/v are treated as psi/chi (no Helmholtz decomposition by
-        default — this is an acceptable approximation when the balance
-        regression captures the dominant geostrophic component).
+        On MPAS/Voronoi grids with cell-centered u/v samples, winds are
+        transformed to streamfunction/velocity-potential control variables
+        before fitting, analogous to AI-VarDA's uv2sfvp preprocessing.
     grid : GridProtocol
         Model grid.  Must support to_columns(), grid_n_columns, grid_area,
         grid_radius.
@@ -364,6 +564,18 @@ def fit_gen_be(
         arr -= arr.mean(axis=0, keepdims=True)
 
     nlev = err_u.shape[2]
+    use_mpas_helmholtz = (
+        has_v
+        and _has_mpas_cell_vector_wind(grid)
+        and err_u.shape[1] == ncol
+        and err_v.shape[1] == ncol
+    )
+    if use_mpas_helmholtz:
+        logger.info("fit_gen_be: converting MPAS cell u/v errors to psi/chi")
+        err_psi, err_chi = _mpas_cell_wind_to_helmholtz_np(err_u, err_v, grid)
+    else:
+        err_psi, err_chi = err_u, err_v
+
     n_3d_groups = 2 + 1 + n_tracers           # psi, chi, T, tracers
     n_sur_channels = 1                          # p_s
     n_total_channels = n_sur_channels + n_3d_groups * nlev
@@ -377,7 +589,7 @@ def fit_gen_be(
     )
 
     # --- 1. Vertical covariance per 3D group ---
-    groups_raw = [err_u, err_v, err_T] + err_tracers  # (n_3d_groups,) × (n_ens, ncol, nlev)
+    groups_raw = [err_psi, err_chi, err_T] + err_tracers  # (n_3d_groups,) × (n_ens, ncol, nlev)
     eig_vecs, eig_vals = [], []
     for k, grp in enumerate(groups_raw):
         ev, el = _build_vert_cov(grp, vert_corr_length)
@@ -409,6 +621,13 @@ def fit_gen_be(
     # --- 4. Balance regression: psi modes → all channels ---
     err_psi_modes = all_modes[:, psi_start:psi_end]  # (N, nlev)
     reg_coeff = _fit_balance(err_psi_modes, all_modes, psi_start, psi_end)
+    if n_tracers:
+        tracer_start = n_sur_channels + 3 * nlev
+        tracer_end = tracer_start + n_tracers * nlev
+        # Moisture is treated as an unbalanced control variable by default.
+        # A psi->moisture balance can create large, nonphysical q_v increments
+        # from mass/wind observations unless it is explicitly designed/tuned.
+        reg_coeff[tracer_start:tracer_end] = 0.0
     # reg_coeff: (n_total_channels, nlev)
 
     # --- 5. Debalance: subtract psi contribution from all channels ---
@@ -436,6 +655,7 @@ def fit_gen_be(
         len_scale=jnp.array(len_scale),
         tracer_names=tracer_names,
         n_levels=nlev,
+        wind_transform="mpas_helmholtz" if use_mpas_helmholtz else "identity",
     )
 
 
@@ -480,6 +700,11 @@ class GenBETransform:
         self._psi_start = 1         # channel index where psi starts
         self._psi_end   = 1 + nlev  # exclusive
 
+        # Build variable slices from ControlVectorSpec before operator setup.
+        self._slices = {}  # name → (offset, size, shape)
+        for entry in spec.entries:
+            self._slices[entry.field_name] = (entry.offset, entry.size, entry.shape)
+
         # Precompute per-channel kappas from length scales
         # kappa ≈ L^2 / (2 * n_iter * dx^2); clipped to [0, 0.5]
         dx = grid.grid_radius * jnp.sqrt(4.0 * jnp.pi / ncol)
@@ -489,6 +714,70 @@ class GenBETransform:
         # Area weights for diffusion fallback (precomputed, shape (ncol,))
         area = grid.to_columns(grid.grid_area)
         self._area_norm = jnp.array(area) / jnp.sum(jnp.array(area))
+        has_mpas_laplacian = all(
+            hasattr(grid, name)
+            for name in (
+                "cellsOnCell",
+                "edgesOnCell",
+                "nEdgesOnCell",
+                "areaCell",
+                "dcEdge",
+                "dvEdge",
+            )
+        )
+        if has_mpas_laplacian:
+            neighbors = jnp.asarray(grid.cellsOnCell, dtype=jnp.int32)
+            self._neighbors = jnp.clip(neighbors, 0, ncol - 1)
+            edges = jnp.asarray(grid.edgesOnCell, dtype=jnp.int32)
+            edges = jnp.clip(edges, 0, grid.nEdges - 1)
+            edge_index = jnp.arange(neighbors.shape[0], dtype=jnp.int32)[:, None]
+            n_edges = jnp.asarray(grid.nEdgesOnCell, dtype=jnp.int32)[None, :]
+            self._neighbor_mask = edge_index < n_edges
+            area = jnp.asarray(grid.areaCell)
+            dc_edge = jnp.asarray(grid.dcEdge)
+            dv_edge = jnp.asarray(grid.dvEdge)
+            edge_weights = (
+                dv_edge[edges]
+                / jnp.maximum(dc_edge[edges], 1.0)
+                / jnp.maximum(area[None, :], 1.0)
+            )
+            self._laplacian_weights = jnp.where(self._neighbor_mask, edge_weights, 0.0)
+            max_diag = jnp.max(jnp.sum(self._laplacian_weights, axis=0))
+            raw_step_m2 = (params.len_scale ** 2) / (2.0 * n_diffusion_iter)
+            self._diffusion_step_m2 = jnp.clip(
+                raw_step_m2,
+                0.0,
+                0.49 / jnp.maximum(max_diag, 1e-30),
+            )
+        else:
+            self._neighbors = None
+            self._neighbor_mask = None
+            self._laplacian_weights = None
+            self._diffusion_step_m2 = None
+
+        self._use_mpas_helmholtz = (
+            getattr(params, "wind_transform", "mpas_helmholtz") == "mpas_helmholtz"
+            and _has_mpas_cell_vector_wind(grid)
+            and "u" in self._slices
+            and "v" in self._slices
+            and self._slices["u"][2][0] == ncol
+            and self._slices["v"][2][0] == ncol
+        )
+        if self._use_mpas_helmholtz:
+            neighbors_np, wx_np, wy_np = _mpas_lsq_gradient_weights_np(grid)
+            self._helm_neighbors = jnp.asarray(neighbors_np, dtype=jnp.int32)
+            self._helm_wx = jnp.asarray(wx_np)
+            self._helm_wy = jnp.asarray(wy_np)
+            radius2 = 1.0 / jnp.maximum(
+                jnp.mean(self._helm_wx ** 2 + self._helm_wy ** 2),
+                1e-20,
+            )
+            self._helm_poisson_step = _MPAS_HELMHOLTZ_RELAX * radius2
+        else:
+            self._helm_neighbors = None
+            self._helm_wx = None
+            self._helm_wy = None
+            self._helm_poisson_step = None
 
         # Precompute SH Gaussian kernels for GaussianGrid
         # kernel[k, ch] = exp(grid.lap[k] * L[ch]^2 / 2)
@@ -501,11 +790,6 @@ class GenBETransform:
             )  # (n_sh, n_total_ch), real
         else:
             self._sh_kernels = None
-
-        # Build variable slices from ControlVectorSpec
-        self._slices = {}  # name → (offset, size, shape)
-        for entry in spec.entries:
-            self._slices[entry.field_name] = (entry.offset, entry.size, entry.shape)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -556,6 +840,73 @@ class GenBETransform:
                 parts.append(jnp.zeros(sz, dtype=psi_col.dtype))
         return jnp.concatenate(parts)
 
+    def _mpas_grad(self, field_col: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Cell-centered MPAS LSQ gradient for (nCells, nlev) fields."""
+        neighbors = self._helm_neighbors
+        wx = self._helm_wx[..., None]
+        wy = self._helm_wy[..., None]
+        neighbor_vals = field_col[neighbors, :]
+        diff = neighbor_vals - field_col[None, :, :]
+        gx = jnp.sum(wx * diff, axis=0)
+        gy = jnp.sum(wy * diff, axis=0)
+        return gx, gy
+
+    def _mpas_laplace(self, field_col: jax.Array) -> jax.Array:
+        """Cell-centered MPAS LSQ Laplacian for (nCells, nlev) fields."""
+        gx, gy = self._mpas_grad(field_col)
+        gxx, _ = self._mpas_grad(gx)
+        _, gyy = self._mpas_grad(gy)
+        return gxx + gyy
+
+    def _mpas_inverse_laplace(self, rhs_col: jax.Array) -> jax.Array:
+        """Approximate mean-zero inverse Laplacian for (nCells, nlev) RHS."""
+        rhs = rhs_col - jnp.mean(rhs_col, axis=0, keepdims=True)
+        step_size = self._helm_poisson_step
+
+        def step(phi, _):
+            residual = rhs - self._mpas_laplace(phi)
+            phi = phi - step_size * residual
+            phi = phi - jnp.mean(phi, axis=0, keepdims=True)
+            return phi, None
+
+        result, _ = jax.lax.scan(
+            step,
+            jnp.zeros_like(rhs),
+            None,
+            length=_MPAS_HELMHOLTZ_POISSON_ITER,
+        )
+        return result
+
+    def _wind_to_psi_chi(
+        self,
+        u_col: jax.Array,
+        v_col: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Runtime U_wind^{-1}: physical u/v -> psi/chi."""
+        if not self._use_mpas_helmholtz:
+            return u_col, v_col
+        du_dx, du_dy = self._mpas_grad(u_col)
+        dv_dx, dv_dy = self._mpas_grad(v_col)
+        div = du_dx + dv_dy
+        vort = dv_dx - du_dy
+        chi_col = self._mpas_inverse_laplace(div)
+        psi_col = self._mpas_inverse_laplace(vort)
+        return psi_col, chi_col
+
+    def _psi_chi_to_wind(
+        self,
+        psi_col: jax.Array,
+        chi_col: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Runtime U_wind: psi/chi -> physical cell-centered east/north u/v."""
+        if not self._use_mpas_helmholtz:
+            return psi_col, chi_col
+        dpsi_dx, dpsi_dy = self._mpas_grad(psi_col)
+        dchi_dx, dchi_dy = self._mpas_grad(chi_col)
+        u_col = dchi_dx - dpsi_dy
+        v_col = dchi_dy + dpsi_dx
+        return u_col, v_col
+
     def _horiz_smooth(self, all_ch: jax.Array, inverse: bool = False) -> jax.Array:
         """Apply per-channel horizontal Gaussian smoothing.
 
@@ -590,10 +941,35 @@ class GenBETransform:
         return grid.to_columns(out_3d)                  # (ncol, n_ch)
 
     def _diffusion_smooth(self, all_ch: jax.Array, inverse: bool = False) -> jax.Array:
-        """Area-weighted Laplacian diffusion (fallback for non-Gaussian grids)."""
+        """Grid-neighbor Laplacian diffusion for non-Gaussian grids.
+
+        MPAS/Voronoi grids expose cell/edge geometry.  Use the finite-volume
+        cell-centred Laplacian
+        areaCell_i^-1 * sum_edges (dvEdge / dcEdge) * (x_neighbor - x_i).
+        Generic grids without geometry fall back to a weak global mean
+        relaxation so legacy behavior remains available.
+        """
         kappa = self._kappa          # (n_total_ch,)
-        area_norm = self._area_norm  # (ncol,)
         sign = -1.0 if inverse else 1.0
+        if (
+            self._neighbors is not None
+            and self._neighbor_mask is not None
+            and self._laplacian_weights is not None
+            and self._diffusion_step_m2 is not None
+        ):
+            neighbors = self._neighbors
+            weights = self._laplacian_weights[..., None]
+            step_m2 = self._diffusion_step_m2
+
+            def step(x, _):
+                neighbor_vals = x[neighbors, :]
+                lap = jnp.sum(weights * (neighbor_vals - x[None, :, :]), axis=0)
+                return x + sign * step_m2[None, :] * lap, None
+
+            result, _ = jax.lax.scan(step, all_ch, None, length=self.n_iter)
+            return result
+
+        area_norm = self._area_norm  # (ncol,)
 
         def smooth_one_channel(channel_col, kap):
             """Apply n_iter diffusion steps to a single (ncol,) column."""
@@ -688,14 +1064,8 @@ class GenBETransform:
         # --- Step 4: U_sigma — scale surface pressure ---
         ps_phys = ps_ch * params.std_ps
 
-        # --- Step 5: U_wind — psi,chi → u,v (identity for now) ---
-        # Full streamfunction decomposition requires grid-specific operators
-        # (spherical harmonics for GaussianGrid, Poisson solver for cubed sphere).
-        # The balance regression already captures the dominant geostrophic
-        # relationship between psi and temperature/pressure.  Using u=psi, v=chi
-        # is standard for ensemble-trained B matrices in limited-area models.
-        u_phys = psi_phys
-        v_phys = chi_phys
+        # --- Step 5: U_wind — psi,chi → u,v ---
+        u_phys, v_phys = self._psi_chi_to_wind(psi_phys, chi_phys)
 
         # --- Pack back to flat control vector ---
         return self._pack_to_flat(u_phys, v_phys, T_phys, ps_phys, tracer_phys)
@@ -721,9 +1091,8 @@ class GenBETransform:
         ps_col = self._to_cols(x, "p_s")
         tracer_cols = [self._to_cols(x, f"tracers.{n}") for n in params.tracer_names]
 
-        # --- Inverse U_wind: u,v → psi,chi (identity) ---
-        psi_col = u_col
-        chi_col = v_col
+        # --- Inverse U_wind: u,v → psi,chi ---
+        psi_col, chi_col = self._wind_to_psi_chi(u_col, v_col)
 
         # --- Inverse U_sigma: unscale surface pressure ---
         ps_col = ps_col / (params.std_ps + 1e-30)
@@ -798,7 +1167,7 @@ def save_gen_be_params(params: GenBEParams, path: str | os.PathLike) -> None:
 
     Writes two files:
       <path>.npz   — JAX arrays as float64 numpy arrays
-      <path>.json  — static metadata (tracer_names, n_levels)
+      <path>.json  — static metadata (tracer_names, n_levels, wind_transform)
 
     Parameters
     ----------
@@ -821,7 +1190,11 @@ def save_gen_be_params(params: GenBEParams, path: str | os.PathLike) -> None:
         reg_coeff=np.array(params.reg_coeff),
         len_scale=np.array(params.len_scale),
     )
-    meta = {"tracer_names": list(params.tracer_names), "n_levels": params.n_levels}
+    meta = {
+        "tracer_names": list(params.tracer_names),
+        "n_levels": params.n_levels,
+        "wind_transform": getattr(params, "wind_transform", "mpas_helmholtz"),
+    }
     path.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     logger.info("Saved GenBEParams to %s.{npz,json}", path)
 
@@ -842,6 +1215,7 @@ def load_gen_be_params(path: str | os.PathLike) -> GenBEParams:
     path = Path(path)
     arrays = np.load(str(path) + ".npz")
     meta = json.loads(path.with_suffix(".json").read_text())
+    wind_transform = meta.get("wind_transform", "mpas_helmholtz")
     return GenBEParams(
         vert_eig_vec=jnp.array(arrays["vert_eig_vec"]),
         vert_eig_val=jnp.array(arrays["vert_eig_val"]),
@@ -850,4 +1224,5 @@ def load_gen_be_params(path: str | os.PathLike) -> GenBEParams:
         len_scale=jnp.array(arrays["len_scale"]),
         tracer_names=tuple(meta["tracer_names"]),
         n_levels=int(meta["n_levels"]),
+        wind_transform=str(wind_transform),
     )

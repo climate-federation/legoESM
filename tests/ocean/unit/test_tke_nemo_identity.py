@@ -31,6 +31,8 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     tke_vertical_mixing,
 )
 
+_RHO0 = 1026.0
+
 
 def _column(nlev=12):
     """A stably-stratified wind-forced column at cell centres (1 water col)."""
@@ -45,6 +47,25 @@ def _column(nlev=12):
     dz_ref = jnp.full((nlev,), 10.0)
     jacobian = jnp.ones((1, 1))
     return T, S, u, v, rho, dz_half, dz_ref, jacobian
+
+
+def _orchestrator_inputs(nlev=8):
+    """(u, v, T, S, rho, dz_half, z_interface, tau_x, tau_y) on a small
+    (3, 4) horizontal slab — mirrors test_tke_nemo_terms.py's helper of the
+    same name (independent copy; a bare-call-level unit-test fixture, not
+    production code, so this is not a doctrine violation)."""
+    shape = (3, 4, nlev)
+    rng = np.random.default_rng(1)
+    T = jnp.asarray(20.0 - 2.0 * np.arange(nlev))[None, None, :] * jnp.ones(shape)
+    S = jnp.full(shape, 35.0)
+    rho = jnp.asarray(1026.0 + 0.2 * np.arange(nlev))[None, None, :] * jnp.ones(shape)
+    u = jnp.asarray(rng.standard_normal(shape) * 0.05)
+    v = jnp.asarray(rng.standard_normal(shape) * 0.05)
+    dz_half = jnp.full(shape[:-1] + (nlev - 1,), 25.0)
+    z_interface = -25.0 * jnp.arange(1, nlev)   # negative heights
+    tau_x = jnp.full(shape[:-1], 0.1)
+    tau_y = jnp.zeros(shape[:-1])
+    return u, v, T, S, rho, dz_half, z_interface, tau_x, tau_y
 
 
 def test_mxl_choice3_no_longer_raises_without_veros_dz_slots():
@@ -265,6 +286,17 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
         # Phase-2 #1317 Tier C.
         assert t.prandtl_mode == "nemo_ri"                  # T8 (NEMO-exact, not Veros)
         assert t.bottom_tke_bc is True                      # T15
+        # Gap-closure (final): T21 — no avm ceiling on either kamm card.
+        assert t.kappaM_max == float("inf")                 # T21
+    # T4/T8/T13 — MLF-only axes (require the carried leap-frog before-state):
+    # the FE card keeps the fidelity ceiling, the MLF card enables them.
+    fe = _dino_vertical_mixing_config(dino_config_for_recipe("nemo_dino_kamm")).tke
+    mlf = _dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
+    assert fe.tke_shear_production == "squared_centered"
+    assert fe.tke_n2_time_level == "step_entry"
+    assert mlf.tke_shear_production == "nemo_burchard"
+    assert mlf.tke_n2_time_level == "nemo_before"
     for card in set(DINO_RECIPES) - {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}:
         vm = _dino_vertical_mixing_config(dino_config_for_recipe(card))
         if getattr(vm, "tke", None) is None:
@@ -283,3 +315,492 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
         assert t.bottom_tke_bc is False
         assert abs(t.mxl0_min_m - 0.04) < 1e-12
         assert abs(t.mxl_min - 1e-8) < 1e-12
+        assert t.kappaM_max == 100.0                 # T21: unchanged elsewhere
+        assert t.tke_shear_production == "squared_centered"
+        assert t.tke_n2_time_level == "step_entry"
+
+
+# ---------------------------------------------------------------------------
+# T21 (Phase-2 #1317): NEMO's tke_avn has NO avm ceiling — kappaM_max=inf
+# leaves K_M unbounded above (formula-level test; the card wiring is pinned
+# in test_nemo_dino_kamm_recipe_assembles_faithful_tke above).
+# ---------------------------------------------------------------------------
+
+
+class TestNoAvmCeiling:
+    def test_kappaM_max_inf_leaves_K_M_unbounded(self):
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            compute_K_from_tke,
+        )
+        cfg_finite = TKEConfig(prandtl_mode="constant", kappaM_max=100.0,
+                               kappaM_min=1e-6, kappaH_min=1e-6)
+        cfg_inf = cfg_finite._replace(kappaM_max=float("inf"))
+        e = jnp.asarray([1e8])       # deliberately huge TKE
+        l_k = jnp.asarray([1e4])     # deliberately huge mixing length
+        N2 = jnp.asarray([1e-5])
+        shear_sq = jnp.asarray([1e-4])
+        K_M_finite, _ = compute_K_from_tke(
+            e, l_k, cfg_finite, N2=N2, shear_sq=shear_sq)
+        K_M_inf, _ = compute_K_from_tke(
+            e, l_k, cfg_inf, N2=N2, shear_sq=shear_sq)
+        assert float(K_M_finite[0]) == pytest.approx(100.0)   # ceiling bound
+        assert float(K_M_inf[0]) > 1e6                        # unbounded
+        assert bool(np.isfinite(np.asarray(K_M_inf)[0]))
+
+    def test_default_kappaM_max_unchanged(self):
+        assert TKEConfig().kappaM_max == 100.0
+
+
+# ---------------------------------------------------------------------------
+# T4 (Phase-2 #1317): Burchard now×before shear (zdfsh2.F90:44-92).
+# ---------------------------------------------------------------------------
+
+
+class TestBurchardShear:
+    def test_formula_matches_hand_derivation(self):
+        """sh2 = (du_now/dz)(du_before/dz) + (dv_now/dz)(dv_before/dz) —
+        re-derived by hand from zdfsh2.F90, not copy-pasted."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_burchard,
+        )
+        u_now = jnp.asarray([1.0, 2.0, 4.0])[None, None, :]
+        v_now = jnp.asarray([0.0, 0.0, 0.0])[None, None, :]
+        u_before = jnp.asarray([1.0, 1.5, 3.0])[None, None, :]
+        v_before = jnp.asarray([0.0, 1.0, 2.0])[None, None, :]
+        dz_half = jnp.full((1, 1, 2), 2.0)
+        out = np.asarray(vertical_shear_burchard(
+            u_now, v_now, u_before, v_before, dz_half))
+        du_now = np.asarray([1.0, 2.0]) / 2.0
+        dv_now = np.asarray([0.0, 0.0]) / 2.0
+        du_before = np.asarray([0.5, 1.5]) / 2.0
+        dv_before = np.asarray([1.0, 1.0]) / 2.0
+        expected = du_now * du_before + dv_now * dv_before
+        np.testing.assert_allclose(out[0, 0], expected, rtol=1e-12)
+
+    def test_can_be_negative_unlike_squared_form(self):
+        """Genuine feature of the energy-conserving cross term: opposite-sign
+        now/before gradients give a NEGATIVE shear production."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_burchard,
+        )
+        u_now = jnp.asarray([0.0, 1.0])[None, None, :]     # du/dz > 0
+        u_before = jnp.asarray([1.0, 0.0])[None, None, :]  # du/dz < 0
+        v = jnp.zeros((1, 1, 2))
+        dz_half = jnp.full((1, 1, 1), 1.0)
+        out = float(np.asarray(
+            vertical_shear_burchard(u_now, v, u_before, v, dz_half))[0, 0, 0])
+        assert out < 0.0
+
+    def test_zero_shear_zero_production(self):
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_burchard,
+        )
+        u = jnp.full((1, 1, 4), 2.0)
+        v = jnp.full((1, 1, 4), -1.0)
+        dz_half = jnp.full((1, 1, 3), 5.0)
+        out = np.asarray(vertical_shear_burchard(u, v, u, v, dz_half))
+        np.testing.assert_allclose(out, 0.0, atol=1e-15)
+
+    def test_tke_shear_production_dispatch_and_gates(self):
+        """Wired into tke_vertical_mixing: nemo_burchard changes K_M vs
+        squared_centered (a strongly-sheared now/before pair, checked
+        through K_M rather than tke_new so the comparison is not swamped by
+        the tke_background/tke_surface_min floors), requires
+        u_before_cell/v_before_cell, and an unknown value / silent-no-op
+        both raise."""
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        # LARGE velocities (not the tiny 0.05 m/s noise) with an
+        # opposite-signed now/before shear, and tke_old seeded well above
+        # the background floor, so the Burchard cross term genuinely
+        # differs from the squared form in the FINAL solved TKE (not just
+        # transiently within the Mode-B iteration).
+        u = 2.0 * u
+        v = 2.0 * v
+        u_before = -u
+        v_before = -v
+        tke_seed = jnp.full(dz_half.shape, 1e-2)
+        common = dict(
+            u_cell=u, v_cell=v, T_cell=T, S_cell=S, rho_cell=rho,
+            dz_half=dz_half, tke_old=tke_seed, tau_x_surface=tx,
+            tau_y_surface=ty, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+            z_interface=z_int,
+        )
+        default_out = tke_vertical_mixing(cfg=TKEConfig(), **common)
+        burchard_out = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="nemo_burchard"),
+            u_before_cell=u_before, v_before_cell=v_before, **common)
+        assert not np.allclose(
+            np.asarray(default_out.tke_new), np.asarray(burchard_out.tke_new))
+        assert bool(np.all(np.isfinite(np.asarray(burchard_out.tke_new))))
+
+        with pytest.raises(ValueError, match="nemo_burchard"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_production="nemo_burchard"), **common)
+        with pytest.raises(ValueError, match="squared_centered"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(), u_before_cell=u_before,
+                v_before_cell=v_before, **common)
+        with pytest.raises(ValueError, match="tke_shear_production"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_production="bogus"), **common)
+
+    def test_default_is_byte_identical(self):
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        common = dict(
+            u_cell=u, v_cell=v, T_cell=T, S_cell=S, rho_cell=rho,
+            dz_half=dz_half, tke_old=None, tau_x_surface=tx,
+            tau_y_surface=ty, dt=3600.0, rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int,
+        )
+        base = tke_vertical_mixing(cfg=TKEConfig(), **common)
+        explicit = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="squared_centered"), **common)
+        np.testing.assert_array_equal(
+            np.asarray(base.tke_new), np.asarray(explicit.tke_new))
+
+
+# ---------------------------------------------------------------------------
+# T8/T13 (Phase-2 #1317): rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri
+# and the Langmuir PE integral — genuinely different from rn2 (Nnow).
+# ---------------------------------------------------------------------------
+
+
+def _n2b_test_column():
+    """A column with n2_mode='adiabatic' inputs (T_n2b/S_n2b are only
+    consulted when N2 is a function of T/S — 'insitu' N2 depends on rho_cell
+    ALONE and would make this a no-op test regardless of wiring)."""
+    u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+    nlev = T.shape[-1]
+    p_cell = jnp.full(T.shape, 1.0e6)   # a representative interior pressure
+    dz_ref = jnp.full((nlev,), 25.0)
+    jacobian = jnp.ones(T.shape[:-1])
+    return u, v, T, S, rho, dz_half, z_int, tx, ty, p_cell, dz_ref, jacobian
+
+
+class TestRn2bTimeLevel:
+    def test_langmuir_uses_n2b_not_n2(self):
+        """With lc=True and n2_mode='adiabatic', tke_vertical_mixing feeds
+        the Langmuir source N2b (falling back to N2 when T_n2b/S_n2b are
+        None) — verified by SPYING on the real nemo_langmuir_tke_source
+        call (the Axell h_lc threshold is a step function of N2, so a
+        black-box tke_new/K_M comparison can accidentally land both calls on
+        the SAME h_lc and look identical despite correct wiring; spying on
+        the actual N2 argument is the robust check)."""
+        (u, v, T, S, rho, dz_half, z_int, tx, ty, p_cell, dz_ref,
+         jacobian) = _n2b_test_column()
+        T_b = T + 3.0   # a materially different before-state contrast
+        S_b = S
+        tke_seed = jnp.full(dz_half.shape, 1e-2)
+        common = dict(
+            u_cell=u, v_cell=v, T_cell=T, S_cell=S, rho_cell=rho,
+            dz_half=dz_half, tke_old=tke_seed, tau_x_surface=tx,
+            tau_y_surface=ty, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+            z_interface=z_int, p_cell=p_cell, dz_ref=dz_ref, jacobian=jacobian,
+            cfg=TKEConfig(lc=True, n2_mode="adiabatic"),
+        )
+        import legoesm.ocean.physics.vertical_mixing.tke as _tke_mod
+        captured = {}
+        _orig = _tke_mod.nemo_langmuir_tke_source
+
+        def _spy(taum, N2, *a, **kw):
+            captured["N2"] = np.asarray(N2).copy()
+            return _orig(taum, N2, *a, **kw)
+
+        _tke_mod.nemo_langmuir_tke_source = _spy
+        try:
+            tke_vertical_mixing(**common)
+            n2_default = captured["N2"]
+            tke_vertical_mixing(T_n2b=T_b, S_n2b=S_b, **common)
+            n2_with_override = captured["N2"]
+        finally:
+            _tke_mod.nemo_langmuir_tke_source = _orig
+        assert not np.allclose(n2_default, n2_with_override)
+
+    def test_prandtl_uses_n2b_not_n2(self):
+        """With prandtl_mode='nemo_ri' and n2_mode='adiabatic', feeding
+        T_n2b/S_n2b changes K_H vs the default (zri's rn2b falls back to
+        rn2)."""
+        (u, v, T, S, rho, dz_half, z_int, tx, ty, p_cell, dz_ref,
+         jacobian) = _n2b_test_column()
+        T_b = T + 3.0
+        S_b = S
+        common = dict(
+            u_cell=u, v_cell=v, T_cell=T, S_cell=S, rho_cell=rho,
+            dz_half=dz_half, tke_old=None, tau_x_surface=tx,
+            tau_y_surface=ty, dt=3600.0, rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int, p_cell=p_cell, dz_ref=dz_ref, jacobian=jacobian,
+            cfg=TKEConfig(prandtl_mode="nemo_ri", kappaM_min=1e-6,
+                         n2_mode="adiabatic"),
+        )
+        default_out = tke_vertical_mixing(**common)
+        n2b_out = tke_vertical_mixing(T_n2b=T_b, S_n2b=S_b, **common)
+        assert not np.allclose(
+            np.asarray(default_out.K_H), np.asarray(n2b_out.K_H))
+
+    def test_requires_both_tracers_together(self):
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        with pytest.raises(ValueError, match="T_n2b and S_n2b"):
+            tke_vertical_mixing(
+                u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+                cfg=TKEConfig(), rho_0=_RHO0, n_iterations=1,
+                z_interface=z_int, T_n2b=T + 1.0)
+
+    def test_default_is_byte_identical(self):
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        base = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(lc=True), rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int)
+        explicit_none = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(lc=True), rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int, T_n2b=None, S_n2b=None)
+        np.testing.assert_array_equal(
+            np.asarray(base.tke_new), np.asarray(explicit_none.tke_new))
+
+
+class TestTkeN2TimeLevelDispatch:
+    def test_unknown_value_raises(self):
+        """Real dispatch guard in k_profiles._vmix_K_profiles, exercised
+        through compute_vertical_K_profiles (not a re-implementation)."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            TKEConfig, VerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+            compute_vertical_K_profiles,
+        )
+
+        grid = create_latlon_grid(n_lat=8, n_lon=12)
+        z = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke", tke=TKEConfig(tke_n2_time_level="bogus")))
+        with pytest.raises(ValueError, match="tke_n2_time_level"):
+            compute_vertical_K_profiles(state, z, None, physics)
+
+    def test_nemo_before_without_tracers_raises(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            TKEConfig, VerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+            compute_vertical_K_profiles,
+        )
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+
+        grid = create_latlon_grid(n_lat=8, n_lon=12)
+        z = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke", tke=TKEConfig(tke_n2_time_level="nemo_before")))
+        with pytest.raises(ValueError, match="n2_tracers_before"):
+            compute_vertical_K_profiles(state, z, None, physics)
+
+
+class TestLeapfrogConstructionGuards:
+    """T4/T8/T13 construction-time raises (dispatch hardening): these axes
+    require outer_integrator='leapfrog' — the before-state does not exist
+    otherwise."""
+
+    def _model(self, outer_integrator, tke_cfg):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig,
+        )
+        grid = create_latlon_grid(8, 16)
+        z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        _lateral_mixing_none = type(OceanPhysicsConfig().lateral_mixing)(
+            scheme="none")
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(scheme="tke", tke=tke_cfg),
+            convection=OceanConvectionConfig(scheme="none"),
+            lateral_mixing=_lateral_mixing_none,
+        )
+        cfg_kw = dict(
+            A_h=2.0e4, bottom_drag_r=1.0e-3, n_barotropic_substeps=8,
+            enable_runtime_checks=False, implicit_vertical_mixing=True,
+            outer_integrator=outer_integrator, physics=physics,
+        )
+        if outer_integrator == "leapfrog":
+            cfg_kw.update(coriolis_scheme="explicit_ab2",
+                         vorticity_scheme="een_total")
+        cfg = LatLonCGridOceanConfig.from_flat(**cfg_kw)
+        return LatLonCGridOceanModel(grid, z_coord, cfg)
+
+    def test_nemo_burchard_requires_leapfrog(self):
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        with pytest.raises(ValueError, match="nemo_burchard"):
+            self._model("forward_euler",
+                        TKEConfig(tke_shear_production="nemo_burchard"))
+
+    def test_nemo_before_requires_leapfrog(self):
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        with pytest.raises(ValueError, match="nemo_before"):
+            self._model("forward_euler",
+                        TKEConfig(tke_n2_time_level="nemo_before"))
+
+    def test_both_construct_cleanly_under_leapfrog(self):
+        """Under outer_integrator='leapfrog' (which DOES carry the
+        before-state) both axes construct without raising — a regression
+        guard for the new construction-time checks."""
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        self._model("leapfrog", TKEConfig(
+            tke_shear_production="nemo_burchard",
+            tke_n2_time_level="nemo_before"))
+
+    def test_n2_nemo_before_tracers_raises_loudly_when_unpopulated(self):
+        """#1317: outer_integrator='leapfrog' construction guarantees
+        T_before/S_before EXIST as NamedTuple slots, but a state bridged
+        straight from a NEMO restart (a twin's step-0 entry state, before
+        the model's own Euler-start populates them) still has them as
+        None. _n2_nemo_before_tracers must raise ValueError (not the old
+        AttributeError: 'NoneType' object has no attribute 'data', and not
+        a silent fallback to entry_state.T/.S)."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+        model = self._model("leapfrog", TKEConfig(tke_n2_time_level="nemo_before"))
+        grid = create_latlon_grid(8, 16)
+        z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        assert state.T_before is None   # the rest-state / bridged-twin default
+
+        with pytest.raises(ValueError, match="before-level tracers"):
+            model._n2_nemo_before_tracers(state)
+
+    def test_n2_nemo_before_tracers_returns_populated_before_state(self):
+        """Sibling to the above: once T_before/S_before ARE populated (e.g.
+        via kamm_twin_90d --bridge-before, or after the model's own
+        Euler-start), the predicate returns them — not None, not a raise."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+        model = self._model("leapfrog", TKEConfig(tke_n2_time_level="nemo_before"))
+        grid = create_latlon_grid(8, 16)
+        z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+        state = state._replace(T_before=state.T, S_before=state.S)
+
+        out = model._n2_nemo_before_tracers(state)
+        assert out is not None
+        t_before, s_before = out
+        assert jnp.array_equal(t_before, state.T.data)
+        assert jnp.array_equal(s_before, state.S.data)
+
+
+class TestNemoBurchardPreCenteredCcState:
+    """#1317 regression: ``_apply_implicit_vertical_mixing``'s fallback path
+    builds a ``cc_state`` with u/v ALREADY cell-centered (``state._replace(
+    u=u_cell, v=v_cell)``) but leaves ``u_before``/``v_before`` untouched at
+    their ORIGINAL face-staggered shape (the model never builds a
+    before-level cc_state). ``k_profiles.py``'s old ``_staggered`` flag was
+    derived from ``u_data.shape`` (already centered by the caller) and reused
+    for ``u_before_data`` too, so it stayed False and skipped centering
+    ``u_before_data`` — the (n_lat, n_lon+1, nlev) face array then hit
+    ``_vertical_shear_burchard``'s ``(du_now)*(du_before)`` product against a
+    (n_lat, n_lon, nlev) ``du_now``, a broadcasting TypeError caught running
+    the #1317 --bridge-before acceptance twin. Fixed by checking
+    ``u_before_data.shape`` independently of the (possibly pre-centered)
+    ``u_data.shape``."""
+
+    def test_precentered_u_v_with_staggered_before_does_not_crash(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            TKEConfig, VerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+            compute_vertical_K_profiles,
+        )
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+
+        grid = create_latlon_grid(n_lat=8, n_lon=12)
+        z = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+
+        # Simulate the caller's cc_state: u/v pre-centered to T's width
+        # (n_lon), u_before/v_before left at the ORIGINAL face width
+        # (n_lon+1) -- the exact mismatch the model's own fallback path
+        # produces.
+        n_lat, n_lon_face, nlev = state.u.data.shape
+        u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+        v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+        rng = np.random.default_rng(0)
+        u_before_face = jnp.asarray(
+            rng.normal(scale=0.1, size=state.u.data.shape))
+        v_before_face = jnp.asarray(
+            rng.normal(scale=0.1, size=state.v.data.shape))
+        cc_state = state._replace(
+            u=state.u.replace(data=u_cell),
+            v=state.v.replace(data=v_cell),
+            u_before=state.u.replace(data=u_before_face),
+            v_before=state.v.replace(data=v_before_face),
+            T_before=state.T, S_before=state.S,
+        )
+        assert cc_state.u.data.shape[1] != cc_state.u_before.data.shape[1]
+
+        # Mode B (diagnostic, prognostic=False -- the TKEConfig default):
+        # exercises the SAME cc_state shape mismatch on the diagnostic path,
+        # which had its own separate bug (u_before_cell/v_before_cell were
+        # not threaded to tke_vertical_mixing at all in Mode B -- fixed
+        # alongside the shape bug).
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke",
+                tke=TKEConfig(tke_shear_production="nemo_burchard")))
+        K_v, A_v = compute_vertical_K_profiles(cc_state, z, None, physics)
+        assert bool(jnp.isfinite(K_v).all())
+        assert bool(jnp.isfinite(A_v).all())
+
+        # Mode A (prognostic=True -- nemo_dino_kamm_mlf's actual runtime
+        # config, the path the #1317 acceptance twin exercises): same
+        # cc_state shape mismatch, the ORIGINAL crash site
+        # (_vertical_shear_burchard's du_now*du_before broadcasting
+        # TypeError, (n_lat,n_lon+1,nlev-1) vs (n_lat,n_lon,nlev-1)).
+        physics_prog = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke",
+                tke=TKEConfig(tke_shear_production="nemo_burchard",
+                              prognostic=True)))
+        K_v_p, A_v_p, tke_new = compute_vertical_K_profiles(
+            cc_state, z, None, physics_prog, dt_tke=2700.0, return_tke=True)
+        assert bool(jnp.isfinite(K_v_p).all())
+        assert bool(jnp.isfinite(A_v_p).all())
+        assert bool(jnp.isfinite(tke_new).all())

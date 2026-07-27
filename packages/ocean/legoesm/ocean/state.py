@@ -1507,6 +1507,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Robert-Asselin-Williams variant — dynatf_qco.F90:144 / traatf_qco.F90:209).
     # NEMO default rn_atfp=0.1. Ignored unless outer_integrator="leapfrog".
     asselin_gamma: float = 0.1
+    # How the leap-frog combine advances tracers (outer_integrator="leapfrog").
+    #   "concentration"      — T(Naa) = T(Nbb) + (T_expl - T(Nnn)) + diss, i.e.
+    #       a bare CONCENTRATION increment.  Under a moving (z-star/vvl)
+    #       coordinate this does NOT conserve tracer content: measured drift
+    #       +8.6e-6 in globally-integrated heat over 200 forcing-free steps,
+    #       LINEAR in step count (#1226).
+    #   "thickness_weighted" — NEMO ``trazdf.F90:271-278``:
+    #           e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+    #       combine CONTENT, then divide by the after-thickness.  Trends carry
+    #       the Kmm ("now") thickness and the before-state carries e3t(Kbb),
+    #       exactly as NEMO weights ``ts(:,:,:,:,Nrhs)``.  NEMO conserves
+    #       content to roundoff (+3.4e-16 on the identical test).
+    # Default "concentration" keeps every existing config bit-identical; the
+    # NEMO/DINO oracle cards select "thickness_weighted".
+    tracer_combine: str = "concentration"
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).

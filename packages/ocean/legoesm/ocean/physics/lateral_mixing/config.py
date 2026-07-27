@@ -182,6 +182,16 @@ class TreguierConfig(NamedTuple):
     """
     enabled: bool = False
     aei0: float = 3000.0     # κ cap [m²/s] = rn_Ue·rn_Le (DINO namelist value)
+    # Optional FLOOR on the returned κ_GM [m²/s], applied to WET columns only
+    # (dry columns stay exactly 0).  The tropical taper ``min(1, |f/f_20|)``
+    # drives κ → 0 AT THE EQUATOR — measured on the eORCA1 tripole state, the
+    # taper reaches 0.0000 and 2.17% of wet cells fall below 0.05 — and an
+    # unfloored zero-GM equatorial band destabilised a 1° global run (non-finite
+    # before day 5).  ``VisbeckConfig`` (the coefficient the OMIP tripole
+    # otherwise uses) carries its own ``kappa_min`` (200 m²/s) for the same
+    # reason.  Default 0.0 = NO floor = byte-identical to the pre-existing
+    # behaviour, so the DINO oracle card is unaffected.
+    kappa_min: float = 0.0
 
 
 class GMRediConfig(NamedTuple):
