@@ -927,6 +927,35 @@ icosahedral lane, per-doubling speedup depended on cells/rank ALONE. So
 ocean-MPAS carries a genuine device-count cost the atmosphere lane does
 not, and raising resolution will NOT rescue it the way it does elsewhere.
 
+**CODEX ROUND-15 2x2 — BOTH effects are real, and separable** (jobs
+26508258/26508336). Both cells hold 5 120 cells/rank; measured load
+imbalance is near-identical (owned max/min within 6 %), so this is a
+partition-QUALITY contrast, not a load-balance one:
+
+| partition | s7 / 32 ranks | s8 / 128 ranks | B/A |
+|---|---|---|---|
+| geometric | 190.07 ms | 313.17 ms | **1.65x** |
+| sfc | 232.46 | 617.66 | 2.66x |
+
+* **Genuine device-count cost:** at the BEST partition, 4x the ranks at
+  identical per-rank work still costs **1.65x**. Not partition quality,
+  not load imbalance — a real rank-count term the atmosphere lane does
+  not have.
+* **Partition quality degrades WITH rank count:** sfc costs 1.22x at 32
+  ranks but **1.97x** at 128. So the two effects compound, and the
+  default `auto` is doing well to land near geometric.
+* Practical: pin `--partition-method geometric` (or auto) on this lane;
+  sfc is actively harmful at scale. pymetis is absent from `.venv-mpi`,
+  so the low-cut METIS arm codex wanted is still unmeasured.
+
+**512-RANK LADDER (job 26508063):** s7 63.83 ms, s8 194.80 ms.
+s8 keeps gaining 256->512 (254.41 -> 194.80 = **1.31x**, at 1 280
+cells/rank) while s7 goes flat (65.71 -> 63.83 = 1.03x, at 320
+cells/rank — below the 300-600 floor). Same floor as the atmosphere,
+reached at a different rank count because the mesh differs. So this lane
+DOES scale to 512 ranks when the mesh is large enough; it just pays the
+rank-count term on the way.
+
 UNEXPLAINED, flagged not resolved: s7's per-doubling speedup RISES
 (1.29 / 1.43 / 1.57) even in the controlled ladder. Efficiency improving
 as the tile shrinks has no physical mechanism I can name; the likeliest
