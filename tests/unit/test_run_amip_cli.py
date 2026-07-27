@@ -603,6 +603,27 @@ def test_diag_days_fractional_flows_to_config():
     assert cfg_int.output.diag_days == pytest.approx(1.0)
 
 
+def test_bechtold_cape_relaxation_sink_flag_round_trip():
+    """--bechtold-cape-relaxation-sink threads the heating-ceiling gate from
+    CLI to ExperimentConfig (default False = bit-exact legacy Bechtold); the
+    --no- form overrides a config-file pin."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+    ]), parser))
+    assert cfg.bechtold_cape_relaxation_sink is False
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--bechtold-cape-relaxation-sink",
+    ]), parser))
+    assert cfg_on.bechtold_cape_relaxation_sink is True
+    parser2 = build_arg_parser()
+    parser2.set_defaults(bechtold_cape_relaxation_sink=True)  # YAML pin
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-bechtold-cape-relaxation-sink",
+    ]), parser2))
+    assert cfg_off.bechtold_cape_relaxation_sink is False
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

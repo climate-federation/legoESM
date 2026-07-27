@@ -1101,6 +1101,13 @@ class ExperimentConfig(NamedTuple):
     # Quasi-equilibrium heating-ceiling ratio (BechtoldConfig.
     # cape_sink_heating_ratio; the C12 warm-runaway sink lever).
     bechtold_cape_sink_heating_ratio: float = 5.0
+    # Gate for the heating ceiling itself (BechtoldConfig.
+    # cape_relaxation_sink).  False = bit-exact legacy Bechtold; True
+    # throttles the column-integrated positive convective heating to
+    # ratio·M_b·CAPE (uniform tendency rescale — budgets preserved).  The
+    # MPAS thermal-runaway lever (hot-column detonation family, day-166
+    # clamp-arm blowup 2026-07-27).
+    bechtold_cape_relaxation_sink: bool = False
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -2704,6 +2711,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
             bechtold_cape_sink_heating_ratio=getattr(
                 amip_cfg, 'bechtold_cape_sink_heating_ratio', 5.0),
+            bechtold_cape_relaxation_sink=getattr(
+                amip_cfg, 'bechtold_cape_relaxation_sink', False),
             bechtold_conv_top_pa=getattr(
                 amip_cfg, 'bechtold_conv_top_pa', 15000.0),
             bechtold_downdraft_evap=getattr(

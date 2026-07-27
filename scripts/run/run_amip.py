@@ -844,6 +844,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BL-ventilation lever. --no-bechtold-downdraft-transport "
                              "disables a config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-cape-relaxation-sink",
+                        dest="bechtold_cape_relaxation_sink",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_cape_relaxation_sink,
+                        help="Enable the Bechtold quasi-equilibrium heating "
+                             "ceiling: column-integrated positive convective "
+                             "heating is throttled to "
+                             "cape_sink_heating_ratio*M_b*CAPE by a uniform "
+                             "tendency rescale (budget-preserving). The "
+                             "thermal-runaway / hot-column-detonation lever. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_cape_relaxation_sink}.")
     parser.add_argument("--bechtold-use-ifs-cape-closure",
                         dest="bechtold_use_ifs_cape_closure",
                         action=argparse.BooleanOptionalAction,
@@ -1935,6 +1947,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
+        bechtold_cape_relaxation_sink=args.bechtold_cape_relaxation_sink,
         mpas_rrtmgp_fp32=args.mpas_rrtmgp_fp32,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
