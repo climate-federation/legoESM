@@ -69,7 +69,7 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 5 | `ldf_slp` `wslpj` | 0.998875 | 0.998447 | **CLOSED** |
 | 5 | `ldf_slp` `uslp`  | 0.999340 | 0.998697 | **CLOSED** |
 | 5 | `ldf_slp` `vslp`  | 0.999012 | 0.997594 | **CLOSED** |
-| 6 | `ldf_eiv` (`aeiu`) | 0.9847 | 1.002 | OPEN |
+| 6 | `ldf_eiv` (`aeiu`) | **0.999815** | **0.999666** (\|x\|) | near — wrap cols 0.90/0.76 open |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
 ### Item 3/4 — fixed 2026-07-27 (commit `634ee4aee`)
