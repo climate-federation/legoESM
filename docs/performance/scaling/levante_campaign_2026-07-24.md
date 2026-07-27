@@ -757,6 +757,40 @@ the tile floor alone; there is real device-count cost to quantify.
 figure carries 14.09 ms for C768@24 — different lane/protocol between
 those jobs, so only the within-job 24-vs-54 contrast is used.)
 
+**THE CUBE PLATEAU, IDENTIFIED (job 26498347).** The fixed-tile contrast
+finally ran inside working configs — C512@24 vs C768@54, both 65.5k
+cols/GPU:
+
+| arm | tile | devices | ms/step |
+|---|---|---|---|
+| C512 kt=2 | 65.5k | 24 | 14.85 |
+| C768 kt=3 | 65.5k | 54 | **13.95** |
+
+**2.25x the devices carrying 2.25x the problem costs nothing** (1.06x, in
+the model's favour) — so communication does NOT grow with device count on
+this lane, and the strong-scaling loss is not a comm wall. Cross-job
+reproducibility is excellent: C768@54 reads 13.93 (job 26497294) and
+13.95 (26498347), 0.1 % apart, which licenses combining the two jobs.
+
+Solving the two fixed-device points for the per-device cost model:
+
+    t(tile) = 11.27 ms FIXED + 54.6 us per 1k columns
+
+At the production 147.5k tile the fixed term is already **58 %** of the
+step, and at 65.5k it is **76 %**. This is an Amdahl ceiling, not a
+network one: from a 24-GPU C768 base the step can never beat ~11.3 ms
+**however many GPUs are added** — a hard cap of 1.72x, of which the
+measured 24->54 run already collected 1.39x. That single number explains
+the cube's efficiency 0.62, the empirical tile floor, and the plateau in
+the figure.
+
+WHAT THE FIXED TERM IS: not yet attributed. Candidates are per-step
+kernel-launch overhead (the L60 step issues many small kernels), the
+tiled path's serial halo exchange, and per-step host synchronisation —
+distinguishing them needs the same nsys treatment that cracked the MPAS
+np4 fusion. That profile is the highest-value next step for atmospheric
+strong scaling, and it is worth more than any further ladder.
+
 **A SECOND cube ceiling, memory:** the fixed-tile arm C1152 L60 @54
 wanted **105.7 GB per device** (rematerialization stuck at 96.6 GB)
 against 80 GB of A100 HBM — job 26497294. So cube scale-out is bounded
