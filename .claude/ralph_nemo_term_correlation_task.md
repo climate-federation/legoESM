@@ -70,7 +70,7 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 5 | `ldf_slp` `uslp`  | 0.999340 | 0.998697 | **CLOSED** |
 | 5 | `ldf_slp` `vslp`  | 0.999012 | 0.997594 | **CLOSED** |
 | 6 | `ldf_eiv` (`aeiu`) | **1.000000** | 1.000608 (\|x\|) | **CLOSED** — seam bug fixed |
-| 7 | eiv transport u/v | **0.9978 / 0.9944** | 0.99 (\|x\|) | near — re-measure post-seam-fix |
+| 7 | eiv transport u/v | **0.9985 / 0.9954** | 0.994 / 0.982 (\|x\|) | near — residual DIFFUSE (not walls/seam) |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
 ### Item 3/4 — fixed 2026-07-27 (commit `634ee4aee`)
@@ -246,3 +246,30 @@ to NEMO's applied sign. Flip the dump, not the model.
 
 Remaining: interior slope |x| +0.30% (was hidden by the seam columns);
 item 4's 13 knife-edge cols; re-measure item 7 after the seam fix.
+
+
+## Item 7 post-seam re-measure (2026-07-27)
+
+kfa=True (kamm card; NEMO's aeiu is genuinely face-averaged):
+  u_eiv corr 0.998474  |x| 0.994097  rel-err med 0.16%
+  v_eiv corr 0.995437  |x| 0.982351  rel-err med 0.15%
+Seam columns CURED: 0.51-0.77 -> 0.996-1.001 (within interior scatter).
+v-lag localised by j-band scan: worst band is MID-BASIN j=[123,148)
+(corr 0.9806), walls are fine (southern band corr 0.999991) => NOT a
+boundary artifact; residual is diffuse. kfa=False on record: clearly worse
+(rel err ~20-30x) — it compares against a kappa NEMO didn't use.
+
+## Item 4 ACCEPTANCE (recommendation, flagged to user)
+
+12 knife-edge columns remain (99.88%). Both identified mechanisms measured
+nearly inert (ladder consistency 14->13, live-gdept alpha 13->12). Margins
+~7e-4 vs input agreement median ~7e-6 => the tail of input precision. Two
+consecutive near-inert cycles = STOP per escalation rule. Recommended
+criterion: "every discrete decision matched except columns whose threshold
+margin is below input precision."
+
+## NEXT: item 8 `traadv_fct` (first unstarted term)
+
+Instrument NEMO MY_SRC traadv_fct.F90 with first-call dumps (upstream flux,
+antidiffusive flux, limited flux, tendency), rebuild, run RUN_GDB, then
+lego-side comparison via the proven cycle.
