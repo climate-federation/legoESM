@@ -161,12 +161,13 @@ def test_guard_rejects_each_kpp_knob_under_mpas_tke(knob):
         _validate_kpp_grid("mpas", mpas_vmix="kpp", **kwargs)
 
 
-def test_mpas_tke_callsite_pins_diagnostic_card():
-    """The main() MPAS call-site must pin tke_prognostic=False: post-#1326
-    the ORCA1 card defaults to the prognostic carry, which MPAS rejects (no
-    MPASOceanState.tke yet), so silently dropping the pin would crash every
-    --mpas-vmix tke run at build. Source tripwire + behavior of the pinned
-    expression (codex MED 2026-07-27)."""
+def test_mpas_tke_callsite_runs_full_card_with_seed():
+    """The main() MPAS call-site runs the FULL #1326 ORCA1 card (prognostic
+    Mode-A included, now that MPASOceanState.tke is wired) and the host loop
+    seeds the carry via model.seed_tke BEFORE the first step (pytree-stable
+    scan carry). Source tripwires + card behavior — a dropped seed call or a
+    re-pinned diagnostic would either crash step 1 or silently degrade the
+    closure."""
     import inspect
     import re
 
@@ -174,15 +175,16 @@ def test_mpas_tke_callsite_pins_diagnostic_card():
 
     src = inspect.getsource(core2)
     m = re.search(
-        r'build_tripole_vmix_config\("tke",\s*iwm=None,\s*'
-        r'tke_prognostic=False\)\s*\n\s*if args\.mpas_vmix == "tke"', src)
-    assert m, "--mpas-vmix tke call-site no longer pins tke_prognostic=False"
-    # The pinned expression yields the diagnostic ORCA1 card with the rest of
-    # the #1326 defaults intact (Mode-B + nn_mxl=3 + Dirichlet BC + nn_eice=3).
-    vm = core2.build_tripole_vmix_config("tke", iwm=None,
-                                         tke_prognostic=False)
+        r'build_tripole_vmix_config\("tke",\s*iwm=None\)\s*\n\s*'
+        r'if args\.mpas_vmix == "tke"', src)
+    assert m, "--mpas-vmix tke call-site no longer runs the full ORCA1 card"
+    assert "state = model.seed_tke(state)" in src, (
+        "the MPAS host loop no longer seeds the prognostic TKE carry")
+    # The card carries the #1326 defaults: prognostic Mode-A + nn_mxl=3 +
+    # Dirichlet surface BC + nn_eice=3.
+    vm = core2.build_tripole_vmix_config("tke", iwm=None)
     assert vm.scheme == "tke"
-    assert vm.tke.prognostic is False
+    assert vm.tke.prognostic is True
     assert vm.tke.tke_mxl_choice == 3
     assert vm.tke.surface_bc == "nemo_dirichlet"
     assert vm.tke.eice == 3

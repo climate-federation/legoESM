@@ -3004,6 +3004,13 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     eta = getattr(state, "eta", None)
     if eta is not None:
         save_kw["eta"] = np.asarray(eta.data)
+    # Prognostic TKE carry (tke closure prognostic=True, any grid): needed to
+    # RESTART without re-spinning the turbulence from the background seed
+    # (the #1310 lesson: an uncheckpointed carry breaks bit-exact restart).
+    # EXTRA key only — scorers and old readers are unaffected.
+    tke = getattr(state, "tke", None)
+    if tke is not None:
+        save_kw["tke"] = np.asarray(tke.data)
     # Geometry for the offline mixed-layer-depth diagnostic (de Boyer Montegut /
     # Treguier 2023): sea-floor depth + level-centre reference depths.  The MLD
     # scorer derives the per-level wet mask from ``z_center_ref < H_bathy``.
@@ -4582,16 +4589,14 @@ def main() -> int:
             # historical — pure grid-agnostic config construction; its
             # closure-mismatch rejects also fire here); 'kpp' (default) keeps
             # the historical KPP + --kpp-* overrides.
-            # tke_prognostic=False: the ORCA1 card defaults to the prognostic
-            # TKE carry (#1326), but MPAS has no MPASOceanState.tke seed yet
-            # (make_mpas_ocean_physics raises on prognostic=True), so MPAS
-            # runs the diagnostic quasi-steady Mode-B until that lands.
+            # Full #1326 ORCA1 card, including the PROGNOSTIC Mode-A carry —
+            # MPASOceanState.tke is seeded by model.seed_tke(state) in the
+            # host loop before the first step (pytree-stable carry).
             # No tke_eice pass-through: _validate_tke_card_grid guarantees
             # --tke-eice is None off the tripole, so the card default
             # (eice=3, NEMO nn_eice) applies here (codex LOW: dead arg).
             vertical_mixing=(
-                build_tripole_vmix_config("tke", iwm=None,
-                                          tke_prognostic=False)
+                build_tripole_vmix_config("tke", iwm=None)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -5415,6 +5420,12 @@ def main() -> int:
     # south-padded it; the latlon branch errored on a non-divisible --latlon-res).
     # ------------------------------------------------------------------
     if app_grid_type == "mpas":
+        # Prognostic-TKE carry seed (MPAS Mode-A): the step carry must be
+        # pytree-stable, so the None->Field promotion happens HERE, once,
+        # before the first step (no-op unless the prognostic TKE closure is
+        # active and the carry is unseeded; a restart-loaded tke passes
+        # through untouched).
+        state = model.seed_tke(state)
         # MPASOceanModel.step has no t_seconds (dm2dc, its only consumer, is
         # arg-gated to tripole/latlon) -- passing it TypeErrors at step 1.
         _ocean_step = (lambda st, sf, fw, t_sec=None:

@@ -41,7 +41,7 @@ LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restor
 PARITY="--bottom-drag-scheme nemo_quadratic"
 IC="--woa-init --woa-t $WTIC --woa-s $WSIC --sss-restore-file $SSSCLIM --ice-init $ICEIC"
 FIX="--mpas-vmix tke"
-LABEL=mpas12_tke
+LABEL=mpas14_tke_main
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 MPAS9=$ROOT/results/omip_nemo/nemolev_mpas10_kppeice
 echo "=== RUN $LABEL (mpas9 + --kpp-eice 3, the MPAS-KPP under-ice lever, day-30 A/B) ==="
