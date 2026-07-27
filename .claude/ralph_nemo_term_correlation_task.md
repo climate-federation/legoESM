@@ -62,7 +62,7 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 2 | `eos_rab` (α, β) | 1.000000 | 1.000007 | **PASS** |
 | 3 | `bn2` (`rn2b`) | 1.00000000 | 0.99997 | near — see below |
 | 4 | `zdf_mxl` (`nmln`/`hmlp`) | 99.859% levels | — | near — 14/9920 cols |
-| 5 | `ldf_slp` (`wslpi`) | 0.9585 | 0.975 | OPEN |
+| 5 | `ldf_slp` (`wslpi`) | **0.999110** | **1.0907** | OPEN — ratio is the gap |
 | 6 | `ldf_eiv` (`aeiu`) | 0.9847 | 1.002 | OPEN |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
@@ -97,6 +97,31 @@ slopes, so fix it before item 5. `col_stretch` in
 
 Eliminated for the residual 14 columns (do NOT re-chase): `mbkt` (0 disagreements
 globally), `nlb10` (=2 on both sides), the level/index convention (validated).
+
+### Item 5 `ldf_slp` — RETRACTION + re-baselined 2026-07-27
+
+**"wslpi corr 0.9585" is WITHDRAWN.** Re-measured with a proper ±2 offset scan
+over 342,134 wet W-points (production call chain, before-state, `bef.ssh`):
+
+| offset | corr | ratio |
+|---|---|---|
+| −1 | 0.983733 | 1.2436 |
+| **0** | **0.999110** | **1.0907** |
+| +1 | 0.968548 | 0.9460 |
+
+Sharply peaked at offset 0 ⇒ the convention is right and 0.9585 was itself an
+alignment artifact. **The real gap is the RATIO: slopes 9.07% TOO LARGE**
+(median rel err 0.83%, p90 3.35%; the p99 62% tail is near-zero-crossing cells,
+not a fidelity signal). Corr is already ~1 — do NOT chase correlation here.
+
+Leads for the 9%: (a) the slope path builds the ADIABATIC N², not NEMO's
+`rn2b` — wire `compute_buoyancy_frequency_nemo_bn2` (with the TRUE gdepw, see
+item 3/4) into `_nemo_wpoint_e3w_wmask_n2`; slope ~ 1/N², and adiabatic N² runs
+0.4% low, so this is a partial but wrong-signed-if-ignored contributor;
+(b) the `S_max` cap — the deepest dumped levels saturate at 0.01, so a cap
+applied at a different point in the chain shifts the sum;
+(c) the live-`e3w` divisor (item 3), which does NOT cancel here.
+NOTE: no `wslpj` dump exists in RUN_GDB — add one before claiming `ldf_slp` done.
 
 ## Term list (work down; each is one cycle)
 
