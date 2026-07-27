@@ -480,3 +480,64 @@ def test_treguier_return_diagnostics_is_consistent_and_nonempty():
     assert set(d) == {"zn", "zah", "zhw", "zRo", "zaeiw"}
     assert all(np.asarray(v).shape == (nlat, nlon) for v in d.values())
     assert float(jnp.max(d["zn"])) > 0.0, "zn identically zero -- fixture inert"
+
+
+def test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes():
+    """The dispatcher must thread slope_n2 to the kappa builder EXPLICITLY.
+
+    Regression for the 1.6% aeiu deficit (#1226): the dispatcher passed the
+    2-field TreguierConfig as `cfg`, so `getattr(cfg, 'slope_n2', 'adiabatic')`
+    silently fell back to 'adiabatic' while the slopes two lines above ran
+    'nemo_bn2' -- an internally inconsistent kappa.  Two guards:
+
+    1. behavioural: the explicit `slope_n2` parameter must actually change
+       kappa (non-vacuous switch);
+    2. source-level: the dispatcher call site must pass `slope_n2=` and
+       `jacobian=` explicitly, so reintroducing the getattr-on-the-wrong-config
+       pattern goes red.
+    """
+    import inspect
+    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as m
+
+    src = inspect.getsource(m.gm_redi_tracer_tendency_latlon)
+    i = src.index("compute_treguier_kappa_gm_nemo_native(")
+    call = src[i:i + 900]
+    assert "slope_n2=" in call, (
+        "dispatcher no longer passes slope_n2 to the Treguier kappa builder -- "
+        "the silent-adiabatic fallback bug is back")
+    assert "jacobian=" in call, (
+        "dispatcher no longer passes jacobian to the Treguier kappa builder")
+
+    # Behavioural half: same fixture as the diagnostics test, two variants.
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes, compute_treguier_kappa_gm_nemo_native,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig, TreguierConfig,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+
+    nlat, nlon, nlev = 6, 5, 8
+    dz = np.geomspace(15.0, 300.0, nlev)
+    z = _z_coord(dz, nlat, nlon, np.full((nlat, nlon), nlev - 1))
+    rng = np.random.default_rng(9)
+    T = 8.0 + np.cumsum(rng.uniform(0.05, 0.4, (nlat, nlon, nlev)), axis=-1)[:, :, ::-1]
+    S = np.full((nlat, nlon, nlev), 35.0)
+    mask = jnp.ones((nlat, nlon))
+    u_mask = jnp.ones((nlat, nlon + 1)); v_mask = jnp.ones((nlat + 1, nlon))
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    rho = jnp.asarray(1026.0 + 0.2 * (10.0 - T))
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+    slopes = compute_nemo_native_slopes(
+        rho, jnp.asarray(T), jnp.asarray(S), mask, u_mask, v_mask, z, grid,
+        GMRediConfig(slope_n2="nemo_bn2"), eos_fn, active_3d=z.is_active)
+    f_cor = jnp.full((nlat, nlon), -1e-4)
+    out = {}
+    for v in ("adiabatic", "nemo_bn2"):
+        out[v] = np.asarray(compute_treguier_kappa_gm_nemo_native(
+            rho, jnp.asarray(T), jnp.asarray(S), slopes[2], slopes[3], mask,
+            z, grid, f_cor, TreguierConfig(), eos_fn,
+            active_3d=z.is_active, slope_n2=v))
+    assert np.abs(out["adiabatic"] - out["nemo_bn2"]).max() > 1e-8, (
+        "slope_n2 has no effect on kappa -- the parameter is not wired through")

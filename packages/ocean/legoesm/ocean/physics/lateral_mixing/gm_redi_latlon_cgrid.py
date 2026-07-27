@@ -1022,6 +1022,7 @@ def compute_treguier_kappa_gm_nemo_native(
     active_3d: jnp.ndarray | None = None,
     jacobian: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
+    slope_n2: str = "adiabatic",
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1082,7 +1083,7 @@ def compute_treguier_kappa_gm_nemo_native(
            else active_3d.astype(dtype))
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+        slope_n2=slope_n2, jacobian=jacobian)
     e3w_3d = jnp.broadcast_to(e3w, rho.shape)
 
     # Floor at 1e-30 (not a hard 0) before sqrt: sqrt(0) has an infinite
@@ -3091,6 +3092,13 @@ def gm_redi_tracer_tendency_latlon(
             kappa_GM = compute_treguier_kappa_gm_nemo_native(
                 rho, T, S, _wslpi_kgm, _wslpj_kgm, mask, z_coord, grid,
                 f_coriolis, _treg, eos_fn, rho_0=rho_0, g=g, active_3d=_act_kgm,
+                # slope_n2 lives on the PARENT GMRediConfig, not on _treg.
+                # Passing _treg alone made getattr(cfg,'slope_n2',..) silently
+                # fall back to 'adiabatic' while the slopes two lines above ran
+                # 'nemo_bn2' -- an internally INCONSISTENT kappa that carried a
+                # 1.6% aeiu deficit (#1226).  Explicit params, no fallback.
+                slope_n2=getattr(cfg, "slope_n2", "adiabatic"),
+                jacobian=jacobian,
             )
         else:
             kappa_GM = compute_treguier_kappa_gm(
