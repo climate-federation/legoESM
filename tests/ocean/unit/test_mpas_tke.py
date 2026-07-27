@@ -572,3 +572,108 @@ class TestPrognosticTKECarryOnMPAS:
         pf = make_tke_profiles_mpas(self._card(prognostic=False))
         out = pf(state, mesh, z_coord, self._forcing(state))
         assert len(out) == 2
+
+
+class TestPrognosticCarryHardening:
+    """codex 2026-07-27 round-2: forced-land masking, partial-cell tke_new,
+    lax.scan pytree/dtype stability, and the restore paths that must
+    reconstruct the carry as a Field."""
+
+    def _card(self):
+        from scripts.run.run_omip_core2 import orca1_zdftke_config
+        return VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config())
+
+    def _forcing(self, n, dtype, ice=0.0):
+        return OceanSurfaceForcing(
+            tau_x=jnp.full((n,), 0.15, dtype=dtype),
+            tau_y=jnp.zeros((n,), dtype=dtype),
+            ice_concentration=jnp.full((n,), ice, dtype=dtype))
+
+    def test_carry_land_masking_forced_land(self, mesh, z_coord):
+        """land_lat_threshold=60 GUARANTEES land cells on the level-1 mesh
+        (polar vertices sit at +-90) — the 85-degree fixture could be
+        all-ocean, making the land assert vacuous (codex MED)."""
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=60.0)
+        land = st.land_mask.data < 0.5
+        assert bool(jnp.any(land)), "fixture must contain land"
+        pf = make_tke_profiles_mpas(self._card())
+        n = st.T.data.shape[0]
+        _, _, tke1 = pf(st, mesh, z_coord,
+                        self._forcing(n, st.T.data.dtype), dt_tke=150.0)
+        assert bool(jnp.all(tke1[land] == 0.0))
+        assert float(jnp.sum(tke1[~land])) > 0.0
+
+    def test_carry_partial_cell_subseafloor_zeroed(self, mesh, z_coord):
+        """Prognostic tke_new at interfaces below bottom_level must be
+        EXACTLY zero (the diagnostic partial-cell test does not cover the
+        Mode-A return; codex MED)."""
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        n = mesh.latCell.shape[0]
+        H = jnp.where(jnp.arange(n) % 2 == 0, 4000.0, 1500.0)
+        pc = create_partial_cell_coordinate(z_coord, H)
+        st = rest_state_mpas_ocean(
+            mesh, pc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0, bathymetry=H)
+        pf = make_tke_profiles_mpas(self._card())
+        _, _, tke1 = pf(st, mesh, pc,
+                        self._forcing(n, st.T.data.dtype), dt_tke=150.0)
+        k_idx = jnp.arange(tke1.shape[1])[None, :]
+        below = k_idx >= jnp.asarray(pc.bottom_level)[:, None]
+        ocean = st.land_mask.data >= 0.5
+        assert bool(jnp.any(below[ocean]))
+        assert bool(jnp.all(tke1[ocean][below[ocean]] == 0.0))
+
+    def test_scan_carry_stable_treedef_dtype_shape(self, mesh, z_coord):
+        """The production host loop is step-per-day, but the carry contract
+        is lax.scan-grade: run the jitted step INSIDE lax.scan for 3 steps
+        and assert the carry keeps an identical treedef and identical leaf
+        dtypes/shapes (codex MED — also pins the dtype-stability fix: the
+        store casts tke_new back to the seed dtype)."""
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        st = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0)
+        config = MPASOceanConfig(
+            physics=OceanPhysicsConfig(
+                vertical_mixing=self._card(),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+            ),
+            implicit_vertical_mixing=True,
+        )
+        model = MPASOceanModel(mesh, z_coord, config)
+        st = model.seed_tke(st)
+        sf = self._forcing(st.T.data.shape[0], st.T.data.dtype)
+
+        def body(carry, _):
+            return model._step_impl(carry, 150.0, surface_forcing=sf), None
+
+        out, _ = jax.lax.scan(body, st, None, length=3)
+        assert jax.tree_util.tree_structure(out) == (
+            jax.tree_util.tree_structure(st))
+        for a, b in zip(jax.tree_util.tree_leaves(st),
+                        jax.tree_util.tree_leaves(out)):
+            assert a.dtype == b.dtype and a.shape == b.shape
+        assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+
+    def test_restart_npz_reconstructs_none_carry_as_field(
+            self, mesh, z_coord, state, tmp_path):
+        """load_restart on a template with tke=None must reconstruct the
+        saved carry as a Field, not drop it (codex MED — a dropped carry
+        re-spins turbulence from background on restart)."""
+        import numpy as np
+        from legoesm.core.field import Field
+        from legoesm.ocean.restart import load_restart
+        n, nlev = state.T.data.shape
+        tke_arr = jnp.full((n, nlev - 1), 2.5e-4, dtype=state.T.data.dtype)
+        seeded = state._replace(tke=Field(
+            data=tke_arr, name="tke", dims=("nCells", "level"),
+            units="m^2/s^2"))
+        p = tmp_path / "restart.npz"
+        np.savez(p, **{f: np.asarray(getattr(seeded, f).data)
+                       for f in ("u", "T", "S", "eta", "tke")})
+        restored = load_restart(p, state)  # template carry is None
+        assert restored.tke is not None
+        assert bool(jnp.allclose(restored.tke.data, tke_arr))

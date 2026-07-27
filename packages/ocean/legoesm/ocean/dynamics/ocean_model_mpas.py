@@ -983,6 +983,12 @@ class MPASOceanModel:
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
             rho_ref_z=state.rho_ref_z,
+            # Carry the prognostic TKE through unchanged (codex MED: omitting
+            # it here silently defaulted a seeded Field back to None inside
+            # jit — a pytree-structure change). The Mode-A store below
+            # overwrites the DATA; this preserves the STRUCTURE on every
+            # intermediate state (conservation fixer, freeze floor).
+            tke=state.tke,
         )
 
         # 10. Conservation fixers (#166: pass expected forcing so fixer
@@ -1081,9 +1087,14 @@ class MPASOceanModel:
             # Store the prognostic TKE carry (Mode A): profiles ran on the
             # OLD state's tke; the update advances one backward-Euler en step
             # (mirrors the lat-lon model step's tke_new store).  Reuse the
-            # incoming Field wrapper so pytree structure is unchanged.
+            # incoming Field wrapper so pytree structure is unchanged, and
+            # PIN the carry dtype to the incoming carry's dtype (codex MED:
+            # under an f32-storage/f64-compute policy the kernel returns f64
+            # after an f32 seed — an unpinned store would flip the scan-carry
+            # leaf dtype between steps).
             state_new = state_new._replace(
-                tke=state.tke.replace(data=_tke_new))
+                tke=state.tke.replace(
+                    data=_tke_new.astype(state.tke.data.dtype)))
 
         return cast_pytree(state_new, None, "storage")
 
