@@ -200,6 +200,8 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
+    "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:

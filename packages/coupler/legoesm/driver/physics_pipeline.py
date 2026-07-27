@@ -2993,6 +2993,8 @@ def _resolve_convection(config):
             # scheme default since the 2026-07-16 flip).
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
+            rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
                 config, 'bechtold_use_ifs_downdraft', True),
