@@ -524,12 +524,18 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
         # The ext swap must be the FULL consistency bundle (all fields
         # + extended halo metrics together); until then the coherent
         # index-copy interim stays.
-        duo_pad_scalars(delp6, ctx)
-        duo_pad_scalars(pt6, ctx)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            duo_pad_scalars(delp6, ctx)
+            duo_pad_scalars(pt6, ctx)
     elif not ctx.get("use_ext_bundle"):
-        for t in range(1, 7):
-            exchange_agrid_scalar_halos(delp6, t, n, ng)
-            exchange_agrid_scalar_halos(pt6, t, n, ng)
+        # same it==1 cadence gate as the ext lane (codex r1 P2-8: the
+        # interim/measurement lanes must not run the entry A-scalar
+        # exchange every inner step when the caller supplies the
+        # upstream n_split schedule)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
     if ctx.get("use_ext_bundle"):
         # authoritative duo entry exchanges (dyn_core.F90:437-471):
         # ext_scalar(delp/pt, 0,0) + ext_vector(u, v, 0,1,1,0)

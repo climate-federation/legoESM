@@ -1,8 +1,9 @@
 """Self-tests for the ext_vector operand-diff harness (codex fix-advice
 rank-2): the comparator's mechanics must be provably non-vacuous
-(seeded-violation detection) and the stage-dump hook must not perturb
-the production exchange (8-retracted-claims lesson: validate the
-instrument before trusting its numbers)."""
+(seeded-violation detection, FAIL-LOUD on missing/empty inputs) and the
+stage-dump hook must not perturb the production exchange
+(8-retracted-claims lesson: validate the instrument before trusting its
+numbers)."""
 
 import importlib.util
 import sys
@@ -44,34 +45,51 @@ def test_compare_detects_seeded_violation(cmpmod):
     rng = np.random.default_rng(0)
     fort = rng.standard_normal((10, 10)) + 3.0
     ours = fort.copy()
-    mx, arg, cov, ncmp = cmpmod.compare("x", ours, fort, -2, -2, 6, 1.0)
-    assert mx == 0.0 and cov == 0 and ncmp == 100
+    mabs, mrel, arg, cov, ncmp = cmpmod.compare(ours, fort, -2, -2, 6,
+                                                1.0)
+    assert mabs == 0.0 and mrel == 0.0 and cov == 0 and ncmp == 100
     ours2 = fort.copy()
     ours2[1, 5] += 0.5                                 # Fortran (-1, 3)
-    mx, arg, cov, _ = cmpmod.compare("x", ours2, fort, -2, -2, 6, 1.0)
-    assert mx > 0.01 and arg == (-1, 3)
+    mabs, mrel, arg, cov, _ = cmpmod.compare(ours2, fort, -2, -2, 6,
+                                             1.0)
+    assert mabs == pytest.approx(0.5) and arg == (-1, 3)
     # sign handling: ours == -fort must be exact under sign=-1
-    mx, _, _, _ = cmpmod.compare("x", -fort, fort, -2, -2, 6, -1.0)
-    assert mx == 0.0
+    mabs, _, _, _, _ = cmpmod.compare(-fort, fort, -2, -2, 6, -1.0)
+    assert mabs == 0.0
 
 
-def test_compare_coverage_and_masks(cmpmod):
+def test_compare_coverage_masks_and_empty(cmpmod):
     fort = np.full((10, 10), 2.0)
     ours = np.full((10, 10), 2.0)
-    fort[0, 0] = cmpmod.SENT                           # corner (-2,-2)
+    fort[0, 0] = cmpmod.SENTINELS[0]                   # corner (-2,-2)
     ours[0, 0] = np.nan                                # both unwritten: ok
-    fort[0, 4] = cmpmod.SENT                           # side halo (-2,2)
-    mx, _, cov, _ = cmpmod.compare("x", ours, fort, -2, -2, 6, 1.0)
+    fort[0, 4] = cmpmod.SENTINELS[1]                   # side halo (-2,2)
+    _, _, _, cov, _ = cmpmod.compare(ours, fort, -2, -2, 6, 1.0)
     assert cov == 1                                    # ours wrote, fort didn't
     # corner exclusion must swallow a corner-only difference
     ours3 = np.full((10, 10), 2.0)
     fort3 = np.full((10, 10), 2.0)
     fort3[9, 9] = 5.0                                  # corner (7,7)
-    mx, _, _, _ = cmpmod.compare("x", ours3, fort3, -2, -2, 6, 1.0,
-                                 exclude="corners")
-    assert mx == 0.0
-    mx, _, _, _ = cmpmod.compare("x", ours3, fort3, -2, -2, 6, 1.0)
-    assert mx > 0.1
+    mabs, _, _, _, _ = cmpmod.compare(ours3, fort3, -2, -2, 6, 1.0,
+                                      exclude="corners")
+    assert mabs == 0.0
+    mabs, _, _, _, _ = cmpmod.compare(ours3, fort3, -2, -2, 6, 1.0)
+    assert mabs > 1.0
+    # all-unwritten overlap must be an explicit EMPTY marker, never 0.0
+    r = cmpmod.compare(np.full((4, 4), np.nan),
+                       np.full((4, 4), cmpmod.SENTINELS[0]),
+                       1, 1, 6, 1.0)
+    assert r == ("EMPTY",)
+
+
+def test_overlap_crop_windows(cmpmod):
+    ours = np.arange(54.0 * 54).reshape(54, 54)        # lo (-2,-2)
+    fort = np.zeros((50, 50))                          # window 0..49
+    cr = cmpmod.overlap_crop(ours, -2, -2, fort, 0, 0)
+    oc, fc, i0, j0 = cr
+    assert oc.shape == (50, 50) and (i0, j0) == (0, 0)
+    assert oc[0, 0] == ours[2, 2]                      # Fortran (0,0)
+    assert cmpmod.overlap_crop(ours, -2, -2, fort, 200, 0) is None
 
 
 def test_read_fort_roundtrip(cmpmod, tmp_path):
@@ -85,6 +103,16 @@ def test_read_fort_roundtrip(cmpmod, tmp_path):
     b, ilo, jlo = cmpmod.read_fort(p)
     assert (ilo, jlo) == (-1, 2)
     np.testing.assert_allclose(b, a, rtol=0, atol=0)
+
+
+def test_main_fatal_on_missing_dumps(cmpmod, tmp_path):
+    """FAIL-LOUD gate (codex r1 P0-2): an empty fort dir or a missing
+    stage must exit nonzero, never read as clean."""
+    np.savez(tmp_path / "ours.npz", n=np.array(4), ng=np.array(3),
+             git_sha=np.array("test"))
+    rc = cmpmod.main(["--fort-dir", str(tmp_path),
+                      "--ours", str(tmp_path / "ours.npz")])
+    assert rc == 1
 
 
 def test_stage_dump_hook_is_inert_and_complete():
@@ -127,6 +155,8 @@ def test_stage_dump_hook_is_inert_and_complete():
                    ("S6", "uin"), ("S6", "vin")):
         for t in range(1, 7):
             assert f"{st}_t{t}_{nm}" in got, (st, t, nm)
-    # S6 capture must equal the actual returned halos (non-vacuous)
+    # S6 capture must equal the actual returned halos, BOTH components
+    # (non-vacuous; codex r1 flagged uin-only)
     for t in range(6):
         np.testing.assert_array_equal(got[f"S6_t{t + 1}_uin"], u_b[t])
+        np.testing.assert_array_equal(got[f"S6_t{t + 1}_vin"], v_b[t])
