@@ -815,6 +815,39 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
     return e3w, wmask3, pn2
 
 
+def _nemo_ml_anchor_index(first: jnp.ndarray, act: jnp.ndarray,
+                          nlev: int) -> jnp.ndarray:
+    """The w-slope ML-ramp anchor index (ldfslp.F90 ``jk = nmln + 1``).
+
+    ``first`` is the 0-based ``nmln`` (see :func:`compute_nemo_native_slopes`
+    docstring); the anchor reads the interior slope one w-level BELOW the
+    mixed-layer base.  NEMO's own ``nmln`` is bottom-capped per column
+    (zdfmxl.F90:99, ``nmln = MIN(jk,mbkt) + 1``), so the anchor ``nmln+1`` can
+    reach ``mbkt+2`` -- past the last WET w-level (``wmask=0`` there) when the
+    ML reaches the seafloor.  That's deliberate: NEMO's ``zwslpi_hml``
+    recurrence stores the (masked-zero) value at that dry level as the
+    "anchor" for the whole ramp in that column.
+
+    A prior version clamped only against the GLOBAL array size
+    (``jnp.clip(first + 1, 1, nlev - 1)``), with no PER-COLUMN ceiling. That
+    is fine wherever the column reaches deeper than ``nlev - 3`` (the common
+    case for the DINO oracle grid, where level ``nlev - 1`` is a universal
+    dry sentinel every column shares), but for a genuinely shallow column
+    sitting in a domain with much deeper neighbours, an unstratified
+    (never-crosses-MLD-threshold) shallow column's ``first`` saturates at the
+    GLOBAL ``nlev - 1`` regardless of that column's own bottom -- i.e. the
+    old clamp silently assumed every column shares one dry bottom level, an
+    assumption real (non-uniform-depth) bathymetry does not satisfy (#1226:
+    442/9920 DINO wet columns read past their own ``bottom_wet_k`` under the
+    old formula, though inert there since DINO happens to carry a universal
+    dry sentinel level).  Clamp against the column's own bottom (``mbkt`` =
+    count of active T-cells) instead, matching NEMO's per-column
+    ``MIN(...,mbkt)`` semantics exactly.
+    """
+    mbkt = jnp.sum(act > 0.5, axis=-1).astype(jnp.int32)          # (nlat,nlon)
+    return jnp.clip(first + 1, 1, jnp.minimum(mbkt + 1, nlev - 1))
+
+
 def compute_nemo_native_slopes(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -994,7 +1027,7 @@ def compute_nemo_native_slopes(
     # ML ramp (:284-297): in-ML for w-level jk <= nmln (1-based) — in the
     # 0-based top-of-cell-k indexing (jk = k+1): k <= first; anchor at
     # jk = nmln+1 => k = first+1 (the first w-level BELOW the ML base).
-    kanc = jnp.clip(first + 1, 1, nlev - 1)
+    kanc = _nemo_ml_anchor_index(first, act, nlev)
     r1_hmlw = 1.0 / jnp.maximum(hml, jnp.asarray(_NEMO_HMLW_FLOOR_M, dtype))
     anc_i = jnp.take_along_axis(swi_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw
     anc_j = jnp.take_along_axis(swj_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw

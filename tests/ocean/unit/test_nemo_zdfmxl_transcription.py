@@ -618,6 +618,105 @@ def test_native_slopes_are_lon_translation_equivariant():
                     "(zero-ghost) dependence is back")
 
 
+def test_wslp_ml_anchor_never_reads_past_the_columns_own_bottom():
+    """The w-slope ML-ramp anchor index (``kanc``, ldfslp.F90 ``nmln+1``) must
+    never exceed the COLUMN'S OWN deepest wet level, not just the array's
+    global level count.
+
+    NEMO caps ``nmln = MIN(jk, mbkt) + 1`` (zdfmxl.F90:99) per column, so the
+    anchor ``nmln+1`` for a fully-unstratified (never-crosses-threshold)
+    column saturates at that column's own ``mbkt+1`` -- the seafloor -- not at
+    the domain's deepest level.  ``compute_nemo_native_slopes`` used to build
+    ``kanc = jnp.clip(first + 1, 1, nlev - 1)``: a GLOBAL array-size bound
+    with no per-column ceiling.  On a domain with a genuinely shallow column
+    next to deep ones, an unstratified shallow column's ``first`` saturates
+    (via ``_nemo_mld_from_potential_density``'s ``has=False`` branch) at the
+    GLOBAL ``nlev - 1`` regardless of that column's own bottom -- i.e. the
+    clamp silently depended on every column sharing one dry bottom level, an
+    assumption that does not hold for real (non-uniform-depth) bathymetry
+    (#1226: 442/9920 DINO wet columns read ``kanc`` past their own
+    ``bottom_wet_k`` under the old formula).
+
+    ``kanc`` is purely an internal index (not separately exposed as a public
+    return value), and its effect on the PUBLIC ``wslpi``/``wslpj`` output is
+    masked away by the final ``* wmask3`` regardless of which dry level it
+    points at (verified: both the old and new formula give byte-identical,
+    all-zero output at the dry sentinel levels on every fixture tried) --
+    which is exactly why this was invisible in the DINO fidelity harness
+    despite being a real transcription gap.  This test therefore calls the
+    module's actual extracted helper, :func:`_nemo_ml_anchor_index` (the
+    exact code the fix changed), directly -- exercising the real source, not
+    a re-derivation -- on a shallow, fully-mixed column, and asserts the
+    INDEX invariant: ``kanc`` must never exceed the column's own
+    ``mbkt + 1`` (0-based).  Non-vacuous: the OLD global-only formula
+    (reproduced alongside for comparison) violates this invariant on this
+    exact fixture.
+    """
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_ml_anchor_index, _nemo_mld,
+    )
+
+    nlat, nlon, nlev = 3, 4, 9
+    dz = np.geomspace(20.0, 200.0, nlev)
+    k_bot = np.full((nlat, nlon), nlev - 1)
+    k_bot[:, 0] = 3   # column 0: shallow, mbkt=3 (0-based active levels 0..2)
+    z = _z_coord(dz, nlat, nlon, k_bot)
+
+    # Uniform T/S everywhere (fully mixed) -> the rho_c criterion never
+    # crosses threshold anywhere -> `has=False` -> `_nemo_mld_from_potential_
+    # density` returns the saturating `m_base = nlev - 2` fallback for EVERY
+    # column, deep or shallow alike -- exactly the scenario the old
+    # global-only clamp could not distinguish from a genuinely deep column.
+    T = np.full((nlat, nlon, nlev), 10.0)
+    S = np.full((nlat, nlon, nlev), 35.0)
+    mask = jnp.ones((nlat, nlon))
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    cfg = GMRediConfig()   # default mld_criterion="rho_c" (the affected path)
+
+    hml, m_base = _nemo_mld(
+        cfg.mld_criterion, jnp.asarray(T), jnp.asarray(S), mask, z, eos_fn,
+        cfg.mld_rho_c, active_3d=z.is_active)
+    m_base = np.asarray(m_base)
+    # Fixture sanity: the shallow column must actually hit the saturating
+    # (unstratified) MLD branch, or this test exercises nothing.
+    assert m_base[0, 0] == nlev - 2, (
+        "fixture's shallow column did not saturate at the unstratified "
+        f"nlev-2 fallback (got {m_base[0, 0]}); adjust the fixture")
+
+    first = jnp.clip(m_base + 1, 1, nlev - 1)
+    kanc = np.asarray(_nemo_ml_anchor_index(first, z.is_active, nlev))
+    mbkt_shallow = int(np.asarray(z.is_active)[0, 0, :].sum())   # = 3
+
+    # The FIX must hold the invariant NEMO's own nmln cap enforces: kanc <=
+    # mbkt + 1 (0-based), i.e. never read past the column's own
+    # seafloor-adjacent w-level.
+    assert kanc[0, 0] <= mbkt_shallow + 1, (
+        f"kanc={kanc[0, 0]} exceeds the shallow column's own "
+        f"mbkt+1={mbkt_shallow + 1} -- the per-column clamp regressed")
+
+    # Non-vacuous: the OLD global-only formula (no per-column mbkt ceiling)
+    # violates that same invariant on this exact fixture, proving the
+    # fixture actually exercises the gap the fix closes.
+    old_kanc_shallow = int(np.clip(int(first[0, 0]) + 1, 1, nlev - 1))
+    assert old_kanc_shallow > mbkt_shallow + 1, (
+        "fixture does not exercise the gap: the OLD global-only clamp did "
+        "not exceed the shallow column's own bottom (mbkt+1) here")
+
+    # Source guard: the call site must actually USE the helper (not just
+    # define it) -- otherwise the inline formula could regress back to the
+    # old global-only clamp while this test still imports and passes the
+    # helper directly, silently going vacuous.
+    import inspect
+    from legoesm.ocean.physics.lateral_mixing import gm_redi_latlon_cgrid as m
+    src = inspect.getsource(m.compute_nemo_native_slopes)
+    assert "_nemo_ml_anchor_index(" in src, (
+        "compute_nemo_native_slopes no longer calls _nemo_ml_anchor_index -- "
+        "the per-column mbkt clamp may have regressed back to a global-only "
+        "jnp.clip(first + 1, 1, nlev - 1)")
+
+
 def test_dispatcher_reads_kfa_directly_not_via_getattr_default():
     """The dispatcher must read cfg.gm_bolus_kappa_face_average DIRECTLY.
 
