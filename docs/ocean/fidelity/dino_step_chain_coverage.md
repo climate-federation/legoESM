@@ -131,3 +131,20 @@ measured a number against this specific NEMO array).
 6. **`ldf_dyn` momentum-viscosity coefficient (order 14)** — feeds #3; no board entry.
 7. **`lbc_lnk` sign convention in `finalize_lbc` (order 53)** — halo/BC sign correctness on
    after-velocity and tracers; asserted by construction elsewhere but not corr-checked here.
+
+
+## Round-2 dispositions (2026-07-27, post-inventory)
+
+| routine | result |
+|---|---|
+| dyn_spg_ts | **VERIFIED** — pssh 0.99999, outputs >=0.9996; residual attributed (entry seed convention, floor-caveated) |
+| tra/dyn_atf_qco + ssh_atf | **VERIFIED** — filtered fields >=0.9999; rn_atfp == asselin_gamma exactly |
+| dynldf_lev_lap (+ldf_dyn coeff) | **VERIFIED** — corr 0.998/0.999; ahmt bit-exact |
+| ssh_nxt/div_hor | **VERIFIED** — hdiv corr 1.000000; sign convention confirmed |
+| dom_qco_r3c | **VERIFIED** — r3t corr 1.000000 (r3u/r3v: reader lacks hu_0/hv_0; T-point is load-bearing) |
+| mlf_baro_corr | ALGEBRA-VERIFIED (identical formula, ocean_model_latlon_cgrid.py:3488-3517); empirical isolation needs a _step_impl diagnostics hook (NEMO dumps 8883-8886 ready) |
+| lbc_lnk sign | WAIVED-DEFERRED — needs a different harness |
+
+With these, every routine in the step chain is verified, attributed, or
+explicitly waived — the coverage gate closes. Follow-ups: the _step_impl hook
+for mlf_baro_corr; hu_0/hv_0 in nemo_io for r3u/r3v.
