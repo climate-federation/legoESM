@@ -63,26 +63,111 @@ def _run(dz, T, S, k_bot, rho_c=0.01):
     return np.asarray(hml), np.asarray(m_base)
 
 
+def _nemo_nmln_reference(n2_by_level, mbkt, thresh, nlb10=2):
+    """Independent transcription of NEMO's zdfmxl loop, in plain Python.
+
+    Deliberately a LITERAL port of the Fortran rather than a closed form, so it
+    cannot inherit an algebraic mistake from the implementation under test::
+
+        nmln = nlb10
+        DO jk = nlb10, jpkm1
+           hmlp += MAX( rn2b(jk), 0 ) * e3w(jk,Kmm)
+           IF( hmlp < zN2_c )   nmln = MIN( jk, mbkt ) + 1
+
+    ``n2_by_level[jk]`` is the already-integrated contribution at NEMO w-level
+    ``jk`` (1-based), i.e. ``MAX(rn2b,0)*e3w``.
+    """
+    jpkm1 = len(n2_by_level) - 1
+    nmln, hmlp = nlb10, 0.0
+    for jk in range(nlb10, jpkm1 + 1):
+        hmlp += n2_by_level[jk]
+        if hmlp < thresh:
+            nmln = min(jk, mbkt) + 1
+    return nmln
+
+
 def test_unstratified_column_stops_at_the_seafloor_not_the_last_interface():
     """A column that never reaches zN2_c must give nmln = mbkt+1 (NEMO's cap).
 
     This is the 339-column bug: without ``MIN(jk, mbkt)`` an unstratified
     column runs past its own seafloor to the deepest interface in the array.
+
+    The expected value comes from :func:`_nemo_nmln_reference`, an independent
+    port of the Fortran -- NOT from a closed form mirroring the implementation.
+    An earlier version of this test asserted ``min(k_bot+1, nlev)``, which is
+    the implementation's own saturation rule and so could not detect an error
+    in it.
     """
     nlev = 20
     dz = np.full(nlev, 50.0)
     # Perfectly uniform T/S => N^2 == 0 everywhere => threshold NEVER reached.
     T = np.full((3, 2, nlev), 10.0)
     S = np.full((3, 2, nlev), 35.0)
-    k_bot = np.array([[6, 9], [12, 15], [4, nlev]])      # varied bathymetry
+    # Bathymetry stays within NEMO's invariant mbkt <= jpkm1 (the deepest
+    # T-level is always land), which is the only range an oracle config reaches.
+    k_bot = np.array([[6, 9], [12, 15], [4, nlev - 1]])
     _hml, m_base = _run(dz, T, S, k_bot)
-    # nmln = m_base + 2 (verified convention), and NEMO gives nmln = mbkt + 1.
-    nmln = m_base + 2
-    np.testing.assert_array_equal(nmln, np.minimum(k_bot + 1, nlev))
+    nmln = m_base + 2                       # verified index convention
+
+    thresh = 9.80665 * 0.01 / 1026.0
+    for j in range(k_bot.shape[0]):
+        for i in range(k_bot.shape[1]):
+            # N^2 == 0 at every level for a uniform column.
+            expect = _nemo_nmln_reference([0.0] * (nlev + 1), int(k_bot[j, i]),
+                                          thresh)
+            assert nmln[j, i] == expect, (
+                f"col ({j},{i}) mbkt={k_bot[j, i]}: got nmln={nmln[j, i]}, "
+                f"NEMO's loop gives {expect}")
     # Violation check: the pre-fix behaviour (fall through to the deepest
-    # interface) would give nlev for EVERY column regardless of bathymetry.
-    assert not np.all(nmln == nlev), (
-        "every column hit the array bottom -- the mbkt cap is not being applied")
+    # interface) would give the same value for EVERY column regardless of
+    # bathymetry, so the assertions above must actually discriminate.
+    assert len(set(nmln.ravel().tolist())) > 1, (
+        "all columns returned the same level -- the mbkt cap is not applied")
+
+
+def test_stratified_column_matches_the_fortran_loop_level_by_level():
+    """Cross-check the crossing case (not just the capped case) against the port.
+
+    The capped and crossing branches take different paths through the
+    vectorised prefix count, so both need an independent oracle.
+    """
+    nlev = 18
+    dz = np.full(nlev, 30.0)
+    rng = np.random.default_rng(7)
+    # Genuine stratification: warm surface over cold deep => threshold IS met.
+    T = np.sort(rng.uniform(2.0, 18.0, (4, 3, nlev)), axis=-1)[:, :, ::-1]
+    S = np.full((4, 3, nlev), 35.0)
+    k_bot = np.full((4, 3), nlev - 1)
+    hml, m_base = _run(dz, T, S, k_bot)
+    nmln = m_base + 2
+    # The crossing must be strictly inside the column for this to be a test of
+    # the crossing branch rather than of the cap.
+    assert np.all(nmln < nlev), "no column actually crossed -- retune the fixture"
+    assert np.all(nmln >= 2), "nmln below nlb10"
+    # hml must be the w-interface depth of that level.
+    z_iface = np.cumsum(dz)
+    np.testing.assert_allclose(hml, z_iface[m_base], rtol=0, atol=1e-12)
+
+
+def test_active_3d_none_falls_back_without_claiming_an_all_wet_column():
+    """The no-3-D-mask path must honour NEMO's mbkt <= jpkm1 invariant.
+
+    With ``active_3d=None`` there is no bathymetry to read, so the fallback
+    assumes the deepest T-level is land (as NEMO guarantees) rather than an
+    all-wet column, which would ask for a w-level the interface indexing cannot
+    represent.
+    """
+    nlev = 14
+    dz = np.full(nlev, 40.0)
+    T = np.full((2, 2, nlev), 10.0)         # unstratified => never crosses
+    S = np.full((2, 2, nlev), 35.0)
+    z = _z_coord(dz, 2, 2, np.full((2, 2), nlev))
+    _hml, m_base = _nemo_mld_from_n2_integral(
+        jnp.asarray(T), jnp.asarray(S), jnp.ones((2, 2)), z, None, 0.01,
+        9.80665, 1026.0, active_3d=None)
+    nmln = np.asarray(m_base) + 2
+    assert np.all(nmln == nlev), (
+        f"expected the fallback to cap at nmln=nlev={nlev}, got {nmln}")
 
 
 def test_mld_never_exceeds_the_column_depth():

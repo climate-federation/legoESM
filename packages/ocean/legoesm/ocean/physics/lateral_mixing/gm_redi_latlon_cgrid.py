@@ -500,32 +500,25 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             rho_ref=rho_0, g=g)                       # (...,nlev-1)
     # e3w(jk) for interface m = spacing between the bracketing T-centres.
     e3w = z_centers[1:] - z_centers[:-1]             # (nlev-1,)
-    # The MLD CRITERION itself is thickness-free, and that is not an
-    # approximation -- it is an identity in NEMO.  eosbn2 divides by the live
-    # e3w and zdfmxl multiplies it straight back:
-    #     rn2b(jk) = grav*( alpha*dT - beta*dS ) / e3w(jk,Kmm)   (eosbn2.F90)
+    # The MLD CRITERION is thickness-free, and that is not an approximation --
+    # it is an identity in NEMO.  eosbn2 divides by the live e3w and zdfmxl
+    # multiplies it straight back:
+    #     rn2b(jk) = grav*( alpha*dT - beta*dS ) / e3w(jk,Kmm)   (eosbn2.F90:1467)
     #     hmlp    += MAX( rn2b(jk), 0 ) * e3w(jk,Kmm)            (zdfmxl.F90:98)
     #  => term    = MAX( grav*( alpha*dT - beta*dS ), 0 )
-    # so e3w cancels EXACTLY and no z-star stretch enters the integral (measured:
-    # applying one flips zero levels).  Reference spacing is therefore correct
+    # so e3w cancels EXACTLY and NO z-star stretch belongs in the integral
+    # (measured: applying one flips zero levels).  Reference spacing is correct
     # here as long as n2_int is built on that SAME spacing, which it is.
     #
-    # The DEPTH is a different matter: hmlp = gdepw(nmln,Kmm) is the live w-depth
-    # and does carry the stretch.  Under key_qco the scale factor is a macro
-    # (domzgr_substitute.h90:131)  e3w(i,j,k,t) = E3w_0(i,j,k)*( 1 + r3t(i,j,t) )
-    # with r3t 2-D, so the stretch is UNIFORM down a column and is recoverable as
-    # H_live/H_ref from the live thicknesses the bridge already hangs on z_coord
-    # -- no need to thread eta through four signatures.
-    _hp = getattr(z_coord, "h_partial", None)
-    if _hp is not None:
-        _wet = (jnp.asarray(active_3d) > 0.5).astype(dtype) if active_3d is not None \
-            else jnp.asarray(mask, dtype)[..., None] * jnp.ones((nlev,), dtype)
-        _h_ref = jnp.sum(_wet * jnp.asarray(dz_ref, dtype), axis=-1)
-        _h_live = jnp.sum(_wet * jnp.asarray(_hp, dtype), axis=-1)
-        col_stretch = jnp.where(_h_ref > 0, _h_live / jnp.maximum(_h_ref, 1e-10),
-                                jnp.ones((), dtype))          # = 1 + r3t
-    else:
-        col_stretch = jnp.ones(T_filled.shape[:-1], dtype)
+    # The DEPTH is a different matter: NEMO's hmlp = gdepw(nmln,Kmm) IS the live
+    # w-depth and does carry (1+r3t) = 1 + ssh/H (domzgr_substitute.h90:131).
+    # We do NOT apply it: eta is not threaded into this function (see the scope
+    # note on _apply_nemo_mld_slope_ramp), and z_coord.h_partial is the STATIC
+    # at-rest thickness (vertical.py:42) -- it is eta-independent, so deriving a
+    # stretch from it yields exactly 1.0 on every DINO column (measured) and
+    # would be a mislabel, not a correction.  The omission is bounded by
+    # max|ssh/H| = 6.3e-4 on the DINO y5 state, well below the errors being
+    # chased here; thread eta if a config with a large free surface needs it.
     # Reference w-level nlb10 = first interface at/below ~10 m; contributions
     # above it are excluded (the near-surface is mixed by definition), so the
     # MLD is floored at ~10 m exactly as NEMO's nmln>=nlb10 initialisation.
@@ -567,18 +560,29 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     below = (cum[..., :nlev - 2] < thresh).astype(jnp.int32).sum(axis=-1)
     if active_3d is not None:
         # mbkt = deepest wet T-level (1-based) = count of wet cells in column.
+        # NEMO guarantees mbkt <= jpkm1 (the bottom T-level is ALWAYS land,
+        # tmask(:,:,jpk)=0), so nmln = mbkt+1 <= jpk and m_base <= nlev-2 -- the
+        # clip below never binds on a NEMO-bridged column.  A hypothetical
+        # all-wet column (mbkt = nlev) would want nmln = nlev+1, i.e. a w-level
+        # BELOW the deepest interior interface, which this interface indexing
+        # (m = 0..nlev-2) cannot represent; it saturates at the deepest
+        # interface instead.  That is a representational limit, not a NEMO
+        # mismatch, and it is unreachable for any oracle config.
         mbkt = (jnp.asarray(active_3d) > 0.5).astype(jnp.int32).sum(axis=-1)
     else:
-        mbkt = jnp.full(below.shape, nlev, dtype=jnp.int32)
+        # No 3-D mask: assume NEMO's own invariant (deepest T-level is land)
+        # rather than nlev, which would imply an all-wet column and hit the
+        # saturation described above.
+        mbkt = jnp.full(below.shape, nlev - 1, dtype=jnp.int32)
     # nmln = MIN(nlb10-1+below, mbkt) + 1 with nlb10 = iref+2, and the lego
     # interface index is m_base = nmln - 2 (verified convention, #1226).
     m_base = jnp.clip(jnp.minimum(1 + below, mbkt) - 1, 0, nlev - 2)
-    # hmlp = gdepw(nmln,Kmm) (zdfmxl.F90:104) -- the LIVE w-depth, carrying the
-    # same (1+r3t) stretch.  z_iface[m] = gdepw_0(m+2) and nmln = m_base+2, so
-    # take(z_iface, m_base) is gdepw_0(nmln); the product was verified EXACT
-    # against NEMO's own dumped hmlp on the DINO y5 state (max err 0.0 m,
-    # 9920 wet columns), which is what certifies this index convention.
-    hml = jnp.take(z_iface, m_base) * col_stretch     # (n_lat, n_lon)
+    # hmlp = gdepw(nmln,Kmm) (zdfmxl.F90:104).  z_iface[m] = gdepw_0(m+2) and
+    # nmln = m_base+2, so this is gdepw_0(nmln).  Convention CERTIFIED against
+    # NEMO's own dumped hmlp on the DINO y5 state: gdepw_0[nmln-1]*(1+ssh/H)
+    # reproduces it to max err 0.0 m over 9920 wet columns (the (1+ssh/H) factor
+    # is the live-depth stretch discussed above, which we do not apply here).
+    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon)
     return hml, m_base
 
 
