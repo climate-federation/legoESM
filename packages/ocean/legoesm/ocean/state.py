@@ -868,6 +868,56 @@ class BarotropicConfig(NamedTuple):
     # options only differ under the MLF before-level seed.  Unknown value
     # raises at the substep entry (dispatch hardening).
     barotropic_een_seed: str = "window_start"
+    # Loop-ENTRY seed convention for the barotropic substep integration's
+    # initial (eta, U_bar, V_bar) — i.e. which face-thickness weights the
+    # 3-D-to-barotropic depth average AT THE MOMENT the substep loop is
+    # seeded (#1226 round 2 item 1; distinct from ``barotropic_face_depth``,
+    # which governs the IN-SUBSTEP flux/drag face thickness once the loop is
+    # already running).  NEMO does not literally recompute this every step —
+    # it carries a persistent barotropic state ``puu_b``/``pvv_b`` and seeds
+    # ``un_e(:,:) = puu_b(:,:,Kbb)`` / ``vn_e(:,:) = pvv_b(:,:,Kbb)``
+    # (dynspg_ts.F90:496-497, the ln_bt_fw=.FALSE. MLF branch).  That
+    # persistent ``puu_b`` is itself finalized, at the END of the PRIOR
+    # step, from the accumulated transport sum divided by NEMO's own
+    # ssh-averaged face depth — the non-RK3 (MLF) nn_bt_flt=2 branch:
+    #   puu_b(Kaa) = puu_b(Kaa) / (hu_0 + zsshu_a)                (:978)
+    #   zsshu_a = 0.5*r1_e1e2u*(e1e2t(j)*pssh(j) + e1e2t(j+1)*pssh(j+1))
+    #                                                              (:963-964)
+    # i.e. the SAME NEMO ssh-average rule as ``barotropic_face_depth=
+    # "nemo_ssh_avg"`` (``nemo_ssh_avg_face_depth`` in
+    # barotropic_latlon_cgrid.py — reused verbatim, not re-derived), just
+    # evaluated once at loop entry instead of every substep.  lego has no
+    # persistent barotropic state; it re-derives the loop-entry (U_bar,
+    # V_bar) fresh each step from the 3-D velocity via
+    # ``_depth_average_to_faces``, whose face-thickness weight is this
+    # option.  "min_rule" (DEFAULT, bit-identical legacy): lego's C-grid
+    # min-rule 3-D face thickness (``min_cell_to_uface``/``min_cell_to_vface``
+    # applied to the per-level layer thickness ``h_k``) — matches every
+    # other 3-D-to-barotropic depth average in the model.  "nemo_ssh_avg":
+    # rescale the min-rule 3-D face thickness by the ratio of the NEMO-rule
+    # TOTAL column face depth to the min-rule TOTAL column face depth (both
+    # evaluated at the seed eta), i.e. ``h_u_seed = h_u_minrule *
+    # (H_u_nemo / H_u_minrule)``.  Exact for z-star (a single per-column
+    # Jacobian scales every level identically, so the ratio equals the
+    # z-star Jacobian ratio at every k); for partial cells this is the same
+    # proportional total-depth correction the rest of the split-explicit
+    # solver already applies via a scalar column factor (documented
+    # approximation, not a new one).  Unknown value raises at the substep
+    # entry (dispatch hardening, same pattern as ``barotropic_face_depth``).
+    #
+    # MEASURED VELOCITY-SEED INERT (2026-07-27, DINO Y5 restart twin,
+    # probe_spg_barotropic vs NEMO RUN_GDB spg dumps): a per-COLUMN scalar
+    # weight rescale cancels identically in the thickness-weighted mean
+    # (sum(u*h*r)/sum(h*r) == sum(u*h)/sum(h) whenever the floor doesn't
+    # bind), so the seeded U_bar/V_bar are bit-identical between the two
+    # modes (outputs differ only by ~1e-16 re-association round-off).
+    # NEMO's own qco stretch e3u(Kbb) = e3u_0*(1+r3u(Kbb)) is ALSO a
+    # per-column scalar, so NEMO's sum_k(u*e3u(Kbb))/sum_k(e3u(Kbb)) seed
+    # is equally invariant — the hypothesized min-rule-vs-ssh-avg seed
+    # convention gap cancels in BOTH models (the entry-seed twin match is
+    # exact: un_e/vn_e corr 1.000000, |x|ratio 1.0000).  Kept as the
+    # documented convention knob; not a fidelity lever.
+    barotropic_seed_face_depth: str = "min_rule"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the

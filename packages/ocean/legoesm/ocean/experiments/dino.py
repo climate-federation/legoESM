@@ -640,6 +640,15 @@ class DINOConfig:
     # face depths).  The kamm cards override to "nemo_ssh_avg" (zero-deviation
     # track item 2 — see the card comment in DINO_RECIPES).
     barotropic_face_depth: str = "min_rule"
+    # LatLonCGridOceanConfig.barotropic.barotropic_seed_face_depth (#1226
+    # round 2 item 1), threaded 1:1 via from_flat/BarotropicConfig.
+    # "min_rule" (default, bit-identical legacy) | "nemo_ssh_avg" (the
+    # barotropic substep loop's ENTRY seed uses the same NEMO ssh-average
+    # face depth as barotropic_face_depth — the lego stand-in for how
+    # NEMO's persistent un_e/vn_e = puu_b/pvv_b(Kbb) is itself finalized,
+    # dynspg_ts.F90:963-966,978-979).  The kamm cards override to
+    # "nemo_ssh_avg" (see the card comment in DINO_RECIPES).
+    barotropic_seed_face_depth: str = "min_rule"
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -1067,6 +1076,21 @@ DINO_RECIPES: dict[str, dict] = {
         # TestNemoSshAvgFaceDepthGate (volume + tracer conserved; mode
         # measured conservation-inert vs min_rule at machine precision).
         "barotropic_face_depth": "nemo_ssh_avg",
+        # #1226 round 2 item 1: the barotropic substep loop's ENTRY seed
+        # (U_bar/V_bar, lego's re-derived stand-in for NEMO's persistent
+        # un_e/vn_e = puu_b/pvv_b(Kbb or Kmm)) uses the SAME NEMO ssh-average
+        # face-depth rule as the in-substep flux above — matching how
+        # puu_b/pvv_b are themselves finalized at the end of every prior step
+        # (dynspg_ts.F90:963-966,978-979, the non-RK3/nn_bt_flt=2 branch this
+        # card's namelist runs).  Meaningful on both the FE card (Kmm seed)
+        # and the MLF card (Kbb before-level seed, barotropic_before_state) —
+        # lands here (the shared base dict), not MLF-only.
+        # MEASURED VELOCITY-SEED INERT (2026-07-27, Y5 restart twin): the
+        # per-column rescale cancels in the thickness-weighted mean (NEMO's
+        # own qco per-column e3u stretch cancels identically), so this is
+        # the documented convention, not a fidelity lever — the entry-seed
+        # twin match is exact either way (see the state.py field docstring).
+        "barotropic_seed_face_depth": "nemo_ssh_avg",
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -2746,6 +2770,7 @@ def dino_lat_lon_model_config(
         # Routed by from_flat into config.barotropic.
         barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
         barotropic_face_depth=cfg.barotropic_face_depth,
+        barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
@@ -2879,13 +2904,15 @@ def dino_mpas_model_config(
             "lat-lon C-grid). Override lateral_tracer_mixing="
             "'geopotential' to run on MPAS.")
     if (cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0
-            or cfg.barotropic_face_depth != "min_rule"):
+            or cfg.barotropic_face_depth != "min_rule"
+            or cfg.barotropic_seed_face_depth != "min_rule"):
         raise ValueError(
             "DINOConfig.barotropic_time_filter="
             f"{cfg.barotropic_time_filter!r} / barotropic_auto_cmax="
             f"{cfg.barotropic_auto_cmax!r} / barotropic_face_depth="
-            f"{cfg.barotropic_face_depth!r}: the MPAS DINO builder does not "
-            "thread these (it would silently run different barotropic "
+            f"{cfg.barotropic_face_depth!r} / barotropic_seed_face_depth="
+            f"{cfg.barotropic_seed_face_depth!r}: the MPAS DINO builder does "
+            "not thread these (it would silently run different barotropic "
             "numerics — codex r9 P2). The centred split-explicit recipe is "
             "lat-lon only; override barotropic_time_filter='cosine' and "
             "barotropic_auto_cmax=0.0 to run on MPAS.")
