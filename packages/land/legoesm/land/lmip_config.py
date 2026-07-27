@@ -12,6 +12,9 @@ An experiment is fully described by a YAML file with this schema::
       bulk_scheme: most | constant
       enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
       albedo_calibration: default | amip_multilayer   # surface-albedo parameter set
+      soil_n_layers: int               # Richards soil layers (default 8)
+      soil_depth_m: float              # total soil column depth [m] (0 = geometric default ~6.375)
+      soil_growth_factor: float        # layer thickness ratio (2.0 = default geometric)
 
     forcing:
       source: cru_jra | synthetic
@@ -50,6 +53,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
+from legoesm.land.soil_grid import SoilGridConfig
+
 # --- Schema keys, validated at load time ---
 _GRID_TYPES = ("latlon", "gaussian", "cubed_sphere")
 _LAND_MODES = ("multilayer", "slab")
@@ -65,6 +70,12 @@ _SNOW_SCHEMES = ("single", "multilayer")
 # tuned against ERA5.  The LMIP path builds its params from the raw PFT/biome
 # tables and so never saw this calibration.
 _ALBEDO_CALIBRATIONS = ("default", "amip_multilayer")
+# Vertical soil grid defaults = SoilGridConfig() (8 geometric layers from
+# dz_top 0.025 m, growth 2 -> 6.375 m total).  Kept as named module constants so
+# the schema default and the SoilGridConfig default cannot silently diverge.
+_SOIL_N_LAYERS_DEFAULT = SoilGridConfig().n_layers
+_SOIL_DEPTH_M_DEFAULT = SoilGridConfig().total_depth
+_SOIL_GROWTH_FACTOR_DEFAULT = SoilGridConfig().growth_factor
 _FORCING_SOURCES = ("cru_jra", "synthetic")
 
 _DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
@@ -153,6 +164,32 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.albedo_calibration={physics['albedo_calibration']!r} "
             f"not in {_ALBEDO_CALIBRATIONS}")
+    # Vertical soil discretisation.  Defaults reproduce SoilGridConfig() (8
+    # geometric layers, dz_top 0.025 m -> ~6.375 m); AMIP parity is 10 / 3.0 m.
+    # The surfdata soil profile is remapped onto THIS grid (init_land_surface_data
+    # passes it to the loader), so the two can never desync.
+    physics.setdefault("soil_n_layers", _SOIL_N_LAYERS_DEFAULT)
+    physics.setdefault("soil_depth_m", _SOIL_DEPTH_M_DEFAULT)
+    _nl = physics["soil_n_layers"]
+    if not isinstance(_nl, int) or isinstance(_nl, bool) or not (1 <= _nl <= 50):
+        raise ValueError(
+            f"physics.soil_n_layers must be an int in [1, 50] (got {_nl!r})")
+    _sd = physics["soil_depth_m"]
+    if not isinstance(_sd, (int, float)) or isinstance(_sd, bool) or _sd < 0.0:
+        raise ValueError(
+            f"physics.soil_depth_m must be a non-negative float "
+            f"(0 = geometric default; got {_sd!r})")
+    if 0.0 < float(_sd) < 0.1:
+        raise ValueError(
+            f"physics.soil_depth_m={_sd} is implausibly shallow for a land column "
+            "(< 0.1 m); use 0 for the geometric default.")
+    physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
+    _gf = physics["soil_growth_factor"]
+    if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):
+        raise ValueError(
+            f"physics.soil_growth_factor must be a float in [1.0, 4.0] (got {_gf!r})")
+    physics["soil_growth_factor"] = float(_gf)
+    physics["soil_depth_m"] = float(_sd)
     if physics["snow_scheme"] == "multilayer" and physics["surface_scheme"] != "two_leaf_canopy":
         raise ValueError(
             "physics.snow_scheme='multilayer' requires surface_scheme='two_leaf_canopy' "

@@ -51,6 +51,25 @@ physics:
   # scheme), not the two-leaf canopy; the albedo terms are scheme-independent
   # but the pairing has not been re-validated at LMIP scale.
   albedo_calibration: amip_multilayer
+  # --- Vertical soil grid -----------------------------------------------------
+  # AMIP parity: 10 layers / 3.0 m (what clm_multilayer_setup + amip_sota run),
+  # replacing the 8-layer / 6.375 m loader default.  The surfdata soil profile is
+  # remapped onto THIS grid, so the two cannot desync.
+  #
+  # ⚠️ dz_top: at growth_factor 2.0 a 10-layer / 3.0 m column has a **2.93 mm**
+  # top layer, vs 25 mm for the 8-layer default (CLM5 itself uses ~17.5 mm).  The
+  # top layer drives the Sellers/SZ09 bare-soil-evaporation resistance and IS the
+  # `theta_soil_top` / `T_soil_top` tape variables — so those diagnostics change
+  # MEANING relative to an 8-layer baseline and are not directly comparable.
+  # Raise soil_growth_factor (~1.65 -> ~13 mm) for a CLM-like top layer at the
+  # same depth and layer count.
+  soil_n_layers: 10
+  soil_depth_m: 3.0
+  soil_growth_factor: 2.0
+  # ⚠️ The surfdata vertical remap (`_remap_soil_layers`) is linear interpolation
+  # in depth, NOT mass-conservative; it was validated against the 8-layer default.
+  # Changing the target grid exercises it in a new regime — soil texture/carbon
+  # column integrals are approximate here.
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)

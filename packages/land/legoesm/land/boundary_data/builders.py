@@ -397,7 +397,16 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
 
     cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=surfdata_path)
-    gsd = load_global_surface_data(cfg_sd, grid)
+    # Remap the surfdata soil profile onto the CONFIG's soil grid, not the loader
+    # default.  build_soil_hydraulics below derives per-(col, layer) hydraulics
+    # from gsd.sand_frac/clay_frac, so the remap target MUST match
+    # ``land_config.soil_grid`` — otherwise a non-default SoilGridConfig silently
+    # produces (ncol, 8) hydraulics against an (ncol, n_layers) soil state.
+    _soil_grid = None
+    if isinstance(land_config, MultiLayerLandConfig):
+        from legoesm.land.soil_grid import make_soil_grid
+        _soil_grid = make_soil_grid(land_config.soil_grid)
+    gsd = load_global_surface_data(cfg_sd, grid, soil_grid=_soil_grid)
     ncol = int(np.asarray(gsd.soil_color).shape[0])
     if theta_top is None:
         theta_top = jnp.full(ncol, THETA_TOP_DEFAULT)
