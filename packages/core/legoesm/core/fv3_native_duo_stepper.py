@@ -398,6 +398,11 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
                                 pt=csw_outs[t - 1]["ptc"])
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
                       uc6[t - 1], vc6[t - 1], gs, bd)
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(203, t, "uc", uc6[t])
+            sd(203, t, "vc", vc6[t])
     divgd6 = [o["divg_d"] for o in csw_outs]
     if ctx.get("use_ext_bundle"):
         # authoritative post-p_grad_c duo exchanges (dyn_core.F90:652-655):
@@ -421,6 +426,11 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
             exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if sd:
+        for t in range(6):
+            sd(204, t, "uc", uc6[t])
+            sd(204, t, "vc", vc6[t])
+            sd(204, t, "divgd", divgd6[t])
 
     cfg = dict(_SW_CFG_DEFAULT)
     cfg.update(sw_cfg or {})
@@ -564,10 +574,34 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
+    # optional step-1 stage twin hook: callable(block, tile0, name, arr)
+    # at the same dyn_core points as the instrumented oracle (201 =
+    # post-entry exchanges, 202 = post-c_sw, 203/204 in dsw12, 205 =
+    # post-d_sw2).  None (default) = byte-identical behavior.
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(201, t, "u", states[t]["u"])
+            sd(201, t, "v", states[t]["v"])
+            sd(201, t, "delp", states[t]["delp"])
+            sd(201, t, "pt", states[t]["pt"])
+
     cfg = dict(_SW_CFG_DEFAULT)
     cfg.update(sw_cfg or {})
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
+    if sd:
+        for t in range(6):
+            sd(202, t, "uc", csw[t]["uc"])
+            sd(202, t, "vc", csw[t]["vc"])
+            sd(202, t, "delpc", csw[t]["delpc"])
+            sd(202, t, "ua", csw[t]["ua"])
+            sd(202, t, "va", csw[t]["va"])
+            sd(202, t, "divgd", csw[t]["divg_d"])
     s12 = dsw12_step_sixface(ctx, states, csw, dt=dt, sw_cfg=sw_cfg)
+    if sd:
+        for t in range(6):
+            sd(205, t, "delp", s12[t]["delp"])
+            sd(205, t, "pt", s12[t]["pt"])
 
     s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
                     s12[t - 1]["uc"], s12[t - 1]["vc"],

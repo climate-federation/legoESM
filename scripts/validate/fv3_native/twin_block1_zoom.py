@@ -71,9 +71,16 @@ def main():
     dump(0, states)
     dt = args.dt_atmos / args.n_split
     for it in range(args.n_split):
+        if it == 0:
+            # step-1 stage twin: capture mid-step intermediates at the
+            # instrumented dyn_core points (201-205)
+            ctx["step_dump"] = (
+                lambda b, t, k, a: out.__setitem__(
+                    f"b{b}_{k}_t{t + 1}", np.array(a, copy=True)))
         states = full_acoustic_step_sixface(ctx, states, dt, d_ext=0.0,
                                             sw_cfg=dict(SW_CFG_CASE8),
                                             entry_ascalar=(it == 0))
+        ctx.pop("step_dump", None)
         dump(101 + it, states)
         print(f"inner step {it + 1}/{args.n_split} done", flush=True)
 
