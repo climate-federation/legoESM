@@ -400,6 +400,8 @@ class TestDiagnosticCollector(unittest.TestCase):
             _run_wallclock_start=0.0,       # epoch → budget long exhausted
             _last_checkpoint_step=0,
             diagnostics=_Diag(),
+            _save_cmor_accumulator_sidecar=(
+                lambda day: calls.append("sidecar")),
             _output_dir="/tmp/ignore_fx_test",
             config=types.SimpleNamespace(
                 output=types.SimpleNamespace(

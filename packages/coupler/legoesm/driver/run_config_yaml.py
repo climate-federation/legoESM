@@ -192,11 +192,16 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.MorrisonConfig.dep_coeff": "morrison_dep_coeff",
     "atm.micro.MorrisonConfig.agg_coeff": "morrison_agg_coeff",
     "atm.micro.MorrisonConfig.k_au": "morrison_k_au",
+    "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
+    "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
+    "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
+    "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:

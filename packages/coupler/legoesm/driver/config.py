@@ -1036,6 +1036,16 @@ class ExperimentConfig(NamedTuple):
                                                  # (Morrison-2005 q_i^(1/3)·N_i^(2/3) form)
     morrison_agg_coeff: float = 1e-3            # MorrisonConfig.agg_coeff [1/s]
     morrison_k_au: float = 6e2                  # MorrisonConfig.k_au [1/(kg*s)]
+    # Anvil-ice sink/source scalars (2026-07-27 warm-drift diagnosis: IWP 34x
+    # obs because small-crystal cirrus defeats both ice sinks while hom
+    # nucleation keeps seeding number — these three knobs bracket the loop).
+    morrison_fall_a_i: float = 700.0            # MorrisonConfig.fall_a_i [m^(1-b)/s]
+    morrison_ice_snow_d_auto: float = 250.0e-6  # MorrisonConfig.ice_snow_d_auto [m]
+    morrison_hom_ice_nuc_N: float = 1.0e6       # MorrisonConfig.hom_ice_nuc_N [1/m^3]
+                                                # (consumed only inside the
+                                                # homogeneous_ice_nucleation
+                                                # branch; validate_strict
+                                                # refuses the inert combo)
     # SBM convective precip efficiency: fraction of column-net drying that
     # precipitates directly as rain (rest is detrained as condensate).
     sbm_precip_efficiency: float = 0.5          # SBMConfig.precip_efficiency
@@ -1101,6 +1111,10 @@ class ExperimentConfig(NamedTuple):
     # Grid spacing [m] for the IFS ZTAURES turnover resolution factor
     # (cumastrn.F90:762-768).  0 = legacy factor 1.0.  Mirrors
     # BechtoldConfig.dx_m.
+    # IFS in-plume conversion constants (anvil-source control, 2026-07-27):
+    # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
+    bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
+    bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
     # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
@@ -1318,6 +1332,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    # Appended at the tuple END to preserve the positional ABI (codex
+    # 2026-07-27 flavor review, Major 1).
+    morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
+                                                # "mg" (E3SM MG, GCM default) |
+                                                # "sam" (gSAM M2005 anvil tune)
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1518,6 +1537,8 @@ class ExperimentConfig(NamedTuple):
                 f"cutoff), got {self.bechtold_conv_top_pa}"
             )
         for _f, _lo, _hi in (
+            ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
@@ -2137,6 +2158,9 @@ class ExperimentConfig(NamedTuple):
             ("morrison_dep_coeff", 1.0e-4, 1.0e-2),
             ("morrison_agg_coeff", 1.0e-4, 1.0e-2),
             ("morrison_k_au", 50.0, 5000.0),
+            ("morrison_fall_a_i", 230.0, 2100.0),
+            ("morrison_ice_snow_d_auto", 8.0e-5, 8.0e-4),
+            ("morrison_hom_ice_nuc_N", 1.0e4, 1.0e7),
         ):
             _v = getattr(self, _f)
             if not math.isfinite(_v) or not (_lo <= _v <= _hi):
@@ -2161,6 +2185,24 @@ class ExperimentConfig(NamedTuple):
                 f"microphysics='morrison' (got {self.microphysics!r}); on "
                 "any other scheme they would be silently inert or retune a "
                 "foreign scheme. Drop them or switch schemes.")
+        # morrison_hom_ice_nuc_N is read ONLY inside the homogeneous-
+        # nucleation branch: overriding it with the flag off would be the
+        # exact silently-inert class the scheme gate above closes.
+        if ("morrison_hom_ice_nuc_N" in _morrison_touched
+                and not self.homogeneous_ice_nucleation):
+            raise ValueError(
+                "morrison_hom_ice_nuc_N override requires "
+                "homogeneous_ice_nucleation=True — the leaf is consumed only "
+                "by the hom-nucleation branch and would be silently inert.")
+        if self.morrison_flavor not in ("mg", "sam"):
+            raise ValueError(
+                f"morrison_flavor={self.morrison_flavor!r} unknown; choose "
+                "'mg' (E3SM MG, default) or 'sam' (gSAM M2005).")
+        if self.morrison_flavor != "mg" and self.microphysics != "morrison":
+            raise ValueError(
+                f"morrison_flavor={self.morrison_flavor!r} requires "
+                f"microphysics='morrison' (got {self.microphysics!r}); on any "
+                "other scheme the flavor would be silently inert.")
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
         for _f, _lo, _hi in (

@@ -1005,6 +1005,8 @@ def _ifs_inplume_precip_conversion(
     z: jax.Array,
     eps_profile: jax.Array,
     pkineu: jax.Array,
+    rprcon: float = _IFS_RPRCON,
+    dnoprc: float = _IFS_ZDNOPRC,
 ) -> tuple[jax.Array, jax.Array]:
     r"""IFS in-updraft precipitation formation (cuascn.F90:718-773).
 
@@ -1081,7 +1083,7 @@ def _ifs_inplume_precip_conversion(
     zcbf = jnp.where(
         zdt > 0.0, 1.0 + _IFS_Z_CPRC2 * jnp.sqrt(zdt_safe), 1.0,
     )
-    zlcrit = _IFS_ZDNOPRC / zcbf
+    zlcrit = dnoprc / zcbf
 
     # Ascent geometry, surface-first for the scan (matches the plume scan).
     z_sf = z[:, ::-1].astype(_dtype)
@@ -1106,7 +1108,7 @@ def _ifs_inplume_precip_conversion(
     cond_sf = jnp.maximum(q_c_sf - q_c_prev_sf * decay_sf, 0.0)
 
     zzco_sf = (
-        (_IFS_RPRCON / g)
+        (rprcon / g)
         / (_IFS_WU_DRAG_FACTOR * zwu_sf)
         * (1.0 + _IFS_LIQ_CONV_ENHANCE * alpha_liq[:, ::-1])
         * zcbf[:, ::-1]
@@ -1147,7 +1149,7 @@ def _ifs_inplume_precip_conversion(
         # level above the departure level, so a supersaturated LAUNCH state
         # must not shed zero-path-length rain via the Z_CLDMAX clip
         # (codex R1 #3).
-        convert = (L_pre > _IFS_ZDNOPRC) & (dz_k > 0.0)
+        convert = (L_pre > dnoprc) & (dz_k > 0.0)
         L_new = jnp.where(convert, L_conv, L_pre)
         precip_k = jnp.maximum(L_pre - L_new, 0.0)
         return L_new.astype(_dtype), (L_new, precip_k)
@@ -2488,6 +2490,7 @@ def bechtold_convection(
         )
         L_converted, precip_frac = _ifs_inplume_precip_conversion(
             plume.q_c_u, plume.T_u, z, eps_profile, pkineu,
+            rprcon=config.rprcon, dnoprc=config.dnoprc,
         )
         plume = plume._replace(q_c_u=L_converted)
     if config.use_ifs_cape_closure or config.use_convective_turnover_tau:

@@ -98,6 +98,10 @@ _RESOLVERS = {
         # probeable at all.
         [{"microphysics": "morrison"},
          {"microphysics": "morrison", "hard_saturation_adjustment": True},
+         # Same gate shape for the hom-nucleation number: validate_strict
+         # refuses morrison_hom_ice_nuc_N without the hom flag (silently-
+         # inert guard), so the flag-on host makes it legally probeable.
+         {"microphysics": "morrison", "homogeneous_ice_nucleation": True},
          {"microphysics": "thompson"},
          {"microphysics": "kessler"}, {"microphysics": "p3"}],
     ),
@@ -147,6 +151,7 @@ _STRING_ALTS = {
     "surface_stability_scheme": "grachev2007_sheba",
     "convective_precip_split": "autoconversion",
     "bechtold_subsidence_solve": "advective",
+    "morrison_flavor": "sam",
 }
 
 _HINTS = typing.get_type_hints(ExperimentConfig)
