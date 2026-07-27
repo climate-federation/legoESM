@@ -282,6 +282,261 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
 
 
+class _MPASSfcFluxAccum:
+    """Per-step accumulator for the MPAS eager loop's ``_sfc_diag`` flux
+    slots so the CMOR feed hands INTERVAL MEANS to the accumulators instead
+    of the end-of-interval instantaneous snapshot (issue #1353: at
+    ``diag_days=1`` every snapshot lands at the same model clock time, so
+    the "monthly mean" of a day/night field like rsut kept the full
+    instantaneous diurnal pattern while labeled ``time: mean``).
+
+    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
+    4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields.
+    State-derived fields (tas/ta/ua/...) stay snapshots; the collector
+    labels them honestly via ``cmip_snapshot_vars``.
+
+    Sums stay on device (lazy ``jnp`` adds, no per-step host sync); the one
+    device->host transfer happens in :meth:`mean` at diag cadence.  Upstream,
+    each slot refreshes at its own cadence (radiation slots hold their last
+    full-radiation value across held-radiation sub-steps), so every per-step
+    sample is the physics' current flux estimate — the same "held" semantics
+    the compiled cube path's ``held_*``/``*_accum`` mechanism averages.
+
+    CHECKPOINTED (codex-2 finding 2): partial-interval sums/counts ride the
+    MPAS checkpoint npz (``cmor_fluxsum_<slot>`` / ``cmor_fluxcnt_<slot>``,
+    absent when empty) and are re-staged through ``_carry_aux`` on load, so
+    a mid-interval wallclock exit + restart RESUMES the interval mean
+    instead of dropping the pre-checkpoint samples.  On the aligned chain
+    (checkpoint cadence a multiple of diag cadence) the diag block (feed +
+    reset) runs before the checkpoint block at the same ``(step+1)``
+    boundary, so the payload is empty — byte-identical checkpoints.
+
+    Precision: sums are float64 on an x64 runtime.  On an fp32 runtime the
+    float64 request silently degrades to float32; the worst case for a
+    1-day interval at dt=75 s (n=1152 samples, |flux| ~ 500 W/m^2) is a
+    relative error ~ n*eps/2 ~ 7e-5, i.e. ~0.03 W/m^2 — below CMOR
+    reporting precision, documented rather than engineered around.
+    """
+
+    SLOTS = (2, 3, 4, 5, 6, 7)
+
+    def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
+                 dt_s: float = 0.0):
+        self._sum: dict = {}   # slot -> device-side running sum
+        self._n: dict = {}     # slot -> sample count
+        # Model steps seen this interval (counted even when the physics
+        # exported nothing) and the count a COMPLETE interval must have.
+        # A window that is SHORT (first one after an off-cadence restart or
+        # a feed-off link) or OVERLONG (a resumed window whose cadence or
+        # calendar changed under it) must NOT be published as a full
+        # interval mean (codex-6/7): the flux fields are withheld.
+        self._steps: int = 0
+        self.expected_steps: int = int(expected_steps)
+        # Absolute simulated day at which the CURRENT window started — the
+        # identity a resumed window is validated against (a cadence change
+        # or a ``--restart-start-day`` time rebase makes the carried samples
+        # incommensurable with the new calendar, codex-7).
+        self.window_start_day: float = float(window_start_day)
+        # Timestep the samples were taken at — part of the identity: a dt
+        # change makes an equal STEP count a different DURATION, so
+        # continuity cannot be judged with the new run's dt (codex-8).
+        self.dt_s: float = float(dt_s)
+
+    def add(self, sfc_diag) -> None:
+        """Accumulate one step's ``_sfc_diag`` tuple (None-safe per slot)."""
+        self._steps += 1
+        if not sfc_diag:
+            return
+        for i in self.SLOTS:
+            if len(sfc_diag) > i and sfc_diag[i] is not None:
+                x = sfc_diag[i]
+                # Accumulate in float64 (codex-1 minor 6): an fp32 running
+                # sum over a long interval loses ~n*eps relative precision.
+                # Under a non-x64 JAX config this politely degrades to
+                # float32 — no worse than the source precision.
+                x = jnp.asarray(
+                    x.data if hasattr(x, "data") else x, dtype=jnp.float64)
+                if i in self._sum:
+                    self._sum[i] = self._sum[i] + x
+                    self._n[i] += 1
+                else:
+                    self._sum[i] = x
+                    self._n[i] = 1
+
+    def mean(self, slot: int):
+        """Interval-mean host array for *slot*, or None if never fed."""
+        n = self._n.get(slot, 0)
+        if n == 0:
+            return None
+        return np.asarray(self._sum[slot], dtype=np.float64) / float(n)
+
+    def has_samples(self) -> bool:
+        """True if any slot accumulated at least one sample this interval."""
+        return bool(self._n)
+
+    def is_complete(self) -> bool:
+        """True iff this interval saw EXACTLY the step count a complete
+        window needs.  A SHORT window (first one after an off-cadence
+        restart or a feed-off link) covers less time than its label claims;
+        an OVERLONG one (a resumed window whose cadence changed under it)
+        covers more — neither may be published (codex-6/7).
+        ``expected_steps`` of 0 disables the check (unit-level use)."""
+        return (self.expected_steps <= 0
+                or self._steps == self.expected_steps)
+
+    def dump(self) -> dict:
+        """Checkpoint payload: ``cmor_fluxsum_<slot>``/``cmor_fluxcnt_<slot>``
+        host arrays (empty dict when no samples)."""
+        out: dict = {}
+        for slot, s in self._sum.items():
+            out[f"cmor_fluxsum_{slot}"] = np.asarray(s)
+            out[f"cmor_fluxcnt_{slot}"] = np.int64(self._n[slot])
+        if out:
+            # Steps seen so far this interval — the resumed link continues
+            # counting toward ``expected_steps`` so the completeness gate
+            # sees the WHOLE window, not just the post-restart part — plus
+            # the window's IDENTITY (its expected length and start day), so
+            # a resume under a changed cadence or a rebased calendar is
+            # detected and dropped instead of silently mixed (codex-7).
+            out["cmor_fluxsteps"] = np.int64(self._steps)
+            out["cmor_fluxexpected"] = np.int64(self.expected_steps)
+            out["cmor_fluxday0"] = np.float64(self.window_start_day)
+            out["cmor_fluxdt_s"] = np.float64(self.dt_s)
+        return out
+
+    @classmethod
+    def checkpoint_keys(cls) -> tuple[str, ...]:
+        """The exact key names this class reads/writes (whitelist)."""
+        return tuple(
+            f"cmor_flux{kind}_{slot}"
+            for slot in cls.SLOTS for kind in ("sum", "cnt")
+        ) + cls.IDENTITY_KEYS
+
+    #: Identity keys a non-empty payload MUST carry (codex-8): expected
+    #: window length, window start day, and the dt the samples were taken
+    #: at — continuity cannot be judged with the NEW run's dt alone.
+    IDENTITY_KEYS = ("cmor_fluxsteps", "cmor_fluxexpected",
+                     "cmor_fluxday0", "cmor_fluxdt_s")
+
+    def restore(self, staged: dict, *, resume_day: float | None = None,
+                dt_s: float | None = None) -> int:
+        """Resume a partial interval from checkpoint-staged keys (popping
+        them ALWAYS).  Returns the number of slots restored — 0 when the
+        payload is discarded as incommensurable.
+
+        FAIL-LOUD on a malformed payload (half a sum/count pair, a
+        non-positive count, missing step count): a silently dropped slot
+        would publish a shortened interval mean as if it were complete
+        (codex-3).
+
+        DISCARD (return 0, keep this accumulator empty) when the payload's
+        window IDENTITY does not match this run (codex-7): a different
+        expected window length (cadence changed, incl. the per-link
+        ``diag_days <= 0`` sentinel) or a window whose stored start day +
+        elapsed steps does not land on this run's resume day (an explicit
+        ``--restart-start-day`` calendar rebase).  Those samples cannot be
+        combined with the new window without misdating the mean.
+        """
+        n_restored = 0
+        _steps = staged.pop("cmor_fluxsteps", None)
+        _expected = staged.pop("cmor_fluxexpected", None)
+        _day0 = staged.pop("cmor_fluxday0", None)
+        _dt_old = staged.pop("cmor_fluxdt_s", None)
+        # PHASE 1 — structural validation of the sum/count pairs, BEFORE any
+        # identity judgement: a half pair or a non-positive count is
+        # CORRUPTION (raise), not an incommensurable-but-well-formed window
+        # (discard).  Pops every key it inspects.
+        _pairs: list[tuple[int, object, int]] = []
+        for slot in self.SLOTS:
+            s = staged.pop(f"cmor_fluxsum_{slot}", None)
+            c = staged.pop(f"cmor_fluxcnt_{slot}", None)
+            if s is None and c is None:
+                continue
+            if s is None or c is None:
+                raise ValueError(
+                    f"CMOR flux checkpoint payload for slot {slot} is "
+                    f"incomplete (sum={'present' if s is not None else 'MISSING'}, "
+                    f"count={'present' if c is not None else 'MISSING'}) — "
+                    f"refusing to resume a corrupt partial interval.")
+            c_int = int(c)
+            if c_int <= 0:
+                raise ValueError(
+                    f"CMOR flux checkpoint slot {slot} has a non-positive "
+                    f"sample count ({c_int}) — corrupt payload.")
+            _pairs.append((slot, s, c_int))
+        if _pairs and _steps is None:
+            raise ValueError(
+                "CMOR flux checkpoint payload restored sums but carries "
+                "no 'cmor_fluxsteps' — cannot judge window completeness.")
+        # PHASE 2 — window identity.
+        _has_sums = bool(_pairs)
+        _discard_reason = None
+        if _has_sums and (_expected is None or _day0 is None
+                          or _dt_old is None):
+            # A payload missing any identity key cannot be validated at all
+            # (codex-8) — refuse rather than resume blind.
+            _discard_reason = "payload is missing window-identity keys"
+        elif _expected is not None and self.expected_steps > 0 and (
+                int(_expected) != self.expected_steps):
+            _discard_reason = (
+                f"expected window length changed "
+                f"({int(_expected)} -> {self.expected_steps} steps)")
+        elif (_dt_old is not None and dt_s
+                and abs(float(_dt_old) - float(dt_s)) > 1e-9):
+            _discard_reason = (
+                f"timestep changed ({float(_dt_old):g} -> {float(dt_s):g} s): "
+                f"the same step count is a different duration")
+        elif (_day0 is not None and resume_day is not None
+                and _dt_old is not None and _steps is not None):
+            # Continuity to FLOATING-POINT tolerance only — a half-step slack
+            # would accept a genuine rebase or a mixed-duration window
+            # (codex-8).  Scale the tolerance with the day magnitude.
+            _continued = float(_day0) + int(_steps) * float(_dt_old) / 86400.0
+            _tol = 1e-9 * max(1.0, abs(float(resume_day)))
+            if abs(_continued - float(resume_day)) > _tol:
+                _discard_reason = (
+                    f"calendar discontinuity (window would continue at day "
+                    f"{_continued:.9f}, run resumes at "
+                    f"{float(resume_day):.9f})")
+        if _discard_reason is not None:
+            logger.warning(
+                "  CMOR flux accumulator: DISCARDED the checkpoint's partial "
+                "interval — %s.  The first window of this run collects from "
+                "scratch (its flux fields are withheld until a full window "
+                "completes).", _discard_reason)
+            if "discontinuity" in _discard_reason:
+                # The CMOR monthly/daily/zonal SIDECAR is restored by the
+                # driver before any calendar rebase and is NOT validated
+                # here — its buckets may belong to the pre-rebase calendar
+                # (pre-existing, codex-8).  Say so loudly; the safe action
+                # is to delete the sidecar for a rebased run.
+                logger.warning(
+                    "  NOTE: the CMOR monthly/daily accumulator SIDECAR is "
+                    "not calendar-validated — on a rebased restart delete "
+                    "cmor_accum_day_*.npz, or its pre-rebase buckets will "
+                    "mix into the new calendar.")
+            return 0
+        # PHASE 3 — commit (validated pairs only).
+        for slot, s, c_int in _pairs:
+            self._sum[slot] = jnp.asarray(s, dtype=jnp.float64)
+            self._n[slot] = c_int
+            n_restored += 1
+        if n_restored:
+            self._steps = int(_steps)
+            if _day0 is not None:
+                self.window_start_day = float(_day0)
+        return n_restored
+
+    def reset(self, window_start_day: float | None = None) -> None:
+        """Start a new window.  *window_start_day* (the absolute day the new
+        window begins at) keeps the identity current for the checkpoint."""
+        self._sum.clear()
+        self._n.clear()
+        self._steps = 0
+        if window_start_day is not None:
+            self.window_start_day = float(window_start_day)
+
+
 def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
                                    hard_threshold, hard_max_heating_K,
                                    ice_curve=False, q_i=None):
@@ -544,6 +799,9 @@ class ModelDriver:
         # Gate for the MPAS CMOR spatial/zonal accumulator feed (set per run
         # in _run_mpas; False here so any other path is a safe no-op).
         self._mpas_cmip_feed_on = False
+        # #1353 per-step flux accumulator (built in _run_mpas when the CMOR
+        # feed is on; None keeps every other path a no-op).
+        self._mpas_sfc_accum = None
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
@@ -4423,6 +4681,21 @@ class ModelDriver:
                     _skin = self._carry_aux.get("ice_T_skin")
                 if _skin is not None:
                     _save["ice_T_skin"] = np.asarray(_skin)
+            # #1353 (codex-2 finding 2): within-interval CMOR flux sums —
+            # so a mid-interval (wallclock / off-cadence) restart resumes
+            # the interval mean instead of dropping the pre-checkpoint
+            # samples.  Empty on the aligned chain (the diag feed + reset
+            # ran before this at the same step boundary).  Loaded-but-not-
+            # yet-adopted (load -> save with no run): forward the STAGED
+            # payload from _carry_aux so a no-step re-save cannot strip the
+            # partial interval (same rule as the ice skin above).
+            _facc = getattr(self, "_mpas_sfc_accum", None)
+            if _facc is not None and _facc.has_samples():
+                _save.update(_facc.dump())
+            elif isinstance(self._carry_aux, dict):
+                for _k, _v in self._carry_aux.items():
+                    if _k.startswith("cmor_flux"):
+                        _save[_k] = np.asarray(_v)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             self._save_cmor_accumulator_sidecar(day)
@@ -5075,6 +5348,29 @@ class ModelDriver:
             self._ice_T_skin = None
             if "ice_T_skin" in d.files:
                 self._carry_aux["ice_T_skin"] = np.asarray(d["ice_T_skin"])
+            # #1353 partial-interval CMOR flux sums: same stale-persistence
+            # rule — drop prior staging, then stage this checkpoint's
+            # payload for the _run_mpas accumulator restore.  WHITELISTED
+            # key names (codex-3): an unexpected ``cmor_flux*`` key is a
+            # corrupt/foreign payload, not something to forward blindly.
+            _flux_keys = set(_MPASSfcFluxAccum.checkpoint_keys())
+            for _stale in [k for k in self._carry_aux
+                           if k.startswith("cmor_flux")]:
+                del self._carry_aux[_stale]
+            # ...and DROP the live accumulator from any prior run on this
+            # reused driver: save_checkpoint prefers a live accumulator
+            # over the staged payload, so a stale one would overwrite the
+            # interval just loaded (codex-4, reproduced).  _run_mpas
+            # rebuilds + restores it from the staging below.
+            self._mpas_sfc_accum = None
+            for _k in d.files:
+                if _k in _flux_keys:
+                    self._carry_aux[_k] = np.asarray(d[_k])
+                elif _k.startswith("cmor_flux"):
+                    raise ValueError(
+                        f"checkpoint has unrecognised CMOR flux key {_k!r} "
+                        f"(expected one of {sorted(_flux_keys)}) — refusing "
+                        f"to resume from an unknown accumulator payload.")
             # ...and clear the SAVE channel (``_mpas_phys_state``, read by
             # save_checkpoint) so a stale carry from a PRIOR run on a
             # reused driver cannot leak.  It is left None until a run
@@ -5765,23 +6061,43 @@ class ModelDriver:
             q_v = None
             if (state.tracers is not None and "q_v" in state.tracers):
                 q_v = state.tracers["q_v"].data
-            # Surface precip [kg/m2/s]: the physics stashes the tuple
-            # (sw_net_sfc, lw_net_sfc, precip) on the dynamics object every
-            # step (commit d4fbca3ec); the third slot is None on a dry run.
-            precip = None
+            # Flux fields (slots of the sfc_diag contract: 2 precip
+            # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
+            # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
+            # it ran (#1353; makes the CMOR ``time: mean`` label true for
+            # these diurnal fields at any diag cadence), else the last
+            # step's instantaneous value (pre-#1353 fallback).  None on
+            # runs without radiation/turbulence; the collector skips
+            # absent fields.
             _sfc_diag = getattr(self.model, "_sfc_diag", None)
-            if (_sfc_diag is not None and len(_sfc_diag) > 2
-                    and _sfc_diag[2] is not None):
-                precip = _sfc_diag[2].data
-            # TOA + surface turbulent fluxes (slots 3.. of the sfc_diag
-            # contract: lw_up_toa, sw_up_toa, sw_down_toa, shflx, lhflx) —
-            # None on runs without radiation/turbulence; the collector
-            # skips absent fields.
+            _accum = getattr(self, "_mpas_sfc_accum", None)
+            # A SHORT window (first interval after an off-cadence restart or
+            # a feed-off link) covers less time than its label claims, so
+            # WITHHOLD the flux fields entirely rather than publish a
+            # partial-window mean — and do NOT fall back to the
+            # instantaneous slots, which is the very defect #1353 fixes
+            # (codex-6).  The state snapshots still feed normally.
+            _accum_partial = (_accum is not None and _accum.has_samples()
+                              and not _accum.is_complete())
+            if _accum_partial:
+                logger.warning(
+                    "  CMOR flux fields WITHHELD at day %.2f: this diagnostic "
+                    "window saw %d of %d steps (restart/feed-gap boundary) — "
+                    "publishing it would label a partial mean as a full "
+                    "interval.", day, _accum._steps, _accum.expected_steps)
+
             def _sfc_slot(i):
+                if _accum is not None:
+                    if _accum_partial:
+                        return None
+                    m = _accum.mean(i)
+                    if m is not None:
+                        return m
                 if (_sfc_diag is not None and len(_sfc_diag) > i
                         and _sfc_diag[i] is not None):
                     return _sfc_diag[i].data
                 return None
+            precip = _sfc_slot(2)
             rlut = _sfc_slot(3)
             rsut = _sfc_slot(4)
             rsdt = _sfc_slot(5)
@@ -5821,6 +6137,39 @@ class ModelDriver:
                         self._logged_tas2m_fallback = True
                     tas = None
             lat_deg = np.degrees(np.asarray(self.grid.latCell))
+            # Interval-mean flux fields carry their averaging window so the
+            # feed can calendar-bin them at the interval MIDPOINT (#1353
+            # codex-1 finding 1); None when the accumulator never ran
+            # (instantaneous fallback -> endpoint binning, the legacy
+            # snapshot semantics).
+            # Midpoint calendar-binning is exact only for a window that
+            # cannot straddle a calendar boundary: its TRUE length (the
+            # integer step count times dt — not the requested ``diag_days``,
+            # which the step arithmetic truncates) must divide the day
+            # evenly.  Anything else — a multi-day cadence, or an arbitrary
+            # sub-daily one like 0.3 d — falls back to endpoint binning, the
+            # legacy snapshot semantics (codex-2/7).
+            _flux_days = None
+            if _accum is not None and _accum.has_samples():
+                _win_days = (_accum.expected_steps * float(self.config.dycore.dt)
+                             / 86400.0) if _accum.expected_steps > 0 else 0.0
+                if 0.0 < _win_days <= 1.0:
+                    _per_day = 1.0 / _win_days
+                    # Duration must divide the day AND the window must SIT on
+                    # that 1/N-day grid: an off-grid phase (fractional
+                    # start_day / rebase) lets a window straddle midnight and
+                    # eventually a month boundary, which midpoint binning
+                    # cannot represent (codex-8).
+                    _phase = float(day) / _win_days
+                    # Tolerance in DAYS (absolute), not a relative one: a
+                    # relative slack grows with the simulation day and would
+                    # admit an off-grid window by ~an hour after a century
+                    # (codex-9).  1e-9 d ~ 0.1 ms, far below fp noise on a
+                    # float64 day counter.
+                    _phase_err_days = abs(_phase - round(_phase)) * _win_days
+                    if (abs(_per_day - round(_per_day)) < 1e-9
+                            and _phase_err_days < 1e-9):
+                        _flux_days = _win_days
             diag.feed_cmip_accumulators_native(
                 day,
                 T=state.T.data,
@@ -5837,12 +6186,20 @@ class ModelDriver:
                 rsdt=rsdt,
                 hfss=hfss,
                 hfls=hfls,
+                flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
                 "  CMOR accumulator feed FAILED at day %.2f (run continues; "
                 "the monthly/daily CMOR means for this interval are lost): %s",
                 day, exc)
+        finally:
+            # Start the next interval's flux averaging fresh (also on a
+            # failed feed — a stale sum would smear across intervals).  The
+            # new window begins at THIS feed's day.
+            _acc = getattr(self, "_mpas_sfc_accum", None)
+            if _acc is not None:
+                _acc.reset(window_start_day=day)
 
     def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
         """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
@@ -5940,8 +6297,10 @@ class ModelDriver:
         steps **from the (restart-loaded) state**, i.e. ``cfg.days`` is the
         number of days *this job* advances, NOT total days since the
         epoch.  ``start_day`` (the absolute day the checkpoint was written
-        at) sets the time origin; ``start_step`` is used only for the
-        absolute-step value stored in checkpoint metadata.  A chained
+        at) sets the time origin; ``start_step`` supplies the absolute-step
+        value stored in checkpoint metadata AND the phase of the periodic
+        diagnostic cadence (so a chain keeps ONE global diagnostic phase —
+        #1353).  A chained
         launcher must therefore pass ``--days = TARGET - latest_checkpoint_day``
         (remaining days) for each link — see
         ``run_amip_mpas_100yr_gpu.sbatch``.  The cube/lat-lon paths use
@@ -5970,6 +6329,17 @@ class ModelDriver:
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # Phase of the diagnostic cadence.  A real periodic cadence
+        # (diag_days > 0) is phased on the ABSOLUTE step so a restart chain
+        # keeps ONE global diagnostic clock (#1353: a restored partial flux
+        # interval must complete at the boundary it belongs to, not at a
+        # fresh job-local multiple).  With diag_days <= 0 the "interval" is
+        # the sentinel ``n_steps_total``, which on THIS lane counts only
+        # THIS job's steps (``cfg.days`` is per-link here, unlike the
+        # cube/lat-lon paths) — phasing that absolutely would move the
+        # once-at-the-end diagnostic off the end of the link, so keep it
+        # job-local.
+        DIAG_PHASE = start_step if cfg.output.diag_days > 0 else 0
         # ``checkpoint_days`` → step cadence.  Enables the 100-yr restart
         # chain (run_amip_mpas_100yr_gpu.sbatch): the driver writes
         # ``checkpoint_day_NNNN.npz`` every cadence and the launcher resumes
@@ -6002,6 +6372,78 @@ class ModelDriver:
                 "single-rank for CMOR spatial output. (Follow-up: owned-cell "
                 "gather + global weights on rank 0.)",
                 getattr(self, "_mpi_world_size", 1))
+
+        # #1353: per-step flux accumulation so the CMOR feed hands interval
+        # MEANS (not the 00 UTC end-of-interval snapshot) for the strongly
+        # diurnal fields pr/rlut/rsut/rsdt/hfss/hfls.  State-derived fields
+        # (tas, ps, psl, prw, ta/hus/ua/va) remain per-interval snapshots —
+        # at diag_days == 1 that is one fixed-phase 00 UTC sample per day,
+        # so their CMOR files get the CF-truthful
+        # ``time: point within days time: mean over days`` label + comment
+        # (Amon) and ``time: point`` (day table) instead of the table
+        # default ``time: mean``.  Sub-daily diag_days gives genuine
+        # multi-sample means, so the table default stands there; a
+        # nonstandard diag_days > 1 keeps table defaults too (the runtime
+        # warning below the segment builder already flags that mode).
+        self._mpas_sfc_accum = (
+            _MPASSfcFluxAccum(expected_steps=DIAG_INTERVAL,
+                              window_start_day=START_DAY, dt_s=DT)
+            if self._mpas_cmip_feed_on else None)
+        if isinstance(self._carry_aux, dict):
+            if self._mpas_sfc_accum is not None:
+                _n_res = self._mpas_sfc_accum.restore(
+                    self._carry_aux, resume_day=START_DAY, dt_s=DT)
+                if _n_res:
+                    logger.info(
+                        "  CMOR flux accumulator: resumed a partial diag "
+                        "interval from the checkpoint (%d slots)", _n_res)
+            else:
+                # Feed OFF for this run (multi-rank, or CMOR output off) but
+                # the checkpoint carries a partial interval from a feed-ON
+                # link: DROP it.  This run advances the model without
+                # sampling, so forwarding those sums into the next
+                # checkpoint would let a later feed-ON link resume samples
+                # that skip this link's steps — a wrong interval mean
+                # (codex-5).  Loud: the dropped partial interval is real
+                # data loss, bounded by one diagnostic interval.
+                _stale_flux = [k for k in self._carry_aux
+                               if k.startswith("cmor_flux")]
+                if _stale_flux:
+                    for _k in _stale_flux:
+                        del self._carry_aux[_k]
+                    logger.warning(
+                        "  CMOR flux accumulator: DROPPED a partial diag "
+                        "interval staged in the checkpoint — the CMOR feed "
+                        "is OFF on this run (multi-rank or cmip_output "
+                        "off), so those samples cannot be continued "
+                        "consistently across this link.")
+        # Sampling-honesty metadata.  The state fields are SNAPSHOTS at every
+        # cadence >= 1 day AND under the ``diag_days <= 0`` sentinel (which
+        # on this lane is "one feed at the end of the link", not "no
+        # diagnostics" — codex-11), so both must disclose it; only sub-daily
+        # cadences give genuine multi-sample means and keep table defaults.
+        _true_cad_days = (DIAG_INTERVAL * DT / 86400.0 if DIAG_INTERVAL > 0
+                          else float(cfg.output.diag_days))
+        if (self._mpas_cmip_feed_on and _diag is not None
+                and (float(cfg.output.diag_days) <= 0.0
+                     or _true_cad_days >= 1.0)):
+            _diag.cmip_snapshot_vars = {
+                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va"}
+            # Label with the TRUE sampling cadence (integer steps x dt), not
+            # the requested diag_days the step arithmetic truncated — e.g.
+            # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
+            # "once-daily 00 UTC" there would be false (codex-8).
+            _diag.cmip_snapshot_cadence_days = _true_cad_days
+            # Time of day the snapshots actually land at: the FIRST sample of
+            # this run is a full interval after the current position when the
+            # restart sits exactly on a boundary (``_rem`` counts the steps
+            # to the next feed, never 0).  A fractional start_day /
+            # --restart-start-day moves it off 00 UTC — derive, never assert
+            # (codex-10/11).
+            if DIAG_INTERVAL > 0:
+                _rem = DIAG_INTERVAL - (start_step % DIAG_INTERVAL)
+                _first = START_DAY + _rem * DT / 86400.0
+                _diag.cmip_snapshot_phase_frac = float(_first) % 1.0
 
         # Build MPAS-compatible physics via make_physics (same code path as
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
@@ -6416,17 +6858,26 @@ class ModelDriver:
         # monotonicity factor is
         # geometry-only, so the CFL guard below is EXACT for the applied op.
         _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        _qv_halo_refresh = None
         if _qv_smooth_nu > 0.0:
             from legoesm.core.operators_voronoi import (
                 scalar_del2_cell_cfl_factor,
             )
             if self._voronoi_layout is not None:
-                raise ValueError(
-                    "mpas_qv_smooth_del2_m2s > 0 is not wired for the "
-                    "distributed Voronoi (MPI) lane yet — the horizontal "
-                    "stencil needs a halo refresh after the dycore step. "
-                    "Run single-process or set the coefficient to 0."
-                )
+                # Distributed lane (#1321 item 2): the del2 stencil reads
+                # 1-ring neighbour cells, so refresh the q_v CELL halo right
+                # before each filter application — the last in-step exchange
+                # ran before the final RK stage, and physics/floors updated
+                # owned q_v after it.  With a fresh halo the OWNED-cell
+                # stencil sees exactly the serial values (halo = owner
+                # values), so owned results match the single-rank filter.
+                # Halo cells come out with a partial-ring laplacian; the
+                # only consumer before the next step's pre-stage exchange
+                # overwrites them is the (optional) hard-saturation drain,
+                # which is COLUMN-LOCAL — it touches halo rows but cannot
+                # couple them into owned columns (codex-2 narrowing).
+                _qv_halo_refresh = (
+                    self._voronoi_layout.halo_exchange.exchange_cell_field)
             if self.state.tracers is None or "q_v" not in self.state.tracers:
                 raise ValueError(
                     "mpas_qv_smooth_del2_m2s > 0 needs a q_v tracer; this "
@@ -6442,6 +6893,12 @@ class ModelDriver:
             # exact arithmetic, to fp roundoff ~1e-7 in fp32).
             # EXACT for the plain form actually applied — no dp-ratio guess.
             _g_max = scalar_del2_cell_cfl_factor(self.grid)
+            if self._voronoi_layout is not None:
+                # Rank-local mesh under MPI: the monotonicity bound must hold
+                # on EVERY cell globally, so take the global max (setup-time
+                # guard, diagnostic-only reduction — never in a loss).
+                from legoesm.parallel.reductions import global_max_mpi
+                _g_max = float(global_max_mpi(jnp.asarray(_g_max)))
             _cfl = _qv_smooth_nu * DT * _g_max
             if _cfl > 0.5:
                 raise ValueError(
@@ -7375,8 +7832,13 @@ class ModelDriver:
             # Eager like the drain below (outside jit).
             if _qv_smooth_nu > 0.0:
                 _trc_sm = self.state.tracers
+                _qv_sm_in = _trc_sm["q_v"].data
+                if _qv_halo_refresh is not None:
+                    # MPI lane: fresh cell halo so boundary-owned stencils
+                    # read owner values (see the setup note, #1321).
+                    _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
                 _qv_new_sm = _mpas_qv_smooth_step(
-                    _trc_sm["q_v"].data, self.grid, _qv_smooth_nu, DT)
+                    _qv_sm_in, self.grid, _qv_smooth_nu, DT)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
@@ -7440,8 +7902,32 @@ class ModelDriver:
             # (#413) — reference assignment, no device work.
             self._mpas_phys_state = _phys_state
 
-            # Diagnostics at intervals
-            if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
+            # #1353: fold this step's surface/TOA fluxes into the CMOR
+            # interval accumulator (lazy device adds — no host sync here).
+            # Cost bound (codex-1 finding 5): 6 elementwise (cast+)adds on
+            # (nCells,) surface fields per step — EXPECTED tens of µs of
+            # async dispatch vs an L5 eager step of ~100+ ms, in a loop
+            # that already dispatches eager per-step work (sponge, ice
+            # skin, guards); the campaign's tracked sim-days/s throughput
+            # is the standing regression check.  Fusing into ``_step_jit``
+            # would couple the diag path into the compiled step and break
+            # the "diag block is read-only / trajectory bit-identical"
+            # property this lane documents — deliberately kept eager.
+            if self._mpas_sfc_accum is not None:
+                self._mpas_sfc_accum.add(
+                    getattr(self.model, "_sfc_diag", None))
+
+            # Diagnostics at intervals — phased by DIAG_PHASE (= start_step
+            # for a real periodic cadence, 0 for the once-at-the-end
+            # sentinel; see its definition).  On the periodic path a restart
+            # chain therefore keeps ONE global diagnostic phase: samples stay
+            # evenly spaced in simulated time across links, and a partial
+            # flux interval restored from the checkpoint (#1353) completes at
+            # the boundary it belongs to instead of at a fresh job-local
+            # multiple (codex-3 HIGH).  Off-cadence restarts emit their first
+            # sample after the REMAINDER of the interval.
+            if (DIAG_INTERVAL > 0
+                    and (DIAG_PHASE + step + 1) % DIAG_INTERVAL == 0):
                 elapsed_day = (step + 1) * DT / 86400.0
                 T_data = self.state.T.data
                 p_s_data = self.state.p_s.data

@@ -226,3 +226,87 @@ def test_validate_cdgrid_refuses_smoothing():
 def test_validate_bounds(bad):
     with pytest.raises(ValueError, match="mpas_qv_smooth_del2_m2s"):
         _mpas_cfg(mpas_qv_smooth_del2_m2s=bad).validate_strict()
+
+
+class TestDistributedEquivalence:
+    """#1321 item 2: the q_v del2 filter on a partitioned mesh (halo refresh
+    + local stencil) must reproduce the serial filter on owned cells.
+
+    Simulated ranks (no MPI needed) — the same wiring the driver applies
+    under the distributed Voronoi lane: refresh the q_v CELL halo, run the
+    module-scope ``_mpas_qv_smooth_step`` on the rank-local mesh, keep the
+    owned cells.  Halo inputs are deliberately POISONED first so the test
+    fails if the refresh step is dropped (the driver's exact stale-halo
+    scenario: physics updated owned q_v after the last in-step exchange).
+    """
+
+    @pytest.mark.parametrize("n_ranks", [2, 3])
+    def test_owned_cells_match_serial(self, mesh, n_ranks):
+        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.parallel.voronoi_partition import (
+            partition_voronoi_mesh, build_local_mesh, scatter_to_local,
+        )
+        from legoesm.parallel.halo_exchange_voronoi import (
+            exchange_local_simulated,
+        )
+
+        nlev = 5
+        rng = np.random.default_rng(21)
+        q_global = jnp.asarray(
+            rng.uniform(0.0, 0.02, size=(mesh.nCells, nlev)))
+        dt = 75.0
+        nu = 0.5 / (dt * scalar_del2_cell_cfl_factor(mesh))
+        q_serial = _mpas_qv_smooth_step(q_global, mesh, nu, dt)
+
+        parts = [partition_voronoi_mesh(mesh, n_ranks, r)
+                 for r in range(n_ranks)]
+        local_meshes = [build_local_mesh(mesh, p) for p in parts]
+        locals_q = []
+        for p in parts:
+            ql = np.asarray(scatter_to_local(q_global, p, "cell")).copy()
+            ql[p.n_owned_cells:, :] = 9.99  # poison halo: refresh must fix
+            locals_q.append(jnp.asarray(ql))
+
+        refreshed = exchange_local_simulated(parts, locals_q, entity="cell")
+
+        for r, (p, lm, ql) in enumerate(zip(parts, local_meshes, refreshed)):
+            q_new_local = _mpas_qv_smooth_step(ql, lm, nu, dt)
+            own = p.n_owned_cells
+            g_ids = np.asarray(p.local_cells[:own])
+            np.testing.assert_allclose(
+                np.asarray(q_new_local[:own]),
+                np.asarray(q_serial)[g_ids],
+                atol=1e-13, rtol=0.0,
+                err_msg=f"rank {r}/{n_ranks}: owned-cell filter mismatch",
+            )
+
+    def test_poisoned_halo_without_refresh_fails(self, mesh):
+        """Non-vacuousness: skipping the halo refresh DOES corrupt
+        boundary-owned cells — proving the refresh in the driver is
+        load-bearing, not decorative."""
+        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.parallel.voronoi_partition import (
+            partition_voronoi_mesh, build_local_mesh, scatter_to_local,
+        )
+
+        nlev = 5
+        rng = np.random.default_rng(22)
+        q_global = jnp.asarray(
+            rng.uniform(0.0, 0.02, size=(mesh.nCells, nlev)))
+        dt = 75.0
+        nu = 0.5 / (dt * scalar_del2_cell_cfl_factor(mesh))
+        q_serial = _mpas_qv_smooth_step(q_global, mesh, nu, dt)
+
+        p = partition_voronoi_mesh(mesh, 2, 0)
+        lm = build_local_mesh(mesh, p)
+        ql = np.asarray(scatter_to_local(q_global, p, "cell")).copy()
+        ql[p.n_owned_cells:, :] = 9.99          # stale/poisoned halo, no refresh
+        q_new_local = _mpas_qv_smooth_step(jnp.asarray(ql), lm, nu, dt)
+        own = p.n_owned_cells
+        g_ids = np.asarray(p.local_cells[:own])
+        diff = np.max(np.abs(np.asarray(q_new_local[:own])
+                             - np.asarray(q_serial)[g_ids]))
+        assert diff > 1e-6, (
+            "poisoned halo did not perturb owned cells — the equivalence "
+            "test above would be vacuous"
+        )
