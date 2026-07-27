@@ -682,6 +682,76 @@ implicit_cn at 600 steps unforced) holds under forcing. That is a science
 review of ONE config field on ONE experiment, not a scheme-stability
 program.
 
+## Precision + grid-coverage verification (2026-07-27, user request)
+
+**Mixed precision — the production storage mode (f64 state + f32
+internals: `LEGOESM_VMIX_F32_SOLVE=1 LEGOESM_BAROCLINIC_F32=1`) — was the
+untested corner of the decision table. Now measured** (job 26493592,
+LL576 L20, same-job arms, conservation-gated 1e-5):
+
+| arm | plain f64 nd1/nd4 | MIXED nd1/nd4 | nd4 mixed gain |
+|---|---|---|---|
+| implicit standard | 63.56 / 23.39 | 51.40 / 20.49 | +14.2 % |
+| implicit **single_reduce** | 64.82 / 22.10 | 52.80 / **19.13** | +15.5 % |
+| explicit + wide | 71.57 / 23.28 | 59.48 / 20.39 | +14.1 % |
+
+Every arm gains ~14-15 % from mixed mode; the decision-table ordering is
+OBSERVED UNCHANGED (single_reduce 6-7 % ahead at nd4, beyond the
+informal ~+-1pp single-run noise — but that noise figure came from a
+different lane, and the mixed arms are single runs; "wide is the
+scale-out choice" is UNVERIFIED in mixed mode beyond nd4). Accuracy: NO
+DIFFERENCE DETECTED IN THESE INDICATORS OVER THIS 33-STEP UNFORCED
+HORIZON — heat/salt drift identical to plain (7.740e-10), zero-forcing
+residual 2.067e-4 vs 2.079e-4; that is not trajectory or science
+equivalence (codex round-13). **Best f64-storage nd4 config =
+single_reduce + mixed at 19.13 ms (1.22x the production plain-standard
+23.39).**
+
+**MPAS np4 fix under f64 — the anomaly MOVES with dtype** (jobs 26493638
+/26493734): f64 np4 is HEALTHY (eff 0.95; the f32-only gate correctly
+does not fire) while f64 np8 ANTI-scaled (20.10 -> 21.42). Adding the
+(8, ..., float64) signature entry — receipt: **np8 21.42 -> 18.98
+(observed -11.4 %, single run, no CI; the unchanged np4 control at 20.09
+supports specificity but does not quantify variance)**. The f64 ladder is now
+monotone 38.34/20.09/18.98, and the shape x dtype dependence of the
+fusion pathology is confirmed from a second angle (element size shifts
+the pathological rung). Gate now carries dtype in the signature; both
+entries have same-day receipts.
+
+**Grid coverage — first receipts for the two unmeasured ocean grids**
+(job 26493648, nd1/2/4, both precisions):
+- **Tripole (synthetic ORCA fold): fold cost measured SAME-JOB (job
+  26493837, codex round-13's demanded protocol): +3.7 % / +1.2 % /
+  +1.2 % at nd1/2/4 vs the matched regular grid** (35.52/25.03/15.91 vs
+  34.25/24.73/15.73 f32) — the fold's cost SHRINKS with device count,
+  and "the fold is not a scaling bottleneck at these counts" is now
+  licensed by a controlled comparison. (Cross-day numbers from
+  26493648 retained above for the f64 points only.)
+- **MPAS-ocean Voronoi: RETRACTION — my "ladders" (subdiv 6 AND the
+  subdiv-7 discriminator, jobs 26493648/26493837) were INVALID.** The
+  bench's own metadata says it: `n_ranks: 1, cells_per_rank_achieved:
+  163842` — every arm ran ONE rank on the FULL mesh, because this bench
+  decomposes by MPI RANK (its docstring states the SPMD multi-device
+  path does not exist by design) and my CUDA_VISIBLE_DEVICES invocation
+  never created ranks. The flat curves were the SAME single-device run
+  repeated, not a latency floor and not a defect — codex round-13's
+  "hypothesis, not verdict" was righter than it knew. What survives:
+  single-device timings (s6 ~7 ms f32/f64, s7 ~21.9 ms f32).
+
+  **THE REAL LADDER (job 26494036, CPU-MPI f64, np1-16, block:cyclic,
+  ranks=N verified in metadata): MPAS-ocean SCALES.** s6 (41k cells):
+  814.46 / 316.71 / 159.27 / 92.85 / 90.51 ms; s7 (164k cells): 3944.43
+  / 1615.85 / 720.87 / 362.42 / 311.53 ms. The np1 base is
+  cache-disadvantaged (np1->2 superlinear, same pattern as the atm
+  spread ladder), so quoting np2-base efficiencies: s6 2->16 = 0.44,
+  **s7 2->16 = 0.65** — the tile-size pattern reproduces on a FOURTH
+  lane (bigger mesh holds efficiency deeper), and the np8->16 flattening
+  sits exactly where per-rank cells fall to 2.5k (s6) vs 10k (s7).
+  Single runs, no repeats; ordering claims only.
+- Remaining coverage gap, flagged not measured: atmosphere SPECTRAL has
+  no scaling receipts on any transport (global-transform lane, x64 by
+  policy).
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
