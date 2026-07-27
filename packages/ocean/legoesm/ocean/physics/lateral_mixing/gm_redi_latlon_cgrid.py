@@ -697,7 +697,7 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 # =====================================================================
 
 def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
-                              slope_n2="adiabatic"):
+                              slope_n2="adiabatic", jacobian=None):
     """Shared W-point geometry + N² for the native ldfslp stencil.
 
     Factors the ``e3w``/``wmask3``/``pn2`` block common to
@@ -753,6 +753,15 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         _gdepw_int = jnp.cumsum(dz)[:-1]
         n2_int = compute_buoyancy_frequency_nemo_bn2(
             T, S, gdept, _gdepw_int, NemoSEOSConfig(), g=g)        # (...,nlev-1)
+        if jacobian is not None:
+            # NEMO divides by the LIVE e3w(jk,Kmm) = e3w_0*(1+r3t)
+            # (domzgr_substitute.h90:131); r3t is 2-D so the z-star stretch is
+            # column-uniform, and the z-star Jacobian (eta+H)/H IS that (1+r3t).
+            # Without this the reference e3w leaves a ~1e-4 bias.  It does NOT
+            # cancel here (unlike in the thickness-free MLD criterion).
+            # Measured on the DINO y5 twin vs NEMO's dumped rn2b, with NEMO's g:
+            # median |rel| 8.59e-05 -> 6.96e-06.
+            n2_int = n2_int / jnp.asarray(jacobian, dtype)[..., None]
     elif slope_n2 == "adiabatic":
         from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
         p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
@@ -784,6 +793,7 @@ def compute_nemo_native_slopes(
     rho_0: float = _RHO_0,
     g: float = constants.g,
     active_3d: jnp.ndarray | None = None,
+    jacobian: jnp.ndarray | None = None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -843,7 +853,7 @@ def compute_nemo_native_slopes(
     # consistent with the slopes it is coupled to; no duplicate numerics).
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'))
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
     pn2_kp1 = jnp.concatenate([pn2[:, :, 1:],
                                jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
 
@@ -1000,6 +1010,7 @@ def compute_treguier_kappa_gm_nemo_native(
     rho_0: float = _RHO_0,
     g: float = constants.g,
     active_3d: jnp.ndarray | None = None,
+    jacobian: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1060,7 +1071,7 @@ def compute_treguier_kappa_gm_nemo_native(
            else active_3d.astype(dtype))
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'))
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
     e3w_3d = jnp.broadcast_to(e3w, rho.shape)
 
     # Floor at 1e-30 (not a hard 0) before sqrt: sqrt(0) has an infinite
@@ -3012,7 +3023,7 @@ def gm_redi_tracer_tendency_latlon(
                    < H_bathy[:, :, jnp.newaxis])
             ).astype(T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
-                rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
+                rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn, jacobian=jacobian,
                 rho_0=rho_0, g=g, active_3d=_act_kgm,
             )
             kappa_GM = compute_treguier_kappa_gm_nemo_native(
@@ -3231,7 +3242,8 @@ def gm_redi_tracer_tendency_latlon(
             # NO dispatch negation, exact traldf_iso stencil (amplitude 1.0).
             _nat = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
-                eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d)
+                eos_fn, rho_0=rho_0, g=g, active_3d=_active_3d,
+                jacobian=jacobian)
             _msc = getattr(cfg, "msc_stabilize", False)
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
@@ -3399,7 +3411,7 @@ def compute_isoneutral_K33_latlon(
         else:
             _vm = v_mask
         _, _, _wi, _wj = compute_nemo_native_slopes(
-            _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
+            _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn, jacobian=_J,
             rho_0=rho_0, g=g, active_3d=_act)
         _kap = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
         # Center kappa broadcast IDENTICAL to the explicit operator's own
