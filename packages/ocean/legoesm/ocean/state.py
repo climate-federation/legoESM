@@ -905,18 +905,37 @@ class BarotropicConfig(NamedTuple):
     # approximation, not a new one).  Unknown value raises at the substep
     # entry (dispatch hardening, same pattern as ``barotropic_face_depth``).
     #
-    # MEASURED VELOCITY-SEED INERT (2026-07-27, DINO Y5 restart twin,
-    # probe_spg_barotropic vs NEMO RUN_GDB spg dumps): a per-COLUMN scalar
-    # weight rescale cancels identically in the thickness-weighted mean
-    # (sum(u*h*r)/sum(h*r) == sum(u*h)/sum(h) whenever the floor doesn't
-    # bind), so the seeded U_bar/V_bar are bit-identical between the two
-    # modes (outputs differ only by ~1e-16 re-association round-off).
-    # NEMO's own qco stretch e3u(Kbb) = e3u_0*(1+r3u(Kbb)) is ALSO a
-    # per-column scalar, so NEMO's sum_k(u*e3u(Kbb))/sum_k(e3u(Kbb)) seed
-    # is equally invariant — the hypothesized min-rule-vs-ssh-avg seed
-    # convention gap cancels in BOTH models (the entry-seed twin match is
-    # exact: un_e/vn_e corr 1.000000, |x|ratio 1.0000).  Kept as the
-    # documented convention knob; not a fidelity lever.
+    # MEASURED INERT AWAY FROM THE WATER-COLUMN FLOOR (2026-07-27, DINO Y5
+    # restart twin, probe_spg_barotropic vs NEMO RUN_GDB spg dumps): a
+    # per-COLUMN scalar weight rescale cancels identically in the
+    # thickness-weighted mean (sum(u*h*r)/sum(h*r) == sum(u*h)/sum(h)
+    # whenever ``max(sum_k h_face, min_water_column_m)`` does NOT bind), so
+    # the seeded U_bar/V_bar are bit-identical between the two modes on
+    # DINO's deep-basin columns (outputs differ only by ~1e-16
+    # re-association round-off).  NEMO's own qco stretch
+    # e3u(Kbb) = e3u_0*(1+r3u(Kbb)) is ALSO a per-column scalar, so NEMO's
+    # sum_k(u*e3u(Kbb))/sum_k(e3u(Kbb)) seed is equally invariant away from
+    # its own (purely land/dry-cell) ``1-ssumask`` guard — the hypothesized
+    # min-rule-vs-ssh-avg seed convention gap cancels in BOTH models on
+    # DINO's twin (entry-seed un_e/vn_e corr 1.000000, |x|ratio 1.0000).
+    #
+    # NOT INERT ON A SHELF COLUMN AT THE PRODUCTION FLOOR: the production
+    # default ``min_water_column_m=0.5`` (state.py) can bind the two
+    # face-depth rules ASYMMETRICALLY on a thin/shelf column (the
+    # ssh-average rescale changes which side of the floor a face lands
+    # on) — an 11% loop-entry velocity difference between "min_rule" and
+    # "nemo_ssh_avg" was reproduced at this default (see
+    # ``TestBarotropicSeedFaceDepth::
+    # test_shelf_column_floor_breaks_inertness_at_production_default`` in
+    # test_barotropic_continuity_and_drag.py).  NEMO's own floor
+    # (``hu_0 + zsshu_a + 1 - ssumask``) is a pure land-mask
+    # divide-by-zero guard (``ssumask`` is static 0/1; the ``+1`` only
+    # activates on masked/dry faces) and never binds on a wet cell no
+    # matter how thin — legoESM's physical ``min_water_column_m`` floor
+    # binds on wet-but-thin columns, which NEMO's guard structurally
+    # cannot do.  So the earlier "inertness" claim held only in the
+    # basins/tests that never exercised the floor; kept as the documented
+    # convention knob, not a validated no-op everywhere.
     barotropic_seed_face_depth: str = "min_rule"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the

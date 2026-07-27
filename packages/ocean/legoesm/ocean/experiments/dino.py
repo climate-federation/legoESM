@@ -1085,11 +1085,18 @@ DINO_RECIPES: dict[str, dict] = {
         # card's namelist runs).  Meaningful on both the FE card (Kmm seed)
         # and the MLF card (Kbb before-level seed, barotropic_before_state) —
         # lands here (the shared base dict), not MLF-only.
-        # MEASURED VELOCITY-SEED INERT (2026-07-27, Y5 restart twin): the
-        # per-column rescale cancels in the thickness-weighted mean (NEMO's
-        # own qco per-column e3u stretch cancels identically), so this is
-        # the documented convention, not a fidelity lever — the entry-seed
-        # twin match is exact either way (see the state.py field docstring).
+        # MEASURED INERT AWAY FROM THE WATER-COLUMN FLOOR (2026-07-27, Y5
+        # restart twin): the per-column rescale cancels in the
+        # thickness-weighted mean (NEMO's own qco per-column e3u stretch
+        # cancels identically) on DINO's deep-basin columns — the
+        # entry-seed twin match is exact there.  NOT inert in general: where
+        # ``max(sum_k h_face, min_water_column_m)`` binds asymmetrically
+        # (shelf columns) at the production default
+        # ``min_water_column_m=0.5``, the two modes diverge (an 11%
+        # loop-entry velocity difference was reproduced) — see the
+        # state.py field docstring and
+        # ``TestBarotropicSeedFaceDepth::
+        # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",

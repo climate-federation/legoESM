@@ -466,15 +466,18 @@ class TestBarotropicSeedFaceDepth:
         must leave ``U_bar``/``V_bar`` EXACTLY equal to the min_rule result.
         The ratio is a per-COLUMN scalar for ANY vertical coordinate (not
         just z-star), so it cancels between the numerator and denominator of
-        the thickness-weighted mean whenever the column-depth floor does not
-        bind — i.e. the option is VELOCITY-SEED INERT by construction
-        (measured 2026-07-27 on the DINO Y5 twin: bit-identical seeds,
+        the thickness-weighted mean AWAY FROM THE WATER-COLUMN FLOOR (this
+        test uses ``min_water_column_m=0.0``, i.e. the floor disabled) —
+        measured 2026-07-27 on the DINO Y5 twin: bit-identical seeds,
         ~1e-16 output round-off; see the
         ``BarotropicConfig.barotropic_seed_face_depth`` docstring — NEMO's
         own qco per-column e3u stretch cancels identically, so the
-        convention gap cancels in both models).  What the option DOES select
-        is the face-DEPTH bookkeeping convention, pinned here as exact
-        velocity equality."""
+        convention gap cancels in both models on DINO's deep-basin columns.
+        This is NOT a general inertness proof: at the PRODUCTION
+        ``min_water_column_m=0.5`` default, the floor can bind
+        asymmetrically on a shelf column and break the equality — see
+        ``test_shelf_column_floor_breaks_inertness_at_production_default``
+        below."""
         grid, z, state = _flat_basin(n_lat=8, n_lon=16, H=1000.0, lat_cap_deg=90.0)
         H_bathy = np.full((grid.n_lat, grid.n_lon), 1000.0)
         H_bathy[:, 8] = 250.0
@@ -500,6 +503,93 @@ class TestBarotropicSeedFaceDepth:
                                    rtol=0, atol=1e-9)
         np.testing.assert_allclose(np.asarray(V_nemo), np.asarray(V_min),
                                    rtol=0, atol=1e-9)
+
+    def test_shelf_column_floor_breaks_inertness_at_production_default(self):
+        """CRITICAL adversarial-review finding on commit 7da6d7989: the
+        "VELOCITY-SEED INERT by construction" claim is FALSE in general — it
+        held only in the tests/twins that disabled the water-column floor
+        (``min_water_column_m=0.0``) or used a flat deep basin.  At the
+        PRODUCTION default ``min_water_column_m=0.5``
+        (``LatLonCGridOceanConfig.min_water_column_m``,
+        ``ocean_tendency_common.column_depth``), the two face-depth rules'
+        OWN total-column-depth references can straddle the floor on a thin
+        shelf column: the min-rule total depth stays floor-UNBOUND while the
+        NEMO ssh-average reference (a fixed ``hu_0`` + a half-weighted
+        2-point ssh average, structurally different from a plain column
+        sum) is floor-BOUND, or vice versa.  ``max(Sigma h, floor)`` is then
+        NOT a common per-column scalar between the two rules, so it does
+        NOT cancel out of the thickness-weighted mean — the "it always
+        cancels" argument in the docstrings assumed a floor-free or
+        floor-symmetric column.
+
+        Reproduction (reviewer's shelf-column construction, reproduced here
+        independently): a 300 m deep basin with ONE thin shelf column
+        (``H_bathy=0.2 m``) at a ``+0.5 m`` ssh anomaly, so the min-rule
+        total depth is ``H_bathy + eta = 0.7 m`` (floor-unbound) but the
+        NEMO ssh-average reference lands at ``~0.448 m`` (floor-bound at
+        the 0.5 m production default) — matching the reviewer's H=300 m /
+        H_u_minrule=0.6 / H_u_nemo=0.449 counter-example order of
+        magnitude.  Even a spatially UNIFORM (unsheared) seed velocity
+        differs by ~10% between "min_rule" and "nemo_ssh_avg" at that face.
+
+        Non-vacuous both ways: also assert the two modes agree exactly on a
+        DEEP column (no floor interaction anywhere), so this test would
+        fail loudly if the helper were changed to disagree everywhere
+        (not just at the floor).
+        """
+        n_lat, n_lon = 8, 16
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z = create_ocean_z_star(n_levels=4, H_max=300.0, dz_surface=50.0, dz_deep=100.0)
+        H_bathy = np.full((grid.n_lat, grid.n_lon), 300.0)
+        shelf_col = 9
+        H_bathy[:, shelf_col] = 0.2  # thin shelf column, bathy alone < floor
+        land_mask = np.ones((grid.n_lat, grid.n_lon))
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+            H_max=300.0, H_bathy_override=jnp.asarray(H_bathy),
+            land_mask_override=jnp.asarray(land_mask))
+        eta0 = np.zeros((grid.n_lat, grid.n_lon))
+        eta0[:, shelf_col] = 0.5  # pushes min-rule total depth to 0.7 m (floor-unbound)
+        eta0 = jnp.asarray(eta0) * state.land_mask.data
+        state = state._replace(eta=state.eta.replace(data=eta0))
+        # Spatially uniform seed velocity (no vertical shear, no horizontal
+        # structure) — isolates the floor effect from any shear/pattern.
+        u_uniform = jnp.ones_like(state.u.data) * state.u_mask.data[..., None]
+        v_zero = jnp.zeros_like(state.v.data)
+        state = state._replace(u=state.u.replace(data=u_uniform),
+                               v=state.v.replace(data=v_zero))
+
+        min_wc = 0.5  # LatLonCGridOceanConfig.min_water_column_m production default
+        h_k = compute_layer_thickness(state.eta.data, state.H_bathy.data, z,
+                                      min_water_column_m=min_wc)
+        args = (state.u.data, state.v.data, h_k, jnp.asarray(min_wc),
+                state.land_mask.data, state.u_mask.data, state.v_mask.data, grid)
+        U_min, _ = _depth_average_to_faces(*args, seed_face_depth="min_rule")
+        U_nemo, _ = _depth_average_to_faces(
+            *args, seed_face_depth="nemo_ssh_avg", eta_dyn=state.eta.data,
+            H_bathy=state.H_bathy.data, area=grid.area.astype(state.eta.data.dtype))
+        U_min = np.asarray(U_min)
+        U_nemo = np.asarray(U_nemo)
+
+        # The east face of the shelf column (index shelf_col+1, since u-face
+        # j is between T-cells j-1 and j on this grid's roll convention —
+        # verified directly: this is the face whose min-rule/nemo total
+        # depths straddle the floor).
+        shelf_face = shelf_col
+        rel_diff = abs(U_nemo[1, shelf_face] - U_min[1, shelf_face]) / abs(U_min[1, shelf_face])
+        assert rel_diff > 0.08, (
+            f"expected the floor to break inertness by >8% at the shelf "
+            f"face (production min_water_column_m=0.5); got {rel_diff:.4%} "
+            f"(U_min={U_min[1, shelf_face]!r}, U_nemo={U_nemo[1, shelf_face]!r})")
+
+        # Non-vacuous: a DEEP column (far from the shelf, no floor
+        # interaction) must still agree exactly — the floor-breaks-inertness
+        # claim is a LOCAL effect, not a wholesale disagreement.
+        deep_face = 3
+        np.testing.assert_allclose(
+            U_min[:, deep_face], U_nemo[:, deep_face], rtol=0, atol=1e-9,
+            err_msg="deep-column faces (no floor interaction) must still "
+                   "agree between min_rule and nemo_ssh_avg seeds")
 
     def test_kamm_recipes_select_nemo_ssh_avg_seed(self):
         """Card selection: both DINO kamm recipes (FE and MLF) opt into

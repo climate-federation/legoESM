@@ -165,14 +165,19 @@ def _depth_average_to_faces(
         with the vertical sum used by ``depth_average_to_faces`` below);
         for partial cells this is the same scalar-column-factor
         approximation the rest of the split-explicit solver already makes.
-        NB the per-column ratio therefore cancels in the weighted MEAN —
-        the option is VELOCITY-SEED INERT by construction (measured
-        2026-07-27, DINO Y5 twin: bit-identical seeds; NEMO's own qco
-        per-column e3u stretch cancels identically, see the
-        ``BarotropicConfig.barotropic_seed_face_depth`` docstring); it
-        selects the face-depth bookkeeping convention, not the velocity.
-        Requires ``eta_dyn``/``H_bathy``/``area`` when selected. Unknown
-        value raises (dispatch hardening).
+        NB the per-column ratio cancels in the weighted MEAN (measured
+        2026-07-27, DINO Y5 twin: bit-identical seeds) ONLY away from the
+        ``min_water_column_m`` floor — the option is INERT there, but NOT
+        inert where ``max(sum_k h_face, min_water_column_m)`` binds
+        asymmetrically between the two face-depth rules (thin/shelf
+        columns): an 11% loop-entry velocity difference was reproduced at
+        the production default ``min_water_column_m=0.5`` (see the
+        ``BarotropicConfig.barotropic_seed_face_depth`` docstring and
+        ``TestBarotropicSeedFaceDepth::
+        test_shelf_column_floor_breaks_inertness_at_production_default``).
+        It selects the face-depth bookkeeping convention, not the
+        velocity, EXCEPT at the floor. Requires ``eta_dyn``/``H_bathy``/
+        ``area`` when selected. Unknown value raises (dispatch hardening).
     eta_dyn, H_bathy, area : required only when ``seed_face_depth ==
         "nemo_ssh_avg"``.
 
@@ -183,7 +188,7 @@ def _depth_average_to_faces(
     """
     if seed_face_depth not in ("min_rule", "nemo_ssh_avg"):
         raise ValueError(
-            "unknown barotropic_seed_face_depth "
+            "unknown barotropic_seed_face_depth scheme "
             f"{seed_face_depth!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
 
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
@@ -206,6 +211,16 @@ def _depth_average_to_faces(
         H_v_minrule = min_cell_to_vface(H_total_2d, grid)
         H_u_nemo, H_v_nemo = nemo_ssh_avg_face_depth(
             eta_dyn, H_bathy, mask, u_mask, v_mask, grid, area, dtype)
+        # `_eps` is a bare numerical divide-by-zero guard for THIS ratio's
+        # own denominator (`H_u_minrule`) — deliberately NOT
+        # `min_water_col`/`config.min_water_column_m` (the caller's
+        # physical wet-cell floor applied later, to `h_u`/`h_v`, by
+        # `depth_average_to_faces` below). The ratio only needs to avoid
+        # 0/0 on masked-out (land) faces where `H_u_minrule` is exactly 0;
+        # using the ~0.5 m physical floor here would itself perturb the
+        # ratio on legitimate thin-but-wet columns instead of just guarding
+        # division. Matches the existing divergent-floor convention
+        # documented in `ocean_tendency_common.column_depth`.
         _eps = jnp.asarray(1.0e-10, dtype=dtype)
         ratio_u = jnp.where(u_mask > 0.5, H_u_nemo / jnp.maximum(H_u_minrule, _eps), 1.0)
         ratio_v = jnp.where(v_mask > 0.5, H_v_nemo / jnp.maximum(H_v_minrule, _eps), 1.0)
@@ -675,7 +690,7 @@ def _run_substep_loop(
     _face_depth_mode = config.barotropic.barotropic_face_depth
     if _face_depth_mode not in ("min_rule", "nemo_ssh_avg"):
         raise ValueError(
-            "unknown barotropic_face_depth "
+            "unknown barotropic_face_depth scheme "
             f"{_face_depth_mode!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
 
     def _face_depths(H_total):
