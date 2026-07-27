@@ -89,7 +89,7 @@ TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 # elevation-band params left at v4 defaults (worth only +0.001 K, not baked here).
 _TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1159, 0.1312, 0.1340, 0.1396, 0.1471, 0.1601, 0.1700, 0.1700, 0.1804, 0.1646, 0.1964, 0.2019, 0.1870, 0.1982, 0.1763, 0.1770)
 _TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9594, 0.9554, 0.9602, 0.9546, 0.9597, 0.9616, 0.9604, 0.9581, 0.9599, 0.9648, 0.9621, 0.9587, 0.9596, 0.9567, 0.9609, 0.9590, 0.9588)
-_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)  # const-ok: baked per-PFT root-depth calibration table (v5 multilayer tuning, #892), not a physical constant — same class as the annotated-by-budget _TUNED_PFT_*_MULTILAYER siblings above
+TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)  # const-ok: baked per-PFT root-depth calibration table (v5 multilayer tuning, #892), not a physical constant — same class as the annotated-by-budget TUNED_PFT_*_MULTILAYER siblings above
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
 # rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.
@@ -104,8 +104,8 @@ _TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.
 _TUNED_PFT_KSCALE_MULTILAYER = (0.3407, 0.3592, 0.5414, 0.3000, 0.3504, 0.3195, 0.3666, 0.3892, 0.4704, 0.2726, 0.2842, 0.4871, 0.4506, 0.2359, 0.3414, 0.3109, 0.3615)
 _TUNED_PFT_CSCALE_MULTILAYER = (0.9667, 0.7929, 1.2015, 0.8780, 0.9405, 0.7792, 0.8785, 0.8328, 1.1022, 0.7266, 0.8066, 1.1616, 1.1277, 0.5978, 0.8958, 0.8324, 0.9134)
 # per-PFT PLANT btran water-stress thresholds (wilting / field capacity) [m3/m3]
-_TUNED_PFT_WP_MULTILAYER = (0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162, 0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874, 0.0869, 0.0822, 0.0988)
-_TUNED_PFT_FC_MULTILAYER = (0.1706, 0.2249, 0.2351, 0.2253, 0.2890, 0.2492, 0.2918, 0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171, 0.2193, 0.2123, 0.2469)
+TUNED_PFT_WP_MULTILAYER = (0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162, 0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874, 0.0869, 0.0822, 0.0988)
+TUNED_PFT_FC_MULTILAYER = (0.1706, 0.2249, 0.2351, 0.2253, 0.2890, 0.2492, 0.2918, 0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171, 0.2193, 0.2123, 0.2469)
 TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7178    # snow-free ice-sheet base (raised: ERA5 ~0.85)
 TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.8077
 # aged-snow albedo floor, tanh snow-cover SWE half-scale [kg/m2], snow-albedo age
@@ -130,15 +130,15 @@ TUNED_GLACIER_CBOOST_MULTILAYER = 4.0693
 TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
 # btran needs theta_fc > theta_wp per PFT; PFT-weighting (a convex combination) then
 # preserves the ordering for every mixed cell, so the stress range never inverts.
-assert all(fc > wp for wp, fc in zip(_TUNED_PFT_WP_MULTILAYER, _TUNED_PFT_FC_MULTILAYER)), \
+assert all(fc > wp for wp, fc in zip(TUNED_PFT_WP_MULTILAYER, TUNED_PFT_FC_MULTILAYER)), \
     "multilayer plant theta_fc must exceed theta_wp for every PFT"
 # every baked per-PFT tuple must have exactly _N_PFT entries (a wrong-length paste is
 # the bake's main footgun -> a load-time tripwire instead of a deep matmul error).
 assert all(len(t) == _N_PFT for t in (
     _TUNED_PFT_ALBEDO_MULTILAYER, _TUNED_PFT_EMISSIVITY_MULTILAYER,
-    _TUNED_PFT_ROOT_DEPTH_MULTILAYER, _TUNED_PFT_Z0_MULTILAYER, _TUNED_PFT_CH_MULTILAYER,
+    TUNED_PFT_ROOT_DEPTH_MULTILAYER, _TUNED_PFT_Z0_MULTILAYER, _TUNED_PFT_CH_MULTILAYER,
     _TUNED_PFT_KSCALE_MULTILAYER, _TUNED_PFT_CSCALE_MULTILAYER,
-    _TUNED_PFT_WP_MULTILAYER, _TUNED_PFT_FC_MULTILAYER)), \
+    TUNED_PFT_WP_MULTILAYER, TUNED_PFT_FC_MULTILAYER)), \
     f"every _TUNED_PFT_*_MULTILAYER tuple must have {_N_PFT} entries"
 
 # Per-variant lookup: snow-free per-PFT (albedo, emissivity, root_depth) columns +
@@ -149,7 +149,7 @@ _VARIANT_TUNED = {
     "slab": (_TUNED_PFT_ALBEDO, _TUNED_PFT_EMISSIVITY, _TUNED_PFT_ROOT_DEPTH,
              TUNED_GLACIER_ALBEDO),
     "multilayer": (_TUNED_PFT_ALBEDO_MULTILAYER, _TUNED_PFT_EMISSIVITY_MULTILAYER,
-                   _TUNED_PFT_ROOT_DEPTH_MULTILAYER, TUNED_GLACIER_ALBEDO_MULTILAYER),
+                   TUNED_PFT_ROOT_DEPTH_MULTILAYER, TUNED_GLACIER_ALBEDO_MULTILAYER),
 }
 
 # Snow-free albedo of glacier / ice-sheet ice used as the snow-free BASE over
@@ -402,8 +402,8 @@ class CLMSurfaceParamProvider(eqx.Module):
             table[:, PARAM_NAMES.index("W_max")] = _TUNED_PFT_WMAX
             self._glacier_albedo = glac_alb
             if variant == "multilayer":  # PLANT btran thresholds override the soil map
-                self.plant_theta_wp = pft_fractions @ jnp.asarray(_TUNED_PFT_WP_MULTILAYER)
-                self.plant_theta_fc = pft_fractions @ jnp.asarray(_TUNED_PFT_FC_MULTILAYER)
+                self.plant_theta_wp = pft_fractions @ jnp.asarray(TUNED_PFT_WP_MULTILAYER)
+                self.plant_theta_fc = pft_fractions @ jnp.asarray(TUNED_PFT_FC_MULTILAYER)
                 # calibrated MOST roughness (drives the coupled diurnal exchange)
                 table[:, PARAM_NAMES.index("z0")] = _TUNED_PFT_Z0_MULTILAYER
                 self._soil_alb_scale = TUNED_SOIL_ALB_SCALE_MULTILAYER

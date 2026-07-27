@@ -272,11 +272,11 @@ def baked_init_params() -> dict:
     """
     from legoesm.land import clm_surface_map as C
     p = dict(init_ext_params())
-    wp = np.asarray(C._TUNED_PFT_WP_MULTILAYER); fc = np.asarray(C._TUNED_PFT_FC_MULTILAYER)
+    wp = np.asarray(C.TUNED_PFT_WP_MULTILAYER); fc = np.asarray(C.TUNED_PFT_FC_MULTILAYER)
     over = dict(
         pft_alb=_inv_ext(np.asarray(C._TUNED_PFT_ALBEDO_MULTILAYER), "pft_alb"),
         pft_emis=_inv_ext(np.asarray(C._TUNED_PFT_EMISSIVITY_MULTILAYER), "pft_emis"),
-        pft_root=_inv_ext(np.asarray(C._TUNED_PFT_ROOT_DEPTH_MULTILAYER), "pft_root"),
+        pft_root=_inv_ext(np.asarray(C.TUNED_PFT_ROOT_DEPTH_MULTILAYER), "pft_root"),
         pft_z0=_inv_ext(np.asarray(C._TUNED_PFT_Z0_MULTILAYER), "pft_z0"),
         pft_ch=_inv_ext(np.asarray(C._TUNED_PFT_CH_MULTILAYER), "pft_ch"),
         pft_kscale=_inv_ext(np.asarray(C._TUNED_PFT_KSCALE_MULTILAYER), "pft_kscale"),

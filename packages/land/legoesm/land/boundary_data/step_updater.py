@@ -35,6 +35,7 @@ from legoesm.land.boundary_data._internals import (
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
+    tuned_pft_root_arrays,
     pft_lookup_arrays,
 )
 from legoesm.land.boundary_data.builders import dominant_pft_index, glacier_mask
@@ -67,7 +68,8 @@ def _cover_fracs_at_year(pft_years, years_jnp, year):
     return fracs / jnp.maximum(jnp.sum(fracs, axis=-1, keepdims=True), 1e-10)
 
 
-def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None):
+def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
+                                  tuned_root_params=False):
     """Build a JAX-pure ``(theta_top, doy, year) -> (land_params, lai_col)``
     closure for use inside a ``lax.scan`` time loop.
 
@@ -78,6 +80,12 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None):
     updater rebuilds the params every step and would otherwise silently revert
     the initial override.  ``None`` = the uncalibrated default (bit-identical to
     the pre-override behaviour).
+
+    ``tuned_root_params`` fills the optional per-column
+    ``root_depth``/``theta_wp``/``theta_fc`` from the calibrated per-PFT tables at
+    the (traced) dominant PFT.  Like ``glacier_alb`` it MUST match what was passed
+    to ``init_land_surface_data``, since this updater rebuilds the params every
+    step.
 
     Splits :func:`~legoesm.land.boundary_data.surface_data_to_land_params` +
     :func:`~legoesm.land.boundary_data.fill_land_param_gaps` into a static
@@ -137,9 +145,14 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None):
         lut_vc3 = jnp.asarray(lut["vc3"])
         lut_vc4 = jnp.asarray(lut["vc4"])
         lut_rz0m = jnp.asarray(lut["rz0m"])
+        # Calibrated per-PFT root-zone params, gathered by the traced dominant PFT.
+        _rt = tuned_pft_root_arrays() if tuned_root_params else None
+        lut_root_depth = None if _rt is None else jnp.asarray(_rt["root_depth"])
+        lut_theta_wp = None if _rt is None else jnp.asarray(_rt["theta_wp"])
+        lut_theta_fc = None if _rt is None else jnp.asarray(_rt["theta_fc"])
         lut_rd = jnp.asarray(lut["rd"])
         lut_isveg = jnp.asarray(lut["is_veg"])
-        bare_fb = bare_canopy_params(ncol)
+        bare_fb = bare_canopy_params(ncol, tuned_root_params=tuned_root_params)
         full = lambda v: jnp.full(ncol, v)
 
         def _update_canopy(theta_top: jnp.ndarray, doy: jnp.ndarray, year: jnp.ndarray):
@@ -180,6 +193,14 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None):
                 alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
                 ALB_VIS=av, ALB_NIR=an,
                 emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
+                # None when not selected -> multilayer_land._get falls back to the
+                # scalar MultiLayerLandConfig values (behaviour-preserving).
+                root_depth=(None if lut_root_depth is None
+                            else lut_root_depth[dom_idx]),
+                theta_wp=(None if lut_theta_wp is None
+                          else lut_theta_wp[dom_idx]),
+                theta_fc=(None if lut_theta_fc is None
+                          else lut_theta_fc[dom_idx]),
             )
             lp_filled = gap_fill_tree(lp, bare_fb, covered_jnp)
             return lp_filled, lp_filled.LAI
