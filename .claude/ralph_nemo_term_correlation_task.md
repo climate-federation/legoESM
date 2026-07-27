@@ -69,7 +69,8 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 5 | `ldf_slp` `wslpj` | 0.998875 | 0.998447 | **CLOSED** |
 | 5 | `ldf_slp` `uslp`  | 0.999340 | 0.998697 | **CLOSED** |
 | 5 | `ldf_slp` `vslp`  | 0.999012 | 0.997594 | **CLOSED** |
-| 6 | `ldf_eiv` (`aeiu`) | **0.999815** | **0.999666** (\|x\|) | near — wrap cols 0.90/0.76 open |
+| 6 | `ldf_eiv` (`aeiu`) | **1.000000** | 1.000608 (\|x\|) | **CLOSED** — seam bug fixed |
+| 7 | eiv transport u/v | **0.9978 / 0.9944** | 0.99 (\|x\|) | near — re-measure post-seam-fix |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
 ### Item 3/4 — fixed 2026-07-27 (commit `634ee4aee`)
@@ -228,3 +229,20 @@ identically 1.0x (measured).
 
 The slope residual (0.15-0.25% low) EXCEEDS this 1e-4 effect ⇒ a second,
 unidentified contributor remains in `ldf_slp`.
+
+
+## Seam bug (2026-07-27, commit c0eaaa9b7) — CLOSED item 6
+
+Shapiro smoothers zero-padded LON = treated the periodic seam as a WALL
+(`_shap`, `smooth()`, `wE/wW`), while NEMO fills a periodic halo
+(`ldfslp.F90:319`). Seam slopes 0.75x -> squared into zah 0.55. Fixed:
+wrap-pad lon / zero-pad lat. Seam cols 0.88/0.76 -> 1.0013/1.0013.
+`gm_bolus_kappa_face_average` wired (kamm=True; NEMO face-averages,
+`ldftra.F90:718`).
+
+**Dump-sign note (item 7):** `eiv_dump_u` = psi_above - psi_below = MINUS the
+applied transport (`puu -= (1)-(2)`); lego's in-model sign VERIFIED identical
+to NEMO's applied sign. Flip the dump, not the model.
+
+Remaining: interior slope |x| +0.30% (was hidden by the seam columns);
+item 4's 13 knife-edge cols; re-measure item 7 after the seam fix.
