@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-"""Symmetry-quotient state twin: divergence modulo the config symmetry.
+"""Symmetry-quotient state twin (SUPERSEDED by compare_twin_v2.py —
+codex r3 P0: the per-block independent min is optimistic and cannot
+localize; kept only for exploratory sweeps).
 
 The 2026-07-27 mapping retraction: the do_schmidt oracle's tile
 correspondence is a per-tile dihedral map, and the case-8 two-burst
@@ -163,7 +165,8 @@ def main(argv=None):
         fort = {}
         for p in sorted(Path(args.fort_dir).glob("dyncore_b*.dat")):
             m = re.match(r"dyncore_b(\d+)_(\w+)_t(\d)\.dat", p.name)
-            if m and int(m.group(1)) < 100:
+            if m and int(m.group(1)) not in (
+                    set(range(101, 108)) | set(range(201, 206))):
                 fort[(int(m.group(1)), m.group(2),
                       int(m.group(3)))] = read_fort(p)
         blocks = sorted({b for (b, _, _) in fort})
