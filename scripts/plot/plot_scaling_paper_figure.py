@@ -44,8 +44,10 @@ PANELS = [
     dict(
         key="atm_latlon", title="lat–lon", sub="720×1440 L26 · A100 NCCL",
         series=[("float32", [(4, 7.72), (8, 5.40), (16, 3.54)]),
-                ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)])],
-        note="",
+                ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)]),
+                ],
+        scatter=[("LL1536 @64", 64, 4.97), ("LL2048 @64", 64, 6.73)],
+        note="+ 64-GPU high-res points",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -66,8 +68,9 @@ PANELS = [
                              (64, 131.58)]),
                 ("float64", [(1, 9987.81), (2, 4727.46), (4, 2349.06),
                              (8, 1161.98), (16, 624.06), (32, 350.89),
-                             (64, 220.57)])],
-        note="matched placement",
+                             (64, 220.57), (128, 92.4), (256, 56.2),
+                             (512, 66.7)])],
+        note="to 512 ranks",
     ),
     dict(
         key="oc_latlon", title="lat–lon", sub="576×1152 L20 · A100 NCCL",
@@ -83,22 +86,28 @@ PANELS = [
         note="fold +1.2–3.7 %",
     ),
     dict(
-        key="oc_mpas", title="MPAS Voronoi", sub="subdiv-7 164k cells · Milan CPU–MPI",
-        series=[("float32", [(1, 3980.56), (2, 1646.00), (4, 745.73),
-                             (8, 363.58), (16, 318.06)]),
-                ("float64", [(1, 3944.43), (2, 1615.85), (4, 720.87),
-                             (8, 362.42), (16, 311.53)])],
-        note="f32 ≈ f64: gather-bound",
+        key="oc_mpas", title="MPAS Voronoi", sub="subdiv-7/8 · Milan CPU–MPI, 32 rpn",
+        series=[("float64 (subdiv-7)", [(32, 190.22), (64, 147.65),
+                                        (128, 102.93), (256, 65.71),
+                                        (512, 63.83)]),
+                ("float64 (subdiv-8)", [(32, 861.25), (64, 494.89),
+                                        (128, 309.05), (256, 254.41),
+                                        (512, 194.80)])],
+        note="32 ranks/node fixed",
     ),
 ]
 
 COLORS = {"float32": "#0072B2", "float64": "#D55E00",
+          "f32 · LL1536/2048 @64": "#009E73",
           "float64 (packed)": "#E69F00",
           "mixed (f64 store)": "#009E73",
-          "float32 (C768)": "#0072B2", "float32 (C384)": "#56B4E9"}
+          "float32 (C768)": "#0072B2", "float32 (C384)": "#56B4E9",
+          "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
+           "f32 · LL1536/2048 @64": "*",
            "float64 (packed)": "s",
-           "float32 (C768)": "o", "float32 (C384)": "^"}
+           "float32 (C768)": "o", "float32 (C384)": "^",
+           "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 
 
 def _style():
@@ -151,9 +160,19 @@ def main() -> int:
             ideal = [t0 * n0 / n for n in xs]
             ax.plot(xs, ideal, "--", color=c, lw=0.7, alpha=0.55, zorder=2)
 
+        for lab, x, y in spec.get("scatter", []):
+            ax.plot([x], [y], "*", color="#009E73", markersize=7,
+                    markeredgewidth=0.8, clip_on=False, zorder=4)
+            ax.annotate(lab, (x, y), fontsize=5.2, color="#009E73",
+                        textcoords="offset points", xytext=(-4, 5), ha="right")
+
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
-        allx = sorted({p[0] for _, pts in spec["series"] for p in pts})
+        allx = sorted({p[0] for _, pts in spec["series"] for p in pts}
+                      | {x for _, x, _ in spec.get("scatter", [])})
+        # thin crowded tick sets to powers spanning the range
+        if len(allx) > 6:
+            allx = [x for i, x in enumerate(allx) if i % 3 == 0 or x == allx[-1]]
         ax.set_xticks(allx)
         ax.set_xticklabels([str(x) for x in allx])
         ax.minorticks_off()
@@ -187,15 +206,17 @@ def main() -> int:
                markeredgewidth=0.9, label="float64"),
         Line2D([], [], color="#009E73", marker="D", markerfacecolor="white",
                markeredgewidth=0.9, label="mixed (f64 storage,\nf32 internals)"),
+        Line2D([], [], color="#009E73", marker="*", ls="none", markersize=7,
+               label="high-resolution point\n(not part of a ladder)"),
         Line2D([], [], color="#666666", ls="--", lw=0.7,
                label="ideal (anchored at\neach series' base)"),
     ]
     ax.legend(handles=handles, frameon=False, loc="upper left",
-              handlelength=1.8, labelspacing=0.8, borderpad=0)
-    ax.text(0, 0.02, "Levante: 4×A100-80 SXM/node (NVLink, IB HDR200);\n"
-                     "2×AMD Milan 7763 CPU nodes. Every point is a\n"
-                     "measured receipt; job ids in the source table.",
-            transform=ax.transAxes, fontsize=5.2, color="#777777", va="bottom")
+              handlelength=1.8, labelspacing=0.55, borderpad=0)
+    ax.text(0, -0.06, "Levante: 4×A100-80 SXM/node (NVLink, IB HDR200);\n"
+                      "2×AMD Milan 7763 CPU nodes. Every point is a\n"
+                      "measured receipt; job ids in the source table.",
+            transform=ax.transAxes, fontsize=5.0, color="#777777", va="top")
 
     # row band labels
     for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
