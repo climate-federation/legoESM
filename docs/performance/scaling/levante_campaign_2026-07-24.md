@@ -682,6 +682,50 @@ implicit_cn at 600 steps unforced) holds under forcing. That is a science
 review of ONE config field on ONE experiment, not a scheme-stability
 program.
 
+## Precision + grid-coverage verification (2026-07-27, user request)
+
+**Mixed precision — the production storage mode (f64 state + f32
+internals: `LEGOESM_VMIX_F32_SOLVE=1 LEGOESM_BAROCLINIC_F32=1`) — was the
+untested corner of the decision table. Now measured** (job 26493592,
+LL576 L20, same-job arms, conservation-gated 1e-5):
+
+| arm | plain f64 nd1/nd4 | MIXED nd1/nd4 | nd4 mixed gain |
+|---|---|---|---|
+| implicit standard | 63.56 / 23.39 | 51.40 / 20.49 | +14.2 % |
+| implicit **single_reduce** | 64.82 / 22.10 | 52.80 / **19.13** | +15.5 % |
+| explicit + wide | 71.57 / 23.28 | 59.48 / 20.39 | +14.1 % |
+
+Every arm gains ~14-15 % from mixed mode; the decision-table ORDERING is
+UNCHANGED under it (single_reduce fastest at nd4 in f64-storage, wide
+still the scale-out choice), and accuracy indicators are clean at this
+horizon: heat/salt drift identical to plain (7.740e-10), zero-forcing
+solver residual 2.067e-4 vs 2.079e-4. **Best f64-storage nd4 config =
+single_reduce + mixed at 19.13 ms (1.22x the production plain-standard
+23.39).**
+
+**MPAS np4 fix under f64 — the anomaly MOVES with dtype** (jobs 26493638
+/26493734): f64 np4 is HEALTHY (eff 0.95; the f32-only gate correctly
+does not fire) while f64 np8 ANTI-scaled (20.10 -> 21.42). Adding the
+(8, ..., float64) signature entry — receipt: **np8 21.42 -> 18.98
+(-11.4 %)**, np4 control unchanged (20.09). The f64 ladder is now
+monotone 38.34/20.09/18.98, and the shape x dtype dependence of the
+fusion pathology is confirmed from a second angle (element size shifts
+the pathological rung). Gate now carries dtype in the signature; both
+entries have same-day receipts.
+
+**Grid coverage — first receipts for the two unmeasured ocean grids**
+(job 26493648, nd1/2/4, both precisions):
+- **Tripole (synthetic ORCA fold)**: f32 35.56/24.91/15.89 ms, f64
+  63.84/43.36/24.12 — within 2-8 % of the regular lat-lon ladder at
+  every point, so THE FOLD IS NOT A SCALING BOTTLENECK at these counts.
+- **MPAS-ocean Voronoi (subdiv 6, L20)**: FLAT (f32 7.00/6.92/6.58; f64
+  ~7.0 throughout) — 41k cells = ~10k cells/GPU at nd4, far below the
+  ~30k floor; latency-floored as the tile-size pattern predicts, not a
+  defect. A meaningful ladder needs subdiv >= 7 (follow-up).
+- Remaining coverage gap, flagged not measured: atmosphere SPECTRAL has
+  no scaling receipts on any transport (global-transform lane, x64 by
+  policy).
+
 ## Using the calibrated bound correctly (a trap worth documenting)
 
 With the fabric constants supplied the bench flips `bound_calibrated=true`,
