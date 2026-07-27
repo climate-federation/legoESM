@@ -1273,14 +1273,28 @@ def _prandtl_number(
       K_M); in the stratified interior ``Pr -> 10`` (small abyssal K_H).
     - ``prandtl_mode="constant"``: ``Pr = Prandtl_tke0`` (Veros
       ``enable_Prandtl_tke=False`` fallback, default 10).
-    - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8): NEMO's EXACT nn_pdl=1
-      form (zdftke.F90:381-401): ``zri = N2·kappaM / (shear_sq +
-      bshear_floor)``, ``pdlr = max(0.1, ri_cri/max(ri_cri,zri))``,
-      ``Pr = 1/pdlr`` — i.e. ``Pr = max(1, min(10, (1/ri_cri)*zri))``,
-      the SAME clamp/scaling as "richardson" but with ``zri`` carrying an
-      EXTRA ``kappaM`` numerator factor NEMO's own formula has (a bulk/
-      flux-Richardson-like ratio, not the plain gradient Ri "richardson"
-      uses — Veros's own formula genuinely omits ``kappaM``). Caller passes
+    - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8, fixed #1226 item 11):
+      NEMO's EXACT nn_pdl=1 form (zdftke.F90:381-401):
+      ``zri = rn2b·p_avm / (p_sh2 + rn_bshear)``, ``pdlr = max(0.1,
+      ri_cri/max(ri_cri,zri))``, ``Pr = 1/pdlr`` — i.e.
+      ``Pr = max(1, min(10, (1/ri_cri)*zri))``, the SAME clamp/scaling as
+      "richardson" but ``zri``'s denominator is the ``p_sh2`` AVM-WEIGHTED
+      shear-production term [m²/s³] (``zdfsh2.F90:80-94``: face-averaged
+      OLD ``avm`` times the Burchard now·before velocity-gradient product),
+      NOT the plain ``shear_sq`` [1/s²] "richardson" divides by — a bulk/
+      flux-Richardson-like ratio (eddy-viscosity-weighted stability), not
+      the plain gradient Ri. ``p_avm`` in NEMO is the SAME pre-step
+      (OLD/previous-timestep) viscosity that feeds ``zdf_sh2`` — here,
+      ``kappaM`` (the caller's ``K_M_old``/prior-iteration K_M, matching
+      the ``P_s = K_M_old·shear_sq`` shear-production term already computed
+      at the call site). legoESM's single per-interface ``K_M`` (vs NEMO's
+      separate u-/v-point avm face-averaged onto the T-point, zdfsh2.F90:
+      80-94) has no face-averaging analog — same documented simplification
+      as :func:`legoesm.ocean.physics.vertical_mixing._shared.
+      vertical_shear_burchard` — so the faithful transcription forms
+      ``p_sh2 ≈ kappaM·shear_sq`` (the AVM-WEIGHTED shear, matching units
+      [m²/s³]) before adding ``bshear_floor`` (now in the SAME m²/s³ units
+      as NEMO's ``rn_bshear``, not ``shear_sq``'s 1/s²). Caller passes
       ``cfg.prandtl_ri_coeff = 1/ri_cri`` (unchanged meaning).
 
     Differentiable; the ``min``/``max`` clamps are sub-gradient-safe and
@@ -1294,7 +1308,13 @@ def _prandtl_number(
     if cfg.prandtl_mode == "nemo_ri":
         bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
                              dtype=N2.dtype)
-        zri = N2 * kappaM / jnp.maximum(shear_sq + bshear, 1e-30)
+        # p_sh2 (avm-weighted shear production, [m^2/s^3]) — zdfsh2.F90:80-94
+        # face-averages OLD avm onto the shear product; legoESM's single
+        # per-interface K_M has no face-avg analog, so kappaM*shear_sq is
+        # the faithful cell-centred transcription (== P_s_curr at the
+        # call site, tke.py:1932).
+        p_sh2 = kappaM * shear_sq
+        zri = N2 * kappaM / jnp.maximum(p_sh2 + bshear, 1e-30)
         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "

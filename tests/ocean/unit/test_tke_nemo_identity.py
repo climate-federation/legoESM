@@ -27,6 +27,7 @@ import pytest
 
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
+    _prandtl_number,
     _solve_tke_backward_euler,
     tke_vertical_mixing,
 )
@@ -522,6 +523,14 @@ class TestRn2bTimeLevel:
         rn2)."""
         (u, v, T, S, rho, dz_half, z_int, tx, ty, p_cell, dz_ref,
          jacobian) = _n2b_test_column()
+        # #1226 item 11: nemo_ri's zri denominator is now the AVM-WEIGHTED
+        # p_sh2 (kappaM*shear_sq), not bare shear_sq -- the fixture's tiny
+        # shear (~(0.05/25)^2) now saturates Pr at the 10-ceiling in BOTH
+        # calls (physically correct: a near-zero-shear stratified column IS
+        # abyssal-limited), masking the N2b sensitivity this test checks.
+        # Scale up the velocity shear so zri sits off the ceiling.
+        u = u * 20.0
+        v = v * 20.0
         T_b = T + 3.0
         S_b = S
         common = dict(
@@ -804,3 +813,136 @@ class TestNemoBurchardPreCenteredCcState:
         assert bool(jnp.isfinite(K_v_p).all())
         assert bool(jnp.isfinite(A_v_p).all())
         assert bool(jnp.isfinite(tke_new).all())
+
+
+# ---------------------------------------------------------------------------
+# #1226 item 11: nemo_ri zri transcription bug fix. Ground truth is an
+# independent loop-port of zdftke.F90:381-401 (the nn_pdl==1 branch) +
+# zdfsh2.F90:80-94 (the p_sh2 avm-weighted shear-production term the
+# denominator actually consumes) -- NOT a call into legoESM's own
+# _prandtl_number, so the test is non-vacuous against a re-introduced bug.
+# ---------------------------------------------------------------------------
+
+
+def _nemo_zri_pdlr_reference(rn2b, p_avm, shear_sq, rn_bshear, ri_cri):
+    """Independent NumPy loop-port of zdftke.F90:381-401 + zdfsh2's p_sh2.
+
+    ``p_sh2`` (zdfsh2.F90:80-94, the no-Stokes branch) is, per interface,
+    ``avm-weighted`` shear production [m^2/s^3] -- on legoESM's cell-centred
+    single-K_M grid (no u-/v-point face-averaging to port), the faithful
+    per-interface form is ``p_avm * shear_sq``. Returns (zri, pdlr) with the
+    SAME branch structure as the Fortran (rn2b<=0 -> zri=0; zdiv==0 exact-
+    zero guard -> divide by rn_bshear alone; else divide by zdiv).
+    """
+    rn2b = np.asarray(rn2b, dtype=np.float64)
+    p_avm = np.asarray(p_avm, dtype=np.float64)
+    shear_sq = np.asarray(shear_sq, dtype=np.float64)
+    p_sh2 = p_avm * shear_sq
+    zri = np.zeros_like(rn2b)
+    for idx in np.ndindex(rn2b.shape):
+        if rn2b[idx] <= 0.0:
+            zri[idx] = 0.0
+            continue
+        zdiv = p_sh2[idx] + rn_bshear
+        if zdiv == 0.0:
+            zri[idx] = rn2b[idx] * p_avm[idx] / rn_bshear
+        else:
+            zri[idx] = rn2b[idx] * p_avm[idx] / zdiv
+    pdlr = np.maximum(0.1, ri_cri / np.maximum(ri_cri, zri))
+    return zri, pdlr
+
+
+class TestNemoRiZriTranscription:
+    """Ground-truth transcription test for #1226 item 11.
+
+    The bug: legoESM's ``zri`` divided by the bare gradient ``shear_sq``
+    [1/s^2] instead of NEMO's avm-weighted ``p_sh2`` [m^2/s^3] -- a
+    dimensional error of order ``kappaM`` (1e-5..1e-1) that collapsed zri
+    far below the Pr=1 clamp. This test builds the reference zri/pdlr by an
+    INDEPENDENT loop-port (not a call into ``_prandtl_number``) and checks
+    ``_prandtl_number``'s ``Pr = 1/pdlr`` against it.
+    """
+
+    RI_CRI = 2.0 / (2.0 + 5.0 / 10.0)  # NEMO default rn_ediss=5, rn_ediff=10
+
+    def _run(self, N2, shear_sq, kappaM, bshear=1.0e-20):
+        cfg = TKEConfig(prandtl_mode="nemo_ri", bshear_floor=bshear,
+                         prandtl_ri_coeff=1.0 / self.RI_CRI)
+        Pr = _prandtl_number(jnp.asarray(N2), jnp.asarray(shear_sq),
+                              jnp.asarray(kappaM), cfg)
+        return np.asarray(Pr)
+
+    def test_matches_independent_loop_port_turbulent_column(self):
+        rng = np.random.default_rng(42)
+        n = 25
+        rn2b = rng.uniform(1e-6, 5e-4, n)          # stratified (>0)
+        p_avm = rng.uniform(1e-5, 1e-2, n)          # realistic K_M range
+        shear_sq = rng.uniform(1e-6, 1e-3, n)       # realistic shear^2
+        zri_ref, pdlr_ref = _nemo_zri_pdlr_reference(
+            rn2b, p_avm, shear_sq, rn_bshear=1.0e-20, ri_cri=self.RI_CRI)
+        Pr_ref = 1.0 / pdlr_ref
+
+        Pr_lego = self._run(rn2b, shear_sq, p_avm)
+        np.testing.assert_allclose(Pr_lego, Pr_ref, rtol=1e-10)
+
+    def test_old_unweighted_formula_fails_this_case(self):
+        """Non-vacuous: the OLD (buggy) ``zri = N2*kappaM/shear_sq`` formula
+        must NOT reproduce the reference on a case where kappaM is far from
+        1 (the two formulas only coincide when kappaM == 1)."""
+        rn2b = np.array([2.0e-4])
+        p_avm = np.array([1.0e-3])          # realistic abyssal K_M, << 1
+        shear_sq = np.array([5.0e-5])
+        zri_ref, pdlr_ref = _nemo_zri_pdlr_reference(
+            rn2b, p_avm, shear_sq, rn_bshear=1.0e-20, ri_cri=self.RI_CRI)
+        Pr_ref = float(1.0 / pdlr_ref[0])
+
+        # OLD buggy transcription (dimensionally wrong: divides by bare
+        # shear_sq, no avm weighting in the denominator).
+        zri_old = rn2b[0] * p_avm[0] / max(shear_sq[0] + 1.0e-20, 1e-30)
+        pdlr_old = max(0.1, self.RI_CRI / max(self.RI_CRI, zri_old))
+        Pr_old = 1.0 / pdlr_old
+
+        Pr_lego = float(self._run(rn2b, shear_sq, p_avm)[0])
+        assert Pr_lego == pytest.approx(Pr_ref, rel=1e-10)
+        assert Pr_old != pytest.approx(Pr_ref, rel=1e-6), (
+            "old formula should NOT match the faithful reference here")
+        assert Pr_lego != pytest.approx(Pr_old, rel=1e-6), (
+            "fixed _prandtl_number should differ from the old buggy value")
+
+    def test_rn2b_non_positive_gives_ri_zero_pr_floor(self):
+        """zdftke.F90:384-385: rn2b<=0 -> zri=0 -> pdlr=max(0.1, ri_cri/
+        max(ri_cri,0))=1 -> Pr=1/pdlr=1 (the convective branch: K_H tracks
+        the full convective K_M, matching the "richardson" mode's Ri<0 ->
+        Pr=1 behaviour)."""
+        for rn2b_val in (0.0, -1.0e-4):
+            Pr = self._run(np.array([rn2b_val]), np.array([1.0e-4]),
+                            np.array([1.0e-2]))
+            np.testing.assert_allclose(Pr, 1.0, rtol=1e-10)
+
+    def test_pr_saturates_at_10_in_strongly_stratified_column(self):
+        """zdftke.F90:399: pdlr = max(0.1, ri_cri/max(ri_cri,zri)) -> as
+        zri -> large, pdlr -> 0.1 -> Pr = 1/pdlr -> 10 (the abyssal
+        saturation ceiling)."""
+        rn2b = np.array([1.0])            # strongly stratified
+        p_avm = np.array([1.0])
+        shear_sq = np.array([1.0e-8])     # vanishing shear -> huge zri
+        Pr = self._run(rn2b, shear_sq, p_avm)
+        np.testing.assert_allclose(Pr, 10.0, rtol=1e-10)
+
+    def test_bshear_floor_now_in_avm_weighted_units(self):
+        """#1226 item 11: bshear_floor is added to the AVM-WEIGHTED p_sh2
+        [m^2/s^3], not to bare shear_sq [1/s^2] -- so with kappaM << 1 and
+        shear_sq below the OLD floor's scale, the floor binds at a
+        different point than it would under the (buggy) unweighted form.
+        Concretely: zero shear_sq with a large bshear_floor must give
+        zri = rn2b*kappaM/bshear_floor (the floor alone dominates the
+        denominator), matching the reference port exactly."""
+        rn2b = np.array([1.0e-4])
+        p_avm = np.array([1.0e-2])
+        shear_sq = np.array([0.0])
+        bshear = 1.0e-6
+        zri_ref, pdlr_ref = _nemo_zri_pdlr_reference(
+            rn2b, p_avm, shear_sq, rn_bshear=bshear, ri_cri=self.RI_CRI)
+        Pr_ref = float(1.0 / pdlr_ref[0])
+        Pr_lego = float(self._run(rn2b, shear_sq, p_avm, bshear=bshear)[0])
+        assert Pr_lego == pytest.approx(Pr_ref, rel=1e-10)
