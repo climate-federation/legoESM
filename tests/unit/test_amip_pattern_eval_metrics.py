@@ -83,3 +83,28 @@ def test_nan_reference_cells_excluded_pairwise():
 def test_weighted_global_mean_uniform_field():
     f = np.full((36, 72), 3.25)
     assert _mod.weighted_global_mean(f, LAT) == pytest.approx(3.25)
+
+
+# ---------------------------------------------------------------------------
+# --months window selector: comparing two runs of DIFFERENT length requires
+# pinning the calendar window on both, else the difference is a sampling
+# confound.  A typo must fail loudly rather than silently reshape the window.
+# ---------------------------------------------------------------------------
+
+def test_parse_months_none_means_every_month_written():
+    assert _mod.parse_months("") is None
+    assert _mod.parse_months(None) is None
+
+
+def test_parse_months_range_and_list():
+    assert _mod.parse_months("1-8") == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert _mod.parse_months("1,2,12") == [1, 2, 12]
+    assert _mod.parse_months("3") == [3]
+    # union, de-duplicated and sorted
+    assert _mod.parse_months("6-8,1,7") == [1, 6, 7, 8]
+
+
+@pytest.mark.parametrize("spec", ["0-5", "12-13", "13", "0", "8-2"])
+def test_parse_months_rejects_out_of_range_or_reversed(spec):
+    with pytest.raises(ValueError):
+        _mod.parse_months(spec)

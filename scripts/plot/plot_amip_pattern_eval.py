@@ -97,12 +97,51 @@ PATTERN_FIELDS = (
 ZONAL3D_FIELDS = (("ta", "K", 1.0), ("ua", "m/s", 1.0))
 
 
-def _open_cmor(run_dir: Path, var: str):
+def parse_months(spec):
+    """Parse a ``--months`` spec ("1-8", "1,2,12", "3") into a sorted list.
+
+    Returns None for an empty spec (= use every month the run wrote).  Raises
+    on anything outside 1-12 rather than silently dropping it, so a typo can
+    never quietly change the comparison window.
+    """
+    if not spec:
+        return None
+    out = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part[1:]:
+            a, b = part.split("-", 1)
+            lo, hi = int(a), int(b)
+            if lo > hi:
+                raise ValueError(f"--months range {part!r} is reversed")
+            out.update(range(lo, hi + 1))
+        else:
+            out.add(int(part))
+    if not out or any(m < 1 or m > 12 for m in out):
+        raise ValueError(f"--months {spec!r} must select calendar months 1-12")
+    return sorted(out)
+
+
+def _open_cmor(run_dir: Path, var: str, months=None):
+    """Open a CMOR variable, optionally restricted to calendar ``months``.
+
+    The month filter is applied HERE so every consumer (pattern maps, zonal
+    sections, the TOA/Bowen table) shares one window — comparing two runs
+    whose CMOR archives have different lengths requires pinning the window on
+    both, else the difference is a sampling confound rather than a result.
+    """
     import xarray as xr
     hits = sorted(glob.glob(str(run_dir / "cmor" / "Amon" / f"{var}_*.nc")))
     if not hits:
         return None
-    return xr.open_mfdataset(hits, combine="by_coords")[var]
+    da = xr.open_mfdataset(hits, combine="by_coords")[var]
+    if months is not None:
+        da = da.sel(time=da["time"].dt.month.isin(months))
+        if da.sizes.get("time", 0) == 0:
+            return None
+    return da
 
 
 def _open_ref(ref_root: Path, dataset: str, var: str):
@@ -176,7 +215,13 @@ def main() -> int:
     ap.add_argument("--out", default="", help="output file prefix "
                     "(default <run_dir>/pattern_eval)")
     ap.add_argument("--label", default="")
+    ap.add_argument("--months", default="",
+                    help="restrict BOTH model and reference to these "
+                         "calendar months (e.g. '1-8' or '1,2,12'); "
+                         "default = every month the run wrote. Pin this "
+                         "when comparing runs of different length.")
     args = ap.parse_args()
+    months = parse_months(args.months)
     run = args.run_dir
     label = args.label or run.name
     out_prefix = args.out or str(run / "pattern_eval")
@@ -187,7 +232,7 @@ def main() -> int:
     nf = len(PATTERN_FIELDS)
     fig, axes = plt.subplots(nf, 3, figsize=(16, 3.1 * nf))
     for i, (var, refset, refvar, scale, unit, epoch) in enumerate(PATTERN_FIELDS):
-        da = _open_cmor(run, var)
+        da = _open_cmor(run, var, months)
         if da is None:
             for ax in axes[i]:
                 ax.set_axis_off()
@@ -237,7 +282,7 @@ def main() -> int:
     fig2, axes2 = plt.subplots(len(ZONAL3D_FIELDS), 3,
                                figsize=(15, 4.2 * len(ZONAL3D_FIELDS)))
     for i, (var, unit, scale) in enumerate(ZONAL3D_FIELDS):
-        da = _open_cmor(run, var)
+        da = _open_cmor(run, var, months)
         ref_da = _open_ref(args.ref_root, "reanalysis_ERA5", var)
         if da is None or ref_da is None:
             for ax in axes2[i]:
@@ -291,7 +336,7 @@ def main() -> int:
     # TOA budget + E-P closure from the model's own CMOR output
     extras = {}
     for v in ("rsdt", "rsut", "rlut", "pr", "evspsbl", "hfls", "hfss"):
-        da = _open_cmor(run, v)
+        da = _open_cmor(run, v, months)
         if da is not None:
             extras[v] = weighted_global_mean(
                 np.asarray(da.mean("time").values), da["lat"].values)
