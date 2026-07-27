@@ -330,6 +330,16 @@ class GMRediConfig(NamedTuple):
     # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
     # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
     mld_criterion: str = "rho_c"
+    # N^2 fed to the NEMO-native isopycnal slopes (ldf_slp).  NEMO's ldfslp
+    # consumes ``rn2b`` -- the LINEARISED alpha/beta bn2 of eosbn2.F90 -- not a
+    # parcel-displacement N^2.  The two diverge with pressure, so the adiabatic
+    # form biases the slopes progressively at depth (#1226: on the DINO twin
+    # |wslpi| runs 1.2% high in aggregate, essentially all of it below level 18,
+    # with the bottom 8 levels carrying ~60% of the excess).  "nemo_bn2" is
+    # S-EOS-specific; "adiabatic" (default) leaves every non-oracle recipe
+    # bit-identical.  Dispatch raises on an unknown value
+    # (gm_redi_latlon_cgrid._nemo_wpoint_e3w_wmask_n2).
+    slope_n2: str = "adiabatic"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

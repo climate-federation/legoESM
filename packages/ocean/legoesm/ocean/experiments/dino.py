@@ -469,6 +469,15 @@ class DINOConfig:
     # selects "n2_integral"; only affects runs with the ML ramp / native
     # slopes active. Dispatch raises on an unknown value.
     gm_redi_mld_criterion: str = "rho_c"
+    # N^2 fed to the NEMO-native isopycnal slopes (GMRediConfig.slope_n2):
+    # "adiabatic" (default, byte-identical parcel-displacement N^2) or
+    # "nemo_bn2" (NEMO's rn2b, the linearised alpha/beta bn2 that ldfslp
+    # actually consumes).  The two diverge with pressure, so "adiabatic" biases
+    # the slopes progressively at depth; on the DINO y5 twin |wslpi| ran 1.48%
+    # high below level 18, which "nemo_bn2" removes (-> 0.05%).  The
+    # nemo_dino_kamm card selects "nemo_bn2".  Dispatch raises on an unknown
+    # value.
+    gm_redi_slope_n2: str = "adiabatic"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -982,6 +991,9 @@ DINO_RECIPES: dict[str, dict] = {
         # (node 6/7); the pot-density default anchors the ML slope ramp at a
         # different depth (slopes corr 0.99 below ML, 0.33 inside).
         "gm_redi_mld_criterion": "n2_integral",
+        # ldfslp consumes rn2b, not a parcel-displacement N^2 (eosbn2.F90:1455).
+        # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
+        "gm_redi_slope_n2": "nemo_bn2",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -2448,6 +2460,10 @@ def dino_lat_lon_model_config(
         raise ValueError(
             f"unknown DINOConfig.gm_kappa_scheme {cfg.gm_kappa_scheme!r}; "
             "expected 'visbeck' or 'treguier'")
+    if cfg.gm_redi_slope_n2 not in ("adiabatic", "nemo_bn2"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_n2 "
+            f"{cfg.gm_redi_slope_n2!r}; expected 'adiabatic' or 'nemo_bn2'")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -2512,6 +2528,7 @@ def dino_lat_lon_model_config(
             # with msc off, matching the missing-MSC signature (#1226).
             msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
+            slope_n2=cfg.gm_redi_slope_n2,
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -2536,6 +2553,7 @@ def dino_lat_lon_model_config(
             slope_scheme=cfg.gm_redi_slope_scheme,
             gm_bolus_advection=cfg.gm_bolus_advection,
             mld_criterion=cfg.gm_redi_mld_criterion,
+            slope_n2=cfg.gm_redi_slope_n2,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap

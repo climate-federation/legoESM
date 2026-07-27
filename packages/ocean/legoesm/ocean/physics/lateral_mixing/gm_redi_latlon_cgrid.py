@@ -696,7 +696,8 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 # Isopycnal slope computation
 # =====================================================================
 
-def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act):
+def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
+                              slope_n2="adiabatic"):
     """Shared W-point geometry + N² for the native ldfslp stencil.
 
     Factors the ``e3w``/``wmask3``/``pn2`` block common to
@@ -738,12 +739,31 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act):
     wmask3 = act * jnp.roll(act, +1, axis=2)
     wmask3 = wmask3.at[:, :, 0].set(act[:, :, 0])
 
-    from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
-    p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
-              * gdept)[None, None, :] * jnp.ones_like(rho)
-    J1 = jnp.ones((nlat, nlon), dtype=dtype)
-    n2_int = compute_buoyancy_frequency_adiabatic(
-        T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn)          # (...,nlev-1)
+    # NEMO's ldf_slp consumes rn2b -- the LINEARISED alpha/beta bn2 of
+    # eosbn2.F90:1455-1468, NOT a parcel-displacement N^2.  The two diverge with
+    # pressure, so the adiabatic form biases the slopes progressively at depth.
+    # Selectable so non-oracle recipes stay bit-identical (GMRediConfig.slope_n2).
+    if slope_n2 == "nemo_bn2":
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency_nemo_bn2, NemoSEOSConfig,
+        )
+        # zrw (eosbn2.F90:1459) weights the two T-point alpha/beta by the TRUE
+        # w-interface depth gdepw, which is the gdept midpoint only on a uniform
+        # ladder -- see the same fix in _nemo_mld_from_n2_integral.
+        _gdepw_int = jnp.cumsum(dz)[:-1]
+        n2_int = compute_buoyancy_frequency_nemo_bn2(
+            T, S, gdept, _gdepw_int, NemoSEOSConfig(), g=g)        # (...,nlev-1)
+    elif slope_n2 == "adiabatic":
+        from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
+        p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
+                  * gdept)[None, None, :] * jnp.ones_like(rho)
+        J1 = jnp.ones((nlat, nlon), dtype=dtype)
+        n2_int = compute_buoyancy_frequency_adiabatic(
+            T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn)      # (...,nlev-1)
+    else:
+        raise ValueError(
+            f"unknown GMRediConfig.slope_n2 {slope_n2!r}; "
+            "expected 'adiabatic' or 'nemo_bn2'.")
     pn2 = jnp.concatenate([jnp.zeros((nlat, nlon, 1), dtype=dtype),
                            n2_int.astype(dtype)], axis=-1)        # (...,nlev)
     pn2 = pn2 * wmask3
@@ -821,7 +841,9 @@ def compute_nemo_native_slopes(
     # Shared W-point e3w / wmask3 / pn2 (NEMO ldf_eiv reuses exactly this
     # geometry + N² — factored so the adaptive-κ path below stays bit-
     # consistent with the slopes it is coupled to; no duplicate numerics).
-    e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act)
+    e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
+        rho, T, S, z_coord, eos_fn, rho_0, g, act,
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'))
     pn2_kp1 = jnp.concatenate([pn2[:, :, 1:],
                                jnp.zeros((nlat, nlon, 1), dtype=dtype)], axis=-1)
 
@@ -1036,7 +1058,9 @@ def compute_treguier_kappa_gm_nemo_native(
     ones_z = jnp.ones((1, 1, rho.shape[-1]), dtype=dtype)
     act = (mask[:, :, None] * ones_z if active_3d is None
            else active_3d.astype(dtype))
-    e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act)
+    e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
+        rho, T, S, z_coord, eos_fn, rho_0, g, act,
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'))
     e3w_3d = jnp.broadcast_to(e3w, rho.shape)
 
     # Floor at 1e-30 (not a hard 0) before sqrt: sqrt(0) has an infinite

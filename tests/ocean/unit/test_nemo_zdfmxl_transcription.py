@@ -234,3 +234,63 @@ def test_uniform_ladder_makes_the_two_weightings_agree():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_slope_n2_dispatch_is_hardened_and_card_opts_in():
+    """`slope_n2` must raise on a typo, and only the oracle card may opt in.
+
+    A bare ``else: <default>`` here would silently run a DIFFERENT N^2 (and so
+    different slopes) on a misspelling.
+    """
+    import dataclasses
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    assert dino_config_for_recipe(
+        "nemo_dino_kamm_mlf").gm_redi_slope_n2 == "nemo_bn2"
+    assert dino_config_for_recipe(
+        "legoesm_default").gm_redi_slope_n2 == "adiabatic"
+
+    from legoesm.ocean.experiments.dino import (
+        dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+    bad = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
+                              gm_redi_slope_n2="not_a_scheme")
+    grid = dino_lat_lon_grid(bad, n_lon=8)
+    with pytest.raises(ValueError, match="gm_redi_slope_n2"):
+        dino_lat_lon_model_config(grid, bad)
+
+
+def test_slope_n2_selector_changes_the_n2_that_reaches_the_slopes():
+    """The two options must give genuinely different N^2 (non-vacuous switch).
+
+    Guards against the selector being threaded but ignored -- which is exactly
+    how the earlier 'wired the right function with a wrong depth' defect hid.
+    """
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_wpoint_e3w_wmask_n2,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+    nlev = 12
+    dz = np.geomspace(10.0, 300.0, nlev)
+    rng = np.random.default_rng(2)
+    T = 10.0 + np.cumsum(rng.uniform(0.05, 0.4, (4, 3, nlev)), axis=-1)[:, :, ::-1]
+    S = 35.0 + rng.uniform(-0.1, 0.1, (4, 3, nlev))
+    z = _z_coord(dz, 4, 3, np.full((4, 3), nlev - 1))
+    act = z.is_active
+    eos_fn = make_eos_fn("nemo_seos", None, rho0=1026.0)
+    rho = jnp.asarray(1026.0 + 0.2 * (10.0 - T))
+
+    out = {}
+    for opt in ("adiabatic", "nemo_bn2"):
+        _e3w, _wm, pn2 = _nemo_wpoint_e3w_wmask_n2(
+            rho, jnp.asarray(T), jnp.asarray(S), z, eos_fn, 1026.0, 9.80665,
+            act, slope_n2=opt)
+        out[opt] = np.asarray(pn2)
+    d = np.abs(out["adiabatic"] - out["nemo_bn2"])
+    assert d.max() > 1e-9, "the selector had no effect -- it is not wired through"
+    with pytest.raises(ValueError, match="slope_n2"):
+        _nemo_wpoint_e3w_wmask_n2(rho, jnp.asarray(T), jnp.asarray(S), z,
+                                  eos_fn, 1026.0, 9.80665, act,
+                                  slope_n2="typo")
