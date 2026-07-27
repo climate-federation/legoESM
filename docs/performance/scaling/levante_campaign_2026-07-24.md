@@ -695,11 +695,15 @@ LL576 L20, same-job arms, conservation-gated 1e-5):
 | implicit **single_reduce** | 64.82 / 22.10 | 52.80 / **19.13** | +15.5 % |
 | explicit + wide | 71.57 / 23.28 | 59.48 / 20.39 | +14.1 % |
 
-Every arm gains ~14-15 % from mixed mode; the decision-table ORDERING is
-UNCHANGED under it (single_reduce fastest at nd4 in f64-storage, wide
-still the scale-out choice), and accuracy indicators are clean at this
-horizon: heat/salt drift identical to plain (7.740e-10), zero-forcing
-solver residual 2.067e-4 vs 2.079e-4. **Best f64-storage nd4 config =
+Every arm gains ~14-15 % from mixed mode; the decision-table ordering is
+OBSERVED UNCHANGED (single_reduce 6-7 % ahead at nd4, beyond the
+informal ~+-1pp single-run noise — but that noise figure came from a
+different lane, and the mixed arms are single runs; "wide is the
+scale-out choice" is UNVERIFIED in mixed mode beyond nd4). Accuracy: NO
+DIFFERENCE DETECTED IN THESE INDICATORS OVER THIS 33-STEP UNFORCED
+HORIZON — heat/salt drift identical to plain (7.740e-10), zero-forcing
+residual 2.067e-4 vs 2.079e-4; that is not trajectory or science
+equivalence (codex round-13). **Best f64-storage nd4 config =
 single_reduce + mixed at 19.13 ms (1.22x the production plain-standard
 23.39).**
 
@@ -707,7 +711,8 @@ single_reduce + mixed at 19.13 ms (1.22x the production plain-standard
 /26493734): f64 np4 is HEALTHY (eff 0.95; the f32-only gate correctly
 does not fire) while f64 np8 ANTI-scaled (20.10 -> 21.42). Adding the
 (8, ..., float64) signature entry — receipt: **np8 21.42 -> 18.98
-(-11.4 %)**, np4 control unchanged (20.09). The f64 ladder is now
+(observed -11.4 %, single run, no CI; the unchanged np4 control at 20.09
+supports specificity but does not quantify variance)**. The f64 ladder is now
 monotone 38.34/20.09/18.98, and the shape x dtype dependence of the
 fusion pathology is confirmed from a second angle (element size shifts
 the pathological rung). Gate now carries dtype in the signature; both
@@ -716,12 +721,17 @@ entries have same-day receipts.
 **Grid coverage — first receipts for the two unmeasured ocean grids**
 (job 26493648, nd1/2/4, both precisions):
 - **Tripole (synthetic ORCA fold)**: f32 35.56/24.91/15.89 ms, f64
-  63.84/43.36/24.12 — within 2-8 % of the regular lat-lon ladder at
-  every point, so THE FOLD IS NOT A SCALING BOTTLENECK at these counts.
+  63.84/43.36/24.12 — within 2-8 % of the regular lat-lon ladder, BUT
+  that baseline is from a DIFFERENT job/day, so "fold is not a
+  bottleneck" is CONFOUNDED until the same-job matched A/B lands (job
+  26493837, submitted on codex round-13's objection).
 - **MPAS-ocean Voronoi (subdiv 6, L20)**: FLAT (f32 7.00/6.92/6.58; f64
-  ~7.0 throughout) — 41k cells = ~10k cells/GPU at nd4, far below the
-  ~30k floor; latency-floored as the tile-size pattern predicts, not a
-  defect. A meaningful ladder needs subdiv >= 7 (follow-up).
+  ~7.0 throughout) at ~10k cells/GPU — CONSISTENT with the tile-size
+  latency floor, but a flat ladder alone cannot exclude a partition or
+  parallel-path defect (codex round-13): "hypothesis, not verdict". The
+  discriminating subdiv-7 ladder (~41k cells/GPU at nd4, above the
+  floor) is in job 26493837 — if it scales, floor confirmed; if it stays
+  flat, defect hunt.
 - Remaining coverage gap, flagged not measured: atmosphere SPECTRAL has
   no scaling receipts on any transport (global-transform lane, x64 by
   policy).
