@@ -3997,32 +3997,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tke-surface-bc", type=str, default=None,
                    choices=["veros_flux", "nemo_dirichlet"],
                    help="Surface-TKE boundary condition for --tripole-vmix "
-                        "tke. None (default) keeps the TKEConfig default "
-                        "(veros_flux, the flux form (|tau|/rho0)^{3/2}); "
-                        "'nemo_dirichlet' selects NEMO's en(1)=max(rn_emin0, "
-                        "rn_ebb*|tau|/rho0) Dirichlet condition (rn_ebb=67.83), "
-                        "closing the flagged surface-BC fidelity gap so wind "
-                        "energy enters the near-surface TKE at the NEMO rate. "
-                        "Requires --tripole-vmix tke (else raises).")
+                        "tke. None (default) keeps the card default "
+                        "(nemo_dirichlet since #1326: NEMO's en(1)="
+                        "max(rn_emin0, rn_ebb*|tau|/rho0), rn_ebb=67.83); "
+                        "'veros_flux' selects the Veros flux form "
+                        "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
+                        "A/B). Requires --tripole-vmix tke (else raises).")
     p.add_argument("--tke-mxl-choice", type=int, default=None, choices=[2, 3],
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
-                        "None (default) keeps the card value (2 = Veros "
-                        "Bougeault-Lacarrere). 3 = NEMO nn_mxl=3: the lup/ldown "
-                        "|dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-stress "
-                        "surface anchor that choice 2 omits (larger upper-ocean "
-                        "mixing length -> more mixed-layer mixing -> cooler SST; "
-                        "the tropical-warm fix candidate). Requires "
-                        "--tripole-vmix tke (else raises).")
-    p.add_argument("--tke-prognostic", action="store_const", const=True,
+                        "None (default) keeps the card value (3 since #1326 = "
+                        "NEMO nn_mxl=3: lup/ldown |dl/dz|<=e3t sweeps WITH the "
+                        "ln_mxl0 wind-stress surface anchor). 2 = Veros "
+                        "Bougeault-Lacarrere (the pre-#1326 behaviour, for "
+                        "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-prognostic", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="Prognostic TKE for --tripole-vmix tke. Unset (default) "
-                        "keeps the card value (quasi-steady Mode-B diagnostic, 3 "
-                        "backward-Euler iters). Set = NEMO's prognostic en "
-                        "integration (Mode-A, one step/model-step carrying "
-                        "OceanState.tke) — the closure accumulates the diurnal-SW "
-                        "+ wind TKE that mixes the tropical ML (the candidate for "
-                        "the tropical warm the mixing-length levers can't touch). "
-                        "Requires --tripole-vmix tke (else raises).")
+                        "keeps the card value (PROGNOSTIC Mode-A since #1326: "
+                        "NEMO's en integration, one step/model-step carrying "
+                        "OceanState.tke). --no-tke-prognostic selects the "
+                        "quasi-steady Mode-B diagnostic (3 backward-Euler "
+                        "iters/call, ~3x cheaper; the pre-#1326 behaviour, for "
+                        "A/B). Requires --tripole-vmix tke (else raises).")
     p.add_argument("--gm-treguier", action="store_true",
                    help="Use the NEMO-faithful flow-dependent GM coefficient "
                         "(TreguierConfig = NEMO &namtra_eiv nn_aei_ijk_t=21: "
@@ -4139,9 +4135,12 @@ def main() -> int:
     # KPP MLD-deepening sensitivity flags are mpas/latlon-only (fail loud).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice,
                        mpas_vmix=args.mpas_vmix)
-    # --mpas-vmix is an MPAS selector: a non-default value on another grid
-    # would be silently ignored (dispatch footgun) — reject.
-    if args.mpas_vmix != "kpp" and args.grid != "mpas":
+    # --mpas-vmix is an MPAS selector: on another grid it would be silently
+    # ignored (dispatch footgun) — reject whenever the flag was typed
+    # EXPLICITLY, even with the 'kpp' default value (codex LOW: an explicit
+    # `--mpas-vmix kpp --grid tripole` is still a user error worth surfacing).
+    if args.grid != "mpas" and (args.mpas_vmix != "kpp"
+                                or "mpas_vmix" in _cli_flags_given()):
         raise SystemExit(
             f"--mpas-vmix {args.mpas_vmix!r} selects the MPAS vertical-mixing "
             f"closure and requires --grid mpas (got --grid {args.grid!r}); "
@@ -4587,9 +4586,11 @@ def main() -> int:
             # TKE carry (#1326), but MPAS has no MPASOceanState.tke seed yet
             # (make_mpas_ocean_physics raises on prognostic=True), so MPAS
             # runs the diagnostic quasi-steady Mode-B until that lands.
+            # No tke_eice pass-through: _validate_tke_card_grid guarantees
+            # --tke-eice is None off the tripole, so the card default
+            # (eice=3, NEMO nn_eice) applies here (codex LOW: dead arg).
             vertical_mixing=(
                 build_tripole_vmix_config("tke", iwm=None,
-                                          tke_eice=args.tke_eice,
                                           tke_prognostic=False)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,

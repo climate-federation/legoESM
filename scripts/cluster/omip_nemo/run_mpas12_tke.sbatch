@@ -9,21 +9,22 @@
 #SBATCH --time=16:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas12_tke_%j.out
 # MPAS12 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
-# NEMO ORCA1 &namzdf_tke card — nn_mxl=2, lc, etau nn_etau=1 w/ nn_htau=1
-# latitude profile, eice=3 card default — through the SAME grid-agnostic
-# kernel the tripole runs; molecular backgrounds + preset convection stripped
-# to the tripole closure environment).  Controlled A/B: EVERYTHING identical
-# to mpas9/mpas10 except the closure, so the day-30 Arctic delta is the
-# TKE-vs-KPP scheme effect on MPAS.  The 2x2 (trp5/trp6/mpas10) put the
-# scheme half at +0.78 Siberian / +36-50 m Arctic MLD — if the card closes
-# it, mpas12 should land near Siberian ~+1.0 and MLD well under +42.9, and
-# mpas12-vs-trp5 becomes the SAME-CARD cross-grid TKE pair (grid effect
+# NEMO ORCA1 &namzdf_tke card — nn_mxl=3 + ln_mxl0 anchor, nemo_dirichlet
+# surface BC, lc, etau nn_etau=1 w/ nn_htau=1 latitude profile, eice=3 card
+# default; MPAS pins the DIAGNOSTIC Mode-B until the prognostic carry lands —
+# through the SAME grid-agnostic kernel the tripole runs).  Controlled A/B:
+# EVERYTHING identical to mpas9/mpas10 except the closure, so the day-30
+# Arctic delta is the TKE-vs-KPP scheme effect on MPAS.  The 2x2
+# (trp5/trp6/mpas10) put the scheme half at +0.78 Siberian / +36-50 m Arctic
+# MLD — mpas12-vs-tripole is the SAME-CARD cross-grid TKE pair (grid effect
 # only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
 set +e
-WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/vfs-tke-fix; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
-PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
+# Runs from the MAIN repo checkout (codex HIGH: this job previously ran the
+# vfs-tke-fix worktree, so a post-merge submission would validate stale code).
 ROOT=/burg-archive/glab/users/pg2328/legoESM
+cd $ROOT
+export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ROOT2=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1
 RUN=$ROOT2/cfgs/ORCA1/EXP00/RUN_REF
 INP=$ROOT2/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields
@@ -33,7 +34,7 @@ WSIC=$ROOT/data/woce_gouretski/woce_s_woa57_annual.nc
 SSSCLIM=$INP/sss_climatology_for_restoring.nc
 ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
-echo "=== worktree (fix tree) ==="; git -C $WT log --oneline -1
+echo "=== repo ==="; git -C $ROOT log --oneline -1
 GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
 COMMON="--nemo-vertical --partial-cell --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.085 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"

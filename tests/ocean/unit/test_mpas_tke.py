@@ -212,6 +212,18 @@ class TestTKEDispatchHardening:
         with pytest.raises(NotImplementedError, match="prognostic"):
             make_tke_profiles_mpas(cfg)
 
+    def test_prognostic_tke_rejected_by_physics_factory_too(self):
+        """make_mpas_ocean_physics is the FIRST build step a config reaches —
+        it must reject prognostic TKE itself rather than defer the failure to
+        the later profiles build in the model step (codex MED 2026-07-27)."""
+        config = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke", tke=TKEConfig(prognostic=True)),
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+        )
+        with pytest.raises(NotImplementedError, match="prognostic"):
+            make_mpas_ocean_physics(config, implicit_vertical_mixing=True)
+
     def test_adiabatic_n2_rejected_on_mpas(self):
         cfg = VerticalMixingConfig(
             scheme="tke", tke=TKEConfig(n2_mode="adiabatic"))
@@ -362,3 +374,87 @@ class TestNemoSurfaceTermsOnMPAS:
         pf_default = make_tke_profiles_mpas(tke_cfg)
         A_v2, K_v2 = pf_default(state, mesh, z_coord, _wind_forcing(state))
         assert bool(jnp.all(jnp.isfinite(K_v2)))
+
+    def test_kernel_receives_degrees_and_e3t_inputs(
+            self, mesh, z_coord, state, monkeypatch):
+        """Capture-level pin of the bridge->kernel input contract (codex MED
+        2026-07-27): a clean run only proves lat_deg/dz_ref are non-None —
+        RADIANS would also run silently (with an h_tau profile wrong by
+        180/pi), and a wrong dz_ref would silently mis-size the nn_mxl=3
+        |dl/dz|<=e3t sweeps. Spy on the kernel and assert the exact arrays."""
+        from legoesm.ocean.physics.vertical_mixing import (
+            mpas_integration as mi,
+        )
+        captured = {}
+        real_kernel = mi.tke_vertical_mixing
+
+        def spy(*a, **kw):
+            captured.update(kw)
+            return real_kernel(*a, **kw)
+
+        monkeypatch.setattr(mi, "tke_vertical_mixing", spy)
+        pf = mi.make_tke_profiles_mpas(self._card())
+        pf(state, mesh, z_coord, self._ice_wind_forcing(state, ice=0.0))
+        # nn_htau=1 needs DEGREES; mesh.latCell is radians (Coriolis input).
+        assert bool(jnp.allclose(captured["lat_deg"],
+                                 jnp.degrees(mesh.latCell)))
+        assert float(jnp.max(jnp.abs(captured["lat_deg"]))) > 4.0  # not rad
+        # nn_mxl=3 e3t inputs: reference thicknesses + the land-safe J
+        # (land cells J=1.0 so dz_ref*J never divides by zero).
+        assert bool(jnp.array_equal(captured["dz_ref"], z_coord.dz_ref))
+        jac = captured["jacobian"]
+        assert jac.shape == (state.T.data.shape[0],)
+        assert bool(jnp.all(jnp.isfinite(jac)))
+        land = state.land_mask.data < 0.5
+        if bool(jnp.any(land)):
+            assert bool(jnp.all(jac[land] == 1.0))
+
+    def test_eice3_quarter_ice_maps_to_full_attenuation(
+            self, mesh, z_coord, state):
+        """NEMO nn_eice=3 maps fi -> min(4*fi, 1): QUARTER ice must attenuate
+        exactly like mode-1 FULL ice (effective fraction 1.0), and differ
+        from mode-1 quarter ice (raw 0.25). Full-ice-only tests cannot see a
+        broken mapping — fi=1 is a fixed point of min(4*fi,1) (codex MED
+        2026-07-27)."""
+        f_q = self._ice_wind_forcing(state, ice=0.25)
+        f_full = self._ice_wind_forcing(state, ice=1.0)
+        _, K3q = make_tke_profiles_mpas(self._card(eice=3))(
+            state, mesh, z_coord, f_q)
+        _, K1f = make_tke_profiles_mpas(self._card(eice=1))(
+            state, mesh, z_coord, f_full)
+        _, K1q = make_tke_profiles_mpas(self._card(eice=1))(
+            state, mesh, z_coord, f_q)
+        assert bool(jnp.allclose(K3q, K1f, rtol=1e-12, atol=0.0))
+        assert not bool(jnp.allclose(K3q, K1q))
+
+    def test_partial_cell_zeroes_subseafloor_interfaces(self, mesh, z_coord):
+        """Partial-cell geometry: profiles at interfaces below each column's
+        deepest active level must be EXACTLY zero. Every other fixture here
+        is full-depth z*, so the bottom_level masking branch was untested
+        (codex MED 2026-07-27)."""
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean as _rest
+        n = mesh.latCell.shape[0]
+        # Mid-column ridge over half the cells; keep a few full columns.
+        H = jnp.where(jnp.arange(n) % 2 == 0, 4000.0, 1500.0)
+        pc = create_partial_cell_coordinate(z_coord, H)
+        st = _rest(mesh, pc, T_water_init_C=20.0, T_deep=2.0,
+                   S_uniform=35.0, H_max=4000.0, land_lat_threshold=85.0,
+                   bathymetry=H)
+        pf = make_tke_profiles_mpas(self._card())
+        A_v, K_v = pf(st, mesh, pc, self._ice_wind_forcing(st, ice=0.0))
+        assert bool(jnp.all(jnp.isfinite(A_v)))
+        assert bool(jnp.all(jnp.isfinite(K_v)))
+        # Interface k sits below the column's deepest active level when
+        # k >= bottom_level (interfaces are between full levels k and k+1).
+        nlev_half = K_v.shape[1]
+        k_idx = jnp.arange(nlev_half)[None, :]
+        bot = jnp.asarray(pc.bottom_level)[:, None]
+        below = k_idx >= bot
+        ocean = st.land_mask.data >= 0.5
+        assert bool(jnp.all(K_v[ocean][below[ocean]] == 0.0))
+        assert bool(jnp.all(A_v[ocean][below[ocean]] == 0.0))
+        # Non-vacuous: the ridge columns really do cut the column, and the
+        # open interfaces above the ridge still mix.
+        assert bool(jnp.any(below[ocean]))
+        assert float(jnp.sum(K_v[ocean])) > 0.0

@@ -100,6 +100,20 @@ def make_mpas_ocean_physics(
             "is no explicit-tendency TKE path on the edge-normal C-grid). Set "
             "implicit_vertical_mixing=True, or use scheme='kpp'."
         )
+    # Reject the prognostic TKE carry HERE too, not only in
+    # make_tke_profiles_mpas (model construction): this factory is the first
+    # build step a config reaches, and accepting prognostic=True here would
+    # defer the failure to a later, less obvious site (codex MED).  Same
+    # static-config jit-safety as the guard above.
+    if (vm_config is not None and vm_scheme == "tke"
+            and bool(getattr(getattr(vm_config, "tke", None),
+                             "prognostic", False))):
+        raise NotImplementedError(
+            "vertical_mixing.tke.prognostic=True is not wired on the MPAS "
+            "ocean (no MPASOceanState.tke carry yet). Set "
+            "vertical_mixing.tke.prognostic=False (diagnostic quasi-steady "
+            "Mode-B), or run prognostic TKE on the lat-lon C-grid."
+        )
 
     # Bail loudly on a vertical_mixing scheme whose K-PROFILE the MPAS factory
     # does not wire in and would SILENTLY DROP (finding #4).  Supported here:

@@ -137,3 +137,52 @@ def test_build_latlon_bathy_threads_override_to_create_setup(monkeypatch):
                                  vertical_mixing=vm)
     assert captured["vm"] is vm
     assert captured["vm"].kpp.Ri_crit == 0.2
+
+
+@pytest.mark.parametrize("knob", [
+    dict(kpp_ri_crit=0.5), dict(kpp_cv=2.5), dict(kpp_eice=3),
+])
+def test_guard_rejects_each_kpp_knob_under_mpas_tke(knob):
+    """--mpas-vmix tke deselects KPP, so EVERY --kpp-* knob must fail loud on
+    MPAS under it (parametrized per knob: a guard that checks only one of the
+    three would pass a single combined test; codex MED 2026-07-27)."""
+    kwargs = dict(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None)
+    kwargs.update(knob)
+    with pytest.raises(SystemExit, match="mpas-vmix"):
+        _validate_kpp_grid("mpas", mpas_vmix="tke", **kwargs)
+    if "kpp_eice" in knob:
+        # --kpp-eice is rejected on MPAS even under KPP (the MPAS KPP bridge
+        # receives no ice concentration), just with the eice-specific message
+        # rather than the closure-mismatch one.
+        with pytest.raises(SystemExit, match="kpp-eice"):
+            _validate_kpp_grid("mpas", mpas_vmix="kpp", **kwargs)
+    else:
+        # ri_crit/cv stay accepted under the default KPP closure.
+        _validate_kpp_grid("mpas", mpas_vmix="kpp", **kwargs)
+
+
+def test_mpas_tke_callsite_pins_diagnostic_card():
+    """The main() MPAS call-site must pin tke_prognostic=False: post-#1326
+    the ORCA1 card defaults to the prognostic carry, which MPAS rejects (no
+    MPASOceanState.tke yet), so silently dropping the pin would crash every
+    --mpas-vmix tke run at build. Source tripwire + behavior of the pinned
+    expression (codex MED 2026-07-27)."""
+    import inspect
+    import re
+
+    import scripts.run.run_omip_core2 as core2
+
+    src = inspect.getsource(core2)
+    m = re.search(
+        r'build_tripole_vmix_config\("tke",\s*iwm=None,\s*'
+        r'tke_prognostic=False\)\s*\n\s*if args\.mpas_vmix == "tke"', src)
+    assert m, "--mpas-vmix tke call-site no longer pins tke_prognostic=False"
+    # The pinned expression yields the diagnostic ORCA1 card with the rest of
+    # the #1326 defaults intact (Mode-B + nn_mxl=3 + Dirichlet BC + nn_eice=3).
+    vm = core2.build_tripole_vmix_config("tke", iwm=None,
+                                         tke_prognostic=False)
+    assert vm.scheme == "tke"
+    assert vm.tke.prognostic is False
+    assert vm.tke.tke_mxl_choice == 3
+    assert vm.tke.surface_bc == "nemo_dirichlet"
+    assert vm.tke.eice == 3
