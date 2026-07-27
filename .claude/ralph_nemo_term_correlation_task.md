@@ -62,7 +62,7 @@ Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 | 2 | `eos_rab` (α, β) | 1.000000 | 1.000007 | **PASS** |
 | 3 | `bn2` (`rn2b`) | 1.00000000 | 0.99997 | near — see below |
 | 4 | `zdf_mxl` (`nmln`/`hmlp`) | 99.859% levels | — | near — 14/9920 cols |
-| 5 | `ldf_slp` (`wslpi`) | **0.999110** | **1.0907** | OPEN — ratio is the gap |
+| 5 | `ldf_slp` (`wslpi`) | **0.999177** | **0.998943** (\|·\|) | near — FIXED via slope_n2 |
 | 6 | `ldf_eiv` (`aeiu`) | 0.9847 | 1.002 | OPEN |
 | 10 | eiv transport | 0.7727 | 1.040 | OPEN |
 
@@ -114,14 +114,44 @@ alignment artifact. **The real gap is the RATIO: slopes 9.07% TOO LARGE**
 (median rel err 0.83%, p90 3.35%; the p99 62% tail is near-zero-crossing cells,
 not a fidelity signal). Corr is already ~1 — do NOT chase correlation here.
 
-Leads for the 9%: (a) the slope path builds the ADIABATIC N², not NEMO's
-`rn2b` — wire `compute_buoyancy_frequency_nemo_bn2` (with the TRUE gdepw, see
-item 3/4) into `_nemo_wpoint_e3w_wmask_n2`; slope ~ 1/N², and adiabatic N² runs
-0.4% low, so this is a partial but wrong-signed-if-ignored contributor;
-(b) the `S_max` cap — the deepest dumped levels saturate at 0.01, so a cap
-applied at a different point in the chain shifts the sum;
-(c) the live-`e3w` divisor (item 3), which does NOT cancel here.
-NOTE: no `wslpj` dump exists in RUN_GDB — add one before claiming `ldf_slp` done.
+### ★★ METRIC LESSON — never score a SIGN-CHANGING field with a signed sum ★★
+
+**"slopes 9% too large" was ALSO withdrawn.** `wslpi` changes sign, and the
+signed sum near-cancels between shallow (negative-dominant) and deep
+(positive-dominant) levels, so a ~1% asymmetric bias inflates ~9×:
+
+    signed ratio  1.0907   <- ILL-CONDITIONED, meaningless here
+    |wslpi| ratio 1.0121   <- the true aggregate magnitude bias
+    RMS ratio     1.0079
+
+**Always quote `|x|` and RMS ratios for sign-changing fields** (slopes,
+velocities, tendencies). Keep signed sums only for sign-definite quantities.
+
+### Item 5 RESOLVED 2026-07-27 (commit `874fb35c6`)
+
+Root cause: the slope path fed a PARCEL-DISPLACEMENT (adiabatic) N², but NEMO's
+`ldf_slp` consumes `rn2b` — the linearised α/β bn2 (`eosbn2.F90:1455-1468`).
+The two diverge with PRESSURE, so the error GREW WITH DEPTH — matching the
+measured signature exactly (bottom 8 levels carried ~60% of the excess).
+
+New selectable `GMRediConfig.slope_n2` = `adiabatic` (default, byte-identical)
+| `nemo_bn2`, surfaced as `DINOConfig.gm_redi_slope_n2`, on the kamm card.
+
+                        adiabatic     nemo_bn2
+    |wslpi| ratio        1.012076     0.998943
+      levels k>=18       1.014793     0.999518   <- depth-growing bias GONE
+      levels k<18        1.002542     0.996925
+    corr                 0.999110     0.999177
+
+ELIMINATED by measurement, do NOT re-chase: (a) the `S_max` cap — both sides use
+0.01 from `rn_slpmax`, points at cap 530 lego vs 514 NEMO, <1% of the excess;
+(b) the mixed-layer ramp — levels k<18 carry no excess.
+
+NEMO re-instrumented + rebuilt with `wslpj`/`uslp`/`vslp` dumps (units 8818-8820)
+so all four slope components can be checked, not just `wslpi`.
+**BUILD GOTCHA**: `makenemo` needs the `nemo-build` conda env on PATH
+(`Text::Balanced` Perl module); otherwise FCM dies with a confusing Perl error:
+    env PATH="/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH" ./makenemo -n DINO -m linux_gfortran -j 8
 
 ## Term list (work down; each is one cycle)
 
