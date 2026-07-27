@@ -495,6 +495,12 @@ def compute_treguier_kappa_gm(
         jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
+    # Optional floor (``TreguierConfig.kappa_min``, default 0.0 = inert /
+    # byte-identical).  The taper above sends κ → 0 at the equator; a zero-GM
+    # equatorial band destabilised a 1° global tripole run, and Visbeck carries
+    # a ``kappa_min`` for the same reason.  Applied BEFORE the wet mask so dry
+    # columns still return exactly 0.
+    kappa = jnp.maximum(kappa, getattr(cfg, "kappa_min", 0.0))
     return jnp.where(wet_col, kappa, 0.0)
 
 

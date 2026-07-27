@@ -1804,6 +1804,33 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 # would silently ride through the packed SPMD halo exchange UNEXCHANGED
 # (stale halos on every RK stage) — fail loudly so the cell-pack layout,
 # the physics application and this set are extended deliberately.
+# Workload signatures — (n_devices, global edge rows, global cell rows,
+# nlev), all trace-time-static — where a tendency-output
+# optimization_barrier is measured to pay. OBSERVED CORRELATION, not a
+# proven XLA cost-model account: at ico-L8 np4 (and only there among
+# np2/4/8) the compiled step carries three once-per-step 3.3-3.6 ms
+# serialized loop-fusion kernels that the HLO frame table resolves to the
+# RK pytree_axpy (pytree_ops.py), ~10.9 ms/step in total (nsys 26479922,
+# HLO 26480096), and the barrier removes most of that: same-day ladder
+# np4 17.78 -> 14.10 ms (-20.7%) with np2 +1.2% (noise) and np8 0.0%
+# (jobs 26486123 dead-gate vs 26486163). An UNgated barrier regressed np2
+# by 10.7% in the earlier experiment (26480310), hence the gate. The
+# signature includes cell rows + nlev because L8's edge count
+# (1,966,080, unpadded — padding pads CELLS, e.g. 655,362 -> 655,376 for
+# 16) is divisible several ways and edge rows alone would fire on
+# unmeasured workloads (codex round-12). The dtype is part of the
+# signature for the same reason — fusion decisions depend on element
+# type, and the receipt is f32-only (f64 unmeasured as of 2026-07-27).
+# Grow ONLY with a measured receipt for the exact signature.
+# PROVISIONAL f64 np8 entry under test (job 26493638: f64 np4 is HEALTHY
+# at eff 0.95 while np8 ANTI-scales 20.10 -> 21.42 — the candidate
+# pathological shape shifts one rung with the doubled element size).
+# Receipt job decides whether this entry stays.
+_FUSION_BARRIER_WORKLOADS = frozenset({
+    (4, 1_966_080, 655_376, 26, "float32"),
+    (8, 1_966_080, 655_376, 26, "float64"),
+})
+
 _VORONOI_SPMD_STATE_FIELDS = frozenset(
     {"u", "T", "p_s", "phis", "v", "tracers"})
 
@@ -2364,6 +2391,17 @@ def make_voronoi_sharded_step(
                     s.u.data, s.T.data, s.p_s.data, s.phis.data,
                     _pack_tracers(s), dt, mesh_arg, halo_arg,
                 )
+                # Static workload-gated fusion barrier (codex rounds
+                # 11-12; see _FUSION_BARRIER_WORKLOADS). Every gate
+                # operand is trace-time static (closure int + aval
+                # shapes) — no retrace; the barrier is an identity for
+                # numerics and AD.
+                _sig = (n_dev, s.u.data.shape[0],
+                        s.T.data.shape[0], s.T.data.shape[1],
+                        str(s.u.data.dtype))
+                if _sig in _FUSION_BARRIER_WORKLOADS:
+                    du, dT, dps, dq = jax.lax.optimization_barrier(
+                        (du, dT, dps, dq))
                 tr_tend = None
                 if s.tracers is not None:
                     tr_tend = {
