@@ -295,6 +295,18 @@ campaign. Efficiency t1/(n*tn) by subdivision:
 | 5 | 1.02 | 0.88 | 1.15 | 0.56 | 0.58 | 0.30 |
 | 6 | 1.02 | 0.88 | 1.07 | 0.51 | 0.54 | 0.57 |
 | 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
+
+**REVISION 2026-07-27 — the subdiv-7 row was PLACEMENT-LIMITED, not
+comm-limited.** Re-running it with `--distribution=block:cyclic` (the
+Milan fix, discovered after this sweep) gives f64 np64 **efficiency 0.71,
+up from 0.52**, and the high-rank columns move most: placement alone is
+worth 2.00x at np16, 1.75x at np32, 1.38x at np64 (job 26495437 vs
+26452579). The f32 ladder at matched placement (job 26495083) reaches
+**0.88**. So the "np16 dip" visible across every row of this table is
+substantially the same NUMA effect found later in the packed CPU atm
+ladder — one fix, two symptoms. Precision itself is worth a near-constant
+~1.4x here; the naive cross-job comparison would have read 2.81x at np16
+and attributed placement to precision.
 | 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
 
 THE TILE-SIZE PATTERN, THIRD LANE (cube and ico are both atmosphere:

@@ -31,14 +31,16 @@ best barotropic solver arm per precision; **f**, tripole grid with the
 ORCA fold, which costs only 1.2–3.7 % relative to the matched regular
 grid; **g**, MPAS Voronoi ocean, subdivision-7, CPU–MPI.
 
-**Panel d carries a placement caveat, not a clean precision
-comparison.** Its float32 ladder (job 26495083) used cyclic rank
-distribution across both sockets, whereas the float64 sweep (job
-26452579) predates that finding and ran packed; since placement alone is
-worth up to 2.13x on these nodes, the float32/float64 gap here mixes
-precision with NUMA placement and the series is labelled "packed"
-accordingly. A matched-placement float64 rerun is in flight; until it
-lands, no precision ratio should be read off this panel.
+**Panel d is matched-placement** (both ladders cyclic across sockets;
+jobs 26495083 and 26495437). The matched rerun mattered: against the
+campaign's original packed float64 sweep the float32 advantage at 16
+ranks would have read 2.81x, of which only **1.40x is precision** — the
+rest was NUMA placement (worth 2.00x at 16 ranks, 1.75x at 32, 1.38x at
+64). Matched, float32 gains a near-constant ~1.4x at every rank count
+and still scales better than float64 (efficiency 0.88 vs 0.71 over
+1->64 ranks). The placement correction also revises the icosahedral
+float64 figure quoted elsewhere in this campaign upward from 0.52 to
+**0.71**.
 
 **Precision speedup is not universal — it tracks what bounds the
 kernel.** Dense, bandwidth-bound lanes gain roughly what halving the
