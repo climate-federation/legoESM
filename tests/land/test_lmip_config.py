@@ -267,3 +267,16 @@ def test_soil_grid_rejects_nonsense(key, bad):
     cfg_in["physics"][key] = bad
     with pytest.raises(ValueError, match=key):
         validate_config(cfg_in)
+
+
+def test_root_calibration_defaults_and_gating():
+    """Per-PFT root-zone params are opt-in; a typo must raise, not silently
+    fall back to the single global rooting depth."""
+    assert validate_config(_minimal()).physics["root_calibration"] == "default"
+    cfg_in = _minimal()
+    cfg_in["physics"]["root_calibration"] = "amip_multilayer"
+    assert validate_config(cfg_in).physics["root_calibration"] == "amip_multilayer"
+    bad = _minimal()
+    bad["physics"]["root_calibration"] = "tuned"
+    with pytest.raises(ValueError, match="root_calibration"):
+        validate_config(bad)

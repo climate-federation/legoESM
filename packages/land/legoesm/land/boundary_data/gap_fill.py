@@ -31,6 +31,7 @@ from legoesm.land.surface_params import (
 from legoesm.land.canopy.config import CanopyLandParams
 
 from legoesm.land.boundary_data._internals import (
+    tuned_pft_root_arrays,
     CI_DEFAULT, KN_DEFAULT, ALF_DEFAULT,
     M_C3, M_C4, B0_C3, B0_C4,
     TGC_DEFAULT_C, HC_MIN_M,
@@ -52,9 +53,25 @@ def bare_land_surface_params(ncol: int):
     return p._replace(fC4=jnp.zeros(ncol))
 
 
-def bare_canopy_params(ncol: int) -> CanopyLandParams:
-    """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol."""
+# Bare ground is index 0 of the CLM5 17-PFT axis (CLM5_PFT_NAMES[0]).
+_BARE_PFT_INDEX = 0
+
+
+def bare_canopy_params(ncol: int, *, tuned_root_params: bool = False) -> CanopyLandParams:
+    """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol.
+
+    ``tuned_root_params`` also fills the optional per-column
+    ``root_depth``/``theta_wp``/``theta_fc`` from the BARE-SOIL row (PFT index 0)
+    of the calibrated tables.  This must MATCH the params being gap-filled: the
+    fallback and the values are combined leaf-by-leaf through a pytree map, so a
+    fallback carrying ``None`` where the params carry an array is a structure
+    mismatch (``None is not a valid value for jnp.array``), not a silent default.
+    """
     full = lambda v: jnp.full(ncol, v)
+    _root_kw = {}
+    if tuned_root_params:
+        _rt = tuned_pft_root_arrays()
+        _root_kw = {k: full(float(v[_BARE_PFT_INDEX])) for k, v in _rt.items()}
     return CanopyLandParams(
         LAI=full(0.0), hc=full(HC_MIN_M), fC4=full(0.0), FNonVeg=full(1.0),
         CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
@@ -63,6 +80,7 @@ def bare_canopy_params(ncol: int) -> CanopyLandParams:
         alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
         ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
         emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
+        **_root_kw,
     )
 
 
@@ -102,7 +120,9 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
                 f"{ncol}; ravel / grid-column mismatch."
             )
         keep_col = keep_col & (f_land > 0.0)                # surfdata only on driver-land
-    fb = (bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
+    fb = (bare_canopy_params(
+              ncol, tuned_root_params=land_params.root_depth is not None)
+          if isinstance(land_params, CanopyLandParams)
           else bare_land_surface_params(ncol))
 
     def _fill(v, f):

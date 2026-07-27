@@ -147,6 +147,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
         soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
         soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
+        root_calibration=cfg.physics.get("root_calibration", "default"),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -404,6 +405,14 @@ def run(args) -> int:
     # multilayer land — the LMIP path builds params from the RAW PFT/biome tables
     # and so never saw it.  Values are imported, never re-typed, so the two paths
     # cannot drift apart.
+    # Per-PFT root-zone params (root depth + plant theta_wp/theta_fc) at the
+    # column's dominant PFT, vs ONE global value from MultiLayerLandConfig.
+    if args.root_calibration not in ("default", "amip_multilayer"):
+        raise ValueError(
+            f"unknown root_calibration {args.root_calibration!r} "
+            "(expected 'default' or 'amip_multilayer')")
+    _tuned_root = (args.root_calibration == "amip_multilayer")
+
     _glacier_alb = None
     _land_albedo = LandAlbedoConfig()
     if args.albedo_calibration == "amip_multilayer":
@@ -454,7 +463,8 @@ def run(args) -> int:
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
-        args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb)
+        args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb,
+        tuned_root_params=_tuned_root)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
     # Year range: --year-end defaults to --year (single-year, backward-compat).
@@ -583,7 +593,8 @@ def run(args) -> int:
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(
-        gsd, config.surface_scheme, glacier_alb=_glacier_alb)
+        gsd, config.surface_scheme, glacier_alb=_glacier_alb,
+        tuned_root_params=_tuned_root)
 
     # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
     if getattr(args, "_cfg_output_tapes", None) is not None:

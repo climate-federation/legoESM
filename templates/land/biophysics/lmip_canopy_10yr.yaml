@@ -70,6 +70,21 @@ physics:
   # in depth, NOT mass-conservative; it was validated against the 8-layer default.
   # Changing the target grid exercises it in a new regime — soil texture/carbon
   # column integrals are approximate here.
+  # --- Root-zone water uptake -------------------------------------------------
+  # "amip_multilayer" replaces ONE global root e-folding depth + plant
+  # theta_wp/theta_fc (1.0 m / 0.15 / 0.30 for every column on Earth) with the
+  # calibrated PER-PFT tables at the column's dominant PFT: root depth
+  # 0.088-1.706 m, theta_wp 0.082-0.116, theta_fc 0.171-0.292.  The uniform 1 m
+  # over-supplies shallow-rooted grass and under-supplies deep-rooted forest.
+  #
+  # ⚠️ THIS IS THE "TEST" HALF, NOT A KNOWN-GOOD DEFAULT.  Those tables were
+  # calibrated under SimpleSEB + MOST (amip_sota's land surface scheme), which
+  # has its own beta_soil moisture path; the two-leaf canopy carries its own
+  # stomatal control, so the pairing is a hypothesis.  Run it against the
+  # `default` baseline before adopting.  Note also: this path applies the
+  # DOMINANT-PFT value (consistent with LAI/height/Vcmax/roughness here), whereas
+  # the coupled CLMSurfaceParamProvider PFT-fraction-WEIGHTS the same tables.
+  root_calibration: amip_multilayer
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)

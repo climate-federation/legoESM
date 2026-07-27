@@ -95,10 +95,17 @@ def _get(lp, name: str, fallback):
     either ``LandSurfaceParams`` (for SimpleSEB; full field set) or
     ``CanopyLandParams`` (for TwoLeafCanopy; disjoint field set).  Missing
     fields fall back to the caller-supplied default rather than raising.
+
+    A field that EXISTS but is ``None`` is also treated as absent: optional
+    per-column params (``root_depth``/``theta_wp``/``theta_fc``) are declared on
+    ``CanopyLandParams`` with a ``None`` default, so a params object that does
+    not carry them must still fall back to the scalar config value rather than
+    propagating ``None`` into the arithmetic.
     """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    v = getattr(lp, name, fallback)
+    return fallback if v is None else v
 
 
 def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,

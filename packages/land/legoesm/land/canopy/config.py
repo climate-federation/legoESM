@@ -458,6 +458,20 @@ class CanopyLandParams(NamedTuple):
     # season).  Trailing optional field — None falls back to the live ``LAI``.
     litter_LAI: jax.Array | None = None
 
+    # ---- Root-zone water uptake (per-column; optional) ----
+    # Root e-folding depth [m] and the PLANT moisture-stress thresholds that set
+    # ``beta_root``/``w_frac_rz`` in ``multilayer_land.root_zone_moisture_stress``.
+    # Trailing optional fields — ``None`` falls back to the SCALAR
+    # ``MultiLayerLandConfig.root_depth``/``theta_wp``/``theta_fc``, which is what
+    # every pre-existing constructor gets (``multilayer_land._get`` maps a None
+    # field to the config fallback), so adding these is behaviour-preserving.
+    # Populated per column from the calibrated per-PFT tables
+    # (``clm_surface_map.TUNED_PFT_ROOT_DEPTH/WP/FC_MULTILAYER``) when the caller
+    # selects the tuned parameter set.
+    root_depth: jax.Array | None = None      # [m]
+    theta_wp: jax.Array | None = None        # [m3/m3]
+    theta_fc: jax.Array | None = None        # [m3/m3]
+
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
 # scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):

@@ -48,6 +48,7 @@ from legoesm.land.boundary_data._internals import (
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
+    tuned_pft_root_arrays,
     FALLBACK_SAND_PCT, FALLBACK_CLAY_PCT,
     THETA_TOP_DEFAULT,
     pft_lookup_arrays,
@@ -101,6 +102,7 @@ def build_canopy_params(
     tgc_C: float = TGC_DEFAULT_C,
     glacier_alb_vis: float = GLACIER_ALB_VIS,
     glacier_alb_nir: float = GLACIER_ALB_NIR,
+    tuned_root_params: bool = False,
     year=None,
 ) -> CanopyLandParams:
     """Per-column :class:`CanopyLandParams` from surface data at ``day_of_year``.
@@ -114,6 +116,16 @@ def build_canopy_params(
     Glacier-dominant columns (:func:`glacier_mask`) are set to a bare **ice
     surface**: no vegetation (LAI=0, FNonVeg=1) and a high snow/ice albedo
     (``glacier_alb_vis``/``glacier_alb_nir``) instead of the soil background.
+
+    ``tuned_root_params`` fills the optional per-column
+    ``root_depth``/``theta_wp``/``theta_fc`` from the calibrated per-PFT tables
+    (:func:`tuned_pft_root_arrays`) at the DOMINANT PFT — consistent with every
+    other field here, which is the dominant PFT's value.  (The coupled
+    ``CLMSurfaceParamProvider`` instead PFT-fraction-WEIGHTS these; blending them
+    would be incoherent in a column whose canopy, LAI, height and roughness are
+    all a single PFT's.)  ``False`` leaves them ``None``, so
+    ``multilayer_land._get`` falls back to the scalar ``MultiLayerLandConfig``
+    values — bit-identical to the pre-existing behaviour.
     """
     dom = dominant_pft_index(gsd, year)                     # (ncol,)
     ncol = dom.shape[0]
@@ -141,6 +153,13 @@ def build_canopy_params(
     alb_vis = np.where(ice, glacier_alb_vis, alb_vis)
     alb_nir = np.where(ice, glacier_alb_nir, alb_nir)
 
+    # Optional per-column root-zone params (dominant PFT).  Absent => the scalar
+    # MultiLayerLandConfig values via multilayer_land._get.
+    _root_kw = {}
+    if tuned_root_params:
+        _rt = tuned_pft_root_arrays()
+        _root_kw = {k: jnp.asarray(v[dom]) for k, v in _rt.items()}
+
     full = lambda v: jnp.full(ncol, v)
     return CanopyLandParams(
         LAI=jnp.asarray(LAI),
@@ -156,6 +175,7 @@ def build_canopy_params(
         emissivity=full(EMISS_VEG),
         rz0m=jnp.asarray(np.where(is_veg > 0.0, lut["rz0m"][dom], RZ0M_BARE)),
         rd=jnp.asarray(np.where(is_veg > 0.0, lut["rd"][dom], 0.0)),
+        **_root_kw,
     )
 
 
@@ -333,7 +353,8 @@ def prescribed_canopy_structure(gsd, day_of_year, year=None):
 
 
 def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
-                                year=None, glacier_alb=None):
+                                year=None, glacier_alb=None,
+                                tuned_root_params=False):
     """Dispatch to the right per-column land-params object for ``surface_scheme``.
 
     ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams` (built directly — land/dev
@@ -358,7 +379,8 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
         _gk = {} if glacier_alb is None else {
             "glacier_alb_vis": float(glacier_alb[0]),
             "glacier_alb_nir": float(glacier_alb[1])}
-        return build_canopy_params(gsd, day_of_year, theta_top, year=year, **_gk)
+        return build_canopy_params(gsd, day_of_year, theta_top, year=year,
+                                   tuned_root_params=tuned_root_params, **_gk)
     # SEB / CLM-ML path: the provider takes a single BROADBAND ice albedo, which
     # is the 0.5/0.5 vis-NIR integral the canopy pair collapses to (see
     # GLACIER_ALBEDO_DEFAULT == 0.5*(GLACIER_ALB_VIS + GLACIER_ALB_NIR)).
@@ -372,7 +394,8 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
 
 
 def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
-                           theta_top=None, year=None, glacier_alb=None):
+                           theta_top=None, year=None, glacier_alb=None,
+                           tuned_root_params=False):
     """Load the surfdata, regrid to ``grid``, and adapt to ``land_config``'s scheme.
 
     The single entry a driver calls at simulation start.  Returns
@@ -417,5 +440,5 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *,
 
     land_params = surface_data_to_land_params(
         gsd, land_config.surface_scheme, day_of_year, theta_top, year=year,
-        glacier_alb=glacier_alb)
+        glacier_alb=glacier_alb, tuned_root_params=tuned_root_params)
     return land_config, land_params, gsd

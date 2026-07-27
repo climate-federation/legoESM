@@ -139,9 +139,9 @@ def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
         row["albedo_veg"] = _csm._TUNED_PFT_ALBEDO_MULTILAYER[idx]
         row["emissivity"] = _csm._TUNED_PFT_EMISSIVITY_MULTILAYER[idx]
         row["z0"] = _csm._TUNED_PFT_Z0_MULTILAYER[idx]
-        row["root_depth"] = _csm._TUNED_PFT_ROOT_DEPTH_MULTILAYER[idx]
-        row["theta_wp"] = _csm._TUNED_PFT_WP_MULTILAYER[idx]
-        row["theta_fc"] = _csm._TUNED_PFT_FC_MULTILAYER[idx]
+        row["root_depth"] = _csm.TUNED_PFT_ROOT_DEPTH_MULTILAYER[idx]
+        row["theta_wp"] = _csm.TUNED_PFT_WP_MULTILAYER[idx]
+        row["theta_fc"] = _csm.TUNED_PFT_FC_MULTILAYER[idx]
     return row
 
 

@@ -15,6 +15,7 @@ An experiment is fully described by a YAML file with this schema::
       soil_n_layers: int               # Richards soil layers (default 8)
       soil_depth_m: float              # total soil column depth [m] (0 = geometric default ~6.375)
       soil_growth_factor: float        # layer thickness ratio (2.0 = default geometric)
+      root_calibration: default | amip_multilayer     # per-PFT root depth + theta_wp/fc
 
     forcing:
       source: cru_jra | synthetic
@@ -70,6 +71,14 @@ _SNOW_SCHEMES = ("single", "multilayer")
 # tuned against ERA5.  The LMIP path builds its params from the raw PFT/biome
 # tables and so never saw this calibration.
 _ALBEDO_CALIBRATIONS = ("default", "amip_multilayer")
+# Root-zone water-uptake parameter set.  "default" = ONE global root e-folding
+# depth + theta_wp/theta_fc from MultiLayerLandConfig (1.0 m / 0.15 / 0.30).
+# "amip_multilayer" = the calibrated PER-PFT tables at the column's DOMINANT PFT
+# (root depth 0.088-1.706 m, theta_wp 0.082-0.116, theta_fc 0.171-0.292).
+# UNVALIDATED PAIRING: those tables were calibrated under SimpleSEB, not the
+# two-leaf canopy — this is the "test" half of the recommendation, not a
+# known-good default.
+_ROOT_CALIBRATIONS = ("default", "amip_multilayer")
 # Vertical soil grid defaults = SoilGridConfig() (8 geometric layers from
 # dz_top 0.025 m, growth 2 -> 6.375 m total).  Kept as named module constants so
 # the schema default and the SoilGridConfig default cannot silently diverge.
@@ -183,6 +192,11 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.soil_depth_m={_sd} is implausibly shallow for a land column "
             "(< 0.1 m); use 0 for the geometric default.")
+    physics.setdefault("root_calibration", "default")
+    if physics["root_calibration"] not in _ROOT_CALIBRATIONS:
+        raise ValueError(
+            f"physics.root_calibration={physics['root_calibration']!r} "
+            f"not in {_ROOT_CALIBRATIONS}")
     physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
     _gf = physics["soil_growth_factor"]
     if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):

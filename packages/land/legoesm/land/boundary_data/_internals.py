@@ -16,7 +16,12 @@ from legoesm.land.canopy.config import (
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
 )
-from legoesm.land.clm_surface_map import TUNED_GLACIER_ALBEDO_MULTILAYER
+from legoesm.land.clm_surface_map import (
+    TUNED_GLACIER_ALBEDO_MULTILAYER,
+    TUNED_PFT_FC_MULTILAYER,
+    TUNED_PFT_ROOT_DEPTH_MULTILAYER,
+    TUNED_PFT_WP_MULTILAYER,
+)
 
 
 # Zone index into the 3-element biome lists: [boreal, temperate, tropical].
@@ -111,6 +116,23 @@ def pft_lookup_arrays() -> dict[str, np.ndarray]:
         hc[i] = PFT_CANOPY_HEIGHT[biome]
     return {"vc3": vc3, "vc4": vc4, "rz0m": rz0m, "rd": rd,
             "hc": hc, "fc4": fc4, "is_veg": is_veg}
+
+
+def tuned_pft_root_arrays() -> dict[str, np.ndarray]:
+    """Per-CLM5-PFT (length-17) calibrated root-zone water-uptake parameters.
+
+    The AMIP recalibration's root e-folding depth and PLANT moisture-stress
+    thresholds, as length-``N_PFT_CLM5`` arrays indexed the same way as
+    :func:`pft_lookup_arrays` (so a dominant-PFT gather lines up).  The LMIP path
+    otherwise runs a single GLOBAL root_depth / theta_wp / theta_fc from
+    ``MultiLayerLandConfig``, which over-supplies shallow-rooted grass and
+    under-supplies deep-rooted forest.
+    """
+    return {
+        "root_depth": np.asarray(TUNED_PFT_ROOT_DEPTH_MULTILAYER, dtype=np.float64),
+        "theta_wp": np.asarray(TUNED_PFT_WP_MULTILAYER, dtype=np.float64),
+        "theta_fc": np.asarray(TUNED_PFT_FC_MULTILAYER, dtype=np.float64),
+    }
 
 
 def cover1d(a):
