@@ -283,3 +283,14 @@ diffs, not the scheme. TRAP: trd dumps contaminated (Krhs carries
 sbc/qsr/bbc/bbl/dmp accumulated BEFORE tra_adv, stpmlf.F90:342-363) — compare
 via flux-reconstructed pure tendency only, or re-instrument with a Krhs
 snapshot before tra_adv_fct.
+
+
+## Items 9/10 (2026-07-27)
+
+Item 9 hpg_sco: u/v corr **1.000000** — MACHINE-EXACT, CLOSED.
+Item 10 EEN: u 0.999896 / v 0.999932, med rel-err 4e-4. STOPPED (two inert
+cycles): e3f avg rule (c6d34a20e, ~inert), dry-vertex e3f_0 fallback
+(9b6aca6ac, byte-identical inert — mechanism falsified by controlled A/B).
+Bottom-4-level |x| 1.04-1.07 (~2.4% of mass) UNATTRIBUTED. Review fix
+d5ff9d15f (helper factoring, mutation-kill proven).
+NEXT item 11 zdftke: avt/avm dumps already exist (8814/8815).
