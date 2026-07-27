@@ -411,6 +411,13 @@ class MPASOceanModel:
         -------
         MPASOceanState
         """
+        # Capture the INCOMING carry dtype before the compute cast: the
+        # Mode-A tke store below must pin the carry back to the caller's
+        # (storage) dtype, and after this line state.tke is already compute
+        # dtype (codex r3 RED — pinning post-cast froze the carry at f64
+        # under an f32-storage/f64-compute policy).
+        _tke_in_dtype = (state.tke.data.dtype
+                         if getattr(state, "tke", None) is not None else None)
         state = cast_pytree(state, None, "compute")
 
         config = self.config
@@ -1088,13 +1095,14 @@ class MPASOceanModel:
             # OLD state's tke; the update advances one backward-Euler en step
             # (mirrors the lat-lon model step's tke_new store).  Reuse the
             # incoming Field wrapper so pytree structure is unchanged, and
-            # PIN the carry dtype to the incoming carry's dtype (codex MED:
-            # under an f32-storage/f64-compute policy the kernel returns f64
-            # after an f32 seed — an unpinned store would flip the scan-carry
-            # leaf dtype between steps).
+            # PIN the carry dtype to the PRE-compute-cast dtype captured at
+            # entry (codex r3: state.tke here is already compute dtype, so
+            # pinning to it froze the carry at f64 under an f32-storage/
+            # f64-compute policy — the scan-carry leaf must return in the
+            # caller's dtype).
             state_new = state_new._replace(
                 tke=state.tke.replace(
-                    data=_tke_new.astype(state.tke.data.dtype)))
+                    data=_tke_new.astype(_tke_in_dtype)))
 
         return cast_pytree(state_new, None, "storage")
 

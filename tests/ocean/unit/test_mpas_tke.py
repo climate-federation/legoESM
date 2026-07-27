@@ -627,12 +627,22 @@ class TestPrognosticCarryHardening:
 
     def test_scan_carry_stable_treedef_dtype_shape(self, mesh, z_coord):
         """The production host loop is step-per-day, but the carry contract
-        is lax.scan-grade: run the jitted step INSIDE lax.scan for 3 steps
-        and assert the carry keeps an identical treedef and identical leaf
-        dtypes/shapes (codex MED — also pins the dtype-stability fix: the
-        store casts tke_new back to the seed dtype)."""
+        is lax.scan-grade: run the step INSIDE lax.scan for 3 steps under an
+        EXPLICIT f32-storage / f64-compute precision policy and assert the
+        carry keeps an identical treedef and identical leaf dtypes/shapes
+        (codex r3: without the split policy the dtype-pinning fix is not
+        exercised — storage==compute makes any cast a no-op)."""
+        import jax.numpy as _jnp
+        from legoesm.core.precision import (
+            PrecisionPolicy, get_policy, set_policy,
+        )
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.mpas_config import MPASOceanConfig
+        _orig_policy = get_policy()
+        set_policy(PrecisionPolicy(
+            storage=_jnp.float32, compute=_jnp.float64,
+            accumulate=_jnp.float64, control=_jnp.float64))
+        self._policy_to_restore = _orig_policy
         st = rest_state_mpas_ocean(
             mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=4000.0, land_lat_threshold=85.0)
@@ -650,13 +660,17 @@ class TestPrognosticCarryHardening:
         def body(carry, _):
             return model._step_impl(carry, 150.0, surface_forcing=sf), None
 
-        out, _ = jax.lax.scan(body, st, None, length=3)
-        assert jax.tree_util.tree_structure(out) == (
-            jax.tree_util.tree_structure(st))
-        for a, b in zip(jax.tree_util.tree_leaves(st),
-                        jax.tree_util.tree_leaves(out)):
-            assert a.dtype == b.dtype and a.shape == b.shape
-        assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+        try:
+            out, _ = jax.lax.scan(body, st, None, length=3)
+            assert jax.tree_util.tree_structure(out) == (
+                jax.tree_util.tree_structure(st))
+            for a, b in zip(jax.tree_util.tree_leaves(st),
+                            jax.tree_util.tree_leaves(out)):
+                assert a.dtype == b.dtype and a.shape == b.shape
+            assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+        finally:
+            from legoesm.core.precision import set_policy as _restore
+            _restore(self._policy_to_restore)
 
     def test_restart_npz_reconstructs_none_carry_as_field(
             self, mesh, z_coord, state, tmp_path):

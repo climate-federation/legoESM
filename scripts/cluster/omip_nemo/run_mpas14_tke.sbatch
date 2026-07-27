@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=glab1
-#SBATCH --job-name=mpas12_tke
+#SBATCH --job-name=mpas14_tke
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="rtx8000|a40"
 #SBATCH --mem=96G
 #SBATCH --time=16:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas12_tke_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas14_tke_%j.out
 # MPAS14 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
 # FULL post-#1326 NEMO ORCA1 &namzdf_tke card — PROGNOSTIC Mode-A en carry
 # (MPASOceanState.tke, seeded via model.seed_tke), nn_mxl=3 + ln_mxl0 anchor,
@@ -55,7 +55,7 @@ if [ -f "$SNAP" ]; then
     --grid-label "$LABEL" \
     --output-dir $ROOT/results/omip_nemo/compare_${LABEL}_m01 2>&1 | tail -25
   echo "=== $LABEL Arctic-SSS regions day-30 (eice ON) ==="
-  $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" "mpas12_tke d30" 1
+  $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" "mpas14_tke_main d30" 1
   echo "=== A/B: mpas9 day-30 (eice OFF, same protocol) ==="
   [ -f "$MPAS9/snapshot_day0030.npz" ] && \
     $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$MPAS9/snapshot_day0030.npz" "$GT" "mpas10_kppeice d30 (KPP-eice)" 1

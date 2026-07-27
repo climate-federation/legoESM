@@ -354,7 +354,7 @@ def load_state_checkpoint(
                 # (codex MED 2026-07-27). No field_meta => it was a raw-array
                 # slot; keep the raw array (old behaviour).
                 fm = field_meta.get(name)
-                if fm:
+                if fm and fm.get("is_field") is True:
                     kwargs[name] = Field(
                         data=arr,
                         name=fm.get("name", name),
