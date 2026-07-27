@@ -3167,6 +3167,12 @@ def _thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_agg_coeff", None)),
         ("morrison_k_au", "k_au",
          getattr(config, "morrison_k_au", None)),
+        ("morrison_fall_a_i", "fall_a_i",
+         getattr(config, "morrison_fall_a_i", None)),
+        ("morrison_ice_snow_d_auto", "ice_snow_d_auto",
+         getattr(config, "morrison_ice_snow_d_auto", None)),
+        ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
+         getattr(config, "morrison_hom_ice_nuc_N", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
