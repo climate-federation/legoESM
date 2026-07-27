@@ -683,6 +683,66 @@ def test_een_e3f_scheme_nemo_avg_matches_loop_port_ground_truth():
     assert n_checked == (n_lat - 2) * (n_lon - 1), "loop-port comparison ran vacuously"
 
 
+def test_een_e3f_scheme_nemo_avg_dry_vertex_uses_dz_ref_not_big_h():
+    """#1226 item 10 final piece: at a FULLY-DRY vertex (all 4 surrounding
+    T-cells dry, ``wet_count == 0``), NEMO's compiled path (``key_qco`` +
+    ``key_vco_3d``, the DINO build) does NOT leave ``e3f_0vor`` at zero —
+    ``dyn_vor_init`` (dynvor.F90:986)::
+
+        WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_0(:,:,:)
+
+    overwrites it with the reference thickness ``e3f_0``, which is
+    per-level-uniform in DINO (verified against mesh_mask.nc: k=33 ->
+    462.65859311661916 m everywhere) and equals legoESM's
+    ``z_coord.dz_ref`` for the full-step-z bridge. ``_een_e3f_h_vtx`` must
+    therefore use ``dz_ref[k]`` at a dry vertex when it is supplied, NOT
+    the plain ``BIG_H`` sentinel (which is the CORRECT convention for the
+    ``"min"`` rule / the legacy ``dz_ref=None`` default, but WRONG for
+    NEMO's compiled ``nemo_avg`` dry-vertex path).
+
+    Non-vacuous: asserts the NEW ``dz_ref``-supplied behaviour differs from
+    the OLD ``BIG_H``-only behaviour (``dz_ref=None``) at the dry vertex —
+    proving this test would have failed against the pre-fix code.
+    """
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _een_e3f_h_vtx
+
+    n_lat, n_lon, nlev = 4, 4, 3
+    # A 2x2 dry block at T-cells (1,1),(1,2),(2,1),(2,2) makes the vertex at
+    # (j=2, i=2) -- whose 4 neighbours are T-cells (1,1),(1,2),(2,1),(2,2)
+    # per the SW-corner convention documented above -- fully dry.
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[1:3, 1:3] = 0.0
+    dz_ref = np.array([10.0, 50.0, 462.65859311661916])  # per-level, DINO-like
+    h_T_2d = land_mask[:, :, None] * dz_ref[None, None, :]
+    h_T = jnp.asarray(h_T_2d)
+    zeros = jnp.zeros((n_lat, n_lon + 1, nlev))
+    grid = create_latlon_grid(n_lat, n_lon)
+
+    h_vtx_old, _, _ = _een_e3f_h_vtx(h_T, zeros, zeros, grid, "nemo_avg")
+    h_vtx_new, _, _ = _een_e3f_h_vtx(
+        h_T, zeros, zeros, grid, "nemo_avg", dz_ref=jnp.asarray(dz_ref),
+    )
+
+    dry_j, dry_i = 2, 2
+    old_dry = np.asarray(h_vtx_old)[dry_j, dry_i, :]
+    new_dry = np.asarray(h_vtx_new)[dry_j, dry_i, :]
+
+    # Old (legacy / dz_ref=None) behaviour: BIG_H sentinel at the dry vertex.
+    np.testing.assert_array_equal(old_dry, np.full(nlev, 1.0e30))
+    # New (dz_ref-supplied) behaviour: the per-level reference thickness,
+    # matching NEMO's e3f_0 overwrite exactly.
+    np.testing.assert_allclose(new_dry, dz_ref, rtol=1e-12)
+    # Non-vacuous: the fix actually changes the dry-vertex value.
+    assert not np.allclose(old_dry, new_dry)
+
+    # A WET vertex must be UNCHANGED by adding dz_ref (only the wet_count==0
+    # branch reads it) -- e.g. vertex (0, 0), all 4 neighbours wet.
+    wet_j, wet_i = 0, 0
+    np.testing.assert_array_equal(
+        np.asarray(h_vtx_old)[wet_j, wet_i, :], np.asarray(h_vtx_new)[wet_j, wet_i, :],
+    )
+
+
 def test_een_e3f_scheme_unknown_value_raises():
     """Dispatch hardening: an unknown een_e3f_scheme raises at ``_bc_pv_flux``
     entry, before any array use (registered in

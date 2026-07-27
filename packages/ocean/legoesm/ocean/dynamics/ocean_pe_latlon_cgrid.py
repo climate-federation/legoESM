@@ -1811,7 +1811,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
-def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme):
+def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
     over latitude in the SAME fused halo exchange (MPI audit lever O4).
 
@@ -1821,6 +1821,15 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme):
     (``maximum(wet_count, 1.0)`` -> ``maximum(wet_count, 4.0)``) pass
     undetected). See the rule description in ``_bc_pv_flux``'s docstring
     comment for the NEMO ``vor_een``/MITgcm ``hFacZ`` derivation.
+
+    Parameters
+    ----------
+    dz_ref : array, shape (nlev,), or None
+        Per-level reference thickness [m] (``z_coord.dz_ref``), used ONLY by
+        the ``"nemo_avg"`` branch at FULLY-DRY vertices (``wet_count == 0``)
+        — see NEMO ``dynvor.F90`` lines quoted below.  ``None`` reproduces
+        the legacy ``BIG_H``-everywhere dry-vertex behaviour (``"min"``
+        branch is dz_ref-independent and always bit-identical).
 
     Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
     ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
@@ -1842,7 +1851,35 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme):
         )
         e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
         wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
-        h_vtx = jnp.where(wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), BIG_H)
+        # Fully-dry vertex (wet_count == 0) fallback.  NEMO's compiled path
+        # (key_qco, DINO's key_vco_3d — NOT key_vco_1d) does NOT leave
+        # ``e3f_0vor`` at zero here: dynvor.F90 dyn_vor_init overwrites it
+        # with the reference thickness e3f_0 (dynvor.F90:986,
+        # ``WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_0(:,:,:)``;
+        # under key_vco_1d, line 983, it would instead be
+        # ``e3f_0vor(:,:,jk) = e3f_0(:,:,jk)`` per level — same value, since
+        # e3f_0 is spatially uniform per level in DINO, see below). e3f_0 is
+        # a per-level-uniform field (domzgr_substitute.h90:100
+        # ``#define e3f_0(i,j,k) e3f_3d(i,j,k)`` for key_vco_3d; verified
+        # against DINO's own mesh_mask.nc e3f_0: every level has zero
+        # horizontal spread, e.g. k=33 -> 462.65859311661916 m everywhere).
+        # That per-level reference IS legoESM's ``z_coord.dz_ref`` for the
+        # full-step-z DINO bridge (``effective_vertical_scale_factors``
+        # builds dz_ref from the per-level mean of NEMO's own e3t_0, and a
+        # full-step wet cell is exactly dz_ref[k], no per-column stretch).
+        # So at a fully-dry vertex use dz_ref[k] instead of the BIG_H
+        # sentinel; q = zeta/h_vtx stays 0 there anyway (zeta's face masks
+        # are already zero), matching NEMO's e3f_0vor -> finite z1_e3f=0 exit.
+        if dz_ref is not None:
+            _dz_ref_bc = jnp.asarray(dz_ref, dtype=h_k.dtype).reshape(
+                (1,) * (e3f_sum.ndim - 1) + (-1,)
+            )
+            dry_fallback = jnp.broadcast_to(_dz_ref_bc, e3f_sum.shape)
+        else:
+            dry_fallback = BIG_H
+        h_vtx = jnp.where(
+            wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), dry_fallback,
+        )
     else:  # "min" (validated at caller entry)
         h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
             (h_k_active, h_sw_active, Fu, u), halo=1,
@@ -1865,9 +1902,12 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme):
             t_sw_partner = t_sw[-1:, fold.perm_T, :]
             e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
             wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
+            # Same fully-dry-vertex fallback as the interior branch above
+            # (dry_fallback: dz_ref[k] when available, else legacy BIG_H).
             h_vtx_north = jnp.where(
                 wet_count_north > 0.0,
-                e3f_sum_north / jnp.maximum(wet_count_north, 1.0), BIG_H,
+                e3f_sum_north / jnp.maximum(wet_count_north, 1.0),
+                dry_fallback[-1:] if dz_ref is not None else BIG_H,
             )
         else:
             h_k_partner = h_k_active[-1:, fold.perm_T, :]
@@ -1892,11 +1932,19 @@ def _bc_pv_flux(
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
     een_e3f_scheme="min",
+    dz_ref=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
     weno5/weno7/weno9). Pure verbatim extraction (Q8). Threads the momentum
-    accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
+    accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``.
+
+    ``dz_ref`` : array, shape (nlev,), or None
+        Per-level reference thickness (``z_coord.dz_ref``), forwarded to
+        ``_een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
+        (#1226 item 10, final piece). ``None`` (default) keeps the legacy
+        ``BIG_H``-everywhere dry-vertex behaviour bit-identical.
+    """
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
     if vorticity_scheme not in ("al81", "ene", "ene_total", "een_total"):
@@ -1973,9 +2021,18 @@ def _bc_pv_flux(
     #     vertex the min-rule is smaller (biased low, MITgcm hFacZ intent),
     #     the average-rule is larger (NEMO intent) — see #1226 item 10.
     #     ``z1_e3f = 0`` at a fully-dry vertex (``zmsk == 0``, division
-    #     skipped) is reproduced here with the same ``BIG_H`` sentinel used
-    #     by the min-rule (``h_vtx → BIG_H`` ⇒ ``1/h_vtx → 0``), so both
-    #     rules share the identical downstream dry-vertex handling.
+    #     skipped) is what NEMO computes in ``e3f_0vor`` -- but NEMO does NOT
+    #     leave it at zero: dyn_vor_init (dynvor.F90:986, key_qco+key_vco_3d,
+    #     the DINO build) overwrites the zero with the reference thickness
+    #     ``e3f_0`` (``WHERE( e3f_0vor(:,:,:) == 0._wp ) e3f_0vor(:,:,:) =
+    #     e3f_0(:,:,:)``), so ``q = zeta/e3f_0vor`` is FINITE, not zero, there
+    #     (the surrounding face masks already zero ``zeta`` at those points,
+    #     so this never changes the tendency where NEMO integrates from —
+    #     only how the intermediate q is computed). ``_een_e3f_h_vtx``
+    #     reproduces this with ``dz_ref[k]`` (== NEMO's per-level-uniform
+    #     ``e3f_0``, see that helper's docstring) instead of the plain
+    #     ``BIG_H`` sentinel when ``dz_ref`` is supplied; ``dz_ref=None``
+    #     (default) keeps the legacy BIG_H-only behaviour for both rules.
     # Thickness-weighted mass fluxes at faces — computed BEFORE the pad so
     # the Fu / u lat pads ride the SAME fused exchange as the h_vtx-building
     # active-thickness pads (audit lever O4: fused pads -> 1 sendrecv pair
@@ -1987,7 +2044,7 @@ def _bc_pv_flux(
     # ``_een_e3f_h_vtx`` — the production code path, also called directly by
     # the ground-truth test (test_al81_budget.py) so no formula is
     # re-derived in the test.
-    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme)
+    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
 
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)
@@ -3922,6 +3979,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_e3f_scheme=config.een_e3f_scheme,
+            dz_ref=z_coord.dz_ref,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
