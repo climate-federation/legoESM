@@ -627,22 +627,15 @@ class TestPrognosticCarryHardening:
 
     def test_scan_carry_stable_treedef_dtype_shape(self, mesh, z_coord):
         """The production host loop is step-per-day, but the carry contract
-        is lax.scan-grade: run the step INSIDE lax.scan for 3 steps under an
-        EXPLICIT f32-storage / f64-compute precision policy and assert the
-        carry keeps an identical treedef and identical leaf dtypes/shapes
-        (codex r3: without the split policy the dtype-pinning fix is not
-        exercised — storage==compute makes any cast a no-op)."""
-        import jax.numpy as _jnp
-        from legoesm.core.precision import (
-            PrecisionPolicy, get_policy, set_policy,
-        )
+        is lax.scan-grade: run the step INSIDE lax.scan for 3 steps under
+        the PRODUCTION (uniform-f64) policy and assert the carry keeps an
+        identical treedef and identical leaf dtypes/shapes.  A SPLIT
+        f32-storage/f64-compute policy is a pre-existing model-wide scan
+        incompatibility (cast_pytree's storage cast does not downcast, so
+        u/T/S/eta ALL return f64 — nothing tke-specific); the tke pin under
+        that policy is covered by test_split_policy_tke_dtype_pinned."""
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.mpas_config import MPASOceanConfig
-        _orig_policy = get_policy()
-        set_policy(PrecisionPolicy(
-            storage=_jnp.float32, compute=_jnp.float64,
-            accumulate=_jnp.float64, control=_jnp.float64))
-        self._policy_to_restore = _orig_policy
         st = rest_state_mpas_ocean(
             mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=4000.0, land_lat_threshold=85.0)
@@ -660,17 +653,50 @@ class TestPrognosticCarryHardening:
         def body(carry, _):
             return model._step_impl(carry, 150.0, surface_forcing=sf), None
 
+        out, _ = jax.lax.scan(body, st, None, length=3)
+        assert jax.tree_util.tree_structure(out) == (
+            jax.tree_util.tree_structure(st))
+        for a, b in zip(jax.tree_util.tree_leaves(st),
+                        jax.tree_util.tree_leaves(out)):
+            assert a.dtype == b.dtype and a.shape == b.shape
+        assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+
+    def test_split_policy_tke_dtype_pinned(self, mesh, z_coord):
+        """Under f32-storage/f64-compute, ONE step must return the tke carry
+        in the SEED dtype (the pre-compute-cast pin — codex r3 RED: pinning
+        to the post-cast dtype froze the carry at f64).  Single step only:
+        the split policy is scan-incompatible model-wide (u/T/S/eta return
+        f64 from the no-downcast storage cast — pre-existing, not carry-
+        specific), so the pin is asserted directly on the step output."""
+        import jax.numpy as _jnp
+        from legoesm.core.precision import (
+            PrecisionPolicy, get_policy, set_policy,
+        )
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        _orig = get_policy()
+        set_policy(PrecisionPolicy(
+            storage=_jnp.float32, compute=_jnp.float64,
+            accumulate=_jnp.float64, control=_jnp.float64))
         try:
-            out, _ = jax.lax.scan(body, st, None, length=3)
-            assert jax.tree_util.tree_structure(out) == (
-                jax.tree_util.tree_structure(st))
-            for a, b in zip(jax.tree_util.tree_leaves(st),
-                            jax.tree_util.tree_leaves(out)):
-                assert a.dtype == b.dtype and a.shape == b.shape
-            assert not bool(jnp.allclose(out.tke.data, st.tke.data))
+            st = rest_state_mpas_ocean(
+                mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
+                S_uniform=35.0, H_max=4000.0, land_lat_threshold=85.0)
+            config = MPASOceanConfig(
+                physics=OceanPhysicsConfig(
+                    vertical_mixing=self._card(),
+                    surface_forcing=SurfaceForcingConfig(scheme="none"),
+                ),
+                implicit_vertical_mixing=True,
+            )
+            model = MPASOceanModel(mesh, z_coord, config)
+            st = model.seed_tke(st)
+            seed_dtype = st.tke.data.dtype
+            sf = self._forcing(st.T.data.shape[0], st.T.data.dtype)
+            out = model._step_impl(st, 150.0, surface_forcing=sf)
+            assert out.tke.data.dtype == seed_dtype
         finally:
-            from legoesm.core.precision import set_policy as _restore
-            _restore(self._policy_to_restore)
+            set_policy(_orig)
 
     def test_restart_npz_reconstructs_none_carry_as_field(
             self, mesh, z_coord, state, tmp_path):
