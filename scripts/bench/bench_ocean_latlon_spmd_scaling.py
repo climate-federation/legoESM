@@ -389,7 +389,11 @@ def main() -> int:
     _build_ctx = contextlib.nullcontext()
     if nd > 1:
         try:
-            _build_ctx = jax.default_device(jax.devices("cpu")[0])
+            # local_devices, NOT devices: under multicontroller jax.devices()
+            # returns the GLOBAL list, so [0] is process 0's cpu device
+            # — non-addressable elsewhere (probe job 26524163).
+            _build_ctx = jax.default_device(
+                jax.local_devices(backend="cpu")[0])
         except RuntimeError:
             # cpu backend not registered (JAX_PLATFORMS=cuda). The fix
             # needs JAX_PLATFORMS=cuda,cpu; fall back to the old on-device
