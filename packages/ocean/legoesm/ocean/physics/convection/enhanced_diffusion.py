@@ -194,6 +194,8 @@ def enhanced_diffusion_convection(
     v: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
     eos_fn=None,
+    eta: jnp.ndarray | None = None,
+    H_bathy: jnp.ndarray | None = None,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
 
@@ -233,6 +235,10 @@ def enhanced_diffusion_convection(
     eos_fn : callable or None
         EOS ``fn(T, S, p) -> rho`` for the adiabatic parcel displacement
         (``None`` -> Wright 1997).  Ignored on the in-situ path.
+    eta, H_bathy : array ``(...)`` or None
+        Sea-surface height [m] and local column depth [m].  REQUIRED when
+        ``cfg.n2_mode == "nemo_bn2"`` (they build NEMO's live
+        ``gdept(Kmm) = gdept_0*(1 + eta/H_bathy)`` ladder); ignored otherwise.
 
     Returns
     -------
@@ -245,8 +251,17 @@ def enhanced_diffusion_convection(
     # NEMO bn2 trigger needs the geometric depth ladders (gdept / interior
     # gdepw); cheap to extract, ignored by every other n2_mode.
     if cfg.n2_mode == "nemo_bn2":
-        from legoesm.ocean.eos import nemo_bn2_depth_ladders
-        _t_depth, _w_depth = nemo_bn2_depth_ladders(z_coord)
+        # NEMO evaluates alpha/beta/bn2 at the LIVE gdept(Kmm) =
+        # gdept_0*(1 + eta/ht_0) -- see eos.nemo_bn2_live_ladders for the
+        # macro expansion and why this is NOT the z* Jacobian ``jacobian``
+        # above ((eta + H)/H_max, normalised by the GLOBAL maximum depth).
+        if eta is None or H_bathy is None:
+            raise ValueError(
+                'EnhancedDiffusionConfig.n2_mode="nemo_bn2" needs eta and '
+                "H_bathy to build NEMO's live gdept(Kmm) ladder; "
+                "enhanced_diffusion_convection was called without them.")
+        from legoesm.ocean.eos import nemo_bn2_live_ladders
+        _t_depth, _w_depth = nemo_bn2_live_ladders(z_coord, eta, H_bathy)
     else:
         _t_depth = _w_depth = None
     K, A, flag = convective_K_A_flag(

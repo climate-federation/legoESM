@@ -199,3 +199,177 @@ def test_shared_compute_N2_nemo_bn2_branch():
         n2_mode="nemo_bn2"))
     ref = _numpy_bn2(T[None, :], S[None, :], gdept, gdepw_int, cfg, constants.g)
     assert np.allclose(n2, ref, atol=1e-18)
+
+
+def test_shared_compute_N2_nemo_bn2_jacobian_stretches_live_gdept():
+    """#1226: NEMO's bn2_t/rab_3d_t evaluate alpha/beta/e3w at the LIVE
+    gdept(Kmm) = gdept_0*J (z-star stretch), not the static reference
+    ladder (eosbn2.F90 rab_3d_t ``zh = gdept(ji,jj,jk,Kmm)``; bn2_t divides
+    by the LIVE ``e3w(ji,jj,jk,Kmm)``, domzgr_substitute.h90:131). The
+    caller stretches ``t_depth``/``w_depth`` by the jacobian BEFORE calling
+    ``compute_N2`` -- ``e3w`` is derived internally as ``diff(t_depth)``, so
+    the stretch already propagates through alpha/beta AND e3w with no
+    separate division needed. Passing a jacobian-stretched ladder must (a)
+    match an independent NumPy transcription built on that SAME stretched
+    ladder and (b) differ from the static-ladder result -- proving the
+    stretch is not a no-op.
+    """
+    from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+    cfg = NemoSEOSConfig()
+    T, S, gdept, gdepw_int = _column()
+    Tj = jnp.asarray(T[None, :]); Sj = jnp.asarray(S[None, :])
+    J = 1.0003   # representative DINO |eta/H| ~ 1e-4 to 1e-3 z-star stretch
+    Jj = jnp.asarray([J])
+
+    n2_live = np.asarray(compute_N2(
+        jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
+        T_cell=Tj, S_cell=Sj,
+        t_depth=jnp.asarray(gdept) * J, w_depth=jnp.asarray(gdepw_int) * J,
+        jacobian=Jj, n2_mode="nemo_bn2"))
+    ref_live = _numpy_bn2(
+        T[None, :], S[None, :], gdept * J, gdepw_int * J, cfg, constants.g,
+    )
+    assert np.allclose(n2_live, ref_live, atol=1e-15)
+
+    n2_static = np.asarray(compute_N2(
+        jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
+        T_cell=Tj, S_cell=Sj,
+        t_depth=jnp.asarray(gdept), w_depth=jnp.asarray(gdepw_int),
+        n2_mode="nemo_bn2"))
+    assert not np.allclose(n2_live, n2_static, atol=1e-8)
+    # Dominant effect of the stretch is the 1/e3w scaling -> n2_live ~ n2_static/J,
+    # with a small residual from alpha/beta's own (thermobaric) J-dependence.
+    assert np.allclose(n2_live, n2_static / J, rtol=1e-4)
+
+
+def test_nemo_bn2_ladder_is_pure_jacobian_stretch_not_eta_shift():
+    """#1226: gdept(Kmm) is the PURE multiplicative z-star stretch
+    gdept_0*(1+r3t) -- NOT gdept_0*(1+r3t) - eta.
+
+    Traced through the actual Fortran macro NEMO's ``gdept(...)`` expands
+    to: domzgr_substitute.h90:139 ``gdept(i,j,k,t) = (DEPt_0(i,j,k)
+    Tisf(r3t,risfdep,i,j,t))``; under key_qco WITHOUT key_isf (DINO has no
+    ice shelf), ``Tisf(r3,isf,i,j,t) = ) Time(r3,i,j,t)`` (:51), i.e. plain
+    ``DEPt_0*(1+r3t)`` -- no ``-eta`` anywhere. ``gdept_z0 = gdept - ssh``
+    (:145) is a DIFFERENT named quantity (depth relative to z=0, used only
+    for diagnostics via the unused ``DEPT_z0`` macro, zero call sites under
+    src/OCE/); eosbn2.F90's ``zh = gdept(ji,jj,jk,Kmm)`` (rab_3d_t) uses the
+    plain macro, not ``gdept_z0``. Verified against NEMO's own dumped
+    gdept(Kmm): the pure-stretch formula matches to ~1e-8; subtracting eta
+    is off by 3-20% -- proving "-eta" would be a REGRESSION, not a fix.
+    """
+    cfg = NemoSEOSConfig()
+    T, S, gdept, gdepw_int = _column()
+    Tj = jnp.asarray(T[None, :]); Sj = jnp.asarray(S[None, :])
+
+    ht_0 = 1200.0  # representative DINO column depth [m]
+    eta = 0.5      # exaggerated SSH anomaly [m] for a clean test signal
+    r3t = eta / ht_0
+    J = 1.0 + r3t
+
+    # TRUE NEMO ladder: gdept_0*(1+r3t), pure multiplicative stretch.
+    gdept_true = gdept * J
+    gdepw_true = gdepw_int * J
+    ref_true = _numpy_bn2(T[None, :], S[None, :], gdept_true, gdepw_true,
+                          cfg, constants.g)
+
+    from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+
+    # CORRECT (current code): t_depth*J, no eta shift.
+    n2_correct = np.asarray(compute_N2(
+        jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
+        T_cell=Tj, S_cell=Sj,
+        t_depth=jnp.asarray(gdept) * J, w_depth=jnp.asarray(gdepw_int) * J,
+        n2_mode="nemo_bn2"))
+    assert np.allclose(n2_correct, ref_true, atol=1e-12)
+
+    # An "-eta shift" construction is NOT a better match to the true ladder.
+    n2_eta_shifted = np.asarray(compute_N2(
+        jnp.zeros_like(Tj), jnp.ones((1, len(T) - 1)), cfg.rho0,
+        T_cell=Tj, S_cell=Sj,
+        t_depth=jnp.asarray(gdept) * J - eta,
+        w_depth=jnp.asarray(gdepw_int) * J - eta,
+        n2_mode="nemo_bn2"))
+    err_correct = np.max(np.abs(n2_correct - ref_true) / np.abs(ref_true))
+    err_eta_shifted = np.max(
+        np.abs(n2_eta_shifted - ref_true) / np.abs(ref_true))
+    assert err_correct < 1e-10
+    assert err_eta_shifted > 1e-4   # genuinely worse, not a rounding wash
+
+
+def test_nemo_bn2_live_ladders_uses_local_column_not_zstar_jacobian():
+    """#1226: the live ladder is ``gdept_0*(1 + eta/H_bathy)`` -- the LOCAL
+    column stretch (NEMO ``r3t = ssh/ht_0``, domqco.F90:160) -- and NOT
+    legoESM's z* Jacobian ``compute_ocean_jacobian = (eta + H)/H_max``,
+    which is normalised by the GLOBAL maximum depth.
+
+    Measured against NEMO's own ``kt==nit000`` ``gdept(Kmm)`` dump on the
+    DINO y5 restart: the local form is off by median 2.5e-8 relative, the
+    z*-Jacobian form by 1.1e-1 (a 4.4e6x regression). The two coincide only
+    when ``H_bathy == H_max``, so this test uses a shallow column where they
+    genuinely differ.
+    """
+    from legoesm.ocean.eos import nemo_bn2_depth_ladders, nemo_bn2_live_ladders
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+
+    class _Z:                      # minimal z_coord stand-in for the ladders
+        z_full_ref = -jnp.array([5.0, 20.0, 60.0, 150.0])
+        z_half_ref = -jnp.array([0.0, 10.0, 35.0, 100.0, 200.0])
+        t_depth_ref = jnp.array([5.0, 20.0, 60.0, 150.0])
+
+    z = _Z()
+    t_ref, w_ref = nemo_bn2_depth_ladders(z)
+    eta = jnp.array([0.5])
+    H = jnp.array([1200.0])        # local column, shallower than any H_max
+
+    t_live, w_live = nemo_bn2_live_ladders(z, eta, H)
+    expect = 1.0 + 0.5 / 1200.0
+    assert np.allclose(np.asarray(t_live), np.asarray(t_ref) * expect, rtol=0,
+                       atol=1e-13)
+    assert np.allclose(np.asarray(w_live), np.asarray(w_ref) * expect, rtol=0,
+                       atol=1e-13)
+
+    # The z* Jacobian is a DIFFERENT number here -- guard the regression that
+    # motivated this helper (using it stretched the ladder by ~0.89, not
+    # ~1.0004).
+    J = np.asarray(compute_ocean_jacobian(eta, H, _ZStar()))
+    assert abs(float(J[0]) - expect) > 1e-3
+
+
+class _ZStar:
+    """OceanZStarCoordinate stand-in: J = (eta + H_bathy)/H_max."""
+    linear_free_surface = False
+    H_max = 4506.0
+
+
+def test_nemo_bn2_live_ladders_dry_column_is_inert():
+    """H_bathy == 0 (land) must give r3t = 0, not eta/0 -> inf/NaN."""
+    from legoesm.ocean.eos import nemo_bn2_live_ladders
+
+    class _Z:
+        z_full_ref = -jnp.array([5.0, 20.0])
+        z_half_ref = -jnp.array([0.0, 10.0, 30.0])
+        t_depth_ref = jnp.array([5.0, 20.0])
+
+    t_live, w_live = nemo_bn2_live_ladders(
+        _Z(), jnp.array([0.3, 0.0]), jnp.array([0.0, 100.0]))
+    assert np.all(np.isfinite(np.asarray(t_live)))
+    assert np.all(np.isfinite(np.asarray(w_live)))
+    assert np.allclose(np.asarray(t_live)[0], np.asarray(_Z().t_depth_ref))
+
+
+def test_enhanced_diffusion_nemo_bn2_requires_eta_and_H_bathy():
+    """nemo_bn2 without the live-ladder inputs must RAISE, not silently fall
+    back to the static (or z*-Jacobian) ladder."""
+    from legoesm.ocean.physics.convection.enhanced_diffusion import (
+        EnhancedDiffusionConfig, enhanced_diffusion_convection,
+    )
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    n, nz = 2, 4
+    z = create_ocean_z_star(n_levels=nz, H_max=100.0)
+    T = jnp.zeros((n, nz)); S = jnp.full((n, nz), 35.0)
+    rho = jnp.full((n, nz), 1025.0); J = jnp.ones((n,))
+    cfg = EnhancedDiffusionConfig(n2_mode="nemo_bn2")
+    with pytest.raises(ValueError, match="eta and H_bathy"):
+        enhanced_diffusion_convection(T, S, rho, z, J, cfg)
