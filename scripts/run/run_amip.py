@@ -1386,6 +1386,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(the model reached 288%% at 228 K). Treats the "
                              "cause of the supersaturation pile-up rather "
                              "than draining it after the fact.")
+    parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
+                        default="mg", dest="morrison_flavor",
+                        help="Morrison parameter flavor: 'mg' (E3SM/CESM "
+                             "Morrison-Gettelman set, GCM default) or 'sam' "
+                             "(SAM/gSAM M2005 set — faster cloud-ice fall "
+                             "fall_b_i=0.865 and PSD bounds tuned against "
+                             "anvil-ice over-accumulation, the exact disease "
+                             "of the 2026-07 AMIP warm drift).")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -1909,6 +1917,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
+        morrison_flavor=args.morrison_flavor,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

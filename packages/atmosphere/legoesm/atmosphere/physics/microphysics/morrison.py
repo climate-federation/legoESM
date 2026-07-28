@@ -1249,8 +1249,33 @@ def morrison_microphysics(
     rho_eff = jnp.maximum(rho, _RHO_FLOOR)
     sed_N_r = rho_eff * sedimentation_tendency(
         jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt)
+    # Ice-NUMBER sinks sharing this step with number sedimentation — melt,
+    # sublimation (both mass-proportional; melt_ice / dq_i_dep are FINAL
+    # donor-clamped values here) and the ice->snow autoconversion number
+    # transfer.  Computed BEFORE the sedimentation call so their sum is
+    # RESERVED via extra_sink: without the joint reservation, sedimentation
+    # could remove all N_i on top of these sinks, the non-negativity floor
+    # would clamp, and the post-step LAMI lower bound would then RECREATE
+    # number to match surviving q_i — an artificial ice-number source with
+    # no phase-transfer counterpart (codex 2026-07-28 round 2).
+    _qi_floor = jnp.clip(q_i, 1.0e-15)
+    _ni_pos = jnp.clip(N_i, 0.0)
+    dN_i_melt = melt_ice * _ni_pos / _qi_floor
+    dN_i_subl = jnp.maximum(-dq_i_dep, 0.0) * _ni_pos / _qi_floor
+    if config.ice_to_snow_scheme in ("m2005_autoconv", "mg_ferrier"):
+        _cons22 = (
+            jnp.pi * config.rho_cloud_ice
+            * config.ice_snow_d_auto ** 3 / 6.0
+        )
+        dN_i_autoconv = jnp.minimum(
+            aggregation / _cons22,
+            _ni_pos / jnp.clip(dt, 1.0),
+        )
+    else:
+        dN_i_autoconv = aggregation * _ni_pos / _qi_floor
     sed_N_i = sedimentation_tendency(
-        jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt)
+        jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
+        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv)
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
@@ -1366,6 +1391,11 @@ def morrison_microphysics(
     # simply vanished: rain in melting layers under-counted drops -> too-large
     # mean size -> too-fast fallout / too-little evaporation.
     melt_N_to_rain = jnp.zeros_like(q_r)
+    # NMLTR from cloud ice: melted crystals become rain drops (the Morrison
+    # reference transfers this number; snow/graupel below already did — the
+    # cloud-ice channel was missing, codex 2026-07-28).  dN_i_melt is
+    # per-mass; *rho converts to the per-volume rain number.
+    melt_N_to_rain = melt_N_to_rain + dN_i_melt * rho
     if snow_double_moment:
         dN_s_melt = melt_snow * jnp.clip(N_s, 0.0) / jnp.clip(q_s, 1e-15)
         melt_N_to_rain = melt_N_to_rain + dN_s_melt * rho
@@ -1380,25 +1410,17 @@ def morrison_microphysics(
     # π·ρ_ci·DCS³/6), clamped to N_i/dt (codex iter-20 B) — NOT the mean-mass
     # rate, which would over-remove number. The heuristic scheme keeps the
     # legacy mean-mass form (clip(q_i,1e-15) floor preserves the AD path).
-    if config.ice_to_snow_scheme in ("m2005_autoconv", "mg_ferrier"):
-        # DCS-sized number removal. For SAM PRCI this is exact; for the MG
-        # Ferrier prci the converted-tail mean mass → m_DCS in the small-ice
-        # (LAMI·DCS ≫ 1) limit, so cons22 is the faithful per-crystal mass.
-        cons22 = (
-            jnp.pi * config.rho_cloud_ice
-            * config.ice_snow_d_auto ** 3 / 6.0
-        )
-        dN_i_autoconv = jnp.minimum(
-            aggregation / cons22,
-            jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0),
-        )
-    else:
-        dN_i_autoconv = (
-            aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
-        )
     # +homo_freeze_N: cloud droplets that homogeneously freeze become ice
     # crystals (SAM NI3D += NC3D).
-    dN_i_dt = dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+    #
+    # Number leaves WITH the mass (SAM: melting/sublimation deplete NI3D
+    # alongside QI3D).  Without these sinks, sedimented crystals melt or
+    # sublimate their MASS away while their NUMBER accumulates forever —
+    # measured as century5's residual Ni^max growth engine (argmax at
+    # 277 K, surface level: +4 C "ice number" with no melting sink,
+    # 2026-07-28; the same surface pile ended century3 at N_i=1e193).
+    dN_i_dt = (dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+               - dN_i_melt - dN_i_subl)
 
     # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
     # Each individual number sink above is bounded (evap/riming ∝ N/dt,
@@ -1414,6 +1436,22 @@ def morrison_microphysics(
     dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / jnp.clip(dt, 1.0))
     dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
+
+    # SAM N_i consistency limiter (mirrors the N_s pattern below): bound the
+    # POST-STEP number so LAMI stays in [lami_min, lami_max] w.r.t. the
+    # POST-STEP mass, and CLEAR the number entirely below QSMALL — orphan
+    # number (q_i ~ 0, N_i > 0) is what accumulated into the century3/5
+    # surface pile (N_i = 1e193 by day 803).  Applied AFTER every physical
+    # number tendency (in-place SAM reset semantics: adjusting the OLD state
+    # alternated 0 <-> lami_min across steps, and a q_i floor in the lower
+    # bound created number in CLEAR AIR — both codex 2026-07-28 round 1).
+    q_i_new = jnp.maximum(jnp.clip(q_i, 0.0) + dq_i_dt * dt, 0.0)
+    _ci_psd = jnp.pi * config.rho_cloud_ice
+    n_i_hi = config.lami_max ** 3 * q_i_new / _ci_psd
+    n_i_lo = config.lami_min ** 3 * q_i_new / _ci_psd
+    n_i_new = jnp.clip(jnp.clip(N_i, 0.0) + dN_i_dt * dt, n_i_lo, n_i_hi)
+    n_i_new = jnp.where(q_i_new > 1.0e-14, n_i_new, 0.0)
+    dN_i_dt = (n_i_new - jnp.clip(N_i, 0.0)) / jnp.maximum(dt, 1.0e-10)
 
     # Snow NUMBER budget (double-moment snow). Number is CONSERVED across the
     # phase changes: the ice→snow autoconversion that removes dN_i_autoconv

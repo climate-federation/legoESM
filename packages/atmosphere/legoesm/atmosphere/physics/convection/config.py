@@ -78,6 +78,8 @@ __param_spec__ = {
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "cmt_c_u": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "dnoprc": {"units": "kg/kg", "bounds": (7.5e-5, 1.2e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS ZDNOPRC=3e-4 (cuascn.F90:277)", "shape": None},
+            "rprcon": {"units": "1/m", "bounds": (3.5e-4, 5.6e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS RPRCON=1.4e-3 (sucumf.F90:164)", "shape": None},
             "delta_deep": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
             "delta_midlevel": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) mid-level", "shape": None},
             "delta_shallow": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
@@ -1626,6 +1628,14 @@ class BechtoldConfig(NamedTuple):
     # because Bechtold's plume does not decay at its LNB; the top-heavy
     # subsidence otherwise bakes the lower stratosphere into a slow blow-up.
     p_conv_top_pa: float = 15000.0
+    # --- in-plume conversion (IFS cuascn.F90:718-773 / sucumf.F90:164) ---
+    # ECMWF tuning constants of the in-plume Sundqvist conversion, promoted
+    # from module constants (2026-07-27 anvil-ice campaign): rprcon scales
+    # the conversion RATE, dnoprc the precip-onset condensate threshold.
+    # More conversion => drier detrained outflow => thinner anvil.
+    # APPENDED AT THE TUPLE END to preserve the positional ABI.
+    rprcon: float = 1.4e-3    # IFS RPRCON conversion rate [1/m]
+    dnoprc: float = 3.0e-4    # IFS ZDNOPRC precip-onset condensate [kg/kg]
 
 
 class ConvectiveEDMFConfig(NamedTuple):

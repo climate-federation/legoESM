@@ -28,7 +28,10 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.conservation import conservative_positive_clip
+from legoesm.core.conservation import (
+    conservative_positive_clip,
+    conservative_positive_clip_global,
+)
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
@@ -1075,18 +1078,43 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # the default is known-wrong and should flip once validated.
         if state_new.tracers is not None:
             if self.config.conservative_tracer_clamp:
-                # ONLY the water MASS tracers get the conserving borrow.
-                # Number concentrations (N_c/N_i/N_r) are NOT conserved
-                # quantities — rescaling them to preserve a column integral is
-                # unphysical and perturbs the microphysics directly (M2005 ice
-                # deposition goes as N_i^(2/3)).  The LES reference makes the
-                # same split ("number slots clip freely; their conservation is
-                # not physically required"), so keep the two lanes consistent.
-                _dsig = jnp.asarray(self.sigma_coord.dsigma)
+                # PER-MASS tracers get the conserving borrow — the mixing
+                # ratios AND the per-mass numbers N_i/N_s/N_g.  The former
+                # blanket number exclusion conflated PROCESS-level number
+                # non-conservation (microphysics may create/destroy number
+                # freely) with TRANSPORT-level conservation: advection
+                # conserves every mass-weighted per-mass field, and the naive
+                # clip INVENTS it at each undershoot.  MEASURED (checkpoint
+                # day 40, 2026-07-28): 28k cells/step undershoot, invention
+                # 6.8e-4 of the N_i field PER STEP = x2.2/day compound
+                # growth; N_i reached 1e193 and overflowed into NaN at day
+                # 803 of century3.  N_c/N_r are per-VOLUME [#/m^3] (see
+                # HydrometeorState), so a dsigma-weighted borrow has no
+                # conservation meaning for them (codex 2026-07-28) — they
+                # keep the plain clip pending a density-aware repair
+                # (follow-up; N_r inflation is ~e15 slower than N_i's and
+                # overflows only at ~year 36 at the measured rate).
+                # Borrow weight = TRUE layer mass dp (post-mass-fix p_s —
+                # the dry-mass fixer runs before the floors).  On pure sigma
+                # dp = dsigma*p_s and the per-column p_s factor cancels in
+                # the rescale, so results are unchanged there; on HYBRID
+                # grids dsigma is NOT the layer mass (documented above) and
+                # would mis-conserve the physical dp-integral by O(0.1%)
+                # (codex 2026-07-28 round 2).  Non-positive dp (a broken
+                # hybrid layer) is zero-weighted rather than borrowed from.
+                _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                # GLOBAL variant: the column-local fixer zeroes net-negative
+                # columns, and on spiky number fields that zeroing alone
+                # re-created x2.74/day growth (868/10242 columns per step at
+                # century4 d90) — the global residual redistribution closes
+                # the budget exactly (serial jnp.sum here; the MPI lane
+                # passes an allreduce-SUM reduction).
                 state_new = state_new._replace(tracers={
                     k: f.replace(data=(
-                        conservative_positive_clip(f.data, _dsig, axis=-1)[0]
-                        if _is_water_mass_tracer(k)
+                        conservative_positive_clip_global(
+                            f.data, _dp, axis=-1)[0]
+                        if is_borrow_eligible_tracer(k)
                         else jnp.maximum(f.data, 0.0)))
                     for k, f in state_new.tracers.items()
                 })
@@ -1105,18 +1133,23 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-#: Water MASS mixing ratios [kg/kg] — the only tracers whose column integral
-#: is a conserved quantity.  Number concentrations (``N_c``/``N_i``/``N_r``)
-#: and any non-water tracer are deliberately excluded: rescaling a number to
-#: preserve an integral is unphysical and feeds straight into the microphysics
-#: (M2005 deposition ~ N_i^(2/3)).  Mirrors the LES lane's ``n_water`` split.
-_WATER_MASS_TRACERS = frozenset(
-    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"})
+#: Tracers eligible for the column-conserving borrow: PER-MASS fields whose
+#: dsigma-weighted column integral is what mass-weighted transport conserves —
+#: the water mixing ratios [kg/kg] and the per-mass numbers [#/kg]
+#: (``N_i``/``N_s``/``N_g``).  ``N_c``/``N_r`` are per-VOLUME [#/m^3]
+#: (HydrometeorState), so this weight has no conservation meaning for them:
+#: they keep the plain clip pending a density-aware repair (codex 2026-07-28;
+#: their invention rate is ~e15 slower than N_i's was).
+BORROW_ELIGIBLE_TRACERS = frozenset(
+    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i", "N_s", "N_g"})
 
 
-def _is_water_mass_tracer(name: str) -> bool:
-    """True for a water mass mixing ratio, tolerating a ``trc_`` prefix."""
-    return str(name).removeprefix("trc_") in _WATER_MASS_TRACERS
+def is_borrow_eligible_tracer(name: str) -> bool:
+    """True for a per-mass tracer, tolerating a ``trc_`` prefix."""
+    return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
+
+
+
 
 
 def _fix_mass_mpas_hydro(

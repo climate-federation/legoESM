@@ -1343,17 +1343,18 @@ def exchange_dgrid_vector_halos(u6: list, v6: list, tile: int,
 _K2E_TAB_CACHE: dict = {}
 
 
-def _k2e_tables(n: int, remap_ng: int = 3):
-    key = (n, remap_ng)
+def _k2e_tables(n: int, remap_ng: int = 3, k2e_nord: int = 4):
+    key = (n, remap_ng, k2e_nord)
     if key not in _K2E_TAB_CACHE:
         from legoesm.grids.fv3_native_halos import compute_fv3_native_k2e
 
         _K2E_TAB_CACHE[key] = compute_fv3_native_k2e(n, remap_ng=remap_ng,
-                                                     k2e_nord=4)
+                                                     k2e_nord=k2e_nord)
     return _K2E_TAB_CACHE[key]
 
 
-def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
+def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int,
+                         k2e_nord: int = 4):
     """Kinked-to-extended along-edge Lagrange remap of the halo rings
     (cube_rmp semantics) for one stagger family, applied AFTER the
     index-copy exchange: each halo-ring value becomes the certified
@@ -1373,7 +1374,7 @@ def k2e_remap_halo_rings(f6: list, stag: str, n: int, ng: int):
         raise NotImplementedError(
             "k2e remap rings pinned for ng<=3 (stepper) / ng==4 (the "
             "ext_vector geographic lattice, upstream dg%bd%ng)")
-    tab = _k2e_tables(n, remap_ng=ng)
+    tab = _k2e_tables(n, remap_ng=ng, k2e_nord=k2e_nord)
     ij = tab[f"{stag}_ij"]
     loc = tab[f"{stag}_loc"]
     coef = tab[f"{stag}_coef"]

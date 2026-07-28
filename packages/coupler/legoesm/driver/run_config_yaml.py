@@ -192,6 +192,9 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.MorrisonConfig.dep_coeff": "morrison_dep_coeff",
     "atm.micro.MorrisonConfig.agg_coeff": "morrison_agg_coeff",
     "atm.micro.MorrisonConfig.k_au": "morrison_k_au",
+    "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
+    "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
+    "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
@@ -201,6 +204,13 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.cmt_c_u": "bechtold_cmt_c_u",
     "atm.conv.BechtoldConfig.cmt_c_d": "bechtold_cmt_c_d",
     "atm.conv.BechtoldConfig.cape_sink_heating_ratio": "bechtold_cape_sink_heating_ratio",
+    # upstream #1366: IFS in-plume conversion constants become tunable.  These
+    # are the levers the in-plume path actually reads -- precip_efficiency is
+    # skipped whenever use_ifs_inplume_precip is True (bechtold.py, the
+    # production default), so rprcon/dnoprc supersede it as the conversion
+    # knobs on this lane.
+    "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:

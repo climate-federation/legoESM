@@ -260,3 +260,43 @@ def test_geopk_threads_pt(ctx):
         assert np.allclose(gz[sl, sl, 0], want, rtol=0, atol=0), fn.__name__
         pkc1, gz1 = fn(delp, hs, bd, pt=np.ones((m, m)))
         assert not np.array_equal(gz[sl, sl, 0], gz1[sl, sl, 0])
+
+
+def test_outer_step_schedule_matches_dyn_core(monkeypatch):
+    """advance_duo_outer_step must reproduce the upstream exchange
+    cadence (dyn_core.F90:432-439): entry A-scalar only on it==1 of
+    each dt_atmos block, i.e. entry_ascalar flags [1,0,0,0,0,0,0] at
+    n_split=7, every inner step at dt = dt_atmos/n_split, state
+    threaded through the chain."""
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states + ["step"]
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    out = ds.advance_duo_outer_step({}, [], 1200.0, 7, d_ext=0.0,
+                                    sw_cfg={"nord": 2})
+    assert [e for _, e in calls] == [True] + [False] * 6
+    assert all(abs(dt - 1200.0 / 7.0) < 1e-12 for dt, _ in calls)
+    assert out == ["step"] * 7          # state threaded, not restarted
+
+
+def test_outer_step_nsplit_one_and_invalid(monkeypatch):
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    ds.advance_duo_outer_step({}, [], 300.0, 1)
+    assert calls == [(300.0, True)]
+    with pytest.raises(ValueError):
+        ds.advance_duo_outer_step({}, [], 300.0, 0)

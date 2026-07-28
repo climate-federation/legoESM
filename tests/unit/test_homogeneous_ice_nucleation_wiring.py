@@ -229,7 +229,10 @@ class TestMorrisonScalarOverlay:
                           ("morrison_rime_coeff", "rime_coeff"),
                           ("morrison_dep_coeff", "dep_coeff"),
                           ("morrison_agg_coeff", "agg_coeff"),
-                          ("morrison_k_au", "k_au")):
+                          ("morrison_k_au", "k_au"),
+                          ("morrison_fall_a_i", "fall_a_i"),
+                          ("morrison_ice_snow_d_auto", "ice_snow_d_auto"),
+                          ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N")):
             assert getattr(e, exp) == getattr(m, leaf), (exp, leaf)
 
     @pytest.mark.parametrize("exp,leaf,val", [
@@ -238,8 +241,17 @@ class TestMorrisonScalarOverlay:
         ("morrison_dep_coeff", "dep_coeff", 3e-4),
         ("morrison_agg_coeff", "agg_coeff", 5e-3),
         ("morrison_k_au", "k_au", 1.2e3),
+        ("morrison_fall_a_i", "fall_a_i", 2100.0),
+        ("morrison_ice_snow_d_auto", "ice_snow_d_auto", 100.0e-6),
+        ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N", 1.0e5),
     ])
     def test_each_scalar_reaches_its_leaf(self, exp, leaf, val):
+        if exp == "morrison_hom_ice_nuc_N":
+            # the leaf is only live inside the hom branch; pair the override
+            # with the flag exactly as validate_strict requires.
+            got = self._leaf(homogeneous_ice_nucleation=True, **{exp: val})
+            assert getattr(got, leaf) == val
+            return
         got = self._leaf(**{exp: val})
         assert getattr(got, leaf) == val, (
             f"{exp} did not reach MorrisonConfig.{leaf} — the audit's "
@@ -302,6 +314,57 @@ class TestMorrisonScalarOverlay:
                 ExperimentConfig(microphysics="morrison",
                                  morrison_dep_coeff=bad).validate_strict()
 
+    def test_flavor_sam_reaches_the_leaf(self):
+        got = self._leaf(morrison_flavor="sam")
+        assert got.morrison_flavor == "sam"
+
+    def test_flavor_default_mg_is_byte_identical(self):
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        assert self._leaf(morrison_flavor="mg") == MorrisonConfig()
+
+    def test_flavor_on_non_morrison_raises(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import _resolve_microphysics
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            ExperimentConfig(microphysics="thompson",
+                             morrison_flavor="sam").validate_strict()
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            _resolve_microphysics(ExperimentConfig(
+                microphysics="thompson", morrison_flavor="sam"))
+
+    def test_flavor_membership_validated(self):
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="morrison_flavor"):
+            ExperimentConfig(microphysics="morrison",
+                             morrison_flavor="gcm").validate_strict()
+
+    def test_hom_nuc_N_override_requires_the_flag(self):
+        """morrison_hom_ice_nuc_N is read only inside the hom-nucleation
+        branch — with the flag off the override would be silently inert
+        (the exact class the scheme gate closes), so validate_strict must
+        refuse the combination and accept it once the flag is on."""
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="morrison_hom_ice_nuc_N"):
+            ExperimentConfig(microphysics="morrison",
+                             morrison_hom_ice_nuc_N=1e5).validate_strict()
+        ExperimentConfig(microphysics="morrison",
+                         homogeneous_ice_nucleation=True,
+                         morrison_hom_ice_nuc_N=1e5).validate_strict()
+
+    def test_validate_strict_bounds_cover_the_ice_knobs(self):
+        from legoesm.driver.config import ExperimentConfig
+        for field, bad in (("morrison_fall_a_i", 10.0),
+                           ("morrison_ice_snow_d_auto", 5e-3),
+                           ("morrison_hom_ice_nuc_N", 1e9)):
+            with pytest.raises(Exception, match=field):
+                kw = {field: bad}
+                if field == "morrison_hom_ice_nuc_N":
+                    kw["homogeneous_ice_nucleation"] = True
+                ExperimentConfig(microphysics="morrison",
+                                 **kw).validate_strict()
+
     def test_params_map_carries_all_five(self):
         """--params routing (codex finding: the map was never extended, so
         calibration files could not use the wiring).  End-to-end threading of
@@ -312,7 +375,10 @@ class TestMorrisonScalarOverlay:
                            ("rime_coeff", "morrison_rime_coeff"),
                            ("dep_coeff", "morrison_dep_coeff"),
                            ("agg_coeff", "morrison_agg_coeff"),
-                           ("k_au", "morrison_k_au")):
+                           ("k_au", "morrison_k_au"),
+                           ("fall_a_i", "morrison_fall_a_i"),
+                           ("ice_snow_d_auto", "morrison_ice_snow_d_auto"),
+                           ("hom_ice_nuc_N", "morrison_hom_ice_nuc_N")):
             assert M[f"atm.micro.MorrisonConfig.{leaf}"] == flat
 
     def test_tuning_catalog_agrees_with_the_leaf_default(self):

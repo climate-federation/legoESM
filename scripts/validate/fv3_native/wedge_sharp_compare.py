@@ -165,7 +165,10 @@ def main():
               for t in range(1, 7)]
         for t in range(1, 7):
             exchange_agrid_scalar_halos(f6, t, n, ng)
-        k2e_remap_halo_rings(f6, "A", n, ng)
+        # thread the run's actual order (codex r5 P2: a bare call
+        # silently selects the historical nord=4)
+        k2e_remap_halo_rings(f6, "A", n, ng,
+                             k2e_nord=int(d.get("k2e_nord", 4)))
         return f6
 
     # --- family D: full vector strip path (NO fill) ------------------

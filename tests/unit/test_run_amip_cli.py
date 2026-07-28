@@ -1291,7 +1291,6 @@ def test_aimip_classical_checkpoint_flag():
 def _serialise_aimip_defaults(tmp_path):
     """Write a default AIMIPClassicalParams checkpoint for the override tests."""
     import equinox as eqx
-
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
     ckpt = tmp_path / "epoch_defaults.eqx"
@@ -1985,8 +1984,8 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     gustiness (coare3/300) rather than reverting to to_louis_config's default
     constant surface — the clobber that silently made --surface-bulk-scheme a
     no-op on every AIMIP run (anemic evaporation, hfls ~6 vs ~88)."""
-    from legoesm.atmosphere.physics.turbulence.config import (
-        LouisConfig, SurfaceLayerConfig)
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig, SurfaceLayerConfig
+
     from scripts.run.run_amip import _louis_with_preserved_surface
     # trained Louis carries a DEFAULT (constant) surface, exactly as
     # to_louis_config() builds it from the trained Cd/Ch/z0:
@@ -2004,8 +2003,8 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
 def test_aimip_louis_preserve_surface_noop_without_prev():
     """No prior turbulence config (e.g. turbulence was none) -> trained Louis
     returned unchanged."""
-    from legoesm.atmosphere.physics.turbulence.config import (
-        LouisConfig, SurfaceLayerConfig)
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig, SurfaceLayerConfig
+
     from scripts.run.run_amip import _louis_with_preserved_surface
     trained = LouisConfig(surface=SurfaceLayerConfig())
     assert _louis_with_preserved_surface(trained, None) is trained
@@ -2015,6 +2014,7 @@ def test_sundqvist_tuning_flags_round_trip_and_override():
     """--sundqvist-{qc-crit,rh-crit,auto-rate} parse and override a
     SundqvistConfig with final precedence; unset knobs stay at the base."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     d = parser.parse_args(["--dataset", "analytical"])
@@ -2032,6 +2032,7 @@ def test_sundqvist_tuning_flags_round_trip_and_override():
 def test_sundqvist_overrides_noop_without_flags():
     """No override flags -> the SAME config object (identity)."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical"])
@@ -2042,6 +2043,7 @@ def test_sundqvist_overrides_noop_without_flags():
 def test_sundqvist_overrides_noop_for_non_sundqvist_micro():
     """A sundqvist override is ignored when microphysics != sundqvist."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical",
@@ -3434,3 +3436,83 @@ def test_hard_saturation_adjustment_requires_warm_rain_scheme():
         ]), parser))
         with pytest.raises(ValueError, match="warm-rain microphysics"):
             cfg.validate_strict()
+
+
+def test_morrison_flavor_round_trips():
+    """--morrison-flavor sam round-trips into ExperimentConfig; default mg."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-flavor", "sam",
+    ]), parser))
+    assert cfg.morrison_flavor == "sam"
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.morrison_flavor == "mg"
+
+
+def test_morrison_flavor_yaml_route():
+    """--config YAML route (keys become parser defaults): morrison_flavor: sam
+    must reach ExperimentConfig, and an explicit CLI flag must still win."""
+    parser = build_arg_parser()
+    parser.set_defaults(morrison_flavor="sam", microphysics="morrison")
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.morrison_flavor == "sam"
+    cfg_cli = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--morrison-flavor", "mg",
+    ]), parser))
+    assert cfg_cli.morrison_flavor == "mg"
+
+
+def test_bechtold_rprcon_dnoprc_thread_and_validate():
+    """bechtold_rprcon / bechtold_dnoprc (IFS in-plume conversion constants,
+    the anvil-source levers) thread into the hot-loop BechtoldConfig on BOTH
+    resolvers; defaults byte-identical; validate_strict bounds enforced."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    cfg = ExperimentConfig(convection="bechtold", bechtold_rprcon=5.0e-3,
+                           bechtold_dnoprc=1.0e-4)
+    leaf = _resolve_convection(cfg)[1]
+    assert (leaf.rprcon, leaf.dnoprc) == (5.0e-3, 1.0e-4)
+    cc = convection_config_for(cfg)
+    assert (cc.bechtold.rprcon, cc.bechtold.dnoprc) == (5.0e-3, 1.0e-4)
+    d = _resolve_convection(ExperimentConfig(convection="bechtold"))[1]
+    assert (d.rprcon, d.dnoprc) == (1.4e-3, 3.0e-4)
+    with pytest.raises(ValueError, match="bechtold_rprcon"):
+        ExperimentConfig(bechtold_rprcon=1.0).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_dnoprc"):
+        ExperimentConfig(bechtold_dnoprc=1.0e-2).validate_strict()
+
+
+def test_inplume_conversion_responds_to_rprcon():
+    """Non-vacuity: the in-plume conversion must produce MORE precip at
+    higher rprcon and at lower dnoprc on a moist synthetic plume profile —
+    the knob the 2026-07-27 anvil campaign tunes.  Guards against the
+    silent-constant regression (the fn ignoring its new args)."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_inplume_precip_conversion,
+    )
+
+    ncol, nlev = 2, 12
+    z = jnp.linspace(12000.0, 200.0, nlev)[None, :].repeat(ncol, 0)
+    # Condensate just above the precip-onset threshold: the conversion is
+    # RATE-limited there (a saturated profile compresses the rprcon response
+    # into the Sundqvist exp plateau and the test goes vacuous).
+    q_c_u = jnp.full((ncol, nlev), 5.0e-4)
+    T_u = jnp.linspace(210.0, 295.0, nlev)[None, :].repeat(ncol, 0)  # noqa: N806 (T = temperature, domain convention)
+    eps = jnp.full((ncol, nlev), 1.0e-4)
+    ke = jnp.full((ncol, nlev), 2.0)
+
+    def total_precip(rprcon, dnoprc):
+        _, pf = _ifs_inplume_precip_conversion(
+            q_c_u, T_u, z, eps, ke, rprcon=rprcon, dnoprc=dnoprc)
+        return float(jnp.sum(pf))
+
+    base = total_precip(1.4e-3, 3.0e-4)
+    assert total_precip(5.6e-3, 3.0e-4) > base * 1.05
+    assert total_precip(1.4e-3, 1.0e-4) > base

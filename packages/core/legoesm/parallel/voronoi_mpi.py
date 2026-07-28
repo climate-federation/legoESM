@@ -310,7 +310,7 @@ def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
     # would pass through _replace UNSLICED silently — fail loudly so
     # the scatter/gather pair is extended deliberately.
     _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
-                 "rho_ref_z"}
+                 "rho_ref_z", "tke"}
     if set(global_state._fields) != _expected:
         raise ValueError(
             "scatter_state_mpas_ocean: MPASOceanState schema changed "
@@ -330,6 +330,9 @@ def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
         w=_cell(global_state.w),
         H_bathy=_cell(global_state.H_bathy),
         land_mask=_cell(global_state.land_mask),
+        # Prognostic TKE carry: cell-centered (nCells, nlev-1); None when the
+        # prognostic TKE closure is off (none-safe — slice only when seeded).
+        tke=(None if global_state.tke is None else _cell(global_state.tke)),
     )
     return new
 
@@ -350,6 +353,8 @@ def gather_state_mpas_ocean(local_state, partition: VoronoiPartition):
         w=_g(local_state.w, "cell"),
         H_bathy=_g(local_state.H_bathy, "cell"),
         land_mask=_g(local_state.land_mask, "cell"),
+        tke=(None if local_state.tke is None
+             else _g(local_state.tke, "cell")),
     )
 
 
@@ -380,7 +385,12 @@ def exchange_state_mpas_ocean(local_state, layout: VoronoiPartitionLayout):
     # field would silently pass through UNEXCHANGED — fail loudly so the
     # scatter/gather/exchange triple is extended deliberately.
     _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
-                 "rho_ref_z"}
+                 "rho_ref_z", "tke"}
+    # ``tke`` (prognostic TKE carry) is deliberately NOT exchanged: the TKE
+    # closure is COLUMN-LOCAL (no lateral stencil reads the carry), halo
+    # columns are seeded at scatter, and each rank advances its own columns —
+    # a halo copy would be dead traffic. Revisit if TKE advection
+    # (advection_scheme != 'none') ever lands on MPAS.
     if set(local_state._fields) != _expected:
         raise ValueError(
             "exchange_state_mpas_ocean: MPASOceanState schema changed "
@@ -1130,18 +1140,54 @@ def make_voronoi_mpi_step(
             # owned and halo cells.
             if getattr(config, "conservative_tracer_clamp", False):
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-                    _is_water_mass_tracer,
+                    is_borrow_eligible_tracer,
                 )
                 from legoesm.core.conservation import (
-                    conservative_positive_clip,
+                    conservative_positive_clip_global,
                 )
-                _dsig = jnp.asarray(sigma_coord.dsigma)
+                # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
+                # mirrors the serial floors exactly (see primitive_eq_mpas:
+                # the naive clip INVENTED per-mass number every step, x2.2/day
+                # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
+                # plain clip pending density-aware repair).  GLOBAL residual
+                # redistribution over OWNED cells via allreduce-SUM (the one
+                # AD-safe collective) so the factor is decomposition-
+                # independent; owned-mask weighting keeps halo cells out of
+                # the budget exactly like the mass fixer.
+                # TRUE layer-mass dp weight (post-mass-fix p_s): identical
+                # rescale on pure sigma (per-column p_s cancels), correct on
+                # hybrid where dsigma is not the layer mass (codex
+                # 2026-07-28 round 2).  Non-positive dp zero-weighted.
+                _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _owned = layout.owned_mask_cells[:, None]
+                # BROADCAST-allreduce VJP wrapper, NOT global_sum_mpi: the
+                # summed scalar is broadcast back into every rank's rescale
+                # factor, whose correct transpose is allreduce(SUM) of the
+                # cotangent — identity-VJP global_sum_mpi drops the cross-
+                # rank term (the #811 flux-form scale lesson; codex
+                # 2026-07-28 round 2).
+                from legoesm.core.conservation import (
+                    broadcast_allreduce_sum,
+                )
+
+                def _mpi_owned_sum(x, _o=_owned):
+                    return broadcast_allreduce_sum(
+                        jnp.sum(jnp.where(_o, x, 0.0)))
+
+                # SORTED iteration: the closure issues collectives per
+                # tracer, so every rank must pair allreduces for the SAME
+                # tracer — dict insertion order is not a cross-rank contract
+                # (codex 2026-07-28: mismatched orders would silently corrupt
+                # every factor).
                 state_new = state_new._replace(tracers={
-                    k: f.replace(data=(
-                        conservative_positive_clip(f.data, _dsig)[0]
-                        if _is_water_mass_tracer(k)
-                        else jnp.maximum(f.data, 0.0)))
-                    for k, f in state_new.tracers.items()
+                    k: state_new.tracers[k].replace(data=(
+                        conservative_positive_clip_global(
+                            state_new.tracers[k].data, _dp,
+                            sum_fn=_mpi_owned_sum)[0]
+                        if is_borrow_eligible_tracer(k)
+                        else jnp.maximum(state_new.tracers[k].data, 0.0)))
+                    for k in sorted(state_new.tracers)
                 })
             else:
                 state_new = state_new._replace(tracers={
