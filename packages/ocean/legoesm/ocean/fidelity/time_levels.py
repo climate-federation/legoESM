@@ -51,6 +51,17 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # not endpoints.
     "eiv_dump_zwz_raw.bin": ("before", "ldfslp.F90:335 zwz pre-Shapiro (unit 8840)"),
     "eiv_dump_zww_raw.bin": ("before", "ldfslp.F90:336 zww pre-Shapiro (unit 8841)"),
+    # FULL j-direction intermediate chain (units 8842-8848).  Lets ldf_slp be
+    # walked stage by stage in NEMO's own order:
+    #   prd_arg -> zgrv_iik/iikm1 -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj
+    # so the FIRST diverging stage can be identified instead of inferred.
+    "eiv_dump_zaj.bin": ("before", "ldfslp.F90:312 zaj, 4-pt zgrv/zcj (unit 8842)"),
+    "eiv_dump_zbj.bin": ("before", "ldfslp.F90:317 zbj = MIN(zbw, -100|zaj|, -7e3/e3w|zaj|) (unit 8843)"),
+    "eiv_dump_zbw.bin": ("before", "ldfslp.F90:303 zbw = zm1_2g*pn2*(prd(k)+prd(k-1)+2) (unit 8844)"),
+    "eiv_dump_zfk.bin": ("before", "ldfslp.F90:320 zfk ML step from nmln, INTEGER division (unit 8845)"),
+    "eiv_dump_zgrv_iik.bin": ("before", "ldfslp.F90 zgrv rolling buffer, current level (unit 8846)"),
+    "eiv_dump_zgrv_iikm1.bin": ("before", "ldfslp.F90 zgrv rolling buffer, level above (unit 8847)"),
+    "eiv_dump_prd_arg.bin": ("before", "ldfslp.F90 prd argument as received (unit 8848)"),
     # Asselin filter dumps are explicit about their own level.
     "atf_dump_tem_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
     "atf_dump_sal_before.bin": ("before", "traatf_qco.F90, pre-filter state"),

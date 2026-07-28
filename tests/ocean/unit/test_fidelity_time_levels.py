@@ -27,6 +27,14 @@ def test_raw_pre_shapiro_slope_dumps_are_registered():
     assert time_level_for_dump("eiv_dump_zww_raw.bin") == "before"
 
 
+def test_ldfslp_intermediate_chain_is_registered():
+    """The full j-direction walk: prd -> zgrv -> zaj -> zbw/zbj -> zfk -> zww."""
+    for name in ("eiv_dump_prd_arg.bin", "eiv_dump_zgrv_iik.bin",
+                 "eiv_dump_zgrv_iikm1.bin", "eiv_dump_zaj.bin",
+                 "eiv_dump_zbw.bin", "eiv_dump_zbj.bin", "eiv_dump_zfk.bin"):
+        assert time_level_for_dump(name) == "before", name
+
+
 def test_atf_after_dumps_are_after_level():
     assert time_level_for_dump("atf_dump_tem_after.bin") == "after"
     assert time_level_for_dump("atf_dump_tem_before.bin") == "before"
