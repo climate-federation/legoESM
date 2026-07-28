@@ -499,7 +499,23 @@ MEASURED_AT: dict[str, str] = {
     "ldf_slp uslp": "9f25d7be4",
     "ldf_slp vslp": "9f25d7be4",
     "ldf_eiv kappa (aeiu)": "9f25d7be4",
-    "dyn_hpg": "DISPUTED",   # two agents measured corr 0.19 vs 1.0 -- harness gap
+    # DISPUTE RESOLVED 2026-07-28 (9f25d7be4): the corr~0.19 measurement was a
+    # PROBE-INVOCATION error, not a model discrepancy. hpg_tendency_compare.py
+    # defaults to ``--state istate`` (the analytic from-rest usr_def_istate
+    # CASE(4) IC); pointing that at RUN_GDB's Y5-DEVELOPED dump compares
+    # legoESM-at-rest against NEMO-at-year-5 -- reproduced here exactly:
+    # du corr=nan, dv corr=0.2409 with a FLAT alignment scan (0.2409 vs
+    # runner-up 0.1876), i.e. the probe's OWN "flat scan -- ratio NOT
+    # trustworthy" guard fires and the number must be discarded. The correct
+    # invocation (that script's own "Run" doc block) passes the developed
+    # restart explicitly:
+    #   --run <RUN_GDB> --state <RUN_GDB>/DINO_00057600_restart.nc
+    #                   --e3t-mode both
+    # which gives a SHARP peak (du 1.000000 vs runner-up 0.8956) and
+    # reproduced the historical pre-fix 1.000054839 baseline EXACTLY before
+    # the live-gdept fix -- independent corroboration that this invocation is
+    # the one every earlier dyn_hpg number came from.
+    "dyn_hpg": "9f25d7be4",
 }
 
 
