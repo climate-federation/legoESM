@@ -1130,28 +1130,54 @@ def make_voronoi_mpi_step(
             # owned and halo cells.
             if getattr(config, "conservative_tracer_clamp", False):
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-                    _borrow_eligible,
+                    is_borrow_eligible_tracer,
                 )
                 from legoesm.core.conservation import (
-                    conservative_positive_clip,
+                    conservative_positive_clip_global,
                 )
                 # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
                 # mirrors the serial floors exactly (see primitive_eq_mpas:
                 # the naive clip INVENTED per-mass number every step, x2.2/day
                 # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
-                # plain clip pending density-aware repair).
+                # plain clip pending density-aware repair).  GLOBAL residual
+                # redistribution over OWNED cells via allreduce-SUM (the one
+                # AD-safe collective) so the factor is decomposition-
+                # independent; owned-mask weighting keeps halo cells out of
+                # the budget exactly like the mass fixer.
                 # TRUE layer-mass dp weight (post-mass-fix p_s): identical
                 # rescale on pure sigma (per-column p_s cancels), correct on
                 # hybrid where dsigma is not the layer mass (codex
                 # 2026-07-28 round 2).  Non-positive dp zero-weighted.
                 _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
                 _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _owned = layout.owned_mask_cells[:, None]
+                # BROADCAST-allreduce VJP wrapper, NOT global_sum_mpi: the
+                # summed scalar is broadcast back into every rank's rescale
+                # factor, whose correct transpose is allreduce(SUM) of the
+                # cotangent — identity-VJP global_sum_mpi drops the cross-
+                # rank term (the #811 flux-form scale lesson; codex
+                # 2026-07-28 round 2).
+                from legoesm.core.conservation import (
+                    broadcast_allreduce_sum,
+                )
+
+                def _mpi_owned_sum(x, _o=_owned):
+                    return broadcast_allreduce_sum(
+                        jnp.sum(jnp.where(_o, x, 0.0)))
+
+                # SORTED iteration: the closure issues collectives per
+                # tracer, so every rank must pair allreduces for the SAME
+                # tracer — dict insertion order is not a cross-rank contract
+                # (codex 2026-07-28: mismatched orders would silently corrupt
+                # every factor).
                 state_new = state_new._replace(tracers={
-                    k: f.replace(data=(
-                        conservative_positive_clip(f.data, _dp)[0]
-                        if _borrow_eligible(k)
-                        else jnp.maximum(f.data, 0.0)))
-                    for k, f in state_new.tracers.items()
+                    k: state_new.tracers[k].replace(data=(
+                        conservative_positive_clip_global(
+                            state_new.tracers[k].data, _dp,
+                            sum_fn=_mpi_owned_sum)[0]
+                        if is_borrow_eligible_tracer(k)
+                        else jnp.maximum(state_new.tracers[k].data, 0.0)))
+                    for k in sorted(state_new.tracers)
                 })
             else:
                 state_new = state_new._replace(tracers={

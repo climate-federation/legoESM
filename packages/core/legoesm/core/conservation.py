@@ -191,6 +191,51 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     return q_clip * jnp.clip(factor, 0.0, 1.0), created
 
 
+def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
+                                      sum_fn=None):
+    """Column-local borrow PLUS global residual redistribution.
+
+    :func:`conservative_positive_clip` zeroes a net-negative column (nothing
+    to borrow from locally) — the minimum-creation choice PER COLUMN, but
+    still creation.  On smooth water mixing ratios that case is rare and
+    tiny; on spiky per-mass NUMBER fields it is not: at century4 day 90 one
+    advection step left 868/10242 columns net-negative in ``N_i``, and the
+    zeroing alone re-created **x2.74/day** exponential field growth (the
+    residual engine behind the day-803 N_i=1e193 overflow, measured
+    2026-07-28).  This wrapper removes the invented residual proportionally
+    from every positive cell so the ``sum_fn``-total is conserved exactly::
+
+        sum(q_out * w) == sum(q_in * w)     whenever sum(q_in * w) >= 0
+
+    (a globally net-negative field still floors at zero — nothing exists to
+    borrow anywhere).  ``sum_fn`` defaults to ``jnp.sum`` (serial); the MPI
+    lane passes an allreduce-SUM-based reduction so the redistribution
+    factor is identical on every rank (decomposition-independent, and
+    allreduce-SUM is the one AD-safe collective).  AD: one extra guarded
+    quotient, same double-``where`` pattern as the column fixer.
+    """
+    q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
+    w = jnp.asarray(weight, dtype=q.dtype)
+    s = sum_fn if sum_fn is not None else jnp.sum
+    eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
+    # ONE reduction per quantity (two total): pos_total reused for the
+    # residual so the two nominally-identical q_col sums cannot differ by
+    # reduction roundoff, and the MPI closure issues exactly two allreduces
+    # per tracer (codex 2026-07-28 global-residual review).
+    pos_total = s(q_col * w)
+    resid = jnp.maximum(pos_total - s(q * w), 0.0)
+    live = pos_total > eps_eff
+    safe_total = jnp.where(live, pos_total, 1.0)
+    # Degenerate-but-positive global total: KEEP the column result (error
+    # bounded by eps_eff, mirroring the column fixer's tiny-positive branch)
+    # — zeroing a tiny trace field violated the conservation contract
+    # (codex: float32 q=[[5e-20]] came back [[0.]]).  Zero only when the
+    # global total is non-positive (nothing exists to borrow anywhere).
+    factor = jnp.where(live, 1.0 - resid / safe_total,
+                       jnp.where(pos_total > 0.0, 1.0, 0.0))
+    return q_col * jnp.clip(factor, 0.0, 1.0), created
+
+
 def _accumulation_dtype():
     """Return the dtype for accumulation in conservation fixers.
 
@@ -555,6 +600,13 @@ def _broadcast_allreduce_sum_bwd(_res, g):
 
 _broadcast_allreduce_sum.defvjp(
     _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
+
+#: Public name for the broadcast-correct allreduce(SUM) (VJP also allreduces
+#: the cotangent) — the ``sum_fn`` to pass to
+#: :func:`conservative_positive_clip_global` under MPI, where the summed
+#: scalar is broadcast into every rank's rescale factor.  Cross-module
+#: imports must use this name (no-private-cross-imports ratchet).
+broadcast_allreduce_sum = _broadcast_allreduce_sum
 
 
 def global_face_sum_if_scattered(

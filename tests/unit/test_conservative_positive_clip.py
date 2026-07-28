@@ -242,7 +242,7 @@ class TestAllTracersBorrowed:
         )
         src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
         assert "conservative_positive_clip" in src
-        assert "_borrow_eligible" in src
+        assert "is_borrow_eligible_tracer" in src
         assert "_is_water_mass_tracer" not in src, (
             "the number exclusion reappeared — it invents number x2.2/day")
 
@@ -251,13 +251,13 @@ class TestAllTracersBorrowed:
         per-volume N_c/N_r are not (dsigma weight has no conservation
         meaning for #/m^3 — codex 2026-07-28)."""
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            _borrow_eligible,
+            is_borrow_eligible_tracer,
         )
         for k in ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
                   "N_i", "N_s", "N_g", "trc_N_i"):
-            assert _borrow_eligible(k), k
+            assert is_borrow_eligible_tracer(k), k
         for k in ("N_c", "N_r", "trc_N_r", "aerosol_number", "ozone"):
-            assert not _borrow_eligible(k), k
+            assert not is_borrow_eligible_tracer(k), k
 
     def test_net_negative_number_column_with_positive_ice_mass(self):
         """Codex 2026-07-28: the net-negative fallback zeroes N_i while
@@ -275,7 +275,7 @@ class TestAllTracersBorrowed:
 
         from legoesm.parallel import voronoi_mpi
         src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
-        assert "_borrow_eligible" in src
+        assert "is_borrow_eligible_tracer" in src
         assert "_is_water_mass_tracer" not in src, (
             "the MPI floors reintroduced the number exclusion")
 
@@ -463,3 +463,93 @@ def test_flag_on_step_executes_with_number_tracers():
         arr = np.asarray(out.tracers[k].data)
         assert np.isfinite(arr).all(), k
         assert arr.min() >= 0.0, k
+
+
+class TestGlobalResidualRedistribution:
+    """century4 residual engine (2026-07-28): net-negative COLUMNS are common
+    on spiky number fields (868/10242 per step measured) and column-local
+    zeroing alone re-created x2.74/day growth.  The _global variant must
+    conserve the TOTAL exactly whenever the global integral is non-negative."""
+
+    def _spiky(self, seed=0):
+        rng = np.random.default_rng(seed)
+        q = rng.uniform(0.0, 1.0, (40, 8))
+        q[rng.integers(0, 40, 6), :] = -0.05      # whole columns net-negative
+        q[rng.integers(0, 40, 3), 2] = 1e4        # spikes (number-field shape)
+        return jnp.asarray(q), jnp.asarray(rng.uniform(0.5, 1.5, 8))
+
+    def test_total_conserved_with_net_negative_columns(self):
+        from legoesm.core.conservation import (
+            conservative_positive_clip, conservative_positive_clip_global,
+        )
+        q, w = self._spiky()
+        col_only, _ = conservative_positive_clip(q, w)
+        out, _ = conservative_positive_clip_global(q, w)
+        t_in = float(jnp.sum(q * w))
+        # non-vacuity: the column-only fixer INVENTS here
+        assert float(jnp.sum(col_only * w)) > t_in * (1 + 1e-12)
+        np.testing.assert_allclose(float(jnp.sum(out * w)), t_in, rtol=1e-12)
+        assert float(out.min()) >= 0.0
+
+    def test_identical_to_column_variant_when_no_negative_columns(self):
+        from legoesm.core.conservation import (
+            conservative_positive_clip, conservative_positive_clip_global,
+        )
+        q, w = _col(seed=2)
+        a, _ = conservative_positive_clip(q, w)
+        b, _ = conservative_positive_clip_global(q, w)
+        np.testing.assert_allclose(np.asarray(b), np.asarray(a), rtol=1e-12)
+
+    def test_iterated_total_is_stable(self):
+        from legoesm.core.conservation import (
+            conservative_positive_clip_global,
+        )
+        q, w = self._spiky(seed=4)
+        t0 = float(jnp.sum(q * w))
+        x = q
+        for _ in range(200):
+            x, _ = conservative_positive_clip_global(x, w)
+        assert abs(float(jnp.sum(x * w)) - t0) < 1e-9 * max(abs(t0), 1.0)
+
+    def test_grad_finite_with_negative_columns(self):
+        from legoesm.core.conservation import (
+            conservative_positive_clip_global,
+        )
+        q, w = self._spiky(seed=6)
+
+        def loss(x):
+            return jnp.sum(conservative_positive_clip_global(x, w)[0] ** 2)
+
+        assert np.isfinite(np.asarray(jax.grad(loss)(q))).all()
+
+    def test_floors_use_the_global_variant(self):
+        import inspect
+
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+        )
+        from legoesm.parallel import voronoi_mpi
+        for src in (
+            inspect.getsource(MPASPrimitiveEquationModel._step_jit),
+            inspect.getsource(voronoi_mpi.make_voronoi_mpi_step),
+        ):
+            assert "conservative_positive_clip_global" in src
+
+
+def test_global_variant_keeps_tiny_positive_field():
+    """Codex 2026-07-28: a degenerate-but-positive global total must KEEP the
+    column result (float32 q=[[5e-20]] was zeroed by the first cut)."""
+    from legoesm.core.conservation import conservative_positive_clip_global
+    q = jnp.asarray([[5e-20]], dtype=jnp.float32)
+    out, _ = conservative_positive_clip_global(q, jnp.ones(1))
+    np.testing.assert_allclose(np.asarray(out), np.asarray(q))
+
+
+def test_mpi_floor_iterates_tracers_sorted():
+    """Collectives inside the tracer loop must pair identically on every
+    rank: the iteration must be over sorted keys, never dict order."""
+    import inspect
+
+    from legoesm.parallel import voronoi_mpi
+    src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
+    assert "sorted(state_new.tracers)" in src
