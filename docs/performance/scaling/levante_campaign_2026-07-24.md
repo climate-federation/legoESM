@@ -920,6 +920,15 @@ device count. Options in order of expected value: (a) larger tiles
 per step (the ocean's wide-halo trick, 120 -> 4 messages, applied to the
 cube), (c) overlapping halo exchange with interior compute.
 
+**A THIRD cube limit — f64 is effectively unrunnable at 24 GPUs.** The
+tiled lane (the CORRECT >6-GPU vehicle) failed to complete even C384 L60
+in f64 within a 3 h wall (job 26512794), where the same arm in f32 runs
+in ~9 ms/step. No output, no error — it never finished compiling. That
+is consistent with #1370: if setup allocates global-sized buffers, f64
+doubles them, and the compile/allocation path degrades accordingly. So
+the cube's f64 GPU column stays EMPTY in the figure, and it is a
+capability gap rather than a measurement I skipped.
+
 **A SECOND cube ceiling, memory:** the fixed-tile arm C1152 L60 @54
 wanted **105.7 GB per device** (rematerialization stuck at 96.6 GB)
 against 80 GB of A100 HBM — job 26497294. So cube scale-out is bounded
