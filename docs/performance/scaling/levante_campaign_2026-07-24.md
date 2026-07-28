@@ -937,6 +937,49 @@ resolution at that tile count. The fixed-tile comm contrast is
 resubmitted at L30 for BOTH arms (job 26497736), which halves the
 working set while holding 147.5k cols/GPU on each side.
 
+## The resolution lever is CAPPED on both transports — and my subdiv-9 runs were invalid
+
+The campaign's cure for every plateau is a larger tile via higher
+resolution. Testing that at the largest rank counts failed on BOTH
+transports, for two DIFFERENT reasons:
+
+**CPU (atm icosahedral): subdiv-9 is not supported by the generator.**
+Jobs 26512349 and 26514768 did not time out in mesh construction as I
+assumed — they raised immediately:
+
+    ValueError: subdivision_level=9 would create 2.62e+06 cells.
+    Maximum supported level is 8 (655,362 cells). For higher
+    resolutions, use load_mpas_mesh() with a pre-built mesh file.
+    (voronoi.py:1242)
+
+MY ERROR: I submitted two multi-node jobs at an unsupported level
+without checking the generator's range, and the error message even names
+the alternative. This is the THIRD time in this campaign that a library
+or bench guard stated the answer before I ran the job (the etopo dt
+warning and the n_lat divisibility check were the others). No pre-built
+finer mesh is present in the tree, so testing beyond subdiv-8 requires
+sourcing an MPAS mesh file first.
+
+**GPU: blocked by the global-allocation defect (#1370)** — LL2304 wanted
+102 GB/device, C1152 97-106 GB.
+
+**CONSEQUENCE, and it is the campaign's sharpest practical finding:**
+raising resolution is the ONLY measured cure for the tile-floor plateau,
+and it is currently unavailable on both transports — capped at subdiv-8
+on CPU by the mesh generator, and by per-device global allocation on GPU.
+So the useful rank/device ceilings measured here are NOT hardware limits:
+
+| lane | useful ceiling | what caps it |
+|---|---|---|
+| atm ico CPU | ~512-1024 ranks at subdiv-8 | mesh generator caps at subdiv-8 |
+| ocean MPAS CPU | 512 ranks at subdiv-8 | same generator cap + rank-count term |
+| atm/ocean GPU | 64 GPUs at LL1536-2048 | #1370 global per-device allocation |
+| cube GPU | 54 GPUs at C768 | kt validation (#1360) + #1370 |
+
+Unblocking #1370 and sourcing a subdiv-9+ mesh are therefore worth more
+than any further tuning: both lanes have headroom that is currently
+unreachable.
+
 ## Cube optimisation: bounded BEFORE implementing — and the bound killed the plan
 
 Directive was to push the cube toward its limit. Codex round-16 defined
