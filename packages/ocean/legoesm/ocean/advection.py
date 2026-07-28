@@ -976,25 +976,47 @@ def fct_tracer_advection(
     ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
 
+    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
     # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
-    # Stencil bounds from the BEFORE (Kbb) base level (NEMO nonosc pbef=Kbb).
-    tr_west = jnp.roll(base, 1, axis=1)
-    tr_east = jnp.roll(base, -1, axis=1)
-    tr_south = jnp.concatenate([base[:1, :, :], base[:-1, :, :]], axis=0)
-    tr_north = jnp.concatenate([base[1:, :, :], base[-1:, :, :]], axis=0)
-    tr_above = jnp.concatenate([base[..., :1], base[..., :-1]], axis=-1)
-    tr_below = jnp.concatenate([base[..., 1:], base[..., -1:]], axis=-1)
-    q_min = jnp.minimum(
-        jnp.minimum(jnp.minimum(base, tr_west), jnp.minimum(tr_east, tr_south)),
-        jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
-    )
+    #
+    # NEMO nonosc (traadv_fct.F90:876-880, 912-920): the PER-POINT bound at
+    # each stencil cell is ``bnd_up = max(pbef, paft)`` / ``bnd_do =
+    # min(pbef, paft)`` where ``paft`` is ``zta_up1`` — the upstream
+    # provisional guess, i.e. exactly this function's ``q_td`` — NOT ``pbef``
+    # (Kbb/``base``) alone.  The 7-point neighbourhood max/min is then taken
+    # over that per-point ``bnd_up``/``bnd_do`` field.  Building the
+    # neighbourhood from ``base`` alone (the prior legoESM behaviour) drops
+    # the ``q_td`` contribution to the bound at every one of the 7 stencil
+    # points — under #1226 item 8's stage-by-stage oracle comparison this
+    # under/over-tightens the box at ~40-45% of wet cells (median diff tiny
+    # at nit000 since q_td ~ base after one step, but non-negligible: max
+    # 0.039 degC on the DINO Y5 restart) and is the first stage at which the
+    # legoESM limiter deviates from a faithful nonosc transcription.
+    bnd_up = jnp.maximum(base, q_td)
+    bnd_do = jnp.minimum(base, q_td)
+    tr_west = jnp.roll(bnd_up, 1, axis=1)
+    tr_east = jnp.roll(bnd_up, -1, axis=1)
+    tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
+    tr_north = jnp.concatenate([bnd_up[1:, :, :], bnd_up[-1:, :, :]], axis=0)
+    tr_above = jnp.concatenate([bnd_up[..., :1], bnd_up[..., :-1]], axis=-1)
+    tr_below = jnp.concatenate([bnd_up[..., 1:], bnd_up[..., -1:]], axis=-1)
     q_max = jnp.maximum(
-        jnp.maximum(jnp.maximum(base, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(bnd_up, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
-    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+    tr_west_do = jnp.roll(bnd_do, 1, axis=1)
+    tr_east_do = jnp.roll(bnd_do, -1, axis=1)
+    tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
+    tr_north_do = jnp.concatenate([bnd_do[1:, :, :], bnd_do[-1:, :, :]], axis=0)
+    tr_above_do = jnp.concatenate([bnd_do[..., :1], bnd_do[..., :-1]], axis=-1)
+    tr_below_do = jnp.concatenate([bnd_do[..., 1:], bnd_do[..., -1:]], axis=-1)
+    q_min = jnp.minimum(
+        jnp.minimum(jnp.minimum(bnd_do, tr_west_do), jnp.minimum(tr_east_do, tr_south_do)),
+        jnp.minimum(jnp.minimum(tr_north_do, tr_above_do), tr_below_do),
+    )
 
     alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
         ad_flux_u, ad_flux_v, ad_vert_int,
