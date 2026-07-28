@@ -173,3 +173,32 @@ LITERAL, Q3 4-regime, D4-bonus) — all σ_LES-gated + codex-CLEAN. ONE remainin
 MEASURED diagnostic-flux margin for Q1b (needs the turbulence-flux-exposure interface change; the
 threshold itself is established structurally). **OPTIONAL REFINEMENTS:** higher-res DYCOMS
 (96²×192); clubb 2×-res σ_LES.
+
+## Observational field-campaign track (NEW; see LES_SUITE.md §10)
+
+A new track requested 2026-07-28: tune/compare the SAME turbulence closures against REAL
+observations from canonical field campaigns with obs data online (complements the LES-truth
+suite). First campaign: **ARM SGP summer 1997** (`arm9707`, base 970618, Lamont OK 36.6°N; the
+obs-constrained NCAR-SCCM variational-analysis product already on disk at
+`data/les_cases/ARM9707/arm9707.nc`).
+
+- **Phase 1 (2026-07-28) — obs-forcing reader DONE.**
+  - `forcing/scm/scm_forcing_io.py` — extracted the format-agnostic netCDF-forcing numerics
+    (`interp_profile_to_pressure`, `omega_to_w`, `forcing_cadence`, `profile_time_fn`,
+    `scalar_time_fn`) so they live ONCE; refactored `dephy_scm.py` onto them (deleted its private
+    duplicates, aliased the public fns to the same names; `_vertical_velocity_values` → `omega_to_w`).
+    No duplicated numerics (CLAUDE.md). dephy test stays green (4 passed).
+  - `forcing/scm/sccm_arm.py::load_arm_sccm_case` — maps the SCCM/ARM file → initial profiles +
+    time-varying `SCMForcing` (subsidence from `omega` [+down→+up]; `theta_adv=divT/Π` from the
+    HORIZONTAL T tendency; `qv_adv=divq` directly, q is a mixing ratio; surface
+    `w_th_s=shflx/(ρ_s c_pd)` [T-flux, matches dephy `hfss`], `w_qv_s=lhflx/(ρ_s L_v)`, +up) +
+    an `ARMObsReference` (GOES cloud→fraction, MWR `cldliq`→LWP kg/m² via `rho_water`,
+    `Prec`→mm/day, soundings, surface scalars). Uses HORIZONTAL advection + prescribed subsidence
+    only (no `vertdiv*` double-count). Integration dt defaults to `min(cadence,300 s)` (the ~3 h
+    cadence is a forcing frame, interpolated between). omega→w density uses the time-varying
+    sounding. Sign/unit conventions at the module head.
+  - Tests: `test_scm_forcing_io.py` (6) + `test_sccm_arm_loader.py` (4, incl. a real-`arm9707.nc`
+    load: base 970618, lat 36.6, GOES cloud∈[0,1], SHF −28→+123 W/m²). All 10 pass; ruff clean
+    (physics `T`/`divT` per-file-ignored, matching dephy). Numerics codex-reviewed.
+  - **Remaining:** Phase 2 obs-vs-SCM scoring (golden-day June-21 shallow-Cu anchor); Phase 3
+    driver + campaign registry so all 9 closures rank against obs; later RICO/GABLS3/ASTEX.

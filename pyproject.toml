@@ -224,6 +224,13 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # scm_runner: T_profile / T_final (temperature) locals — physical symbol convention.
 "packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N806"]
 "tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
+# SCM forcing IO + ARM/SCCM loader: physical symbols T (temperature), divT (T
+# advective tendency) as args/locals read clearer than snake_case, matching the
+# sibling dephy_scm loader (units-in-names rule).
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/scm_forcing_io.py" = ["N803", "N806"]
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/sccm_arm.py" = ["N803", "N806"]
+"tests/atmosphere/hydrostatic/unit/test_scm_forcing_io.py" = ["N806"]
+"tests/atmosphere/hydrostatic/unit/test_sccm_arm_loader.py" = ["N806"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).

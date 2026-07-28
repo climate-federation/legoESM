@@ -786,3 +786,52 @@ codex adversarial-review loop before "done."
   Nieuwstadt/GABLS1/Wangara/BOMEX/DYCOMS anchors once gate-0 fixes the achievable resolution.
 - Shared cloud/saturation scheme identity for D9 — pick the concrete scheme (must use
   `thermo.saturation_*`, no re-impl) when the moist cases are built.
+
+---
+
+## 10. Observational field-campaign track (obs-forced SCM; started 2026-07-28)
+
+A NEW track, distinct from §1–§9 (which are LES-truth): tune/compare the SAME turbulence
+closures against **real observations** from canonical boundary-layer field campaigns whose
+forcing + obs data are available online. Where the LES-truth suite controls confounds by
+construction (periodic LES, prescribed SGS), the campaign track trades that control for
+realism — real diurnal forcing and observed cloud/precip/soundings. The two are complementary:
+a closure that wins on LES truth AND on obs is robustly better.
+
+Two capability pillars this track needs (both greenfield vs the LES-truth path):
+- **(A) time-varying / diurnal forcing** end-to-end — the LES artifacts froze forcing at t=0;
+  a campaign has a full diurnal (and multi-day) cycle.
+- **(B) observational-reference ingestion** — the LES-truth path scores vs LES mean profiles;
+  a campaign scores vs observed GOES cloud, MWR liquid-water path, precipitation, and soundings.
+
+**First campaign — ARM SGP summer 1997 (`arm9707`, base date 970618, the June 18–July 18 IOP at
+the Lamont OK Central Facility, 36.6°N/−97.5°E).** Its NCAR-SCCM variational-analysis product
+(`data/les_cases/ARM9707/arm9707.nc`, Khairoutdinov CSU 2000) is obs-CONSTRAINED and already on
+disk: it carries BOTH pillars in one file — time-varying surface fluxes + large-scale advective
+tendencies + subsidence (pillar A), and observed GOES cloud amount, MWR LWP, precipitation and
+soundings (pillar B). Canonical continental diurnal shallow-Cu intercomparison (Brown et al. 2002).
+
+**Phase 1 — DONE (2026-07-28): the obs-forcing reader.** The SCCM/ARM file is the observational
+analogue of a DEPHY case, so the reader mirrors `dephy_scm.py`:
+- `forcing/scm/scm_forcing_io.py` — the format-agnostic conversions (vertical interp, hydrostatic
+  `omega→w`, SCMForcing time-interp closures) extracted so they are defined ONCE; `dephy_scm.py`
+  refactored onto them (no duplicated numerics, CLAUDE.md shared-utility rule).
+- `forcing/scm/sccm_arm.py::load_arm_sccm_case` → initial profiles + a time-varying `SCMForcing`
+  (subsidence from `omega`; `theta_adv = divT/Π`; `qv_adv = divq` (q is a mixing ratio); surface
+  `w_th_s=shflx/(ρ c_pd)`, `w_qv_s=lhflx/(ρ L_v)`, all +up) + an `ARMObsReference` (obs targets).
+  Sign/unit conventions documented at the module head + checked by tests. HORIZONTAL advective
+  tendencies + prescribed `subsidence_w` only (the SCM reconstructs vertical advection from `w`;
+  adding `vertdiv*` would double-count — the standard "revealed forcing" decomposition).
+- Tests: `tests/atmosphere/hydrostatic/unit/test_scm_forcing_io.py`,
+  `test_sccm_arm_loader.py` (synthetic-fixture sign/conversion assertions + a real-`arm9707.nc`
+  load + an SCM round-trip). Numerics codex-reviewed.
+
+**Remaining phases (staged, not yet built):**
+- **Phase 2** — an obs-vs-SCM scoring assembly (reuse `core/profile_metrics`): SCM cloud
+  fraction / LWP / precip / sounding θ,q vs the `ARMObsReference`, with a golden-day (June 21)
+  shallow-Cu segment as the anchor and honest missing-obs (NaN) handling.
+- **Phase 3** — a driver + a campaign registry entry so all nine closures run the ARM forcing and
+  rank against obs, alongside the LES-truth ranking (is the obs-best closure the LES-best one?).
+- **Later campaigns** (same reader/scoring path, obs online): RICO (precipitating trade Cu),
+  GABLS2/GABLS3 (Cabauw tower SBL), ASTEX (Sc→Cu transition). Each is a variable-name mapping +
+  a registry entry once Phases 2–3 exist.
