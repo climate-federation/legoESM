@@ -67,8 +67,30 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # --- sweep terms ---
     "sbc (utau/qsr/qns/sfx)":        (1.0,        1.0,        "exact"),
     "eos_rab beta":                  (1.0,        1.0,        "bit-exact"),
-    "eos_rab alpha":                 (1.0,        1.000007,   "median rel 4.7e-6 [e3t=both per probe_n2.py]"),
-    "bn2 (rn2b)":                    (1.0,        0.999993,   "median |rel| 6.96e-6 [e3t=both per probe_n2.py]"),
+    "eos_rab alpha":                 (1.0,        1.000007,   "median rel 4.7e-6 [e3t=both per probe_n2.py]. TIER-2 "
+                                                              "2026-07-28: root cause of this residual class IDENTIFIED "
+                                                              "and FIXED -- NEMO's eos_rab/bn2 take the LIVE z-star depth "
+                                                              "gdept(Kmm)=gdept_0*(1+r3t) (domzgr_substitute.h90:139+:50+:56, "
+                                                              "pure multiplicative stretch; gdept_z0=gdept-ssh at :145 is a "
+                                                              "SEPARATE macro whose only consumer repo-wide is dynhpg.F90), "
+                                                              "while lego's eos.py nemo_bn2_depth_ladders returned the STATIC "
+                                                              "reference ladder. Isolated sensitivity on the bridged y5 "
+                                                              "restart: alpha shifts 5.25e-6 (vs this row's 4.7e-6). The "
+                                                              "GM/Redi consumer already carried the fix (hence this number); "
+                                                              "the OTHER THREE consumers (TKE nemo_bn2, enhanced-diffusion "
+                                                              "convection, k_profiles implicit) were still static and are now "
+                                                              "fixed identically. NOT re-measured end-to-end after that fix "
+                                                              "-- this row's number predates it; re-measure before trusting."),
+    "bn2 (rn2b)":                    (1.0,        0.999993,   "median |rel| 6.96e-6 [e3t=both per probe_n2.py]. TIER-2 "
+                                                              "2026-07-28: same live-gdept root cause + fix as eos_rab alpha "
+                                                              "above (eosbn2.F90:1166 rab_3d_t zh=gdept(Kmm); :1459-1467 bn2_t "
+                                                              "zrw + /e3w(Kmm)). Isolated sensitivity on the bridged y5 "
+                                                              "restart: bn2 shifts 8.57e-5, independently reproducing the "
+                                                              "8.59e-5 already documented at gm_redi_latlon_cgrid.py for the "
+                                                              "one consumer that HAD the fix (which took it 8.59e-5 -> the "
+                                                              "6.96e-6 recorded here) -- that cross-validation is what makes "
+                                                              "this a real cause and not a coincidence of magnitude. Three "
+                                                              "other consumers now fixed; NOT re-measured end-to-end."),
     "zdf_mxl (nmln)":                (0.99859,    None,       "12/9920 cols differ; REOPENED [e3t=both per probe_nmln_kanc.py]"),
     "ldf_slp wslpi":                 (0.999177,   1.003000,   "interior 1.0011, bottom row 1.0255; REOPENED [e3t=both "
                                                               "per probe_wslpi.py/probe_wslp_wall_v1.py; the 1.0255 "
@@ -82,7 +104,35 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "ldf_slp wslpj":                 (0.998875,   0.998447,   "[e3t=both]"),
     "ldf_slp uslp":                  (0.999340,   0.998697,   "[e3t=both]"),
     "ldf_slp vslp":                  (0.999012,   0.997594,   "[e3t=both]"),
-    "ldf_eiv kappa (aeiu)":          (1.0,        1.000608,   "ratio not 1 [e3t=both per probe_aeiu_v3.py]"),
+    "ldf_eiv kappa (aeiu)":          (1.0,        1.000608,   "ratio not 1 [e3t=both per probe_aeiu_v3.py]. TIER-2 "
+                                                              "2026-07-28: a REAL constant bug found and FIXED, but it "
+                                                              "accounts for only ~1/20 of this row -- read both halves. "
+                                                              "(a) FIXED: NEMO phycst.F90:89 sets omega=2*rpi/rsiday "
+                                                              "(full double precision; DINO has no key_cice, so the "
+                                                              "rounded literal branch does NOT run), while legoESM's "
+                                                              "canonical constants.Omega is only a 4-significant-figure "
+                                                              "value -- 1.5875e-5 low. Omega enters zRo=0.4*zn/|f| "
+                                                              "linearly and is then SQUARED into zaeiw, so the "
+                                                              "coefficient carries 3.175e-5. Proven decisively by feeding "
+                                                              "NEMO's OWN dumped e3w/rn2b/wslpi/wslpj through the "
+                                                              "Treguier chain: zn/zah/zhw reproduce NEMO bit-exactly "
+                                                              "(relerr 0), zRo carries exactly 1.578e-5 and zaeiw exactly "
+                                                              "3.156e-5, and BOTH collapse to <=9e-16 when NEMO's omega "
+                                                              "is substituted -- i.e. given matched inputs the operator "
+                                                              "is machine-exact. Fixed by threading an omega param "
+                                                              "(default constants.Omega, zero behaviour change) through "
+                                                              "compute_treguier_kappa_gm{,_nemo_native} + "
+                                                              "gm_redi_tracer_tendency_latlon, and wiring "
+                                                              "DINOConfig.omega/LatLonCGridOceanConfig.omega = "
+                                                              "NEMO_CONSTANTS_CONFIG.Omega on the nemo_dino_kamm_mlf card "
+                                                              "(also feeds create_mercator_grid so grid.f matches). The "
+                                                              "global constants.Omega was deliberately NOT changed "
+                                                              "(125-file blast radius). (b) NOT CLOSED: 3.175e-5 does not "
+                                                              "explain 6.08e-4 -- the remaining ~19/20 is INHERITED from "
+                                                              "this row's upstream inputs, which are themselves DEBT rows "
+                                                              "(ldf_slp wslpi 1.0030 / wslpj 0.9984 / uslp 0.9987 / vslp "
+                                                              "0.9976, and bn2 above). This row cannot reach bar until "
+                                                              "ldf_slp does. NOT re-measured end-to-end post-Omega-fix."),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
     "eiv transport u":               (0.999617,   0.996234,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996234; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [MEASURED AT e3t=both. The superseding "
@@ -123,6 +173,12 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "LEGOESM_NEMO_E3T (default 'off'); re-ran with e3t=both "
                                                               "-> corr 0.997578->0.997559, ratio 0.996198->0.996197 "
                                                               "(unchanged to 5 s.f.); harness (A) REFUTED]"),
+    # legoESM cannot RUN on NEMO's true vertical grid: LEGOESM_NEMO_E3T
+    # defaults to "off" (the wrong e3t_1d ladder) because "both" destabilises
+    # multi-day runs (max|u| 0.66 -> 3 m/s). This is a real defect, and it is
+    # why every fidelity probe must set the env var explicitly -- it has
+    # contaminated three measurements so far.
+    "STABILITY on NEMO true grid (e3t_0)": (None, None, "legoESM UNSTABLE on NEMO's actual geometry; bridge defaults to the wrong ladder to hide it"),
     # --- round 2 ---
     "dyn_spg_ts pssh":               (0.999989,   0.999900,   "[e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
                                                               "and its e2v-substituted twin both give ratio 0.9986 "
