@@ -165,6 +165,9 @@ PER_ELEMENT: dict[str, float] = {
     # carries NO evidence about the S-dependent terms, which DINO never
     # exercises.
     "eos_rab beta": 0.0,
+    # probe_bottom_drag (A) under fp64: rel_err_med = rel_err_p90 = 0.000e+00
+    # over 9920 T-points -- per-element proven, not merely aggregate-clean.
+    "zdf_drg_nonlin T-point rate": 0.0,
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -181,15 +184,20 @@ PER_ELEMENT: dict[str, float] = {
 #      float32, rounding NEMO's f64 gdept_1d to ~7 digits.  JAX_ENABLE_X64=1
 #      does NOT change that policy.
 #
-# *** CONTAMINATION WARNING ***  EVERY other row in this table was measured
-# under the DEFAULT fp32 policy.  f32 eps = 1.19e-7, so any row whose residual
-# sits in the 1e-8..1e-5 range may be partly or wholly this artifact rather than
-# a legoESM defect -- in particular the "unexplained 3e-6..5e-5 band" (ssh_nxt,
-# r3t, r3u/r3v, dyn_drg_init, dyn_cor_2d) that this campaign has repeatedly
-# failed to explain.  Those rows MUST be re-measured under fp64 before any
-# further cause-hunting; do not chase a cause for a number that may be a dtype.
-# Rows far above that band (dyn_spg_ts puu_b at 1.3%, dyn_ldf at 0.4%) cannot be
-# explained by f32 and stay genuinely open.
+# *** CONTAMINATION HYPOTHESIS -- TESTED AND FALSIFIED 2026-07-28 ***
+# Because every other row was measured under the DEFAULT fp32 policy, I
+# proposed that the "unexplained 3e-6..5e-5 band" might be f32 rounding
+# (eps 1.19e-7) rather than a legoESM defect.  MEASURED, not argued: all four
+# available band probes re-run under PrecisionPolicy.fp64() via run_fp64.py
+# (single variable, everything else identical):
+#     ssh_nxt / div_hor   0.999991  ->  0.999991   (unchanged)
+#     dom_qco_r3c r3t     0.999997  ->  0.999997   (unchanged)
+#     dyn_drg_init u      0.999937 / 1.000278  ->  0.9999374 / 1.000278
+#     dyn_cor_2d u        0.999717 / 0.998805  ->  0.9997170 / 0.9988055
+# NO row moved.  The band is REAL -- discretisation or transcription, not
+# dtype.  The hypothesis is withdrawn; do not re-raise it without new evidence.
+# (fp64 remains REQUIRED for oracle work regardless -- it is what closed
+# eos_rab/bn2/zdf_mxl above.  It simply is not the explanation for this band.)
 #
 # ROOT CAUSE shared by the two rows above (and by zdf_mxl's 10 columns).
 # alpha recomputed with NEMO's OWN gdept is BIT-EXACT (median|rel| = 0.000e+00,
