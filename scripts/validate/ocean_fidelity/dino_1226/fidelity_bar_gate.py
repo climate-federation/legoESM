@@ -237,7 +237,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce [e3t=both]"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]"),
     "traadv_fct vertical upstream flux": (0.997700, None,     "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662) [e3t=both]"),
-    "dyn_hpg":                       (1.0,        0.999986794,   "TIER-2 2026-07-28 (blocker-1 fix): the remaining "
+    "dyn_hpg (du)":                  (1.0,        1.000000018,   "TIER-2 2026-07-28 (blocker-1 fix): the remaining "
                                                               "hypothesis (residual inherited from the in-situ "
                                                               "density / EOS-depth input on a developed state) was "
                                                               "CONFIRMED. eos_geometric_depth_1d (the PGF's own "
@@ -306,6 +306,10 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # The API limitation is CLOSED; it was NOT the dominant cause for every
     # term it was suspected for.
     "STABILITY on NEMO true grid (e3t_0)": (None, None, "legoESM UNSTABLE on NEMO's actual geometry; bridge defaults to the wrong ladder to hide it"),
+    # dv's residual is the DEFERRED v-face metric (dy_v vs NEMO e2v): the
+    # metric_convention work shipped T/u-face only because vface_zonal_cos_lat
+    # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
+    "dyn_hpg (dv)":                  (1.0,        0.999986794, "blocked on the deferred v-face metric; substituted -> 1.000000007"),
     # --- round 2 ---
     "dyn_spg_ts pssh":               (0.999989,   0.999900,   "[e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
                                                               "and its e2v-substituted twin both give ratio 0.9986 "
