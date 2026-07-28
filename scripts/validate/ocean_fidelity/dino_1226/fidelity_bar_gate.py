@@ -134,9 +134,50 @@ BAR_PER_ELEM_EPS = 1e-9
 # Shrink-only in the same sense as MEASUREMENTS: add entries as terms are
 # re-measured, never delete one to make a row pass.
 PER_ELEMENT: dict[str, float] = {
-    "bn2 (rn2b)": 6.96e-6,       # probe_n2.py, median |rel| [e3t=both]
-    "eos_rab alpha": 4.7e-6,     # probe_n2.py, median rel [e3t=both]
+    # RE-MEASURED at HEAD 2026-07-28 by eos_rab_bn2_per_element.py against
+    # NEMO's dump_alpha_b / dump_beta_b / tke_dump_rn2b [e3t=both; 342134 wet
+    # 3-D T-cells, 332214 wet w-interfaces].
+    #
+    # RETRACTION (same day, my error).  The FIRST run of that probe fed the NOW
+    # T/S and reported alpha 5.661e-7 with three >1% outliers and bn2 1.392e-5
+    # with a 7074-cell tail "structured at levels 6-8".  All of that was a
+    # TIME-LEVEL bug in the probe: NEMO stpmlf.F90:184 is
+    #     CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nnn )
+    # -- T/S BEFORE, depth NOW -- so the dumps are BEFORE-level (as
+    # bn2_alpha_compare.py's header already stated).  Feeding NOW T/S puts
+    # |T_now - T_before| into the "error", which is largest in the thermocline;
+    # that WAS the levels 6-8 structure.  At the correct time level the tail is
+    # EMPTY (zero cells above 1%) and the outliers do not exist.  The earlier
+    # probe_n2.py figures (bn2 6.96e-6, alpha 4.7e-6) also do not reproduce.
+    #
+    # bn2 is a SIGN-CHANGING field (27.2% of wet interfaces sit within 1e-3 of
+    # RMS of zero), so a pointwise |lego-nemo|/|nemo| median is NOT trustworthy
+    # for it.  The figure below is the conditioning-robust
+    # err_norm = |lego-nemo| / RMS(nemo) = 4.322e-9 (p99 9.213e-7, max 3.103e-6).
+    # Pointwise-relative for the same run was 1.956e-7 with zero >1% cells.
+    "bn2 (rn2b)": 4.322e-9,
+    # alpha does NOT cross zero (signed range +9.27e-5..+3.22e-4), so its
+    # pointwise-relative stats ARE valid.  max|rel| 1.605e-8, zero cells >1%.
+    "eos_rab alpha": 1.322e-9,
+    # beta is EXACT per-element (all stats identically 0.0).  Honest caveat: for
+    # the DINO set lambda2 = mu2 = nu = 0, so beta collapses to the CONSTANT
+    # b0/rho0 = 7.4614e-4 -- matching it is real but trivially so, and this row
+    # carries NO evidence about the S-dependent terms, which DINO never
+    # exercises.
+    "eos_rab beta": 0.0,
 }
+
+# ROOT CAUSE shared by the two rows above (and by zdf_mxl's 10 columns).
+# alpha recomputed with NEMO's OWN gdept is BIT-EXACT (median|rel| = 0.000e+00,
+# max = 0.000e+00).  Our live gdept differs from NEMO's gdept(Kmm) by median
+# |rel| 2.163e-8.  bn2's residual has the depth profile of that same error
+# amplified by z*dT/dz: interfaces 0-5 are at 8e-15..4e-12 (bit-exact), a bump
+# peaks at level 9 (~118 m, 3.107e-7) and decays to 2.794e-11 by level 33 --
+# exactly where z*dT/dz peaks.  NOTE the earlier "bn2 has its own INDEPENDENT
+# defect" verdict is WRONG: that split substituted alpha/beta but left bn2
+# using OUR gdept for its own zrw weight and e3w divisor, so it could not see
+# this cause.  Closing the 2.163e-8 depth residual should close eos_rab alpha,
+# bn2 and the 10 zdf_mxl columns together.
 
 # term -> (corr, ratio, note).  corr/ratio None = never measured at all.
 MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
