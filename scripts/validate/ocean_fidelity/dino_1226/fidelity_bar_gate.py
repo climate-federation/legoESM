@@ -32,15 +32,14 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "ldf_slp uslp":                  (0.999340,   0.998697,   ""),
     "ldf_slp vslp":                  (0.999012,   0.997594,   ""),
     "ldf_eiv kappa (aeiu)":          (1.0,        1.000608,   "ratio not 1"),
-    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  1.0,        "AT BAR: K_h_base*cos(lat_T) u-face avg is a same-row no-op -> exact vs NEMO gphiu"),
-    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  1.0000260,  "v-face interpolates avg(cos) not cos(avg): ~2.6e-5 rel, second-order in dlat"),
+    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
     "eiv transport u":               (0.998474,   0.994097,   "REOPENED"),
     "eiv transport v":               (0.995437,   0.982351,   "REOPENED - 1.8% low"),
     "traadv_fct fluxes":             (0.99994,    1.000100,   ""),
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct"),
     "traadv_fct vertical upstream flux": (0.997700, None,     "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662)"),
-    "traadv_fct (SALINITY)":         (None,       None,       "NEVER COMPARED"),
     "dyn_hpg":                       (1.0,        1.000045,   "ratio not 1"),
     "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED"),
     "dyn_vor EEN v":                 (0.999932,   1.000717,   "REOPENED"),
@@ -59,12 +58,25 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001800,   ""),
     "ssh_nxt / div_hor":             (1.0,        0.999991,   ""),
     "dom_qco_r3c r3t":               (1.0,        0.999997,   ""),
-    "dom_qco_r3c r3u/r3v":           (None,       None,       "NEVER COMPARED (reader lacks hu_0/hv_0)"),
+    "dom_qco_r3c r3u/r3v":           (0.999999999879, 0.999997, "hu_0/hv_0 added to nemo_io.NemoGrid (derived from e3u_0/e3v_0+mask); "
+                                                              "face-averaged eta/H0 formula match; ratio not exactly 1 (same residual class as r3t)"),
     "mlf_baro_corr":                 (None,       None,       "algebra only; needs _step_impl hook"),
     "lbc_lnk sign":                  (None,       None,       "NEVER VERIFIED"),
-    "zdf_mxl_turb":                  (None,       None,       "NEVER VERIFIED"),
-    "zdf_drg_nonlin / dyn_drg_init": (None,       None,       "NEVER TERM-ISOLATED"),
-    "dyn_cor_2d (69x/step)":         (None,       None,       "NEVER TERM-ISOLATED"),
+    "zdf_mxl_turb":                  (None,       None,       "MISSING TERM: no legoESM equivalent -- NEMO's Kz<avt_c "
+                                                              "turbocline diagnostic (hmld) is distinct from zdf_mxl's "
+                                                              "N^2-criterion MLD (nmln, which IS ported); hmld/mldkz5 "
+                                                              "is diagnostic-only (never feeds dynamics), no lego port exists"),
+    "zdf_drg_nonlin T-point rate":   (1.0,        1.0,        "AT BAR: exact, nemo_effective_bottom_drag_r on bridged bottom u/v"),
+    "dyn_drg_init RHS increment":    (0.999937,   1.000278,   "u; v=0.999961/0.999988 (both DEBT, ~5e-5 residual)"),
+    "dyn_cor_2d (69x/step)":         (0.99999992, 0.999986,   "interior (excl. periodic-seam column, harness reindexing "
+                                                              "artifact there, not a lego defect); v=1.0/0.999928; "
+                                                              "een_barotropic_coriolis(metric_complete=True) vs dumped "
+                                                              "substep-1 zu_trd/zv_trd"),
+    "traadv_fct (SALINITY)":         (0.203165,   3.167599,   "DEBT: corr/ratio far below bar; rel_err_med=0.036 (good "
+                                                              "typical agreement) but p90=5.31 -- dominated by a handful "
+                                                              "of west/east-boundary columns (same class as the existing "
+                                                              "T-tendency 0.9945 boundary residual, amplified because S's "
+                                                              "signal is much smaller than T's)"),
 }
 
 

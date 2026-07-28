@@ -28,16 +28,23 @@ def _encode(zyx: np.ndarray) -> np.ndarray:
     return (z * 100 + y * 10 + x).astype(np.float64)
 
 
-def _write_mesh_mask(path):
+def _write_mesh_mask(path, with_e3uv_0=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     d1 = (("z",), np.arange(NZ).astype(np.float64) + 0.5)
-    ds = xr.Dataset({
+    data = {
         "glamt": d2, "gphit": d2, "e1t": d2, "e2t": d2, "e1u": d2, "e2v": d2,
         "ff_t": d2, "ff_f": d2,
         "e3t_1d": d1, "gdept_1d": d1, "gdepw_1d": d1,
         "tmask": d3, "umask": d3, "vmask": d3,
-    })
+    }
+    if with_e3uv_0:
+        # distinct constant thickness per level so hu_0/hv_0 = nlev * 1.0 *
+        # (mask sum) is a hand-checkable reduction, independent of _encode.
+        d3_const = (("z", "y", "x"), np.ones((NZ, NY, NX)))
+        data["e3u_0"] = d3_const
+        data["e3v_0"] = d3_const
+    ds = xr.Dataset(data)
     ds.to_netcdf(path)
 
 
@@ -73,6 +80,37 @@ def test_mesh_mask_halo_strip_and_axis_order(tmp_path):
     assert g.glamt[0, 0] == 1 * NX + 1
     # 3-D pattern z*100+y*10+x at interior (iy,ix,iz) -> global (iz, iy+1, ix+1)
     assert g.tmask[1, 2, 0] == 0 * 100 + (1 + 1) * 10 + (2 + 1)   # = 23
+
+
+def test_mesh_mask_hu0_hv0_derived_from_e3u0_e3v0(tmp_path):
+    """#1226 item 2: hu_0/hv_0 = sum_k(e3u_0*umask) / sum_k(e3v_0*vmask)
+    (domain.F90:140-146), derived by the reader when e3u_0/e3v_0 are
+    present -- the r3u/r3v comparison needs these and mesh_mask.nc never
+    carries hu_0/hv_0 directly."""
+    p = tmp_path / "mesh_mask_e3uv0.nc"
+    _write_mesh_mask(p, with_e3uv_0=True)
+    g = read_nemo_mesh_mask(str(p), nn_hls=1)
+    assert g.e3u_0 is not None and g.e3u_0.shape == (IY, IX, NZ)
+    assert g.e3v_0 is not None and g.e3v_0.shape == (IY, IX, NZ)
+    assert g.hu_0 is not None and g.hu_0.shape == (IY, IX)
+    assert g.hv_0 is not None and g.hv_0.shape == (IY, IX)
+    # e3u_0 == 1.0 everywhere -> hu_0 = sum_k(umask) at that column.
+    umask_sum = g.umask.sum(axis=-1)
+    vmask_sum = g.vmask.sum(axis=-1)
+    np.testing.assert_allclose(g.hu_0, umask_sum)
+    np.testing.assert_allclose(g.hv_0, vmask_sum)
+
+
+def test_mesh_mask_hu0_hv0_none_when_e3uv0_absent(tmp_path):
+    """No silent zero/garbage fallback: absent e3u_0/e3v_0 -> None, matching
+    the existing e3t_0/gdept_0 optional-field convention."""
+    p = tmp_path / "mesh_mask_no_e3uv0.nc"
+    _write_mesh_mask(p, with_e3uv_0=False)
+    g = read_nemo_mesh_mask(str(p), nn_hls=1)
+    assert g.e3u_0 is None
+    assert g.e3v_0 is None
+    assert g.hu_0 is None
+    assert g.hv_0 is None
 
 
 def test_restart_reads_state_and_rhd(tmp_path):
