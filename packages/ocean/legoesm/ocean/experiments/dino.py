@@ -97,6 +97,23 @@ class DINOConfig:
     # y5 twin that single constant WAS the entire remaining N^2 residual against
     # NEMO's own dumped rn2b (median rel err 4.95e-05 -> 6.96e-06, #1226).
     g: float = constants.g
+    # Earth rotation rate [rad/s], feeds f = 2*omega*sin(lat) at grid
+    # construction (create_mercator_grid). Defaults to legoESM's canonical
+    # (rounded) value; the NEMO oracle card pins NEMO's own value via
+    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:89, the
+    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday,
+    # matching the key_cice literal to 8 sig figs). legoESM's rounded
+    # constants.Omega is a 4-sig-fig rounding of the SAME physical constant,
+    # not a different convention -- global constants.Omega is left alone
+    # (125 call sites across atm/ocean/ice, canaried by
+    # test_mle_faithful.py) since only the oracle recipe needs the extra
+    # digits.  const-ok: the relative rounding gap enters the Treguier
+    # ldf_eiv Rossby radius zRo = 0.4*zn/|f| LINEARLY and
+    # zaeiw = zRo^2*T^-1 QUADRATICALLY (measured on NEMO's own dumped
+    # zn/zah/zhw/wslpi/wslpj fed through this exact formula, #1226) -- the
+    # single identified cause of the ldf_eiv kappa (aeiu) amplitude bias
+    # (ratio 1.000608, corr already 1.0).
+    omega: float = constants.Omega
 
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
@@ -1046,6 +1063,13 @@ DINO_RECIPES: dict[str, dict] = {
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
         "g": _NEMO_CONSTANTS.g,
+        # NEMO's full-precision Earth rotation rate (phycst.F90:89, the
+        # non-key_cice sidereal branch DINO takes) -- legoESM's canonical
+        # constants.Omega is a 4-sig-fig ROUNDING of the same physical
+        # constant (1.578e-5 relative). #1226: this was the entire ldf_eiv
+        # kappa (aeiu) amplitude bias (ratio 1.000608 at corr=1.0), traced to
+        # zRo = 0.4*zn/|f| (linear in 1/omega) then squared into zaeiw.
+        "omega": _NEMO_CONSTANTS.Omega,
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -2198,6 +2222,7 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
             lon_east_deg=cfg.lon_east_deg,
             equator_on_tpoint=True,
             n_lat=_NEMO_DINO_NLAT,
+            omega=cfg.omega,
         )
 
     return create_mercator_grid(
@@ -2205,6 +2230,7 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
         lat_max_deg=cfg.lat_max_deg,
         lon_west_deg=cfg.lon_west_deg,
         lon_east_deg=cfg.lon_east_deg,
+        omega=cfg.omega,
     )
 
 
@@ -2759,6 +2785,7 @@ def dino_lat_lon_model_config(
     model_cfg = LatLonCGridOceanConfig.from_flat(
         rho_0=cfg.rho_0,
         g=cfg.g,
+        omega=cfg.omega,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).

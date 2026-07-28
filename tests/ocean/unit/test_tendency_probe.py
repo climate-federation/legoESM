@@ -339,7 +339,8 @@ def test_gm_redi_probe_threads_kappa_redi_cos_lat_override(
         gm_redi_tracer_state=(state.T.data, state.S.data),
     )
 
-    kappa_redi_override = _static_kappa_redi_override(gm_redi_config.gm_redi, grid)
+    kappa_redi_override, kappa_redi_v_override = _static_kappa_redi_override(
+        gm_redi_config.gm_redi, grid)
     assert kappa_redi_override is not None, "fixture must exercise the cos-lat path"
     dT_expected, dS_expected = gm_redi_tracer_tendency_latlon(
         state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
@@ -349,6 +350,7 @@ def test_gm_redi_probe_threads_kappa_redi_cos_lat_override(
         u_mask=state.u_mask.data, v_mask=state.v_mask.data,
         rho_0=gm_redi_config.constants.rho_0, g=gm_redi_config.constants.g,
         kappa_redi_override=kappa_redi_override,
+        kappa_redi_v_override=kappa_redi_v_override,
         dt=300.0,
     )
     np.testing.assert_allclose(

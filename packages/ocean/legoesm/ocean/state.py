@@ -1331,6 +1331,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     ConstantsConfig for a reference-model recipe) ---
     g: float = constants.g
     rho_0: float = constants.rho_ocean
+    # Earth rotation rate [rad/s], feeds the GM/Redi Treguier ldf_eiv f20
+    # tropical-taper reference (gm_redi_tracer_tendency_latlon's ``omega``
+    # kwarg) -- MUST equal the value that built ``grid.f``/``f_coriolis``,
+    # same reasoning as ``g`` above (#1226: legoESM's canonical rounded
+    # constants.Omega vs NEMO's full-precision value was the entire ldf_eiv
+    # kappa amplitude residual, ratio 1.000608 at corr=1.0).
+    omega: float = constants.Omega
 
     # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
     lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()

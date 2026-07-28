@@ -1657,6 +1657,7 @@ def _make_gm_redi_spec(model, dt: float) -> "PhaseSpec":
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
+            omega=config.omega,  # #1226: config.omega, not config.constants.Omega
         )
         T_new = state.T.data + dt_static * dT_gm * mask_3d
         S_new = state.S.data + dt_static * dS_gm * mask_3d

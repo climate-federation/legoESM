@@ -443,6 +443,7 @@ def compute_treguier_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: TreguierConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    omega: float = constants.Omega,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) / Held-Larichev (1996) eddy-induced-velocity
     coefficient — faithful port of NEMO 5.0.1 ``ldftra.F90::ldf_eiv``
@@ -472,6 +473,12 @@ def compute_treguier_kappa_gm(
     ``_eady_growth_and_length`` chain for N²/N/σ (no duplicate numerics);
     N² is the in-situ model N² (NEMO uses its native ``rn2b``).
 
+    ``omega`` MUST match the Earth rotation rate that built ``f_coriolis``
+    (see :func:`gm_redi_latlon_cgrid.compute_treguier_kappa_gm_nemo_native`'s
+    docstring, #1226) — it feeds the ``f20`` tropical-taper reference; a
+    mismatched value reintroduces an amplitude bias that would otherwise
+    cancel in the ``|f/f20|`` ratio.
+
     Returns the 2-D ``kappa_GM`` [m²/s], exactly 0 on dry columns.
     """
     # The shared helper needs a Visbeck-shaped cfg ONLY for its mixing-length
@@ -491,7 +498,7 @@ def compute_treguier_kappa_gm(
     zah = jnp.sum(sigma ** 2 * dz_half, axis=-1)
     zhw = _TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
     t_inv = jnp.sqrt(zah / zhw)
-    f20 = 2.0 * constants.Omega * jnp.sin(
+    f20 = 2.0 * omega * jnp.sin(
         jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)

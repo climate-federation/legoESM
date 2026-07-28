@@ -153,6 +153,48 @@ class TestTreguierKappa:
         g = jax.grad(total)(rho)
         assert bool(jnp.isfinite(g).all())
 
+    def test_omega_override_changes_taper_only(self):
+        """#1226: the ldf_eiv kappa (aeiu) amplitude bias (ratio 1.000608 at
+        corr=1.0) traced to legoESM's canonical constants.Omega being a
+        4-sig-fig rounding of the physical Earth rotation rate NEMO's own
+        ldftra.F90 uses (verified by feeding NEMO's own dumped
+        zn/zah/zhw/wslpi/wslpj through this exact formula: the relative gap
+        enters zRo linearly and zaeiw quadratically, matching NEMO's own
+        omega closes both to machine precision). ``omega`` feeds ONLY
+        ``f20 = 2*omega*sin(20deg)`` inside this function -- an independent
+        hand-computed f20 with a DIFFERENT omega must change kappa (a no-op
+        parameter would silently defeat the whole fix)."""
+        rho, S_x, S_y, z, jac = _setup(slope=1e-5)
+        omega_a = constants.Omega
+        from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+        omega_b = NEMO_CONSTANTS_CONFIG.Omega
+        assert omega_a != omega_b
+        # Pick |f| squarely inside the tropical taper's linear regime (not
+        # at the min(1, .) clip) so a small omega shift is NOT masked by the
+        # cap: |f| = 0.5*f20(omega_a) sits well under both f20(omega_a) and
+        # f20(omega_b) (they differ by ~1.6e-5 relative).
+        f20_a = 2.0 * omega_a * np.sin(np.deg2rad(20.0))
+        f_val = jnp.full((3, 3), 0.5 * f20_a)
+        cfg = TreguierConfig(enabled=True, aei0=1.0e12)   # cap inert
+        k_a = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f_val, cfg, omega=omega_a))
+        k_b = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f_val, cfg, omega=omega_b))
+        # Independently hand-compute the taper ratio the omega swap implies:
+        # taper = min(1, |f|/f20); f20 scales linearly with omega, so
+        # taper_b/taper_a = f20_a/f20_b = omega_a/omega_b (both un-clipped
+        # here since |f|=0.5*f20_a < f20_b too -- omega_b > omega_a).
+        f20_b = 2.0 * omega_b * np.sin(np.deg2rad(20.0))
+        expected_ratio = f20_a / f20_b
+        assert not np.isclose(expected_ratio, 1.0)   # non-vacuous
+        np.testing.assert_allclose(
+            k_b / k_a, np.full_like(k_a, expected_ratio), rtol=1e-9)
+        # Default (no omega kwarg) must equal the explicit constants.Omega
+        # call -- zero-behaviour-change guarantee for every non-oracle caller.
+        k_default = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f_val, cfg))
+        np.testing.assert_allclose(k_default, k_a, rtol=1e-12)
+
 
 class TestTreguierKappaNemoNative:
     """#1317: compute_treguier_kappa_gm_nemo_native must consume the SAME
@@ -325,6 +367,51 @@ class TestTreguierKappaNemoNative:
         assert bool(wet_interior.any())  # non-vacuous
         assert bool(jnp.isfinite(jnp.where(wet3d, grad, 0.0)).all())
 
+    def test_omega_override_changes_taper_only(self):
+        """Same #1226 guarantee as the generic-path test above, for the
+        nemo_native leaf (compute_treguier_kappa_gm_nemo_native) — the
+        function the production nemo_dino_kamm_mlf card actually calls."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_nemo_native_slopes, compute_treguier_kappa_gm_nemo_native,
+            gm_redi_density_and_jacobian,
+        )
+        from legoesm.ocean.eos import make_eos_fn
+        dcfg, z, g, st = self._dino_fixture()
+        gm_cfg = GMRediConfig(slope_scheme="nemo_iso_lap", slope_positions="nemo_native")
+        eos_fn = make_eos_fn("nemo_seos")
+        mask = st.land_mask.data
+        rho, jacobian = gm_redi_density_and_jacobian(
+            st.T.data, st.S.data, st.eta.data, st.H_bathy.data, g, z,
+            eos="nemo_seos", mask=mask)
+        omega_a = constants.Omega
+        from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+        omega_b = NEMO_CONSTANTS_CONFIG.Omega
+        assert omega_a != omega_b
+        f = jnp.broadcast_to(g.f, mask.shape)
+        _z_top = jnp.cumsum(z.dz_ref) - z.dz_ref
+        act = ((mask[:, :, None] > 0.5)
+               & (_z_top[None, None, :] < st.H_bathy.data[:, :, None])).astype(st.T.data.dtype)
+        uslp, vslp, wslpi, wslpj = compute_nemo_native_slopes(
+            rho, st.T.data, st.S.data, mask, st.u_mask.data, st.v_mask.data,
+            z, g, gm_cfg, eos_fn, active_3d=act)
+        cfg = TreguierConfig(enabled=True, aei0=1.0e9)   # cap inert
+        k_a = np.asarray(compute_treguier_kappa_gm_nemo_native(
+            rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f, cfg,
+            eos_fn, active_3d=act, omega=omega_a))
+        k_b = np.asarray(compute_treguier_kappa_gm_nemo_native(
+            rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f, cfg,
+            eos_fn, active_3d=act, omega=omega_b))
+        k_default = np.asarray(compute_treguier_kappa_gm_nemo_native(
+            rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f, cfg,
+            eos_fn, active_3d=act))
+        wet = np.asarray(mask) > 0.5
+        assert wet.any()
+        # Different omega -> different taper -> different kappa somewhere in
+        # the wet domain (non-vacuous: a no-op parameter would defeat the fix).
+        assert not np.allclose(k_a[wet], k_b[wet])
+        # Zero-behaviour-change guarantee: omitting omega == constants.Omega.
+        np.testing.assert_allclose(k_default[wet], k_a[wet], rtol=1e-12)
+
     def test_dispatch_prefers_nemo_native_over_generic_treguier(self):
         """gm_redi_tracer_tendency_latlon must route through the
         nemo_native-consistent kappa_GM (not the generic simplified-slope
@@ -407,6 +494,44 @@ class TestDispatchAndWiring:
         # DINOConfig.treguier_aei0 default = 0.5*rn_Ue*rn_Le (ldftra.F90:332
         # explicit 1/2 factor) = 1500, not the un-halved rn_Ue*rn_Le = 3000.
         assert mc2.gm_redi.treguier.aei0 == pytest.approx(1500.0)
+
+    def test_dino_omega_wiring_nemo_card(self):
+        """#1226: the nemo_dino_kamm_mlf card pins NEMO's full-precision
+        Omega (NEMO_CONSTANTS_CONFIG.Omega, phycst.F90:89) via
+        DINOConfig.omega -> LatLonCGridOceanConfig.omega (the top-level
+        field self.config.omega, NOT the currently-unwired self.config.
+        constants.Omega default) -> create_mercator_grid(omega=...) ->
+        grid.f. Every other recipe stays byte-identical to legoESM's
+        canonical constants.Omega (zero-behaviour-change guarantee)."""
+        from legoesm.ocean.experiments.dino import (
+            dino_config_for_recipe, dino_lat_lon_grid,
+            dino_lat_lon_model_config,
+        )
+        from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+        default_cfg = dino_config_for_recipe("legoesm_default")
+        assert default_cfg.omega == constants.Omega
+        g_default = dino_lat_lon_grid(default_cfg, n_lon=50)
+        mc_default, _ = dino_lat_lon_model_config(g_default, default_cfg)
+        assert mc_default.omega == constants.Omega
+
+        nemo_cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert nemo_cfg.omega == NEMO_CONSTANTS_CONFIG.Omega
+        assert nemo_cfg.omega != constants.Omega
+        g_nemo = dino_lat_lon_grid(nemo_cfg, n_lon=50)
+        mc_nemo, _ = dino_lat_lon_model_config(g_nemo, nemo_cfg)
+        assert mc_nemo.omega == pytest.approx(NEMO_CONSTANTS_CONFIG.Omega)
+        # The Coriolis field itself must reflect the pinned omega (not just
+        # the config value) -- f = 2*omega*sin(lat) at grid construction.
+        expected_f_ratio = nemo_cfg.omega / default_cfg.omega
+        got_f_ratio = float(np.asarray(g_nemo.f)[50, 25]
+                            / np.asarray(g_default.f)[50, 25])
+        # rel=1e-6: sin(lat) itself differs at the ~1e-7 bit level between
+        # two independently-constructed Mercator grids (lat-placement
+        # rounding, unrelated to omega) -- loose enough to catch a
+        # completely-unwired omega (which would give ratio 1.0, off by
+        # 1.6e-5) yet tight enough not to mask that failure mode.
+        assert got_f_ratio == pytest.approx(expected_f_ratio, rel=1e-6)
 
     def test_dino_unknown_scheme_raises(self):
         from legoesm.ocean.experiments.dino import (
