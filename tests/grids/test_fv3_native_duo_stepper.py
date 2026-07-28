@@ -338,13 +338,31 @@ def test_topo_fn_threads_hs_and_step_runs():
     t_mt = int(np.argmax([float(np.max(h)) for h in ctx_t["hs6"]]))
     assert not np.allclose(out_t[t_mt]["u"], out_0[t_mt]["u"])
     assert not np.allclose(out_t[t_mt]["delp"], out_0[t_mt]["delp"])
-    # faces whose hs is zero across the WHOLE data domain (incl the
-    # halos the one-time ext_scalar(phis) filled from mountain-face
-    # neighbours — upstream test_cases.F90:1567+ semantics, so
-    # mountain-adjacent faces legitimately differ at edge columns)
-    # must stay BIT-identical after one step — pins the None path
-    far = [t for t in range(6)
-           if float(np.max(np.abs(ctx_t["hs6"][t]))) == 0.0]
-    assert far, "mountain phis reached every face's halo at C12 — "                 "identity clause needs a larger n"
-    for t in far:
-        np.testing.assert_array_equal(out_t[t]["u"], out_0[t]["u"])
+    # deterministic threading pin (step-identity clauses kept tripping
+    # on legitimate cross-face flux-averaging propagation): SPY on both
+    # geopk sites — each must receive the ctx hs, nonzero on the
+    # mountain face, all-zero when topo_fn is None
+    import legoesm.core.fv3_native_duo_stepper as ds
+    seen = {"cg": [], "d": []}
+    orig_cg, orig_d = ds.geopk_sw_1lev, ds.geopk_sw_1lev_d
+
+    def spy_cg(delpc, hs, bd, pt=None):
+        seen["cg"].append(float(np.max(np.abs(hs))))
+        return orig_cg(delpc, hs, bd, pt=pt)
+
+    def spy_d(delp, hs, bd, pt=None):
+        seen["d"].append(float(np.max(np.abs(hs))))
+        return orig_d(delp, hs, bd, pt=pt)
+
+    ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = spy_cg, spy_d
+    try:
+        full_acoustic_step_sixface(ctx_t, w2_six_face_state(ctx_t),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) > 1e4 and max(seen["d"]) > 1e4
+        seen["cg"].clear()
+        seen["d"].clear()
+        full_acoustic_step_sixface(ctx_0, w2_six_face_state(ctx_0),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) == 0.0 and max(seen["d"]) == 0.0
+    finally:
+        ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = orig_cg, orig_d
