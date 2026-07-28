@@ -1025,11 +1025,33 @@ all-reduce.
 
 **CONCLUSION: the cube's fixed cost is dominated by rank-arrival skew,
 not by launch count or bytes.** Packing fields, batching levels and
-fattening messages all target the wrong term. The next real step is to
-measure WHERE the skew originates (per-rank arrival times at each halo
-phase) — and skew has no one-line fix; it is load imbalance, or a
-serialised phase upstream of the exchange. Recorded here rather than
-guessed at.
+fattening messages all target the wrong term.
+
+**SKEW LOCATED (4-rank profile, job 26526100).** Aligning SendRecv
+launches by sequence across ranks 0/1/12/23 over two steady steps:
+
+* 10 of 172 exchanges carry >1 ms of max duration, and **9 of the 10 are
+  skew-dominated** — arrival skew ~= max duration (e.g. 13.6 ms skew vs
+  12.6 ms duration with the last arriver's own service at 14 us: early
+  ranks WAIT the full skew).
+* The ordering is SYSTEMATIC: rank 23 arrives last 95/140 times, rank 0
+  44/140; rank 12 arrives FIRST 135/140. Median idle gap before a late
+  arrival is 20 us — the late rank was computing back-to-back, not
+  blocked upstream.
+* BUT total per-rank work is EQUAL: compute 8.2-8.5 ms/step in ~428
+  kernels on every rank.
+
+Equal totals + systematically late at fixed sequence points = **pipeline
+drift, not load imbalance**: the 16-phase pad sequence has
+rank-dependent participation (partial permutes let non-target ranks run
+ahead), the drift accumulates within the step, and the ~10
+full-participation exchanges act as resync barriers where the
+accumulated drift is paid as wait. The cost is real (~7.5 ms/step in the
+wait tail) but the remedy is ALGORITHMIC — reorder/merge pad phases so
+drift cannot accumulate, or overlap the resync exchanges with interior
+compute — a scoped dycore-scheduling follow-up, not a bench or config
+change. No further profiling is needed; the mechanism chain
+(launch-count -> bytes -> skew -> ordering) is now measured end to end.
 
 ## Tripole (ORCA fold) past 4 GPUs — first receipts (job 26512798)
 
