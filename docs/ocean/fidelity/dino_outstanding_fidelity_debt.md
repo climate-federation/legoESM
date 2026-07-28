@@ -62,6 +62,59 @@ they were only ever hypotheses.
 3. `dyn_spg_ts` `puu_b` \|x\| 0.987 — the entry-seed hypothesis was falsified (fix inert); no replacement hypothesis.
 4. NEMO's `grid_T` history output is **numerically wrong** (votemper ×9.6 surface → ×290 deep; restarts are fine). Cause not diagnosed — an XIOS thickness-weighting/normalisation issue is suspected. Any past analysis reading NEMO T/S from `grid_T` is invalid.
 
+## E. `ldftra` isoneutral diffusivity (Redi, `nn_aht_ijk_t=20`) — instrumented 2026-07-27
+
+Investigated as the leading suspect for the 13%-too-weak upper-ocean meridional
+T gradient (costs ACC via thermal wind). **Verdict: NOT the cause** — the
+coefficient magnitude is bit-exact; a small (~2.6e-5) v-face discretization
+residual was found and is now tracked, but it is far too small to explain 13%.
+
+- **Formula correction (source read + live dump both confirm)**: NEMO's
+  `nn_aht_ijk_t=20` (`ldftra.F90:290-296,322-326`, `ldfc1d_c2d.F90:106-155`)
+  computes `ahtu/ahtv = (½·rn_Ud)·max(e1u,e2u)^1` — i.e. **`rn_Ld` is DEAD for
+  this branch** (`aht0 = ½·rn_Ud·rn_Ld` is computed but never used by
+  `CASE(20)`; only the printed `aht0` diagnostic references it). The task
+  brief's "aht0 = 1350 m²/s (=½·rn_Ud·rn_Ld)" is a **documentation red
+  herring** — NEMO's own `ocean.output` prints the value actually used:
+  `"maximum reachable coefficient (at the Equator) = 1501.1854665553683 m2/s"`
+  (`ldftra.F90:325`, `zah_max = zUfac*(ra*rad)^inn`). Confirmed independently
+  by a live `kt==nit000` dump of `ahtu`/`ahtv` (MY_SRC/ldftra.F90, units
+  8960-8963, `cfgs/DINO/RUN_1226_AHTU`).
+- **legoESM's `K_h_base = 0.5*cfg.U_T*grid.radius*grid.dlon`** (dino.py:2520)
+  evaluates to **1501.1854665553683** for both the default and
+  `nemo_faithful_dino_config()` grids — bit-identical to NEMO's `zah_max`,
+  because `grid.radius=constants.R_earth=6371229.0` and `grid.dlon≈1°` in
+  radians reproduce `ra*rad*rn_e1_deg` exactly. The task's other stated
+  number ("kappa_Redi = 1443.4475639955465") does not reproduce from current
+  source with either grid path checked — likely stale/from a different
+  config snapshot; the live value is 1501.1854665553683.
+- **Field comparison (u-point, all 36 levels, both hemispheres)**: corr
+  1.0000000000, ratio 1.0000000000, rel-err median 0, p90 1.7e-16 — roundoff.
+  **AT BAR.** legoESM's `_static_kappa_redi_override` (T-point `cos(lat)`
+  field) → `interp_cell_to_uface` (same-row average) is a no-op for a
+  field that is constant along a row, so it reproduces NEMO's direct
+  `cos(gphiu)` evaluation exactly.
+- **v-point**: corr 1.0, ratio **1.0000260** — DEBT (exceeds the 1e-6 bar).
+  `interp_cell_to_vface` averages `cos(φ_j)` and `cos(φ_j+1)` (two adjacent
+  T-row values) where NEMO evaluates `cos` directly at the true `gphiv`
+  midpoint latitude. `avg(cos) ≠ cos(avg)` — a genuine, second-order-in-Δφ
+  discretization difference (~2.6e-5 relative at 1° spacing), present at
+  every v-face. Real, but three orders of magnitude too small to be the
+  13% front-weakening mechanism.
+- **Minimal faithful fix (not yet implemented)**: evaluate
+  `K_h_base*cos(lat)` directly at `grid.lat_v` (the true v-face latitude,
+  already computed elsewhere for the grid's Coriolis/metric terms) instead of
+  interpolating the T-point cosine field, as a `kappa_redi_lat_scaling`-gated
+  branch in `_static_kappa_redi_override`. Only changes the v-face values;
+  u-face stays a no-op since NEMO's u-point and the flanking T-points share
+  the same latitude row on this Mercator grid.
+- **Residual open question**: the ahtu/ahtv coefficient is now the LEAST
+  likely explanation for the 13% front deficit found so far. The search for
+  that deficit should move to a different term (candidates from this same
+  ledger: `traadv_fct` vertical upstream flux over-clip 1.7-1.9x — row
+  "traadv_fct VERTICAL upstream flux" above, added by a parallel
+  investigation — or the slope/taper chain `ldf_slp`).
+
 ---
 
 ## Honest count
