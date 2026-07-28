@@ -13,7 +13,7 @@
 # refuses).  Bake a transient surfdata first, e.g. HYDE anthropogenic cover:
 #
 #   python scripts/data/build_anthropogenic_surfdata.py --dataset hyde \
-#     --base data/legoesm_surfdata_c250617.nc \
+#     --base data/legoesm_surfdata_c260716.nc \
 #     --year-start 1920 --year-end 1929 \
 #     --out data/legoesm_surfdata_hyde_1920-1929.nc
 #

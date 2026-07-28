@@ -128,7 +128,7 @@ forcing:
   k_neighbors: 4
 
 surfdata:
-  path: data/legoesm_surfdata_c250617.nc
+  path: data/legoesm_surfdata_c260716.nc
 
 time:
   dt: 3600.0                      # 1 h
@@ -141,11 +141,16 @@ restart:
 land_frac_min: 0.0                # any surfdata land
 land_mask_file: ""
 
-# ⚠️ The model's own `land_fraction` output over-states global land area by ~26%
-# (187.7 vs 149.0 x10^12 m2) at 2 deg — coastal smearing in the surfdata regrid.
-# Area-weighted MEANS are largely immune; global TOTALS are not.  For totals,
-# weight with the CLM surface dataset's LANDFRAC_MKSURFDATA conservatively
-# remapped to the model grid, not the tape's land_fraction.
+# LAND AREA: this template uses surfdata c260716, whose land fraction is CORRECT.
+# The tape's `land_fraction` (= f_land + f_lake + f_glacier, regridded) totals
+# 146.94 x10^12 m2 at 2 deg — conserved through the regrid from the 146.93 native
+# value, and within 1.4% of the CLM LANDFRAC_MKSURFDATA reference (148.99).
+#
+# ⚠️ The SUPERSEDED c250617 surfdata over-stated global land area by ~26%
+# (187.65 x10^12 m2), which inflates every global TOTAL computed from it (a naive
+# GPP total came out ~30% high).  Area-weighted MEANS are far less affected.  Any
+# analysis of a run made with c250617 — including the 1985-2014 run — must NOT
+# have its totals compared against a c260716 run without redoing the weighting.
 
 output:
   tapes:

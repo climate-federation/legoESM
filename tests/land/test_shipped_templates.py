@@ -90,3 +90,62 @@ def test_calibrated_spinup_and_production_share_physics():
             f"physics.{key} differs between the spin-up and production "
             f"templates ({spin[key]!r} vs {prod[key]!r}) — the chained run "
             "would jump physics at the restart boundary")
+
+
+# --------------------------------------------------------------------------
+# Template surfdata must match what the downloader actually stages
+# --------------------------------------------------------------------------
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_DOWNLOADER = _REPO_ROOT / "scripts" / "data" / "download_lmip_data.sh"
+
+# Templates that intentionally use a DIFFERENT surfdata (documented, not drift).
+_SURFDATA_EXEMPT = {
+    "smoke_test": "",                                  # synthetic, injected by tests
+    "lmip_canopy_lulcc": "legoesm_surfdata_hyde_1920-1929.nc",   # transient LULCC
+}
+
+
+def _downloader_surfdata_name() -> str:
+    """The single dated surfdata build ``download_lmip_data.sh`` stages."""
+    import shlex
+    for line in _DOWNLOADER.read_text().splitlines():
+        if line.strip().startswith("SURFDATA_NAME="):
+            # shlex handles the quoting AND drops the trailing shell comment.
+            rhs = shlex.split(line.split("=", 1)[1], comments=True)
+            assert rhs, f"could not parse SURFDATA_NAME from: {line!r}"
+            name = rhs[0]
+            assert name.endswith(".nc"), f"parsed {name!r}, expected a .nc filename"
+            return name
+    raise AssertionError(f"SURFDATA_NAME not found in {_DOWNLOADER}")
+
+
+def test_downloader_surfdata_name_parses():
+    """Guard the parser itself — a silently mis-parsed name would make the
+    drift check below vacuous (it would compare against a garbage string)."""
+    name = _downloader_surfdata_name()
+    assert name.startswith("legoesm_surfdata_") and name.endswith(".nc")
+    assert "#" not in name and '"' not in name
+
+
+@pytest.mark.parametrize("path", _TEMPLATES, ids=lambda p: p.stem)
+def test_template_surfdata_matches_the_downloader(path):
+    """A template pinning an OLD surfdata build is a silent data bug.
+
+    ``download_lmip_data.sh`` stages exactly one dated build; a template asking
+    for a different name either fails at job start (file absent) or — worse —
+    picks up a stale leftover on a shared filesystem and runs the WRONG boundary
+    data.  That is not hypothetical: every template pinned c250617 while the
+    downloader fetched c260716, and c250617 over-states global land area by ~26%
+    (187.65 vs 146.94 x10^12 m2 at 2 deg), inflating every global total.
+    """
+    stem = path.stem
+    got = pathlib.PurePath(
+        yaml.safe_load(path.read_text())["surfdata"]["path"]).name
+    if stem in _SURFDATA_EXEMPT:
+        assert got == _SURFDATA_EXEMPT[stem], (
+            f"{stem} is surfdata-exempt but its path changed to {got!r}; "
+            "update _SURFDATA_EXEMPT deliberately or point it at the downloader build")
+        return
+    assert got == _downloader_surfdata_name(), (
+        f"{stem} pins surfdata {got!r} but download_lmip_data.sh stages "
+        f"{_downloader_surfdata_name()!r} — the run would use the wrong boundary data")

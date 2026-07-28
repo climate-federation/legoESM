@@ -103,7 +103,7 @@ forcing:
   k_neighbors: 4
 
 surfdata:
-  path: data/legoesm_surfdata_c250617.nc
+  path: data/legoesm_surfdata_c260716.nc
 
 time:
   dt: 3600.0                      # 1 h
