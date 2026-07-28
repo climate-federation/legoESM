@@ -34,8 +34,8 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "ldf_eiv kappa (aeiu)":          (1.0,        1.000608,   "ratio not 1"),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
-    "eiv transport u":               (0.998474,   0.994097,   "REOPENED"),
-    "eiv transport v":               (0.995437,   0.982351,   "REOPENED - 1.8% low"),
+    "eiv transport u":               (0.999617,   0.996234,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996234; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT"),
+    "eiv transport v":               (0.999103,   0.990637,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990637; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT"),
     "traadv_fct fluxes":             (0.99994,    1.000100,   ""),
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct"),
@@ -72,11 +72,41 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "artifact there, not a lego defect); v=1.0/0.999928; "
                                                               "een_barotropic_coriolis(metric_complete=True) vs dumped "
                                                               "substep-1 zu_trd/zv_trd"),
-    "traadv_fct (SALINITY)":         (0.203165,   3.167599,   "DEBT: corr/ratio far below bar; rel_err_med=0.036 (good "
-                                                              "typical agreement) but p90=5.31 -- dominated by a handful "
-                                                              "of west/east-boundary columns (same class as the existing "
-                                                              "T-tendency 0.9945 boundary residual, amplified because S's "
-                                                              "signal is much smaller than T's)"),
+    "traadv_fct (SALINITY)":         (0.203165,   3.167599,   "DEBT: corr/ratio far below bar. VERIFIED (not the "
+                                                              "'boundary-column artifact' hypothesis -- REFUTED: "
+                                                              "excluding i/j=0,last leaves corr 0.2024 (unchanged); "
+                                                              "excluding bathymetry-step-adjacent columns too only "
+                                                              "reaches corr 0.379/ratio 1.37, still far below bar). "
+                                                              "Method: measured via the SAME flux-reconstruction-from-"
+                                                              "dumps technique as T (immune to the tra_sbc/tra_qsr "
+                                                              "Krhs contamination); raw contaminated dump gives an "
+                                                              "even worse corr=0.052, so contamination was not "
+                                                              "hiding a good match either. ROOT CAUSE: per-face "
+                                                              "upstream+antidiffusive S fluxes match NEMO at "
+                                                              "corr 0.94-0.995 / abs_ratio 0.9999-1.010 (metric-"
+                                                              "scaled: lego's mass_flux is pre-metric [m^2/s], "
+                                                              "NEMO's ztFu/v/w are full volume-flux "
+                                                              "[m^3/s] per traadv.F90:321-333 -- scaling lego's flux "
+                                                              "by grid.dy*0.5 (zonal)/v-face metric (merid)/grid.area "
+                                                              "(vert) before comparing is mandatory, a raw pre-metric "
+                                                              "vs post-metric flux comparison gives a spurious "
+                                                              "~1e-5..1e-10 ratio that is NOT a physics defect). The "
+                                                              "horizontal-only and vertical-only upstream tendencies "
+                                                              "ALSO independently match NEMO at corr 0.9999/ratio "
+                                                              "~1.000 each. But S's net upstream tendency is a "
+                                                              "near-total CANCELLATION of those two terms -- "
+                                                              "corr(horiz,vert) = -0.9999, net/gross = 1.2% (T's is "
+                                                              "-0.995 / 10.2% net/gross) -- so S's advective tendency "
+                                                              "is ~8x more exposed to the SAME absolute-scale "
+                                                              "horiz/vert discretization mismatch that is invisible "
+                                                              "for T. This is a genuine interior defect (survives "
+                                                              "excluding boundary+topo-step columns), NOT a masked-"
+                                                              "cell/edge artifact, though its proximate cause is "
+                                                              "catastrophic-cancellation amplification of an "
+                                                              "existing (already-documented in advection.py's nonosc "
+                                                              "box-tightening comment) small horiz/vert discretization "
+                                                              "gap, not a new independent S-specific bug. S feeds the "
+                                                              "EOS -> ACC: flagged, not yet fixed."),
 }
 
 
