@@ -146,6 +146,11 @@ def main() -> int:
                         "steps (built once, reused; band-sharded geometry) "
                         "and times BLOCKS of segment calls instead of "
                         "per-step host dispatch. 0 = default fused lane.")
+    p.add_argument("--device-hbm", type=str, default=None,
+                   help="#1361 memory preflight: target device whose HBM the "
+                        "estimated per-device footprint must fit "
+                        "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
+                        "estimate printed, no gate.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
@@ -180,6 +185,26 @@ def main() -> int:
     # the expensive build (the ocean twin's guard).
     if args.steps < 1:
         raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+
+    # #1361 preflight: decidable from the ARGUMENTS ALONE, so it runs before
+    # any jax import / device query / model build. Job 26497323 ran a whole
+    # 16-GPU arm before dying on `n_lat 720 not divisible by n_devices 64` --
+    # the later in-loop guard below is kept as a belt-and-braces check for the
+    # weak-mode derived n_lat, but the fatal case is caught here at submit time.
+    from legoesm.parallel.scaling_preflight import (
+        preflight_or_exit, validate_divisibility, validate_memory,
+    )
+    if args.mode == "strong":
+        preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
+                          axis="n_lat")
+    _n_lat_est = (args.n_lat if args.mode == "strong"
+                  else args.nlat_per_dev * args.n_devices)
+    _est = preflight_or_exit(
+        validate_memory, n_columns=_n_lat_est * args.n_lon, nlev=args.nlev,
+        n_devices=args.n_devices, device=args.device_hbm)
+    print(f"[preflight] ok: n_lat={_n_lat_est} n_lon={args.n_lon} "
+          f"nlev={args.nlev} n_devices={args.n_devices} "
+          f"est={_est / 1024**3:.1f} GB/device", flush=True)
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
