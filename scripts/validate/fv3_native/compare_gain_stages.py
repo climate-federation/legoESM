@@ -77,12 +77,22 @@ def main(argv=None):
         for nm in names:
             for arm in ("sym", "anti"):
                 o_mx = f_mx = None
+                o_arg = f_arg = None
                 for t in range(1, 7):
                     kb = f"base_{st}_{nm}_t{t}"
                     kp = f"{arm}_{st}_{nm}_t{t}"
                     if kb in ours.files and kp in ours.files:
-                        d = float(np.abs(ours[kp] - ours[kb]).max())
-                        o_mx = d if o_mx is None else max(o_mx, d)
+                        da = np.abs(ours[kp] - ours[kb])
+                        w = np.isfinite(da)          # unwritten slots
+                        if not w.any():
+                            fatal.append(f"ours all-nan {st} {nm} t{t}")
+                            continue
+                        d = float(da[w].max())
+                        if o_mx is None or d > o_mx:
+                            o_mx = d
+                            kk = np.unravel_index(
+                                int(np.nanargmax(da)), da.shape)
+                            o_arg = (t, int(kk[0]), int(kk[1]))
                     else:
                         fatal.append(f"ours missing {st} {nm} t{t}")
                     fb = orc["base"].get((st, nm, t))
@@ -92,15 +102,20 @@ def main(argv=None):
                         if not common:
                             fatal.append(f"oracle empty {st} {nm} t{t}")
                             continue
-                        d = max(abs(fp[k] - fb[k]) for k in common)
-                        f_mx = d if f_mx is None else max(f_mx, d)
+                        k_, d = max(((k, abs(fp[k] - fb[k]))
+                                     for k in common),
+                                    key=lambda x: x[1])
+                        if f_mx is None or d > f_mx:
+                            f_mx = d
+                            f_arg = (t,) + k_
                     else:
                         fatal.append(f"oracle missing {st} {nm} t{t}")
                 if o_mx is None or f_mx is None:
                     continue
                 ratio = o_mx / f_mx if f_mx > 0 else float("inf")
                 print(f"{st:>6s} {nm:>6s} {arm:>5s} {o_mx:12.4e} "
-                      f"{f_mx:12.4e} {ratio:10.3f}")
+                      f"{f_mx:12.4e} {ratio:10.5f}  o@{o_arg} "
+                      f"f@{f_arg}")
 
     print("\nREADING: both sides start from the same eps=1e-4 delp "
           "bump at tile-3 vertex cells.  ratio ~1 = stage responds "

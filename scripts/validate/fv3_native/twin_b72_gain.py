@@ -73,6 +73,12 @@ def main():
             ctx, states, 1200.0 / 7.0, d_ext=0.0,
             sw_cfg=dict(SW_CFG_CASE8), entry_ascalar=True)
         ctx.pop("step_dump", None)
+        # complete the dt_atmos block so stage 300 matches the
+        # oracle's block-73 dump (7 inner steps, entry only on 1)
+        for _ in range(6):
+            states = full_acoustic_step_sixface(
+                ctx, states, 1200.0 / 7.0, d_ext=0.0,
+                sw_cfg=dict(SW_CFG_CASE8), entry_ascalar=False)
         for k, a in got.items():
             out[f"{arm}_{k}"] = a
         for t in range(6):                   # final state = stage 300
