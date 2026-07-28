@@ -3168,6 +3168,49 @@ def gm_redi_density_and_jacobian(
     return rho, jacobian
 
 
+def _nemo_native_active_3d(
+    mask: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    H_bathy: jnp.ndarray,
+    dtype,
+) -> jnp.ndarray:
+    """3-D active (wet) mask for the ``compute_nemo_native_slopes`` family.
+
+    #1226 (this row): prefer ``z_coord.is_active`` (``OceanPartialCellCoordinate``,
+    ``vertical.py:514`` — an EXACT per-column integer index compare,
+    ``k <= bottom_level``) over re-deriving a ``top-interface-depth < H_bathy``
+    FLOAT comparison here.  The float form is what three ``nemo_iso_lap``
+    call sites in this module (the Treguier-κ branch, the ``nemo_native``
+    tendency branch, and the K33 branch) used to duplicate independently —
+    and it is NOT robust: ``H_bathy`` (from the fidelity bridge, per-column
+    ``cumsum(e3t_0)`` at the column's own ``bottom_level``) and
+    ``cumsum(z_coord.dz_ref)`` (the GLOBAL representative ladder) are two
+    independently-rounded quantities that can differ by a few ULPs. For a
+    full-step column whose bottom lands exactly on a level interface this
+    tie breaks the WRONG way often enough to matter: measured on the DINO Y5
+    RUN_GDB twin (kt=57601), it spuriously marked the deepest level ACTIVE at
+    ~1861/10348 T-columns, giving ``compute_nemo_native_slopes``'s ``zaj``
+    stage a bottom-level (k=34 of 36) correlation of 0.98 against NEMO's own
+    dumped ``eiv_dump_zgrv_iik.bin`` (vs 1.0 at every other level) — the
+    FIRST deviating stage in the ldf_slp family's five-row debt
+    (wslpi/wslpj/uslp/vslp/ldf_eiv-aeiu). Switching to ``is_active`` closes
+    that level to corr 0.999999, matching the rest of the column. This is
+    the SAME idiom :func:`compute_isopycnal_slopes_latlon_cgrid` already uses
+    at its ``nemo_mld_slope_ramp`` branch (``getattr(z_coord, "is_active",
+    None)``) — a pure z-star coordinate has no ``is_active`` attribute at
+    all (no partial cells => no dry interior/bottom cells to mis-mask), so
+    the float fallback there is inert, not wrong.
+    """
+    is_active = getattr(z_coord, "is_active", None)
+    if is_active is not None:
+        return (mask[:, :, jnp.newaxis] > 0.5).astype(dtype) * is_active.astype(dtype)
+    z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+    return (
+        (mask[:, :, jnp.newaxis] > 0.5)
+        & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+    ).astype(dtype)
+
+
 def gm_redi_tracer_tendency_latlon(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -3307,12 +3350,7 @@ def gm_redi_tracer_tendency_latlon(
         # slope_positions combination keeps the byte-identical generic path.
         if (getattr(cfg, "slope_scheme", "triads") == "nemo_iso_lap"
                 and getattr(cfg, "slope_positions", "mode_b") == "nemo_native"):
-            _z_top_kgm = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
-            _act_kgm = (
-                (mask[:, :, jnp.newaxis] > 0.5)
-                & (_z_top_kgm[jnp.newaxis, jnp.newaxis, :]
-                   < H_bathy[:, :, jnp.newaxis])
-            ).astype(T.dtype)
+            _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
             _uslp_kgm, _vslp_kgm, _wslpi_kgm, _wslpj_kgm = compute_nemo_native_slopes(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn, jacobian=jacobian,
                 rho_0=rho_0, g=g, active_3d=_act_kgm,
@@ -3529,17 +3567,10 @@ def gm_redi_tracer_tendency_latlon(
         # the DINO / nemo_dino_kamm oracle).  kappa_GM flows into the tendency's
         # streamfunction bolus; kappa_GM=0 recovers pure Redi bit-for-bit.
         # 3-D wet mask (NEMO tmask): a cell is water iff its column is wet
-        # (2-D mask) AND its TOP-interface reference depth is above the
-        # bathymetry (cell has some water). Supplies the vertical bottom extent
-        # so the sub-seafloor dry level (garbage 0 tracer) cannot leak an
-        # across-floor vertical gradient. Top-interface test (vs bottom) leaves
-        # a full-dz margin, so it is robust to cumsum roundoff.
-        _z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref   # (nlev,) top-iface depth
-        _active_3d = (
-            (mask[:, :, jnp.newaxis] > 0.5)
-            & (_z_top[jnp.newaxis, jnp.newaxis, :]
-               < H_bathy[:, :, jnp.newaxis])
-        ).astype(T.dtype)
+        # (2-D mask) AND its level is active (see _nemo_native_active_3d --
+        # prefers z_coord.is_active's exact per-column integer bottom-level
+        # compare over a float top-depth-vs-H_bathy tie, #1226).
+        _active_3d = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
@@ -3712,13 +3743,8 @@ def compute_isoneutral_K33_latlon(
                 eos_depth=eos_depth)
         _m = mask if mask is not None else jnp.ones(T.shape[:2], T.dtype)
         # 3-D wet mask (NEMO tmask) — SAME construction as the tendency
-        # dispatcher's nemo_iso_lap branch (top-interface depth vs bathymetry).
-        _z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
-        _act = (
-            (_m[:, :, jnp.newaxis] > 0.5)
-            & (_z_top[jnp.newaxis, jnp.newaxis, :]
-               < H_bathy[:, :, jnp.newaxis])
-        ).astype(T.dtype)
+        # dispatcher's nemo_iso_lap branch (_nemo_native_active_3d, #1226).
+        _act = _nemo_native_active_3d(_m, z_coord, H_bathy, T.dtype)
         # 2-D wall masks: threaded from the model step (staircase walls);
         # None => interior-open walls derived from the cell mask (the flat
         # GYRE oracle behaviour, unchanged).

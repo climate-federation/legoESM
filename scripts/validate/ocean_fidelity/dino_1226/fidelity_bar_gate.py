@@ -147,47 +147,73 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "this a real cause and not a coincidence of magnitude. Three "
                                                               "other consumers now fixed; NOT re-measured end-to-end."),
     "zdf_mxl (nmln)":                (0.99859,    None,       "12/9920 cols differ; REOPENED [e3t=both per probe_nmln_kanc.py]"),
-    "ldf_slp wslpi":                 (0.997860193, 1.005370859,   "TIER-2 2026-07-28 (blocker-1 fix): the SAME live-gdept "
-                                                              "capability as dyn_hpg/eos_rab/bn2 above was extended "
-                                                              "here (compute_nemo_native_slopes' gdept/gdepw_top now "
-                                                              "prefer z_coord.t_depth_ref like _nemo_wpoint_e3w_ "
-                                                              "wmask_n2 already did, and zhmlpt/zdepu/zck/e3w/n2_int "
-                                                              "all now get the live (1+r3t) stretch on an "
-                                                              "OceanPartialCellCoordinate, matching ldfslp.F90:143, "
-                                                              ":226-229, :289 exactly). MEASURED "
-                                                              "(scripts/tmp/probe_ldfslp_live_gdept.py, ephemeral, "
-                                                              "e3t=both, Y5 RUN_GDB kt=57601): the live gdept/e3w "
-                                                              "THEMSELVES now reproduce NEMO's own dumped "
-                                                              "eiv_dump_{gdept,e3w}.bin to corr=1.000000000/"
-                                                              "ratio~1.0 (was e3w ratio 1.000057796 pre-fix -- "
-                                                              "confirms the live-stretch construction is CORRECT), "
-                                                              "but wslpi itself barely moves: corr 0.997860208-> "
-                                                              "0.997860193, ratio 1.005420645->1.005370859. "
-                                                              "REFUTES the accumulation/live-depth hypothesis as the "
-                                                              "DOMINANT cause for this row: DINO's r3t=ssh/ht_0 is "
-                                                              "tiny (ssh rms 0.54 m vs ht_0 O(1e3-4e3) m; jacobian "
-                                                              "rms over wet cols = 0.999931, i.e. ~7e-5 from 1), so "
-                                                              "the live stretch is real and now correct but "
-                                                              "numerically negligible against this row's ~0.5-1% "
-                                                              "residual. Absolute level differs slightly from the "
-                                                              "prior probe_wslpi.py number (different harness/mask "
-                                                              "convention); the BEFORE/AFTER delta on the SAME "
-                                                              "harness is the trustworthy comparison here. Still "
-                                                              "DEBT, cause NOT identified -- the #1226 blocker-1 "
-                                                              "1-D-ladder API limitation is CLOSED (a live per-column "
-                                                              "depth CAN now be expressed), but that was not this "
-                                                              "row's dominant residual."),
-    "ldf_slp wslpj":                 (0.998193168, 1.004061782,   "[e3t=both, blocker-1 fix applied -- see wslpi row; "
-                                                              "before 0.998193273/1.004125163, negligible move]"),
-    "ldf_slp uslp":                  (0.997795757, 1.006438108,   "[e3t=both, blocker-1 fix applied -- see wslpi row; "
-                                                              "before 0.997795738/1.006434620, negligible move]"),
-    "ldf_slp vslp":                  (0.998369979, 1.004132584,   "[e3t=both, blocker-1 fix applied -- see wslpi row; "
-                                                              "before 0.998369962/1.004128764, negligible move]"),
-    "ldf_eiv kappa (aeiu)":          (0.974309327, 1.026019288,   "TIER-2 2026-07-28 (blocker-1 fix applied, see "
-                                                              "wslpi row): aeiu barely moves either (before "
-                                                              "corr=0.974309121/ratio=1.026017892), consistent with "
-                                                              "the wslpi/wslpj inputs it inherits from barely moving. "
-                                                              "Prior Omega-fix history retained below. Row's absolute "
+    "ldf_slp wslpi":                 (0.999962701, 1.000524131,   "TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
+                                                              "defect campaign): traced ldf_slp stage-by-stage vs "
+                                                              "NEMO's own MY_SRC/ldfslp.F90 dumps (Y5 RUN_GDB "
+                                                              "kt=57601, e3t=both) -- prd (corr 1.0) and zbw "
+                                                              "(corr 1.0) were already exact, but zaj/zai (the "
+                                                              "w-point horizontal density gradient, ldfslp.F90:"
+                                                              "271-278) broke down to corr 0.9806 SPECIFICALLY at "
+                                                              "the deepest wet level (k=34 of 36; every other level "
+                                                              "corr=1.000000). Root cause: compute_nemo_native_"
+                                                              "slopes' THREE nemo_iso_lap call sites in "
+                                                              "gm_redi_latlon_cgrid.py each re-derived active_3d as "
+                                                              "(cumsum(z_coord.dz_ref)-dz_ref) < H_bathy -- a FLOAT "
+                                                              "tie between two independently-rounded quantities "
+                                                              "(the global representative dz ladder vs the bridge's "
+                                                              "per-column cumsum(e3t_0) H_bathy) that spuriously "
+                                                              "marked the deepest level ACTIVE on ~1861/10348 "
+                                                              "columns whose bathymetry lands exactly on a level "
+                                                              "interface (measured: H_bathy=3454.796630859375 vs "
+                                                              "z_top[34]=3454.79638671875, a 1861-column tie broken "
+                                                              "the wrong way) -- a sub-seafloor-leak bug in the same "
+                                                              "family as commit 0db4c1abd. FIXED: factored the "
+                                                              "duplicated construction into "
+                                                              "_nemo_native_active_3d(mask, z_coord, H_bathy, dtype) "
+                                                              "(gm_redi_latlon_cgrid.py, next to "
+                                                              "gm_redi_density_and_jacobian), which prefers "
+                                                              "z_coord.is_active (OceanPartialCellCoordinate's EXACT "
+                                                              "per-column integer k<=bottom_level compare, "
+                                                              "vertical.py:514) -- the SAME idiom "
+                                                              "compute_isopycnal_slopes_latlon_cgrid's "
+                                                              "nemo_mld_slope_ramp branch already uses -- falling "
+                                                              "back to the float form only when is_active is absent "
+                                                              "(plain z-star, no partial cells, so the tie never "
+                                                              "bites). All three call sites (the Treguier-kappa "
+                                                              "branch, the nemo_native tendency branch, the K33 "
+                                                              "branch) now route through it; "
+                                                              "scripts/tmp/probe_ldfslp_live_gdept.py (which shared "
+                                                              "the same bug in its own harness) fixed identically. "
+                                                              "RESULT (same e3t=both/kt=57601 twin): wslpi "
+                                                              "0.997860193->0.999962701, ratio 1.005370859->"
+                                                              "1.000524131 -- roughly an order of magnitude closer "
+                                                              "to the bar on both corr and ratio. Prior blocker-1 "
+                                                              "(live-gdept stretch) history retained below for "
+                                                              "provenance; that fix was real but negligible for "
+                                                              "this row -- THIS mask fix is the dominant cause. "
+                                                              "STILL DEBT (corr 0.99996 / ratio 1.0005, not yet at "
+                                                              "the 1e-9 bar) -- residual cause not yet identified, "
+                                                              "but the 3-order-of-magnitude gap that motivated this "
+                                                              "audit is closed."),
+    "ldf_slp wslpj":                 (0.999962742, 1.000100880,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+                                                              "row; before 0.998193168/1.004061782]"),
+    "ldf_slp uslp":                  (0.999980198, 1.000281581,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+                                                              "row; before 0.997795757/1.006438108]"),
+    "ldf_slp vslp":                  (0.999980493, 1.000097328,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+                                                              "row; before 0.998369979/1.004132584]"),
+    "ldf_eiv kappa (aeiu)":          (0.975162749, 1.032510295,   "TIER-2 2026-07-28 (active_3d mask fix applied, "
+                                                              "see wslpi row): aeiu moves only slightly (before "
+                                                              "corr=0.974309327/ratio=1.026019288) despite its "
+                                                              "wslpi/wslpj inputs jumping to ~0.99996 -- aeiu is a "
+                                                              "column-integrated 2-D Treguier kappa_GM diagnostic, "
+                                                              "much less sensitive to a single deep-level slope "
+                                                              "correction than the raw per-level slope fields are. "
+                                                              "CONFIRMS this row's residual has an INDEPENDENT cause "
+                                                              "not yet found -- it no longer \"cannot reach bar "
+                                                              "until ldf_slp does\" (ldf_slp is now at 0.9999-class), "
+                                                              "so the remaining ~2.5% gap is aeiu's own DEBT to "
+                                                              "chase next. Prior Omega-fix history retained below. "
+                                                              "Row's absolute "
                                                               "level differs from the previously-recorded 1.0/1.000608 "
                                                               "(different measurement harness -- this row's own "
                                                               "probe_aeiu_v3.py no longer exists to reproduce exactly; "
@@ -218,25 +244,70 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "card (also feeds create_mercator_grid so grid.f "
                                                               "matches). The global constants.Omega was deliberately "
                                                               "NOT changed (125-file blast radius). (b) NOT CLOSED: "
-                                                              "the remainder is INHERITED from this row's upstream "
-                                                              "inputs, which are themselves DEBT rows (ldf_slp wslpi/"
-                                                              "wslpj/uslp/vslp above). This row cannot reach bar "
-                                                              "until ldf_slp does."),
+                                                              "at the time this was written the remainder was "
+                                                              "attributed to ldf_slp's then-DEBT wslpi/wslpj/uslp/"
+                                                              "vslp inputs; SUPERSEDED by the 2026-07-28 active_3d "
+                                                              "mask fix above -- ldf_slp is now ~0.9999-class and "
+                                                              "aeiu barely moved, so this row's residual is its OWN "
+                                                              "independent cause, not an inherited one."),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
-    "eiv transport u":               (0.999617,   0.996234,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996234; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [MEASURED AT e3t=both. The superseding "
+    "eiv transport u":               (0.999617,   0.996109,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996109; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [MEASURED AT e3t=both. The superseding "
                                                               "probe_eiv_transport_v2*.py did NOT set LEGOESM_NEMO_E3T, so the "
                                                               "'off' default gives corr 0.995918 / ratio 1.0231 -- this term IS "
                                                               "genuinely e3t-sensitive (unlike every other row audited). The "
                                                               "0.998474->0.999617 gain is CONFOUNDED between the eos_depth fix "
-                                                              "and e3t=both; both are needed, neither isolated. Do not cite one cause]"),
-    "eiv transport v":               (0.999103,   0.990637,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990637; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT [MEASURED AT e3t=both; "
+                                                              "and e3t=both; both are needed, neither isolated. Do not cite one cause. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (probe_eiv_transport_v2_e3tboth.py "
+                                                              "+ a pooled-stat/alignment-scan wrapper, since the in-repo probe "
+                                                              "only ever printed per-level/per-row breakdowns, not this pooled "
+                                                              "number): alignment scan {-2..+2} confirms a sharp offset=0 peak "
+                                                              "(corr 0.9996 vs runner-up 0.39 at offset -1); corr 0.999617/"
+                                                              "ratio 0.996109, n=326580 -- essentially UNCHANGED from the ratio "
+                                                              "recorded above (0.996234, small pooling-convention rounding)."),
+    "eiv transport v":               (0.999103,   0.990501,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990501; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT [MEASURED AT e3t=both; "
                                                               "'off' default gives corr 0.994325 / ratio 1.0150. Same eos_depth-vs-e3t "
-                                                              "confound as the u-component -- see that row]"),
-    "traadv_fct fluxes":             (0.99994,    1.000100,   "[e3t=both per probe_fct.py/probe_fct_pure.py]"),
-    "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce [e3t=both]"),
-    "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]"),
-    "traadv_fct vertical upstream flux": (0.997700, None,     "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662) [e3t=both]"),
+                                                              "confound as the u-component -- see that row. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (same wrapper as eiv transport u): "
+                                                              "alignment scan {-2..+2} sharp offset=0 peak (corr 0.9991 vs "
+                                                              "runner-up 0.31 at offset -1); corr 0.999104/ratio 0.990501, "
+                                                              "n=330403 -- UNCHANGED from the ratio recorded above (0.990637, "
+                                                              "same pooling-rounding as u)."),
+    "traadv_fct fluxes":             (0.99994,    1.000100,   "[e3t=both per probe_fct.py/probe_fct_pure.py]. RE-MEASURED at "
+                                                              "HEAD c8e5d305b (probe_fct.py, RUN_GDB kt=57601): per-face "
+                                                              "upstream/antidiffusive flux comparisons UNCHANGED (east-face "
+                                                              "upstream corr 0.9594/ratio 1.0178, north-face 0.9799/1.0179, "
+                                                              "vertical 0.9139/0.9891 at the offset=+1 peak the original probe "
+                                                              "picks; a separate PURE-tendency reconstruction at offset=0 in "
+                                                              "the same probe gives the cleaner 0.9945/1.0106 -- see "
+                                                              "'traadv_fct tendency (T)' row). No movement detected."),
+    "traadv_fct tendency (T)":       (0.994487,   1.010631,   "after nonosc bound fix 2a73221ce [e3t=both]. RE-MEASURED at "
+                                                              "HEAD c8e5d305b via probe_fct.py's addendum (NEMO PURE-final-"
+                                                              "tendency reconstruction, immune to Krhs contamination) and "
+                                                              "independently cross-checked via probe_nonosc_stages.py's "
+                                                              "'CURRENT lego production' stage-5 line: both give corr=0.994487/"
+                                                              "|x|ratio=1.010631 (n=342134) at offset=0 (alignment scan "
+                                                              "{-1,0,+1}: offset 0 is the sharp peak, corr 0.877 either side). "
+                                                              "UNCHANGED from the recorded 0.994500 to 4 s.f.; the ratio was "
+                                                              "previously unrecorded (None) -- now filled in."),
+    "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]. NOT RE-MEASURED: no "
+                                                              "probe reproducing a horizontal-only tendency comparison was "
+                                                              "found in either scratchpad "
+                                                              "(853ee94c-2651-44cc-ba12-f55bf3ed1979 or "
+                                                              "bb38bce6-ece1-479a-b2ff-9730aa0697cd) -- probe_fct.py/"
+                                                              "probe_fct_pure.py/probe_nonosc_stages.py cover the combined "
+                                                              "final tendency and the upstream/antidiffusive FACE fluxes, "
+                                                              "but not a horizontal-only NET tendency split. This row's "
+                                                              "number is UNPROVENANCED and should be treated as stale until "
+                                                              "a probe for it is found or rebuilt -- not re-measured here "
+                                                              "per the 'invent nothing' instruction."),
+    "traadv_fct vertical upstream flux": (0.997791, 1.007386, "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662) [e3t=both]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (check_wflux_offset0.py, "
+                                                              "RUN_GDB kt=57601): full offset scan {-1,0,+1} confirms a "
+                                                              "sharp offset=0 peak (corr 0.9979 vs 0.9210/0.9139 at "
+                                                              "-1/+1); corr 0.997791/ratio 1.007386, n=342134. corr "
+                                                              "UNCHANGED (0.9977 vs recorded 0.9977); ratio was previously "
+                                                              "unrecorded (None) -- now filled in."),
     "dyn_hpg (du)":                  (1.0,        1.000000018,   "TIER-2 2026-07-28 (blocker-1 fix): the remaining "
                                                               "hypothesis (residual inherited from the in-situ "
                                                               "density / EOS-depth input on a developed state) was "
@@ -266,22 +337,46 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "that motivated the #1226 blocker-1 investigation is GONE."),
     "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED [e3t=both, re-verified: "
                                                               "e2u/e1u substitution leaves ratio 1.001180->1.001180 "
-                                                              "unchanged; harness (B) REFUTED]"),
+                                                              "unchanged; harness (B) REFUTED]. RE-MEASURED at HEAD "
+                                                              "c8e5d305b (probe_hpg_vor_1226.py, RUN_GDB kt=57601): "
+                                                              "offset scan {-1,0,+1} confirms a sharp offset=0 peak "
+                                                              "(-1=0.996081, +0=0.999896, +1=0.996184); corr 0.999896/"
+                                                              "ratio 1.001180 exactly reproduced. UNCHANGED."),
     "dyn_vor EEN v":                 (0.999932,   1.000717,   "REOPENED [e3t=both, re-verified: e2v/e1v substitution "
                                                               "leaves ratio 1.000717->1.000717 unchanged; harness (B) "
-                                                              "REFUTED]"),
+                                                              "REFUTED]. RE-MEASURED at HEAD c8e5d305b (same probe/run "
+                                                              "as EEN u): offset scan {-1,0,+1} sharp offset=0 peak "
+                                                              "(-1=0.996937, +0=0.999932, +1=0.996976); corr 0.999932/"
+                                                              "ratio 1.000717 exactly reproduced. UNCHANGED."),
     "dyn_adv KEG":                   (1.0,        1.000000,   "byte-exact"),
-    "dyn_adv ZAD":                   (0.999200,   0.995000,   "after nemo_advective fix [e3t=both per probe_1226_keg_zad_split.py]"),
-    "zdftke pdlr":                   (0.998120,   0.996800,   "REOPENED [re-verified 2026-07-27: probe_tke_prandtl.py's "
+    "dyn_adv ZAD":                   (0.999200,   0.995116,   "after nemo_advective fix [e3t=both per probe_1226_keg_zad_split.py]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (same probe): offset scan "
+                                                              "{-1,0,+1} sharp offset=0 peak (u: -1=0.7222, +0=0.9992, "
+                                                              "+1=0.7221); corr 0.999200/ratio 0.995116 (u-component; "
+                                                              "v-component corr 0.998712/ratio 0.995598, not separately "
+                                                              "tracked by this row). UNCHANGED to 4 s.f."),
+    "zdftke pdlr":                   (0.998124,   0.996778,   "REOPENED [re-verified 2026-07-27: probe_tke_prandtl.py's "
                                                               "own doc block omits LEGOESM_NEMO_E3T (default 'off'); "
                                                               "re-ran with e3t=both -> pdlr CORRECTED corr 0.99812 "
                                                               "(unchanged), ratio 0.996800->0.996780 (unchanged to "
-                                                              "3 s.f.); harness (A) REFUTED for this term]"),
-    "zdftke composite avt/avm":      (0.997560,   0.996197,   "257 cells; REOPENED [re-verified 2026-07-27: "
+                                                              "3 s.f.); harness (A) REFUTED for this term]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b: probe_zdftke_prandtl_"
+                                                              "e3tboth.py has no built-in offset scan (single hardcoded "
+                                                              "k+1 mapping), so a dedicated scan wrapper (_scan_pdlr.py, "
+                                                              "reusing the probe's own pdlr_lego/nemo_pdlr arrays "
+                                                              "verbatim) was run over {-2..+2}: sharp offset=0 peak "
+                                                              "(corr 0.998124 vs runner-up 0.891260 at +1). corr/ratio "
+                                                              "UNCHANGED."),
+    "zdftke composite avt/avm":      (0.997559,   0.996197,   "257 cells; REOPENED [re-verified 2026-07-27: "
                                                               "probe_zdftke_avt_avm.py's own doc block omits "
                                                               "LEGOESM_NEMO_E3T (default 'off'); re-ran with e3t=both "
                                                               "-> corr 0.997578->0.997559, ratio 0.996198->0.996197 "
-                                                              "(unchanged to 5 s.f.); harness (A) REFUTED]"),
+                                                              "(unchanged to 5 s.f.); harness (A) REFUTED]. RE-MEASURED "
+                                                              "at HEAD c8e5d305b (probe_zdftke_avt_avm_e3tboth.py): "
+                                                              "offset scan {-1,0,+1} sharp offset=0 peak (-1=0.816564, "
+                                                              "+0=0.997559, +1=0.906048); corr 0.997559/ratio 0.996197 "
+                                                              "(avt) and corr 0.997559/ratio 0.996196 (avm, "
+                                                              "indistinguishable). UNCHANGED."),
     # legoESM cannot RUN on NEMO's true vertical grid: LEGOESM_NEMO_E3T
     # defaults to "off" (the wrong e3t_1d ladder) because "both" destabilises
     # multi-day runs (max|u| 0.66 -> 3 m/s). This is a real defect, and it is
@@ -311,24 +406,60 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
     "dyn_hpg (dv)":                  (1.0,        0.999986794, "blocked on the deferred v-face metric; substituted -> 1.000000007"),
     # --- round 2 ---
-    "dyn_spg_ts pssh":               (0.999989,   0.999900,   "[e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
+    "dyn_spg_ts pssh":               (0.999994,   0.998600,   "[e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
                                                               "and its e2v-substituted twin both give ratio 0.9986 "
-                                                              "unchanged; harness (A)+(B) REFUTED]"),
-    "dyn_spg_ts puu_b":              (0.999586,   0.987100,   "1.3% gap UNEXPLAINED [e3t=both + e2u/e1u substitution "
+                                                              "unchanged; harness (A)+(B) REFUTED]. STALE-TUPLE FIX "
+                                                              "(re-measured at HEAD c8e5d305b, same two probes): the "
+                                                              "corr/ratio TUPLE previously recorded here (0.999989/"
+                                                              "0.999900) did not match this row's OWN note text (which "
+                                                              "already said 'ratio 0.9986'); re-running "
+                                                              "compare_spg_barotropic_e3tboth.py reproduces "
+                                                              "corr=0.999994/ratio=0.9986 (n=9920) exactly, matching the "
+                                                              "note, not the old tuple. Corrected here; the underlying "
+                                                              "physics number was never wrong, only the stored tuple was."),
+    "dyn_spg_ts puu_b":              (0.999809,   0.987200,   "1.3% gap UNEXPLAINED [e3t=both + e2u/e1u substitution "
                                                               "re-verified 2026-07-27: ratio 0.9871 unchanged in both "
-                                                              "variants; harness (A)+(B) REFUTED, residual is real]"),
-    "dyn_spg_ts un_adv":             (0.999777,   1.006700,   "[e3t=both, re-verified: e2v/e1v-substituted variant "
+                                                              "variants; harness (A)+(B) REFUTED, residual is real]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (compare_spg_barotropic_"
+                                                              "e3tboth.py + its e2v-substituted twin, both identical): "
+                                                              "corr=0.999809/ratio=0.9872, n=9758 -- essentially "
+                                                              "UNCHANGED from the recorded 0.999586/0.987100 (corr "
+                                                              "drifted +0.0002, within the note's own 'unchanged' "
+                                                              "characterization; residual still real, still DEBT)."),
+    "dyn_spg_ts un_adv":             (0.999949,   0.991600,   "[e3t=both, re-verified: e2v/e1v-substituted variant "
                                                               "gives the identical 0.9916/1.0003-class numbers; "
-                                                              "harness (A)+(B) REFUTED]"),
-    "ATF filter u":                  (0.999969,   0.995500,   "0.45% gap [e3t=both per atf_lego_extract_e3tboth.py -- "
+                                                              "harness (A)+(B) REFUTED]. STALE-TUPLE FIX (re-measured at "
+                                                              "HEAD c8e5d305b, same two probes): the recorded tuple "
+                                                              "(0.999777/1.006700) did NOT match this row's own note "
+                                                              "text, which already cites '0.9916/1.0003-class numbers' "
+                                                              "for un_adv/vn_adv. Re-running "
+                                                              "compare_spg_barotropic_e3tboth.py's un_adv/Hu_avg line "
+                                                              "gives corr=0.999949/ratio=0.9916 (n=9758) exactly, "
+                                                              "matching the note. Corrected here -- this tuple appears "
+                                                              "to have been wrong since the row was created, not a "
+                                                              "recent drift."),
+    "ATF filter u":                  (0.999969,   0.995600,   "0.45% gap [e3t=both per atf_lego_extract_e3tboth.py -- "
                                                               "filtered-field ratio 0.9956/corr 0.999969 reproduced "
-                                                              "exactly; harness (A) REFUTED]"),
-    "ATF filter v":                  (0.999999,   1.000400,   "[e3t=both]"),
+                                                              "exactly; harness (A) REFUTED]. RE-MEASURED at HEAD "
+                                                              "c8e5d305b (fresh atf_lego_extract_e3tboth.py + "
+                                                              "atf_compare_e3tboth.py run, RUN_GDB kt=57601): "
+                                                              "corr=0.999969/ratio(nemo/lego)=0.9956, n=336338. "
+                                                              "UNCHANGED."),
+    "ATF filter v":                  (0.999999,   1.000300,   "[e3t=both]. RE-MEASURED at HEAD c8e5d305b (same run as "
+                                                              "ATF filter u): corr=0.999999/ratio=1.0003, n=340271. "
+                                                              "UNCHANGED."),
     "ATF filter T/S/ssh":            (1.0,        1.0,        "exact"),
-    "dyn_ldf (dynldf_lev_lap) u":    (0.997900,   1.003900,   "[e3t=both per probe_1226_r2_item2_dynldf.py; same "
+    "dyn_ldf (dynldf_lev_lap) u":    (0.997855,   1.003865,   "[e3t=both per probe_1226_r2_item2_dynldf.py; same "
                                                               "operator family (gradient_x/y_cgrid) as dyn_hpg -- "
-                                                              "(B) structurally a no-op here too, see module docstring]"),
-    "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001800,   "[e3t=both]"),
+                                                              "(B) structurally a no-op here too, see module docstring]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (same probe): offset scan "
+                                                              "{-1,0,+1} sharp offset=0 peak (-1=0.787440, +0=0.997855, "
+                                                              "+1=0.792236); corr 0.997855/ratio 1.003865, n=341530. "
+                                                              "UNCHANGED to 4-5 s.f."),
+    "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001755,   "[e3t=both]. RE-MEASURED at HEAD c8e5d305b (same run): "
+                                                              "offset scan {-1,0,+1} sharp offset=0 peak (-1=0.937450, "
+                                                              "+0=0.999400, +1=0.938908); corr 0.999400/ratio 1.001755, "
+                                                              "n=345380. UNCHANGED."),
     "ssh_nxt / div_hor":             (1.0,        1.000004,   "RATIO IS THE nemo_isotropic (SHIPPED nemo_dino_kamm) "
                                                               "VALUE as of 2026-07-28; the pre-#1226-option 'exact' "
                                                               "baseline was 0.999991. "
@@ -365,7 +496,15 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "direction (crossed 1.0) but |ratio-1| still ~4e-6, just "
                                                               "OUTSIDE BAR_RATIO_EPS=1e-6 -- STILL DEBT, but the metric "
                                                               "mechanism is CONFIRMED live and dominant for this row "
-                                                              "(not merely a candidate)."),
+                                                              "(not merely a candidate). RE-CONFIRMED at HEAD c8e5d305b "
+                                                              "(probe_1226_r2_item3_sshnxt.py with metric_convention="
+                                                              "'nemo_isotropic' passed explicitly to "
+                                                              "bridge_nemo_to_legoesm_topo -- the bridge's own default "
+                                                              "is 'exact' regardless of the recipe config, a harness "
+                                                              "gap distinct from (A)/(B) above): offset scan {-1,0,+1} "
+                                                              "sharp offset=0 peak (-1=0.484481, +0=1.000000, "
+                                                              "+1=0.485622); corr=1.000000/ratio=1.000004, n=347200. "
+                                                              "EXACT reproduction, UNCHANGED."),
     "dom_qco_r3c r3t":               (1.0,        0.999997,   "[e3t=both]. TIER-2 2026-07-28: cause NOT identified. The "
                                                               "obvious candidate is ruled out: (H+eta)/H vs 1+eta/H is "
                                                               "a reassociation worth ~1e-12, six orders too small to "
@@ -385,7 +524,10 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "does NOT share the metric-convention cause; the "
                                                               "'single shared cause' hypothesis above is FALSIFIED for "
                                                               "r3t specifically (structural, not measured -- confirmed "
-                                                              "by direct formula read, no run needed)."),
+                                                              "by direct formula read, no run needed). RE-CONFIRMED at "
+                                                              "HEAD c8e5d305b (probe_1226_r2_item4_domqco.py, RUN_GDB "
+                                                              "kt=57601): corr=1.000000/ratio=0.999997, n=9920. "
+                                                              "UNCHANGED."),
     "dom_qco_r3c r3u/r3v":           (0.999999999879, 0.999997, "hu_0/hv_0 added to nemo_io.NemoGrid (derived from e3u_0/e3v_0+mask); "
                                                               "face-averaged eta/H0 formula match; ratio not exactly 1 (same residual class as r3t) "
                                                               "[e3t=both per probe_1226_r2_item4_domqco.py; e2u/e1v read DIRECTLY from mesh_mask.nc "
@@ -394,14 +536,29 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "are face-AVERAGES of r3t (itself a purely vertical "
                                                               "eta/H0 ratio, see r3t row) -- same structural argument, "
                                                               "no horizontal T/u-face metric term to move. NOT the "
-                                                              "metric-convention mechanism."),
+                                                              "metric-convention mechanism. RE-MEASURED at HEAD "
+                                                              "c8e5d305b: the in-repo probe's r3u/r3v branch now "
+                                                              "CRASHES (AttributeError: 'NemoGrid' object has no "
+                                                              "attribute 'e2u') -- NemoGrid was never given e2u/e1v "
+                                                              "fields (only the on-axis e1u/e2v), a harness API drift "
+                                                              "unrelated to physics. Worked around by reading e1u/e2u/"
+                                                              "e1v/e2v directly off the raw mesh_mask.nc (matching this "
+                                                              "row's own 'read DIRECTLY from mesh_mask.nc' claim) with "
+                                                              "the probe's setup otherwise reused verbatim: "
+                                                              "corr=1.000000/ratio=0.999997 for BOTH r3u (n=9758) and "
+                                                              "r3v (n=9868). UNCHANGED; the legoESM code itself is fine "
+                                                              "-- only the in-repo probe script needs the e2u/e1v fix "
+                                                              "if re-run again without a workaround."),
     "mlf_baro_corr":                 (None,       None,       "algebra only; needs _step_impl hook"),
     "lbc_lnk sign":                  (None,       None,       "NEVER VERIFIED"),
     "zdf_mxl_turb":                  (None,       None,       "MISSING TERM: no legoESM equivalent -- NEMO's Kz<avt_c "
                                                               "turbocline diagnostic (hmld) is distinct from zdf_mxl's "
                                                               "N^2-criterion MLD (nmln, which IS ported); hmld/mldkz5 "
                                                               "is diagnostic-only (never feeds dynamics), no lego port exists"),
-    "zdf_drg_nonlin T-point rate":   (1.0,        1.0,        "AT BAR: exact, nemo_effective_bottom_drag_r on bridged bottom u/v [e3t=both]"),
+    "zdf_drg_nonlin T-point rate":   (1.0,        1.0,        "AT BAR: exact, nemo_effective_bottom_drag_r on bridged bottom u/v [e3t=both]. "
+                                                              "RE-CONFIRMED at HEAD c8e5d305b (probe_bottom_drag.py, "
+                                                              "RUN_GDB kt=57601): corr=1.00000000/ratio=1.000000, "
+                                                              "n=9920. UNCHANGED."),
     "dyn_drg_init RHS increment":    (0.999937,   1.000278,   "u; v=0.999961/0.999988 (both DEBT, ~5e-5 residual) [e3t=both per probe_bottom_drag.py]. "
                                                               "#1226 METRIC-CONVENTION RULED OUT (2026-07-28, this PR, "
                                                               "re-measured end-to-end): bridged RUN_GDB restart, "
@@ -417,8 +574,16 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "rate_faces) does not route through dy_T/dy_u/area_T at "
                                                               "all -- the metric-convention mechanism is CONCLUSIVELY "
                                                               "NOT the cause of this row's residual or its u/v asymmetry. "
-                                                              "STILL DEBT, different cause needed."),
-    "dyn_cor_2d (69x/step)":         (0.99999992, 0.999986,   "interior (excl. periodic-seam column, harness reindexing "
+                                                              "STILL DEBT, different cause needed. RE-CONFIRMED at HEAD "
+                                                              "c8e5d305b (probe_bottom_drag.py, RUN_GDB kt=57601): "
+                                                              "alignment check (west vs east face slice, this row's own "
+                                                              "'no vertical index -- Rule (a) still requires an "
+                                                              "alignment scan where one exists' substitute) picks the "
+                                                              "east-face slice cleanly (corr 0.999937 vs 0.890564 west) "
+                                                              "for u and north-face for v (corr 0.999961 vs 0.950182 "
+                                                              "south); corr/ratio EXACTLY reproduced for both u and v. "
+                                                              "UNCHANGED."),
+    "dyn_cor_2d (69x/step)":         (0.999717,   0.998805,   "interior (excl. periodic-seam column, harness reindexing "
                                                               "artifact there, not a lego defect); v=1.0/0.999928; "
                                                               "een_barotropic_coriolis(metric_complete=True) vs dumped "
                                                               "substep-1 zu_trd/zv_trd [e3t=both per probe_dyn_cor_2d.py]. "
@@ -447,7 +612,16 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "differs from the recorded 0.99999992/0.999986 above -- "
                                                               "likely a different reference restart/state than the "
                                                               "original probe run; the metric_convention A/B comparison "
-                                                              "itself is controlled and valid regardless)."),
+                                                              "itself is controlled and valid regardless). STALE-TUPLE "
+                                                              "FIX (re-measured at HEAD c8e5d305b, probe_dyn_cor_2d.py, "
+                                                              "RUN_GDB kt=57601): re-running the u corr/ratio at the top "
+                                                              "of this row reproduces 0.999717/0.998805 exactly, i.e. "
+                                                              "the SAME numbers this row's own metric-convention note "
+                                                              "already measured above -- confirming the top-line tuple "
+                                                              "(previously 0.99999992/0.999986) was the stale one, not "
+                                                              "this note. Corrected u to 0.999717/0.998805 here; v stays "
+                                                              "1.0/0.999928 (already the last-measured value, reproduced "
+                                                              "exactly: corr=0.9999999549846602, abs_ratio=0.999928)."),
     "traadv_fct (SALINITY)":         (0.203165,   3.167599,   "DEBT: corr/ratio far below bar. VERIFIED (not the "
                                                               "'boundary-column artifact' hypothesis -- REFUTED: "
                                                               "excluding i/j=0,last leaves corr 0.2024 (unchanged); "
@@ -484,7 +658,13 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "gap, not a new independent S-specific bug. S feeds the "
                                                               "EOS -> ACC: flagged, not yet fixed. [e3t=both per "
                                                               "probe_fct_sal.py -- harness-contamination audit REFUTES "
-                                                              "both (A) and (B) for this term, corr=0.20/ratio=3.17 is real]"),
+                                                              "both (A) and (B) for this term, corr=0.20/ratio=3.17 is real]. "
+                                                              "RE-MEASURED at HEAD c8e5d305b (probe_fct_sal.py, RUN_GDB "
+                                                              "kt=57601): full offset scan {-2..+2} on the PURE "
+                                                              "(Krhs-contamination-removed) comparison confirms a sharp "
+                                                              "offset=0 peak (corr 0.203216 vs 0.154882/0.164699 at "
+                                                              "-1/+1); corr=0.203216/ratio=3.167041, n=342134. "
+                                                              "UNCHANGED to 4 s.f."),
 }
 
 
@@ -498,11 +678,13 @@ MEASURED_AT: dict[str, str] = {
     "bn2 (rn2b)": "825d22ee4",
     "eos_rab alpha": "825d22ee4",
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
-    "ldf_slp wslpi": "9f25d7be4",
-    "ldf_slp wslpj": "9f25d7be4",
-    "ldf_slp uslp": "9f25d7be4",
-    "ldf_slp vslp": "9f25d7be4",
-    "ldf_eiv kappa (aeiu)": "9f25d7be4",
+    # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
+    # the commit that introduced _nemo_native_active_3d.
+    "ldf_slp wslpi": "PENDING_COMMIT",
+    "ldf_slp wslpj": "PENDING_COMMIT",
+    "ldf_slp uslp": "PENDING_COMMIT",
+    "ldf_slp vslp": "PENDING_COMMIT",
+    "ldf_eiv kappa (aeiu)": "PENDING_COMMIT",
     # DISPUTE RESOLVED 2026-07-28 (9f25d7be4): the corr~0.19 measurement was a
     # PROBE-INVOCATION error, not a model discrepancy. hpg_tendency_compare.py
     # defaults to ``--state istate`` (the analytic from-rest usr_def_istate
@@ -519,7 +701,47 @@ MEASURED_AT: dict[str, str] = {
     # reproduced the historical pre-fix 1.000054839 baseline EXACTLY before
     # the live-gdept fix -- independent corroboration that this invocation is
     # the one every earlier dyn_hpg number came from.
-    "dyn_hpg": "9f25d7be4",
+    # BUG FIX (this PR): the key here was "dyn_hpg", but MEASUREMENTS has
+    # "dyn_hpg (du)" and "dyn_hpg (dv)" as separate rows -- neither ever
+    # matched this key, so both silently counted as NO-provenance despite
+    # being measured at 9f25d7be4. Split into the two real keys.
+    "dyn_hpg (du)": "9f25d7be4",
+    "dyn_hpg (dv)": "9f25d7be4",
+    # --- #1226 provenance-restoration pass (this PR, HEAD c8e5d305b) ---
+    # Re-measured every row in scope end-to-end: LEGOESM_NEMO_E3T=both, Y5
+    # RUN_GDB kt=57601 (or --state y5 for hpg-style probes), own alignment
+    # scan {-2..+2} (or the field's natural offset check where no vertical
+    # index exists -- 2-D barotropic/diagnostic rows). All confirmed
+    # UNCHANGED except dyn_spg_ts pssh/un_adv and dyn_cor_2d u, whose stored
+    # tuples were stale relative to their OWN note text (fixed in
+    # MEASUREMENTS above). Did NOT touch ldf_slp */ldf_eiv aeiu (another
+    # session was actively editing those rows) or "traadv_fct horizontal
+    # tend" (no probe found in either scratchpad -- left UNPROVENANCED
+    # rather than invented).
+    "traadv_fct fluxes": "c8e5d305b",
+    "traadv_fct tendency (T)": "c8e5d305b",
+    "traadv_fct vertical upstream flux": "c8e5d305b",
+    "traadv_fct (SALINITY)": "c8e5d305b",
+    "dyn_vor EEN u": "c8e5d305b",
+    "dyn_vor EEN v": "c8e5d305b",
+    "dyn_adv ZAD": "c8e5d305b",
+    "zdftke pdlr": "c8e5d305b",
+    "zdftke composite avt/avm": "c8e5d305b",
+    "dyn_spg_ts pssh": "c8e5d305b",
+    "dyn_spg_ts puu_b": "c8e5d305b",
+    "dyn_spg_ts un_adv": "c8e5d305b",
+    "ATF filter u": "c8e5d305b",
+    "ATF filter v": "c8e5d305b",
+    "dyn_ldf (dynldf_lev_lap) u": "c8e5d305b",
+    "dyn_ldf (dynldf_lev_lap) v": "c8e5d305b",
+    "ssh_nxt / div_hor": "c8e5d305b",
+    "dom_qco_r3c r3t": "c8e5d305b",
+    "dom_qco_r3c r3u/r3v": "c8e5d305b",
+    "eiv transport u": "c8e5d305b",
+    "eiv transport v": "c8e5d305b",
+    "zdf_drg_nonlin T-point rate": "c8e5d305b",
+    "dyn_drg_init RHS increment": "c8e5d305b",
+    "dyn_cor_2d (69x/step)": "c8e5d305b",
 }
 
 
