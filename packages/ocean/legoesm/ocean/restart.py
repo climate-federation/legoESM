@@ -96,6 +96,14 @@ def load_restart(path: str | Path, template_state) -> tuple:
             continue
         ref_field = getattr(template_state, name)
         if not isinstance(ref_field, Field):
+            if ref_field is None:
+                # Optional carry slot (e.g. prognostic tke) that the writer
+                # saved but the template left unseeded: reconstruct a Field
+                # with generic metadata rather than silently dropping the
+                # carry (codex MED 2026-07-27 — a dropped carry re-spins the
+                # turbulence from the background seed on restart).
+                replace_kw[name] = Field(
+                    data=jnp.asarray(loaded[name]), name=name)
             continue
         replace_kw[name] = Field(
             data=jnp.asarray(loaded[name]),

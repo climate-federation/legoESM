@@ -1,23 +1,22 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=glab1
-#SBATCH --job-name=mpas12_tke
+#SBATCH --job-name=mpas14_tke
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="rtx8000|a40"
 #SBATCH --mem=96G
 #SBATCH --time=16:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas12_tke_%j.out
-# MPAS12 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
-# NEMO ORCA1 &namzdf_tke card — nn_mxl=3 + ln_mxl0 anchor, nemo_dirichlet
-# surface BC, lc, etau nn_etau=1 w/ nn_htau=1 latitude profile, eice=3 card
-# default; MPAS pins the DIAGNOSTIC Mode-B until the prognostic carry lands —
-# through the SAME grid-agnostic kernel the tripole runs).  Controlled A/B:
-# EVERYTHING identical to mpas9/mpas10 except the closure, so the day-30
-# Arctic delta is the TKE-vs-KPP scheme effect on MPAS.  The 2x2
-# (trp5/trp6/mpas10) put the scheme half at +0.78 Siberian / +36-50 m Arctic
-# MLD — mpas12-vs-tripole is the SAME-CARD cross-grid TKE pair (grid effect
-# only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mpas14_tke_%j.out
+# MPAS14 = mpas9_parity config + THE SCHEME-MATCH LEVER: --mpas-vmix tke (the
+# FULL post-#1326 NEMO ORCA1 &namzdf_tke card — PROGNOSTIC Mode-A en carry
+# (MPASOceanState.tke, seeded via model.seed_tke), nn_mxl=3 + ln_mxl0 anchor,
+# nemo_dirichlet surface BC, lc, etau nn_etau=1 w/ nn_htau=1 latitude
+# profile, eice=3 — through the SAME grid-agnostic kernel the tripole runs).
+# Controlled A/B: EVERYTHING identical to mpas9/mpas10 except the closure, so
+# the day-30 Arctic delta is the TKE-vs-KPP scheme effect on MPAS; and
+# mpas14-vs-trpsbc_ndir_mxl3_prog is the SAME-CARD cross-grid TKE pair (grid
+# effect only).  Score d30 vs NEMO m1 + A/B vs mpas10 (KPP-eice rung).
 set +e
 # Runs from the MAIN repo checkout (codex HIGH: this job previously ran the
 # vfs-tke-fix worktree, so a post-merge submission would validate stale code).
@@ -41,7 +40,7 @@ LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restor
 PARITY="--bottom-drag-scheme nemo_quadratic"
 IC="--woa-init --woa-t $WTIC --woa-s $WSIC --sss-restore-file $SSSCLIM --ice-init $ICEIC"
 FIX="--mpas-vmix tke"
-LABEL=mpas12_tke
+LABEL=mpas14_tke_main
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 MPAS9=$ROOT/results/omip_nemo/nemolev_mpas10_kppeice
 echo "=== RUN $LABEL (mpas9 + --kpp-eice 3, the MPAS-KPP under-ice lever, day-30 A/B) ==="
@@ -56,7 +55,7 @@ if [ -f "$SNAP" ]; then
     --grid-label "$LABEL" \
     --output-dir $ROOT/results/omip_nemo/compare_${LABEL}_m01 2>&1 | tail -25
   echo "=== $LABEL Arctic-SSS regions day-30 (eice ON) ==="
-  $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" "mpas12_tke d30" 1
+  $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$SNAP" "$GT" "mpas14_tke_main d30" 1
   echo "=== A/B: mpas9 day-30 (eice OFF, same protocol) ==="
   [ -f "$MPAS9/snapshot_day0030.npz" ] && \
     $PY $ROOT/scripts/tmp/_diag_arctic_sss_regions.py "$MPAS9/snapshot_day0030.npz" "$GT" "mpas10_kppeice d30 (KPP-eice)" 1
