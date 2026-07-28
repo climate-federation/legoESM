@@ -43,9 +43,17 @@ def main():
     rows = [("ours", d["times_days"], w)]
     if args.ref:
         r = np.load(args.ref, allow_pickle=False)
-        tk = "times_days" if "times_days" in r.files else "times"
-        wr = (np.hypot(r["u"], r["v"]) if "u" in r.files
-              else r["wind"])
+        tk = next((k for k in ("times_days", "times", "days")
+                   if k in r.files), None)
+        if "u" in r.files and "v" in r.files:
+            wr = np.hypot(r["u"], r["v"])
+        else:
+            wk = next((k for k in ("wind", "speed", "w")
+                       if k in r.files), None)
+            if wk is None or tk is None:
+                raise SystemExit(
+                    f"ref {args.ref}: no usable keys; has {r.files}")
+            wr = r[wk]
         rows.append(("oracle", r[tk], wr))
 
     vmax = args.vmax
