@@ -60,7 +60,9 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
 )
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate, OceanZStarCoordinate, compute_ocean_jacobian,
+)
 
 __physics_contract__ = {
     "summary": (
@@ -771,6 +773,19 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
     # gdept_1d is not the arithmetic midpoint either (5.28 m apart), so the
     # derived form was wrong in BOTH modes.
     e3w = jnp.concatenate([2.0 * gdept[:1], gdept[1:] - gdept[:-1]])  # NEMO e3w(k)
+    # #1226 blocker 1: e3w(Kmm) = e3w_0*(1+r3t) is LIVE everywhere ldfslp.F90 /
+    # ldftra.F90 read it (the :131 Time() macro applies to e3w unconditionally,
+    # not just the rn2b division above) -- the slope-stability bound
+    # (-7e3/e3w, ldfslp.F90:281-282) and the ldf_eiv column sums (zn/zah/zhw,
+    # ldftra.F90:689,694-696) both consume this SAME e3w.  ``jacobian`` IS
+    # (1+r3t) ONLY on an OceanPartialCellCoordinate -- see the matching gate
+    # in compute_nemo_native_slopes above (a pure z* coordinate's jacobian is
+    # (eta+H_bathy)/H_max, a different quantity).  jacobian=None or z*
+    # coordinate -> stretch=1, BIT-IDENTICAL.
+    _live_e3w = (jacobian is not None
+                 and isinstance(z_coord, OceanPartialCellCoordinate))
+    if _live_e3w:
+        e3w = e3w[None, None, :] * jnp.asarray(jacobian, dtype)[..., None]
 
     wmask3 = act * jnp.roll(act, +1, axis=2)
     wmask3 = wmask3.at[:, :, 0].set(act[:, :, 0])
@@ -789,14 +804,16 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         _gdepw_int = jnp.cumsum(dz)[:-1]
         n2_int = compute_buoyancy_frequency_nemo_bn2(
             T, S, gdept, _gdepw_int, NemoSEOSConfig(), g=g)        # (...,nlev-1)
-        if jacobian is not None:
+        if _live_e3w:
             # NEMO divides by the LIVE e3w(jk,Kmm) = e3w_0*(1+r3t)
-            # (domzgr_substitute.h90:131); r3t is 2-D so the z-star stretch is
-            # column-uniform, and the z-star Jacobian (eta+H)/H IS that (1+r3t).
-            # Without this the reference e3w leaves a ~1e-4 bias.  It does NOT
-            # cancel here (unlike in the thickness-free MLD criterion).
-            # Measured on the DINO y5 twin vs NEMO's dumped rn2b, with NEMO's g:
-            # median |rel| 8.59e-05 -> 6.96e-06.
+            # (domzgr_substitute.h90:131); on an OceanPartialCellCoordinate
+            # the (eta+H_bathy)/H_bathy Jacobian IS that (1+r3t) (see the
+            # gate above -- NOT true on a pure z* coordinate, whose Jacobian
+            # is (eta+H_bathy)/H_max instead).  Without this the reference
+            # e3w leaves a ~1e-4 bias.  It does NOT cancel here (unlike in
+            # the thickness-free MLD criterion).  Measured on the DINO y5
+            # twin vs NEMO's dumped rn2b, with NEMO's g: median |rel|
+            # 8.59e-05 -> 6.96e-06.
             n2_int = n2_int / jnp.asarray(jacobian, dtype)[..., None]
     elif slope_n2 == "adiabatic":
         from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
@@ -899,8 +916,38 @@ def compute_nemo_native_slopes(
     dtype = rho.dtype
     nlat, nlon, nlev = rho.shape
     dz = jnp.asarray(z_coord.dz_ref, dtype=dtype)                # (nlev,)
-    gdept = jnp.cumsum(dz) - 0.5 * dz                            # cell centres
+    # T-point depth: prefer the coordinate's own t_depth_ref (NEMO gdept_0),
+    # matching _nemo_wpoint_e3w_wmask_n2's ladder -- the arithmetic midpoint
+    # differs from NEMO's analytic gdept_0 by up to 11.3 m on DINO (#1226).
+    # gdepw_top (top-of-cell-k interface depth) is unaffected: NEMO derives it
+    # from cumsum(e3t_0) (e3_to_depth_1d, depth_e3.F90:125-130), which for a
+    # full-step config already equals cumsum(dz_ref) -- the reference ladder
+    # legoESM already carries independent of t_depth_ref.
+    _td = getattr(z_coord, "t_depth_ref", None)
+    gdept = (jnp.asarray(_td, dtype=dtype) if _td is not None
+             else jnp.cumsum(dz) - 0.5 * dz)                     # cell centres
     gdepw_top = jnp.cumsum(dz) - dz                              # top-of-cell depth
+    # #1226 blocker 1: NEMO's ldf_slp (ldfslp.F90:143 zhmlpt, :226-229 zdepu/
+    # zdepv, :289 zck) reads all THREE off the LIVE gdept(Kmm)/gdepw(Kmm) =
+    # gdept_0*(1+r3t) / gdepw_0*(1+r3t) (domzgr_substitute.h90:131,139 Time()
+    # macro -- a pure per-column multiplicative stretch, no vertical
+    # dependence).  ``jacobian`` IS that (1+r3t) factor ONLY on an
+    # OceanPartialCellCoordinate (vertical.py compute_ocean_jacobian:
+    # (eta+H_bathy)/H_bathy, the LOCAL column depth).  On a pure
+    # OceanZStarCoordinate the SAME function returns (eta+H_bathy)/H_max (the
+    # GLOBAL max depth) -- a DIFFERENT quantity (nemo_bn2_live_ladders'
+    # docstring: off by median 1.1e-1) that is not even ~1 at eta=0 over
+    # sloping bathymetry, so applying it here would corrupt e3w on every
+    # z-star fixture (caught by test_dispatch_prefers_nemo_native_over_
+    # generic_treguier: NaN from a stretched e3w going negative on a shallow
+    # column).  Gate strictly on the coordinate type, matching the existing
+    # isinstance(z_coord, OceanPartialCellCoordinate) convention this file
+    # already uses for pgf_scheme="nemo_sco" et al.  jacobian=None or a pure
+    # z* coordinate -> stretch=1, BIT-IDENTICAL.
+    _stretch2d = (jnp.asarray(jacobian, dtype=dtype)
+                  if (jacobian is not None
+                      and isinstance(z_coord, OceanPartialCellCoordinate))
+                  else None)
 
     from legoesm.grids.latlon import ensure_geometry
     geom = ensure_geometry(grid)
@@ -946,8 +993,13 @@ def compute_nemo_native_slopes(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian)
     first = jnp.clip(m_base + 1, 1, nlev - 1)                    # (nlat,nlon) int
-    # zhmlpt = gdept(nmln-1) = depth of the last T-point inside the ML
+    # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
+    # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
+    # stretched by the SAME per-column (1+r3t) factor afterward (stretch has
+    # no level dependence, so gather-then-stretch == stretch-then-gather).
     zhmlpt = jnp.take(gdept, jnp.clip(first - 1, 0, nlev - 1)) * mask
+    if _stretch2d is not None:
+        zhmlpt = zhmlpt * _stretch2d
 
     kidx = jnp.arange(nlev)[None, None, :]
 
@@ -970,7 +1022,11 @@ def compute_nemo_native_slopes(
     r1_hmlu = 1.0 / jnp.maximum(
         jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=1)),
         jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
+    # zdepu ~ gdept(...,Kmm) (ldfslp.F90:226-229, live) -- same per-column
+    # (1+r3t) stretch as zhmlpt/zck above.
     zdepu = (gdept - 0.5 * dz[0])[None, None, :] * jnp.ones_like(zgru)
+    if _stretch2d is not None:
+        zdepu = zdepu * _stretch2d[:, :, None]
     # NEMO's slope stability bound is -7e3/e3u(ji,jj,jk,Kmm)*|zau| (ldfslp.F90
     # :133-134) and it uses the U-FACE / V-FACE thickness, NOT the cell value.
     # At a staircase / partial-cell topography step the face thickness is the
@@ -1017,7 +1073,9 @@ def compute_nemo_native_slopes(
     zai = (zgru_im1 + zgru + _km1(zgru_im1) + _km1(zgru)) / zci * wmask3
     zaj = (zgrv_jm1 + zgrv + _km1(zgrv_jm1) + _km1(zgrv)) / zcj * wmask3
     zbw = (-0.5 / jnp.asarray(g, dtype)) * pn2 * (prd + _km1(prd) + 2.0)
-    e3w_k = e3w[None, None, :]
+    # e3w is (nlev,) (static ladder, jacobian=None) or (nlat,nlon,nlev) (live,
+    # jacobian passed) -- shape is trace-time-static, branch is safe under JIT.
+    e3w_k = e3w[None, None, :] if e3w.ndim == 1 else e3w
     zbi = jnp.minimum(zbw, jnp.minimum(-z1_slpmax * jnp.abs(zai),
                                        (-_NEMO_SLOPE_STAB_7E3 / e3w_k) * jnp.abs(zai)))
     zbj = jnp.minimum(zbw, jnp.minimum(-z1_slpmax * jnp.abs(zaj),
@@ -1031,7 +1089,12 @@ def compute_nemo_native_slopes(
     r1_hmlw = 1.0 / jnp.maximum(hml, jnp.asarray(_NEMO_HMLW_FLOOR_M, dtype))
     anc_i = jnp.take_along_axis(swi_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw
     anc_j = jnp.take_along_axis(swj_int, kanc[:, :, None], axis=-1)[:, :, 0] * r1_hmlw
+    # zck = gdepw(jk,Kmm) - gdepw(mikt,Kmm) (ldfslp.F90:289); mikt=0 (no ice
+    # shelf) and gdepw_top[0]=0, so this is the live gdepw_top -- same
+    # per-column stretch as zhmlpt/zdepu above.
     zck = gdepw_top[None, None, :]
+    if _stretch2d is not None:
+        zck = zck * _stretch2d[:, :, None]
     in_ml_w = kidx < kanc[:, :, None]
     wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
     wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3

@@ -49,7 +49,7 @@ from legoesm.grids.operators_latlon_cgrid import (  # noqa: F401
     upwind_cell_to_uface as upwind_to_u_points,
     upwind_cell_to_vface as upwind_to_v_points,
 )
-from legoesm.ocean.eos import make_eos_fn
+from legoesm.ocean.eos import make_eos_fn, nemo_bn2_live_ladders
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -1279,11 +1279,19 @@ def _bc_geometry_and_density(
         ) if _pgf_quadrature == "nemo_trapezoid" else None,
         eos_depth=_eos_depth,
         # Geometric gdept ladder for the "geometric" EOS depth (NEMO gdept_1d).
+        # #1226 blocker 1: NEMO's eos_insitu/S-EOS (eosbn2.F90:1166) reads the
+        # LIVE gdept(Kmm) = gdept_0*(1+r3t), not the static gdept_0 -- same
+        # macro expansion as eos.nemo_bn2_live_ladders (already used for the
+        # bn2/eos_rab consumers). Apply the SAME live stretch here so the PGF's
+        # own density iteration sees the identical depth NEMO's rab_3d_t does.
+        # Bit-identical when t_depth_ref is None (no fidelity ladder carried,
+        # the pre-existing behaviour for every non-NEMO-bridged recipe).
         eos_geometric_depth_1d=(
-            jnp.abs(z_coord.z_full_ref)
-            if getattr(z_coord, "t_depth_ref", None) is None
-            else jnp.asarray(z_coord.t_depth_ref)
-        ) if _eos_depth == "geometric" else None,
+            (jnp.abs(z_coord.z_full_ref)
+             if getattr(z_coord, "t_depth_ref", None) is None
+             else nemo_bn2_live_ladders(z_coord, eta_safe, H_bathy)[0])
+            if _eos_depth == "geometric" else None
+        ),
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
