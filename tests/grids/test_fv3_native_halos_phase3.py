@@ -156,22 +156,31 @@ class TestK2EOracle:
             create_fv3_native_duogrid_data,
         )
 
+        # 2026-07-27 root cause: nord=2 is the AUTHORITATIVE live
+        # order and is now ACCEPTED; only genuinely unsupported orders
+        # raise (the {2,4} surface is pinned in test_k2e_nord_config)
+        create_fv3_native_duogrid_data(12, ng=3, k2e_nord=2)
         with pytest.raises(NotImplementedError, match="k2e_nord"):
-            create_fv3_native_duogrid_data(12, ng=3, k2e_nord=2)
+            create_fv3_native_duogrid_data(12, ng=3, k2e_nord=3)
         with pytest.raises(NotImplementedError, match="ng="):
             create_fv3_native_duogrid_data(12, ng=4)
 
     def test_ed_route_explicit_nord_request_raises(self):
-        # codex p3 P2: the public dispatcher must not silently ignore an
-        # EXPLICIT k2e_nord request on the ED route; the default (None)
-        # maps to the upstream duo-grid order 4.
+        # codex p3 P2 (updated 2026-07-27): the public dispatcher must
+        # not silently ignore an EXPLICIT k2e_nord request; {2,4} are
+        # the supported orders (2 = authoritative live default, 4 =
+        # historical fixture order), anything else raises.  The default
+        # (None) stays 4 for the existing certified fixtures.
         from legoesm.grids.cubed_sphere import create_cubed_sphere
 
-        with pytest.raises(NotImplementedError, match="k2e_nord=2"):
+        with pytest.raises(NotImplementedError, match="k2e_nord=3"):
             create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
-                                use_duogrid=True, k2e_nord=2)
+                                use_duogrid=True, k2e_nord=3)
+        g2 = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
+                                 use_duogrid=True, k2e_nord=2)
+        assert int(g2.duogrid.k2e_nord) == 2
         g = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
-                                use_duogrid=True)  # default: fine, order 4
+                                use_duogrid=True)  # default: order 4
         assert int(g.duogrid.k2e_nord) == 4
 
     def test_fp32_constant_field_tolerance(self):

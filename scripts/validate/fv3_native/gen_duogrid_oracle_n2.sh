@@ -42,7 +42,33 @@ gfortran $FF -J "$WORKDIR" -o "$WORKDIR/duogrid_oracle" \
 (cd "$WORKDIR" && ./duogrid_oracle)
 
 mkdir -p "$REPO_ROOT/tests/grids/fixtures"
-python - "$WORKDIR" \
-    "$REPO_ROOT/tests/grids/fixtures/fv3_duogrid_oracle_n2.npz" \
-    < "$HERE/_pack_duogrid_oracle.py"
+python3 - "$WORKDIR" "$REPO_ROOT/tests/grids/fixtures/fv3_duogrid_oracle_n2.npz" << 'PACKEOF'
+import sys
+
+import numpy as np
+
+wd, out = sys.argv[1], sys.argv[2]
+data = {}
+for res in (12, 24, 48):
+    fams = {}
+    with open(f"{wd}/duogrid_k2e_n2_c{res}.txt") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            p = line.split()
+            fams.setdefault(p[0], []).append(
+                (int(p[1]), int(p[2]), int(p[3]), int(p[4]),
+                 [float(x) for x in p[5:]]))
+    for fam, rows in fams.items():
+        t1 = [r for r in rows if r[0] == 1]
+        data[f"c{res}_{fam}_ij"] = np.array([(r[1], r[2]) for r in t1],
+                                            dtype=np.int64)
+        data[f"c{res}_{fam}_loc"] = np.array([r[3] for r in t1],
+                                             dtype=np.int64)
+        data[f"c{res}_{fam}_coef"] = np.array([r[4] for r in t1])
+    data[f"c{res}_k2e_nord"] = np.array(
+        len(next(iter(fams.values()))[0][4]))
+np.savez_compressed(out, **data)
+print("packed", out, len(data), "arrays")
+PACKEOF
 echo "AUTH fixture written."

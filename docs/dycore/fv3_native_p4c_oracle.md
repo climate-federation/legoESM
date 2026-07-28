@@ -105,9 +105,15 @@ native seam angles (→ blow-up).
    equiangular-duo → ED-native-duo, same solver + M1 config) goes
    43.8→58.9 — WORSE.  CAVEAT: no rung is a single-*metric* isolation.
    C→D switches the whole ED-native grid config — the ED gnomonic metrics
-   AND their *mandatory* `k2e_nord=2 (AUTHORITATIVE live default; 4 = the historical mirror-monolith order, retracted 2026-07-27 as the vertex amplifier)` duo tables (order-2 is the wrong
-   interpolant on ED, ~4e-2 coeff error, so ED forces order 4;
-   `cubed_sphere.py:462`), which are inseparable from the metric family.
+   AND their duo k2e tables (HISTORICAL NOTE: this rung ran the
+   mirror-monolith order 4; 2026-07-27 established the AUTHORITATIVE
+   live order is 2 — fv_arrays.F90:150/global_grid_data.F90:57
+   defaults, no override — and that order 4's corner-adjacent
+   extrapolation lobes are the vertex amplifier.  The "~4e-2 coeff
+   error / ED forces order 4" claim described the LEGACY-equiangular
+   extension lines, not the order choice; `cubed_sphere.py` now
+   admits {2,4} with None->4 kept only for the historical fixtures),
+   which are inseparable from the metric family.
    A→B (A-L 0.54→22.5) is bundled differently (it also flips no-duo→duo).
    So the rungs compare whole grid/solver *configs*, giving directional
    evidence (every ED/FB config here is worse than production-A-L-
