@@ -68,3 +68,30 @@ $ git show --stat c0eaaa9b7   # gm_bolus_kappa_face_average (card default flip) 
 $ git show --stat db4146440   # eos_depth fix
 ```
 All four confirmed present in `git log --all` on this repository; diffs read in full as part of this audit.
+
+
+## CORRECTION (verified 2026-07-27, after the audit was written)
+
+**The single reported hit — `forcing_annual_cycle` not reaching wind stress — is
+REFUTED. It is not a defect.**
+
+NEMO's DINO wind is ALSO annual-mean. `cfgs/DINO/MY_SRC/usrdef_sbc.F90:221`:
+
+    utau(ji,jj) = znl_cbc( znds_wnd_phi, znds_wnd_val, gphiu(ji,jj) )
+
+a pure function of latitude over STATIC knot values (`znds_wnd_val`, set once at
+:156). `compute_day_of_year`'s seasonal cosines (`zcos_sais1/zcos_sais2`) feed
+only `ztstar` and `zqsr_dayMean` — never `utau`/`vtau`/`taum`. So legoESM
+applying the annual cycle to T*/Q_sr while leaving the wind at its annual mean
+reproduces NEMO exactly, and the absence of a `dino_wind_stress_seasonal` is
+correct, not a gap.
+
+**Audit result therefore: ZERO genuine reachability hits.** The three known
+instances (`slope_n2` b9005e528, `gm_bolus_kappa_face_average` 294d09e59 +
+c0eaaa9b7, `eos_depth` db4146440) were the complete set; no fourth was hiding in
+the GM/Redi, TKE, barotropic or Coriolis blocks.
+
+Method note: the audit inferred "NEMO has a seasonal cycle, lego's wind does
+not" from the card's `ln_ann_cyc=T` comment without checking whether NEMO's WIND
+consumes it. Rule 0 — read the oracle's source for the specific quantity, not
+the flag that nominally governs it.
