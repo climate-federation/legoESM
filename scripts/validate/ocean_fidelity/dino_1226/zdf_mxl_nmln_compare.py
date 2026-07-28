@@ -72,7 +72,11 @@ _spec.loader.exec_module(_bn2_alpha_compare)
 _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 _load_interior = _bn2_alpha_compare._load_interior
-from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
+from legoesm.ocean.fidelity.nemo_io import (
+    read_nemo_mesh_mask,
+    read_nemo_restart,
+    read_nemo_restart_before,
+)
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 from legoesm.ocean.experiments.dino import (
     dino_config_for_recipe, dino_lat_lon_model_config,
@@ -89,9 +93,20 @@ RESTART = "DINO_00057600_restart.nc"
 
 
 def build_state():
+    # fp64 policy: the depth ladder is cast to get_policy().control, which
+    # defaults to float32 and rounds NEMO's f64 gdept_1d to ~7 digits (#1226).
+    if os.environ.get("LEGOESM_FIDELITY_FP64", "1") == "1":
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64())
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
     grid = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
     now = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
+    # TIME LEVEL (#1226): zdfmxl.F90:98 integrates rn2b -- the BEFORE N^2 --
+    # and rn2b comes from bn2( ts(:,:,:,:,Nbb), ..., Nnn ) (stpmlf.F90:184-186):
+    # T/S BEFORE, geometry NOW.  Feeding NOW T/S puts |T_now - T_before| into
+    # the comparison, which is exactly what produced the phantom structure in
+    # eos_rab_bn2_per_element.py's first run.
+    bef = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
 
     cfg = dataclasses.replace(
         dino_config_for_recipe("nemo_dino_kamm_mlf"),
@@ -105,8 +120,8 @@ def build_state():
     state = br.state
     mask = state.land_mask.data
     H_bathy = state.H_bathy.data
-    T = jnp.asarray(state.T.data)
-    S = jnp.asarray(state.S.data)
+    T = jnp.asarray(np.asarray(bef.T).reshape(state.T.data.shape))
+    S = jnp.asarray(np.asarray(bef.S).reshape(state.S.data.shape))
     eta = jnp.asarray(state.eta.data)
 
     eos_fn = make_eos_fn(mc.eos, mc.eos_linear)

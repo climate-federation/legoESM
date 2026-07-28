@@ -155,10 +155,10 @@ PER_ELEMENT: dict[str, float] = {
     # for it.  The figure below is the conditioning-robust
     # err_norm = |lego-nemo| / RMS(nemo) = 4.322e-9 (p99 9.213e-7, max 3.103e-6).
     # Pointwise-relative for the same run was 1.956e-7 with zero >1% cells.
-    "bn2 (rn2b)": 4.322e-9,
+    "bn2 (rn2b)": 5.880e-16,
     # alpha does NOT cross zero (signed range +9.27e-5..+3.22e-4), so its
     # pointwise-relative stats ARE valid.  max|rel| 1.605e-8, zero cells >1%.
-    "eos_rab alpha": 1.322e-9,
+    "eos_rab alpha": 0.0,
     # beta is EXACT per-element (all stats identically 0.0).  Honest caveat: for
     # the DINO set lambda2 = mu2 = nu = 0, so beta collapses to the CONSTANT
     # b0/rho0 = 7.4614e-4 -- matching it is real but trivially so, and this row
@@ -167,6 +167,30 @@ PER_ELEMENT: dict[str, float] = {
     "eos_rab beta": 0.0,
 }
 
+# CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
+# and BEFORE-level T/S (stpmlf.F90:184), all of these reach machine roundoff:
+#     live gdept vs NEMO gdept(Kmm)   2.163e-8  ->  1.199e-16
+#     eos_rab alpha  median |rel|     1.322e-9  ->  0.000e+00  (max 3.960e-16)
+#     bn2 err_norm   median           4.322e-9  ->  1.413e-17  (max 9.046e-15)
+#     zdf_mxl nmln   mismatched cols  10/9920   ->  0/9920     (histogram {0: 9920})
+# TWO distinct causes, and they are NOT the same kind of thing:
+#  (a) TIME LEVEL was a PROBE bug -- legoESM was never wrong; the probes fed NOW
+#      T/S against BEFORE-level dumps.
+#  (b) FLOAT32 DEPTH LADDER is real: create_z_star_from_thicknesses (vertical.py
+#      ~:225) casts the f64 ladder to get_policy().control, which DEFAULTS TO
+#      float32, rounding NEMO's f64 gdept_1d to ~7 digits.  JAX_ENABLE_X64=1
+#      does NOT change that policy.
+#
+# *** CONTAMINATION WARNING ***  EVERY other row in this table was measured
+# under the DEFAULT fp32 policy.  f32 eps = 1.19e-7, so any row whose residual
+# sits in the 1e-8..1e-5 range may be partly or wholly this artifact rather than
+# a legoESM defect -- in particular the "unexplained 3e-6..5e-5 band" (ssh_nxt,
+# r3t, r3u/r3v, dyn_drg_init, dyn_cor_2d) that this campaign has repeatedly
+# failed to explain.  Those rows MUST be re-measured under fp64 before any
+# further cause-hunting; do not chase a cause for a number that may be a dtype.
+# Rows far above that band (dyn_spg_ts puu_b at 1.3%, dyn_ldf at 0.4%) cannot be
+# explained by f32 and stay genuinely open.
+#
 # ROOT CAUSE shared by the two rows above (and by zdf_mxl's 10 columns).
 # alpha recomputed with NEMO's OWN gdept is BIT-EXACT (median|rel| = 0.000e+00,
 # max = 0.000e+00).  Our live gdept differs from NEMO's gdept(Kmm) by median
@@ -908,8 +932,14 @@ def _self_test() -> int:
     assert classify(1.0, 1.0, None) == "AT BAR"
     assert classify(1.0, 1.0, 0.0) == "AT BAR"
     assert classify(0.9, 1.0, 0.0) == "DEBT"
-    # the real regression this bar exists for
-    assert classify(1.0, 0.9999999934, PER_ELEMENT["bn2 (rn2b)"]) == "DEBT"
+    # The historical regression this bar exists for: bn2 held AT BAR on a mean
+    # ratio of 1-6.6e-9 while its per-element error was 6.96e-6.  Pinned as a
+    # LITERAL, not PER_ELEMENT["bn2 (rn2b)"] -- that entry is now 5.88e-16
+    # (fixed 2026-07-28 by fp64), and keying the self-test off a live value
+    # made it go stale the moment the bug was fixed.
+    assert classify(1.0, 0.9999999934, 6.96e-6) == "DEBT"
+    # and the fixed value must now pass
+    assert classify(1.0, 1.0, 5.880e-16) == "AT BAR"
     print("self-test OK: per-element bar fires on a cancelling-metric pass")
     return 0
 

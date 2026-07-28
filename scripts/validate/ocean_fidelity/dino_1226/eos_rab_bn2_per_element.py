@@ -148,6 +148,17 @@ def per_element_stats(name, lego, nemo, wet):
 
 
 def build_state():
+    # PRECISION (#1226, 2026-07-28).  create_z_star_from_thicknesses casts the
+    # depth ladder to get_policy().control, which DEFAULTS TO float32 -- so the
+    # f64 gdept_1d we read out of NEMO's mesh_mask was being rounded to ~7
+    # digits (measured: our t_depth_ref vs NEMO gdept_1d, median |rel| 2.555e-8
+    # = 0.21 x f32 eps).  That single cast is the source of eos_rab alpha's
+    # 1.32e-9, bn2's 4.32e-9 and zdf_mxl's 10 columns.  JAX_ENABLE_X64=1 does
+    # NOT change this policy.  An oracle-fidelity comparison must run fp64.
+    if os.environ.get("LEGOESM_FIDELITY_FP64", "1") == "1":
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64())
+
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
     grid = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
     now = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
