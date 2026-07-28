@@ -145,7 +145,13 @@ at full cost. This section is that place.
 | "wslpi corr 0.9585" | alignment artifact; a proper ±2 offset scan peaks at 0.999110 | 2026-07-27 |
 | "col_stretch recovers (1+r3t)" | `h_partial` is the STATIC at-rest thickness; measured identically 1.0 | 2026-07-27 |
 | "dry-vertex e3f_0 fallback explains the EEN bottom bias" | controlled A/B was byte-identical | 2026-07-27 |
+| "the vertical upstream flux is corr 0.91" | OFFSET ARTIFACT — the probe headline scored `offset=+1`; at the correct `offset=0` the advecting transport, upstream flux and upstream tendency all match at corr >= 0.9977. (A REAL but climate-inert dry-cell masking bug was found while chasing it: w-face clips 1126-1256 -> 603 vs NEMO 662, commit 01c1f226a.) | 2026-07-27 |
 | "the FCT limiter is the climate lever" | centered (unlimited) advection reproduces fct2 to 4 decimals over 5 years; ACC identical | 2026-07-27 |
+
+**Two probe-artifact retractions in one day** (composition reconstruction,
+vertical-flux offset). EVERY headline number must carry its own offset/alignment
+scan BEFORE it is reported as a finding — an agent reporting a bare correlation
+without one is reporting an unverified quantity.
 
 **Rule 0 applies to OUR code too.** A probe that re-implements a code path is
 not evidence about that code path — trace the dispatch chain.

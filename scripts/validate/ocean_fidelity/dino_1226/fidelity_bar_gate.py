@@ -39,7 +39,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "traadv_fct fluxes":             (0.99994,    1.000100,   ""),
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct"),
-    "traadv_fct VERTICAL upstream flux": (0.910000, None,     "NEW DEFECT - w over-clip 1.7-1.9x; diapycnal-mixing candidate"),
+    "traadv_fct vertical upstream flux": (0.997700, None,     "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662)"),
     "traadv_fct (SALINITY)":         (None,       None,       "NEVER COMPARED"),
     "dyn_hpg":                       (1.0,        1.000045,   "ratio not 1"),
     "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED"),
