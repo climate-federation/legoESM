@@ -115,6 +115,13 @@ class DINOConfig:
     # (ratio 1.000608, corr already 1.0).
     omega: float = constants.Omega
 
+    # T/u-face horizontal metric convention (#1226) fed to
+    # LatLonCGridOceanConfig.metric_convention (see that field's docstring in
+    # state.py for the NEMO usr_def_hgr.F90 citation + the #516 v-face
+    # exemption). Default "exact" is BIT-IDENTICAL to every prior DINO run;
+    # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
+    metric_convention: str = "exact"
+
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
     # b = g_φ · g_λ · (H_deep - H_shallow) + H_shallow  per the
@@ -1070,6 +1077,16 @@ DINO_RECIPES: dict[str, dict] = {
         # kappa (aeiu) amplitude bias (ratio 1.000608 at corr=1.0), traced to
         # zRo = 0.4*zn/|f| (linear in 1/omega) then squared into zaeiw.
         "omega": _NEMO_CONSTANTS.Omega,
+        # #1226: NEMO's usr_def_hgr.F90 DINO grid sets the T/u-face
+        # meridional cell height EQUAL to the zonal width at every row
+        # (pe1t = pe2t), a deliberate closed-form isotropic-Mercator
+        # approximation -- NOT the true finite-difference R*dphi legoESM's
+        # default "exact" convention computes. Closes the e2t (-1.27e-5..
+        # +9.5e-6) / e1e2t (-2.5e-5..+4.1e-5) mesh_mask residual to ~1e-7
+        # (roundoff) on the DINO R1 48x195 mesh. See
+        # legoesm.grids.latlon.create_mercator_grid's docstring for the
+        # NEMO citation. Does NOT touch the #516 v-face metric.
+        "metric_convention": "nemo_isotropic",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -2223,6 +2240,12 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
             equator_on_tpoint=True,
             n_lat=_NEMO_DINO_NLAT,
             omega=cfg.omega,
+            # #1226: keep the raw LatLonGrid's own dy/area consistent with
+            # the LatLonCGridGeometry the model actually steps on (built
+            # from cfg.metric_convention via ensure_geometry) — direct
+            # readers of grid.dy/grid.area (diagnostics, CFL) then see the
+            # same convention as the tendencies.
+            metric_convention=cfg.metric_convention,
         )
 
     return create_mercator_grid(
@@ -2231,6 +2254,7 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
         lon_west_deg=cfg.lon_west_deg,
         lon_east_deg=cfg.lon_east_deg,
         omega=cfg.omega,
+        metric_convention=cfg.metric_convention,
     )
 
 
@@ -2786,6 +2810,9 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         g=cfg.g,
         omega=cfg.omega,
+        # #1226: T/u-face metric convention (see DINOConfig.metric_convention
+        # + LatLonCGridOceanConfig.metric_convention docstrings).
+        metric_convention=cfg.metric_convention,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).

@@ -6,6 +6,7 @@ velocity staggering (NEMO east/north face -> legoESM u/v faces), and the state
 placement.
 """
 import numpy as np
+import pytest
 
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
@@ -157,6 +158,38 @@ def test_topo_bridge_geometry_matches_nemo_metrics():
     assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
     assert np.max(np.abs(np.asarray(geom.dy_T) - grid.e2t)) < 1e-4 * grid.e2t.max()
     assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
+
+
+def test_topo_bridge_metric_convention_default_is_bit_identical():
+    """#1226: metric_convention default omission == explicit "exact"."""
+    grid, state, _ = _synthetic_topo()
+    out_default = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    out_exact = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True, metric_convention="exact")
+    for f in ("dx_T", "dy_T", "area_T", "dx_v", "dy_v", "area_q"):
+        np.testing.assert_array_equal(
+            getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
+
+
+def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():
+    """metric_convention="nemo_isotropic" is forwarded to create_latlon_geometry:
+    dy_T becomes dx_T (NEMO's pe1t=pe2t isotropic identity). The synthetic
+    fixture's e2t is built to match the "exact" formula (a true R*dlat), so an
+    isotropic bridge is compared against an isotropic-consistent e2t (:=e1t)
+    here -- otherwise the bridge's own e2t-vs-dy_T sanity guard (a REAL safety
+    check on live NEMO mesh_mask data, not weakened here) would legitimately
+    reject this fixture as a mismatched build."""
+    grid, state, _ = _synthetic_topo()
+    grid_iso = grid._replace(e2t=grid.e1t.copy())
+    out_iso = bridge_nemo_to_legoesm_topo(
+        grid_iso, state, periodic_i=True, metric_convention="nemo_isotropic")
+    np.testing.assert_allclose(
+        np.asarray(out_iso.geometry.dy_T), np.asarray(out_iso.geometry.dx_T),
+        rtol=1e-6,
+    )
+    with pytest.raises(ValueError, match="metric_convention"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, metric_convention="bogus")
 
 
 def test_topo_bridge_topography_and_staggering():

@@ -1001,15 +1001,18 @@ class LatLonCGridOceanModel:
         *,
         iwm_forcing=None,
     ):
+        self.z_coord = z_coord
+        self.config = config or LatLonCGridOceanConfig.from_flat()
+        self._validate_config(self.config)
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
         # access (legacy fields are identical); for a tripolar grid the
         # geometry carries fold descriptor and rotation angles.
-        self.grid = ensure_geometry(grid)
-        self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig.from_flat()
-        self._validate_config(self.config)
+        # ``metric_convention`` (#1226) is validated above, so the raise on
+        # an unknown value happens before this call.
+        self.grid = ensure_geometry(
+            grid, metric_convention=self.config.metric_convention)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
         # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
@@ -1351,6 +1354,16 @@ class LatLonCGridOceanModel:
         for name, value in nonnegative.items():
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+        # #1226: T/u-face metric convention dispatch -- raise on an unknown
+        # value rather than silently falling through to create_latlon_geometry's
+        # own raise deep inside ensure_geometry (fail at config-validation time,
+        # before any grid conversion work happens).
+        if config.metric_convention not in ("exact", "nemo_isotropic"):
+            raise ValueError(
+                "metric_convention must be 'exact' or 'nemo_isotropic', got "
+                f"{config.metric_convention!r}"
+            )
 
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
         # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the

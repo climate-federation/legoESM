@@ -1281,6 +1281,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     fields group as:
 
     - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Grid metric convention** (#1226): ``metric_convention`` ("exact"
+      default | "nemo_isotropic" for the NEMO DINO oracle cards).
     - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
       ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
       ``A_h_merid``, ``A_h_cap_*``.
@@ -1338,6 +1340,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     # constants.Omega vs NEMO's full-precision value was the entire ldf_eiv
     # kappa amplitude residual, ratio 1.000608 at corr=1.0).
     omega: float = constants.Omega
+
+    # T/u-face horizontal metric convention (#1226) fed to
+    # ``legoesm.grids.latlon.ensure_geometry`` at model construction.
+    # ``"exact"`` (default, BIT-IDENTICAL to every prior release) is the
+    # true finite-difference ``dy_T = R*dphi`` + exact spherical-cap
+    # ``area_T``. ``"nemo_isotropic"`` reproduces NEMO's DINO
+    # usr_def_hgr.F90 closed form ``pe1t = pe2t`` (see
+    # create_mercator_grid's docstring for the full citation) -- ONLY the
+    # nemo_dino_kamm*/nemo_faithful_grid oracle cards set this; every other
+    # recipe stays on "exact". Does NOT touch the v-face metric (#516
+    # vface_zonal_cos_lat invariant) -- see ensure_geometry/
+    # create_latlon_geometry docstrings. Dispatch raises in
+    # LatLonCGridOceanModel._validate_config on an unknown value.
+    metric_convention: str = "exact"
 
     # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
     lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
