@@ -680,11 +680,11 @@ MEASURED_AT: dict[str, str] = {
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
     # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
     # the commit that introduced _nemo_native_active_3d.
-    "ldf_slp wslpi": "PENDING_COMMIT",
-    "ldf_slp wslpj": "PENDING_COMMIT",
-    "ldf_slp uslp": "PENDING_COMMIT",
-    "ldf_slp vslp": "PENDING_COMMIT",
-    "ldf_eiv kappa (aeiu)": "PENDING_COMMIT",
+    "ldf_slp wslpi": "7816b514e",
+    "ldf_slp wslpj": "7816b514e",
+    "ldf_slp uslp": "7816b514e",
+    "ldf_slp vslp": "7816b514e",
+    "ldf_eiv kappa (aeiu)": "7816b514e",
     # DISPUTE RESOLVED 2026-07-28 (9f25d7be4): the corr~0.19 measurement was a
     # PROBE-INVOCATION error, not a model discrepancy. hpg_tendency_compare.py
     # defaults to ``--state istate`` (the analytic from-rest usr_def_istate
