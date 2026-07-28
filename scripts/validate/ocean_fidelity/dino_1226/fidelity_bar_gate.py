@@ -81,16 +81,33 @@ the "single shared cause" hypothesis for the 3e-6..5e-5 band is FALSIFIED for
 those two rows specifically (structural, confirmed by direct formula read).
 ``dyn_cor_2d`` is only PARTIALLY exposed (its e2u/dy_u contributor is
 metric-sensitive, its e1v/dx_v contributor is the #516-protected v-face and
-is NOT). ``dyn_drg_init``'s u/v asymmetry is larger than a symmetric metric
-offset predicts, so it is not expected to collapse cleanly. The
-``nemo_dino_kamm``/``nemo_dino_kamm_mlf`` DINO_RECIPES cards now set
-``metric_convention="nemo_isotropic"``; every other recipe/caller stays
-``"exact"``. END-TO-END re-measurement of ``ssh_nxt/div_hor``,
-``dyn_cor_2d``, and ``dyn_drg_init`` under ``nemo_isotropic`` through the
-bridge (against the real ``sshnxt_dump_*.bin``/``cor2d_dump_*.bin``/
-``drg_dump_*.bin`` in ``RUN_1226_AHTU``) did NOT complete this session --
-their numbers below are UNCHANGED and remain DEBT. Re-measure before
-crediting any of them as fixed.
+is NOT -- and NOTE the u/v assignment is CROSSED vs the naive guess: NEMO's
+``cor_u`` is built from ``e1u``/``e1v`` (zonal widths, INVARIANT under this
+flag) while ``cor_v`` carries ``e2u = dy_u`` (the sensitive one), so it is
+``cor_v``, not ``cor_u``, that can move). ``dyn_drg_init``'s u/v asymmetry is
+larger than a symmetric metric offset predicts, so it is not expected to
+collapse cleanly. The ``nemo_dino_kamm``/``nemo_dino_kamm_mlf`` DINO_RECIPES
+cards now set ``metric_convention="nemo_isotropic"``; every other
+recipe/caller stays ``"exact"``.
+
+END-TO-END re-measurement DID complete (2026-07-28, bridged ``RUN_GDB``
+restart, ``LEGOESM_NEMO_E3T=both``, controlled A/B with metric_convention the
+ONLY variable). Results, per-row detail below:
+  * ``ssh_nxt/div_hor``  0.999991 -> **1.000004** (real, predicted-direction
+    movement; crossed 1.0; |ratio-1| ~4e-6 still outside the 1e-6 bar). The
+    recorded tuple below is now the ``nemo_isotropic`` value, i.e. the
+    SHIPPED ``nemo_dino_kamm`` card's state. STILL DEBT.
+  * ``dyn_cor_2d``  u identical to 8 s.f. (predicted invariant, confirmed);
+    v 0.999928 -> 0.999923 (moved AWAY from 1.0). NOT closed.
+  * ``dyn_drg_init``  identical to 8 s.f. for BOTH u and v -- zero movement,
+    mechanism CONCLUSIVELY excluded for this row.
+NONE of the five rows crossed the bar. The 3e-6..5e-5 band therefore has AT
+LEAST TWO distinct causes: the metric convention (live and dominant for
+ssh_nxt/div_hor, marginal for dyn_cor_2d v) and something else entirely for
+dyn_drg_init + the structurally-excluded r3t/r3u-v family. CAVEAT: the
+dyn_cor_2d run's own exact-convention baseline did not reproduce the recorded
+0.99999992/0.999986 (see that row) -- its A/B is controlled and valid, but its
+absolute numbers come from a different reference state than the original probe.
 """
 from __future__ import annotations
 
@@ -308,7 +325,10 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "operator family (gradient_x/y_cgrid) as dyn_hpg -- "
                                                               "(B) structurally a no-op here too, see module docstring]"),
     "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001800,   "[e3t=both]"),
-    "ssh_nxt / div_hor":             (1.0,        0.999991,   "[e3t=both per probe_1226_r2_item3_sshnxt.py]. TIER-2 "
+    "ssh_nxt / div_hor":             (1.0,        1.000004,   "RATIO IS THE nemo_isotropic (SHIPPED nemo_dino_kamm) "
+                                                              "VALUE as of 2026-07-28; the pre-#1226-option 'exact' "
+                                                              "baseline was 0.999991. "
+                                                              "[e3t=both per probe_1226_r2_item3_sshnxt.py]. TIER-2 "
                                                               "2026-07-28: cause NOT identified. Ruled out by direct "
                                                               "check against NEMO sshwzv.F90: the formula, the "
                                                               "arithmetic regrouping, the time level, and the H "
