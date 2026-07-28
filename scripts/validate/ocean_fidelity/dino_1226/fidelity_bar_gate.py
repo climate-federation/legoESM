@@ -463,7 +463,24 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # too small, ~7e-5, to be the dominant cause there) -- see those rows.
     # The API limitation is CLOSED; it was NOT the dominant cause for every
     # term it was suspected for.
-    "STABILITY on NEMO true grid (e3t_0)": (None, None, "legoESM UNSTABLE on NEMO's actual geometry; bridge defaults to the wrong ladder to hide it"),
+    "STABILITY on NEMO true grid (e3t_0)": (None, None,
+        "MEASURED 2026-07-28 (was: 'legoESM UNSTABLE on NEMO's actual geometry; "
+        "bridge defaults to the wrong ladder to hide it'). FROM REST the model is "
+        "STABLE on NEMO's true ladder: LEGOESM_NEMO_E3T=both, nemo_dino_kamm_mlf, "
+        "5 full years (1800 d, 57600 steps) completed with T in [3.5,26.3] C and "
+        "max|u_surf| 0.52 m/s -- no growth (dino_year_screen_fullframe.py). The "
+        "documented blow-up (max|u| 0.66 -> 3 m/s over 20 d) is specific to "
+        "starting FROM A NEMO RESTART, not to the ladder itself, so the scope of "
+        "that defect is narrower than recorded. Ladders are IDENTICAL for k=0..24 "
+        "(top 913 m) and differ only below ~1000 m (up to +15%): NEMO's e3t_0 is "
+        "the FINITE-DIFFERENCE gdepw(k+1)-gdepw(k) (ln_e3_dep), e3t_1d the "
+        "analytic derivative. CLIMATE EFFECT MEASURED, controlled (same script, "
+        "same NEMO reference, ONLY the ladder differs): y5 ACC 67.7 -> 66.2 Sv, "
+        "i.e. the CORRECT ladder moves 1.5 Sv FURTHER from NEMO's 91.1. The "
+        "hypothesis that this ladder explains the deep-contrast deficit is "
+        "FALSIFIED. Still UNMEASURED as a per-element fidelity row (this is a "
+        "stability/climate result, not a term comparison); the restart-start "
+        "instability remains a real open defect."),
     # dv's residual is the DEFERRED v-face metric (dy_v vs NEMO e2v): the
     # metric_convention work shipped T/u-face only because vface_zonal_cos_lat
     # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
