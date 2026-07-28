@@ -168,6 +168,8 @@ PER_ELEMENT: dict[str, float] = {
     # probe_bottom_drag (A) under fp64: rel_err_med = rel_err_p90 = 0.000e+00
     # over 9920 T-points -- per-element proven, not merely aggregate-clean.
     "zdf_drg_nonlin T-point rate": 0.0,
+    # 0/9920 columns differ -- an exact integer-level match, so per-element 0.
+    "zdf_mxl (nmln)": 0.0,
     # ldf_slp RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py, the
     # first probe for these rows with BOTH mechanical preconditions wired
     # (require_fp64 + time_level_for_dump) AND a consistent run directory.
@@ -262,7 +264,17 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "6.96e-6 recorded here) -- that cross-validation is what makes "
                                                               "this a real cause and not a coincidence of magnitude. Three "
                                                               "other consumers now fixed; NOT re-measured end-to-end."),
-    "zdf_mxl (nmln)":                (0.99859,    None,       "12/9920 cols differ; REOPENED [e3t=both per probe_nmln_kanc.py]"),
+    "zdf_mxl (nmln)":                (1.0,        1.0,        "CLOSED 2026-07-28: 0/9920 columns differ, histogram {0: 9920} "
+                                                              "(zdf_mxl_nmln_compare.py at fp64 + BEFORE-level T/S). Was "
+                                                              "'12/9920 cols differ; REOPENED'. TWO causes, neither in zdf_mxl: "
+                                                              "(a) the probe fed NOW T/S while zdfmxl.F90:98 integrates rn2b "
+                                                              "(BEFORE) -- a HARNESS bug; (b) the f32 depth ladder. The selection "
+                                                              "logic was proven bit-correct independently by substituting NEMO's "
+                                                              "own rn2b into the real code path (10/9920 -> 0/9920), which is why "
+                                                              "the blame moved upstream to bn2 rather than to this routine. "
+                                                              "CAVEAT: nmln (the LEVEL) is exact; hmlp (the DEPTH) still shows "
+                                                              "max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch "
+                                                              "on gdepw -- documented in _nemo_mld_from_n2_integral, separate DEBT."),
     "ldf_slp wslpi":                 (0.999963, 1.001200,   "CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999876/1.002818. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962701/1.000524131. TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
                                                               "defect campaign): traced ldf_slp stage-by-stage vs "
                                                               "NEMO's own MY_SRC/ldfslp.F90 dumps (Y5 RUN_GDB "

@@ -83,3 +83,32 @@ def test_describe_float_leaves_reports_dtypes_without_raising():
          "n": jnp.arange(2, dtype=jnp.int64)}))
     assert any(v == "float32" for v in leaves.values())
     assert not any("n" in k for k in leaves)   # int leaf skipped
+
+
+def test_oracle_bridge_warns_once_under_fp32():
+    """RUNNING in fp32 is legitimate; COMPARING to an fp64 oracle is not.
+
+    The bridge therefore warns rather than raising (a 5-year model run in fp32
+    is a valid performance choice), while comparison probes use the hard
+    require_fp64 gate. Regression for the f32 depth ladder that silently
+    corrupted every #1226 measurement.
+    """
+    import warnings
+
+    from legoesm.ocean.fidelity import nemo_state_bridge as bridge
+
+    set_policy(PrecisionPolicy.fp32())
+    bridge._FP32_BRIDGE_WARNED = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        bridge._warn_if_not_fp64()
+        bridge._warn_if_not_fp64()          # one-shot, must not repeat
+    assert len(caught) == 1
+    assert "JAX_ENABLE_X64=1 does NOT change this" in str(caught[0].message)
+
+    set_policy(PrecisionPolicy.fp64())
+    bridge._FP32_BRIDGE_WARNED = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        bridge._warn_if_not_fp64()
+    assert not caught
