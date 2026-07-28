@@ -899,6 +899,40 @@ resolution at that tile count. The fixed-tile comm contrast is
 resubmitted at L30 for BOTH arms (job 26497736), which halves the
 working set while holding 147.5k cols/GPU on each side.
 
+## Ocean GPU scale-out to 64 devices — and a CROSS-LANE memory defect (#1370)
+
+| arm | devices | tile | ms/step |
+|---|---|---|---|
+| LL1152x2304 L20 | 16 | 165.9k cols/GPU | 19.83 |
+| LL1152x2304 L20 | 64 | 41.5k | **11.19** (4.75 GC/s) |
+| LL2304x4608 L20 | 64 | 165.9k | **OOM — 102 GB/device** |
+
+The strong arm reaches 64 GPUs (19.83 -> 11.19 ms, 1.77x for 4x devices,
+eff 0.44 — the tile falls to 41.5k, near the ~30k floor, so this is the
+floor behaving exactly as the atmosphere's does).
+
+**The fixed-tile arm could not run, and WHY it could not is the finding.**
+LL2304 at 64 GPUs asked for **102.04 GB per device**. The per-device
+SHARD is 3.3 M cells — about 0.2 GB for fifteen f32 fields. But the
+GLOBAL problem is 212 M cells = 12.7 GB per field-set, and ~8 such
+buffers is ~102 GB: an exact match. The allocation tracks the GLOBAL
+size, not the shard.
+
+This is the SAME signature as the cube's C1152 wall (105.7 GB at L60,
+97.5 GB at L30 — only 8 % for halving the levels, so level-INDEPENDENT).
+Two independent lanes, one defect class: **SPMD setup materialises
+global-sized buffers per device, so RESOLUTION is capped regardless of
+device count.** Both lanes shard correctly one size down (ocean LL1152
+@64, cube C768 @54), so the sharded step is sound — it is the
+setup/allocation path.
+
+WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
+every plateau is a LARGER TILE, i.e. raising resolution as devices are
+added. This defect makes that impossible — adding GPUs cannot buy
+resolution — so every GPU lane is pinned at the tile floor. Filed as
+**#1370** with the arithmetic; distinct from #1360 (the cube's kt
+validation ceiling), and validating kt=4 alone would NOT unblock C1152.
+
 ## Ocean MPAS Voronoi scale-out — and a lane that does NOT obey the tile law
 
 Controlled ladder, **32 ranks/node fixed** so nodes scale with ranks and
