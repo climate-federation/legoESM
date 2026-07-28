@@ -129,3 +129,23 @@ applied it with a tolerance it does not have. Nothing in A–C is known to be
 wrong; the point is that **none of it is known to be right** at the stated bar,
 and the campaign has now produced enough retractions to make that distinction
 load-bearing.
+
+
+## F. RETRACTED findings — read this before re-investigating
+
+Retractions must live where the next session looks, or they get re-discovered
+at full cost. This section is that place.
+
+| retracted claim | why it died | date |
+|---|---|---|
+| "Tracer operator COMPOSITION differs from NEMO (GM/Redi mutates the field advection reads)" | TRUE for `nemo_dino_kamm` (forward_euler) but **NOT for `nemo_dino_kamm_mlf`**, the recipe under test: `_leapfrog_step` passes hardcoded `_ab2_scope_override="advective"` (ocean_model_latlon_cgrid.py:6836,6868), routing GM/Redi to the ADDITIVE `_diss_dT_incr` bucket; the mutation branch (:3873) is dead code there. Final update :6925 is additive. Only the single first from-rest step mutates (1 of 58,400). The probe hand-reconstructed the mutating path and mislabelled it "actual code order" without tracing dispatch. NOTE: an earlier session had already retracted this in `dino_session_2026_07_25.md` — it was re-discovered because that retraction was not carried forward. | 2026-07-27 |
+| "N² is 54% too large" | interface index off-by-one in the comparison; correctly aligned = corr 1.000000 | 2026-07-26 |
+| "hmlp is 14% too deep" | unvalidated depth lookup; control test now reproduces NEMO's hmlp to 0.0 m | 2026-07-27 |
+| "slopes are 9% too large" | signed-sum ratio on a SIGN-CHANGING field inflated a 1.2% magnitude bias ~9x | 2026-07-27 |
+| "wslpi corr 0.9585" | alignment artifact; a proper ±2 offset scan peaks at 0.999110 | 2026-07-27 |
+| "col_stretch recovers (1+r3t)" | `h_partial` is the STATIC at-rest thickness; measured identically 1.0 | 2026-07-27 |
+| "dry-vertex e3f_0 fallback explains the EEN bottom bias" | controlled A/B was byte-identical | 2026-07-27 |
+| "the FCT limiter is the climate lever" | centered (unlimited) advection reproduces fct2 to 4 decimals over 5 years; ACC identical | 2026-07-27 |
+
+**Rule 0 applies to OUR code too.** A probe that re-implements a code path is
+not evidence about that code path — trace the dispatch chain.
