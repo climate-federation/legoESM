@@ -484,6 +484,25 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
 }
 
 
+# Rows whose number was measured before this commit are STALE: the code has
+# changed underneath them.  Discovered the hard way -- wslpi/aeiu carried
+# a8b10ca4d-era values through ~15 commits while the real numbers had moved
+# (0.999177 -> 0.997860, 1.000000 -> 0.974309), which then produced a false
+# "regression" alarm.  A number without a measured-at commit is not evidence.
+MEASURED_AT: dict[str, str] = {
+    # term -> git commit the number was measured at (short sha), or "" if unknown
+    "bn2 (rn2b)": "825d22ee4",
+    "eos_rab alpha": "825d22ee4",
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
+    "ldf_slp wslpi": "9f25d7be4",
+    "ldf_slp wslpj": "9f25d7be4",
+    "ldf_slp uslp": "9f25d7be4",
+    "ldf_slp vslp": "9f25d7be4",
+    "ldf_eiv kappa (aeiu)": "9f25d7be4",
+    "dyn_hpg": "DISPUTED",   # two agents measured corr 0.19 vs 1.0 -- harness gap
+}
+
+
 def classify(corr: float | None, ratio: float | None) -> str:
     if corr is None or ratio is None:
         return "UNMEASURED"
@@ -503,6 +522,11 @@ def main() -> int:
         flag = "" if status == "AT BAR" else f"  <-- {status}"
         print(f"{term:<{width}}  {cs} {rs}{flag}" + (f"   ({note})" if note else ""))
 
+    unknown_prov = [t for t, *_ in rows if MEASURED_AT.get(t, "") == ""]
+    disputed = [t for t, v in MEASURED_AT.items() if v == "DISPUTED"]
+    if disputed:
+        print(f"\nDISPUTED (conflicting measurements, do not trust): {', '.join(disputed)}")
+    print(f"rows with NO measured-at provenance: {len(unknown_prov)} of {len(rows)}")
     at_bar = sum(s == "AT BAR" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
