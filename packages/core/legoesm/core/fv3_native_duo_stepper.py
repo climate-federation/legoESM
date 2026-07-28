@@ -61,7 +61,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_metrics: bool = False,
                                oracle_conventions: bool = False,
                                omega: float | None = None,
-                               k2e_nord: int = 2) -> dict:
+                               k2e_nord: int = 2,
+                               topo_fn=None) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
@@ -230,11 +231,20 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     ee6 = [build_extended_corner_lonlat(n, ng, tile=t)
            for t in range(1, 7)]
 
+    # surface geopotential (phis, m^2/s^2) per face on the data domain:
+    # topo_fn(lon, lat) -> phis; geopk consumes it as gz(km+1) exactly
+    # like upstream (test_cases case-5 phis feeds geopk's hs argument)
+    hs6 = None
+    if topo_fn is not None:
+        hs6 = [np.asarray(topo_fn(np.asarray(gs["agrid_lon"]),
+                                  np.asarray(gs["agrid_lat"])))
+               for gs in gs6]
+
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
-            "kk6": kk6, "ee6": ee6,
+            "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
 
@@ -400,9 +410,11 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
 
     uc6 = [np.array(o["uc"], copy=True) for o in csw_outs]
     vc6 = [np.array(o["vc"], copy=True) for o in csw_outs]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(states[t - 1]["delp"])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(states[t - 1]["delp"]))
         pkc, gz = geopk_sw_1lev(csw_outs[t - 1]["delpc"], hs, bd,
                                 pt=csw_outs[t - 1]["ptc"])
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
@@ -831,9 +843,11 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(delp6[t - 1])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(delp6[t - 1]))
         pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd,
                                   pt=pt6[t - 1])
         # divg2 = d_ext*da_min_c*saved divergence (km=1; dyn_core

@@ -300,3 +300,37 @@ def test_outer_step_nsplit_one_and_invalid(monkeypatch):
     assert calls == [(300.0, True)]
     with pytest.raises(ValueError):
         ds.advance_duo_outer_step({}, [], 300.0, 0)
+
+
+def test_topo_fn_threads_hs_and_step_runs():
+    """W5 follow-up: ctx topo_fn -> hs6 (surface geopotential) consumed
+    by both geopk sites; a mountain state must step FINITE and differ
+    from the flat-hs step (non-vacuous)."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+        full_acoustic_step_sixface,
+        w2_six_face_state,
+    )
+
+    def phis(lon, lat):
+        r2 = np.minimum((np.pi / 9) ** 2,
+                        (lon - np.pi / 2) ** 2 + (lat - np.pi / 6) ** 2)
+        return 2000.0 * 9.80665 * (1.0 - np.sqrt(r2) / (np.pi / 9))
+
+    ctx_t = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True,
+                                       topo_fn=phis)
+    ctx_0 = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True)
+    assert ctx_t["hs6"] is not None and len(ctx_t["hs6"]) == 6
+    assert ctx_0["hs6"] is None
+    assert float(max(h.max() for h in ctx_t["hs6"])) > 1e4  # peak ~2e4
+    st_t = w2_six_face_state(ctx_t)
+    st_0 = w2_six_face_state(ctx_0)
+    out_t = full_acoustic_step_sixface(ctx_t, st_t, 300.0, d_ext=0.0)
+    out_0 = full_acoustic_step_sixface(ctx_0, st_0, 300.0, d_ext=0.0)
+    for t in range(6):
+        assert np.all(np.isfinite(out_t[t]["u"]))
+        assert np.all(np.isfinite(out_t[t]["delp"]))
+    # hs must actually change the dynamics (same IC here, different hs)
+    assert not np.allclose(out_t[0]["u"], out_0[0]["u"])
