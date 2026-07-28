@@ -57,27 +57,42 @@ def main():
     ours = np.load(args.ours, allow_pickle=False)
     times = np.asarray(ours["times_days"])
     n_days = int(round(float(times[-1])))
+    if "dt_atmos" not in ours.files or float(ours["dt_atmos"]) != 1800.0:
+        raise SystemExit("cadence gate: ours npz dt_atmos != 1800 — "
+                         "twin protocol violated (codex r9)")
     us, vs = load_oracle(Path(args.oracle_dir), n_days)
 
-    # oracle native tiles -> the same 1-degree canvas via cell-center
-    # nearest sampling using each tile's own lon/lat from grid_spec?
-    # atmos_daily lacks 2-D coords at layout 1,1 c2l-off — use the
-    # native max metric + our lens frames for the pattern panel; the
-    # CURVES are lens-independent maxima.
+    # SAME metric both sides (codex r9 P0: native-max vs lens-max is
+    # the case-8 raw-vs-lens confound): the oracle tiles are the SAME
+    # grid as ours (frozen-map identity), so compare NATIVE cell-max
+    # wind on both — ours from A-averaged native components in the
+    # dumped frames is not available per-day, so use the native-tile
+    # hypot of THEIR (ucomp, vcomp) vs the native-tile hypot of OUR
+    # A-averaged winds recomputed from the daily lens frames' source
+    # is unavailable — instead both sides through the ORACLE-native
+    # metric: theirs directly; ours via its dumped native state at
+    # matching blocks when present, else DISCLOSE lens-only pattern
+    # panels and plot the native curve for theirs with ours' lens
+    # curve clearly labeled as a LOWER BOUND (lens under-reports).
     orc_max = [float(np.max(np.hypot(
         np.stack([us[t][k] for t in range(6)]),
         np.stack([vs[t][k] for t in range(6)])))) for k in range(n_days)]
     our_w = np.hypot(ours["u"], ours["v"])
     our_max = [float(np.nanmax(our_w[k])) for k in range(len(times))]
+    print("NOTE: ours curve = 1-degree lens max (LOWER BOUND, up to "
+          "~sqrt(2)+sampling below native); oracle curve = native-tile "
+          "max.  Pattern panels are ours-lens only.  A same-metric "
+          "native curve needs per-day native dumps (follow-up).")
 
     days = [float(x) for x in args.days.split(",")]
     fig = plt.figure(figsize=(4.6 * len(days), 6.2),
                      constrained_layout=True)
     gs = fig.add_gridspec(2, len(days), height_ratios=[1, 1.2])
     axc = fig.add_subplot(gs[0, :])
-    axc.plot(times, our_max, "o-", label="ours (duo stepper, nord=2)")
+    axc.plot(times, our_max, "o-",
+             label="ours, 1-deg LENS max (lower bound)")
     axc.plot(np.arange(1, n_days + 1), orc_max, "s--",
-             label="fv3_solo case-5 (native-tile max)")
+             label="fv3_solo case-5, NATIVE-tile max")
     axc.set_xlabel("day")
     axc.set_ylabel("max |V| [m/s]")
     axc.legend()
