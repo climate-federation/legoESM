@@ -16,6 +16,12 @@ from legoesm.land.canopy.config import (
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
 )
+from legoesm.land.canopy.radiative_transfer import (
+    NIR_FRACTION,
+    PAR_FRACTION,
+    RHO_UV,
+    UV_FRACTION,
+)
 from legoesm.land.clm_surface_map import (
     TUNED_GLACIER_ALBEDO_MULTILAYER,
     TUNED_PFT_FC_MULTILAYER,
@@ -53,18 +59,46 @@ GLACIER_ALBEDO_DEFAULT = 0.6   # broadband for the SEB / slab path
 
 # --- AMIP-calibrated glacier albedo (2026-07 recalibration) ---
 # ``clm_multilayer_setup`` raises the snow-free ice-sheet base to
-# ``TUNED_GLACIER_ALBEDO_MULTILAYER`` (broadband) against ERA5, which the
-# uncalibrated pair above under-states (0.60).  The canopy two-stream consumes a
-# (visible, NIR) PAIR, and the broadband it integrates to is 0.5*(vis + NIR) —
-# PAR (0.48) and UV (0.02) ride the visible band, NIR is 0.50
-# (``radiative_transfer._PAR/_UV/_NIR_FRACTION``).  ``GLACIER_ALBEDO_DEFAULT``
-# = 0.5*(0.70 + 0.50) = 0.60 confirms that weighting in the existing constants.
-# So centre the calibrated pair on the tuned broadband while preserving the
-# vis-NIR contrast of the uncalibrated pair (ice is brighter in the visible).
+# ``TUNED_GLACIER_ALBEDO_MULTILAYER`` (a BROADBAND value, calibrated on the SEB
+# path against ERA5), which the uncalibrated pair above under-states.
+#
+# The two-leaf canopy consumes a (visible, NIR) PAIR, so the broadband target has
+# to be inverted through the scheme's ACTUAL spectral weighting.  In
+# ``radiative_transfer``, ALB_VIS multiplies only the PAR stream and ALB_NIR only
+# the NIR stream; the UV stream (2 %) carries a FIXED leaf/soil reflectance
+# ``RHO_UV`` and never sees the surface albedo at all.  So
+#
+#     alpha_eff = PAR_FRACTION*vis + NIR_FRACTION*nir + UV_FRACTION*RHO_UV
+#
+# i.e. the pair is weighted 0.48/0.50, NOT 0.50/0.50.  (``GLACIER_ALBEDO_DEFAULT``
+# = 0.6 is the SEB/slab path's broadband constant and is NOT this integral — the
+# uncalibrated pair actually gives alpha_eff = 0.587 on the canopy path.  Deriving
+# the tuned pair from 0.5/0.5 left the ice sheets 0.0154 too DARK, i.e. -2.1 % on
+# exactly the albedo this calibration exists to correct.)
+#
+# Invert exactly, holding the vis-NIR contrast of the uncalibrated pair (ice is
+# brighter in the visible):
+#     vis = nir + contrast
+#     nir = (alpha_target - UV_FRACTION*RHO_UV - PAR_FRACTION*contrast)
+#           / (PAR_FRACTION + NIR_FRACTION)
 GLACIER_ALB_CONTRAST = GLACIER_ALB_VIS - GLACIER_ALB_NIR
-GLACIER_ALB_VIS_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER + 0.5 * GLACIER_ALB_CONTRAST
-GLACIER_ALB_NIR_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER - 0.5 * GLACIER_ALB_CONTRAST
+GLACIER_ALB_NIR_TUNED = (
+    (TUNED_GLACIER_ALBEDO_MULTILAYER - UV_FRACTION * RHO_UV
+     - PAR_FRACTION * GLACIER_ALB_CONTRAST)
+    / (PAR_FRACTION + NIR_FRACTION))
+GLACIER_ALB_VIS_TUNED = GLACIER_ALB_NIR_TUNED + GLACIER_ALB_CONTRAST
 GLACIER_ALBEDO_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER   # broadband, SEB / slab path
+
+
+def canopy_effective_broadband_albedo(alb_vis: float, alb_nir: float) -> float:
+    """Broadband surface albedo the two-leaf canopy scheme actually realises.
+
+    The inverse of the derivation above; used by the tests to pin the tuned pair
+    to :data:`TUNED_GLACIER_ALBEDO_MULTILAYER` so a change to the spectral
+    weights or to ``RHO_UV`` cannot silently drift the ice-sheet albedo.
+    """
+    return (PAR_FRACTION * alb_vis + NIR_FRACTION * alb_nir
+            + UV_FRACTION * RHO_UV)
 
 # --- Soil-texture fallback where HWSD has no soil (sandy default) ---
 FALLBACK_SAND_PCT = 92.0
