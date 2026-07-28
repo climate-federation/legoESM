@@ -881,9 +881,38 @@ instance:
 
 ms-scale skew with microsecond-scale service time on the last-arriving
 rank confirms the barrier reading; aligned starts implicate the
-collective or the scheduler instead. That analysis runs on the
-closed-loop trace (job 26507936), which is also the lane the cost model
-was fitted to.
+collective or the scheduler instead.
+
+**CLOSED-LOOP PROFILE (job 26510470) — the production lane, isolated
+per-step with a marker kernel** (`loop_add_fusion_3`, exactly one per
+timed step; naive time-windowing was still catching setup and XLA
+autotune `RedzoneAllocatorKernel`, so a marker was required):
+
+| per step (mean of 3 inter-marker intervals) | ms |
+|---|---|
+| wall | 17.11 |
+| GPU kernel time | 15.08 |
+| **of which NCCL SendRecv (halo)** | **6.65 (44 %)** |
+| largest compute fusion | 0.90 |
+
+So in the lane the cost model was fitted to, the halo exchange is **6.65
+ms/step, 44 %** — substantial, but NOT the 66 % the single-shot lane
+showed, and NOT the whole 11.27 ms fixed term. The remaining ~8 ms is
+spread across many small compute fusions (the largest is 0.90 ms), which
+is the signature of a LAUNCH-BOUND step rather than one dominated by any
+single kernel.
+
+The per-step `AllReduce_Sum_f32_RING` that dominated the single-shot
+trace is ABSENT here (only tiny TREE all-reduces, 0.046 ms). It was an
+artifact of the single-shot lane, which is exactly why the lane mismatch
+mattered — the intervention it suggested would have targeted a
+collective the production lane does not issue.
+
+REVISED READING of the 11.27 ms fixed term: roughly half is halo
+exchange (perimeter-scaling, consistent with the single-shot ratio) and
+roughly half is many small compute kernels whose launch overhead does
+not shrink with tile size. Both halves point at the same two fixes —
+fewer/fatter halo messages, and kernel fusion to cut launch count.
 
 CONSEQUENCE FOR REACHING THE LIMIT: the lever is halo-cost-per-tile, not
 device count. Options in order of expected value: (a) larger tiles
