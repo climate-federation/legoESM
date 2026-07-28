@@ -34,6 +34,7 @@ with a test and a measured before/after.
 | 15 | `ahtv` built from one T-point field for both faces; NEMO builds `ahtu`/`ahtv` independently | ahtv → bit-exact, AT BAR |
 | 16 | Live per-column `gdept` reached only 1 of 4 consumers; PGF/slopes used the static ladder | `dyn_hpg` du → **AT BAR**, accumulation profile gone |
 | 17 | The `(1+r3t)` Jacobian applied unconditionally (valid only for partial-cell coords) | latent NaN, caught by a Treguier dispatch test |
+| 18 | **3-D wet mask re-derived as a FLOAT compare at 3 call sites** — a ULP tie marked the deepest DRY level active in 1861/10348 columns (sub-seafloor leak) | all four slope components improved ~10x |
 
 **Terms now AT BAR (10):** `sbc`, `eos_rab` β and α, `bn2`, `ldftra ahtu`,
 `ldftra ahtv`, `dyn_adv` KEG, `zdf_drg_nonlin` coefficient, `dyn_hpg` du,
@@ -48,11 +49,17 @@ with a test and a measured before/after.
 
 ## 3. TO FIX — the remaining debt, grouped by what it needs
 
-### (a) One unidentified defect, 5 rows — highest value
-`ldf_slp` wslpi / wslpj / uslp / vslp, and `ldf_eiv` κ (which *cannot* move
-until the slopes do). Exonerated by measurement already: live depth (r3t ~7e-5,
+### (a) `ldf_slp` — 4 rows, improved ~10x, cause of the remainder unknown
+wslpi/wslpj/uslp/vslp went to 0.99996-0.99998 / ratio ~1.0001-1.0005 after the
+ULP wet-mask fix (bug #18). Still DEBT; the residual cause is not identified. Exonerated by measurement already: live depth (r3t ~7e-5,
 two orders too small), metric convention (moved 0.0), the diffusivity
 coefficient (bit-exact), N² and α (both AT BAR), the seam.
+
+### (a2) `ldf_eiv` κ (aeiu) — INDEPENDENT cause, corrected belief
+corr 0.975 / ratio 1.033. **The earlier claim that this was inherited from
+`ldf_slp` is FALSIFIED**: the slopes improved an order of magnitude (to
+~0.9999-class inputs) and aeiu barely moved (0.974309 → 0.975163). It has its
+own, still-unidentified cause and is now the single worst non-salinity row.
 
 ### (b) Salinity — the most alarming single row
 `traadv_fct` SALINITY: corr **0.203** / ratio 3.17. Not a boundary artifact
