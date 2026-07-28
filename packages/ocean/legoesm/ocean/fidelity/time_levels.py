@@ -45,6 +45,12 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "eiv_dump_vslp.bin": ("before", "ldfslp.F90 uses rn2b/rab_b"),
     "eiv_dump_wslpi.bin": ("before", "ldfslp.F90 uses rn2b/rab_b"),
     "eiv_dump_wslpj.bin": ("before", "ldfslp.F90 uses rn2b/rab_b"),
+    # RAW pre-Shapiro w-point slopes (zwz/zww captured at ldfslp.F90:335-336,
+    # written to units 8840/8841 at :378-379).  These split ldf_slp into the
+    # slope FORMULA (stage A) and the 16-point smoother (stage B) -- internals,
+    # not endpoints.
+    "eiv_dump_zwz_raw.bin": ("before", "ldfslp.F90:335 zwz pre-Shapiro (unit 8840)"),
+    "eiv_dump_zww_raw.bin": ("before", "ldfslp.F90:336 zww pre-Shapiro (unit 8841)"),
     # Asselin filter dumps are explicit about their own level.
     "atf_dump_tem_before.bin": ("before", "traatf_qco.F90, pre-filter state"),
     "atf_dump_sal_before.bin": ("before", "traatf_qco.F90, pre-filter state"),

@@ -21,6 +21,12 @@ def test_eos_rab_and_rn2b_dumps_are_before_level():
         assert time_level_for_dump(name) == "before", name
 
 
+def test_raw_pre_shapiro_slope_dumps_are_registered():
+    """The ldf_slp internals split (formula vs smoother) needs these."""
+    assert time_level_for_dump("eiv_dump_zwz_raw.bin") == "before"
+    assert time_level_for_dump("eiv_dump_zww_raw.bin") == "before"
+
+
 def test_atf_after_dumps_are_after_level():
     assert time_level_for_dump("atf_dump_tem_after.bin") == "after"
     assert time_level_for_dump("atf_dump_tem_before.bin") == "before"
