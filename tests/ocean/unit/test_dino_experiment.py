@@ -1765,8 +1765,8 @@ class TestIsoneutralRediOnly:
                                    rtol=1e-6)
         np.testing.assert_allclose(np.asarray(arr), np.asarray(ref), rtol=1e-6)
 
-    def test_static_kappa_override_refuses_tripole_sentinel(self):
-        """Tripole carries a NaN cos_lat_v sentinel -- refuse, never fabricate.
+    def test_static_kappa_override_refuses_tripole(self):
+        """Tripole has no 1-D v-face axis -- refuse, never fabricate ahtv.
 
         The ndim!=1 guard does not catch tripole (it stores a zonal-mean 1-D
         lat), so without this the consumer would silently build ahtv from a
@@ -1778,11 +1778,31 @@ class TestIsoneutralRediOnly:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         from legoesm.grids.latlon import create_latlon_geometry
         g = create_latlon_geometry(8, 12)
-        tri_like = g._replace(
-            cos_lat_v=jnp.full_like(jnp.asarray(g.cos_lat_v), jnp.nan))
+        tri_like = g._replace(fold=g.fold._replace(is_active=True))
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        with pytest.raises(ValueError, match="tripolar NaN sentinel"):
+        with pytest.raises(ValueError, match="no 1-D v-face axis"):
             _static_kappa_redi_override(gm_on, tri_like)
+
+    def test_static_kappa_override_is_jit_safe(self):
+        """The override runs INSIDE jit -- it must never inspect array values.
+
+        Regression: a NaN-scanning tripole guard raised
+        TracerArrayConversionError and killed every production run.
+        """
+        import jax
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.grids.latlon import create_latlon_geometry
+        g = create_latlon_geometry(8, 12)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        # Production shape: the geometry is closed over with STATIC ints but
+        # z-star-live ARRAY leaves, so cos_lat_v arrives as a tracer.
+        f = jax.jit(lambda cv, lt: _static_kappa_redi_override(
+            gm_on, g._replace(cos_lat_v=cv, lat=lt)))
+        kT, kv = f(jnp.asarray(g.cos_lat_v), jnp.asarray(g.lat))
+        assert kT.shape == (8, 12) and kv.shape == (8, 12)
 
     def test_mpas_builder_rejects_isoneutral(self):
         import dataclasses

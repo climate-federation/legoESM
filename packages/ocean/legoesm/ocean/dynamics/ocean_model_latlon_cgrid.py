@@ -837,14 +837,15 @@ def _static_kappa_redi_override(gm_cfg, grid):
     # faces are not the midpoints (DINO: 2.5e-4) -- and do NOT substitute
     # vface_zonal_cos_lat, which is the #516 pole-zeroed transport metric.
     cos_lat_v = jnp.asarray(grid.cos_lat_v)[1:]           # north face of cell j
-    if bool(np.any(np.isnan(np.asarray(cos_lat_v)))):
-        # Tripole sentinel (grids/tripole.py): no 1-D v-face axis exists.  The
-        # ndim!=1 guard above does NOT catch it (tripole stores a zonal-mean
-        # 1-D lat), so refuse here rather than run a fabricated ahtv.
+    if bool(getattr(getattr(grid, "fold", None), "is_active", False)):
+        # Tripole has NO 1-D v-face axis; its cos_lat_v is a zonal-mean
+        # representative, not the real face metric.  The ndim!=1 guard above
+        # does NOT catch it (tripole stores a zonal-mean 1-D lat), so refuse
+        # here rather than run a fabricated ahtv.  fold.is_active is a STATIC
+        # Python bool -- never inspect array VALUES here, this runs inside jit.
         raise ValueError(
-            "kappa_redi_lat_scaling needs a 1-D v-face cos(lat_v); this grid "
-            "carries the tripolar NaN sentinel (no 1-D v-face axis). Supply a "
-            "2-D kappa_Redi field instead.")
+            "kappa_redi_lat_scaling needs a 1-D v-face cos(lat_v); a tripolar "
+            "grid has no 1-D v-face axis. Supply a 2-D kappa_Redi field.")
     kappa_v = (gm_cfg.kappa_Redi * cos_lat_v)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat_v.dtype)
     return kappa_T, kappa_v
