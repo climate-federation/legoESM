@@ -38,6 +38,9 @@ from legoesm.ocean.physics.convection.config import (
     EnhancedDiffusionConfig,
     OceanConvectionConfig,
 )
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    validate_treguier_cfg,
+)
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig,
     LateralMixingConfig,
@@ -131,20 +134,38 @@ class NEMOMatchMPASRecipeConfig:
     # freshwater
     normalize_freshwater: bool = True
 
-    # GM/Redi (mesoscale eddy parameterization)
+    # GM/Redi (mesoscale eddy parameterization).
+    # NOTE (MPAS recipe): `gm_treguier=True` is NOT runnable here — the MPAS
+    # GM/Redi path (`gm_redi_mpas.py`) raises NotImplementedError for the
+    # Treguier block, which is implemented on the lat-lon C-grid only, and it
+    # raises only inside the FIRST GM tendency (i.e. after a full model build
+    # and a step's worth of density/slope work).  The fields are kept so both
+    # recipes share `_nemo_match_gm_redi`; `nemo_match_mpas_model_config`
+    # rejects the flag up front so the failure lands at config build.
     gm_redi: bool = True
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
     redi_S_max: float = 0.005
-    # NEMO ldf_eiv flow-dependent kappa_GM (`nn_aei_ijk_t=21`: aeiu/aeiv =
-    # F(growth rate of baroclinic instability), capped at aei0 = rn_Ue*rn_Le).
-    # ORCA1 runs `ln_ldfeiv=.true., nn_aei_ijk_t=21, rn_Ue=0.018, rn_Le=100e3`
-    # => aei0 = 1800 m^2/s, i.e. NEMO uses a SPACE/TIME-VARYING coefficient where
-    # this recipe otherwise pins the constant `kappa_GM` above.  False keeps the
-    # constant (byte-identical default); True selects the NEMO-faithful scaling
-    # (TreguierConfig — already used by the DINO oracle card).
+    # NEMO ldf_eiv flow-dependent kappa_GM — see `_nemo_match_gm_redi` below for
+    # the namelist provenance.  False keeps the constant `kappa_GM` above
+    # (byte-identical default); True selects the NEMO-faithful Treguier scaling.
     gm_treguier: bool = False
     gm_aei0: float = 1800.0
+    # Floor on the Treguier kappa_GM [m^2/s]; only meaningful with
+    # gm_treguier=True.
+    #
+    # DEFAULT 0.0 = RAW NEMO (capped-only; kappa -> 0 at the equator).  This is
+    # a NEMO-MATCH recipe, so its default must be the oracle form: a nonzero
+    # floor is a deliberate NON-NEMO closure change (see TreguierConfig).
+    #
+    # This DELIBERATELY differs from `run_omip_core2.py --gm-kappa-min`, whose
+    # default is 200.0: that is a production stability knob (an unfloored
+    # equatorial band destabilised a 1-degree global run), not a fidelity
+    # setting.  The divergence is intentional and tested
+    # (test_nemo_match_recipe / test_run_omip_core2_gm_treguier) -- what was a
+    # BUG before was the recipe silently taking 0.0 with nobody aware of it,
+    # because the field did not exist and could not be set.
+    gm_kappa_min: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -201,20 +222,39 @@ class NEMOMatchTripoleRecipeConfig:
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
     redi_S_max: float = 0.005
-    # NEMO ldf_eiv flow-dependent kappa_GM (`nn_aei_ijk_t=21`: aeiu/aeiv =
-    # F(growth rate of baroclinic instability), capped at aei0 = rn_Ue*rn_Le).
-    # ORCA1 runs `ln_ldfeiv=.true., nn_aei_ijk_t=21, rn_Ue=0.018, rn_Le=100e3`
-    # => aei0 = 1800 m^2/s, i.e. NEMO uses a SPACE/TIME-VARYING coefficient where
-    # this recipe otherwise pins the constant `kappa_GM` above.  False keeps the
-    # constant (byte-identical default); True selects the NEMO-faithful scaling
-    # (TreguierConfig — already used by the DINO oracle card).
+    # NEMO ldf_eiv flow-dependent kappa_GM — see `_nemo_match_gm_redi` below for
+    # the namelist provenance.  False keeps the constant `kappa_GM` above
+    # (byte-identical default); True selects the NEMO-faithful Treguier scaling.
     gm_treguier: bool = False
     gm_aei0: float = 1800.0
+    # Floor on the Treguier kappa_GM [m^2/s]; only meaningful with
+    # gm_treguier=True.
+    #
+    # DEFAULT 0.0 = RAW NEMO (capped-only; kappa -> 0 at the equator).  This is
+    # a NEMO-MATCH recipe, so its default must be the oracle form: a nonzero
+    # floor is a deliberate NON-NEMO closure change (see TreguierConfig).
+    #
+    # This DELIBERATELY differs from `run_omip_core2.py --gm-kappa-min`, whose
+    # default is 200.0: that is a production stability knob (an unfloored
+    # equatorial band destabilised a 1-degree global run), not a fidelity
+    # setting.  The divergence is intentional and tested
+    # (test_nemo_match_recipe / test_run_omip_core2_gm_treguier) -- what was a
+    # BUG before was the recipe silently taking 0.0 with nobody aware of it,
+    # because the field did not exist and could not be set.
+    gm_kappa_min: float = 0.0
 
 
 def _nemo_match_gm_redi(cfg) -> GMRediConfig | None:
     """Build the shared GM/Redi block both proven configs use, or None."""
     if not cfg.gm_redi:
+        if cfg.gm_treguier:
+            # Otherwise the selected kappa_GM scheme (and its floor) vanish at
+            # this early return -- the same silent-discard the CLI rejects via
+            # the --gm-treguier/--no-gm-redi conflict guard.
+            raise ValueError(
+                "gm_treguier=True with gm_redi=False: the Treguier kappa_GM "
+                "scheme cannot apply when GM/Redi is disabled entirely. Set "
+                "gm_redi=True, or leave gm_treguier=False.")
         return None
     # NEMO ORCA1 runs GM with a FLOW-DEPENDENT coefficient (&namtra_eiv:
     # ln_ldfeiv=T, nn_aei_ijk_t=21 => aeiu/aeiv = F(growth rate of baroclinic
@@ -224,8 +264,15 @@ def _nemo_match_gm_redi(cfg) -> GMRediConfig | None:
     # `kappa_GM` so existing runs stay byte-identical.  Treguier and Visbeck are
     # mutually exclusive (both are adaptive-kappa schemes) — enforced by
     # GMRediConfig, so Visbeck stays disabled on both branches.
-    _treguier = TreguierConfig(enabled=True, aei0=cfg.gm_aei0) \
-        if getattr(cfg, "gm_treguier", False) else TreguierConfig()
+    # `gm_kappa_min` is threaded so the recipe and `run_omip_core2.py` build the
+    # SAME block: without it the recipe silently took kappa_min=0.0 (no floor)
+    # while the CLI defaulted to 200 — one scheme, two opposite defaults.
+    _treguier = (
+        TreguierConfig(enabled=True, aei0=cfg.gm_aei0,
+                       kappa_min=cfg.gm_kappa_min)
+        if cfg.gm_treguier else TreguierConfig()
+    )
+    validate_treguier_cfg(_treguier)
     return GMRediConfig(
         kappa_GM=cfg.kappa_GM,
         kappa_Redi=cfg.kappa_Redi,
@@ -298,6 +345,15 @@ def nemo_match_mpas_model_config(
     """
     if cfg is None:
         cfg = NEMOMatchMPASRecipeConfig()
+    if cfg.gm_treguier:
+        # gm_redi_mpas raises NotImplementedError for the Treguier block, but
+        # only inside the first GM tendency -- i.e. after a full model build.
+        # Reject here so the failure is at config build, next to the flag.
+        raise NotImplementedError(
+            "NEMOMatchMPASRecipeConfig.gm_treguier=True is not supported: the "
+            "NEMO ldf_eiv (Treguier) kappa_GM is implemented on the lat-lon "
+            "C-grid GM/Redi only, so the MPAS path cannot run it. Use the "
+            "tripole recipe, or leave gm_treguier=False for constant kappa_GM.")
     if physics is None:
         physics = _default_match_physics()
     return MPASOceanConfig(
