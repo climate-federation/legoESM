@@ -148,7 +148,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce [e3t=both]"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]"),
     "traadv_fct vertical upstream flux": (0.997700, None,     "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662) [e3t=both]"),
-    "dyn_hpg":                       (1.0,        1.000045,   "ratio not 1 [e3t=both, re-verified 2026-07-27: "
+    "dyn_hpg":                       (1.0,        1.000053,   "ratio not 1 [e3t=both, re-verified 2026-07-27: "
                                                               "re-measured with NEMO e1u/e2u/e1v/e2v spliced into "
                                                               "cos_lat/dy_T (the fields the non-tripolar gradient "
                                                               "operators actually read) -- ratio unchanged "
@@ -205,6 +205,9 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # multi-day runs (max|u| 0.66 -> 3 m/s). This is a real defect, and it is
     # why every fidelity probe must set the env var explicitly -- it has
     # contaminated three measurements so far.
+    # BLOCKER: z_coord.t_depth_ref is a 1-D ladder API, so a per-column live
+    # gdept_0*(1+r3t) cannot be expressed; testing the live-depth hypothesis for
+    # dyn_hpg/ldf_slp needs that widened to 3-D (real change, not a probe).
     "STABILITY on NEMO true grid (e3t_0)": (None, None, "legoESM UNSTABLE on NEMO's actual geometry; bridge defaults to the wrong ladder to hide it"),
     # --- round 2 ---
     "dyn_spg_ts pssh":               (0.999989,   0.999900,   "[e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
