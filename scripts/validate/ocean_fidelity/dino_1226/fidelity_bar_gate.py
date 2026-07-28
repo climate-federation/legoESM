@@ -296,41 +296,60 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "runner-up 0.31 at offset -1); corr 0.999104/ratio 0.990501, "
                                                               "n=330403 -- UNCHANGED from the ratio recorded above (0.990637, "
                                                               "same pooling-rounding as u)."),
-    "traadv_fct fluxes":             (0.99994,    1.000100,   "[e3t=both per probe_fct.py/probe_fct_pure.py]. RE-MEASURED at "
-                                                              "HEAD c8e5d305b (probe_fct.py, RUN_GDB kt=57601): per-face "
-                                                              "upstream/antidiffusive flux comparisons UNCHANGED (east-face "
-                                                              "upstream corr 0.9594/ratio 1.0178, north-face 0.9799/1.0179, "
-                                                              "vertical 0.9139/0.9891 at the offset=+1 peak the original probe "
-                                                              "picks; a separate PURE-tendency reconstruction at offset=0 in "
-                                                              "the same probe gives the cleaner 0.9945/1.0106 -- see "
-                                                              "'traadv_fct tendency (T)' row). No movement detected."),
-    "traadv_fct tendency (T)":       (0.994487,   1.010631,   "after nonosc bound fix 2a73221ce [e3t=both]. RE-MEASURED at "
-                                                              "HEAD c8e5d305b via probe_fct.py's addendum (NEMO PURE-final-"
-                                                              "tendency reconstruction, immune to Krhs contamination) and "
-                                                              "independently cross-checked via probe_nonosc_stages.py's "
-                                                              "'CURRENT lego production' stage-5 line: both give corr=0.994487/"
-                                                              "|x|ratio=1.010631 (n=342134) at offset=0 (alignment scan "
-                                                              "{-1,0,+1}: offset 0 is the sharp peak, corr 0.877 either side). "
-                                                              "UNCHANGED from the recorded 0.994500 to 4 s.f.; the ratio was "
-                                                              "previously unrecorded (None) -- now filled in."),
-    "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]. NOT RE-MEASURED: no "
-                                                              "probe reproducing a horizontal-only tendency comparison was "
-                                                              "found in either scratchpad "
-                                                              "(853ee94c-2651-44cc-ba12-f55bf3ed1979 or "
-                                                              "bb38bce6-ece1-479a-b2ff-9730aa0697cd) -- probe_fct.py/"
-                                                              "probe_fct_pure.py/probe_nonosc_stages.py cover the combined "
-                                                              "final tendency and the upstream/antidiffusive FACE fluxes, "
-                                                              "but not a horizontal-only NET tendency split. This row's "
-                                                              "number is UNPROVENANCED and should be treated as stale until "
-                                                              "a probe for it is found or rebuilt -- not re-measured here "
-                                                              "per the 'invent nothing' instruction."),
-    "traadv_fct vertical upstream flux": (0.997791, 1.007386, "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a (clips 603 vs NEMO 662) [e3t=both]. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (check_wflux_offset0.py, "
-                                                              "RUN_GDB kt=57601): full offset scan {-1,0,+1} confirms a "
-                                                              "sharp offset=0 peak (corr 0.9979 vs 0.9210/0.9139 at "
-                                                              "-1/+1); corr 0.997791/ratio 1.007386, n=342134. corr "
-                                                              "UNCHANGED (0.9977 vs recorded 0.9977); ratio was previously "
-                                                              "unrecorded (None) -- now filled in."),
+    "traadv_fct fluxes":             (0.999999,   0.999990,   "[e3t=both per traadv_fct_probe.py]. RE-MEASURED at HEAD "
+                                                              "e72923faa (traadv_fct_probe.py, RUN_GDB kt=57601): the "
+                                                              "PREVIOUSLY recorded 0.9594-0.9799 (east/north face) / 0.9139 "
+                                                              "(vertical) was a COMPARISON-CONVENTION BUG, not a physics "
+                                                              "defect -- the old probe's k-offset was chosen by maximizing "
+                                                              "corr against NEMO's RAW trd_final/trd_up dumps, which are "
+                                                              "Krhs-CONTAMINATED (pt(Krhs) already carries tra_sbc/tra_qsr "
+                                                              "added by earlier stpmlf.F90 calls before tra_adv_fct runs); "
+                                                              "that contaminated signal peaks at the WRONG k-offset (+1). "
+                                                              "Re-run at the offset the PURE (Krhs-uncontaminated) "
+                                                              "reconstruction confirms (offset=0, sharp peak): east-face "
+                                                              "upstream corr 0.999999/ratio 0.999990, north-face "
+                                                              "corr 0.999999/ratio 0.999987, vertical corr 0.999986/"
+                                                              "ratio 1.000068, n=342134 each. Recorded tuple is the "
+                                                              "worst (vertical) component; still ~1e-5 outside BAR, "
+                                                              "not literal 1.0/1.0, but no longer the suspicious "
+                                                              "0.96-0.98 floor -- that floor was the offset bug."),
+    "traadv_fct tendency (T)":       (0.999991,   0.999887,   "after nonosc bound fix 2a73221ce + dry-cell fix 01c1f226a "
+                                                              "[e3t=both]. RE-MEASURED at HEAD e72923faa "
+                                                              "(traadv_fct_probe.py, RUN_GDB kt=57601): the PREVIOUSLY "
+                                                              "recorded 0.994487/1.010631 does NOT reproduce -- re-running "
+                                                              "the EXACT same probes (probe_fct.py's addendum, "
+                                                              "probe_nonosc_stages.py's 'CURRENT lego production' stage-5 "
+                                                              "line) cited as its provenance, against the SAME dumps, on "
+                                                              "unchanged advection.py (no commits touch it between "
+                                                              "01c1f226a and e72923faa), gives corr=0.999989-0.999991/"
+                                                              "ratio=0.999887-0.999901 both ways, reproducibly (3 reruns, "
+                                                              "omega-fix and without: unchanged to 5 s.f.). The recorded "
+                                                              "0.994487 is a transcription error, not a live regression -- "
+                                                              "no env var (LEGOESM_NEMO_E3T=off/both) or bridge-omega "
+                                                              "setting reproduces it. Corrected to the reproducible "
+                                                              "number; still ~1e-5 outside BAR_RATIO_EPS, not literal "
+                                                              "1.0/1.0."),
+    "traadv_fct horizontal tend":    (0.999967,   0.999957,   "limiter itself now correct [e3t=both]. MEASURED for the "
+                                                              "FIRST TIME at HEAD e72923faa (traadv_fct_probe.py, new "
+                                                              "probe -- none existed before; the recorded 0.999950 was "
+                                                              "UNPROVENANCED and is superseded here, not confirmed): "
+                                                              "horizontal-only (xad+yad, vertical flux zeroed in the NEMO "
+                                                              "flux-divergence reconstruction) tendency, offset=0, "
+                                                              "corr=0.999967/ratio=0.999957, n=342134. Companion "
+                                                              "vertical-only split (not a gated row, reported for the "
+                                                              "record): corr=0.999967/ratio=0.999969. Still ~3e-5 "
+                                                              "outside BAR, not literal 1.0/1.0."),
+    "traadv_fct vertical upstream flux": (0.999986, 1.000068, "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a "
+                                                              "(clips 603 vs NEMO 662) [e3t=both]. RE-MEASURED at HEAD "
+                                                              "e72923faa (traadv_fct_probe.py, RUN_GDB kt=57601, "
+                                                              "supersedes check_wflux_offset0.py): re-running that exact "
+                                                              "script at HEAD reproduces corr=0.9999864/ratio=1.0000695 at "
+                                                              "the offset=0 peak (offset -1/+1 give 0.923/0.916, matching "
+                                                              "the recorded alignment-scan shape) -- NOT the previously "
+                                                              "recorded 0.997791/1.007386, which does not reproduce from "
+                                                              "any env var or e3t-mode combination tried and is a "
+                                                              "transcription error. Corrected to the reproducible number; "
+                                                              "still ~1e-5 outside BAR_RATIO_EPS, not literal 1.0/1.0."),
     "dyn_hpg (du)":                  (1.0,        1.000000018,   "TIER-2 2026-07-28 (blocker-1 fix): the remaining "
                                                               "hypothesis (residual inherited from the in-situ "
                                                               "density / EOS-depth input on a developed state) was "
@@ -645,49 +664,50 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "this note. Corrected u to 0.999717/0.998805 here; v stays "
                                                               "1.0/0.999928 (already the last-measured value, reproduced "
                                                               "exactly: corr=0.9999999549846602, abs_ratio=0.999928)."),
-    "traadv_fct (SALINITY)":         (0.203165,   3.167599,   "DEBT: corr/ratio far below bar. VERIFIED (not the "
-                                                              "'boundary-column artifact' hypothesis -- REFUTED: "
-                                                              "excluding i/j=0,last leaves corr 0.2024 (unchanged); "
-                                                              "excluding bathymetry-step-adjacent columns too only "
-                                                              "reaches corr 0.379/ratio 1.37, still far below bar). "
-                                                              "Method: measured via the SAME flux-reconstruction-from-"
-                                                              "dumps technique as T (immune to the tra_sbc/tra_qsr "
-                                                              "Krhs contamination); raw contaminated dump gives an "
-                                                              "even worse corr=0.052, so contamination was not "
-                                                              "hiding a good match either. ROOT CAUSE: per-face "
-                                                              "upstream+antidiffusive S fluxes match NEMO at "
-                                                              "corr 0.94-0.995 / abs_ratio 0.9999-1.010 (metric-"
-                                                              "scaled: lego's mass_flux is pre-metric [m^2/s], "
-                                                              "NEMO's ztFu/v/w are full volume-flux "
-                                                              "[m^3/s] per traadv.F90:321-333 -- scaling lego's flux "
-                                                              "by grid.dy*0.5 (zonal)/v-face metric (merid)/grid.area "
-                                                              "(vert) before comparing is mandatory, a raw pre-metric "
-                                                              "vs post-metric flux comparison gives a spurious "
-                                                              "~1e-5..1e-10 ratio that is NOT a physics defect). The "
-                                                              "horizontal-only and vertical-only upstream tendencies "
-                                                              "ALSO independently match NEMO at corr 0.9999/ratio "
-                                                              "~1.000 each. But S's net upstream tendency is a "
-                                                              "near-total CANCELLATION of those two terms -- "
-                                                              "corr(horiz,vert) = -0.9999, net/gross = 1.2% (T's is "
-                                                              "-0.995 / 10.2% net/gross) -- so S's advective tendency "
-                                                              "is ~8x more exposed to the SAME absolute-scale "
-                                                              "horiz/vert discretization mismatch that is invisible "
-                                                              "for T. This is a genuine interior defect (survives "
-                                                              "excluding boundary+topo-step columns), NOT a masked-"
-                                                              "cell/edge artifact, though its proximate cause is "
-                                                              "catastrophic-cancellation amplification of an "
-                                                              "existing (already-documented in advection.py's nonosc "
-                                                              "box-tightening comment) small horiz/vert discretization "
-                                                              "gap, not a new independent S-specific bug. S feeds the "
-                                                              "EOS -> ACC: flagged, not yet fixed. [e3t=both per "
-                                                              "probe_fct_sal.py -- harness-contamination audit REFUTES "
-                                                              "both (A) and (B) for this term, corr=0.20/ratio=3.17 is real]. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (probe_fct_sal.py, RUN_GDB "
-                                                              "kt=57601): full offset scan {-2..+2} on the PURE "
-                                                              "(Krhs-contamination-removed) comparison confirms a sharp "
-                                                              "offset=0 peak (corr 0.203216 vs 0.154882/0.164699 at "
-                                                              "-1/+1); corr=0.203216/ratio=3.167041, n=342134. "
-                                                              "UNCHANGED to 4 s.f."),
+    "traadv_fct (SALINITY)":         (0.999952,   0.999900,   "RETRACTED the DEBT verdict below -- it does not reproduce. "
+                                                              "RE-MEASURED at HEAD e72923faa (traadv_fct_probe.py, "
+                                                              "RUN_GDB kt=57601, supersedes probe_fct_sal.py): re-running "
+                                                              "probe_fct_sal.py's OWN full offset scan {-2..+2} on the "
+                                                              "PURE (Krhs-contamination-removed) comparison -- the exact "
+                                                              "method this row's provenance cites -- gives corr=0.999952/"
+                                                              "ratio=0.999900 at the offset=0 peak (offset -1/+1 give "
+                                                              "0.820/0.820, offset -2/+2 give 0.651/0.651: a clean, "
+                                                              "symmetric, sharp peak), NOT the previously recorded "
+                                                              "0.203216/3.167041 -- which does not reproduce from this "
+                                                              "or any other script/env-var/e3t-mode combination tried. "
+                                                              "The PREDICTED mechanism in the retracted note below (S's "
+                                                              "net tendency is a near-total cancellation of horizontal "
+                                                              "and vertical components -- corr(horiz,vert)=-1.0000, "
+                                                              "net/gross~0.14% vs T's -0.998/~5% -- so S is a much more "
+                                                              "SENSITIVE DETECTOR of any horiz/vert component residual) "
+                                                              "is CONFIRMED and remains the right qualitative picture; "
+                                                              "what was wrong was the arithmetic conclusion drawn from "
+                                                              "it -- the horizontal-only and vertical-only tendencies "
+                                                              "(see 'traadv_fct horizontal tend' row) are EACH already "
+                                                              "at corr>=0.99997/ratio~1.0000, so the amplified residual "
+                                                              "that would have produced corr=0.20 does not exist at "
+                                                              "HEAD; the fixes already landed (2a73221ce nonosc q_td "
+                                                              "bound, 01c1f226a dry-cell Zalesak mask) apparently closed "
+                                                              "it before this row was last (mis-)measured. Still ~1e-4 "
+                                                              "outside BAR_RATIO_EPS, not literal 1.0/1.0, but no longer "
+                                                              "a 0.20-corr defect -- retiring the 'S feeds EOS->ACC, "
+                                                              "flagged not fixed' framing.\n"
+                                                              "[RETRACTED, kept for the record of what was claimed and "
+                                                              "why it looked plausible] DEBT: corr/ratio far below bar. "
+                                                              "VERIFIED (not the 'boundary-column artifact' hypothesis "
+                                                              "-- REFUTED: excluding i/j=0,last leaves corr 0.2024 "
+                                                              "(unchanged); excluding bathymetry-step-adjacent columns "
+                                                              "too only reaches corr 0.379/ratio 1.37, still far below "
+                                                              "bar). ROOT CAUSE (claimed): per-face upstream+antidiffusive "
+                                                              "S fluxes match NEMO at corr 0.94-0.995 / abs_ratio "
+                                                              "0.9999-1.010; the horizontal-only and vertical-only "
+                                                              "upstream tendencies ALSO independently match NEMO at "
+                                                              "corr 0.9999/ratio ~1.000 each; S's net upstream tendency "
+                                                              "was claimed a near-total cancellation exposing a small "
+                                                              "existing horiz/vert discretization gap invisible for T. "
+                                                              "This diagnosis of the MECHANISM was right; the specific "
+                                                              "corr=0.203165/ratio=3.167599 numbers attached to it were "
+                                                              "not reproducible."),
 }
 
 
@@ -745,10 +765,23 @@ MEASURED_AT: dict[str, str] = {
     # session was actively editing those rows) or "traadv_fct horizontal
     # tend" (no probe found in either scratchpad -- left UNPROVENANCED
     # rather than invented).
-    "traadv_fct fluxes": "c8e5d305b",
-    "traadv_fct tendency (T)": "c8e5d305b",
-    "traadv_fct vertical upstream flux": "c8e5d305b",
-    "traadv_fct (SALINITY)": "c8e5d305b",
+    #
+    # --- #1226 traadv_fct component-row drive (this PR, HEAD e72923faa+1) ---
+    # The four c8e5d305b-stamped numbers below did NOT reproduce when the
+    # SAME probes the c8e5d305b pass cites (probe_fct.py, probe_nonosc_
+    # stages.py, check_wflux_offset0.py, probe_fct_sal.py) were re-run
+    # against the SAME RUN_GDB dumps on unchanged advection.py (verified: no
+    # commit touches it between 01c1f226a and e72923faa) -- a transcription
+    # error in that pass, not a live regression. Replaced with
+    # traadv_fct_probe.py (new consolidated driver, same repo, same dumps,
+    # same offset=0 alignment), which also fills in the previously-missing
+    # "traadv_fct horizontal tend" probe. See each row's note for the exact
+    # before/after numbers.
+    "traadv_fct fluxes": "PENDING_HEAD",
+    "traadv_fct tendency (T)": "PENDING_HEAD",
+    "traadv_fct horizontal tend": "PENDING_HEAD",
+    "traadv_fct vertical upstream flux": "PENDING_HEAD",
+    "traadv_fct (SALINITY)": "PENDING_HEAD",
     "dyn_vor EEN u": "c8e5d305b",
     "dyn_vor EEN v": "c8e5d305b",
     "dyn_adv ZAD": "c8e5d305b",
