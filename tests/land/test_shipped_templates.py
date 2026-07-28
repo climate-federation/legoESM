@@ -54,3 +54,39 @@ def test_lulcc_template_declares_transient_cover_and_eluc():
     cfg = validate_config(yaml.safe_load(path.read_text()))
     assert cfg.surfdata["land_cover_dataset"] != "clm5"        # a real reconstruction
     assert cfg.raw.get("land_use_change", {}).get("scheme") == "bookkeeping"
+
+
+def test_calibrated_spinup_template_is_the_calibrated_config():
+    """The calibrated spin-up template must actually ship all three calibration
+    selectors ON and cold-start.  A template that silently reverted to the
+    pre-calibration defaults would spin up the WRONG model state and only show
+    up as a confusing climatology weeks later."""
+    path = _TEMPLATE_DIR / "lmip_calibrated_spinup.yaml"
+    cfg = validate_config(yaml.safe_load(path.read_text()))
+    p = cfg.physics
+    assert p["albedo_calibration"] == "amip_multilayer"
+    assert p["root_calibration"] == "amip_multilayer"
+    assert (p["soil_n_layers"], p["soil_depth_m"]) == (10, 3.0)
+    assert p["enable_freeze_thaw"] is True          # LMIP is ahead of AMIP here
+    assert p["surface_scheme"] == "two_leaf_canopy"
+    assert p["bulk_scheme"] == "most"
+    assert cfg.restart["from"] == ""                # cold start
+    assert cfg.time["dt"] == 3600.0
+    assert cfg.time["n_steps"] == 87600             # 10 yr hourly, noleap
+
+
+def test_calibrated_spinup_and_production_share_physics():
+    """The spin-up and the production template it chains into must run the SAME
+    physics — a mismatch would put a discontinuity at the restart boundary."""
+    spin = validate_config(yaml.safe_load(
+        (_TEMPLATE_DIR / "lmip_calibrated_spinup.yaml").read_text())).physics
+    prod = validate_config(yaml.safe_load(
+        (_TEMPLATE_DIR / "lmip_canopy_10yr.yaml").read_text())).physics
+    for key in ("albedo_calibration", "root_calibration", "soil_n_layers",
+                "soil_depth_m", "soil_growth_factor", "enable_freeze_thaw",
+                "surface_scheme", "bulk_scheme", "snow_scheme",
+                "stomatal_model", "stomata_enabled"):
+        assert spin[key] == prod[key], (
+            f"physics.{key} differs between the spin-up and production "
+            f"templates ({spin[key]!r} vs {prod[key]!r}) — the chained run "
+            "would jump physics at the restart boundary")

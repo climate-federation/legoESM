@@ -1,0 +1,165 @@
+# 10-year COLD-START spin-up for the CALIBRATED biophysics LMIP, ~2 deg latlon.
+#
+# The entry point for a fresh calibrated LMIP campaign.  Chain it into
+# `biophysics/lmip_canopy_10yr` (same physics, warm-started) for production:
+#
+#   # 1. spin-up (cold start)
+#   python scripts/run/init_experiment.py biophysics/lmip_calibrated_spinup \
+#       --name spinup --output-dir $SCRATCH/lmip/spinup --machine derecho_gpu \
+#       -o forcing.year_start=1975 -o forcing.year_end=1984
+#   cd $SCRATCH/lmip/spinup && qsub -A <ACCT> run.sh
+#
+#   # 2. production, warm-started from the spin-up's final restart
+#   python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
+#       --name prod --output-dir $SCRATCH/lmip/prod --machine derecho_gpu \
+#       -o forcing.year_start=1985 -o forcing.year_end=1994 \
+#       -o restart.from=$SCRATCH/lmip/spinup/restart_1985_d000h00.npz
+#
+# PHYSICS = the 2026-07 calibrated configuration.  Three changes vs the
+# pre-calibration LMIP baseline, each independently revertible via one config
+# key, so a controlled comparison is a single `-o` override:
+#
+#   albedo_calibration: amip_multilayer   ->  default
+#   soil_n_layers/soil_depth_m: 10 / 3.0  ->  8 / 0.0   (geometric ~6.375 m)
+#   root_calibration: amip_multilayer     ->  default
+#
+# ⚠️ To reproduce the PRE-CALIBRATION baseline byte-for-byte, override all three.
+# Do NOT compare a calibrated run against a number computed from the old
+# configuration unless the only difference is the variable under test.
+
+template_name: biophysics/lmip_calibrated_spinup
+template_version: 1.0.0
+description: 10-year cold-start spin-up, calibrated biophysics LMIP, 2 deg latlon, hourly, two-leaf canopy + MOST
+
+grid:
+  type: latlon
+  resolution: 90                # 90 x 180 ~ 2 deg
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy   # mechanistic canopy (intrinsic Ball-Berry stomata)
+  bulk_scheme: most                 # stability-dependent surface exchange (land)
+  stomatal_model: ball_berry
+  snow_albedo_feedback: true
+  # Single-node bulk SWE budget — the stable, production-consistent scheme (also
+  # what AMIP and the EC-site harness run).  NOT the multilayer snow column,
+  # which is unstable at global scale (docs/land/phase2b_snow_thermal_plan.md).
+  snow_scheme: single
+  # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  REQUIRED for a
+  # global run: without it, boreal/Arctic columns lose their energy budget once
+  # the top soil layer crosses freezing and drift to NaN (546/8006 land cells in
+  # the 2026-07-08 run; 0 with it on).  AMIP does NOT enable this — LMIP is ahead
+  # here, so do not "align to AMIP" by turning it off.
+  enable_freeze_thaw: true
+
+  # --- Calibrated surface albedo ----------------------------------------------
+  # The 2026-07 ERA5 recalibration `clm_multilayer_setup` injects for the coupled
+  # multilayer land: brighter fresh/aged snow, the Niu-Yang half-cover scale
+  # (15.4 vs the uncalibrated 50 kg/m2 — the uncalibrated value leaves a
+  # 20 kg/m2 seasonal pack only ~38% covered where the calibrated one gives
+  # ~86%), faster snow-age decay, stronger dry-soil brightening, and a brighter
+  # ice-sheet base.  The LMIP path builds params from the RAW PFT/biome tables,
+  # so it never saw this calibration.
+  # NOTE: tuned under SimpleSEB (amip_sota's surface scheme), not the two-leaf
+  # canopy.  The albedo terms are scheme-independent, but the pairing has not
+  # been re-validated at LMIP scale.
+  albedo_calibration: amip_multilayer
+
+  # --- Vertical soil grid (AMIP parity) ---------------------------------------
+  # 10 layers / 3.0 m, matching clm_multilayer_setup + amip_sota, replacing the
+  # 8-layer / 6.375 m loader default.  The surfdata soil profile is remapped onto
+  # THIS grid, so hydraulics and the Richards state cannot desync.
+  #
+  # ⚠️ dz_top: at growth_factor 2.0 this gives a **2.93 mm** top layer, vs 25 mm
+  # for the 8-layer default (CLM5 itself uses ~17.5 mm).  The top layer drives the
+  # Sellers/SZ09 bare-soil-evaporation resistance and IS the `theta_soil_top` /
+  # `T_soil_top` tape variables — those diagnostics change MEANING relative to an
+  # 8-layer baseline and are not directly comparable.  Set soil_growth_factor to
+  # ~1.65 for a CLM-like ~13 mm top layer at the same depth and layer count.
+  #
+  # ⚠️ UNVERIFIED: long-run numerical stability of a ~3 mm top layer at
+  # dt=3600 s has NOT been established — short smokes complete cleanly, but that
+  # is not evidence over a decade.  Watch the NaN-revert count in the driver's
+  # end-of-run banner; if it climbs versus the 8-layer baseline, raise
+  # soil_growth_factor (thicker top layer) before reducing dt.
+  soil_n_layers: 10
+  soil_depth_m: 3.0
+  soil_growth_factor: 2.0
+  # ⚠️ The surfdata vertical remap (`_remap_soil_layers`) is linear interpolation
+  # in depth, NOT mass-conservative, and was validated against the 8-layer
+  # default.  A new target grid exercises it in a new regime — soil texture /
+  # carbon column integrals are approximate here.
+
+  # --- Calibrated root-zone water uptake --------------------------------------
+  # Replaces ONE global root e-folding depth + plant theta_wp/theta_fc
+  # (1.0 m / 0.15 / 0.30 for every column on Earth) with the calibrated PER-PFT
+  # tables at the column's dominant PFT: root depth 0.088-1.706 m,
+  # theta_wp 0.082-0.116, theta_fc 0.171-0.292.
+  #
+  # ⚠️ THIS IS A HYPOTHESIS, NOT A KNOWN-GOOD DEFAULT.  Those tables were
+  # calibrated under SimpleSEB + MOST, which uses the beta_soil moisture path;
+  # the two-leaf canopy carries its own stomatal control.  Run it against
+  # `root_calibration: default` before treating it as settled.  Note this path
+  # applies the DOMINANT-PFT value (consistent with LAI/height/Vcmax/roughness
+  # here), whereas the coupled CLMSurfaceParamProvider PFT-fraction-WEIGHTS the
+  # same tables.
+  root_calibration: amip_multilayer
+
+  # --- Stomatal / photosynthesis calibration (null = per-PFT surfdata default) --
+  # ⚠️ #730: the interactive canopy conductance is UNCALIBRATED on the deep, moist
+  # Richards soil.  The 1985-2014 run gave global-land GPP ~3.5 gC/m2/day against
+  # an observational ~2.2-2.5 (+50-70%), partly because CO2 is held at a constant
+  # 412 ppmv.  Tune these against ERA5/FLUXNET before treating GPP as production.
+  vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)
+  g1: null                          # stomatal slope (ball_berry ~2.97-27, medlyn ~1.3-12)
+  gs_max: null                      # max conductance [mol/m2/s] (~0.099-0.9)
+  # SimpleSEB-only interactive Jarvis stomata (ignored by the canopy scheme):
+  stomata_enabled: false
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5
+  suffix: ""
+  # Override per campaign; stage every year first with download_lmip_data.sh
+  # (the driver fail-fasts on a missing year rather than silently going synthetic).
+  year_start: 1975
+  year_end: 1984                  # 10 contiguous spin-up years
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c250617.nc
+
+time:
+  dt: 3600.0                      # 1 h
+  n_steps: 87600                  # 10 years hourly (10 * 8760, noleap)
+  start_doy: 0.0
+
+restart:
+  from: ""                        # COLD START — this is the spin-up
+
+land_frac_min: 0.0                # any surfdata land
+land_mask_file: ""
+
+# ⚠️ The model's own `land_fraction` output over-states global land area by ~26%
+# (187.7 vs 149.0 x10^12 m2) at 2 deg — coastal smearing in the surfdata regrid.
+# Area-weighted MEANS are largely immune; global TOTALS are not.  For totals,
+# weight with the CLM surface dataset's LANDFRAC_MKSURFDATA conservatively
+# remapped to the model grid, not the tape's land_fraction.
+
+output:
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip, reverted]
+
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]
+
+    - name: annual
+      freq: annual
+      average: mean
+      vars: [T_sfc, shflx, lhflx, runoff, precip]
