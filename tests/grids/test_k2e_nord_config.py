@@ -59,15 +59,20 @@ def test_ring_remap_nord_discriminates():
     resp = {}
     for nord in (2, 4):
         f6 = [np.zeros((n + 2 * ng, n + 2 * ng)) for _ in range(6)]
+        # vertex-adjacent bumps on tile 3 (both, like the C48 probe:
+        # tile-1's north halo receives from the (1, n) bump)
         f6[2][1 - lo, 1 - lo] = 1.0
+        f6[2][1 - lo, n - lo] = 1.0
         for t in range(1, 7):
             exchange_agrid_scalar_halos(f6, t, n, ng)
         k2e_remap_halo_rings(f6, "A", n, ng, k2e_nord=nord)
         resp[nord] = np.array([f6[0][i - lo, (n + 1) - lo]
                                for i in (1, 2, 3)])
-    assert not np.allclose(resp[2], resp[4])
-    # cache keyed by nord: second call must not leak the other order
-    assert not np.allclose(resp[2], resp[4], atol=1e-12)
+    # the response must be live (a dead probe proves nothing) and the
+    # two orders must disagree — cache keyed by nord, no leakage
+    assert np.abs(resp[2]).max() > 1e-3, resp
+    assert np.abs(resp[4]).max() > 1e-3, resp
+    assert not np.allclose(resp[2], resp[4], atol=1e-12), resp
 
 
 def test_stepper_ctx_threads_nord():
