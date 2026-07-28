@@ -495,6 +495,12 @@ def create_tripole_grid(
     lat_1d = jnp.mean(lat_T, axis=1)
     lon_1d = lon_T[0, :]
     cos_lat_1d = jnp.maximum(jnp.cos(lat_1d), 1e-10)
+    # A tripolar grid has NO 1-D v-face axis (the fold rows are curvilinear),
+    # so there is no honest 1-D cos(lat_v).  NaN sentinel: any consumer that
+    # reads it on a tripole grid gets a loud NaN rather than a plausible-
+    # looking half-cell reconstruction of zonal-mean latitudes.  Matches the
+    # dlon/dlat=0.0 sentinels below.  (The 2-D v-face metric lives in dx_v.)
+    cos_lat_v_1d = jnp.full((n_lat + 1,), jnp.nan, dtype=lat_1d.dtype)
     sin_lat_1d = jnp.sin(lat_1d)
 
     if min_dx_m > 0.0:
@@ -532,6 +538,7 @@ def create_tripole_grid(
         fold=fold,
         cos_lat=cos_lat_1d,
         sin_lat=sin_lat_1d,
+        cos_lat_v=cos_lat_v_1d,
         lat=lat_1d,
         lon=lon_1d,
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing

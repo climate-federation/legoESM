@@ -1731,6 +1731,59 @@ class TestIsoneutralRediOnly:
         gm_off = GMRediConfig(kappa_Redi=100.0)
         assert _static_kappa_redi_override(gm_off, g) == (None, None)
 
+    def test_static_kappa_override_on_cgrid_geometry(self):
+        """cos_lat_v on LatLonCGridGeometry -- the from-rest path.
+
+        Regression for the #1226 tier-2 ahtv fix, which read grid.cos_lat_v
+        directly and so crashed EVERY from-rest run while every test passed
+        (the tests all used the bridged LatLonGrid, which stores it).
+        """
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.grids.latlon import create_latlon_geometry
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
+        geom = create_latlon_geometry(
+            g.n_lat, 12, radius=float(g.radius),
+            lat_1d=jnp.asarray(g.lat), lon_1d=jnp.asarray(g.lon),
+            lat_face_1d=jnp.asarray(g.lat_v))
+        assert geom.cos_lat_v.shape == (g.n_lat + 1,)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        arr, arr_v = _static_kappa_redi_override(gm_on, geom)
+        assert arr.shape == (g.n_lat, 12) and arr_v.shape == (g.n_lat, 12)
+        # Same quantity as the LatLonGrid answer -- cos at the TRUE v-face
+        # latitude.  Agreement to f32 eps, not bit-exact, only because the
+        # two cast at different points (grid casts lat_v then cos; the
+        # geometry cos's the f64 faces then casts).  A midpoint rebuild
+        # would instead be off by 2.5e-4 here -- 3 orders larger.
+        ref, ref_v = _static_kappa_redi_override(gm_on, g)
+        np.testing.assert_allclose(np.asarray(arr_v), np.asarray(ref_v),
+                                   rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(arr), np.asarray(ref), rtol=1e-6)
+
+    def test_static_kappa_override_refuses_tripole_sentinel(self):
+        """Tripole carries a NaN cos_lat_v sentinel -- refuse, never fabricate.
+
+        The ndim!=1 guard does not catch tripole (it stores a zonal-mean 1-D
+        lat), so without this the consumer would silently build ahtv from a
+        half-cell reconstruction of zonal-mean latitudes.
+        """
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.grids.latlon import create_latlon_geometry
+        g = create_latlon_geometry(8, 12)
+        tri_like = g._replace(
+            cos_lat_v=jnp.full_like(jnp.asarray(g.cos_lat_v), jnp.nan))
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        with pytest.raises(ValueError, match="tripolar NaN sentinel"):
+            _static_kappa_redi_override(gm_on, tri_like)
+
     def test_mpas_builder_rejects_isoneutral(self):
         import dataclasses
 

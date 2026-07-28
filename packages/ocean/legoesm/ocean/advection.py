@@ -1809,7 +1809,7 @@ def adv_flux_superbee_wgrid_latlon_cgrid(
     # Veros uCFL_y = |v·cosu(face)|*dt/(cost(south)*dyt(south)) — the face/
     # centre cosine ratio is kept for faithfulness (advection.py:44-47).
     # Face latitudes from grid.lat (same construction divergence_cgrid uses;
-    # LatLonCGridGeometry does not carry cos_lat_v).
+    # LatLonCGridGeometry now carries cos_lat_v; this path predates it).
     dy_cell = (0.5 * grid.dy)                            # (n_lat,) cell heights
     cos_face = jnp.cos(0.5 * (grid.lat[:-1] + grid.lat[1:]))
     cos_ratio = cos_face / grid.cos_lat[:-1]
