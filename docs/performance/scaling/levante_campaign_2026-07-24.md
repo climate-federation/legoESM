@@ -937,6 +937,57 @@ resolution at that tile count. The fixed-tile comm contrast is
 resubmitted at L30 for BOTH arms (job 26497736), which halves the
 working set while holding 147.5k cols/GPU on each side.
 
+## Cube optimisation: bounded BEFORE implementing — and the bound killed the plan
+
+Directive was to push the cube toward its limit. Codex round-16 defined
+the strategy first (per the standing pre-implementation rule) and its
+cheapest-bound step then REFUTED the intervention I was about to build.
+
+**Codex corrections to my reading:**
+* My "88 SendRecv / 4 rounds = 22 exchanges" was wrong. The kt=2 tile pad
+  emits **16 phases per logical scalar pad** (4 edges + 4 guards + 4
+  diagonals + 4 corner slivers) for serial-exact offset/corner handling
+  (`cubesphere_exchange.py:1276`); the RK body pads dp/B/zeta/invT/lnps/T
+  separately, the vector pad calls the scalar pad twice, x3 RK stages.
+* Vertical batching is ALREADY done (4-D pads carry all L60 levels), so
+  it cannot remove launches — my own payload arithmetic had hinted at
+  this (strips ~41x larger than a single-field depth-1 strip).
+* XLA already fuses much of it: ~384 source permutes become ~101
+  optimized HLO ops and 88 traced SendRecv. So field packing's ceiling
+  is the 6.65 ms NCCL time, NOT the 11.27 ms fixed term.
+* A once-per-step STALE deep halo (the ocean's trick) **changes answers**
+  on this dycore — it alters RK2/RK3 boundary tendencies. Exact
+  communication avoidance would need a 3 x radius = 6-cell overlap with
+  cube-edge interpolation, and the tiled transport supports only halo
+  1/2. That is a new algorithm, not a port.
+
+**THE BOUND (one step, 86 SendRecv, latency floor 17.8 us measured):**
+
+| class | n | total |
+|---|---|---|
+| <=25 us (latency-bound) | 39 | **0.61 ms** |
+| 25-100 us | 33 | 1.20 ms |
+| >100 us (payload/wait) | **14** | **7.54 ms** |
+
+Field packing removes LAUNCHES, so its absolute ceiling is the
+latency-bound class: **0.61 ms of a 17.11 ms step = 3.6 %**. Not worth
+the change.
+
+**What the tail actually is.** The largest single exchange is **4.86 ms**.
+At the measured 64.2 GB/s NVLink that would be ~310 MB, but the entire
+per-step halo volume is ~8 MB. So that call is not moving data — it is
+WAITING. Fourteen exchanges holding 7.54 ms is arrival skew absorbed at
+halo sync points, the same signature codex flagged for the single-shot
+all-reduce.
+
+**CONCLUSION: the cube's fixed cost is dominated by rank-arrival skew,
+not by launch count or bytes.** Packing fields, batching levels and
+fattening messages all target the wrong term. The next real step is to
+measure WHERE the skew originates (per-rank arrival times at each halo
+phase) — and skew has no one-line fix; it is load imbalance, or a
+serialised phase upstream of the exchange. Recorded here rather than
+guessed at.
+
 ## Tripole (ORCA fold) past 4 GPUs — first receipts (job 26512798)
 
 The fold is the ocean's production topology but had only ever been
