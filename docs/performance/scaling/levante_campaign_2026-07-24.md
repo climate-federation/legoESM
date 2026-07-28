@@ -928,6 +928,27 @@ resolution at that tile count. The fixed-tile comm contrast is
 resubmitted at L30 for BOTH arms (job 26497736), which halves the
 working set while holding 147.5k cols/GPU on each side.
 
+## Tripole (ORCA fold) past 4 GPUs — first receipts (job 26512798)
+
+The fold is the ocean's production topology but had only ever been
+measured to 4 GPUs. LL1152x2304 L20 f32, implicit_cn + forced PCG:
+
+| devices | tile | ms/step | GC/s |
+|---|---|---|---|
+| 8 | 331.8k cols/GPU | 33.97 | 1.56 |
+| 16 | 165.9k | **23.79** | 2.23 |
+
+8->16 = 1.43x, **efficiency 0.71** — the fold scales respectably at
+production tiles, and the topology is not a scale-out blocker at these
+counts.
+
+SCOPE, stated because it is tempting to misread: the regular-grid
+LL1152@16 number elsewhere in this report (19.83 ms) used
+**explicit_substep + wide-halo**, whereas this tripole ladder used
+**implicit_cn + PCG**. Those are DIFFERENT SOLVERS, so the pair licenses
+NO fold-cost claim. The only licensed fold cost remains the earlier
+same-job matched contrast (+1.2-3.7 %, job 26493837).
+
 ## Ocean GPU scale-out to 64 devices — and a CROSS-LANE memory defect (#1370)
 
 | arm | devices | tile | ms/step |
