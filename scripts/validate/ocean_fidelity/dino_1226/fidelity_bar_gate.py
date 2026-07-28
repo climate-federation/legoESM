@@ -67,7 +67,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # --- sweep terms ---
     "sbc (utau/qsr/qns/sfx)":        (1.0,        1.0,        "exact"),
     "eos_rab beta":                  (1.0,        1.0,        "bit-exact"),
-    "eos_rab alpha":                 (1.0,        1.000007,   "median rel 4.7e-6 [e3t=both per probe_n2.py]. TIER-2 "
+    "eos_rab alpha":                 (1.0,        0.9999999998,   "median rel 4.7e-6 [e3t=both per probe_n2.py]. TIER-2 "
                                                               "2026-07-28: root cause of this residual class IDENTIFIED "
                                                               "and FIXED -- NEMO's eos_rab/bn2 take the LIVE z-star depth "
                                                               "gdept(Kmm)=gdept_0*(1+r3t) (domzgr_substitute.h90:139+:50+:56, "
@@ -81,7 +81,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "convection, k_profiles implicit) were still static and are now "
                                                               "fixed identically. NOT re-measured end-to-end after that fix "
                                                               "-- this row's number predates it; re-measure before trusting."),
-    "bn2 (rn2b)":                    (1.0,        0.999993,   "median |rel| 6.96e-6 [e3t=both per probe_n2.py]. TIER-2 "
+    "bn2 (rn2b)":                    (1.0,        0.9999999934,   "median |rel| 6.96e-6 [e3t=both per probe_n2.py]. TIER-2 "
                                                               "2026-07-28: same live-gdept root cause + fix as eos_rab alpha "
                                                               "above (eosbn2.F90:1166 rab_3d_t zh=gdept(Kmm); :1459-1467 bn2_t "
                                                               "zrw + /e3w(Kmm)). Isolated sensitivity on the bridged y5 "
@@ -154,7 +154,34 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "operators actually read) -- ratio unchanged "
                                                               "1.000045153->1.000045138 (u), 1.000054459->1.000061469 "
                                                               "(v); harness-artifact hypothesis (B) REFUTED for this "
-                                                              "term, residual is real]"),
+                                                              "term, residual is real]. TIER-2 2026-07-28: the PGF "
+                                                              "OPERATOR IS EXONERATED, cause NOT identified. All four "
+                                                              "suspected discretization causes were checked against NEMO "
+                                                              "primary source and are exact transcriptions: (i) the g "
+                                                              "constant is already pinned to NEMO grav for this card "
+                                                              "(dino.py '_NEMO_CONSTANTS.g' -> LatLonCGridOceanConfig.g, "
+                                                              "consumed as config.g in the nemo_sco branch) -- and note "
+                                                              "g_lego/g_nemo-1 = 5.00e-5 does NOT equal this row's "
+                                                              "4.5e-5, so the constant-triage rule does not fit either; "
+                                                              "(ii) e3w-vs-e3t weighting matches zgr_lib.F90:350-355 "
+                                                              "depth_to_e3_1d; (iii) the zhpi top-down recurrence "
+                                                              "accumulation order matches dynhpg.F90:367-390; (iv) the "
+                                                              "k=1 surface term matches dynhpg.F90:343-365. All four are "
+                                                              "locked by tests/ocean/unit/test_nemo_sco_step_pgf.py, "
+                                                              "which compares against a LITERAL numpy transcription of "
+                                                              "the Fortran loop at rtol=1e-12 (7/7 pass). NB dynhpg IS "
+                                                              "the one routine that legitimately uses gdept_z0 = "
+                                                              "gdept-ssh (domzgr_substitute.h90:145) -- unlike eosbn2, "
+                                                              "which uses plain gdept -- and that IS what lego does. "
+                                                              "Remaining hypothesis (UNTESTED): the residual is INHERITED "
+                                                              "from the in-situ density / EOS-depth input on a developed "
+                                                              "state, the same pattern that explained eiv transport "
+                                                              "(static-vs-live gdept) and ldf_eiv aeiu (operator exact, "
+                                                              "inputs not). Also NB an earlier 'AT BAR' for this term was "
+                                                              "RETRACTED (d0844a9d6): it had been measured on a "
+                                                              "degenerate from-rest state (ssh=0, du identically zero "
+                                                              "both sides, zuap/stretch absent) -- this term MUST be "
+                                                              "measured on the developed Y5 twin state."),
     "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED [e3t=both, re-verified: "
                                                               "e2u/e1u substitution leaves ratio 1.001180->1.001180 "
                                                               "unchanged; harness (B) REFUTED]"),
@@ -198,8 +225,28 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "operator family (gradient_x/y_cgrid) as dyn_hpg -- "
                                                               "(B) structurally a no-op here too, see module docstring]"),
     "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001800,   "[e3t=both]"),
-    "ssh_nxt / div_hor":             (1.0,        0.999991,   "[e3t=both per probe_1226_r2_item3_sshnxt.py]"),
-    "dom_qco_r3c r3t":               (1.0,        0.999997,   "[e3t=both]"),
+    "ssh_nxt / div_hor":             (1.0,        0.999991,   "[e3t=both per probe_1226_r2_item3_sshnxt.py]. TIER-2 "
+                                                              "2026-07-28: cause NOT identified. Ruled out by direct "
+                                                              "check against NEMO sshwzv.F90: the formula, the "
+                                                              "arithmetic regrouping, the time level, and the H "
+                                                              "(bathymetry) reference all agree to ~1e-11, i.e. three "
+                                                              "orders tighter than this 9e-6 residual, so none of them "
+                                                              "is the source. Suspected (NOT proven) a float32 step in "
+                                                              "a since-deleted comparison script. Belongs to the "
+                                                              "unexplained 3e-6..5e-5 residual BAND shared with r3t, "
+                                                              "r3u/r3v, dyn_drg RHS and dyn_cor_2d -- a single shared "
+                                                              "cause would close several rows at once and is the "
+                                                              "highest-value next investigation."),
+    "dom_qco_r3c r3t":               (1.0,        0.999997,   "[e3t=both]. TIER-2 2026-07-28: cause NOT identified. The "
+                                                              "obvious candidate is ruled out: (H+eta)/H vs 1+eta/H is "
+                                                              "a reassociation worth ~1e-12, six orders too small to "
+                                                              "explain this 3e-6, so the formula is fine and this is "
+                                                              "NOT summation-order roundoff. Same unexplained "
+                                                              "3e-6..5e-5 band as ssh_nxt/div_hor above (and r3u/r3v "
+                                                              "sits at the same 0.999997, explicitly noted there as "
+                                                              "'same residual class as r3t' -- consistent with one "
+                                                              "shared upstream cause rather than four independent "
+                                                              "coincidences)."),
     "dom_qco_r3c r3u/r3v":           (0.999999999879, 0.999997, "hu_0/hv_0 added to nemo_io.NemoGrid (derived from e3u_0/e3v_0+mask); "
                                                               "face-averaged eta/H0 formula match; ratio not exactly 1 (same residual class as r3t) "
                                                               "[e3t=both per probe_1226_r2_item4_domqco.py; e2u/e1v read DIRECTLY from mesh_mask.nc "
