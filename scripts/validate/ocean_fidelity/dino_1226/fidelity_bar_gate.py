@@ -188,6 +188,29 @@ PER_ELEMENT: dict[str, float] = {
     # in the bottom 2-3 levels, max always at the deepest ACTIVE level in
     # columns j~185-191 -> a bottom-boundary / bathymetry-step term.  The
     # formula-vs-smoother split (raw pre-Shapiro dumps) is in flight.
+    # CHAIN WALK after the live-gdept fix (ldf_slp_per_element.py section J,
+    # NEMO execution order, e3t=both, fp64, BEFORE-level):
+    #     prd 1.989e-11 | zgrv 4.4e-11 | zaj 1.180e-06 | zbw 3.467e-07
+    #     zbj 4.380e-07 | zfk 0.0 EXACT | zww_raw 1.461e-06 | wslpj 1.762e-06
+    # zaj is the first diverging stage and its INPUTS are at roundoff, so the
+    # defect is in zaj's own divisor zcj = MAX(sum4 vmask, eps)*e2t.  The mask
+    # count is integer-exact, leaving e2t -- and NEMO's DINO usr_def_hgr.F90
+    # builds the grid ISOTROPICALLY (pe1t = pe2t) while legoESM's default
+    # 'exact' convention computes the true finite-difference dy (recorded
+    # elsewhere in this file as dy_T vs e2t relerr -1.27e-5..+9.5e-6).
+    # A/B MEASURED 2026-07-28, single variable (LEGOESM_METRIC_CONVENTION):
+    #     zaj  1.180e-06  ->  5.232e-11   (4.5 orders, to roundoff) CONFIRMED
+    #     zbw  3.467e-07  ->  3.467e-07   (no e2t term, unchanged as predicted)
+    #     wslpj err_norm 1.762e-06 -> 1.399e-06 ; |x|ratio 0.999929 -> 0.999932
+    # So the metric convention OWNS zaj but is NOT the ldf_slp floor.  The rows
+    # below are still recorded at the shipped default ('exact'): adopting
+    # nemo_isotropic for the DINO oracle is a CONFIG-PLUMBING change (the
+    # bridge defaults to 'exact' regardless of the recipe card -- a known
+    # harness gap) and it also moves ssh_nxt, so it needs its own controlled
+    # pass rather than being smuggled in here.
+    # NEXT FLOOR: zbw = zm1_2g*pn2*(prd(k)+prd(k-1)+2) at 3.467e-07.  prd is at
+    # roundoff, so this is pn2 -- the N^2 the SLOPES consume, which may not be
+    # the same code path as the bn2 row already closed at 5.88e-16.
     "ldf_slp wslpi": 5.907e-7,
     "ldf_slp wslpj": 1.629e-6,
     "ldf_slp uslp": 2.994e-7,

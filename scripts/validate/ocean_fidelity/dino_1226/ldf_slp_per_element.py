@@ -205,7 +205,15 @@ def build_state():
         dino_config_for_recipe("nemo_dino_kamm_mlf"),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0,
     )
+    # METRIC CONVENTION (#1226): NEMO's DINO usr_def_hgr.F90 builds the grid
+    # ISOTROPICALLY (pe1t = pe2t); legoESM's default 'exact' computes the true
+    # finite-difference dy, differing from NEMO e2t by -1.27e-5..+9.5e-6.  zcj
+    # (ldfslp.F90:307) multiplies the vmask COUNT by e2t, so that discrepancy
+    # lands directly in zaj.  Env-switchable so the A/B is a single variable.
+    _metric = os.environ.get("LEGOESM_METRIC_CONVENTION", "exact")
+    print(f"metric_convention={_metric}", flush=True)
     br = bridge_nemo_to_legoesm_topo(grid, now, periodic_i=True, full_step=True,
+                                     metric_convention=_metric,
                                       omega=cfg.omega)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 
