@@ -338,9 +338,13 @@ def test_topo_fn_threads_hs_and_step_runs():
     t_mt = int(np.argmax([float(np.max(h)) for h in ctx_t["hs6"]]))
     assert not np.allclose(out_t[t_mt]["u"], out_0[t_mt]["u"])
     assert not np.allclose(out_t[t_mt]["delp"], out_0[t_mt]["delp"])
-    # and faces with hs == 0 everywhere must stay BIT-identical after
-    # one step (PG is face-local; identical delp/pt/winds in) — pins
-    # the None path too
-    for t in range(6):
-        if float(np.max(np.abs(ctx_t["hs6"][t]))) == 0.0:
-            np.testing.assert_array_equal(out_t[t]["u"], out_0[t]["u"])
+    # faces whose hs is zero across the WHOLE data domain (incl the
+    # halos the one-time ext_scalar(phis) filled from mountain-face
+    # neighbours — upstream test_cases.F90:1567+ semantics, so
+    # mountain-adjacent faces legitimately differ at edge columns)
+    # must stay BIT-identical after one step — pins the None path
+    far = [t for t in range(6)
+           if float(np.max(np.abs(ctx_t["hs6"][t]))) == 0.0]
+    assert far, "mountain phis reached every face's halo at C12 — "                 "identity clause needs a larger n"
+    for t in far:
+        np.testing.assert_array_equal(out_t[t]["u"], out_0[t]["u"])
