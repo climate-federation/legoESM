@@ -94,20 +94,45 @@ residual was found and is now tracked, but it is far too small to explain 13%.
   field) → `interp_cell_to_uface` (same-row average) is a no-op for a
   field that is constant along a row, so it reproduces NEMO's direct
   `cos(gphiu)` evaluation exactly.
-- **v-point**: corr 1.0, ratio **1.0000260** — DEBT (exceeds the 1e-6 bar).
-  `interp_cell_to_vface` averages `cos(φ_j)` and `cos(φ_j+1)` (two adjacent
-  T-row values) where NEMO evaluates `cos` directly at the true `gphiv`
-  midpoint latitude. `avg(cos) ≠ cos(avg)` — a genuine, second-order-in-Δφ
-  discretization difference (~2.6e-5 relative at 1° spacing), present at
-  every v-face. Real, but three orders of magnitude too small to be the
-  13% front-weakening mechanism.
-- **Minimal faithful fix (not yet implemented)**: evaluate
-  `K_h_base*cos(lat)` directly at `grid.lat_v` (the true v-face latitude,
-  already computed elsewhere for the grid's Coriolis/metric terms) instead of
-  interpolating the T-point cosine field, as a `kappa_redi_lat_scaling`-gated
-  branch in `_static_kappa_redi_override`. Only changes the v-face values;
-  u-face stays a no-op since NEMO's u-point and the flanking T-points share
-  the same latitude row on this Mercator grid.
+- **v-point — FIXED 2026-07-27 (tier-2 item 1)**. The original note here
+  ("`interp_cell_to_vface` averages `cos(φ_j)` and `cos(φ_j+1)`... `avg(cos) ≠
+  cos(avg)`") was **WRONG** — `_static_kappa_redi_override` never called
+  `interp_cell_to_vface`; grep + `git log -p --follow` confirm it has never
+  existed in that function. That description was a probe-reimplementation
+  artifact (Rule 0: "trace the real dispatch chain, a probe that re-implements
+  a path is not evidence about that path"), not a description of the code that
+  actually ran. The REAL cause: legoESM built ONE T-point field
+  (`K_h_base*cos(lat_T)`) and reused it unshifted for BOTH the u-face and
+  v-face Redi fluxes (`zfu`/`zfv` in
+  `nemo_iso_lap_tracer_tendency_latlon_cgrid`, plus the shared
+  `nemo_iso_w_kappa_sums`/`nemo_iso_a33` w-point kappa averages that feed the
+  `ln_traldf_msc` implicit K33). NEMO's `nn_aht_ijk_t=20` does NOT do this:
+  `ldf_c2d('TRA', ...)` (`ldfc1d_c2d.F90:141-145`) evaluates `ahtu` and `ahtv`
+  as two INDEPENDENT arrays, `ahtu(ji,jj)=zUfac·MAX(e1u,e2u)^inn` and
+  `ahtv(ji,jj)=zUfac·MAX(e1v,e2v)^inn` — i.e. `∝cos(lat_u)` and `∝cos(lat_v)`
+  respectively, each at its own point. `cos(lat_u)==cos(lat_T)` exactly on
+  this grid (u shares its T-row's latitude) so the u-face was already exact;
+  `cos(lat_v)` is a genuinely different (row-shifted) value that legoESM was
+  never computing at all.
+  **Fix**: `_static_kappa_redi_override` now returns `(kappa_T, kappa_v)`,
+  with `kappa_v = K_h_base·grid.cos_lat_v[1:]` (the true v-face latitude,
+  north-face-of-cell-j convention matching `grid.dx_v[1:,:]`). A new
+  keyword-only `kappa_Redi_v`/`kappa_redi_v_override` (default `None` ⇒ reuse
+  the existing field, bit-identical for every other closure — Visbeck/EKE/
+  GEOMETRIC/Treguier are genuinely T-point quantities that legitimately DO
+  face-average the same way for u and v) threads this through
+  `nemo_iso_lap_tracer_tendency_latlon_cgrid`, `nemo_iso_w_kappa_sums`,
+  `nemo_iso_a33`, `gm_redi_tracer_tendency_latlon`, and
+  `compute_isoneutral_K33_latlon`.
+  **Verified against the actual NEMO dump** (`ldftra_dump_{ahtu,ahtv,gphiu,
+  gphiv}.bin`, `RUN_1226_AHTU`, reproducible via
+  `scripts/validate/ocean_fidelity/dino_1226/ldftra_ahtv_compare.py`):
+  pre-fix v-face corr 0.9998618 / ratio 1.0000380 (NOT the previously
+  recorded 1.0000260 — the earlier number came from whatever ad-hoc
+  reimplementation produced the false "interp_cell_to_vface" story, not from
+  this code); post-fix corr 1.0000000 / ratio 0.9999999704 — matches the
+  u-face's own bit-exact quality. Ground-truth unit test:
+  `tests/ocean/unit/test_dino_experiment.py::TestDinoLatLonModelConfig::test_static_kappa_override_row_scaling`.
 - **Residual open question**: the ahtu/ahtv coefficient is now the LEAST
   likely explanation for the 13% front deficit found so far. The search for
   that deficit should move to a different term (candidates from this same
@@ -146,9 +171,11 @@ at full cost. This section is that place.
 | "col_stretch recovers (1+r3t)" | `h_partial` is the STATIC at-rest thickness; measured identically 1.0 | 2026-07-27 |
 | "dry-vertex e3f_0 fallback explains the EEN bottom bias" | controlled A/B was byte-identical | 2026-07-27 |
 | "the vertical upstream flux is corr 0.91" | OFFSET ARTIFACT — the probe headline scored `offset=+1`; at the correct `offset=0` the advecting transport, upstream flux and upstream tendency all match at corr >= 0.9977. (A REAL but climate-inert dry-cell masking bug was found while chasing it: w-face clips 1126-1256 -> 603 vs NEMO 662, commit 01c1f226a.) | 2026-07-27 |
+| "the harness biases EVERY measurement ~0.44% (e3t default) + 30-60 ppm (dy_v vs e2v)" | MOSTLY REFUTED by measurement. The e3t default affected ONLY `eiv transport`; dyn_ldf/ATF/dyn_spg_ts/zdftke/ldf_slp/ZAD/salinity are identical under off vs both. The dy_v/e2v part is refuted outright: on non-tripolar grids `gradient_*_cgrid`/`divergence_cgrid` recompute face metrics inline and NEVER read grid.dx_u/dy_u/dx_v/dy_v, so substituting NEMO's metrics is a structural no-op. | 2026-07-27 |
+| "dyn_hpg is AT BAR (1.000000008)" | Measured on a DEGENERATE from-rest state (ssh=0, zonally-uniform IC) where `du` is identically zero on both sides and the zuap/stretch terms vanish. On the actual Y5 twin state it stays 1.000045. The number certified the trapezoid p'/EOS/g/gradient path only. | 2026-07-27 |
 | "the FCT limiter is the climate lever" | centered (unlimited) advection reproduces fct2 to 4 decimals over 5 years; ACC identical | 2026-07-27 |
 
-**Two probe-artifact retractions in one day** (composition reconstruction,
+**Five probe/relay retractions in one day** (composition reconstruction,
 vertical-flux offset). EVERY headline number must carry its own offset/alignment
 scan BEFORE it is reported as a finding — an agent reporting a bare correlation
 without one is reporting an unverified quantity.
