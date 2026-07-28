@@ -248,6 +248,11 @@ def _compute_advection_flux_div(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
+            # #1226 item 8: same wet mask already threaded as
+            # recon_fill_mask (is_active/active_3d) — faithfully masks
+            # the NEMO nonosc per-point bound at dry cells (see
+            # fct_tracer_advection's active_mask docstring).
+            active_mask=recon_fill_mask,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (

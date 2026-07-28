@@ -835,6 +835,7 @@ def fct_tracer_advection(
     dt: float,
     high_order: str = "ppm",
     tracer_before: jnp.ndarray | None = None,
+    active_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -877,6 +878,23 @@ def fct_tracer_advection(
         ``0.5·pU·(pt(Kmm)+pt(Kmm))``.  ``None`` (forward-Euler / AB2 path)
         ⇒ base == ``tracer`` (Kbb == Kmm) ⇒ byte-identical to the FE-certified
         scheme.
+    active_mask : (n_lat, n_lon, nlev) or None
+        Per-cell wet mask (``is_active`` / ``active_3d``), truthy where
+        wet.  NEMO's ``nonosc`` masks the per-point bound to
+        ``MERGE(max(pbef,paft), -zbig, tmask==1)`` / ``MERGE(min(...),
+        +zbig, tmask==1)`` (traadv_fct.F90:911-915) BEFORE the 7-point
+        neighbourhood max/min, so a dry cell's ``q_td`` (an unconstrained
+        ``h_k→0`` division that legoESM does not bother to make sane,
+        since it is masked out of the tracer update anyway) never widens
+        a WET neighbour's box.  ``None`` (default) skips the mask — the
+        historical behaviour, which lets a dry cell's ``q_td`` blow-up
+        (``0/eps``) leak into the neighbourhood stencil and, downstream,
+        into that neighbour's ``R_in``/``R_out`` — the root cause of
+        legoESM's w-face clip count running ~1.9x NEMO's on the DINO
+        oracle (#1226 item 8: the flux values already matched NEMO at
+        corr > 0.9999 pre-fix; only the boundedness of the LIMITER inputs
+        at dry cells was unfaithful).  Passing the mask is a strict
+        no-op away from dry/wet boundaries.
 
     Returns
     -------
@@ -997,6 +1015,18 @@ def fct_tracer_advection(
     # legoESM limiter deviates from a faithful nonosc transcription.
     bnd_up = jnp.maximum(base, q_td)
     bnd_do = jnp.minimum(base, q_td)
+    if active_mask is not None:
+        # #1226 item 8: faithful dry-cell mask (traadv_fct.F90:911-915
+        # ``MERGE(..., -zbig/+zbig, tmask==1)``) BEFORE the neighbourhood
+        # max/min — a dry cell's ``q_td`` is an unconstrained ``h_k→0``
+        # division (legoESM never bothered to make it sane there since the
+        # tracer update masks the cell out anyway) and must not widen a
+        # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
+        # max (not ``inf``) so float32 callers stay finite under AD.
+        wet = active_mask > 0.5
+        zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
+        bnd_up = jnp.where(wet, bnd_up, -zbig)
+        bnd_do = jnp.where(wet, bnd_do, zbig)
     tr_west = jnp.roll(bnd_up, 1, axis=1)
     tr_east = jnp.roll(bnd_up, -1, axis=1)
     tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
@@ -1454,6 +1484,28 @@ def _zalesak_signsplit_face_alphas(
         Q_up, jnp.maximum(inc_in, eps), inc_in > t_grad))
     R_out = jnp.minimum(1.0, grad_safe_ratio(
         Q_dn, jnp.maximum(inc_out, eps), inc_out > t_grad))
+
+    # #1226 item 8: dry-cell (h_k ~ 0) ratios are NOT a real Zalesak
+    # constraint — NEMO's own ``nonosc`` gives a dry point zbetup=zbetdo=
+    # zbig there (traadv_fct.F90: zpos/zneg are exactly 0 once the
+    # antidiffusive fluxes are wmask'ed, so the ``zpos/=0.`` guard falls
+    # through to the "no local extremum" branch, zcoef=1, no clip).
+    # legoESM's ad_vert_int/ad_flux_u/ad_flux_v are likewise ~0 at a dry
+    # cell (the advecting mass flux is masked upstream), but Q_up/Q_dn and
+    # inc_in/inc_out are each an O(1e-19)/O(h_k) ratio of that same
+    # float-noise residual over an h_k that floors to eps=1e-30 -- the
+    # *ratio* of two independent noise floors is unconstrained garbage
+    # (observed up to ~1e17 on the DINO oracle), NOT a small number, so it
+    # does not cancel in R_in/R_out and instead saturates one of them to 0.
+    # A near-zero R at a dry cell then forces alpha=0 (full clip) on the
+    # WET neighbour's face sharing that dry cell as sender/receiver --
+    # i.e. every subsurface-topography w-face over-clips, inflating
+    # legoESM's w-face clip count ~1.9x vs NEMO (662) purely from this
+    # noise, with no signal in the antidiffusive flux itself (the clipped
+    # face fluxes already matched NEMO at corr>0.9999 pre-fix). Force the
+    # faithful zbig-equivalent (unclipped, R=1) at dry cells.
+    R_in = jnp.where(h_ok, R_in, 1.0)
+    R_out = jnp.where(h_ok, R_out, 1.0)
 
     # ---- Per-face alpha selection ----
     # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).

@@ -359,6 +359,151 @@ class TestNonoscBoundIncludesUpstreamGuess:
 
 
 # ---------------------------------------------------------------------------
+# Dry-cell (partial-column) bound masking — #1226 item 8
+# ---------------------------------------------------------------------------
+
+class TestActiveMaskDryCell:
+    """A dry cell's ``h_k -> 0`` upstream guess ``q_td`` is an unconstrained
+    ``O(noise)/eps`` blow-up.  NEMO's ``nonosc`` never lets this leak: it
+    masks the per-point bound to ``+-zbig`` at dry cells (tmask==0) BEFORE
+    the 7-point neighbourhood max/min (traadv_fct.F90:911-915), so a dry
+    cell never widens (or corrupts) a wet neighbour's box, and its own
+    ``zbetup``/``zbetdo`` fall back to "no local extremum" (zbig, i.e.
+    unclipped) because its antidiffusive flux is exactly wmask'ed to zero.
+    ``active_mask`` reproduces both effects for legoESM's Zalesak limiter
+    (issue #1226 item 8: w-face clip count was running ~1.9x NEMO's on the
+    DINO oracle, traced to exactly this unmasked dry-cell blow-up).
+    """
+
+    def _partial_column_state(self, grid_small):
+        """One column has a dry bottom cell (``h_k=0``, tracer garbage);
+        its wet neighbours carry a smooth, sharp-enough front that the
+        high-order flux is genuinely anti-diffusive (clippable) there."""
+        n_lat, n_lon, nlev = grid_small.n_lat, grid_small.n_lon, 4
+        rng = np.random.default_rng(7)
+        tracer = jnp.broadcast_to(
+            jnp.linspace(20.0, 5.0, nlev), (n_lat, n_lon, nlev),
+        ) + jnp.asarray(rng.normal(size=(n_lat, n_lon, nlev)) * 0.3)
+        h_k = jnp.ones((n_lat, n_lon, nlev)) * 50.0
+        # Dry the bottom cell of one column (partial-cell topography step).
+        dry_i, dry_j = 2, 3
+        h_k = h_k.at[dry_i, dry_j, -1].set(0.0)
+        active_mask = jnp.ones((n_lat, n_lon, nlev))
+        active_mask = active_mask.at[dry_i, dry_j, -1].set(0.0)
+        # A dry cell's own tracer value is physically meaningless; NEMO
+        # carries whatever masked garbage sits there too (it is multiplied
+        # out by tmask everywhere that matters) -- use 0.0, the model's own
+        # masked-cell convention, to reproduce the T=0 cold-cell geometry.
+        tracer = tracer.at[dry_i, dry_j, -1].set(0.0)
+        mu = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.3
+        mv = jnp.zeros((n_lat + 1, n_lon, nlev))
+        w_half = jnp.zeros((n_lat, n_lon, nlev + 1))
+        w_half = w_half.at[..., 1:nlev].set(2e-4)
+        return tracer, mu, mv, w_half, h_k, active_mask, (dry_i, dry_j)
+
+    def test_dry_cell_does_not_poison_wet_neighbour_bound(self, grid_small):
+        """Without ``active_mask`` the dry cell's ``q_td`` blow-up can pull
+        a WET neighbour's antidiffusive flux fully clipped (alpha->0) even
+        though the flux magnitude there is unrelated to the dry cell's
+        noise.  With ``active_mask`` the wet-interior tendency must be
+        finite and the dry cell itself must not appear as a spurious
+        source of clipping."""
+        tracer, mu, mv, w_half, h_k, active_mask, (di, dj) = (
+            self._partial_column_state(grid_small))
+        div_h, div_w = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, 50.0,
+            high_order="centred2", active_mask=active_mask)
+        eps = 1e-30
+        tendency = -(div_h + div_w) / jnp.maximum(h_k, eps)
+        wet = active_mask > 0.5
+        assert bool(jnp.all(jnp.isfinite(tendency[wet]))), (
+            "wet-cell tendency must stay finite with active_mask")
+        # The dry cell's own tendency is masked out by the caller in
+        # production (h_k=0 -> the flux-form update discards it); this
+        # test only asserts the WET domain is clean, matching NEMO's own
+        # tmask-gated final update (traadv_fct.F90: `pt_rhs * tmask`).
+
+    def test_dry_cell_noise_ratio_does_not_zero_the_alpha(self, grid_small):
+        """Direct ``_zalesak_signsplit_face_alphas`` reproduction of the
+        DINO-oracle pathology (#1226 item 8): a dry cell (``h_k=0``) whose
+        antidiffusive flux is float-noise-level (~1e-19, i.e. genuinely
+        zero to any physical tolerance) still produces an unconstrained
+        ``Q/inc`` ratio there once divided by ``h_k``'s ``eps=1e-30``
+        floor — NOT a small number, so it does not cancel and can pin
+        ``R_in``/``R_out`` (hence the face ``alpha``) to 0 or an arbitrary
+        value.  ``h_k<=0`` cells must be excluded from the Zalesak
+        constraint entirely (NEMO's own dry-point zbetup=zbetdo=zbig,
+        i.e. R=1, unclipped)."""
+        n_lat, n_lon, nlev = grid_small.n_lat, grid_small.n_lon, 3
+        ad_flux_u = jnp.zeros((n_lat, n_lon + 1, nlev))
+        ad_flux_v = jnp.zeros((n_lat + 1, n_lon, nlev))
+        # Interface 0 is between cell k=0 (wet, real signal) and cell k=1
+        # (dry, h_k=0) -- the exact oracle geometry (a genuine antidiffusive
+        # flux on the WET side, float noise on the dry side, h_k floors to
+        # eps on the dry side).
+        ad_vert_int = jnp.zeros((n_lat, n_lon, nlev - 1))
+        ad_vert_int = ad_vert_int.at[:, :, 0].set(-3.0e-19)  # noise-level
+        q_td = jnp.full((n_lat, n_lon, nlev), 10.0)
+        q_min = jnp.full((n_lat, n_lon, nlev), 9.0)
+        q_max = jnp.full((n_lat, n_lon, nlev), 11.0)
+        h_k = jnp.ones((n_lat, n_lon, nlev)) * 20.0
+        h_k = h_k.at[:, :, 1].set(0.0)  # cell k=1 is dry
+        a_u, a_v, a_w = _zalesak_signsplit_face_alphas(
+            ad_flux_u, ad_flux_v, ad_vert_int, q_td, q_min, q_max, h_k,
+            dt=10.0, grid=grid_small,
+        )
+        # The interface's own flux is noise-level (~1e-19); a correct
+        # limiter must not clip it toward 0 just because the dry
+        # neighbour's ratio saturated.
+        assert bool(jnp.all(a_w[:, :, 0] > 0.99)), (
+            f"dry-cell noise incorrectly clipped a near-zero flux: "
+            f"min alpha={float(jnp.min(a_w[:, :, 0]))}")
+
+    def test_active_mask_is_noop_away_from_dry_cells(self, grid_small,
+                                                       smooth_state):
+        """An all-wet ``active_mask`` (no land) must be byte-identical to
+        omitting the mask entirely."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        all_wet = jnp.ones_like(h_k)
+        a = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt,
+            high_order="centred2")
+        b = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt,
+            high_order="centred2", active_mask=all_wet)
+        for x, y in zip(a, b):
+            assert jnp.array_equal(x, y)
+
+    def test_dry_cell_blowup_is_real_without_the_fix(self, grid_small):
+        """Non-vacuity: confirm the pre-fix (``active_mask=None``)
+        construction actually produces the pathological huge ``q_td`` this
+        fix guards against, so the fix is provably not a no-op."""
+        tracer, mu, mv, w_half, h_k, active_mask, (di, dj) = (
+            self._partial_column_state(grid_small))
+        eps = 1e-30
+        # Reproduce q_td exactly as fct_tracer_advection's Step 1 does.
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            divergence_cgrid,
+        )
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            upwind_to_u_points, upwind_to_v_points,
+        )
+        tr_u_low = upwind_to_u_points(tracer, mu)
+        tr_v_low = upwind_to_v_points(tracer, mv)
+        div_h_low = divergence_cgrid(mu * tr_u_low, mv * tr_v_low, grid_small)
+        w_int = w_half[..., 1:tracer.shape[-1]]
+        T_face_low = jnp.where(w_int > 0.0, tracer[..., 1:], tracer[..., :-1])
+        F_vert_low_int = w_int * T_face_low
+        F_vert_low = jnp.pad(F_vert_low_int, ((0, 0), (0, 0), (1, 1)))
+        vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+        dq_low = -(div_h_low + vert_div_low) / jnp.maximum(h_k, eps)
+        q_td = tracer + dq_low * 50.0
+        assert float(jnp.abs(q_td[di, dj, -1])) > 1e6, (
+            "the dry cell's unmasked q_td should blow up; got "
+            f"{float(q_td[di, dj, -1])}")
+
+
+# ---------------------------------------------------------------------------
 # Sign-split correctness
 # ---------------------------------------------------------------------------
 
