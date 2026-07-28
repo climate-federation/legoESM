@@ -116,6 +116,27 @@ import sys
 # The bar.  Roundoff only -- these are NOT tolerances for physics differences.
 BAR_CORR = 1.0 - 1e-9
 BAR_RATIO_EPS = 1e-6
+# PER-ELEMENT bar.  corr and ratio are BOTH aggregate statistics: `ratio` is a
+# MEAN, so mixed-sign per-element errors CANCEL and a term can sit inside
+# BAR_RATIO_EPS while every element is wrong by orders more.  This is not
+# hypothetical -- it was how "bn2 (rn2b)" held AT BAR at ratio 1-6.6e-9 while
+# its OWN note recorded median |rel| 6.96e-6, a thousand times larger; that
+# 7e-6 is exactly what put 10 of DINO's 9920 MLD columns on the wrong level
+# (proved by substituting NEMO's own rn2b into the real zdf_mxl code path:
+# mismatches 10 -> 0, see zdf_mxl_nmln_compare.py).  A term is only AT BAR if
+# its per-element error is ALSO at roundoff.
+BAR_PER_ELEM_EPS = 1e-9
+
+# term -> measured per-element error (median or max |rel|, whichever the
+# measuring probe reports -- record the LARGER when both are known).  Absent =
+# never measured per-element; such a row can still show AT BAR but is counted
+# and reported separately, because it passed on cancelling statistics ALONE.
+# Shrink-only in the same sense as MEASUREMENTS: add entries as terms are
+# re-measured, never delete one to make a row pass.
+PER_ELEMENT: dict[str, float] = {
+    "bn2 (rn2b)": 6.96e-6,       # probe_n2.py, median |rel| [e3t=both]
+    "eos_rab alpha": 4.7e-6,     # probe_n2.py, median rel [e3t=both]
+}
 
 # term -> (corr, ratio, note).  corr/ratio None = never measured at all.
 MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
@@ -805,16 +826,41 @@ MEASURED_AT: dict[str, str] = {
 }
 
 
-def classify(corr: float | None, ratio: float | None) -> str:
+def classify(corr: float | None, ratio: float | None,
+             per_elem: float | None = None) -> str:
+    """AT BAR requires corr, MEAN ratio AND per-element error at roundoff.
+
+    per_elem=None means the per-element error was never measured; the row is
+    then judged on the aggregate statistics alone, which CANNOT see cancelling
+    error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
+    """
     if corr is None or ratio is None:
         return "UNMEASURED"
+    if per_elem is not None and per_elem > BAR_PER_ELEM_EPS:
+        return "DEBT"
     if corr >= BAR_CORR and abs(ratio - 1.0) <= BAR_RATIO_EPS:
         return "AT BAR"
     return "DEBT"
 
 
+def _self_test() -> int:
+    """Synthetic-violation check: the per-element bar must be non-vacuous."""
+    # perfect aggregates, wrecked per-element -> must be DEBT, not AT BAR
+    assert classify(1.0, 1.0, 1e-3) == "DEBT", "per-element bar is VACUOUS"
+    assert classify(1.0, 1.0, None) == "AT BAR"
+    assert classify(1.0, 1.0, 0.0) == "AT BAR"
+    assert classify(0.9, 1.0, 0.0) == "DEBT"
+    # the real regression this bar exists for
+    assert classify(1.0, 0.9999999934, PER_ELEMENT["bn2 (rn2b)"]) == "DEBT"
+    print("self-test OK: per-element bar fires on a cancelling-metric pass")
+    return 0
+
+
 def main() -> int:
-    rows = [(t, c, r, n, classify(c, r)) for t, (c, r, n) in MEASUREMENTS.items()]
+    if "--self-test" in sys.argv:
+        return _self_test()
+    rows = [(t, c, r, n, classify(c, r, PER_ELEMENT.get(t)))
+            for t, (c, r, n) in MEASUREMENTS.items()]
     width = max(len(t) for t, *_ in rows)
     print(f"{'term':<{width}}  {'corr':>12} {'ratio':>12}  status")
     print("-" * (width + 42))
@@ -832,8 +878,15 @@ def main() -> int:
     at_bar = sum(s == "AT BAR" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
+    mean_only = [t for t, c, r, _n, s in rows
+                 if s == "AT BAR" and t not in PER_ELEMENT]
     print(f"\nAT BAR {at_bar} | DEBT {debt} | UNMEASURED {unmeasured} | total {len(rows)}")
-    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}")
+    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}, "
+          f"per-element <= {BAR_PER_ELEM_EPS}")
+    if mean_only:
+        print(f"\nAT BAR on CANCELLING statistics only ({len(mean_only)} of "
+              f"{at_bar}) -- per-element error never measured, so these are "
+              f"NOT proven exact:\n  " + "\n  ".join(mean_only))
     if debt or unmeasured:
         print("\nFAIL: the sweep is NOT complete. Do not describe these as "
               "'matched', 'faithful', 'closed' or 'good enough'.")
