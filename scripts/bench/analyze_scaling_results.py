@@ -182,18 +182,27 @@ def analyze_halo_exchange(data: dict) -> dict[str, Any]:
     results = {}
     for key, info in halo.items():
         if isinstance(info, dict) and "mean_us" in info:
+            # bandwidth_gb_s is None for a world_size==1 profile: a local
+            # device-memory pad, not an inter-rank transfer, so "bandwidth"
+            # is undefined (scaling_diagnostics 2026-07-24 fix). Preserve
+            # None rather than coercing to 0 — 0 GB/s would read as a
+            # pathologically slow link when in fact nothing crossed a rank.
             results[key] = {
                 "mean_us": info["mean_us"],
                 "p95_us": info.get("p95_us", 0),
-                "bandwidth_gb_s": info.get("bandwidth_gb_s", 0),
+                "bandwidth_gb_s": info.get("bandwidth_gb_s"),
+                "local_pad_only": info.get("local_pad_only", False),
                 "bytes_per_exchange": info.get("bytes_per_exchange", 0),
                 "variability_pct": round(
                     info.get("std_us", 0) / info["mean_us"] * 100, 1
                 ) if info["mean_us"] > 0 else 0,
             }
 
-    # Bandwidth assessment
-    max_bw = max((r.get("bandwidth_gb_s", 0) for r in results.values()), default=0)
+    # Bandwidth assessment — skip None (undefined for local-pad profiles);
+    # default None when no exchange reported a real cross-rank bandwidth.
+    _bws = [r["bandwidth_gb_s"] for r in results.values()
+            if r.get("bandwidth_gb_s") is not None]
+    max_bw = max(_bws) if _bws else None
 
     return {
         "exchanges": results,
@@ -202,14 +211,23 @@ def analyze_halo_exchange(data: dict) -> dict[str, Any]:
     }
 
 
-def _halo_assessment(results: dict, peak_bw: float) -> str:
+def _halo_assessment(results: dict, peak_bw: float | None) -> str:
     issues = []
 
+    # No cross-rank bandwidth to assess (world_size==1 local-pad profile):
+    # the exchanges are device-memory shuffles, so a bandwidth verdict would
+    # be a category error. Report that and skip the bandwidth checks.
+    if peak_bw is None:
+        issues.append(
+            "No inter-rank bandwidth measured (single-process / local-pad "
+            "profile) — re-run with world_size>1 to assess halo bandwidth.")
+
     # Check bandwidth utilization (A100 NVLink: ~600 GB/s, PCIe: ~32 GB/s, InfiniBand: ~25 GB/s)
-    if peak_bw < 1.0:
-        issues.append(f"Very low bandwidth ({peak_bw:.1f} GB/s). Check: small message sizes, blocking sendrecv overhead, host-device copies.")
-    elif peak_bw < 10.0:
-        issues.append(f"Low bandwidth ({peak_bw:.1f} GB/s). Consider message aggregation or async overlap.")
+    if peak_bw is not None:
+        if peak_bw < 1.0:
+            issues.append(f"Very low bandwidth ({peak_bw:.1f} GB/s). Check: small message sizes, blocking sendrecv overhead, host-device copies.")
+        elif peak_bw < 10.0:
+            issues.append(f"Low bandwidth ({peak_bw:.1f} GB/s). Consider message aggregation or async overlap.")
 
     # Check variability
     for key, info in results.items():
@@ -316,12 +334,23 @@ def analyze_overlap(data: dict) -> dict[str, Any]:
         "halo_fraction_pct": olap.get("halo_fraction_pct", 0),
         "mean_step_ms": olap.get("mean_step_ms", 0),
         "mean_halo_ms": olap.get("mean_halo_ms", 0),
-        "theoretical_speedup_pct": olap.get("theoretical_speedup_pct", 0),
+        # None when the standalone-halo probe exceeded the full step, i.e.
+        # it was not measuring a component of the step (scaling_diagnostics
+        # 2026-07-24 fix). Pass it through as-is; do not coerce to a number.
+        "measurement_valid": olap.get("measurement_valid", True),
+        "theoretical_speedup_pct": olap.get("theoretical_speedup_pct"),
         "assessment": _overlap_assessment(olap),
     }
 
 
 def _overlap_assessment(olap: dict) -> str:
+    # Refuse to report an overlap verdict from an invalid measurement — the
+    # halo probe was not timing a component of this step, so its fraction is
+    # meaningless (a >100% "halo fraction" is arithmetically impossible).
+    if not olap.get("measurement_valid", True):
+        return (olap.get("invalid_reason")
+                or "Overlap measurement invalid (halo probe not a component "
+                   "of the step) — re-run the diagnosis; no verdict.")
     frac = olap.get("halo_fraction_pct", 0)
     if frac > 30:
         return f"HIGH overlap potential ({frac:.0f}% halo). Implementing async halo exchange could yield significant speedup."
@@ -428,10 +457,12 @@ def rank_bottlenecks(analyses: dict[str, Any]) -> list[dict[str, Any]]:
             ],
         })
 
-    # Halo bandwidth
+    # Halo bandwidth — None means no inter-rank transfer was measured
+    # (local-pad / single-process profile); a "low bandwidth" bottleneck is
+    # not inferable from it, so skip the check rather than treat None as 0.
     halo = analyses.get("halo_exchange", {})
-    peak_bw = halo.get("peak_bandwidth_gb_s", 0)
-    if peak_bw < 5.0 and comm_pct > 10:
+    peak_bw = halo.get("peak_bandwidth_gb_s")
+    if peak_bw is not None and peak_bw < 5.0 and comm_pct > 10:
         bottlenecks.append({
             "priority": 2,
             "category": "halo_bandwidth",

@@ -822,8 +822,13 @@ def main() -> int:
         if is_rank0:
             for k, v in halo_info.items():
                 if isinstance(v, dict) and "mean_us" in v:
-                    print(f"  {k}: {v['mean_us']:.1f} us, "
-                          f"BW={v.get('bandwidth_gb_s', '?')} GB/s")
+                    # bandwidth_gb_s is None for a world_size==1 local pad
+                    # (no inter-rank transfer) — say so instead of printing
+                    # "None GB/s" as if a link were measured.
+                    bw = v.get("bandwidth_gb_s")
+                    bw_str = (f"BW={bw} GB/s" if bw is not None
+                              else "BW=n/a (local pad, no inter-rank transfer)")
+                    print(f"  {k}: {v['mean_us']:.1f} us, {bw_str}")
 
     # ---------------------------------------------------------------
     # [5] Reduction profiling
@@ -872,7 +877,15 @@ def main() -> int:
             rank=rank,
         )
         if is_rank0:
-            print(f"  Halo fraction: {overlap_info['halo_fraction_pct']:.1f}%")
+            # Honor the profiler's validity flag: a standalone halo that
+            # exceeds the full step is not a component of it, so its
+            # fraction is meaningless — refuse it rather than print a
+            # bogus overlap opportunity (scaling_diagnostics 2026-07-24).
+            if overlap_info.get("measurement_valid", True):
+                print(f"  Halo fraction: {overlap_info['halo_fraction_pct']:.1f}%")
+            else:
+                print(f"  Halo fraction: INVALID — "
+                      f"{overlap_info.get('invalid_reason', 'probe not a step component')}")
 
     # ---------------------------------------------------------------
     # XLA profile (optional)
