@@ -20,12 +20,23 @@ Two suspected harness artifacts were checked against every row below.
   (B) the bridge builds ``geom.dx_u/dy_u/dx_v/dy_v`` analytically from
       gphit/gphiv (``create_latlon_geometry``) rather than reading NEMO's own
       e1u/e2u/e1v/e2v from mesh_mask.nc.
-VERDICT: every scratchpad probe that produced a MEASUREMENTS number below was
-ALREADY invoked with ``LEGOESM_NEMO_E3T=both`` (verified by grepping each
-probe's own "Run with:" doc block across both session scratchpads; spot
-re-run of zdftke pdlr/composite, dyn_spg_ts puu_b/un_adv and dyn_hpg/dyn_vor
-with the env var toggled reproduced the SAME numbers to 4+ sig figs) -- (A)
-does NOT contaminate this table. (B) was measured directly: bridge dy_v/dy_T
+VERDICT on (A): mostly clean, with ONE real exception. ~34 of the ~40 rows
+come from probes whose own "Run with:" doc block sets LEGOESM_NEMO_E3T=both.
+Six rows came from probes that never set it (so ran the "off" default): ATF
+filter u/v, dyn_spg_ts puu_b/un_adv, zdftke pdlr, zdftke composite avt/avm,
+and eiv transport u/v (probe_eiv_transport_v2*.py, which superseded a v1 that
+DID set it). All were re-run with the env var toggled:
+  - ATF, dyn_spg_ts, zdftke: reproduce to 4-5 sig figs either way -- (A)
+    REFUTED for those, the residuals are real.
+  - eiv transport u/v: GENUINELY e3t-sensitive. "off" gives corr 0.995918 /
+    ratio 1.0231 (u) and 0.994325 / 1.0150 (v); "both" gives 0.999617 /
+    0.9962 and 0.999103 / 0.9906. The numbers recorded below are the CLEAN
+    ("both") ones. CAVEAT: this improvement is CONFOUNDED with the
+    concurrent eos_depth='geometric' fix (commit f8e6f9488 credits that fix
+    for 0.998474->0.999617 over the same window). Reaching 0.999617/0.996234
+    needs BOTH changes; neither was isolated against a frozen baseline of the
+    other. Do not attribute that gain to a single cause.
+(B) was measured directly: bridge dy_v/dy_T
 vs NEMO's real e2v/e2t agree to ~4-5e-5 relative error at every INTERIOR row;
 the only rows with a real 0.2-0.8% discrepancy are the two channel WALL rows
 (row 0 south, row 198 north) -- not a domain-wide floor. Root cause: on a
@@ -35,8 +46,10 @@ own dx_u/dy_u/dx_v/dy_v fields -- they recompute face metrics inline from
 ``cos_lat``/``dy``/``radius``/``dlon`` every call, so patching those fields
 (or substituting NEMO's e1u/e2u/e1v/e2v into them) is a NO-OP for every
 production tendency; verified empirically for dyn_hpg/dyn_vor/dyn_spg_ts
-(ratio unchanged to 5+ digits after the substitution). Net: NEITHER harness
-artifact explains any DEBT row in this table; each row's number is real.
+(ratio unchanged to 5+ digits after the substitution) AND for ATF and eiv
+transport. Net: (B) explains NO row; (A) explains no row except the eiv
+transport pair, whose recorded numbers are already the clean ones. Every
+other DEBT number below is a real model residual, not a measurement artifact.
 See docs/ocean/fidelity/ (harness-audit note) for the full re-measurement
 log. Per-row notes below are tagged ``[e3t=both]`` where independently
 verified.
@@ -72,8 +85,15 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     "ldf_eiv kappa (aeiu)":          (1.0,        1.000608,   "ratio not 1 [e3t=both per probe_aeiu_v3.py]"),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
-    "eiv transport u":               (0.999617,   0.996234,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996234; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [e3t=both per probe_eiv_transport_v1.py]"),
-    "eiv transport v":               (0.999103,   0.990637,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990637; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT [e3t=both]"),
+    "eiv transport u":               (0.999617,   0.996234,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996234; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [MEASURED AT e3t=both. The superseding "
+                                                              "probe_eiv_transport_v2*.py did NOT set LEGOESM_NEMO_E3T, so the "
+                                                              "'off' default gives corr 0.995918 / ratio 1.0231 -- this term IS "
+                                                              "genuinely e3t-sensitive (unlike every other row audited). The "
+                                                              "0.998474->0.999617 gain is CONFOUNDED between the eos_depth fix "
+                                                              "and e3t=both; both are needed, neither isolated. Do not cite one cause]"),
+    "eiv transport v":               (0.999103,   0.990637,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990637; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT [MEASURED AT e3t=both; "
+                                                              "'off' default gives corr 0.994325 / ratio 1.0150. Same eos_depth-vs-e3t "
+                                                              "confound as the u-component -- see that row]"),
     "traadv_fct fluxes":             (0.99994,    1.000100,   "[e3t=both per probe_fct.py/probe_fct_pure.py]"),
     "traadv_fct tendency (T)":       (0.994500,   None,       "after nonosc bound fix 2a73221ce [e3t=both]"),
     "traadv_fct horizontal tend":    (0.999950,   None,       "limiter itself now correct [e3t=both]"),
