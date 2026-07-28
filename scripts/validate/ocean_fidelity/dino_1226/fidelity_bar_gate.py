@@ -950,14 +950,35 @@ MEASURED_AT: dict[str, str] = {
 }
 
 
+# Rows that are NOT term comparisons.  A stability criterion or a missing-term
+# waiver has no corr/ratio, and forcing 1.0/1.0 onto one to clear the board
+# would be gaming the gate.  Encode them honestly instead:
+#   True  = criterion MEASURED and PASSED
+#   False = criterion MEASURED and FAILED  -> DEBT
+#   None  = still genuinely unmeasured     -> UNMEASURED
+BINARY_GATES: dict[str, bool | None] = {
+    # From rest, 5 full years on NEMO's true e3t_0 ladder: STABLE, no growth.
+    # But the restart-start blow-up (max|u| 0.66 -> 3 m/s over 20 d) is REAL and
+    # unfixed, so the criterion "legoESM runs on NEMO's actual geometry" is only
+    # half met.  FAILED, not passed -- this row does not get to clear on the
+    # easier half of its own criterion.
+    "STABILITY on NEMO true grid (e3t_0)": False,
+}
+
+
 def classify(corr: float | None, ratio: float | None,
-             per_elem: float | None = None) -> str:
+             per_elem: float | None = None, name: str | None = None) -> str:
     """AT BAR requires corr, MEAN ratio AND per-element error at roundoff.
 
     per_elem=None means the per-element error was never measured; the row is
     then judged on the aggregate statistics alone, which CANNOT see cancelling
     error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
     """
+    if name is not None and name in BINARY_GATES:
+        verdict = BINARY_GATES[name]
+        if verdict is None:
+            return "UNMEASURED"
+        return "AT BAR" if verdict else "DEBT"
     if corr is None or ratio is None:
         return "UNMEASURED"
     if per_elem is not None and per_elem > BAR_PER_ELEM_EPS:
@@ -982,14 +1003,18 @@ def _self_test() -> int:
     assert classify(1.0, 0.9999999934, 6.96e-6) == "DEBT"
     # and the fixed value must now pass
     assert classify(1.0, 1.0, 5.880e-16) == "AT BAR"
-    print("self-test OK: per-element bar fires on a cancelling-metric pass")
+    # binary gates must not be clearable by an absent corr/ratio
+    assert classify(None, None, name="STABILITY on NEMO true grid (e3t_0)") == "DEBT"
+    assert classify(None, None, name="not-a-binary-gate") == "UNMEASURED"
+    print("self-test OK: per-element bar fires on a cancelling-metric pass; "
+          "binary gates classify without corr/ratio")
     return 0
 
 
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
-    rows = [(t, c, r, n, classify(c, r, PER_ELEMENT.get(t)))
+    rows = [(t, c, r, n, classify(c, r, PER_ELEMENT.get(t), name=t))
             for t, (c, r, n) in MEASUREMENTS.items()]
     width = max(len(t) for t, *_ in rows)
     print(f"{'term':<{width}}  {'corr':>12} {'ratio':>12}  status")
