@@ -60,7 +60,7 @@ PRECISION="${PRECISION:-float64}"
 NDEV_LIST="${NDEV_LIST:-1 2 3}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/diagnosis_${STAMP}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/diagnosis_${STAMP}_j${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUTDIR"
 
 echo "=== HOST ==="; hostname; date

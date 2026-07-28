@@ -2865,7 +2865,7 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
-def convection_config_for(config):
+def convection_config_for(config, grid_dx_m=None):
     """The ``ConvectionConfig`` (scheme + tuned per-scheme leaf) to build a
     combined-physics convection kernel from.
 
@@ -2876,6 +2876,14 @@ def convection_config_for(config):
     ``convective_precip_efficiency``, ...) silently never reached them —
     the same gap class as the 2026-07-23 hard-sat override. This wraps the
     FV resolver so all lanes share ONE tuned leaf.
+
+    ``grid_dx_m``: the caller's grid spacing [m] (sqrt of mean cell area).
+    Fills Bechtold's IFS ZTAURES ``dx_m`` when the user left the 0.0
+    sentinel — otherwise the deep CAPE closure runs the legacy
+    resolution-agnostic turnover (factor 1.0 instead of ~3 at 2°),
+    over-vigorous convection on coarse meshes (codex 2026-07-23 finding A).
+    An explicit ``bechtold_dx_m``/``--params`` value always wins.  Static
+    Python float — trace-time constant, no retrace.
     """
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 
@@ -2888,6 +2896,9 @@ def convection_config_for(config):
         # Schemes without a leaf slot (or resolver-handled specially) keep
         # the plain scheme selection — the factory dispatch validates it.
         return cc
+    if (scheme == "bechtold" and grid_dx_m is not None
+            and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
+        leaf = leaf._replace(dx_m=float(grid_dx_m))
     return cc._replace(**{scheme: leaf})
 
 
@@ -2982,6 +2993,8 @@ def _resolve_convection(config):
             # scheme default since the 2026-07-16 flip).
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
+            rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
                 config, 'bechtold_use_ifs_downdraft', True),
@@ -3122,6 +3135,67 @@ def validate_microphysics_tracer_slots(
     return need_slots
 
 
+def _thread_morrison_scalars(config, scheme, micro_config):
+    """Forward user-touched ``morrison_*`` flat scalars to the shared applier.
+
+    Explicit attribute reads (not getattr-with-a-variable) so the
+    flag-reachability AST audit can SEE them — a dynamic read is exactly the
+    blind spot its review documented.  Values equal to the ExperimentConfig
+    default are NOT forwarded: the defaults are locked equal to the
+    MorrisonConfig leaves by test, so an untouched config is byte-identical
+    on Morrison and silent on every other scheme.  Shared by the FV
+    (``_resolve_microphysics``) and MPAS (``model_driver``) lanes.
+    """
+    import math
+
+    from legoesm.driver.config import ExperimentConfig as _ExpCfg
+
+    # ONE tolerance for both touched-ness (here, vs the flat default) and
+    # application (in the applier, vs the current leaf): float32-host storage
+    # noise is ~1.2e-7 relative (2^-23), so differences below 1e-6 relative
+    # are treated as THE DEFAULT everywhere — never half-recognised as
+    # "touched" but then not applied (codex 2026-07-26 round 2, item 4).
+    # These are order-of-magnitude process coefficients; a deliberate retune
+    # below 1e-6 relative is physically meaningless.
+    _touched = {}
+    for _exp_name, _leaf_name, _val in (
+        ("morrison_bergeron_rate", "bergeron_rate",
+         getattr(config, "morrison_bergeron_rate", None)),
+        ("morrison_rime_coeff", "rime_coeff",
+         getattr(config, "morrison_rime_coeff", None)),
+        ("morrison_dep_coeff", "dep_coeff",
+         getattr(config, "morrison_dep_coeff", None)),
+        ("morrison_agg_coeff", "agg_coeff",
+         getattr(config, "morrison_agg_coeff", None)),
+        ("morrison_k_au", "k_au",
+         getattr(config, "morrison_k_au", None)),
+        ("morrison_fall_a_i", "fall_a_i",
+         getattr(config, "morrison_fall_a_i", None)),
+        ("morrison_ice_snow_d_auto", "ice_snow_d_auto",
+         getattr(config, "morrison_ice_snow_d_auto", None)),
+        ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
+         getattr(config, "morrison_hom_ice_nuc_N", None)),
+    ):
+        if _val is not None and not math.isclose(
+                float(_val), float(_ExpCfg._field_defaults[_exp_name]),
+                rel_tol=1e-6, abs_tol=0.0):
+            _touched[_leaf_name] = float(_val)
+    # Flavor is a string selector, not a float: forward only when it deviates
+    # from the leaf default ("mg"), mirroring the touched-scalar rule so a
+    # default config stays byte-identical on Morrison and silent elsewhere.
+    _flavor = getattr(config, "morrison_flavor", None)
+    if _flavor in (None, "mg"):
+        _flavor = None
+    if not _touched and _flavor is None:
+        return micro_config
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    return apply_microphysics_experiment_flags(
+        micro_config, scheme, morrison_scalars=_touched,
+        morrison_flavor=_flavor)
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
@@ -3199,9 +3273,17 @@ def _resolve_microphysics(config):
     # so the fail-loud "scheme lacks the field" contract is written once
     # (mirrors the model_driver MPAS call site); validate_strict has already
     # refused an override without the boolean gate.
+    # ``homogeneous_ice_nucleation`` shares this call but is INDEPENDENT of the
+    # hard-sat overrides: both of those default to None, so gating the call on
+    # them alone made the cirrus-nucleation flag SILENTLY INERT on this lane
+    # unless the user happened to also pass --hard-sat-adjust-threshold /
+    # --hard-sat-max-heating-k (measured: morrison.homogeneous_ice_nucleation
+    # stayed False for ExperimentConfig(homogeneous_ice_nucleation=True)).
+    # Include it in the guard so the flag reaches the scheme on its own.
     _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
     _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
-    if _hs_thr is not None or _hs_cap is not None:
+    _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
+    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
         from legoesm.atmosphere.physics.microphysics.config import (
             apply_microphysics_experiment_flags,
         )
@@ -3209,7 +3291,19 @@ def _resolve_microphysics(config):
             micro_config, scheme,
             hard_sat_adjust_threshold=_hs_thr,
             hard_sat_max_heating_K=_hs_cap,
+            homogeneous_ice_nucleation=_hom_nuc,
         )
+
+    # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
+    # scalars, declared with "MorrisonConfig.<field>" comments but NEVER
+    # wired — the flag-reachability audit's cause-1/2 gap).  Threaded through
+    # the SAME shared helper as the flags above so the hard
+    # scheme=="morrison" gate lives in ONE place (Thompson/P3 share leaf
+    # NAMES with different defaults — a presence-keyed overlay here silently
+    # retuned them; codex 2026-07-26 Critical).  Only user-touched values are
+    # forwarded, so a non-Morrison scheme with untouched defaults stays
+    # silent and a Morrison config at defaults is byte-identical.
+    micro_config = _thread_morrison_scalars(config, scheme, micro_config)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -3371,6 +3465,60 @@ def _resolve_turbulence(config):
 # Gravity wave drag resolver
 # ---------------------------------------------------------------------------
 
+def gwd_config_for(config):
+    """The ``GravityWaveDragConfig`` (scheme + tuned per-scheme leaves) to
+    build a gravity-wave-drag kernel from.
+
+    Third member of the resolver family (:func:`turbulence_config_for`,
+    :func:`convection_config_for`): every lane — FV pipeline, MPAS,
+    spectral — previously built ``GravityWaveDragConfig(scheme=...)`` from
+    the scheme STRING alone, so the tuned ExperimentConfig scalars
+    (``mcfarlane_k_wave`` / ``mcfarlane_directional_spread`` /
+    ``mcfarlane_tau_max``, and the Hines launch amplitude) silently never
+    reached the kernel on ANY production AMIP path; only the AIMIP training
+    path consumed them.  Same gap class as the 2026-07-23 convection and
+    hard-sat overrides.
+
+    ``config.gravity_wave_drag_override`` (a full config whose ``scheme``
+    must equal ``config.gravity_wave_drag`` — enforced by
+    ``validate_strict``) still wins verbatim: an explicitly injected config
+    is never second-guessed by the scalar overlay.
+
+    COMPOSITE schemes ("mcfarlane+hines") carry BOTH leaves, so the overlay
+    is applied per-leaf independently of which names appear in the string.
+    Static Python floats — trace-time constants, no retrace.
+    """
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+
+    scheme = getattr(config, "gravity_wave_drag", "none")
+    override = getattr(config, "gravity_wave_drag_override", None)
+    if override is not None:
+        return override
+    gc = GravityWaveDragConfig(scheme=scheme)
+    if scheme == "none":
+        return gc
+    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
+    # NOT wired: no McFarlaneConfig field of that name exists (dangling
+    # ExperimentConfig scalar, tracked separately).
+    mc = gc.mcfarlane._replace(
+        k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
+        directional_spread=float(getattr(
+            config, "mcfarlane_directional_spread",
+            gc.mcfarlane.directional_spread)),
+        tau_max=float(getattr(config, "mcfarlane_tau_max",
+                              gc.mcfarlane.tau_max)),
+    )
+    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    hn = gc.hines._replace(
+        total_rms_wind=float(getattr(config, "hines_total_rms_wind",
+                                     gc.hines.total_rms_wind)),
+        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
+    )
+    return gc._replace(mcfarlane=mc, hines=hn)
+
+
 def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
@@ -3388,16 +3536,11 @@ def _resolve_gwd(config):
     if scheme == "none":
         return None, None
 
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-        GravityWaveDragConfig,
-    )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
         get_gwd_fn,
     )
 
-    override = getattr(config, 'gravity_wave_drag_override', None)
-    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
-    _name, gwd_fn, gwd_config = get_gwd_fn(gc)
+    _name, gwd_fn, gwd_config = get_gwd_fn(gwd_config_for(config))
     return gwd_fn, gwd_config
 
 

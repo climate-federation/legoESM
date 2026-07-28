@@ -295,6 +295,20 @@ class DiagnosticCollector:
         self._spatial_monthly = None
         self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
         self._voronoi_regrid_weights = None  # cached MPAS cell → lat-lon weights
+        # #1353 sampling honesty: CMOR var names whose feed is a per-interval
+        # SNAPSHOT rather than a time integral (lean MPAS path at
+        # diag_days >= 1).  The writer stamps honest cell_methods/comment
+        # attrs on these instead of the bare table ``time: mean``.
+        # None/empty = table defaults everywhere (cube/lat-lon
+        # segment-accumulated path).  ``cmip_snapshot_cadence_days`` is the
+        # sampling cadence the labels describe (1.0 = once-daily 00 UTC).
+        self.cmip_snapshot_vars: set | None = None
+        self.cmip_snapshot_cadence_days: float = 1.0
+        # Time-of-day the snapshots land at, as a fraction of a day, when the
+        # cadence is a whole number of days (a fractional ``start_day`` /
+        # ``--restart-start-day`` moves it off 00 UTC — never assert 00 UTC,
+        # derive it; codex-10).  None => unknown, describe as "fixed phase".
+        self.cmip_snapshot_phase_frac: float | None = None
         # Time axis reference is the experiment start year (CMIP6 AMIP
         # convention: ``days since <start_year>-01-01``), which makes the
         # stored time values start at zero and decode to the correct
@@ -1279,6 +1293,12 @@ class DiagnosticCollector:
         precip=None,
         phis=None,
         tas=None,
+        rlut=None,
+        rsut=None,
+        rsdt=None,
+        hfss=None,
+        hfls=None,
+        flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
         accumulators from NATIVE-grid host arrays, bypassing the heavy
@@ -1307,16 +1327,20 @@ class DiagnosticCollector:
 
         Sampling / accuracy caveats (documented, not silently hidden):
 
-        * The lean MPAS loop has no per-interval time integrator, so each fed
-          value is the INSTANTANEOUS end-of-interval sample, not an interval
-          mean.  At the common ``diag_days=1`` cadence the monthly means are an
-          average of one snapshot per day (diurnally aliased at the fixed
-          diagnostic phase — the same alias :meth:`collect`'s ``t_low_mean``
-          mitigation targets), the daily-table extremes ``tasmin``/``tasmax``
-          collapse to that single sample, and ``pr`` is the last physics-step
-          rate rather than an accumulated flux.  Sub-daily ``diag_days`` give
-          proper multi-sample means/extrema; a device-side interval accumulator
-          is the follow-up for bias-free daily/monthly ``pr``.
+        * STATE-derived fields (``tas``/``ps``/``psl``/``prw`` and the 3-D
+          ``ta``/``hus``/``ua``/``va``) are the INSTANTANEOUS end-of-interval
+          sample, not an interval mean.  At the common ``diag_days=1`` cadence
+          their monthly means average one fixed-phase snapshot per day
+          (diurnally aliased — the same alias :meth:`collect`'s ``t_low_mean``
+          mitigation targets) and the daily-table extremes
+          ``tasmin``/``tasmax`` collapse to that single sample; the driver
+          marks them ``cell_methods = "time: point"`` via
+          ``cmip_snapshot_vars`` (#1353).  The FLUX fields
+          (``precip``/``rlut``/``rsut``/``rsdt``/``hfss``/``hfls``) are fed as
+          per-step interval MEANS by the MPAS driver's ``_MPASSfcFluxAccum``
+          (#1353), so their ``time: mean`` label is true at any diag cadence.
+          Sub-daily ``diag_days`` gives multi-sample means for the state
+          fields too.
         * ``ua850``/``va850`` come from :meth:`_interp_to_plev19`, which BOUNDED
           -extrapolates below the lowest model level (inherited shared-helper
           behaviour, identical to :meth:`collect`; not masked to NaN).
@@ -1379,6 +1403,30 @@ class DiagnosticCollector:
 
         doy, _ = day_to_calendar(day)
         year = int(day // 365.0)
+        # #1353 (codex-1 BLOCKER 1): interval-MEAN flux fields cover
+        # [day - flux_interval_days, day], so calendar-bin them at the
+        # interval MIDPOINT — endpoint binning would push each month's last
+        # daily mean into the next month (Jan-31's [30,31] mean landing in
+        # February) and shift daily ``pr`` one interval late.  The feed
+        # cadence divides the day evenly in practice (diag_days = 1 or
+        # 1/2^k), so intervals never straddle a month boundary and midpoint
+        # binning is exact.  State-snapshot fields keep the endpoint ``day``
+        # (they ARE the state at ``day``).
+        if flux_interval_days:
+            # No clamp at 0: negative-epoch runs are supported and
+            # ``day_to_calendar``/``//`` handle negatives consistently
+            # (Python floor semantics) — clamping shifted the first
+            # interval of such a run into the wrong bucket (codex-3 LOW).
+            _flux_day = float(day) - 0.5 * float(flux_interval_days)
+            flux_doy, _ = day_to_calendar(_flux_day)
+            flux_year = int(_flux_day // 365.0)
+        else:
+            flux_doy, flux_year = doy, year
+        # Flux-field name sets (Amon spatial / daily / zonal) used to split
+        # the PHASE-2 commits between the two calendar bins.
+        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl")
+        _FLUX_DAILY = ("pr",)
+        _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
         # (object/string) input raises HERE, in PHASE 1, instead of inside an
@@ -1407,6 +1455,14 @@ class DiagnosticCollector:
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
         phis_np = None if phis is None else np.asarray(phis, dtype=_f64)
+        # TOA / surface-flux CMOR fields (already in CMOR sign conventions:
+        # rlut/rsut/hfss/hfls positive up, rsdt positive down; see the
+        # radiation/turbulence packers).
+        rlut_np = None if rlut is None else np.asarray(rlut, dtype=_f64)
+        rsut_np = None if rsut is None else np.asarray(rsut, dtype=_f64)
+        rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
+        hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
+        hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1421,6 +1477,11 @@ class DiagnosticCollector:
             ("precip", precip_np, (_ncol,)),
             ("phis", phis_np, (_ncol,)),
             ("tas", tas_field, (_ncol,)),
+            ("rlut", rlut_np, (_ncol,)),
+            ("rsut", rsut_np, (_ncol,)),
+            ("rsdt", rsdt_np, (_ncol,)),
+            ("hfss", hfss_np, (_ncol,)),
+            ("hfls", hfls_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
@@ -1451,11 +1512,25 @@ class DiagnosticCollector:
         fields_3d: dict[str, np.ndarray] = {}
         daily_2d: dict[str, np.ndarray] = {}
         if have_spatial:
+            # evspsbl [kg/m2/s] = latent heat flux / L_v. PRE-EXISTING
+            # documented approximation for this lane: no sublimation split
+            # (L_s over ice-covered cells => ~13% undercount there; see
+            # coupling_fields.surface_mass_flux for the phase-aware form),
+            # matching the bulk-flux scheme's own L_v-only partition of
+            # lhflx.  Wiring the phase-aware flux needs the ice fraction in
+            # this feed — tracked as a follow-up, unchanged by #1353.
+            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
             for _name, _src in (
                 ('tas', tas_field),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('psl', psl),
+                ('rlut', rlut_np),
+                ('rsut', rsut_np),
+                ('rsdt', rsdt_np),
+                ('hfss', hfss_np),
+                ('hfls', hfls_np),
+                ('evspsbl', evspsbl_np),
             ):
                 if _src is None:
                     continue
@@ -1530,21 +1605,65 @@ class DiagnosticCollector:
                 z3d['q_v'] = q_v_np * 1000.0             # [g/kg]
 
         # ================================================================
-        # PHASE 2 — commit (cheap, shape-checked add_* only).
+        # PHASE 2 — commit (cheap, shape-checked add_* only).  Flux fields
+        # commit under the interval-midpoint calendar bin, state snapshots
+        # under the endpoint bin (identical when flux_interval_days unset —
+        # the split dicts are then committed in one call each; the
+        # accumulators keep per-FIELD (sum, count) pairs, so a split commit
+        # changes no mean).
         # ================================================================
+        def _split(d: dict, flux_names) -> tuple[dict, dict]:
+            flux = {k: v for k, v in d.items() if k in flux_names}
+            state = {k: v for k, v in d.items() if k not in flux_names}
+            return state, flux
+
+        # Same CALENDAR BUCKET (year, month) — not same doy: away from month
+        # boundaries the midpoint and endpoint fall in the same month and
+        # the commit stays a single legacy add_* call per accumulator.
+        _same_bin = (
+            flux_year == year
+            and (MonthlyAccumulator.day_to_month(flux_doy)
+                 == MonthlyAccumulator.day_to_month(doy)))
         fed = False
         if have_spatial:
-            if fields_2d:
-                self._spatial_monthly.add_2d(doy, year, fields_2d)
+            _state_2d, _flux_2d = _split(fields_2d, _FLUX_2D)
+            if _same_bin:
+                _state_2d, _flux_2d = fields_2d, {}
+            if _state_2d:
+                self._spatial_monthly.add_2d(doy, year, _state_2d)
+                fed = True
+            if _flux_2d:
+                self._spatial_monthly.add_2d(flux_doy, flux_year, _flux_2d)
                 fed = True
             if fields_3d:
                 self._spatial_monthly.add_3d(doy, year, fields_3d)
                 fed = True
             if daily_2d and self._spatial_daily is not None:
-                self._spatial_daily.add_2d(doy, year, daily_2d)
-                fed = True
+                # DAILY buckets are per (year, int(doy)) — finer than the
+                # monthly month bucket, so the collapse test is DAY
+                # equality, not month equality (codex-2 finding 7: a
+                # month-level collapse binned interior daily pr at the
+                # interval ENDPOINT day, re-introducing the one-day lag
+                # for every day except month boundaries).
+                _same_day = (flux_year == year
+                             and int(flux_doy) == int(doy))
+                _state_d, _flux_d = _split(daily_2d, _FLUX_DAILY)
+                if _same_day:
+                    _state_d, _flux_d = daily_2d, {}
+                if _state_d:
+                    self._spatial_daily.add_2d(doy, year, _state_d)
+                    fed = True
+                if _flux_d:
+                    self._spatial_daily.add_2d(flux_doy, flux_year, _flux_d)
+                    fed = True
         if have_zonal:
-            self.monthly_accum.add_2d(doy, year, z2d, lat_np)
+            _state_z, _flux_z = _split(z2d, _FLUX_ZONAL)
+            if _same_bin:
+                _state_z, _flux_z = z2d, {}
+            if _state_z:
+                self.monthly_accum.add_2d(doy, year, _state_z, lat_np)
+            if _flux_z:
+                self.monthly_accum.add_2d(flux_doy, flux_year, _flux_z, lat_np)
             self.monthly_accum.add_3d(doy, year, z3d, lat_np)
             fed = True
 
@@ -1682,7 +1801,12 @@ class DiagnosticCollector:
         if not data.get('days'):
             return
         lat, lon = self._cmip_target_latlon()
-        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+        # Same honesty overrides as the end-of-run writer — without this
+        # the restart-chain path (which writes MOST day files on long
+        # runs) kept the misleading table defaults (codex-2 finding 4).
+        self.cf_writer.write_daily(
+            data, lat=lat, lon=lon,
+            extra_attrs_by_var=self._daily_snapshot_attrs())
 
     def finalize_cmip_fixed(self) -> None:
         """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
@@ -1858,6 +1982,84 @@ class DiagnosticCollector:
         )
         return lat, lon
 
+    def _snapshot_phase_text(self) -> str:
+        """Human text for the snapshot sampling phase (#1353 codex-10).
+
+        A whole-day cadence samples at a FIXED time of day, but that time is
+        00 UTC only when the run's day counter is integral — a fractional
+        ``start_day`` / ``--restart-start-day`` shifts it.  Derive it from
+        ``cmip_snapshot_phase_frac`` instead of asserting 00 UTC; say
+        "a fixed time of day" when the phase was not supplied.
+        """
+        frac = getattr(self, "cmip_snapshot_phase_frac", None)
+        if frac is None:
+            return "a fixed time of day"
+        frac = float(frac) % 1.0
+        if abs(frac) < 1e-9 or abs(frac - 1.0) < 1e-9:
+            return "00 UTC"
+        _sec = int(round(frac * 86400.0)) % 86400
+        if _sec == 0:                      # rounded across midnight
+            return "00 UTC"
+        return f"{_sec // 3600:02d}:{(_sec % 3600) // 60:02d} UTC"
+
+    def _daily_snapshot_attrs(self) -> dict | None:
+        """Per-var honesty overrides for the CMIP ``day`` table on the
+        snapshot-sampled feed (#1353 codex-1 MAJOR 3): tas/psl/ua850/va850
+        "daily means" are a single fixed-phase sample per diag interval and
+        tasmin/tasmax are extrema OF that sample — label ``time: point``.
+        ``pr`` is a true interval mean (per-step accumulator) and keeps the
+        table's ``time: mean``.  None when the feed is not snapshot-mode
+        (cube/lat-lon path, or sub-daily sampling)."""
+        if not self.cmip_snapshot_vars:
+            return None
+        _cad = float(getattr(self, "cmip_snapshot_cadence_days", 1.0))
+        # The day-table time axis is the shared writer's day-midpoint with
+        # whole-day bounds; the sample itself is taken at the interval END
+        # (00 UTC on the following day boundary).  Say so explicitly rather
+        # than re-time the axis, which would desynchronise this table from
+        # every other producer feeding the same writer (codex-3 MED).
+        # A cadence that is a whole number of days keeps a FIXED sampling
+        # phase (00 UTC).  A fractional one — e.g. dt=10000 s truncating the
+        # requested diag_days=1 to 8 steps = 0.926 d — DRIFTS through the
+        # day, so a day bucket can hold 0, 1 or 2 samples and the written
+        # value is their mean.  Do not claim "one sample at 00 UTC" there
+        # (codex-9).
+        if abs(_cad - round(_cad)) < 1e-9:
+            # Exactly one instantaneous sample lands in the day cell, so
+            # ``time: point`` is literally true (the extremes degenerate to
+            # that same sample).
+            _phase = self._snapshot_phase_text()
+            _pt = {"cell_methods": "time: point",
+                   "comment": (
+                       f"Single instantaneous sample per {_cad:g}-day diag "
+                       f"interval, taken at the interval END ({_phase}), not "
+                       f"at the recorded day midpoint (lean MPAS path).")}
+            _ext = {"cell_methods": "time: point",
+                    "comment": (
+                        f"Extremum of ONE instantaneous end-of-interval "
+                        f"sample ({_phase}) per {_cad:g}-day interval — NOT "
+                        f"a true daily extreme (lean MPAS path).")}
+        else:
+            # Drifting phase: a day cell holds 0, 1 or 2 samples and the
+            # written value is their MEAN, so ``time: point`` would be
+            # false; keep the table's mean/minimum/maximum cell_methods and
+            # let the comment disclose the sparse, drifting sampling.
+            _pt = {"comment": (
+                f"Mean of the 0-2 instantaneous samples that fell in this "
+                f"day: sampling is every {_cad:.6g} days at a DRIFTING "
+                f"phase (the integer step count truncates the requested "
+                f"cadence) — sparsely sampled, not a continuous daily mean "
+                f"(lean MPAS path).")}
+            _ext = {"comment": (
+                f"Extremum over the 0-2 instantaneous samples that fell in "
+                f"this day at a drifting {_cad:.6g}-day cadence — NOT a "
+                f"true daily extreme (lean MPAS path).")}
+        # ua850/va850 derive from the snapshot ua/va; all four state
+        # day-fields are snapshot-sampled under this mode.
+        out = {v: _pt for v in ("tas", "psl", "ua850", "va850")}
+        out.update({"tasmin": _ext, "tasmax": _ext})
+        return out
+
     def _write_cmip_daily_files(self) -> None:
         """Flush the daily accumulator to CMIP6 ``day`` NetCDF files."""
         if self._spatial_daily is None or self.cf_writer is None:
@@ -1866,7 +2068,9 @@ class DiagnosticCollector:
         if not data.get("days"):
             return
         lat, lon = self._cmip_target_latlon()
-        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+        self.cf_writer.write_daily(
+            data, lat=lat, lon=lon,
+            extra_attrs_by_var=self._daily_snapshot_attrs())
 
     def _write_cmip_fixed_files(self) -> None:
         """Write the CMIP6 ``fx`` file (orog / sftlf / areacella).
@@ -1964,6 +2168,46 @@ class DiagnosticCollector:
             time_mid = 0.5 * (day_start + day_end)
             time_bounds = (day_start, day_end)
 
+            snap_vars = self.cmip_snapshot_vars or ()
+            # CF-truthful label for a monthly mean built from sparse
+            # instantaneous samples (#1353 codex-1 BLOCKER 2: plain
+            # ``time: point`` would claim a single instant while the value
+            # IS a mean — of point samples, not of the continuous field).
+            # At exactly daily cadence CF has a precise two-part encoding;
+            # at coarser cadences no CF string fits, so the table
+            # ``time: mean`` stands and the comment carries the truth
+            # (codex-2 finding 3).
+            _cad = float(getattr(self, "cmip_snapshot_cadence_days", 1.0))
+            _phase_txt = self._snapshot_phase_text()
+            if _cad == 1.0:
+                _snap_attrs = {
+                    "cell_methods":
+                        "time: point within days time: mean over days",
+                    "comment": (
+                        f"Monthly mean of once-daily instantaneous samples "
+                        f"at {_phase_txt} (lean MPAS path, diag_days=1); "
+                        f"diurnally aliased — not a continuous time mean."),
+                }
+            elif abs(_cad - round(_cad)) < 1e-9:
+                _snap_attrs = {
+                    "comment": (
+                        f"Monthly mean of instantaneous samples taken once "
+                        f"per {_cad:g} days at a fixed phase ({_phase_txt}; "
+                        f"lean MPAS path); sparsely sampled — not a "
+                        f"continuous time mean."),
+                }
+            else:
+                # Fractional cadence: the sampling phase DRIFTS through the
+                # day, so no fixed-phase claim (codex-9).
+                _snap_attrs = {
+                    "comment": (
+                        f"Monthly mean of instantaneous samples taken every "
+                        f"{_cad:.6g} days at a DRIFTING phase (the integer "
+                        f"step count truncates the requested cadence; lean "
+                        f"MPAS path); sparsely sampled — not a continuous "
+                        f"time mean."),
+                }
+
             for key, arr in data.items():
                 if not key.startswith("field_2d_"):
                     continue
@@ -1979,6 +2223,8 @@ class DiagnosticCollector:
                         time_bounds=time_bounds,
                         lat=lat,
                         lon=lon,
+                        extra_attrs=(
+                            _snap_attrs if var_name in snap_vars else None),
                     )
                 except (KeyError, ValueError):
                     pass
@@ -2004,6 +2250,8 @@ class DiagnosticCollector:
                         lat=lat,
                         lon=lon,
                         plev=plev,
+                        extra_attrs=(
+                            _snap_attrs if var_name in snap_vars else None),
                     )
                 except (KeyError, ValueError):
                     pass

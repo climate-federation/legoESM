@@ -35,8 +35,12 @@ Launch:
     #PBS -l select=6:ncpus=64:mpiprocs=4:ngpus=4
     mpiexec -n 24 python scripts/bench/bench_cube_tiled_step_scaling.py \
         --kt 2 --resolution 192 --nlev 60 --steps 12 --multicontroller
-  Levante (SLURM, 24 GPUs = 6 nodes x 4):
-    srun -N6 --ntasks-per-node=4 --gpus-per-task=1 \
+  Levante (SLURM, 24 GPUs = 6 nodes x 4) — leave ALL node GPUs visible
+  (--gpu-bind=none); bare jax.distributed.initialize() under SLURM binds
+  the SLURM_LOCALID-th device per task. Do NOT pin one GPU per task
+  (--gpus-per-task=1 / CUDA_VISIBLE_DEVICES shims): the pinned device
+  renumbers to ordinal 0 while jax asks for ordinal LOCALID (job 26446699):
+    srun -N6 --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none \
         python scripts/bench/bench_cube_tiled_step_scaling.py \
         --kt 2 --resolution 192 --nlev 60 --steps 12 --multicontroller
 """
@@ -299,8 +303,14 @@ def main() -> int:
     if args.closed_loop:
         # A feedback trajectory can blow up where pristine-input samples
         # cannot — never record a timing row for a non-finite integration.
-        _finite = all(bool(np.all(np.isfinite(np.asarray(x))))
-                      for x in jax.tree.leaves(s))
+        # Reduce ON DEVICE: under multicontroller the state shards span
+        # non-addressable devices, so np.asarray(x) raises (job 26450318);
+        # a jitted global all-reduce yields a fully-replicated scalar every
+        # process may fetch.
+        import jax.numpy as jnp
+
+        _isfinite_all = jax.jit(lambda t: jnp.all(jnp.isfinite(t)))
+        _finite = all(bool(_isfinite_all(x)) for x in jax.tree.leaves(s))
         if not _finite:
             print("ERROR: closed-loop state went non-finite during the "
                   "timed window — refusing to record the row.", flush=True)

@@ -47,3 +47,21 @@ def test_sbm_tuning_reaches_leaf():
 def test_none_passthrough():
     cc = convection_config_for(_cfg(convection="none"))
     assert cc.scheme == "none"
+
+
+def test_bechtold_grid_dx_autofill():
+    # Sentinel dx_m=0.0 + caller grid spacing -> ZTAURES dx filled in.
+    cc = convection_config_for(_cfg(convection="bechtold"), grid_dx_m=223e3)
+    assert cc.bechtold.dx_m == 223e3
+
+
+def test_bechtold_explicit_dx_wins_over_grid():
+    cc = convection_config_for(
+        _cfg(convection="bechtold", bechtold_dx_m=50e3), grid_dx_m=223e3)
+    assert cc.bechtold.dx_m == 50e3
+
+
+def test_grid_dx_ignored_for_non_bechtold():
+    cc = convection_config_for(_cfg(convection="sbm"), grid_dx_m=223e3)
+    assert cc.scheme == "sbm"
+    assert not hasattr(cc.sbm, "dx_m")

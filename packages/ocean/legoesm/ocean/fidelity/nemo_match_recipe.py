@@ -41,6 +41,7 @@ from legoesm.ocean.physics.convection.config import (
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig,
     LateralMixingConfig,
+    TreguierConfig,
     VisbeckConfig,
 )
 from legoesm.ocean.physics.surface_forcing.config import (
@@ -135,6 +136,15 @@ class NEMOMatchMPASRecipeConfig:
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
     redi_S_max: float = 0.005
+    # NEMO ldf_eiv flow-dependent kappa_GM (`nn_aei_ijk_t=21`: aeiu/aeiv =
+    # F(growth rate of baroclinic instability), capped at aei0 = rn_Ue*rn_Le).
+    # ORCA1 runs `ln_ldfeiv=.true., nn_aei_ijk_t=21, rn_Ue=0.018, rn_Le=100e3`
+    # => aei0 = 1800 m^2/s, i.e. NEMO uses a SPACE/TIME-VARYING coefficient where
+    # this recipe otherwise pins the constant `kappa_GM` above.  False keeps the
+    # constant (byte-identical default); True selects the NEMO-faithful scaling
+    # (TreguierConfig — already used by the DINO oracle card).
+    gm_treguier: bool = False
+    gm_aei0: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -191,17 +201,37 @@ class NEMOMatchTripoleRecipeConfig:
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
     redi_S_max: float = 0.005
+    # NEMO ldf_eiv flow-dependent kappa_GM (`nn_aei_ijk_t=21`: aeiu/aeiv =
+    # F(growth rate of baroclinic instability), capped at aei0 = rn_Ue*rn_Le).
+    # ORCA1 runs `ln_ldfeiv=.true., nn_aei_ijk_t=21, rn_Ue=0.018, rn_Le=100e3`
+    # => aei0 = 1800 m^2/s, i.e. NEMO uses a SPACE/TIME-VARYING coefficient where
+    # this recipe otherwise pins the constant `kappa_GM` above.  False keeps the
+    # constant (byte-identical default); True selects the NEMO-faithful scaling
+    # (TreguierConfig — already used by the DINO oracle card).
+    gm_treguier: bool = False
+    gm_aei0: float = 1800.0
 
 
 def _nemo_match_gm_redi(cfg) -> GMRediConfig | None:
     """Build the shared GM/Redi block both proven configs use, or None."""
     if not cfg.gm_redi:
         return None
+    # NEMO ORCA1 runs GM with a FLOW-DEPENDENT coefficient (&namtra_eiv:
+    # ln_ldfeiv=T, nn_aei_ijk_t=21 => aeiu/aeiv = F(growth rate of baroclinic
+    # instability), capped at aei0 = rn_Ue*rn_Le = 0.018*100e3 = 1800 m^2/s;
+    # ldftra.F90:386).  `gm_treguier=True` selects that scaling (TreguierConfig,
+    # the same block the DINO oracle card uses); the default keeps the constant
+    # `kappa_GM` so existing runs stay byte-identical.  Treguier and Visbeck are
+    # mutually exclusive (both are adaptive-kappa schemes) — enforced by
+    # GMRediConfig, so Visbeck stays disabled on both branches.
+    _treguier = TreguierConfig(enabled=True, aei0=cfg.gm_aei0) \
+        if getattr(cfg, "gm_treguier", False) else TreguierConfig()
     return GMRediConfig(
         kappa_GM=cfg.kappa_GM,
         kappa_Redi=cfg.kappa_Redi,
         S_max=cfg.redi_S_max,
         visbeck=VisbeckConfig(enabled=False),
+        treguier=_treguier,
         slope_scheme="centered",
     )
 

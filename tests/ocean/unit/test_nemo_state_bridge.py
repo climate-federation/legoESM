@@ -7,8 +7,9 @@ placement.
 """
 import numpy as np
 
-from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
+from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
+    bridge_before_state_topo,
     bridge_nemo_to_legoesm,
     bridge_nemo_to_legoesm_topo,
 )
@@ -261,3 +262,76 @@ def test_topo_bridge_variable_dlat_uses_faces():
     # And the southernmost row (driven by the reflected south face) is correct.
     e2t_south = constants.R_earth * (lat_face[1] - lat_face[0])
     assert abs(float(dy_T[0, 0]) - e2t_south) < 1e-6 * e2t_south
+
+
+# ---------------------------------------------------------------------------
+# bridge_before_state_topo (#1317 leap-frog before-level bridge)
+# ---------------------------------------------------------------------------
+def _synthetic_before(grid, rng_seed=3):
+    rng = np.random.default_rng(rng_seed)
+    ny, nx, nz = grid.tmask.shape
+    return NemoBeforeState(
+        T=15.0 + rng.random((ny, nx, nz)), S=35.0 + rng.random((ny, nx, nz)),
+        u=rng.random((ny, nx, nz)), v=rng.random((ny, nx, nz)),
+        ssh=0.01 * rng.random((ny, nx)),
+        tau_x=0.1 * rng.random((ny, nx)), tau_y=0.1 * rng.random((ny, nx)),
+    )
+
+
+def test_bridge_before_state_topo_populates_before_fields():
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    before = _synthetic_before(grid)
+
+    st = bridge_before_state_topo(br, grid, before, periodic_i=True)
+    assert st.T_before is not None and st.T_before.data.shape == (TNY, TNX, TNZ)
+    assert st.S_before is not None
+    assert st.u_before.data.shape == br.state.u.data.shape
+    assert st.v_before.data.shape == br.state.v.data.shape
+    assert st.eta_before.data.shape == br.state.eta.data.shape
+    assert st.tau_x_prev is not None
+    assert st.tau_y_prev is not None
+
+    # SAME staggering convention as the now-level bridge: NEMO u -> west-wall
+    # prepend (or periodic wrap), NEMO v -> south-wall prepend.
+    wet3 = grid.tmask > 0.5
+    u_before = np.asarray(st.u_before.data)
+    assert np.allclose(u_before[:, 1:, :][wet3], before.u[wet3])
+    v_before = np.asarray(st.v_before.data)
+    assert np.allclose(v_before[1:, :, :][wet3], before.v[wet3])
+    assert np.allclose(np.asarray(st.eta_before.data), before.ssh)
+    assert np.allclose(np.asarray(st.tau_x_prev), before.tau_x)
+    assert np.allclose(np.asarray(st.tau_y_prev), before.tau_y)
+
+    # T/S at wet cells match the raw restart exactly (only dry cells are
+    # Neumann-filled, same as the now-level T/S bridge).
+    assert np.allclose(np.asarray(st.T_before.data)[wet3], before.T[wet3])
+    assert np.allclose(np.asarray(st.S_before.data)[wet3], before.S[wet3])
+
+    # now-level fields are untouched (this function is purely additive).
+    assert np.allclose(np.asarray(st.T.data), np.asarray(br.state.T.data))
+
+
+def test_bridge_before_state_topo_missing_tau_leaves_prev_none():
+    """A restart without utau_b/vtau_b (NemoBeforeState.tau_x/tau_y=None)
+    leaves state.tau_x_prev/tau_y_prev at their None default -- the
+    _leapfrog_step Euler-start branch (gated on state.u_before, not
+    tau_x_prev) still seeds "before := now" for the centred-forcing carry
+    on step 1, matching the NEMO nit000 convention."""
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    before = _synthetic_before(grid)._replace(tau_x=None, tau_y=None)
+
+    st = bridge_before_state_topo(br, grid, before, periodic_i=True)
+    assert st.u_before is not None   # velocity/tracer before-state still set
+    assert st.tau_x_prev is None
+    assert st.tau_y_prev is None
+
+
+def test_bridge_before_state_topo_closed_basin_u_wall():
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=False)
+    before = _synthetic_before(grid)
+    st = bridge_before_state_topo(br, grid, before, periodic_i=False)
+    u_before = np.asarray(st.u_before.data)
+    assert np.allclose(u_before[:, 0, :], 0.0)   # closed -> west wall, not periodic

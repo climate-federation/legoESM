@@ -174,6 +174,34 @@ class DINOConfig:
     # dynspg_ts.F90 ~L360).  Requires wind_through_step=True (the stress must
     # reach model.step's surface_forcing).  Default False = prior behaviour.
     surface_stress_implicit: bool = False
+    # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
+    # / zdf_baroclinic_only docstrings for the full transcription. Threaded
+    # 1:1 (same field names) to the model config. Default False on both =
+    # bit-identical.
+    zdf_drag_in_matrix: bool = False
+    zdf_baroclinic_only: bool = False
+    # NEMO dyn_drg in-subcycle barotropic drag (#1226): see
+    # LatLonCGridOceanConfig.barotropic_drag_substep. Threaded 1:1.
+    # Requires zdf_drag_in_matrix=True + zdf_baroclinic_only=True (NEMO's
+    # DINO composition ln_drgimp=T + ln_dynspg_ts=T). Default False =
+    # bit-identical.
+    barotropic_drag_substep: bool = False
+    # NEMO ln_bt_fw=.FALSE. centred barotropic slow forcing (#1226 item 3):
+    # see LatLonCGridOceanConfig.barotropic_forcing_centred docstring.
+    # Threaded 1:1. Requires outer_integrator="leapfrog" (validated at model
+    # construction) -- only the nemo_dino_kamm_mlf card sets this True; the
+    # FE nemo_dino_kamm card has no NEMO ln_bt_fw=.FALSE. counterpart (FE
+    # runs the forward branch, ln_bt_fw=T, which is already what lego's
+    # uncentred F_slow matches). Default False = bit-identical.
+    barotropic_forcing_centred: bool = False
+    # EEN barotropic-Coriolis coefficient seed level (#1226 item 4): see
+    # BarotropicConfig.barotropic_een_seed docstring. "window_start"
+    # (default, bit-identical) = lego's legacy freeze at the integration's
+    # own seed thickness (Nbb under the MLF before-level seed); "nemo_kmm" =
+    # NEMO's dyn_cor_2D_init(Kmm) NOW-thickness freeze (dynspg_ts.F90:355 +
+    # :1349-1379). Only differs from the default under the MLF leapfrog, so
+    # only the nemo_dino_kamm_mlf card flips it.
+    barotropic_een_seed: str = "window_start"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -292,12 +320,24 @@ class DINOConfig:
     # measurably nil at the 62-day state — so it is characterised, not shipped
     # here. See docs/ocean/fidelity/dino_tendency_certificate.md.)
     convection_n2_threshold: float = 0.0        # -1e-12 = NEMO rn_evd threshold
+    # NEMO's full EVD switch is the two-time-level MIN(rn2, rn2b) <= -1e-12
+    # (zdfevd.F90:119) — Phase-2 #1317 T25 ships this as
+    # ``EnhancedDiffusionConfig.two_level_trigger`` (elementwise max of the
+    # now/before coefficients — equivalent to the MIN-N² trigger for a hard
+    # threshold), enabled on the nemo_dino_kamm card below.
     # TKE static-stability trigger. Default "insitu" (BIT-IDENTICAL legacy).
     # NEMO's zdftke consumes the SAME rn2 (eosbn2 bn2) as zdfevd — select
     # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². For the DINO S-EOS
     # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
     # convection comment), so no recipe switches by default.
     tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
+    # NEMO's step-entry (Nnow) N² sequencing (bn2 computed BEFORE tra_adv,
+    # stpmlf.F90:186-190) — Phase-2 #1317 T5. Consumed by BOTH zdfevd (via
+    # convection_n2_mode) and zdftke (via tke_n2_mode); wires the SAME
+    # entry-state T/S override into both triggers when set on the
+    # nemo_dino_kamm card. Default False = BIT-IDENTICAL (post-advection
+    # mid-step T/S, the prior legoESM behaviour).
+    n2_before_advection: bool = False
     # ------------------------------------------------------------------
     # NEMO zdftke closure-IDENTITY axes (Kamm 2025 DINO, namzdf_tke ref
     # defaults). Every default below reproduces the PRIOR DINO TKE behaviour
@@ -327,6 +367,66 @@ class DINOConfig:
     # NEMO zdftke diffuses en with 0.5·(avm[k+1]+avm[k]) (zdftke.F90:406-410),
     # i.e. alpha_tke=1.0. None = keep the TKEConfig default (30).
     tke_alpha: float | None = None              # 1.0 = NEMO en self-diffusion
+    # ----- Phase-2 #1317 Tier A: the ranked structural suspects -----
+    # T3 — surface TKE BC PLACEMENT: NEMO holds en(1) at z=0 and SOLVES the
+    # tridiagonal from jk=2 (the first INTERIOR w-level, zdftke.F90:264,
+    # 403-410); the prior legoESM Dirichlet placement pins the CARRIED
+    # interior interface 0 itself — one w-level too deep (probe:
+    # avt(30m)~50x NEMO with placement held as the only variable).
+    # "nemo_z0" prepends a virtual z=0 row so interior interface 0 becomes
+    # a genuinely SOLVED row, matching NEMO exactly.
+    tke_surface_bc_level: str = "interior_pinned"  # "nemo_z0" = NEMO
+    # T23 — background COMPOSITION: NEMO's avm/avt/avs backgrounds are
+    # MAX-only floors (zdftke avm=max(...,avm0), zdfevd REPLACES where
+    # unstable); legoESM's default ADDS the model-level A_v/K_v floor on
+    # top of the closure's own (already-floored) output, doubling the
+    # stable-thermocline background.
+    vmix_background_mode: str = "additive"       # "nemo_max_floor" = NEMO
+    # T6 — buoyancy SINK discretization: NEMO subtracts avt·rn2·dt fully
+    # EXPLICITLY using the previous-step avt (zdftke.F90:417-418), with the
+    # post-solve floor clamping negative overshoot; legoESM's default
+    # linearises the stable-branch sink IMPLICITLY on the diagonal (a
+    # softer asymptotic decay vs NEMO's sharper clamp-to-floor cutoff).
+    tke_buoyancy_sink: str = "implicit_linearized"  # "nemo_explicit" = NEMO
+    # ----- Phase-2 #1317 Tier B: one-line card flips (knobs pre-existed) -----
+    # T25 — EVD two-time-level trigger: NEMO's zdfevd fires on
+    # MIN(rn2, rn2b) <= threshold (zdfevd.F90:119); requires
+    # n2_before_advection=True to give the "before" state genuine content
+    # (otherwise before==after and the flag is a no-op).
+    convection_two_level_trigger: bool = False   # True = NEMO MIN(rn2,rn2b)
+    # ----- Phase-2 #1317 Tier C: small faithful items -----
+    # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
+    # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
+    # the avm factor — see tke_prandtl_ri below, now wired to "nemo_ri").
+    # T18/T19 — mixing-length floors: NEMO's ln_mxl0 init OVERWRITES BOTH
+    # rn_mxl0 (surface) and rmxl_min (interior) to the SAME derived value
+    # rmxl_min=1e-6/(rn_ediff*sqrt(rn_emin))=0.01 m for DINO's rn_ediff=0.1,
+    # rn_emin=1e-6 (zdftke.F90:846,859-863) — the namelist rn_mxl0=0.04 is
+    # DEAD CODE once ln_mxl0=T. legoESM defaults: mxl_min=1e-8 (interior,
+    # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
+    tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
+    tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
+    # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
+    # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
+    # completeness. Requires a NEMO bottom_drag_scheme.
+    tke_bottom_bc: bool = False                  # True = NEMO bottom BC
+    # T21 — avm ceiling: NEMO's tke_avn has NO ceiling on avm at all (the
+    # closure's own max(rn_ediff*zmxlm*sqrt(en), avmb) is unbounded above);
+    # legoESM's kappaM_max defaults to K_conv (=100, numerically coincides
+    # with the EVD replace-value rn_evd by default but is a SEPARATE knob —
+    # the TKE closure's own ceiling could otherwise clip K_M before EVD ever
+    # sees it). None (default, BIT-IDENTICAL) keeps kappaM_max=cfg.K_conv;
+    # the kamm card sets this to float('inf') (no ceiling).
+    tke_kappaM_max: float | None = None           # inf = NEMO (no ceiling)
+    # T4 — Burchard now×before shear (zdfsh2.F90:44-92). Requires
+    # outer_integrator="leapfrog" (construction raises otherwise); the FE
+    # kamm card keeps "squared_centered" (FE-frame fidelity ceiling — no
+    # before-velocity state, same class as this card's other FE-frame notes).
+    tke_shear_production: str = "squared_centered"  # "nemo_burchard" = MLF-only
+    # T8/T13 — rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri + Langmuir PE.
+    # Requires outer_integrator="leapfrog" (construction raises otherwise).
+    tke_n2_time_level: str = "step_entry"          # "nemo_before" = MLF-only
 
     # ------------------------------------------------------------------
     # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
@@ -337,12 +437,13 @@ class DINOConfig:
     use_gm_redi: bool = True
     # Adaptive-κ_GM scaling: "visbeck" (Visbeck 1997, the historical legoESM
     # DINO choice) | "treguier" (Treguier 1997 / NEMO nn_aei_ijk_t=21 — the
-    # ACTUAL DINO+ORCA1 oracle scaling; cap aei0 = rn_Ue·rn_Le = 0.03·100 km
-    # = 3000 m²/s from the DINO &namtra_eiv). The GM-effectiveness diagnostic
+    # ACTUAL DINO+ORCA1 oracle scaling; cap aei0 = 0.5·rn_Ue·rn_Le
+    # (ldftra.F90:332 — NEMO's explicit 1/2 factor) = 0.5·0.03·100 km
+    # = 1500 m²/s from the DINO &namtra_eiv). The GM-effectiveness diagnostic
     # (2026-07-01) showed Visbeck κ (200-2000) under-predicts the 1° channel
     # need — Treguier is the faithful option. Lat-lon only (MPAS raises).
     gm_kappa_scheme: str = "visbeck"
-    treguier_aei0: float = 3000.0  # Treguier κ cap [m²/s] = rn_Ue·rn_Le
+    treguier_aei0: float = 1500.0  # Treguier κ cap [m²/s] = 0.5·rn_Ue·rn_Le (ldftra.F90:332)
     visbeck_alpha: float = 0.015   # Visbeck dimensionless prefactor
     visbeck_kappa_min: float = 200.0      # κ_GM floor [m²/s]
     visbeck_kappa_max: float = 2000.0     # κ_GM ceiling [m²/s]
@@ -503,6 +604,18 @@ class DINOConfig:
     # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
     # n_barotropic_substeps as-is).
     barotropic_auto_cmax: float = 0.0
+    # LatLonCGridOceanConfig.barotropic.barotropic_diffusion_alpha (#1226),
+    # threaded 1:1 via from_flat/BarotropicConfig. NEMO has no eta-diffusion
+    # term in dynspg_ts; the legoESM default 0.01 is a forward-frame 2Δx
+    # stability crutch. Default here (0.01) keeps every non-kamm recipe
+    # bit-identical; the kamm cards override to 0.0 (see DINO_RECIPES).
+    barotropic_diffusion_alpha: float = 0.01
+    # LatLonCGridOceanConfig.barotropic.barotropic_face_depth (#1226), threaded
+    # 1:1 via from_flat/BarotropicConfig.  "min_rule" (default, bit-identical
+    # legacy) | "nemo_ssh_avg" (NEMO dynspg_ts.F90 zhup2_e/zhvp2_e ssh-average
+    # face depths).  The kamm cards override to "nemo_ssh_avg" (zero-deviation
+    # track item 2 — see the card comment in DINO_RECIPES).
+    barotropic_face_depth: str = "min_rule"
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -551,6 +664,15 @@ class DINOConfig:
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
+    # Leap-frog tracer combine: "concentration" (legoESM legacy) or
+    # "thickness_weighted" (NEMO trazdf.F90:271-278 — conserves tracer CONTENT
+    # under the moving z-star coordinate). See LatLonCGridOceanConfig.
+    tracer_combine: str = "concentration"
+    # Global eta-volume projection (legoESM stabilizer). NEMO has no analogue --
+    # ssh_nxt is conservative by construction -- and the projection's uniform
+    # shift breaks flux-form constancy preservation, so the oracle cards set it
+    # False. Default True preserves existing legoESM behaviour.
+    fix_eta_drift: bool = True
     ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
     # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
     # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
@@ -749,6 +871,13 @@ DINO_RECIPES: dict[str, dict] = {
         "pgf_scheme": "nemo_sco",
         "pgf_quadrature": "nemo_trapezoid",
         # -- Vertical mixing (namzdf: ln_zdftke=T; namzdf_tke rn_ediff=0.1 rn_ediss=0.7) --
+        # FE-FRAME FIDELITY CEILING (Phase-2 #1317 T4/T8/T13): this card has
+        # no carried leap-frog before-state, so TKEConfig.tke_shear_production
+        # stays "squared_centered" (not the Burchard now×before cross term)
+        # and TKEConfig.tke_n2_time_level stays "step_entry" (rn2b consumers
+        # — Prandtl zri, Langmuir PE — reuse rn2 rather than the true Nbb
+        # level). Both are MLF-only fixes; see nemo_dino_kamm_mlf, which
+        # inherits this block and overrides ONLY those two axes.
         "vmix_scheme": "tke",
         "tke_momentum_visc_bg": 1.2e-4,          # rn_avm0 (NO legoESM 5e-4 stabilizer floor)
         "tke_prandtl_ri": True,                  # nn_pdl=1 Ri-dependent Prandtl (default namzdf_tke)
@@ -763,6 +892,20 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_dissipation": "nemo_1p5_split",     # zdftke zfact2/zfact3 1.5/0.5 split
         "tke_kappa_convention": "veros_sqrte",   # avm=rn_ediff·zmxlm·SQRT(en) (zdftke:713)
         "tke_alpha": 1.0,                        # en self-diffusion 0.5·(avm+avm) (zdftke:406)
+        # -- Phase-2 #1317 Tier A: the ranked structural suspects (surface BC
+        #    placement, background composition, buoyancy-sink discretization) --
+        "tke_surface_bc_level": "nemo_z0",       # solve from jk=2, hold z=0 (#1 suspect)
+        "vmix_background_mode": "nemo_max_floor",  # MAX-only floors, nothing added (#2 suspect)
+        "tke_buoyancy_sink": "nemo_explicit",    # explicit -avt*rn2*dt, prev-step avt (#3 suspect)
+        # -- Phase-2 #1317 Tier B: one-line card flips (knobs pre-existed) --
+        "n2_before_advection": True,             # step-entry (Nnow) N² (stpmlf.F90:186-190)
+        "convection_two_level_trigger": True,    # zdfevd MIN(rn2,rn2b) (zdfevd.F90:119)
+        # -- Phase-2 #1317 Tier C: small faithful items (tke_prandtl_ri --
+        #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
+        "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
+        "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
+        "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
+        "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
         # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
@@ -779,6 +922,28 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_n2_threshold": -1e-12,
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
+        # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
+        #    NOT overridden by cfgs/DINO/EXP00/namelist_cfg's &namdrg block).
+        #    NEMO-faithful composition (namelist cites): ln_drgimp=T puts the
+        #    bottom drag on the implicit vertical diagonal (dynzdf.F90:293-305,
+        #    zdf_drag_in_matrix), removes the barotropic mean from the 3-D
+        #    solve unconditionally (dynzdf.F90:147-171, zdf_baroclinic_only),
+        #    and the barotropic mode gets its own explicit in-subcycle drag +
+        #    pu_RHSi slow-forcing correction (dyn_drg, dynspg_ts.F90:700-706 +
+        #    1584-1642, barotropic_drag_substep). The three together +
+        #    explicit_substep is exactly the combination that lifts the
+        #    drag_in_matrix+explicit_substep construction guard (baroclinic_only
+        #    is required alongside barotropic_drag_substep — see
+        #    ocean_model_latlon_cgrid.py's construction-time raises).
+        #    Enablement here reflects FIDELITY (this is what NEMO's namelist
+        #    actually runs), NOT a fix claim: the east-wall checkerboard
+        #    v-mode status (previously measured inert across a 4-way
+        #    zdf_drag_in_matrix x zdf_baroclinic_only attribution, 2026-07-23,
+        #    before barotropic_drag_substep existed) is tracked separately on
+        #    #1226. --
+        "zdf_drag_in_matrix": True,
+        "zdf_baroclinic_only": True,
+        "barotropic_drag_substep": True,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
         # -- Tracer lateral diffusion (namtra_ldf: ln_traldf_iso + ln_traldf_msc,
@@ -844,9 +1009,25 @@ DINO_RECIPES: dict[str, dict] = {
         # pattern = the forward_euler-vs-MLF integrator-frame difference, which no
         # barotropic sub-step composition can remove. The bit-faithful NEMO-DINO
         # dynspg_ts match is the MLF card (nemo_dino_kamm_mlf), not this FE card.
-        # barotropic_diffusion_alpha (0.01, default) is a forward-frame 2dx
-        # stability crutch, not a NEMO term; setting it 0 slightly WORSENS step-1
-        # eta (1.88->1.94e-2) and does not touch the (non-2dx) residual.
+        # alpha=0: no NEMO counterpart; the 0.01 crutch masks pump signal
+        # (2026-07-23 sweep B measured ~1/3 of the barotropic pump signal
+        # masked by the default 0.01 eta-diffusion damping — it corrupts
+        # oracle tendency comparisons). dynspg_ts.F90 has no eta-diffusion
+        # term at all; set to 0 for the NEMO-true composition.
+        "barotropic_diffusion_alpha": 0.0,
+        # Zero-deviation track item 2 (#1226): NEMO's e1e2-weighted ssh-average
+        # face depth for the substep flux AND drag/update depth (zhup2_e,
+        # dynspg_ts.F90:568-592,658-666).  Pair-consistent with the tracer
+        # continuity by construction: the substep loop builds the eta-update
+        # divergence and the Hu_avg accumulation from the SAME gated flux
+        # (mirroring NEMO's zhU -> ssh + un_adv, dynspg_ts.F90:604-643), and
+        # the tracer step's Hallberg-Adcroft delta_U correction enforces
+        # sum_k(h_u*u_corr) == Hu_avg for ANY face-depth mode (the lego
+        # analogue of NEMO's barotropic-component replacement, :984-988).
+        # Conservation gate: test_partial_cells_phase7.py::
+        # TestNemoSshAvgFaceDepthGate (volume + tracer conserved; mode
+        # measured conservation-inert vs min_rule at machine precision).
+        "barotropic_face_depth": "nemo_ssh_avg",
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -938,6 +1119,21 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
+    # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
+    # concentration, so the leap-frog conserves tracer content under the moving
+    # z-star coordinate. The concentration form drifts +8.6e-6 in globally-
+    # integrated heat over 200 forcing-free steps where NEMO drifts +3.4e-16
+    # (#1226).
+    "tracer_combine": "thickness_weighted",
+    # fix_eta_drift is left ON (measured 2026-07-26): NEMO has no analogue
+    # (ssh_nxt is conservative by construction), and switching it OFF does
+    # improve flux-form constancy 3.279e-05 -> 2.313e-05 because its uniform
+    # eta shift is invisible to the tracer mass fluxes. BUT heat drift is
+    # UNCHANGED (4.140e-06 -> 4.153e-06) while VOLUME drift degrades by four
+    # orders (1.3e-11 -> 2.55e-07). So the fixer is not the content leak -- it
+    # is MASKING a real volume non-conservation in the split-explicit
+    # barotropic solve. Removing the mask without fixing the solver trades
+    # exact volume for nothing. Fix the solver, then drop the fixer.
     # LIVE in-substep EEN barotropic Coriolis (node 16, NEMO dyn_cor_2D applied
     # each substep on ua_e/va_e): removes the pre-step 2D barotropic Coriolis
     # from F_slow (dynspg_ts:296-300) and re-applies the SAME EEN stencil live,
@@ -955,6 +1151,31 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # residual (residual #1b, alongside the Nbb before-level seed).  Boxcar
     # averaging + window are identical to nemo_boxcar_centred.
     "barotropic_time_filter": "nemo_boxcar_ab3",
+    # Zero-deviation item 3 (#1226): NEMO ln_bt_fw=.FALSE. centres the
+    # barotropic wind/emp slow forcing at ½(before+now) and the dyn_drg_init
+    # drag residual at the BEFORE (Kbb) level (dynspg_ts.F90:392-421,
+    # :1623-1636) -- the branch DINO's namelist actually runs. Only
+    # meaningful under the leapfrog (requires outer_integrator="leapfrog",
+    # validated at model construction), so it lands on THIS card only, not
+    # the FE nemo_dino_kamm card (which matches NEMO's ln_bt_fw=T forward
+    # branch, already uncentred).
+    "barotropic_forcing_centred": True,
+    # Zero-deviation item 4 (#1226): NEMO seeds the FROZEN in-window EEN
+    # barotropic-Coriolis coefficients at Kmm=NOW (dyn_cor_2D_init(Kmm),
+    # dynspg_ts.F90:355 + :1349-1379), while lego's legacy "window_start"
+    # under the MLF before-level seed freezes them at Nbb.  Only differs
+    # under the leapfrog's Nbb seed, so it lands on THIS card only (under
+    # FE the window seed IS Kmm and the options coincide byte-identically).
+    "barotropic_een_seed": "nemo_kmm",
+    # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
+    # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
+    # — meaningful ONLY under the MLF integrator (construction raises
+    # otherwise), so they land on THIS card only, not the FE nemo_dino_kamm
+    # card (which has no before-state and keeps the FE-frame fidelity
+    # ceiling: squared_centered shear + step_entry rn2b, the same class as
+    # this card's other FE-frame notes).
+    "tke_shear_production": "nemo_burchard",  # zdfsh2 now×before shear
+    "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2062,7 +2283,12 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         tke = TKEConfig(
             prandtl_mode="constant",
             kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
-            kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+            # T21: NEMO's tke_avn has NO avm ceiling. None (default) keeps
+            # the prior BIT-IDENTICAL kappaM_max=K_conv; the kamm card sets
+            # tke_kappaM_max=float('inf').
+            kappaM_max=(cfg.K_conv if cfg.tke_kappaM_max is None
+                       else cfg.tke_kappaM_max),
+            bg_diff_scale=0.0,
             # NEMO zdftke consumes eosbn2's rn2 — "nemo_bn2" (else "insitu").
             n2_mode=cfg.tke_n2_mode,
             # NEMO zdftke closure-identity axes (see DINOConfig; defaults keep
@@ -2072,27 +2298,50 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             surface_bc=cfg.tke_surface_bc,
             dissipation_discretization=cfg.tke_dissipation,
             kappa_convention=cfg.tke_kappa_convention,
-            # NEMO zdftke surface terms — BOTH are namelist_ref defaults
-            # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
-            # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
-            # (rn_efr=0.05, nn_htau=0 → constant 10 m)). Faithful ON.
+            # NEMO zdftke surface terms — namelist_ref defaults (DINO's
+            # namelist_cfg sets no &namzdf_tke overrides): ln_lc=T
+            # (rn_lc=0.15), nn_etau=1 (rn_efr=0.05) and nn_htau=1 — the
+            # LATITUDE penetration profile htau=max(0.5,min(30,45|sin(lat)|))
+            # (zdftke.F90:870), NOT the constant 10 m (that is nn_htau=0).
+            # The prior card ran constant10m: 3x-too-shallow sub-ML TKE at
+            # mid/high lat -> A_v collapses below the ML at boundary/ridge
+            # columns -> the east-wall mode balance breaks (#1226
+            # mode-projection: lego implicit-friction f=-2e-8 vs NEMO
+            # vtrd_zdf -1.07e-5). Coefficient-sweep live mismatch, now fixed.
             lc=True,
             etau_mode="below_ml",
+            etau_htau_mode="latitude",
+            # Phase-2 #1317 Tier A/C: closure-identity axes (see DINOConfig
+            # docstrings above the field declarations).
+            n2_before_advection=cfg.n2_before_advection,
+            tke_surface_bc_level=cfg.tke_surface_bc_level,
+            tke_buoyancy_sink=cfg.tke_buoyancy_sink,
+            mxl_min=cfg.tke_mxl_min_m,
+            mxl0_min_m=cfg.tke_mxl0_min_m,
+            bottom_tke_bc=cfg.tke_bottom_bc,
+            tke_shear_production=cfg.tke_shear_production,
+            tke_n2_time_level=cfg.tke_n2_time_level,
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
             # vs the Gaspar/Veros default 30. None ⇒ keep the TKEConfig default.
             tke = tke._replace(alpha_tke=cfg.tke_alpha)
         if cfg.tke_prandtl_ri:
-            # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. richardson mode with
-            # coeff=1/ri_cri reproduces NEMO's Pr=1/pdlr=clamp(Ri/ri_cri,1,10)
-            # to machine precision (clamp-to-[1,10] is order-independent). ri_cri
-            # is derived from the SAME c_eps/c_k the TKE closure uses, so it
-            # auto-tracks a retuned dissipation ratio (NEMO 0.7/0.1 → 2/9 → 4.5).
+            # NEMO nn_pdl=1: Ri-dependent inverse Prandtl. "nemo_ri" mode
+            # with coeff=1/ri_cri reproduces NEMO's zri=rn2b*avm/(sh2+bshear),
+            # pdlr=max(0.1,ri_cri/max(ri_cri,zri)), Pr=1/pdlr EXACTLY (Phase-2
+            # #1317 T8 — "richardson" is VEROS's own Ri=N2/shear_sq formula,
+            # missing NEMO's avm numerator factor; "nemo_ri" is the fix).
+            # ri_cri is derived from the SAME c_eps/c_k the TKE closure uses,
+            # so it auto-tracks a retuned dissipation ratio (NEMO 0.7/0.1 →
+            # 2/9 → 4.5).
             ri_cri = 2.0 / (2.0 + tke.c_eps / tke.c_k)
             tke = tke._replace(
-                prandtl_mode="richardson", prandtl_ri_coeff=1.0 / ri_cri)
-        return VerticalMixingConfig(scheme="tke", tke=tke)
+                prandtl_mode="nemo_ri", prandtl_ri_coeff=1.0 / ri_cri)
+        return VerticalMixingConfig(
+            scheme="tke", tke=tke,
+            vmix_background_mode=cfg.vmix_background_mode,
+        )
     if cfg.vmix_scheme == "kpp":
         return VerticalMixingConfig(
             scheme="kpp", kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
@@ -2338,6 +2587,11 @@ def dino_lat_lon_model_config(
                     smooth_transition=cfg.convection_smooth_transition,
                     n2_mode=cfg.convection_n2_mode,
                     n2_threshold=cfg.convection_n2_threshold,
+                    # Phase-2 #1317 T25: NEMO's two-time-level MIN(rn2,rn2b)
+                    # trigger (zdfevd.F90:119). Only genuinely differs from
+                    # the single-level trigger when n2_before_advection=True
+                    # gives the "before" state real content.
+                    two_level_trigger=cfg.convection_two_level_trigger,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -2370,6 +2624,8 @@ def dino_lat_lon_model_config(
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
         asselin_gamma=cfg.asselin_gamma,
+        tracer_combine=cfg.tracer_combine,
+        fix_eta_drift=cfg.fix_eta_drift,
         ab2_scope=cfg.ab2_scope,
         # Routed into config.barotropic by from_flat.  Required by the
         # oceananigans card (explicit_ab2 × implicit_cn): keeps the
@@ -2393,6 +2649,16 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
+        # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
+        zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
+        zdf_baroclinic_only=cfg.zdf_baroclinic_only,
+        barotropic_drag_substep=cfg.barotropic_drag_substep,
+        # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
+        # see DINOConfig.barotropic_forcing_centred docstring).
+        barotropic_forcing_centred=cfg.barotropic_forcing_centred,
+        # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
+        # DINOConfig.barotropic_een_seed docstring).
+        barotropic_een_seed=cfg.barotropic_een_seed,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
@@ -2415,6 +2681,10 @@ def dino_lat_lon_model_config(
         barotropic_time_filter=cfg.barotropic_time_filter,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
+        # BarotropicConfig fields (#1226; see the DINOConfig docstrings).
+        # Routed by from_flat into config.barotropic.
+        barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
+        barotropic_face_depth=cfg.barotropic_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
@@ -2547,11 +2817,13 @@ def dino_mpas_model_config(
             "DINO path (the Redi-only iso-neutral recipe is wired for the "
             "lat-lon C-grid). Override lateral_tracer_mixing="
             "'geopotential' to run on MPAS.")
-    if cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0:
+    if (cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0
+            or cfg.barotropic_face_depth != "min_rule"):
         raise ValueError(
             "DINOConfig.barotropic_time_filter="
             f"{cfg.barotropic_time_filter!r} / barotropic_auto_cmax="
-            f"{cfg.barotropic_auto_cmax!r}: the MPAS DINO builder does not "
+            f"{cfg.barotropic_auto_cmax!r} / barotropic_face_depth="
+            f"{cfg.barotropic_face_depth!r}: the MPAS DINO builder does not "
             "thread these (it would silently run different barotropic "
             "numerics — codex r9 P2). The centred split-explicit recipe is "
             "lat-lon only; override barotropic_time_filter='cosine' and "
@@ -2637,6 +2909,7 @@ def dino_mpas_model_config(
                 smooth_transition=cfg.convection_smooth_transition,
                 n2_mode=cfg.convection_n2_mode,
                 n2_threshold=cfg.convection_n2_threshold,
+                two_level_trigger=cfg.convection_two_level_trigger,
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(

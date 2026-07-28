@@ -73,17 +73,16 @@ def _print_forcing_activity(args) -> None:
     solar_file_active = getattr(args, "solar_source", "constant") in (
         "file", "spectral_file"
     )
-    # The gaussian/spectral and voronoi/mpas standalone radiation paths
-    # integrate with the configured constant S_0 — the solar FILE (TSI +
-    # 14-band spectral) is not threaded there (same gap the CMIP6 deck
-    # labels; keep the two tables telling the same truth).
+    # The gaussian/spectral standalone radiation path integrates with the
+    # configured constant S_0 — the solar FILE (TSI + 14-band spectral) is
+    # not threaded there (same gap the CMIP6 deck labels; keep the two
+    # tables telling the same truth).  The MPAS lane threads it since the
+    # 2026-07-23 port: daily-sampled traced forcing["tsi"] (+
+    # ["solar_spectral_fraction"] under --solar-source spectral_file with
+    # rrtmg/rrtmgp) into the standalone radiation.
     _grid = getattr(args, "grid_type", None) or "cubed_sphere"
     _disc = getattr(args, "discretization", None) or ""
-    solar_file_unthreaded = (
-        (_grid == "gaussian" and _disc == "spectral")
-        or (_grid in ("voronoi", "mpas", "mpas_voronoi", "icosahedral")
-            and _disc == "mpas")
-    )
+    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral")
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
@@ -324,6 +323,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="MPAS vertical biharmonic hyperdiffusion of T "
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
+    parser.add_argument("--mpas-conservative-tracer-clamp",
+                        action="store_true", default=False,
+                        help="MPAS floors: borrow the clipped negative tracer "
+                             "deficit back from the positive cells in the same "
+                             "column instead of the mass-CREATING plain "
+                             "max(q,0).  The naive clamp invents ~+30 kg/m2/yr "
+                             "of water on a century AMIP run (measured); this "
+                             "cuts that 10.4x.  Off = bit-identical to before.")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -1245,6 +1252,99 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
+    parser.add_argument("--mpas-land-beta-soil",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_land_beta_soil",
+                        help="MPAS lane only (#1312 phase 2b): thread the "
+                             "interactive multilayer land's per-cell "
+                             "root-zone beta_soil into the turbulence "
+                             "surface humidity (traced forcing['beta_land'], "
+                             "one-step lag) — the land latent flux is then "
+                             "throttled by the soil's own moisture state, "
+                             "REPLACING the static --mpas-land-beta over "
+                             "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
+                        dest="mpas_qv_smooth_del2_m2s",
+                        help="MPAS lane only: horizontal q_v del2 (unweighted "
+                             "SCVT Laplacian) smoothing diffusivity [m^2/s], "
+                             "applied post-step + a q>=0 floor (~1e5-1e6 "
+                             "typical at 240 km; 0=off, default). Conserves "
+                             "(to roundoff) the per-level mixing-ratio integral "
+                             "but NOT column water vapour (non-conservative "
+                             "filter). "
+                             "Setup refuses coefficients above the explicit "
+                             "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--hines-total-rms-wind", type=float, default=None,
+                        dest="hines_total_rms_wind",
+                        help="Hines (1997) non-orographic GWD launch RMS wind "
+                             "[m/s] (default 2.0). Larger = stronger "
+                             "non-orographic drag; the low-level extratropical "
+                             "westerly bias is the observable lever.")
+    parser.add_argument("--hines-fmax", type=float, default=None,
+                        dest="hines_Fmax",
+                        help="Hines saturation momentum-flux cap [Pa] "
+                             "(default 0.1).")
+    parser.add_argument("--mcfarlane-tau-max", type=float, default=None,
+                        dest="mcfarlane_tau_max",
+                        help="McFarlane orographic GWD surface stress cap [Pa] "
+                             "(default 10.0). Reaches the kernel on every lane "
+                             "via gwd_config_for.")
+    parser.add_argument("--mcfarlane-k-wave", type=float, default=None,
+                        dest="mcfarlane_k_wave",
+                        help="McFarlane orographic GWD horizontal wavenumber "
+                             "[1/m] (default 2*pi/100 km). Scales the launch "
+                             "stress tau_0 ~ G_0*rho*N*k*h^2*U. No "
+                             "__param_spec__ entry yet (bounds undecided), so "
+                             "this flag is its ONLY route -- --params cannot "
+                             "reach it.")
+    parser.add_argument("--homogeneous-ice-nucleation",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="homogeneous_ice_nucleation",
+                        help="Morrison only: Koop/Ren-MacKenzie homogeneous "
+                             "cirrus ice nucleation, which pins RH over ice "
+                             "near 1.45-1.6 instead of letting it run away "
+                             "(the model reached 288%% at 228 K). Treats the "
+                             "cause of the supersaturation pile-up rather "
+                             "than draining it after the fact.")
+    parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
+                        default="mg", dest="morrison_flavor",
+                        help="Morrison parameter flavor: 'mg' (E3SM/CESM "
+                             "Morrison-Gettelman set, GCM default) or 'sam' "
+                             "(SAM/gSAM M2005 set — faster cloud-ice fall "
+                             "fall_b_i=0.865 and PSD bounds tuned against "
+                             "anvil-ice over-accumulation, the exact disease "
+                             "of the 2026-07 AMIP warm drift).")
+    parser.add_argument("--tropopause-refine", type=float, default=None,
+                        dest="tropopause_refine",
+                        help="Sigma-coordinate layer redistribution toward "
+                             "the tropopause at FIXED nlev (1.0 = uniform, "
+                             "bit-identical; 3.0 doubles the levels in "
+                             "70-200 hPa, paid for by the mid-troposphere). "
+                             "Fixes the unresolved tropical cold point "
+                             "without adding levels. Sigma coordinate only.")
+    parser.add_argument("--hard-sat-ice-curve",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="hard_sat_ice_curve",
+                        help="Mixed-phase hard-saturation drain: gate and "
+                             "land on the w(T)-blended liquid/ice saturation "
+                             "curve below freezing (blended latent heat, "
+                             "cold condensate to cloud ice). Fixes the "
+                             "TTL ice-supersaturation vapour bias. Requires "
+                             "--hard-saturation-adjustment.")
+    parser.add_argument("--mpas-ice-skin-prognostic",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_ice_skin_prognostic",
+                        help="MPAS lane only: prognostic sea-ice skin "
+                             "temperature (Semtner 1976 zero-layer conduction "
+                             "+ slab thermal inertia) replacing the constant "
+                             "T_ice anchor over ice-covered cells — removes "
+                             "the year-round 271.35 K pin behind the polar "
+                             "tas warm bias. Needs radiation != none.")
+    parser.add_argument("--mpas-ice-thickness-m", type=float, default=None,
+                        dest="mpas_ice_thickness_m",
+                        help="Climatological ice slab thickness [m] for the "
+                             "prognostic ice skin (default 2.0; bounds "
+                             "[0.1, 10]). Requires --mpas-ice-skin-prognostic.")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1523,6 +1623,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top if args.p_top is not None else 200.0,
         stretching=args.stretching if args.stretching is not None else 2.0,
+        tropopause_refine=(args.tropopause_refine
+                           if args.tropopause_refine is not None else 1.0),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 
@@ -1533,6 +1635,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -1720,6 +1823,31 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_land_beta=(args.mpas_land_beta
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
+        mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_qv_smooth_del2_m2s=(
+            args.mpas_qv_smooth_del2_m2s
+            if args.mpas_qv_smooth_del2_m2s is not None
+            else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
+        hard_sat_ice_curve=args.hard_sat_ice_curve,
+        homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
+        morrison_flavor=args.morrison_flavor,
+        hines_total_rms_wind=(
+            args.hines_total_rms_wind
+            if args.hines_total_rms_wind is not None
+            else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
+        hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
+                    else _EXPERIMENT_DEFAULTS.hines_Fmax),
+        mcfarlane_tau_max=(
+            args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
+            else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),
+        mcfarlane_k_wave=(
+            args.mcfarlane_k_wave if args.mcfarlane_k_wave is not None
+            else _EXPERIMENT_DEFAULTS.mcfarlane_k_wave),
+        mpas_ice_skin_prognostic=args.mpas_ice_skin_prognostic,
+        mpas_ice_thickness_m=(
+            args.mpas_ice_thickness_m
+            if args.mpas_ice_thickness_m is not None
+            else _EXPERIMENT_DEFAULTS.mpas_ice_thickness_m),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,
@@ -1950,17 +2078,27 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "spectral standalone radiation paths use the "
                      "RRTMGPConfig constant surface albedo and would "
                      "silently ignore the flag.")
-    if args.use_multilayer_land and (
-            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-            or args.discretization in ("spectral", "mpas")):
+    if args.use_multilayer_land and args.discretization == "spectral":
         parser.error("--use-multilayer-land runs inside the coupled physics "
-                     "pipeline (cubed_sphere / latlon only); the MPAS and "
-                     "spectral standalone physics carry a PASSIVE land tile "
-                     "and cannot step the soil column (the multilayer setup "
-                     "crashes on the unstructured mesh: VoronoiMesh has no "
-                     "lat/lat2d). Pass --no-use-multilayer-land to override "
-                     "a --config YAML that enables it.")
+                     "pipeline or the MPAS driver loop; the SPECTRAL "
+                     "standalone physics carries a PASSIVE land tile and "
+                     "cannot step the soil column. Pass "
+                     "--no-use-multilayer-land to override a --config YAML "
+                     "that enables it.")
+    # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
+    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']), but
+    # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
+    # only simple_seb is wired on MPAS.
+    if (args.use_multilayer_land
+            and args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                                    "mpas")
+                 or args.discretization == "mpas")):
+        parser.error(
+            f"--land-surface-scheme {args.land_surface_scheme} is not wired "
+            "on the MPAS lane (coupled-pipeline canopy threading); use "
+            "--land-surface-scheme simple_seb with --use-multilayer-land "
+            "on MPAS.")
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade

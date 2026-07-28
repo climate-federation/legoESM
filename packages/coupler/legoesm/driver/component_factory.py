@@ -551,6 +551,8 @@ def create_atmosphere_dycore(
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
+            # Mass-conserving tracer positivity clamp (see DycoreConfig).
+            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 

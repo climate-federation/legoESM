@@ -55,7 +55,7 @@ def test_orca1_zdftke_namelist_mapping():
     assert cfg.c_eps == 0.7                     # rn_ediss (ref default)
     assert cfg.tke_background == 1.0e-6         # rn_emin
     assert cfg.tke_surface_min == 1.0e-4        # rn_emin0
-    assert cfg.tke_mxl_choice == 2              # nn_mxl = 2 (closest)
+    assert cfg.tke_mxl_choice == 3              # nn_mxl=3 (lup/ldown + ln_mxl0)
     # nn_pdl=1: Pr = clamp(Ri/ri_cri, 1, 10), ri_cri = 2/(2+ediss/ediff) = 2/9
     assert cfg.prandtl_mode == "richardson"
     assert cfg.prandtl_ri_coeff == pytest.approx(4.5)
@@ -82,9 +82,11 @@ def test_orca1_zdftke_namelist_mapping():
     # rn_ebb=67.83 has no config field: it is tke.py's module constant.
     from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
     assert tke_mod._NEMO_TKE_EBB == 67.83
-    # Structural conventions follow the validated DINO recipe (defaults).
-    assert cfg.prognostic is False
+    # NEMO integrates en prognostically -> the ORCA1 card default (2026-07-24).
+    assert cfg.prognostic is True
     assert cfg.n2_mode == "insitu"
+    # prognostic carry uses the vertical TKE solve only (no horizontal en
+    # advection): advection_scheme stays "none" (Veros vs.dtke path off).
     assert cfg.advection_scheme == "none"
 
 
@@ -154,12 +156,14 @@ def test_orca1_zdftke_surface_bc_override():
     flagged gap); 'nemo_dirichlet' selects NEMO's en(1)=rn_ebb|tau|/rho0
     Dirichlet BC; an unknown value raises (not a silent fallthrough)."""
     r = _runner()
-    assert r.orca1_zdftke_config().surface_bc == "veros_flux"          # default
-    assert r.orca1_zdftke_config(surface_bc=None).surface_bc == "veros_flux"
-    nd = r.orca1_zdftke_config(surface_bc="nemo_dirichlet")
-    assert nd.surface_bc == "nemo_dirichlet"
+    # 2026-07-24: the ORCA1 card DEFAULT is now the NEMO Dirichlet BC (the
+    # flagged veros_flux gap is closed); --tke-surface-bc veros_flux reverts.
+    assert r.orca1_zdftke_config().surface_bc == "nemo_dirichlet"       # default
+    assert r.orca1_zdftke_config(surface_bc=None).surface_bc == "nemo_dirichlet"
+    vf = r.orca1_zdftke_config(surface_bc="veros_flux")
+    assert vf.surface_bc == "veros_flux"
     # ONLY the surface BC changes — every other leaf is byte-identical.
-    assert nd._replace(surface_bc="veros_flux") == r.orca1_zdftke_config()
+    assert vf._replace(surface_bc="nemo_dirichlet") == r.orca1_zdftke_config()
     with pytest.raises(ValueError, match="surface_bc"):
         r.orca1_zdftke_config(surface_bc="dirichlet")     # typo must raise
 
@@ -204,34 +208,67 @@ def test_build_tripole_keyword_surface_bc_defaults_none():
 
 
 def test_orca1_zdftke_mxl_choice_override():
-    """--tke-mxl-choice: None keeps the card value (2); 3 selects NEMO nn_mxl=3
-    (lup/ldown sweeps + ln_mxl0 anchor); an unknown value raises."""
+    """--tke-mxl-choice: None keeps the card value (now 3 = NEMO nn_mxl=3,
+    lup/ldown sweeps + ln_mxl0 anchor); 2 reverts to Veros; unknown raises."""
     r = _runner()
-    assert r.orca1_zdftke_config().tke_mxl_choice == 2                # default
-    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 2
-    c3 = r.orca1_zdftke_config(mxl_choice=3)
-    assert c3.tke_mxl_choice == 3
+    # 2026-07-24: card DEFAULT is now nn_mxl=3 (ln_mxl0 anchor); =2 reverts.
+    assert r.orca1_zdftke_config().tke_mxl_choice == 3                # default
+    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 3
+    c2 = r.orca1_zdftke_config(mxl_choice=2)
+    assert c2.tke_mxl_choice == 2
     # ONLY the mixing-length choice changes; every other leaf byte-identical.
-    assert c3._replace(tke_mxl_choice=2) == r.orca1_zdftke_config()
+    assert c2._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
     for bad in (1, 4, 0):
         with pytest.raises(ValueError, match="mxl_choice"):
             r.orca1_zdftke_config(mxl_choice=bad)
     # composes with surface_bc (both overrides apply, independent)
-    both = r.orca1_zdftke_config(surface_bc="nemo_dirichlet", mxl_choice=3)
-    assert both.tke_mxl_choice == 3 and both.surface_bc == "nemo_dirichlet"
+    both = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2)
+    assert both.tke_mxl_choice == 2 and both.surface_bc == "veros_flux"
 
 
 def test_builder_tke_mxl_choice_threads():
-    """build_tripole_vmix_config threads --tke-mxl-choice onto the closure."""
+    """build_tripole_vmix_config threads --tke-mxl-choice onto the closure.
+    Uses the NON-default 2 so a broken forward would be caught (default is 3)."""
     r = _runner()
-    vm = r.build_tripole_vmix_config("tke", tke_mxl_choice=3)
-    assert vm.tke.tke_mxl_choice == 3
-    assert vm.tke == r.orca1_zdftke_config(mxl_choice=3)
-    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 2  # default
+    vm = r.build_tripole_vmix_config("tke", tke_mxl_choice=2)
+    assert vm.tke.tke_mxl_choice == 2
+    assert vm.tke == r.orca1_zdftke_config(mxl_choice=2)
+    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 3  # default
     # off-tke closure rejects (dispatch hardening), like the other knobs
     for vmix in ("none", "kpp"):
         with pytest.raises(ValueError, match="tke-mxl-choice"):
             r.build_tripole_vmix_config(vmix, tke_mxl_choice=3)
+
+
+def test_orca1_zdftke_prognostic_override():
+    """--tke-prognostic: None keeps the card value (now True = NEMO prognostic
+    Mode-A en); False reverts to diagnostic Mode-B. Composes with other knobs."""
+    r = _runner()
+    # 2026-07-24: card DEFAULT is now prognostic=True (NEMO Mode-A); False reverts.
+    assert r.orca1_zdftke_config().prognostic is True                # default
+    assert r.orca1_zdftke_config(prognostic=None).prognostic is True
+    cd = r.orca1_zdftke_config(prognostic=False)
+    assert cd.prognostic is False
+    # ONLY prognostic changes; every other leaf byte-identical.
+    assert cd._replace(prognostic=True) == r.orca1_zdftke_config()
+    # composes with surface_bc + mxl_choice (all three independent overrides)
+    allc = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2,
+                                 prognostic=False)
+    assert (allc.prognostic is False and allc.tke_mxl_choice == 2
+            and allc.surface_bc == "veros_flux")
+
+
+def test_builder_tke_prognostic_threads():
+    """build_tripole_vmix_config threads --tke-prognostic onto the closure.
+    Uses the NON-default False so a broken forward is caught (default is True)."""
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_prognostic=False)
+    assert vm.tke.prognostic is False
+    assert vm.tke == r.orca1_zdftke_config(prognostic=False)
+    assert r.build_tripole_vmix_config("tke").tke.prognostic is True  # default
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tke-prognostic"):
+            r.build_tripole_vmix_config(vmix, tke_prognostic=True)
 
 
 def test_tke_card_knobs_require_tripole_tke():
@@ -261,12 +298,15 @@ def test_tke_card_knobs_require_tripole_tke():
     # discard path 3: tripole but vmix kpp (knob not applied in kpp branch)
     with pytest.raises(SystemExit, match="tke-eice"):
         r._validate_tke_card_grid("tripole", "kpp", tke_eice=1)
-    # --tke-mxl-choice is guarded the same way (all three discard paths)
-    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3)   # allowed
+    # --tke-mxl-choice + --tke-prognostic are guarded the same way (all paths)
+    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3,
+                              tke_prognostic=True)                   # allowed
     for grid, vmix in (("mpas", "tke"), ("latlon_bathy", "tke"),
                        ("tripole", "none"), ("tripole", "kpp")):
         with pytest.raises(SystemExit, match="tke-mxl-choice"):
             r._validate_tke_card_grid(grid, vmix, tke_mxl_choice=3)
+        with pytest.raises(SystemExit, match="tke-prognostic"):
+            r._validate_tke_card_grid(grid, vmix, tke_prognostic=True)
 
 
 def test_main_wires_tke_card_guard_before_builders(monkeypatch):

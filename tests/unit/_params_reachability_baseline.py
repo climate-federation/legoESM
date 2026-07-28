@@ -181,9 +181,9 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.rad.GrayRadiationConfig.tau_equator',
     'atm.rad.GrayRadiationConfig.tau_moist_coeff',
     'atm.rad.GrayRadiationConfig.tau_pole',
-    # atm: HinesConfig (2)
-    'atm.gwd.HinesConfig.Fmax',
-    'atm.gwd.HinesConfig.total_rms_wind',
+    # atm: HinesConfig (0) — Fmax + total_rms_wind became reachable when
+    # gwd_config_for started threading the hines_* ExperimentConfig scalars
+    # into the kernel leaf on every lane (2026-07-24).
     # atm: HoltslagBovilleConfig (13)
     'atm.turb.HoltslagBovilleConfig.Ri_crit',
     'atm.turb.HoltslagBovilleConfig.betah',
@@ -253,35 +253,31 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.MassFluxConfig.cape_threshold',
     'atm.conv.MassFluxConfig.delta_0',
     'atm.conv.MassFluxConfig.tau_adj',
-    # atm: McFarlaneConfig (7)
+    # atm: McFarlaneConfig (6) — directional_spread became reachable via the
+    # mcfarlane_directional_spread scalar + gwd_config_for (2026-07-24); the
+    # rest still have no ExperimentConfig scalar to route through.
     'atm.gwd.McFarlaneConfig.G_0',
-    'atm.gwd.McFarlaneConfig.directional_spread',
     'atm.gwd.McFarlaneConfig.efficiency',
     'atm.gwd.McFarlaneConfig.envelope_scale',
     'atm.gwd.McFarlaneConfig.fcrit2',
     'atm.gwd.McFarlaneConfig.h_topo',
     'atm.gwd.McFarlaneConfig.min_wind',
-    # atm: MorrisonConfig (21)
+    # atm: MorrisonConfig (15; 5 wired 2026-07-26 + ice_snow_d_auto wired
+    # 2026-07-27 via _thread_morrison_scalars — anvil-ice tuning)
     'atm.micro.MorrisonConfig.N_i0',
     'atm.micro.MorrisonConfig.Nc_0',
     'atm.micro.MorrisonConfig.a_v_i',
     'atm.micro.MorrisonConfig.a_v_r',
     'atm.micro.MorrisonConfig.a_v_s',
-    'atm.micro.MorrisonConfig.agg_coeff',
-    'atm.micro.MorrisonConfig.bergeron_rate',
     'atm.micro.MorrisonConfig.cooper_T_act',
     'atm.micro.MorrisonConfig.cooper_a',
-    'atm.micro.MorrisonConfig.dep_coeff',
     'atm.micro.MorrisonConfig.evap_coeff',
-    'atm.micro.MorrisonConfig.ice_snow_d_auto',
     'atm.micro.MorrisonConfig.k_ac',
-    'atm.micro.MorrisonConfig.k_au',
     'atm.micro.MorrisonConfig.k_sc',
     'atm.micro.MorrisonConfig.melt_rate',
     'atm.micro.MorrisonConfig.rain_selfcoll_k',
     'atm.micro.MorrisonConfig.rain_vent_f1',
     'atm.micro.MorrisonConfig.rain_vent_f2',
-    'atm.micro.MorrisonConfig.rime_coeff',
     'atm.micro.MorrisonConfig.x_star',
     # atm: OzoneProfileConfig (3)
     'atm.rad.OzoneProfileConfig.o3_max_vmr',

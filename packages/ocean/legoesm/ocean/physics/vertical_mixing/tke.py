@@ -178,6 +178,53 @@ _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE in
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
 
+def nemo_surface_avm(
+    cfg: "TKEConfig", e_sfc: jnp.ndarray, l_sfc: jnp.ndarray | None,
+) -> jnp.ndarray:
+    r"""NEMO's TRUE surface-w-level viscosity ``avm(jk=1)`` (T3-exact).
+
+    ``tke_avn`` (zdftke.F90:713-715) evaluates avm at EVERY w-level
+    ``jk=1..jpkm1`` from the SAME formula used in the interior:
+
+    .. math::
+
+        avm(1) = \max(rn\_ediff \cdot zmxlm(1) \cdot \sqrt{en(1)},\ avmb(1))
+
+    with ``en(1)`` the surface Dirichlet TKE value (``e_sfc``,
+    :func:`_surface_tke_dirichlet`) and ``zmxlm(1)`` the ``ln_mxl0`` surface
+    mixing-length anchor (:func:`_mxl0_surface_anchor`, already computed by
+    the orchestrator for the ``nn_mxl=3`` sweeps — reused here, not
+    re-derived). ``rn_ediff`` is legoESM's ``c_k``; the ``sqrt(en)`` (not
+    ``sqrt(2*en)``) form matches ``kappa_convention="veros_sqrte"`` (the
+    kamm-card selection) exactly — see :func:`compute_K_from_tke`.
+
+    This is the value NEMO's ``jk=2`` row actually uses in
+    ``0.5*(avm(2)+avm(1))`` (zdftke.F90:407-410); the interior floor
+    ``avmb`` is legoESM's ``kappaM_min``.
+
+    Parameters
+    ----------
+    e_sfc : (...,) — surface Dirichlet TKE value (``en(1)``).
+    l_sfc : (...,) or None — ``ln_mxl0`` surface mixing length
+        (:func:`_mxl0_surface_anchor`; None only when ``tke_mxl_choice != 3``,
+        in which case NEMO's ``zmxlm(1)`` formula does not apply — the caller
+        must not invoke this function in that regime).
+
+    Returns
+    -------
+    (...,) avm(1), NEMO's true surface-w-level viscosity, floored at
+    ``kappaM_min``.
+    """
+    if l_sfc is None:
+        raise ValueError(
+            "nemo_surface_avm requires l_sfc (the ln_mxl0 surface mixing "
+            "length, tke_mxl_choice=3) — NEMO's zmxlm(1) has no meaning "
+            "under a different mixing-length choice.")
+    e_safe = jnp.maximum(jnp.asarray(e_sfc), 0.0)
+    zav = cfg.c_k * jnp.asarray(l_sfc) * jnp.sqrt(e_safe)
+    return jnp.maximum(zav, cfg.kappaM_min)
+
+
 def _surface_tke_dirichlet(cfg: "TKEConfig", taum, rho_0: float):
     """NEMO nn_bc_surf=1 Dirichlet surface-TKE value, or None for the Veros
     flux BC — the single owner of the ``TKEConfig.surface_bc`` dispatch shared
@@ -197,6 +244,46 @@ def _surface_tke_dirichlet(cfg: "TKEConfig", taum, rho_0: float):
     raise ValueError(
         "Unknown surface-TKE boundary scheme TKEConfig.surface_bc: must be "
         f'one of ("veros_flux", "nemo_dirichlet"), got {_sbc!r}')
+# 0.001875 = (rn_ebb0/rho0)*0.5 = 3.75*0.5/1000 (zdftke.F90:284, CAUTION the
+# NEMO rCdU_bot it multiplies is <= 0 there — legoESM's r is the POSITIVE
+# +Cd*|U| convention, so no sign flip is needed here; see
+# nemo_bottom_tke_dirichlet).
+_NEMO_TKE_BOTTOM_EBB0_HALF = 0.001875
+
+
+def nemo_bottom_tke_dirichlet(
+    r_bottom_drag: jnp.ndarray, u_bot: jnp.ndarray, v_bot: jnp.ndarray,
+    cfg: "TKEConfig",
+) -> jnp.ndarray:
+    r"""NEMO bottom-friction TKE BC (T15, zdftke.F90:279-288).
+
+    .. math::
+
+        en(m_{bkt}+1) = \max(0.001875\cdot r_{bot}\cdot|u_{bot}|,\;
+                             rn\_emin)
+
+    with ``r_bot`` the NEMO non-linear/log-layer bottom-drag rate at the
+    TRACER point (``+Cd·|U|``, legoESM's positive convention — see
+    :func:`legoesm.ocean.dynamics.ocean_tendency_common.nemo_effective_bottom_drag_r`;
+    single-owner doctrine, no re-derived drag coefficient) and ``u_bot``/
+    ``v_bot`` the bottom-cell T-point velocity components. ``rn_emin`` is
+    ``cfg.tke_background`` (legoESM's interior TKE floor — same value as
+    NEMO's namelist default 1e-6 m²/s²).
+
+    Parameters
+    ----------
+    r_bottom_drag : (...,) — bottom-drag rate at T-points [m/s], >= 0.
+    u_bot, v_bot : (...,) — T-point bottom-cell velocity components [m/s].
+    cfg : TKEConfig (uses ``tke_background`` as the ``rn_emin`` floor).
+
+    Returns
+    -------
+    (...,) the Dirichlet TKE value for the deepest carried interface.
+    """
+    speed = _safe_stress_modulus(u_bot, v_bot)   # AD-safe |u_bot| at rest
+    return jnp.maximum(
+        _NEMO_TKE_BOTTOM_EBB0_HALF * r_bottom_drag * speed,
+        jnp.asarray(cfg.tke_background, dtype=speed.dtype))
 # nn_htau=1 latitude profile: h_tau = max(0.5, min(30, 45·|sin φ|)) m
 _NEMO_TKE_HTAU_CONST_M = 10.0  # nn_htau=0 constant penetration depth [m]
 _NEMO_TKE_HTAU_MIN_M = 0.5
@@ -690,6 +777,10 @@ def _solve_tke_backward_euler(
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
     surface_dirichlet: jnp.ndarray | None = None,
+    surface_bc_level: str = "interior_pinned",
+    bottom_dirichlet: jnp.ndarray | None = None,
+    K_M_surface: jnp.ndarray | None = None,
+    bottom_level: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -737,18 +828,74 @@ def _solve_tke_backward_euler(
         ``dz_cell``; both ``None`` (default) ⇒ BIT-IDENTICAL legacy
         (face gradients over ``dz_half``, avg-of-faces volumes, injection
         over ``dz_half[0]``).
+    surface_bc_level : "interior_pinned" (default, BIT-IDENTICAL) or
+        "nemo_z0" (``TKEConfig.tke_surface_bc_level``). NEMO holds ``en(1)``
+        at the z=0 W-POINT (zdftke.F90:264-269) and SOLVES the tridiagonal
+        from ``jk=2`` (zdftke.F90:403: ``DO_2Dik(...,2,jpkm1,1)``) — the
+        first INTERIOR w-level (legoESM's interior interface 0). The
+        "interior_pinned" mode instead pins interface 0 ITSELF Dirichlet
+        (one w-level too deep — the #1 T3 suspect from the Phase-1 audit:
+        the whole en/avt profile displaced one cell down). "nemo_z0" fixes
+        this by prepending a VIRTUAL surface row (z=0, Dirichlet =
+        ``surface_dirichlet``) to the tridiagonal system so interior
+        interface 0 becomes a genuinely SOLVED row coupled to that virtual
+        surface value — exactly NEMO's ``jk=2`` row (zdftke.F90:403-410):
+        ``zzd_lw(jk=2) = -0.5·dt·max(avm(2)+avm(1),2e-5) / (e3t(1)·e3w(2))``.
+        The ``(N+1)``-row system is solved once and only the interior
+        ``N`` rows are returned (``e_new[..., 1:]``) — the state pytree
+        shape is unchanged. Requires ``surface_dirichlet`` (raises
+        otherwise: "nemo_z0" has no meaning without a held surface value)
+        and ``dz_surface`` (the z=0-to-first-cell-centre distance, the
+        surface row's control volume / face spacing — same slot
+        ``-z_full_ref[0]·J`` used elsewhere). The surface face is
+        ``0.5*(avm(jk=2)+avm(jk=1))`` (zdftke.F90:407-410): ``avm(jk=2)`` is
+        ``K_M_old[..., 0]`` (the topmost carried interface's own carried
+        diffusivity — exact, same quantity NEMO's ``p_avm(jk=2)`` is) and
+        ``avm(jk=1)`` is the TRUE surface-w-level viscosity, passed as
+        ``K_M_surface`` (:func:`nemo_surface_avm` — T3-exact). When
+        ``K_M_surface`` is None (bit-identical legacy / no ``tke_mxl_choice=3``
+        anchor available), the face falls back to the documented
+        APPROXIMATION ``avm(1) ~= avm(2) = K_M_old[..., 0]`` (i.e.
+        ``avm(1)+avm(1)`` rather than the true ``avm(2)+avm(1)`` — exact only
+        where the surface and first-interior viscosities coincide).
+    K_M_surface : (...,) or None — NEMO's true surface-w-level viscosity
+        ``avm(jk=1)`` (:func:`nemo_surface_avm`), consulted ONLY by the
+        ``surface_bc_level="nemo_z0"`` face-coefficient assembly above. None
+        ⇒ the documented approximation (BIT-IDENTICAL to the prior
+        behaviour); ignored (and must be None) when ``surface_bc_level !=
+        "nemo_z0"`` (silent-no-op guard, matching ``bottom_dirichlet``).
+    bottom_dirichlet : (...,) or None — NEMO bottom TKE BC (T15,
+        zdftke.F90:279-288): ``en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|,
+        rn_emin)``. Held Dirichlet at the interior interface the per-column
+        seafloor sits at. ``bottom_level`` is None (default, BIT-IDENTICAL):
+        the pin lands at the array's LAST row unconditionally — exact only
+        on a FLAT-BOTTOM column (every DINO column reaches max depth) and
+        one level too deep on a SHALLOWER column (a masked/dry level there;
+        downstream wet-interface masking prevents any leak into wet cells,
+        so this was never a correctness bug, just a BC that didn't fire at
+        the physically correct row). ``bottom_level`` supplied (T15-exact):
+        the Dirichlet row is scattered to interior interface
+        ``bottom_level`` PER COLUMN (NEMO's ``mbkt+1`` — interface
+        ``bottom_level`` sits between T-cells ``bottom_level`` and
+        ``bottom_level+1`` in legoESM's 0-based indexing, exactly ``mbkt``'s
+        seafloor cell), clamped to ``[0, N-1]`` (N = number of carried
+        interfaces) so a dry/degenerate column cannot index out of bounds.
+        ``None`` (default) ⇒ BIT-IDENTICAL (the ``[..., -1]`` pin above).
 
     Returns
     -------
     e_new : (..., nlev-1)
     """
-    if (dz_cell is None) != (dz_surface is None):
+    if dz_cell is not None and dz_surface is None:
         raise ValueError(
-            "_solve_tke_backward_euler: dz_cell and dz_surface must be "
-            "passed together (TKEConfig.veros_dz_slots) or both omitted "
-            f"(legacy); got dz_cell={'set' if dz_cell is not None else None}, "
-            f"dz_surface={'set' if dz_surface is not None else None}."
+            "_solve_tke_backward_euler: dz_cell requires dz_surface too "
+            "(TKEConfig.veros_dz_slots); got dz_cell=set, dz_surface=None."
         )
+    # dz_surface MAY be passed alone (dz_cell=None) for
+    # surface_bc_level="nemo_z0" without veros_dz_slots — the virtual
+    # surface row only needs the z=0-to-interface-0 distance, not the full
+    # Veros metric-slot machinery dz_cell gates. veros_slots (the metric-
+    # slot feature) is keyed off dz_cell alone, unaffected.
     veros_slots = dz_cell is not None
     N = e_old.shape[-1]   # number of interfaces
     # Dtype hygiene: surface_flux / external_source can promote to f64 (tau or
@@ -779,6 +926,11 @@ def _solve_tke_backward_euler(
         e_sqrt = jnp.sqrt(jnp.maximum(e_old, cfg.tke_background))
     # Linearised dissipation rate (per unit e_new):
     diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
+    _buoy_disc = getattr(cfg, "tke_buoyancy_sink", "implicit_linearized")
+    if _buoy_disc not in ("implicit_linearized", "nemo_explicit"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_buoyancy_sink: must be one of "
+            f"('implicit_linearized', 'nemo_explicit'), got {_buoy_disc!r}.")
     if veros_positivity:
         # ---- Veros buoyancy treatment (positivity="veros_surface_correction")
         # P_b = -K_H·N² enters the RHS fully EXPLICITLY, both signs (Veros
@@ -787,6 +939,28 @@ def _solve_tke_backward_euler(
         # stratification sink may legitimately drive the solved TKE
         # NEGATIVE — the Veros energy debt; no implicit sink on the
         # diagonal.
+        buoy_sink_rate = jnp.zeros_like(e_old)
+        buoy_source = -K_H_old * N2       # signed; full explicit P_b
+    elif _buoy_disc == "nemo_explicit":
+        # ---- NEMO explicit buoyancy sink (zdftke.F90:417-418) ----
+        # en(jk) += dt*(sh2 - avt(jk)*rn2(jk) + ...); avt is the PREVIOUS-
+        # step (before-solve) diffusivity p_avt — exactly legoESM's carried
+        # ``K_H_old`` — and rn2 may be either sign (stable OR unstable): the
+        # WHOLE term enters the RHS explicitly, no implicit sink on the
+        # diagonal. NEMO relies on the POST-solve floor `en=MAX(en,rn_emin)`
+        # (zdftke.F90:468-470, already applied below by this function's
+        # tail) to catch any negative overshoot from a large stable sink —
+        # it does NOT split by sign the way the default linearised form
+        # does. Sign check: N2>0 (stable) -> -K_H*N2<0, a genuine TKE SINK;
+        # N2<0 (unstable) -> -K_H*N2>0, a genuine TKE SOURCE (convection)
+        # -- matches the "P_b = -K_H*N^2" sign convention documented on
+        # TKEConfig/the module docstring. NOTE: under n2_mode="insitu" N2 is
+        # clipped >= 0 (documented pre-existing "insitu" limitation --
+        # convection never fires through the TKE, orthogonal to this
+        # branch), so the SOURCE half is inert there -- exactly as it
+        # already is for the default "implicit_linearized" split below
+        # (its N2_neg term is identically 0 too); nemo_explicit does not
+        # introduce a NEW gap relative to insitu's existing behaviour.
         buoy_sink_rate = jnp.zeros_like(e_old)
         buoy_source = -K_H_old * N2       # signed; full explicit P_b
     else:
@@ -908,6 +1082,36 @@ def _solve_tke_backward_euler(
     if external_source is not None:
         rhs = rhs + dt * external_source
 
+    if bottom_dirichlet is not None:
+        # NEMO bottom TKE BC (zdftke.F90:279-288): en(mbkt+1) =
+        # MAX(0.001875·CdU_bot·|u_bot|, rn_emin)*ssmask, set the SAME way as
+        # the surface value (a plain identity row — NEMO solves the
+        # tridiagonal only from jk=2 to jpkm1, so the bottom row jpk is
+        # ALSO held, not coupled). Held AFTER the diffusion assembly so the
+        # pinned row's super/sub-diagonal entries are zeroed too (no
+        # leftover coupling into a row now pinned).
+        _e_bd = jnp.asarray(bottom_dirichlet, dtype=e_old.dtype)
+        if bottom_level is None:
+            # BIT-IDENTICAL legacy: unconditional pin at the array's last
+            # row (exact on a flat-bottom column; see the docstring).
+            a_diff = a_diff.at[..., -1].set(0.0)
+            diag = diag.at[..., -1].set(1.0)
+            rhs = rhs.at[..., -1].set(_e_bd)
+        else:
+            # T15-exact: scatter the pin to the PER-COLUMN seafloor
+            # interface (NEMO's mbkt), clamped into range so a dry column
+            # cannot index out of bounds. take/put_along_axis over the last
+            # (interface) axis — differentiable (pure gather/scatter, no
+            # data-dependent control flow).
+            N = e_old.shape[-1]
+            idx = jnp.clip(
+                jnp.asarray(bottom_level), 0, N - 1)[..., jnp.newaxis]
+            is_bottom = jnp.arange(N) == idx    # (..., N) one-hot per column
+            a_diff = jnp.where(is_bottom, 0.0, a_diff)
+            c_diff = jnp.where(is_bottom, 0.0, c_diff)
+            diag = jnp.where(is_bottom, 1.0, diag)
+            rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)
+
     # Surface flux BC at interface k=0: add the flux divergence with
     # ``forc_tke_surface``-style energy input. Veros injects over the
     # surface W half-volume 0.5·dzw_top (tke.py:225) — the distance from
@@ -917,7 +1121,100 @@ def _solve_tke_backward_euler(
         inj_vol = jnp.maximum(jnp.asarray(dz_surface, dtype=e_old.dtype), _EPS)
     else:
         inj_vol = jnp.maximum(dz_half[..., 0], _EPS)
-    if surface_dirichlet is not None:
+    if surface_bc_level not in ("interior_pinned", "nemo_z0"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_surface_bc_level: must be one of "
+            f"('interior_pinned', 'nemo_z0'), got {surface_bc_level!r}.")
+    if surface_bc_level == "nemo_z0" and surface_dirichlet is None:
+        raise ValueError(
+            "TKEConfig.tke_surface_bc_level='nemo_z0' requires "
+            "surface_bc='nemo_dirichlet' (a held surface TKE value) — "
+            "'nemo_z0' only changes WHERE the Dirichlet value is held, it "
+            "does not supply one.")
+
+    if surface_bc_level == "nemo_z0":
+        # ---- NEMO z=0 surface row (zdftke.F90:264-269,403-410) ----
+        # Prepend ONE virtual surface row (z=0, Dirichlet) so interior
+        # interface 0 becomes a genuinely SOLVED row coupled to it — NEMO's
+        # jk=2, not a pinned Dirichlet row. See the docstring above.
+        if dz_surface is None:
+            raise ValueError(
+                "TKEConfig.tke_surface_bc_level='nemo_z0' requires "
+                "dz_surface (the z=0-to-first-cell-centre distance).")
+        e_sfc = jnp.asarray(surface_dirichlet, dtype=e_old.dtype)
+        dz_face_sfc = jnp.maximum(
+            jnp.asarray(dz_surface, dtype=e_old.dtype), _EPS)
+        # Row 0's OWN control volume: dz_half[...,0] in BOTH the legacy and
+        # veros_slots assemblies (legacy: dz_int_eff[0] = dz_face[...,0] =
+        # dz_half[...,0]; veros_slots: vol[0] = dz_half[...,0]) — the same
+        # slot every other row's face-flux-over-volume ratio already uses.
+        vol0 = jnp.maximum(dz_half[..., 0], _EPS)
+        # Face flux coefficient between the virtual surface row and interior
+        # interface 0: NEMO's true face is 0.5*(avm(jk=2)+avm(jk=1))
+        # (zdftke.F90:407-410). avm(jk=2) is K_M_old[...,0] (the topmost
+        # carried interface's own diffusivity — exact, the same quantity
+        # NEMO's p_avm(jk=2) is). avm(jk=1) is the TRUE surface-w-level
+        # viscosity: when the caller supplies K_M_surface (T3-exact,
+        # :func:`nemo_surface_avm`) the face is bit-exact; None falls back
+        # to the documented APPROXIMATION avm(1) ~= avm(2) = K_M_old[...,0]
+        # (i.e. avm(1)+avm(1) rather than the true avm(2)+avm(1) —  exact
+        # only where the surface and first-interior viscosities coincide).
+        _avm1 = K_M_old[..., 0] if K_M_surface is None else jnp.asarray(
+            K_M_surface, dtype=e_old.dtype)
+        K_face_sfc = cfg.alpha_tke * 0.5 * (K_M_old[..., 0] + _avm1)
+        delta_sfc = dt * K_face_sfc / dz_face_sfc      # (...,) flux coeff.
+        row0_coupling = delta_sfc / vol0               # a[row 0] magnitude
+        if bottom_dirichlet is not None and bottom_level is not None:
+            # Degenerate-column guard: when the T15 bottom Dirichlet pin
+            # ALSO lands on interior interface 0 (a 1-interior-interface
+            # column), row 0 must stay a PURE identity row (diag=1, no
+            # coupling either direction) — the surface face coupling built
+            # above would otherwise silently override the bottom pin's
+            # diag=1/rhs=bottom_dirichlet with diag=1+row0_coupling and
+            # couple it to the virtual surface row, corrupting the held
+            # value. Zero the surface coupling on any column where row 0
+            # is the bottom-pinned row (rare on real DINO bathymetry but a
+            # genuine correctness edge case once bottom_level can be < the
+            # array length).
+            row0_coupling = jnp.where(is_bottom[..., 0], 0.0, row0_coupling)
+
+        # Row 0 (interior interface 0, NEMO jk=2): add the upward coupling
+        # to the virtual surface row (a_diff[...,0] was 0 — no upward
+        # neighbour existed before this row was added). The DIAGONAL gets
+        # the new face's magnitude (a genuinely new contribution — the
+        # matrix previously had no upward coupling here at all); the RHS is
+        # NOT separately incremented by ``row0_coupling*e_sfc`` — that
+        # source enters through the tridiagonal system ITSELF via the
+        # matrix coupling ``a_ext[row=1] = -row0_coupling`` against the
+        # virtual row's identity value ``rhs_ext[row=0] = e_sfc`` (the
+        # standard Thomas-elimination first step,
+        # ``rhs[1] -= (a[1]/b[0])*rhs[0]``, already reproduces exactly this
+        # term). Adding it here TOO double-counted the surface source by 2x
+        # (physics-validator review, T3-exact gap-closure 2026-07-24) —
+        # bug predates this fix (commit e1744a0530), caught once the
+        # approximation-mode ``avm(1)~=avm(2)`` stopped floor-masking the
+        # symptom (the exact avm(1) is large enough to push the solved
+        # profile above ``tke_surface_min``/``tke_background``, where the
+        # prior 2x error becomes visible instead of hidden by the floor).
+        b0 = diag[..., 0] + row0_coupling
+
+        # Assemble the (N+1)-row system: row 0 = virtual surface (identity,
+        # Dirichlet: a=0, b=1, c=0); rows 1..N = the original N rows, with
+        # row 1 (= original row 0)'s sub-diagonal now coupling UP into the
+        # surface row.
+        a_ext = jnp.concatenate(
+            [jnp.zeros_like(a_diff[..., :1]),
+             -row0_coupling[..., None], a_diff[..., 1:]], axis=-1)
+        b_ext = jnp.concatenate(
+            [jnp.ones_like(diag[..., :1]), b0[..., None], diag[..., 1:]],
+            axis=-1)
+        c_ext = jnp.concatenate(
+            [jnp.zeros_like(c_diff[..., :1]), c_diff], axis=-1)
+        rhs_ext = jnp.concatenate([e_sfc[..., None], rhs], axis=-1)
+
+        e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
+        e_new = e_new_ext[..., 1:]
+    elif surface_dirichlet is not None:
         # NEMO nn_bc_surf=1 Dirichlet surface TKE (zdftke.F90:264-269): hold
         # e_new[...,0] = e_sfc exactly by making row 0 an identity row (the
         # k=1 row's sub-diagonal still couples to the held value — the
@@ -927,11 +1224,10 @@ def _solve_tke_backward_euler(
         c_diff = c_diff.at[..., 0].set(0.0)
         rhs = rhs.at[..., 0].set(
             jnp.asarray(surface_dirichlet, dtype=e_old.dtype))
+        e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
     else:
         rhs = rhs.at[..., 0].add(dt * surface_flux / inj_vol)
-
-    # Solve tridiagonal system.
-    e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
+        e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
 
     if veros_positivity:
         # Veros tke.py:238-245: interior TKE MAY GO NEGATIVE (the debt is
@@ -977,6 +1273,15 @@ def _prandtl_number(
       K_M); in the stratified interior ``Pr -> 10`` (small abyssal K_H).
     - ``prandtl_mode="constant"``: ``Pr = Prandtl_tke0`` (Veros
       ``enable_Prandtl_tke=False`` fallback, default 10).
+    - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8): NEMO's EXACT nn_pdl=1
+      form (zdftke.F90:381-401): ``zri = N2·kappaM / (shear_sq +
+      bshear_floor)``, ``pdlr = max(0.1, ri_cri/max(ri_cri,zri))``,
+      ``Pr = 1/pdlr`` — i.e. ``Pr = max(1, min(10, (1/ri_cri)*zri))``,
+      the SAME clamp/scaling as "richardson" but with ``zri`` carrying an
+      EXTRA ``kappaM`` numerator factor NEMO's own formula has (a bulk/
+      flux-Richardson-like ratio, not the plain gradient Ri "richardson"
+      uses — Veros's own formula genuinely omits ``kappaM``). Caller passes
+      ``cfg.prandtl_ri_coeff = 1/ri_cri`` (unchanged meaning).
 
     Differentiable; the ``min``/``max`` clamps are sub-gradient-safe and
     the ``6.6`` / ``1`` / ``10`` are Veros's fixed scheme constants.
@@ -986,9 +1291,14 @@ def _prandtl_number(
     if cfg.prandtl_mode == "richardson":
         Ri = N2 / jnp.maximum(shear_sq, 1e-12)
         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * Ri))
+    if cfg.prandtl_mode == "nemo_ri":
+        bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
+                             dtype=N2.dtype)
+        zri = N2 * kappaM / jnp.maximum(shear_sq + bshear, 1e-30)
+        return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "
-        f"'constant' or 'richardson'."
+        f"'constant', 'richardson' or 'nemo_ri'."
     )
 
 
@@ -1027,6 +1337,7 @@ def compute_K_from_tke(
     N2: jnp.ndarray | None = None,
     shear_sq: jnp.ndarray | None = None,
     z_interface: jnp.ndarray | None = None,
+    N2_prandtl: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""Compute K_M and K_H from TKE and the mixing length.
 
@@ -1061,6 +1372,12 @@ def compute_K_from_tke(
       oracle wherever the caps/floors don't bind.
     - ``"veros_sqrte"``: Veros tke.py:73 ``kappaM = c_k·mxl·sqrttke`` with
       ``sqrttke = sqrt(max(0, e))`` (zero in negative-TKE debt regions).
+
+    N2_prandtl : (..., nlev-1) or None
+        N² fed to the Prandtl-number computation (T8: NEMO's ``zri`` reads
+        ``rn2b``, the BEFORE/Nbb level — genuinely different from the
+        ``rn2``/Nnow ``N2`` used for the mixing length / buoyancy sink).
+        None (default, BIT-IDENTICAL) ⇒ falls back to ``N2``.
 
     Returns
     -------
@@ -1097,7 +1414,8 @@ def compute_K_from_tke(
                 f"prandtl_mode={cfg.prandtl_mode!r} requires N2 and "
                 f"shear_sq for the Prandtl-number computation."
             )
-        Pr = _prandtl_number(N2, shear_sq, K_M, cfg)
+        _N2_pr = N2 if N2_prandtl is None else N2_prandtl
+        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
         # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
@@ -1284,6 +1602,12 @@ def tke_vertical_mixing(
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    bottom_dirichlet: jnp.ndarray | None = None,
+    bottom_level: jnp.ndarray | None = None,
+    T_n2b: jnp.ndarray | None = None,
+    S_n2b: jnp.ndarray | None = None,
+    u_before_cell: jnp.ndarray | None = None,
+    v_before_cell: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1320,6 +1644,19 @@ def tke_vertical_mixing(
         Distance between adjacent cell centres.
     tke_old : (..., nlev-1) or None
     tau_x_surface, tau_y_surface : (...)
+    bottom_dirichlet : (...,) or None — NEMO bottom TKE BC value (T15;
+        :func:`nemo_bottom_tke_dirichlet`), held at the DEEPEST carried
+        interface (or, when ``bottom_level`` is also given, at the
+        PER-COLUMN seafloor interface — T15-exact). REQUIRED when
+        ``cfg.bottom_tke_bc=True`` (raises otherwise — the gate has no
+        meaning without a value); ignored (and must be None) when the gate
+        is off.
+    bottom_level : (...,) int or None — per-column T-point bottom-cell
+        index (:class:`OceanPartialCellCoordinate.bottom_level`). None
+        (default, BIT-IDENTICAL) ⇒ ``bottom_dirichlet`` pins the array's
+        last interface unconditionally (exact on a flat-bottom column,
+        the historical behaviour). Ignored when ``bottom_dirichlet`` is
+        None.
     dt : float
     cfg : TKEConfig
     n_iterations : int
@@ -1351,6 +1688,22 @@ def tke_vertical_mixing(
     -------
     TKEOutput
     """
+    _bottom_bc_on = bool(getattr(cfg, "bottom_tke_bc", False))
+    if _bottom_bc_on and bottom_dirichlet is None:
+        raise ValueError(
+            "TKEConfig.bottom_tke_bc=True requires bottom_dirichlet (the "
+            "NEMO bottom-friction TKE value, nemo_bottom_tke_dirichlet) to "
+            "be passed to tke_vertical_mixing.")
+    if not _bottom_bc_on and bottom_dirichlet is not None:
+        raise ValueError(
+            "bottom_dirichlet was passed but TKEConfig.bottom_tke_bc=False "
+            "— set the gate True to actually use it (silent-no-op guard)."
+        )
+    if bottom_dirichlet is None and bottom_level is not None:
+        raise ValueError(
+            "bottom_level was passed but bottom_dirichlet is None — "
+            "bottom_level only selects WHERE the bottom Dirichlet pin lands, "
+            "it does not supply one (silent-no-op guard).")
     if (getattr(cfg, "buoyancy_timing", "pre_mixing")
             == "post_mixing_veros"):
         # This orchestrator IS the pre-mixing solve (the TKE budget charged
@@ -1400,6 +1753,14 @@ def tke_vertical_mixing(
     else:
         dz_cell = None
 
+    _surf_bc_level = getattr(cfg, "tke_surface_bc_level", "interior_pinned")
+    if _surf_bc_level == "nemo_z0" and dz_surface is None:
+        raise ValueError(
+            "TKEConfig.tke_surface_bc_level='nemo_z0' requires dz_surface "
+            "(= -z_full_ref[0]·J, the z=0-to-first-cell-centre distance) to "
+            "be passed to tke_vertical_mixing."
+        )
+
     # NEMO nn_mxl=3 (tke_mxl_choice=3) needs the e3t cell thicknesses for the
     # lup/ldown |dl/dz|<=e3t mixing-length sweeps (zdftke.F90:690-704) even
     # when the Veros metric-slot feature (veros_dz_slots) is OFF — the two are
@@ -1428,7 +1789,37 @@ def tke_vertical_mixing(
             dtype=rho_cell.dtype,
         )
 
-    shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
+    # Shear-production discretization (T4, Phase-2 #1317): "squared_centered"
+    # (default, BIT-IDENTICAL) is the now-only squared form; "nemo_burchard"
+    # is the Burchard (2002) now×before energy-conserving cross term, which
+    # NEMO feeds to BOTH the shear-production source AND the Prandtl zri
+    # (zdftke.F90:392-395 reads the SAME p_sh2) — so ``shear_sq`` below feeds
+    # both consumers identically to NEMO either way.
+    _shear_disc = getattr(cfg, "tke_shear_production", "squared_centered")
+    if _shear_disc not in ("squared_centered", "nemo_burchard"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_production: must be one of "
+            f"('squared_centered', 'nemo_burchard'), got {_shear_disc!r}.")
+    if _shear_disc == "nemo_burchard":
+        if u_before_cell is None or v_before_cell is None:
+            raise ValueError(
+                "TKEConfig.tke_shear_production='nemo_burchard' requires "
+                "u_before_cell and v_before_cell (the carried leap-frog "
+                "before-velocities, state.u_before/v_before) to be passed "
+                "to tke_vertical_mixing.")
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_burchard as _vertical_shear_burchard,
+        )
+        shear_sq = _vertical_shear_burchard(
+            u_cell, v_cell, u_before_cell, v_before_cell, dz_half)
+    else:
+        if u_before_cell is not None or v_before_cell is not None:
+            raise ValueError(
+                "u_before_cell/v_before_cell were passed but "
+                "TKEConfig.tke_shear_production='squared_centered' — set "
+                "tke_shear_production='nemo_burchard' to actually use them "
+                "(silent-no-op guard).")
+        shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
 
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
@@ -1447,6 +1838,34 @@ def tke_vertical_mixing(
         adiabatic_over_dz_half=veros_slots,
         t_depth=t_depth, w_depth=w_depth,
     )
+
+    # ----- rn2b (T8/T13, NEMO's TRUE before/Nbb level) -----
+    # NEMO's ``rn2`` (this ``N2`` — step-entry Nnow T/S, via T_n2/S_n2) feeds
+    # the en-equation buoyancy sink AND the mixing length (zdftke.F90:418,650)
+    # — the ONLY terms N2 (as computed above) may be used for. ``rn2b`` (the
+    # leap-frog BEFORE/Nbb level, stpmlf.F90:186 ``bn2(ts(Nbb))`` — one full
+    # leap-frog step behind Nnow) feeds the Prandtl zri (:384-395) and the
+    # Langmuir PE integral (:340-344) — genuinely DIFFERENT time levels, not
+    # a relabelling of the same tracers. ``T_n2b``/``S_n2b`` (None ⇒
+    # BIT-IDENTICAL: rn2b consumers fall back to using this N2, the PRIOR
+    # behaviour) let the caller supply the true Nbb tracers (leapfrog
+    # ``state.T_before``/``S_before``) so those two consumers get NEMO's
+    # actual time level instead.
+    if T_n2b is not None or S_n2b is not None:
+        if T_n2b is None or S_n2b is None:
+            raise ValueError(
+                "tke_vertical_mixing: T_n2b and S_n2b must be supplied "
+                "together (rn2b needs both tracers).")
+        N2b = _compute_N2(
+            rho_cell, dz_half, rho_0, g,
+            T_cell=T_n2b, S_cell=S_n2b, p_cell=p_cell,
+            dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
+            n2_mode=cfg.n2_mode,
+            adiabatic_over_dz_half=veros_slots,
+            t_depth=t_depth, w_depth=w_depth,
+        )
+    else:
+        N2b = N2
 
     if taum_surface is not None:
         # NEMO taum channel: the caller supplies the surface stress MODULUS
@@ -1481,8 +1900,10 @@ def tke_vertical_mixing(
         _depth_w = -z_interface
     if _lc_on:
         # Langmuir source enters the RHS as +dt·source — exactly NEMO's
-        # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367).
-        _lc_src = nemo_langmuir_tke_source(taum, N2, _depth_w, dz_half, cfg,
+        # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367). NEMO's PE
+        # integral (:340,344) reads ``rn2b`` (the BEFORE/Nbb level) — N2b
+        # (defaults to N2 when T_n2b/S_n2b are not supplied, T8/T13).
+        _lc_src = nemo_langmuir_tke_source(taum, N2b, _depth_w, dz_half, cfg,
                                            ice_frac=ice_frac)
         external_source = (_lc_src if external_source is None
                            else external_source + _lc_src)
@@ -1491,6 +1912,15 @@ def tke_vertical_mixing(
     tke_curr = tke_old
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
     _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
+    # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
+    # (:func:`nemo_surface_avm`), consulted only by the nemo_z0 face
+    # assembly. Requires the ln_mxl0 anchor (tke_mxl_choice=3) and a held
+    # surface value (surface_dirichlet) — both already validated above when
+    # surface_bc_level="nemo_z0" is selected. None otherwise ⇒ the
+    # documented approximation, bit-identical to the prior behaviour.
+    _K_M_surface = None
+    if _surf_bc_level == "nemo_z0" and _l_anchor is not None:
+        _K_M_surface = nemo_surface_avm(cfg, surface_dirichlet, _l_anchor)
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
@@ -1498,7 +1928,7 @@ def tke_vertical_mixing(
             l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
-            z_interface=z_interface)
+            z_interface=z_interface, N2_prandtl=N2b)
         P_s_curr = K_M_curr * shear_sq
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
@@ -1509,8 +1939,14 @@ def tke_vertical_mixing(
             dt=dt, cfg=cfg,
             external_source=external_source,
             dz_cell=dz_cell,
-            dz_surface=dz_surface if veros_slots else None,
+            dz_surface=(dz_surface if (veros_slots
+                                        or _surf_bc_level == "nemo_z0")
+                       else None),
             surface_dirichlet=surface_dirichlet,
+            surface_bc_level=_surf_bc_level,
+            bottom_dirichlet=bottom_dirichlet,
+            K_M_surface=_K_M_surface,
+            bottom_level=bottom_level,
         )
 
     if _etau_on:
@@ -1531,7 +1967,7 @@ def tke_vertical_mixing(
         l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
-        z_interface=z_interface)
+        z_interface=z_interface, N2_prandtl=N2b)
 
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
 
@@ -1555,6 +1991,19 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
             f"Unknown TKEConfig.shear_production={shear!r}; expected "
             f"'pre_solve' or 'realized_veros'."
         )
+    _tke_shear = getattr(cfg, "tke_shear_production", "squared_centered")
+    if _tke_shear not in ("squared_centered", "nemo_burchard"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_production: must be one of "
+            f"('squared_centered', 'nemo_burchard'), got {_tke_shear!r}.")
+    if timing == "post_mixing_veros" and _tke_shear == "nemo_burchard":
+        raise ValueError(
+            "TKEConfig.tke_shear_production='nemo_burchard' is not "
+            "supported with buoyancy_timing='post_mixing_veros' — "
+            "tke_set_diffusivities does not accept u_before_cell/"
+            "v_before_cell and would silently keep squared_centered. "
+            "Disable tke_shear_production or use the standard pre_mixing "
+            "path.")
     if timing == "post_mixing_veros":
         if not (getattr(cfg, "prognostic", False)
                 and getattr(cfg, "veros_dz_slots", False)
@@ -1593,6 +2042,31 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 "(the Veros-faithful step order has no Langmuir/etau terms; "
                 "they would silently not be applied). Disable lc/etau or "
                 "use the standard pre_mixing path.")
+        if getattr(cfg, "tke_surface_bc_level",
+                   "interior_pinned") != "interior_pinned":
+            raise ValueError(
+                "TKEConfig.tke_surface_bc_level='nemo_z0' is not supported "
+                "with buoyancy_timing='post_mixing_veros' — the post-mixing "
+                "solve (tke_integrate_post_mixing) does not accept "
+                "surface_bc_level and would silently keep the "
+                "interior_pinned Dirichlet placement. Disable "
+                "tke_surface_bc_level or use the standard pre_mixing path.")
+        if getattr(cfg, "tke_buoyancy_sink",
+                   "implicit_linearized") != "implicit_linearized":
+            raise ValueError(
+                "TKEConfig.tke_buoyancy_sink='nemo_explicit' is not "
+                "supported with buoyancy_timing='post_mixing_veros' — the "
+                "post-mixing solve already charges P_diss_v = kappaH*N^2 "
+                "fully explicitly (Veros integrate_tke forc), so this axis "
+                "is not consulted there and would silently no-op. Disable "
+                "tke_buoyancy_sink or use the standard pre_mixing path.")
+        if getattr(cfg, "bottom_tke_bc", False):
+            raise ValueError(
+                "TKEConfig.bottom_tke_bc=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — tke_integrate_post_"
+                "mixing does not accept bottom_dirichlet and would silently "
+                "keep the natural no-flux bottom row. Disable "
+                "bottom_tke_bc or use the standard pre_mixing path.")
     elif shear == "realized_veros":
         raise ValueError(
             "TKEConfig.shear_production='realized_veros' requires "

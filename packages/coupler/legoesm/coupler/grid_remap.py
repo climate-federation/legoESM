@@ -138,10 +138,25 @@ def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     )
     src_lon_e_padded = cell_edges_1d(src_lon_padded, periodic_lon=False)
 
-    # require_full_coverage=True: this global lat-lon path guarantees full
-    # coverage (pole-clamped v-faces span [-pi/2, pi/2]; the ghost columns close
-    # the lon seam), so any residual coverage deficit is a BUG -> raise loudly.
-    # Host-side check on the static weights; no AD/JIT impact.
+    # DEFAULT 'dstarea' normalisation and NO polar_fill, deliberately.  This path
+    # carries the conservative FLUX direction (the ESM energy / freshwater budgets
+    # depend on it), and both 'fracarea' and polar_fill trade strict conservation
+    # for correct magnitude -- the right trade for intensive forcing fields, the
+    # wrong one here.  So every destination cell must be fully covered and any
+    # shortfall is a bug: require_full_coverage is the strict invariant, identical
+    # in strength to the original check.
+    #
+    # This does reject a non-global source band, which is correct rather than
+    # incidental: Mercator/DINO satisfy `_is_regular_latlon` too (their lat_v is
+    # bounded by lat_max_deg, not +-pi/2), and a lat_max=70 deg Mercator source into
+    # a global lat-lon destination has 0.0 coverage in its outer rows -- a constant
+    # 290 K SST would arrive as 0 K.
+    #
+    # No span assertions here: a lat assertion would newly reject legitimate
+    # Mercator -> Mercator pairs, and a lon assertion would reject DINO's
+    # regional-longitude frame (span 0.84 rad) that passes today.  Those
+    # preconditions belong to the forcing callers, whose sources are global
+    # datasets and whose ghost padding would otherwise mask a partial axis.
     w = compute_overlap_weights(
         src_lat_e, src_lon_e_padded, dst_lat_e, dst_lon_e,
         require_full_coverage=True,

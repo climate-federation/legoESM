@@ -51,7 +51,8 @@ _MSG_RE = re.compile(
 _DISP_RE = re.compile(
     r"(scheme|model_type|discretization|integrator|grid_type|eos|advection|limiter"
     r"|drag|micro|cloud|radiation|convection|turbulence|method|formula|variant|pgf"
-    r"|entity|partition|parameterization|dycore|kernel|registry|backend|solver|preset)",
+    r"|entity|partition|parameterization|dycore|kernel|registry|backend|solver|preset"
+    r"|normali[sz]ation)",
     re.I,
 )
 # NB: deliberately NOT including very common words (mode/source/profile/transform)
@@ -185,6 +186,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
+        # normalization guard: a typo must not silently select 'dstarea', which
+        # returns coverage x field on a partly covered polar row instead of the
+        # area-weighted mean ('fracarea').
+        ("packages/core/legoesm/grids/conservative_regrid.py", "compute_overlap_weights"),
         ("packages/core/legoesm/grids/cubed_sphere.py", "gnomonic_grids"),
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
         ("packages/core/legoesm/grids/factory.py", "create_regional_grid"),
@@ -260,6 +265,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # AL81/EEN q-boundary convention (q_boundary: neumann_fill | nemo_live).
+        # A typo must raise, not silently pick the coast-vorticity behaviour
+        # (nemo_live keeps wall shear vorticity live; neumann_fill erases it).
+        ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),

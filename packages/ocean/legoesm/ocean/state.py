@@ -506,6 +506,31 @@ class LatLonCGridOceanState(NamedTuple):
     # equal histories", silently skipping the cold-start ramp) — nemo_ab3am4
     # runs are step-1-eager, then scan.
     bt_hist: object = None
+    # NEMO ln_bt_fw=.FALSE. CENTRED barotropic slow forcing (#1226 item 3;
+    # dynspg_ts.F90:392-421): under the centred (non-forward) split-explicit
+    # integration NEMO forces zu_frc/ssh_frc with the TIME-AVERAGE
+    # ½(before+now) of the wind stress (utau_b+utauU) and the net freshwater
+    # flux (emp_b+emp), NOT the plain now-value. These carry the PREVIOUS
+    # step's forcing at the SAME representation as the ``surface_forcing``/
+    # ``freshwater`` step() args (T-point, pre-rotation) so
+    # ``barotropic_forcing_centred=True`` can rebuild the NEMO average
+    # without re-deriving the tau sign/interp/rotation chain twice.
+    # ``tau_x_prev``/``tau_y_prev`` mirror ``OceanSurfaceForcing.tau_x/tau_y``
+    # (T-point, atmosphere convention [Pa]); ``freshwater_eta_prev`` is the
+    # previous step's REDUCED net eta-forcing rate
+    # (``freshwater_eta_tendency`` output, T-point [m/s]) rather than a full
+    # carried ``FreshwaterForcing`` — only the eta/barotropic (NEMO
+    # ``ssh_frc``) channel is centred; the separate virtual-salt-flux tracer
+    # deposit (NEMO ``tra_sbc``) is untouched and stays at NOW. Default
+    # None -> inert (barotropic_forcing_centred=False path never reads
+    # these): zero behaviour change for existing configs. NEMO's nit000
+    # seeding (sbcmod.F90:568-573, "before" set equal to "now" on step 1,
+    # no restart) is reproduced by seeding these to the FIRST step's now
+    # values rather than zero (done in ``_step_impl``/``_leapfrog_step``,
+    # not here — this field only carries the state).
+    tau_x_prev: object = None
+    tau_y_prev: object = None
+    freshwater_eta_prev: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -807,6 +832,42 @@ class BarotropicConfig(NamedTuple):
     #   not the Coriolis V->u averaging) -- it is a fidelity refinement, not that
     #   fix.
     barotropic_coriolis: str = "avg"
+    # C-grid face depth used by the substep continuity flux AND the drag/update
+    # depth (dynspg_ts.F90:568-592 zhup2_e/zhvp2_e; :658-666,771-778 zsshu_a/
+    # hu_e — same spatial rule, different ssh time-level).  "min_rule" (DEFAULT,
+    # bit-identical legacy): lego's C-grid min-rule face depth (MOM6/MITgcm
+    # hFacW convention), applied to the total column depth.  "nemo_ssh_avg":
+    # NEMO's own rule — a FIXED still-water reference depth (hu_0/hv_0; lego's
+    # min-rule applied to H_bathy alone) PLUS an e1e2-area-weighted 2-point
+    # average of the dynamic ssh at the two adjacent T-cells (r1_e1e2u ==
+    # 1/(e1u*e2u), the u-/v-point's OWN metric area — verified against
+    # domhgr.F90:146-160, NOT a sum of the two T-cell areas).  Conservation
+    # (#1226 zero-deviation item 2, verified 2026-07-23): the tracer step's
+    # Hallberg-Adcroft delta_U correction enforces the column-sum invariant
+    # sum_k(h_u*u_corr) == Hu_avg identically for ANY face-depth mode (the
+    # min-rule h_u weights only set the vertical distribution), and Hu_avg is
+    # accumulated from the SAME gated flux that updates eta each substep — so
+    # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
+    # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
+    barotropic_face_depth: str = "min_rule"
+    # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
+    # coefficients (#1226 zero-deviation item 4; only read when
+    # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D
+    # coefficients over the whole substep window (dyn_cor_2D_init docstring:
+    # "these are however frozen although they should be updated in the
+    # variable volume case") — the deviation is only WHICH level the freeze is
+    # built from.  "window_start" (DEFAULT, bit-identical legacy): the
+    # thickness of the barotropic integration's own seed state — the NOW eta
+    # under FE/AB2, but the BEFORE (Nbb) eta under the MLF leapfrog's
+    # before-level seed (_barotropic_before_state).  "nemo_kmm": NEMO's level —
+    # dyn_cor_2D_init(Kmm) (dynspg_ts.F90:355, recomputed every step under
+    # vvl) builds every thickness at Kmm=NOW (e3u/e3v/r1_hu/r1_hv all Kmm,
+    # :1349-1379), so the coefficients are built from the NOW eta even though
+    # the fast integration starts from Nbb.  Identical whenever the window
+    # seed IS the NOW state (FE/AB2, or MLF's first Euler step) — the two
+    # options only differ under the MLF before-level seed.  Unknown value
+    # raises at the substep entry (dispatch hardening).
+    barotropic_een_seed: str = "window_start"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
@@ -1446,6 +1507,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Robert-Asselin-Williams variant — dynatf_qco.F90:144 / traatf_qco.F90:209).
     # NEMO default rn_atfp=0.1. Ignored unless outer_integrator="leapfrog".
     asselin_gamma: float = 0.1
+    # How the leap-frog combine advances tracers (outer_integrator="leapfrog").
+    #   "concentration"      — T(Naa) = T(Nbb) + (T_expl - T(Nnn)) + diss, i.e.
+    #       a bare CONCENTRATION increment.  Under a moving (z-star/vvl)
+    #       coordinate this does NOT conserve tracer content: measured drift
+    #       +8.6e-6 in globally-integrated heat over 200 forcing-free steps,
+    #       LINEAR in step count (#1226).
+    #   "thickness_weighted" — NEMO ``trazdf.F90:271-278``:
+    #           e3t(Kaa)·T(Kaa) = e3t(Kbb)·T(Kbb) + 2·rdt·e3t(Kmm)·RHS
+    #       combine CONTENT, then divide by the after-thickness.  Trends carry
+    #       the Kmm ("now") thickness and the before-state carries e3t(Kbb),
+    #       exactly as NEMO weights ``ts(:,:,:,:,Nrhs)``.  NEMO conserves
+    #       content to roundoff (+3.4e-16 on the identical test).
+    # Default "concentration" keeps every existing config bit-identical; the
+    # NEMO/DINO oracle cards select "thickness_weighted".
+    tracer_combine: str = "concentration"
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
@@ -1921,6 +1997,122 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     Arctic halocline-erosion audit).  Column-constant top-cell S is
     #     used for the runoff-depth-spread channel too.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
+
+    # --- NEMO dynzdf composition (#1226): drag-in-matrix + baroclinic-only ---
+    # Two SEPARATELY toggleable options transcribing NEMO's ``ln_drgimp``
+    # implicit-friction composition (dynzdf.F90), each independently
+    # attributable against the measured east-wall 2Δx checkerboard v-mode
+    # (legoESM's implicit vertical-friction stage damps it at 1/20-1/300 of
+    # NEMO's vtrd_zdf, pattern corr 0.091).
+    #
+    # zdf_drag_in_matrix (dynzdf.F90:293-305 + 148-171, zdfdrg.F90 rCdU_bot):
+    # NEMO's semi-implicit bottom friction adds the drag rate directly INTO
+    # the tridiagonal matrix diagonal at each column's deepest wet cell,
+    # instead of an explicit RHS kick before the solve:
+    #   zwd(iku) = zwd(iku) - zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa)
+    # (rCdU_bot <= 0 in NEMO's convention, so the SUBTRACTION of a negative
+    # quantity ADDS positive definiteness to the diagonal -- a damping term;
+    # legoESM's r_eff [m/s] is the positive ``-rCdU_bot``, so the diagonal
+    # gains ``+ dt_mom * r_eff / e3u`` at the bottom cell only).  With
+    # ``ln_dynspg_ts`` (split-explicit barotropic, DINO's default) NEMO ALSO
+    # adds a barotropic-drag RHS correction at the bottom cell using the
+    # AFTER barotropic velocity uu_b/vv_b (dynzdf.F90:148-171) -- see
+    # zdf_baroclinic_only below, which folds that correction into the SAME
+    # depth-mean split.  REQUIRES the model's OWN outside bottom-drag
+    # application on momentum (``_bc_bottom_drag`` in the explicit tendency)
+    # to be SKIPPED when this flag is True -- double-applying drag both
+    # outside AND inside the matrix would double-count it (2x the intended
+    # damping).  Requires ``bottom_drag_scheme`` in {"nemo_quadratic",
+    # "nemo_loglayer"} (validated at model construction) since the diagonal
+    # term needs NEMO's rCdU_bot rate, not the legacy linear/MOM6 rate.
+    # Default False -> the pre-existing outside-the-matrix explicit drag
+    # application is UNCHANGED -> BIT-IDENTICAL.
+    # NOTE (tendency-probe fidelity): when enabled, the bottom-drag
+    # contribution moves OUT of the explicit tendency (``_bc_bottom_drag``
+    # is skipped, so ``diag_botdrag`` is zero) and INTO the implicit vmix
+    # increment. ``fidelity/tendency_probe.py``'s du_mix/dv_mix comparison
+    # then includes drag on the legoESM side too -- matching NEMO's
+    # vtrd_zdf diagnostic, which likewise includes the ``ln_drgimp`` drag
+    # contribution when NEMO's implicit-drag option is on.
+    zdf_drag_in_matrix: bool = False
+    # zdf_baroclinic_only (dynzdf.F90:119-171, stpmlf.F90:392): NEMO solves
+    # the implicit vertical-friction tridiagonal system on the BAROCLINIC
+    # residual only -- it subtracts the (Kaa) barotropic mean uu_b/vv_b from
+    # the RHS BEFORE the solve and (under ln_dynspg_ts) re-injects the
+    # barotropic drag correction at the bottom cell directly (the "barotropic
+    # component only" comment at dynzdf.F90:144); the barotropic splice back
+    # into the 3-D field happens AFTER dyn_zdf, at mlf_baro_corr.  legoESM's
+    # barotropic mode is already spliced into u/v BEFORE this stage (stage
+    # A->2 of _leapfrog_step / the AB2 state), so the faithful transcription
+    # is: take the e3-weighted depth mean of the solve's INPUT velocity (the
+    # SAME dz_u/dz_v the solve uses, at the solve's time level), subtract it,
+    # solve the tridiagonal on the residual, then add the SAME depth mean
+    # back UNCHANGED to the solve's OUTPUT -- exactly conservative when
+    # A_v=0 (round-trips to the input).  Combines with zdf_drag_in_matrix's
+    # barotropic-drag bottom-cell RHS correction (both flags target the
+    # ln_dynspg_ts barotropic-component treatment; zdf_baroclinic_only can
+    # be enabled alone, in which case the barotropic mean simply free-wheels
+    # through the solve unchanged rather than getting the drag correction).
+    # Default False -> the solve acts on the full (baroclinic + barotropic)
+    # velocity as before -> BIT-IDENTICAL.
+    zdf_baroclinic_only: bool = False
+    # barotropic_drag_substep (dynspg_ts.F90:700-706 + dyn_drg_init
+    # :1584-1642): NEMO's split-explicit barotropic drag — run whenever
+    # ln_dynspg_ts=T, independent of ln_drgimp — in two pieces:
+    # (1) per-substep EXPLICIT bottom stress on the evolving barotropic
+    #     velocity, ``zu_trd += zCdU_u*un_e*hur_e`` (:703; the DINO-active
+    #     ``.NOT.ll_wd`` branch — the implicit division at :764-768 is the
+    #     wetting-drying-only variant, ll_wd=F for DINO).  In lego's
+    #     positive-r convention (``r_eff = -zCdU_u >= 0``) this is
+    #     ``dU/dt += -r_eff*U/H_u`` per substep — a damping term;
+    # (2) a once-per-step slow-forcing correction
+    #     ``pu_RHSi += r1_hu(Kmm) * pCdU_u * (u_bot - U_bar)`` (:1616+1627+
+    #     :1642, bottom-only + forward branches) — the bottom-cell
+    #     baroclinic residual's drag projection onto the barotropic RHS
+    #     (NEMO zu_frc → lego F_slow_u/F_slow_v).
+    # REQUIRES zdf_drag_in_matrix=True AND zdf_baroclinic_only=True (or
+    # barotropic.nemo_stage_mean_imposition=True), validated at model
+    # construction: (a) with the default explicit 3-D drag kick
+    # (_bc_bottom_drag) active, F_slow already carries the depth-mean of
+    # drag on the FULL bottom velocity into every substep — adding (1)+(2)
+    # on top would double-count; (b) NEMO removes the barotropic mean from
+    # the 3-D implicit solve unconditionally under ln_drgimp + ln_dynspg_ts
+    # (dynzdf.F90:147-159), so the in-matrix drag acts on the baroclinic
+    # residual only — without that removal the matrix diagonal would drag
+    # the barotropic mode too and the substep drag would double-count it.
+    # NEMO's DINO namelist composition (ln_drgimp=T + ln_dynspg_ts=T
+    # simultaneously) therefore maps to zdf_drag_in_matrix=True +
+    # zdf_baroclinic_only=True + barotropic_drag_substep=True.
+    # explicit_substep solver only (the in-subcycle mechanism has no other
+    # consumer; loud error otherwise).  Default False -> BIT-IDENTICAL.
+    barotropic_drag_substep: bool = False
+    # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
+    # dynspg_ts.F90:392-421 + the dyn_drg_init Kbb residual :1623-1636):
+    # under NEMO's CENTRED (non-forward) split-explicit integration — the
+    # branch DINO's namelist actually runs — the once-per-step barotropic
+    # slow forcing zu_frc/ssh_frc uses the TIME-AVERAGE of the before and
+    # now surface forcing, not the plain now-value:
+    #   wind:  zu_frc += (utau_b+utauU)/(2*rho0*hu(Kmm))       (:400-401)
+    #   emp:   ssh_frc = ((emp+emp_b) - (rnf+rnf_b))/(2*rho0)  (:417-421)
+    #   drag:  zu_i = puu(ikbu,Kbb) - puu_b(Kbb)  [NOT centred -- pure
+    #          BEFORE, ln_bt_fw=F branch]                     (:1634-1636)
+    # lego's default (False) freezes F_slow at NOW throughout (documented
+    # residual #1 in ``_leapfrog_step``): the wind/freshwater terms use the
+    # NOW ``surface_forcing``/``freshwater`` step() args unaveraged, and the
+    # ``barotropic_drag_substep`` residual uses NOW ``state.u/v`` (see its
+    # own docstring). True flips wind+emp to the ½(before+now) average
+    # (using ``state.tau_x_prev``/``tau_y_prev``/``freshwater_eta_prev``)
+    # and the drag residual to the pure-BEFORE (``state.u_before``/
+    # ``v_before``) level -- matching the SAME dynspg_ts.F90 branch this
+    # flag is named for. Requires ``outer_integrator="leapfrog"`` (the
+    # ``_before`` carry fields this reads only exist there; validated at
+    # construction). Only the eta/barotropic (NEMO ``ssh_frc``) freshwater
+    # channel is centred -- the separate virtual-salt-flux tracer deposit
+    # (NEMO ``tra_sbc``) is untouched. First step (``*_prev`` is None):
+    # seeded to the NOW value (NEMO nit000 sbcmod.F90:568-573, no restart
+    # -> "before" set equal to "now"), so the average degenerates to NOW on
+    # step 1 exactly like NEMO. Default False -> BIT-IDENTICAL.
+    barotropic_forcing_centred: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

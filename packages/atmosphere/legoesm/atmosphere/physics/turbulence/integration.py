@@ -593,13 +593,36 @@ def _make_mpas_turbulence(
             T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
         # MPAS land surface boundary: throttle the LAND fraction's surface
-        # humidity gradient by ``land_beta`` (soil-moisture availability)
-        # instead of the saturated infinite-swamp value the nearest-ocean
-        # SST fill otherwise implies.  Static feature gate (Python ``if`` on
-        # build-time config, the JAX feature-gating exception): defaults
-        # (f_land None / beta 1) keep this branch out of the trace entirely,
-        # byte-identical to the pre-knob path.
-        if f_land is not None and land_beta != 1.0:
+        # humidity gradient by a soil-moisture availability beta instead of
+        # the saturated infinite-swamp value the nearest-ocean SST fill
+        # otherwise implies.  Two sources, traced wins:
+        #   1. ``forcing["beta_land"]`` — TRACED per-cell root-zone beta_soil
+        #      from the interactive multilayer land (#1312 phase 2b; one-step
+        #      lag, updated by the driver loop each step without retrace).
+        #   2. the STATIC ``land_beta`` build-time knob (mpas_land_beta).
+        # Both gates are static Python ``if``s (dict-key membership is part
+        # of the forcing pytree structure; the knob is a build-time closure
+        # const — the JAX feature-gating exception): defaults keep these
+        # branches out of the trace entirely, byte-identical to before.
+        _beta_traced = (forcing.get("beta_land")
+                        if forcing is not None else None)
+        if _beta_traced is not None:
+            if f_land is None:
+                raise ValueError(
+                    "forcing['beta_land'] (traced per-cell beta_soil) "
+                    "requires the land fraction to be threaded into the "
+                    "turbulence factory (make_physics f_land=...); the "
+                    "driver must pass f_land whenever mpas_land_beta_soil "
+                    "is enabled."
+                )
+            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                beta_limited_surface_humidity,
+            )
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            q_sfc = beta_limited_surface_humidity(
+                q_sfc, q_v_col[:, -1], _f_land_col,
+                jnp.asarray(_beta_traced, dtype=q_sfc.dtype).reshape(nCells))
+        elif f_land is not None and land_beta != 1.0:
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 beta_limited_surface_humidity,
             )
@@ -654,6 +677,13 @@ def _make_mpas_turbulence(
                 tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
 
         zero_ps = jnp.zeros_like(p_s)
+        # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,
+        # positive upward — the schemes' own shflx/lhflx sign, which is
+        # already the CMOR convention]. None-guarded: a scheme without
+        # surface fluxes (or turbulence "none") simply leaves the fields
+        # unset, byte-identical to the pre-export tendency.
+        _shf = getattr(turb_out, "shflx", None)
+        _lhf = getattr(turb_out, "lhflx", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
             dv_dt=None,
@@ -661,6 +691,14 @@ def _make_mpas_turbulence(
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
             tracer_tendencies=tracer_tends if tracer_tends else None,
+            # units="W/m^2": p_s.replace would otherwise INHERIT p_s's "Pa"
+            # (Field.replace keeps self.units), mislabelling the flux Field.
+            shflx_sfc=None if _shf is None else state.p_s.replace(
+                data=_shf.reshape(p_s.shape), name="shflx_sfc_turb",
+                units="W/m^2"),
+            lhflx_sfc=None if _lhf is None else state.p_s.replace(
+                data=_lhf.reshape(p_s.shape), name="lhflx_sfc_turb",
+                units="W/m^2"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

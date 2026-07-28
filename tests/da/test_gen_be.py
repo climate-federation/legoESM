@@ -60,8 +60,8 @@ def _make_ensemble(n_members=12, nlat=8, nlon=16, nlev=4):
         key = jax.random.PRNGKey(i + 42)
         states.append(_make_hydrostatic_state(nlat, nlon, nlev, rng_key=key))
     # Subtract ensemble mean to get errors
-    from legoesm.core.field import Field
     import jax.numpy as jnp
+    from legoesm.core.field import Field
 
     def mean_field(field_list):
         """Compute mean over a list of Field objects."""
@@ -165,13 +165,43 @@ class TestFitGenBE:
         assert params.len_scale.shape == (n_total,)
         assert params.vert_eig_vec.shape == (n_3d, nlev, nlev)
 
+    def test_mpas_helmholtz_zero_wind_is_zero(self):
+        """MPAS cell-vector uv2sfvp helper maps zero winds to zero potentials."""
+        from types import SimpleNamespace
+
+        from legoesm.da.gen_be import _mpas_cell_wind_to_helmholtz_np
+
+        grid = SimpleNamespace(
+            grid_n_columns=4,
+            grid_radius=6.371e6,
+            cellsOnCell=np.array(
+                [
+                    [1, 0, 3, 2],
+                    [2, 3, 0, 1],
+                ],
+                dtype=np.int64,
+            ),
+            nEdgesOnCell=np.array([2, 2, 2, 2], dtype=np.int64),
+            latCell=np.deg2rad(np.array([0.0, 0.0, 1.0, 1.0])),
+            lonCell=np.deg2rad(np.array([0.0, 1.0, 0.0, 1.0])),
+        )
+        u = np.zeros((3, 4, 2), dtype=np.float64)
+        v = np.zeros_like(u)
+
+        psi, chi = _mpas_cell_wind_to_helmholtz_np(u, v, grid)
+
+        assert psi.shape == u.shape
+        assert chi.shape == u.shape
+        assert np.allclose(psi, 0.0)
+        assert np.allclose(chi, 0.0)
+
 
 class TestGenBETransform:
     """GenBETransform.sqrt_multiply and inv_multiply correctness."""
 
     def _setup(self, nlat=8, nlon=16, nlev=4):
-        from legoesm.da.gen_be import fit_gen_be, GenBETransform
         from legoesm.da.control_vector import build_control_spec
+        from legoesm.da.gen_be import GenBETransform, fit_gen_be
 
         grid = _make_latlon_grid(nlat, nlon)
         errors = _make_ensemble(n_members=12, nlat=nlat, nlon=nlon, nlev=nlev)
@@ -295,10 +325,10 @@ class TestGenBEWithoutV:
 
     def test_no_v_field(self):
         """fit_gen_be and sqrt_multiply work when state has no v field."""
-        from legoesm.da.gen_be import fit_gen_be, GenBETransform
-        from legoesm.da.control_vector import build_control_spec
         from legoesm.core.field import Field
         from legoesm.core.state import HydrostaticState
+        from legoesm.da.control_vector import build_control_spec
+        from legoesm.da.gen_be import GenBETransform, fit_gen_be
 
         nlat, nlon, nlev = 4, 8, 3
         grid = _make_latlon_grid(nlat, nlon)

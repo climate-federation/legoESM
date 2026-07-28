@@ -1,0 +1,57 @@
+You have NO repository access. Do NOT use tools. Answer from this text alone,
+in <= 45 lines. Be adversarial and specific.
+
+A hydrostatic sigma-coordinate GCM (MPAS unstructured horizontal, ~500 km
+cells, dt = 75 s, nlev = 30, model top sigma = 0.01, 100-year AMIP run) is
+switching from uniform-in-sigma level placement to a "tropopause-refined"
+grid at the SAME level count. Half-levels are the quantiles of a density
+  d(s) = 1 + (refine-1) * exp(-0.5*((ln s - ln 0.12)/0.45)^2)
+integrated in SIGMA (equidistribution: level spacing ~ 1/d).
+A config validator allows refine in [1, 6]; the run uses refine = 3.
+
+Resulting layer thicknesses (hPa, p_s = 985 hPa), top -> bottom, refine=3:
+39.8 24.6 17.3 14.9 14.2 14.3 14.9 16.1 17.9 20.2 23.2 26.8 30.7 34.4 37.4
+39.4 40.7 41.4 41.8 42.1 42.2 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3
+Uniform baseline: 32.5 hPa everywhere.
+Max ADJACENT-layer thickness ratio: refine=1 -> 1.000, refine=2 -> 1.315,
+refine=3 -> 1.618, refine=4 -> 1.911, refine=6 -> 2.406.
+Every grid this model has ever successfully run has max adjacent ratio <= 1.066
+(a stretched hybrid grid).
+
+Numerics in play: full levels are the ARITHMETIC MIDPOINT of the bracketing
+half-levels; geopotential uses the exact Simmons-Burridge alpha
+alpha_k = 1 - (sigma_{k-1/2}/dsigma_k)*ln(sigma_{k+1/2}/sigma_{k-1/2});
+vertical advection is FIRST-ORDER UPWIND on diff(sigma_full); sigma-dot comes
+from a flux-form cumulative mass divergence; the thermodynamic vertical
+transport advects potential temperature and converts back with the Exner
+function.
+
+Q1. What is the correct upper bound on `refine`, and on WHAT numerical
+criterion? Name the specific discretization whose accuracy or stability
+degrades, give the ratio at which it degrades, and say whether 6 is
+indefensible, merely aggressive, or fine.
+
+Q2. First-order upwind has no formal order to lose from stretching. Does the
+adjacent-ratio criterion therefore not apply here? What DOES the ratio hurt in
+this specific numerical setup? Consider: spurious vertical wave reflection off
+the grid-stretching discontinuity; the truncation error of the arithmetic
+midpoint as a "full level" when dsigma/sigma is large; the consistency between
+the Simmons-Burridge pressure at which Phi_k is defined and the arithmetic
+midpoint at which T_k, q_k, radiation and physics live.
+
+Q3. The refinement centre is fixed in SIGMA (0.12), so it tracks the surface
+pressure: 121 hPa where p_s = 1010 hPa, but 78 hPa over the Tibetan Plateau
+where p_s = 650 hPa. The physical target is the tropical cold point at
+~95-100 hPa, which is nearly invariant in PRESSURE. Is sigma-following
+refinement defensible? Is 0.12 the right centre? Would you demand the hybrid
+coordinate instead, given the model already has one?
+
+Q4. The construction is a 20001-point trapezoid cumulative + np.interp
+inversion in float64, run once on the host, then cast to the model's float32
+storage dtype. Measured max placement error 1.1e-8 in sigma vs a 4-million-
+point reference; zero non-monotone cases over a large sweep including
+n_levels in {10..137}, refine in {1.0001..6}, width in {0.02..3},
+sigma_refine in {0.0101..0.999}, sigma_top in {1e-5..1e-2}, in float64 and
+after the float32 cast. Is there ANY parameter combination in the allowed box
+where this breaks? Specifically consider n_levels = 2 and n_levels = 3, and
+width very small with sigma_refine very close to sigma_top.

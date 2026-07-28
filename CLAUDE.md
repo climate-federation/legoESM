@@ -22,7 +22,14 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 ## Operating Mode
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
-- **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict. Exempt: trivial/mechanical edits (typo, comment, rename, doc/markdown/`.tex`-only, single config value).
+- **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict.
+  **If the review SUBAGENT dies (spend limit, API error), that is NOT a review
+  waiver — the codex CLI is a separate binary with separate credentials and is
+  usually still reachable: `codex exec --sandbox read-only -C <repo> "<prompt>"`
+  (`which codex`, `~/.codex/auth.json`). Try the CLI directly before ever
+  proceeding unreviewed, and if BOTH are unavailable say "UNREVIEWED" in every
+  status until one succeeds.** 2026-07-26: a subagent hit a monthly spend limit
+  and many iterations ran unreviewed while the CLI worked fine the whole time. Exempt: trivial/mechanical edits (typo, comment, rename, doc/markdown/`.tex`-only, single config value).
 - **Pre-impl search mandatory**: before new fn/helper/class/operator/diagnostic/init/load/loss/numerical routine, grep `src/legoesm/` for similar names/docstrings/formulas in `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`. State searched+found. Similar exists → extend/factor.
 - **Shared utilities — never re-derive** (prod, scripts, validators, plotters, tests, notebooks, probes):
   - Constants: `from legoesm import constants` → `T_freeze`, `R_d`, `c_pd`, `L_v`, `R_v`, `epsilon`, `g`, `p_ref`, `kappa`, `sigma_sb`, `T_freeze_ocean`. No literals `273.15`/`287.0`/`1004.64`/`2.501e6`/`461.51`/`0.622`/`9.80616`/`6.371e6`/`7.292e-5`.
@@ -49,6 +56,65 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
   - Plotters NOT exempt. Use model helpers for q_sat, RH, ρ, virtual T, MSE.
 - No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
 - **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
+
+## Attribution Gates — MANDATORY, each from a real 2026-07 failure
+Model is near operational. Every rule below is mechanical: satisfy it or state
+explicitly that you did not. "I was careful" is not compliance.
+
+- **PROVE THE PATH EXECUTES before blaming a line.** Naming a file:line as the
+  cause requires showing that line runs in the configuration under test: print
+  the ENCLOSING FUNCTION (`awk` the nearest `def` above it) and confirm the
+  active lane/driver calls it. FAILURE: blamed the positivity clamps at
+  `model_driver.py:10923` for the century's water source; they live in
+  `_run_per_step` while the century runs `_run_mpas`, which contains no
+  moisture clamp at all. A fix was nearly written for a lane the run never
+  touches. Same class as reading an entry point instead of the full path.
+- **REUSING A REFERENCE IMPL MEANS PORTING ITS EXCLUSIONS, not just its
+  formula.** State which of the reference's guards/scope conditions you kept
+  and which you dropped, with a reason for each. FAILURE: copied
+  `spectral_les_moist.conserving_positive` but not its `n_water` split, so the
+  column-conserving borrow was applied to number concentrations
+  (`N_c`/`N_i`/`N_r`) — unphysical, and it fed M2005 deposition (~N_i^(2/3)),
+  producing a fake "accelerating dry bias" that was reported before being
+  caught.
+- **A TEST THAT INSPECTS SOURCE MUST NAME THE SYMBOL THAT RUNS, and must be
+  shown to FAIL when the feature is removed.** An `inspect.getsource(X)`
+  assertion where X is a delegating wrapper passes while proving nothing.
+  FAILURE: asserted against `MPASPrimitiveEquationModel.step`; the floors are
+  in `_step_jit`.
+- **TOOL STATUS IS NOT EVIDENCE — read the output tail.** An exit code without
+  the tool's own success line (pytest's `N passed`, "COMPLETED in Xs") is
+  UNVERIFIED; OOM kills and timeouts can surface as success. FAILURE: reported
+  a regression suite green on exit-0 that was actually `Out Of Memory` mid-run.
+  Quote the decisive line when claiming a suite passed.
+- **EVERY BASELINE/ALLOW-LIST REASON STRING IS A CLAIM — verify it in code
+  before writing it.** A plausible-sounding reason permanently hides a real
+  defect. FAILURE: classified `convective_buoyancy_death_memory` as "carried in
+  SegmentCarry" (it is not — the leaf `BechtoldConfig.buoyancy_death_memory`
+  exists and nothing maps to it), asserted an `SBMConfig.precip_efficiency`
+  leaf that does not exist, and credited `micro_substeps` to a consumer that
+  reads `args.`, not the config field.
+- **RATE / TENDENCY / SKILL COMPARISONS: identical windows on BOTH sides, and
+  print the window next to the number.** Differing spans is a confound, not a
+  result. FAILURE: TCW over days 190-530 vs CMOR year 1 gave "+38.7 kg/m2/yr";
+  matched windows gave +13.4. Extends the existing controlled-comparison rule
+  to derived rates.
+- **A DIAGNOSTIC'S PRINTED PRECISION BOUNDS THE RATE YOU CAN CLAIM.** Log CWV
+  at 0.1 kg/m2 over 8 days resolves only ~±4.6 kg/m2/yr — do not report a
+  trend inside one quantum. Prefer fp64 from model state (checkpoints) over
+  parsed log lines. Same class as the throughput-quantization error.
+- **`JAX_ENABLE_X64=1` on any numerics/conservation test.** An fp32 mismatch is
+  NOT a failure until re-run with x64; and a *new* failure is not yours until
+  reproduced with your change stashed. Do both before reporting a regression.
+- **RUN-TARGET PARAMS ARE ABSOLUTE (`TARGET_DAYS`), and "latest checkpoint"
+  MOVES.** For a controlled pair, COPY the pinned checkpoint into each arm dir;
+  never use a `PREV_CKPT_DIR`-style newest-wins pointer while another run is
+  advancing. FAILURE (twice): arms exited instantly at "Already at/past
+  target".
+- **A LAUNCHER FLAG THAT SWITCHES ONE FORCING CHANNEL MUST SWITCH ALL OF
+  THEM.** Verify the resolved paths in the run log, not the flag you passed.
+  FAILURE: `CENTURY_DECK=1` set era-correct ozone+volcanic but left 1979-2016
+  SST.
 
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
@@ -103,6 +169,14 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **CRITICAL — Visual verify spatial/grid artifacts**: passing tests+norms NECESSARY ≠ SUFFICIENT for cubed-sphere ops, halo exchange, diffusion coeffs, grid metrics. Edge artifacts/cube imprint/grid-scale noise only detected visually (v-wind W2, wind_speed W5). Run `--only sw --grid cubed_sphere --quick` + inspect PNGs vs baseline. Norms can improve while artifacts worsen. Never claim "tests pass, edge fixed" from pytest alone.
 - **Diffusion sensitivity**: div damping + hyperdiff AMPLIFY halo errors at cubed-sphere face boundaries. Check W2 v-wind visually when touching `_hyperdiff_cube`, `_div_damp_cube`, diffusion params.
 - **Visual-regression gate (cube imprint)**: `scripts/validate/visual_regression.py --check` numericises the W2 v-wind cube-imprint check (SSIM + per-panel perceptual hash + edge-artifact ratio vs tiny committed ref in `tests/visual_baselines/`). Deterministic metric math gated in CI (`tests/test_visual_regression_metrics.py`); full cube-SW `--check` runs as a NIGHTLY non-blocking CI job until tolerances are calibrated across CI hardware. Tiny numeric baselines (.npy+json) ARE tracked — the one carve-out to "no tracked visual baselines".
+- **CRITICAL — VALIDATE THE INSTRUMENT BEFORE QUOTING ITS NUMBER (2026-07-25 duogrid lesson: 8 confident claims, all retracted).** A diagnostic script is UNTRUSTED CODE until it passes its own controls. Never state a finding — never write "measured", "confirmed", "proven", "VERDICT" — from a probe's first output. **Before quoting any diagnostic number, run these five checks and say in the message that you ran them:**
+  1. **Right conserved/invariant quantity?** Budget what the SYSTEM conserves, not a convenient proxy. (Failed: reported "vertex creates energy" from **KE alone** — KE is NOT conserved in shallow water, it trades with PE. Total `E=∫area(½h|V|²+½gh²)` reversed the sign of the conclusion.)
+  2. **Same transform / units / staggering on BOTH sides?** Two "A-grid winds" from different operators are DIFFERENT QUANTITIES. (Failed: ours `c2l_ord2` vs oracle `C2L_ORD=4` — the SAME raw state gave 1.96e-2 vs 5.79e-2, a 3× swing that WAS the reported effect. Also: never budget across a stage boundary where the state changes representation — mid-step FV3 winds are in circulation form, which produced ±5.6e10 garbage.)
+  3. **Same time, resolution, config?** Index by MATCHED TIME, not frame number. (Failed: mapped day→frame as `round(day)-1` against an HOURLY file, comparing our day-1 to their hour-1; and quoted a **C12** wedge gain (~300×) as the mechanism for a **C48** instability, where it is ~124×.)
+  4. **Is the metric measuring what its name says?** Prove it on a synthetic case with a KNOWN answer before use. (Failed: called `mean|f−4-neighbour-mean|` a "2Δx grid-scale" measure — it is a high-pass/curvature residual that a merely sharper SMOOTH feature reproduces. Failed: a "gain" probe that re-filled a FIXED source, which is trivially 1.0000 by construction.)
+  5. **Can the reduction support the claim?** `max` over tiles/corners/components taken independently per run can peak at DIFFERENT physical locations; a max-of-per-tile-means is not a global mean. Keep argmax metadata and map to a common physical location before claiming "localized".
+  Plus: **diff ARRAYS, never printed summaries** (claimed "bit-identical ⇒ deterministic, not chaos"; the arrays actually differed by 9e-6 — only the rounded printout matched). **Never let a probe print its own verdict** ("=> the growth is REAL") — the interpretation belongs in the analysis after the controls pass, not baked into the tool where it gets echoed back as evidence. **`nanmax`/`nanmean`/`nansum` hide failures** — make NaN and missing frames FATAL. **Record every effective flag, env var and git SHA in each artifact**; a default `--n 36` silently mis-slicing a C48 file runs fine and lies.
+- **CRITICAL — LABEL EVERY CLAIM, AND PREFER RETRACTING EARLY.** Tag each statement **CONFIRMED** (control-passed evidence shown, instrument validated) vs **PLAUSIBLE** (inferred / single-run / uncontrolled). A chain of PLAUSIBLE steps is not CONFIRMED. When a later measurement contradicts an earlier claim, **retract it loudly and immediately in the same message and in the memory file** — do not quietly move on, because stale confident claims get built on. Run the codex adversarial review on the DIAGNOSTIC TOOLING, not just the model code: the instruments decide what you believe, so a bug there manufactures a confident wrong physics conclusion. Cheap self-check before any big claim: *"what measurement would make this false, and did I run it?"* If the answer is no, the claim is PLAUSIBLE at best.
 
 ## Domain Architect vs Syntax Engine (AI guardrails)
 See `docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the human dictates the *logic* (units, signs, conserved qty, valid scheme sets, references, acceptance criteria); AI fills the *body*; every declared invariant is checked **mechanically** so violations fail LOUDLY. Each gate is a **tripwire, not a proof** and ships a synthetic-violation self-test (provably non-vacuous). NON-NEGOTIABLE harness (extend, never weaken; budgets/TODOs shrink only):

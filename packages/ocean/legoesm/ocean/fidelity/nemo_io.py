@@ -4,9 +4,12 @@ The NEMO counterpart of :mod:`mitgcm_io`. NEMO writes plain NetCDF (via the
 native ``iom_nf90`` path — no XIOS needed), so this is a thin xarray reader; the
 only conventions it reconciles are:
 
-* **Halo strip.** NEMO global arrays carry an ``nn_hls``-cell halo on every side
-  (``nn_hls=1`` for GYRE: a 30x20 physical domain is stored 32x22). The physical
-  interior is ``[nn_hls:-nn_hls, nn_hls:-nn_hls]``.
+* **Halo strip.** ``nn_hls`` here is the FILE's halo, not the run's: NEMO
+  <= 4.0 wrote global arrays WITH an ``nn_hls``-cell halo per side
+  (``nn_hls=1`` for GYRE: 30x20 stored 32x22); NEMO 4.2+/5.x writes the
+  COMPUTE domain WITHOUT halos (pass ``nn_hls=0`` — DINO 5.0.2 files are
+  52x199 all-real; stripping a phantom halo discards the land-wall and
+  ridge columns, #1226 root cause). Interior is ``[h:-h, h:-h]`` for h>0.
 * **Axis order.** NEMO 3-D fields are ``(z, y, x)`` on disk; legoESM wants the
   vertical LAST — ``(y=lat, x=lon, z=lev)`` — a single ``moveaxis(0, -1)``.
 * **Vertical order.** NEMO ``k=1`` is the surface, ``k`` increasing downward —
@@ -49,6 +52,16 @@ class NemoGrid(NamedTuple):
     # V-point latitude (north cell faces) [deg] (n_lat, n_lon) — only needed by
     # the Mercator/topography bridge for exact meridional cell faces; optional so
     # existing flat-bottom NemoGrid constructors (GYRE) stay valid.
+    # NEMO's ACTUAL 3-D vertical scale factors (key_vco_3d). NEMO integrates
+    # with THESE, not with the 1-D reference ladder above: for DINO, e3t_1d is
+    # the unstretched analytic ladder (sums to 4506.375 m) while e3t_0 is
+    # stretched so the deepest wet column is exactly the domain depth
+    # (4000.000 m). They agree in the upper ocean and diverge below ~2000 m by
+    # up to 12.9% (#1226). Optional so existing GYRE constructors stay valid --
+    # GYRE is key_linssh where the two coincide, which is why this went
+    # unnoticed.
+    e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    gdept_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
     gphiv: np.ndarray | None = None
     # Partial-periodic seam-wall profile, shape ``(n_lat,)``, 1.0 = the
     # zonal periodic-seam u-face is WALLED at that latitude row, 0.0 =
@@ -76,19 +89,23 @@ class NemoState(NamedTuple):
 
 
 def _check_hls(nn_hls: int) -> None:
-    # a[h:-h] silently returns an empty slice for h=0, so a no-halo file would
-    # have its whole interior chopped. Require an explicit halo.
-    if nn_hls < 1:
-        raise ValueError(
-            f"nn_hls must be >= 1 (NEMO always writes a >=1-cell halo); got "
-            f"{nn_hls}. Pass the file's actual halo width."
-        )
+    # nn_hls must match the FILE, not the run: NEMO <= 4.0 wrote global
+    # arrays WITH the halo (GYRE 30x20 stored 32x22 -> nn_hls=1), but NEMO
+    # 4.2+/5.x writes the COMPUTE domain WITHOUT halos (DINO 5.0.2:
+    # jpiglo=56 at runtime with nn_hls=2, files 52 wide -> nn_hls=0).
+    # Stripping a phantom halo discards REAL boundary columns/rows (the
+    # DINO land-wall + ridge columns; #1226 root cause) — pass 0 for
+    # halo-free files.
+    if nn_hls < 0:
+        raise ValueError(f"nn_hls must be >= 0; got {nn_hls}.")
 
 
 def _strip_halo_2d(a: np.ndarray, nn_hls: int) -> np.ndarray:
     _check_hls(nn_hls)
     h = nn_hls
     a = np.asarray(a, dtype=np.float64)
+    if h == 0:      # a[0:-0] would be an empty slice — no-op explicitly
+        return a
     out = a[h:-h, h:-h]
     assert out.shape == (a.shape[0] - 2 * h, a.shape[1] - 2 * h)
     return out
@@ -99,6 +116,8 @@ def _to_latlon_lev(a: np.ndarray, nn_hls: int) -> np.ndarray:
     _check_hls(nn_hls)
     a = np.asarray(a, dtype=np.float64)
     h = nn_hls
+    if h == 0:
+        return np.moveaxis(a, 0, -1)
     return np.moveaxis(a[:, h:-h, h:-h], 0, -1)
 
 
@@ -121,11 +140,17 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
     # strip it to the interior rows.  Only a GENUINE partial seam (some
     # walled, some open) sets the field — a fully re-entrant or fully
     # walled config leaves it ``None`` (byte-identical downstream).
-    _tmask_raw = np.asarray(m["tmask"].values).squeeze()  # (z, y, x) with halo
-    _tsurf_west_halo = _tmask_raw[0, nn_hls:-nn_hls, 0]   # interior rows, col 0
-    _seam_wall = (_tsurf_west_halo < 0.5).astype(np.float64)  # 1 = walled
-    if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
+    if nn_hls == 0:
+        # Halo-free file (NEMO 4.2+/5.x): column 0 is a REAL domain column
+        # (DINO: the land-wall continent itself), not a halo probe — the
+        # wall is carried by the land mask, so no seam fabrication.
         _seam_wall = None
+    else:
+        _tmask_raw = np.asarray(m["tmask"].values).squeeze()  # (z,y,x) w/ halo
+        _tsurf_west_halo = _tmask_raw[0, nn_hls:-nn_hls, 0]   # interior rows
+        _seam_wall = (_tsurf_west_halo < 0.5).astype(np.float64)  # 1 = walled
+        if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
+            _seam_wall = None
 
     return NemoGrid(
         glamt=h2("glamt"), gphit=h2("gphit"),
@@ -133,6 +158,8 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         ff_t=h2("ff_t"), ff_f=h2("ff_f"),
         e3t_1d=v1("e3t_1d"), gdept_1d=v1("gdept_1d"), gdepw_1d=v1("gdepw_1d"),
         tmask=m3("tmask"), umask=m3("umask"), vmask=m3("vmask"),
+        e3t_0=(m3("e3t_0") if "e3t_0" in m else None),
+        gdept_0=(m3("gdept_0") if "gdept_0" in m else None),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
         seam_wall_rows=_seam_wall,
     )
@@ -156,4 +183,74 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
     )
 
 
-__all__ = ("NemoGrid", "NemoState", "read_nemo_mesh_mask", "read_nemo_restart")
+class NemoBeforeState(NamedTuple):
+    """Halo-stripped NEMO leap-frog BEFORE-level (Nbb, ``tb/sb/ub/vb``) state.
+
+    Same shape/axis conventions as :class:`NemoState`. Separate from
+    :class:`NemoState` (not every caller needs the before level — only the
+    MLF twin bridging NEMO's leap-frog integrator memory, #1317
+    ``--bridge-before``). ``ssh``/``tau_x``/``tau_y`` are ``None`` when the
+    restart does not carry ``sshb``/``utau_b``/``vtau_b`` (older NEMO
+    restarts write only the tracer/velocity before-fields).
+    """
+    T: np.ndarray
+    S: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    ssh: np.ndarray | None
+    tau_x: np.ndarray | None   # utau_b, T-point wind stress [Pa], before-level
+    tau_y: np.ndarray | None   # vtau_b
+
+
+def read_nemo_restart_before(path: str, *, nn_hls: int = 1) -> NemoBeforeState:
+    """Read + halo-strip NEMO's leap-frog BEFORE-level fields (Nbb).
+
+    Uses ``tb/sb/ub/vb`` (+ ``sshb``/``utau_b``/``vtau_b`` when present) --
+    the modified-leap-frog integrator's THIRD time level, one full step
+    behind the ``tn/sn/un/vn`` (Kbb) read by :func:`read_nemo_restart`. Only
+    meaningful for a restart written under ``outer_integrator="leapfrog"``
+    (NEMO ``stp_MLF``/key_qco); a forward-Euler/AB2 restart still writes
+    these fields (NEMO always carries a before-level in the restart file)
+    but a legoESM twin only reads them via ``--bridge-before``
+    (``kamm_twin_90d.py``), which requires the leapfrog card.
+    """
+    r = xr.open_dataset(path, decode_times=False)
+
+    def m3(name: str) -> np.ndarray:
+        return _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
+
+    def h2(name: str) -> np.ndarray:
+        return _strip_halo_2d(np.asarray(r[name].values).squeeze(), nn_hls)
+
+    return NemoBeforeState(
+        T=m3("tb"), S=m3("sb"), u=m3("ub"), v=m3("vb"),
+        ssh=(h2("sshb") if "sshb" in r else None),
+        tau_x=(h2("utau_b") if "utau_b" in r else None),
+        tau_y=(h2("vtau_b") if "vtau_b" in r else None),
+    )
+
+
+def read_nemo_restart_en(path: str, *, nn_hls: int = 1) -> np.ndarray:
+    """Read + halo-strip NEMO's TKE restart field ``en`` (w-levels, T-points).
+
+    Not part of :class:`NemoState` (``en`` is closure-scheme integrator memory,
+    not a core prognostic field every caller needs) -- a standalone reader for
+    fidelity harnesses that want to bridge the TKE closure's cold-start memory
+    specifically (e.g. the #1317 ``--bridge-tke`` twin experiment).
+
+    Returns ``(n_lat, n_lon, jpk)`` with ``jpk`` NEMO w-levels, index 0 = the
+    surface w-level (``gdepw_1d[0]=0``), same convention as ``gdepw_1d``.
+    ``jpk == nlev`` (NEMO's w-levels and T-levels share the same
+    ``nav_lev``-length axis). The caller maps this onto legoESM's ``nlev-1``
+    interior interfaces (``state.tke``, dims ``("lat","lon","level")``) by
+    dropping only the surface w-level (index 0): ``en[..., 1:jpk]`` has
+    exactly ``jpk-1 == nlev-1`` levels, aligned index-for-index with lego's
+    interior interfaces 0..nlev-2 -- see ``kamm_twin_90d.py``'s
+    ``--bridge-tke``.
+    """
+    r = xr.open_dataset(path, decode_times=False)
+    return _to_latlon_lev(np.asarray(r["en"].values).squeeze(), nn_hls)
+
+
+__all__ = ("NemoGrid", "NemoState", "NemoBeforeState", "read_nemo_mesh_mask",
+           "read_nemo_restart", "read_nemo_restart_before", "read_nemo_restart_en")

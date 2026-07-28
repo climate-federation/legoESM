@@ -1,0 +1,72 @@
+You have NO repository access. Do NOT use tools. Answer from this text alone,
+in <= 45 lines. This is ROUND 2: review my FIXES adversarially. Find what I
+broke or got wrong. Label each item CONFIRMED-BUG / OK / CONCERN.
+
+Round 1 established (you agreed): a vertical biharmonic filter built as an
+index-space fourth difference has sum_k(tend_k)=0 but NOT sum_k(tend_k*dsigma_k)
+=0, so on the new non-uniform sigma grid it was a spurious column enthalpy sink
+of -7.86 W/m2 and a water sink of -0.135 mm/day (2-delta checkerboard, +-5 K /
++-1 g/kg, nu=2e-6 1/s). Also present at -0.99 W/m2 on the shipped stretched
+hybrid grid.
+
+FIX 1 (the conservation break). Signature became
+`vertical_del4_T_tendency(x, nu, dsigma=None)`. Body unchanged through
+`tend = -nu*bih`, then:
+
+    if dsigma is None:
+        return tend
+    _ds = dsigma.astype(tend.dtype)
+    return tend - (tend * _ds).sum(axis=-1, keepdims=True) / _ds.sum()
+
+Both call sites now pass `sigma_coord.dsigma`: the T call
+`vertical_del4_T_tendency(T_3d, nu, sigma_coord.dsigma)` where T_3d is
+(nCells, nlev); and the tracer call inside
+`jax.vmap(lambda qk: vertical_del4_T_tendency(qk, nu, sigma_coord.dsigma),
+in_axes=-1, out_axes=-1)(q)` where q is (nCells, nlev, ntracers).
+`sigma_coord` is either a SigmaCoordinate (dsigma = diff of sigma half levels)
+or a HybridSigmaPressureCoordinate (whose `.dsigma` property returns
+`dA + dB`, a per-layer constant that is the layer thickness at p_s = p_ref
+only — the TRUE hybrid thickness is `dA*p_ref + dB*p_s` and varies by column).
+Measured after the fix: mass-weighted residual < 1e-9 W/m2 on uniform-sigma
+L30, refined-sigma L30 and L40, and stretched-hybrid L40; and on a UNIFORM
+grid the corrected result differs from the legacy result by < 1e-18 K/s.
+
+Q1. Is FIX 1 correct? Check: the reduction axis; the keepdims broadcast; that
+`_ds.sum()` (a scalar, not keepdims) is the right normaliser; behaviour under
+`jax.vmap` over the tracer axis; float32 vs float64; whether `.astype` on a
+possibly-float32 dsigma loses the conservation it is meant to guarantee; and
+whether the HYBRID coordinate's `dsigma = dA + dB` is the right weight, or
+whether using it makes the hybrid case only APPROXIMATELY conservative
+(and if so, how badly, given p_ref = 1e5 Pa and real p_s in 500-1050 hPa).
+
+Q2. Does removing a column-uniform offset from a biharmonic filter tendency
+create any NEW problem: a spurious uniform heating/moistening far from the
+checkerboard, a positivity violation for a tracer near zero, a loss of the
+filter's scale selectivity, or a gradient/AD pathology? Quantify if you can.
+
+FIX 2. The quadrature mesh for the level-placement density integral changed
+from `np.linspace(sigma_top, 1, 20001)` to
+`np.geomspace(sigma_top, 1, 20001)`, because the density is a Gaussian in
+LOG sigma and a sigma-uniform mesh cannot resolve a narrow bump near the lid.
+Measured: worst-case level placement error over the whole allowed parameter
+box drops from 3.1e-5 to 2.0e-7 in sigma; the DEFAULT grid moves by 7.8e-9 in
+sigma (8e-6 hPa) and gets closer to a 4e6-point reference; the refine=1
+identity is preserved to 1.1e-16.
+Q3. Any downside? The geomspace mesh is ~5x COARSER in sigma near the surface
+(ds = 2.3e-4 at sigma=1 vs 5e-5 uniform). Does that matter for a density bump
+placed near the surface?
+
+FIX 3. The config validator bound on `tropopause_refine` was tightened from
+[1, 6] to [1, 3], and its justification comment corrected from "vertical-CFL
+limit" (which I disproved: CFL is 0.26) to grid smoothness (max adjacent-layer
+thickness ratio 1.00 / 1.62 / 2.41 at refine 1 / 3 / 6, vs <= 1.07 on every
+grid this model has run).
+Q4. Is [1, 3] defensible? refine=3 still gives 1.62. Should I go further?
+
+FIX 4. MPAS checkpoints now store `meta_sigma_half` (the half-level sigma
+array, float64) and the loader raises ValueError if it differs from the
+current grid by more than atol=1e-6, because uniform-L30 and refined-L30 have
+IDENTICAL array shapes so the pre-existing shape guard could not tell them
+apart.
+Q5. Is atol=1e-6 right? The array is stored from a float32 model coordinate.
+Is there any legitimate restart that this now wrongly rejects?

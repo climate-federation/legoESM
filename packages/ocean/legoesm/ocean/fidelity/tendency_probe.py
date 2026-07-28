@@ -34,6 +34,9 @@ import numpy as np
 
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+    _static_kappa_redi_override,
+)
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
 )
@@ -101,6 +104,18 @@ class LatLonProbeResult(NamedTuple):
     dS_gm_redi: jnp.ndarray
     # EOS-derived density at cell centres — kg/m^3
     rho: jnp.ndarray
+    # Vertical-mixing (NEMO zdf) tracer tendency [degC/s, PSU/s] — the
+    # backward-Euler vertical-diffusion increment (T_new - T_old)/dt_tracer
+    # computed with the ACTIVE vertical-mixing K (TKE/KPP/constant closure),
+    # i.e. the legoESM analogue of NEMO's ``ttrd_zdf`` tracer trend.  This is
+    # the per-process field the NEMO tendency-match compares (tier-3 oracle);
+    # zero when ``vertical_mixing scheme="none"`` (the Veros-ACC probe default).
+    # Computed with the SAME shared helper the production implicit solve uses
+    # (``implicit_vertical_diffusion_ocean``) — no re-derived numerics.
+    # APPENDED LAST (never inserted mid-tuple) so existing positional/tuple
+    # consumers and serialized snapshots keep their field order (codex MED).
+    dT_zdf: jnp.ndarray = None
+    dS_zdf: jnp.ndarray = None
 
 
 def probe_latlon_cgrid(
@@ -114,6 +129,7 @@ def probe_latlon_cgrid(
     sponge=None,
     dt: float = 300.0,
     dt_tracer: float | None = None,
+    gm_redi_tracer_state: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> LatLonProbeResult:
     """Compute per-process tendencies on a frozen ocean state.
 
@@ -133,6 +149,21 @@ def probe_latlon_cgrid(
     dt : float
         Timestep [s] — needed for the CFL-aware advection-flux build
         even though no time integration is performed.
+    gm_redi_tracer_state : (T, S) or None
+        Tracer fields fed to the GM/Redi (iso) tendency + implicit-K33
+        solve ONLY — an oracle-fidelity override for models whose iso
+        operator is evaluated at a different time level than the
+        state's primary ``T``/``S`` (e.g. NEMO's leap-frog: the
+        iso-neutral operator — density, N², slopes, gradients — is
+        computed entirely on the *before* level ``Nbb``
+        (``stpmlf.F90:199`` ``CALL ldf_slp(kstp, rhd, rn2b, Nbb, Nnn)``
+        "before slope for standard operator"; ``traldf_iso_scheme.h90``
+        gradients read ``pt_in(...,Kbb)``), while advection is
+        evaluated on the *now* level ``Nnn``/``Kmm``
+        (``traadv_fct.F90:354`` ``trd_tra(..., pt(:,:,:,jn,Kmm))``).
+        ``None`` (default) uses ``state.T.data``/``state.S.data`` —
+        byte-identical to the pre-existing behaviour for every other
+        caller.
 
     Returns
     -------
@@ -178,14 +209,30 @@ def probe_latlon_cgrid(
     # Compute it here so it (a) is exposed for the per-process iso comparison and
     # (b) is folded into the tracer totals to match what the model integrates.
     if getattr(config, "gm_redi", None) is not None:
+        # T_iso/S_iso: the tracer fed to the iso operator.  Defaults to the
+        # state's primary T/S (byte-identical to the pre-existing behaviour);
+        # ``gm_redi_tracer_state`` lets an oracle-fidelity caller supply a
+        # different time level (see the docstring / NEMO Kbb citation above).
+        if gm_redi_tracer_state is not None:
+            T_iso, S_iso = gm_redi_tracer_state
+        else:
+            T_iso, S_iso = state.T.data, state.S.data
+        # Production (ocean_model_latlon_cgrid.py) ALWAYS threads the static
+        # cos(lat) Redi override through every gm_redi_tracer_tendency_latlon /
+        # compute_isoneutral_K33_latlon call site (e.g. lines 3551/3718/3756,
+        # 6986/6994) — reuse the exact same exported helper so the probe never
+        # silently runs with kappa_Redi held at its (wrong, non-cos-scaled)
+        # equator value on any recipe with kappa_redi_lat_scaling=True.
+        kappa_redi_override = _static_kappa_redi_override(config.gm_redi, grid)
         dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
-            state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+            T_iso, S_iso, state.eta.data, state.H_bathy.data,
             grid, z_coord, config.gm_redi,
             eos=getattr(config, "eos", "wright"),
             eos_linear=getattr(config, "eos_linear", None),
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
+            kappa_redi_override=kappa_redi_override,
             dt=(dt_tracer if dt_tracer is not None else dt),
         )
         if getattr(config.gm_redi, "implicit_K33", False):
@@ -200,12 +247,13 @@ def probe_latlon_cgrid(
             )
             dt_tr = dt_tracer if dt_tracer is not None else dt
             K33 = compute_isoneutral_K33_latlon(
-                state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                T_iso, S_iso, state.eta.data, state.H_bathy.data,
                 grid, z_coord, config.gm_redi,
                 eos=getattr(config, "eos", "wright"),
                 eos_linear=getattr(config, "eos_linear", None),
                 mask=state.land_mask.data,
                 rho_0=config.constants.rho_0, g=config.constants.g,
+                kappa_redi_override=kappa_redi_override,
                 # #1226: same wall masks as the tendency call above.
                 u_mask=state.u_mask.data, v_mask=state.v_mask.data,
                 dt=dt_tr,
@@ -222,13 +270,47 @@ def probe_latlon_cgrid(
             dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
             dz_half = build_dz_half(dz_cell)
             mask3 = state.land_mask.data[:, :, jnp.newaxis]
-            T_imp = implicit_vertical_diffusion_ocean(state.T.data, K33, dz_cell, dz_half, dt_tr)
-            S_imp = implicit_vertical_diffusion_ocean(state.S.data, K33, dz_cell, dz_half, dt_tr)
-            dT_gm = dT_gm + (T_imp - state.T.data) / dt_tr * mask3
-            dS_gm = dS_gm + (S_imp - state.S.data) / dt_tr * mask3
+            T_imp = implicit_vertical_diffusion_ocean(T_iso, K33, dz_cell, dz_half, dt_tr)
+            S_imp = implicit_vertical_diffusion_ocean(S_iso, K33, dz_cell, dz_half, dt_tr)
+            dT_gm = dT_gm + (T_imp - T_iso) / dt_tr * mask3
+            dS_gm = dS_gm + (S_imp - S_iso) / dt_tr * mask3
     else:
         dT_gm = jnp.zeros_like(tendencies.dT_dt.data)
         dS_gm = jnp.zeros_like(tendencies.dS_dt.data)
+
+    # --- Vertical-mixing (NEMO zdf) tracer tendency -------------------------
+    # The legoESM analogue of NEMO's ``ttrd_zdf``: the backward-Euler vertical-
+    # diffusion increment produced by the ACTIVE vertical-mixing closure at the
+    # frozen state, (T_new - T_old)/dt_tracer.  Same construction as the
+    # implicit-K33 block above (shared ``implicit_vertical_diffusion_ocean``),
+    # but with the closure's tracer diffusivity K_v from the shared
+    # ``compute_vertical_K_profiles`` dispatch — no re-derived numerics and no
+    # duplicated closure.  scheme="none" (the Veros-ACC probe default) leaves
+    # this exactly zero, so existing tier-2 comparisons are unchanged.
+    _vm_cfg = getattr(getattr(config, "physics", None), "vertical_mixing", None)
+    if _vm_cfg is not None and getattr(_vm_cfg, "scheme", "none") != "none":
+        from legoesm.ocean.physics.vertical_mixing import (
+            build_dz_half, compute_vertical_K_profiles,
+            implicit_vertical_diffusion_ocean,
+        )
+        _dt_tr = dt_tracer if dt_tracer is not None else dt
+        # K_v = the closure's TRACER diffusivity at this state (the same call
+        # the production implicit solve makes).
+        _K_v, _A_v = compute_vertical_K_profiles(
+            state, z_coord, surface_forcing, config.physics,
+        )
+        _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
+        _dz_half = build_dz_half(_dz_cell)
+        _mask3 = state.land_mask.data[:, :, jnp.newaxis]
+        _T_zdf = implicit_vertical_diffusion_ocean(
+            state.T.data, _K_v, _dz_cell, _dz_half, _dt_tr)
+        _S_zdf = implicit_vertical_diffusion_ocean(
+            state.S.data, _K_v, _dz_cell, _dz_half, _dt_tr)
+        dT_zdf = (_T_zdf - state.T.data) / _dt_tr * _mask3
+        dS_zdf = (_S_zdf - state.S.data) / _dt_tr * _mask3
+    else:
+        dT_zdf = jnp.zeros_like(tendencies.dT_dt.data)
+        dS_zdf = jnp.zeros_like(tendencies.dS_dt.data)
 
     return LatLonProbeResult(
         pgf_ke_u=diag.KE_PGF_u.data,
@@ -253,6 +335,8 @@ def probe_latlon_cgrid(
         total_v=diag.total_v.data,
         dT_dt_total=tendencies.dT_dt.data + dT_gm,
         dS_dt_total=tendencies.dS_dt.data + dS_gm,
+        dT_zdf=dT_zdf,
+        dS_zdf=dS_zdf,
         dT_gm_redi=dT_gm,
         dS_gm_redi=dS_gm,
         rho=rho,

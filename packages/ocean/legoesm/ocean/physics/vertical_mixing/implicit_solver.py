@@ -125,6 +125,8 @@ def implicit_vertical_diffusion_ocean(
     dz: jax.Array,
     dz_half: jax.Array,
     dt: float,
+    *,
+    extra_diag: jax.Array | float = 0.0,
 ) -> jax.Array:
     """Backward-Euler implicit vertical diffusion for a column field.
 
@@ -158,6 +160,15 @@ def implicit_vertical_diffusion_ocean(
         (``dz_half_k = 0.5 (dz_k + dz_{k+1})`` is the standard choice).
     dt : float
         Time step [s].  Must be positive.
+    extra_diag : jax.Array or float, shape ``(..., nlev)``, default 0.0
+        Additional POSITIVE term added to the diagonal ``b`` (e.g. an
+        implicit bottom-drag rate ``dt·r/h`` at the bottom cell, zero
+        elsewhere — NEMO dynzdf.F90 ``ln_drgimp``: ``zwd(iku) -=
+        zDt_2*(rCdU_bot(i+1)+rCdU_bot(i))/e3u(iku)`` where ``rCdU_bot<=0``
+        so the subtraction ADDS positive definiteness).  Sign convention:
+        MUST be ``>= 0`` — it represents a damping (sink) term; a negative
+        value would remove diagonal dominance and could destabilise the
+        solve.  Default 0.0 ⇒ bit-identical to the pre-existing diagonal.
 
     Returns
     -------
@@ -176,7 +187,8 @@ def implicit_vertical_diffusion_ocean(
         # One-level columns have no vertical gradient ⇒ no-op.
         return field
 
-    a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt)
+    a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
+                                          extra_diag=extra_diag)
     if _vmix_f32_solve_enabled(field.dtype):
         f32 = jnp.float32
         x = thomas_solve(a.astype(f32), b.astype(f32), c.astype(f32),
@@ -247,6 +259,8 @@ def _build_implicit_tridiag(
     dz: jax.Array,
     dz_half: jax.Array,
     dt: float,
+    *,
+    extra_diag: jax.Array | float = 0.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Assemble the backward-Euler tridiagonal ``(a, b, c, d)`` for one field.
 
@@ -257,6 +271,11 @@ def _build_implicit_tridiag(
     system with byte-identical arithmetic and then solve them all in ONE
     batched Thomas call.  ``a, b, c, d`` are returned with the system (level)
     on the LAST axis and ``field``'s leading shape preserved (no flattening).
+
+    ``extra_diag`` (default 0.0, see :func:`implicit_vertical_diffusion_ocean`)
+    is added directly to the diagonal ``b`` — a POSITIVE damping term (e.g.
+    NEMO's implicit bottom drag) localized to whichever level the caller
+    already zeroed elsewhere (typically via a bottom-level indicator mask).
 
     Caller guarantees ``field.shape[-1] = nlev >= 2`` (the ``nlev < 2`` no-op
     is handled by the public wrappers before this is invoked).
@@ -308,11 +327,12 @@ def _build_implicit_tridiag(
 
     # Tridiagonal coefficients:
     #   a_k = -α_k   (sub-diagonal, a_0 = 0)
-    #   b_k = 1 + α_k + β_k
+    #   b_k = 1 + α_k + β_k + extra_diag_k
     #   c_k = -β_k   (super-diagonal, c_{N-1} = 0)
     #   d_k = φ^n_k
+    # extra_diag defaults to 0.0 -> b unchanged -> bit-identical.
     a = -alpha
-    b = 1.0 + alpha + beta
+    b = 1.0 + alpha + beta + extra_diag
     c = -beta
     d = field
     return a, b, c, d

@@ -44,7 +44,7 @@ from legoesm.grids.latlon import (
     create_latlon_geometry,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
-from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
+from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
@@ -201,6 +201,86 @@ def bridge_nemo_to_legoesm(
     )
 
 
+def effective_vertical_scale_factors(grid, tmask, mode=None):
+    """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
+
+    NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
+    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO they agree
+    in the upper ocean and diverge below ~2000 m by up to 12.9%: ``e3t_1d`` sums
+    to 4506.375 m while ``e3t_0`` is stretched so the deepest wet column is
+    exactly the 4000 m domain depth. Building legoESM's grid from ``e3t_1d`` put
+    its abyssal layers 7-13% off and its water columns ~22 m too deep --
+    precisely where #1226's ACC deficit is sourced (80% of the missing thermal
+    wind below 2000 m), and thermal wind integrates density x THICKNESS.
+
+    Falls back to the 1-D ladder when the mesh_mask predates ``e3t_0`` (GYRE,
+    ``key_linssh``, where the two coincide -- which is why this went unnoticed).
+
+    Raises
+    ------
+    ValueError
+        If ``e3t_0`` varies horizontally over wet cells, i.e. the config has
+        PARTIAL CELLS (``ln_zps``), which this bridge does not support. Silently
+        averaging a thinned bottom cell into a full one would yield a
+        plausible-looking but wrong bathymetry.
+    """
+    e3t = np.asarray(grid.e3t_1d).ravel().astype(np.float64)
+    t_depth = np.asarray(grid.gdept_1d).ravel().astype(np.float64)
+    # DIAGNOSTIC (#1226, temporary): LEGOESM_NEMO_E3T isolates which half of
+    # NEMO's 3-D geometry drives a regression -- the thickness ladder or the
+    # T-depth ladder.  "both" (default) | "e3t_only" | "gdept_only" | "off"
+    import os as _os
+    # DEFAULT IS "off" -- i.e. the KNOWN-WRONG 1-D ladder. This is deliberate
+    # and temporary. Adopting NEMO's true e3t_0 thicknesses is CORRECT (it makes
+    # legoESM's geometry match NEMO to roundoff: volume 4.7e-03 -> 6.0e-09) but
+    # it DESTABILISES the model: from a bit-exact NEMO restart, max|u| grows
+    # 0.66 -> 2.2 m/s over 20 days and saturates near 3 m/s, where the 1-D
+    # ladder holds 0.60-0.69 indefinitely. Isolated to the THICKNESS ladder --
+    # "gdept_only" (NEMO T-depths, 1-D thicknesses) is stable at 0.61, so the
+    # depth ladder is innocent.
+    # => legoESM is UNSTABLE ON NEMO'S ACTUAL GRID and was stable only because
+    #    it ran on a wrong one. That second defect must be found before this can
+    #    default to "both". Do NOT flip this default to hide the instability.
+    _mode = (mode if mode is not None
+             else _os.environ.get("LEGOESM_NEMO_E3T", "off"))
+    if _mode not in ("off", "e3t_only", "gdept_only", "both"):
+        raise ValueError(
+            f"unknown vertical-scale-factor mode {_mode!r}; expected "
+            '"off", "e3t_only", "gdept_only" or "both"')
+    e3t3 = getattr(grid, "e3t_0", None)
+    if e3t3 is None or _mode == "off":
+        return e3t, t_depth, "e3t_1d"
+    e3t3 = np.asarray(e3t3)
+    nlev = e3t3.shape[-1]
+    spread = np.zeros(nlev)
+    for k in range(nlev):
+        w = tmask[:, :, k]
+        if w.any():
+            v = e3t3[:, :, k][w]
+            spread[k] = float(v.max() - v.min())
+    if spread.max() > 1.0e-6:
+        raise ValueError(
+            f"mesh_mask e3t_0 varies horizontally (max spread {spread.max():.3e} "
+            "m over wet cells): this is a PARTIAL-CELL (ln_zps) grid, which "
+            "bridge_nemo_to_legoesm_topo does not support."
+        )
+    lev_any = tmask.any(axis=(0, 1))
+    out_e3t = e3t.copy()
+    for k in range(nlev):
+        if lev_any[k]:
+            out_e3t[k] = float(e3t3[:, :, k][tmask[:, :, k]].mean())
+    if _mode == "gdept_only":
+        out_e3t = e3t.copy()            # keep the 1-D thickness ladder
+    gd3 = getattr(grid, "gdept_0", None)
+    out_td = t_depth.copy()
+    if gd3 is not None and _mode in ("both", "gdept_only"):
+        gd3 = np.asarray(gd3)
+        for k in range(nlev):
+            if lev_any[k]:
+                out_td[k] = float(gd3[:, :, k][tmask[:, :, k]].mean())
+    return out_e3t, out_td, "e3t_0"
+
+
 def bridge_nemo_to_legoesm_topo(
     grid: NemoGrid,
     state: NemoState,
@@ -352,12 +432,16 @@ def bridge_nemo_to_legoesm_topo(
             "full-step-z. NB partial cells (ln_zps) are NOT detectable from the "
             "mask — the caller must guarantee ln_zps=F."
         )
+    # NEMO integrates with e3t_0, not the 1-D ladder e3t_1d -- see
+    # effective_vertical_scale_factors for why this matters (#1226).
+    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(grid, tmask)
+
     depth_cum = np.cumsum(e3t_1d)                        # bottom-interface depth
     H_bathy = np.where(
         k_bot > 0, depth_cum[np.clip(k_bot - 1, 0, len(e3t_1d) - 1)], 0.0)
 
     z_coord = create_z_star_from_thicknesses(
-        e3t_1d, t_depth_ref_m=np.asarray(grid.gdept_1d).ravel(),
+        e3t_1d, t_depth_ref_m=_t_depth,
     )
 
     # NEMO ln_zco FULL-STEP-z: fixed reference levels everywhere + a
@@ -417,8 +501,74 @@ def bridge_nemo_to_legoesm_topo(
     )
 
 
+def bridge_before_state_topo(
+    br: NemoBridgeOutput,
+    grid: NemoGrid,
+    before: NemoBeforeState,
+    *,
+    periodic_i: bool = True,
+) -> LatLonCGridOceanState:
+    """Populate ``br.state``'s leap-frog BEFORE fields (Nbb) from a NEMO restart.
+
+    NEMO's Modified-Leap-Frog restart always carries a THIRD time level
+    (``tb/sb/ub/vb`` (+``sshb``/``utau_b``/``vtau_b``)), one full step behind
+    the now-level (``tn/sn/...``) fields :func:`bridge_nemo_to_legoesm_topo`
+    already bridges onto ``br.state``. This populates
+    ``state.{T,S,u,v,eta}_before`` (+ ``tau_x_prev``/``tau_y_prev`` when the
+    restart carries ``utau_b``/``vtau_b``) with the SAME face-staggering /
+    Neumann-land-fill conventions as the now-level bridge, so a twin using
+    this state is an EXACT leap-frog entry state (matches NEMO's own three
+    time levels), not a forward-Euler cold start.
+
+    Must be called with the SAME ``grid``/``periodic_i`` used to build
+    ``br`` (no independent re-derivation of the mesh/mask).
+
+    Parameters
+    ----------
+    br : NemoBridgeOutput
+        Output of :func:`bridge_nemo_to_legoesm_topo` on the SAME ``grid``.
+    grid : NemoGrid
+        The mesh_mask this ``br`` was bridged from (for ``tmask``).
+    before : NemoBeforeState
+        From :func:`nemo_io.read_nemo_restart_before` on the SAME restart
+        file ``br.state`` was bridged from.
+    """
+    tmask = np.asarray(grid.tmask) > 0.5
+    mask3 = jnp.asarray(tmask)
+    umap = _u_east_to_face_periodic if periodic_i else _u_east_to_face
+
+    T_fill = neumann_fill_cgrid(jnp.asarray(before.T), mask3, br.geometry)
+    S_fill = neumann_fill_cgrid(jnp.asarray(before.S), mask3, br.geometry)
+    u_face = umap(np.asarray(before.u))
+    v_face = _v_north_to_face(np.asarray(before.v))
+
+    st = br.state
+    replacements = dict(
+        T_before=st.T.replace(data=T_fill),
+        S_before=st.S.replace(data=S_fill),
+        u_before=st.u.replace(data=jnp.asarray(u_face)),
+        v_before=st.v.replace(data=jnp.asarray(v_face)),
+        eta_before=st.eta.replace(
+            data=jnp.asarray(before.ssh if before.ssh is not None else st.eta.data)),
+    )
+    # utau_b/vtau_b (T-point, before-level wind stress): only set when the
+    # restart carries them. When absent (older NEMO builds without these
+    # fields), leave tau_x_prev/tau_y_prev at their None default --
+    # ``_leapfrog_step``'s own forward-Euler-start branch (state.u_before is
+    # the ONLY None-gate it checks) then seeds "before := now" on step 1
+    # (NEMO nit000 convention, sbcmod.F90:568-573) exactly as an un-bridged
+    # cold start would, so barotropic_forcing_centred=True still gets a
+    # defined ½(before+now) average rather than an AttributeError.
+    if before.tau_x is not None:
+        replacements["tau_x_prev"] = jnp.asarray(before.tau_x)
+    if before.tau_y is not None:
+        replacements["tau_y_prev"] = jnp.asarray(before.tau_y)
+    return st._replace(**replacements)
+
+
 __all__ = (
     "NemoBridgeOutput",
     "bridge_nemo_to_legoesm",
     "bridge_nemo_to_legoesm_topo",
+    "bridge_before_state_topo",
 )
