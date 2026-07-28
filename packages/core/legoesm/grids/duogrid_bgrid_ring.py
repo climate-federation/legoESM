@@ -43,7 +43,7 @@ _BAND = 8
 # P0: v1 probed in FV3 reference tile layout while the FB core runs
 # create_cubed_sphere layout — raw application error 3.158; the map is
 # now conjugated by the ED face perm/rot at build time)
-_MAP_VERSION = "create-ed-v2"
+_MAP_VERSION_FMT = "create-ed-v3-nord{nord}"
 
 _CACHE: dict = {}
 
@@ -116,7 +116,8 @@ def _run_certified_exchange(field6: np.ndarray, n: int, ng: int,
 
 
 def build_bgrid_ring1_map(n: int, ng: int = 3, *,
-                          use_disk_cache: bool = True) -> dict:
+                          use_disk_cache: bool = True,
+                          k2e_nord: int = 2) -> dict:
     """Extract the faithful ring-1 linear map by impulse probing.
 
     Returns numpy arrays (jnp-converted at apply time):
@@ -130,13 +131,14 @@ def build_bgrid_ring1_map(n: int, ng: int = 3, *,
             f"build_bgrid_ring1_map: n={n} too small for the probe "
             f"band (_BAND={_BAND}); the certified probe context also "
             "needs ng=3 <= n//2")
-    key = (_MAP_VERSION, n, ng)
+    version = _MAP_VERSION_FMT.format(nord=k2e_nord)
+    key = (version, n, ng)
     if key in _CACHE:
         return _CACHE[key]
     path = None
     if use_disk_cache:
         path = os.path.join(
-            _cache_dir(), f"bgrid_ring1_{_MAP_VERSION}_n{n}_ng{ng}.npz")
+            _cache_dir(), f"bgrid_ring1_{version}_n{n}_ng{ng}.npz")
     if use_disk_cache and os.path.exists(path):
         z = np.load(path)
         m = {k: z[k] for k in ("starts", "src_face", "src_i", "src_j",
@@ -149,7 +151,8 @@ def build_bgrid_ring1_map(n: int, ng: int = 3, *,
     )
 
     ctx = build_six_face_duo_context(n, ng, use_ext_bundle=True,
-                                     oracle_conventions=True)
+                                     oracle_conventions=True,
+                                     k2e_nord=k2e_nord)
     ectx = ctx["ectx"]
 
     npx = n + 1

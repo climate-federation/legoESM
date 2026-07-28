@@ -105,7 +105,7 @@ native seam angles (→ blow-up).
    equiangular-duo → ED-native-duo, same solver + M1 config) goes
    43.8→58.9 — WORSE.  CAVEAT: no rung is a single-*metric* isolation.
    C→D switches the whole ED-native grid config — the ED gnomonic metrics
-   AND their *mandatory* `k2e_nord=4` duo tables (order-2 is the wrong
+   AND their *mandatory* `k2e_nord=2 (AUTHORITATIVE live default; 4 = the historical mirror-monolith order, retracted 2026-07-27 as the vertex amplifier)` duo tables (order-2 is the wrong
    interpolant on ED, ~4e-2 coeff error, so ED forces order 4;
    `cubed_sphere.py:462`), which are inseparable from the metric family.
    A→B (A-L 0.54→22.5) is bundled differently (it also flips no-duo→duo).
