@@ -168,6 +168,28 @@ PER_ELEMENT: dict[str, float] = {
     # probe_bottom_drag (A) under fp64: rel_err_med = rel_err_p90 = 0.000e+00
     # over 9920 T-points -- per-element proven, not merely aggregate-clean.
     "zdf_drg_nonlin T-point rate": 0.0,
+    # ldf_slp RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py, the
+    # first probe for these rows with BOTH mechanical preconditions wired
+    # (require_fp64 + time_level_for_dump) AND a consistent run directory.
+    # These are err_norm = |lego-nemo| / RMS(nemo), NOT pointwise |rel|: 7-9.5%
+    # of wet points sit within 1e-3 of RMS of zero, so a pointwise-relative
+    # median is meaningless here (max pointwise |rel| balloons to 1e5-1e6 purely
+    # from near-zero-slope cells -- the same artifact as the retracted "slopes
+    # 9% too large" finding in section F).
+    #   wslpi corr 0.999876 |x|ratio 1.002818   wslpj corr 0.999800 |x|ratio 1.003324
+    #   uslp  corr 0.999944 |x|ratio 1.002248   vslp  corr 0.999906 |x|ratio 1.002346
+    # NOTE these differ from the previously recorded corr/ratio (e.g. wslpi
+    # 0.999963/1.000524): the older probe read its restart from RUN_Y5_REBUILD
+    # while comparing against RUN_GDB's dumps, and ran at the default fp32
+    # policy.  The values here supersede on provenance, not on preference.
+    # Residual is STRUCTURED: err_norm rises monotonically with depth and jumps
+    # in the bottom 2-3 levels, max always at the deepest ACTIVE level in
+    # columns j~185-191 -> a bottom-boundary / bathymetry-step term.  The
+    # formula-vs-smoother split (raw pre-Shapiro dumps) is in flight.
+    "ldf_slp wslpi": 9.440e-6,
+    "ldf_slp wslpj": 1.460e-5,
+    "ldf_slp uslp": 1.221e-5,
+    "ldf_slp vslp": 1.968e-5,
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -241,7 +263,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "this a real cause and not a coincidence of magnitude. Three "
                                                               "other consumers now fixed; NOT re-measured end-to-end."),
     "zdf_mxl (nmln)":                (0.99859,    None,       "12/9920 cols differ; REOPENED [e3t=both per probe_nmln_kanc.py]"),
-    "ldf_slp wslpi":                 (0.999962701, 1.000524131,   "TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
+    "ldf_slp wslpi":                 (0.999876, 1.002818,   "RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962701/1.000524131. TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
                                                               "defect campaign): traced ldf_slp stage-by-stage vs "
                                                               "NEMO's own MY_SRC/ldfslp.F90 dumps (Y5 RUN_GDB "
                                                               "kt=57601, e3t=both) -- prd (corr 1.0) and zbw "
@@ -289,11 +311,11 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "the 1e-9 bar) -- residual cause not yet identified, "
                                                               "but the 3-order-of-magnitude gap that motivated this "
                                                               "audit is closed."),
-    "ldf_slp wslpj":                 (0.999962742, 1.000100880,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp wslpj":                 (0.999800, 1.003324,   "RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962742/1.000100880. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.998193168/1.004061782]"),
-    "ldf_slp uslp":                  (0.999980198, 1.000281581,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp uslp":                  (0.999944, 1.002248,   "RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980198/1.000281581. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.997795757/1.006438108]"),
-    "ldf_slp vslp":                  (0.999980493, 1.000097328,   "[e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp vslp":                  (0.999906, 1.002346,   "RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980493/1.000097328. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.998369979/1.004132584]"),
     "ldf_eiv kappa (aeiu)":          (0.999994774, 0.999958065,   "MEASUREMENT-ARTIFACT FIX 2026-07-28 (NOT a model "
                                                               "fix; ratio 0.999958 is 4e-5 outside BAR_RATIO_EPS so "
