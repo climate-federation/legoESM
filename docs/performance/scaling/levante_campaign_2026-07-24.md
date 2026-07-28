@@ -1115,10 +1115,23 @@ state, the vertex-mask cache primed FROM the global state, and the
 replicated geometry stacks. The cube's level-independent wall fits: its
 setup residency is mesh tables + 2-D geometry.
 
-Fix candidates under codex round-18 review: host-side state construction,
-explicit free-after-shard, sharding the geometry stacks, and priming the
-vertex-mask cache from the sharded state. Acceptance test: re-run this
-probe; bytes_in_use must track the SHARD, not the global.
+**FIX STAGE (i) SHIPPED AND MEASURED** (commits e1b502000/e5a541c65 +
+probe 26524423): building the global model/state under
+`jax.default_device(local cpu)` at nd>1 drops per-device residency
+**1.58 -> 0.30 GB (@16) and 3.11 -> 0.71 GB (@32) — a 5x reduction** —
+with the compiled step unchanged and parity at 1e-10. Getting there
+burned four probe attempts on real multicontroller facts, each recorded:
+lower/compile is COLLECTIVE (rank-0-only deadlocks the shutdown
+barrier); `jax.devices()` is the GLOBAL list under jax.distributed (use
+`local_devices`); `JAX_PLATFORMS=cuda` unregisters the cpu backend; and
+the host-side build needs `--mem=0` or the SLURM cgroup kills it.
+
+HONEST STATUS vs the pre-registered threshold: codex's acceptance
+(@32/@16 bytes ratio <= 1.10) is NOT met — the residual ~1.4-1.7
+global-field equivalents still scale with global size (the stage-(iii)
+targets: P()-replicated geometry stacks + model.grid). But the residual
+extrapolates to ~1.5 GB/device at LL2304 against 80 GB HBM, so the WALL
+should already be gone; the LL2304@64 run is the decisive test.
 
 WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
 every plateau is a LARGER TILE, i.e. raising resolution as devices are
