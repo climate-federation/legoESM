@@ -926,6 +926,22 @@ device count.** Both lanes shard correctly one size down (ocean LL1152
 @64, cube C768 @54), so the sharded step is sound — it is the
 setup/allocation path.
 
+**OCEAN FIXED-TILE CONTRAST, recovered by sizing under the wall (job
+26510472).** Instead of retrying LL2304, LL1632 @32 holds the anchor's
+tile (166.5k vs 165.9k cols/GPU) at HALF the global size:
+
+| arm | devices | tile | ms/step |
+|---|---|---|---|
+| LL1152x2304 | 16 | 165.9k | 19.83 |
+| LL1632x3264 | 32 | 166.5k | **19.55** (5.45 GC/s) |
+
+**2x the devices carrying 2x the problem costs NOTHING** (0.99x,
+weak-scaling efficiency 1.01). So the ocean GPU lane joins the
+atmosphere: comm does not grow with device count at constant tile
+(cube 1.06x at 2.25x, lat-lon 1.17x at 4x, ocean 0.99x at 2x). **All
+three GPU lanes are tile-limited, none is device-count-limited** over
+the tested ranges.
+
 WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
 every plateau is a LARGER TILE, i.e. raising resolution as devices are
 added. This defect makes that impossible — adding GPUs cannot buy
