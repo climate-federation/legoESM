@@ -61,13 +61,15 @@ corr 0.975 / ratio 1.033. **The earlier claim that this was inherited from
 ~0.9999-class inputs) and aeiu barely moved (0.974309 → 0.975163). It has its
 own, still-unidentified cause and is now the single worst non-salinity row.
 
-### (b) Salinity — the most alarming single row
-`traadv_fct` SALINITY: corr **0.203** / ratio 3.17. Not a boundary artifact
-(refuted by measurement). Mechanism: horizontal and vertical tendencies each
-match at 0.9999 but **cancel to 1.2% of gross**, so each component's residual is
-~5× the net signal. Salinity carries ~35% of DINO's density span, so this feeds
-the EOS and the ACC. *This is the quantitative proof the exactness bar is
-necessary: 0.9999 per component gives 0.20 on the applied tendency.*
+### (b) Salinity — RESOLVED as a measurement artifact (was: "most alarming row")
+`traadv_fct` SALINITY measured 0.999952 / 0.999900 at HEAD. The recorded
+0.203/3.17 was a comparison-convention error (the sibling `fluxes` row chose its
+k-offset against Krhs-contaminated dumps, peaking at the wrong offset).
+The CANCELLATION MECHANISM is real and confirmed — corr(horiz,vert) = −1.0000
+for S vs −0.998 for T, so S genuinely is the most sensitive detector of
+component residual, and salinity does carry ~35% of DINO's density span. But
+with each component at five nines, no amplified residual exists.
+**Principle retained, example retracted.**
 
 ### (c) Blocked on the deferred v-face metric
 `dyn_hpg` dv (substituted → 1.000000007), and probably part of `dyn_cor_2d` v.
