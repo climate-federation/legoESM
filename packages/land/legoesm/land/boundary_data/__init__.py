@@ -63,6 +63,7 @@ from legoesm.land.boundary_data._internals import (
     GLACIER_ALB_VIS_TUNED,
     GLACIER_ALB_NIR_TUNED,
     GLACIER_ALBEDO_TUNED,
+    canopy_effective_broadband_albedo,
 )
 
 __all__ = [
@@ -81,4 +82,5 @@ __all__ = [
     # glacier ice-surface albedo (uncalibrated defaults + AMIP recalibration)
     "GLACIER_ALB_VIS", "GLACIER_ALB_NIR", "GLACIER_ALBEDO_DEFAULT",
     "GLACIER_ALB_VIS_TUNED", "GLACIER_ALB_NIR_TUNED", "GLACIER_ALBEDO_TUNED",
+    "canopy_effective_broadband_albedo",
 ]
