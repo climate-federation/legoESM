@@ -1140,16 +1140,26 @@ def make_voronoi_mpi_step(
             # owned and halo cells.
             if getattr(config, "conservative_tracer_clamp", False):
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-                    _is_water_mass_tracer,
+                    _borrow_eligible,
                 )
                 from legoesm.core.conservation import (
                     conservative_positive_clip,
                 )
-                _dsig = jnp.asarray(sigma_coord.dsigma)
+                # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
+                # mirrors the serial floors exactly (see primitive_eq_mpas:
+                # the naive clip INVENTED per-mass number every step, x2.2/day
+                # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
+                # plain clip pending density-aware repair).
+                # TRUE layer-mass dp weight (post-mass-fix p_s): identical
+                # rescale on pure sigma (per-column p_s cancels), correct on
+                # hybrid where dsigma is not the layer mass (codex
+                # 2026-07-28 round 2).  Non-positive dp zero-weighted.
+                _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
                 state_new = state_new._replace(tracers={
                     k: f.replace(data=(
-                        conservative_positive_clip(f.data, _dsig)[0]
-                        if _is_water_mass_tracer(k)
+                        conservative_positive_clip(f.data, _dp)[0]
+                        if _borrow_eligible(k)
                         else jnp.maximum(f.data, 0.0)))
                     for k, f in state_new.tracers.items()
                 })
