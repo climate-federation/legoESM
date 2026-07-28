@@ -1095,6 +1095,31 @@ atmosphere: comm does not grow with device count at constant tile
 three GPU lanes are tile-limited, none is device-count-limited** over
 the tested ranges.
 
+**#1370 DIAGNOSED (probe job 26523157, after two harness failures the
+CPU smoke could not catch).** Matched 3.3M-cell shards at 2x global size
+(LL1152@16 vs LL1632@32):
+
+| signal | @16 | @32 | reading |
+|---|---|---|---|
+| compiled entry args | 0.06 GB | 0.06 GB | step is CLEAN |
+| compiled temps | 0.22 | 0.21 | not remat pressure |
+| state leaves (per-device) | 0.070 sharded / 0 replicated | same | sharding correct |
+| **bytes_in_use** | **1.58 GB** | **3.11 GB** | **tracks GLOBAL size** |
+
+Per-device residency is a constant **~7.4 global-field equivalents** —
+and 7.4x the LL2304 field size is the observed 102 GB wall. So the
+defect is NOT step-entry replication (my original hypothesis — refuted
+in its specific form) and NOT remat: it is **SETUP-TIME global device
+arrays that stay alive after sharding** — the globally-built initial
+state, the vertex-mask cache primed FROM the global state, and the
+replicated geometry stacks. The cube's level-independent wall fits: its
+setup residency is mesh tables + 2-D geometry.
+
+Fix candidates under codex round-18 review: host-side state construction,
+explicit free-after-shard, sharding the geometry stacks, and priming the
+vertex-mask cache from the sharded state. Acceptance test: re-run this
+probe; bytes_in_use must track the SHARD, not the global.
+
 WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
 every plateau is a LARGER TILE, i.e. raising resolution as devices are
 added. This defect makes that impossible — adding GPUs cannot buy
