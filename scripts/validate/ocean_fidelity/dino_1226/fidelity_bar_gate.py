@@ -707,7 +707,11 @@ MEASURED_AT: dict[str, str] = {
     "ldf_slp wslpj": "7816b514e",
     "ldf_slp uslp": "7816b514e",
     "ldf_slp vslp": "7816b514e",
-    "ldf_eiv kappa (aeiu)": "7816b514e",
+    # ldf_eiv kappa (aeiu): re-measured b4be5ee65 -- the 0.975163/1.032510
+    # tuple recorded at 7816b514e was a harness measurement artifact (raw
+    # T-point kappa_GM compared against NEMO's U-face-averaged paeiu dump),
+    # not a re-measurement of the same quantity after a model change.
+    "ldf_eiv kappa (aeiu)": "b4be5ee65",
     # DISPUTE RESOLVED 2026-07-28 (9f25d7be4): the corr~0.19 measurement was a
     # PROBE-INVOCATION error, not a model discrepancy. hpg_tendency_compare.py
     # defaults to ``--state istate`` (the analytic from-rest usr_def_istate
