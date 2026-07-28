@@ -1148,12 +1148,18 @@ barrier); `jax.devices()` is the GLOBAL list under jax.distributed (use
 `local_devices`); `JAX_PLATFORMS=cuda` unregisters the cpu backend; and
 the host-side build needs `--mem=0` or the SLURM cgroup kills it.
 
-HONEST STATUS vs the pre-registered threshold: codex's acceptance
-(@32/@16 bytes ratio <= 1.10) is NOT met — the residual ~1.4-1.7
-global-field equivalents still scale with global size (the stage-(iii)
-targets: P()-replicated geometry stacks + model.grid). But the residual
-extrapolates to ~1.5 GB/device at LL2304 against 80 GB HBM, so the WALL
-should already be gone; the LL2304@64 run is the decisive test.
+**STAGE (iii) SHIPPED — ACCEPTANCE MET** (commit 57494f2de, probe
+26526284): sharding the band-geometry stacks P("lat") removes the
+residual. Per-device residency is now **0.10 GB at BOTH probe sizes —
+ratio 1.00, meeting codex's pre-registered <= 1.10 exactly**. Full arc:
+1.58/3.11 GB (before) -> 0.30/0.71 (host-side build) -> **0.10/0.10**
+(sharded stacks): a 16-31x reduction, residency now independent of
+global size. All 13 SPMD gate suites (equivalence/tripole/wide-halo)
+pass. One diagnostic casualty, harmless to production: the probe's
+OUTER re-jit now refuses ("closing over a multi-process jax.Array"),
+because the wrapper closes over the now-sharded stacks — the production
+inner jit receives them as ARGUMENTS and is unaffected (the probe's own
+step invocation ran). Remaining acceptance: the LL2304@64 wall run.
 
 WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
 every plateau is a LARGER TILE, i.e. raising resolution as devices are
