@@ -233,12 +233,21 @@ def build_six_face_duo_context(n: int, ng: int = 3,
 
     # surface geopotential (phis, m^2/s^2) per face on the data domain:
     # topo_fn(lon, lat) -> phis; geopk consumes it as gz(km+1) exactly
-    # like upstream (test_cases case-5 phis feeds geopk's hs argument)
+    # like upstream (test_cases case-5 phis feeds geopk's hs argument).
+    # Upstream applies ONE static ext_scalar(phis) before stepping
+    # (test_cases.F90:1567-1582) so the halo/wedge slots carry the k2e
+    # values, not the raw analytic evaluation (codex r8 P1).
     hs6 = None
     if topo_fn is not None:
         hs6 = [np.asarray(topo_fn(np.asarray(gs["agrid_lon"]),
                                   np.asarray(gs["agrid_lat"])))
                for gs in gs6]
+        if use_ext_bundle:
+            from legoesm.grids.fv3_native_ext_vector import (
+                ext_scalar_sixface,
+            )
+
+            ext_scalar_sixface(hs6, "A", ectx)
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,

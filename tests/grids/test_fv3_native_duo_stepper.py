@@ -332,5 +332,15 @@ def test_topo_fn_threads_hs_and_step_runs():
     for t in range(6):
         assert np.all(np.isfinite(out_t[t]["u"]))
         assert np.all(np.isfinite(out_t[t]["delp"]))
-    # hs must actually change the dynamics (same IC here, different hs)
-    assert not np.allclose(out_t[0]["u"], out_0[0]["u"])
+    # hs must change the dynamics ON THE MOUNTAIN FACE (codex r8: the
+    # first version compared face 1, where hs ~ 0 and identity is
+    # CORRECT after one step — a vacuous assertion)
+    t_mt = int(np.argmax([float(np.max(h)) for h in ctx_t["hs6"]]))
+    assert not np.allclose(out_t[t_mt]["u"], out_0[t_mt]["u"])
+    assert not np.allclose(out_t[t_mt]["delp"], out_0[t_mt]["delp"])
+    # and faces with hs == 0 everywhere must stay BIT-identical after
+    # one step (PG is face-local; identical delp/pt/winds in) — pins
+    # the None path too
+    for t in range(6):
+        if float(np.max(np.abs(ctx_t["hs6"][t]))) == 0.0:
+            np.testing.assert_array_equal(out_t[t]["u"], out_0[t]["u"])

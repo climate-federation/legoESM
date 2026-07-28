@@ -116,7 +116,14 @@ def main():
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)
 
-    sw_cfg = {"nord": args.nord} if args.nord is not None else None
+    # oracle-matched W-config (codex r8 P0: the C48.sw.case2.duo.hord6
+    # nml = hords 6, nord=nord_v=2, vtdm4=0.06, dddmp=0, d4_bg=0.12 —
+    # the stepper's W2-tuned default sw_cfg would CONFOUND the twin)
+    sw_cfg = {"hord_tr": 6, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
+              "hord_mt": 6, "nord_v": 2, "damp_v": 0.06,
+              "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2}
+    if args.nord is not None:
+        sw_cfg["nord"] = args.nord
 
     nmap = build_nearest_map(ctx)
     n, ng = ctx["n"], ctx["ng"]
