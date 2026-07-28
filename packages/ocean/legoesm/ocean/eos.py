@@ -671,11 +671,25 @@ def nemo_bn2_live_ladders(
     ``(..., nlev-1)``, positive-down [m].
     """
     gdept, gdepw_int = nemo_bn2_depth_ladders(z_coord)
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: domqco is NOT active, so r3t == 0 and
+        # gdept(Kmm) == gdept_0 EXACTLY -- the column never stretches.
+        # Applying the z* stretch here would give the density an eta
+        # dependence NEMO does not have.  Mirrors the same special case in
+        # vertical.compute_ocean_jacobian (:813-815).
+        return gdept, gdepw_int
     # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
     # rather than eta/0 -> inf/NaN poisoning the downstream N^2 chain.
     H = jnp.asarray(H_bathy)
     r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
-    stretch = (1.0 + r3t)[..., jnp.newaxis]
+    # Safety floor on the stretch, NOT on r3t: a column driven to
+    # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
+    # NON-POSITIVE geometric depth, which silently flips the sign of the S-EOS
+    # compressibility term and evaluates the Roquet polynomial outside its fit
+    # range.  Callers that already clamp eta (the PGF passes eta_safe) never
+    # reach this; it exists so an unclamped caller degrades loudly-wrong
+    # rather than silently-plausible.
+    stretch = jnp.maximum(1.0 + r3t, 1.0e-6)[..., jnp.newaxis]
     return gdept * stretch, gdepw_int * stretch
 
 

@@ -43,6 +43,7 @@ from legoesm.ocean.eos import (
     eos_density_derivatives,
     int_drhodTS_dynamic_enthalpy,
     make_eos_fn,
+    nemo_bn2_live_ladders,
     rho_0 as _RHO_0,
 )
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
@@ -3156,14 +3157,34 @@ def gm_redi_density_and_jacobian(
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
     eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
     fill_fn = lambda field: neumann_fill_cgrid(field, mask)
-    _geo_depth_1d = (
-        (jnp.abs(z_coord.z_full_ref) if getattr(z_coord, "t_depth_ref", None) is None
-         else jnp.asarray(z_coord.t_depth_ref))
+    # NEMO's eos_insitu evaluates at the LIVE gdept(Knn) = gdept_0*(1+r3t),
+    # r3t = ssh/ht_0 (eosbn2.F90:541 `zh = gdept(ji,jj,jk,Knn)`), NOT the static
+    # reference ladder.  Feeding the static one omitted a stretch of up to
+    # 1.206 m on DINO and put a depth-STRUCTURED 2.559e-6 into prd -- the
+    # residual floor inherited by all four ldf_slp rows (#1226).  Substituting
+    # NEMO's own gdept collapsed prd to 1.804e-11, i.e. this term owned the
+    # whole residual.  nemo_bn2_live_ladders is the canonical helper the
+    # eos_rab/bn2 consumers already use (it takes H_bathy directly; do NOT use
+    # compute_ocean_jacobian here -- that is (eta+H_bathy)/H_max, a different
+    # quantity, off by median 1.1e-1 vs 2.5e-8) and it applies the same
+    # t_depth_ref-or-|z_full_ref| fallback this previously did inline.
+    # iterate_eos_and_pressure_anomaly's p_eos = rho0*g*gdept multiply is
+    # shape-general, so a (nlat, nlon, nlev) depth needs no change there.
+    # GATING mirrors the PGF sibling (ocean_pe_latlon_cgrid.py:1289-1294) so the
+    # two never disagree on the EOS depth within one timestep: BIT-IDENTICAL to
+    # the previous behaviour when t_depth_ref is None (no fidelity ladder — i.e.
+    # every non-NEMO-bridged recipe), live stretch only when it is carried.
+    # nemo_bn2_live_ladders itself honours linear_free_surface (key_linssh: the
+    # column never stretches, so r3t == 0 and gdept(Kmm) == gdept_0).
+    _geo_depth = (
+        (jnp.abs(z_coord.z_full_ref)
+         if getattr(z_coord, "t_depth_ref", None) is None
+         else nemo_bn2_live_ladders(z_coord, eta, H_bathy)[0])
         if eos_depth == "geometric" else None
     )
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
-        eos_depth=eos_depth, eos_geometric_depth_1d=_geo_depth_1d,
+        eos_depth=eos_depth, eos_geometric_depth_1d=_geo_depth,
     )
     return rho, jacobian
 

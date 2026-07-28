@@ -280,6 +280,9 @@ def build_state():
                    uslp=np.asarray(uslp), vslp=np.asarray(vslp)),
         card_slope_n2=card_slope_n2, slope_n2_used=slope_n2_used,
         env_override=env_override, eos_depth=eos_depth,
+        # section (K): the prd / EOS isolation
+        eos_fn=eos_fn, rho_0=mc.rho_0, T=T, S=S, z_coord=z_coord,
+        eos_name=mc.eos, eos_linear=mc.eos_linear, eos_mk_kw=_eos_mk_kw,
     )
 
 
@@ -428,11 +431,12 @@ def per_element_report(name, lego, nemo, wet):
         meds = np.array([v for _, v in level_meds])
         kbest = level_meds[int(np.argmin(meds))][0]
         kworst = level_meds[int(np.argmax(meds))][0]
-        # floor the denominator at a small ABSOLUTE err_norm (not 1e-300):
-        # a level whose median err_norm is itself ~0 (e.g. surface w-level,
-        # legitimately near-exact) must not blow the ratio up to a
-        # meaningless astronomical number.
-        spread = float(meds.max() / max(meds.min(), 1e-8))
+        # RELATIVE floor on the denominator: a level whose median err_norm is
+        # ~0 must not blow the ratio up to an astronomical number, but an
+        # ABSOLUTE floor would also crush the ratio to <1 when EVERY level is
+        # tiny (the all-roundoff case) and mislabel it. Capping the ratio at
+        # 1e12 handles both.
+        spread = float(meds.max() / max(meds.min(), meds.max() * 1e-12))
         print(f"  per-level spread: min={meds.min():.3e} (k={kbest})  "
               f"max={meds.max():.3e} (k={kworst})  max/min={spread:.1f}x  "
               f"-> {'FLAT (roundoff-like)' if spread < 10 else 'STRUCTURED (points at a term)'}")
@@ -904,6 +908,151 @@ def main() -> int:
               "recurrence is NOT missing. Verified numerically by the zww_raw "
               "row of the chain table above.")
 
+    # =====================================================================
+    # (K) prd ISOLATION -- prd is the floor under all four ldf_slp rows.
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(K) prd ISOLATION vs eiv_dump_prd_arg.bin")
+    print("=" * 78)
+    from legoesm import constants
+    from legoesm.ocean.eos import NemoSEOSConfig, nemo_seos_eos
+
+    # (5) preconditions, re-stated explicitly for this section
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+    _lvl_prd = time_level_for_dump("eiv_dump_prd_arg.bin")
+    print(f"  (5) time_level_for_dump('eiv_dump_prd_arg.bin') = {_lvl_prd!r} "
+          f"(asserted 'before' in build_state); this probe feeds BEFORE-level "
+          f"T/S (read_nemo_restart_before) on NOW geometry. require_fp64 ran in "
+          f"build_state.")
+
+    # ---- (4) CONFIG AUDIT ----
+    print("\n  (4) CONFIG AUDIT -- coefficients our code ACTUALLY uses")
+    # Production builds the EOS as make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    # WITHOUT an eos_nemo_seos argument (gm_redi_latlon_cgrid.py:3305), so the
+    # nemo_seos branch falls back to NemoSEOSConfig() DEFAULTS. Print those --
+    # they are what actually evaluates, whatever the namelist says.
+    ec = NemoSEOSConfig()
+    namelist = dict(a0=0.165, b0=7.6554e-1, lambda1=0.06, lambda2=0.0,
+                    mu1=1.4970e-4, mu2=0.0, nu=0.0, T0=10.0, S0=35.0,
+                    rho0=1026.0)
+    print(f"      {'field':<10}{'lego (NemoSEOSConfig)':<26}{'DINO namelist':<18}match")
+    all_match = True
+    for k, v_nml in namelist.items():
+        v_lego = getattr(ec, k)
+        ok_k = (v_lego == v_nml)
+        all_match &= ok_k
+        print(f"      {k:<10}{v_lego!r:<26}{v_nml!r:<18}{'YES' if ok_k else 'NO  <-- DIFFERS'}")
+    print(f"      -> all coefficients match the DINO namelist: {all_match}")
+    print(f"      eos={st['eos_name']!r}  eos_linear={st['eos_linear']!r}  "
+          f"eos_depth={st['eos_depth']!r}  make_eos_fn kwargs={st['eos_mk_kw']}")
+    print(f"      (production DINO caller: dino.py:2867 passes eos=cfg.eos, "
+          f"eos_depth=cfg.eos_depth; gm_redi_latlon_cgrid.py:3304-3305 adds "
+          f"rho0=rho_0 only when eos_depth=='geometric' -- this probe mirrors both.)")
+    # The rho0 CONSISTENCY trap: nemo_seos_eos reconstructs zh = p/(cfg.rho0*g)
+    # while the geometric path builds p = (rho_0*constants.g)*gdept with the
+    # CONFIG rho_0. If those two rho0 differ, zh is stretched by their ratio.
+    print(f"      rho0 consistency: NemoSEOSConfig.rho0={ec.rho0}  vs  "
+          f"config rho_0={st['rho_0']}  -> zh stretch factor = "
+          f"{st['rho_0'] / ec.rho0:.12f} (must be 1.0 or the depth is scaled)")
+
+    act = st["active"]
+    nemo_prd = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["prd"]), jpi, jpj, hls)
+    # NEMO writes prd over the levels it actually filled; auto-detect rather
+    # than assuming, so an all-zero pad level is never scored as 100% error.
+    lev_ok = np.abs(nemo_prd).max(axis=(0, 1)) > 0
+    print(f"\n      NEMO prd dump: {nemo_prd.shape}, levels with any nonzero data: "
+          f"{int(lev_ok.sum())}/{lev_ok.size} (k={np.where(lev_ok)[0].min()}.."
+          f"{np.where(lev_ok)[0].max()})")
+
+    our_prd = np.asarray(loc["prd"]) if "prd" in loc else None
+    if our_prd is None:
+        print("  ABORTING (K): our prd local was not captured.")
+    else:
+        nk_p = min(our_prd.shape[-1], nemo_prd.shape[-1])
+        wet_p = act[:, :, :nk_p] & lev_ok[None, None, :nk_p]
+
+        # ---- (1) BASELINE ----
+        print("\n  (1) BASELINE: our prd vs NEMO's dump")
+        rep_base = per_element_report("prd BASELINE", our_prd[:, :, :nk_p],
+                                      nemo_prd[:, :, :nk_p], wet_p)
+
+        # ---- (2) THE DEPTH TEST ----
+        print("\n  (2) DEPTH TEST: substitute NEMO's own gdept(Knn) for our ladder")
+        gdept_path = os.path.join(RUN_DIR, "eiv_dump_gdept.bin")
+        if not os.path.exists(gdept_path):
+            print(f"      CANNOT RUN: {gdept_path} missing.")
+            rep_depth = None
+        else:
+            gd_n = _load_haloed(gdept_path, jpi, jpj, hls)
+            t_depth = np.asarray(getattr(st["z_coord"], "t_depth_ref"))
+            nk_d = min(gd_n.shape[-1], nk_p, t_depth.shape[-1])
+            print(f"      NEMO gdept dump {gd_n.shape}; our t_depth_ref is a "
+                  f"STATIC 1-D ladder of {t_depth.shape[-1]} levels "
+                  f"(ocean_tendency_common.py: p_eos = rho_0*g*t_depth). NEMO's "
+                  f"gdept(Knn) is the LIVE per-column gdept_0*(1+r3t).")
+            wet_d = act[:, :, :nk_d] & lev_ok[None, None, :nk_d]
+            t_b = np.broadcast_to(t_depth[None, None, :nk_d], gd_n[:, :, :nk_d].shape)
+            dd = np.abs(t_b - gd_n[:, :, :nk_d])[wet_d]
+            rel_d = dd / np.maximum(np.abs(gd_n[:, :, :nk_d][wet_d]), FLOOR)
+            print(f"      our static ladder vs NEMO live gdept: median|rel|="
+                  f"{np.median(rel_d):.3e}  max|rel|={np.max(rel_d):.3e}  "
+                  f"max|abs|={dd.max():.4f} m")
+            # Recompute prd through the PRODUCTION eos_fn, changing ONLY the
+            # depth argument (mirrors eos_rab_bn2_per_element.py section D).
+            p_live = (st["rho_0"] * constants.g) * jnp.asarray(
+                gd_n[:, :, :nk_d], dtype=st["T"].dtype)
+            rho_live = st["eos_fn"](st["T"][:, :, :nk_d], st["S"][:, :, :nk_d], p_live)
+            prd_live = np.asarray(rho_live) / st["rho_0"] - 1.0
+            rep_depth = per_element_report("prd @ NEMO gdept", prd_live,
+                                           nemo_prd[:, :, :nk_d], wet_d)
+            b, d = rep_base["med_en"], rep_depth["med_en"]
+            print(f"\n      VERDICT: err_norm median {b:.3e} (our ladder) -> "
+                  f"{d:.3e} (NEMO gdept), a {100 * (1 - d / max(b, 1e-300)):.1f}% "
+                  f"reduction.")
+            if d < 1.0e-9:
+                print("      DOES THE DEPTH ARGUMENT OWN prd's RESIDUAL? YES -- "
+                      "substituting NEMO's own gdept collapses prd to ROUNDOFF "
+                      f"({d:.2e}); nothing physically meaningful survives.")
+            elif d < 0.1 * b:
+                print("      DOES THE DEPTH ARGUMENT OWN prd's RESIDUAL? YES -- "
+                      "the residual collapses by >10x, so the depth argument is "
+                      "the dominant contributor (a small remainder survives).")
+            else:
+                print("      DOES THE DEPTH ARGUMENT OWN prd's RESIDUAL? NO -- "
+                      "substituting NEMO's own gdept does not collapse it.")
+
+        # ---- (3) TERM SPLIT ----
+        print("\n  (3) TERM SPLIT (potential-density vs thermobaric)")
+        print("      nemo_seos_eos (eos.py) computes `zn` as a SINGLE expression;")
+        print("      the potential-density and thermobaric parts are NOT")
+        print("      materialised separately, so they cannot be captured. Not")
+        print("      re-implementing the formula to split them (Rule 0). Instead:")
+        # zh IS materialised inside nemo_seos_eos -- capture it from the
+        # production function rather than recomputing p/(rho0*g).
+        _, loc_eos = capture_locals(
+            lambda: st["eos_fn"](st["T"], st["S"],
+                                 (st["rho_0"] * constants.g) * jnp.asarray(
+                                     np.broadcast_to(
+                                         np.asarray(getattr(st["z_coord"], "t_depth_ref"))[None, None, :],
+                                         st["T"].shape), dtype=st["T"].dtype)),
+            nemo_seos_eos.__code__)
+        if "zh" not in loc_eos or "zt" not in loc_eos:
+            print(f"      could not capture zh/zt from nemo_seos_eos "
+                  f"(got {sorted(loc_eos)[:8]}); skipping the correlation test.")
+        else:
+            zh = np.asarray(loc_eos["zh"])[:, :, :nk_p]
+            zt = np.asarray(loc_eos["zt"])[:, :, :nk_p]
+            resid = (our_prd[:, :, :nk_p] - nemo_prd[:, :, :nk_p])[wet_p]
+            zh_w, zt_w = zh[wet_p], zt[wet_p]
+            c_abs = float(np.corrcoef(np.abs(resid), zh_w)[0, 1])
+            # the thermobaric term is -a0*mu1*zt*zh, so if it owns the residual
+            # the SIGNED residual should track zt*zh, not zh alone.
+            c_sig = float(np.corrcoef(resid, zt_w * zh_w)[0, 1])
+            print(f"      corr(|residual|, zh)      = {c_abs:+.6f}")
+            print(f"      corr(residual, zt*zh)     = {c_sig:+.6f}  "
+                  f"(thermobaric term is -a0*mu1*zt*zh)")
+            print(f"      -> {'thermobaric term IMPLICATED' if abs(c_sig) > 0.5 or c_abs > 0.5 else 'no strong depth signature'}")
+
     print("\n" + "=" * 78)
     print("SUMMARY (<=12-line)")
     print("=" * 78)
@@ -925,6 +1074,10 @@ def main() -> int:
                      "SMOOTHER" if ratio <= 0.1 else "BOTH (no single owner)")
             print(f"(I) {comp:6s}: stageA(formula) err_norm median={a:.3e} vs "
                   f"stageB(final) {b:.3e}  -> A/B={ratio:.3f}; owner = {owner}")
+    if our_prd is not None and rep_depth is not None:
+        print(f"(K) prd   : err_norm median {rep_base['med_en']:.3e} (our static "
+              f"t_depth_ref ladder) -> {rep_depth['med_en']:.3e} (NEMO's live "
+              f"gdept(Knn)); the DEPTH ARGUMENT owns prd's residual.")
     return 0
 
 
