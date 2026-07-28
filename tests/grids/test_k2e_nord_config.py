@@ -88,3 +88,33 @@ def test_stepper_ctx_threads_nord():
                                       omega=0.0, k2e_nord=4)
     assert ctx2["ectx"]["k2e_nord"] == 2
     assert ctx4["ectx"]["k2e_nord"] == 4
+
+
+def test_nord2_tables_match_unforced_auth_fixture():
+    """Our nord-2 tables vs the packed UNFORCED-generator fixture
+    (fv3_duogrid_oracle_n2.npz; driver FATALs unless the auth tree's
+    own default is 2).  Fail-loud if the fixture is absent — a missing
+    certificate must never read as a pass (codex r6 P1)."""
+    from pathlib import Path
+
+    from legoesm.grids.fv3_native_halos import compute_fv3_native_k2e
+
+    fx = (Path(__file__).parent / "fixtures"
+          / "fv3_duogrid_oracle_n2.npz")
+    assert fx.exists(), (
+        "nord-2 fixture missing — regenerate with "
+        "scripts/validate/fv3_native/gen_duogrid_oracle_n2.sh")
+    z = np.load(fx)
+    for res in (12, 24):          # C48 covered by the sbatch gate
+        assert int(z[f"c{res}_k2e_nord"]) == 2
+        ours = compute_fv3_native_k2e(res, remap_ng=3, k2e_nord=2)
+        for fam in ("A", "B", "CX", "CY", "DX", "DY"):
+            rows = {tuple(z[f"c{res}_{fam}_ij"][k]):
+                    (int(z[f"c{res}_{fam}_loc"][k]),
+                     z[f"c{res}_{fam}_coef"][k])
+                    for k in range(len(z[f"c{res}_{fam}_ij"]))}
+            for k, (fi, fj) in enumerate(ours[f"{fam}_ij"]):
+                lv, cw = rows[(int(fi), int(fj))]
+                assert int(ours[f"{fam}_loc"][k]) == lv, (res, fam, k)
+                assert np.abs(ours[f"{fam}_coef"][k, :len(cw)]
+                              - cw).max() < 1e-12, (res, fam, k)
