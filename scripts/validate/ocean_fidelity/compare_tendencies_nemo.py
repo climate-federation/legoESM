@@ -70,6 +70,7 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "u": _fill(dsU.variables["uoce"][r0]),           # (z, y, x) U-points
         "v": _fill(dsV.variables["voce"][r0]),           # V-points
         "avt": _fill(dsT.variables["avt"][r1]),          # (z+? , y, x) W-points
+        "avt_rec0": _fill(dsT.variables["avt"][0]),      # step-8761 avt (A2 target)
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
@@ -174,6 +175,59 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx)
 
 
+def run_stage_a2_mode_a(d, rst, cfg_prog):
+    """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
+    prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
+    K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
+    same carry — closure implementation vs closure implementation."""
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
+    from legoesm.ocean.eos import nemo_seos_eos
+
+    T3 = rst["tn"]; S3 = rst["sn"]
+    z, ny, nx = T3.shape
+    ncol = ny * nx
+
+    def cols(a):
+        return np.transpose(a.reshape(z, ncol), (1, 0))
+
+    e3t = d["e3t"]  # rec r0 geometry (ssh drift over 1 h is negligible)
+    T_c = np.nan_to_num(cols(T3), nan=0.0)
+    S_c = np.where(np.isfinite(cols(S3)), cols(S3), 35.0)
+    u_c = np.nan_to_num(cols(u_to_T(rst["un"])), nan=0.0)
+    v_c = np.nan_to_num(cols(v_to_T(rst["vn"])), nan=0.0)
+    dz_c = np.where(np.isfinite(cols(e3t)), cols(e3t), 1.0)
+    dz_half = 0.5 * (dz_c[:, :-1] + dz_c[:, 1:])
+    zc = np.cumsum(dz_c, axis=1) - 0.5 * dz_c
+    rho = np.asarray(nemo_seos_eos(
+        jnp.asarray(T_c), jnp.asarray(S_c),
+        jnp.asarray(constants.rho_ocean * constants.g * zc)))
+    taum = np.nan_to_num(d["taum"].reshape(ncol), nan=0.0)
+    lat_deg = d["lat"].reshape(ncol)
+    dz_ref_1d = np.nanmax(dz_c, axis=0)
+    z_interface = -np.cumsum(dz_ref_1d)[:-1]
+    # en on W-levels (0=surface); interior interfaces 1..z-1 seed the carry.
+    en_i = np.nan_to_num(cols(rst["en"])[:, 1:], nan=0.0)
+    out = tke_vertical_mixing(
+        jnp.asarray(u_c), jnp.asarray(v_c), jnp.asarray(T_c),
+        jnp.asarray(S_c), jnp.asarray(rho), jnp.asarray(dz_half),
+        tke_old=jnp.asarray(en_i),
+        tau_x_surface=jnp.asarray(taum),
+        tau_y_surface=jnp.zeros_like(jnp.asarray(taum)),
+        taum_surface=jnp.asarray(taum),
+        dt=3600.0, cfg=cfg_prog, rho_0=constants.rho_ocean, g=constants.g,
+        n_iterations=1,
+        z_interface=jnp.asarray(z_interface),
+        lat_deg=jnp.asarray(lat_deg),
+        ice_frac=None,
+        dz_ref=jnp.asarray(dz_ref_1d),
+        jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
+    )
+    K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
+    return K_H
+
+
 def run_stage_b(d):
     """Operator test: BE solve with NEMO's avt/avs vs ttrd_zdf/strd_zdf."""
     import jax.numpy as jnp
@@ -207,6 +261,25 @@ def run_stage_b(d):
     strd = cols(d["strd_zdf"])
     wet_c = cols(np.isfinite(T).astype(float)) > 0.5
     return dT, dS, ttrd, strd, wet_c, (z, ny, nx)
+
+
+def d2_for_a2(d):
+    """Stage A2 uses the RESTART state; geometry/stress must be the values in
+    effect DURING step 8761 — d already holds rec r0=0 state-row fields when
+    --rec 1, which IS the post-step-8761 snapshot; the 1-hour drift in e3t/
+    taum is negligible for K (documented approximation)."""
+    return d
+
+
+def avt_a2(d):
+    """A2 target = avt RECORD 1 (not 0): the restart stores no avt, so
+    NEMO's first-step avt (rec 0) is an initialization transient — measured
+    2026-07-27: calm-column rms(avt) 9-22 m2/s at rec 0 vs 0.003-0.1 at
+    rec 1, same columns. Scoring one kernel en-step against rec 1 leaves a
+    one-step en lag (small: surface TKE e-folds in minutes-hours)."""
+    z = d["avt"].shape[0]
+    ncol = d["avt"].shape[1] * d["avt"].shape[2]
+    return np.transpose(d["avt"].reshape(z, ncol), (1, 0))[:, 1:]
 
 
 def region_report(name, ours, theirs, wet, lat_col, top_k=None,
@@ -255,6 +328,10 @@ def main():
                     help="target record r (state r-1 vs avt/trends r); 1..11")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--skip-maps", action="store_true")
+    ap.add_argument("--restart-npz", default=None,
+                    help="rebuild_nemo_restart.py output; enables the EXACT "
+                         "Mode-A closure test (Stage A2, forces --rec 1: the "
+                         "restart state pairs with avt record 0)")
     args = ap.parse_args()
 
     from scripts.run.run_omip_core2 import orca1_zdftke_config
@@ -275,6 +352,18 @@ def main():
     result["stage_a"] = region_report(
         "Stage A: closure K_H (legoESM TKE card) vs NEMO avt [m2/s]",
         K_H, avt_i, wet_pair, lat_col, evd_cols=evd_cols)
+
+    if args.restart_npz:
+        if args.rec != 1:
+            raise SystemExit("--restart-npz requires --rec 1 (the restart "
+                             "state pairs with avt record 0)")
+        rst = dict(np.load(args.restart_npz))
+        cfg_a2 = orca1_zdftke_config()  # prognostic=True card
+        K_H2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
+        result["stage_a2_mode_a"] = region_report(
+            "Stage A2: MODE-A closure — kernel(restart state + NEMO en, one "
+            "3600s en-step) K_H vs NEMO avt rec 0 [m2/s]",
+            K_H2, avt_a2(d), wet_pair, lat_col, evd_cols=evd_cols)
 
     dT, dS, ttrd, strd, wet_c, _ = run_stage_b(d)
     result["stage_b_T"] = region_report(
