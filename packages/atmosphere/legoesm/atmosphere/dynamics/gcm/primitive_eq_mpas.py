@@ -28,7 +28,10 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.conservation import conservative_positive_clip
+from legoesm.core.conservation import (
+    conservative_positive_clip,
+    conservative_positive_clip_global,
+)
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
@@ -1040,10 +1043,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 # hybrid layer) is zero-weighted rather than borrowed from.
                 _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
                 _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                # GLOBAL variant: the column-local fixer zeroes net-negative
+                # columns, and on spiky number fields that zeroing alone
+                # re-created x2.74/day growth (868/10242 columns per step at
+                # century4 d90) — the global residual redistribution closes
+                # the budget exactly (serial jnp.sum here; the MPI lane
+                # passes an allreduce-SUM reduction).
                 state_new = state_new._replace(tracers={
                     k: f.replace(data=(
-                        conservative_positive_clip(f.data, _dp, axis=-1)[0]
-                        if _borrow_eligible(k)
+                        conservative_positive_clip_global(
+                            f.data, _dp, axis=-1)[0]
+                        if is_borrow_eligible_tracer(k)
                         else jnp.maximum(f.data, 0.0)))
                     for k, f in state_new.tracers.items()
                 })
@@ -1069,13 +1079,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 #: (HydrometeorState), so this weight has no conservation meaning for them:
 #: they keep the plain clip pending a density-aware repair (codex 2026-07-28;
 #: their invention rate is ~e15 slower than N_i's was).
-_BORROW_ELIGIBLE = frozenset(
+BORROW_ELIGIBLE_TRACERS = frozenset(
     {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i", "N_s", "N_g"})
 
 
-def _borrow_eligible(name: str) -> bool:
+def is_borrow_eligible_tracer(name: str) -> bool:
     """True for a per-mass tracer, tolerating a ``trc_`` prefix."""
-    return str(name).removeprefix("trc_") in _BORROW_ELIGIBLE
+    return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
 
 
 
