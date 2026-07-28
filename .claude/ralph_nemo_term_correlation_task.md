@@ -321,3 +321,22 @@ NEXT item 11 zdftke: avt/avm dumps already exist (8814/8815).
 | 11 zdftke | pdlr 0.998; composite 1.0 excl. 257 threshold-chatter cells | CLOSED |
 
 NEXT: 90-day twin re-run with the full fixed card (integration test), then push/PR.
+
+
+## ★ ACCEPTANCES REVOKED (user directive, 2026-07-27) ★
+
+"Good enough" is NOT the bar — NEMO-faithful is. Every term below was accepted
+on a SINGLE analysis, several with an "irreducible" label that was never proven.
+Given this campaign's retraction record, treat every such label as provisional.
+REOPENED (drive to ~1.0 or prove the deviation is in NEMO's own arithmetic):
+  item 8  traadv_fct 0.9923  <- IN PROGRESS (nonosc is DETERMINISTIC; a faithful
+          transcription must reproduce it to roundoff; suspected source of the
+          spurious diapycnal mixing collapsing deep stratification)
+  item 4  zdf_mxl 99.88% (12 knife-edge cols)
+  item 10 EEN 0.9999 (bottom levels 1.04-1.07)
+  item 7  eiv transport u 0.9985 / v 0.9954
+  item 11 composite avt/avm 0.9976 (257 "threshold chatter" cells)
+  item 5  slope bottom row 1.0255 ("difference-of-small-numbers amplification")
+Each needs: NEMO-side dumps of the INTERNALS (not just inputs/outputs), a
+stage-by-stage comparison, and a named first-deviating stage. "Amplification"
+and "chatter" are hypotheses, not verdicts, until the internals are compared.
