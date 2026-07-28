@@ -200,6 +200,33 @@ def build_state():
     # NEMO at ~1861/10348 columns on this exact state).
     active_3d = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
 
+    # --- oracle-comparison preconditions, both MECHANICAL (#1226) ---
+
+    # Rule 1c: NEMO is fp64. Assert it on the GEOMETRY too -- an f32
+
+    # ladder under an f64 state passes every state-level check.
+
+    from legoesm.ocean.fidelity.precision_gate import require_fp64
+
+    require_fp64(z_coord, T, S, context="eos_rab/bn2 per-element")
+
+    # Time level: assert the T/S we are about to compare is the level
+
+    # this dump actually belongs to, rather than assuming 'now'.
+
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+
+    _lvl = time_level_for_dump("dump_alpha_b.bin")
+
+    if _lvl != "before":
+
+        raise ValueError(
+
+            f"this probe feeds BEFORE-level T/S but dump_alpha_b.bin is "
+
+            f"{_lvl!r}-level; fix the probe or the registry")
+
+
     return dict(
         jpi=jpi, jpj=jpj, jpk=jpk, hls=hls, ni_ni=mask.shape,
         z_coord=z_coord, mask=mask, T=T, S=S, eta=eta, H_bathy=H_bathy,

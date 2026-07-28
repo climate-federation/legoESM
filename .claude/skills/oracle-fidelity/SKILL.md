@@ -73,6 +73,97 @@ hypotheses. Clearing requires comparing the routine's INTERNALS stage by stage
 and either reaching the bar or proving the deviation lives in the oracle's own
 arithmetic.
 
+## Rule 1c — Match the oracle's PRECISION, and verify it by printing the dtype
+
+NEMO, MITgcm and Veros are **fp64** models. An oracle comparison run in
+float32 is measuring your own rounding, not your physics. f32 eps = 1.19e-7,
+so anything you "find" in the 1e-8..1e-5 band may be the dtype.
+
+**Every oracle-fidelity evaluation runs fp64.** Set it explicitly:
+
+```python
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64())
+```
+
+**`JAX_ENABLE_X64=1` IS NOT ENOUGH.** It permits f64 arrays; it does NOT change
+legoESM's precision policy. Constructors cast to `get_policy().control`, which
+**defaults to float32** — so a harness can run with x64 enabled and still build
+its grid in single precision.
+
+DOUBLE-CHECK IT — do not assume (this is Rule 10 applied to dtype). Print the
+dtype of the arrays you are comparing *and* of the GEOMETRY behind them:
+
+```python
+for f in ("t_depth_ref", "dz_ref", "z_full_ref", "z_half_ref", "h_partial"):
+    print(f, np.asarray(getattr(z_coord, f)).dtype)   # want float64
+```
+
+A ladder that is f32 while T/S are f64 is the easy case to miss: the state
+looks right and the geometry silently is not (Rule 2's blind spot again).
+
+Real case (#1226): `create_z_star_from_thicknesses` cast NEMO's f64 `gdept_1d`
+to the policy control dtype = f32, losing ~7 digits — median |rel| 2.555e-8 =
+**0.21 x f32 eps**, the fingerprint of single precision. Under fp64:
+
+```
+live gdept vs NEMO   2.163e-8  ->  1.199e-16
+eos_rab alpha        1.322e-9  ->  0.000e+00
+bn2 (err_norm)       4.322e-9  ->  1.413e-17
+zdf_mxl nmln          10/9920  ->  0/9920
+```
+
+Four terms, one dtype. Weeks had gone into hunting a physical cause for an
+"unexplained 3e-6..5e-5 residual band" that was substantially float32.
+
+**Diagnostic tell:** if a residual's median sits near a fixed fraction of
+machine eps (~0.2-0.5 x eps) and is roughly FLAT across unrelated terms, suspect
+the dtype before the physics. A real discretisation error has structure; a
+rounding floor does not.
+
+Corollary for the gate: record the precision every measurement was taken at,
+next to the number. A figure measured at a different precision than the current
+default is STALE, exactly like a figure measured at a different commit.
+
+## Rule 1d — Pin the oracle's TIME LEVEL per dump, in a registry that raises
+
+A leapfrog oracle carries three time levels, and a routine is routinely called
+with T/S at one and geometry at another:
+
+```fortran
+CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nnn )   ! stpmlf.F90:184  T/S BEFORE, geom NOW
+CALL eos_rab( ts(:,:,:,:,Nnn), rab_n, Nnn )   ! stpmlf.F90:185
+```
+
+Compare a dump against the wrong level and you silently substitute
+`|T_now - T_before|` for "error". **This does not look like noise.** That
+difference is largest in the thermocline, so it renders as a beautifully
+depth-structured signal — the most convincing possible disguise.
+
+Real case (#1226), the same mistake made TWICE in one day: feeding NOW T/S
+against BEFORE-level dumps produced a 7074-cell "tail", three 1.8% alpha
+"outliers", and a "levels 6-8 structure" that got a written mechanistic
+explanation. At the correct level: tail EMPTY, zero outliers, no structure.
+The wrong-level numbers had already been committed to the gate.
+
+**Never infer the level from the field name or from what you loaded last.**
+Read the oracle's call site, then record it ONCE in a registry that
+FAILS CLOSED on anything unregistered
+(`ocean/fidelity/time_levels.py::time_level_for_dump`, which raises rather than
+defaulting to "now"), and let `select_ts(dump, now=, before=)` pick — so the
+correct level is the DEFAULT ACTION, not a thing to remember. Registering a
+dump requires citing the `file:line` that proves it; an unsourced entry is a
+guess, and a guess here is the whole failure mode.
+
+**Tell:** a residual that is near-zero in a well-mixed layer, peaks at the
+thermocline, and decays with depth has the shape of a T-tendency, not of a
+discretisation error. Suspect the time level before you write a mechanism.
+
+**How it got caught** (worth copying): invert the oracle's own polynomial for
+the input it implies. NEMO's dumped alpha at one "outlier" implied T = 7.103 C
+where we had fed 6.858 C — not roundoff, a *different temperature*. Numbers can
+be argued about; an implied input that is 0.245 C off cannot.
+
 ## Rule 2 — Know what each gate CANNOT see
 
 Write down every gate's blind spot; the next bug lives there.
