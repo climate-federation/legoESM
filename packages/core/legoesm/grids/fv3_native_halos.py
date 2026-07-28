@@ -218,9 +218,14 @@ def compute_fv3_native_k2e(res: int, remap_ng: int = 3,
     sorted by (i, j) — the exact record set the Fortran oracle emits
     (tables are tile- and side-symmetric; tile 1 stored).
     """
-    if k2e_nord != 4:
+    if k2e_nord not in (2, 4):
         raise NotImplementedError(
-            "k2e_nord != 4 not oracle-pinned (upstream struct default is 4)")
+            f"k2e_nord={k2e_nord}: supported orders are 2 (the "
+            "AUTHORITATIVE live default — Zenodo fv_arrays.F90:150/"
+            "global_grid_data.F90:57, no nml override) and 4 (the "
+            "luanfs-mirror monolith order the historical fixtures "
+            "pinned; 2026-07-27 root cause: its corner-adjacent "
+            "extrapolation lobes are the vertex amplifier)")
     gg_ng = remap_ng + 2
 
     # ---- supergrid 1-D line (gen_lonlat_equal_edge, grid_type == 0) ----
@@ -587,10 +592,11 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
     from legoesm.grids.halo import EAST, NORTH, SOUTH, WEST
     import jax.numpy as jnp
 
-    if k2e_nord != 4:
+    if k2e_nord not in (2, 4):
         raise NotImplementedError(
-            "fv3-native duogrid: only the upstream default k2e_nord=4 is "
-            "oracle-pinned")
+            f"fv3-native duogrid: k2e_nord={k2e_nord}; supported are 2 "
+            "(authoritative live default) and 4 (historical fixture "
+            "order) — see compute_fv3_native_k2e")
     if ng not in (1, 2, 3):
         raise NotImplementedError(
             f"fv3-native duogrid: ng={ng} unsupported (oracle-pinned remap "

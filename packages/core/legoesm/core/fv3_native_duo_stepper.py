@@ -60,7 +60,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                ext_exclude: tuple = (),
                                use_ext_metrics: bool = False,
                                oracle_conventions: bool = False,
-                               omega: float | None = None) -> dict:
+                               omega: float | None = None,
+                               k2e_nord: int = 2) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
@@ -170,7 +171,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         create_fv3_native_duogrid_data,
     )
 
-    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
+    # k2e_nord=2 = the AUTHORITATIVE live default (fv_arrays.F90:150 +
+    # global_grid_data.F90:57, no nml override; the dg/gg FATAL only
+    # enforces equality of the two 2-defaults).  The historic 4 came
+    # from the luanfs mirror monolith and is the vertex amplifier
+    # (4-pt corner-adjacent ring Lagrange has oscillating extrapolation
+    # lobes; measured differential gain 1.56x/block, gamma=0.054/blk).
+    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3),
+                                        k2e_nord=k2e_nord)
 
     for gs in gs6:
         # bounded lane: guards see bounded_domain=True + corner flags
@@ -198,7 +206,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         if bad:
             raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
-                                 vector_corner=vector_corner)
+                                 vector_corner=vector_corner,
+                                 k2e_nord=k2e_nord)
         # ORACLE-FAITHFUL DEFAULT (Zenodo grep): upstream duo d_sw
         # consumes the model gridstruct metrics — the model tree never
         # reads the dg ext metrics; extend_gridstruct was OUR coherence

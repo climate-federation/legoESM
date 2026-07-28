@@ -419,7 +419,8 @@ class _CornerLagrange:
 # ---------------------------------------------------------------------------
 
 def build_ext_context(n: int, ng: int, gs6: list, *,
-                      vector_corner: str = "lagrange") -> dict:
+                      vector_corner: str = "lagrange",
+                      k2e_nord: int = 4) -> dict:
     """Precompute everything the ext exchanges need at resolution n.
 
     ``gs6`` MUST be the KINKED (pre-``extend_gridstruct``) mpp-state
@@ -471,7 +472,7 @@ def build_ext_context(n: int, ng: int, gs6: list, *,
         "n": n, "ng": ng, "amat6": amat6, "dx6": dx6, "dy6": dy6,
         "vlon4": vlon4, "vlat4": vlat4, "ew4": ew4, "es4": es4,
         "corner_a4": corner_a4, "corner_a3": corner_a3,
-        "corner_b3": corner_b3,
+        "corner_b3": corner_b3, "k2e_nord": k2e_nord,
         "corner_du3": corner_du3, "corner_dv3": corner_dv3,
         "vector_corner": vector_corner,
     }
@@ -488,13 +489,15 @@ def ext_scalar_sixface(f6: list, stag: str, ectx: dict):
     if stag == "A":
         for t in range(1, 7):
             exchange_agrid_scalar_halos(f6, t, n, ng)
-        k2e_remap_halo_rings(f6, "A", n, ng)
+        k2e_remap_halo_rings(f6, "A", n, ng,
+                             k2e_nord=ectx.get("k2e_nord", 4))
         for t in range(6):
             ectx["corner_a3"][t].fill(f6[t])
     elif stag == "B":
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(f6, t, n, ng)
-        k2e_remap_halo_rings(f6, "B", n, ng)
+        k2e_remap_halo_rings(f6, "B", n, ng,
+                             k2e_nord=ectx.get("k2e_nord", 4))
         for t in range(6):
             ectx["corner_b3"][t].fill(f6[t])
     else:
@@ -527,7 +530,8 @@ def _geo_lattice_exchange(g6: list, ectx: dict, dump=None,
     ngp = _NG_P1
     for t in range(1, 7):
         exchange_agrid_scalar_halos(g6, t, n, ngp)
-    k2e_remap_halo_rings(g6, "A", n, ngp)
+    k2e_remap_halo_rings(g6, "A", n, ngp,
+                         k2e_nord=ectx.get("k2e_nord", 4))
     if dump:
         st, nm = names[0].split("_")     # post-k2e, pre-corner (cube_rmp)
         for t in range(6):

@@ -115,6 +115,13 @@ def main():
                          "(codex r2: a single smooth bulk direction "
                          "under-samples seam-sensitive growth — use "
                          "BOTH smooth modes for the chaos floor)")
+    ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
+                    help="along-ring k2e Lagrange order: 2 = the "
+                         "AUTHORITATIVE live default (fv_arrays.F90:150,"
+                         " no nml override; 2026-07-27 root cause — 4's "
+                         "corner-adjacent extrapolation lobes are the "
+                         "vertex amplifier), 4 = historical mirror-"
+                         "monolith order (A/B arm)")
     ap.add_argument("--plain-conventions", action="store_true",
                     help="A/B arm: plain-conventions lane (default is "
                          "the bounded lane + ext bundle — the lane "
@@ -173,7 +180,8 @@ def main():
                                      use_ext_bundle=True,
                                      oracle_conventions=oc,
                                      ext_exclude=ext_exclude,
-                                     omega=0.0)
+                                     omega=0.0,
+                                     k2e_nord=args.k2e_nord)
 
     # FV3 constants_mod GRAV (case-8 delp = 5000*Grav); legoESM
     # constants.g differs by 5e-5 rel (codex modon-r1 P2)
@@ -398,6 +406,7 @@ def main():
                           else args.dt_atmos),
         n_split=np.array(0 if args.dt_atmos is None else args.n_split),
         git_sha=np.array(_git_sha()),
+        k2e_nord=np.array(args.k2e_nord),
         protocol="six-face duo stepper, " + ic_desc + " "
                  "(tests.test_cases.colliding_modons formulas, certified "
                  "edge-midpoint D projection), omega=0; c2l_ord2 lens + "
@@ -412,6 +421,7 @@ def main():
             dt_atmos=np.array(args.dt_atmos),
             n_split=np.array(args.n_split),
             git_sha=np.array(_git_sha()),
+        k2e_nord=np.array(args.k2e_nord),
             ic_perturb=np.array(args.ic_perturb),
             protocol=np.array(
                 "block-state twin: full-lattice u/v/delp/pt per tile at "
