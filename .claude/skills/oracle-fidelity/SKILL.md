@@ -164,6 +164,41 @@ the input it implies. NEMO's dumped alpha at one "outlier" implied T = 7.103 C
 where we had fed 6.858 C — not roundoff, a *different temperature*. Numbers can
 be argued about; an implied input that is 0.245 C off cannot.
 
+## Rule 1e — Reconcile a disagreeing measurement BEFORE you record it
+
+When a new probe disagrees with a recorded number, the temptation is to explain
+why the OLD one was untrustworthy (wrong run directory, stale commit, worse
+precision) and record the new one. That reasoning is backwards: a disagreement
+is evidence that **one of them has a bug**, and you do not know which yet.
+
+Real case (#1226, twice in one session): a rebuilt `ldf_slp` probe — with
+better provenance in every respect, fp64 and both preconditions wired —
+reported `wslpi` 0.999876/1.0028 against a recorded 0.999963/1.000524. I
+attributed the gap to the old probe's known flaws and committed the new
+numbers as "superseding on provenance". The new probe was the broken one: it
+omitted `eos_depth="geometric"` from the config and silently took a different
+density convention. Corrected, it reproduced the historical value exactly.
+
+**A better harness does not make a measurement right.** Provenance is a reason
+to *trust*, never a reason to *skip reconciling*.
+
+Procedure when two measurements of the same quantity disagree:
+1. Do NOT record either yet.
+2. Find a quantity both probes should agree on exactly and check it — an input,
+   a mask count, a cell census. Disagreement upstream localises the bug.
+3. Diff the two CONFIGS field by field, not just the code. The #1226 bug was
+   one missing kwarg that changed a physical convention, invisible in the
+   numerics and silent at runtime because it had a default.
+4. Only record once you can say WHY they differed.
+
+Two independent probes that CONVERGE are much stronger evidence than either
+alone — that convergence is the thing worth chasing, and it is what finally
+established these four rows.
+
+Corollary: a config field with a silent default is a trap for oracle work.
+Prefer an explicit value at every probe call site, and diff the assembled
+config against the production one rather than trusting that defaults match.
+
 ## Rule 2 — Know what each gate CANNOT see
 
 Write down every gate's blind spot; the next bug lives there.

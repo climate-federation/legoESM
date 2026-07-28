@@ -83,6 +83,106 @@ DUMP_META = {
     "vslp": "eiv_dump_vslp.bin",
 }
 
+# Section (I): RAW (pre-Shapiro) w-point slopes, ldfslp.F90:335-336 (units
+# 8840/8841 written at :378-379). Same haloed convention as eiv_dump_wslpi.bin.
+RAW_DUMPS = {
+    "wslpi": "eiv_dump_zwz_raw.bin",   # zwz, i-direction
+    "wslpj": "eiv_dump_zww_raw.bin",   # zww, j-direction
+}
+
+
+# Section (J): the full j-direction intermediate chain, in NEMO execution
+# order. All haloed, float64, same convention as eiv_dump_wslpj.bin.
+CHAIN_DUMPS = {
+    "prd": "eiv_dump_prd_arg.bin",
+    "zgrv_iik": "eiv_dump_zgrv_iik.bin",
+    "zgrv_iikm1": "eiv_dump_zgrv_iikm1.bin",
+    "zaj": "eiv_dump_zaj.bin",
+    "zbw": "eiv_dump_zbw.bin",
+    "zbj": "eiv_dump_zbj.bin",
+    "zfk": "eiv_dump_zfk.bin",
+    "zww_raw": "eiv_dump_zww_raw.bin",
+    "wslpj": "eiv_dump_wslpj.bin",
+}
+
+# ldfslp.F90:209 is ``DO jk = jpkm1, 2, -1`` -- 1-based jk never takes the
+# values 1 or jpk, so the dumped intermediates are IDENTICALLY ZERO at 0-based
+# k=0 and k=nlev-1. Scoring those pad levels would manufacture a 100% "error"
+# at k=0 for every field that legoESM computes there (zbw, zbj, ...), so the
+# chain is scored on the levels NEMO actually wrote.
+KLO, KHI = 1, 35   # 0-based python slice [KLO:KHI] == jk = 2..jpkm1
+
+
+def capture_locals(fn, target_code):
+    """Run ``fn()`` and snapshot the local variables of ``target_code``'s frame
+    at its RETURN, via ``sys.settrace``.
+
+    Same spirit as ``_JnpCapture`` (which is kept for the raw-Shapiro capture):
+    it READS the production function's own intermediates without altering a
+    single operation.  Needed here because ``zaj``/``zbw``/``zbj``/``zcj`` are
+    plain local variables, not arguments to a distinctive ``jnp`` call, so the
+    pad-proxy cannot see them.  The global tracer returns ``None`` for every
+    frame except the target, so only that one frame is line-traced.
+    """
+    holder = {}
+
+    def tracer(frame, event, arg):
+        if event == "call" and frame.f_code is target_code:
+            def local_tracer(f, ev, a):
+                if ev == "return":
+                    holder.update(f.f_locals)
+                return local_tracer
+            return local_tracer
+        return None
+
+    old = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        out = fn()
+    finally:
+        sys.settrace(old)
+    return out, holder
+
+
+class _JnpCapture:
+    """Proxy for the ``jnp`` module attribute of ``gm_redi_latlon_cgrid``, used
+    to READ OFF the PRE-SMOOTHER slope field from the REAL production call.
+
+    Why a proxy and not (a) a flag or (c) a diagnostics return: neither exists
+    -- ``compute_nemo_native_slopes`` has no smoothing kwarg and returns only
+    the four final fields.  And the Shapiro helper ``_shap`` is a LOCAL CLOSURE
+    defined inside the function body (gm_redi_latlon_cgrid.py:1105), so it
+    cannot be monkeypatched by name either.
+
+    What it does: ``_shap``'s FIRST operation is
+    ``jnp.pad(f, ((0,0),(1,1),(0,0)), mode="wrap")`` (:1115) and its argument
+    ``f`` IS the pre-smoother slope.  This proxy forwards every attribute to
+    the real ``jnp`` and records ``f`` on exactly that pad signature.  It
+    CHANGES NO NUMERICS -- the production slope formula runs untouched and the
+    returned fields are asserted bit-identical to the unproxied call.  The only
+    other ``mode="wrap"`` pad in this module (:722) is inside
+    ``_shapiro_smooth_slopes``, a DIFFERENT code path that
+    ``compute_nemo_native_slopes`` never calls (verified by grep + the
+    len(captured)==4 assertion below).
+
+    ``_shap`` is applied in the fixed order uslp, vslp, wslpi, wslpj
+    (:1133-1136), so captured[2]/captured[3] are the raw wslpi/wslpj.
+    """
+
+    _SHAP_PADW = ((0, 0), (1, 1), (0, 0))
+
+    def __init__(self, real):
+        self._real = real
+        self.captured = []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def pad(self, a, pad_width, mode="constant", **kw):
+        if mode == "wrap" and tuple(tuple(p) for p in pad_width) == self._SHAP_PADW:
+            self.captured.append(np.asarray(a))
+        return self._real.pad(a, pad_width, mode=mode, **kw)
+
 
 def build_state():
     # PRECISION (#1226): see eos_rab_bn2_per_element.py -- fp32 control policy
@@ -120,10 +220,21 @@ def build_state():
     S = jnp.asarray(_sb.reshape(state.S.data.shape))
     eta = jnp.asarray(state.eta.data)
 
+    # EOS DEPTH CONVENTION (probe bug found by the section-(J) chain walk,
+    # 2026-07-28).  The DINO card sets eos_depth="geometric" (dino.py:912,936)
+    # and production passes it through (dino.py:2867 -> gm_redi_latlon_cgrid
+    # :3304-3305).  The first version of this probe omitted the argument and
+    # silently got the "insitu" DEFAULT -- a DIFFERENT density convention from
+    # the one NEMO uses, whose docstring documents a depth-growing O(1e-6)
+    # bias.  That put a bias into `prd` (ldf_slp's INPUT) and hence into every
+    # downstream slope number this script printed.  Mirror the production
+    # caller exactly, including the rho0 kwarg that makes "geometric" cancel.
+    eos_depth = getattr(mc, "eos_depth", cfg.eos_depth)
+    _eos_mk_kw = {"rho0": mc.rho_0} if eos_depth == "geometric" else {}
     rho, jacobian = gm_redi_density_and_jacobian(
         T, S, eta, H_bathy, br.geometry, z_coord,
         eos=mc.eos, eos_linear=mc.eos_linear, mask=mask,
-        rho_0=mc.rho_0, g=mc.g,
+        rho_0=mc.rho_0, g=mc.g, eos_depth=eos_depth,
     )
     active_3d = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
 
@@ -132,25 +243,35 @@ def build_state():
     require_fp64(z_coord, T, S, context="ldf_slp per-element")
 
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
-    for dump_name in DUMP_META.values():
+    for dump_name in (list(DUMP_META.values()) + list(RAW_DUMPS.values())
+                      + list(CHAIN_DUMPS.values())):
         lvl = time_level_for_dump(dump_name)
         if lvl != "before":
             raise ValueError(
                 f"this probe feeds BEFORE-level T/S but {dump_name!r} is "
                 f"{lvl!r}-level; fix the probe or the registry")
 
-    eos_fn = make_eos_fn(mc.eos, mc.eos_linear)
+    # same _eos_mk_kw convention as gm_redi_latlon_cgrid.py:3304-3305
+    eos_fn = make_eos_fn(mc.eos, mc.eos_linear, **_eos_mk_kw)
     card_slope_n2 = mc.gm_redi.slope_n2
     env_override = os.environ.get("SLOPE_N2")
     slope_n2_used = env_override if env_override is not None else card_slope_n2
     gm_cfg = mc.gm_redi._replace(slope_n2=slope_n2_used)
 
-    uslp, vslp, wslpi, wslpj = compute_nemo_native_slopes(
-        rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg, eos_fn,
-        rho_0=mc.rho_0, g=mc.g, active_3d=active_3d, jacobian=jacobian,
-    )
+    # One argument bundle, called twice: once plain (stage B / the four rows)
+    # and once under the _JnpCapture proxy (stage A / pre-Shapiro), so both
+    # stages come from the IDENTICAL production call.
+    def recall():
+        return compute_nemo_native_slopes(
+            rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg,
+            eos_fn, rho_0=mc.rho_0, g=mc.g, active_3d=active_3d,
+            jacobian=jacobian,
+        )
+
+    uslp, vslp, wslpi, wslpj = recall()
 
     return dict(
+        recall=recall,
         jpi=jpi, jpj=jpj, jpk=jpk, hls=hls,
         mask=np.asarray(mask) > 0.5,
         u_mask=np.asarray(u_mask), v_mask=np.asarray(v_mask),
@@ -158,7 +279,7 @@ def build_state():
         lego=dict(wslpi=np.asarray(wslpi), wslpj=np.asarray(wslpj),
                    uslp=np.asarray(uslp), vslp=np.asarray(vslp)),
         card_slope_n2=card_slope_n2, slope_n2_used=slope_n2_used,
-        env_override=env_override,
+        env_override=env_override, eos_depth=eos_depth,
     )
 
 
@@ -332,6 +453,9 @@ def main() -> int:
     print(f"card default GMRediConfig.slope_n2 = {st['card_slope_n2']!r}")
     print(f"SLOPE_N2 env override = {st['env_override']!r}")
     print(f"==> slope_n2 ACTUALLY USED = {st['slope_n2_used']!r}")
+    print(f"==> eos_depth ACTUALLY USED = {st['eos_depth']!r} "
+          f"(card value; 'geometric' is NEMO's convention -- the probe's "
+          f"original omission defaulted to 'insitu' and biased every number)")
     nj, ni = st["mask"].shape
     print(f"grid interior (nj,ni) = ({nj},{ni})  wet T-columns = {int(st['mask'].sum())}")
 
@@ -389,7 +513,396 @@ def main() -> int:
         rep = per_element_report(comp, lego_al, nemo_al, wet_al)
         rep["best_off"] = best_off
         rep["sharp"] = sharp
+        # keep the aligned stage-B arrays so section (I) can compare stage A
+        # and stage B on the SAME points without recomputing the alignment.
+        rep["_al"] = (lego_al, nemo_al, wet_al)
         summary[comp] = rep
+
+    # =====================================================================
+    # (I) INTERNALS SPLIT: stage A (slope FORMULA, pre-Shapiro) vs
+    #     stage B (the 16-point SMOOTHER), for the two w-point components.
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(I) INTERNALS SPLIT: stage A = slope formula (pre-Shapiro zwz/zww)")
+    print("                     stage B = 16-point Shapiro smoother (final wslpi/wslpj)")
+    print("=" * 78)
+
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as _gmr
+    cap = _JnpCapture(_gmr.jnp)
+    _gmr.jnp = cap
+    try:
+        u2, v2, wi2, wj2 = st["recall"]()
+    finally:
+        _gmr.jnp = cap._real
+    u2, v2, wi2, wj2 = (np.asarray(a) for a in (u2, v2, wi2, wj2))
+
+    print(f"  [verify] captured {len(cap.captured)} Shapiro-pad inputs "
+          f"(expect exactly 4: uslp, vslp, wslpi, wslpj)")
+    if len(cap.captured) != 4:
+        print("  ABORTING section (I): the capture did not see exactly the four "
+              "_shap calls, so captured[2]/[3] cannot be assumed to be the raw "
+              "wslpi/wslpj. Reporting this rather than guessing.")
+        raw_ok = False
+    else:
+        raw_ok = True
+        raw = {"wslpi": cap.captured[2], "wslpj": cap.captured[3]}
+        # the proxy must be INERT on the numerics: the returned final fields
+        # must be bit-identical to the unproxied call made in build_state().
+        inert = all(np.array_equal(a, b) for a, b in (
+            (wi2, st["lego"]["wslpi"]), (wj2, st["lego"]["wslpj"]),
+            (u2, st["lego"]["uslp"]), (v2, st["lego"]["vslp"])))
+        print(f"  [verify] proxy is INERT (all four returned fields bit-identical "
+              f"to the unproxied call): {inert} (expect True)")
+        # and the capture must actually be the PRE-smoother field, i.e. it must
+        # DIFFER from the final smoothed field.
+        differs = {c: not np.array_equal(raw[c], st["lego"][c]) for c in raw}
+        print(f"  [verify] captured raw field DIFFERS from the final smoothed "
+              f"field: {differs} (expect True for both -- else the smoother "
+              f"was a no-op and stage A/B cannot be separated)")
+        if not inert or not all(differs.values()):
+            print("  WARNING: capture verification FAILED -- stage-A numbers below "
+                  "cannot be trusted; see the booleans above.")
+
+    stageA = {}
+    if raw_ok:
+        act = st["active"]
+        wet_w_full = wet_w_mask(act)
+        for comp, dump_name in RAW_DUMPS.items():
+            print("\n" + "-" * 78)
+            print(f"  STAGE A -- {comp} raw (pre-Shapiro) vs {dump_name}")
+            print("-" * 78)
+            lego_raw = raw[comp]
+            nemo_raw = _load_haloed(os.path.join(RUN_DIR, dump_name), jpi, jpj, hls)
+            print(f"  lego raw shape={lego_raw.shape}  nemo raw dump shape={nemo_raw.shape}")
+            scanA = offset_scan(lego_raw, nemo_raw, wet_w_full, OFFSETS)
+            for off in OFFSETS:
+                r = scanA[off]
+                print(f"    offset={off:+d}: " + ("no overlap" if r is None else
+                      f"n={r['n']:7d}  corr={r['corr']:.6f}"))
+            validA = {o: r for o, r in scanA.items()
+                      if r is not None and np.isfinite(r["corr"])}
+            if not validA:
+                print(f"  *** {comp} stage A: NO VALID OFFSET -- reporting as FAILURE ***")
+                continue
+            offA = max(validA, key=lambda o: validA[o]["corr"])
+            print(f"  BEST OFFSET (stage A) = {offA:+d}  corr={validA[offA]['corr']:.6f}")
+            kloA = max(0, -offA)
+            khiA = min(lego_raw.shape[-1], nemo_raw.shape[-1] - offA)
+            repA = per_element_report(
+                f"{comp} STAGE-A raw", lego_raw[:, :, kloA:khiA],
+                nemo_raw[:, :, kloA + offA:khiA + offA], wet_w_full[:, :, kloA:khiA])
+            repA["best_off"] = offA
+            repA["_al"] = (lego_raw[:, :, kloA:khiA],
+                           nemo_raw[:, :, kloA + offA:khiA + offA],
+                           wet_w_full[:, :, kloA:khiA])
+            stageA[comp] = repA
+
+        # ---- side-by-side + bottom-3-active-level attribution ----
+        print("\n" + "-" * 78)
+        print("  STAGE A vs STAGE B side-by-side (err_norm = |lego-nemo|/RMS(nemo))")
+        print("-" * 78)
+        act = st["active"]
+        nlev = act.shape[-1]
+        kb = nlev - 1 - np.argmax(act[:, :, ::-1], axis=-1)   # last active level
+        has_wet = act.any(axis=-1)
+        kidx = np.arange(nlev)[None, None, :]
+        bottom3 = (has_wet[:, :, None] & (kidx >= (kb - 2)[:, :, None])
+                   & (kidx <= kb[:, :, None]))
+        print(f"  bottom-3-active-level cells (per column, from z_coord.is_active) "
+              f"= {int(bottom3.sum())}")
+
+        for comp in RAW_DUMPS:
+            if comp not in stageA or summary.get(comp) is None:
+                print(f"  {comp}: stage A or stage B missing -- cannot compare.")
+                continue
+            A_l, A_n, A_w = stageA[comp]["_al"]
+            B_l, B_n, B_w = summary[comp]["_al"]
+            nk = min(A_l.shape[-1], B_l.shape[-1])
+            # common points: wet in BOTH stages over the common level range
+            both = A_w[:, :, :nk] & B_w[:, :, :nk]
+            dA = np.abs(A_l[:, :, :nk] - A_n[:, :, :nk])
+            dB = np.abs(B_l[:, :, :nk] - B_n[:, :, :nk])
+            print(f"\n  {comp}: stage A err_norm median/p99/max = "
+                  f"{stageA[comp]['med_en']:.3e}/{stageA[comp]['p99_en']:.3e}/"
+                  f"{stageA[comp]['max_en']:.3e}   corr={stageA[comp]['corr']:.6f}"
+                  f"  |x|ratio={stageA[comp]['abs_ratio']:.6f}")
+            print(f"  {comp}: stage B err_norm median/p99/max = "
+                  f"{summary[comp]['med_en']:.3e}/{summary[comp]['p99_en']:.3e}/"
+                  f"{summary[comp]['max_en']:.3e}   corr={summary[comp]['corr']:.6f}"
+                  f"  |x|ratio={summary[comp]['abs_ratio']:.6f}")
+            # ABSOLUTE error magnitudes (same units, both are slopes) so the
+            # "how much of B is already in A" fraction is not distorted by the
+            # two stages' slightly different RMS normalisers.
+            b3 = both & bottom3[:, :, :nk]
+            for label, sel in (("ALL common wet points", both),
+                               ("BOTTOM-3 active levels", b3)):
+                if not sel.any():
+                    print(f"    {label}: no points")
+                    continue
+                mA, mB = float(np.median(dA[sel])), float(np.median(dB[sel]))
+                frac = mA / mB if mB > 0 else float("nan")
+                print(f"    {label} (n={int(sel.sum())}): median|dA|={mA:.3e}  "
+                      f"median|dB|={mB:.3e}  -> fraction of stage-B error already "
+                      f"present in stage A = {frac:.3f}")
+
+        # ---- interpretation, using the three cases the coordinator specified ----
+        print("\n  INTERPRETATION:")
+        for comp in RAW_DUMPS:
+            if comp not in stageA or summary.get(comp) is None:
+                continue
+            a_med, b_med = stageA[comp]["med_en"], summary[comp]["med_en"]
+            a_p99, b_p99 = stageA[comp]["p99_en"], summary[comp]["p99_en"]
+            ratio = a_med / b_med if b_med > 0 else float("nan")
+            if ratio >= 0.5:
+                verdict = ("stage A is ALREADY comparable to stage B -> the residual "
+                           "is owned by the SLOPE FORMULA (suspects: the sequential "
+                           "zuslp_hml recurrence ldfslp.F90:271, and the `zbu - zeps` "
+                           "MINUS-eps denominator at :268), not the smoother.")
+            elif ratio <= 0.1:
+                verdict = ("stage A is CLEAN relative to stage B -> the residual is "
+                           "owned by the SMOOTHER (suspect: masking/land treatment at "
+                           "bathymetry steps where the 16-point stencil mixes columns "
+                           "with different bottom levels; NEMO's deliberate "
+                           "parenthesisation at :278-289).")
+            else:
+                verdict = (f"BOTH stages carry error, stage B larger "
+                           f"(A/B median ratio {ratio:.3f}) -> reporting both "
+                           f"magnitudes, claiming no single owner.")
+            print(f"    {comp}: A/B median err_norm ratio = {ratio:.3f} "
+                  f"(A={a_med:.3e} B={b_med:.3e}; p99 A={a_p99:.3e} B={b_p99:.3e})")
+            print(f"      -> {verdict}")
+
+    # =====================================================================
+    # (J) LINE-LEVEL WALK of the j-direction chain, in NEMO execution order:
+    #     prd -> zgrv(iik),zgrv(iikm1) -> zaj -> zbw -> zbj -> zfk
+    #         -> zww_raw -> wslpj
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(J) j-DIRECTION CHAIN WALK, in NEMO execution order")
+    print("=" * 78)
+    print(f"  scoring levels k={KLO}..{KHI - 1} (0-based); ldfslp.F90:209 is "
+          f"'DO jk = jpkm1, 2, -1' so k=0 and k={st['active'].shape[-1] - 1} "
+          f"are never written by NEMO (dump zeros) and are EXCLUDED.")
+
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _NEMO_SLOPE_STAB_7E3,
+    )
+    (_u3, _v3, _wi3, _wj3), loc = capture_locals(
+        st["recall"], _gmr.compute_nemo_native_slopes.__code__)
+    need = ["prd", "zgrv", "zcj", "zaj", "zbw", "zbj", "swj_int", "in_ml_w",
+            "wslpj", "_km1", "e3w_k", "z1_slpmax", "e2t", "zeps"]
+    missing = [k for k in need if k not in loc]
+    print(f"  [verify] captured {len(loc)} locals from "
+          f"compute_nemo_native_slopes; missing from the needed set: {missing}")
+    inert_j = np.array_equal(np.asarray(_wj3), st["lego"]["wslpj"])
+    print(f"  [verify] settrace capture is INERT (returned wslpj bit-identical "
+          f"to the unproxied call): {inert_j} (expect True)")
+    if missing or not inert_j:
+        print("  ABORTING section (J): required locals missing or capture not "
+              "inert -- reporting that rather than guessing.")
+    else:
+        act = st["active"]
+        wmask_w = wet_w_mask(act)
+        vmask_v = wet_v_mask(act, st["v_mask"])
+        _km1 = loc["_km1"]
+        L = lambda k: np.asarray(loc[k])
+
+        # our chain fields, in NEMO order. zfk: NEMO's zfk is 1 OUTSIDE the ML
+        # and 0 inside; our production decision variable is the boolean
+        # `in_ml_w` (gm_redi_latlon_cgrid.py:1098), so our zfk == 1 - in_ml_w.
+        # This READS our boolean, it does not re-derive the ML criterion.
+        our = {
+            "prd": (L("prd"), act),
+            "zgrv_iik": (L("zgrv"), vmask_v),
+            "zgrv_iikm1": (np.asarray(_km1(loc["zgrv"])), vmask_v),
+            "zaj": (L("zaj"), wmask_w),
+            "zbw": (L("zbw"), wmask_w),
+            "zbj": (L("zbj"), wmask_w),
+            "zfk": (1.0 - L("in_ml_w").astype(float), wmask_w),
+            "zww_raw": (raw["wslpj"] if raw_ok else None, wmask_w),
+            "wslpj": (st["lego"]["wslpj"], wmask_w),
+        }
+
+        print(f"\n  {'stage':<12}{'corr':<12}{'errN med':<13}{'errN p99':<13}"
+              f"{'errN max':<13}{'n':<9}")
+        chain_stats = {}
+        for name, dump in CHAIN_DUMPS.items():
+            lego_f, wet_f = our[name]
+            if lego_f is None:
+                print(f"  {name:<12}SKIPPED (our field unavailable)")
+                continue
+            nemo_f = _load_haloed(os.path.join(RUN_DIR, dump), jpi, jpj, hls)
+            nk = min(lego_f.shape[-1], nemo_f.shape[-1], KHI)
+            sl = slice(KLO, nk)
+            lo_a, ne_a, w_a = lego_f[:, :, sl], nemo_f[:, :, sl], wet_f[:, :, sl]
+            m = w_a & np.isfinite(lo_a) & np.isfinite(ne_a)
+            lo, ne = lo_a[m], ne_a[m]
+            rms = float(np.sqrt(np.mean(ne ** 2)))
+            en = np.abs(lo - ne) / max(rms, FLOOR)
+            corr = (float(np.corrcoef(lo, ne)[0, 1])
+                    if lo.std() > 0 and ne.std() > 0 else float("nan"))
+            s = dict(corr=corr, med=float(np.median(en)),
+                     p99=float(np.percentile(en, 99)), max=float(np.max(en)),
+                     n=int(m.sum()), rms=rms,
+                     lo_a=lo_a, ne_a=ne_a, m=m)
+            chain_stats[name] = s
+            print(f"  {name:<12}{corr:<12.6f}{s['med']:<13.3e}{s['p99']:<13.3e}"
+                  f"{s['max']:<13.3e}{s['n']:<9d}")
+
+        print("\n  PER-LEVEL median err_norm (columns are 0-based k):")
+        for name, s in chain_stats.items():
+            cells = []
+            for kk in range(s["lo_a"].shape[-1]):
+                mk = s["m"][:, :, kk]
+                if not mk.any():
+                    cells.append(f"k{kk + KLO}:--")
+                    continue
+                e = np.abs(s["lo_a"][:, :, kk][mk] - s["ne_a"][:, :, kk][mk]) / max(s["rms"], FLOOR)
+                cells.append(f"k{kk + KLO}:{np.median(e):.1e}")
+            print(f"    {name:<11}" + " ".join(cells))
+
+        # ---- FIRST DIVERGING STAGE ----
+        print("\n  FIRST DIVERGING STAGE:")
+        order = [n for n in CHAIN_DUMPS if n in chain_stats]
+        ROUNDOFF = 1.0e-10
+        first_jump = first_nonround = None
+        prev = None
+        for name in order:
+            med = chain_stats[name]["med"]
+            if first_nonround is None and med > ROUNDOFF:
+                first_nonround = name
+            # A stage that matches EXACTLY (median 0, e.g. zfk) is NOT a
+            # meaningful jump denominator -- every later stage would show a
+            # spurious "infinite" jump over it. Compare against the most
+            # recent stage that actually carries a nonzero residual.
+            if prev is not None and first_jump is None:
+                base = chain_stats[prev]["med"]
+                if med > 100.0 * base:
+                    first_jump = (name, prev, med / base)
+            if med > 0.0:
+                prev = name
+        print(f"    earliest stage NOT at roundoff (median err_norm > {ROUNDOFF:.0e}): "
+              f"{first_nonround}")
+        if first_jump:
+            print(f"    earliest >100x jump vs the previous stage: {first_jump[0]} "
+                  f"(x{first_jump[2]:.1f} over {first_jump[1]})")
+        else:
+            print("    no stage shows a >100x jump over its predecessor -- the "
+                  "residual GROWS GRADUALLY along the chain rather than being "
+                  "injected at one line.")
+
+        # ---- Q1: zcj (mask count) ----
+        print("\n  Q1: zcj = MAX(sum of 4 vmask, zeps) * e2t (ldfslp.F90:307-308)")
+        print("      NEMO does NOT dump zcj, so it is INFERRED from the dumps:")
+        print("      zaj = (4 zgrv terms)/zcj*wmask  =>  zcj = numerator/zaj.")
+        g_iik = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zgrv_iik"]), jpi, jpj, hls)
+        g_km1 = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zgrv_iikm1"]), jpi, jpj, hls)
+        zaj_n = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zaj"]), jpi, jpj, hls)
+        num_n = ((np.roll(g_iik, 1, axis=0) + g_km1)
+                 + (np.roll(g_km1, 1, axis=0) + g_iik))
+        e2t_np = np.asarray(loc["e2t"])[:, :, None]
+        sl = slice(KLO, KHI)
+        ok = wmask_w[:, :, sl] & (np.abs(zaj_n[:, :, sl]) > 1e-30)
+        cnt_n = (num_n[:, :, sl] / np.where(ok, zaj_n[:, :, sl], np.nan)) / e2t_np
+        cnt_o = np.asarray(loc["zcj"])[:, :, sl] / e2t_np
+        nlev_a = act.shape[-1]
+        kb = nlev_a - 1 - np.argmax(act[:, :, ::-1], axis=-1)
+        kidx3 = np.arange(nlev_a)[None, None, :]
+        bot3 = (act.any(-1)[:, :, None] & (kidx3 >= (kb - 2)[:, :, None])
+                & (kidx3 <= kb[:, :, None]))[:, :, sl]
+        # The INFERRED count inherits zaj's own error (it is a division by
+        # zaj), so a 1e-6 tolerance would flag that noise, not a real
+        # disagreement. The count is an INTEGER 1..4, so the meaningful test
+        # is whether it differs by >=0.5 (i.e. a different mask count);
+        # both tolerances are reported so the reader can see the separation.
+        for lbl, sel in (("all wet w-points", ok), ("bottom-3 levels", ok & bot3)):
+            d = np.abs(cnt_n - cnt_o)[sel]
+            d = d[np.isfinite(d)]
+            if d.size == 0:
+                print(f"      {lbl}: no usable points")
+                continue
+            n_noise = int((d > 1e-6).sum())
+            n_real = int((d > 0.5).sum())
+            print(f"      {lbl}: n={d.size}  max|count_nemo - count_lego|={d.max():.3e}")
+            print(f"        cells off by >=0.5 (a DIFFERENT integer count) : {n_real}"
+                  f"  -> {'MATCH' if n_real == 0 else 'REAL MISMATCH'}")
+            print(f"        cells off by >1e-6 (inherits zaj's own noise)   : {n_noise}")
+        print(f"      our zcj/e2t distinct values (bottom-3): "
+              f"{np.unique(np.round(cnt_o[bot3], 6))[:8]}")
+
+        # ---- Q2: which of zbj's three terms wins ----
+        print("\n  Q2: zbj = MIN(zbw, -100*|zaj|, -7e3/e3w(Kmm)*|zaj|) (ldfslp.F90:317)")
+        e3w_np = np.asarray(loc["e3w_k"])
+        print(f"      our e3w_k ndim={np.asarray(loc['e3w_k']).ndim} "
+              f"({'LIVE 3-D (Kmm)' if e3w_np.ndim == 3 else 'STATIC 1-D ladder'}), "
+              f"our z1_slpmax={float(loc['z1_slpmax']):.6g} (NEMO literal 100), "
+              f"7e3 const={_NEMO_SLOPE_STAB_7E3:.6g}")
+        zbw_n = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zbw"]), jpi, jpj, hls)
+        zbj_n = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zbj"]), jpi, jpj, hls)
+        e3w_b = np.broadcast_to(e3w_np if e3w_np.ndim == 3 else e3w_np,
+                                (nj, ni, nlev_a))
+        def _branch(zbw_a, zaj_a, z1, e3w_a, zbj_a):
+            t1, t2 = zbw_a, -z1 * np.abs(zaj_a)
+            t3 = (-_NEMO_SLOPE_STAB_7E3 / e3w_a) * np.abs(zaj_a)
+            stack = np.stack([t1, t2, t3], axis=0)
+            return np.argmin(stack, axis=0)
+        br_n = _branch(zbw_n[:, :, sl], zaj_n[:, :, sl], 100.0,
+                       e3w_b[:, :, sl], zbj_n[:, :, sl])
+        br_o = _branch(np.asarray(loc["zbw"])[:, :, sl], np.asarray(loc["zaj"])[:, :, sl],
+                       float(loc["z1_slpmax"]), e3w_b[:, :, sl],
+                       np.asarray(loc["zbj"])[:, :, sl])
+        print("      NOTE: the NEMO branch uses NEMO's dumped zbw/zaj but OUR e3w "
+              "for term 3 (NEMO does not dump e3w) -- term-3 attribution on the "
+              "NEMO side is therefore conditional on e3w agreeing.")
+        for lbl, sel in (("all wet w-points", wmask_w[:, :, sl]),
+                         ("bottom-3 levels", wmask_w[:, :, sl] & bot3)):
+            tot = int(sel.sum())
+            if tot == 0:
+                continue
+            fn = [float((br_n[sel] == t).mean()) for t in range(3)]
+            fo = [float((br_o[sel] == t).mean()) for t in range(3)]
+            print(f"      {lbl} (n={tot}):")
+            print(f"        NEMO  term1(zbw)={fn[0]:.4f} term2(-100|zaj|)={fn[1]:.4f} "
+                  f"term3(-7e3/e3w|zaj|)={fn[2]:.4f}")
+            print(f"        lego  term1(zbw)={fo[0]:.4f} term2(-100|zaj|)={fo[1]:.4f} "
+                  f"term3(-7e3/e3w|zaj|)={fo[2]:.4f}")
+            print(f"        cells where the WINNING branch differs: "
+                  f"{int((br_n[sel] != br_o[sel]).sum())}/{tot}")
+
+        # ---- Q3: zfk exactness ----
+        print("\n  Q3: zfk = REAL(1 - 1/(1 + jk/(nmln+1))) -- FORTRAN INTEGER "
+              "division, a 0/1 step (ldfslp.F90:320)")
+        zfk_n = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zfk"]), jpi, jpj, hls)
+        zfk_o = (1.0 - np.asarray(loc["in_ml_w"]).astype(float))
+        selw = wmask_w[:, :, sl]
+        dfk = np.abs(zfk_o[:, :, sl] - zfk_n[:, :, sl])
+        ndiff = int((dfk[selw] > 0).sum())
+        print(f"      NEMO zfk distinct values: {np.unique(zfk_n[:, :, sl][selw])}  "
+              f"(expect exactly [0. 1.] if the integer step is faithful)")
+        print(f"      our zfk distinct values : {np.unique(zfk_o[:, :, sl][selw])}")
+        print(f"      cells where zfk DIFFERS: {ndiff}/{int(selw.sum())} "
+              f"({100.0 * ndiff / max(int(selw.sum()), 1):.4f}%) -> "
+              f"{'EXACT MATCH' if ndiff == 0 else 'MISMATCH'}")
+        if ndiff:
+            jj, ii, kk = np.where(selw & (dfk > 0))
+            print(f"      differing cells are at levels "
+                  f"{np.unique(kk + KLO)[:12]} (0-based)")
+
+        # ---- Q4: zww_raw assembly + the recurrence ----
+        print("\n  Q4: zww = (zfk*zaj/(zbj - zeps) + (1-zfk)*zck*zwslpj_hml)*wmask "
+              "(ldfslp.F90:328)")
+        print(f"      our zeps = {float(loc['zeps']):.3e}, used as "
+              f"'zbj - zeps' (MINUS) at gm_redi_latlon_cgrid.py:1084 -- matches "
+              f"NEMO's minus sign.")
+        print("      RECURRENCE: NEMO's zwslpj_hml is a down-column running state "
+              "(:331-332) set at jk=nmln+1. ldfslp.F90:209 runs the level loop "
+              "'DO jk = jpkm1, 2, -1' i.e. BOTTOM-TO-TOP, so nmln+1 is visited "
+              "BEFORE the shallower in-ML levels that read it. legoESM carries "
+              "the SAME quantity as a gather at the anchor level "
+              "(take_along_axis(swj_int, kanc) * r1_hmlw, :1090-1091), which is "
+              "the exact vectorised equivalent of that recurrence -- so the "
+              "recurrence is NOT missing. Verified numerically by the zww_raw "
+              "row of the chain table above.")
 
     print("\n" + "=" * 78)
     print("SUMMARY (<=12-line)")
@@ -404,6 +917,14 @@ def main() -> int:
               f"|x|ratio={r['abs_ratio']:.6f}  err_norm(median/p99/max)="
               f"{r['med_en']:.3e}/{r['p99_en']:.3e}/{r['max_en']:.3e}  "
               f"pointwise-rel {trust} ({r['frac_near0']*100:.1f}% near-zero)")
+    for comp in RAW_DUMPS:
+        if comp in stageA and summary.get(comp) is not None:
+            a, b = stageA[comp]["med_en"], summary[comp]["med_en"]
+            ratio = a / b if b > 0 else float("nan")
+            owner = ("SLOPE FORMULA" if ratio >= 0.5 else
+                     "SMOOTHER" if ratio <= 0.1 else "BOTH (no single owner)")
+            print(f"(I) {comp:6s}: stageA(formula) err_norm median={a:.3e} vs "
+                  f"stageB(final) {b:.3e}  -> A/B={ratio:.3f}; owner = {owner}")
     return 0
 
 
