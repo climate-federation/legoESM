@@ -8006,6 +8006,20 @@ class ModelDriver:
                 _ts["T_finite"].append(T_finite)
                 _ts["CWV"].append(_cwv)
 
+                # Ice-crystal number telemetry (2026-07-28, century3 day-803
+                # NaN): N_i grew x2/day for 800 days with every CLIMATE
+                # diagnostic nominal, because PSD clamps mask absurd N in all
+                # rates — only the raw field overflowing was visible.  A
+                # daily max makes any number runaway visible in the log
+                # months before overflow.  Serial/single-rank only (the MPI
+                # lane's fused global diag would need an allreduce-MAX
+                # extension; rank-local would mislead).
+                _ni_max = float("nan")
+                if (self._voronoi_layout is None
+                        and self.state.tracers is not None
+                        and "N_i" in self.state.tracers):
+                    _ni_max = float(jnp.max(
+                        self.state.tracers["N_i"].data))
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
                 logger.info(
@@ -8013,6 +8027,8 @@ class ModelDriver:
                     f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
                     f"|u|_max={max_u:.1f}m/s"
                     + ("" if _cwv != _cwv else f"  CWV={_cwv:.1f}kg/m2")
+                    + ("" if _ni_max != _ni_max
+                       else f"  Ni^max={_ni_max:.1e}/kg")
                     + f"  ({rate:.1f} sim-days/s)"
                 )
 
