@@ -766,7 +766,7 @@ MEASURED_AT: dict[str, str] = {
     # tend" (no probe found in either scratchpad -- left UNPROVENANCED
     # rather than invented).
     #
-    # --- #1226 traadv_fct component-row drive (this PR, HEAD e72923faa+1) ---
+    # --- #1226 traadv_fct component-row drive (this PR, MEASURED_AT c1ba30e39) ---
     # The four c8e5d305b-stamped numbers below did NOT reproduce when the
     # SAME probes the c8e5d305b pass cites (probe_fct.py, probe_nonosc_
     # stages.py, check_wflux_offset0.py, probe_fct_sal.py) were re-run
@@ -777,11 +777,11 @@ MEASURED_AT: dict[str, str] = {
     # same offset=0 alignment), which also fills in the previously-missing
     # "traadv_fct horizontal tend" probe. See each row's note for the exact
     # before/after numbers.
-    "traadv_fct fluxes": "PENDING_HEAD",
-    "traadv_fct tendency (T)": "PENDING_HEAD",
-    "traadv_fct horizontal tend": "PENDING_HEAD",
-    "traadv_fct vertical upstream flux": "PENDING_HEAD",
-    "traadv_fct (SALINITY)": "PENDING_HEAD",
+    "traadv_fct fluxes": "c1ba30e39",
+    "traadv_fct tendency (T)": "c1ba30e39",
+    "traadv_fct horizontal tend": "c1ba30e39",
+    "traadv_fct vertical upstream flux": "c1ba30e39",
+    "traadv_fct (SALINITY)": "c1ba30e39",
     "dyn_vor EEN u": "c8e5d305b",
     "dyn_vor EEN v": "c8e5d305b",
     "dyn_adv ZAD": "c8e5d305b",
