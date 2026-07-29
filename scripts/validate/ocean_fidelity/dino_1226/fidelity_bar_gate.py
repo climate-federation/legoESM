@@ -211,6 +211,22 @@ PER_ELEMENT: dict[str, float] = {
     # NEXT FLOOR: zbw = zm1_2g*pn2*(prd(k)+prd(k-1)+2) at 3.467e-07.  prd is at
     # roundoff, so this is pn2 -- the N^2 the SLOPES consume, which may not be
     # the same code path as the bn2 row already closed at 5.88e-16.
+    # *** PENDING PRODUCTION WIRING -- READ BEFORE TRUSTING THE ldf_slp ROWS ***
+    # The four ldf_slp entries below are recorded at the SHIPPED DEFAULT
+    # (metric_convention="exact"), because bridge_nemo_to_legoesm_topo still
+    # defaults to "exact" regardless of the recipe card.  Under
+    # metric_convention="nemo_isotropic" -- which is what NEMO's DINO actually
+    # builds (usrdef_hgr.F90:111-119, pe2t = pe1t; pe2v = pe1v) and which the
+    # human APPROVED on 2026-07-28 -- the same probe measures:
+    #     wslpi err_norm 3.427e-10  |x|ratio 0.999962   (unchanged)
+    #     wslpj err_norm 2.770e-10  |x|ratio 0.999957   (was 6.180e-07)
+    #     uslp  err_norm 2.200e-10  |x|ratio 1.000017   (unchanged)
+    #     vslp  err_norm 3.265e-10  |x|ratio 1.000021   (was 1.541e-06, 4700x)
+    # i.e. ALL FOUR fall BELOW the 1e-9 per-element bar.  They are NOT recorded
+    # as such here because production does not yet produce them: recording a
+    # number the shipped code path does not generate would be exactly the
+    # provenance failure this gate exists to prevent.  Wire the bridge, re-run,
+    # THEN update these four rows.
     # i/j ASYMMETRY RESOLVED 2026-07-28 -- the e2 METRIC owns it, measured with
     # a control: vs NEMO's own mesh_mask, e1u matches EXACTLY (median and max
     # |rel| = 0.000e+00) while e2v does NOT (median 2.798e-05, max 8.241e-03).
