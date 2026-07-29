@@ -7,6 +7,8 @@ and ``gm_redi_latlon_cgrid.py`` (lat-lon C-grid) import from here.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -434,6 +436,86 @@ _TREGUIER_ZHW_OFFSET_M = 5.0       # zhw initialisation offset [m] (ldf_eiv "zhw
 _TREGUIER_TAPER_LAT_DEG = 20.0     # tropical taper reference latitude (z1_f20)
 
 
+def _static_bool(flag) -> bool:
+    """``bool(flag)`` for a concrete flag; False for a tracer.
+
+    ``enabled`` is a dispatch switch and must be static, but a caller that
+    traces the whole config should not hit ``TracerBoolConversionError`` inside
+    a *validator*: an unknown-at-trace-time flag simply skips validation.
+    """
+    if isinstance(flag, jax.core.Tracer):
+        return False
+    return bool(flag)
+
+
+def _concrete_float(value, name: str) -> float | None:
+    """Return ``value`` as a Python float, or None if it is a TRACER.
+
+    Accepts every concrete numeric leaf form a config can carry -- Python
+    float/int, numpy scalar, 0-D ``jnp`` array -- so validation cannot be
+    bypassed by passing ``np.float32(nan)`` or ``jnp.asarray(-1.0)``.
+    ``bool`` is rejected outright: it is an ``int`` subclass, so ``aei0=True``
+    would otherwise install a 1 m^2/s cap.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"TreguierConfig.{name} must be a real number, got bool "
+            f"{value!r} (bool is an int subclass; aei0=True would set a "
+            f"1 m^2/s cap).")
+    if isinstance(value, jax.core.Tracer):
+        return None
+    try:
+        # numpy scalars and 0-D concrete jnp arrays convert cleanly; a
+        # non-scalar array (an already-spatial kappa field) does not.
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_treguier_cfg(cfg: TreguierConfig) -> None:
+    """Fail-early check on a Treguier block, on CONCRETE Python values only.
+
+    ``compute_treguier_kappa_gm`` applies the NEMO cap ``aei0`` and then the
+    optional floor ``kappa_min``; with ``kappa_min > aei0`` the floor would win
+    on EVERY wet cell and the coefficient would exceed the very cap the scheme
+    exists to impose.
+
+    TRACING: ``aei0`` is a ``tunable_tier=2`` parameter, and
+    ``param_collector.apply_param_overrides`` splices trained leaves into the
+    config as TRACERS inside the loss.  A Python ``>`` on a tracer raises
+    ``TracerBoolConversionError``, so this validator SKIPS any non-concrete
+    leaf and is a fail-early convenience for concrete configs ONLY.  The
+    invariant itself is enforced unconditionally (and differentiably) in the
+    kernels, which floor with ``min(kappa_min, aei0)`` — see
+    :func:`compute_treguier_kappa_gm`.
+    """
+    if not _static_bool(cfg.enabled):
+        return
+    # Only a TRACER is exempt; every concrete leaf form the collector or a
+    # caller can produce (Python float, numpy scalar, 0-D jnp array) is
+    # validated -- `isinstance(x, (int, float))` alone would silently wave
+    # through np.float32(nan) and jnp.asarray(-1.0).
+    aei0 = _concrete_float(cfg.aei0, "aei0")
+    kappa_min = _concrete_float(cfg.kappa_min, "kappa_min")
+    if aei0 is None or kappa_min is None:
+        return
+    if not (math.isfinite(kappa_min) and math.isfinite(aei0)):
+        raise ValueError(
+            f"TreguierConfig: aei0 and kappa_min must be finite, got "
+            f"aei0={cfg.aei0!r}, kappa_min={cfg.kappa_min!r}.")
+    if kappa_min < 0.0:
+        raise ValueError(
+            f"TreguierConfig.kappa_min must be >= 0, got {cfg.kappa_min!r}.")
+    if aei0 <= 0.0:
+        raise ValueError(
+            f"TreguierConfig.aei0 must be > 0, got {cfg.aei0!r}.")
+    if kappa_min > aei0:
+        raise ValueError(
+            f"TreguierConfig: kappa_min ({cfg.kappa_min!r} m^2/s) exceeds the "
+            f"NEMO cap aei0 ({cfg.aei0!r} m^2/s) -- the floor would override "
+            f"the cap on every wet cell. Lower kappa_min or raise aei0.")
+
+
 def compute_treguier_kappa_gm(
     rho: jnp.ndarray,
     S_x: jnp.ndarray,
@@ -498,9 +580,15 @@ def compute_treguier_kappa_gm(
     # Optional floor (``TreguierConfig.kappa_min``, default 0.0 = inert /
     # byte-identical).  The taper above sends κ → 0 at the equator; a zero-GM
     # equatorial band destabilised a 1° global tripole run, and Visbeck carries
-    # a ``kappa_min`` for the same reason.  Applied BEFORE the wet mask so dry
-    # columns still return exactly 0.
-    kappa = jnp.maximum(kappa, getattr(cfg, "kappa_min", 0.0))
+    # a ``kappa_min`` for the same reason.  NOTE this is a DELIBERATE departure
+    # from NEMO, which is capped-only (κ → 0 at f = 0); kappa_min=0.0 (the
+    # default, and the DINO/ORCA1 oracle setting) is the raw NEMO form.
+    #
+    # The floor is clamped to the cap so ``min(raw, aei0) <= κ <= aei0`` holds
+    # UNCONDITIONALLY -- including when a trained (traced) ``aei0`` makes the
+    # Python-level ``validate_treguier_cfg`` check unavailable.  Applied BEFORE
+    # the wet mask so dry columns still return exactly 0.
+    kappa = jnp.maximum(kappa, jnp.minimum(cfg.kappa_min, cfg.aei0))
     return jnp.where(wet_col, kappa, 0.0)
 
 

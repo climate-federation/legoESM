@@ -39,6 +39,20 @@ from legoesm.grids.fv3_native_gridstruct import (
 # screens-r1 F6).  Default OFF = faithful.
 _PG_BVERTEX_MEAN2 = os.environ.get("LEGOESM_DUO_PG_BVERTEX", "") == "mean2"
 
+# Entry A-scalar exchange gating (marginal-stability probe).  Upstream
+# runs the ENTRY ext_scalar(delp,pt) only on the first acoustic step of
+# each dt_atmos block (dyn_core.F90:432-439 `if (it==1)`), while the
+# TAIL refresh (:1336-1337) runs every step; our stepper has no n_split
+# structure and so runs BOTH every step -- two A-scalar wedge
+# applications per step where upstream averages ~1.3.  The exchange is
+# idempotent on an unchanged field, so this should be a no-op; with a
+# faithful ~300x corner-wedge amplifier sitting in a near-cancellation
+# against del-6 (measured per-step excess gain only ~1.0033), "should
+# be" is worth measuring.  "off" drops the entry refresh, keeping the
+# tail one.
+_ENTRY_ASCALAR_OFF = (
+    os.environ.get("LEGOESM_DUO_ENTRY_ASCALAR", "") == "off")
+
 
 def build_six_face_duo_context(n: int, ng: int = 3,
                                use_ext_bundle: bool = False,
@@ -46,7 +60,9 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                ext_exclude: tuple = (),
                                use_ext_metrics: bool = False,
                                oracle_conventions: bool = False,
-                               omega: float | None = None) -> dict:
+                               omega: float | None = None,
+                               k2e_nord: int = 2,
+                               topo_fn=None) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
@@ -156,7 +172,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         create_fv3_native_duogrid_data,
     )
 
-    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
+    # k2e_nord=2 = the AUTHORITATIVE live default (fv_arrays.F90:150 +
+    # global_grid_data.F90:57, no nml override; the dg/gg FATAL only
+    # enforces equality of the two 2-defaults).  The historic 4 came
+    # from the luanfs mirror monolith and is the vertex amplifier
+    # (4-pt corner-adjacent ring Lagrange has oscillating extrapolation
+    # lobes; measured differential gain 1.56x/block, gamma=0.054/blk).
+    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3),
+                                        k2e_nord=k2e_nord)
 
     for gs in gs6:
         # bounded lane: guards see bounded_domain=True + corner flags
@@ -184,7 +207,8 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         if bad:
             raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
-                                 vector_corner=vector_corner)
+                                 vector_corner=vector_corner,
+                                 k2e_nord=k2e_nord)
         # ORACLE-FAITHFUL DEFAULT (Zenodo grep): upstream duo d_sw
         # consumes the model gridstruct metrics — the model tree never
         # reads the dg ext metrics; extend_gridstruct was OUR coherence
@@ -207,11 +231,29 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     ee6 = [build_extended_corner_lonlat(n, ng, tile=t)
            for t in range(1, 7)]
 
+    # surface geopotential (phis, m^2/s^2) per face on the data domain:
+    # topo_fn(lon, lat) -> phis; geopk consumes it as gz(km+1) exactly
+    # like upstream (test_cases case-5 phis feeds geopk's hs argument).
+    # Upstream applies ONE static ext_scalar(phis) before stepping
+    # (test_cases.F90:1567-1582) so the halo/wedge slots carry the k2e
+    # values, not the raw analytic evaluation (codex r8 P1).
+    hs6 = None
+    if topo_fn is not None:
+        hs6 = [np.asarray(topo_fn(np.asarray(gs["agrid_lon"]),
+                                  np.asarray(gs["agrid_lat"])))
+               for gs in gs6]
+        if use_ext_bundle:
+            from legoesm.grids.fv3_native_ext_vector import (
+                ext_scalar_sixface,
+            )
+
+            ext_scalar_sixface(hs6, "A", ectx)
+
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
-            "kk6": kk6, "ee6": ee6,
+            "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
 
@@ -377,13 +419,20 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
 
     uc6 = [np.array(o["uc"], copy=True) for o in csw_outs]
     vc6 = [np.array(o["vc"], copy=True) for o in csw_outs]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(states[t - 1]["delp"])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(states[t - 1]["delp"]))
         pkc, gz = geopk_sw_1lev(csw_outs[t - 1]["delpc"], hs, bd,
                                 pt=csw_outs[t - 1]["ptc"])
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
                       uc6[t - 1], vc6[t - 1], gs, bd)
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(203, t, "uc", uc6[t])
+            sd(203, t, "vc", vc6[t])
     divgd6 = [o["divg_d"] for o in csw_outs]
     if ctx.get("use_ext_bundle"):
         # authoritative post-p_grad_c duo exchanges (dyn_core.F90:652-655):
@@ -407,6 +456,11 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(divgd6, t, n, ng)
             exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if sd:
+        for t in range(6):
+            sd(204, t, "uc", uc6[t])
+            sd(204, t, "vc", vc6[t])
+            sd(204, t, "divgd", divgd6[t])
 
     cfg = dict(_SW_CFG_DEFAULT)
     cfg.update(sw_cfg or {})
@@ -463,7 +517,8 @@ SW_CFG_CASE8 = {
 
 
 def acoustic_step_sixface(ctx: dict, states: list, dt: float,
-                          sw_cfg: dict | None = None) -> list:
+                          sw_cfg: dict | None = None,
+                          entry_ascalar: bool = True) -> list:
     """SB3: ONE full duo acoustic step on all six faces —
     c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
     -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
@@ -509,12 +564,18 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
         # The ext swap must be the FULL consistency bundle (all fields
         # + extended halo metrics together); until then the coherent
         # index-copy interim stays.
-        duo_pad_scalars(delp6, ctx)
-        duo_pad_scalars(pt6, ctx)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            duo_pad_scalars(delp6, ctx)
+            duo_pad_scalars(pt6, ctx)
     elif not ctx.get("use_ext_bundle"):
-        for t in range(1, 7):
-            exchange_agrid_scalar_halos(delp6, t, n, ng)
-            exchange_agrid_scalar_halos(pt6, t, n, ng)
+        # same it==1 cadence gate as the ext lane (codex r1 P2-8: the
+        # interim/measurement lanes must not run the entry A-scalar
+        # exchange every inner step when the caller supplies the
+        # upstream n_split schedule)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
     if ctx.get("use_ext_bundle"):
         # authoritative duo entry exchanges (dyn_core.F90:437-471):
         # ext_scalar(delp/pt, 0,0) + ext_vector(u, v, 0,1,1,0)
@@ -523,7 +584,9 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
             ext_vector_dgrid_sixface,
         )
 
-        if "ascalar" in ctx.get("ext_exclude", ()):
+        if _ENTRY_ASCALAR_OFF or not entry_ascalar:
+            pass          # upstream gates the entry exchange on it==1
+        elif "ascalar" in ctx.get("ext_exclude", ()):
             for t in range(1, 7):
                 exchange_agrid_scalar_halos(delp6, t, n, ng)
                 exchange_agrid_scalar_halos(pt6, t, n, ng)
@@ -541,10 +604,34 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float,
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
+    # optional step-1 stage twin hook: callable(block, tile0, name, arr)
+    # at the same dyn_core points as the instrumented oracle (201 =
+    # post-entry exchanges, 202 = post-c_sw, 203/204 in dsw12, 205 =
+    # post-d_sw2).  None (default) = byte-identical behavior.
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(201, t, "u", states[t]["u"])
+            sd(201, t, "v", states[t]["v"])
+            sd(201, t, "delp", states[t]["delp"])
+            sd(201, t, "pt", states[t]["pt"])
+
     cfg = dict(_SW_CFG_DEFAULT)
     cfg.update(sw_cfg or {})
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
+    if sd:
+        for t in range(6):
+            sd(202, t, "uc", csw[t]["uc"])
+            sd(202, t, "vc", csw[t]["vc"])
+            sd(202, t, "delpc", csw[t]["delpc"])
+            sd(202, t, "ua", csw[t]["ua"])
+            sd(202, t, "va", csw[t]["va"])
+            sd(202, t, "divgd", csw[t]["divg_d"])
     s12 = dsw12_step_sixface(ctx, states, csw, dt=dt, sw_cfg=sw_cfg)
+    if sd:
+        for t in range(6):
+            sd(205, t, "delp", s12[t]["delp"])
+            sd(205, t, "pt", s12[t]["pt"])
 
     s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
                     s12[t - 1]["uc"], s12[t - 1]["vc"],
@@ -717,7 +804,8 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
                                d_ext: float = 0.02,
-                               sw_cfg: dict | None = None) -> list:
+                               sw_cfg: dict | None = None,
+                               entry_ascalar: bool = True) -> list:
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
@@ -737,7 +825,8 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     bd = ctx["bd"]
     npx = n + 1
 
-    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg)
+    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg,
+                                  entry_ascalar=entry_ascalar)
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
@@ -763,9 +852,11 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(delp6[t - 1])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(delp6[t - 1]))
         pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd,
                                   pt=pt6[t - 1])
         # divg2 = d_ext*da_min_c*saved divergence (km=1; dyn_core
@@ -789,6 +880,29 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     return [{"delp": delp6[t], "pt": pt6[t], "u": u6[t], "v": v6[t]}
             for t in range(6)]
+
+
+def advance_duo_outer_step(ctx: dict, states: list, dt_atmos: float,
+                           n_split: int, d_ext: float = 0.02,
+                           sw_cfg: dict | None = None) -> list:
+    """One dt_atmos block = ``n_split`` acoustic steps at
+    dt = dt_atmos/n_split with the UPSTREAM exchange schedule: the
+    entry A-scalar ext_scalar(delp, pt) fires only on the FIRST inner
+    step of the block (dyn_core.F90:432-439 gates it on ``it == 1``),
+    while the D-vector entry (:468-472), the post-PG B/C exchanges
+    (:651-655) and the tail A-scalar refresh (:1335-1337) fire every
+    inner step.  Per 1200 s at n_split=7 this is the oracle's 8
+    A-scalar applications per field (1 entry + 7 tail); the flat
+    back-to-back stepper (entry every step) applies 14.
+    """
+    if n_split < 1:
+        raise ValueError(f"n_split must be >= 1, got {n_split}")
+    dt = dt_atmos / n_split
+    for it in range(n_split):
+        states = full_acoustic_step_sixface(ctx, states, dt,
+                                            d_ext=d_ext, sw_cfg=sw_cfg,
+                                            entry_ascalar=(it == 0))
+    return states
 
 
 def w2_six_face_state(ctx: dict, alpha: float = 0.0,

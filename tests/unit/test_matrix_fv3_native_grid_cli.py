@@ -72,7 +72,7 @@ def test_run_shallow_water_fv3_native_grid_w2_branch(tmp_path):
         cs.create_fv3_native_cubed_sphere = orig
     assert calls["n"] == 12
     assert calls["kw"].get("use_duogrid") is True
-    assert calls["kw"].get("k2e_nord") == 4
+    assert calls["kw"].get("k2e_nord") == 2   # faithful order (2026-07-28)
     # Williamson runs rotating: omega == constants.Omega
     assert abs(calls["kw"].get("omega") - constants.Omega) < 1e-12
     # ED provenance actually reached the model, with duo halos on (codex
