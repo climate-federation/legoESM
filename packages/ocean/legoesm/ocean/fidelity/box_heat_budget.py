@@ -181,7 +181,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     w_baro = diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     if getattr(config, "gm_redi", None) is not None:
-        kappa_redi_ov = _static_kappa_redi_override(config.gm_redi, grid)
+        kappa_redi_ov, kappa_redi_v_ov = _static_kappa_redi_override(config.gm_redi, grid)
         # GM-bolus-through-FCT fold (tracer_tendency_compare.py): ONLY
         # exported/folded into the advecting flux when the recipe sets
         # gm_bolus_advection="through_fct" (nemo_dino_kamm_mlf). The other
@@ -198,6 +198,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
             mask=mask, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
             kappa_redi_override=kappa_redi_ov,
+            kappa_redi_v_override=kappa_redi_v_ov,
             return_bolus_transport=through_fct,
             dt=dt_model,
         )

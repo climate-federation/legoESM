@@ -2010,3 +2010,91 @@ class TestK33NemoNativeA33:
                     T, S, eta, H_bathy, grid, z_coord, cfg_bad,
                     eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
                     dt=2700.0)
+
+
+class TestNemoNativeActive3dBottomTie:
+    """#1226 (ldf_slp stage audit, 2026-07-28): ``_nemo_native_active_3d``
+    must use ``z_coord.is_active`` (an EXACT per-column integer bottom-level
+    compare) rather than a float ``top-depth < H_bathy`` tie.
+
+    Root-cause reproduction: on the DINO Y5 RUN_GDB twin, a column whose
+    bathymetry lands almost exactly on the deepest level's top interface had
+    ``H_bathy`` (bridge's per-column ``cumsum(e3t_0)``) and
+    ``cumsum(z_coord.dz_ref)`` (the GLOBAL representative ladder) disagree by
+    a few ULPs, so the float compare ``z_top[k] < H_bathy`` spuriously
+    included the dry deepest level as ACTIVE.  That fed a wrong ``vmask3``/
+    ``zgrv`` into ``compute_nemo_native_slopes``, degrading its w-point
+    horizontal-density-gradient stage (``zaj``) from corr 1.000000 to 0.9806
+    at that level only — the first deviating stage in the wslpi/wslpj/uslp/
+    vslp/ldf_eiv-aeiu five-row debt.  This test builds the SAME shape of tie
+    directly (a two-column domain where column 0's ``H_bathy`` sits a few
+    ULPs BELOW the reference cumulative depth at the deepest level, exactly
+    like the measured case) and asserts the deepest level is masked DRY.
+    """
+
+    def test_bottom_level_ulp_tie_masks_dry(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_native_active_3d,
+        )
+        from legoesm.ocean.vertical import (
+            create_z_star_from_thicknesses, create_full_step_coordinate,
+        )
+        dz = jnp.asarray([100.0, 100.0, 100.0, 100.0], dtype=jnp.float64)
+        z_coord = create_z_star_from_thicknesses(dz)
+        # Column 0: bottom lands EXACTLY at the top of the deepest level (a
+        # dry level 3) -- H_bathy computed as an independently-rounded twin
+        # of cumsum(dz)[:3] that differs by a few ULPs (the measured
+        # H_bathy=3454.796630859375 vs z_top[34]=3454.79638671875 case,
+        # reproduced at this grid's scale). Column 1: fully wet control.
+        z_top3 = float(jnp.cumsum(dz)[2])   # top-of-level-3 interface = 300.0
+        H_bathy = jnp.asarray(
+            [[np.nextafter(z_top3, np.inf)], [400.0]], dtype=jnp.float64)
+        mask = jnp.ones((2, 1), dtype=jnp.float64)
+        # is_active path: bottom_level from an exact 3-D wet-count, matching
+        # NEMO's own tmask column sum (this is what the fidelity bridge
+        # actually threads through, not the float construction below).
+        bottom_level = jnp.asarray([[2], [3]], dtype=jnp.int32)  # (n_lat, n_lon)
+        z_coord_pc = create_full_step_coordinate(z_coord, bottom_level=bottom_level)
+
+        act = _nemo_native_active_3d(mask, z_coord_pc, H_bathy, jnp.float64)
+        assert act.shape == (2, 1, 4)
+        # Column 0's deepest level (k=3) MUST be dry -- the exact is_active
+        # compare, not the float tie.
+        assert float(act[0, 0, 3]) == 0.0
+        assert float(act[0, 0, 2]) == 1.0
+        # Column 1 fully wet.
+        assert float(act[1, 0, 3]) == 1.0
+
+        # Ground truth this fails under the OLD (pre-fix) float construction
+        # -- proves the bug this test guards against is real, not vacuous.
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act_old = (
+            (mask[:, :, jnp.newaxis] > 0.5)
+            & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+        ).astype(jnp.float64)
+        assert float(act_old[0, 0, 3]) == 1.0, (
+            "reproduction is vacuous: the OLD float-tie construction must "
+            "mis-mask this column's deepest level ACTIVE for the bug to be "
+            "real (H_bathy was built as the next float above z_top[3])")
+
+    def test_no_is_active_falls_back_to_float_construction(self):
+        """A plain z-star (no partial cells) has no ``is_active`` -- the
+        float fallback must still run (not raise) and match the legacy
+        formula exactly, so byte-identical byte-for-byte on every existing
+        pure-z* caller (GYRE-flat, non-full-step DINO, etc.)."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_native_active_3d,
+        )
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        dz = jnp.asarray([100.0, 100.0, 100.0, 100.0], dtype=jnp.float64)
+        z_coord = create_z_star_from_thicknesses(dz)
+        assert getattr(z_coord, "is_active", None) is None
+        mask = jnp.ones((2, 1), dtype=jnp.float64)
+        H_bathy = jnp.asarray([[400.0], [200.0]], dtype=jnp.float64)
+        act = _nemo_native_active_3d(mask, z_coord, H_bathy, jnp.float64)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        expected = (
+            (mask[:, :, jnp.newaxis] > 0.5)
+            & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+        ).astype(jnp.float64)
+        assert jnp.array_equal(act, expected)

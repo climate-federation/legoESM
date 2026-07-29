@@ -32,6 +32,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -223,7 +224,8 @@ def probe_latlon_cgrid(
         # 6986/6994) — reuse the exact same exported helper so the probe never
         # silently runs with kappa_Redi held at its (wrong, non-cos-scaled)
         # equator value on any recipe with kappa_redi_lat_scaling=True.
-        kappa_redi_override = _static_kappa_redi_override(config.gm_redi, grid)
+        kappa_redi_override, kappa_redi_v_override = _static_kappa_redi_override(
+            config.gm_redi, grid)
         dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
             T_iso, S_iso, state.eta.data, state.H_bathy.data,
             grid, z_coord, config.gm_redi,
@@ -232,8 +234,20 @@ def probe_latlon_cgrid(
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
+            # #1226: config.omega (the field dino_lat_lon_model_config
+            # actually threads a NEMO-recipe's pinned Omega into, mirroring
+            # config.g/config.rho_0's own split from config.constants.*) --
+            # NOT config.constants.Omega, which stays the unwired NamedTuple
+            # default. Without this the probe silently reintroduces the
+            # ldf_eiv kappa (aeiu) amplitude bias the fix removes in
+            # production. getattr guards a bare LatLonCGridOceanConfig built
+            # before the omega field existed (defaults to the same value
+            # the field itself defaults to).
+            omega=getattr(config, "omega", constants.Omega),
             kappa_redi_override=kappa_redi_override,
+            kappa_redi_v_override=kappa_redi_v_override,
             dt=(dt_tracer if dt_tracer is not None else dt),
+            eos_depth=_eos_depth,
         )
         if getattr(config.gm_redi, "implicit_K33", False):
             # When the vertical isoneutral diagonal is applied IMPLICITLY (Veros-
@@ -254,9 +268,11 @@ def probe_latlon_cgrid(
                 mask=state.land_mask.data,
                 rho_0=config.constants.rho_0, g=config.constants.g,
                 kappa_redi_override=kappa_redi_override,
+                kappa_redi_v_override=kappa_redi_v_override,
                 # #1226: same wall masks as the tendency call above.
                 u_mask=state.u_mask.data, v_mask=state.v_mask.data,
                 dt=dt_tr,
+                eos_depth=_eos_depth,
             )
             # Match the production model: zero K33 at non-wet interfaces
             # so partial-cell bottom cells never mix against below-bottom

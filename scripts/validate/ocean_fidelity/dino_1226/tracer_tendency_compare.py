@@ -105,16 +105,24 @@ DT = 2700.0
 H = 2
 CH = slice(12, 47)  # channel rows, interior idx (matches momentum_budget_diff.py)
 
+# #1226: cfg built BEFORE the bridge so cfg.omega (NEMO's full-precision
+# Earth rotation rate on the nemo_dino_kamm_mlf card) reaches
+# bridge_nemo_to_legoesm_topo's grid.f construction -- omitting this left
+# grid.f (and every f20 taper reference downstream) on legoESM's rounded
+# constants.Omega default, silently re-running the pre-fix ldf_eiv kappa
+# (aeiu) amplitude bias this script exists to validate.
+cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
+    lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+
 # --- bridge day-0 twin state (leap-frog before-level populated: #1317 --bridge-before) ---
 g = read_nemo_mesh_mask(f"{RUN}/mesh_mask.nc", nn_hls=0)
 s = read_nemo_restart(f"{RUN}/DINO_00005760_restart.nc", nn_hls=0)
-br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
+br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
+                                  omega=cfg.omega)
 before = read_nemo_restart_before(f"{RUN}/DINO_00005760_restart.nc", nn_hls=0)
 state0 = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 br = br._replace(state=state0)
 
-cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
-    lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)
@@ -169,14 +177,16 @@ mass_flux_v = h_v * state.v.data * v_mask_3d_tr
 # gm_redi_tracer_tendency_latlon(..., return_bolus_transport=True) on the
 # BEFORE tracer, then _add_bolus_to_advecting_flux onto the mass flux --
 # so ADVECTION below is apples-to-apples with NEMO's bolus-augmented trend.
-_kappa_redi_ov = _static_kappa_redi_override(mc.gm_redi, grid)
+_kappa_redi_ov, _kappa_redi_v_ov = _static_kappa_redi_override(mc.gm_redi, grid)
 _, _, _bolus = gm_redi_tracer_tendency_latlon(
     state0.T_before.data, state0.S_before.data, state.eta.data, state.H_bathy.data,
     grid, z_coord, mc.gm_redi,
     eos=mc.eos, eos_linear=mc.eos_linear,
     mask=mask, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
     rho_0=mc.constants.rho_0, g=mc.constants.g,
+    omega=mc.omega,   # #1226: see the cfg/bridge omega note above.
     kappa_redi_override=_kappa_redi_ov,
+    kappa_redi_v_override=_kappa_redi_v_ov,
     return_bolus_transport=True,
     dt=DT,
 )

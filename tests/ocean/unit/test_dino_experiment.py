@@ -449,6 +449,20 @@ class TestDINORecipes:
         mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
         assert mc.barotropic.barotropic_een_seed == "nemo_kmm"
 
+    def test_een_e3f_scheme_mlf_card_only(self):
+        # #1226 item 10 (NEMO nn_e3f_typ=1, dynvor.F90::vor_een:733-745 —
+        # masked-average e3f, not the min-rule). Only the leapfrog/EEN-total
+        # card selects it; every other recipe keeps the bit-identical
+        # min-rule default (MITgcm hFacZ convention).
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.een_e3f_scheme == "nemo_avg"
+        for recipe in ("nemo_dino_kamm", "legoesm_default", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            assert dino_config_for_recipe(recipe).een_e3f_scheme == "min", recipe
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.een_e3f_scheme == "nemo_avg"
+
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
         # legoESM sigmoid default leaks enhanced mixing into weakly-stable water
@@ -1695,14 +1709,27 @@ class TestIsoneutralRediOnly:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        arr = _static_kappa_redi_override(gm_on, g)
+        arr, arr_v = _static_kappa_redi_override(gm_on, g)
         assert arr.shape == (g.n_lat, 12)
+        assert arr_v.shape == (g.n_lat, 12)
         lat = np.asarray(g.lat)
         # grid.lat is stored float32 -> f32-appropriate tolerance
         np.testing.assert_allclose(
             np.asarray(arr)[:, 0], 100.0 * np.cos(lat), rtol=1e-6)
+        # v-face (#1226 tier-2 item 1): NEMO evaluates ahtv INDEPENDENTLY at
+        # the v-point (ldftra.F90:325-329 -> ldfc1d_c2d.F90:141-145,
+        # ahtv=zUfac*MAX(e1v,e2v)**inn), NOT ahtu broadcast onto the v-face —
+        # ground-truth against grid.cos_lat_v at the north-face-of-cell-j
+        # convention (matches grid.dx_v[1:,:] used by the operator).
+        cos_lat_v = np.asarray(g.cos_lat_v)[1:]
+        np.testing.assert_allclose(
+            np.asarray(arr_v)[:, 0], 100.0 * cos_lat_v, rtol=1e-6)
+        # The two must differ (this is the whole point of the fix) except at
+        # the equator-straddling row where cos(lat_T) and cos(lat_v) coincide
+        # by symmetry.
+        assert not np.allclose(np.asarray(arr)[:, 0], np.asarray(arr_v)[:, 0])
         gm_off = GMRediConfig(kappa_Redi=100.0)
-        assert _static_kappa_redi_override(gm_off, g) is None
+        assert _static_kappa_redi_override(gm_off, g) == (None, None)
 
     def test_mpas_builder_rejects_isoneutral(self):
         import dataclasses
