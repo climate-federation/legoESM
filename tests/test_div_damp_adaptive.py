@@ -380,6 +380,54 @@ def test_corner_div_damp_changes_winds(small_3d_state):
     assert jnp.all(jnp.isfinite(s_active.u_d.data))
 
 
+def test_corner_div_damp_del4_active_without_d2(small_3d_state):
+    """PE mirror of the NH regression: the del-4 pair (d4_bg>0,
+    nord>0) activates corner damping WITHOUT d2_bg (FV3 sw_core.F90:1641
+    has no d2_bg master switch).  RED under the old ``d2_bg > 0``
+    gate (bit-identical to inert)."""
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=34)
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev)))),
+        v_d=s.v_d.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev)))),
+    )
+
+    cfg_inert = CDGridPrimitiveEquationConfig(div_damp_coeff=1e7)
+    cfg_del4 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=0.16,
+        corner_div_damp_nord=1,
+    )
+
+    model_inert = CDGridPrimitiveEquationModel(grid, coord, cfg_inert)
+    model_del4 = CDGridPrimitiveEquationModel(grid, coord, cfg_del4)
+
+    s_inert = model_inert.step(s, 100.0)
+    s_del4 = model_del4.step(s, 100.0)
+
+    diff = float(jnp.max(jnp.abs(s_inert.u_d.data - s_del4.u_d.data)))
+    base = float(jnp.max(jnp.abs(s_inert.u_d.data)))
+    assert diff > 1e-6 * base, (
+        "del-4 corner damping (d2_bg=0, d4_bg=0.16, nord=1) must be "
+        "ACTIVE on the PE path — bit-identical means the d2_bg master "
+        f"gate is back (diff={diff:.3e}, base={base:.3e})"
+    )
+    assert jnp.all(jnp.isfinite(s_del4.u_d.data))
+
+
 def test_corner_div_damp_stable_short_run(small_3d_state):
     """corner_div_damp_d2_bg=0.001 stable for 20 steps from HS init."""
     grid, cdgrid, coord, _ = small_3d_state

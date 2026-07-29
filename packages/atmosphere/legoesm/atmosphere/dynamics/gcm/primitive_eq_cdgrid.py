@@ -443,11 +443,13 @@ def fv3_hydrostatic_tendencies(
     # (SPMD/MPI) or None (single-device → per-op halo).
 
     # FV3_3D iter 14/190: optional a2b_ord4 for ζ_corner; shared with iter-187 smag_vort cap (sw_core.F90:1795)
-    _need_zeta_a2b_for_smag = (
-        config.corner_div_damp_d2_bg > 0.0
-        and config.corner_div_damp_d4_bg > 0.0
-        and config.corner_div_damp_nord > 0
+    # ζ needed whenever the del-4 branch runs — which no longer requires
+    # d2_bg>0 (see corner_div_damp_active).
+    from legoesm.core._fv3_divergence_corner import (
+        corner_div_damp_active as _cdd_active,
+        corner_div_damp_del4_active as _cdd_del4_active,
     )
+    _need_zeta_a2b_for_smag = _cdd_del4_active(config)
     _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
@@ -590,7 +592,9 @@ def fv3_hydrostatic_tendencies(
 
     # FV3_3D iter 16: B-grid corner-div damping (FV3 sw_core.F90:1641-1724).
     # ke(i,j) += damp*delpc(i,j); momentum -= grad(ke). Differs from cell-centre div_damp above.
-    if config.corner_div_damp_d2_bg > 0.0:
+    # Activation matches FV3 (no d2_bg master switch): d2_bg>0 OR the
+    # del-4 pair (d4_bg>0 AND nord>0) — see corner_div_damp_active.
+    if _cdd_active(config):
         from legoesm.core._fv3_divergence_corner import (
             fv3_divergence_corner_3d,
         )
@@ -628,7 +632,7 @@ def fv3_hydrostatic_tendencies(
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
         # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
         # would break the iter-22 bit-for-bit test).
-        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+        if _cdd_del4_active(config):
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
             )

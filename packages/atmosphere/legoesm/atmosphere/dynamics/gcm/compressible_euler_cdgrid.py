@@ -376,11 +376,13 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 7. D-grid momentum tendencies ---
     # iter-74: interp ζ only; add f_corner directly (interp(f_cc)≠f_corner gives O(dx²) Coriolis err).
     # FV3_3D iter 170/190: a2b_ord4 for ζ_corner (mirror of PE 14); shared with iter-187 smag_vort cap.
-    _need_zeta_a2b_for_smag = (
-        config.corner_div_damp_d2_bg > 0.0
-        and config.corner_div_damp_d4_bg > 0.0
-        and config.corner_div_damp_nord > 0
+    # ζ needed whenever the del-4 branch runs — which no longer requires
+    # d2_bg>0 (see corner_div_damp_active).
+    from legoesm.core._fv3_divergence_corner import (
+        corner_div_damp_active as _cdd_active,
+        corner_div_damp_del4_active as _cdd_del4_active,
     )
+    _need_zeta_a2b_for_smag = _cdd_del4_active(config)
     _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
@@ -606,7 +608,11 @@ def cdgrid_compressible_euler_slow_tendencies(
         _dtheta_p_dt_ah_cc = None
 
     # FV3_3D iter 168: B-grid corner-div damp (mirror of PE iter-16/18; FV3 sw_core.F90:1641-1822 d_sw5)
-    if config.corner_div_damp_d2_bg > 0.0:
+    # Activation matches FV3 (no d2_bg master switch): d2_bg>0 OR the
+    # del-4 pair (d4_bg>0 AND nord>0).  The old ``d2_bg > 0`` gate left
+    # the matrix NH configs (d2_bg=0, nord=1, d4_bg=0.16) with ZERO
+    # corner damping → DCMIP TC2/TC3 cube vertex blow-up.
+    if _cdd_active(config):
         from legoesm.core._fv3_divergence_corner import (
             fv3_divergence_corner_3d,
         )
@@ -632,7 +638,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         # Step 3: del-(2*(nord+1)) damp (FV3 sw_core.F90:1725-1822, nord>0)
         # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
         # would break the iter-22 bit-for-bit test; mirror of PE-side rationale).
-        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+        if _cdd_del4_active(config):
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
             )
