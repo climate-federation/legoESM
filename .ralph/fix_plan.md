@@ -27,9 +27,18 @@ task. `--self-test` must keep passing every loop.
       (`vslp`, `wslpj`, `zaj`, `ssh_nxt`, `dyn_cor_2d`, anything else that moves).
       Then adversarial review — this touches barotropic v-point areas `1/(dx_v*dy_v)`, the PGF,
       and `latlon_cgrid_operators`.
-- [ ] **The 6 cancelling-only AT BAR rows** — cheapest real progress. They need only a per-element
+- [x] **DONE 2026-07-29 — the 6 cancelling-only AT BAR rows** — cheapest real progress. They need only a per-element
       measurement. Five claim "exact"/"bit-exact" in their notes, but a CLAIM IS NOT A MEASUREMENT,
       and that exact gap is what let `bn2` sit falsely AT BAR for weeks.
+      RESULT: all six clear the 1e-9 bar; NO cancellation was hiding a defect this time --
+      but that is now a MEASUREMENT rather than a claim. The gate's "AT BAR on CANCELLING
+      statistics only" line is GONE: all 11 AT BAR rows are per-element proven.
+      Two caveats recorded in the gate, both honest limits rather than failures:
+      the ATF `ssh` leg is TAUTOLOGICAL (one unknown solved then re-substituted, so it
+      certifies transcription only -- T/S do not share this), and `sfx` was reconstructed
+      from the production A_S/dino_S_star because no first-class legoESM sfx array exists.
+      Two probe-side wet-mask bugs were found and fixed mid-measurement (u-face periodic
+      seam, v-face wall row) -- both harness, not legoESM.
 - [ ] **Instrument NEMO for the big rows.** `dyn_spg_ts` (1.3e-2, the worst), `zdftke`, `dyn_vor`,
       `traadv_fct`. Add `WRITE` dumps of the INTERMEDIATES following the
       `cfgs/DINO/MY_SRC/ldfslp.F90` pattern (units 8840-8848, `l_1226_raw_dump_done` first-call

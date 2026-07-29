@@ -170,6 +170,41 @@ PER_ELEMENT: dict[str, float] = {
     "zdf_drg_nonlin T-point rate": 0.0,
     # 0/9920 columns differ -- an exact integer-level match, so per-element 0.
     "zdf_mxl (nmln)": 0.0,
+    # --- the 6 former CANCELLING-ONLY rows, MEASURED per-element 2026-07-29 by
+    # cancelling_rows_per_element.py (fp64, BEFORE-level, e3t=both).  Each had
+    # been passing on aggregate statistics alone, which is exactly how bn2 sat
+    # falsely AT BAR.  This time no cancellation was hiding a defect -- but that
+    # is now a MEASUREMENT, not a claim.  Values are the worst MEDIAN across
+    # each row's sub-metrics; the robust err_norm is used for sign-changing
+    # fields and pointwise |rel| for one-signed ones (each stated per row).
+    #
+    # sbc: utau err_norm med 0.0 (p99 1.3e-15) | qsr pointwise med 1.26e-16
+    #      (one-signed 0..+230) | qns err_norm med 4.69e-16 (sign-changing) |
+    #      sfx err_norm med 0.0.  CAVEAT: no first-class legoESM sfx array
+    #      exists -- it was reconstructed from the production A_S/dino_S_star,
+    #      so that leg certifies the FORCING FORMULA, not a shipped field.
+    "sbc (utau/qsr/qns/sfx)": 4.693e-16,
+    # one-signed (+526..+1501) so pointwise |rel| is valid; max 2.2e-16.
+    # Excludes 197 periodic-seam cells where NEMO's OWN dump is zero (harness
+    # artifact, verified confined to column 50).
+    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": 0.0,
+    # as ahtu; scored on grid.vmask -- the T-mask falsely counted a closed wall
+    # row as wet (probe bug found and fixed during the measurement).
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": 0.0,
+    # sign-changing with 5.96% near-zero, so the pointwise max of 5.3e-6 is NOT
+    # trustworthy; err_norm median 9.40e-14 (p99 2.7e-12) is the real figure.
+    "dyn_hpg (du)": 9.400e-14,
+    # sign-changing, 39.7% near-zero.  PGF/KEG additive separability verified
+    # EXACTLY (max|full-(KEG+PGF)| = 0.0), and each vanishes exactly on its own
+    # null state -- so this is a real decomposition, not a fitted one.
+    "dyn_adv KEG": 3.578e-19,
+    # T and S pointwise |rel| median 0.0 (max <= 2.2e-16), one-signed.
+    # CAVEAT the probe itself raised: the ssh leg is TAUTOLOGICAL -- one unknown
+    # is solved for and then re-substituted -- so it certifies TRANSCRIPTION of
+    # the filter, not an independent check of the ssh value.  T/S do not share
+    # that weakness.
+    "ATF filter T/S/ssh": 0.0,
+
     # ldf_slp RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py, the
     # first probe for these rows with BOTH mechanical preconditions wired
     # (require_fp64 + time_level_for_dump) AND a consistent run directory.
