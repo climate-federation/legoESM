@@ -46,7 +46,20 @@ task. `--self-test` must keep passing every loop.
       ONE quantity.
       OPEN: the V-component does NOT close the same way (12.6% explained) — `pvv_b` has a second
       cause. Do not assume symmetry with u.
-      NEXT THREAD: why is zu_frc off by 8.03e-03? It is the vertically-integrated slow
+      IN PROGRESS: why is zu_frc off by 8.03e-03? **KEY SOURCE FACT (verified from cpp_DINO.fcm =
+      `key_qco key_vco_3d`)**: under key_qco NEMO builds it with the **STATIC** reference ladder --
+      `SUM(e3u_0 * puu(Krhs) * umask) * r1_hu_0` (dynspg_ts.F90:336) -- NOT the live e3u(Kmm),
+      which is the `# else` branch DINO does not compile. The in-source comment gives the reason
+      ("e3. are substitute by 1D arrays and can't be used in SUM operand"). So for THIS term the
+      oracle's choice is STATIC, the OPPOSITE of the three live-ladder fixes already made — do not
+      "fix" it in the direction that felt right last time. Also checking the
+      `zu_frc -= zu_trd*ssumask` removal (:304/:367).
+      IF the weighting is not the cause, zu_frc is the depth-mean of the 3-D momentum RHS, and
+      several DEBT rows measure pieces of that same RHS (dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3,
+      dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3) — so the barotropic rows may be a DOWNSTREAM
+      CONSEQUENCE of the momentum rows. That would be a big structural unification; it needs the
+      arithmetic shown, not asserted.
+      (original) why is zu_frc off by 8.03e-03? It is the vertically-integrated slow
       (baroclinic) momentum trend — candidates are the terms summed into it and the integration
       weights. The e3t ladder is now correct, so it is NOT that.
       (growth shape, for the record)
