@@ -826,12 +826,31 @@ analogue of a DEPHY case, so the reader mirrors `dephy_scm.py`:
   `test_sccm_arm_loader.py` (synthetic-fixture sign/conversion assertions + a real-`arm9707.nc`
   load + an SCM round-trip). Numerics codex-reviewed.
 
-**Remaining phases (staged, not yet built):**
-- **Phase 2** — an obs-vs-SCM scoring assembly (reuse `core/profile_metrics`): SCM cloud
-  fraction / LWP / precip / sounding θ,q vs the `ARMObsReference`, with a golden-day (June 21)
-  shallow-Cu segment as the anchor and honest missing-obs (NaN) handling.
+**Phase 2 — DONE (2026-07-29): the obs-vs-SCM scoring assembly** (`les_suite/arm_obs_score.py`).
+- `build_arm_comparables(case, physics_config, ...)` runs the obs-forced SCM over a window
+  (optionally re-initialised from the observed sounding at the window start — the ARM
+  "continuous-forcing" restart that avoids multi-day free-run drift) and samples its output at the
+  observation times + pressure levels, returning `ARMComparables` (θ, q, u, v soundings + LWP).
+  LWP reuses the canonical `column_water_vapor` mass integral applied to the SCM cloud-liquid
+  tracer `q_c` — which required threading `q_c` through `SCMHistory` (a trailing Optional field,
+  gated like `q_v`).
+- `score_arm_obs(obs, comp) -> ARMObsScore` computes a NaN-aware per-channel normalized RMSE +
+  RMS-combined score, mirroring `score.py`'s normalize-by-floored-obs-spread design. Missing obs
+  (NaN) are MASKED, never zero-filled (which would flatter the fit). Cloud-fraction and precip
+  channels are scored when supplied; the runner leaves them `None` (the SCM emits neither a
+  fractional cloud diagnostic nor a surface precip flux in history yet) — a drop-in for Phase 2b.
+- Constraint (documented + SCM-enforced): the ARM forcing prescribes surface fluxes, so a
+  closure's turbulence `surface.Ch_neutral` must be 0 (fluxes injected via the prescribed
+  channel, not the bulk formula). Tests: `tests/atmosphere/les_suite/test_arm_obs_score.py`
+  (deterministic scoring + NaN-masking + an end-to-end SCM run scored on θ/q/u/v/LWP). Numerics
+  codex-reviewed.
+
+**Remaining phases (staged):**
+- **Phase 2b** — SCM cloud-fraction + surface-precip diagnostics in history, so those obs
+  channels (GOES cloud, gauge precip) are scored too (the scorer already supports them).
 - **Phase 3** — a driver + a campaign registry entry so all nine closures run the ARM forcing and
-  rank against obs, alongside the LES-truth ranking (is the obs-best closure the LES-best one?).
+  rank against obs, alongside the LES-truth ranking (is the obs-best closure the LES-best one?),
+  golden-day (June 21) shallow-Cu anchor via the obs-restart path.
 - **Later campaigns** (same reader/scoring path, obs online): RICO (precipitating trade Cu),
   GABLS2/GABLS3 (Cabauw tower SBL), ASTEX (Sc→Cu transition). Each is a variable-name mapping +
-  a registry entry once Phases 2–3 exist.
+  a registry entry.

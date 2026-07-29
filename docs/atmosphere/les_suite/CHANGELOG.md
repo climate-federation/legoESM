@@ -200,5 +200,22 @@ obs-constrained NCAR-SCCM variational-analysis product already on disk at
   - Tests: `test_scm_forcing_io.py` (6) + `test_sccm_arm_loader.py` (4, incl. a real-`arm9707.nc`
     load: base 970618, lat 36.6, GOES cloud∈[0,1], SHF −28→+123 W/m²). All 10 pass; ruff clean
     (physics `T`/`divT` per-file-ignored, matching dephy). Numerics codex-reviewed.
-  - **Remaining:** Phase 2 obs-vs-SCM scoring (golden-day June-21 shallow-Cu anchor); Phase 3
-    driver + campaign registry so all 9 closures rank against obs; later RICO/GABLS3/ASTEX.
+  - Phase 2 (below) obs-vs-SCM scoring built next.
+
+- **Phase 2 (2026-07-29) — obs-vs-SCM scoring assembly DONE.**
+  - `les_suite/arm_obs_score.py`: `score_arm_obs(obs, comp)` = NaN-aware per-channel normalized
+    RMSE + RMS-combined, mirroring `score.py` (normalize by the floored OBS spread; missing obs
+    MASKED, never zero-filled). `build_arm_comparables(case, physics_config, ...)` runs the
+    obs-forced SCM over a window (optional obs-sounding restart at the window start) and samples
+    θ/q/u/v at obs pressure levels + obs times, + LWP from the `q_c` tracer via the canonical
+    `column_water_vapor` mass integral.
+  - `scm.py`: added trailing Optional `q_c` to `SCMHistory`, populated in `run()` gated like `q_v`
+    (enables time-resolved LWP). Backward-compatible; `test_scm_forcing.py` (51) + `test_scm.py`
+    (106) stay green.
+  - Constraint documented + SCM-enforced: prescribe="fluxes" ⇒ turbulence `surface.Ch_neutral=0`
+    (no bulk-formula/prescribed double-count). Cloud-fraction + precip left `None` by the runner
+    (SCM emits neither in history yet) but scored when supplied → Phase 2b drop-in.
+  - Tests: `tests/atmosphere/les_suite/test_arm_obs_score.py` (5 deterministic scoring/NaN-mask +
+    1 end-to-end SCM-run scored on θ/q/u/v/LWP). Numerics codex-reviewed.
+  - **Remaining:** Phase 2b (SCM cloud/precip diagnostics in history); Phase 3 driver + campaign
+    registry for the 9-closure obs ranking (golden-day June-21 anchor via the obs-restart path).

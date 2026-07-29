@@ -437,6 +437,7 @@ class SCMHistory(NamedTuple):
     v: jax.Array           # (n_saved, nlev)
     p_s: jax.Array         # (n_saved,)
     q_v: jax.Array | None  # (n_saved, nlev) or None
+    q_c: jax.Array | None = None  # (n_saved, nlev) cloud liquid, or None
 
 
 class SingleColumnModel:
@@ -1000,9 +1001,11 @@ class SingleColumnModel:
         """
         seconds_per_day = 86400.0
         times = []
-        Ts, us, vs, p_ss, qvs = [], [], [], [], []
+        Ts, us, vs, p_ss, qvs, qcs = [], [], [], [], [], []
         has_qv = (self.state.tracers is not None
                   and "q_v" in self.state.tracers)
+        has_qc = (self.state.tracers is not None
+                  and "q_c" in self.state.tracers)
 
         for k in range(nsteps):
             elapsed = k * self.dt
@@ -1018,6 +1021,8 @@ class SingleColumnModel:
                 p_ss.append(self.state.p_s.data[0, 0, 0])
                 if has_qv:
                     qvs.append(self.state.tracers["q_v"].data[0, 0, 0])
+                if has_qc:
+                    qcs.append(self.state.tracers["q_c"].data[0, 0, 0])
 
         history = SCMHistory(
             time=jnp.asarray(times),
@@ -1026,5 +1031,6 @@ class SingleColumnModel:
             v=jnp.stack(vs),
             p_s=jnp.asarray(p_ss),
             q_v=jnp.stack(qvs) if has_qv else None,
+            q_c=jnp.stack(qcs) if has_qc else None,
         )
         return self.state, history
