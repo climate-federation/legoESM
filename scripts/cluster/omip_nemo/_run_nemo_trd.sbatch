@@ -6,7 +6,7 @@
 #SBATCH --ntasks=32
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=120G
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/nemo_trd_%j.out
 # NEMO ORCA1 tracer-trend re-run (tendency-matching step b): restart from the
 # RUN_REF step-8760 tiles (32-rank decomp -> 32 ranks REQUIRED), 24 steps
