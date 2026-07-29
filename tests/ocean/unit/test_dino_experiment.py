@@ -1701,7 +1701,7 @@ class TestIsoneutralRediOnly:
 
     def test_static_kappa_override_row_scaling(self):
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.experiments.dino import (
             DINOConfig, dino_lat_lon_grid,
@@ -1709,7 +1709,7 @@ class TestIsoneutralRediOnly:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        arr, arr_v = _static_kappa_redi_override(gm_on, g)
+        arr, arr_v = static_kappa_redi_override(gm_on, g)
         assert arr.shape == (g.n_lat, 12)
         assert arr_v.shape == (g.n_lat, 12)
         lat = np.asarray(g.lat)
@@ -1729,7 +1729,7 @@ class TestIsoneutralRediOnly:
         # by symmetry.
         assert not np.allclose(np.asarray(arr)[:, 0], np.asarray(arr_v)[:, 0])
         gm_off = GMRediConfig(kappa_Redi=100.0)
-        assert _static_kappa_redi_override(gm_off, g) == (None, None)
+        assert static_kappa_redi_override(gm_off, g) == (None, None)
 
     def test_mpas_builder_rejects_isoneutral(self):
         import dataclasses
@@ -1747,13 +1747,13 @@ class TestIsoneutralRediOnly:
         from types import SimpleNamespace
 
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         gm = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
         fake = SimpleNamespace(lat=np.zeros((4, 5)), n_lon=5)
         with pytest.raises(ValueError, match="1-D latitudes"):
-            _static_kappa_redi_override(gm, fake)
+            static_kappa_redi_override(gm, fake)
 
 
 def _pytest_raises_valueerror(match):

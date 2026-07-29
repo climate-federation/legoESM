@@ -1180,7 +1180,7 @@ def compute_treguier_kappa_gm_nemo_native(
     real, non-negligible formulation gap, not roundoff.
 
     Method (``ldftra.F90:664-706``, exact — see also
-    :data:`_gm_redi_common._TREGUIER_RO_FACTOR` &c. for the shared tunables
+    :data:`_gm_redi_common.TREGUIER_RO_FACTOR` &c. for the shared tunables
     reused here):
 
     .. math::
@@ -1194,7 +1194,7 @@ def compute_treguier_kappa_gm_nemo_native(
     - ``Ro = clip(0.4·zn/max(|f|,1e-10), 2 km, 40 km)``;
     - ``zah = Σ_jk zn2·(wslpi²+wslpj²)·e3w(jk)·wmask(jk)``,
       ``zhw = 5 + Σ_jk e3w(jk)·wmask(jk)`` (the ``ldf_eiv`` ``zhw(:,:)=5.``
-      initialisation offset, ``_gm_redi_common._TREGUIER_ZHW_OFFSET_M``);
+      initialisation offset, ``_gm_redi_common.TREGUIER_ZHW_OFFSET_M``);
       ``T⁻¹ = sqrt(zah/zhw)``;
     - tropical taper ``min(1, |f|/f₂₀)``, ``f₂₀ = 2Ω sin(20°)``;
     - cap at ``cfg.aei0`` (the one namelist tunable, ``rn_Ue·rn_Le``).
@@ -1221,8 +1221,8 @@ def compute_treguier_kappa_gm_nemo_native(
     Returns the 2-D ``kappa_GM`` [m²/s], zero on dry columns.
     """
     from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-        _TREGUIER_RO_FACTOR, _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M,
-        _TREGUIER_F_MIN, _TREGUIER_ZHW_OFFSET_M, _TREGUIER_TAPER_LAT_DEG,
+        TREGUIER_RO_FACTOR, TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M,
+        TREGUIER_F_MIN, TREGUIER_ZHW_OFFSET_M, TREGUIER_TAPER_LAT_DEG,
     )
     dtype = rho.dtype
     ones_z = jnp.ones((1, 1, rho.shape[-1]), dtype=dtype)
@@ -1245,18 +1245,18 @@ def compute_treguier_kappa_gm_nemo_native(
     zn = jnp.sum(jnp.sqrt(jnp.maximum(zn2, 1e-30)) * e3w_3d, axis=-1)  # :689, unmasked term
     ze3w = e3w_3d * wmask3
     zah = jnp.sum(zn2 * (wslpi ** 2 + wslpj ** 2) * ze3w, axis=-1)  # :694-695
-    zhw = _TREGUIER_ZHW_OFFSET_M + jnp.sum(ze3w, axis=-1)           # :665,696
+    zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(ze3w, axis=-1)           # :665,696
 
-    f_abs = jnp.maximum(jnp.abs(f_coriolis), _TREGUIER_F_MIN)
-    ro = jnp.clip(_TREGUIER_RO_FACTOR * zn / f_abs,
-                  _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M)
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
+    ro = jnp.clip(TREGUIER_RO_FACTOR * zn / f_abs,
+                  TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
     # Same sqrt(0)-VJP guard as zn above: zah is EXACTLY 0 wherever wslpi=
     # wslpj=0 (dry columns, or a genuinely flat/unstratified wet column —
     # unlike compute_treguier_kappa_gm's sigma, which always carries a
     # 1e-30 floor baked into S_mag, wslpi/wslpj here are the raw
     # ldfslp-native slopes and CAN be exact zero); floor before sqrt.
     t_inv = jnp.sqrt(jnp.maximum(zah, 1e-30) / jnp.maximum(zhw, _EPS_DIV))
-    f20 = 2.0 * omega * jnp.sin(jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
+    f20 = 2.0 * omega * jnp.sin(jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
     # Same equatorial-taper floor as the generic path

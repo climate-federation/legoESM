@@ -36,7 +36,7 @@ from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _static_kappa_redi_override,
+    static_kappa_redi_override,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
@@ -224,7 +224,7 @@ def probe_latlon_cgrid(
         # 6986/6994) — reuse the exact same exported helper so the probe never
         # silently runs with kappa_Redi held at its (wrong, non-cos-scaled)
         # equator value on any recipe with kappa_redi_lat_scaling=True.
-        kappa_redi_override, kappa_redi_v_override = _static_kappa_redi_override(
+        kappa_redi_override, kappa_redi_v_override = static_kappa_redi_override(
             config.gm_redi, grid)
         dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
             T_iso, S_iso, state.eta.data, state.H_bathy.data,

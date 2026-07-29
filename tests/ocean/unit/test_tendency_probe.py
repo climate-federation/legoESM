@@ -389,13 +389,13 @@ def test_gm_redi_probe_threads_kappa_redi_cos_lat_override(
     """``kappa_redi_lat_scaling=True`` (the DINO nemo_dino_kamm_mlf recipe)
     means kappa_Redi is NOT the flat scalar the probe would use if it
     silently dropped ``kappa_redi_override`` — reproduce production's own
-    ``_static_kappa_redi_override`` + ``gm_redi_tracer_tendency_latlon`` call
+    ``static_kappa_redi_override`` + ``gm_redi_tracer_tendency_latlon`` call
     verbatim and assert the probe matches it bit-for-bit. This is the actual
     #1317 defect: the probe used to call ``gm_redi_tracer_tendency_latlon``
     WITHOUT ``kappa_redi_override``, silently running Redi at the (wrong,
     non-cos-scaled) equator-value kappa everywhere."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        _static_kappa_redi_override,
+        static_kappa_redi_override,
     )
     from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
         gm_redi_tracer_tendency_latlon,
@@ -406,7 +406,7 @@ def test_gm_redi_probe_threads_kappa_redi_cos_lat_override(
         gm_redi_tracer_state=(state.T.data, state.S.data),
     )
 
-    kappa_redi_override, kappa_redi_v_override = _static_kappa_redi_override(
+    kappa_redi_override, kappa_redi_v_override = static_kappa_redi_override(
         gm_redi_config.gm_redi, grid)
     assert kappa_redi_override is not None, "fixture must exercise the cos-lat path"
     dT_expected, dS_expected = gm_redi_tracer_tendency_latlon(
