@@ -3793,7 +3793,18 @@ class TestRunAmipFiniteCheck:
             def setup(self):
                 pass
             def run(self, **kwargs):
-                pass
+                # MUST return "COMPLETED" — the documented ModelDriver.run()
+                # contract (driver/run_status.py: "COMPLETED" => exit 0,
+                # anything else => exit 1, so unexpected statuses cannot slip
+                # through). Returning None made main() take the
+                # "run did not complete cleanly (status=None)" branch and exit
+                # BEFORE the finite check, so this test could never observe the
+                # NaN-field message it exists to assert.
+                #
+                # That is exactly the scenario under test: a run that COMPLETES
+                # normally but leaves NaN in the final state. A stub that
+                # reports failure tests the wrong branch entirely.
+                return "COMPLETED"
             def load_checkpoint(self, p):
                 return 0, 0.0
 
