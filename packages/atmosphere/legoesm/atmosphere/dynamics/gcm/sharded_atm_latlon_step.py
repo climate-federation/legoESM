@@ -32,6 +32,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
+from legoesm.parallel.geometry_consistency import (
+    assert_schema_agrees, broadcast_checked)
+
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
 )
@@ -385,6 +388,27 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
         raw["__polar_mask_v"] = jnp.stack(
             [model._polar_mask_v[r * nl:r * nl + nl + 1] for r in range(n_dev)],
             axis=0)
+    # #1362: the band geometry above is RECOMPUTED per process from the same
+    # config, and per-process XLA autotuning on device-derived grid fields
+    # makes the last ULPs differ at larger sizes -- which trips the
+    # bit-identical assert inside a replicated device_put (the ocean lane hit
+    # exactly this at LL576 np=4; this lane hit it at LL768).  Verify
+    # cross-process agreement, then broadcast process 0's bytes.  Guarded, not
+    # blind: a REAL divergence (different polar masks = different filtering =
+    # different physics) RAISES instead of being masked by process 0.
+    #
+    # The schema gate matters more here than in the ocean lane: the polar-mask
+    # entries are CONDITIONAL on ``model._polar_mask``, so a per-process
+    # difference in that one setting changes the field LIST itself, which
+    # would desynchronize the per-field gathers rather than fail cleanly.
+    ordered_names = list(raw)
+    assert_schema_agrees(ordered_names, n_dev,
+                         context="make_sharded_atm_latlon_step")
+    raw = {
+        name: jnp.asarray(broadcast_checked(
+            raw[name], name, context="make_sharded_atm_latlon_step"))
+        for name in ordered_names
+    }
     spec_of = lat_spec if shard_geometry else (lambda _arr: P())
     stacks = {
         name: jax.device_put(arr, NamedSharding(mesh, spec_of(arr)))
@@ -1202,6 +1226,18 @@ def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
             [model._polar_mask_v[r * nl:r * nl + nl + 1]
              for r in range(p_lat)],
             axis=0)[:, None]
+    # #1362, 2-D twin of the guard in _build_geometry_stacks -- same
+    # per-process recompute, same replicated-device_put bit-identity assert.
+    # n_dev is the FULL device count here (p_lat * p_lon): the schema
+    # fingerprint must describe this process's whole mesh, not one axis.
+    ordered_names = list(raw)
+    assert_schema_agrees(ordered_names, p_lat * p_lon,
+                         context="make_sharded_atm_latlon_step_2d")
+    raw = {
+        name: jnp.asarray(broadcast_checked(
+            raw[name], name, context="make_sharded_atm_latlon_step_2d"))
+        for name in ordered_names
+    }
     spec_of = tile_spec if shard_geometry else (lambda _arr: P())
     stacks = {
         name: jax.device_put(arr, NamedSharding(mesh, spec_of(arr)))

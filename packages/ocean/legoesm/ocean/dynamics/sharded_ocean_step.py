@@ -45,6 +45,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.parallel.geometry_consistency import (
+    assert_schema_agrees, broadcast_checked)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 try:                                   # JAX >= 0.8 exposes shard_map at top level
@@ -200,40 +202,6 @@ def build_band_grids(grid, n_devices: int):
             make_latlon_band_layout(r, n_devices, n_lat, int(grid.n_lon), fold))
         for r in range(n_devices)
     ]
-
-
-def _content_hash48(arr) -> float:
-    """48-bit content digest of ``arr``'s bytes, exactly representable in f64.
-
-    Used to compare EXACT-dtype arrays (masks, index tables) across
-    processes: unlike moment fingerprints, a byte digest is positional, so a
-    permutation or a two-cell flip cannot cancel. 48 bits keeps the value
-    under 2**53 so it survives the float64 ``process_allgather`` payload
-    exactly. Not cryptographic — collision-resistance at 2**-48 is far
-    beyond the ~10 setup-time comparisons this guard makes.
-    """
-    import hashlib
-
-    a = np.ascontiguousarray(arr)
-    h = hashlib.blake2b(a.tobytes(), digest_size=6)
-    return float(int.from_bytes(h.digest(), "big"))
-
-
-def _schema_fingerprint(names, n_dev) -> np.ndarray:
-    """Fixed-shape schema digest: field-name list, count, x64 flag, n_dev.
-
-    Gathered ONCE before the per-field loop so a process-dependent field
-    selection is caught by a collective every process reaches, instead of
-    desynchronizing the per-field gathers (codex round-5 findings 3/4).
-    """
-    import hashlib
-
-    joined = ",".join(names).encode()
-    digest = float(int.from_bytes(
-        hashlib.blake2b(joined, digest_size=6).digest(), "big"))
-    return np.array(
-        [float(len(names)), digest, float(bool(jax.config.jax_enable_x64)),
-         float(n_dev)], dtype=np.float64)
 
 
 def _build_band_vertex_masks(model, n_dev):
@@ -561,86 +529,21 @@ def make_sharded_ocean_step(model, mesh):
         # are (re)computed per process and can differ in their last ULPs
         # (per-process XLA autotuning on device-derived grid fields), which
         # trips that assert at larger sizes (job 26450848: LL576 np=4,
-        # area-scale fields differing at 1e-7 relative). Broadcast process
-        # 0's bytes so every controller puts the SAME replicated value.
-        # GUARD (codex round-3): process 0 must not silently mask REAL
-        # cross-process divergence. Compare an allgathered fingerprint:
-        # structural entries exactly; value entries EXACTLY for integer/bool
-        # arrays (masks are comparison results — bit-reproducible, and an
-        # exact compare is the only way to catch a two-cell flip that cancels
-        # in the sum, codex round-4) and to rtol 1e-5 for float arrays (only
-        # ULP autotune drift is expected there; quantize-then-assert-equal
-        # false-positived on a rounding boundary, job 26453240).
-        # NO DEADLOCK RISK: every process fingerprints the same fields in the
-        # same order and derives the verdict from the SAME gathered array, so
-        # the refusal is symmetric — all raise or none.
-        # Residual (documented): a float-geometry divergence preserving sum,
-        # sum-of-squares AND absmax to 1e-5 is not detected; band grids are
-        # analytic in lat/lon, so any real inconsistency moves those moments.
-        host = np.asarray(arr)
-        if jax.process_count() > 1:
-            from jax.experimental import multihost_utils
-
-            flat = host.ravel()
-            # Integer/bool arrays (masks, index tables) are exact data, not
-            # autotuned arithmetic: fingerprint their BYTES so a positional
-            # difference is caught. Moment-only compares are blind to a
-            # permutation — a bool mask's (sum, sumsq, absmax) is identical
-            # for every arrangement with the same true-count (codex round-5).
-            # A mask that genuinely differs across processes means different
-            # wet domains = different physics: refusing is the correct
-            # outcome, not a false alarm.
-            is_exact = host.dtype.kind in "biu"
-            struct = np.array(
-                [float(host.ndim), *map(float, host.shape),
-                 float(np.dtype(host.dtype).num)], dtype=np.float64)
-            if is_exact:
-                vals = np.array([_content_hash48(host)], dtype=np.float64)
-            else:
-                finite = flat[np.isfinite(flat)]
-                f64 = finite.astype(np.float64)
-                struct = np.concatenate(
-                    [struct, [float(flat.size - finite.size)]])
-                vals = np.array(
-                    [float(f64.sum()) if f64.size else 0.0,
-                     float((f64 * f64).sum()) if f64.size else 0.0,
-                     float(np.abs(f64).max()) if f64.size else 0.0],
-                    dtype=np.float64)
-            g_struct = multihost_utils.process_allgather(struct)
-            g_vals = multihost_utils.process_allgather(vals)
-            struct_ok = bool(np.all(g_struct == g_struct[0]))
-            if is_exact:
-                vals_ok = bool(np.all(g_vals == g_vals[0]))
-            else:
-                vals_ok = bool(np.allclose(g_vals, g_vals[0],
-                                           rtol=1e-5, atol=0.0))
-            if not (struct_ok and vals_ok):
-                raise RuntimeError(
-                    f"make_sharded_ocean_step: band-geometry field {name!r} "
-                    f"DIVERGES across processes (struct_ok={struct_ok}, "
-                    f"vals_ok={vals_ok}, exact_dtype={is_exact}, "
-                    f"gathered={g_vals.tolist()}) — a real config/grid "
-                    f"inconsistency, not autotune noise; refusing to "
-                    f"broadcast process 0 over it.")
-            host = multihost_utils.broadcast_one_to_all(host)
+        # area-scale fields differing at 1e-7 relative). broadcast_checked
+        # verifies cross-process agreement (raising on a REAL divergence
+        # rather than letting process 0 mask it) and then broadcasts process
+        # 0's bytes. Shared with the atmosphere lat-lon lane (#1362) —
+        # legoesm.parallel.geometry_consistency is the ONE implementation.
+        host = broadcast_checked(
+            arr, name, context="make_sharded_ocean_step")
         return jax.device_put(jnp.asarray(host), rep)
 
-    if jax.process_count() > 1:
-        # Schema gate FIRST (one fixed-shape collective every process
-        # reaches): a process-dependent field list or a mixed
-        # jax_enable_x64 setting would otherwise desynchronize the
-        # per-field gathers below instead of failing with a clear message.
-        from jax.experimental import multihost_utils as _mhu
-
-        _g = _mhu.process_allgather(
-            _schema_fingerprint(list(array_field_names), n_dev))
-        if not bool(np.all(_g == _g[0])):
-            raise RuntimeError(
-                "make_sharded_ocean_step: the band-geometry SCHEMA differs "
-                "across processes (field list / x64 setting / device count "
-                f"— gathered {_g.tolist()}). Fix the per-process config "
-                "before sharding; the per-field checks below assume one "
-                "schema.")
+    # Schema gate FIRST (one fixed-shape collective every process reaches):
+    # a process-dependent field list or a mixed jax_enable_x64 setting would
+    # otherwise desynchronize the per-field gathers below instead of failing
+    # with a clear message.
+    assert_schema_agrees(list(array_field_names), n_dev,
+                         context="make_sharded_ocean_step")
 
     geom_stacks = {
         name: _replicated_put(
