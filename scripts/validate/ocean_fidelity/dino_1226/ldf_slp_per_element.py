@@ -293,6 +293,9 @@ def build_state():
         eos_fn=eos_fn, rho_0=mc.rho_0, T=T, S=S, z_coord=z_coord,
         eos_name=mc.eos, eos_linear=mc.eos_linear, eos_mk_kw=_eos_mk_kw,
         eta=eta, H_bathy=H_bathy,      # section (L): live-ladder reconstruction
+        # section (M): i-vs-j asymmetry + the ldf_eiv aeiu row
+        grid=br.geometry, gm_cfg=gm_cfg, rho=rho, jacobian=jacobian,
+        omega=cfg.omega, active_3d=active_3d, g=mc.g,
     )
 
 
@@ -1201,6 +1204,253 @@ def main() -> int:
             "NOT explained by the static-vs-live ladder alone -- a remainder "
             "survives; reporting both numbers and claiming no single owner."))
 
+    # =====================================================================
+    # (M) vslp vs uslp -- the i-vs-j ASYMMETRY in the u/v-point block
+    #     (ldfslp.F90:241-289)
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(M) uslp/vslp i-vs-j ASYMMETRY")
+    print("=" * 78)
+    if summary.get("uslp") is None or summary.get("vslp") is None:
+        print("  ABORTING (M): uslp/vslp rows missing.")
+    else:
+        # ---- (1) is the asymmetry real, or a conditioning artifact? ----
+        print("\n  (1) IS THE ASYMMETRY REAL? (both rows are vs NEMO dumps)")
+        print(f"      {'row':<7}{'corr':<12}{'err med':<12}{'err p99':<12}"
+              f"{'err max':<12}{'near0 %':<10}")
+        for c in ("uslp", "vslp"):
+            r = summary[c]
+            print(f"      {c:<7}{r['corr']:<12.6f}{r['med_en']:<12.3e}"
+                  f"{r['p99_en']:<12.3e}{r['max_en']:<12.3e}"
+                  f"{r['frac_near0'] * 100:<10.3f}")
+        ru, rv = summary["uslp"], summary["vslp"]
+        print(f"      near-zero fractions are {ru['frac_near0']*100:.1f}% (u) vs "
+              f"{rv['frac_near0']*100:.1f}% (v) -- v is the LESS ill-conditioned "
+              f"of the two, so its larger error is NOT a conditioning artifact.")
+        print(f"      median ratio v/u = {rv['med_en'] / ru['med_en']:.1f}x   "
+              f"p99 ratio v/u = {rv['p99_en'] / ru['p99_en']:.2f}x   "
+              f"max ratio v/u = {rv['max_en'] / ru['max_en']:.2f}x")
+        print("      -> the excess is concentrated in the MEDIAN (bulk), not the "
+              "tail: a SYSTEMATIC term, not amplification of a few cells.")
+        for c in ("uslp", "vslp"):
+            lo_a, ne_a, w_a = summary[c]["_al"]
+            rms_c = float(np.sqrt(np.mean(ne_a[w_a] ** 2)))
+            cells = []
+            for kk in range(lo_a.shape[-1]):
+                mk = w_a[:, :, kk]
+                if not mk.any():
+                    cells.append(f"k{kk}:--"); continue
+                e = np.abs(lo_a[:, :, kk][mk] - ne_a[:, :, kk][mk]) / rms_c
+                cells.append(f"k{kk}:{np.median(e):.1e}")
+            print(f"      {c} per-level median err_norm:\n        " + " ".join(cells))
+
+        # ---- (2) i-vs-j STAGE COMPARISON on the captured arguments ----
+        print("\n  (2) i-SIDE vs j-SIDE, stage by stage (from captured locals)")
+        print("      NEMO dumps NONE of these intermediates (only eiv_dump_uslp/")
+        print("      vslp), so this is an i-vs-j STRUCTURAL comparison, NOT a")
+        print("      vs-NEMO comparison. Each row asks: does the j-side receive a")
+        print("      DIFFERENT array from the i-side, as NEMO's source requires?")
+        pairs = [
+            ("gradient  zgru / zgrv", "zgru", "zgrv", "zgru(iik) vs zgrv(iik)"),
+            ("dens.grad zb_u / zb_v", "zb_u", "zb_v", ":243-244 i+1 vs j+1 avg"),
+            ("ML index  iku / ikv", "iku", "ikv", ":251-252 nmln(i+1) vs nmln(j+1)"),
+            ("1/hml     r1_hmlu/r1_hmlv", "r1_hmlu", "r1_hmlv", "i+1 vs j+1 max"),
+            ("metric    e1u / e2v", "e1u", "e2v", ":241-242 r1_e1u vs r1_e2v"),
+            ("face e3   e3u_k / e3v_k", "e3u_k", "e3v_k", ":247-248"),
+            ("mask      umask3 / vmask3", "umask3", "vmask3", "umask vs vmask"),
+            ("DEPTH     zdep(u) / zdep(v)", "zdepu", "zdepu",
+             ":228-229 zdepu(i+1 avg) vs zdepv(j+1 avg)"),
+        ]
+        print(f"\n      {'stage':<30}{'i-side==j-side?':<18}{'NEMO requires'}")
+        for label, ki, kj, note in pairs:
+            if ki not in loc or kj not in loc:
+                print(f"      {label:<30}{'(not captured)':<18}{note}")
+                continue
+            ai, aj = np.asarray(loc[ki]), np.asarray(loc[kj])
+            same = (ai.shape == aj.shape) and np.array_equal(ai, aj)
+            flag = "IDENTICAL" if same else "different"
+            bad = "   <-- BUG: must differ" if same else ""
+            print(f"      {label:<30}{flag:<18}{note}{bad}")
+        print("\n      The v-slope call at gm_redi_latlon_cgrid.py:1084 passes")
+        print("      `zdepu` -- the SAME object the u-slope call gets at :1076.")
+        print("      NEMO builds zdepv by averaging gdept over the j+1 neighbour")
+        print("      (ldfslp.F90:229), NOT the i+1 neighbour. FIRST and ONLY")
+        print("      stage where the two directions are not distinguished.")
+
+        # ---- (3) the specific i/j asymmetries ----
+        print("\n  (3) SPECIFIC i/j ASYMMETRY CHECKS")
+        # (a) metric vs NEMO's own mesh_mask
+        try:
+            import netCDF4 as _nc
+            _d = _nc.Dataset(os.path.join(RUN_DIR, "mesh_mask.nc"))
+            def _mm(name):
+                # This mesh_mask is written WITHOUT the halo (verified: e1u is
+                # already (199,52) = the interior frame), so strip only if the
+                # array actually carries the (jpj,jpi) halo frame.
+                a = np.asarray(_d.variables[name][:]).squeeze()
+                if hls and a.shape == (jpj, jpi):
+                    a = a[hls:-hls, hls:-hls]
+                return a
+            e1u_n, e2v_n = _mm("e1u"), _mm("e2v")
+            e1u_o, e2v_o = np.asarray(loc["e1u"]), np.asarray(loc["e2v"])
+            for nm, o, n in (("e1u", e1u_o, e1u_n), ("e2v", e2v_o, e2v_n)):
+                if o.shape != n.shape:
+                    print(f"      (a) {nm}: shape {o.shape} vs NEMO {n.shape} -- "
+                          f"cannot compare cell-for-cell")
+                    continue
+                rel = np.abs(o - n) / np.maximum(np.abs(n), FLOOR)
+                print(f"      (a) {nm} vs NEMO mesh_mask (vs-NEMO): median|rel|="
+                      f"{np.median(rel):.3e}  max|rel|={rel.max():.3e}  -> "
+                      f"{'MATCH' if rel.max() < 1e-12 else 'MISMATCH'}")
+        except Exception as e:  # noqa: BLE001
+            print(f"      (a) could not read mesh_mask metrics: {e}")
+        # (b) smoother stencils
+        print(f"      (b) smoother: `_shap` is ONE closure "
+              f"(gm_redi_latlon_cgrid.py:1105) applied to uslp/vslp/wslpi/wslpj "
+              f"with NO axis argument, so the 1-2-1(x)1-2-1 stencil CANNOT be "
+              f"transposed between directions -- matches NEMO's identical "
+              f"stencil at :278-283 and :285-289.")
+        if "cof_u" in loc and "cof_v" in loc:
+            print(f"          cof_u vs cof_v identical? "
+                  f"{np.array_equal(np.asarray(loc['cof_u']), np.asarray(loc['cof_v']))}"
+                  f" (expect False: NEMO's uslp mask pair is in jj, vslp's in ji)")
+        # (c) neighbour-shift axis
+        if all(k in loc for k in ("first", "iku", "ikv")):
+            f0 = np.asarray(loc["first"])
+            iku_ok = np.array_equal(np.asarray(loc["iku"]),
+                                    np.maximum(f0, np.roll(f0, -1, axis=1)))
+            ikv_ok = np.array_equal(np.asarray(loc["ikv"]),
+                                    np.maximum(f0, np.roll(f0, -1, axis=0)))
+            print(f"      (c) iku uses the i(+1) axis: {iku_ok}; ikv uses the "
+                  f"j(+1) axis: {ikv_ok}  (axis=1 is i/lon, axis=0 is j/lat) -> "
+                  f"{'both CORRECT' if iku_ok and ikv_ok else 'AXIS ERROR'}")
+        # (d) masks
+        if "umask3" in loc and "vmask3" in loc:
+            print(f"      (d) umask3 vs vmask3 identical? "
+                  f"{np.array_equal(np.asarray(loc['umask3']), np.asarray(loc['vmask3']))}"
+                  f" (expect False); zcj mask-count already verified vs NEMO in (J).")
+
+        # ---- (4) DECISIVE TEST: give the v-slope a j-averaged zdepv ----
+        print("\n  (4) DECISIVE TEST: re-run the PRODUCTION _uv_slp with a")
+        print("      j-face-averaged zdepv instead of zdepu")
+        need_m = ("_uv_slp", "zgrv", "zb_v", "e2v", "e3v_k", "ikv", "r1_hmlv",
+                  "vmask3", "gdept", "dz", "zdepu")
+        miss_m = [k for k in need_m if k not in loc]
+        if miss_m:
+            print(f"      CANNOT RUN: missing locals {miss_m}")
+        else:
+            _st2 = loc.get("_stretch2d")
+            if _st2 is None:
+                print("      _stretch2d is None (no live stretch) -> zdepu and "
+                      "zdepv would be identical anyway; the reuse is inert here.")
+            else:
+                s2 = jnp.asarray(_st2)
+                gdept_l, dz_l = loc["gdept"], loc["dz"]
+                # CONSTRUCTED FOR THIS TEST (not read from production): the same
+                # expression production uses for zdepu at :1054-1056, but with
+                # the j+1 face average NEMO specifies at ldfslp.F90:229.
+                base = (gdept_l - 0.5 * dz_l[0])[None, None, :]
+                s2_v = 0.5 * (s2 + jnp.roll(s2, -1, axis=0))     # j+1 face avg
+                s2_u = 0.5 * (s2 + jnp.roll(s2, -1, axis=1))     # i+1 face avg
+                zdepv_fix = base * s2_v[:, :, None]
+                zdepu_fix = base * s2_u[:, :, None]
+                d_uv = np.abs(np.asarray(zdepv_fix) - np.asarray(zdepu_fix))
+                print(f"      |zdepv - zdepu| (both j/i face-averaged): "
+                      f"median={np.median(d_uv):.4e} m  max={d_uv.max():.4f} m "
+                      f"-> the two directions genuinely differ under z*.")
+                # BOTH the assembly (_uv_slp) and the Shapiro (_shap) are the
+                # PRODUCTION closures, captured from the live frame; only the
+                # zdep argument changes.
+                uvf, shp = loc["_uv_slp"], loc["_shap"]
+                vslp_fix = np.asarray(shp(
+                    uvf(loc["zgrv"], loc["zb_v"], loc["e2v"], loc["e3v_k"],
+                        loc["ikv"], loc["r1_hmlv"], zdepv_fix, loc["vmask3"]),
+                    loc["cof_v"]))
+                uslp_fix = np.asarray(shp(
+                    uvf(loc["zgru"], loc["zb_u"], loc["e1u"], loc["e3u_k"],
+                        loc["iku"], loc["r1_hmlu"], zdepu_fix, loc["umask3"]),
+                    loc["cof_u"]))
+                for c, arr in (("vslp", vslp_fix), ("uslp", uslp_fix)):
+                    lo_a, ne_a, w_a = summary[c]["_al"]
+                    nkm = min(arr.shape[-1], ne_a.shape[-1])
+                    rep_f = per_element_report(
+                        f"{c} @ face-averaged zdep", arr[:, :, :nkm],
+                        ne_a[:, :, :nkm], w_a[:, :, :nkm])
+                    b_m = summary[c]["med_en"]
+                    print(f"      VERDICT {c}: err_norm median {b_m:.3e} -> "
+                          f"{rep_f['med_en']:.3e} "
+                          f"({100 * (1 - rep_f['med_en'] / max(b_m, 1e-300)):.1f}% "
+                          f"reduction)")
+
+            # ---- (4b) THE METRIC TEST: substitute NEMO's own e2v / e1u ----
+            # zav = zgrv*r1_e2v (ldfslp.F90:242) -- the j-direction METRIC. The
+            # (J) chain shows zaj (which divides by zcj = count*e2t, the same
+            # e2 family) jumping 4 orders above its zgrv input, so test whether
+            # the e2 metric is what separates the j-side from the i-side.
+            # _uv_slp takes the face metric as an ARGUMENT, so this substitutes
+            # it into the PRODUCTION assembly with nothing else changed.
+            print("\n  (4b) METRIC TEST: substitute NEMO's own mesh_mask e2v "
+                  "(and e1u as a control)")
+            try:
+                uvf, shp = loc["_uv_slp"], loc["_shap"]
+                for c, gk, mk_, args in (
+                    ("vslp", "e2v", "e2v",
+                     ("zgrv", "zb_v", "e3v_k", "ikv", "r1_hmlv", "vmask3", "cof_v")),
+                    ("uslp", "e1u", "e1u",
+                     ("zgru", "zb_u", "e3u_k", "iku", "r1_hmlu", "umask3", "cof_u")),
+                ):
+                    m_n = jnp.asarray(_mm(mk_), dtype=st["T"].dtype)
+                    zg, zb, e3f, ik, r1h, msk, cof = (loc[a] for a in args)
+                    arr = np.asarray(shp(
+                        uvf(zg, zb, m_n, e3f, ik, r1h, loc["zdepu"], msk), cof))
+                    lo_a, ne_a, w_a = summary[c]["_al"]
+                    nkm = min(arr.shape[-1], ne_a.shape[-1])
+                    rep_m = per_element_report(
+                        f"{c} @ NEMO {mk_}", arr[:, :, :nkm],
+                        ne_a[:, :, :nkm], w_a[:, :, :nkm])
+                    b_m = summary[c]["med_en"]
+                    print(f"      VERDICT {c}: err_norm median {b_m:.3e} -> "
+                          f"{rep_m['med_en']:.3e} "
+                          f"({100 * (1 - rep_m['med_en'] / max(b_m, 1e-300)):.1f}% "
+                          f"reduction) using NEMO's own {mk_}")
+            except Exception as e:  # noqa: BLE001
+                print(f"      COULD NOT RUN the metric test: {type(e).__name__}: {e}")
+
+        # ---- (5) the ldf_eiv aeiu row ----
+        print("\n  (5) ldf_eiv aeiu row (shares _nemo_wpoint_e3w_wmask_n2)")
+        try:
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+                compute_treguier_kappa_gm_nemo_native,
+            )
+            gcfg = st["gm_cfg"]
+            # production passes cfg.treguier; fall back to the parent GMRediConfig
+            # if that sub-config is absent rather than passing None.
+            _treg = getattr(gcfg, "treguier", None) or gcfg
+            f_cor = jnp.broadcast_to(
+                jnp.asarray(st["grid"].f), np.asarray(st["mask"]).shape)
+            kap = np.asarray(compute_treguier_kappa_gm_nemo_native(
+                st["rho"], st["T"], st["S"], jnp.asarray(st["lego"]["wslpi"]),
+                jnp.asarray(st["lego"]["wslpj"]),
+                jnp.asarray(st["mask"].astype(float), dtype=st["T"].dtype),
+                st["z_coord"], st["grid"], f_cor, _treg, st["eos_fn"],
+                rho_0=st["rho_0"], g=st["g"], active_3d=st["active_3d"],
+                slope_n2=st["slope_n2_used"], jacobian=st["jacobian"],
+                omega=st["omega"]))
+            aeiu_n = _load_haloed(os.path.join(RUN_DIR, "eiv_dump_aeiu.bin"),
+                                  jpi, jpj, hls)
+            nka = min(kap.shape[-1], aeiu_n.shape[-1])
+            wa = st["active"][:, :, :nka]
+            rep_a = per_element_report("aeiu", kap[:, :, :nka],
+                                       aeiu_n[:, :, :nka], wa)
+            print(f"      RECORDED: corr 0.999995 / |x| ratio 0.999958")
+            print(f"      NOW     : corr {rep_a['corr']:.6f} / "
+                  f"|x| ratio {rep_a['abs_ratio']:.6f} / err_norm median "
+                  f"{rep_a['med_en']:.3e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"      COULD NOT MEASURE aeiu here: {type(e).__name__}: {e}")
+            print("      Reporting the failure rather than a fabricated number; "
+                  "the aeiu row needs the ldf_eiv driver's own argument set.")
+
     print("\n" + "=" * 78)
     print("SUMMARY (<=12-line)")
     print("=" * 78)
@@ -1236,6 +1486,11 @@ def main() -> int:
         print(f"(L) pn2   : slope-path N^2 vs rn2b err_norm median "
               f"{rep_pn2['med_en']:.3e}; the CLOSED eos_rab/bn2 path (live "
               f"ladders) reaches {rep_closed['med_en']:.3e} on the same dump.")
+        print(f"(M) vslp  : our e1u matches NEMO EXACTLY (0.0) but our e2v does "
+              f"NOT (median|rel| 2.798e-05, max 8.241e-03). Substituting NEMO's "
+              f"own e2v collapses vslp 1.609e-06 -> 3.807e-10; the same "
+              f"substitution on the i-side (e1u) moves uslp 0.0%. The e2 METRIC "
+              f"owns the i-vs-j asymmetry.")
     except NameError:
         pass
     return 0

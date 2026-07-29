@@ -1049,11 +1049,24 @@ def compute_nemo_native_slopes(
     r1_hmlu = 1.0 / jnp.maximum(
         jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=1)),
         jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
-    # zdepu ~ gdept(...,Kmm) (ldfslp.F90:226-229, live) -- same per-column
-    # (1+r3t) stretch as zhmlpt/zck above.
-    zdepu = (gdept - 0.5 * dz[0])[None, None, :] * jnp.ones_like(zgru)
+    # zdepu/zdepv ~ gdept(...,Kmm) (ldfslp.F90:261-266, live).  NEMO takes the
+    # U-FACE / V-FACE AVERAGE of the two bracketing T-column depths:
+    #     zdepu = 0.5*( (gdept(i,j,k) + gdept(i+1,j,k)) - e3u(i,j,miku,Kmm) )
+    #     zdepv = 0.5*( (gdept(i,j,k) + gdept(i,j+1,k)) - e3v(i,j,mikv,Kmm) )
+    # (risfdep == 0, no ice shelf in DINO).  Using the bare T-point ladder for
+    # BOTH -- and in particular passing zdepu to the v-slope, which averages
+    # over the wrong axis entirely -- was a transcription defect (#1226).
+    # Stretch per column FIRST, then face-average, so each column carries its
+    # own (1+r3t) exactly as NEMO's live gdept does.
+    _gd_col = gdept[None, None, :] * jnp.ones_like(zgru)
     if _stretch2d is not None:
-        zdepu = zdepu * _stretch2d[:, :, None]
+        _gd_col = _gd_col * _stretch2d[:, :, None]
+    _e3_top = 0.5 * dz[0]
+    if _stretch2d is not None:
+        _e3_top = _e3_top * _stretch2d[:, :, None]
+    # axis=1 is the i/lon direction (matches zb_u/iku above), axis=0 is j/lat.
+    zdepu = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=1)) - _e3_top
+    zdepv = 0.5 * (_gd_col + jnp.roll(_gd_col, -1, axis=0)) - _e3_top
     # NEMO's slope stability bound is -7e3/e3u(ji,jj,jk,Kmm)*|zau| (ldfslp.F90
     # :133-134) and it uses the U-FACE / V-FACE thickness, NOT the cell value.
     # At a staircase / partial-cell topography step the face thickness is the
@@ -1081,7 +1094,7 @@ def compute_nemo_native_slopes(
     r1_hmlv = 1.0 / jnp.maximum(
         jnp.maximum(zhmlpt, jnp.roll(zhmlpt, -1, axis=0)),
         jnp.asarray(_NEMO_HML_UV_FLOOR_M, dtype))
-    vslp = _uv_slp(zgrv, zb_v, e2v, e3v_k, ikv, r1_hmlv, zdepu, vmask3)
+    vslp = _uv_slp(zgrv, zb_v, e2v, e3v_k, ikv, r1_hmlv, zdepv, vmask3)
 
     # --- wslpi / wslpj (:265-297) ---
     zgru_im1 = jnp.roll(zgru, +1, axis=1)
