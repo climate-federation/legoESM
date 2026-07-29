@@ -19,6 +19,33 @@ deleting a `PER_ELEMENT` entry, not by flipping a `BINARY_GATES` verdict. Those 
 task. `--self-test` must keep passing every loop.
 
 ## High Priority (in order)
+- [ ] **THE ACC LEVER — the wind does not survive the barotropic pathway. HIGHEST VALUE IN THE
+      CAMPAIGN.** ACC momentum budget measured 2026-07-29 (acc_momentum_budget.py), both models fed
+      the SAME NEMO Y5 state, channel band rows 14-48 (-64.44..-45.35 degN, chosen objectively as
+      rows with no land at any longitude).
+      Channel- and depth-integrated zonal force difference (lego - NEMO) [m^3/s^2]:
+          adv +1.24 | vor -2.40 | ldf -0.002 | hpg +1.09   -> INTERIOR total -0.075, **0.0% share**
+          spg -1240 | zdf -13856                            -> SURFACE/BAROTROPIC **100.0% share**
+      Per-element the interior terms are near-exact too: adv+hpg err_norm 7.6e-5 (corr 1.000000),
+      vor 1.7e-3, ldf 4.5e-2, and the four-term sum vs NEMO's D06 accumulator 1.24e-3.
+      MECHANISM: legoESM's wind ENTERS correctly — its explicit du_dt carries +1.3845e4 vs the
+      analytic channel input +1.3856e4 (0.9992x) — but the REALIZED channel tendency after the
+      barotropic + vertical stages is -1238 vs NEMO's +13859, a shortfall of -1.09x the wind input.
+      The wind is input correctly and then does NOT SURVIVE the free-surface/barotropic pathway.
+      NEXT: which operation removes it — the F_slow depth-mean split, the substep recurrence, the
+      barotropic bottom drag, or the mean re-imposition? Note this is the SAME pathway as the
+      already-found missing `zu_trd` subtraction (dynspg_ts.F90:304/:367), which is now a prime
+      suspect rather than a loose end.
+      CAVEAT: instantaneous budget at Y5 with both models on a shared state. It establishes which
+      term differs THERE; it does NOT prove that term caused the 5-year from-rest divergence, and a
+      term matching here can still differ in the spin-up regime. Re-run the same budget on a
+      from-rest state before treating it as closed.
+      THREE TRAPS caught and now gated in the script, each of which would have produced a false
+      ranking: (a) NEMO stage 8 is BAROCLINIC-ONLY (dynzdf.F90:150-151 strips uu_b(Kaa) under
+      ln_drgimp+ln_dynspg_ts) — unrestored it ranked zdf at 97.7% on a depth-uniform artifact;
+      (b) legoESM's vortcor_u ALREADY carries (f+zeta) x u, so adding coriolis_cgrid double-counts
+      f (RMS 2.001x at corr 0.99998); (c) the bridge leaves tau_x_prev=None, which SILENTLY DROPS
+      THE WIND FROM STEP 1 — seeded per NEMO's before:=now rule.
 - [ ] **THE BAROTROPIC SEED — now the single highest-value target (3 rows).**
       MEASURED 2026-07-29 (spg_substep_chain.py): `dyn_spg_ts` is NOT the defect. The velocity
       error is already at the LOOP-ENTRY SEED (err_norm u 2.31e-2) and flat through substep 1
