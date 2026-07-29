@@ -39,7 +39,13 @@ task. `--self-test` must keep passing every loop.
       worth its own row, NOT yet measured.
       GUARDED: precision_gate.require_explicit_e3t_mode() now refuses an inherited default
       (4th contaminated measurement).
-      NEXT: with e3t=both, walk the SUBSTEP RECURRENCE (2.966e-04 -> 1.992e-02 over 68 substeps).
+      GROWTH SHAPE MEASURED 2026-07-29: final/substep-1 = 67.2 against 68 substeps => the
+      accumulation is **LINEAR**, i.e. a CONSTANT ~2.97e-04 added per substep, NOT amplifying
+      feedback or an instability. That is the signature of a term held FIXED across the loop
+      being slightly wrong — in NEMO's split-explicit scheme that is the SLOW FORCING
+      (zu_frc/zv_frc/ssh_frc, computed once before the loop and applied every substep), which is
+      dumped. Testing that first; if it is clean the error is in a per-substep term instead
+      (SSH gradient, in-loop Coriolis, bottom drag, the forcing add, or the ssh update).
       (superseded: RESOLVED TO (B): the AVERAGING OPERATOR owns it; the 3-D velocity is
       BIT-IDENTICAL to NEMO (err_norm 0.0 at all 35 levels, both components).** Since the
       numerator is exact, the entire 2.31e-2 lives in the thickness weighting
