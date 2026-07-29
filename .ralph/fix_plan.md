@@ -39,6 +39,17 @@ task. `--self-test` must keep passing every loop.
       worth its own row, NOT yet measured.
       GUARDED: precision_gate.require_explicit_e3t_mode() now refuses an inherited default
       (4th contaminated measurement).
+      **CHAIN CLOSED 2026-07-29: the SLOW FORCING `zu_frc` owns the worst row.**
+      zu_frc err_norm 8.03e-03 -> propagated through ONE substep (rDt_e=117.391304 s) predicts
+      substep-1 2.9661e-04 vs measured 2.9656e-04 (ratio 1.000) -> x68 predicts final puu_b
+      2.0166e-02 vs measured 1.9918e-02 = **101.2% explained**. The entire 1.3e-2 gap reduces to
+      ONE quantity.
+      OPEN: the V-component does NOT close the same way (12.6% explained) — `pvv_b` has a second
+      cause. Do not assume symmetry with u.
+      NEXT THREAD: why is zu_frc off by 8.03e-03? It is the vertically-integrated slow
+      (baroclinic) momentum trend — candidates are the terms summed into it and the integration
+      weights. The e3t ladder is now correct, so it is NOT that.
+      (growth shape, for the record)
       GROWTH SHAPE MEASURED 2026-07-29: final/substep-1 = 67.2 against 68 substeps => the
       accumulation is **LINEAR**, i.e. a CONSTANT ~2.97e-04 added per substep, NOT amplifying
       feedback or an instability. That is the signature of a term held FIXED across the loop
