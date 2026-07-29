@@ -19,6 +19,17 @@ deleting a `PER_ELEMENT` entry, not by flipping a `BINARY_GATES` verdict. Those 
 task. `--self-test` must keep passing every loop.
 
 ## High Priority (in order)
+- [ ] **THE BAROTROPIC SEED — now the single highest-value target (3 rows).**
+      MEASURED 2026-07-29 (spg_substep_chain.py): `dyn_spg_ts` is NOT the defect. The velocity
+      error is already at the LOOP-ENTRY SEED (err_norm u 2.31e-2) and flat through substep 1
+      (2.31e-2) to final (3.09e-2). Substep count matches exactly (23==23, 68==68); alignment
+      sharp at (0,0) on both a U-face and a T-point field; ssh EXACT at seed => velocity-specific,
+      not shared with the eta/PGF chain. `puu_b`, `un_adv` and `pssh` are ALL INHERITED from the
+      seed — the solver faithfully propagates a wrong initial condition.
+      NEXT: compare legoESM's before-level U_bar/V_bar seed per column vs NEMO's
+      puu_b(Kbb)/pvv_b(Kbb) — uniform scale factor, or concentrated on shelf/thin columns?
+      `BarotropicConfig.barotropic_seed_face_depth`'s docstring already documents an 11%
+      loop-entry residual at shelf columns under `min_water_column_m=0.5`: leading candidate.
 - [x] **DONE 2026-07-28/29 — metric_convention pass (human APPROVED: NEMO match).**
       `nemo_isotropic` already sets `dy_T`/`dy_u`/`area_T` and now `dy_v = R*dlon*cos(lat_v)`
       (NEMO `pe2v = pe1v`, `usrdef_hgr.F90:117`). REMAINING: wire the DINO bridge to select it
