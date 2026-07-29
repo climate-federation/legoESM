@@ -33,43 +33,79 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, FLAG_UNCOERCIBLE, assert_flags_agree, assert_schema_agrees,
-    broadcast_checked, coerce_count, name_digest48)
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    coerce_bool, coerce_count, config_digest48, name_digest48,
+    tree_schema_digest48)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
 )
 
 
-# Ordered flag names for the MESH-ONLY entry gate used by the gather bridges.
-# STATIC tuple: the payload width is fixed by this literal, never by data.
-_MESH_ENTRY_FLAGS = ("has_mesh", "n_dev", "n_axes", "axis_names")
+# Ordered flag names for the MESH+TREE entry gate used by the shard/gather
+# bridges. STATIC tuple: the payload width is fixed by this literal, never by
+# rank-local data (the variable-length parts are folded into single digests).
+_MESH_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "has_tree", "tree_schema",
+)
 
 
-def _agree_mesh_entry(mesh, *, where: str) -> None:
-    """Agree the mesh identity, as the FIRST statement of a GATHER entry point.
+def _mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists for the mesh digests.
 
-    #1362 round 4.  The gather bridges are public and they DO run a
-    cross-process collective: ``replicate_leaf`` compiles a jit identity with
-    replicated ``out_shardings``, and XLA inserts the all-gather (unlike the
-    SCATTER direction, whose ``make_array_from_callback`` builds each
-    addressable shard locally).  ``gather_atm_latlon_to_hydrostatic`` also
-    branches on ``mesh is None`` and SKIPS that collective entirely, so a
-    process that received ``None`` while its peers received a mesh would leave
-    them blocked forever.
-
-    Only the mesh is agreed here — that is the whole rank-local input — so the
-    payload is 4 wide and the cost is one tiny allgather per SEGMENT BOUNDARY
-    (never in the step hot loop, and a no-op under one process), alongside a
-    full-state gather that is orders of magnitude larger.
+    The SIZES are carried per axis (not just the axis count) because a mesh
+    reshaped ``(2, 4)`` on one rank and ``(4, 2)`` on another has the same
+    names, the same count, and the same total device count (codex round-4,
+    blocker 5 tail).  Never raises: an unreadable mesh degrades to a marker
+    term that still participates in the comparison.
     """
-    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
-        else ()
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
+
+
+def _agree_mesh_entry(mesh, tree=None, *, where: str) -> None:
+    """Agree the mesh AND the pytree LEAF SCHEMA, as the FIRST statement of a
+    shard/gather entry point.
+
+    #1362 round 4.  These bridges are public and they DO run cross-process
+    collectives: ``replicate_leaf`` compiles a jit identity with replicated
+    ``out_shardings`` and XLA inserts the all-gather, and a direct
+    ``device_put`` of a full global array onto a cross-process
+    ``NamedSharding`` falls back to an all-gather too (documented on
+    ``latlon_spmd.shard_leaf``).  Two rank-local inputs decide how many of
+    those run:
+
+    * ``mesh is None`` SKIPS the collective entirely, so a process that
+      received ``None`` while its peers received a mesh leaves them blocked.
+    * the STATE SCHEMA — one replication per leaf, so a tracer dict differing
+      in key set, order or shape across processes produces mismatched
+      schedules (codex round-4, blocker 5).  ``tree`` folds that whole schema
+      into ONE fixed-width digest via :func:`tree_schema_digest48`.
+
+    Cost: a 9-float allgather per SEGMENT BOUNDARY (never inside the step hot
+    loop), alongside a full-state gather that is orders of magnitude larger —
+    and an exact no-op under a single process.
+    """
+    names, sizes = _mesh_axis_terms(mesh)
     assert_flags_agree(_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(axis_names)),
-        name_digest48(axis_names),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        float(tree is not None),
+        tree_schema_digest48(tree) if tree is not None else FLAG_ABSENT,
     ), context=where)
 
 
@@ -91,6 +127,10 @@ def shard_state_atm_latlon(
     is reconstructed inside the body. Mirrors ``ocean.shard_state_latlon`` but
     walks the 6-field atm pytree (bare arrays + a tracers dict, no masks).
     """
+    # FIRST statement: the SCATTER runs one placement per leaf, so its
+    # SCHEDULE is rank-local data (a tracer dict differing in key set / order
+    # / shape across processes). #1362 round 4, blockers 5-6.
+    _agree_mesh_entry(mesh, state, where="shard_state_atm_latlon")
     from legoesm.parallel.latlon_spmd import shard_leaf
 
     _mp = jax.process_count() > 1
@@ -225,7 +265,7 @@ def gather_state_atm_latlon(
     byte-unchanged."""
     # FIRST statement: this entry point runs a cross-process replication
     # collective (see _agree_mesh_entry).
-    _agree_mesh_entry(mesh, where="gather_state_atm_latlon")
+    _agree_mesh_entry(mesh, state, where="gather_state_atm_latlon")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -267,6 +307,9 @@ def shard_hydrostatic_to_atm_latlon(hs, grid, mesh):
     state: convert (cell winds -> C-grid faces) THEN shard. ``mesh=None`` returns
     the un-sharded C-grid state (single-device fallback). Inverse of
     :func:`gather_atm_latlon_to_hydrostatic`."""
+    # FIRST statement: the `mesh is None` branch below SKIPS the scatter
+    # entirely (#1362 round 4).
+    _agree_mesh_entry(mesh, hs, where="shard_hydrostatic_to_atm_latlon")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
     c_state = hydrostatic_to_cgrid(hs, grid)
@@ -280,7 +323,8 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
     expects. ``mesh=None`` converts the already-full C-grid state directly."""
     # FIRST statement: the `mesh is None` branch below SKIPS the replication
     # collective entirely, so the mesh must be agreed before it (#1362 r4).
-    _agree_mesh_entry(mesh, where="gather_atm_latlon_to_hydrostatic")
+    _agree_mesh_entry(mesh, c_state,
+                      where="gather_atm_latlon_to_hydrostatic")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         cgrid_to_hydrostatic)
     full = c_state if mesh is None else gather_state_atm_latlon(c_state, mesh)
@@ -558,33 +602,13 @@ def unroll_to_dtype_fixed_point(step1, state, n_left: int):
 # Ordered flag names for the SPMD entry gate. STATIC tuple: the payload width
 # is fixed by this literal, never by rank-local data.
 _SPMD_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "axis_names", "p_lat", "p_lon",
-    "grid_n_lat", "grid_n_lon",
-    "fold_active", "anchor_mass_to_initial", "use_polar_filter",
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes", "p_lat",
+    "p_lon", "grid_n_lat", "grid_n_lon", "grid_schema",
+    "fold_active", "config_digest",
+    "has_polar_mask", "has_polar_mask_v",
     "n_steps", "segment_steps", "compiled_segments",
     "has_physics_fn", "has_on_segment", "has_phys_state", "shard_geometry",
 )
-
-
-def _tri(value) -> float:
-    """Tri-state payload entry: ``None`` (not applicable to this call site) ->
-    :data:`FLAG_ABSENT`, else the boolean.  Keeps the entry payload FIXED
-    WIDTH across call sites that carry different subsets of the flags.
-
-    Truthiness that RAISES (a multi-element array) maps to
-    :data:`FLAG_UNCOERCIBLE` rather than propagating: like
-    :func:`coerce_count`, this runs while ASSEMBLING a collective payload,
-    where any exception kills one rank while its peers block in the gather.
-    Ranks that disagree still disagree (the sentinel differs from ``0.0``/
-    ``1.0``); ranks that all pass the same bad object agree and proceed, which
-    is the same behaviour they had before the gate existed.
-    """
-    if value is None:
-        return FLAG_ABSENT
-    try:
-        return float(bool(value))
-    except Exception:                       # pragma: no cover - defensive
-        return FLAG_UNCOERCIBLE
 
 
 def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
@@ -649,37 +673,61 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
     cfg = getattr(model, "config", None)
     fold = getattr(grid, "fold", None)
     shape = dict(mesh.shape) if mesh is not None else {}
-    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
-        else ()
-    # Counts that can be user-supplied or grid-supplied go through
-    # coerce_count so building this payload cannot raise before the collective
-    # (codex round-3, blocker 3). The mesh-derived sizes are plain ints by
-    # construction inside ``jax.sharding.Mesh``, so they need no coercion.
-    n_steps_flag, n_steps_bad = coerce_count(n_steps)
-    seg_flag, seg_bad = coerce_count(segment_steps)
-    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
-                                         absent=0.0)
-    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
-                                         absent=0.0)
+    names, sizes = _mesh_axis_terms(mesh)
+    # Every user- or object-supplied value goes through a STRICT, NON-THROWING
+    # encoder so building this payload cannot raise before the collective
+    # (codex round-3 blocker 3, round-4 blockers 1-2). The mesh-derived sizes
+    # are plain ints by construction inside ``jax.sharding.Mesh``.
+    problems = []
+
+    def _count(value, label, absent=FLAG_ABSENT):
+        payload, problem = coerce_count(value, absent=absent)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    def _flag(value, label):
+        payload, problem = coerce_bool(value, absent=FLAG_ABSENT)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
     flags = (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(axis_names)),
-        name_digest48(axis_names),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
         float(shape.get("lat", 0)),
         float(shape.get("lon", 0)),
-        n_lat_flag,
-        n_lon_flag,
+        _count(getattr(grid, "n_lat", None), "grid.n_lat", absent=0.0),
+        _count(getattr(grid, "n_lon", None), "grid.n_lon", absent=0.0),
+        # The grid's own array fields are what `build_band_grids_atm` slices
+        # and `_build_geometry_stacks` broadcasts; agreeing their dtypes and
+        # shapes here turns a structural mismatch into a clean raise instead
+        # of a mismatched per-field gather.
+        tree_schema_digest48(grid),
         float(bool(fold is not None and getattr(fold, "is_active", False))),
-        float(bool(getattr(cfg, "anchor_mass_to_initial", False))),
-        float(bool(getattr(cfg, "use_polar_filter", False))),
-        n_steps_flag,
-        seg_flag,
-        _tri(compiled_segments),
-        _tri(has_physics_fn),
-        _tri(has_on_segment),
-        _tri(has_phys_state),
-        _tri(shard_geometry),
+        # ONE digest over EVERY static scalar of the model config, not a
+        # hand-picked trio. `fix_mass` gates a global-area psum,
+        # `zero_mean_ps_tendency` and the integrator selection select different
+        # programs -- all were missing from the hand-written list (codex
+        # round-4, blocker 3). A digest closes the class, not the instances.
+        config_digest48(cfg),
+        # Rank-local CACHE presence. `_build_geometry_stacks` conditions on
+        # `_polar_mask` and then slices `_polar_mask_v` unconditionally, so a
+        # rank holding one but not the other dies before the schema gather
+        # (codex round-4, blocker 4). Both are agreed; the refusal that
+        # follows is symmetric.
+        float(getattr(model, "_polar_mask", None) is not None),
+        float(getattr(model, "_polar_mask_v", None) is not None),
+        _count(n_steps, "n_steps"),
+        _count(segment_steps, "segment_steps"),
+        _flag(compiled_segments, "compiled_segments"),
+        _flag(has_physics_fn, "has_physics_fn"),
+        _flag(has_on_segment, "has_on_segment"),
+        _flag(has_phys_state, "has_phys_state"),
+        _flag(shard_geometry, "shard_geometry"),
     )
     assert_flags_agree(_SPMD_ENTRY_FLAGS, flags, context=where)
     # ONLY NOW may a bad value raise. Every process has entered AND LEFT the
@@ -687,12 +735,18 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
     # own payload, so this refusal is symmetric by construction -- unlike the
     # `int(n_steps)` that used to sit inside the payload build and could kill
     # one rank while its peers blocked (codex round-3, blocker 3).
-    for label, problem in (("n_steps", n_steps_bad),
-                           ("segment_steps", seg_bad),
-                           ("grid.n_lat", n_lat_bad),
-                           ("grid.n_lon", n_lon_bad)):
-        if problem is not None:
-            raise ValueError(f"{where}: {label} {problem}")
+    for label, problem in problems:
+        raise ValueError(f"{where}: {label} {problem}")
+    # A polar mask present without its v-face twin would blow up mid-build on
+    # every rank; refuse here, after the gate, so the message is the same
+    # everywhere.
+    if (getattr(model, "_polar_mask", None) is not None
+            and getattr(model, "_polar_mask_v", None) is None):
+        raise ValueError(
+            f"{where}: model._polar_mask is set but model._polar_mask_v is "
+            f"None; the band/tile geometry build slices BOTH, so this would "
+            f"fail mid-build (after the entry gate, before the geometry "
+            f"collective) instead of here.")
 
 
 def _refuse_unsupported_spmd_config(model) -> None:
@@ -724,6 +778,53 @@ def _refuse_unsupported_spmd_config(model) -> None:
             "atm lat-band SPMD: anchor_mass_to_initial uses a band-local "
             "jnp.sum(p_s*area) target that is not yet SPMD-routed; disable it "
             "or use fix_mass with the pre-state (psum'd) path.")
+
+
+# Ordered flag names for the PER-INVOCATION gate on a returned SPMD callable.
+# STATIC tuple: the payload width is fixed by this literal, never by data.
+_CALL_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "axis_names", "axis_sizes",
+    "state_schema", "has_phys_state", "phys_state_schema",
+)
+
+
+def _agree_spmd_call(mesh, state, phys_state, *, where: str) -> None:
+    """Agree a returned SPMD callable's per-CALL inputs, as its FIRST statement.
+
+    #1362 round 4, blocker 7.  The factories are gated, but the CLOSURES they
+    return are public entry points in their own right and they perform
+    rank-local checks BEFORE their collective program:
+    ``refuse_unthreaded_stateful_physics`` raises when ``phys_state is None``
+    on one rank while a peer carrying a state walks into ``shard_map``; the
+    2-D closure raises ``NotImplementedError`` on a non-None carry; the cache
+    key is built from a rank-local pytree structure.  Each of those is a raise
+    ahead of a collective its peers enter -- a HANG.
+
+    The state SCHEMA is agreed too, not just its presence: ``in_specs`` derive
+    from the pytree structure, so two processes with different tracer sets
+    compile different programs.
+
+    COST, stated honestly: this is one small allgather PER CALL, i.e. per STEP
+    on the per-step lane, and it forces a host sync that would otherwise be
+    hidden by async dispatch.  It is an exact no-op under a single process
+    (``assert_flags_agree`` returns immediately when ``process_count() <= 1``),
+    which is every single-controller run; it costs only in the
+    multi-controller lane, where an unagreed divergence is an unrecoverable
+    hang rather than a slow run.  Gating only on cache MISSES was considered
+    and rejected: whether a call misses is itself rank-local, so a
+    conditional gate can desynchronise exactly like the bug it guards.
+    """
+    names, sizes = _mesh_axis_terms(mesh)
+    assert_flags_agree(_CALL_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        name_digest48(names),
+        name_digest48(sizes),
+        tree_schema_digest48(state),
+        float(phys_state is not None),
+        (tree_schema_digest48(phys_state) if phys_state is not None
+         else FLAG_ABSENT),
+    ), context=where)
 
 
 @contextmanager
@@ -879,6 +980,8 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None, *,
     _cache = {}
 
     def sharded_step(c_state, dt, phys_state=None):
+        _agree_spmd_call(mesh, c_state, phys_state,
+                         where="make_sharded_atm_latlon_step.step")
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-band SPMD step")
         # Cache key = (state pytree STRUCTURE, phys_state pytree structure):
@@ -1039,6 +1142,8 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     _cache = {}
 
     def segment(c_state, dt, phys_state=None):
+        _agree_spmd_call(mesh, c_state, phys_state,
+                         where="make_sharded_atm_latlon_segment.segment")
         _refuse_carry(phys_state)
         # Cache key = state pytree STRUCTURE (in/out specs derive from it) —
         # same doctrine as the per-step factory.
@@ -1326,6 +1431,13 @@ def shard_state_atm_latlon_2d(
     constructs and every C-grid tendency preserves) and is reconstructed
     inside the body from the east neighbour via the lon ring.
     """
+    # FIRST statement: this is a DIRECT ``device_put`` of full global arrays
+    # onto a cross-process ``NamedSharding``, which XLA services with an
+    # ALL-GATHER (documented on ``latlon_spmd.shard_leaf``) -- so the round-3
+    # allow-list reason "SCATTER, no collective" was FALSE for this entry
+    # (codex round-4, blocker 6). Gate the mesh AND the leaf schedule.
+    _agree_mesh_entry(mesh, state, where="shard_state_atm_latlon_2d")
+
     def _put(arr):
         return jax.device_put(arr, NamedSharding(mesh, tile_spec(arr)))
 
@@ -1350,7 +1462,7 @@ def gather_state_atm_latlon_2d(
     periodic closure (== column 0)."""
     # FIRST statement: this entry point runs a cross-process replication
     # collective (see _agree_mesh_entry).
-    _agree_mesh_entry(mesh, where="gather_state_atm_latlon_2d")
+    _agree_mesh_entry(mesh, state, where="gather_state_atm_latlon_2d")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -1637,6 +1749,8 @@ def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
     _cache = {}
 
     def sharded_step(c_state, dt, phys_state=None):
+        _agree_spmd_call(mesh, c_state, phys_state,
+                         where="make_sharded_atm_latlon_step_2d.step")
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-lon 2-D SPMD step")
         if phys_state is not None:
@@ -1728,6 +1842,8 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
     _cache = {}
 
     def segment(c_state, dt, phys_state=None):
+        _agree_spmd_call(mesh, c_state, phys_state,
+                         where="make_sharded_atm_latlon_segment_2d.segment")
         _refuse_carry(phys_state)
         key = jax.tree.structure(c_state)
         fn = _cache.get(key)

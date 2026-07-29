@@ -51,10 +51,16 @@ __all__ = [
     "assert_flags_agree",
     "broadcast_checked",
     "coerce_count",
+    "coerce_bool",
+    "config_digest48",
+    "tree_schema_digest48",
+    "safe_repr",
     "FLAG_ABSENT",
     "FLAG_UNCOERCIBLE",
     "FLAG_OUT_OF_RANGE",
+    "FLAG_NEGATIVE",
     "FLAG_MAX_EXACT",
+    "FLAG_DIGEST_FAILED",
 ]
 
 # --- entry-gate payload sentinels -------------------------------------------
@@ -66,11 +72,17 @@ __all__ = [
 # mapped to a SENTINEL that travels through the collective; every rank then
 # sees it in the gathered payload and the raise that follows is symmetric.
 #
-# The sentinels are large-magnitude NEGATIVE values no legitimate count can
-# take (counts are >= 0; FLAG_ABSENT marks "not applicable to this call site").
-FLAG_ABSENT = -1.0
+# The sentinels are large-magnitude NEGATIVE values that NO legitimate count
+# can take.  They must also not collide with each other: ``FLAG_ABSENT`` used
+# to be ``-1.0``, so a rank passing ``segment_steps=None`` and a peer passing
+# ``-1`` produced the SAME payload entry, agreed, and then diverged downstream
+# (codex round-4, blocker 1).  Counts are validated non-negative, so every
+# sentinel is unreachable from valid data AND distinct from every other.
+FLAG_ABSENT = -6.0e15
 FLAG_UNCOERCIBLE = -8.0e15
 FLAG_OUT_OF_RANGE = -7.0e15
+FLAG_NEGATIVE = -5.0e15
+FLAG_DIGEST_FAILED = -4.0e15
 # 2**53 is the largest integer whose successor is exactly representable in
 # float64.  Above it two DIFFERENT counts alias to the same payload entry, so
 # the gate would pass a real divergence (codex round-3, minor 2).  Values past
@@ -79,40 +91,199 @@ FLAG_MAX_EXACT = 2.0 ** 53
 _MAX_EXACT_INT = 2 ** 53
 
 
+def safe_repr(value, limit: int = 120) -> str:
+    """``repr(value)`` that cannot raise and cannot blow up the message.
+
+    A user object whose ``__repr__`` raises would otherwise propagate out of
+    the payload build — the very pre-collective throw the gates exist to
+    remove (codex round-4, blocker 1).
+    """
+    try:
+        text = repr(value)
+    except Exception:                       # pragma: no cover - defensive
+        try:
+            text = f"<unrepresentable {type(value).__name__}>"
+        except Exception:                   # pragma: no cover - defensive
+            text = "<unrepresentable>"
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def coerce_count(value, *, absent: float = FLAG_ABSENT):
     """Map a rank-local COUNT to an exactly-comparable entry-gate payload float.
 
     Returns ``(payload, problem)``.  ``problem`` is ``None`` when the value is
-    usable; otherwise it is a human-readable clause NAMING the offending value,
+    usable; otherwise it is a human-readable clause naming the offending value,
     which the caller must raise AFTER its collective so the refusal is
     symmetric across processes.
 
-    This function never raises.  That is the whole point: it is called while
+    This function NEVER raises.  That is the whole point: it is called while
     ASSEMBLING a collective payload, upstream of the collective itself, where a
     raise deadlocks the peers (codex round-3, blocker 3).
 
-    ``None`` maps to ``absent`` (default :data:`FLAG_ABSENT`) so a call site
-    that does not carry the value still emits a FIXED-WIDTH payload.
+    STRICT by type, not by coercibility (codex round-4, blocker 1).  Only a
+    real non-negative Python/NumPy integer is accepted:
+
+    * ``3.5`` is REJECTED.  ``int(3.5) == 3`` made a rank carrying ``3.5``
+      indistinguishable from a peer carrying ``3``; the payloads agreed and
+      then ``range(3.5)`` blew up on one rank alone while its peer entered the
+      step collective.
+    * ``bool`` is REJECTED.  ``True`` is not a step count, and silently
+      encoding it as ``1`` hides a caller bug.
+    * Arrays (even size-1) are REJECTED: ``int(arr)`` succeeds for size 1 and
+      raises for size > 1, so accepting them makes the gate's behaviour depend
+      on rank-local shape.
+    * NEGATIVE integers get their OWN sentinel, so they can never collide with
+      the "absent" encoding.
+
+    ``None`` maps to ``absent`` (default :data:`FLAG_ABSENT`, itself outside
+    the valid range) so a call site that does not carry the value still emits a
+    FIXED-WIDTH payload.
     """
     if value is None:
         return float(absent), None
-    try:
-        # int() FIRST, and the range check on the INTEGER: converting to float
-        # first would already have collapsed 2**53+1 onto 2**53, so the very
-        # aliasing this guards against would be invisible to the guard.
-        # int(nan) -> ValueError, int(inf) -> OverflowError, both caught here.
-        as_int = int(value)
-    except (TypeError, ValueError, OverflowError, AttributeError):
+    # `bool` is a subclass of `int`, so it must be excluded FIRST.
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
         return FLAG_UNCOERCIBLE, (
-            f"is not usable as an integer count (got {value!r}); every "
-            f"process must be launched with the same value")
-    if abs(as_int) > _MAX_EXACT_INT:
+            "must be a non-negative Python/NumPy integer (got type "
+            f"{type(value).__name__}: {safe_repr(value)}); every process must "
+            "be launched with the same value")
+    try:
+        as_int = int(value)
+    except Exception:                       # pragma: no cover - defensive
+        return FLAG_UNCOERCIBLE, (
+            f"could not be read as an integer ({safe_repr(value)})")
+    if as_int < 0:
+        return FLAG_NEGATIVE, (
+            f"must be non-negative (got {safe_repr(value)})")
+    # Range check on the INTEGER: converting to float first would already have
+    # collapsed 2**53+1 onto 2**53, so the very aliasing this guards against
+    # would be invisible to the guard.
+    if as_int > _MAX_EXACT_INT:
         return FLAG_OUT_OF_RANGE, (
-            f"is outside the exactly-comparable range |n| <= 2**53 (got "
-            f"{value!r}); beyond that bound two different counts alias to "
-            f"the same float64 payload entry and the cross-process agreement "
-            f"check would pass a real divergence")
+            f"is outside the exactly-comparable range n <= 2**53 (got "
+            f"{safe_repr(value)}); beyond that bound two different counts "
+            f"alias to the same float64 payload entry and the cross-process "
+            f"agreement check would pass a real divergence")
     return float(as_int), None
+
+
+def coerce_bool(value, *, absent: float = FLAG_ABSENT):
+    """Strict, NON-THROWING tri-state encoder for a rank-local BOOLEAN flag.
+
+    Returns ``(payload, problem)`` exactly like :func:`coerce_count`.
+    ``None`` -> ``absent`` ("not applicable at this call site").
+
+    Only a real ``bool`` / ``np.bool_`` is accepted.  ``bool(value)`` on an
+    arbitrary object RAISES for a multi-element array ("truth value of an array
+    is ambiguous") — inside a gate that is a pre-collective throw, i.e. a hang
+    (codex round-4, blocker 2).  Anything else becomes a sentinel that travels
+    through the collective and is refused symmetrically afterwards.
+    """
+    if value is None:
+        return float(absent), None
+    if isinstance(value, (bool, np.bool_)):
+        return (1.0 if value else 0.0), None
+    return FLAG_UNCOERCIBLE, (
+        f"must be a bool (got type {type(value).__name__}: "
+        f"{safe_repr(value)})")
+
+
+def _canonical_config_terms(obj, prefix: str = "", depth: int = 0,
+                            out=None, seen=None):
+    """Flatten a config object into ORDERED ``"path=value"`` strings.
+
+    Covers the STATIC scalars that select a compiled program: scheme literals,
+    integrator names, and every feature-gating bool (``fix_mass``,
+    ``fix_moisture``, ``use_polar_filter``, ...).  Arrays contribute only
+    ``dtype`` + ``shape`` — comparing their VALUES is the job of
+    :func:`broadcast_checked`, not of a cheap fixed-width entry gate.
+
+    Never raises: any unreadable field becomes a ``<unreadable>`` term, which
+    still participates in the comparison.
+    """
+    if out is None:
+        out, seen = [], set()
+    if depth > 4 or len(out) > 512:          # bounded work, bounded payload
+        return out
+    if id(obj) in seen:
+        return out
+    seen.add(id(obj))
+    fields = getattr(obj, "_fields", None)   # NamedTuple
+    if fields is None:
+        dc = getattr(obj, "__dataclass_fields__", None)
+        fields = tuple(dc) if dc else None
+    if fields is None:
+        return out
+    for name in fields:
+        try:
+            val = getattr(obj, name)
+        except Exception:                    # pragma: no cover - defensive
+            out.append(f"{prefix}{name}=<unreadable>")
+            continue
+        path = f"{prefix}{name}"
+        if val is None or isinstance(val, (bool, int, float, str, np.bool_,
+                                           np.integer, np.floating)):
+            out.append(f"{path}={safe_repr(val, 64)}")
+        elif hasattr(val, "dtype") and hasattr(val, "shape"):
+            out.append(f"{path}=array:{safe_repr(val.dtype, 32)}:"
+                       f"{safe_repr(tuple(val.shape), 64)}")
+        elif getattr(val, "_fields", None) or getattr(
+                val, "__dataclass_fields__", None):
+            _canonical_config_terms(val, path + ".", depth + 1, out, seen)
+        else:
+            out.append(f"{path}=<{type(val).__name__}>")
+    return out
+
+
+def config_digest48(obj) -> float:
+    """One fixed-width, order-sensitive digest of a config's STATIC scalars.
+
+    Why a digest instead of a hand-listed set of flags: an entry gate that
+    enumerates ``fold``/``anchor``/``polar`` by hand agrees only the fields
+    somebody remembered.  ``fix_mass`` gates a global-area psum,
+    ``outer_integrator`` selects a different program, ``fix_moisture`` adds a
+    reduction — each was MISSING from the hand-written list (codex round-4,
+    blocker 3).  Digesting every static scalar closes the class instead of the
+    three instances, and costs ONE payload entry.
+
+    Never raises; an internal failure returns :data:`FLAG_DIGEST_FAILED`,
+    which still compares equal across ranks that fail identically and unequal
+    against a rank that succeeded.
+    """
+    try:
+        return name_digest48(_canonical_config_terms(obj))
+    except Exception:                        # pragma: no cover - defensive
+        return FLAG_DIGEST_FAILED
+
+
+def tree_schema_digest48(tree) -> float:
+    """Digest of a pytree's LEAF SCHEMA: ordered path, dtype and full shape.
+
+    The gather/scatter entry points run one cross-process replication PER
+    NON-``None`` LEAF, so the NUMBER and ORDER of those collectives is
+    rank-local data: a state whose tracer dict differs across processes (extra
+    species, different insertion order, different shape) produces mismatched
+    schedules and hangs (codex round-4, blocker 5).  Folding the whole leaf
+    schema into ONE fixed-width float makes that a clean symmetric raise.
+
+    ``jax.tree_util`` key paths give a canonical, ORDER-SENSITIVE description
+    (dict keys are sorted by ``tree_flatten_with_path``, so an insertion-order
+    difference alone does not false-positive, while a KEY-SET difference does
+    move the digest).  Never raises.
+    """
+    try:
+        from jax.tree_util import tree_flatten_with_path, keystr
+        leaves, _ = tree_flatten_with_path(tree)
+        terms = []
+        for path, leaf in leaves:
+            dtype = getattr(leaf, "dtype", None)
+            shape = getattr(leaf, "shape", None)
+            terms.append(
+                f"{keystr(path)}:{safe_repr(dtype, 32)}:"
+                f"{safe_repr(tuple(shape) if shape is not None else None, 64)}")
+        return name_digest48(terms)
+    except Exception:                        # pragma: no cover - defensive
+        return FLAG_DIGEST_FAILED
 
 
 def _dtype_kind_and_ndim(a):

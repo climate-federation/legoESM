@@ -16,15 +16,20 @@ import pytest
 
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT,
+    FLAG_NEGATIVE,
     FLAG_OUT_OF_RANGE,
     FLAG_UNCOERCIBLE,
     assert_flags_agree,
     assert_schema_agrees,
     broadcast_checked,
+    coerce_bool,
     coerce_count,
+    config_digest48,
     content_hash48,
     name_digest48,
+    safe_repr,
     schema_fingerprint,
+    tree_schema_digest48,
 )
 
 
@@ -360,10 +365,12 @@ class TestDtypeRouting:
 
 class TestCoerceCount:
     """`coerce_count` is the reason the entry gates can no longer die while
-    ASSEMBLING their collective payload (codex round-3, blocker 3)."""
+    ASSEMBLING their collective payload (round-3 blocker 3), and — after
+    round-4 blocker 1 — the reason they cannot silently ACCEPT a value that
+    diverges downstream."""
 
     def test_good_values_pass_through_exactly(self):
-        for v in (0, 1, 7, 2 ** 40, True):
+        for v in (0, 1, 7, 2 ** 40, np.int64(5)):
             payload, problem = coerce_count(v)
             assert problem is None
             assert payload == float(int(v))
@@ -372,32 +379,186 @@ class TestCoerceCount:
         assert coerce_count(None) == (FLAG_ABSENT, None)
         assert coerce_count(None, absent=0.0) == (0.0, None)
 
-    @pytest.mark.parametrize("bad", ["bad", None.__class__, object(),
-                                     float("nan"), float("inf"), 3.5 + 0j])
-    def test_uncoercible_returns_a_sentinel_and_NEVER_raises(self, bad):
-        """The property that matters: no exception escapes.  A raise here
-        happens BEFORE the gate's collective and hangs every peer."""
+    def test_absent_cannot_alias_a_real_or_rejected_value(self):
+        """codex round-4, blocker 1.  FLAG_ABSENT used to be ``-1.0``, so
+        ``segment_steps=None`` on one rank and ``-1`` on another produced the
+        SAME payload entry: the gate agreed, then one rank raised while its
+        peer built the next collective."""
+        absent, _ = coerce_count(None)
+        neg, problem = coerce_count(-1)
+        assert problem is not None, "-1 must be REJECTED, not encoded"
+        assert neg == FLAG_NEGATIVE
+        assert absent != neg, "absent and negative must not alias"
+
+    @pytest.mark.parametrize("bad", [3.5, 3.0, "3", "bad", object(),
+                                     float("nan"), float("inf"), 3.5 + 0j,
+                                     np.array([1, 2]), np.array([3])])
+    def test_non_integer_types_are_REFUSED(self, bad):
+        """`int(3.5) == 3` made a rank carrying 3.5 indistinguishable from a
+        peer carrying 3; the payloads agreed and then ``range(3.5)`` blew up on
+        one rank alone.  A size-1 array coerces while a size-2 array raises, so
+        accepting arrays makes the gate depend on rank-local shape."""
         payload, problem = coerce_count(bad)
-        assert problem is not None
-        assert payload in (FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE)
-        assert repr(bad) in problem, "the message must NAME the bad value"
+        assert problem is not None, f"{bad!r} must be refused"
+        assert payload == FLAG_UNCOERCIBLE
+
+    def test_35_and_3_do_not_collide(self):
+        """The decisive property, stated directly."""
+        assert coerce_count(3.5)[0] != coerce_count(3)[0]
+
+    def test_bool_is_refused_not_encoded_as_1(self):
+        for v in (True, False, np.bool_(True)):
+            payload, problem = coerce_count(v)
+            assert problem is not None, "a bool is not a step count"
+            assert payload == FLAG_UNCOERCIBLE
+
+    def test_NEVER_raises_even_for_a_hostile_object(self):
+        """A raise inside the payload build lands BEFORE the collective and
+        hangs every peer, so no input may escape as an exception."""
+        class Hostile:
+            def __int__(self):
+                raise RuntimeError("boom")
+
+            def __repr__(self):
+                raise RuntimeError("boom")
+
+            def __bool__(self):
+                raise RuntimeError("boom")
+
+        payload, problem = coerce_count(Hostile())     # must not raise
+        assert problem is not None and isinstance(payload, float)
+        payload_b, problem_b = coerce_bool(Hostile())  # must not raise
+        assert problem_b is not None and isinstance(payload_b, float)
+        assert "unrepresentable" in safe_repr(Hostile())
 
     def test_value_above_2_53_is_refused_not_silently_aliased(self):
         """codex round-3 minor 2: above 2**53 two DIFFERENT counts map to the
-        same float64 payload entry, so the agreement check would pass a real
-        divergence."""
+        same float64 payload entry."""
         big = 2 ** 53 + 1
         assert float(big) == float(2 ** 53), "fixture: these MUST alias"
         payload, problem = coerce_count(big)
         assert payload == FLAG_OUT_OF_RANGE
         assert problem is not None and "2**53" in problem
-        # and the boundary itself is still accepted
-        assert coerce_count(2 ** 53)[1] is None
+        assert coerce_count(2 ** 53)[1] is None      # the boundary is fine
 
-    def test_sentinels_cannot_collide_with_a_real_count(self):
-        for s in (FLAG_ABSENT, FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE):
-            assert s < 0, "counts are >= 0, so a sentinel must be negative"
-        assert len({FLAG_ABSENT, FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE}) == 3
+    def test_sentinels_are_all_distinct_and_unreachable(self):
+        sentinels = (FLAG_ABSENT, FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE,
+                     FLAG_NEGATIVE)
+        assert len(set(sentinels)) == len(sentinels)
+        for s in sentinels:
+            assert s < 0, "valid counts are >= 0, so a sentinel must be < 0"
+            # and no accepted count can ever reach one
+            assert coerce_count(abs(int(s)))[0] != s or \
+                coerce_count(abs(int(s)))[1] is not None
+
+
+class TestCoerceBool:
+    """codex round-4, blocker 2: `bool(value)` RAISES on a multi-element array
+    ("truth value ... is ambiguous"), and inside a gate that is a
+    pre-collective throw, i.e. a hang."""
+
+    def test_real_bools_encode(self):
+        assert coerce_bool(True) == (1.0, None)
+        assert coerce_bool(False) == (0.0, None)
+        assert coerce_bool(np.bool_(True)) == (1.0, None)
+
+    def test_none_is_the_absent_sentinel(self):
+        assert coerce_bool(None) == (FLAG_ABSENT, None)
+
+    @pytest.mark.parametrize("bad", [np.array([True, False]), 1, 0, "yes",
+                                     [], object()])
+    def test_non_bool_is_refused_without_raising(self, bad):
+        payload, problem = coerce_bool(bad)
+        assert problem is not None
+        assert payload == FLAG_UNCOERCIBLE
+
+    def test_multi_element_array_would_have_raised_under_bool(self):
+        """Fixture proving the hazard is real, not hypothetical."""
+        arr = np.array([True, False])
+        with pytest.raises(ValueError):
+            bool(arr)
+        assert coerce_bool(arr)[1] is not None    # ... but this does not
+
+
+class TestConfigDigest:
+    """codex round-4, blocker 3.  Hand-listing `fold`/`anchor`/`polar` agreed
+    only the fields somebody remembered; `fix_mass` (which gates a global-area
+    psum), the integrator choice and `fix_moisture` were all missing.  ONE
+    digest over every static scalar closes the class."""
+
+    @staticmethod
+    def _cfg(**kw):
+        import types
+        base = dict(fix_mass=False, outer_integrator="forward_euler",
+                    use_polar_filter=False, dt=900.0, name="x")
+        base.update(kw)
+        ns = types.SimpleNamespace(**base)
+        ns._fields = tuple(base)          # duck-type a NamedTuple
+        return ns
+
+    def test_a_feature_gating_bool_moves_the_digest(self):
+        assert (config_digest48(self._cfg(fix_mass=True))
+                != config_digest48(self._cfg(fix_mass=False)))
+
+    def test_a_scheme_literal_moves_the_digest(self):
+        assert (config_digest48(self._cfg(outer_integrator="ab2"))
+                != config_digest48(self._cfg(outer_integrator="forward_euler")))
+
+    def test_identical_configs_agree(self):
+        assert config_digest48(self._cfg()) == config_digest48(self._cfg())
+
+    def test_never_raises_on_a_hostile_or_plain_object(self):
+        class Hostile:
+            _fields = ("x",)
+
+            @property
+            def x(self):
+                raise RuntimeError("boom")
+
+        assert isinstance(config_digest48(Hostile()), float)
+        assert isinstance(config_digest48(None), float)
+        assert isinstance(config_digest48(object()), float)
+
+
+class TestTreeSchemaDigest:
+    """codex round-4, blocker 5: one replication runs PER LEAF, so the leaf
+    schedule is rank-local data."""
+
+    def test_extra_leaf_moves_the_digest(self):
+        a = {"T": np.zeros((4, 8)), "q": np.zeros((4, 8))}
+        b = {"T": np.zeros((4, 8)), "q": np.zeros((4, 8)),
+             "o3": np.zeros((4, 8))}
+        assert tree_schema_digest48(a) != tree_schema_digest48(b)
+
+    def test_different_key_moves_the_digest(self):
+        a = {"T": np.zeros((4, 8))}
+        b = {"S": np.zeros((4, 8))}
+        assert tree_schema_digest48(a) != tree_schema_digest48(b)
+
+    def test_shape_and_dtype_move_the_digest(self):
+        base = {"T": np.zeros((4, 8), dtype=np.float64)}
+        assert (tree_schema_digest48(base)
+                != tree_schema_digest48({"T": np.zeros((4, 9))}))
+        assert (tree_schema_digest48(base)
+                != tree_schema_digest48(
+                    {"T": np.zeros((4, 8), dtype=np.float32)}))
+
+    def test_insertion_order_alone_does_NOT_false_positive(self):
+        """Dict key paths are canonicalised, so a different insertion order
+        with the SAME key set must still agree — otherwise the gate would
+        refuse healthy runs."""
+        a = {"T": np.zeros(3), "q": np.zeros(3)}
+        b = {"q": np.zeros(3), "T": np.zeros(3)}
+        assert tree_schema_digest48(a) == tree_schema_digest48(b)
+
+    def test_optional_none_field_moves_the_digest(self):
+        assert (tree_schema_digest48({"a": np.zeros(3), "b": None})
+                != tree_schema_digest48({"a": np.zeros(3),
+                                         "b": np.zeros(3)}))
+
+    def test_never_raises(self):
+        assert isinstance(tree_schema_digest48(object()), float)
+
 
 
 class TestSchemaDescriptorTolerance:
@@ -596,7 +757,15 @@ class TestGateCheckerIsNonVacuous:
         assert _direct_gate_index(mutated, "_agree_spmd_entry") == 1
 
 
-# (symbol -> gate that must be its FIRST direct top-level statement)
+# (symbol -> gate that must be its FIRST direct top-level statement).
+#
+# ROUND-4 RETRACTION.  The round-3 allow-list claimed the SCATTER direction ran
+# no collective.  That is FALSE for every entry that uses a raw
+# ``jax.device_put`` of a full global array onto a cross-process
+# ``NamedSharding``: the repo's own ``latlon_spmd.shard_leaf`` docstring records
+# that XLA services exactly that with an ALL-GATHER.  Those entries are now
+# GATED, and `test_exempt_entries_contain_no_mesh_device_put` mechanically
+# refuses to let the claim be re-asserted.
 _ATM_GATED = {
     "make_sharded_atm_latlon_step": "_agree_spmd_entry",
     "make_sharded_atm_latlon_segment": "_agree_spmd_entry",
@@ -606,72 +775,75 @@ _ATM_GATED = {
     # outside any factory, and are the production path via model_driver.
     "run_atm_latlon_spmd_segment": "_agree_spmd_entry",
     "run_atm_latlon_spmd": "_agree_spmd_entry",
-    # round 4: the GATHER direction runs a real cross-process replication
-    # (replicate_leaf -> jit identity with replicated out_shardings).
+    # round 4: GATHER runs a real cross-process replication (replicate_leaf ->
+    # jit identity with replicated out_shardings); SCATTER runs one placement
+    # per leaf, and the 2-D one is a raw cross-process device_put.
     "gather_state_atm_latlon": "_agree_mesh_entry",
     "gather_state_atm_latlon_2d": "_agree_mesh_entry",
     "gather_atm_latlon_to_hydrostatic": "_agree_mesh_entry",
+    "shard_state_atm_latlon": "_agree_mesh_entry",
+    "shard_state_atm_latlon_2d": "_agree_mesh_entry",
+    "shard_hydrostatic_to_atm_latlon": "_agree_mesh_entry",
 }
 
-# SHRINK-ONLY.  Every entry is a CLAIM about what the function does; it was
-# read before being written here (CLAUDE.md: a plausible-sounding allow-list
-# reason permanently hides a real defect).
+# SHRINK-ONLY.  Every entry is a CLAIM about what the function does, and
+# round 4 proved that a plausible-sounding reason hides a real defect, so the
+# reasons below are now also checked MECHANICALLY (see
+# TestExemptionsAreVerifiedNotAsserted).
 _ATM_UNGATED = {
-    "lat_spec": "pure: returns P() from arr.ndim; no collective, no raise",
-    "tile_spec": "pure: returns P() from arr.ndim; no collective, no raise",
+    "lat_spec":
+        "pure: returns P() from arr.ndim. It CAN raise (AttributeError) on a "
+        "non-array, but it enters no collective and is called only with real "
+        "leaves, so a raise here cannot strand a peer in a gather",
+    "tile_spec": "pure: same contract as lat_spec",
     "atm_grid_array_field_names": "pure host introspection of grid._fields",
-    "atm_latlon_geometry_bytes": "pure host byte accounting",
+    "atm_latlon_geometry_bytes":
+        "pure host byte accounting; it calls build_band_grids_atm, which can "
+        "raise on indivisibility, but neither enters a collective",
     "unroll_to_dtype_fixed_point":
         "trace-time only (jax.eval_shape probe); no host collective",
     "state_finite_scalar":
-        "runs INSIDE shard_map (in-graph psum), not a host entry point",
+        "emits an in-graph psum when called with an axis inside a shard_map; "
+        "it is a TRACED helper, never a host entry point that runs a "
+        "collective by itself",
     "build_band_grids_atm":
-        "pure host geometry; its divisibility ValueError is symmetric because "
-        "every caller has already agreed grid.n_lat and n_dev at its gate",
+        "pure host geometry. It is public and CAN be called directly (the "
+        "byte-accounting helper does), so its divisibility ValueError is only "
+        "symmetric because the inputs it raises on (grid.n_lat, n_devices) "
+        "are themselves agreed at whichever gated entry the caller used; it "
+        "enters no collective of its own",
     "build_tile_grids_atm_2d":
-        "pure host geometry; same symmetry argument as build_band_grids_atm",
-    "shard_state_atm_latlon":
-        "SCATTER: shard_leaf -> make_array_from_callback builds each "
-        "addressable shard locally; no legoesm collective helper on either "
-        "branch",
-    "shard_state_atm_latlon_2d":
-        "SCATTER: per-leaf device_put onto the tile mesh; no collective "
-        "helper and no rank-local skip of one",
-    "shard_hydrostatic_to_atm_latlon":
-        "SCATTER wrapper over shard_state_atm_latlon; same reason",
+        "pure host geometry; same contract as build_band_grids_atm",
     "build_sharded_held_suarez_state_atm_latlon":
-        "band-LOCAL construction via jax.make_array_from_callback (#1100); "
-        "no gather, no replicated put",
+        "band-LOCAL construction via jax.make_array_from_callback (#1100): "
+        "each addressable shard is built from local data, no gather, and no "
+        "replicated put",
 }
 
 _OCEAN_GATED = {
     "make_sharded_ocean_step": "_agree_ocean_spmd_entry",
     "make_sharded_ocean_step_global": "_agree_ocean_spmd_entry",
-    "gather_state_latlon": "_agree_ocean_gather_entry",
+    "gather_state_latlon": "_agree_ocean_mesh_entry",
+    "shard_state_latlon": "_agree_ocean_mesh_entry",
+    "shard_forcing_latlon": "_agree_ocean_mesh_entry",
+    "shard_forcing_stack_latlon": "_agree_ocean_mesh_entry",
 }
 
 _OCEAN_UNGATED = {
     "build_band_grids":
-        "pure host geometry; divisibility raise is symmetric behind the "
-        "factory gate that already agreed grid dims + n_dev",
-    "append_vface_wall_row": "pure array op (concatenate a zero row)",
-    "shard_state_latlon":
-        "SCATTER: per-leaf device_put; no collective helper and no "
-        "rank-local skip of one. Its multi-process behaviour is the #1100 "
-        "shard_leaf migration, NOT the #1362 replicated-geometry class",
-    "shard_forcing_latlon": "SCATTER: same as shard_state_latlon",
-    "shard_forcing_stack_latlon": "SCATTER: same as shard_state_latlon",
+        "pure host geometry; enters no collective of its own (same contract "
+        "as build_band_grids_atm)",
+    "append_vface_wall_row":
+        "pure array op (concatenate a zero row); no collective, no branch",
 }
 
 _OPSPLIT_GATED = {
     "make_sharded_operator_split_step": "_agree_opsplit_spmd_entry",
+    "shard_operator_split_carry": "_agree_opsplit_mesh_entry",
+    "shard_operator_split_forcing": "_agree_opsplit_mesh_entry",
 }
 
 _OPSPLIT_UNGATED = {
-    "shard_operator_split_carry":
-        "SCATTER: per-leaf device_put of the carry; no collective helper and "
-        "no rank-local skip of one (#1100 scope, not #1362)",
-    "shard_operator_split_forcing": "SCATTER: same as the carry twin",
     "need_rad_and_time":
         "module ALIAS of the pure _need_rad_and_time cadence helper "
         "(jnp arithmetic on step_index); no collective, no raise",
@@ -739,6 +911,137 @@ class TestEveryPublicEntryPointIsClassified:
                 f"{lane}.{name}: an allow-list entry needs a REASON, and "
                 f"every reason string is a claim that must be verified in "
                 f"code before it is written")
+
+
+class TestExemptionsAreVerifiedNotAsserted:
+    """codex round-4 MAJOR: checking that a reason is a LONG STRING accepts a
+    FALSE reason, and round 4 proved that is not hypothetical — the round-3
+    list asserted "SCATTER, therefore no collective" for five entries that
+    each `device_put` a full global array onto a cross-process
+    `NamedSharding`, which the repo's own `shard_leaf` docstring records as an
+    ALL-GATHER.  This test makes the specific claim MECHANICAL, so it cannot
+    be re-asserted in prose.
+    """
+
+    @staticmethod
+    def _mesh_device_put_calls(fn):
+        """`jax.device_put(x, NamedSharding(...))` calls directly in ``fn``.
+
+        Matches the SHAPE of the hazard (a put whose target sharding is built
+        from a mesh), not a name, so renaming the local does not evade it.
+        """
+        import ast
+        hits = []
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "device_put"):
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "NamedSharding"):
+                    hits.append(node)
+                    break
+        return hits
+
+    @pytest.mark.parametrize("lane,mod_fn,gated,ungated", _LANES,
+                             ids=[l[0] for l in _LANES])
+    def test_exempt_entries_contain_no_mesh_device_put(self, lane, mod_fn,
+                                                       gated, ungated):
+        fns = _top_level_functions(_module_tree(mod_fn()))
+        for name in ungated:
+            fn = fns.get(name)
+            if fn is None:                    # a module alias, not a def
+                continue
+            hits = self._mesh_device_put_calls(fn)
+            assert not hits, (
+                f"{lane}.{name} is on the UNGATED allow-list but contains a "
+                f"jax.device_put(..., NamedSharding(...)): under multi-process "
+                f"that is serviced by an ALL-GATHER (see "
+                f"latlon_spmd.shard_leaf), so the exemption reason is FALSE. "
+                f"Gate it or migrate it to shard_leaf.")
+
+    def test_the_detector_is_not_vacuous(self):
+        """It must FIND the pattern it claims to reject."""
+        fn = _parse_fn("""
+            def f(state, mesh):
+                return jax.device_put(state, NamedSharding(mesh, P()))
+        """)
+        assert self._mesh_device_put_calls(fn), (
+            "fixture: the detector must match the hazard shape, else "
+            "test_exempt_entries_contain_no_mesh_device_put passes vacuously")
+        clean = _parse_fn("""
+            def g(state):
+                return state + 1
+        """)
+        assert not self._mesh_device_put_calls(clean)
+
+
+class TestReturnedClosuresAreGated:
+    """codex round-4, blocker 7 + MAJOR.
+
+    The factories are gated, but the CLOSURES they return are public entry
+    points too — a user holds ``step = make_...(...)`` and calls it — and they
+    ran rank-local refusals (``refuse_unthreaded_stateful_physics``, the 2-D
+    ``NotImplementedError``, ``_validate_forcing_layout``) BEFORE entering
+    their collective program.  The top-level enumerator could not see them.
+    """
+
+    # (module, factory, returned-closure name, gate)
+    CLOSURES = [
+        ("atm", "make_sharded_atm_latlon_step", "sharded_step",
+         "_agree_spmd_call"),
+        ("atm", "make_sharded_atm_latlon_step_2d", "sharded_step",
+         "_agree_spmd_call"),
+        ("atm", "make_sharded_atm_latlon_segment", "segment",
+         "_agree_spmd_call"),
+        ("atm", "make_sharded_atm_latlon_segment_2d", "segment",
+         "_agree_spmd_call"),
+        ("ocean", "make_sharded_ocean_step", "sharded_step",
+         "_agree_ocean_spmd_call"),
+        ("ocean", "make_sharded_ocean_step_global", "sharded_step_global",
+         "_agree_ocean_spmd_call"),
+        ("opsplit", "make_sharded_operator_split_step", "sharded_split_step",
+         "_agree_opsplit_mesh_entry"),
+    ]
+
+    _MODULES = {"atm": _atm_module, "ocean": _ocean_module,
+                "opsplit": _opsplit_module}
+
+    @pytest.mark.parametrize("lane,factory,closure,gate", CLOSURES,
+                             ids=[f"{c[0]}.{c[1]}.{c[2]}" for c in CLOSURES])
+    def test_closure_gate_is_its_first_direct_statement(self, lane, factory,
+                                                        closure, gate):
+        import ast
+        fns = _top_level_functions(_module_tree(self._MODULES[lane]()))
+        outer = fns[factory]
+        inner = [n for n in ast.walk(outer)
+                 if isinstance(n, ast.FunctionDef) and n.name == closure]
+        assert inner, f"{factory} defines no closure named {closure}"
+        # The SHARDED closure is the one that is returned; take the last
+        # definition, which is the multi-device body (an early serial
+        # fallback may share the name in a `mesh is None` branch).
+        idx = _direct_gate_index(inner[-1], gate)
+        assert idx == 0, (
+            f"{lane}.{factory}.{closure}: {gate}(...) must be its FIRST "
+            f"DIRECT statement (got index {idx}). The rank-local refusals "
+            f"below it — stateful-physics refusal, forcing-layout validation, "
+            f"the 2-D carry NotImplementedError — otherwise raise on one rank "
+            f"while a peer enters the shard_map: a HANG.")
+
+    @pytest.mark.parametrize("lane,factory,closure,gate", CLOSURES,
+                             ids=[f"{c[0]}.{c[1]}.{c[2]}" for c in CLOSURES])
+    def test_closure_is_actually_returned(self, lane, factory, closure, gate):
+        """Guards against the gate being attached to a dead nested def."""
+        import ast
+        fns = _top_level_functions(_module_tree(self._MODULES[lane]()))
+        returned = {n.value.id for n in ast.walk(fns[factory])
+                    if isinstance(n, ast.Return)
+                    and isinstance(n.value, ast.Name)}
+        assert closure in returned, (
+            f"{factory} does not return {closure}; the gate would be on a "
+            f"function nobody calls")
 
 
 class TestFactoryWiringOrder:
@@ -822,6 +1125,19 @@ class _StubModel:
         self.config = _StubConfig()
 
 
+class _StubStatics:
+    """Duck-typed ``_SplitStepStatics``: only the fields the gate digests."""
+
+    _fields = ("dt", "fix_moisture", "qv_smooth_coeff", "owned_mask")
+
+    def __init__(self, dt=900.0, fix_moisture=False, qv_smooth_coeff=0.0,
+                 owned_mask=None):
+        self.dt = dt
+        self.fix_moisture = fix_moisture
+        self.qv_smooth_coeff = qv_smooth_coeff
+        self.owned_mask = owned_mask
+
+
 class _StubMesh:
     """Only what the entry gates read: axis_names, shape, devices.size."""
 
@@ -901,9 +1217,9 @@ class TestEntryPayloadShape:
         seen2 = capture_flags(cm)
         model = _StubModel()
         model._polar_mask = None
-        cm._agree_opsplit_spmd_entry(model, _StubMesh(), fix_mass=True,
-                                     rad_update_steps=4, ghg_keys=("co2",),
-                                     where="t")
+        cm._agree_opsplit_spmd_entry(model, _StubMesh(), _StubStatics(),
+                                     fix_mass=True, rad_update_steps=4,
+                                     ghg_keys=("co2",), where="t")
         assert seen2["names"] is cm._OPSPLIT_SPMD_ENTRY_FLAGS
         assert len(seen2["values"]) == len(cm._OPSPLIT_SPMD_ENTRY_FLAGS)
 
@@ -1048,7 +1364,10 @@ class TestOceanFactoryWiringOrder:
 
     def test_entry_flag_tuples_are_static_literals(self):
         for mod_fn, attr in ((_ocean_module, "_OCEAN_SPMD_ENTRY_FLAGS"),
-                             (_ocean_module, "_OCEAN_GATHER_ENTRY_FLAGS"),
+                             (_ocean_module, "_OCEAN_MESH_ENTRY_FLAGS"),
+                             (_ocean_module, "_OCEAN_CALL_ENTRY_FLAGS"),
+                             (_atm_module, "_CALL_ENTRY_FLAGS"),
+                             (_opsplit_module, "_OPSPLIT_MESH_ENTRY_FLAGS"),
                              (_atm_module, "_SPMD_ENTRY_FLAGS"),
                              (_atm_module, "_MESH_ENTRY_FLAGS"),
                              (_opsplit_module, "_OPSPLIT_SPMD_ENTRY_FLAGS")):

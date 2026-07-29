@@ -46,8 +46,9 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    assert_flags_agree, assert_schema_agrees, broadcast_checked, coerce_count,
-    name_digest48)
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    coerce_bool, coerce_count, config_digest48, name_digest48,
+    tree_schema_digest48)
 from legoesm.parallel.latlon_spmd import (
     cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
 from legoesm.parallel.shard_map_compat import shard_map
@@ -128,9 +129,47 @@ def _forcing_specs(forcing: SegmentForcing, n_dev) -> SegmentForcing:
     })
 
 
+# Ordered flag names for the operator-split MESH+TREE gate (scatter bridges and
+# the returned callable). STATIC tuple: fixed width, never rank-local.
+_OPSPLIT_MESH_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "has_tree", "tree_schema", "has_tree2", "tree2_schema",
+)
+
+
+def _agree_opsplit_mesh_entry(mesh, tree=None, tree2=None, *,
+                              where: str) -> None:
+    """Agree the mesh AND pytree LEAF SCHEMAS before a scatter / a sharded call.
+
+    #1362 round 4, blockers 6-7.  These entries ``device_put`` full global
+    arrays onto a cross-process ``NamedSharding`` — serviced by an ALL-GATHER
+    (documented on ``latlon_spmd.shard_leaf``) — one per NON-``None`` leaf, and
+    they return early on ``mesh is None``.  So both the mesh and the leaf
+    schedule are rank-local inputs to a collective, and the returned
+    ``sharded_split_step`` additionally derives its shard_map specs from the
+    carry/forcing structure.
+    """
+    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    assert_flags_agree(_OPSPLIT_MESH_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        float(tree is not None),
+        tree_schema_digest48(tree) if tree is not None else FLAG_ABSENT,
+        float(tree2 is not None),
+        tree_schema_digest48(tree2) if tree2 is not None else FLAG_ABSENT,
+    ), context=where)
+
+
 def shard_operator_split_carry(carry: SegmentCarry, mesh) -> SegmentCarry:
     """Commit a SegmentCarry to the lat-band layout (grid-shaped + flattened
     leaves P("lat"); scalars / land_ml replicated). ``mesh=None`` -> unchanged."""
+    # FIRST statement: the `mesh is None` return SKIPS every per-leaf put,
+    # and each put is an all-gather under multi-process (#1362 r4, blocker 6).
+    _agree_opsplit_mesh_entry(mesh, carry,
+                              where="shard_operator_split_carry")
     if mesh is None:
         return carry
     n_dev = mesh.devices.size
@@ -144,6 +183,11 @@ def shard_operator_split_carry(carry: SegmentCarry, mesh) -> SegmentCarry:
 
 
 def shard_operator_split_forcing(forcing: SegmentForcing, mesh) -> SegmentForcing:
+    """Commit a SegmentForcing to the lat-band layout. ``mesh=None`` -> unchanged."""
+    # FIRST statement: same rank-local early return + per-leaf all-gather as
+    # the carry twin (#1362 round 4, blocker 6).
+    _agree_opsplit_mesh_entry(mesh, forcing,
+                              where="shard_operator_split_forcing")
     if mesh is None:
         return forcing
     n_dev = mesh.devices.size
@@ -170,14 +214,32 @@ def _need_rad_and_time(step_index, start_day, dt, rad_update_steps):
 # Ordered flag names for the operator-split SPMD entry gate. STATIC tuple: the
 # payload width is fixed by this literal, never by rank-local data.
 _OPSPLIT_SPMD_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "axis_names",
-    "grid_n_lat", "grid_n_lon", "fold_active", "has_polar_mask",
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "grid_n_lat", "grid_n_lon", "geom_schema", "fold_active",
+    "has_polar_mask", "has_polar_mask_v",
+    "model_config_digest", "statics_digest", "statics_schema",
     "fix_mass", "rad_update_steps", "n_ghg_keys", "ghg_keys",
 )
 
 
-def _agree_opsplit_spmd_entry(model, mesh, *, fix_mass, rad_update_steps,
-                              ghg_keys, where: str) -> None:
+def _opsplit_mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists; never raises."""
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
+
+
+def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
+                              rad_update_steps, ghg_keys, where: str) -> None:
     """Agree every rank-local input, as the FIRST statement of this factory.
 
     #1362 round 4.  This is the THIRD lat-band SPMD lane (after
@@ -202,25 +264,52 @@ def _agree_opsplit_spmd_entry(model, mesh, *, fix_mass, rad_update_steps,
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
-        else ()
-    keys = tuple(str(k) for k in (ghg_keys or ()))
-    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
-                                         absent=0.0)
-    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
-                                         absent=0.0)
-    rad_flag, rad_bad = coerce_count(rad_update_steps, absent=0.0)
+    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    problems = []
+
+    def _count(value, label, absent=FLAG_ABSENT):
+        payload, problem = coerce_count(value, absent=absent)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    def _flag(value, label):
+        payload, problem = coerce_bool(value, absent=FLAG_ABSENT)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    # `ghg_keys or ()` would evaluate the truthiness of an ARRAY and raise
+    # before the collective (codex round-4, blocker 2); test for None instead.
+    try:
+        keys = () if ghg_keys is None else tuple(
+            str(k) for k in ghg_keys)
+    except Exception:                       # pragma: no cover - defensive
+        keys = ("<unreadable ghg_keys>",)
+        problems.append(("ghg_keys", "is not an iterable of species names"))
     flags = (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(axis_names)),
-        name_digest48(axis_names),
-        n_lat_flag,
-        n_lon_flag,
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        _count(getattr(grid, "n_lat", None), "grid.n_lat", absent=0.0),
+        _count(getattr(grid, "n_lon", None), "grid.n_lon", absent=0.0),
+        tree_schema_digest48(grid),
         float(bool(fold is not None and getattr(fold, "is_active", False))),
         float(getattr(model, "_polar_mask", None) is not None),
-        float(bool(fix_mass)),
-        rad_flag,
+        # The body conditions on `_polar_mask` and then slices
+        # `_polar_mask_v` unconditionally (codex round-4, blocker 4).
+        float(getattr(model, "_polar_mask_v", None) is not None),
+        config_digest48(getattr(model, "config", None)),
+        # `statics` was not agreed AT ALL: `statics.fix_moisture` controls a
+        # global-area reduction, `qv_smooth_coeff` / `owned_mask` gate loud
+        # rank-local refusals, and `dt` sets the trajectory (codex round-4,
+        # blocker 3). Digest its static scalars AND its leaf schema.
+        config_digest48(statics),
+        tree_schema_digest48(statics),
+        _flag(fix_mass, "fix_mass"),
+        _count(rad_update_steps, "rad_update_steps", absent=0.0),
         float(len(keys)),
         name_digest48(keys),
     )
@@ -228,11 +317,14 @@ def _agree_opsplit_spmd_entry(model, mesh, *, fix_mass, rad_update_steps,
     # AFTER the collective only, so the refusal is symmetric on every rank
     # (see the atm twin's rationale: a raise while assembling the payload
     # kills one process while its peers block in process_allgather).
-    for label, problem in (("grid.n_lat", n_lat_bad),
-                           ("grid.n_lon", n_lon_bad),
-                           ("rad_update_steps", rad_bad)):
-        if problem is not None:
-            raise ValueError(f"{where}: {label} {problem}")
+    for label, problem in problems:
+        raise ValueError(f"{where}: {label} {problem}")
+    if (getattr(model, "_polar_mask", None) is not None
+            and getattr(model, "_polar_mask_v", None) is None):
+        raise ValueError(
+            f"{where}: model._polar_mask is set but model._polar_mask_v is "
+            f"None; the band geometry build slices BOTH, so this would fail "
+            f"mid-build instead of here.")
 
 
 def make_sharded_operator_split_step(
@@ -272,7 +364,7 @@ def make_sharded_operator_split_step(
     # FIRST statement: agree every rank-local input before ANY rank-local
     # check can raise or return (#1362 round 4 -- this lane was the third,
     # unfixed instance of the class).
-    _agree_opsplit_spmd_entry(model, mesh, fix_mass=fix_mass,
+    _agree_opsplit_spmd_entry(model, mesh, statics, fix_mass=fix_mass,
                               rad_update_steps=rad_update_steps,
                               ghg_keys=ghg_keys,
                               where="make_sharded_operator_split_step")
@@ -397,6 +489,9 @@ def make_sharded_operator_split_step(
     _cache = {}
 
     def sharded_split_step(carry, forcing):
+        _agree_opsplit_mesh_entry(
+            mesh, carry, forcing,
+            where="make_sharded_operator_split_step.step")
         # Cache key = pytree STRUCTURE (None<->array flips) PLUS every leaf's
         # shape/dtype: the in/out_specs derive from arr.ndim + arr.shape[0], so a
         # shape/rank change under an unchanged structure would otherwise reuse a

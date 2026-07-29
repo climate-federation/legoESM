@@ -46,8 +46,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.parallel.geometry_consistency import (
-    assert_flags_agree, assert_schema_agrees, broadcast_checked, coerce_count,
-    name_digest48)
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    coerce_bool, coerce_count, config_digest48, name_digest48,
+    tree_schema_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 try:                                   # JAX >= 0.8 exposes shard_map at top level
@@ -238,6 +239,54 @@ def _build_band_vertex_masks(model, n_dev):
     return [jnp.asarray(vmask[r * nl: r * nl + nl + 1]) for r in range(n_dev)]
 
 
+# Ordered flag names for the ocean MESH+TREE gate used by the scatter/gather
+# bridges and by the returned SPMD callable. STATIC tuple: fixed width.
+_OCEAN_MESH_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "has_tree", "tree_schema",
+)
+
+
+def _ocean_mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists; never raises."""
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
+
+
+def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
+    """Agree the mesh AND a pytree LEAF SCHEMA before a scatter/gather.
+
+    #1362 round 4, blockers 5-6.  Both directions are collective here: the
+    gather's ``replicate_leaf`` compiles a jit identity with replicated
+    ``out_shardings``, and the scatter's DIRECT ``device_put`` of a full
+    global array onto a cross-process ``NamedSharding`` falls back to an
+    all-gather (documented on ``latlon_spmd.shard_leaf``) -- so the earlier
+    "SCATTER, therefore no collective" exemption was FALSE for this lane.
+    One collective runs PER LEAF, so the leaf schedule (optional fields,
+    dtypes, shapes) is rank-local data and is folded into one digest.
+    """
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    assert_flags_agree(_OCEAN_MESH_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        float(tree is not None),
+        tree_schema_digest48(tree) if tree is not None else FLAG_ABSENT,
+    ), context=where)
+
+
 def shard_state_latlon(state, mesh):
     """Lay out a ``LatLonCGridOceanState`` for the lat-band SPMD step.
 
@@ -252,6 +301,11 @@ def shard_state_latlon(state, mesh):
     expects; the test uses it instead of a uniform ``tree.map(P("lat"))`` (which
     fails on ``v`` because ``n_lat+1`` is not divisible by ``N``).
     """
+    # FIRST statement: a DIRECT ``device_put`` of full global arrays onto a
+    # cross-process ``NamedSharding`` is serviced by an ALL-GATHER, and one
+    # runs per leaf -- so both the mesh and the leaf SCHEDULE are rank-local
+    # inputs to a collective (#1362 round 4, blockers 5-6).
+    _agree_ocean_mesh_entry(mesh, state, where="shard_state_latlon")
     # v-carrier contract (see make_sharded_ocean_step's fold note): the TOP
     # v-face row (regular pole wall OR tripole seam/cap row) must be
     # wall-masked — the carrier drops it and reconstructs it as zero, which
@@ -327,6 +381,10 @@ def shard_forcing_latlon(forcing, mesh):
     untouched (they vanish from the pytree structure, matching the specs the
     step derives).  ``forcing=None`` returns ``None``.
     """
+    # FIRST statement: the `forcing is None or mesh is None` return below
+    # SKIPS every per-leaf put, so a rank with no forcing would leave a peer
+    # blocked in one (#1362 round 4, blocker 6).
+    _agree_ocean_mesh_entry(mesh, forcing, where="shard_forcing_latlon")
     if forcing is None or mesh is None:
         return forcing
 
@@ -364,6 +422,10 @@ def shard_forcing_stack_latlon(stack, mesh):
     stack must be laid out consistently with the state the sharded step
     carries, and a second copy would drift.
     """
+    # FIRST statement: same rank-local early-return + per-leaf put as
+    # shard_forcing_latlon (#1362 round 4, blocker 6).
+    _agree_ocean_mesh_entry(mesh, stack,
+                            where="shard_forcing_stack_latlon")
     if mesh is None:
         return stack
 
@@ -400,40 +462,6 @@ def append_vface_wall_row(v_lower):
     return jnp.concatenate([v_lower, wall], axis=0)
 
 
-# Ordered flag names for the ocean GATHER entry gate. STATIC tuple: the
-# payload width is fixed by this literal, never by rank-local data (the
-# variable-length part -- which fields are non-None -- is folded into ONE
-# order-sensitive digest, so the width stays constant).
-_OCEAN_GATHER_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "axis_names",
-    "n_gathered_fields", "gathered_fields",
-)
-
-
-def _agree_ocean_gather_entry(state, mesh, *, where: str) -> None:
-    """Agree the mesh AND the gathered-field list before the first gather.
-
-    #1362 round 4.  :func:`gather_state_latlon` runs one cross-process
-    replication per NON-``None`` field, so the COUNT of collectives it enters
-    is rank-local data (an optional prognostic present on some processes
-    only).  Folding the ordered names of exactly the fields that will be
-    gathered into a single ``name_digest48`` keeps the payload fixed-width
-    while making that divergence a clean symmetric raise instead of a hang.
-    """
-    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
-        else ()
-    gathered = tuple(
-        name for name in state._fields if getattr(state, name) is not None)
-    assert_flags_agree(_OCEAN_GATHER_ENTRY_FLAGS, (
-        float(mesh is not None),
-        float(mesh.devices.size if mesh is not None else 0),
-        float(len(axis_names)),
-        name_digest48(axis_names),
-        float(len(gathered)),
-        name_digest48(gathered),
-    ), context=where)
-
-
 def gather_state_latlon(state, mesh):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
@@ -457,7 +485,7 @@ def gather_state_latlon(state, mesh):
     # collectives -- one rank finishing while a peer still waits. So agree the
     # mesh AND the ordered list of fields that will actually be gathered,
     # before the first one runs.
-    _agree_ocean_gather_entry(state, mesh, where="gather_state_latlon")
+    _agree_ocean_mesh_entry(mesh, state, where="gather_state_latlon")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -491,8 +519,9 @@ def gather_state_latlon(state, mesh):
 # Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
 # width is fixed by this literal, never by rank-local data.
 _OCEAN_SPMD_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "axis_names",
-    "grid_n_lat", "grid_n_lon", "fold_active",
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "grid_n_lat", "grid_n_lon", "geom_schema", "fold_active",
+    "config_digest", "has_vertex_mask",
 )
 
 
@@ -527,27 +556,80 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
-        else ()
-    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
-                                         absent=0.0)
-    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
-                                         absent=0.0)
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    problems = []
+
+    def _count(value, label, absent=FLAG_ABSENT):
+        payload, problem = coerce_count(value, absent=absent)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
     flags = (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(axis_names)),
-        name_digest48(axis_names),
-        n_lat_flag,
-        n_lon_flag,
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        _count(getattr(grid, "n_lat", None), "grid.n_lat", absent=0.0),
+        _count(getattr(grid, "n_lon", None), "grid.n_lon", absent=0.0),
+        # The geometry array fields that `build_band_grids` slices and
+        # `_replicated_put` broadcasts, by dtype + shape.
+        tree_schema_digest48(grid),
         float(bool(fold is not None and getattr(fold, "is_active", False))),
+        # ONE digest over EVERY static scalar of the ocean config instead of a
+        # hand-picked few: the step body branches on `outer_integrator`, the
+        # tracer integrator, the polar filter, the freeze floor and the EW
+        # overlap, and NONE of them were agreed (codex round-4, blocker 3).
+        # A valid/invalid or euler/ab2 split makes one rank raise during
+        # tracing while its peer compiles a different program.
+        config_digest48(getattr(model, "config", None)),
+        # `_build_band_vertex_masks` RAISES when this cache is unprimed, and
+        # it runs before the schema collective -- so its presence must be
+        # agreed first or an unprimed rank dies while its peer blocks
+        # (codex round-4, blocker 4).
+        float(getattr(model, "_vertex_mask", None) is not None),
     )
     assert_flags_agree(_OCEAN_SPMD_ENTRY_FLAGS, flags, context=where)
     # AFTER the collective only: symmetric on every rank (see atm twin).
-    for label, problem in (("grid.n_lat", n_lat_bad),
-                           ("grid.n_lon", n_lon_bad)):
-        if problem is not None:
-            raise ValueError(f"{where}: {label} {problem}")
+    for label, problem in problems:
+        raise ValueError(f"{where}: {label} {problem}")
+
+
+# Ordered flag names for the PER-INVOCATION gate on the returned ocean SPMD
+# callable. STATIC tuple: fixed width, never rank-local.
+_OCEAN_CALL_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "axis_names", "axis_sizes",
+    "state_schema", "has_forcing", "forcing_schema",
+)
+
+
+def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
+    """Agree a returned ocean SPMD callable's per-CALL inputs, FIRST statement.
+
+    #1362 round 4, blocker 7.  ``sharded_step`` runs ``_validate_forcing_layout``
+    and builds a rank-local cache key BEFORE entering its ``shard_map``: a
+    forcing layout that is invalid on one rank only makes that rank raise while
+    its peers enter the collective program -- a hang.  The state + forcing leaf
+    SCHEMA is agreed too, because ``in_specs``/``out_specs`` are derived from
+    it, so two processes with different optional fields compile different
+    programs.
+
+    Cost: one small allgather per CALL, and an exact no-op under a single
+    process.  See the atmosphere twin ``_agree_spmd_call`` for why gating only
+    on cache misses is NOT a valid optimisation.
+    """
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    assert_flags_agree(_OCEAN_CALL_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        name_digest48(names),
+        name_digest48(sizes),
+        tree_schema_digest48(state),
+        float(forcing is not None),
+        (tree_schema_digest48(forcing) if forcing is not None
+         else FLAG_ABSENT),
+    ), context=where)
 
 
 def make_sharded_ocean_step(model, mesh):
@@ -787,6 +869,9 @@ def make_sharded_ocean_step(model, mesh):
         # ONE forcing operand: None fields drop out of the pytree structure,
         # so specs derived by tree.map skip them automatically and the
         # structure key below distinguishes every None<->array combination.
+        _agree_ocean_spmd_call(
+            mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
+            where="make_sharded_ocean_step.step")
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
@@ -889,6 +974,8 @@ def make_sharded_ocean_step_global(model, mesh):
     inner = make_sharded_ocean_step(model, mesh)
 
     def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
+        _agree_ocean_spmd_call(mesh, state, (surface_forcing, freshwater),
+                               where="make_sharded_ocean_step_global.step")
         # Scatter the global state to the band layout; the forcing is sharded
         # INSIDE ``inner`` (make_sharded_ocean_step lays it out), so pass it
         # through global.
