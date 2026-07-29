@@ -1025,11 +1025,33 @@ all-reduce.
 
 **CONCLUSION: the cube's fixed cost is dominated by rank-arrival skew,
 not by launch count or bytes.** Packing fields, batching levels and
-fattening messages all target the wrong term. The next real step is to
-measure WHERE the skew originates (per-rank arrival times at each halo
-phase) — and skew has no one-line fix; it is load imbalance, or a
-serialised phase upstream of the exchange. Recorded here rather than
-guessed at.
+fattening messages all target the wrong term.
+
+**SKEW LOCATED (4-rank profile, job 26526100).** Aligning SendRecv
+launches by sequence across ranks 0/1/12/23 over two steady steps:
+
+* 10 of 172 exchanges carry >1 ms of max duration, and **9 of the 10 are
+  skew-dominated** — arrival skew ~= max duration (e.g. 13.6 ms skew vs
+  12.6 ms duration with the last arriver's own service at 14 us: early
+  ranks WAIT the full skew).
+* The ordering is SYSTEMATIC: rank 23 arrives last 95/140 times, rank 0
+  44/140; rank 12 arrives FIRST 135/140. Median idle gap before a late
+  arrival is 20 us — the late rank was computing back-to-back, not
+  blocked upstream.
+* BUT total per-rank work is EQUAL: compute 8.2-8.5 ms/step in ~428
+  kernels on every rank.
+
+Equal totals + systematically late at fixed sequence points = **pipeline
+drift, not load imbalance**: the 16-phase pad sequence has
+rank-dependent participation (partial permutes let non-target ranks run
+ahead), the drift accumulates within the step, and the ~10
+full-participation exchanges act as resync barriers where the
+accumulated drift is paid as wait. The cost is real (~7.5 ms/step in the
+wait tail) but the remedy is ALGORITHMIC — reorder/merge pad phases so
+drift cannot accumulate, or overlap the resync exchanges with interior
+compute — a scoped dycore-scheduling follow-up, not a bench or config
+change. No further profiling is needed; the mechanism chain
+(launch-count -> bytes -> skew -> ordering) is now measured end to end.
 
 ## Tripole (ORCA fold) past 4 GPUs — first receipts (job 26512798)
 
@@ -1115,10 +1137,29 @@ state, the vertex-mask cache primed FROM the global state, and the
 replicated geometry stacks. The cube's level-independent wall fits: its
 setup residency is mesh tables + 2-D geometry.
 
-Fix candidates under codex round-18 review: host-side state construction,
-explicit free-after-shard, sharding the geometry stacks, and priming the
-vertex-mask cache from the sharded state. Acceptance test: re-run this
-probe; bytes_in_use must track the SHARD, not the global.
+**FIX STAGE (i) SHIPPED AND MEASURED** (commits e1b502000/e5a541c65 +
+probe 26524423): building the global model/state under
+`jax.default_device(local cpu)` at nd>1 drops per-device residency
+**1.58 -> 0.30 GB (@16) and 3.11 -> 0.71 GB (@32) — a 5x reduction** —
+with the compiled step unchanged and parity at 1e-10. Getting there
+burned four probe attempts on real multicontroller facts, each recorded:
+lower/compile is COLLECTIVE (rank-0-only deadlocks the shutdown
+barrier); `jax.devices()` is the GLOBAL list under jax.distributed (use
+`local_devices`); `JAX_PLATFORMS=cuda` unregisters the cpu backend; and
+the host-side build needs `--mem=0` or the SLURM cgroup kills it.
+
+**STAGE (iii) SHIPPED — ACCEPTANCE MET** (commit 57494f2de, probe
+26526284): sharding the band-geometry stacks P("lat") removes the
+residual. Per-device residency is now **0.10 GB at BOTH probe sizes —
+ratio 1.00, meeting codex's pre-registered <= 1.10 exactly**. Full arc:
+1.58/3.11 GB (before) -> 0.30/0.71 (host-side build) -> **0.10/0.10**
+(sharded stacks): a 16-31x reduction, residency now independent of
+global size. All 13 SPMD gate suites (equivalence/tripole/wide-halo)
+pass. One diagnostic casualty, harmless to production: the probe's
+OUTER re-jit now refuses ("closing over a multi-process jax.Array"),
+because the wrapper closes over the now-sharded stacks — the production
+inner jit receives them as ARGUMENTS and is unaffected (the probe's own
+step invocation ran). Remaining acceptance: the LL2304@64 wall run.
 
 WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
 every plateau is a LARGER TILE, i.e. raising resolution as devices are
