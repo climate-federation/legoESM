@@ -33,7 +33,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    assert_schema_agrees, broadcast_checked)
+    assert_flags_agree, assert_schema_agrees, broadcast_checked)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
@@ -403,7 +403,8 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
     # would desynchronize the per-field gathers rather than fail cleanly.
     ordered_names = list(raw)
     assert_schema_agrees(ordered_names, n_dev,
-                         context="make_sharded_atm_latlon_step")
+                         context="make_sharded_atm_latlon_step",
+                         arrays=[raw[n] for n in ordered_names])
     raw = {
         name: jnp.asarray(broadcast_checked(
             raw[name], name, context="make_sharded_atm_latlon_step"))
@@ -518,12 +519,27 @@ def unroll_to_dtype_fixed_point(step1, state, n_left: int):
 def _refuse_unsupported_spmd_config(model) -> None:
     """Dispatch-hardening shared by the step + segment factories: only a
     non-fold lat-lon grid with an SPMD-safe mass path is supported.  Fail
-    LOUD rather than silently mis-fold / band-local-sum."""
+    LOUD rather than silently mis-fold / band-local-sum.
+
+    The refusal decision is AGREED ACROSS PROCESSES first.  These are
+    rank-local reads of per-process config, and this function runs BEFORE the
+    geometry schema gate; if one process rejected its config and unwound
+    while its peers proceeded into `process_allgather`, that would be a
+    collective-order violation whose symptom is a HANG rather than an error
+    (codex 2026-07-29, blocker 1).  Agreeing on the flags first makes the
+    refusal symmetric: all processes raise, or none do.
+    """
     fold = getattr(model.grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
+    fold_active = bool(fold is not None
+                       and getattr(fold, "is_active", False))
+    anchor = bool(getattr(model.config, "anchor_mass_to_initial", False))
+    assert_flags_agree(
+        ("fold_active", "anchor_mass_to_initial"), (fold_active, anchor),
+        context="atm lat-band SPMD config gate")
+    if fold_active:
         raise NotImplementedError(
             "atm lat-band SPMD: tripole north-fold is a follow-up.")
-    if getattr(model.config, "anchor_mass_to_initial", False):
+    if anchor:
         raise NotImplementedError(
             "atm lat-band SPMD: anchor_mass_to_initial uses a band-local "
             "jnp.sum(p_s*area) target that is not yet SPMD-routed; disable it "
@@ -1232,7 +1248,8 @@ def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
     # fingerprint must describe this process's whole mesh, not one axis.
     ordered_names = list(raw)
     assert_schema_agrees(ordered_names, p_lat * p_lon,
-                         context="make_sharded_atm_latlon_step_2d")
+                         context="make_sharded_atm_latlon_step_2d",
+                         arrays=[raw[n] for n in ordered_names])
     raw = {
         name: jnp.asarray(broadcast_checked(
             raw[name], name, context="make_sharded_atm_latlon_step_2d"))
@@ -1309,9 +1326,20 @@ def _check_2d_mesh(mesh) -> tuple[int, int]:
 
 
 def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
-    """2-D-specific dispatch-hardening on top of the shared band refusals."""
+    """2-D-specific dispatch-hardening on top of the shared band refusals.
+
+    As in the 1-D twin, the polar-filter refusal is AGREED ACROSS PROCESSES
+    before any rank raises.  This case is the sharpest instance of
+    codex-2026-07-29 blocker 1: `use_polar_filter` also controls whether the
+    `__polar_mask`/`__polar_mask_v` entries exist in the geometry field list,
+    so a per-process difference would BOTH skew the field schema AND make one
+    rank raise here while another blocked in the schema collective.
+    """
     _refuse_unsupported_spmd_config(model)
-    if p_lon > 1 and bool(getattr(model.config, "use_polar_filter", False)):
+    polar = bool(getattr(model.config, "use_polar_filter", False))
+    assert_flags_agree(("use_polar_filter", "p_lon"), (polar, p_lon),
+                       context="atm 2-D SPMD config gate")
+    if p_lon > 1 and polar:
         raise NotImplementedError(
             "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 is "
             "not wired — the polar filter FFTs the full longitude circle "

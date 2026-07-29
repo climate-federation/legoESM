@@ -45,10 +45,22 @@ import numpy as np
 
 __all__ = [
     "content_hash48",
+    "name_digest48",
     "schema_fingerprint",
     "assert_schema_agrees",
+    "assert_flags_agree",
     "broadcast_checked",
 ]
+
+# Every per-field collective payload is padded to these FIXED widths.  A
+# payload whose LENGTH depends on rank-local data (dtype class, ndim,
+# non-finite count) would let two processes enter `process_allgather` with
+# different shapes and DEADLOCK -- the exact failure this module exists to
+# turn into a clean symmetric raise (codex 2026-07-29, blocker 2; the flaw was
+# inherited from the pre-extraction ocean implementation, so fixing it here
+# fixes BOTH lanes).
+_STRUCT_WIDTH = 8
+_VALS_WIDTH = 3
 
 # Relative tolerance for FLOAT geometry fields. Only ULP-scale autotune drift
 # is expected there; quantize-then-assert-equal false-positived on a rounding
@@ -71,27 +83,88 @@ def content_hash48(arr) -> float:
     return float(int.from_bytes(h.digest(), "big"))
 
 
-def schema_fingerprint(names, n_dev) -> np.ndarray:
-    """Fixed-shape schema digest: field-name list, count, x64 flag, n_dev.
+def name_digest48(names) -> float:
+    """Order-sensitive, UNAMBIGUOUS digest of a sequence of names.
 
-    Gathered ONCE before the per-field loop so a process-dependent field
-    selection is caught by a collective every process reaches, instead of
-    desynchronizing the per-field gathers (codex round-5 findings 3/4).
+    Uses a NUL separator, which cannot occur in a Python identifier or any
+    legoESM field name, so ``["a,b", "c"]`` and ``["a", "b,c"]`` cannot
+    collide.  A plain ``",".join`` COULD (codex 2026-07-29, minor 5): those
+    two lists have the same length, so a count check does not separate them
+    either.
     """
-    joined = ",".join(names).encode()
-    digest = float(int.from_bytes(
+    joined = "\x00".join(names).encode()
+    return float(int.from_bytes(
         hashlib.blake2b(joined, digest_size=6).digest(), "big"))
+
+
+def schema_fingerprint(names, n_dev, dtype_kinds=(), ndims=()) -> np.ndarray:
+    """Fixed-shape schema digest gathered ONCE before the per-field loop.
+
+    Covers the field-name list (order-sensitive), the count, the x64 flag,
+    ``n_dev``, and -- critically -- the per-field DTYPE CLASS and NDIM.
+
+    The dtype/ndim terms are not cosmetic.  :func:`broadcast_checked` routes
+    exact dtypes to a 1-value digest and float dtypes to a 3-moment
+    fingerprint, and its struct entry depends on ndim.  If the schema gate
+    did not cover those, a field that is bool on one process and float on
+    another would PASS the gate and then deadlock inside the per-field
+    gather with mismatched payloads.  Catching it here converts that hang
+    into a clean symmetric RuntimeError (codex 2026-07-29, blocker 2).
+
+    ``dtype_kinds``/``ndims`` default to empty for callers that have not yet
+    resolved the arrays; passing them is strongly preferred.
+    """
     return np.array(
-        [float(len(names)), digest, float(bool(jax.config.jax_enable_x64)),
-         float(n_dev)], dtype=np.float64)
+        [float(len(names)),
+         name_digest48(names),
+         float(bool(jax.config.jax_enable_x64)),
+         float(n_dev),
+         name_digest48([str(k) for k in dtype_kinds]),
+         name_digest48([str(int(n)) for n in ndims])],
+        dtype=np.float64)
 
 
-def assert_schema_agrees(names, n_dev, *, context: str) -> None:
+def assert_flags_agree(names, values, *, context: str) -> None:
+    """Raise unless every process agrees on a tuple of rank-local CONFIG flags.
+
+    Call this BEFORE any rank-local ``raise`` that inspects per-process
+    config.  Otherwise one process can reject its config and exit while its
+    peers proceed into a collective and block forever — a collective-ORDER
+    violation whose symptom (hang vs backend error) is backend-dependent
+    (codex 2026-07-29, blocker 1).
+
+    ``names`` and ``values`` must be STATIC tuples written at the call site,
+    so the payload length is fixed by the code path rather than by data.
+    """
+    if jax.process_count() <= 1:
+        return
+    from jax.experimental import multihost_utils
+
+    payload = np.array(
+        [float(len(values)), name_digest48(names),
+         *(float(v) for v in values)], dtype=np.float64)
+    gathered = multihost_utils.process_allgather(payload)
+    if not bool(np.all(gathered == gathered[0])):
+        raise RuntimeError(
+            f"{context}: per-process CONFIG differs across processes "
+            f"(flags {list(names)} -> gathered {gathered.tolist()}). Every "
+            f"process must be built from the same config; refusing before "
+            f"any rank-local rejection so the failure is symmetric rather "
+            f"than a hang.")
+
+
+def assert_schema_agrees(names, n_dev, *, context: str, arrays=None) -> None:
     """Raise unless every process agrees on the geometry field SCHEMA.
 
     ``names`` must be an ORDERED sequence — the per-field
     :func:`broadcast_checked` calls that follow are matched positionally
     across processes, so a reordering is itself a divergence worth catching.
+
+    Pass ``arrays`` (the per-name arrays, same order) so the gate also covers
+    each field's DTYPE CLASS and NDIM.  Those decide the per-field payload
+    SHAPE in :func:`broadcast_checked`, so leaving them out lets a
+    bool-vs-float disagreement slip past this gate and deadlock in the
+    per-field gather instead of raising here.
 
     No-op when ``jax.process_count() == 1``.
     """
@@ -99,22 +172,32 @@ def assert_schema_agrees(names, n_dev, *, context: str) -> None:
         return
     from jax.experimental import multihost_utils
 
+    names = list(names)
+    if arrays is None:
+        kinds, ndims = (), ()
+    else:
+        hosts = [np.asarray(a) for a in arrays]
+        kinds = [("exact" if h.dtype.kind in "biu" else "inexact")
+                 for h in hosts]
+        ndims = [h.ndim for h in hosts]
     gathered = multihost_utils.process_allgather(
-        schema_fingerprint(list(names), n_dev))
+        schema_fingerprint(names, n_dev, kinds, ndims))
     if not bool(np.all(gathered == gathered[0])):
         raise RuntimeError(
             f"{context}: the band-geometry SCHEMA differs across processes "
-            f"(field list / x64 setting / device count — gathered "
-            f"{gathered.tolist()}). Fix the per-process config before "
-            f"sharding; the per-field checks assume one schema.")
+            f"(field list / x64 setting / device count / per-field dtype "
+            f"class / ndim — gathered {gathered.tolist()}). Fix the "
+            f"per-process config before sharding; the per-field checks "
+            f"assume one schema.")
 
 
 def broadcast_checked(arr, name: str, *, context: str) -> np.ndarray:
     """Verify ``arr`` agrees across processes, then broadcast process 0's bytes.
 
-    Returns a host ``np.ndarray`` that is bit-identical on every process, safe
-    to hand to a replicated ``device_put``.  Single-process: returns the host
-    view unchanged, no collectives.
+    Multi-process: returns a host ``np.ndarray`` that is bit-identical on
+    every process, safe to hand to a replicated ``device_put``.
+    Single-process: returns ``arr`` ITSELF, untouched — no collectives, no
+    host round trip, no dtype/weak-type change.
 
     The fingerprint compares structural entries exactly; value entries
     EXACTLY for integer/bool arrays and to ``rtol=1e-5`` for float arrays.
@@ -131,29 +214,43 @@ def broadcast_checked(arr, name: str, *, context: str) -> np.ndarray:
     AND absmax to ``rtol`` is not detected.  Band grids are analytic in
     lat/lon, so any real inconsistency moves those moments.
     """
-    host = np.asarray(arr)
+    # EARLY return, BEFORE np.asarray: single process has nothing to compare,
+    # and converting here would force a device->host->device round trip and
+    # strip weak-type metadata on a 1-process mesh. The ocean lane already
+    # held host arrays so it was unaffected, but the atmosphere lane passes
+    # `jnp.stack` results straight in and WAS regressed by an unconditional
+    # conversion (codex 2026-07-29, major 3). Return the caller's object
+    # untouched.
     if jax.process_count() <= 1:
-        return host
+        return arr
     from jax.experimental import multihost_utils
 
+    host = np.asarray(arr)
     flat = host.ravel()
     is_exact = host.dtype.kind in "biu"
-    struct = np.array(
-        [float(host.ndim), *map(float, host.shape),
-         float(np.dtype(host.dtype).num)], dtype=np.float64)
+    # FIXED-WIDTH payloads (see _STRUCT_WIDTH/_VALS_WIDTH): the gathered shape
+    # must never depend on rank-local data, or two processes can enter this
+    # collective with different shapes and hang. Shape is folded in as a
+    # digest rather than splatted, so an ndim difference cannot change the
+    # length either.
+    struct = np.zeros(_STRUCT_WIDTH, dtype=np.float64)
+    struct[0] = float(host.ndim)
+    struct[1] = float(np.dtype(host.dtype).num)
+    struct[2] = float(1.0 if is_exact else 0.0)
+    struct[3] = float(host.size)
+    struct[4] = name_digest48([str(d) for d in host.shape])
+    vals = np.zeros(_VALS_WIDTH, dtype=np.float64)
     if is_exact:
-        vals = np.array([content_hash48(host)], dtype=np.float64)
+        vals[0] = content_hash48(host)
     else:
         finite = flat[np.isfinite(flat)]
         f64 = finite.astype(np.float64)
         # Non-finite COUNT is structural: a NaN appearing on one process only
         # must not be averaged away by the moment compare below.
-        struct = np.concatenate([struct, [float(flat.size - finite.size)]])
-        vals = np.array(
-            [float(f64.sum()) if f64.size else 0.0,
-             float((f64 * f64).sum()) if f64.size else 0.0,
-             float(np.abs(f64).max()) if f64.size else 0.0],
-            dtype=np.float64)
+        struct[5] = float(flat.size - finite.size)
+        vals[0] = float(f64.sum()) if f64.size else 0.0
+        vals[1] = float((f64 * f64).sum()) if f64.size else 0.0
+        vals[2] = float(np.abs(f64).max()) if f64.size else 0.0
 
     g_struct = multihost_utils.process_allgather(struct)
     g_vals = multihost_utils.process_allgather(vals)

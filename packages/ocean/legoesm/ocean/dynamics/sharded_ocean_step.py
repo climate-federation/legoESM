@@ -542,18 +542,24 @@ def make_sharded_ocean_step(model, mesh):
     # a process-dependent field list or a mixed jax_enable_x64 setting would
     # otherwise desynchronize the per-field gathers below instead of failing
     # with a clear message.
-    assert_schema_agrees(list(array_field_names), n_dev,
-                         context="make_sharded_ocean_step")
-
-    geom_stacks = {
-        name: _replicated_put(
-            jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
-                      axis=0), name)
+    # Build the raw stacks FIRST so the schema gate can also cover each
+    # field's dtype class and ndim -- those decide the per-field payload
+    # shape below, so a bool-vs-float disagreement must fail HERE rather than
+    # deadlock in the per-field gather.
+    _raw_geom = {
+        name: jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
+                        axis=0)
         for name in array_field_names
     }
-    vmask_stack = _replicated_put(
-        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0),
-        "vertex_mask")
+    _raw_vmask = jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0)
+    _gate_names = [*array_field_names, "vertex_mask"]
+    assert_schema_agrees(
+        _gate_names, n_dev, context="make_sharded_ocean_step",
+        arrays=[*(_raw_geom[n] for n in array_field_names), _raw_vmask])
+
+    geom_stacks = {name: _replicated_put(_raw_geom[name], name)
+                   for name in array_field_names}
+    vmask_stack = _replicated_put(_raw_vmask, "vertex_mask")
 
     # Static perms for the v north-boundary-row ppermute (band r receives band
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
