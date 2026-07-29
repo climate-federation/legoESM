@@ -80,11 +80,20 @@ class TestSchemaFingerprint:
     def test_shape_and_dtype_are_fixed(self):
         """Fixed shape is what lets every process reach the SAME collective
         even when their field lists differ — a variable-length payload would
-        deadlock instead of reporting."""
+        deadlock instead of reporting.
+
+        Asserts the payloads AGREE with each other rather than pinning a
+        literal width, so extending the fingerprint (as the dtype-kind/ndim
+        terms did) does not silently turn this into a stale-constant test.
+        The one thing that must never vary is that the width is independent
+        of the INPUTS.
+        """
         a = schema_fingerprint(["x", "y"], 4)
         b = schema_fingerprint(["completely", "different", "names"], 9)
-        assert a.shape == b.shape == (4,)
-        assert a.dtype == b.dtype == np.float64
+        c = schema_fingerprint(["x"], 1, ["exact", "inexact"], [1, 2, 3])
+        assert a.shape == b.shape == c.shape
+        assert a.ndim == 1 and a.shape[0] >= 4
+        assert a.dtype == b.dtype == c.dtype == np.float64
 
     def test_sensitive_to_field_list(self):
         assert not np.array_equal(schema_fingerprint(["a", "b"], 4),
