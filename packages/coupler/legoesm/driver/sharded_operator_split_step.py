@@ -198,7 +198,9 @@ def _agree_opsplit_spmd_entry(model, mesh, *, fix_mass, rad_update_steps,
     different compiled programs (Python-level feature gating on static
     values), so processes disagreeing there run different graphs.
     """
-    grid = model.grid
+    # Defensive attribute reads: nothing in the payload build may raise before
+    # the collective (see the atm twin for the full rule).
+    grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
     axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
         else ()

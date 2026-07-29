@@ -33,8 +33,8 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
-    coerce_count, name_digest48)
+    FLAG_ABSENT, FLAG_UNCOERCIBLE, assert_flags_agree, assert_schema_agrees,
+    broadcast_checked, coerce_count, name_digest48)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
@@ -569,8 +569,22 @@ _SPMD_ENTRY_FLAGS = (
 def _tri(value) -> float:
     """Tri-state payload entry: ``None`` (not applicable to this call site) ->
     :data:`FLAG_ABSENT`, else the boolean.  Keeps the entry payload FIXED
-    WIDTH across call sites that carry different subsets of the flags."""
-    return FLAG_ABSENT if value is None else float(bool(value))
+    WIDTH across call sites that carry different subsets of the flags.
+
+    Truthiness that RAISES (a multi-element array) maps to
+    :data:`FLAG_UNCOERCIBLE` rather than propagating: like
+    :func:`coerce_count`, this runs while ASSEMBLING a collective payload,
+    where any exception kills one rank while its peers block in the gather.
+    Ranks that disagree still disagree (the sentinel differs from ``0.0``/
+    ``1.0``); ranks that all pass the same bad object agree and proceed, which
+    is the same behaviour they had before the gate existed.
+    """
+    if value is None:
+        return FLAG_ABSENT
+    try:
+        return float(bool(value))
+    except Exception:                       # pragma: no cover - defensive
+        return FLAG_UNCOERCIBLE
 
 
 def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
@@ -624,7 +638,15 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
     maps to a fixed sentinel, so the payload WIDTH is set by
     ``_SPMD_ENTRY_FLAGS`` alone and never by rank-local data.
     """
-    grid = model.grid
+    # Attribute reads are ALL defensive. The rule this enforces: any value
+    # that can legitimately differ between processes (n_steps, grid dims, the
+    # config flags) must not be able to raise while the payload is being
+    # assembled, because that raise lands BEFORE the collective and hangs the
+    # peers. Structural type errors (a caller passing the wrong object) are
+    # identical on every rank in an SPMD launch, but reading them through
+    # getattr costs nothing and removes the last pre-collective throw sites.
+    grid = getattr(model, "grid", None)
+    cfg = getattr(model, "config", None)
     fold = getattr(grid, "fold", None)
     shape = dict(mesh.shape) if mesh is not None else {}
     axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
@@ -649,8 +671,8 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
         n_lat_flag,
         n_lon_flag,
         float(bool(fold is not None and getattr(fold, "is_active", False))),
-        float(bool(getattr(model.config, "anchor_mass_to_initial", False))),
-        float(bool(getattr(model.config, "use_polar_filter", False))),
+        float(bool(getattr(cfg, "anchor_mass_to_initial", False))),
+        float(bool(getattr(cfg, "use_polar_filter", False))),
         n_steps_flag,
         seg_flag,
         _tri(compiled_segments),

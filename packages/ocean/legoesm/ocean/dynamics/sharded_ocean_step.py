@@ -523,7 +523,9 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
     payload must not be able to kill one rank while its peers block in the
     gather (codex round-3 blocker 3, same rationale as the atm twin).
     """
-    grid = model.grid
+    # Defensive attribute reads: nothing in the payload build may raise before
+    # the collective (see the atm twin for the full rule).
+    grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
     axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
         else ()
