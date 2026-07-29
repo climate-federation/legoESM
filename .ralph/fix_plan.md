@@ -60,8 +60,16 @@ task. `--self-test` must keep passing every loop.
       `init_woa.py`, `init_latlon_cgrid.py`, `bathymetry.py`) — building a T(z) profile at t=0,
       where a static ladder is CORRECT. Audit complete; do not re-run it.
 - [x] DONE — `vslp` residual: closed by the metric pass (1.541e-06 -> 3.265e-10).
-- [ ] `ldf_eiv aeiu` — re-measure; it shares `_nemo_wpoint_e3w_wmask_n2`, so the slope-N^2 fix
-      should already have moved it off its recorded 0.999995 / 0.999958.
+- [x] **DONE 2026-07-29 — `ldf_eiv aeiu` re-measured. IMPROVED but still DEBT.**
+      corr 0.999995 -> 1.000000, |x|ratio 0.999958 -> 1.000001 (|ratio-1| = 5.5e-7, PASSES the
+      ratio bar) — the slope-N^2 live-ladder fix moved it, as predicted. BUT pointwise |rel|
+      median is 1.061e-06, so it FAILS the 1e-9 per-element bar and correctly stays DEBT.
+      NOTE: under the pre-2026-07-28 gate this would have flipped to a FALSE "AT BAR" — corr and
+      ratio both clean with three orders of per-element error underneath, the bn2 pattern exactly.
+      The per-element bar caught it automatically.
+      Per-level err_norm is FLAT (max/min 1.1x over 35 levels) => NOT another depth-ladder
+      problem; the remaining cause is unidentified. `aeiv` not measurable: eiv_dump_aeiv.bin does
+      not exist in RUN_GDB (would need NEMO instrumentation).
 
 ## Medium Priority
 - [ ] `traadv_fct` family (~1e-4/1e-5), `ATF filter u/v`, `dyn_drg_init`, `dyn_ldf u/v`,
