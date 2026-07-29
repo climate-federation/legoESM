@@ -1,0 +1,37 @@
+inputs:
+  nmc_sample: outputs/mpas_nmc_r6_l40/samples/mpas_nmc_case_009_20170115000000.npz
+  gen_be_path: outputs/mpas_gen_be_r6_l40/mpas_gen_be
+
+output:
+  directory: outputs/mpas_temperature_single_obs_3dvar
+
+grid:
+  resolution: 6
+  levels: 40
+  lloyd_iterations: 0
+
+background:
+  sample_state: f24
+  verification_time: 2017-01-15T00:00:00
+  era5_initialization_time: 2017-01-14T00:00:00
+
+observation:
+  variable: temperature
+  latitude_degrees_north: 40.4113
+  longitude_degrees_east: -38.68
+  pressure_hpa: 800.0
+  increment_k: 1.0
+  error_standard_deviation_k: 1.0
+
+background_error:
+  horizontal_length_scale_multiplier: 1.0
+  standard_deviation_multiplier: 3.0
+  diffusion_iterations: 400
+
+diagnostics:
+  pressure_levels_hpa: [675.0, 800.0, 925.0]
+
+plot:
+  longitude_extent_degrees: [-70.0, -10.0]
+  latitude_extent_degrees: [15.0, 65.0]
+  dpi: 300
