@@ -19,14 +19,19 @@ deleting a `PER_ELEMENT` entry, not by flipping a `BINARY_GATES` verdict. Those 
 task. `--self-test` must keep passing every loop.
 
 ## High Priority (in order)
-- [ ] **Finish the metric_convention pass (human APPROVED: go for the NEMO match).**
+- [x] **DONE 2026-07-28/29 — metric_convention pass (human APPROVED: NEMO match).**
       `nemo_isotropic` already sets `dy_T`/`dy_u`/`area_T` and now `dy_v = R*dlon*cos(lat_v)`
       (NEMO `pe2v = pe1v`, `usrdef_hgr.F90:117`). REMAINING: wire the DINO bridge to select it
       (`bridge_nemo_to_legoesm_topo` defaults to `"exact"` regardless of the recipe card — a
       harness gap), then ONE controlled pass recording before/after for EVERY affected row
       (`vslp`, `wslpj`, `zaj`, `ssh_nxt`, `dyn_cor_2d`, anything else that moves).
-      Then adversarial review — this touches barotropic v-point areas `1/(dx_v*dy_v)`, the PGF,
-      and `latlon_cgrid_operators`.
+      DONE: the bridge now defaults to metric_convention="auto" and DETECTS the convention from
+      the oracle's own mesh_mask (detect_metric_convention: DINO has e1t == e2t EXACTLY), which
+      also stays correct for non-isotropic NEMO configs and cannot drift like a recipe card.
+      dy_v matches NEMO's e2v to 0.000e+00. All four ldf_slp rows are PRODUCTION-TRUE and below
+      the 1e-9 per-element bar: wslpi 3.427e-10, wslpj 2.770e-10, uslp 2.200e-10, vslp 3.265e-10
+      (vslp was 1.541e-06 -- 4700x). Remaining gap on them is the |x|ratio (1.7e-5..4.3e-5),
+      which is the documented CONDITIONING tail, not a transcription error.
 - [x] **DONE 2026-07-29 — the 6 cancelling-only AT BAR rows** — cheapest real progress. They need only a per-element
       measurement. Five claim "exact"/"bit-exact" in their notes, but a CLAIM IS NOT A MEASUREMENT,
       and that exact gap is what let `bn2` sit falsely AT BAR for weeks.
@@ -45,11 +50,16 @@ task. `--self-test` must keep passing every loop.
       flag), rebuild, rerun, register each dump in `legoesm.ocean.fidelity.time_levels` with its
       `file:line`. This is the single highest-leverage action: `ldf_slp` closed in hours BECAUSE
       its chain was dumped, while the 3e-6 band resisted for weeks on endpoints alone.
-- [ ] **Suspect the static-vs-live depth-ladder defect at every remaining call site.** It has been
-      found TWICE (`gm_redi_density_and_jacobian`, `_nemo_wpoint_e3w_wmask_n2`). Grep for
-      `t_depth_ref` / `z_full_ref` / `cumsum(dz)` consumers and check each against NEMO's
-      `gdept(Kmm)`. (This is an inference, not a measurement — treat as a prior, not a fact.)
-- [ ] `vslp` residual after the metric pass, if any remains.
+- [x] **DONE 2026-07-29 — audited every static-depth-ladder consumer. The prior PAID OFF: a THIRD
+      site found.** `eos.compute_ocean_rho`'s `eos_depth="geometric"` branch (eos.py:2336) read the
+      static `t_depth_ref`. Reachable ONLY from `fidelity/tendency_probe.py` — i.e. the ORACLE
+      TENDENCY COMPARISON — so probes there measured the model against a different density
+      convention than the model itself now uses. Fixed, gated identically (static when no
+      free-surface info is on the state, `|z_full_ref|` when no fidelity ladder). 219 tests pass.
+      The remaining `t_depth_ref`/`z_full_ref` hits are INITIALISATION (`init.py`,
+      `init_woa.py`, `init_latlon_cgrid.py`, `bathymetry.py`) — building a T(z) profile at t=0,
+      where a static ladder is CORRECT. Audit complete; do not re-run it.
+- [x] DONE — `vslp` residual: closed by the metric pass (1.541e-06 -> 3.265e-10).
 - [ ] `ldf_eiv aeiu` — re-measure; it shares `_nemo_wpoint_e3w_wmask_n2`, so the slope-N^2 fix
       should already have moved it off its recorded 0.999995 / 0.999958.
 

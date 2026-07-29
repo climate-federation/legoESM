@@ -2333,9 +2333,27 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
     if eos_depth == "geometric":
         # NEMO eos_insitu: density from the GEOMETRIC gdept, not the in-situ
         # hydrostatic integral.  p = rho0*g*gdept -> zh recovers gdept exactly.
-        depth = getattr(z_coord, "t_depth_ref", None)
-        if depth is None:
-            depth = jnp.abs(z_coord.z_full_ref)
+        # LIVE gdept(Kmm) = gdept_0*(1+r3t), matching eosbn2.F90:541 and the
+        # production GM/Redi path (gm_redi_density_and_jacobian).  Feeding the
+        # STATIC ladder here left this consumer -- reached via
+        # fidelity/tendency_probe.py, i.e. the ORACLE TENDENCY COMPARISON --
+        # on a different density convention from the model it is measuring
+        # (#1226; the same defect cost prd a depth-structured 2.559e-6).
+        # Gated exactly like its siblings: bit-identical when no fidelity
+        # ladder is carried, and nemo_bn2_live_ladders honours
+        # linear_free_surface (key_linssh: the column never stretches).
+        _td = getattr(z_coord, "t_depth_ref", None)
+        _H = getattr(getattr(state, "H_bathy", None), "data", None)
+        _eta = getattr(getattr(state, "eta", None), "data", None)
+        if _td is None:
+            depth = jnp.abs(z_coord.z_full_ref)          # unchanged
+        elif _H is None or _eta is None:
+            # No free-surface information on this state (e.g. an analytic
+            # column in a unit test): keep the STATIC ladder, bit-identical to
+            # the pre-change behaviour rather than silently switching ladders.
+            depth = jnp.asarray(_td)
+        else:
+            depth = nemo_bn2_live_ladders(z_coord, _eta, _H)[0]
         r0 = rho_0 if rho0 is None else rho0
         p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
         return eos_fn(state.T.data, state.S.data, p_eos)

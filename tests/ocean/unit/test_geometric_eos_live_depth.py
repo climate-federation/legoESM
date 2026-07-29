@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.eos import nemo_bn2_depth_ladders, nemo_bn2_live_ladders
 from legoesm.ocean.vertical import create_z_star_from_thicknesses
 
@@ -181,3 +182,56 @@ def test_bridge_signature_defaults_to_auto():
         "the bridge must DETECT the oracle's metric convention; a hard "
         "'exact' default silently mismatched NEMO's e2v and cost the ldf_slp "
         "rows 4 orders of magnitude")
+
+
+def test_compute_ocean_rho_geometric_uses_the_live_ladder_when_it_can():
+    """Third call site of the same defect (#1226), found by audit not by symptom.
+
+    compute_ocean_rho(eos_depth="geometric") is reached from
+    fidelity/tendency_probe.py -- the ORACLE TENDENCY COMPARISON -- so a static
+    ladder there measured the model against a different density convention than
+    the model itself now uses.
+    """
+    from types import SimpleNamespace
+
+    from legoesm.ocean.eos import compute_ocean_rho, make_eos_fn
+
+    nlev = 6
+    z = _z_coord(nlev=nlev)
+    T = jnp.asarray(np.linspace(20.0, 4.0, nlev))[None, None, :]
+    S = jnp.full((1, 1, nlev), 35.0)
+    eos_fn = make_eos_fn("nemo_seos", rho0=1026.0)
+
+    def _rho(eta_val):
+        st = SimpleNamespace(
+            T=SimpleNamespace(data=T), S=SimpleNamespace(data=S),
+            eta=SimpleNamespace(data=jnp.asarray([[eta_val]])),
+            H_bathy=SimpleNamespace(data=jnp.asarray([[600.0]])))
+        return compute_ocean_rho(st, z, jnp.ones((1, 1)), eos_fn=eos_fn,
+                                 eos_depth="geometric", rho0=1026.0)
+
+    # a free surface must now move the density -- it did not before the fix
+    assert float(np.abs(np.asarray(_rho(6.0)) - np.asarray(_rho(0.0))).max()) > 0.0
+
+
+def test_compute_ocean_rho_geometric_static_when_no_free_surface():
+    """No eta/H on the state (analytic unit-test column) -> STATIC, unchanged.
+
+    Guards the fallback: a first version dropped to |z_full_ref| here, silently
+    switching ladders instead of preserving the previous behaviour.
+    """
+    from types import SimpleNamespace
+
+    from legoesm.ocean.eos import compute_ocean_rho, make_eos_fn
+
+    nlev = 6
+    z = _z_coord(nlev=nlev)
+    T = jnp.asarray(np.linspace(20.0, 4.0, nlev))[None, None, :]
+    S = jnp.full((1, 1, nlev), 35.0)
+    eos_fn = make_eos_fn("nemo_seos", rho0=1026.0)
+    st = SimpleNamespace(T=SimpleNamespace(data=T), S=SimpleNamespace(data=S))
+    rho = compute_ocean_rho(st, z, jnp.ones((1, 1)), eos_fn=eos_fn,
+                            eos_depth="geometric", rho0=1026.0)
+    expected = eos_fn(T, S, (1026.0 * constants.g)
+                     * jnp.asarray(z.t_depth_ref, dtype=T.dtype))
+    np.testing.assert_array_equal(np.asarray(rho), np.asarray(expected))
