@@ -105,6 +105,28 @@ measured a number against this specific NEMO array).
 1. **`dyn_spg` → `dyn_spg_ts` barotropic solver (order 28, stpmlf.F90:256)** — never put
    through the term-board's NEMO-dump corr protocol at all. Only a structural/unit check
    exists (null-mode restored, energy no-work), not a corr-vs-NEMO-array number. This is
+
+> **CORRECTION 2026-07-29 — the "null mode restored" claim was an ARTIFACT.**
+> The measured restoration (checkerboard `cor_u` 0.036 vs smooth 0.037; avg 2.6e-7) came
+> ENTIRELY from a periodic-seam index bug in `pv_flux_ene` /
+> `pv_flux_al81_partial_cell` (west-neighbour v-flux built by rolling an
+> already-wrapped `(n_lon+1)` array, so u-face 0 got cell 0 instead of cell n-1).
+> Per-longitude profile: buggy col 0 = 3.64e-02 against an INTERIOR of 2.90e-07; the
+> test metric was `np.max`, so one column carried it. With the seam closed the response
+> is a uniform 2.58e-07 — i.e. EEN annihilates the zonal 2Δx mode, like the 4-point
+> average.
+> This is ANALYTIC, not just measured: for uniform `q` the AL81 12-point triad reduces
+> EXACTLY to the 4-point average (`|AL81 − 4pt| = 2.7e-20`), and the barotropic call
+> uses `ζ=0`. Consistent with `ralph_barotropic_coriolis_redesign_task.md:27` ("No
+> null-mode-free LINEAR C-grid f×U exists"). Corroborated by node 16's own 30-day
+> probe, which found `avg` and `een` give IDENTICAL deep-equatorial KE growth.
+> The same bug also invalidated the `een_metric` "reduces the energy residual" claim:
+> closing the seam improved BOTH residuals (plain 3.22e-03→1.94e-05, metric
+> 2.81e-03→2.83e-04) and flipped their order. The seam bug was the dominant energy
+> error, not the fold.
+> Fix + rewritten tests: `test_barotropic_coriolis_null_mode.py::test_een_does_NOT_restore_the_checkerboard_null_mode` and
+> `::test_pv_flux_periodic_seam_is_closed`.
+
    the single highest-leverage gap: the barotropic mode sets basin-scale transport/BSF and
    the whole reason node 16 was investigated in the earlier wiring-diagram sweep was a 2.6×
    BSF over-strength — that investigation never got the corr-to-1.0 treatment this loop
