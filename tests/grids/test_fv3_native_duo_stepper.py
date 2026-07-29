@@ -260,3 +260,109 @@ def test_geopk_threads_pt(ctx):
         assert np.allclose(gz[sl, sl, 0], want, rtol=0, atol=0), fn.__name__
         pkc1, gz1 = fn(delp, hs, bd, pt=np.ones((m, m)))
         assert not np.array_equal(gz[sl, sl, 0], gz1[sl, sl, 0])
+
+
+def test_outer_step_schedule_matches_dyn_core(monkeypatch):
+    """advance_duo_outer_step must reproduce the upstream exchange
+    cadence (dyn_core.F90:432-439): entry A-scalar only on it==1 of
+    each dt_atmos block, i.e. entry_ascalar flags [1,0,0,0,0,0,0] at
+    n_split=7, every inner step at dt = dt_atmos/n_split, state
+    threaded through the chain."""
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states + ["step"]
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    out = ds.advance_duo_outer_step({}, [], 1200.0, 7, d_ext=0.0,
+                                    sw_cfg={"nord": 2})
+    assert [e for _, e in calls] == [True] + [False] * 6
+    assert all(abs(dt - 1200.0 / 7.0) < 1e-12 for dt, _ in calls)
+    assert out == ["step"] * 7          # state threaded, not restarted
+
+
+def test_outer_step_nsplit_one_and_invalid(monkeypatch):
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    ds.advance_duo_outer_step({}, [], 300.0, 1)
+    assert calls == [(300.0, True)]
+    with pytest.raises(ValueError):
+        ds.advance_duo_outer_step({}, [], 300.0, 0)
+
+
+def test_topo_fn_threads_hs_and_step_runs():
+    """W5 follow-up: ctx topo_fn -> hs6 (surface geopotential) consumed
+    by both geopk sites; a mountain state must step FINITE and differ
+    from the flat-hs step (non-vacuous)."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+        full_acoustic_step_sixface,
+        w2_six_face_state,
+    )
+
+    def phis(lon, lat):
+        r2 = np.minimum((np.pi / 9) ** 2,
+                        (lon - np.pi / 2) ** 2 + (lat - np.pi / 6) ** 2)
+        return 2000.0 * 9.80665 * (1.0 - np.sqrt(r2) / (np.pi / 9))
+
+    ctx_t = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True,
+                                       topo_fn=phis)
+    ctx_0 = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True)
+    assert ctx_t["hs6"] is not None and len(ctx_t["hs6"]) == 6
+    assert ctx_0["hs6"] is None
+    assert float(max(h.max() for h in ctx_t["hs6"])) > 1e4  # peak ~2e4
+    st_t = w2_six_face_state(ctx_t)
+    st_0 = w2_six_face_state(ctx_0)
+    out_t = full_acoustic_step_sixface(ctx_t, st_t, 300.0, d_ext=0.0)
+    out_0 = full_acoustic_step_sixface(ctx_0, st_0, 300.0, d_ext=0.0)
+    for t in range(6):
+        assert np.all(np.isfinite(out_t[t]["u"]))
+        assert np.all(np.isfinite(out_t[t]["delp"]))
+    # hs must change the dynamics ON THE MOUNTAIN FACE (codex r8: the
+    # first version compared face 1, where hs ~ 0 and identity is
+    # CORRECT after one step — a vacuous assertion)
+    t_mt = int(np.argmax([float(np.max(h)) for h in ctx_t["hs6"]]))
+    assert not np.allclose(out_t[t_mt]["u"], out_0[t_mt]["u"])
+    assert not np.allclose(out_t[t_mt]["delp"], out_0[t_mt]["delp"])
+    # deterministic threading pin (step-identity clauses kept tripping
+    # on legitimate cross-face flux-averaging propagation): SPY on both
+    # geopk sites — each must receive the ctx hs, nonzero on the
+    # mountain face, all-zero when topo_fn is None
+    import legoesm.core.fv3_native_duo_stepper as ds
+    seen = {"cg": [], "d": []}
+    orig_cg, orig_d = ds.geopk_sw_1lev, ds.geopk_sw_1lev_d
+
+    def spy_cg(delpc, hs, bd, pt=None):
+        seen["cg"].append(float(np.max(np.abs(hs))))
+        return orig_cg(delpc, hs, bd, pt=pt)
+
+    def spy_d(delp, hs, bd, pt=None):
+        seen["d"].append(float(np.max(np.abs(hs))))
+        return orig_d(delp, hs, bd, pt=pt)
+
+    ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = spy_cg, spy_d
+    try:
+        full_acoustic_step_sixface(ctx_t, w2_six_face_state(ctx_t),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) > 1e4 and max(seen["d"]) > 1e4
+        seen["cg"].clear()
+        seen["d"].clear()
+        full_acoustic_step_sixface(ctx_0, w2_six_face_state(ctx_0),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) == 0.0 and max(seen["d"]) == 0.0
+    finally:
+        ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = orig_cg, orig_d

@@ -26,7 +26,7 @@ except ImportError:
 
 clm_ml_available = True
 try:
-    import multilayer_canopy  # noqa: F401 – just test import
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy  # noqa: F401 – just test import
 except ImportError:
     clm_ml_available = False
 
@@ -647,7 +647,10 @@ class TestConfig(unittest.TestCase):
         cfg = CLMMLCanopyConfig()
         self.assertEqual(cfg.nlevmlcan, 9)
         self.assertEqual(cfg.runge_kutta_type, 10)
-        self.assertEqual(cfg.num_ml_steps, 1)
+        # None = derive the sub-step from dtime_ml_target_s rather than follow
+        # the host timestep (see tests/land/unit/test_clm_ml_substep.py).
+        self.assertIsNone(cfg.num_ml_steps)
+        self.assertAlmostEqual(cfg.dtime_ml_target_s, 300.0)
         self.assertAlmostEqual(cfg.o2ref, 209.0)
         self.assertEqual(cfg.met_type, 0)
 
@@ -864,8 +867,8 @@ class TestSolarGeometry(unittest.TestCase):
             _compute_virtual_lon_deg,
             _ensure_clm_initialized,
         )
-        from clm_share.shr_orb_mod import shr_orb_cosz, shr_orb_decl
-        import clm_src_utils.clm_varorb as _varorb
+        from legoesm.land.canopy.clm_ml_backend.clm_share.shr_orb_mod import shr_orb_cosz, shr_orb_decl
+        import legoesm.land.canopy.clm_ml_backend.clm_src_utils.clm_varorb as _varorb
         from math import pi
 
         _ensure_clm_initialized()  # sets _varorb.*

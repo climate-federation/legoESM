@@ -213,6 +213,46 @@ class TestConservation:
         else:
             assert abs(integral) < 1e-20
 
+    def test_tracer_integral_conserved_with_floored_treguier_kappa(self):
+        """A nonzero ``TreguierConfig.kappa_min`` installs a FINITE kappa_GM in
+        the equatorial band where the NEMO taper would give zero — i.e. it
+        switches the bolus transport ON there.  The operator must stay
+        flux-divergence-conservative with that spatially varying, floored
+        coefficient (the floor changes the closure, it must not create or
+        destroy tracer)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jacobian, grid, cfg,
+        )
+        # Mimic a floored Treguier field: taper -> 0 toward the equator, then
+        # clamped up to kappa_min, so the band carries GM it otherwise wouldn't.
+        f20 = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(20.0))
+        f_2d = jnp.broadcast_to(grid.f, mask.shape)
+        taper = jnp.minimum(1.0, jnp.abs(f_2d) / f20)      # the NEMO taper
+        raw = cfg.kappa_GM * taper
+        # This fixture's grid does not reach the equator, so pick the floor
+        # from the field itself: it must bind on SOME columns and not others,
+        # i.e. the coefficient really is spatially varying and partly floored.
+        kappa_min = float(jnp.median(raw))
+        kappa_gm_field = jnp.maximum(raw, kappa_min)
+        assert bool((kappa_gm_field > raw + 1e-9).any()), "floor never binds"
+        assert bool((kappa_gm_field == raw).any()), "floor binds everywhere"
+        assert float(jnp.min(kappa_gm_field)) == pytest.approx(kappa_min)
+        dT = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask,
+            z_coord, jacobian, grid, kappa_gm_field, cfg.kappa_Redi,
+        )
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        area = grid.area[:, :, jnp.newaxis]
+        integral = float(jnp.sum(dT * dz * area * mask[:, :, jnp.newaxis]))
+        max_dT = float(jnp.max(jnp.abs(dT)))
+        total_vol = float(jnp.sum(dz * area * mask[:, :, jnp.newaxis]))
+        assert max_dT > 0, "floored kappa must produce a nonzero tendency"
+        relative = abs(integral) / (max_dT * total_vol)
+        assert relative < 1e-10, f"Conservation violated: {relative:.2e}"
+
 
 # =====================================================================
 # 4. Variance reduction (APE)

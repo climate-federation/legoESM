@@ -139,6 +139,7 @@ def _mock_step_unified(
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
     "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
+    "budget_ledger_accum",
 )
 
 

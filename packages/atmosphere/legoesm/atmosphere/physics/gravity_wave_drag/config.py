@@ -87,7 +87,7 @@ __param_spec__ = {
         "params": {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
-            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-11, 1.0e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Charron & Manzini (2002); CAM frontgfc trigger threshold", "shape": None},
+            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-16, 1.0e-13), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM namelist_defaults_eam.xml frontgfc 1.25e-15 (7.5e-16 at 4x5; 2e-14 at ne120np4 on E3SM master); Charron & Manzini (2002)", "shape": None},
             "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
             # --- launch / trigger levels ---
             "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
@@ -527,8 +527,15 @@ class E3SMFrontalConfig(NamedTuple):
     taubgnd : float
         Background source strength [Pa] (default 1.5e-3, CAM ``taubgnd``).
     frontgfc : float
-        Frontogenesis-function critical threshold [K^2/(m^2 s)]
-        (default 1.0e-10, CAM ``frontgfc``).
+        Frontogenesis-function critical threshold [K^2/(m^2 s)] above which
+        the frontal source launches (default 1.25e-15 — the E3SM OPERATIONAL
+        namelist value, namelist_defaults_eam.xml:524; the coarse 4x5 grid
+        uses 7.5e-16).  The earlier default of 1.0e-10 sat ~5 ORDERS OF
+        MAGNITUDE above anything the resolved flow produces (10-day r16 AMIP
+        A/B 2026-07-20: max frontgf 5.4e-15, p99 2.4e-16), so the frontal
+        source could NEVER fire; 1.25e-15 sits at the observed
+        distribution's tail, selecting only the strongest resolved fronts —
+        exactly the CAM design intent.
     c0 : float
         Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
     launch_p : float
@@ -559,7 +566,7 @@ class E3SMFrontalConfig(NamedTuple):
         AMIP-gated.
     """
     taubgnd: float = 1.5e-3
-    frontgfc: float = 1.0e-10
+    frontgfc: float = 1.25e-15
     c0: float = 30.0
     launch_p: float = 5.0e4
     front_p: float = 6.0e4

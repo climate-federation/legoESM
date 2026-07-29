@@ -185,7 +185,20 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     #                                   at sponge_coeff*100/101 (see sponge_profile)
     sponge_width_m: float = 10000.0    # sponge-layer depth below the top [m]
     sponge_shape: str = "sin2"         # "sin2" | "sam_rational" (see sponge_profile)
-    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z. Last field to preserve positional ABI.
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z (kept in place for positional ABI).
+    # --- #1029 ω-side SB81 energy conversion (hybrid coordinate only) ---
+    # True: the thermodynamic κT·ω/p dynamic conversion uses the SB81
+    # α-weighted form (sb81_omega_over_p_dyn) built from the SAME half-level
+    # construction as the geopotential and the momentum/thermo ln p^SB
+    # gradients — the discretization-consistent closure of the #1029 PGF
+    # chain.  False (default): the legacy arithmetic ω_full/p_full form.
+    # Default OFF: the consistent form removes the arithmetic form's
+    # accidental damping of the lid-amplified orographic-wave mode
+    # (#1029(b)) — measured held_suarez_topo latlon blowup day ~49 -> ~12
+    # (A/B job 9130802, byte-fixed protocol) — so it stays opt-in until the
+    # lid treatment lands.  Static Python bool (feature-gating exception):
+    # each value compiles its own branch, no jnp.where double-trace.
+    sb81_omega_conversion: bool = False
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -517,6 +530,13 @@ def cgrid_latlon_hydrostatic_tendencies(
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_range
 
+    # RAW continuity diagnosis, captured BEFORE any zero-mean correction:
+    # the SB81 moving-top conversion term (section 11) rests on the exact
+    # continuity identity F_top=0 + dp_s_dt = -D_total/B_range, which a
+    # globally corrected dp_s_dt would break (codex #1029 r1 a3).  The
+    # PROGNOSTIC surface-pressure update keeps the corrected field.
+    _dp_s_dt_raw = dp_s_dt
+
     # Apply zero-mean correction only when the post-step mass fixer is OFF.
     # When fix_mass=True the mass fixer already corrects the global integral,
     # and applying both creates a double-correction artifact.
@@ -579,14 +599,33 @@ def cgrid_latlon_hydrostatic_tendencies(
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
     # The v·∇_η(ln p) term is the horizontal pressure-gradient correction
     # to the thermodynamic equation (Simmons & Burridge 1981).
-    if _hybrid:
-        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
+    if _hybrid and config.sb81_omega_conversion:
+        # #1029 ω-side (opt-in): SB81 α-weighted dynamic conversion
+        #   (ω/p)_k^dyn = -(1/Δp_k)[L_k Σ_{j<k}C_j + α_k C_k],
+        # built from the SAME flux-form cumsum as continuity (iter-54
+        # reuse) and the SAME sb81_halflevel_construction as Phi and the
+        # ln p^SB gradients — the LAST piece of the one-convention chain
+        # (momentum + v·∇ln p shared the SB81 field since PR #1215; the
+        # arithmetic ω_full/p_full form below is a third convention).
+        # ∂p/∂t and η̇∂p/∂η are contained in the cumsum (continuity);
+        # _dp_s_dt_raw threads the exact moving-top term (nonzero only
+        # for B_top != 0 sigma-like tops; RAW, pre-zero-mean — see the
+        # capture at section 9); the advective v·∇ln p part is added
+        # below (shared field).  Default OFF pending the #1029(b) lid
+        # treatment — see the config-field comment.
+        from legoesm.grids.vertical import sb81_omega_over_p_dyn
+        adiabatic = kappa * T * sb81_omega_over_p_dyn(
+            _cumsum_dp, sigma_coord, p_s, dp_s_dt=_dp_s_dt_raw)
     else:
-        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
-    # Tiny epsilon prevents division by zero without suppressing physics
-    # at the model top (the old p_floor=100 Pa clamp distorted heating
-    # for all levels with p < 100 Pa).
-    adiabatic = kappa * T * omega / (p_full + 1e-10)
+        if _hybrid:
+            omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
+        else:
+            omega = compute_pressure_velocity(
+                sigma_dot, p_s, dp_s_dt, sigma_coord)
+        # Tiny epsilon prevents division by zero without suppressing physics
+        # at the model top (the old p_floor=100 Pa clamp distorted heating
+        # for all levels with p < 100 Pa).
+        adiabatic = kappa * T * omega / (p_full + 1e-10)
 
     # v · grad_eta(ln p) at cell centres (average face gradients to centres).
     # #1029: the thermodynamic conversion MUST difference the SAME discrete

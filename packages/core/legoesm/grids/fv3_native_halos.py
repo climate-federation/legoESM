@@ -218,9 +218,14 @@ def compute_fv3_native_k2e(res: int, remap_ng: int = 3,
     sorted by (i, j) — the exact record set the Fortran oracle emits
     (tables are tile- and side-symmetric; tile 1 stored).
     """
-    if k2e_nord != 4:
+    if k2e_nord not in (2, 4):
         raise NotImplementedError(
-            "k2e_nord != 4 not oracle-pinned (upstream struct default is 4)")
+            f"k2e_nord={k2e_nord}: supported orders are 2 (the "
+            "AUTHORITATIVE live default — Zenodo fv_arrays.F90:150/"
+            "global_grid_data.F90:57, no nml override) and 4 (the "
+            "luanfs-mirror monolith order the historical fixtures "
+            "pinned; 2026-07-27 root cause: its corner-adjacent "
+            "extrapolation lobes are the vertex amplifier)")
     gg_ng = remap_ng + 2
 
     # ---- supergrid 1-D line (gen_lonlat_equal_edge, grid_type == 0) ----
@@ -434,8 +439,8 @@ def _ed_ext_agrid_lonlat(n: int, ng: int):
     A-points the reference uses, remapped to create's face layout.
     """
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM,
-        _GNOMONIC_ED_FACE_ROT,
+        GNOMONIC_ED_FACE_PERM as _GNOMONIC_ED_FACE_PERM,
+        GNOMONIC_ED_FACE_ROT as _GNOMONIC_ED_FACE_ROT,
     )
 
     # supergrid ghost width: need A-points to i = n+ng -> supergrid 2(n+ng),
@@ -475,8 +480,8 @@ def _ed_ext_stagger_lonlat(n: int, ng: int, parity: str):
     parity "B": odd nodes (2i-1, 2j-1), shape (6, n+2ng+1, n+2ng+1).
     """
     from legoesm.grids.cubed_sphere import (
-        _GNOMONIC_ED_FACE_PERM,
-        _GNOMONIC_ED_FACE_ROT,
+        GNOMONIC_ED_FACE_PERM as _GNOMONIC_ED_FACE_PERM,
+        GNOMONIC_ED_FACE_ROT as _GNOMONIC_ED_FACE_ROT,
     )
 
     line = _ed_line(n, 2 * (ng + 2))
@@ -582,15 +587,16 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
     from legoesm.grids.duogrid import (
         DuoGridData,
         MAX_K2E_NORD,
-        _compute_corner_lagrange_coeff,
+        compute_corner_lagrange_coeff as _compute_corner_lagrange_coeff,
     )
     from legoesm.grids.halo import EAST, NORTH, SOUTH, WEST
     import jax.numpy as jnp
 
-    if k2e_nord != 4:
+    if k2e_nord not in (2, 4):
         raise NotImplementedError(
-            "fv3-native duogrid: only the upstream default k2e_nord=4 is "
-            "oracle-pinned")
+            f"fv3-native duogrid: k2e_nord={k2e_nord}; supported are 2 "
+            "(authoritative live default) and 4 (historical fixture "
+            "order) — see compute_fv3_native_k2e")
     if ng not in (1, 2, 3):
         raise NotImplementedError(
             f"fv3-native duogrid: ng={ng} unsupported (oracle-pinned remap "
@@ -664,3 +670,13 @@ def create_fv3_native_duogrid_data(n: int, ng: int = 3, k2e_nord: int = 4,
         ew_ext=jnp.array(ew_ext, dtype=jnp.float64),
         es_ext=jnp.array(es_ext, dtype=jnp.float64),
     )
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+ED_CARTS = _ED_CARTS
+ed_line = _ed_line
+lagrange_coef = _lagrange_coef
+compute_ext_vectors_native = _compute_ext_vectors_native

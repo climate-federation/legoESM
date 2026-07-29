@@ -165,6 +165,8 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
             rad_update_interval_steps=int(
                 base_cfg.get("aimip_rad_update_interval", 6),
             ),
+            surface_bulk_scheme=str(
+                base_cfg.get("aimip_surface_bulk_scheme", "constant")),
         )
     if variant == "column_nn":
         return make_column_mlp_spectral_physics(model, grid)

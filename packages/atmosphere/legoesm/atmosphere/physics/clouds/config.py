@@ -23,6 +23,16 @@ __param_spec__ = {
             "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
             "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
             "clubb_cf_override_ramp_pa": "numerics: smoothing width [Pa] of the override level gate (linear blend over [p_min-ramp, p_min] to avoid a cloud/heating discontinuity); a regulariser, not a trained coefficient; 0 => sharp step",
+            # Defaults sit on a HARD physical bound (1.0 = full / neutral, 0.0 =
+            # off): a sigmoid maps to the OPEN (lo, hi) so an on-bound default is
+            # unseedable, and the bound cannot widen past the physical limit
+            # (strength/inhomogeneity>1 or a negative floor are unphysical). So
+            # these opt-in levers are fixed (tier 0) at their off/neutral default;
+            # a scenario that trains one gives it a scenario-specific interior
+            # default. Same class as land.canopy.interception_fraction.
+            "clubb_cf_override_strength": "opt-in marine-Sc lever, default 1.0 (full) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
+            "clubb_cf_override_floor": "opt-in marine-Sc cloud-collapse floor, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
+            "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
@@ -31,9 +41,8 @@ __param_spec__ = {
             "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
-            # --- CLUBB cf override strength: blend fraction toward the diagnostic-CLUBB PDF cf in the BL (marine-Sc albedo lever) ---
-            "clubb_cf_override_strength": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "marine-Sc albedo lever (this repo)", "shape": None},
-            "clubb_cf_override_floor": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "marine-Sc albedo lever cloud-collapse floor (this repo)", "shape": None},
+            # (clubb_cf_override_strength / clubb_cf_override_floor: excluded —
+            #  opt-in marine-Sc levers whose defaults sit on a hard bound.)
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
             "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
@@ -42,7 +51,7 @@ __param_spec__ = {
             # --- optical_radius: fixed-fallback effective radii [m] for RRTMGP cloud optics ---
             "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
-            "cloud_inhomogeneity_factor": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Cahalan et al. (1994) plane-parallel albedo bias", "shape": None},
+            # (cloud_inhomogeneity_factor: excluded — default 1.0 on the bound.)
             "cloud_fsd": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Shonk & Hogan (2008, 2010) fractional standard deviation of in-cloud water", "shape": None},
             # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
             "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},

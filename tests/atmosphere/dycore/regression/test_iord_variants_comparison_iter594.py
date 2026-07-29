@@ -1,16 +1,24 @@
-"""FV3_3D iter 594: side-by-side comparison of all 5 FV3 iord variants.
+"""FV3_3D iter 594: side-by-side comparison of the FV3 iord limiter families.
 
-Demonstrates that iord=8/9/10/11/12 produce DISTINCT bl, br on a
-stress test mixing a smooth ramp + sharp step.  Useful for users
-choosing between variants.
+The limiter FAMILIES {8}, {10}, {11}, and the positive-definite iv=0
+family produce distinct bl, br on a stress test mixing a smooth ramp +
+sharp step.  NOTE (#1256): iord=9 and iord=12 are the SAME positive-
+definite family — iord=9 is the ``pert_ppm(iv=0)`` SUBROUTINE
+(``_pert_ppm_iv0``) and iord=12 is the INLINE iord==7/12 branch
+(``_pert_ppm_iv0_inline``); they are identical for ``q > 0`` (the
+positive-definite fields these transports carry) and differ only for
+``q <= 0``.  The bit-exact match of each to its oracle branch, and the
+q<=0 divergence, are certified in
+``tests/unit/test_hord12_oracle_iord_branch_1256.py``.
 
 Tests
 -----
 
-1. ``test_all_five_iord_variants_distinct`` — at the step
-   discontinuity, iord=8/9/10/11/12 give different bl, br.
-2. ``test_smooth_region_all_variants_agree`` — far from extrema,
-   all variants give similar (non-flat) result.
+1. ``test_all_five_iord_variants_distinct`` — at the step discontinuity
+   the distinct families differ (iord=9/12 coincide on this positive
+   field).
+2. ``test_smooth_region_all_variants_agree`` — far from extrema, all
+   variants give similar (non-flat) result.
 """
 from __future__ import annotations
 
@@ -19,11 +27,11 @@ import numpy as np
 import pytest
 
 from legoesm.core.fv_tp_2d import (
-    pert_ppm,           # iord=9
-    _pert_ppm_iv0,       # iord=12
-    apply_hord8_limiter, # iord=8
-    apply_hord10_limiter,# iord=10
-    apply_hord11_limiter,# iord=11
+    _pert_ppm_iv0,        # iord=9 (pert_ppm iv=0 subroutine)
+    _pert_ppm_iv0_inline, # iord=12 (inline iord==7/12 branch)
+    apply_hord8_limiter,  # iord=8
+    apply_hord10_limiter, # iord=10
+    apply_hord11_limiter, # iord=11
 )
 
 
@@ -55,18 +63,24 @@ def test_all_five_iord_variants_distinct():
     q = _build_stress_field(n=20)
     bl, br, dm = _build_bl_br_dm(q)
 
-    # Apply each variant
-    bl9, br9 = pert_ppm(bl, br)
-    bl12, br12 = _pert_ppm_iv0(q, bl, br)
+    # Apply each variant with its CORRECT limiter (#1256): iord=9 = iv=0
+    # subroutine, iord=12 = inline iord==7/12 branch.  The stress field is
+    # all-positive, so iord=9 and iord=12 coincide here by construction.
+    bl9, br9 = _pert_ppm_iv0(q, bl, br)
+    bl12, br12 = _pert_ppm_iv0_inline(q, bl, br)
     bl8, br8 = apply_hord8_limiter(bl, br, dm)
     bl11, br11 = apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)
     bl10, br10 = apply_hord10_limiter(bl, br, dm, q)
 
-    # All 5 variants should produce DISTINCT results on this stress field
-    # (check at least 2 pairs differ significantly)
+    # iord=9 and iord=12 are the SAME family for q>0 — assert they coincide
+    # on this positive field (the corrected labels; a regression to
+    # pert_ppm(iv=1) for iord=9 would break this).
+    np.testing.assert_allclose(np.asarray(bl9), np.asarray(bl12))
+    np.testing.assert_allclose(np.asarray(br9), np.asarray(br12))
+
+    # The distinct FAMILIES should differ on the stress field.
     variants = {
-        "iord=9":  (bl9, br9),
-        "iord=12": (bl12, br12),
+        "iv0(9/12)": (bl9, br9),
         "iord=8":  (bl8, br8),
         "iord=11": (bl11, br11),
         "iord=10": (bl10, br10),
@@ -93,8 +107,8 @@ def test_smooth_region_all_variants_agree():
     bl, br, dm = _build_bl_br_dm(q)
 
     for name, fn in [
-        ("iord=9",  lambda: pert_ppm(bl, br)),
-        ("iord=12", lambda: _pert_ppm_iv0(q, bl, br)),
+        ("iord=9",  lambda: _pert_ppm_iv0(q, bl, br)),
+        ("iord=12", lambda: _pert_ppm_iv0_inline(q, bl, br)),
         ("iord=8",  lambda: apply_hord8_limiter(bl, br, dm)),
         ("iord=11", lambda: apply_hord11_limiter(bl, br, dm)),
         ("iord=10", lambda: apply_hord10_limiter(bl, br, dm, q)),

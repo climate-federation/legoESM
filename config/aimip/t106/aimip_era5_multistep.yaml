@@ -61,6 +61,10 @@ aimip_optimizer: "adamw"
 # back on in the fullperiod follow-on if the radiative loss-of-skill
 # turns out to matter.
 aimip_radiation: "gray"
+# Historical config predating the classical-mode rrtmgp pin
+# (campaign_driver.validate_classical_radiation); explicit escape keeps the
+# original experiment reproducible.
+allow_non_rrtmgp: true
 aimip_rad_update_interval: 6
 
 aimip_spatial_surface: false

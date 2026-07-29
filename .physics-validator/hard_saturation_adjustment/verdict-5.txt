@@ -1,0 +1,11 @@
+(a) Pass. For positive condensation, final drain is ≤ `cond_hard`; the later cap can only reduce it. Along the conserved enthalpy path, this leaves `q_v` no lower and `T` no higher than the on-curve root, hence RH cannot fall below 1. This remains true through the monotone upper q_sat cap.
+
+(b) Pass, with a wording caveat. If `smooth < cond_hard`, the convex blend is also `< cond_hard`, so the new min is inactive. “Below threshold” is not universally equivalent: at extreme warm/high-q states it can bind slightly below RH=1.1—but only because the raw blend would undershoot (not legitimate smooth condensation). Example: 362.50 K, 124.22 kPa, RH=1.09947: raw blend gives RH≈0.95; cap correctly lands on RH=1.
+
+(c) Pass. Heating/mass caps only further reduce positive condensation; the q_c clamp affects only evaporation and cannot alter the protected positive branch.
+
+(d) Pass. Conservation remains structural because one returned rate drives equal/opposite vapor and latent-heat updates. JAX gradients remain finite and the active min branch carries the hard implicit gradient. Strictly, `minimum` is piecewise differentiable at its switching surface, but this is not a live-gradient loss or substantive regression.
+
+(e) No new issue. The known cold negative-q_sat / sub-ULP rounding caveat remains; claims require finite physical inputs with `dt > 0`.
+
+OVERALL VERDICT: no substantive findings

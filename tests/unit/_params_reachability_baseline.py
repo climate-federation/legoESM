@@ -16,7 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (14)
+    # atm: BechtoldConfig (12)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
@@ -28,12 +28,13 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.BechtoldConfig.delta_deep',
     'atm.conv.BechtoldConfig.delta_midlevel',
     'atm.conv.BechtoldConfig.delta_shallow',
-    'atm.conv.BechtoldConfig.downdraft_alpha',
-    # CLI-only (--bechtold-downdraft-entrain-rate), like its siblings
-    # downdraft_alpha / downdraft_evap_efficiency: the whole penetrative-
-    # downdraft family is exposed as ExperimentConfig scalars + CLI flags, not
-    # via the --params qualified-name loader.  Conscious exclusion.
-    'atm.conv.BechtoldConfig.downdraft_entrain_rate',
+    # downdraft_alpha / downdraft_entrain_rate were REMOVED 2026-07-23: their
+    # convention-named ExperimentConfig scalars (bechtold_downdraft_alpha /
+    # bechtold_downdraft_entrain_rate) are threaded unconditionally by
+    # _resolve_convection, so they are now in _ATM_SCALAR_PARAM_MAP
+    # (--params-reachable).  downdraft_evap_efficiency stays CLI-only: its
+    # scalar (bechtold_downdraft_evap) is NOT convention-named, so the map's
+    # verified-threading contract does not cover it.
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
@@ -47,6 +48,59 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBLiteConfig.C_eps',
     'atm.turb.CLUBBLiteConfig.Pr_t',
     'atm.turb.CLUBBLiteConfig.l_mix_max',
+    # atm: CLUBBParams (48) — like every other turbulence scheme, full CLUBB is
+    # calibrated via the SCM-RCE campaign / LES tuning collector, not the atm
+    # run_amip --params scalar map (build_atm_scalar_param_map exposes 0
+    # atm.turb.* params). Driver-level reachability (nested CLUBBConfig.params
+    # descent in build_atm_scalar_param_map) is tracked as a follow-up.
+    'atm.turb.CLUBBParams.C1',
+    'atm.turb.CLUBBParams.C10',
+    'atm.turb.CLUBBParams.C11',
+    'atm.turb.CLUBBParams.C12',
+    'atm.turb.CLUBBParams.C14',
+    'atm.turb.CLUBBParams.C2rt',
+    'atm.turb.CLUBBParams.C2rtthl',
+    'atm.turb.CLUBBParams.C2thl',
+    'atm.turb.CLUBBParams.C4',
+    'atm.turb.CLUBBParams.C6rt',
+    'atm.turb.CLUBBParams.C6rtb',
+    'atm.turb.CLUBBParams.C6thl',
+    'atm.turb.CLUBBParams.C6thlb',
+    'atm.turb.CLUBBParams.C7',
+    'atm.turb.CLUBBParams.C8',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2_wp2',
+    'atm.turb.CLUBBParams.C_invrs_tau_N2_xp2',
+    'atm.turb.CLUBBParams.C_invrs_tau_bkgnd',
+    'atm.turb.CLUBBParams.C_invrs_tau_sfc',
+    'atm.turb.CLUBBParams.C_invrs_tau_shear',
+    'atm.turb.CLUBBParams.C_uu_buoy',
+    'atm.turb.CLUBBParams.C_uu_shr',
+    'atm.turb.CLUBBParams.C_wp3_pr_turb',
+    'atm.turb.CLUBBParams.Lscale_mu_coef',
+    'atm.turb.CLUBBParams.beta',
+    'atm.turb.CLUBBParams.c_K',
+    'atm.turb.CLUBBParams.c_K1',
+    'atm.turb.CLUBBParams.c_K10',
+    'atm.turb.CLUBBParams.c_K10h',
+    'atm.turb.CLUBBParams.c_K2',
+    'atm.turb.CLUBBParams.c_K6',
+    'atm.turb.CLUBBParams.c_K8',
+    'atm.turb.CLUBBParams.c_K9',
+    'atm.turb.CLUBBParams.coef_spread_DG_means_rt',
+    'atm.turb.CLUBBParams.coef_spread_DG_means_thl',
+    'atm.turb.CLUBBParams.gamma_coef',
+    'atm.turb.CLUBBParams.gamma_coefb',
+    'atm.turb.CLUBBParams.lambda0_stability_coef',
+    'atm.turb.CLUBBParams.lmin_coef',
+    'atm.turb.CLUBBParams.mu',
+    'atm.turb.CLUBBParams.mult_coef',
+    'atm.turb.CLUBBParams.nu1',
+    'atm.turb.CLUBBParams.nu2',
+    'atm.turb.CLUBBParams.nu6',
+    'atm.turb.CLUBBParams.nu8',
+    'atm.turb.CLUBBParams.nu9',
+    'atm.turb.CLUBBParams.slope_coef_spread_DG_means_w',
     # atm: CloudConfig (8)
     'atm.clouds.CloudConfig.Nc_default',
     'atm.clouds.CloudConfig.T_ice_only',
@@ -127,9 +181,9 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.rad.GrayRadiationConfig.tau_equator',
     'atm.rad.GrayRadiationConfig.tau_moist_coeff',
     'atm.rad.GrayRadiationConfig.tau_pole',
-    # atm: HinesConfig (2)
-    'atm.gwd.HinesConfig.Fmax',
-    'atm.gwd.HinesConfig.total_rms_wind',
+    # atm: HinesConfig (0) — Fmax + total_rms_wind became reachable when
+    # gwd_config_for started threading the hines_* ExperimentConfig scalars
+    # into the kernel leaf on every lane (2026-07-24).
     # atm: HoltslagBovilleConfig (13)
     'atm.turb.HoltslagBovilleConfig.Ri_crit',
     'atm.turb.HoltslagBovilleConfig.betah',
@@ -158,6 +212,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.KainFritschConfig.timec_min_s',
     'atm.conv.KainFritschConfig.usl_depth_pa',
     # atm: KesslerConfig (5)
+    # The hard-saturation-adjustment trigger + heating cap (all warm-rain
+    # micro configs) were REMOVED from this baseline 2026-07-23: they are now
+    # routed onto ExperimentConfig flat scalars (hard_sat_adjust_threshold /
+    # hard_sat_max_heating_K) and reachable via --params through
+    # _ATM_SCALAR_PARAM_MAP (the day-137 summer-regime tuning need).  The
+    # remaining sibling micro params stay SCM-RCE-only (pipeline-internal).
     'atm.micro.KesslerConfig.accretion_coeff',
     'atm.micro.KesslerConfig.autoconversion_rate',
     'atm.micro.KesslerConfig.autoconversion_threshold',
@@ -193,41 +253,37 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.MassFluxConfig.cape_threshold',
     'atm.conv.MassFluxConfig.delta_0',
     'atm.conv.MassFluxConfig.tau_adj',
-    # atm: McFarlaneConfig (7)
+    # atm: McFarlaneConfig (6) — directional_spread became reachable via the
+    # mcfarlane_directional_spread scalar + gwd_config_for (2026-07-24); the
+    # rest still have no ExperimentConfig scalar to route through.
     'atm.gwd.McFarlaneConfig.G_0',
-    'atm.gwd.McFarlaneConfig.directional_spread',
     'atm.gwd.McFarlaneConfig.efficiency',
     'atm.gwd.McFarlaneConfig.envelope_scale',
     'atm.gwd.McFarlaneConfig.fcrit2',
     'atm.gwd.McFarlaneConfig.h_topo',
     'atm.gwd.McFarlaneConfig.min_wind',
-    # atm: MorrisonConfig (21)
+    # atm: MorrisonConfig (15; 5 wired 2026-07-26 + ice_snow_d_auto wired
+    # 2026-07-27 via _thread_morrison_scalars — anvil-ice tuning)
     'atm.micro.MorrisonConfig.N_i0',
     'atm.micro.MorrisonConfig.Nc_0',
     'atm.micro.MorrisonConfig.a_v_i',
     'atm.micro.MorrisonConfig.a_v_r',
     'atm.micro.MorrisonConfig.a_v_s',
-    'atm.micro.MorrisonConfig.agg_coeff',
-    'atm.micro.MorrisonConfig.bergeron_rate',
     'atm.micro.MorrisonConfig.cooper_T_act',
     'atm.micro.MorrisonConfig.cooper_a',
-    'atm.micro.MorrisonConfig.dep_coeff',
     'atm.micro.MorrisonConfig.evap_coeff',
-    'atm.micro.MorrisonConfig.ice_snow_d_auto',
     'atm.micro.MorrisonConfig.k_ac',
-    'atm.micro.MorrisonConfig.k_au',
     'atm.micro.MorrisonConfig.k_sc',
     'atm.micro.MorrisonConfig.melt_rate',
     'atm.micro.MorrisonConfig.rain_selfcoll_k',
     'atm.micro.MorrisonConfig.rain_vent_f1',
     'atm.micro.MorrisonConfig.rain_vent_f2',
-    'atm.micro.MorrisonConfig.rime_coeff',
     'atm.micro.MorrisonConfig.x_star',
     # atm: OzoneProfileConfig (3)
     'atm.rad.OzoneProfileConfig.o3_max_vmr',
     'atm.rad.OzoneProfileConfig.p_peak_hPa',
     'atm.rad.OzoneProfileConfig.sigma_logp',
-    # atm: P3Config (16)
+    # atm: P3Config (18)
     'atm.micro.P3Config.N_i0',
     'atm.micro.P3Config.Nc_0',
     'atm.micro.P3Config.a_v_i',
@@ -285,10 +341,18 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.SundqvistConfig.evap_coeff',
     'atm.micro.SundqvistConfig.qc_crit',
     'atm.micro.SundqvistConfig.rh_crit',
-    # atm: SurfaceLayerConfig (3)
+    # atm: SurfaceLayerConfig (6) — conscious exclusion: like Cd_neutral /
+    # Ch_neutral / z0, the MOST stability-function coefficients and the
+    # thermal/momentum roughness ratio z0h_z0_ratio are trained via the AIMIP
+    # classical bundle (aimip_params.surface_most_* / surface_z0h_z0_ratio), not
+    # the ExperimentConfig --params scalar map. Same reachability status as their
+    # SurfaceLayerConfig siblings.
     'atm.turb.SurfaceLayerConfig.Cd_neutral',
     'atm.turb.SurfaceLayerConfig.Ch_neutral',
+    'atm.turb.SurfaceLayerConfig.most_stable_beta',
+    'atm.turb.SurfaceLayerConfig.most_unstable_gamma',
     'atm.turb.SurfaceLayerConfig.z0',
+    'atm.turb.SurfaceLayerConfig.z0h_z0_ratio',
     # atm: TKEConfig (4)
     'atm.turb.TKEConfig.Ce',
     'atm.turb.TKEConfig.Ck',
@@ -467,11 +531,31 @@ UNREACHABLE_PARAMS = frozenset({
     'land.canopy.sif.kp',
     'land.canopy.sif.max_electron_yield',
     'land.snow_bands.alpha_glacier_ice',
-    'land.snow_bands.blow_snow_subl_rate',
     'land.snow_bands.blow_snow_wind_thresh_ms',
     'land.snow_bands.lapse_rate_K_m',
     'land.snow_bands.lw_elev_lapse_W_m2_per_m',
-    'land.snow_bands.refreeze_frac',
-    'land.snow_bands.sky_view_min',
     'land.snow_bands.sw_elev_grad_per_m',
+    # --- Land closures spec'd but not routed by any run_lmip land-surface
+    # scheme's config tree (#691). apply_params_to_config(driver="run_lmip")
+    # does not carry these nested *Config NamedTuples under simple_seb/two_leaf/
+    # clm_ml, so they are not settable from a calibration file yet. Conscious
+    # baseline entries (shrink as each config is wired through the router). The
+    # land_use_change family surfaced when the module was registered in
+    # param_collector.SPEC_MODULES (its spec is in-scope, so the drift guard
+    # requires registration); interception / d13c are pre-existing #691 debt.
+    # (clm_ml / two_leaf_canopy params ARE reachable under their
+    # --land-surface-scheme and are deliberately NOT baselined.)
+    'land.canopy.interception.dewmx',
+    'land.canopy.interception.fwet_exponent',
+    'land.canopy.interception.maximum_leaf_wetted_fraction',
+    'land.d13c.phi_c4_leakiness',
+    'land.land_use_change.clear_burn_frac',
+    'land.land_use_change.clear_slash_frac',
+    'land.land_use_change.prod_frac_100yr',
+    'land.land_use_change.prod_frac_10yr',
+    'land.land_use_change.prod_frac_1yr',
+    'land.land_use_change.tau_100yr_years',
+    'land.land_use_change.tau_10yr_years',
+    'land.land_use_change.tau_1yr_years',
+    'land.land_use_change.tau_regrow_years',
 })

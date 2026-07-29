@@ -428,20 +428,23 @@ def test_tier3_column_mse_conserved(name):
         "this leak set — its coupled condensation water+energy budget now closes "
         "∫(dq_v+dq_c) to MACHINE PRECISION in-scheme (gated by "
         "test_tier3_kf_precip_efficiency_leak_removed), so it is excluded from "
-        "the leaking loop here."
+        "the leaking loop here.  BECHTOLD graduated 2026-07-22 (implicit_flux "
+        "default + released detrained-condensate latent — the KF remedy; gated "
+        "by test_bechtold_column_conservation), leaving ZM as the sole member."
     ),
 )
 def test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN():
-    """# BUG (contract): ZM/Bechtold leak column total water in-scheme.
+    """# BUG (contract): ZM leaks column total water in-scheme.
 
-    KF used to leak here too but now closes in-scheme (see
-    test_tier3_kf_precip_efficiency_leak_removed) and is excluded from the loop.
+    KF (2026-07-13) and Bechtold (2026-07-22) used to leak here too but now
+    close in-scheme (see test_tier3_kf_precip_efficiency_leak_removed and
+    tests/unit/test_bechtold_column_conservation.py) and are excluded.
     """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
     dp = _dp(ph)
-    for name in ("zhang_mcfarlane", "bechtold"):
+    for name in ("zhang_mcfarlane",):
         out = _all_schemes(T, q, pf, ph, u, v, None, mc)[name]()
         net = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
         scale = _col_int(jnp.abs(out.dq_v_dt), dp) + 1e-15

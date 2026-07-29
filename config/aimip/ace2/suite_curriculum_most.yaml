@@ -1,0 +1,47 @@
+# ACE2-loss + rollout-curriculum retrain WITH the MOST surface bulk scheme.
+#
+# What this trains that the constant-scheme curriculum (suite_curriculum.yaml,
+# results/aimip_ace2curr) does NOT:
+#   * local aerodynamic roughness z0 as a SPATIAL land field
+#     (aimip_spatial_surface: true, inherited from the base) feeding the
+#     log-law neutral-drag term of the MOST bulk scheme;
+#   * the thermal/momentum roughness ratio z0h/z0
+#     (surface_z0h_z0_ratio; Garratt 1992);
+#   * the GLOBAL Monin-Obukhov stability-function coefficients
+#     (surface_most_unstable_gamma / surface_most_stable_beta;
+#     Businger-Dyer 1971 / Dyer 1974).
+# Under aimip_surface_bulk_scheme: constant those three leaves are DEAD
+# (compute_surface_fluxes never enters the compute_most_fluxes branch, so
+# jax.grad wrt them is exactly zero).  Setting it to "most" routes the
+# surface flux through the stability-dependent path, making them live,
+# trainable gradients — the entire point of this suite.
+#
+# CONTROLLED COMPARISON: byte-identical base / grid / rollout curriculum /
+# eval protocol to suite_curriculum.yaml (results/aimip_ace2curr).  The ONLY
+# variable under test is the surface bulk scheme (most vs constant).  Re-bench
+# both on the SAME WB2 protocol to attribute any delta to the surface closure.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}                       # REPLACE the base loss block wholesale
+  # Short-lead-first ladder through the dycore (dt=600 s: 12h=72, 24h=144,
+  # 72h=432, 120h=720 steps). Total epochs = sum of phase epochs = 7.
+  aimip_rollout_curriculum:
+    - [12, 2]
+    - [24, 2]
+    - [72, 2]
+    - [120, 1]
+  # THE lever under test: activate the Monin-Obukhov stability path so the
+  # trained surface_most_* / z0h_z0_ratio leaves stop being dead knobs.
+  aimip_surface_bulk_scheme: most
+  # Spatial local-z0 field stays on (inherited base default) so the log-law
+  # neutral drag of the MOST scheme is a trainable spatial land field too.
+  aimip_spatial_surface: true
+
+# column_nn replaces the physics with an NN — the surface bulk scheme is N/A
+# there, so this suite trains the classical variant only.
+variants:
+  - classical
+
+output_dir: results/aimip_ace2curr_most

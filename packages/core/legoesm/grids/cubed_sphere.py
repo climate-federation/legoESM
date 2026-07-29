@@ -476,16 +476,26 @@ def create_cubed_sphere(
             from legoesm.grids.fv3_native_halos import (
                 create_fv3_native_duogrid_data,
             )
-            # k2e_nord on the ED route is the upstream duo-grid order and
-            # only 4 is oracle-pinned.  DEFAULT (None) maps to 4; any
-            # EXPLICIT non-4 request fails loudly (codex p3: never silently
-            # ignore a user's numerical order).
-            if k2e_nord is not None and k2e_nord != 4:
+            # k2e_nord on the ED route: 2 = the AUTHORITATIVE live
+            # default (Zenodo fv_arrays.F90:150 + global_grid_data.F90
+            # :57, no namelist override — the dg/gg FATAL only enforces
+            # equality of two 2-defaults); 4 = the luanfs-mirror
+            # monolith order the historical fixtures were pinned at
+            # (2026-07-27: 4-point corner-adjacent ring Lagrange has
+            # oscillating extrapolation lobes and is the measured
+            # vertex amplifier — the C48 case-8 root cause, PR #1372).
+            # DEFAULT (None) now maps to 2 — the FAITHFUL order — after
+            # the acceptance battery (case-8 d5 in the oracle band, W2
+            # max+RMS inside the Zenodo envelope, symmetry residuals at
+            # the oracle floor); pass 4 explicitly for the historical
+            # fixture order.
+            if k2e_nord is not None and k2e_nord not in (2, 4):
                 raise NotImplementedError(
-                    f"gnomonic='ed' duogrid: k2e_nord={k2e_nord} is not the "
-                    "oracle-pinned upstream duo-grid order (4); omit the "
-                    "argument or pass 4")
-            duogrid = create_fv3_native_duogrid_data(n, ng=ng, k2e_nord=4)
+                    f"gnomonic='ed' duogrid: k2e_nord={k2e_nord}; "
+                    "supported orders are 2 (authoritative live "
+                    "default) and 4 (mirror-monolith fixture order)")
+            duogrid = create_fv3_native_duogrid_data(
+                n, ng=ng, k2e_nord=2 if k2e_nord is None else k2e_nord)
         else:
             from legoesm.grids.duogrid import create_duogrid_data
             duogrid = create_duogrid_data(
@@ -3845,3 +3855,11 @@ def create_cubed_sphere_panel(
         rsin_v=rsin_v_panel.astype(cdgrid_panel.rsin_v.dtype),
     )
     return panel, cdgrid_panel
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+GNOMONIC_ED_FACE_PERM = _GNOMONIC_ED_FACE_PERM
+GNOMONIC_ED_FACE_ROT = _GNOMONIC_ED_FACE_ROT

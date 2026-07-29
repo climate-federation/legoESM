@@ -347,8 +347,24 @@ def load_state_checkpoint(
                     staggering=fm.get("staggering", template_val.staggering),
                 )
             elif template_val is None:
-                # Field was None in template but exists in checkpoint
-                kwargs[name] = arr
+                # Slot was None in the template but exists in the checkpoint.
+                # If the checkpoint's field_meta says it was a Field (e.g. the
+                # prognostic tke carry), reconstruct the Field — grafting the
+                # raw array would break every ``.data`` consumer downstream
+                # (codex MED 2026-07-27). No field_meta => it was a raw-array
+                # slot; keep the raw array (old behaviour).
+                fm = field_meta.get(name)
+                if fm and fm.get("is_field") is True:
+                    kwargs[name] = Field(
+                        data=arr,
+                        name=fm.get("name", name),
+                        dims=tuple(fm.get("dims", ())),
+                        units=fm.get("units", ""),
+                        long_name=fm.get("long_name", ""),
+                        staggering=fm.get("staggering", "cell"),
+                    )
+                else:
+                    kwargs[name] = arr
             else:
                 kwargs[name] = arr
 

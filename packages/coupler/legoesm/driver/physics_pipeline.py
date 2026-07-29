@@ -168,6 +168,10 @@ class PhysicsPipeline:
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
+        # CONCRETE dynamics timestep [s] for the CLM-ML canopy's static sub-step
+        # count (the segment passes dt as a tracer; set at driver setup). None ⇒
+        # use the traced dt (simple_seb / two_leaf, byte-identical).
+        self.land_ml_dt = None
         # Optional PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI) for the
         # multilayer tile.  None (default) ⇒ no carbon coupling (Jarvis stomata /
         # byte-identical).  When set (+ land_ml_cfg.stomata.enabled +
@@ -175,6 +179,16 @@ class PhysicsPipeline:
         # making Vc_max25 / g1 / LCMA affect the surface flux — i.e. TRAINABLE in the
         # coupled calibration — without paying a multi-decade carbon-pool spin-up.
         self.land_ml_carbon = None     # CarbonState (prescribed) or None
+        # CLM-ML canopy: concrete per-column GridInfo tuple (structural ints
+        # ncan/ntop/nbot per column) extracted from the warm-started canopy at
+        # driver setup and threaded into the jitted step so the CLM-ML forward runs
+        # traceably over ncol>1 (S2).  None ⇒ not a CLM-ML run (byte-identical for
+        # simple_seb / two_leaf, which pass it straight through as None).
+        self.clm_ml_grid_info = None
+        # Per-column CLM PFT (concrete (ncol,) int array) for mixed-PFT columns;
+        # set in model_driver._setup_multilayer_land from the surface map's dominant
+        # PFT when CLMMLCanopyConfig.use_surfdata_pft. None => single pft_clm.
+        self.clm_ml_pft_per_col = None
         # When True, T_land is stepped each radiation call (full slab-land
         # tile, --land-mask-file path).  When False, T_land is carried but
         # NOT updated — the land albedo/T_sfc blend still applies (passive
@@ -264,6 +278,14 @@ class PhysicsPipeline:
         # pass to produce CMOR rsutcs/rlutcs; when False (default) every
         # clear-sky code path is a byte-identical no-op.
         self._clear_sky_diag = False  # set by build_physics_pipeline (#843)
+        # Per-process column budget ledger (diagnostics.process_ledger):
+        # static Python bool set by build_physics_pipeline from
+        # config.output.budget_ledger.  When True, physics_step_no_rad
+        # attributes its column water/dry-enthalpy tendency rates per
+        # operator and returns them on PhysicsOutput.budget_ledger; when
+        # False (default) every ledger code path is a byte-identical no-op
+        # (feature-gating exception: Python ``if``, never jnp.where).
+        self.budget_ledger = False  # set by build_physics_pipeline
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -517,7 +539,7 @@ class PhysicsPipeline:
 
     def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
                                    T, p_s, q_v, u, v, precip_col, dt,
-                                   land_ml_params=None):
+                                   land_ml_params=None, cos_zenith_col=None):
         """Advance the MULTILAYER (Richards) land tile one radiation step and return
         ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
 
@@ -536,14 +558,28 @@ class PhysicsPipeline:
         rho = p_s_col / (constants.R_d * T_air)
         precip = precip_col if precip_col is not None else jnp.zeros_like(p_s_col)
         ones = jnp.ones_like(p_s_col)
+        # Solar zenith: CLM-ML consumes cos_zenith as its beam-extinction geometry
+        # (kb = 0.5/cosz), so it needs the REAL diurnal / latitudinal value threaded
+        # from the radiation core (``cos_zenith_col``).  The two_leaf / simple_seb
+        # tiles pass None here and keep the historical 0.5 placeholder (unchanged —
+        # a shared faithful-zenith upgrade for those is a separate follow-up).
+        _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
         forcing = AtmToSurface(
             sw_down=sw_down_col, lw_down=lw_down_col, precip_total=precip,
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
             p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
-            cos_zenith=0.5 * ones, co2_ppmv=412.0 * ones,
+            cos_zenith=_cosz, co2_ppmv=412.0 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
+        # CLM-ML needs a CONCRETE dt to resolve its static ML sub-step count
+        # (num_ml_steps = ceil(dt/dtime_ml)); the jitted segment passes dt as a
+        # TRACER, which fails require_positive_finite.  The timestep is fixed, so
+        # the concrete config dt (threaded from setup) is numerically identical.
+        # Only the clm_ml path substitutes it — simple_seb / two_leaf keep the
+        # traced dt_rad (byte-identical).
+        if self.clm_ml_grid_info is not None and self.land_ml_dt is not None:
+            dt_rad = float(self.land_ml_dt) * self.rad_update_steps
         # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
         # carbon pools are discarded so the prescribed leaf carbon is reused every
         # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
@@ -554,7 +590,9 @@ class PhysicsPipeline:
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=_lmp, carbon_state=self.land_ml_carbon)
+            land_params=_lmp, carbon_state=self.land_ml_carbon,
+            clm_ml_grid_info=self.clm_ml_grid_info,
+            clm_ml_pft_per_col=self.clm_ml_pft_per_col)
         return land_new, resp.T_sfc, resp.albedo
 
     def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):
@@ -1261,6 +1299,30 @@ class PhysicsPipeline:
         # convection AND turbulence drying (codex#4 round-2 HIGH) — not just
         # convection, so it can only be applied on the assembled totals.
 
+        # --- Budget-ledger capture: microphysics + convection rows ---------
+        # Taken HERE because dq_c_dt/dq_r_dt/... still hold the MICRO-ONLY
+        # values (the convective detrainment is merged just below and the
+        # donor clamp adjusts them at the end).  Ledger sign convention:
+        # positive = the process adds water/dry enthalpy to the column
+        # (process_ledger module docstring).
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import ledger_entry
+            _bl_dsigma = self.sigma_half[1:] - self.sigma_half[:-1]
+            _bl_micro = ledger_entry(
+                dq_v_dt_micro + dq_c_dt + dq_r_dt
+                + dq_i_dt + dq_s_dt + dq_g_dt,
+                dT_dt_micro, p_s, _bl_dsigma)
+            # Convection's column store contribution: vapour tendency plus —
+            # for detraining (mass-flux) schemes only — the anvil condensate
+            # routed into q_c below.  The in-updraft rain (dq_r_conv_dt) and
+            # the adjustment-scheme condensate go straight to surface precip,
+            # i.e. they LEAVE the column and correctly do not appear here: a
+            # conserving scheme's water row equals −(its surface precip).
+            _bl_conv_q = dq_v_dt_conv + (
+                dq_c_dt_conv if _ctr.detrains_to_cloud
+                else jnp.zeros_like(dq_v_dt_conv))
+            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma)
+
         # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
         # schemes, ``detrains_to_cloud``) adds convective condensate to the
         # cloud-water tendency; microphysics processes the augmented bucket on
@@ -1506,6 +1568,21 @@ class PhysicsPipeline:
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
 
+        # --- Budget-ledger capture: turbulence row -------------------------
+        # The BL scheme's tendencies INCLUDE its implicit surface-flux bottom
+        # BC, so surface evaporation enters the ledger through this row.  On
+        # a no-turbulence (bulk-kick) config the surface exchange lands in
+        # the other_physics residual instead (documented in process_ledger).
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import ledger_entry
+            if turb_out is not None:
+                _bl_turb = ledger_entry(
+                    ad.unflatten_3d(turb_out.dq_v_dt),
+                    ad.unflatten_3d(turb_out.dT_dt),
+                    p_s, _bl_dsigma)
+            else:
+                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma)
+
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
             _gwd_kwargs = dict(
@@ -1666,6 +1743,30 @@ class PhysicsPipeline:
         else:
             snow_new = snow
 
+        # --- Budget-ledger assembly: radiation row + other_physics residual.
+        # ``other_physics`` = assembled totals − (turb+conv+micro+rad), so
+        # the five physics rows sum to the PhysicsOutput totals BY
+        # CONSTRUCTION (GWD heating, the donor clamp, the bulk-BL kick and
+        # any future operator land there until given their own row).  The
+        # clips/dynamics rows stay zero here — the segment driver fills them.
+        _bl_out = None
+        if self.budget_ledger:
+            from legoesm.diagnostics.process_ledger import (
+                N_LEDGER, ROW_CONVECTION, ROW_MICROPHYSICS, ROW_OTHER,
+                ROW_RADIATION, ROW_TURBULENCE, ledger_entry,
+            )
+            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma)
+            _bl_total = ledger_entry(
+                dq_v_dt + dq_c_dt + dq_r_dt + dq_i_dt + dq_s_dt + dq_g_dt,
+                dT_dt, p_s, _bl_dsigma)
+            _bl_other = _bl_total - (_bl_turb + _bl_conv + _bl_micro + _bl_rad)
+            _bl_out = jnp.zeros((N_LEDGER, 2), dtype=_bl_total.dtype)
+            _bl_out = _bl_out.at[ROW_TURBULENCE].set(_bl_turb)
+            _bl_out = _bl_out.at[ROW_CONVECTION].set(_bl_conv)
+            _bl_out = _bl_out.at[ROW_MICROPHYSICS].set(_bl_micro)
+            _bl_out = _bl_out.at[ROW_RADIATION].set(_bl_rad)
+            _bl_out = _bl_out.at[ROW_OTHER].set(_bl_other)
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -1710,6 +1811,7 @@ class PhysicsPipeline:
             # diagnostic CLUBB, always-None otherwise), so no dtype flip.
             cloud_fraction=(
                 turb_out.cloud_fraction if turb_out is not None else None),
+            budget_ledger=_bl_out,
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -1746,6 +1848,32 @@ class PhysicsPipeline:
             cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, orbit=orbit)
             return s_0 * eccf * jnp.maximum(cos_sza, 0.0)
         return daily_mean_insolation(lat, day_of_year, s_0, orbit=orbit)
+
+    def _effective_cos_zenith(self, lat, lon, day_of_year, seconds_of_day, s_0):
+        """Effective cos(solar zenith) in [0, 1] per grid cell for a surface canopy.
+
+        The SAME value the radiation solar path uses (mirrors the ``_mu`` block in
+        ``compute_radiation_core``'s dynamic-albedo branch): the INSTANTANEOUS
+        cos(SZA) under a diurnal cycle, else the daytime-effective daily-mean cosine
+        ``mu = Q_day / (S_0 * f_day)``.  The CLM-ML canopy consumes this as its solar
+        zenith (beam extinction ``kb = 0.5/cosz``), so it sees the real diurnal /
+        latitudinal sun instead of the fixed 0.5 placeholder.  Returned on the native
+        grid (lat/lon shape); the caller flattens to column space.
+        """
+        from legoesm.atmosphere.physics.radiation.solar import (
+            cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+            earth_sun_distance_factor,
+        )
+        _orbit = getattr(self, "orbit", None)
+        if self.diurnal_cycle:
+            _hour = seconds_of_day / 3600.0
+            return jnp.maximum(
+                cos_zenith_angle(lat, lon, day_of_year, _hour, orbit=_orbit), 0.0)
+        _eccf = (earth_sun_distance_factor(day_of_year, _orbit)
+                 if _orbit is not None else 1.0)
+        _q_day = daily_mean_insolation(lat, day_of_year, s_0, orbit=_orbit) / _eccf
+        _f_day = daylight_fraction(lat, day_of_year, orbit=_orbit)
+        return jnp.clip(_q_day / (s_0 * jnp.maximum(_f_day, 1.0e-6)), 0.0, 1.0)
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
@@ -2105,9 +2233,18 @@ class PhysicsPipeline:
             # (column space) + the lagged precip; the slab T_land rides through.
             precip_col = (ad.flatten_2d(conv_precip)
                           if conv_precip is not None else None)
+            # CLM-ML: thread the REAL per-column solar zenith (same value the
+            # radiation solar path uses) so the canopy radiation sees the diurnal /
+            # latitudinal sun, not the 0.5 placeholder.  Only for clm_ml — two_leaf
+            # / simple_seb keep 0.5 (unchanged).  lat/lon/day/s_0 are in scope here.
+            _cosz_col = None
+            if self.clm_ml_grid_info is not None:
+                _cosz_col = ad.flatten_2d(self._effective_cos_zenith(
+                    lat, lon, day_of_year, seconds_of_day, s_0)).reshape(-1)
             land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
-                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad)
+                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad,
+                cos_zenith_col=_cosz_col)
             # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
             # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
             # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
@@ -2728,6 +2865,43 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
+def convection_config_for(config, grid_dx_m=None):
+    """The ``ConvectionConfig`` (scheme + tuned per-scheme leaf) to build a
+    combined-physics convection kernel from.
+
+    Single source of truth mirroring :func:`turbulence_config_for`: the
+    combined-physics lanes (MPAS, spectral) previously built
+    ``ConvectionConfig(scheme=...)`` with BARE scheme defaults, so every
+    tuned ExperimentConfig field (``bechtold_*``, ``sbm_tau_c``,
+    ``convective_precip_efficiency``, ...) silently never reached them —
+    the same gap class as the 2026-07-23 hard-sat override. This wraps the
+    FV resolver so all lanes share ONE tuned leaf.
+
+    ``grid_dx_m``: the caller's grid spacing [m] (sqrt of mean cell area).
+    Fills Bechtold's IFS ZTAURES ``dx_m`` when the user left the 0.0
+    sentinel — otherwise the deep CAPE closure runs the legacy
+    resolution-agnostic turnover (factor 1.0 instead of ~3 at 2°),
+    over-vigorous convection on coarse meshes (codex 2026-07-23 finding A).
+    An explicit ``bechtold_dx_m``/``--params`` value always wins.  Static
+    Python float — trace-time constant, no retrace.
+    """
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+
+    scheme = config.convection
+    cc = ConvectionConfig(scheme=scheme)
+    if scheme == "none":
+        return cc
+    _, leaf = _resolve_convection(config)
+    if leaf is None or scheme not in cc._fields:
+        # Schemes without a leaf slot (or resolver-handled specially) keep
+        # the plain scheme selection — the factory dispatch validates it.
+        return cc
+    if (scheme == "bechtold" and grid_dx_m is not None
+            and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
+        leaf = leaf._replace(dx_m=float(grid_dx_m))
+    return cc._replace(**{scheme: leaf})
+
+
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
@@ -2783,6 +2957,10 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # Vertical subsidence solve selector (day-65 blowup bisect,
+            # 2026-07-22): fallback matches the BechtoldConfig default.
+            subsidence_solve=getattr(
+                config, 'bechtold_subsidence_solve', 'implicit_flux'),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -2815,6 +2993,8 @@ def _resolve_convection(config):
             # scheme default since the 2026-07-16 flip).
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
+            rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
                 config, 'bechtold_use_ifs_downdraft', True),
@@ -2852,6 +3032,16 @@ def _resolve_convection(config):
         # so a scheme without the field keeps its default "constant"; the scheme
         # body raises on an unknown value (dispatch-hardening).
         _split = getattr(config, "convective_precip_split", "constant")
+        # Thread the Sundqvist-split autoconversion scalars UNCONDITIONALLY on
+        # any scheme that exposes them (tiedtke here; bechtold threads its own
+        # dedicated kwargs above) — mirroring bechtold, so the --params /
+        # _ATM_SCALAR_PARAM_MAP reachability claim holds regardless of the
+        # split selector.  Byte-identical at defaults (5.0e-4 / 0.9 == the
+        # scheme defaults); the values are inert until the split activates.
+        if hasattr(conv_config, "precip_split_scheme"):
+            conv_config = conv_config._replace(
+                autoconv_q_c_crit=getattr(config, "autoconv_q_c_crit", 5.0e-4),
+                autoconv_pe_max=getattr(config, "autoconv_pe_max", 0.9))
         if _split != "constant":
             if not hasattr(conv_config, "precip_split_scheme"):
                 # A requested non-constant split on a scheme that cannot honour
@@ -2861,10 +3051,7 @@ def _resolve_convection(config):
                     f"convective_precip_split={_split!r} requires a convection "
                     "scheme with the physical autoconversion split (bechtold or "
                     f"tiedtke); scheme {scheme!r} does not support it")
-            conv_config = conv_config._replace(
-                precip_split_scheme=_split,
-                autoconv_q_c_crit=getattr(config, "autoconv_q_c_crit", 5.0e-4),
-                autoconv_pe_max=getattr(config, "autoconv_pe_max", 0.9))
+            conv_config = conv_config._replace(precip_split_scheme=_split)
 
     _check_pipeline_convection_supported(scheme, conv_config)
 
@@ -2948,6 +3135,67 @@ def validate_microphysics_tracer_slots(
     return need_slots
 
 
+def _thread_morrison_scalars(config, scheme, micro_config):
+    """Forward user-touched ``morrison_*`` flat scalars to the shared applier.
+
+    Explicit attribute reads (not getattr-with-a-variable) so the
+    flag-reachability AST audit can SEE them — a dynamic read is exactly the
+    blind spot its review documented.  Values equal to the ExperimentConfig
+    default are NOT forwarded: the defaults are locked equal to the
+    MorrisonConfig leaves by test, so an untouched config is byte-identical
+    on Morrison and silent on every other scheme.  Shared by the FV
+    (``_resolve_microphysics``) and MPAS (``model_driver``) lanes.
+    """
+    import math
+
+    from legoesm.driver.config import ExperimentConfig as _ExpCfg
+
+    # ONE tolerance for both touched-ness (here, vs the flat default) and
+    # application (in the applier, vs the current leaf): float32-host storage
+    # noise is ~1.2e-7 relative (2^-23), so differences below 1e-6 relative
+    # are treated as THE DEFAULT everywhere — never half-recognised as
+    # "touched" but then not applied (codex 2026-07-26 round 2, item 4).
+    # These are order-of-magnitude process coefficients; a deliberate retune
+    # below 1e-6 relative is physically meaningless.
+    _touched = {}
+    for _exp_name, _leaf_name, _val in (
+        ("morrison_bergeron_rate", "bergeron_rate",
+         getattr(config, "morrison_bergeron_rate", None)),
+        ("morrison_rime_coeff", "rime_coeff",
+         getattr(config, "morrison_rime_coeff", None)),
+        ("morrison_dep_coeff", "dep_coeff",
+         getattr(config, "morrison_dep_coeff", None)),
+        ("morrison_agg_coeff", "agg_coeff",
+         getattr(config, "morrison_agg_coeff", None)),
+        ("morrison_k_au", "k_au",
+         getattr(config, "morrison_k_au", None)),
+        ("morrison_fall_a_i", "fall_a_i",
+         getattr(config, "morrison_fall_a_i", None)),
+        ("morrison_ice_snow_d_auto", "ice_snow_d_auto",
+         getattr(config, "morrison_ice_snow_d_auto", None)),
+        ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
+         getattr(config, "morrison_hom_ice_nuc_N", None)),
+    ):
+        if _val is not None and not math.isclose(
+                float(_val), float(_ExpCfg._field_defaults[_exp_name]),
+                rel_tol=1e-6, abs_tol=0.0):
+            _touched[_leaf_name] = float(_val)
+    # Flavor is a string selector, not a float: forward only when it deviates
+    # from the leaf default ("mg"), mirroring the touched-scalar rule so a
+    # default config stays byte-identical on Morrison and silent elsewhere.
+    _flavor = getattr(config, "morrison_flavor", None)
+    if _flavor in (None, "mg"):
+        _flavor = None
+    if not _touched and _flavor is None:
+        return micro_config
+    from legoesm.atmosphere.physics.microphysics.config import (
+        apply_microphysics_experiment_flags,
+    )
+    return apply_microphysics_experiment_flags(
+        micro_config, scheme, morrison_scalars=_touched,
+        morrison_flavor=_flavor)
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
@@ -3004,6 +3252,58 @@ def _resolve_microphysics(config):
                 "--subgrid-autoconv."
             )
         micro_config = micro_config._replace(subgrid_autoconversion=True)
+
+    # Hard (iterated) saturation-adjustment guard (opt-in): drain local super-
+    # saturation pools the smooth sigmoid path cannot, landing q_v on the liquid
+    # saturation curve (conserving c_pd*T + L_v*q_v).  Fail loudly on a scheme
+    # without the field (e.g. sundqvist) rather than silently ignoring it.
+    if getattr(config, "hard_saturation_adjustment", False):
+        if "hard_saturation_adjustment" not in getattr(
+                micro_config, "_fields", ()):
+            raise ValueError(
+                f"hard_saturation_adjustment=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no warm-rain saturation "
+                "adjustment); use a warm-rain scheme (kessler, seifert_beheng, "
+                "morrison, thompson, p3) or drop --hard-saturation-adjustment."
+            )
+        micro_config = micro_config._replace(hard_saturation_adjustment=True)
+
+    # Optional trigger/heating-cap overrides (flat ExperimentConfig scalars /
+    # --params via _ATM_SCALAR_PARAM_MAP).  Threaded through the SHARED helper
+    # so the fail-loud "scheme lacks the field" contract is written once
+    # (mirrors the model_driver MPAS call site); validate_strict has already
+    # refused an override without the boolean gate.
+    # ``homogeneous_ice_nucleation`` shares this call but is INDEPENDENT of the
+    # hard-sat overrides: both of those default to None, so gating the call on
+    # them alone made the cirrus-nucleation flag SILENTLY INERT on this lane
+    # unless the user happened to also pass --hard-sat-adjust-threshold /
+    # --hard-sat-max-heating-k (measured: morrison.homogeneous_ice_nucleation
+    # stayed False for ExperimentConfig(homogeneous_ice_nucleation=True)).
+    # Include it in the guard so the flag reaches the scheme on its own.
+    _hs_thr = getattr(config, "hard_sat_adjust_threshold", None)
+    _hs_cap = getattr(config, "hard_sat_max_heating_K", None)
+    _hom_nuc = bool(getattr(config, "homogeneous_ice_nucleation", False))
+    if _hs_thr is not None or _hs_cap is not None or _hom_nuc:
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        micro_config = apply_microphysics_experiment_flags(
+            micro_config, scheme,
+            hard_sat_adjust_threshold=_hs_thr,
+            hard_sat_max_heating_K=_hs_cap,
+            homogeneous_ice_nucleation=_hom_nuc,
+        )
+
+    # Morrison ice-process tunables (flat ``morrison_*`` ExperimentConfig
+    # scalars, declared with "MorrisonConfig.<field>" comments but NEVER
+    # wired — the flag-reachability audit's cause-1/2 gap).  Threaded through
+    # the SAME shared helper as the flags above so the hard
+    # scheme=="morrison" gate lives in ONE place (Thompson/P3 share leaf
+    # NAMES with different defaults — a presence-keyed overlay here silently
+    # retuned them; codex 2026-07-26 Critical).  Only user-touched values are
+    # forwarded, so a non-Morrison scheme with untouched defaults stays
+    # silent and a Morrison config at defaults is byte-identical.
+    micro_config = _thread_morrison_scalars(config, scheme, micro_config)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -3165,6 +3465,60 @@ def _resolve_turbulence(config):
 # Gravity wave drag resolver
 # ---------------------------------------------------------------------------
 
+def gwd_config_for(config):
+    """The ``GravityWaveDragConfig`` (scheme + tuned per-scheme leaves) to
+    build a gravity-wave-drag kernel from.
+
+    Third member of the resolver family (:func:`turbulence_config_for`,
+    :func:`convection_config_for`): every lane — FV pipeline, MPAS,
+    spectral — previously built ``GravityWaveDragConfig(scheme=...)`` from
+    the scheme STRING alone, so the tuned ExperimentConfig scalars
+    (``mcfarlane_k_wave`` / ``mcfarlane_directional_spread`` /
+    ``mcfarlane_tau_max``, and the Hines launch amplitude) silently never
+    reached the kernel on ANY production AMIP path; only the AIMIP training
+    path consumed them.  Same gap class as the 2026-07-23 convection and
+    hard-sat overrides.
+
+    ``config.gravity_wave_drag_override`` (a full config whose ``scheme``
+    must equal ``config.gravity_wave_drag`` — enforced by
+    ``validate_strict``) still wins verbatim: an explicitly injected config
+    is never second-guessed by the scalar overlay.
+
+    COMPOSITE schemes ("mcfarlane+hines") carry BOTH leaves, so the overlay
+    is applied per-leaf independently of which names appear in the string.
+    Static Python floats — trace-time constants, no retrace.
+    """
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+
+    scheme = getattr(config, "gravity_wave_drag", "none")
+    override = getattr(config, "gravity_wave_drag_override", None)
+    if override is not None:
+        return override
+    gc = GravityWaveDragConfig(scheme=scheme)
+    if scheme == "none":
+        return gc
+    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
+    # NOT wired: no McFarlaneConfig field of that name exists (dangling
+    # ExperimentConfig scalar, tracked separately).
+    mc = gc.mcfarlane._replace(
+        k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
+        directional_spread=float(getattr(
+            config, "mcfarlane_directional_spread",
+            gc.mcfarlane.directional_spread)),
+        tau_max=float(getattr(config, "mcfarlane_tau_max",
+                              gc.mcfarlane.tau_max)),
+    )
+    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    hn = gc.hines._replace(
+        total_rms_wind=float(getattr(config, "hines_total_rms_wind",
+                                     gc.hines.total_rms_wind)),
+        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
+    )
+    return gc._replace(mcfarlane=mc, hines=hn)
+
+
 def _resolve_gwd(config):
     """Resolve gravity wave drag kernel and config from ExperimentConfig.
 
@@ -3182,16 +3536,11 @@ def _resolve_gwd(config):
     if scheme == "none":
         return None, None
 
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-        GravityWaveDragConfig,
-    )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
         get_gwd_fn,
     )
 
-    override = getattr(config, 'gravity_wave_drag_override', None)
-    gc = override if override is not None else GravityWaveDragConfig(scheme=scheme)
-    _name, gwd_fn, gwd_config = get_gwd_fn(gc)
+    _name, gwd_fn, gwd_config = get_gwd_fn(gwd_config_for(config))
     return gwd_fn, gwd_config
 
 
@@ -3432,6 +3781,9 @@ def build_physics_pipeline(grid, sigma, config):
     # only when config.output.clear_sky_diag is set (default off).
     pipeline._clear_sky_diag = bool(
         getattr(getattr(config, 'output', None), 'clear_sky_diag', False))
+    # Per-process budget ledger (same OutputConfig flow as clear_sky_diag).
+    pipeline.budget_ledger = bool(
+        getattr(getattr(config, 'output', None), 'budget_ledger', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

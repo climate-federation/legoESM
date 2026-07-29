@@ -760,11 +760,8 @@ class DINOConfig:
     barotropic_slow_forcing_ab2: bool = False     # True (Oceananigans card)
 
     # ------------------------------------------------------------------
-    # Diagnostics (paper Figs 5-6: MOC and σ_2 referenced to 2000 m)
+    # Derived / effective properties
     # ------------------------------------------------------------------
-    sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
-    rho_ref_z0: float = 1026.0            # ρ_ref(z=0) [kg/m³]
-    rho_ref_z2000: float = 1035.0         # ρ_ref(z=2000) [kg/m³]
 
     @property
     def A_v_bg_effective(self) -> float:
@@ -2604,6 +2601,9 @@ def dino_lat_lon_model_config(
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
             f"{cfg.gm_redi_mld_criterion!r}; expected 'rho_c' or 'n2_integral'")
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        validate_treguier_cfg,
+    )
     from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
     if cfg.lateral_tracer_mixing not in ("geopotential", "isoneutral"):
         raise ValueError(
@@ -2679,6 +2679,10 @@ def dino_lat_lon_model_config(
                 aei0=cfg.treguier_aei0,
             ),
         )
+        # Fail at CONFIG BUILD, not on the first tendency: a non-finite or
+        # non-positive --treguier-aei0 otherwise reaches the kernel and turns
+        # the whole coefficient field into NaN mid-run.
+        validate_treguier_cfg(gm_redi_cfg.treguier)
     else:
         gm_redi_cfg = GMRediConfig(
             # Placeholders; ignored at runtime because an adaptive κ is
@@ -2707,6 +2711,9 @@ def dino_lat_lon_model_config(
                 aei0=cfg.treguier_aei0,
             ),
         ) if cfg.use_gm_redi else None
+    if gm_redi_cfg is not None:
+        # Same config-build guard as the lat-lon branch above.
+        validate_treguier_cfg(gm_redi_cfg.treguier)
 
     physics_cfg = None
     if physics:

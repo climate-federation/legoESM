@@ -92,6 +92,7 @@ from legoesm.forcing.time_utils import (
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
     apply_conservative_regrid,
+    check_axis_span,
     compute_overlap_weights,
 )
 from legoesm.ocean.freshwater import FreshwaterForcing
@@ -103,6 +104,19 @@ from legoesm.ocean.freshwater import FreshwaterForcing
 
 #: Records per noleap day on the cache time axis (3-hourly).
 RECORDS_PER_DAY: int = 8
+
+#: Normalisation for the forcing remap, matching the OMIP2 applicator (kept as a
+#: named constant in both places rather than a bare literal, since it is a physics
+#: policy).  JRA55-do is Gaussian with outermost centre ~+-89.570 deg -> inferred
+#: outer edge ~+-89.849 deg, a 0.151 deg polar gap (3.4x narrower than CORE-II's),
+#: so the polar destination row is partly covered: 0.977 at 1 deg, 0.633 at 0.25
+#: deg, and uncovered entirely below ~0.15 deg.  Every cached channel is INTENSIVE
+#: (tas, huss, psl, winds, radiative and precip flux densities) and the shortfall is
+#: a DATA GAP, so 'fracarea' returns the mean of the overlapping source rather than
+#: coverage x field, and polar_fill covers rows beyond the source's band.  Not
+#: strictly conservative by construction -- correct magnitude is what matters for an
+#: intensive field.  See regrid_polar_coverage_2026-07-24.md.
+_FORCING_NORMALIZATION: str = "fracarea"
 
 #: Variables this module reads / regrids / caches.  Exactly the set
 #: needed to populate AtmToSurface and the freshwater path for tropical
@@ -509,12 +523,27 @@ def build_jra55_cache(
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
+    # Clamp src/target lat edges into [-pi/2, pi/2]: for a COARSE source the
+    # uniform-spacing edge inference can overshoot the pole (the 8-row test
+    # fixture's 86 deg outer centre lands at ~98 deg), where sin() caps below 1
+    # and leaves a spurious polar gap -- the polar rows would then regrid a
+    # constant to LESS than its value.  INERT on real TL319 JRA55-do, whose
+    # inferred outer edge is ~+-89.85 deg; kept as a cheap guard for coarse or
+    # irregular inputs.  _grid_edges_from_centers returns RADIANS.
+    src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
+    target_lat_edges = np.clip(config.target_lat_edges, -np.pi / 2, np.pi / 2)
 
     # Periodic longitude wrap: the source grid may not cover the full
     # [0°, 360°] range of the target (e.g. JRA55 TL319 at 640 points
     # has edges [-0.28°, 359.72°] which leaves a 0.28° gap at the
     # wrap point).  Fix by appending one ghost column at +360°.
     # The ghost column's data will be the first column's data (wrap).
+    # PRECONDITION the wrap-pad relies on, checked BEFORE padding: the RAW source
+    # must tile the full 360 deg.  The +360 ghost below would turn a partial
+    # source into one cell spanning the whole missing sector, which then reports
+    # COMPLETE longitude coverage to the weight builder.
+    check_axis_span(src_lon_edges, 2.0 * np.pi,
+                    name="JRA55-do source longitude")
     src_lon_edges_deg = np.degrees(src_lon_edges)
     target_lon_max = np.degrees(config.target_lon_edges[-1])
     if src_lon_edges_deg[-1] < target_lon_max - 1e-6:
@@ -527,9 +556,18 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
+    # fracarea + polar_fill treat JRA55-do's physical polar gap (see the constant's
+    # rationale above), after which every destination cell sums to 1 and
+    # require_full_coverage is the STRICT invariant again -- so a longitude
+    # seam/ghost deficit still raises.  The raw-longitude precondition the wrap-pad
+    # above relies on is asserted before that pad.
+    # See regrid_polar_coverage_2026-07-24.md
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
-        config.target_lat_edges, config.target_lon_edges,
+        target_lat_edges, config.target_lon_edges,
+        require_full_coverage=True,
+        normalization=_FORCING_NORMALIZATION,
+        polar_fill=True,
     )
 
     # Allocate output arrays on the cache axis.

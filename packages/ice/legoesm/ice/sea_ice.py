@@ -168,7 +168,7 @@ def _validate_dynamic_state_shape(h_dyn_shape, config, grid) -> None:
             )
 
 
-def _uses_new_physics(config: SeaIceConfig) -> bool:
+def uses_new_physics(config: SeaIceConfig) -> bool:
     """True when any Tier-1/Tier-2 new physics gate is enabled."""
     return (
         config.snow.enabled
@@ -359,13 +359,13 @@ def step_sea_ice(
                 "use n_categories=1."
             )
 
-    if config.dynamics == "none" and config.n_categories == 1 and not _uses_new_physics(config):
+    if config.dynamics == "none" and config.n_categories == 1 and not uses_new_physics(config):
         # Original slab path — fully backward compatible
         if isinstance(state, DynamicSeaIceState):
             state = dynamic_to_slab(state)
         return _step_slab(state, forcing, ocean_sst, ocean_u, ocean_v,
                           config, U_min, dt)
-    elif _uses_new_physics(config):
+    elif uses_new_physics(config):
         # Extended physics path: snow / brine / ridging / ponds /
         # delta-Eddington / Lipscomb 2001 remap.  Requires
         # DynamicSeaIceState carrier so the new state fields are
@@ -880,7 +880,17 @@ def _step_dynamic(
             T_ice = T_0[..., None]
             conc = c_0[..., None]
         # Conc-weighted aggregate per-ice-area realized latent for the response.
-        lhflx_exch = lhflx_num / jnp.maximum(conc_sum_lh, 1e-30)
+        # float32 AD safety: UNCONDITIONAL floored divide -> NaN adjoint over
+        # ice-free cells (``integer_pow(1e-30, -2)`` overflows float32 to
+        # ``inf`` and the numerator is exactly 0 there).  ``lhflx_num =
+        # sum_k lhflx_realized_k * conc_old_k`` (L846/876) and conc_old is
+        # non-negative, so ``conc_sum_lh == 0`` implies ``lhflx_num == 0`` and
+        # the fallback 0.0 REPRODUCES the old forward value exactly.
+        _has_lh_conc = conc_sum_lh > 1e-30
+        _conc_sum_lh_safe = jnp.where(_has_lh_conc, conc_sum_lh, 1.0)
+        lhflx_exch = jnp.where(
+            _has_lh_conc, lhflx_num / _conc_sum_lh_safe, 0.0,
+        )
 
         # Open-water ice growth should only be deposited into category 0
         # (thinnest). Zero out new-ice growth in empty higher categories
@@ -955,7 +965,7 @@ def _step_dynamic(
     )
 
     # Legacy path: snow / brine / pond fields are pass-through (zero-
-    # initialised in the input state when ``_uses_new_physics`` is False).
+    # initialised in the input state when ``uses_new_physics`` is False).
     new_state = DynamicSeaIceState(
         h_ice=state.h_ice.replace(data=h),
         T_ice=state.T_ice.replace(data=T_ice),
@@ -1144,9 +1154,30 @@ def _thermo_single(
     # much ice and the ocean heat scaled as if the base had vanished (codex #28).
     eps = 1e-30
     removal_cap = h / dt + basal_growth_rate + deposition_rate
+    # float32 AD safety -- LEGACY-kernel counterpart of the ``_thermo_v2``
+    # ``ocean_heat_scale`` site below; keep BOTH on this idiom.
+    # ``jnp.maximum``'s JVP is a MULTIPLY by a 0/1 mask, not a select, so the
+    # floored denominator still reaches ``div``'s denominator-JVP, which forms
+    # ``integer_pow(1e-30, -2) == 1e60`` -> ``inf`` in float32.  Over an
+    # ice-free column ``removal_cap == 0``, so the staged residual is
+    # ``0 * inf == NaN``, and the outer ``jnp.where`` cannot stop it (its
+    # transpose feeds numeric 0.0 INTO the divide).  ``total_removal`` carries a
+    # tangent w.r.t. ``concentration`` because ``_cap_multicat_concentration``
+    # sets ``h = h * max(sum_k a_k, 1)``, so the NaN reaches the multicat
+    # ``lhflx_exch`` adjoint via ``removal_scale`` -> ``sublim_loss_rate`` ->
+    # ``sublim_mass_per_ice_area`` -> ``lhflx_realized``, and the reduce-sum
+    # transpose then poisons EVERY category of d/d_concentration.
+    # Forward value is bitwise unchanged: the taken branch keeps the identical
+    # ``jnp.maximum(total_removal, eps)`` denominator, the untaken branch still
+    # selects exactly 1.0.  (The floor stays inside the branch only for a
+    # pathological 0 < total_removal < 1e-30; the predicate already implies
+    # total_removal > 0 strictly, since removal_cap >= 0.)
+    _capping = total_removal > removal_cap
+    _total_removal_safe = jnp.where(
+        _capping, jnp.maximum(total_removal, eps), 1.0)
     removal_scale = jnp.where(
-        total_removal > removal_cap,
-        removal_cap / jnp.maximum(total_removal, eps),
+        _capping,
+        removal_cap / _total_removal_safe,
         1.0,
     )
     # Heat / atmosphere-mass channels must be capped CONSISTENTLY with the
@@ -1835,9 +1866,14 @@ def _thermo_v2(
     # codex; matches the _thermo_single survived-fraction treatment).  == 1 when
     # the demand is fully met or there is no basal melt (growth / no melt).
     basal_melt_demand = jnp.maximum(-dt * dh_dt_basal, 0.0)
+    # float32 AD safety: safe denominator INSIDE the branch (the outer where
+    # alone does not stop the ``-num * integer_pow(1e-30, -2) == -0 * inf``
+    # NaN residual; jnp.maximum's JVP is a multiply by a mask, not a select).
+    _has_basal_demand = basal_melt_demand > 1e-30
+    _basal_demand_safe = jnp.where(_has_basal_demand, basal_melt_demand, 1.0)
     ocean_heat_scale = jnp.where(
-        basal_melt_demand > 1e-30,
-        basal_melt_m / jnp.maximum(basal_melt_demand, 1e-30),
+        _has_basal_demand,
+        basal_melt_m / _basal_demand_safe,
         1.0,
     )
 
@@ -2557,8 +2593,21 @@ def _step_dynamic_v2(
         # (sublim_mass_total is on the INPUT-conc basis).  The SH/STRESS
         # numerators are kept per-grid-cell and divided by ``conc_agg`` at the
         # response build (findings #9 + #4), NOT by this latent basis.
-        sum_conc_safe = jnp.maximum(
-            jnp.maximum(sum_conc_pre, sum_conc_post), 1e-30,
+        # float32 AD safety: UNCONDITIONAL floored divide at the
+        # ``lhflx_resp`` use below -> NaN adjoint over ice-free cells.
+        # ``sublim_mass_total`` (L2570) is PER-GRID-CELL, already weighted by
+        # the input conc inside ``_thermo_v2``, so a zero latent basis (no ice
+        # at EITHER end) implies ``sublim_mass_total == 0``; the 0.0 fallback
+        # below is forward-identical and keeps the documented invariant
+        # ``resp.lhflx * max(pre, post) == L_s * sublim_mass_total`` exact
+        # (0 == 0).  MULTICAT counterpart of the single-cat site at L2635 --
+        # both must be fixed together or the cross-path parity comment above
+        # becomes false on the ice-free adjoint.
+        _has_conc_basis_mc = jnp.maximum(sum_conc_pre, sum_conc_post) > 1e-30
+        sum_conc_safe = jnp.where(
+            _has_conc_basis_mc,
+            jnp.maximum(sum_conc_pre, sum_conc_post),
+            1.0,
         )
         fw_per_cat = jnp.stack(fw_flux_list, axis=-1)
         heat_per_cat = jnp.stack(ocean_heat_list, axis=-1)
@@ -2593,7 +2642,11 @@ def _step_dynamic_v2(
         # clamp cells under-report the latent and break
         # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
-        lhflx_resp = constants.L_s * sublim_mass_total / sum_conc_safe
+        lhflx_resp = jnp.where(
+            _has_conc_basis_mc,
+            constants.L_s * sublim_mass_total / sum_conc_safe,
+            0.0,
+        )
 
     else:
         result = _thermo_v2(
@@ -2632,8 +2685,21 @@ def _step_dynamic_v2(
         # max(conc_pre, conc_post) == L_s * surface_mass_flux.  (Using the
         # post-transport thermo-input conc here would diverge from the multicat
         # ``sum_conc_safe`` basis under transport='advect'.)  #28, codex.
-        conc_basis = jnp.maximum(jnp.maximum(conc_pre, conc), 1e-30)
-        lhflx_resp = constants.L_s * sublim_mass_total / conc_basis
+        # float32 AD safety: UNCONDITIONAL floored divide -> NaN adjoint over
+        # ice-free cells.  The documented invariant is ``resp.lhflx *
+        # max(conc_pre, conc_post) == L_s * surface_mass_flux``; with that basis
+        # zero there is no ice at EITHER end, so ``sublim_mass_total == 0`` and
+        # both sides of the invariant are 0 -- fallback 0.0 is forward-identical
+        # and keeps the invariant exact.  Single-cat counterpart of the multicat
+        # L2561/L2596 site; keep BOTH on this idiom.
+        _conc_basis_raw = jnp.maximum(conc_pre, conc)
+        _has_conc_basis = _conc_basis_raw > 1e-30
+        conc_basis = jnp.where(_has_conc_basis, _conc_basis_raw, 1.0)
+        lhflx_resp = jnp.where(
+            _has_conc_basis,
+            constants.L_s * sublim_mass_total / conc_basis,
+            0.0,
+        )
         tau_x_resp = result["tau_x"]
         tau_y_resp = result["tau_y"]
 
@@ -2747,10 +2813,27 @@ def _step_dynamic_v2(
         # FINAL aggregated concentration (the one ``f_ice`` multiplies by), so
         # ``resp * f_ice`` recovers the per-cell total exactly even after ITD
         # remap / ridging changed the aggregate area (findings #9 + #4).
-        conc_agg_safe = jnp.maximum(conc_agg, 1e-30)
-        shflx_resp = shflx_pergrid_num / conc_agg_safe
-        tau_x_resp = tau_x_pergrid_num / conc_agg_safe
-        tau_y_resp = tau_y_pergrid_num / conc_agg_safe
+        # float32 AD safety AND a latent FORWARD overflow: this UNCONDITIONAL
+        # floored divide NaN'd the adjoint over ice-free cells, and -- because
+        # the numerators are built from the POST-THERMO conc (L2584-2590) while
+        # ``conc_agg`` is aggregated AFTER ITD remap / ridging (L2745) -- a cell
+        # whose entire area ridges away leaves a NONZERO numerator over a zero
+        # ``conc_agg``, giving ``num/1e-30 ~ 1e30`` which OVERFLOWS float32 to
+        # ``inf`` in the FORWARD pass; the coupler then forms ``inf * f_ice(=0)``
+        # == NaN.  Fallback 0.0 is the physically correct per-ice-tile flux when
+        # there is no ice tile left, and preserves the consumer contract
+        # (``resp * f_ice`` recovers the per-cell total: 0 * 0 == 0).
+        _has_conc_agg = conc_agg > 1e-30
+        conc_agg_safe = jnp.where(_has_conc_agg, conc_agg, 1.0)
+        shflx_resp = jnp.where(
+            _has_conc_agg, shflx_pergrid_num / conc_agg_safe, 0.0,
+        )
+        tau_x_resp = jnp.where(
+            _has_conc_agg, tau_x_pergrid_num / conc_agg_safe, 0.0,
+        )
+        tau_y_resp = jnp.where(
+            _has_conc_agg, tau_y_pergrid_num / conc_agg_safe, 0.0,
+        )
     else:
         h_agg, T_agg, conc_agg = h, T_ice, conc
 

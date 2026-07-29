@@ -187,6 +187,16 @@ class PhysicsState(NamedTuple):
     # unaffected.
     dyn_tendency_T: jnp.ndarray = None
     dyn_tendency_qv: jnp.ndarray = None
+    # CONVECTIVE surface precipitation [kg/m^2/s], shape (ncol,), written by
+    # the convection module each step (the combined-physics accumulator
+    # captures the convection slot's ``precip`` tendency field).  Consumed
+    # one step LAGGED by the radiation module's cloud-fraction call
+    # (Slingo-1987 ``convective_cloud``) on the standalone (MPAS) path —
+    # the same lagged-carry convention the FV pipeline uses for its
+    # ``conv_precip`` threading.  Always materialised as zeros (uniform
+    # pytree; byte-identical for runs that never read it).  Appended LAST
+    # with a default so existing direct constructors are unaffected.
+    conv_precip: jnp.ndarray = None
 
 
 # Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
@@ -358,6 +368,9 @@ def init_physics_state(
         # docstrings).
         dyn_tendency_T=None,
         dyn_tendency_qv=None,
+        # Lagged convective surface precip for the standalone-path Slingo
+        # cumulus cloud fraction; zeros before the first convection step.
+        conv_precip=jnp.zeros((ncol,), dtype=dtype),
     )
 
 
@@ -415,4 +428,8 @@ def update_physics_state(phys_state, updates):
         # r2).  A driver re-populates them before every convection call.
         dyn_tendency_T=updates.get("dyn_tendency_T", None),
         dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
+        # Evolving lag carry (convection writes, radiation reads next step):
+        # carried forward unchanged when the step's convection published
+        # nothing (schemes without a rain split).
+        conv_precip=updates.get("conv_precip", phys_state.conv_precip),
     )

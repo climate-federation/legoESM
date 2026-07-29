@@ -193,6 +193,7 @@ def compute_two_leaf_canopy_fluxes(
     LAI_override: jnp.ndarray | None = None,
     w_frac_soil_evap: jnp.ndarray | None = None,
     soil_surface_relsat: jnp.ndarray | None = None,
+    fwet: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -418,6 +419,8 @@ def compute_two_leaf_canopy_fluxes(
             ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
             cv=_bcast(cc.cv), d_leaf=d_leaf,
             r_soil_surface=r_soil_surface,
+            fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
+                  else jnp.broadcast_to(fwet, w_frac_rz.shape)),
         )
 
     def _solve_one_col(x0, bun):
@@ -455,6 +458,9 @@ def compute_two_leaf_canopy_fluxes(
     fSun    = sw_rt.fSun
     LE_Sun  = fluxes_per_col["LE_Sun"]
     LE_Sh   = fluxes_per_col["LE_Sh"]
+    # Wet-leaf evaporation (interception loss) — the store-sourced share of the
+    # canopy latent flux; the caller routes it to the canopy-water store.
+    LE_wet_canopy_d = fluxes_per_col["LE_wet_Sun"] + fluxes_per_col["LE_wet_Sh"]
     LE_Soil = fluxes_per_col["LE_Soil"]
     H_Sun   = fluxes_per_col["H_Sun"]
     H_Sh    = fluxes_per_col["H_Sh"]
@@ -589,6 +595,7 @@ def compute_two_leaf_canopy_fluxes(
         fSun=fSun,
         Ts_solve=Ts_cvg,
         LE_canopy=LE_canopy_d,
+        LE_wet_canopy=LE_wet_canopy_d,
         LE_soil=LE_Soil,
         H_canopy=H_canopy_d,
         H_soil=H_Soil,

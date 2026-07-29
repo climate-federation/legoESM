@@ -88,13 +88,9 @@ _OPTIONAL_CLASS_KEYS = frozenset({"excluded"})
 PARAM_SPEC_TODO: frozenset[str] = frozenset(
     {
         # --- atmosphere ----------------------------------------------------
-        # PARALLEL-MERGE BACKLOG (2026-06-13): the concurrent CLUBB full-closure
-        # port landed CLUBBParams (~40 closure constants) on main via a separate
-        # PR that predates this param-spec gate. Classified here as migration
-        # backlog (author __param_spec__ + delete this entry in the CLUBB owner's
-        # follow-up); the field baseline below pins its current float fields so
-        # no NEW unspecced float can slip into it meanwhile.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
+        # (CLUBB graduated 2026-07-11: clubb.py now ships a complete
+        # __param_spec__ over CLUBBParams + CLUBBConfig — see clubb.py and
+        # param_collector.SPEC_MODULES.)
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }

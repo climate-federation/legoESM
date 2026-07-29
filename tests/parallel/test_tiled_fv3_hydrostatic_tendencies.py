@@ -12,7 +12,8 @@ optional term is already off by default — A_h=0, hyperdiff=0, div_damp=0,
 corner_div_damp off, T_diss=0, no physics — and ``fix_mass=True`` (default) makes
 ``_apply_zero_mean_per_stage`` FALSE, so dp_s/dt is used RAW (no global
 zero_mean), exactly the base cut the tiled stage composes.  The ``sponge_tau_sec``
-default (3600 s) is the ONE on-by-default term the stage omits, so it is zeroed.
+default (432000 s / 5 d since #1028) is the ONE on-by-default term the stage
+omits, so it is zeroed.
 The T_min / p_floor clamps at the function entry are no-ops on the test state
 (T ~ 250 K >> 50 K floor; p_s ~ 1e5 Pa in [100, 2e6]).
 

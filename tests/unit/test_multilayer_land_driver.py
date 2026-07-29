@@ -106,6 +106,109 @@ def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
         driver_two_leaf.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
 
 
+def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
+    """A coupled clm_ml setup (S2) warm-starts the canopy and threads a per-column
+    grid_info into the pipeline — it no longer raises.
+
+    The setup runs ONE eager cold canopy step to build the per-column vertical
+    structure, grafts the warm canopy_state onto the cold-start land state, and
+    stores the concrete per-column GridInfo tuple on the pipeline so the jitted run
+    steps run the ncol>1 traceable canopy.  Requires the clm-ml-jax backend."""
+    import pytest
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
+    import inspect as _inspect
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    if "cos_zenith_device" not in _inspect.signature(
+            _mlmod.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
+    _patch_land_loaders(monkeypatch)
+    # A tiny grid keeps the eager warm-start + O(ncol) machinery cheap.
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver_clm = ModelDriver(cfg, output_dir=tmp_path / "clmml")
+    driver_clm.setup()
+
+    gi = driver_clm.physics.clm_ml_grid_info
+    assert isinstance(gi, tuple) and len(gi) >= 1, (
+        f"expected a per-column GridInfo tuple, got {type(gi)}")
+    ncol = int(driver_clm._land_ml_state.T_soil.shape[0])
+    assert len(gi) == ncol, f"grid_info has {len(gi)} entries for {ncol} columns"
+    # Each entry is a concrete GridInfo with a warm-started structure (ncan>=1).
+    assert all(int(g.ncan) >= 1 for g in gi)
+    # The land state carries a WARM canopy (mlcanopy populated), not a cold None.
+    cs = driver_clm._land_ml_state.canopy_state
+    assert cs is not None and cs.mlcanopy is not None, "canopy not warm-started"
+
+
+def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
+    """The coupled land tile runs the CLM-ML canopy over ncol>1 INSIDE jax.jit (S2
+    + coupler threading).  Exercises the exact coupled-segment mechanism — the
+    pipeline threads the per-column grid_info + concrete dt into step_multilayer_land
+    with a TRACED mlcanopy carry (as in the lax.scan segment) — via one jitted land
+    step, ~100x cheaper than a full-day run (which is 288 canopy sub-steps x ncol).
+
+    A crash would surface here (trace or first exec); a finite, advanced land state
+    with a still-warm canopy proves the jitted ncol>1 coupled canopy works."""
+    import pytest
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
+    import inspect as _inspect
+    import jax
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _mlmod
+    if "cos_zenith_device" not in _inspect.signature(
+            _mlmod.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+
+    # One jitted coupled land step: land_ml (with the warm mlcanopy) is a jit ARG,
+    # so canopy_state.mlcanopy is a TRACER exactly like the segment's scan carry;
+    # the pipeline supplies grid_info + concrete dt from setup.
+    tile = driver.physics._step_multilayer_land_tile
+
+    @jax.jit
+    def _step(land_ml, T, p_s, q_v, u, v):
+        # Pass a real per-column cos_zenith (as compute_radiation_core threads for
+        # clm_ml) to exercise the faithful-zenith param end to end.
+        return tile(land_ml, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+                    T, p_s, q_v, u, v, None, 600.0,
+                    cos_zenith_col=jnp.full(ncol, 0.7))
+
+    land_new, T_sfc_col, _ = _step(
+        driver._land_ml_state, driver.state.T.data, driver.state.p_s.data,
+        driver.q_v, driver.state.u.data, driver.state.v.data)
+
+    assert jnp.isfinite(T_sfc_col).all(), "coupled CLM-ML skin T not finite"
+    assert T_sfc_col.shape[0] == ncol
+    # The canopy carry stays warm (structure came from the threaded grid_info, so
+    # the traced mlcanopy did not need a host int()).
+    assert land_new.canopy_state is not None
+    assert land_new.canopy_state.mlcanopy is not None
+
+
+def test_effective_cos_zenith_physical(monkeypatch, tmp_path):
+    """The land-tile solar-zenith helper returns cos in [0,1], finite, on both the
+    diurnal (instantaneous) and non-diurnal (daily-mean-effective) branches — the
+    value threaded into the CLM-ML canopy radiation.  No backend needed."""
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    pipe = driver.physics
+    lat = jnp.linspace(-1.4, 1.4, 8)   # radians
+    lon = jnp.linspace(0.0, 6.0, 8)
+    for diurnal in (True, False):
+        pipe.diurnal_cycle = diurnal
+        cz = np.asarray(pipe._effective_cos_zenith(lat, lon, 172.0, 43200.0, 1361.0))
+        assert np.all(np.isfinite(cz)), f"non-finite cos_zenith (diurnal={diurnal})"
+        assert np.all(cz >= 0.0) and np.all(cz <= 1.0), (
+            f"cos_zenith outside [0,1] (diurnal={diurnal}): {cz}")
+
+
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     """A 1-day AMIP run completes and the prognostic soil column advances."""
     _patch_land_loaders(monkeypatch)
@@ -543,3 +646,59 @@ def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
     # the jitted graph consumed the TRACED param (not the closure-baked attribute)
     assert not np.allclose(np.asarray(out_base[sw_net_sfc]),
                            np.asarray(out_bright[sw_net_sfc]))
+
+
+def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path):
+    """The coupled driver with clm_ml_use_surfdata_pft=True gives each column its
+    DOMINANT PFT (argmax of the surface map's pft_fractions), so the warm CLM-ML
+    grid_info has MULTIPLE structure groups -> the group-by-structure scan engages.
+
+    Uses a MIXED-PFT synthetic surface map (half columns dominant PFT 7, half PFT 11).
+    Asserts (a) driver.physics.clm_ml_pft_per_col is the mixed {7,11} derivation, and
+    (b) the extracted per-column grid_info spans >=2 distinct (ncan,ntop,nbot,pft)
+    structures.  This is the end-to-end wiring of the per-column-PFT / group-by-
+    structure work down through the coupled land driver."""
+    import pytest
+    pytest.importorskip("legoesm.land.canopy.clm_ml_backend.multilayer_canopy")
+    import inspect as _inspect
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLCanopyFluxesMod as _m
+    if "cos_zenith_device" not in _inspect.signature(_m.MLCanopyFluxes).parameters:
+        pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
+
+    import legoesm.land.clm_surface_map as _clm
+
+    def _mixed_pft_surface_map(path, lat_deg, lon_deg):
+        n = int(np.asarray(lat_deg).size)
+        pft = np.zeros((n, 17))
+        half = max(1, n // 2)
+        pft[:half, 7] = 1.0    # dominant PFT 7
+        pft[half:, 11] = 1.0   # dominant PFT 11
+        o = np.ones(n)
+        return dict(
+            pft_fractions=jnp.asarray(pft),
+            theta_wp=jnp.asarray(0.12 * o), theta_fc=jnp.asarray(0.30 * o),
+            glacier_frac=jnp.asarray(np.zeros(n)),
+            pct_sand=jnp.asarray(40.0 * o), pct_clay=jnp.asarray(20.0 * o),
+            theta_r=jnp.asarray(0.05 * o), theta_sat=jnp.asarray(0.45 * o),
+            alpha_vg=jnp.asarray(2.0 * o), n_vg=jnp.asarray(1.4 * o),
+            K_sat=jnp.asarray(1.0e-5 * o))
+
+    _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(_clm, "load_clm_surface", _mixed_pft_surface_map)
+
+    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+                                clm_ml_use_surfdata_pft=True,
+                                grid=GridConfig(resolution=2, nlev=8))
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    ppc = driver.physics.clm_ml_pft_per_col
+    assert ppc is not None, "clm_ml_pft_per_col must be set when use_surfdata_pft=True"
+    ppc = np.asarray(ppc)
+    assert set(np.unique(ppc).tolist()) == {7, 11}, (
+        f"dominant-PFT derivation should give mixed {{7, 11}}, got {set(np.unique(ppc).tolist())}")
+
+    gi = driver.physics.clm_ml_grid_info
+    sigs = {(int(g.ncan), int(g.ntop), int(g.nbot), int(g.pft)) for g in gi}
+    assert len(sigs) >= 2, (
+        f"mixed PFT must yield >=2 structure groups (group-by-structure engages), got {sigs}")

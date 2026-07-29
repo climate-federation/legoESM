@@ -1,0 +1,54 @@
+You have NO repository access. Do NOT use tools. Answer from this text alone,
+in <= 40 lines.
+
+A hydrostatic sigma-coordinate atmospheric model (levels indexed k=0 at the top,
+k=nlev-1 at the surface, layer thickness dsigma_k, surface pressure p_s) applies
+this vertical biharmonic filter to temperature AND to every moisture tracer,
+with nu = 2.0e-6 1/s, every dynamics timestep:
+
+  Tp     = pad(x, (1,1), mode="reflect")            # inner
+  lap    = Tp[:-2] - 2*Tp[1:-1] + Tp[2:]
+  lap_p  = pad(lap, (1,1), mode="edge")             # outer, zero-gradient
+  bih    = lap_p[:-2] - 2*lap_p[1:-1] + lap_p[2:]
+  tend   = -nu * bih
+
+It is a fourth difference on the LEVEL INDEX (no dsigma anywhere). Its docstring
+says: "a no-flux boundary -> the column-integrated tendency is ZERO to machine
+precision for ANY profile, so the filter dissipates grid-scale variance WITHOUT
+spurious column heating/cooling", and the tracer call site says it "conserves
+column moisture to machine precision".
+
+The grid used to be uniform (dsigma constant). It is being changed to a
+non-uniform grid: layer thicknesses top->bottom, in hPa, at p_s = 985 hPa:
+39.8 24.6 17.3 14.9 14.2 14.3 14.9 16.1 17.9 20.2 23.2 26.8 30.7 34.4 37.4
+39.4 40.7 41.4 41.8 42.1 42.2 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3
+
+I measure: sum_k(tend_k) = 0 to machine precision on BOTH grids, but
+sum_k(tend_k * dsigma_k) is 0 only on the uniform grid. On the new grid, for a
+2-delta checkerboard of +-5 K in T and +-1 g/kg in q_v, I get a spurious column
+enthalpy sink of -7.86 W/m2 and a spurious column moisture sink of
+-0.135 mm/day (linear in the checkerboard amplitude: +-1 K gives -1.57 W/m2).
+This is a 100-year climate run whose target top-of-atmosphere energy imbalance
+is below 1 W/m2.
+
+Q1. Is my diagnosis correct? State the exact algebraic reason the unweighted
+sum vanishes but the mass-weighted sum does not.
+
+Q2. Which fix would you ship, and why?
+ (a) tend -= (tend*dsigma).sum() / dsigma.sum()
+     Measured: leaves the uniform grid unchanged to 1.4e-20 K/s (below float32
+     ULP, so bit-identical in practice), and drives the new grid's mass-weighted
+     residual to machine zero. But it adds a spatially UNIFORM tendency to the
+     whole column to compensate a local defect.
+ (b) Rewrite as a mass-flux divergence: F_{k+1/2} = lap_{k+1} - lap_k with
+     F = 0 at both boundaries, tend_k = -nu * (F_{k+1/2} - F_{k-1/2}) / dsigma_k.
+     Exactly conservative by telescoping, but the effective damping RATE now
+     scales as 1/dsigma_k, so it is NOT backward-compatible with the existing
+     uniform and hybrid runs, and it makes the damping strongest exactly where
+     the layers are thinnest.
+
+Q3. Is (a) physically objectionable, and if so how badly? Is there a third
+option better than both?
+
+Q4. The same defect already exists (smaller: -0.99 W/m2) on the model's shipped
+"hybrid" stretched grid, which nobody noticed. Does that change your answer?

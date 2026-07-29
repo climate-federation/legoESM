@@ -310,6 +310,13 @@ class SegmentCarry(NamedTuple):
     # ⇒ byte-identical legacy carry.  Advanced each physics step in
     # ``physics_step_no_rad`` (snowfall source, degree-day melt); brightens the
     # land albedo.  Threaded exactly like ``w_land``.
+    budget_ledger_accum: jax.Array = None
+    # Time-integrated per-process column budget ledger (N_LEDGER, 2)
+    # [water kg/m² , dry enthalpy J/m²] — the process_ledger rows summed as
+    # ``rate*dt`` each step, like ``precip_accum``.  ``None`` unless the
+    # static ``budget_ledger`` diagnostic gate is on ⇒ byte-identical legacy
+    # carry.  Read at segment boundaries (``accum / seg_duration`` = mean
+    # rates) and reset to zeros at every segment start.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -330,7 +337,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                cloud_fraction=None,
                conv_precip_prev=None,
                land_ml=None, w_land=None, snow=None,
-               conv_prog_nlev=None):
+               conv_prog_nlev=None, budget_ledger_accum=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
     Prognostic fields are cast to at least the precision policy's storage
@@ -472,6 +479,10 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         # Snow water equiv.: None unless snow-albedo feedback is active
         # (identical legacy carry).
         snow=None if snow is None else _promote(snow, storage),
+        # Budget-ledger accumulator: None unless the diagnostic gate is on
+        # (identical legacy carry); the driver seeds zeros((N_LEDGER, 2)).
+        budget_ledger_accum=(None if budget_ledger_accum is None
+                             else _promote(budget_ledger_accum, accum)),
     )
 
 
@@ -512,6 +523,41 @@ def unpack_carry(carry, state_template):
             held_tuple, int(carry.step_index),
             carry.precip_accum,
             carry.shflx_accum, carry.lhflx_accum)
+
+
+def segment_accum_to_rate(accum, seg_steps: int, dt: float):
+    """Convert a segment accumulator to a segment-MEAN rate.
+
+    The ``SegmentCarry`` accumulators (``precip_accum`` [kg/m2],
+    ``shflx_accum``/``lhflx_accum``/``*_toa_accum`` [W/m2 * s]) are built as
+    ``accum += instantaneous_rate * dt`` over exactly *seg_steps* steps, from a
+    zero reseed at every segment start (the ``precip_accum=jnp.zeros(...)``
+    argument in the driver's per-segment ``pack_carry`` call,
+    model_driver.py:8809).  Dividing by the segment duration therefore recovers
+    the time-mean of the instantaneous rate, in the SAME units and with the
+    SAME sign convention as the per-step quantity (precip positive-downward,
+    i.e. INTO the surface, kg/m2/s).
+
+    Budget: ``rate * (seg_steps * dt) == accum`` to round-off, so a consumer
+    integrating this rate over the SAME segment duration re-integrates the
+    quantity the atmosphere produced.  NOTE this closes the interface budget
+    only when the consumer's integration window equals the segment; see the
+    cadence caveat on ``ModelDriver._run_compiled`` (the coupler callback fires
+    on the DIAG cadence, which is a multiple of the segment length whenever
+    ``compute_segment_length`` returns a GCD smaller than ``diag_interval``).
+
+    *seg_steps* and *dt* are static Python scalars (never traced), so the
+    divisor is a weak-typed Python float: dtype-preserving, JIT-invisible and
+    transparent to ``jax.grad``.  The guard below is therefore a Python-level
+    check on static values and never runs under a trace.
+    """
+    duration = seg_steps * dt
+    if not duration > 0:
+        raise ValueError(
+            f"segment duration must be positive, got seg_steps={seg_steps} "
+            f"dt={dt} (duration={duration})"
+        )
+    return accum / duration
 
 
 # ======================================================================
@@ -927,6 +973,11 @@ class _SplitStepStatics:
     # the lat-band-SPMD lane (which does not pass them) byte-identical.
     pipeline: object = None
     clear_sky_fresh: str = "hold"
+    # Per-process budget ledger (diagnostics.process_ledger): static Python
+    # bool — when True the split body fills the dynamics/clips rows and
+    # accumulates phys_out.budget_ledger into the carry.  Default False keeps
+    # every lane byte-identical (feature-gating exception: Python ``if``).
+    budget_ledger: bool = False
 
 
 def build_operator_split_statics(
@@ -936,7 +987,7 @@ def build_operator_split_statics(
     hs_newtonian_relax, energy_consistent_moisture_clip,
     do_sat_adjust, fix_moisture, sigma_full, dsigma, grid,
     owned_mask, qv_smooth_coeff, fric_decay, hyperdiffusion_3d,
-    pipeline=None, clear_sky_fresh="hold",
+    pipeline=None, clear_sky_fresh="hold", budget_ledger=False,
 ):
     """Bundle the operator-split closure statics (the frozen ``_SplitStepStatics``).
 
@@ -966,6 +1017,7 @@ def build_operator_split_statics(
         owned_mask=owned_mask, qv_smooth_coeff=qv_smooth_coeff,
         fric_decay=_a(fric_decay), hyperdiffusion_3d=hyperdiffusion_3d,
         pipeline=pipeline, clear_sky_fresh=clear_sky_fresh,
+        budget_ledger=budget_ledger,
     )
 
 
@@ -1012,6 +1064,11 @@ class _SplitStepLocals(NamedTuple):
     phys_qke: object
     phys_gwd: object
     phys_cloud_fraction: object = None
+    # Per-step (N_LEDGER, 2) budget ledger with the physics + dynamics +
+    # state-update-clips rows filled; the finalizer adds the tail's clip
+    # delta and accumulates ``*dt`` into the carry.  ``None`` when the
+    # static gate is off.
+    budget_ledger_step: object = None
 
 
 _MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
@@ -1071,6 +1128,22 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     from legoesm.core.conservation import energy_consistent_moisture_floor
     if moist is None:
         moist = {_nm: getattr(carry, _nm) for _nm in _MOIST_FIELDS}
+
+    # --- Budget ledger: DYNAMICS row (store delta across the dycore step,
+    # incl. the dry-mass fixer's p_s adjustment and — with advect_moisture —
+    # the flux-form tracer transport; column-locked tracers register only
+    # the p_s-driven column-mass change).  Positive = dynamics added
+    # water/dry enthalpy to the (global-mean) column store.
+    if statics.budget_ledger:
+        from legoesm.diagnostics.process_ledger import column_store_snapshot
+        _led_q_names = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
+        _led_before = column_store_snapshot(
+            carry.p_s, statics.dsigma, carry.T,
+            *(getattr(carry, _n) for _n in _led_q_names))
+        _led_after = column_store_snapshot(
+            p_s_new, statics.dsigma, T_new,
+            *(moist[_n] for _n in _led_q_names))
+        _led_dynamics = (_led_after - _led_before) / statics.dt
     _dm_in = {}
     for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
         if moist[_nm] is not None:
@@ -1192,6 +1265,44 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     N_i_upd = _dm_upd(moist["N_i"], phys_out.dN_i_dt)
     conv_prog_upd = phys_out.conv_prog
 
+    # --- Budget ledger: CLIPS row (state-update part) + assembly ----------
+    # Clips = post-floor stores minus the raw Euler-update stores (positive
+    # water = the q >= 0 floors CREATED water; the energy delta is nonzero
+    # only on the energy_consistent_moisture_clip path, which pairs the
+    # floored vapour with latent heat).  The tail's clip delta (sat adjust /
+    # moisture fixer / q_v-smoothing floor) is added in finalize_split_step.
+    if statics.budget_ledger:
+        from legoesm.diagnostics.process_ledger import (
+            ROW_CLIPS, ROW_DYNAMICS, column_store_snapshot,
+        )
+        if phys_out.budget_ledger is None:
+            raise ValueError(
+                "budget_ledger statics gate is on but PhysicsOutput."
+                "budget_ledger is None — the PhysicsPipeline was built "
+                "without config.output.budget_ledger; both gates must come "
+                "from the same OutputConfig.")
+        _led_T_raw = T_new + statics.dt * _phys_dT_dt
+        _led_raw = column_store_snapshot(
+            p_s_new, statics.dsigma, _led_T_raw,
+            _qv_raw,
+            moist["q_c"] + statics.dt * phys_out.dq_c_dt,
+            moist["q_r"] + statics.dt * phys_out.dq_r_dt,
+            None if moist["q_i"] is None
+            else moist["q_i"] + statics.dt * phys_out.dq_i_dt,
+            None if moist["q_s"] is None
+            else moist["q_s"] + statics.dt * phys_out.dq_s_dt,
+            None if moist["q_g"] is None
+            else moist["q_g"] + statics.dt * phys_out.dq_g_dt)
+        _led_clipped = column_store_snapshot(
+            p_s_new, statics.dsigma, T_upd,
+            q_v_upd, q_c_upd, q_r_upd, q_i_upd, q_s_upd, q_g_upd)
+        _led_clips = (_led_clipped - _led_raw) / statics.dt
+        _led_step = phys_out.budget_ledger.astype(_led_clips.dtype)
+        _led_step = _led_step.at[ROW_DYNAMICS].set(_led_dynamics)
+        _led_step = _led_step.at[ROW_CLIPS].set(_led_clips)
+    else:
+        _led_step = None
+
     # --- Accumulate precipitation ---
     precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
     precip_accum = carry.precip_accum + precip_step * statics.dt
@@ -1237,6 +1348,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         phys_tke=phys_out.tke, phys_qke=phys_out.qke,
         phys_gwd=phys_out.gwd_spectrum,
         phys_cloud_fraction=phys_out.cloud_fraction,
+        budget_ledger_step=_led_step,
     )
 
 
@@ -1270,6 +1382,14 @@ def finalize_split_step(carry, lz, statics):
     q_v_upd = lz.q_v_upd
     p_s_new = lz.p_s_new
 
+    # Budget ledger: snapshot the tail's entry (T, q_v) store so the tail's
+    # water/enthalpy changes (saturation adjustment, moisture fixer, q_v
+    # smoothing floor) are booked into the CLIPS row below.
+    if statics.budget_ledger:
+        from legoesm.diagnostics.process_ledger import column_store_snapshot
+        _led_tail_before = column_store_snapshot(
+            p_s_new, statics.dsigma, T_upd, q_v_upd)
+
     # --- Saturation adjustment ---
     if statics.do_sat_adjust:
         p_full = p_s_new[..., None] * statics.sigma_full
@@ -1288,6 +1408,22 @@ def finalize_split_step(carry, lz, statics):
 
     # --- Moisture smoothing (static-gated ∇⁴ + positivity floor) ---
     q_v_upd = _apply_qv_smoothing(q_v_upd, statics)
+
+    # Budget ledger: book the tail delta into CLIPS, then time-integrate the
+    # per-step ledger into the carry accumulator (rate·dt, like precip_accum).
+    if statics.budget_ledger:
+        from legoesm.diagnostics.process_ledger import (
+            ROW_CLIPS, column_store_snapshot,
+        )
+        _led_tail_after = column_store_snapshot(
+            p_s_new, statics.dsigma, T_upd, q_v_upd)
+        _led_tail_rate = (_led_tail_after - _led_tail_before) / statics.dt
+        _led_step = lz.budget_ledger_step.at[ROW_CLIPS].add(_led_tail_rate)
+        _led_accum = (carry.budget_ledger_accum
+                      + _led_step.astype(carry.budget_ledger_accum.dtype)
+                      * statics.dt)
+    else:
+        _led_accum = carry.budget_ledger_accum
 
     # --- Rayleigh friction ---
     u_upd = lz.u_new * statics.fric_decay
@@ -1381,6 +1517,9 @@ def finalize_split_step(carry, lz, statics):
                 else _match_dtype(lz.w_land_new, carry.w_land)),
         snow=(None if carry.snow is None
               else _match_dtype(lz.snow_new, carry.snow)),
+        # Ledger accumulator: None (gate off) passes through unchanged so the
+        # carry pytree structure is stable across scan iterations.
+        budget_ledger_accum=_led_accum,
     )
     return new_carry
 
@@ -1420,6 +1559,7 @@ def build_segment_fn(
     pipeline=None,
     advect_moisture: bool = False,
     tiled_step_fn=None,
+    budget_ledger: bool = False,
 ):
     """Build a compiled segment function.
 
@@ -1608,6 +1748,15 @@ def build_segment_fn(
     if owned_face_ids is not None:
         _owned_mask = jnp.zeros(6, dtype=jnp.float32)
         _owned_mask = _owned_mask.at[owned_face_ids].set(1.0)
+        if budget_ledger:
+            # The ledger's dynamics/clips seams live in the single-rank
+            # split body; the MPI owned-face branch does not fill them and
+            # its global means would need allreduce plumbing.  Refuse loudly
+            # (dispatch-hardening: no silent zero rows on a distributed run).
+            raise NotImplementedError(
+                "budget_ledger diagnostics are single-rank only — run the "
+                "instrumented diagnosis on one device (P0.4 protocol) or "
+                "extend the MPI owned-face branch first.")
 
     # Iter 8: when the segment driver applies a target-anchored
     # ``fix_ps_mass_target`` immediately after the dycore step, the
@@ -1711,6 +1860,7 @@ def build_segment_fn(
             fric_decay=fric_decay,
             hyperdiffusion_3d=hyperdiffusion_3d,
             pipeline=pipeline, clear_sky_fresh=_clr_fresh,
+            budget_ledger=budget_ledger,
         )
 
         def _single_step(carry: SegmentCarry, _unused) -> tuple:

@@ -65,6 +65,18 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "aimip_variant",
         "model_type",  # nested dycore.model_type
         "discretization",  # nested dycore.discretization
+        "bechtold_subsidence_solve",  # Bechtold vertical solve (day-65 bisect)
+        # External-forcing source selectors (2026-07-21 AMIP/CMIP audit):
+        # the driver gates each channel with an equality test, so a typo
+        # silently deactivated the channel before these membership checks.
+        "aerosol_forcing",
+        "ghg_forcing",
+        "ozone_forcing",
+        "ozone_source",
+        "solar_source",
+        "solar_spectral_band_order",
+        "dataset",
+        "experiment",
     }
 )
 # Validated by equality-rejection rather than a set membership: ``carbon_cycle``
@@ -78,13 +90,9 @@ EQUALITY_VALIDATED: frozenset[str] = frozenset({"carbon_cycle"})
 # move the field to EXPECTED_VALIDATED.
 KNOWN_UNVALIDATED: frozenset[str] = frozenset(
     {
-        # ExperimentConfig forcing-source selectors (validated at their loaders)
-        "aerosol_forcing",
-        "ghg_forcing",
-        "ozone_forcing",
-        "ozone_source",
-        "solar_source",
-        "solar_spectral_band_order",  # validated in forcing/external.py
+        # (2026-07-21 AMIP/CMIP audit: the forcing-source selectors moved to
+        # EXPECTED_VALIDATED — the driver's equality-gate activation made a
+        # typo a silent channel-off, not a loud loader error.)
         "topography",
         # nested GridConfig / DycoreConfig selectors (validated at factory)
         "grid_type",        # grids.factory.create_grid (C3)
