@@ -52,7 +52,12 @@ microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
 turbulence: louis           # Louis required by the tiled surface
-gravity_wave_drag: mcfarlane  # orographic wave breaking (was hines)
+gravity_wave_drag: mcfarlane+hines  # orographic (McFarlane) + non-orographic
+                            # (Hines) composite (directive 2026-07-15). The
+                            # 2026-07-15 A/B: on latlon24 the +hines lid
+                            # braking pushed the topo-wave blowup day 100->179
+                            # (ll24_bech_gwd); on cube C12 it is metric-neutral
+                            # (matched d31-60 vs mcfarlane-only) and 60 d clean.
 diurnal_cycle: true
 orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
                             # declination + (a/r)^2 eccentricity asymmetry
@@ -131,8 +136,16 @@ sst_var: tosbcs
 sst_offset: 0.0
 sic_var: siconcbcs
 sic_scale: 0.01
-solar_source: file
+solar_source: spectral_file  # transient TSI + 14-band spectral SSI (2026-07-23
+                            # upgrade; was `file` = TSI-only since the first
+                            # campaign config — the spectral weights in the
+                            # swflux_14band file were never consumed). Reader
+                            # validated on the MPI-M file: SSI_frac -> 112
+                            # g-points, sum=1, band rotation `auto` (#322 fix);
+                            # TSI reproduces solar cycles 21/22 (~1.2 W/m^2).
+                            # Weights reach rrtmg/rrtmgp only (gray: TSI only).
 solar_tsi_var: TSI
+solar_spectral_var: SSI_frac
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external

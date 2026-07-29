@@ -914,6 +914,44 @@ class TestIconDataQuality:
         with pytest.raises(ValueError, match="(?i)kelvin|spurious"):
             load_amip_forcing(cfg, grid)
 
+    def test_icon_mislabeled_celsius_attr_kelvin_values(self, grid, tmp_path):
+        """Data wins over a lying units attribute (ICON pool
+        bc_sst_1979_2016.nc: tosbcs carries units='degC' but stores Kelvin,
+        265-304 K).  offset=0 must load with a mislabel warning; the +T_freeze
+        offset the attribute would demand must be REJECTED (would cook the
+        converted SST to ~563 K)."""
+        p = tmp_path / "icon_mislabel.nc"
+        n_cell = 12
+        sst = np.full((2, n_cell), 290.0)         # Kelvin values...
+        sic = np.full((2, n_cell), 0.3)
+        _write_icon_file(p, sst, sic, sst_units="degC")   # ...Celsius label
+        cfg_ok = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                   sst_offset=0.0, sic_scale=1.0)
+        with pytest.warns(UserWarning, match="(?i)mislabel"):
+            f = load_amip_forcing(cfg_ok, grid)
+        np.testing.assert_allclose(np.asarray(f.sst), 290.0, rtol=1e-6)
+        cfg_bad = cfg_ok._replace(sst_offset=constants.T_freeze)
+        with pytest.raises(ValueError, match="(?i)kelvin|spurious|outside"):
+            load_amip_forcing(cfg_bad, grid)
+
+    def test_icon_true_celsius_attr_still_enforced(self, grid, tmp_path):
+        """A GENUINE Celsius file (values ~15) keeps the strict attr rule:
+        offset=0 rejected, +T_freeze loads — the mislabel escape must not
+        weaken the original guard."""
+        p = tmp_path / "icon_true_celsius.nc"
+        n_cell = 12
+        sst = np.full((2, n_cell), 15.0)          # genuinely Celsius
+        sic = np.full((2, n_cell), 0.3)
+        _write_icon_file(p, sst, sic, sst_units="degC")
+        cfg_bad = AMIPForcingConfig(path=str(p), sst_var="sst", sic_var="sic",
+                                    sst_offset=0.0, sic_scale=1.0)
+        with pytest.raises(ValueError, match="(?i)celsius"):
+            load_amip_forcing(cfg_bad, grid)
+        cfg_ok = cfg_bad._replace(sst_offset=constants.T_freeze)
+        f = load_amip_forcing(cfg_ok, grid)
+        np.testing.assert_allclose(np.asarray(f.sst), 15.0 + constants.T_freeze,
+                                   rtol=1e-6)
+
 
 def test_sst_floor_applied_after_interp():
     """SST anchors below the seawater freezing point survive load (bcs) but the

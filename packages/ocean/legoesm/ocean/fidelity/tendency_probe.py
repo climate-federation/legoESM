@@ -105,6 +105,18 @@ class LatLonProbeResult(NamedTuple):
     dS_gm_redi: jnp.ndarray
     # EOS-derived density at cell centres — kg/m^3
     rho: jnp.ndarray
+    # Vertical-mixing (NEMO zdf) tracer tendency [degC/s, PSU/s] — the
+    # backward-Euler vertical-diffusion increment (T_new - T_old)/dt_tracer
+    # computed with the ACTIVE vertical-mixing K (TKE/KPP/constant closure),
+    # i.e. the legoESM analogue of NEMO's ``ttrd_zdf`` tracer trend.  This is
+    # the per-process field the NEMO tendency-match compares (tier-3 oracle);
+    # zero when ``vertical_mixing scheme="none"`` (the Veros-ACC probe default).
+    # Computed with the SAME shared helper the production implicit solve uses
+    # (``implicit_vertical_diffusion_ocean``) — no re-derived numerics.
+    # APPENDED LAST (never inserted mid-tuple) so existing positional/tuple
+    # consumers and serialized snapshots keep their field order (codex MED).
+    dT_zdf: jnp.ndarray = None
+    dS_zdf: jnp.ndarray = None
 
 
 def probe_latlon_cgrid(
@@ -282,6 +294,40 @@ def probe_latlon_cgrid(
         dT_gm = jnp.zeros_like(tendencies.dT_dt.data)
         dS_gm = jnp.zeros_like(tendencies.dS_dt.data)
 
+    # --- Vertical-mixing (NEMO zdf) tracer tendency -------------------------
+    # The legoESM analogue of NEMO's ``ttrd_zdf``: the backward-Euler vertical-
+    # diffusion increment produced by the ACTIVE vertical-mixing closure at the
+    # frozen state, (T_new - T_old)/dt_tracer.  Same construction as the
+    # implicit-K33 block above (shared ``implicit_vertical_diffusion_ocean``),
+    # but with the closure's tracer diffusivity K_v from the shared
+    # ``compute_vertical_K_profiles`` dispatch — no re-derived numerics and no
+    # duplicated closure.  scheme="none" (the Veros-ACC probe default) leaves
+    # this exactly zero, so existing tier-2 comparisons are unchanged.
+    _vm_cfg = getattr(getattr(config, "physics", None), "vertical_mixing", None)
+    if _vm_cfg is not None and getattr(_vm_cfg, "scheme", "none") != "none":
+        from legoesm.ocean.physics.vertical_mixing import (
+            build_dz_half, compute_vertical_K_profiles,
+            implicit_vertical_diffusion_ocean,
+        )
+        _dt_tr = dt_tracer if dt_tracer is not None else dt
+        # K_v = the closure's TRACER diffusivity at this state (the same call
+        # the production implicit solve makes).
+        _K_v, _A_v = compute_vertical_K_profiles(
+            state, z_coord, surface_forcing, config.physics,
+        )
+        _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
+        _dz_half = build_dz_half(_dz_cell)
+        _mask3 = state.land_mask.data[:, :, jnp.newaxis]
+        _T_zdf = implicit_vertical_diffusion_ocean(
+            state.T.data, _K_v, _dz_cell, _dz_half, _dt_tr)
+        _S_zdf = implicit_vertical_diffusion_ocean(
+            state.S.data, _K_v, _dz_cell, _dz_half, _dt_tr)
+        dT_zdf = (_T_zdf - state.T.data) / _dt_tr * _mask3
+        dS_zdf = (_S_zdf - state.S.data) / _dt_tr * _mask3
+    else:
+        dT_zdf = jnp.zeros_like(tendencies.dT_dt.data)
+        dS_zdf = jnp.zeros_like(tendencies.dS_dt.data)
+
     return LatLonProbeResult(
         pgf_ke_u=diag.KE_PGF_u.data,
         pgf_ke_v=diag.KE_PGF_v.data,
@@ -305,6 +351,8 @@ def probe_latlon_cgrid(
         total_v=diag.total_v.data,
         dT_dt_total=tendencies.dT_dt.data + dT_gm,
         dS_dt_total=tendencies.dS_dt.data + dS_gm,
+        dT_zdf=dT_zdf,
+        dS_zdf=dS_zdf,
         dT_gm_redi=dT_gm,
         dS_gm_redi=dS_gm,
         rho=rho,

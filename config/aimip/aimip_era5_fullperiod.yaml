@@ -67,6 +67,10 @@ aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"
 
 aimip_radiation: "gray"
+# Historical config predating the classical-mode rrtmgp pin
+# (campaign_driver.validate_classical_radiation); explicit escape keeps the
+# original experiment reproducible.
+allow_non_rrtmgp: true
 aimip_rad_update_interval: 6
 
 aimip_spatial_surface: false

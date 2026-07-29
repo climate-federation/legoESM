@@ -152,9 +152,17 @@ def _configure_jax_gpu(precision: str) -> None:
 
 
 def _launcher_world_size() -> int:
-    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
-    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
-                "SLURM_NTASKS"):
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher).
+
+    GLOBAL sizes only (codex 2026-07-24 round-3): PALS_LOCAL_SIZE is
+    PER-NODE — using it as world size would accept a one-node partial
+    federation as complete. PALS jobs expose no global size env here, so
+    they fall through to 1 and rely on the mpi4py path. Prefer the STEP
+    task count over the allocation's SLURM_NTASKS so an `srun -n1` inside
+    a larger allocation is not mistaken for the allocation-wide count.
+    """
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS"):
         val = os.environ.get(var)
         if val and val.isdigit():
             return int(val)
@@ -1666,7 +1674,20 @@ def main() -> int:
             )
 
     # --- MPI init ---
-    rank, n_ranks = _init_mpi()
+    if args.cs_spmd:
+        # Route-B: jax.distributed is already federated (initialized above,
+        # BEFORE any JAX use) and mpi4jax is never armed — rank identity
+        # comes from the runtime, so a CUDA venv without a loadable libmpi
+        # is VALID here (job 26449146: the mpi4py loud-guard killed the
+        # NCCL cube lane that needs no MPI at all). n_ranks keeps the
+        # LAUNCHER world size so the partial-federation gate below still
+        # compares jax.process_count() against what was launched.
+        import jax as _jax
+        _lw = _launcher_world_size()
+        rank = _jax.process_index()
+        n_ranks = _lw if _lw > 1 else _jax.process_count()
+    else:
+        rank, n_ranks = _init_mpi()
     is_rank0 = (rank == 0)
 
     # cs-spmd consistency gate: every launched process must have joined

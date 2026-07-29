@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--gwd-scheme",          default="mcfarlane")
     parser.add_argument("--convection-scheme",   default="tiedtke")
     parser.add_argument("--turbulence-scheme",   default="louis")
+    parser.add_argument("--surface-bulk-scheme", default="constant")
     parser.add_argument("--microphysics-scheme", default="none")
     parser.add_argument("--cloud-scheme",        default="xu_randall")
     parser.add_argument("--suite", type=Path,
@@ -156,6 +157,7 @@ def main():
     schemes = {
         "convection_scheme":   args.convection_scheme,
         "turbulence_scheme":   args.turbulence_scheme,
+        "surface_bulk_scheme": args.surface_bulk_scheme,
         "gwd_scheme":          args.gwd_scheme,
         "microphysics_scheme": args.microphysics_scheme,
         "cloud_scheme":        args.cloud_scheme,

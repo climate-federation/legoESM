@@ -166,7 +166,18 @@ def _ridging_column_kernel(
     # per-cat-capped ``h_part`` / ``H_mean`` are recomputed below for the ridge
     # distribution.  ``1 - h_part/H_mean`` is bounded in [0.5, 1] since
     # ``H_mean >= H_min = 2*h_part`` (clipped for the over-thick collapse case).
-    h_part_est = jnp.sum(weights * h_cat) / jnp.maximum(jnp.sum(weights), 1e-30)
+    # float32 AD safety: ``participation_weights`` returns EXACTLY zero for an
+    # ice-free column (its own two-sided where, L111-113), so this
+    # UNCONDITIONAL floored divide produced a NaN adjoint in float32
+    # (``integer_pow(1e-30, -2) == inf``; ``-0 * inf == NaN``).  Safe
+    # denominator inside the branch; fallback 0.0 == the old floored value
+    # (0/1e-30).  Every OTHER divide in this kernel already uses this idiom.
+    _w_sum = jnp.sum(weights)
+    _has_participation = _w_sum > 1e-30
+    _w_sum_safe = jnp.where(_has_participation, _w_sum, 1.0)
+    h_part_est = jnp.where(
+        _has_participation, jnp.sum(weights * h_cat) / _w_sum_safe, 0.0,
+    )
     H_min_est = 2.0 * h_part_est
     H_max_est = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part_est, 1e-6)), H_star)
     H_max_est = jnp.minimum(H_max_est, hi[-1])

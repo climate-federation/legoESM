@@ -176,3 +176,63 @@ def test_hybrid_rest_over_topo_fp32_policy():
     assert vN < 0.02, (
         f"fp32 hybrid rest-over-topography drifted to {vN:.3e} m/s (> 0.02) — "
         f"#1029 SB81 PGF regression at production precision")
+
+
+def test_sb81_omega_conversion_rest_balanced_and_gate_live():
+    """#1029 ω-side opt-in flag: (a) with sb81_omega_conversion=True the
+    rest-over-topo state STAYS at rest (at exact rest the flux-form mass
+    divergence is exactly zero, so both conversion forms vanish — the SB81
+    swap cannot disturb a balanced column); (b) the gate is LIVE: from a
+    perturbed (divergent) state one step under each flag value produces
+    DIFFERENT temperatures (a silently-dead flag would be the dispatch
+    footgun CLAUDE.md forbids), both finite."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
+    )
+    from tests.test_cases.dcmip2012.rest_state_topography import (
+        rest_state_topography_init_latlon,
+    )
+    import jax.numpy as jnp
+
+    grid = create_latlon_grid(_N_LAT, _N_LON)
+    coord = standard_hybrid_levels(_NLEV)
+    state0 = hydrostatic_to_cgrid(
+        rest_state_topography_init_latlon(grid, coord, h_0=2000.0), grid)
+
+    # (a) rest balance with the SB81 conversion ON (short run suffices —
+    # the pre-#1215 imbalance was visible within a few steps).
+    cfg_on = CGridLatLonPrimitiveEquationConfig(
+        A_h=0.0, fix_mass=True, anchor_mass_to_initial=True,
+        use_polar_filter=True, sb81_omega_conversion=True,
+    )
+    model_on = CGridLatLonPrimitiveEquationModel(grid, coord, cfg_on, dt=_DT)
+    s = state0
+    for _ in range(20):
+        s = model_on.step(s, _DT)
+    v_rest = float(jnp.maximum(jnp.max(jnp.abs(s.u)), jnp.max(jnp.abs(s.v))))
+    assert bool(jnp.all(jnp.isfinite(s.T)))
+    assert v_rest < _BALANCED_TOL_MS, (
+        f"SB81 ω-conversion disturbed the balanced rest state: {v_rest:.3e} "
+        f"m/s (must be fp64 round-off level)")
+
+    # (b) gate liveness on a divergent state.
+    cfg_off = CGridLatLonPrimitiveEquationConfig(
+        A_h=0.0, fix_mass=True, anchor_mass_to_initial=True,
+        use_polar_filter=True, sb81_omega_conversion=False,
+    )
+    model_off = CGridLatLonPrimitiveEquationModel(grid, coord, cfg_off, dt=_DT)
+    u_wave = jnp.sin(jnp.linspace(0.0, 2.0 * jnp.pi, state0.u.shape[1]))
+    u_pert = state0.u.at[:, :, _NLEV // 2].add(u_wave[None, :])
+    state_pert = state0._replace(u=u_pert)
+    s_on = model_on.step(state_pert, _DT)
+    s_off = model_off.step(state_pert, _DT)
+    assert bool(jnp.all(jnp.isfinite(s_on.T)))
+    assert bool(jnp.all(jnp.isfinite(s_off.T)))
+    dT = float(jnp.max(jnp.abs(s_on.T - s_off.T)))
+    assert dT > 0.0, (
+        "sb81_omega_conversion flag is DEAD — on/off produced identical "
+        "temperatures on a divergent state")

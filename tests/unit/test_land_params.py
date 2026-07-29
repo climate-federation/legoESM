@@ -62,13 +62,15 @@ def multilayer_config():
 # =====================================================================
 
 class TestLandSurfaceParams:
-    # LAI/SAI/htop/hbot are PRESCRIBED (climatology / surfdata) per-cell canopy
-    # fields, not trainable bounded params, so they are the LandSurfaceParams
-    # fields outside PARAM_NAMES/BOUNDS.  PARAM_NAMES/BOUNDS index the 12-column
-    # CLM5 PFT lookup table that every ``array_to_params`` caller maps
-    # column-for-column; the CLM-ML canopy inputs are prescribed separately and
-    # read with a ``None`` fallback in ``canopy/clm_ml_interface.py``.
-    _NON_BOUNDED_FIELDS = {"LAI", "SAI", "htop", "hbot"}
+    # LAI/SAI/htop/hbot/fC4 are PRESCRIBED (climatology / surfdata / dominant-PFT)
+    # per-cell canopy fields, not trainable bounded params, so they are the
+    # LandSurfaceParams fields outside PARAM_NAMES/BOUNDS.  PARAM_NAMES/BOUNDS
+    # index the 12-column CLM5 PFT lookup table that every ``array_to_params``
+    # caller maps column-for-column; the CLM-ML canopy inputs are prescribed
+    # separately and read with a ``None`` fallback in
+    # ``canopy/clm_ml_interface.py``.  fC4 is the dominant-PFT C4 flag [0,1]
+    # (#897), prescribed from PFT data (None => pure C3), not a tuned closure.
+    _NON_BOUNDED_FIELDS = {"LAI", "SAI", "htop", "hbot", "fC4"}
 
     def test_namedtuple_fields(self):
         # Every trainable param is a field; the non-bounded extras are the

@@ -80,7 +80,9 @@ SPMD_PARITY_MAX_STEPS = 8
 
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
-                          tripole=False, baro_solver="implicit_cn"):
+                          tripole=False, baro_solver="implicit_cn",
+                          force_pcg=False, pcg_variant="standard",
+                          pcg_fixed_iters=0):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -118,6 +120,33 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     # is explicit_substep, so it MUST be set explicitly here or the bench
     # measures a non-production step.
     flat = {"barotropic_solver": baro_solver}
+    if force_pcg:
+        # Solver-matched strong ladders (codex 2026-07-24 finding 2): the
+        # implicit-CN dispatch runs adaptive stock CG on a SINGLE device but
+        # the fixed-iteration distributed PCG under SPMD/MPI — an nd=1
+        # reference leg without this flag times a DIFFERENT solver than the
+        # nd>1 legs. Forces the fixed-M PCG everywhere.
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--force-pcg only affects the implicit_cn barotropic solve; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_force_pcg"] = True
+    if pcg_fixed_iters:
+        # Each PCG iteration contributes DEPENDENT reduction batches, and
+        # the campaign's mechanism finding (job 26458930) is that exposed
+        # dependent sync — not bytes, not schedulable overlap — is what the
+        # step pays above its roofline. Iteration count is therefore the
+        # most direct sync-point lever available in config.
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-fixed-iters only affects the implicit_cn fixed-M PCG.")
+        flat["barotropic_implicit_pcg_fixed_iters"] = int(pcg_fixed_iters)
+    if pcg_variant != "standard":
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-variant only affects the implicit_cn fixed-M PCG; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_pcg_variant"] = pcg_variant
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -185,6 +214,34 @@ def main() -> int:
                         "previous silent explicit_substep default made the "
                         "bench measure a non-production configuration "
                         "(scaling audit, bottleneck 4).")
+    p.add_argument("--force-pcg", action="store_true",
+                   help="Force the fixed-iteration distributed PCG for the "
+                        "implicit_cn barotropic solve even on a single "
+                        "device (barotropic_implicit_force_pcg=True), so an "
+                        "nd=1 strong-scaling reference leg times the SAME "
+                        "solver the nd>1 SPMD legs run (the dispatch "
+                        "otherwise routes nd=1 to adaptive stock CG).")
+    p.add_argument("--seed", type=int, default=0,
+                   help="IC perturbation seed. Repeats across seeds give a "
+                        "variance estimate, without which a single-run "
+                        "difference between two arms cannot be called an "
+                        "ordering (codex round-8).")
+    p.add_argument("--pcg-fixed-iters", type=int, default=0,
+                   help="Iterations of the fixed-M implicit_cn PCG "
+                        "(0 = scheme default, 60). Each iteration carries "
+                        "DEPENDENT reduction batches, so this is the most "
+                        "direct lever on the exposed-sync cost that "
+                        "dominates this step above its roofline. Lowering "
+                        "it trades solver convergence for sync points — "
+                        "check zero_forcing_probe_residual in the output "
+                        "before believing any speedup.")
+    p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
+                   default="standard",
+                   help="Fixed-M PCG recurrence for the implicit_cn "
+                        "barotropic solve: standard = 2 dependent reduction "
+                        "batches/iter; single_reduce = Chronopoulos-Gear, "
+                        "ONE batched reduction/iter (halves the per-step "
+                        "reduction count the census reports).")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
@@ -231,7 +288,7 @@ def main() -> int:
                         "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
                         "pair per direction per dtype group at every "
                         "pad_multi site instead of one per field — "
-                        "measured 25% fewer static collective-permutes on "
+                        "measured 25%% fewer static collective-permutes on "
                         "this step, bit-identical results. A/B against "
                         "the default run.")
     p.add_argument("--wide-halo", action="store_true",
@@ -316,13 +373,46 @@ def main() -> int:
         # Trace-time switch — set BEFORE the sharded step is built/jitted.
         os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
-    model, s0 = build_model_and_state(
-        n_lat, args.n_lon, args.nlev,
-        wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
-        tripole=args.tripole, baro_solver=args.baro_solver)
-    # Prime the build-once vertex-mask cache from the CONCRETE state so the
-    # wrapper can build the per-band vertex masks host-side.
-    model._ensure_vertex_mask(s0)
+    # #1370 fix stage (i), codex round-18: build the GLOBAL model/state on
+    # the HOST cpu backend, not the accelerator. rest-state init runs jnp
+    # ops at GLOBAL shape; on the default (GPU) device that materialises
+    # ~7.4 global-field-equivalents of setup residency per device AND
+    # compiles a global-sized init program — the 102 GB wall that killed
+    # LL2304@64 (probe 26523157: the compiled STEP is clean; the residency
+    # is setup-time). Host-side globals are RAM, and only the per-band
+    # shards reach the accelerator via shard_state_latlon's device_put.
+    # Identical values on every process (deterministic init + the step
+    # factory's existing process-0 broadcast + content-hash guard).
+    # nd==1 keeps the old on-device build: that lane TIMES the
+    # single-device step, so its state belongs on the accelerator.
+    import contextlib
+    _build_ctx = contextlib.nullcontext()
+    if nd > 1:
+        try:
+            # local_devices, NOT devices: under multicontroller jax.devices()
+            # returns the GLOBAL list, so [0] is process 0's cpu device
+            # — non-addressable elsewhere (probe job 26524163).
+            _build_ctx = jax.default_device(
+                jax.local_devices(backend="cpu")[0])
+        except RuntimeError:
+            # cpu backend not registered (JAX_PLATFORMS=cuda). The fix
+            # needs JAX_PLATFORMS=cuda,cpu; fall back to the old on-device
+            # build LOUDLY rather than crash.
+            print("[#1370] WARNING: no cpu backend — global init will "
+                  "materialise on the accelerator (set "
+                  "JAX_PLATFORMS=cuda,cpu to enable the host-side build)",
+                  flush=True)
+    with _build_ctx:
+        model, s0 = build_model_and_state(
+            n_lat, args.n_lon, args.nlev, seed=args.seed,
+            wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
+            tripole=args.tripole, baro_solver=args.baro_solver,
+            force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
+            pcg_fixed_iters=args.pcg_fixed_iters)
+        # Prime the build-once vertex-mask cache from the CONCRETE state so
+        # the wrapper can build the per-band vertex masks host-side (global
+        # 2-D — stays on the host under the nd>1 context).
+        model._ensure_vertex_mask(s0)
 
     # Wet-cell weak metric (audit item 9): ACTIVE cell-levels from the state
     # land mask (2-D column mask, z-star: a wet column is wet at all nlev

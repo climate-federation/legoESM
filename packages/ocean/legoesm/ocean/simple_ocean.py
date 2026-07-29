@@ -37,6 +37,17 @@ class SimpleOceanConfig(NamedTuple):
     rho_ocean: float = constants.rho_ocean
     c_ocean: float = constants.c_sw
     Q_flux: float = 0.0              # Prescribed OHT convergence [W/m2]
+    # Optional spatially+seasonally varying q-flux (ocean-heat-transport
+    # convergence) CLIMATOLOGY file [W/m2], sign +INTO the mixed layer (same
+    # sign as the scalar Q_flux above).  Empty (default) => the scalar Q_flux
+    # is used everywhere (byte-identical).  When set, the coupled driver loads
+    # the (12, ...) monthly climatology, regrids to the ocean grid, and threads
+    # the calendar-month-interpolated map into the slab step each coupling
+    # interval as the ``q_flux`` step argument (see coupled_esm_driver.
+    # _step_ocean).  Standard CMIP slab calibration: q_flux(x, month) =
+    # -(monthly-mean net downward surface heat flux from an AMIP-SST-forced
+    # run), so the slab reproduces the observed SST climatology.
+    q_flux_path: str = ""
     albedo_ocean: float = 0.06
     emissivity_ocean: float = 0.97
     Cd_ocean: float = 1.5e-3         # Drag coefficient
@@ -200,8 +211,17 @@ def _slab_step(
     forcing: AtmToSurface,
     config: SimpleOceanConfig,
     dt: float,
+    q_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Single mixed-layer energy balance step."""
+    """Single mixed-layer energy balance step.
+
+    ``q_flux`` (optional, [W/m2], sign +INTO the mixed layer) is the
+    spatially+seasonally varying ocean-heat-transport convergence for this
+    step; ``None`` (default) falls back to the scalar ``config.Q_flux``, so a
+    run without a q-flux climatology is byte-identical.  Threaded per step
+    (not baked into the config) so the climatology can vary seasonally without
+    a recompile — the slab step runs eagerly on the host.
+    """
     T_sfc = state.T_sfc.data
 
     # Surface humidity: saturated, on the same thermodynamic convention as the
@@ -222,9 +242,14 @@ def _slab_step(
     lw_net = (config.emissivity_ocean * forcing.lw_down
               - config.emissivity_ocean * constants.sigma_sb * T_sfc ** 4)
 
-    # Energy balance
+    # Energy balance.  Sign convention: all terms are the net heat flux INTO
+    # the mixed layer [W/m2].  sw_net/lw_net are +into-ocean (absorbed SW,
+    # net LW); shflx/lhflx are +upward (out of the ocean), hence subtracted;
+    # q_flux_eff is the prescribed ocean-heat-transport convergence, +into the
+    # mixed layer (same sign as the scalar config.Q_flux it replaces).
+    q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
-    dT_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux) / C_mix
+    dT_dt = (sw_net + lw_net - shflx - lhflx + q_flux_eff) / C_mix
     T_sfc_trial = T_sfc + dt * dT_dt
 
     # Freezing clamp.  When the trial SST is below T_freeze, the energy
@@ -262,8 +287,13 @@ def _two_layer_step(
     forcing: AtmToSurface,
     config: SimpleOceanConfig,
     dt: float,
+    q_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Two-layer slab ocean: mixed layer + deep layer."""
+    """Two-layer slab ocean: mixed layer + deep layer.
+
+    ``q_flux`` (optional, [W/m2], +INTO the mixed layer) — see ``_slab_step``;
+    ``None`` falls back to the scalar ``config.Q_flux`` (byte-identical).
+    """
     T_sfc = state.T_sfc.data
     T_deep = state.T_deep.data
 
@@ -290,9 +320,13 @@ def _two_layer_step(
     F_mix = (config.rho_ocean * config.c_ocean * config.k_mix
              * (T_sfc - T_deep) / d_mid)
 
-    # Mixed layer energy balance
+    # Mixed layer energy balance.  Sign convention: net heat flux INTO the
+    # mixed layer [W/m2] — sw_net/lw_net +into-ocean, shflx/lhflx +upward
+    # (subtracted), q_flux_eff +into the layer, F_mix +downward to the deep
+    # layer (subtracted from the mixed layer).
+    q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
-    dT_sfc_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux - F_mix) / C_mix
+    dT_sfc_dt = (sw_net + lw_net - shflx - lhflx + q_flux_eff - F_mix) / C_mix
     T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
     # Deep layer
@@ -346,8 +380,15 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
     """
     mode = config.mode
 
+    # All step closures accept an optional ``q_flux`` array [W/m2] (the
+    # per-step spatially+seasonally varying ocean-heat-transport convergence,
+    # +into the mixed layer).  ``None`` (the default, and the only value the
+    # fixed-SST mode ignores) preserves byte-identical behavior via the scalar
+    # ``config.Q_flux``.  The coupled driver interpolates the monthly
+    # climatology and passes it in each coupling interval (eager path, no
+    # recompile); a caller that never sets it is unchanged.
     if mode == "fixed":
-        def step_fixed(state, forcing, dt):
+        def step_fixed(state, forcing, dt, q_flux=None):
             if sst_map is not None:
                 sst = sst_map
             else:
@@ -360,13 +401,13 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
         return step_fixed
 
     elif mode == "slab":
-        def step_slab(state, forcing, dt):
-            return _slab_step(state, forcing, config, dt)
+        def step_slab(state, forcing, dt, q_flux=None):
+            return _slab_step(state, forcing, config, dt, q_flux=q_flux)
         return step_slab
 
     elif mode == "two_layer":
-        def step_two_layer(state, forcing, dt):
-            return _two_layer_step(state, forcing, config, dt)
+        def step_two_layer(state, forcing, dt, q_flux=None):
+            return _two_layer_step(state, forcing, config, dt, q_flux=q_flux)
         return step_two_layer
 
     else:

@@ -459,6 +459,23 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   mpas7 kppdeep r2 (ico7), DINO pub campaign r2 (latlon 365d wright+seos + MPAS 90d + figures),
   DINO L2 recipe intercomparison r2. Score day-90 vs NEMO month-3 as before.
 
+- **2026-07-14 (post-fix A/B RESULT — ll3 vs ll2, clean one-variable):** ll3_ri015 (8974876) and
+  ll2_ri015 (8920073) ran the BYTE-IDENTICAL command (latlon_bathy 180×360, --kpp-ri-crit 0.15,
+  full P45, --prognostic-sea-ice, dt150, 0.25yr), day-90 vs NEMO month-3 — the ONLY difference is
+  the code (ll2 @ 1cb0c4464 pre-fix; ll3 @ 4c32e98a2 post-L1-L3). The fixes IMPROVE every metric:
+  SST RMSE 0.975→0.959 / bias 0.392→0.382 / corr 0.9967→0.9968 (both EXCELLENT); SSS RMSE
+  1.451→1.409 / corr 0.768→0.782; Arctic SSS bias +1.44→+1.23 (fresher toward NEMO). **HEADLINE:
+  Arctic MLD bias +78.7 m → +26.6 m (lego 176.9→124.9 vs NEMO 98.2) — a ~52 m shoaling toward
+  NEMO**, the KPP-freshwater-buoyancy channel (fix B) restoring the polar-halocline defense the
+  boundary layer was missing. Global MLD bias +13.1→+8.3 m. SSS still verdict-"poor" (Arctic
+  rmse 3.59, +1.23 residual = the structural Siberian-shelf freshwater retention, NOT the
+  ice-partition bug — see [[omip-cross-grid-arctic-sss]]).
+  mpas7 kppdeep r2 (8974878, post-fix): SST EXCELLENT (RMSE 1.099, bias 0.025, corr 0.995), SSS
+  GOOD (RMSE 0.975, corr 0.925) — strong absolute, but Arctic MLD +177 m too deep (lego 273.7 vs
+  NEMO 96.1; separate MPAS issue, no pre-fix MPAS baseline at this protocol to A/B).
+  trp3 (tripole, the run that exercises the NEW L3 ice transport) still queue-blocked on burst
+  node availability — the headline L3 validation awaits it.
+
 ## Next actions (gated)
 
 DONE iter1: probe, stage, BUILD, smoke-validated, WOA, ref-run 8089712 + mesh 8089713 launched.

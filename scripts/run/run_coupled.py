@@ -175,6 +175,11 @@ def build_sea_ice_config(args):
         v = getattr(args, flag, None)
         if v is not None and v != getattr(base, field):
             changed[field] = v
+    # Multi-category ITD thermodynamics: n_categories > 1 builds the coupled
+    # DynamicSeaIceState (dynamics stays the default "none").
+    _ncat = int(getattr(args, "ice_categories", 1))
+    if _ncat != base.n_categories:
+        changed["n_categories"] = _ncat
     _reject_unreachable_sea_ice_options(args, changed, base)
     if not changed:
         return None
@@ -220,6 +225,15 @@ def _reject_unreachable_sea_ice_options(args, changed, base) -> None:
             f"--ice-bulk-scheme {bulk!r} uses simple_bulk_fluxes and never "
             f"consults stability functions. Use one of {_ICE_MOST_SCHEMES}."
         )
+    # Multi-category ITD THERMODYNAMICS is now wired into the coupled tile
+    # (n_categories > 1 -> DynamicSeaIceState, dynamics="none").  What remains
+    # OMIP-only is anything needing the ice VELOCITY / grid-global momentum
+    # solve: EVP/mEVP dynamics and mechanical RIDGING (its convergence term
+    # reads the strain rate).  n_categories must be a positive int.
+    ncat = int(getattr(args, "ice_categories", 1))
+    if ncat < 1:
+        raise SystemExit(
+            f"--ice-categories must be a positive integer; got {ncat}.")
 
 
 def build_coupler_config(args):
@@ -743,12 +757,25 @@ def build_parser():
                              "(CloudConfig.conv_cloud_condensate). LOWER => "
                              "optically THINNER / more realistic anvil. Range "
                              "[1e-5, 1e-3]. Default: CloudConfig default.")
-    parser.add_argument("--microphysics", default="morrison",
+    # Default None → resolved per-grid in main(): 'morrison' (ice-capable
+    # double-moment) on cube/latlon/voronoi, 'kessler' on the spectral/gaussian
+    # path.  The full coupled spectral graph (morrison's 9 prognostic tracers +
+    # convection + turbulence + GWD + clouds + the spectral transforms + the
+    # ocean coupling, all fused into one lax.scan at production nlev) exceeds
+    # XLA-CPU LLVM codegen and SIGSEGVs during compile (confirmed 2026-07-22:
+    # nlev=10 and bare-morrison compile, the full nlev=20 stack crashes).
+    # kessler's warm-rain graph compiles and gives the same equator-to-pole SST
+    # structure. An explicit --microphysics on spectral is honored (with a
+    # codegen warning for the heavy schemes).
+    parser.add_argument("--microphysics", default=None,
                         choices=list(VALID_MICROPHYSICS),
-                        help="Microphysics scheme (default: morrison — the "
-                             "ice-capable double-moment scheme; warm-rain-only "
-                             "kessler leaves SUPERCOOLED LIQUID high cloud aloft "
-                             "(no freeze->snow->precip sink), which drives the TOA "
+                        help="Microphysics scheme (default: morrison on "
+                             "cube/latlon/voronoi, kessler on spectral/gaussian "
+                             "— the full double-moment spectral graph exceeds "
+                             "XLA-CPU codegen). morrison is the ice-capable "
+                             "double-moment scheme; warm-rain-only kessler "
+                             "leaves SUPERCOOLED LIQUID high cloud aloft (no "
+                             "freeze->snow->precip sink), which drives the TOA "
                              "cold drift in coupled CMIP runs. Use --microphysics "
                              "kessler for the cheap warm-rain path; 'none' with "
                              "active convection gives pr=0 and a cloud-water trap)")
@@ -777,14 +804,22 @@ def build_parser():
                              "slab/two_layer/fixed = thermodynamic slab")
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
+    parser.add_argument("--ocean-qflux-path", type=str, default="",
+                        help="Slab/two-layer ocean q-flux (ocean-heat-transport "
+                             "convergence) climatology NetCDF [W/m2, +into the "
+                             "mixed layer], (time,lat,lon). Empty (default) => "
+                             "the scalar Q_flux everywhere. The standard CMIP "
+                             "slab BC so regional SSTs are correct; generate one "
+                             "with scripts/data/generate_qflux_climatology.py.")
     parser.add_argument("--grid", default="cubed_sphere",
                         choices=["cubed_sphere", "latlon", "voronoi", "gaussian"],
                         help="Atmosphere grid (default cubed_sphere). "
-                             "latlon + voronoi(MPAS) support --ocean dynamic (3D "
-                             "ocean); cubed_sphere couples to the grid-agnostic "
-                             "slab (fixed/slab/two_layer, its 3D ocean is dycore-"
-                             "blocked); gaussian(spectral) is fixed-SST AMIP only "
-                             "for now (coupled synthesis is a follow-up).")
+                             "latlon + voronoi(MPAS) drive --ocean dynamic (3D "
+                             "ocean) co-located; cubed_sphere and gaussian"
+                             "(spectral) drive --ocean dynamic on a DISTINCT "
+                             "lat-lon ocean grid (--ocean-grid latlon:<res>, "
+                             "conservative cross-grid remap) and also couple to "
+                             "the grid-agnostic slab (fixed/slab/two_layer).")
     parser.add_argument("--couple-surface-radiation",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Feed the coupler's tile-blended (land+ocean) skin "
@@ -810,13 +845,21 @@ def build_parser():
                              "have no prognostic salinity and deliberately "
                              "discard it (CoupledESMDriver._step_ocean). The "
                              "ice-side salinity still evolves either way.")
-    # NO --ice-ridging HERE: it needs multi-category ice, and this driver's
-    # coupler tile is a scalar-slab SeaIceState, so a flag could only ever
-    # exit. SUPPRESS would keep a hidden always-failing CLI contract for no
-    # benefit -- the flag never shipped, so there is nothing to stay
-    # compatible with (codex). Multi-category ITD + ridging ARE reachable
-    # from run_omip_core2 (--ice-categories/--ice-ridging, which builds the
-    # DynamicSeaIceState); see _reject_unreachable_sea_ice_options.
+    # Multi-category ITD THERMODYNAMICS (2026-07-22): the coupler tile now
+    # builds a DynamicSeaIceState when --ice-categories > 1, running the
+    # ice-thickness-distribution thermodynamics + inter-category remap in place
+    # of a single slab category (step_sea_ice returns an AGGREGATE TileResponse,
+    # so the tile-fraction/blend path is transparent).  DYNAMICS (velocity: EVP/
+    # mEVP need a grid-global C-grid momentum solve; free_drift needs the
+    # diagnostic-velocity + strain-rate plumbing) and RIDGING (needs that
+    # velocity) stay OMIP-only (run_omip_core2) — rejected by
+    # _reject_unreachable_sea_ice_options.
+    parser.add_argument("--ice-categories", type=int, default=1,
+                        help="Number of ice-thickness-distribution (ITD) "
+                             "categories for the coupled sea-ice tile (default "
+                             "1 = single-category slab). >1 runs multi-category "
+                             "ITD THERMODYNAMICS (dynamics stays 'none'; EVP/"
+                             "mEVP + ridging remain OMIP-only).")
     parser.add_argument("--ice-ponds", action="store_true",
                         help="CESM-style melt ponds (SeaIceConfig.ponds).")
     parser.add_argument("--ice-shortwave-scheme",
@@ -938,6 +981,13 @@ def build_parser():
                              "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
                              "being clamped to ~5s. Without it a 2deg lat-lon "
                              "run is ~80x more steps and infeasible.")
+    parser.add_argument("--sb81-omega-conversion", action="store_true",
+                        default=False,
+                        help="SB81 α-weighted κT·ω/p energy conversion on the "
+                             "hybrid lat-lon C-grid lane (#1029; no effect on "
+                             "other grids/coordinates). Default OFF — unmasks "
+                             "the #1029(b) lid-wave instability sooner; opt-in "
+                             "until the lid treatment lands.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -970,6 +1020,16 @@ def build_parser():
                         help="3D ocean (--ocean dynamic --ocean-ic woa): Newtonian "
                              "relaxation timescale [days] for the surface salinity "
                              "toward the WOA initial state. 0 = off.")
+    parser.add_argument("--ocean-grid", default="",
+                        help="Give the 3-D dynamic ocean a DISTINCT lat-lon grid "
+                             "as 'latlon:<resolution>' (e.g. latlon:48), coupled "
+                             "to the atmosphere via the conservative cross-grid "
+                             "remap. REQUIRED to run --ocean dynamic on a "
+                             "cubed_sphere or gaussian atmosphere (the cube/"
+                             "spectral 3-D ocean dycore does not exist, so the "
+                             "ocean lives on a lat-lon grid). Empty (default) "
+                             "keeps the ocean co-located on the atmosphere grid "
+                             "(latlon/voronoi).")
     parser.add_argument("--tripole-mesh", default=None,
                         help="NEMO eORCA mesh_mask file (e.g. "
                              "data/grids/eORCA1.2_mesh_mask.nc).  When set with "
@@ -1078,6 +1138,38 @@ def build_parser():
     return parser
 
 
+# Heavy multi-tracer microphysics whose FULLY-FUSED coupled spectral graph
+# (scheme + convection + turbulence + GWD + clouds + spectral transforms +
+# ocean coupling in one lax.scan at production nlev) overruns XLA-CPU LLVM
+# codegen and SIGSEGVs during compile (confirmed 2026-07-22: nlev=10 and
+# bare-scheme compile; the full nlev=20 stack crashes). Warm-rain kessler
+# stays well under the limit and gives the same equator-to-pole SST structure.
+_SPECTRAL_HEAVY_MICRO = frozenset(
+    {"morrison", "thompson", "p3", "sdm", "seifert_beheng", "fast_sbm"})
+
+
+def resolve_coupled_microphysics(grid: str, microphysics: str | None):
+    """Resolve the per-grid microphysics default for a coupled run.
+
+    ``microphysics is None`` means the user did not pass ``--microphysics``:
+    default to ``kessler`` on the spectral/gaussian path (the heavy
+    double-moment default is intractable for XLA-CPU codegen there — see
+    ``_SPECTRAL_HEAVY_MICRO``) and ``morrison`` elsewhere.  An explicit choice
+    is always honored; a heavy explicit choice on the spectral path returns an
+    ``"explicit_heavy_warn"`` action so ``main`` can warn about the codegen
+    risk.  Returns ``(resolved_scheme, action)`` where action is one of
+    ``"kept"`` / ``"defaulted_kessler"`` / ``"defaulted_morrison"`` /
+    ``"explicit_heavy_warn"``.
+    """
+    if microphysics is None:
+        if grid == "gaussian":
+            return "kessler", "defaulted_kessler"
+        return "morrison", "defaulted_morrison"
+    if grid == "gaussian" and microphysics in _SPECTRAL_HEAVY_MICRO:
+        return microphysics, "explicit_heavy_warn"
+    return microphysics, "kept"
+
+
 def main():
     parser = build_parser()
 
@@ -1095,6 +1187,25 @@ def main():
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
     # AFTER parsing so it cleanly overrides whatever the per-scheme defaults
     # are, without fighting argparse precedence.
+    # Per-grid microphysics default (2026-07-22 audit): see
+    # resolve_coupled_microphysics.  Resolve BEFORE --minimal-physics (which
+    # forces 'none' regardless).
+    args.microphysics, _micro_action = resolve_coupled_microphysics(
+        args.grid, args.microphysics)
+    if _micro_action == "defaulted_kessler":
+        logger.info(
+            "  Microphysics: defaulting to 'kessler' on the spectral path "
+            "(the coupled double-moment graph exceeds XLA-CPU codegen at "
+            "production nlev). Pass --microphysics explicitly to override.")
+    elif _micro_action == "explicit_heavy_warn":
+        logger.warning(
+            "  --microphysics %s on the spectral/gaussian coupled path builds "
+            "a very large fused graph; it compiles at reduced nlev / physics "
+            "but can SIGSEGV in XLA-CPU codegen at production nlev. If it "
+            "crashes, lower --nlev, drop physics, use --microphysics kessler, "
+            "or run double-moment microphysics on the MPAS/cube backend.",
+            args.microphysics)
+
     if args.minimal_physics:
         args.radiation = "gray"
         args.turbulence = "none"
@@ -1209,6 +1320,9 @@ def main():
             # by the equatorial CFL instead of the ~60x-smaller pole-cell dx, so
             # a 2deg run uses dt~450s (5760 steps/30d) not dt~5.6s (460k steps).
             use_polar_filter=(args.grid == "latlon" and args.polar_filter),
+            # #1029 ω-side SB81 conversion (hybrid latlon lane only; the
+            # factory threads it, other dycores ignore it). Default OFF.
+            sb81_omega_conversion=args.sb81_omega_conversion,
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
@@ -1265,32 +1379,60 @@ def main():
     # Coupled slab ocean on gaussian(spectral) IS wired (A2): _build_atm_forcing
     # synthesizes the spectral coefficient state to grid, and _run_spectral
     # recomputes + stashes the surface net radiation at the daily coupling
-    # boundary. A 3-D DYNAMIC ocean on the spectral grid stays gated (spectral
-    # ocean is idealized). cubed_sphere / latlon / voronoi(MPAS) support both.
-    if args.grid == "gaussian" and args.ocean == "dynamic":
-        raise SystemExit(
-            "coupled --grid gaussian supports the (grid-agnostic) slab ocean "
-            "only: a 3-D DYNAMIC ocean on the spectral grid is idealized / not "
-            "wired. Use --ocean slab (default) on gaussian, or --grid "
-            "cubed_sphere / latlon / voronoi for a dynamic ocean.")
+    # boundary.  A 3-D DYNAMIC ocean on the spectral grid is ALSO wired now, on
+    # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled through
+    # the SAME conservative cross-grid remap the cube atm uses: the Gaussian
+    # grid exposes quadrature-consistent latitude cell edges (GaussianGrid.lat_v)
+    # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
+    # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
+    # voronoi(MPAS) support the dynamic ocean too.
     overrides = {}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
+    # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
+    # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the
+    # conservative cross-grid remap (neither has a co-located 3-D ocean dycore).
+    _xgrid_ocean = args.ocean == "dynamic" and args.grid in (
+        "cubed_sphere", "gaussian")
+    if _xgrid_ocean and not args.ocean_grid:
+        raise SystemExit(
+            f"--ocean dynamic on --grid {args.grid} requires a distinct lat-lon "
+            "ocean grid: pass --ocean-grid latlon:<resolution> (e.g. "
+            f"latlon:48). The {args.grid} atmosphere couples to the lat-lon 3-D "
+            "ocean via the conservative cross-grid remap; a co-located 3-D "
+            f"ocean dycore for --grid {args.grid} does not exist.")
     if args.ocean == "dynamic":
-        # Prognostic 3D LatLonCGridOceanModel.  Two grid configurations:
+        # Prognostic 3D LatLonCGridOceanModel.  Grid configurations:
         #   * SHARED lat-lon (default): the ocean lives on the atmosphere's
-        #     lat-lon grid (no remap).  Requires --grid latlon.
-        #   * TRIPOLE (--tripole-mesh): the ocean runs on the eORCA tripole grid
-        #     (a DIFFERENT grid from the lat-lon atm), coupled via the Phase-2
-        #     cross-grid conservative remap (coupler.grid_remap).
-        if args.grid not in ("latlon", "voronoi"):
+        #     lat-lon grid (no remap).  --grid latlon.
+        #   * DISTINCT lat-lon (--ocean-grid latlon:<res>): the ocean runs on a
+        #     separate lat-lon grid, coupled via the cross-grid conservative
+        #     remap — REQUIRED for a cube/spectral atmosphere.
+        #   * TRIPOLE (--tripole-mesh): the eORCA tripole ocean grid.
+        if args.grid not in ("latlon", "voronoi") and not _xgrid_ocean:
             raise SystemExit(
-                "--ocean dynamic requires --grid latlon (the 3D lat-lon C-grid "
-                "ocean — co-located, or the tripole grid via --tripole-mesh) or "
-                "--grid voronoi (the 3D MPAS ocean co-located on the atmosphere's "
-                f"Voronoi mesh); got --grid {args.grid}.  The cube 3D ocean is "
-                "blocked by the cube-ocean dycore instability and the gaussian "
-                "ocean is idealized-only (both deferred).")
+                "--ocean dynamic requires --grid latlon / voronoi (co-located "
+                "ocean), or a cube/gaussian atmosphere with an explicit "
+                "--ocean-grid latlon:<res>; got --grid "
+                f"{args.grid} with --ocean-grid {args.ocean_grid!r}.")
         overrides["ocean_mode"] = "dynamic"
+        if args.ocean_grid:
+            # Build the distinct lat-lon ocean grid (cross-grid coupling).
+            if not args.ocean_grid.startswith("latlon:"):
+                raise SystemExit(
+                    "--ocean-grid must be 'latlon:<resolution>' (the only "
+                    f"distinct 3-D ocean grid); got {args.ocean_grid!r}.")
+            try:
+                _ocean_res = int(args.ocean_grid.split(":", 1)[1])
+            except ValueError:
+                raise SystemExit(
+                    f"--ocean-grid resolution must be an int; got "
+                    f"{args.ocean_grid!r}.")
+            from legoesm.grids.latlon import create_latlon_grid
+            ocean_grid_obj = create_latlon_grid(_ocean_res)
+            logger.info(
+                "  Ocean grid: DISTINCT lat-lon %dx%d; %s atm -> lat-lon ocean "
+                "conservative cross-grid remap",
+                ocean_grid_obj.n_lat, ocean_grid_obj.n_lon, args.grid)
         if args.tripole_mesh and args.grid != "latlon":
             # --tripole-mesh is a lat-lon-atm option (the eORCA tripole ocean
             # couples to a lat-lon atmosphere via the cross-grid remap); reject
@@ -1372,6 +1514,7 @@ def main():
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
+            q_flux_path=args.ocean_qflux_path,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
@@ -1380,6 +1523,7 @@ def main():
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,   # None = scheme-native
             thermo_convention=args.bulk_thermo_convention,
+            q_flux_path=args.ocean_qflux_path,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"

@@ -1,0 +1,16 @@
+Final audit of [the campaign note](/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.claude/worktrees/scaling-campaign/docs/performance/scaling/levante_campaign_2026-07-24.md:264):
+
+1. **Q1 — SUPPORTED, scoped.** The direct 144-row measurement removes the invalid divide-by-four inference; 95.7 µs/iter is now a measured *distributed incremental per-iteration overhead*.
+2. **QUALIFY:** call it “derived from two measured slopes,” add a CI for 28.1 and propagate it; “sync” remains a well-supported attribution, not a directly isolated timer.
+3. **OVERSTATED:** “fully measured—no inferences” and “non-PCG overhead” go too far. The 3.13 ms is an *iteration-independent distributed remainder*; it could include fixed PCG/setup work, so correctly leave it unattributed.
+4. **OVERSTATED:** “all alternatives eliminated,” “unavoidable,” and “nothing to hide” should become “not dominant in these tested implementations.” Scheduler flags and one-device sharded timing are not exhaustive eliminations.
+5. **OVERSTATED:** the 45.7/44.1 µs split is a model-based decomposition, not two independently timed components; it assumes linear single-reduce local overhead and only two sync categories. The 120→4 census corroborates count reduction, not that exact halo-time value.
+6. **DECISION TABLE — INCORRECT/overbroad:** single_reduce is not fastest at f64/1 GPU (standard is 63.54 vs 64.81 ms), and “f32, **or >=2 GPUs**” conflicts with the f64 row.
+7. Restrict it to: f64, **2–4 GPUs**, tested LL576 case → single_reduce; f32, **2–16 GPUs**, tested LL576 case → wide-halo, stability-gated; otherwise benchmark. “Bit-identical residual” is not full accuracy/trajectory validation.
+8. **TILE LAW — SUPPORTED AS A PATTERN, NOT A LAW.** Three workloads show the same association, but C-resolution, LL grid, and ico subdivision change global problem/shape too; they do not isolate tile size causally.
+9. Replace “third independent component” with “third workload/decomposition lane” (cube and ico are both atmosphere), and remove “sufficient,” “comm does not degrade,” and a universal ~30k floor; cache recovery can mask comm cost.
+10. The ico “fixed per-rank cost rather than growing communication” interpretation is not identified by flat efficiency alone; it needs phase-level timing.
+11. **WIDE-HALO STABILITY — NO:** one unforced 600-step IC supports “no observed short-run failure and gates passed,” not “conserves better/at least as well.” Heat/salt are lower once, eta drift is higher, and there are no repeats or forcing.
+12. Also soften “eta numerically irrelevant,” “IDENTICAL” heat trends, “nothing degrades,” and “30× exchanges is precisely why it wins” to observations/scoped consistency claims.
+13. Minor remaining scope fixes: “five hypotheses refuted” means only the tested variants; the roofline excludes byte-volume dominance under its model, not all communication explanations; “byte compression” was not directly tested.
+14. The rest is generally well-scoped—especially cross-machine comparisons, transient-hang diagnosis, solver-accuracy caveats, and the explicit wide-halo promotion gate.

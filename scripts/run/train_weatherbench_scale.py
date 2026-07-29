@@ -184,7 +184,7 @@ def main(argv=None):
     import yaml
 
     from legoesm.training.data_parallel import (
-        shard_samples, mpi_data_parallel_training_loop,
+        mpi_data_parallel_training_loop,
     )
     from legoesm.ml.training import create_optimizer, TrainingConfig
 
@@ -210,14 +210,21 @@ def main(argv=None):
     model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(cfg, yml)
 
     # --- ERA5 IC/target/forcing samples, sharded across ranks ---
+    # #1286: the loader builds ONLY this rank's contiguous shard (fix B — never
+    # the full global list) and keeps it HOST-resident (fix A — the training
+    # loop device_puts one sample at a time).  The rank's slice is byte-for-byte
+    # the old ``shard_samples(build_all(), rank, nproc)`` partition, so gradient
+    # semantics are unchanged; we no longer materialize the global GPU-resident
+    # set that OOM'd at T106.
     from legoesm.training.scale_build import load_era5_samples
-    samples = load_era5_samples(cfg, yml, grid, sigma)          # list of (ic, target, forcing)
-    local = shard_samples(samples, rank, nproc)
+    local = load_era5_samples(cfg, yml, grid, sigma,
+                              rank=rank, nproc=nproc, host_resident=True)
     if nproc > 1 and len(local) == 0:
         raise RuntimeError(
-            f"rank {rank}: empty local shard (global samples={len(samples)} < ranks={nproc}); "
+            f"rank {rank}: empty local shard (ranks={nproc} > global samples); "
             "reduce ranks or add training data")
-    log.info("ERA5 samples: %d global, %d local/rank", len(samples), len(local))
+    log.info("ERA5 samples: %d local/rank (host-resident, sharded-at-build)",
+             len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
     from legoesm.training.losses import combined_loss

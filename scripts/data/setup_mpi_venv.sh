@@ -44,11 +44,14 @@ echo "Bootstrapping $VENV_DIR via $PYBIN ..."
 "$PYBIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip wheel
 
-echo "Installing legoESM (editable, no dev extras to keep MPI venv lean)..."
-"$VENV_DIR/bin/pip" install -e .
-
-echo "Installing MPI-compatible pins from requirements_mpi.txt..."
+echo "Installing MPI-compatible pins from requirements_mpi.txt (first, so the"
+echo "federation install below resolves against the pinned jax stack)..."
 "$VENV_DIR/bin/pip" install -r requirements_mpi.txt
+
+echo "Installing legoESM federation (editable). Plain 'pip install -e .' cannot"
+echo "resolve the uv-workspace members (legoesm-atmosphere etc. are not on"
+echo "PyPI); install_federation.py resolves the member DAG locally."
+"$VENV_DIR/bin/python" scripts/experiment/install_federation.py --all
 
 echo ""
 echo "=== Sanity check ==="

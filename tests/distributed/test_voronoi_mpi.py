@@ -13,31 +13,28 @@ Verifies:
 """
 
 import os
+
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
-
-from legoesm.grids.voronoi import create_voronoi_mesh
-from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.core.field import Field
-from legoesm.core.state import MPASHydrostaticState
+import numpy as np
+import pytest
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationModel,
     MPASPrimitiveEquationConfig,
+    MPASPrimitiveEquationModel,
 )
-from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
+from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.parallel.voronoi_mpi import (
-    make_voronoi_partition_layout,
-    scatter_state_voronoi,
     gather_state_voronoi,
     make_voronoi_mpi_step,
-    _fix_mass_mpi,
+    make_voronoi_partition_layout,
+    scatter_state_voronoi,
 )
+
+from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
 
 def _skip_if_no_mpi():
@@ -351,3 +348,58 @@ class TestMassConservation:
             np.testing.assert_allclose(
                 float(global_mass), float(initial_mass), rtol=3e-8,
                 err_msg="Mass not conserved under MPI")
+
+
+class TestConservativeClampMPIStep:
+    """Clamp-ON floors under MPI: the per-tracer collectives must execute
+    with matching counts on every rank and reproduce the serial result.
+
+    NOTE the iteration-order angle is guarded by the ``sorted(...)`` loop +
+    its source pin in test_conservative_positive_clip.py: JAX canonicalizes
+    dict-pytree keys at flatten time, so a rank-dependent INSERTION order
+    cannot reach the traced loop anyway (codex 2026-07-28 round 3) — this
+    test's value is the end-to-end clamp-ON MPI step (collectives, factors,
+    serial equivalence).  Compares LOCAL owned cells against the scattered
+    serial reference because ``gather_state_voronoi`` does not carry
+    ``tracers`` (pre-existing gap, flagged)."""
+
+    @_xfail_mpi_stack
+    def test_clamp_on_step_matches_serial(self, mesh, sigma, config):
+        _skip_if_no_mpi()
+        rank, n_ranks = _get_mpi_info()
+
+        from legoesm.parallel.voronoi_partition import (
+            partition_cells_geometric,
+            scatter_to_local,
+        )
+        cell_owner = partition_cells_geometric(mesh, n_ranks)
+        layout = make_voronoi_partition_layout(
+            mesh, rank, n_ranks, cell_owner=cell_owner)
+
+        cfg = config._replace(conservative_tracer_clamp=True)
+        global_state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+        ncell, nlev = global_state.T.data.shape
+        rng = np.random.default_rng(9)
+        tracers = {}
+        for k in ("q_v", "q_i", "N_i"):
+            data = jnp.asarray(rng.uniform(0.0, 1e-3, (ncell, nlev)))
+            data = data.at[:, 1].add(-2e-4)   # guarantee clamp work
+            tracers[k] = global_state.p_s.replace(data=data)
+        global_state = global_state._replace(tracers=tracers)
+
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        serial_state = model.step(global_state, DT)
+
+        local_state = scatter_state_voronoi(global_state, layout.partition)
+        mpi_step = make_voronoi_mpi_step(model, layout, sigma, cfg)
+        local_result = mpi_step(local_state, DT)
+
+        owned = np.asarray(layout.owned_mask_cells)
+        for k in ("q_v", "q_i", "N_i"):
+            serial_local = np.asarray(scatter_to_local(
+                serial_state.tracers[k].data, layout.partition, "cell"))
+            got = np.asarray(local_result.tracers[k].data)
+            np.testing.assert_allclose(
+                got[owned], serial_local[owned], rtol=1e-7, atol=1e-10,
+                err_msg=f"clamp-ON MPI tracer {k} mismatch vs serial "
+                        f"on rank {rank}")

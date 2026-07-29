@@ -30,14 +30,26 @@ _MODULE_PATH = (
 _FUNC_NAME = "build_sfno_curriculum_epoch_plan"
 
 
+_CURRICULUM_PATH = _MODULE_PATH.with_name("curriculum.py")
+
+
 def _load_pure_helper():
-    """Extract + exec ONLY ``build_sfno_curriculum_epoch_plan`` (no jax import)."""
+    """Extract + exec ONLY ``build_sfno_curriculum_epoch_plan`` (no jax import).
+
+    The wrapper now delegates to the shared, jax-free curriculum module, so
+    exec that module's source into the namespace first (still without
+    importing ``legoesm.training`` — the package __init__ pulls in jax).
+    """
+    ns: dict = {}
+    exec(  # noqa: S102
+        compile(_CURRICULUM_PATH.read_text(), str(_CURRICULUM_PATH), "exec"),
+        ns,
+    )
     src = _MODULE_PATH.read_text()
     tree = ast.parse(src)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == _FUNC_NAME:
             mod = ast.Module(body=[node], type_ignores=[])
-            ns: dict = {}
             exec(compile(mod, str(_MODULE_PATH), "exec"), ns)  # noqa: S102
             return ns[_FUNC_NAME]
     raise AssertionError(f"{_FUNC_NAME} not found in {_MODULE_PATH}")

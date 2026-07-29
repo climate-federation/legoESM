@@ -370,7 +370,7 @@ def main(argv=None) -> int:
 
     jax.config.update("jax_enable_x64", True)
     try:
-        import clm_src_cpl.lnd_comp_nuopc as lnd_comp
+        import legoesm.land.canopy.clm_ml_backend.clm_src_cpl.lnd_comp_nuopc as lnd_comp
         import offline_executable.main as offline_main
     except ImportError as e:  # pragma: no cover - requires optional clm-ml-jax
         print(f"clm-ml-jax not importable ({e}); this driver needs the optional "
@@ -384,7 +384,7 @@ def main(argv=None) -> int:
     def wrapped(bounds, time_indx, fin1, fin2):
         orig(bounds, time_indx, fin1, fin2)
         try:
-            from clm_src_main import clm_instMod
+            from legoesm.land.canopy.clm_ml_backend.clm_src_main import clm_instMod
             c = capture_clm_ml(clm_instMod.mlcanopy_inst, 0)
             records.append(dict(step=int(time_indx), **c, **run_bigleaf(c)))
         except Exception as e:  # never let the diagnostic kill the run

@@ -55,6 +55,11 @@ class EarthSystemDriver:
         # the same make_coupler ocean tile, so it needs the same guard (codex).
         validate_air_sea_consistency(config, coupler_config)
         self._atm = ModelDriver(config, output_dir=output_dir)
+        # Same contract as CoupledESMDriver: this driver's _build_atm_forcing
+        # reads held_sw_net_sfc / held_lw_net_sfc / seg_precip out of the
+        # atmosphere's _carry_aux (see below), so a lane that never writes
+        # them must refuse rather than force the surface with zeros.
+        self._atm._requires_surface_flux_export = True
         self._coupler_config = coupler_config
         self._land_config = land_config
         self._ice_config = ice_config
@@ -131,8 +136,23 @@ class EarthSystemDriver:
         T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
         rho_low = p_low / (constants.R_d * T_v_low)
 
-        # Extract real radiation and precipitation from last atmosphere physics
+        # Extract real radiation and precipitation from last atmosphere
+        # physics.  STRICT, via the SAME shared checker CoupledESMDriver uses:
+        # a lane that advanced a segment with an active radiation /
+        # precipitation source must have stashed these, or the surface is
+        # silently forced with sw_down=0 / precip=0.
+        from legoesm.core.coupling_fields import require_surface_radiation_aux
         aux = getattr(self._atm, '_carry_aux', {})
+        _acfg = self.config
+        require_surface_radiation_aux(
+            aux,
+            radiation_active=(
+                getattr(_acfg, "radiation", "none") not in (None, "none")),
+            precip_active=(
+                getattr(_acfg, "microphysics", "none") not in (None, "none")
+                or getattr(_acfg, "convection", "none") not in (None, "none")),
+            lane=type(self._atm).__name__,
+        )
         sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
         lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
         seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))
@@ -280,6 +300,18 @@ class EarthSystemDriver:
 
         Runs the coupler and feeds surface temperature back to the
         atmosphere for the next segment.
+
+        NOTE (issue F4): unlike ``CoupledESMDriver._segment_hook`` this hook
+        does NOT sub-cycle -- ``_step_coupler`` integrates the land/ice/lake
+        surface with a SINGLE forward-Euler step of the full ``dt_segment``.
+        That is acceptable only for the small idealized configs this
+        REFERENCE/TEST-ONLY driver is exercised with (it is instantiated
+        nowhere in packages/, src/ or scripts/ -- only in tests).  A real
+        coupled run MUST use ``CoupledESMDriver``, which sub-cycles the
+        surface + ocean + carbon at ``coupling_dt``; do NOT wire this driver
+        into a production entry point without first adding the same
+        n_sub/sub_dt loop, or a large ``dt_segment`` (now correctly reported
+        per segment) becomes an unstable forward-Euler surface step.
         """
         if self._step_surface is None:
             return

@@ -64,7 +64,7 @@ _FIELD_BOUNDS = {
     "carry_T_land": (180.0, 345.0),   # K: polar-winter ice .. hot desert
     "carry_w_land": (0.0, None),       # mm soil water
     "carry_snow": (0.0, None),         # mm snow water-equivalent
-    "carry_seg_precip": (0.0, None),   # accumulated precip (>=0)
+    "carry_seg_precip": (0.0, None),   # segment-mean precip RATE kg/m2/s (>=0)
     # two-moment microphysics carries
     "carry_dmtr_q_i": (0.0, 0.02),
     "carry_dmtr_q_s": (0.0, 0.02),
@@ -80,7 +80,13 @@ _FIELD_BOUNDS = {
 _CONTEXT_FIELDS = (
     ("T", "air_T", 240.0, 275.0, "K"),           # 40-level volume mean (cold)
     ("carry_T_land", "land_T", 275.0, 295.0, "K"),
-    ("carry_seg_precip", "seg_precip", 1.5, 5.0, "mm/day~"),
+    # Segment-mean precip RATE [kg/m2/s].  The old 1.5-5.0 "mm/day~" hint only
+    # happened to work when the segment was exactly one day long (a 1-day
+    # ACCUMULATION in kg/m2 is numerically ~mm/day); it was already wrong for
+    # any other diag_days, and for the MPAS / per-step paths which always stored
+    # a rate.  Same 1.5-5.0 mm/day realism band, written as the exact
+    # seconds-per-day conversion so the arithmetic stays visible.
+    ("carry_seg_precip", "seg_precip", 1.5 / 86400.0, 5.0 / 86400.0, "kg/m2/s"),
     ("carry_held_lw_up_toa", "OLR", 230.0, 250.0, "W/m2"),
 )
 
@@ -91,7 +97,7 @@ _CONTEXT_FIELDS = (
 _DRIFT_THRESH = {           # units per model-day
     "air_T": 0.5,           # K/day
     "land_T": 0.5,          # K/day
-    "seg_precip": 0.3,      # (mm/day)/day
+    "seg_precip": 0.3 / 86400.0,   # (kg/m2/s)/day, i.e. 0.3 (mm/day)/day
     "OLR": 0.5,             # (W/m2)/day
 }
 
