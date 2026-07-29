@@ -26,8 +26,19 @@ task. `--self-test` must keep passing every loop.
       sharp at (0,0) on both a U-face and a T-point field; ssh EXACT at seed => velocity-specific,
       not shared with the eta/PGF chain. `puu_b`, `un_adv` and `pssh` are ALL INHERITED from the
       seed — the solver faithfully propagates a wrong initial condition.
-      IN PROGRESS 2026-07-29: the seed is `sum_k(u*h_face)/sum_k(h_face)`, so there are exactly
-      two separable causes — (A) the 3-D VELOCITY entering it is already wrong, or (B) the
+      **RESOLVED TO (B) 2026-07-29: the AVERAGING OPERATOR owns it; the 3-D velocity is
+      BIT-IDENTICAL to NEMO (err_norm 0.0 at all 35 levels, both components).** Since the
+      numerator is exact, the entire 2.31e-2 lives in the thickness weighting
+      (`_depth_average_to_faces`). Not upstream dynamics, not the bridge, not the solver.
+      NEXT: per-column `sum_k(h_face)` vs NEMO `sum_k(e3u(Kbb))`, and the u-face WET LEVEL COUNT.
+      DINO is FULL-STEP so e3u_0 == e3t_0 and the min-rule should agree level-for-level — which
+      points at WHICH LEVELS ARE COUNTED WET at a u-face (bathymetry steps), i.e. the same mask
+      family as bug #18 (ULP tie marking the deepest dry level active) and ldf_slp's zcj count.
+      DEAD END, do not retry: `stp_dump_07_dynspg_u/ub.bin` are NOT the entry velocity —
+      stpmlf.F90:288-294 dumps `uu(Naa)`/`uu_b(Naa)` and :403-406 shows Naa == Nrhs in the step
+      body, so `_u.bin` is the momentum RHS accumulator (~1e-6) and `_ub.bin` duplicates
+      spg_dump_puu_b_final.bin.
+      (historical framing: the seed is `sum_k(u*h_face)/sum_k(h_face)`, two separable causes — (A) the 3-D VELOCITY entering it is already wrong, or (B) the
       WEIGHTING/averaging is wrong. Measuring (A) FIRST against `stp_dump_07_dynspg_u/ub.bin`
       (NEMO's 3-D velocity at the dyn_spg_ts entry); if that is already ~2-3% off, the seed is
       inherited and ALL the barotropic code is exonerated.

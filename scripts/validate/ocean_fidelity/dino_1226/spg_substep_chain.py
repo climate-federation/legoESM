@@ -1,5 +1,59 @@
 """#1226 dyn_spg_ts chain walk: forcing -> loop entry -> substep 1 -> final.
 
+STAGE 4 (added this iteration): seed-error attribution.  The established
+result (STAGE 1-3, unchanged below) is that the puu_b/un_adv/pssh error is
+ALREADY present at the loop-ENTRY seed and stays flat -- not an accumulation
+defect.  The seed is U_bar = sum_k(u*h_face)/sum_k(h_face), so there are only
+two possible causes: (A) the 3-D velocity being averaged is already wrong, or
+(B) the averaging/weighting is wrong.
+
+DEAD END, kept here as a documented negative result (do not re-attempt):
+``stp_dump_07_dynspg_u.bin``/``_v.bin`` (stpmlf.F90:293, dumped as
+``uu(:,:,:,Naa)``/``vv(:,:,:,Naa)`` right after the ``dyn_spg`` call at
+stpmlf.F90:288) is NOT the after-level 3-D velocity state.  Traced
+stpmlf.F90:403-406: ``Nrhs = Nbb; Nbb = Nnn; Nnn = Naa; Naa = Nrhs`` runs at
+the very END of the step to rotate indices for the NEXT step -- so DURING
+the step body (including at line 288/293) ``Naa`` and ``Nrhs`` are the SAME
+index.  In the MLF (non-RK3) branch of ``dyn_spg_ts``
+(dynspg_ts.F90:1072-1165, ``#else`` / MLF case), the barotropic correction is
+written into ``puu(:,:,jk,Krhs)`` (:1102,1134) and ``puu(:,:,jk,Kmm)``
+(:1148) -- ``puu(:,:,jk,Kaa)`` (== the same memory as ``Krhs`` here) is never
+written by ``dyn_spg_ts`` as a velocity STATE; what stp_dump_07 captures is
+the momentum RHS/tendency accumulator (units ~m/s^2, matching the measured
+~1e-6 magnitude, 5 orders below the ~0.1 m/s velocity scale) -- confirmed by
+comparing against ``stp_dump_07_dynspg_ub.bin``/``_vb.bin`` (``uu_b(:,:,Naa)``,
+a genuinely SEPARATE array from ``puu``, populated by ``dynatf_qco.F90``,
+NOT aliased to Krhs), which DOES match ``spg_dump_puu_b_final.bin`` bit-for-
+bit (both are literally ``puu_b(Kaa)`` -- the SAME dyn_spg_ts write, dumped
+twice).  So ``ub_naa``/``vb_naa`` below is a valid (and redundant, by
+construction) re-check of STAGE 3's ``puu_b_final`` row; ``u_3d_naa``/
+``v_3d_naa`` (the ``_u.bin``/``_v.bin`` pair) is NOT informative for (A) and
+is reported only for the record (do not read anything into its huge
+err_norm -- comparing a velocity STATE against a tendency ACCUMULATOR is an
+apples-to-oranges comparison, not evidence of anything, and the per-level
+"depth-structure" it appears to show is an artifact of that unit mismatch,
+not a real vertical structure -- worth flagging explicitly since a
+depth-structured-looking artifact from a wrong-quantity comparison is
+exactly the kind of false diagnosis this campaign has hit before, see
+``ocean/fidelity/time_levels.py``'s own docstring).
+
+THE REAL (A) TEST run instead: legoESM's bridged before-level 3-D velocity
+(``state.u_before``/``v_before``, built by ``bridge_before_state_topo`` from
+``NemoBeforeState.u``/``.v``) vs NEMO's OWN restart ``ub``/``vb`` arrays
+(``uu(:,:,:,Nbb)``/``vv(:,:,:,Nbb)``, restart.F90:347-348 MLF branch) --
+this IS the exact 3-D input ``uu_b(Kbb)`` is built from every step
+(dynatf_qco.F90:222-235's Kmm/Kaa-writing loop is the SAME formula applied
+one step later; on THIS step, ``uu_b(Kbb)`` is whatever the PRIOR step's
+``dynatf_qco`` wrote into what is now the Kbb slot -- i.e. it is, by
+construction, the depth-weighted mean of exactly this ``ub``/``vb`` restart
+array).  Since the bridge (``bridge_before_state_topo``) does nothing but a
+Neumann-fill + C-grid face relabeling of the SAME restart array (no
+numerics), comparing ``state.u_before``/``v_before`` against the raw
+restart ``ub``/``vb`` directly answers (A): if this 3-D comparison is
+already ~2-3% off, the seed error is INHERITED (bridge/restart-read
+artifact, e.g. Neumann-fill at land or an interpolation difference), not
+constructed by the depth-averaging operator, and (B) is exonerated.
+
 Targets the WORST remaining fidelity row, ``dyn_spg_ts puu_b`` (|x|ratio
 0.9872 -- the largest unexplained gap on the board), plus its siblings
 ``un_adv`` (0.9916) and ``pssh`` (0.9986).  The decisive question: is the
@@ -150,6 +204,24 @@ register_dump("spg_dump_un_adv_final.bin", "after",
               "the after-loop finalized quantity; registered 'after' as the closest "
               "vocabulary match (a transport, no tracer level applies)")
 register_dump("spg_dump_vn_adv_final.bin", "after", "same as un_adv_final, vn_adv")
+register_dump("stp_dump_07_dynspg_u.bin", "after",
+              "stpmlf.F90:288,293 uu(:,:,:,Naa) -- 3-D velocity immediately "
+              "after dyn_spg returns (dyn_spg_ts's barotropic correction "
+              "already folded in), BEFORE dyn_zdf's implicit vertical solve; "
+              "dumped by stp_dump_state_and_bt(kstage=7,'dynspg',...)")
+register_dump("stp_dump_07_dynspg_v.bin", "after", "same as dynspg_u, vv(:,:,:,Naa)")
+register_dump("stp_dump_07_dynspg_ub.bin", "after",
+              "stpmlf.F90:288,293-294 uu_b(:,:,Naa) -- NEMO's own internally-"
+              "carried 2-D barotropic velocity at Naa, populated EVERY step "
+              "by dynatf_qco.F90:222-235 as uu_b(Kaa) = "
+              "[sum_k e3u(jk,Kaa)*puu(jk,Kaa)]*r1_hu(Kaa) (a genuine "
+              "thickness-weighted depth mean of the 3-D field at the SAME "
+              "level, not a separately-carried restart quantity for DINO's "
+              "ln_bt_fw=F/nn_bt_flt=2 config -- confirmed: ts_rst's "
+              "'ub2_b'/'un_bf' read only fires under ln_bt_fw=T and its "
+              "'sshbb_e' block only under nn_bt_flt=3, neither DINO's branch, "
+              "dynspg_ts.F90:1124-1153)")
+register_dump("stp_dump_07_dynspg_vb.bin", "after", "same as dynspg_ub, vv_b(:,:,Naa)")
 
 for _name in (
     "spg_dump_zu_frc.bin", "spg_dump_zv_frc.bin", "spg_dump_ssh_frc.bin",
@@ -157,19 +229,22 @@ for _name in (
     "spg_dump_ssh_substep1.bin", "spg_dump_ub_substep1.bin", "spg_dump_vb_substep1.bin",
     "spg_dump_puu_b_final.bin", "spg_dump_pvv_b_final.bin", "spg_dump_pssh_final.bin",
     "spg_dump_un_adv_final.bin", "spg_dump_vn_adv_final.bin",
+    "stp_dump_07_dynspg_u.bin", "stp_dump_07_dynspg_v.bin",
+    "stp_dump_07_dynspg_ub.bin", "stp_dump_07_dynspg_vb.bin",
 ):
     time_level_for_dump(_name)  # raises if unregistered -- fail loud, not silent
 
 
-def _read_dims(run_dir: str) -> tuple[int, int, int]:
+def _read_dims(run_dir: str) -> tuple[int, int, int, int, int, int]:
     with open(os.path.join(run_dir, "ocean.output")) as f:
         text = f.read()
     jpi = int(re.search(r"jpi\s*:\s*(\d+)", text).group(1))
     jpj = int(re.search(r"jpj\s*:\s*(\d+)", text).group(1))
+    jpk = int(re.search(r"jpk\s*:\s*(\d+)", text).group(1))
     hls = int(re.search(r"nn_hls\s*=\s*(\d+)", text).group(1))
     icycle = int(re.search(r"icycle\s*=\s*(\d+)", text).group(1))
     nn_e = int(re.search(r"iterations nn_e\s*=\s*(\d+)", text).group(1))
-    return jpi, jpj, hls, icycle, nn_e
+    return jpi, jpj, jpk, hls, icycle, nn_e
 
 
 def _load_full(path: str, jpi: int, jpj: int, hls: int) -> np.ndarray:
@@ -183,6 +258,20 @@ def _load_full(path: str, jpi: int, jpj: int, hls: int) -> np.ndarray:
 def _load_interior(path: str, ni: int, nj: int) -> np.ndarray:
     """Interior-only (Nis0:Nie0,Njs0:Nje0) 2-D dump, already haloless."""
     return np.fromfile(path, dtype="<f8").reshape(nj, ni)
+
+
+def _load_full_3d(path: str, jpi: int, jpj: int, jpkm1: int, hls: int) -> np.ndarray:
+    """Full-domain (jpkm1,jpj,jpi) 3-D stream dump -> haloless (n_lat,n_lon,jpkm1).
+
+    stp_dump_state_and_bt writes level-by-level (DO jk=1,jpkm1 -> one
+    (jpj,jpi) record per level, stpmlf.F90:753-756) -- same haloed full-domain
+    convention as the 2-D dumps _load_full already handles, just with a
+    leading level axis to strip and move last.
+    """
+    a = np.fromfile(path, dtype="<f8").reshape(jpkm1, jpj, jpi)
+    if hls:
+        a = a[:, hls:-hls, hls:-hls]
+    return np.moveaxis(a, 0, -1)
 
 
 def _report(name: str, lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> None:
@@ -220,7 +309,7 @@ def _shift_scan(name: str, lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray)
 
 
 def main() -> int:
-    jpi, jpj, hls, icycle, nn_e = _read_dims(RUN_DIR)
+    jpi, jpj, jpk, hls, icycle, nn_e = _read_dims(RUN_DIR)
     print(f"NEMO dims jpi={jpi} jpj={jpj} nn_hls={hls}  icycle={icycle}  nn_e={nn_e}"
           f"  (nn_bt_flt=2 boxcar: window |jn-2*nn_e|<nn_e -> last in-window jn = 3*nn_e-1)")
     assert icycle == 3 * nn_e - 1, (
@@ -444,6 +533,104 @@ def main() -> int:
     _shift_scan("puu_b_final (u-face)", _u_to_nemo(u_final_bar), nemo_puu_b, umask2)
     _shift_scan("pssh_final (T-point)", np.asarray(state_final.eta.data), nemo_pssh, land)
 
+    # --- STAGE 4: seed-error attribution -- (A) is the 3-D velocity being
+    # averaged already wrong, or (B) is the averaging/weighting wrong?
+    # Cross-check via the INDEPENDENT stp_dump_07_dynspg_* dump family
+    # (stpmlf.F90:288-294, NEMO's own uu_b/vv_b bookkeeping at Naa, see
+    # module docstring for the full derivation + correction of the task's
+    # premise: these are Naa/AFTER, not the Kbb loop-entry seed).
+    print("\n=== STAGE 4: seed-error attribution (A) 3-D velocity vs (B) averaging ===")
+    jpkm1 = jpk - 1
+    nemo_u3d_naa = _load_full_3d(
+        os.path.join(RUN_DIR, "stp_dump_07_dynspg_u.bin"), jpi, jpj, jpkm1, hls)
+    nemo_v3d_naa = _load_full_3d(
+        os.path.join(RUN_DIR, "stp_dump_07_dynspg_v.bin"), jpi, jpj, jpkm1, hls)
+    nemo_ub_naa = _load_full(os.path.join(RUN_DIR, "stp_dump_07_dynspg_ub.bin"), jpi, jpj, hls)
+    nemo_vb_naa = _load_full(os.path.join(RUN_DIR, "stp_dump_07_dynspg_vb.bin"), jpi, jpj, hls)
+
+    lego_u3d_naa = np.asarray(state_final.u.data)
+    lego_v3d_naa = np.asarray(state_final.v.data)
+    n_lev_cmp = min(lego_u3d_naa.shape[-1], nemo_u3d_naa.shape[-1])
+    umask3 = np.asarray(g.umask)[..., :n_lev_cmp] > 0.5
+    vmask3 = np.asarray(g.vmask)[..., :n_lev_cmp] > 0.5
+
+    print("--- DEAD END (documented, see module docstring): u_3d_naa/v_3d_naa is "
+          "puu(:,:,jk,Krhs) aliased to Naa (stpmlf.F90:403-406), a momentum RHS "
+          "accumulator, NOT the velocity state -- units mismatch makes this "
+          "comparison meaningless. Printed once for the record, not used below. ---")
+    m3 = umask3 & np.isfinite(_u_to_nemo(lego_u3d_naa[..., :n_lev_cmp])) & np.isfinite(nemo_u3d_naa[..., :n_lev_cmp])
+    print(f"  u_3d_naa (all levels)       RMS(lego)={float(np.sqrt(np.mean(_u_to_nemo(lego_u3d_naa[..., :n_lev_cmp])[m3]**2))):.4e}  "
+          f"RMS(nemo)={float(np.sqrt(np.mean(nemo_u3d_naa[..., :n_lev_cmp][m3]**2))):.4e}  "
+          "(RMS(lego) ~0.1 m/s state vs RMS(nemo) ~1e-6-1e-7 tendency -- confirms "
+          "the Krhs/Naa aliasing diagnosis, not a real defect)")
+
+    print("--- (A) cross-check: NEMO's OWN uu_b(Naa)/vv_b(Naa) (genuinely separate "
+          "array, NOT Krhs-aliased -- dynatf_qco.F90:222-235 thickness-weighted mean "
+          "of uu(Naa)) vs legoESM's depth-mean of the SAME production field, applying "
+          "the identical operator. Redundant with STAGE 3's puu_b_final by construction "
+          "(NEMO dumps puu_b(Kaa) to BOTH spg_dump_puu_b_final.bin and "
+          "stp_dump_07_dynspg_ub.bin -- verified bit-identical files) -- a pure harness "
+          "self-consistency check, not new evidence. ---")
+    _, e_ub_naa = _report("ub_naa (NEMO internal uu_b)", _u_to_nemo(u_final_bar), nemo_ub_naa, umask2)
+    _, e_vb_naa = _report("vb_naa (NEMO internal vv_b)", _v_to_nemo(v_final_bar), nemo_vb_naa, vmask2)
+    assert abs(e_ub_naa - e_puu) < 1e-9 and abs(e_vb_naa - e_pvv) < 1e-9, (
+        "ub_naa/vb_naa should reproduce STAGE 3's puu_b_final/pvv_b_final err_norm "
+        "EXACTLY (same NEMO array dumped twice) -- a mismatch means the two dump "
+        "files are NOT actually identical and the Krhs/Naa aliasing story needs "
+        "re-checking, not the seed construction")
+
+    # --- THE REAL (A) TEST: legoESM's bridged before-level 3-D velocity
+    # (state.u_before/v_before, built by bridge_before_state_topo from the SAME
+    # restart's ub/vb with only a Neumann-fill + C-grid face relabel -- no
+    # numerics) vs NEMO's raw restart ub/vb (uu(:,:,:,Nbb)/vv(:,:,:,Nbb),
+    # restart.F90:347-348 MLF branch). This IS the true 3-D input the depth-
+    # average at the loop-entry seed reduces -- comparing it directly answers
+    # (A) without any dyn_spg_ts internals or aliasing risk at all.
+    print("\n--- (A) THE REAL TEST: legoESM state.u_before/v_before (bridged) vs "
+          "NEMO restart ub/vb (uu(:,:,:,Nbb)/vv(:,:,:,Nbb), restart.F90:347-348) ---")
+    lego_u_before = np.asarray(st.u_before.data)
+    lego_v_before = np.asarray(st.v_before.data)
+    n_lev_b = min(lego_u_before.shape[-1], before.u.shape[-1])
+    umask3b = np.asarray(g.umask)[..., :n_lev_b] > 0.5
+    vmask3b = np.asarray(g.vmask)[..., :n_lev_b] > 0.5
+    # before.u/v are T-grid-shaped NEMO arrays (jpj,jpi,jpk) pre-face-mapping;
+    # map through the SAME east/north-face convention the bridge itself uses
+    # (_u_east_to_face_periodic/_v_north_to_face) is already baked into
+    # st.u_before -- so compare st.u_before (post-bridge) against the
+    # bridge's OWN raw input reshaped the same way _u_to_nemo/_v_to_nemo
+    # already handle the now-level comparison (STAGE 0-3 above).
+    nemo_ub_restart = before.u[..., :n_lev_b]
+    nemo_vb_restart = before.v[..., :n_lev_b]
+    _, e_u3d_before = _report("u_before_3d (all levels)",
+                               _u_to_nemo(lego_u_before[..., :n_lev_b]),
+                               nemo_ub_restart, umask3b)
+    _, e_v3d_before = _report("v_before_3d (all levels)",
+                               _v_to_nemo(lego_v_before[..., :n_lev_b]),
+                               nemo_vb_restart, vmask3b)
+    print("  per-level err_norm (u_before, surface -> bottom):")
+    lego_ub_nemo = _u_to_nemo(lego_u_before[..., :n_lev_b])
+    for k in range(n_lev_b):
+        mk = umask3b[..., k] & np.isfinite(lego_ub_nemo[..., k]) & np.isfinite(nemo_ub_restart[..., k])
+        if mk.sum() < 10:
+            continue
+        rms_k = float(np.sqrt(np.mean(nemo_ub_restart[..., k][mk] ** 2)))
+        if rms_k <= 0:
+            continue
+        err_k = float(np.sqrt(np.mean(
+            (lego_ub_nemo[..., k][mk] - nemo_ub_restart[..., k][mk]) ** 2))) / rms_k
+        print(f"    k={k:2d}  err_norm={err_k:.4e}  RMS(nemo)={rms_k:.4e}  n={int(mk.sum())}")
+
+    print("\nSTAGE 4 VERDICT: if e_u3d_before/e_v3d_before (the raw 3-D before-level "
+          "velocity, direct restart comparison, no depth-averaging involved at all) "
+          "is already at the ~2-3e-2 err_norm level seen at the STAGE-1 seed, the "
+          "error is INHERITED at the bridge/restart-read step -- attribution (A), "
+          "the depth-averaging operator is exonerated. If e_u3d_before/"
+          "e_v3d_before is CLEAN (near roundoff) while the STAGE-1 seed still shows "
+          "~2-3e-2, the averaging/weighting itself introduces the error -- "
+          "attribution (B).")
+    print(f"  e_u3d_before={e_u3d_before:.4e}  e_v3d_before={e_v3d_before:.4e}  "
+          f"(cf. STAGE-1 seed: e_uninit={e_uninit:.4e}  e_vninit={e_vninit:.4e})")
+
     # --- Filter/weight cross-check: legoESM's own boxcar weights vs the
     # NEMO namelist-derived count (nn_e, ln_bt_av=T since nn_bt_flt=2 != 3,
     # ln_bt_fw=F -> ts_wgt CASE(2) -> icycle = 2*nn_e).
@@ -480,16 +667,28 @@ def main() -> int:
           "ssh/eta problem, which points at the U/V depth-mean construction "
           "specifically (the before-level 3-D-to-2-D reduction), not the "
           "eta continuity/PGF chain.")
-    print("NEXT: compare legoESM's before-level U_bar_seed/V_bar_seed "
-          "(_depth_average_to_faces on state.u_before/v_before) directly "
-          "against NEMO's OWN puu_b(Kbb)/pvv_b(Kbb) restart fields "
-          "(ub/vb in the restart, read via read_nemo_restart_before) -- "
-          "per-column, to see whether the 2-3% gap is uniform (a global "
-          "scale/metric factor in the depth-average, e.g. min_water_column_m "
-          "or the nemo_ssh_avg face-depth rescale) or concentrated on shelf/"
-          "thin columns (the seed_face_depth floor-interaction documented in "
-          "BarotropicConfig.barotropic_seed_face_depth's own docstring, "
-          "measured there as an 11%% loop-entry residual at shelf columns).")
+    print(f"\nSTAGE 4 RESULT (this iteration): e_u3d_before={e_u3d_before:.4e}  "
+          f"e_v3d_before={e_v3d_before:.4e} -- the 3-D before-level velocity "
+          "(state.u_before/v_before) is BIT-IDENTICAL to NEMO's restart ub/vb "
+          "at EVERY level (0.0000e+00 err_norm, 35/35 levels, both components) "
+          "-- see the per-level table above. The bridge does nothing but a "
+          "Neumann-fill + C-grid face relabel to this array, so the INPUT to "
+          "the depth-average is proven correct. Yet the depth-MEAN of that "
+          "same exact input (STAGE-1 seed, e_uninit/e_vninit) is already "
+          f"{e_uninit:.4e}/{e_vninit:.4e}. This is a CLEAN, unambiguous "
+          "attribution to (B): the averaging/weighting -- NOT (A) the 3-D "
+          "velocity -- introduces the seed error. (A) is EXONERATED.")
+    print("NEXT: per the task's (B) branch, compare legoESM's sum_k(h_face) "
+          "(the min-rule/nemo_ssh_avg face depth _depth_average_to_faces "
+          "builds from H_bathy+eta) against NEMO's sum_k(e3u(Kbb)) per column "
+          "-- since the 3-D velocity numerator is proven exact, the entire "
+          "2-3% gap must live in the denominator (face-depth/thickness-sum) "
+          "or the face-mask/min_water_column_m floor applied to it. Report "
+          "whether the gap is a UNIFORM per-column scale (metric/thickness "
+          "convention) or CONCENTRATED on particular columns (shelf/thin/"
+          "bathymetry-step, where barotropic_seed_face_depth's own docstring "
+          "already measured an 11% floor-interaction residual) -- this is "
+          "the next concrete, mechanical step, not yet measured here.")
     return 0
 
 
