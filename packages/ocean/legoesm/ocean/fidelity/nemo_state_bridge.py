@@ -319,6 +319,34 @@ def _warn_if_not_fp64() -> None:
     )
 
 
+def detect_metric_convention(grid, rtol: float = 1e-12) -> str:
+    """Read the oracle's OWN grid to decide its horizontal metric convention.
+
+    NEMO's ``mesh_mask`` carries both ``e1t`` and ``e2t``, so the convention is
+    OBSERVABLE rather than something to assume:
+
+    * DINO's ``usr_def_hgr.F90:111-119`` sets ``pe2t = pe1t =
+      ra*rad*COS(phi)*rn_e1_deg`` — Mercator conformality imposed analytically
+      — so ``e1t == e2t`` EXACTLY  → ``"nemo_isotropic"``.
+    * A config carrying a genuine finite-difference meridional metric has
+      ``e1t != e2t``  → ``"exact"``.
+
+    Detecting beats a hard default because this bridge also serves
+    non-isotropic NEMO configs (GYRE), where forcing ``"nemo_isotropic"`` would
+    be wrong.  It also beats trusting a recipe card, which can drift out of
+    step with the mesh_mask actually being read.
+
+    Getting this wrong is not subtle in its consequences: the shipped
+    ``"exact"`` default mismatched NEMO's ``e2v`` by median 2.798e-05, which
+    ``ldf_slp``'s ``vslp`` divides by — worth 4 orders of magnitude on that row
+    (#1226).
+    """
+    e1t = np.asarray(grid.e1t, dtype=np.float64)
+    e2t = np.asarray(grid.e2t, dtype=np.float64)
+    rel = np.abs(e1t - e2t) / np.maximum(np.abs(e2t), 1e-30)
+    return "nemo_isotropic" if float(rel.max()) <= rtol else "exact"
+
+
 def bridge_nemo_to_legoesm_topo(
     grid: NemoGrid,
     state: NemoState,
@@ -328,7 +356,7 @@ def bridge_nemo_to_legoesm_topo(
     radius: float = constants.R_earth,
     f_rtol: float = 1e-3,
     full_step: bool = False,
-    metric_convention: str = "exact",
+    metric_convention: str = "auto",
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -393,6 +421,16 @@ def bridge_nemo_to_legoesm_topo(
         If ``gphiv`` is missing, the bathymetry is not full-step, or the built
         Coriolis does not match NEMO ``ff_t`` to ``f_rtol``.
     """
+    # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
+    # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
+    # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
+    # analytically), giving e1t == e2t EXACTLY, whereas a config with a genuine
+    # finite-difference meridional metric has e1t != e2t.  Detecting beats a
+    # hard default because this bridge also serves non-isotropic NEMO configs
+    # (GYRE), where forcing "nemo_isotropic" would be wrong.
+    if metric_convention == "auto":
+        metric_convention = detect_metric_convention(grid)
+
     _warn_if_not_fp64()
     if grid.gphiv is None:
         raise ValueError(

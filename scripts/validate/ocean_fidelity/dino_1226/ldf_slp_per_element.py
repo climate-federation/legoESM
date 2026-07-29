@@ -211,7 +211,7 @@ def build_state():
     # finite-difference dy, differing from NEMO e2t by -1.27e-5..+9.5e-6.  zcj
     # (ldfslp.F90:307) multiplies the vmask COUNT by e2t, so that discrepancy
     # lands directly in zaj.  Env-switchable so the A/B is a single variable.
-    _metric = os.environ.get("LEGOESM_METRIC_CONVENTION", "exact")
+    _metric = os.environ.get("LEGOESM_METRIC_CONVENTION", "auto")
     print(f"metric_convention={_metric}", flush=True)
     br = bridge_nemo_to_legoesm_topo(grid, now, periodic_i=True, full_step=True,
                                      metric_convention=_metric,

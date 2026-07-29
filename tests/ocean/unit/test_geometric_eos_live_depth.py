@@ -142,3 +142,42 @@ def test_gm_redi_density_does_move_with_eta_when_a_ladder_is_carried():
     rho_eta, _ = gm_redi_density_and_jacobian(
         T, S, jnp.asarray([[6.0]]), H, None, z, **kw)
     assert float(np.abs(np.asarray(rho_eta) - np.asarray(rho_0eta)).max()) > 0.0
+
+
+def test_bridge_auto_detects_the_oracle_metric_convention():
+    """metric_convention="auto" asks the ORACLE instead of assuming (#1226).
+
+    Exercises the real detector, not arithmetic: a hand-built grid whose
+    e1t == e2t (DINO's analytic Mercator conformality) must select
+    nemo_isotropic, and one where they differ must select exact -- because this
+    bridge also serves non-isotropic NEMO configs, where forcing the isotropic
+    convention would be wrong.
+    """
+    from types import SimpleNamespace
+
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        detect_metric_convention,
+    )
+    e1 = np.full((4, 3), 1000.0)
+    assert detect_metric_convention(
+        SimpleNamespace(e1t=e1, e2t=e1.copy())) == "nemo_isotropic"
+    # a 1e-5 difference -- the real DINO-vs-exact discrepancy is 2.8e-5, so the
+    # detector must NOT call that isotropic
+    assert detect_metric_convention(
+        SimpleNamespace(e1t=e1, e2t=e1 * (1.0 + 1e-5))) == "exact"
+    assert detect_metric_convention(
+        SimpleNamespace(e1t=e1, e2t=e1 * 1.01)) == "exact"
+
+
+def test_bridge_signature_defaults_to_auto():
+    """The shipped default must be 'auto', not a hard-coded convention."""
+    import inspect
+
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        bridge_nemo_to_legoesm_topo,
+    )
+    sig = inspect.signature(bridge_nemo_to_legoesm_topo)
+    assert sig.parameters["metric_convention"].default == "auto", (
+        "the bridge must DETECT the oracle's metric convention; a hard "
+        "'exact' default silently mismatched NEMO's e2v and cost the ldf_slp "
+        "rows 4 orders of magnitude")
