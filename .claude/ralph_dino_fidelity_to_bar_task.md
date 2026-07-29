@@ -65,10 +65,27 @@ vectorised gather is equivalent). Do not re-audit these.
 - The 16-point Shapiro smoother is NOT the ldf_slp defect (90%/87% of the error is present
   pre-smoother; >=100% in the bottom-3 levels, where it slightly REDUCES the error).
 
-**Known and measured, needs its own controlled pass:** `metric_convention="nemo_isotropic"` OWNS
-`zaj` (1.180e-06 -> 5.232e-11) because NEMO's DINO builds the grid isotropically (`pe1t = pe2t`).
-The bridge defaults to `"exact"` regardless of the recipe card — a harness gap. Adopting it also
-moves `ssh_nxt`, so it needs a single controlled change, not a smuggled one.
+**metric_convention — DECIDED by the human 2026-07-28: GO FOR THE NEMO MATCH.**
+NEMO's DINO `usrdef_hgr.F90:111-119` sets `pe2t = pe1t = ra*rad*COS(phi)*rn_e1_deg` — the
+meridional scale factor IS the zonal one (Mercator conformality imposed analytically). legoESM's
+default `"exact"` computes the true finite-difference `dy`; they differ at O(dphi^2), measured
+median 2.798e-05 / max 8.241e-03. Reproducing NEMO's approximation is REQUIRED for fidelity.
+- `zaj`/`wslpj` need `e2t` (T-face): already covered by the shipped option. MEASURED
+  1.180e-06 -> 5.232e-11.
+- `vslp` needs `e2v` = `dy_v` (v-point MERIDIONAL spacing). **DONE 2026-07-28**: `nemo_isotropic`
+  now also sets `dy_v = R*dlon*cos(lat_v)`.
+- **The "#516 adjointness invariant" blocker was a FALSE DILEMMA — do not re-raise it.** That
+  invariant (strain/stress adjoint pair + divergence/advection mass consistency) is a property of
+  `dx_v`, the ZONAL v-face length, via `vface_zonal_cos_lat`; it holds because operators SHARE the
+  metric, not because of its value. `strain_rate_cgrid` takes a `LatLonGrid`, which has no `dy_v`
+  field at all. All 9 #516 invariant tests pass unchanged with the new `dy_v`.
+- The `test_vface_metric_invariant_under_metric_convention` guard was NARROWED deliberately
+  (dx_v/area_q/cos_alpha_v/sin_alpha_v still asserted invariant) and the new `dy_v` behaviour is
+  PINNED by two assertions. Do not widen it back, and do not weaken the remaining four.
+REMAINING: wire the DINO bridge to select `nemo_isotropic` (it defaults to `"exact"` regardless of
+the recipe card — a harness gap) and run ONE controlled pass recording before/after for every
+affected row (`vslp`, `wslpj`, `zaj`, `ssh_nxt`, and anything else that moves). Then adversarial
+review: this touches barotropic v-point areas (`1/(dx_v*dy_v)`), the PGF, and `latlon_cgrid_operators`.
 
 ## Guardrails
 - **Reconcile before recording (skill Rule 1e).** When a new measurement disagrees with a recorded
@@ -109,12 +126,11 @@ human — never asserted because a number is stubborn.
   adjointness/mass-consistency invariants and oracle fidelity. Someone must choose.
 - `zdf_mxl_turb`: legoESM has NO equivalent. Implement, or waive explicitly (it is diagnostic-only
   in NEMO and never feeds dynamics). A waiver is a human decision.
-- Adopting `metric_convention="nemo_isotropic"` as the DINO default (moves several rows at once).
 - `STABILITY on NEMO true grid`: from rest it now runs 5 years stable, but the RESTART-start
   blow-up (max|u| 0.66 -> 3 m/s over 20 d) is real and unfixed. Open-ended bug hunt.
 - Any change that would alter non-fidelity recipes' numerics.
 
-## Current state (2026-07-28)
+## Current state (2026-07-28, end of session)
 `AT BAR 11 | DEBT 31 | UNMEASURED 3`, 6 of the 11 still passing on cancelling statistics only.
 Ranked worst-first: `dyn_spg_ts puu_b` 1.3e-2, `eiv transport v` 9.5e-3, `dyn_spg_ts un_adv`
 8.4e-3, `dyn_adv ZAD` 4.9e-3, `ATF filter u` 4.4e-3, `eiv transport u` 3.9e-3, `dyn_ldf u` 3.9e-3,
