@@ -50,6 +50,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS_DIV as _EPS_DIV,
     compute_eke_kappa_gm,
     compute_treguier_kappa_gm,
+    validate_treguier_cfg,
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
@@ -986,6 +987,16 @@ def compute_treguier_kappa_gm_nemo_native(
     f20 = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
+    # Same equatorial-taper floor as the generic path
+    # (``_gm_redi_common.compute_treguier_kappa_gm``): the NEMO-native branch
+    # runs the IDENTICAL min(1,|f/f20|) taper, so it needs the IDENTICAL floor
+    # -- otherwise ``TreguierConfig.kappa_min`` is silently inert on exactly the
+    # nemo_iso_lap+nemo_native (most NEMO-faithful) configuration.  Clamped to
+    # the cap (same reason as the generic path: the invariant must hold even
+    # when a trained/traced aei0 disables the Python-level validator) and
+    # applied BEFORE the wet mask so dry columns still return exactly 0;
+    # default kappa_min=0.0 keeps this byte-identical.
+    kappa = jnp.maximum(kappa, jnp.minimum(cfg.kappa_min, cfg.aei0))
     return jnp.where(mask > 0.5, kappa, 0.0)
 
 
@@ -2882,6 +2893,21 @@ def gm_redi_tracer_tendency_latlon(
         raise ValueError(
             "GMRediConfig: visbeck.enabled and treguier.enabled are mutually "
             "exclusive adaptive-kappa diagnostics — enable exactly one.")
+    if _treg is not None and _treg.enabled and kappa_gm_override is not None:
+        # The override (prognostic EKE, built by the step whenever
+        # ``gm_redi.eke is not None``) is consumed BEFORE Treguier below, so
+        # this combination would silently run the EKE coefficient -- and its
+        # own [0, kappa_max] clip, NOT the Treguier taper/cap/floor -- while
+        # the user believes the selected NEMO ldf_eiv scheme is active.
+        raise ValueError(
+            "GMRediConfig: treguier.enabled with a prognostic-EKE kappa_GM "
+            "override (gm_redi.eke) — the EKE override takes precedence and "
+            "the Treguier coefficient would never reach the operator. Enable "
+            "exactly one of eke / treguier.")
+    if _treg is not None:
+        # Concrete-value check only (skipped for a trained/traced aei0); the
+        # kappa_min <= aei0 invariant itself is enforced in the kernels.
+        validate_treguier_cfg(_treg)
     if kappa_gm_override is not None:
         kappa_GM = kappa_gm_override
     elif _treg is not None and _treg.enabled:

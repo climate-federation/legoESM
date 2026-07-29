@@ -483,16 +483,19 @@ def create_cubed_sphere(
             # monolith order the historical fixtures were pinned at
             # (2026-07-27: 4-point corner-adjacent ring Lagrange has
             # oscillating extrapolation lobes and is the measured
-            # vertex amplifier).  DEFAULT (None) maps to 4 for
-            # back-compat with the certified fixtures; any other
-            # explicit value fails loudly.
+            # vertex amplifier — the C48 case-8 root cause, PR #1372).
+            # DEFAULT (None) now maps to 2 — the FAITHFUL order — after
+            # the acceptance battery (case-8 d5 in the oracle band, W2
+            # max+RMS inside the Zenodo envelope, symmetry residuals at
+            # the oracle floor); pass 4 explicitly for the historical
+            # fixture order.
             if k2e_nord is not None and k2e_nord not in (2, 4):
                 raise NotImplementedError(
                     f"gnomonic='ed' duogrid: k2e_nord={k2e_nord}; "
                     "supported orders are 2 (authoritative live "
                     "default) and 4 (mirror-monolith fixture order)")
             duogrid = create_fv3_native_duogrid_data(
-                n, ng=ng, k2e_nord=4 if k2e_nord is None else k2e_nord)
+                n, ng=ng, k2e_nord=2 if k2e_nord is None else k2e_nord)
         else:
             from legoesm.grids.duogrid import create_duogrid_data
             duogrid = create_duogrid_data(

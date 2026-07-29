@@ -154,6 +154,213 @@ class TestTreguierKappa:
         assert bool(jnp.isfinite(g).all())
 
 
+class TestTreguierKappaMinFloor:
+    """``TreguierConfig.kappa_min`` — the equatorial-taper floor.
+
+    The taper ``min(1, |f/f20|)`` drives κ → 0 at the equator; the floor keeps a
+    finite GM there.  Default 0.0 must be INERT (byte-identical), the floor must
+    NOT leak into dry columns, and it must behave identically on the generic and
+    the NEMO-native κ paths.
+    """
+
+    def test_default_is_inert(self):
+        """The unfloored result must equal the INDEPENDENT ldf_eiv formula --
+        a reference that predates the floor -- not merely another call through
+        the same new code (which would pass even if the floor were wrong)."""
+        assert TreguierConfig().kappa_min == 0.0
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-4)
+        aei0 = 1.0e9
+        got = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f,
+            TreguierConfig(enabled=True, aei0=aei0)))
+        want = _expected_kappa(rho, S_x, S_y, z, jac, np.asarray(f), aei0)
+        np.testing.assert_allclose(got, want, rtol=1e-6)
+
+    def test_floor_binds_at_the_equator(self):
+        """f → 0 makes the taper → 0, so the unfloored κ collapses; the floor
+        is what keeps GM alive in the equatorial band."""
+        rho, S_x, S_y, z, jac = _setup()
+        f_eq = jnp.full((3, 3), 1.0e-8)          # ~equatorial: taper ~ 2e-4
+        unfloored = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f_eq, TreguierConfig(enabled=True)))
+        floored = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f_eq,
+            TreguierConfig(enabled=True, kappa_min=200.0)))
+        assert (unfloored < 200.0).all()         # floor is genuinely binding
+        np.testing.assert_allclose(floored, 200.0, rtol=1e-12)
+
+    def test_floor_does_not_raise_midlatitude_kappa(self):
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-4)
+        cfg_hi = TreguierConfig(enabled=True, aei0=1.0e9)
+        free = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f, cfg_hi))
+        assert (free > 1.0).all()
+        floored = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f, cfg_hi._replace(kappa_min=1.0)))
+        np.testing.assert_array_equal(free, floored)
+
+    def test_floor_excluded_from_dry_columns(self):
+        """The floor is applied BEFORE the wet mask, so a dry column must stay
+        EXACTLY 0 even with a large kappa_min (else GM would switch on over
+        land)."""
+        rho, S_x, S_y, z, _ = _setup()
+        jac = jnp.zeros((3, 3))                  # all-dry
+        k = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, jnp.full((3, 3), 1e-4),
+            TreguierConfig(enabled=True, kappa_min=200.0)))
+        np.testing.assert_array_equal(k, 0.0)
+
+    def test_grad_finite_with_floor(self):
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1e-4)
+        cfg = TreguierConfig(enabled=True, kappa_min=200.0)
+
+        def total(r):
+            return jnp.sum(compute_treguier_kappa_gm(
+                r, S_x, S_y, z, jac, f, cfg))
+
+        assert bool(jnp.isfinite(jax.grad(total)(rho)).all())
+
+    def test_floor_is_clamped_to_the_cap(self):
+        """STRUCTURAL invariant: even with kappa_min > aei0 (reachable when a
+        TRAINED, traced aei0 disables the Python validator) the kernel must
+        never return more than the cap."""
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-4)
+        k = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f,
+            TreguierConfig(enabled=True, aei0=100.0, kappa_min=200.0)))
+        assert (k <= 100.0 + 1e-9).all()
+        np.testing.assert_allclose(k, 100.0, rtol=1e-12)
+
+    def test_traced_aei0_does_not_raise_and_is_differentiable(self):
+        """``aei0`` is tunable_tier=2, so param_collector splices it in as a
+        TRACER inside the loss.  A Python ``kappa_min > aei0`` comparison would
+        raise TracerBoolConversionError; the floor must stay trace-safe."""
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-4)
+
+        def total(aei0):
+            cfg = TreguierConfig(enabled=True, aei0=aei0, kappa_min=200.0)
+            return jnp.sum(compute_treguier_kappa_gm(
+                rho, S_x, S_y, z, jac, f, cfg))
+
+        # forward under jit (aei0 traced) and reverse-mode through the cap
+        val = jax.jit(total)(jnp.asarray(1800.0))
+        assert bool(jnp.isfinite(val))
+        g = jax.grad(total)(jnp.asarray(1800.0))
+        assert bool(jnp.isfinite(g))
+
+    def test_traced_kappa_min_is_differentiable(self):
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-8)          # equatorial: the floor binds
+
+        def total(kmin):
+            cfg = TreguierConfig(enabled=True, aei0=1800.0, kappa_min=kmin)
+            return jnp.sum(compute_treguier_kappa_gm(
+                rho, S_x, S_y, z, jac, f, cfg))
+
+        g = jax.grad(total)(jnp.asarray(200.0))
+        assert bool(jnp.isfinite(g))
+        # d(sum)/d(kappa_min) = number of columns where the floor BINDS.
+        # Establish that count from the fixture instead of hard-coding it, so
+        # a fixture change gives a diagnostic failure rather than a bare 9.
+        unfloored = np.asarray(compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f,
+            TreguierConfig(enabled=True, aei0=1800.0)))
+        n_binding = int((unfloored < 200.0).sum())
+        assert n_binding == unfloored.size, "fixture must be fully floored here"
+        assert float(g) == pytest.approx(float(n_binding))
+
+    def test_validator_skips_traced_leaves(self):
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+
+        def f(aei0):
+            # would raise TracerBoolConversionError if the validator compared
+            validate_treguier_cfg(
+                TreguierConfig(enabled=True, aei0=aei0, kappa_min=200.0))
+            return aei0 * 2.0
+
+        assert float(jax.jit(f)(jnp.asarray(100.0))) == pytest.approx(200.0)
+
+    def test_validator_rejects_non_finite(self):
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        with pytest.raises(ValueError, match="must be finite"):
+            validate_treguier_cfg(
+                TreguierConfig(enabled=True, aei0=float("nan")))
+        with pytest.raises(ValueError, match="must be > 0"):
+            validate_treguier_cfg(TreguierConfig(enabled=True, aei0=0.0))
+
+    @pytest.mark.parametrize("bad", [
+        np.float32("nan"), np.float64("nan"), np.float32(-1.0),
+        jnp.asarray(float("nan")), jnp.asarray(-1.0),
+    ])
+    def test_validator_rejects_concrete_non_python_scalars(self, bad):
+        """An ``isinstance(x, (int, float))`` guard would wave these through --
+        they are CONCRETE (not tracers), so they must be validated, or a
+        NaN/negative diffusivity reaches the kernel."""
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        with pytest.raises(ValueError, match="must be finite|must be > 0"):
+            validate_treguier_cfg(TreguierConfig(enabled=True, aei0=bad))
+
+    def test_validator_rejects_bool(self):
+        """bool is an int subclass: aei0=True would install a 1 m^2/s cap."""
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        with pytest.raises(ValueError, match="must be a real number"):
+            validate_treguier_cfg(TreguierConfig(enabled=True, aei0=True))
+
+    def test_floor_precedes_resolution_scaling(self):
+        """DOCUMENTED ordering (same as VisbeckConfig.kappa_min): the floor is
+        on the raw Treguier coefficient, and the Hallberg resolution function
+        scales it afterwards, so the EFFECTIVE kappa may fall below the floor.
+        Pinning it so the behaviour cannot drift silently."""
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            gm_resolution_scaled_kappa,
+        )
+        rho, S_x, S_y, z, jac = _setup()
+        f = jnp.full((3, 3), 1.0e-8)
+        kappa = compute_treguier_kappa_gm(
+            rho, S_x, S_y, z, jac, f,
+            TreguierConfig(enabled=True, kappa_min=200.0))
+        np.testing.assert_allclose(np.asarray(kappa), 200.0, rtol=1e-12)
+        scaled = np.asarray(gm_resolution_scaled_kappa(
+            kappa, f, jnp.full((3, 3), 1.0e4), 400.0, 2.0))
+        assert (scaled < 200.0).all()      # floor is pre-scaling, by design
+
+    def test_validator_rejects_floor_above_cap(self):
+        """kappa_min > aei0 would override the NEMO cap on every wet cell."""
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        with pytest.raises(ValueError, match="exceeds the NEMO cap"):
+            validate_treguier_cfg(
+                TreguierConfig(enabled=True, aei0=1800.0, kappa_min=5000.0))
+        with pytest.raises(ValueError, match="must be >= 0"):
+            validate_treguier_cfg(
+                TreguierConfig(enabled=True, kappa_min=-1.0))
+        # disabled block is never validated; valid block passes
+        validate_treguier_cfg(TreguierConfig(kappa_min=5000.0))
+        validate_treguier_cfg(
+            TreguierConfig(enabled=True, aei0=1800.0, kappa_min=200.0))
+
+    def test_param_spec_classifies_kappa_min(self):
+        """A new float field on a specced Config must be in params/excluded or
+        tests/test_param_specs.py goes red."""
+        from legoesm.ocean.physics.lateral_mixing import config as _lm_config
+        entry = _lm_config.__param_spec__["TreguierConfig"]
+        assert "kappa_min" in (set(entry["params"]) | set(entry["excluded"]))
+
+
 class TestTreguierKappaNemoNative:
     """#1317: compute_treguier_kappa_gm_nemo_native must consume the SAME
     wslpi/wslpj (compute_nemo_native_slopes) NEMO's own ldf_eiv sums over
@@ -275,6 +482,58 @@ class TestTreguierKappaNemoNative:
             rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f, cfg,
             eos_fn, active_3d=act))
         assert np.allclose(got, 0.0)
+        # ...and a large floor must NOT switch GM on over a dry column: the
+        # floor is applied before the wet mask on this path too.
+        got_floored = np.asarray(compute_treguier_kappa_gm_nemo_native(
+            rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f,
+            cfg._replace(kappa_min=200.0), eos_fn, active_3d=act))
+        np.testing.assert_array_equal(got_floored, 0.0)
+
+    def test_kappa_min_floor_applies_on_this_path_too(self):
+        """REGRESSION: the floor was added to the generic
+        ``compute_treguier_kappa_gm`` only, so ``kappa_min`` was silently INERT
+        on the nemo_iso_lap+nemo_native path — i.e. on exactly the most
+        NEMO-faithful configuration.  Both κ paths run the SAME equatorial
+        taper and so must honour the SAME floor."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_nemo_native_slopes, compute_treguier_kappa_gm_nemo_native,
+            gm_redi_density_and_jacobian,
+        )
+        from legoesm.ocean.eos import make_eos_fn
+        dcfg, z, g, st = self._dino_fixture()
+        gm_cfg = GMRediConfig(slope_scheme="nemo_iso_lap",
+                              slope_positions="nemo_native")
+        eos_fn = make_eos_fn("nemo_seos")
+        mask = st.land_mask.data
+        rho, jacobian = gm_redi_density_and_jacobian(
+            st.T.data, st.S.data, st.eta.data, st.H_bathy.data, g, z,
+            eos="nemo_seos", mask=mask)
+        f = jnp.broadcast_to(g.f, mask.shape)
+        _z_top = jnp.cumsum(z.dz_ref) - z.dz_ref
+        act = ((mask[:, :, None] > 0.5)
+               & (_z_top[None, None, :]
+                  < st.H_bathy.data[:, :, None])).astype(st.T.data.dtype)
+        uslp, vslp, wslpi, wslpj = compute_nemo_native_slopes(
+            rho, st.T.data, st.S.data, mask, st.u_mask.data, st.v_mask.data,
+            z, g, gm_cfg, eos_fn, active_3d=act)
+        cfg = TreguierConfig(enabled=True, aei0=1500.0)
+        wet = np.asarray(mask) > 0.5
+
+        def _kappa(c):
+            return np.asarray(compute_treguier_kappa_gm_nemo_native(
+                rho, st.T.data, st.S.data, wslpi, wslpj, mask, z, g, f, c,
+                eos_fn, active_3d=act))
+
+        unfloored = _kappa(cfg)
+        # the fixture must actually contain sub-floor wet cells, else the
+        # assertion below would pass vacuously
+        floor = 200.0
+        assert (unfloored[wet] < floor).any()
+        floored = _kappa(cfg._replace(kappa_min=floor))
+        assert (floored[wet] >= floor - 1e-9).all()
+        # default (0.0) stays byte-identical to the pre-floor behaviour
+        np.testing.assert_array_equal(_kappa(cfg._replace(kappa_min=0.0)),
+                                      unfloored)
 
     def test_grad_finite(self):
         from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
@@ -389,6 +648,45 @@ class TestDispatchAndWiring:
                 st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
                 g, z, bad, mask=st.land_mask.data,
                 u_mask=st.u_mask.data, v_mask=st.v_mask.data)
+
+    def test_eke_override_with_treguier_raises(self):
+        """A prognostic-EKE kappa_GM override is consumed BEFORE Treguier, so
+        the combination would silently run the EKE coefficient (and its own
+        [0, kappa_max] clip) while the user believes NEMO ldf_eiv is active."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            gm_redi_tracer_tendency_latlon,
+        )
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state,
+        )
+        dcfg = DINOConfig()
+        z = create_dino_z_star(dcfg)
+        g = dino_lat_lon_grid(dcfg, n_lon=50)
+        st = dino_lat_lon_state(g, z, dcfg)
+        cfg = GMRediConfig(treguier=TreguierConfig(enabled=True))
+        override = jnp.full(st.land_mask.data.shape, 500.0)
+        with pytest.raises(ValueError, match="prognostic-EKE"):
+            gm_redi_tracer_tendency_latlon(
+                st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
+                g, z, cfg, mask=st.land_mask.data,
+                u_mask=st.u_mask.data, v_mask=st.v_mask.data,
+                kappa_gm_override=override)
+
+    def test_dino_treguier_rejects_non_finite_aei0(self):
+        """DINO builds an enabled TreguierConfig directly; a NaN --treguier-aei0
+        must fail at CONFIG BUILD, not turn the coefficient field into NaN
+        mid-run."""
+        import dataclasses as _dc
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        bad = _dc.replace(DINOConfig(), gm_kappa_scheme="treguier",
+                          treguier_aei0=float("nan"))
+        gg = dino_lat_lon_grid(bad, n_lon=50)
+        with pytest.raises(ValueError, match="must be finite"):
+            dino_lat_lon_model_config(gg, bad, physics=True)
 
     def test_dino_gm_kappa_scheme_wiring(self):
         from legoesm.ocean.experiments.dino import (

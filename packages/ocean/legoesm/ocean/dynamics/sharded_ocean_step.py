@@ -544,10 +544,16 @@ def make_sharded_ocean_step(model, mesh):
     template = band_grids[0]           # static-scalar source (uniform bands)
     array_field_names = _geom_array_field_names(template)
 
-    # Stack each geometry ARRAY field over the band axis (rank 0..N-1) -> a
-    # replicated pytree the body indexes by axis_index.  Replicate (P()) so every
-    # device holds the whole small grid stack.
-    rep = NamedSharding(mesh, P())
+    # Stack each geometry ARRAY field over the band axis (rank 0..N-1) and
+    # SHARD along that axis (#1370 stage (iii), codex round-18): each device
+    # holds ONLY its own band's slab instead of the whole global stack —
+    # this was one of the residual ~1.4-1.7 global-field-equivalents of
+    # per-device residency left after the host-side-build fix (probe
+    # 26524423). The leading axis has length n_dev, so P("lat") divides it
+    # exactly; the body indexes its local slab at [0]. Values are unchanged
+    # — same stack, different placement; the process-0 broadcast +
+    # divergence guard below runs on HOST values and is placement-blind.
+    rep = NamedSharding(mesh, P("lat"))
 
     def _replicated_put(arr, name):
         # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
@@ -655,13 +661,16 @@ def make_sharded_ocean_step(model, mesh):
         fw_local, sf_local, sponge_local, t_s_local = forcing_local
         r = jax.lax.axis_index(axis)
 
-        # Rebuild this band's geometry: index the stacked arrays at r, keep the
-        # static scalars (n_lat_local, n_lon, radius, dlon, dlat, fold) from the
-        # band template.  The fold is inactive + identical on every band here.
-        geom_arrays = {name: geom_stacks_local[name][r]
+        # Rebuild this band's geometry. The stacks are SHARDED P("lat") on
+        # their leading band axis, so inside shard_map each device's local
+        # view is its own (1, ...) slab — index [0], NOT [r] (stage (iii);
+        # [r] was the replicated-stack indexing). Static scalars
+        # (n_lat_local, n_lon, radius, dlon, dlat, fold) come from the band
+        # template. The fold is inactive + identical on every band here.
+        geom_arrays = {name: geom_stacks_local[name][0]
                        for name in array_field_names}
         band_geom = template._replace(**geom_arrays)
-        band_vmask = vmask_stack_local[r]
+        band_vmask = vmask_stack_local[0]
 
         # Reconstruct the band's nl+1 v-faces from the nl-row v_lower.  band r's
         # north boundary row is band r+1's v_lower[0] (= global v[e]); the north
@@ -789,8 +798,11 @@ def make_sharded_ocean_step(model, mesh):
             # Forcing leaves are cell-centered -> plain lat-band specs;
             # scalars (t_seconds) replicate, exactly like dt.
             forcing_spec = jax.tree.map(_lat_spec, forcing)
-            geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
-            vmask_spec = P()
+            # Stage (iii): the stacks are banded on their leading axis, so
+            # the shard_map spec matches their P("lat") placement (the body
+            # indexes its local (1, ...) slab at [0]).
+            geom_spec = jax.tree.map(lambda _x: P("lat"), geom_stacks)
+            vmask_spec = P("lat")
             # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the
             # replication check); the band halo reads neighbour-rank data so
             # disable it (same as the validated PCG / halo-parity shard_maps).

@@ -2255,7 +2255,13 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                     build_bgrid_ring1_map,
                 )
 
-                ring_map = build_bgrid_ring1_map(n)   # cached, trace-time
+                _grid_nord = int(getattr(
+                    getattr(cdgrid.base, "duogrid", None), "k2e_nord",
+                    2))
+                ring_map = build_bgrid_ring1_map(
+                    n, k2e_nord=_grid_nord)   # cached, trace-time;
+                # order follows the GRID (codex r9: a default-2 map on
+                # an explicit nord-4 grid is the mixed-order hazard)
                 divg_d_pad = apply_bgrid_ring1(divg_d, ring_map, n)
             elif use_cross_face_halo:
                 # 2026-07-10 opt-in port (dyn_core.F90:652 ext_scalar B-grid
