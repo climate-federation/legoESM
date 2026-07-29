@@ -26,10 +26,17 @@ task. `--self-test` must keep passing every loop.
       sharp at (0,0) on both a U-face and a T-point field; ssh EXACT at seed => velocity-specific,
       not shared with the eta/PGF chain. `puu_b`, `un_adv` and `pssh` are ALL INHERITED from the
       seed — the solver faithfully propagates a wrong initial condition.
-      NEXT: compare legoESM's before-level U_bar/V_bar seed per column vs NEMO's
-      puu_b(Kbb)/pvv_b(Kbb) — uniform scale factor, or concentrated on shelf/thin columns?
-      `BarotropicConfig.barotropic_seed_face_depth`'s docstring already documents an 11%
-      loop-entry residual at shelf columns under `min_water_column_m=0.5`: leading candidate.
+      IN PROGRESS 2026-07-29: the seed is `sum_k(u*h_face)/sum_k(h_face)`, so there are exactly
+      two separable causes — (A) the 3-D VELOCITY entering it is already wrong, or (B) the
+      WEIGHTING/averaging is wrong. Measuring (A) FIRST against `stp_dump_07_dynspg_u/ub.bin`
+      (NEMO's 3-D velocity at the dyn_spg_ts entry); if that is already ~2-3% off, the seed is
+      inherited and ALL the barotropic code is exonerated.
+      DOWNGRADED CANDIDATE: `barotropic_seed_face_depth` ("min_rule" vs "nemo_ssh_avg") is
+      DOCUMENTED AND MEASURED INERT away from the `min_water_column_m` floor — a per-column
+      scalar cancels identically in the weighted mean — so it can only bite on thin/shelf
+      columns. DINO is a deep basin, so it is a WEAK explanation for a domain-wide 2.3%. Test it
+      only if the pattern turns out to be shelf-concentrated. (I had called it the "leading
+      candidate" last iteration; reading its own docstring says otherwise.)
 - [x] **DONE 2026-07-28/29 — metric_convention pass (human APPROVED: NEMO match).**
       `nemo_isotropic` already sets `dy_T`/`dy_u`/`area_T` and now `dy_v = R*dlon*cos(lat_v)`
       (NEMO `pe2v = pe1v`, `usrdef_hgr.F90:117`). REMAINING: wire the DINO bridge to select it
