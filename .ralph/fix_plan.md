@@ -44,7 +44,12 @@ task. `--self-test` must keep passing every loop.
       from the production A_S/dino_S_star because no first-class legoESM sfx array exists.
       Two probe-side wet-mask bugs were found and fixed mid-measurement (u-face periodic
       seam, v-face wall row) -- both harness, not legoESM.
-- [ ] **Instrument NEMO for the big rows.** `dyn_spg_ts` (1.3e-2, the worst), `zdftke`, `dyn_vor`,
+- [ ] **Instrument NEMO for the big rows** — but CHECK FIRST, more is already dumped than the
+      queue assumed. `dyn_spg_ts` needs NO rebuild: its whole substep chain is already on disk
+      (spg_dump_{zu_frc,zv_frc,ssh_frc, un_e_init,vn_e_init,sshn_e_init, ub_substep1,vb_substep1,
+      ssh_substep1, puu_b_final,pvv_b_final,pssh_final,un_adv_final,vn_adv_final}.bin), which is
+      enough to answer the decisive question (error at substep 1 vs accumulated over ~69).
+      Still likely needed for: `zdftke`, `dyn_vor`,
       `traadv_fct`. Add `WRITE` dumps of the INTERMEDIATES following the
       `cfgs/DINO/MY_SRC/ldfslp.F90` pattern (units 8840-8848, `l_1226_raw_dump_done` first-call
       flag), rebuild, rerun, register each dump in `legoesm.ocean.fidelity.time_levels` with its
