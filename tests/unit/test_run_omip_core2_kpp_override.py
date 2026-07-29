@@ -188,3 +188,20 @@ def test_mpas_tke_callsite_runs_full_card_with_seed():
     assert vm.tke.tke_mxl_choice == 3
     assert vm.tke.surface_bc == "nemo_dirichlet"
     assert vm.tke.eice == 3
+
+
+def test_ice_ocean_heat_coeff_flag_roundtrip():
+    """--ice-ocean-heat-coeff parses, requires --prognostic-sea-ice (silent
+    no-op guard), and reaches SeaIceConfig.ocean_heat_transfer_coeff via
+    _replace (the Antarctic under-melt lever, 2026-07-28)."""
+    import scripts.run.run_omip_core2 as core2
+
+    p = core2._build_arg_parser()
+    a = p.parse_args(["--grid", "tripole", "--prognostic-sea-ice",
+                      "--ice-ocean-heat-coeff", "70"])
+    assert a.ice_ocean_heat_coeff == 70.0
+    b = p.parse_args(["--grid", "tripole"])
+    assert b.ice_ocean_heat_coeff is None
+    from legoesm.ice.config import SeaIceConfig
+    cfg = SeaIceConfig()._replace(ocean_heat_transfer_coeff=70.0)
+    assert cfg.ocean_heat_transfer_coeff == 70.0
