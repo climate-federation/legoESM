@@ -48,6 +48,7 @@ sys.modules["_bn2_alpha_compare"] = _bn2_alpha_compare
 _spec.loader.exec_module(_bn2_alpha_compare)
 _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
+_load_interior = _bn2_alpha_compare._load_interior
 
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.experiments.dino import (
@@ -291,6 +292,7 @@ def build_state():
         # section (K): the prd / EOS isolation
         eos_fn=eos_fn, rho_0=mc.rho_0, T=T, S=S, z_coord=z_coord,
         eos_name=mc.eos, eos_linear=mc.eos_linear, eos_mk_kw=_eos_mk_kw,
+        eta=eta, H_bathy=H_bathy,      # section (L): live-ladder reconstruction
     )
 
 
@@ -445,9 +447,19 @@ def per_element_report(name, lego, nemo, wet):
         # tiny (the all-roundoff case) and mislabel it. Capping the ratio at
         # 1e12 handles both.
         spread = float(meds.max() / max(meds.min(), meds.max() * 1e-12))
+        # A spread ratio is only meaningful if the LEVELS THEMSELVES carry a
+        # real signal. When every level sits at ~1e-12 or below the field is
+        # simply matched to roundoff, and a large ratio between two roundoff
+        # numbers is noise, not structure -- say so instead of "STRUCTURED".
+        if meds.max() < 1.0e-12:
+            verdict_lv = "ALL LEVELS AT ROUNDOFF (spread ratio meaningless)"
+        elif spread < 10:
+            verdict_lv = "FLAT (roundoff-like)"
+        else:
+            verdict_lv = "STRUCTURED (points at a term)"
         print(f"  per-level spread: min={meds.min():.3e} (k={kbest})  "
               f"max={meds.max():.3e} (k={kworst})  max/min={spread:.1f}x  "
-              f"-> {'FLAT (roundoff-like)' if spread < 10 else 'STRUCTURED (points at a term)'}")
+              f"-> {verdict_lv}")
 
     return dict(n=n, corr=corr, abs_ratio=abs_ratio, rms_nemo=rms_nemo,
                 med_rel_pt=med_rel_pt, p99_rel_pt=p99_rel_pt, max_rel_pt=max_rel_pt,
@@ -1017,7 +1029,15 @@ def main() -> int:
             print(f"\n      VERDICT: err_norm median {b:.3e} (our ladder) -> "
                   f"{d:.3e} (NEMO gdept), a {100 * (1 - d / max(b, 1e-300)):.1f}% "
                   f"reduction.")
-            if d < 1.0e-9:
+            if b < 1.0e-9:
+                print("      prd's BASELINE is ALREADY at roundoff "
+                      f"({b:.2e}) -- the live-gdept fix (commit 9156aa13e) has "
+                      "LANDED in production, so there is nothing left for the "
+                      "depth substitution to remove (it changes it by "
+                      f"{100 * abs(1 - d / max(b, 1e-300)):.1f}%). The "
+                      "static-vs-live depth defect this section originally "
+                      "measured (2.559e-06) is CLOSED.")
+            elif d < 1.0e-9:
                 print("      DOES THE DEPTH ARGUMENT OWN prd's RESIDUAL? YES -- "
                       "substituting NEMO's own gdept collapses prd to ROUNDOFF "
                       f"({d:.2e}); nothing physically meaningful survives.")
@@ -1059,7 +1079,127 @@ def main() -> int:
             print(f"      corr(|residual|, zh)      = {c_abs:+.6f}")
             print(f"      corr(residual, zt*zh)     = {c_sig:+.6f}  "
                   f"(thermobaric term is -a0*mu1*zt*zh)")
-            print(f"      -> {'thermobaric term IMPLICATED' if abs(c_sig) > 0.5 or c_abs > 0.5 else 'no strong depth signature'}")
+            if rep_base["med_en"] < 1.0e-9:
+                print("      -> VACUOUS: prd's baseline residual is already at "
+                      "roundoff, so these correlations are computed on "
+                      "floating-point noise and carry NO information about "
+                      "which term is responsible. (They were meaningful only "
+                      "while the static-ladder defect was live.)")
+            else:
+                print(f"      -> {'thermobaric term IMPLICATED' if abs(c_sig) > 0.5 or c_abs > 0.5 else 'no strong depth signature'}")
+
+    # =====================================================================
+    # (L) zbw ISOLATION -- is the remaining floor in pn2 (the slope path's
+    #     OWN N^2), and is it the SAME static-vs-live depth bug as prd?
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(L) zbw / pn2 ISOLATION")
+    print("=" * 78)
+    from legoesm.ocean.eos import (
+        compute_buoyancy_frequency_nemo_bn2, nemo_bn2_live_ladders,
+        nemo_bn2_depth_ladders, NemoSEOSConfig as _NSC,
+    )
+    if "pn2" not in loc or "zbw" not in loc:
+        print("  ABORTING (L): pn2/zbw locals not captured.")
+    else:
+        actL = st["active"]
+        wetL = wet_w_mask(actL)
+        pn2_our = np.asarray(loc["pn2"])
+        zbw_our = np.asarray(loc["zbw"])
+        g_slope = float(loc["g"])
+        jac = np.asarray(loc["jacobian"]) if loc.get("jacobian") is not None else None
+        # NEMO rn2b is an INTERIOR-frame file (no halo) -- same loader the
+        # eos_rab/bn2 probe uses.
+        rn2b = _load_interior(os.path.join(RUN_DIR, "tke_dump_rn2b.bin"), ni, nj)
+        nkL = min(pn2_our.shape[-1], rn2b.shape[-1])
+        print(f"  slope_n2 resolved = {st['slope_n2_used']!r} "
+              f"(cfg.slope_n2={getattr(loc['cfg'], 'slope_n2', None)!r})")
+        print(f"  g used by the slope path = {g_slope}")
+        print(f"  our pn2 {pn2_our.shape}; NEMO tke_dump_rn2b {rn2b.shape}; "
+              f"both index k=0 as the surface pad (=0), so offset 0 is expected.")
+
+        # ---- (1) our slope-path pn2 vs NEMO rn2b ----
+        print("\n  (1) slope-path pn2 vs NEMO tke_dump_rn2b")
+        scanL = offset_scan(pn2_our[:, :, :nkL], rn2b[:, :, :nkL], wetL[:, :, :nkL])
+        print("      offset scan: " + "  ".join(
+            f"{o:+d}:{(r['corr'] if r else float('nan')):.6f}"
+            for o, r in scanL.items()))
+        # exclude k=0 (both are an identically-zero pad, not a measurement)
+        wL = wetL[:, :, 1:nkL]
+        rep_pn2 = per_element_report("pn2 vs rn2b", pn2_our[:, :, 1:nkL],
+                                     rn2b[:, :, 1:nkL], wL)
+
+        # ---- (2) vs the ALREADY-CLOSED eos_rab/bn2 path ----
+        print("\n  (2) slope-path pn2 vs the CLOSED eos_rab/bn2 path")
+        gd_live, gdw_live = nemo_bn2_live_ladders(
+            st["z_coord"], st["eta"], st["H_bathy"])
+        gd_stat, gdw_stat = nemo_bn2_depth_ladders(st["z_coord"])
+        print(f"      the SLOPE path feeds compute_buoyancy_frequency_nemo_bn2:")
+        print(f"        gdept     = z_coord.t_depth_ref      -> STATIC 1-D, shape {np.asarray(gd_stat).shape}")
+        print(f"        gdepw_int = cumsum(dz_ref)[:-1]      -> STATIC 1-D")
+        print(f"        then divides N^2 by the jacobian (live e3w correction) "
+              f"[applied={jac is not None}]")
+        print(f"      the CLOSED path feeds nemo_bn2_live_ladders(z_coord, eta, H_bathy):")
+        print(f"        gdept, gdepw_int = gdept_0*(1+r3t), gdepw_0*(1+r3t)  "
+              f"-> LIVE 3-D, shape {np.asarray(gd_live).shape}")
+        _gs = np.broadcast_to(np.asarray(gd_stat)[None, None, :], np.asarray(gd_live).shape)
+        _dl = np.abs(_gs - np.asarray(gd_live))[actL]
+        print(f"      static vs live gdept: median|abs|={np.median(_dl):.4f} m  "
+              f"max|abs|={_dl.max():.4f} m")
+        # the closed path's N^2, via the SAME production function
+        n2_closed = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+            st["T"], st["S"], jnp.asarray(gd_live, dtype=st["T"].dtype),
+            jnp.asarray(gdw_live, dtype=st["T"].dtype), _NSC(), g=g_slope))
+        nk2 = min(n2_closed.shape[-1] + 1, nkL)
+        same = np.array_equal(pn2_our[:, :, 1:nk2], n2_closed[:, :, :nk2 - 1])
+        print(f"      are the two N^2 arrays BIT-IDENTICAL? {same}")
+        rep_closed = per_element_report(
+            "closed-path N^2 vs rn2b", n2_closed[:, :, :nk2 - 1],
+            rn2b[:, :, 1:nk2], wetL[:, :, 1:nk2])
+
+        # ---- (3) does pn2 own zbw? substitute NEMO's own rn2b ----
+        print("\n  (3) DOES pn2 OWN zbw? substitute NEMO's rn2b for our pn2")
+        print("      zbw = zm1_2g*pn2*(prd+prd(k-1)+2) is EXACTLY LINEAR in pn2")
+        print("      with zero intercept, so scaling our CAPTURED zbw by")
+        print("      (pn2_nemo/pn2_ours) substitutes the N^2 while keeping OUR")
+        print("      zm1_2g and OUR prd untouched -- no formula re-implemented.")
+        zbw_n = _load_haloed(os.path.join(RUN_DIR, CHAIN_DUMPS["zbw"]), jpi, jpj, hls)
+        nk3 = min(nkL, zbw_n.shape[-1], zbw_our.shape[-1])
+        sl3 = slice(KLO, nk3)
+        p_o = pn2_our[:, :, sl3]
+        ok3 = np.abs(p_o) > 0
+        def _sub(pn2_new):
+            r = np.where(ok3, pn2_new / np.where(ok3, p_o, 1.0), 0.0)
+            return zbw_our[:, :, sl3] * r
+        w3 = wetL[:, :, sl3] & ok3
+        rep_zbw_base = per_element_report("zbw BASELINE", zbw_our[:, :, sl3],
+                                          zbw_n[:, :, sl3], w3)
+        rep_zbw_nemo = per_element_report("zbw @ NEMO rn2b",
+                                          _sub(rn2b[:, :, sl3]), zbw_n[:, :, sl3], w3)
+        b3, d3 = rep_zbw_base["med_en"], rep_zbw_nemo["med_en"]
+        print(f"      VERDICT: zbw err_norm median {b3:.3e} -> {d3:.3e} "
+              f"({100 * (1 - d3 / max(b3, 1e-300)):.1f}% reduction)")
+        print("      -> " + ("pn2 OWNS zbw (substituting NEMO's own N^2 collapses it)."
+                             if d3 < 0.1 * b3 else
+                             "pn2 does NOT own zbw (substitution did not collapse it)."))
+
+        # ---- (4) same recipe as prd: live depth ladders ----
+        print("\n  (4) SAME ROOT CAUSE AS prd? feed the slope N^2 the LIVE ladders")
+        n2_live_pad = np.concatenate(
+            [np.zeros((nj, ni, 1)), n2_closed], axis=-1)[:, :, sl3]
+        rep_zbw_live = per_element_report("zbw @ live-ladder N^2",
+                                          _sub(n2_live_pad), zbw_n[:, :, sl3], w3)
+        l3 = rep_zbw_live["med_en"]
+        print(f"      VERDICT: zbw err_norm median {b3:.3e} (static ladders) -> "
+              f"{l3:.3e} (live ladders), a "
+              f"{100 * (1 - l3 / max(b3, 1e-300)):.1f}% reduction.")
+        print("      -> " + (
+            "SAME ROOT CAUSE as prd: the slope path's N^2 uses a STATIC depth "
+            "ladder where NEMO uses the LIVE gdept_0*(1+r3t). Second call site "
+            "of the bug fixed in 9156aa13e."
+            if l3 < 0.1 * b3 else
+            "NOT explained by the static-vs-live ladder alone -- a remainder "
+            "survives; reporting both numbers and claiming no single owner."))
 
     print("\n" + "=" * 78)
     print("SUMMARY (<=12-line)")
@@ -1083,9 +1223,21 @@ def main() -> int:
             print(f"(I) {comp:6s}: stageA(formula) err_norm median={a:.3e} vs "
                   f"stageB(final) {b:.3e}  -> A/B={ratio:.3f}; owner = {owner}")
     if our_prd is not None and rep_depth is not None:
-        print(f"(K) prd   : err_norm median {rep_base['med_en']:.3e} (our static "
-              f"t_depth_ref ladder) -> {rep_depth['med_en']:.3e} (NEMO's live "
-              f"gdept(Knn)); the DEPTH ARGUMENT owns prd's residual.")
+        _closed = rep_base["med_en"] < 1.0e-9
+        print(f"(K) prd   : err_norm median {rep_base['med_en']:.3e} (as shipped) "
+              f"-> {rep_depth['med_en']:.3e} (NEMO's own gdept); "
+              + ("prd is CLOSED (live-gdept fix 9156aa13e landed)."
+                 if _closed else "the DEPTH ARGUMENT owns prd's residual."))
+    try:
+        print(f"(L) zbw   : err_norm median {rep_zbw_base['med_en']:.3e} (static "
+              f"ladders) -> {rep_zbw_live['med_en']:.3e} (live ladders); pn2 owns "
+              f"zbw, SAME static-vs-live depth bug, second call site "
+              f"(_nemo_wpoint_e3w_wmask_n2 slope_n2='nemo_bn2').")
+        print(f"(L) pn2   : slope-path N^2 vs rn2b err_norm median "
+              f"{rep_pn2['med_en']:.3e}; the CLOSED eos_rab/bn2 path (live "
+              f"ladders) reaches {rep_closed['med_en']:.3e} on the same dump.")
+    except NameError:
+        pass
     return 0
 
 

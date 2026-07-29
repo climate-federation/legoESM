@@ -803,19 +803,45 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         # w-interface depth gdepw, which is the gdept midpoint only on a uniform
         # ladder -- see the same fix in _nemo_mld_from_n2_integral.
         _gdepw_int = jnp.cumsum(dz)[:-1]
-        n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T, S, gdept, _gdepw_int, NemoSEOSConfig(), g=g)        # (...,nlev-1)
+        # #1226: evaluate alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1+r3t),
+        # exactly as eosbn2.F90:1166/:1459 does -- NOT at the static ladder.
+        # ``jacobian`` IS (1+r3t) under the _live_e3w gate above, so the live
+        # ladders come for free without widening this signature; the same
+        # pattern is already used in _nemo_mld_from_n2_integral.
+        # Stretching BOTH gdept and gdepw keeps the zrw weight (a RATIO of
+        # depth differences) invariant, and makes the e3w that
+        # compute_buoyancy_frequency_nemo_bn2 derives internally as
+        # diff(gdept) the LIVE e3w -- which is why the explicit
+        # ``/ jacobian`` correction below is dropped WITH this change rather
+        # than kept alongside it: keeping both would apply (1+r3t) twice.
         if _live_e3w:
-            # NEMO divides by the LIVE e3w(jk,Kmm) = e3w_0*(1+r3t)
-            # (domzgr_substitute.h90:131); on an OceanPartialCellCoordinate
-            # the (eta+H_bathy)/H_bathy Jacobian IS that (1+r3t) (see the
-            # gate above -- NOT true on a pure z* coordinate, whose Jacobian
-            # is (eta+H_bathy)/H_max instead).  Without this the reference
-            # e3w leaves a ~1e-4 bias.  It does NOT cancel here (unlike in
-            # the thickness-free MLD criterion).  Measured on the DINO y5
-            # twin vs NEMO's dumped rn2b, with NEMO's g: median |rel|
-            # 8.59e-05 -> 6.96e-06.
-            n2_int = n2_int / jnp.asarray(jacobian, dtype)[..., None]
+            _Jn2 = jnp.asarray(jacobian, dtype)[..., None]
+            _gdept_n2 = gdept[None, None, :] * _Jn2
+            _gdepw_n2 = _gdepw_int[None, None, :] * _Jn2
+        else:
+            _gdept_n2, _gdepw_n2 = gdept, _gdepw_int
+        n2_int = compute_buoyancy_frequency_nemo_bn2(
+            T, S, _gdept_n2, _gdepw_n2, NemoSEOSConfig(), g=g)     # (...,nlev-1)
+        # HISTORICAL (superseded 2026-07-28, kept for provenance):
+        # this branch used to divide n2_int by the jacobian --
+        #     NEMO divides by the LIVE e3w(jk,Kmm) = e3w_0*(1+r3t)
+        # (domzgr_substitute.h90:131); on an OceanPartialCellCoordinate
+        # the (eta+H_bathy)/H_bathy Jacobian IS that (1+r3t) (see the
+        # gate above -- NOT true on a pure z* coordinate, whose Jacobian
+        # is (eta+H_bathy)/H_max instead).  Without this the reference
+        # e3w leaves a ~1e-4 bias.  It does NOT cancel here (unlike in
+        # the thickness-free MLD criterion).  Measured on the DINO y5
+        # twin vs NEMO's dumped rn2b, with NEMO's g: median |rel|
+        # 8.59e-05 -> 6.96e-06.
+        #
+        # SUPERSEDED 2026-07-28: this scalar correction fixed only the e3w
+        # DENOMINATOR while alpha/beta stayed at STATIC depths, leaving
+        # pn2 at err_norm 3.460e-07 -- quantitatively the whole of zbw's
+        # 3.467e-07 floor.  The live ladders above now carry (1+r3t) into
+        # BOTH the alpha/beta depths and the internal diff(gdept) e3w, so
+        # this division would double-count.  Measured: zbw 3.467e-07 ->
+        # 9.369e-16, statistically identical to substituting NEMO's own
+        # dumped rn2b (9.304e-16).
     elif slope_n2 == "adiabatic":
         from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
         p_cell = (jnp.asarray(rho_0, dtype) * jnp.asarray(g, dtype)
