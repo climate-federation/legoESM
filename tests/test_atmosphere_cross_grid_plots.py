@@ -3770,6 +3770,26 @@ class TestRunAmipFiniteCheck:
                 )
                 self.output_dir = "/tmp/amip_test_unused"
                 self._mpi_rank = None
+                # `main()` reads `driver.physics` UNCONDITIONALLY on the way to
+                # the finite-check (run_amip.py, the Sundqvist precip-tunable
+                # override block): `getattr(driver.physics, "micro_config",
+                # None)`. That guards the ATTRIBUTE but not `physics` itself,
+                # so a stub without it dies with AttributeError before the NaN
+                # path under test is ever reached.
+                #
+                # Fixed on the stub, not by making production defensive: a real
+                # driver always has `.physics`, and a `getattr(driver,
+                # "physics", None)` fallback in run_amip.py would silently skip
+                # the trained-config injection if the attribute ever went
+                # missing for real — converting a loud failure into wrong
+                # physics. The test double is what drifted; it is what should
+                # track the real surface.
+                #
+                # An empty namespace is the minimal honest stand-in: every
+                # `getattr(self.physics, ..., None)` resolves to None, so each
+                # override block correctly no-ops for a driver that has no
+                # configured schemes.
+                self.physics = SimpleNamespace()
             def setup(self):
                 pass
             def run(self, **kwargs):
