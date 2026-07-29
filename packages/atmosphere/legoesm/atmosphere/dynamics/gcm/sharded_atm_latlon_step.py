@@ -33,11 +33,44 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    assert_flags_agree, assert_schema_agrees, broadcast_checked)
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    coerce_count, name_digest48)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState,
 )
+
+
+# Ordered flag names for the MESH-ONLY entry gate used by the gather bridges.
+# STATIC tuple: the payload width is fixed by this literal, never by data.
+_MESH_ENTRY_FLAGS = ("has_mesh", "n_dev", "n_axes", "axis_names")
+
+
+def _agree_mesh_entry(mesh, *, where: str) -> None:
+    """Agree the mesh identity, as the FIRST statement of a GATHER entry point.
+
+    #1362 round 4.  The gather bridges are public and they DO run a
+    cross-process collective: ``replicate_leaf`` compiles a jit identity with
+    replicated ``out_shardings``, and XLA inserts the all-gather (unlike the
+    SCATTER direction, whose ``make_array_from_callback`` builds each
+    addressable shard locally).  ``gather_atm_latlon_to_hydrostatic`` also
+    branches on ``mesh is None`` and SKIPS that collective entirely, so a
+    process that received ``None`` while its peers received a mesh would leave
+    them blocked forever.
+
+    Only the mesh is agreed here — that is the whole rank-local input — so the
+    payload is 4 wide and the cost is one tiny allgather per SEGMENT BOUNDARY
+    (never in the step hot loop, and a no-op under one process), alongside a
+    full-state gather that is orders of magnitude larger.
+    """
+    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
+        else ()
+    assert_flags_agree(_MESH_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(axis_names)),
+        name_digest48(axis_names),
+    ), context=where)
 
 
 def lat_spec(arr) -> P:
@@ -190,6 +223,9 @@ def gather_state_atm_latlon(
     ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
     the primitive shared with the ocean gather); the single-process path is
     byte-unchanged."""
+    # FIRST statement: this entry point runs a cross-process replication
+    # collective (see _agree_mesh_entry).
+    _agree_mesh_entry(mesh, where="gather_state_atm_latlon")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -242,6 +278,9 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
     C-grid state THEN convert (C-grid faces -> cell winds) to the cell-centered,
     Field-wrapped ``HydrostaticState`` the driver/output/restart contract
     expects. ``mesh=None`` converts the already-full C-grid state directly."""
+    # FIRST statement: the `mesh is None` branch below SKIPS the replication
+    # collective entirely, so the mesh must be agreed before it (#1362 r4).
+    _agree_mesh_entry(mesh, where="gather_atm_latlon_to_hydrostatic")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         cgrid_to_hydrostatic)
     full = c_state if mesh is None else gather_state_atm_latlon(c_state, mesh)
@@ -519,18 +558,29 @@ def unroll_to_dtype_fixed_point(step1, state, n_left: int):
 # Ordered flag names for the SPMD entry gate. STATIC tuple: the payload width
 # is fixed by this literal, never by rank-local data.
 _SPMD_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "p_lat", "p_lon",
+    "has_mesh", "n_dev", "n_axes", "axis_names", "p_lat", "p_lon",
     "grid_n_lat", "grid_n_lon",
     "fold_active", "anchor_mass_to_initial", "use_polar_filter",
-    "n_steps",
+    "n_steps", "segment_steps", "compiled_segments",
+    "has_physics_fn", "has_on_segment", "has_phys_state", "shard_geometry",
 )
 
 
-def _agree_spmd_entry(model, mesh, *, n_steps=None, where: str) -> None:
-    """Agree EVERY rank-local input, as the FIRST statement of a public factory.
+def _tri(value) -> float:
+    """Tri-state payload entry: ``None`` (not applicable to this call site) ->
+    :data:`FLAG_ABSENT`, else the boolean.  Keeps the entry payload FIXED
+    WIDTH across call sites that carry different subsets of the flags."""
+    return FLAG_ABSENT if value is None else float(bool(value))
 
-    #1362 / codex round 2. Gating individual refusals was not enough: each
-    public factory performs several rank-local checks BEFORE reaching any
+
+def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
+                      compiled_segments=None, has_physics_fn=None,
+                      has_on_segment=None, has_phys_state=None,
+                      shard_geometry=None, where: str) -> None:
+    """Agree EVERY rank-local input, as the FIRST statement of a public entry.
+
+    #1362 / codex rounds 2-3. Gating individual refusals was not enough: each
+    public entry point performs several rank-local checks BEFORE reaching any
     collective -- ``n_steps`` validation, ``_check_2d_mesh``, the ``mesh is
     None`` early return, and ``build_band_grids_atm``'s divisibility check.
     Any one of them lets a process raise (or return a serial closure) while a
@@ -538,33 +588,89 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, where: str) -> None:
     one at a time is whack-a-mole; the invariant has to be established ONCE,
     before anything can diverge.
 
-    So: agree the mesh shape, the grid dimensions, the config flags that gate
-    refusals, and ``n_steps`` -- all in a single fixed-width collective at the
-    very top. Every rank-local check downstream is then guaranteed symmetric,
-    because its inputs are proven identical on every process.
+    So: agree the mesh shape AND AXIS ORDER, the grid dimensions, the config
+    flags that gate refusals, and every input that decides HOW MANY SPMD steps
+    (or which lane) this process will execute -- all in a single fixed-width
+    collective at the very top. Every rank-local check downstream is then
+    guaranteed symmetric, because its inputs are proven identical on every
+    process.
 
-    ``n_steps`` matters even when positive on all ranks: two processes with
-    different values capture different STATIC scan lengths and then execute
-    different numbers of in-body SPMD collectives (codex round-2 blocker 3).
-    ``-1`` encodes "not a segment factory".
+    What each non-obvious entry buys:
+
+    * ``axis_names`` -- the ORDERED axis-name digest. ``n_axes`` + the per-axis
+      sizes do NOT pin the order: a ``(lat, lon)`` mesh of shape ``(2, 3)`` and
+      a peer's ``(lon, lat)`` mesh of shape ``(3, 2)`` both report
+      ``n_axes=2, p_lat=2, p_lon=3``. The gate passed, then ``_check_2d_mesh``
+      rejected the swapped peer while the valid one walked into the geometry
+      collective -- a hang (codex round-3, blocker 2). ``name_digest48`` is
+      order-sensitive and NUL-separated, and returns one fixed-width float, so
+      folding it in costs no payload width.
+    * ``n_steps`` / ``segment_steps`` -- unequal positive values capture
+      different STATIC scan lengths and drive different numbers of host-side
+      SPMD dispatches (codex round-2 blocker 3, round-3 blocker 4). Both are
+      routed through :func:`coerce_count`, which NEVER raises: an uncoercible
+      or aliasing value becomes a sentinel that travels through the collective
+      and is refused symmetrically BELOW.
+    * ``compiled_segments`` -- selects the compiled-scan lane vs the per-step
+      lane. Two processes on different lanes run different programs.
+    * ``has_physics_fn`` / ``has_phys_state`` -- change the traced program and
+      the carry contract.
+    * ``has_on_segment`` -- the callback triggers a per-segment
+      ``gather_atm_latlon_to_hydrostatic``, itself a cross-process
+      replication. A callback on some ranks only = unmatched gathers.
+    * ``shard_geometry`` -- changes the geometry stacks' ``PartitionSpec``.
+
+    ``None`` for any of these encodes "not applicable at this call site" and
+    maps to a fixed sentinel, so the payload WIDTH is set by
+    ``_SPMD_ENTRY_FLAGS`` alone and never by rank-local data.
     """
     grid = model.grid
     fold = getattr(grid, "fold", None)
     shape = dict(mesh.shape) if mesh is not None else {}
+    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
+        else ()
+    # Counts that can be user-supplied or grid-supplied go through
+    # coerce_count so building this payload cannot raise before the collective
+    # (codex round-3, blocker 3). The mesh-derived sizes are plain ints by
+    # construction inside ``jax.sharding.Mesh``, so they need no coercion.
+    n_steps_flag, n_steps_bad = coerce_count(n_steps)
+    seg_flag, seg_bad = coerce_count(segment_steps)
+    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
+                                         absent=0.0)
+    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
+                                         absent=0.0)
     flags = (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(mesh.axis_names) if mesh is not None else 0),
+        float(len(axis_names)),
+        name_digest48(axis_names),
         float(shape.get("lat", 0)),
         float(shape.get("lon", 0)),
-        float(int(getattr(grid, "n_lat", 0) or 0)),
-        float(int(getattr(grid, "n_lon", 0) or 0)),
+        n_lat_flag,
+        n_lon_flag,
         float(bool(fold is not None and getattr(fold, "is_active", False))),
         float(bool(getattr(model.config, "anchor_mass_to_initial", False))),
         float(bool(getattr(model.config, "use_polar_filter", False))),
-        float(-1 if n_steps is None else int(n_steps)),
+        n_steps_flag,
+        seg_flag,
+        _tri(compiled_segments),
+        _tri(has_physics_fn),
+        _tri(has_on_segment),
+        _tri(has_phys_state),
+        _tri(shard_geometry),
     )
     assert_flags_agree(_SPMD_ENTRY_FLAGS, flags, context=where)
+    # ONLY NOW may a bad value raise. Every process has entered AND LEFT the
+    # same collective above, and every process sees the same sentinel in its
+    # own payload, so this refusal is symmetric by construction -- unlike the
+    # `int(n_steps)` that used to sit inside the payload build and could kill
+    # one rank while its peers blocked (codex round-3, blocker 3).
+    for label, problem in (("n_steps", n_steps_bad),
+                           ("segment_steps", seg_bad),
+                           ("grid.n_lat", n_lat_bad),
+                           ("grid.n_lon", n_lon_bad)):
+        if problem is not None:
+            raise ValueError(f"{where}: {label} {problem}")
 
 
 def _refuse_unsupported_spmd_config(model) -> None:
@@ -572,13 +678,17 @@ def _refuse_unsupported_spmd_config(model) -> None:
     non-fold lat-lon grid with an SPMD-safe mass path is supported.  Fail
     LOUD rather than silently mis-fold / band-local-sum.
 
-    The refusal decision is AGREED ACROSS PROCESSES first.  These are
-    rank-local reads of per-process config, and this function runs BEFORE the
-    geometry schema gate; if one process rejected its config and unwound
-    while its peers proceeded into `process_allgather`, that would be a
-    collective-order violation whose symptom is a HANG rather than an error
-    (codex 2026-07-29, blocker 1).  Agreeing on the flags first makes the
-    refusal symmetric: all processes raise, or none do.
+    This function performs NO cross-process agreement of its own.  It reads
+    rank-local config and raises, which is only safe because
+    :func:`_agree_spmd_entry` has ALREADY run as the first statement of the
+    public entry point and proved ``fold_active`` / ``anchor_mass_to_initial``
+    identical on every process.  Given that, the refusal here is symmetric by
+    construction: all processes raise, or none do.
+
+    The per-refusal agreement calls this docstring used to describe were
+    REMOVED when the single entry gate landed (codex 2026-07-29 round 2) --
+    they were whack-a-mole and left five other unguarded paths.  Do NOT call
+    this from a new entry point without gating that entry point first.
     """
     fold = getattr(model.grid, "fold", None)
     fold_active = bool(fold is not None
@@ -666,6 +776,8 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None, *,
     # FIRST statement: agree every rank-local input before ANY
     # rank-local check can raise or return (codex round-2 blocker 1/2/3).
     _agree_spmd_entry(model, mesh, n_steps=None,
+                      has_physics_fn=physics_fn is not None,
+                      shard_geometry=shard_geometry,
                       where="make_sharded_atm_latlon_step")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
@@ -835,6 +947,8 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     # FIRST statement: agree every rank-local input before ANY
     # rank-local check can raise or return (codex round-2 blocker 1/2/3).
     _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      has_physics_fn=physics_fn is not None,
+                      shard_geometry=shard_geometry,
                       where="make_sharded_atm_latlon_segment")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
@@ -970,6 +1084,17 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
     HydrostaticState                       (``phys_state is None``), or
     (HydrostaticState, PhysicsState)       with the threaded carry-out.
     """
+    # FIRST statement: this wrapper VALIDATES AND LOOPS ON ``n_steps`` itself,
+    # outside any factory. The factory gate below sees ``n_steps=None``, so
+    # before this call two processes could pass 1 vs 2 here, agree on
+    # everything the factory checks, and then execute DIFFERENT numbers of
+    # SPMD steps -- a production path via ``model_driver`` (codex round-3,
+    # blocker 4). Every loop-count and lane-selecting input of THIS function
+    # is agreed here, before its own `n_steps < 1` refusal can fire.
+    _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      has_physics_fn=physics_fn is not None,
+                      has_phys_state=phys_state is not None,
+                      where="run_atm_latlon_spmd_segment")
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
     step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
@@ -1048,6 +1173,20 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
     (HydrostaticState, str)           final state + ``"COMPLETED"`` / ``"BLOWUP
                                       at step N"``.
     """
+    # FIRST statement: the production run driver. It validates and loops on
+    # BOTH ``n_steps`` and ``segment_steps`` outside any factory, and
+    # ``compiled_segments`` selects a different lane entirely, so the factory
+    # gates (which see n_steps=None on the per-step lane) cannot cover it
+    # (codex round-3, blocker 4). ``on_segment`` matters too: the callback
+    # triggers a per-segment ``gather_atm_latlon_to_hydrostatic``, which is
+    # itself a cross-process replication -- a callback installed on some ranks
+    # only means unmatched gathers.
+    _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      segment_steps=segment_steps,
+                      compiled_segments=compiled_segments,
+                      has_physics_fn=physics_fn is not None,
+                      has_on_segment=on_segment is not None,
+                      where="run_atm_latlon_spmd")
     import jax.numpy as jnp
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
@@ -1187,6 +1326,9 @@ def gather_state_atm_latlon_2d(
     (``u[:, n_lon] = u[:, 0]``).  Bit-comparable to the single-device state,
     whose top v-face is the pole wall (== 0) and whose last u column is the
     periodic closure (== column 0)."""
+    # FIRST statement: this entry point runs a cross-process replication
+    # collective (see _agree_mesh_entry).
+    _agree_mesh_entry(mesh, where="gather_state_atm_latlon_2d")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -1384,9 +1526,11 @@ def _check_2d_mesh(mesh) -> tuple[int, int]:
 def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
     """2-D-specific dispatch-hardening on top of the shared band refusals.
 
-    As in the 1-D twin, the polar-filter refusal is AGREED ACROSS PROCESSES
-    before any rank raises.  This case is the sharpest instance of
-    codex-2026-07-29 blocker 1: `use_polar_filter` also controls whether the
+    Like the 1-D twin this performs NO agreement itself; it relies on
+    :func:`_agree_spmd_entry` having already agreed ``use_polar_filter`` (and
+    the mesh's axis ORDER, which decides ``p_lon``) at the entry point.  That
+    dependency is the sharpest instance of codex-2026-07-29 blocker 1:
+    `use_polar_filter` ALSO controls whether the
     `__polar_mask`/`__polar_mask_v` entries exist in the geometry field list,
     so a per-process difference would BOTH skew the field schema AND make one
     rank raise here while another blocked in the schema collective.
@@ -1442,6 +1586,8 @@ def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
     # FIRST statement: agree every rank-local input before ANY
     # rank-local check can raise or return (codex round-2 blocker 1/2/3).
     _agree_spmd_entry(model, mesh, n_steps=None,
+                      has_physics_fn=physics_fn is not None,
+                      shard_geometry=shard_geometry,
                       where="make_sharded_atm_latlon_step_2d")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
@@ -1507,6 +1653,8 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
     # FIRST statement: agree every rank-local input before ANY
     # rank-local check can raise or return (codex round-2 blocker 1/2/3).
     _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      has_physics_fn=physics_fn is not None,
+                      shard_geometry=shard_geometry,
                       where="make_sharded_atm_latlon_segment_2d")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map

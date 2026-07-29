@@ -45,6 +45,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
+from legoesm.parallel.geometry_consistency import (
+    assert_flags_agree, assert_schema_agrees, broadcast_checked, coerce_count,
+    name_digest48)
 from legoesm.parallel.latlon_spmd import (
     cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
 from legoesm.parallel.shard_map_compat import shard_map
@@ -164,6 +167,72 @@ def _need_rad_and_time(step_index, start_day, dt, rad_update_steps):
     return need_rad, doy, sod
 
 
+# Ordered flag names for the operator-split SPMD entry gate. STATIC tuple: the
+# payload width is fixed by this literal, never by rank-local data.
+_OPSPLIT_SPMD_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names",
+    "grid_n_lat", "grid_n_lon", "fold_active", "has_polar_mask",
+    "fix_mass", "rad_update_steps", "n_ghg_keys", "ghg_keys",
+)
+
+
+def _agree_opsplit_spmd_entry(model, mesh, *, fix_mass, rad_update_steps,
+                              ghg_keys, where: str) -> None:
+    """Agree every rank-local input, as the FIRST statement of this factory.
+
+    #1362 round 4.  This is the THIRD lat-band SPMD lane (after
+    ``sharded_atm_latlon_step`` and ``sharded_ocean_step``) and it had the
+    SAME two defects, unfixed: it recomputes the band geometry per process
+    from ``build_band_grids_atm`` and hands it to a REPLICATED
+    ``device_put`` (whose bit-identity assert is what #1362 trips), and it
+    performs a rank-local ``mesh is None`` return plus a north-fold
+    ``raise`` before reaching any collective.  Rounds 1-3 fixed the two
+    lanes where the defect was REPORTED; per legoESM's "fix the class, not
+    the instance" rule this lane gets the identical treatment.
+
+    ``has_polar_mask`` is the sharpest entry: ``model._polar_mask`` decides
+    whether the ``__polar_mask``/``__polar_mask_v`` fields EXIST in the
+    stacked geometry dict, so a per-process difference changes the field
+    LIST and would desynchronise the per-field gathers instead of failing
+    cleanly.  ``fix_mass`` / ``rad_update_steps`` / the GHG key ORDER select
+    different compiled programs (Python-level feature gating on static
+    values), so processes disagreeing there run different graphs.
+    """
+    grid = model.grid
+    fold = getattr(grid, "fold", None)
+    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
+        else ()
+    keys = tuple(str(k) for k in (ghg_keys or ()))
+    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
+                                         absent=0.0)
+    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
+                                         absent=0.0)
+    rad_flag, rad_bad = coerce_count(rad_update_steps, absent=0.0)
+    flags = (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(axis_names)),
+        name_digest48(axis_names),
+        n_lat_flag,
+        n_lon_flag,
+        float(bool(fold is not None and getattr(fold, "is_active", False))),
+        float(getattr(model, "_polar_mask", None) is not None),
+        float(bool(fix_mass)),
+        rad_flag,
+        float(len(keys)),
+        name_digest48(keys),
+    )
+    assert_flags_agree(_OPSPLIT_SPMD_ENTRY_FLAGS, flags, context=where)
+    # AFTER the collective only, so the refusal is symmetric on every rank
+    # (see the atm twin's rationale: a raise while assembling the payload
+    # kills one process while its peers block in process_allgather).
+    for label, problem in (("grid.n_lat", n_lat_bad),
+                           ("grid.n_lon", n_lon_bad),
+                           ("rad_update_steps", rad_bad)):
+        if problem is not None:
+            raise ValueError(f"{where}: {label} {problem}")
+
+
 def make_sharded_operator_split_step(
     model, mesh, statics, *, fix_mass, rad_update_steps, start_day,
     ghg_keys=None,
@@ -198,6 +267,13 @@ def make_sharded_operator_split_step(
     shape-agnostic column-local mock, sidestepping this — the real-physics
     end-to-end gate is the driver subprocess parity.)
     """
+    # FIRST statement: agree every rank-local input before ANY rank-local
+    # check can raise or return (#1362 round 4 -- this lane was the third,
+    # unfixed instance of the class).
+    _agree_opsplit_spmd_entry(model, mesh, fix_mass=fix_mass,
+                              rad_update_steps=rad_update_steps,
+                              ghg_keys=ghg_keys,
+                              where="make_sharded_operator_split_step")
     dt = statics.dt
     sigma_coord = model.sigma_coord
 
@@ -279,10 +355,8 @@ def make_sharded_operator_split_step(
     template = band_grids[0]
     afn = atm_grid_array_field_names(template)
     rep = NamedSharding(mesh, P())
-    stacks = {
-        name: jax.device_put(
-            jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids], 0),
-            rep)
+    raw = {
+        name: jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids], 0)
         for name in afn
     }
     # Per-band polar-filter masks (only when the filter is on): slice the global
@@ -291,12 +365,33 @@ def make_sharded_operator_split_step(
     # passes None -> _step_cgrid_impl resolves self._polar_mask (also None).
     nl = int(grid.n_lat) // n_dev
     if model._polar_mask is not None:
-        stacks["__polar_mask"] = jax.device_put(jnp.stack(
-            [model._polar_mask[r * nl:(r + 1) * nl] for r in range(n_dev)],
-            0), rep)
-        stacks["__polar_mask_v"] = jax.device_put(jnp.stack(
+        raw["__polar_mask"] = jnp.stack(
+            [model._polar_mask[r * nl:(r + 1) * nl] for r in range(n_dev)], 0)
+        raw["__polar_mask_v"] = jnp.stack(
             [model._polar_mask_v[r * nl:r * nl + nl + 1] for r in range(n_dev)],
-            0), rep)
+            0)
+    # #1362 (round 4): the band geometry above is RECOMPUTED per process from
+    # the same config, and per-process XLA autotuning on device-derived grid
+    # fields makes the last ULPs differ at larger sizes -- which trips the
+    # bit-identical assert inside the REPLICATED ``device_put`` below.  This
+    # is the SAME defect fixed in the atm and ocean lanes; this lane reuses
+    # ``build_band_grids_atm`` so it inherits the hazard verbatim.  Verify
+    # cross-process agreement, then broadcast process 0's bytes -- GUARDED,
+    # so a REAL divergence (different polar masks = different filtering =
+    # different physics) RAISES instead of being papered over by process 0.
+    # Single-process: both helpers short-circuit, so this is a no-op.
+    _ordered = list(raw)
+    assert_schema_agrees(_ordered, n_dev,
+                         context="make_sharded_operator_split_step",
+                         arrays=[raw[n] for n in _ordered])
+    stacks = {
+        name: jax.device_put(
+            jnp.asarray(broadcast_checked(
+                raw[name], name,
+                context="make_sharded_operator_split_step")),
+            rep)
+        for name in _ordered
+    }
     _cache = {}
 
     def sharded_split_step(carry, forcing):

@@ -46,7 +46,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.parallel.geometry_consistency import (
-    assert_flags_agree, assert_schema_agrees, broadcast_checked)
+    assert_flags_agree, assert_schema_agrees, broadcast_checked, coerce_count,
+    name_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 try:                                   # JAX >= 0.8 exposes shard_map at top level
@@ -399,6 +400,40 @@ def append_vface_wall_row(v_lower):
     return jnp.concatenate([v_lower, wall], axis=0)
 
 
+# Ordered flag names for the ocean GATHER entry gate. STATIC tuple: the
+# payload width is fixed by this literal, never by rank-local data (the
+# variable-length part -- which fields are non-None -- is folded into ONE
+# order-sensitive digest, so the width stays constant).
+_OCEAN_GATHER_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names",
+    "n_gathered_fields", "gathered_fields",
+)
+
+
+def _agree_ocean_gather_entry(state, mesh, *, where: str) -> None:
+    """Agree the mesh AND the gathered-field list before the first gather.
+
+    #1362 round 4.  :func:`gather_state_latlon` runs one cross-process
+    replication per NON-``None`` field, so the COUNT of collectives it enters
+    is rank-local data (an optional prognostic present on some processes
+    only).  Folding the ordered names of exactly the fields that will be
+    gathered into a single ``name_digest48`` keeps the payload fixed-width
+    while making that divergence a clean symmetric raise instead of a hang.
+    """
+    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
+        else ()
+    gathered = tuple(
+        name for name in state._fields if getattr(state, name) is not None)
+    assert_flags_agree(_OCEAN_GATHER_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(axis_names)),
+        name_digest48(axis_names),
+        float(len(gathered)),
+        name_digest48(gathered),
+    ), context=where)
+
+
 def gather_state_latlon(state, mesh):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
@@ -414,6 +449,15 @@ def gather_state_latlon(state, mesh):
     the primitive shared with the atm gather); the single-process path is
     byte-unchanged.
     """
+    # FIRST statement (#1362 round 4). Two rank-local hazards live below:
+    # ``replicate_leaf`` runs a real cross-process collective (a jit identity
+    # with replicated out_shardings; XLA inserts the all-gather), and the
+    # ``if ... is None: continue`` skips mean a state whose OPTIONAL fields
+    # differ across processes performs a DIFFERENT NUMBER of those
+    # collectives -- one rank finishing while a peer still waits. So agree the
+    # mesh AND the ordered list of fields that will actually be gathered,
+    # before the first one runs.
+    _agree_ocean_gather_entry(state, mesh, where="gather_state_latlon")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -447,7 +491,8 @@ def gather_state_latlon(state, mesh):
 # Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
 # width is fixed by this literal, never by rank-local data.
 _OCEAN_SPMD_ENTRY_FLAGS = (
-    "has_mesh", "n_dev", "n_axes", "grid_n_lat", "grid_n_lon", "fold_active",
+    "has_mesh", "n_dev", "n_axes", "axis_names",
+    "grid_n_lat", "grid_n_lon", "fold_active",
 )
 
 
@@ -464,18 +509,43 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
 
     Agreeing the mesh shape, grid dimensions and fold state up front makes
     every downstream rank-local check symmetric by construction.
+
+    ``axis_names`` carries the ORDERED axis-name digest, not just the axis
+    COUNT: the band body indexes ``mesh.axis_names[0]``, so two processes
+    whose meshes name that axis differently would psum/ppermute over
+    different axes while every count-based flag agreed (the ocean instance of
+    codex round-3 blocker 2, which was found on the atmosphere twin --
+    fixing only the lane where a defect was reported is what left five
+    unguarded paths after round 1).
+
+    Grid dimensions go through :func:`coerce_count`, which NEVER raises, and
+    the refusal is deferred until AFTER the collective; building a collective
+    payload must not be able to kill one rank while its peers block in the
+    gather (codex round-3 blocker 3, same rationale as the atm twin).
     """
     grid = model.grid
     fold = getattr(grid, "fold", None)
+    axis_names = tuple(str(a) for a in mesh.axis_names) if mesh is not None \
+        else ()
+    n_lat_flag, n_lat_bad = coerce_count(getattr(grid, "n_lat", None),
+                                         absent=0.0)
+    n_lon_flag, n_lon_bad = coerce_count(getattr(grid, "n_lon", None),
+                                         absent=0.0)
     flags = (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
-        float(len(mesh.axis_names) if mesh is not None else 0),
-        float(int(getattr(grid, "n_lat", 0) or 0)),
-        float(int(getattr(grid, "n_lon", 0) or 0)),
+        float(len(axis_names)),
+        name_digest48(axis_names),
+        n_lat_flag,
+        n_lon_flag,
         float(bool(fold is not None and getattr(fold, "is_active", False))),
     )
     assert_flags_agree(_OCEAN_SPMD_ENTRY_FLAGS, flags, context=where)
+    # AFTER the collective only: symmetric on every rank (see atm twin).
+    for label, problem in (("grid.n_lat", n_lat_bad),
+                           ("grid.n_lon", n_lon_bad)):
+        if problem is not None:
+            raise ValueError(f"{where}: {label} {problem}")
 
 
 def make_sharded_ocean_step(model, mesh):

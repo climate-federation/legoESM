@@ -50,7 +50,103 @@ __all__ = [
     "assert_schema_agrees",
     "assert_flags_agree",
     "broadcast_checked",
+    "coerce_count",
+    "FLAG_ABSENT",
+    "FLAG_UNCOERCIBLE",
+    "FLAG_OUT_OF_RANGE",
+    "FLAG_MAX_EXACT",
 ]
+
+# --- entry-gate payload sentinels -------------------------------------------
+# An entry gate turns rank-local scalars (n_steps, segment_steps, grid dims)
+# into a fixed-width float payload.  Building that payload must NEVER raise:
+# a rank that dies in `int(n_steps)` while its peers block in
+# `process_allgather` is a HANG, which is strictly worse than the bug the gate
+# exists to fix (codex 2026-07-29 round-3, blocker 3).  So an unusable value is
+# mapped to a SENTINEL that travels through the collective; every rank then
+# sees it in the gathered payload and the raise that follows is symmetric.
+#
+# The sentinels are large-magnitude NEGATIVE values no legitimate count can
+# take (counts are >= 0; FLAG_ABSENT marks "not applicable to this call site").
+FLAG_ABSENT = -1.0
+FLAG_UNCOERCIBLE = -8.0e15
+FLAG_OUT_OF_RANGE = -7.0e15
+# 2**53 is the largest integer whose successor is exactly representable in
+# float64.  Above it two DIFFERENT counts alias to the same payload entry, so
+# the gate would pass a real divergence (codex round-3, minor 2).  Values past
+# the bound are refused rather than silently compared.
+FLAG_MAX_EXACT = 2.0 ** 53
+_MAX_EXACT_INT = 2 ** 53
+
+
+def coerce_count(value, *, absent: float = FLAG_ABSENT):
+    """Map a rank-local COUNT to an exactly-comparable entry-gate payload float.
+
+    Returns ``(payload, problem)``.  ``problem`` is ``None`` when the value is
+    usable; otherwise it is a human-readable clause NAMING the offending value,
+    which the caller must raise AFTER its collective so the refusal is
+    symmetric across processes.
+
+    This function never raises.  That is the whole point: it is called while
+    ASSEMBLING a collective payload, upstream of the collective itself, where a
+    raise deadlocks the peers (codex round-3, blocker 3).
+
+    ``None`` maps to ``absent`` (default :data:`FLAG_ABSENT`) so a call site
+    that does not carry the value still emits a FIXED-WIDTH payload.
+    """
+    if value is None:
+        return float(absent), None
+    try:
+        # int() FIRST, and the range check on the INTEGER: converting to float
+        # first would already have collapsed 2**53+1 onto 2**53, so the very
+        # aliasing this guards against would be invisible to the guard.
+        # int(nan) -> ValueError, int(inf) -> OverflowError, both caught here.
+        as_int = int(value)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return FLAG_UNCOERCIBLE, (
+            f"is not usable as an integer count (got {value!r}); every "
+            f"process must be launched with the same value")
+    if abs(as_int) > _MAX_EXACT_INT:
+        return FLAG_OUT_OF_RANGE, (
+            f"is outside the exactly-comparable range |n| <= 2**53 (got "
+            f"{value!r}); beyond that bound two different counts alias to "
+            f"the same float64 payload entry and the cross-process agreement "
+            f"check would pass a real divergence")
+    return float(as_int), None
+
+
+def _dtype_kind_and_ndim(a):
+    """``(kind, ndim)`` for the schema digest, tolerant of a plain scalar.
+
+    Reads ``.dtype``/``.ndim`` from METADATA when present (a jax array exposes
+    both without materialising, so no device sync).  A plain Python scalar or
+    list has neither; falling through to ``np.asarray`` there is FREE (it is
+    already host data) and, critically, keeps this function from dying with a
+    bare ``AttributeError`` BEFORE :func:`assert_schema_agrees` reaches its
+    collective — a rank-local raise ahead of a collective is a HANG, so
+    "fail explicitly" here must NOT mean "raise here" (codex round-3, minor 3).
+
+    An unsupported dtype class (object/str) is reported as ``unsupported:<k>``
+    rather than being silently bucketed with the float fields, so a
+    disagreement about it is visible in the digest and a same-on-all-ranks
+    unsupported field fails later in :func:`broadcast_checked` with its own
+    message instead of here.
+    """
+    dtype = getattr(a, "dtype", None)
+    if dtype is None:
+        host = np.asarray(a)
+        dtype, ndim = host.dtype, host.ndim
+    else:
+        ndim = int(getattr(a, "ndim", np.ndim(a)))
+    k = np.dtype(dtype).kind
+    if k in "biu":
+        kind = "exact"
+    elif k in "fc":
+        kind = "inexact"
+    else:
+        kind = f"unsupported:{k}"
+    return kind, int(ndim)
+
 
 # Every per-field collective payload is padded to these FIXED widths.  A
 # payload whose LENGTH depends on rank-local data (dtype class, ndim,
@@ -183,9 +279,15 @@ def assert_schema_agrees(names, n_dev, *, context: str, arrays=None) -> None:
         # the very "one rank exits while a peer blocks" hazard this gate
         # exists to remove (codex round-2 minor). `broadcast_checked` does
         # the single real materialisation later.
-        kinds = [("exact" if np.dtype(a.dtype).kind in "biu" else "inexact")
-                 for a in arrays]
-        ndims = [int(getattr(a, "ndim", np.ndim(a))) for a in arrays]
+        #
+        # `_dtype_kind_and_ndim` also survives a plain Python scalar, which a
+        # bare `a.dtype` read did not (codex round-3, minor 3): no production
+        # caller passes one today, but an AttributeError HERE would be a
+        # rank-local raise BEFORE the collective, i.e. a hang rather than a
+        # clear failure.
+        described = [_dtype_kind_and_ndim(a) for a in arrays]
+        kinds = [d[0] for d in described]
+        ndims = [d[1] for d in described]
     gathered = multihost_utils.process_allgather(
         schema_fingerprint(names, n_dev, kinds, ndims))
     if not bool(np.all(gathered == gathered[0])):

@@ -15,9 +15,13 @@ import numpy as np
 import pytest
 
 from legoesm.parallel.geometry_consistency import (
+    FLAG_ABSENT,
+    FLAG_OUT_OF_RANGE,
+    FLAG_UNCOERCIBLE,
     assert_flags_agree,
     assert_schema_agrees,
     broadcast_checked,
+    coerce_count,
     content_hash48,
     name_digest48,
     schema_fingerprint,
@@ -352,101 +356,670 @@ class TestDtypeRouting:
         assert (np.dtype(dtype).kind in "biu") is exact
 
 
-class TestFactoryWiringOrder:
-    """The gate must be CALLED, and called FIRST.
 
-    codex round-2 flagged that every previous test exercised the helpers in
-    isolation, so deleting `_agree_spmd_entry(...)` from the factories while
-    leaving the helper defined would have stayed green. These tests read the
-    production source and assert the wiring itself.
 
-    Source inspection is a weak instrument, so per CLAUDE.md each assertion
-    names the symbol that ACTUALLY RUNS (the public factory), not a wrapper,
-    and pins ORDER rather than mere presence — presence alone is what the
-    round-2 blocker already satisfied while still deadlocking.
+class TestCoerceCount:
+    """`coerce_count` is the reason the entry gates can no longer die while
+    ASSEMBLING their collective payload (codex round-3, blocker 3)."""
+
+    def test_good_values_pass_through_exactly(self):
+        for v in (0, 1, 7, 2 ** 40, True):
+            payload, problem = coerce_count(v)
+            assert problem is None
+            assert payload == float(int(v))
+
+    def test_none_maps_to_the_absent_sentinel(self):
+        assert coerce_count(None) == (FLAG_ABSENT, None)
+        assert coerce_count(None, absent=0.0) == (0.0, None)
+
+    @pytest.mark.parametrize("bad", ["bad", None.__class__, object(),
+                                     float("nan"), float("inf"), 3.5 + 0j])
+    def test_uncoercible_returns_a_sentinel_and_NEVER_raises(self, bad):
+        """The property that matters: no exception escapes.  A raise here
+        happens BEFORE the gate's collective and hangs every peer."""
+        payload, problem = coerce_count(bad)
+        assert problem is not None
+        assert payload in (FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE)
+        assert repr(bad) in problem, "the message must NAME the bad value"
+
+    def test_value_above_2_53_is_refused_not_silently_aliased(self):
+        """codex round-3 minor 2: above 2**53 two DIFFERENT counts map to the
+        same float64 payload entry, so the agreement check would pass a real
+        divergence."""
+        big = 2 ** 53 + 1
+        assert float(big) == float(2 ** 53), "fixture: these MUST alias"
+        payload, problem = coerce_count(big)
+        assert payload == FLAG_OUT_OF_RANGE
+        assert problem is not None and "2**53" in problem
+        # and the boundary itself is still accepted
+        assert coerce_count(2 ** 53)[1] is None
+
+    def test_sentinels_cannot_collide_with_a_real_count(self):
+        for s in (FLAG_ABSENT, FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE):
+            assert s < 0, "counts are >= 0, so a sentinel must be negative"
+        assert len({FLAG_ABSENT, FLAG_UNCOERCIBLE, FLAG_OUT_OF_RANGE}) == 3
+
+
+class TestSchemaDescriptorTolerance:
+    """codex round-3 minor 3: `assert_schema_agrees` read `a.dtype`, which
+    dies with a bare AttributeError on a plain Python scalar — and dying THERE
+    is a pre-collective rank-local raise, i.e. a hang."""
+
+    def test_plain_python_scalar_does_not_explode(self, multiproc):
+        multiproc()
+        # must not raise AttributeError; agreeing peers => no divergence
+        assert_schema_agrees(["s"], 2, context="t", arrays=[1.5]) is None
+
+    def test_scalar_is_classified_like_its_numpy_dtype(self, multiproc):
+        fake = multiproc()
+        assert_schema_agrees(["s"], 2, context="t", arrays=[1.5])
+        from_scalar = fake.seen[-1]
+        fake2 = multiproc()
+        assert_schema_agrees(["s"], 2, context="t",
+                             arrays=[np.float64(1.5)])
+        np.testing.assert_array_equal(from_scalar, fake2.seen[-1])
+
+    def test_bool_scalar_still_routes_to_the_exact_class(self, multiproc):
+        fake = multiproc()
+        assert_schema_agrees(["s"], 2, context="t", arrays=[True])
+        exact_like = fake.seen[-1]
+        fake2 = multiproc()
+        assert_schema_agrees(["s"], 2, context="t", arrays=[1.5])
+        assert not np.array_equal(exact_like, fake2.seen[-1]), (
+            "a bool scalar and a float scalar must NOT share a schema digest "
+            "— broadcast_checked routes them to different payload layouts")
+
+
+# ---------------------------------------------------------------------------
+# Entry-gate wiring: a STRICT, non-spoofable source check
+# ---------------------------------------------------------------------------
+# codex round-3 (MAJOR) refuted the round-2 instrument: it used
+# `ast.walk(first_statement)` and accepted ANY nested occurrence, so
+#
+#     if mesh is None:
+#         _agree_spmd_entry(...)     # gate on ONE branch only
+#         return serial_step
+#
+# passed every assertion while still deadlocking.  The checker below demands
+# the gate be a DIRECT top-level statement of the function body (an
+# `ast.Expr` whose value is the call), which that shape does not satisfy.
+# `test_checker_rejects_*` below are the NON-VACUITY self-tests: they feed the
+# checker synthetically mutated trees and assert it says NO — and, for the
+# spoof shape, that the OLD instrument said YES.
+
+
+def _module_tree(mod):
+    import ast
+    import inspect
+    return ast.parse(inspect.getsource(mod))
+
+
+def _top_level_functions(tree) -> dict:
+    import ast
+    return {n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _public_entry_names(tree) -> set:
+    """Public names a caller can reach: top-level defs AND module-level
+    ALIASES (``need_rad_and_time = _need_rad_and_time``).
+
+    Aliases matter because an alias is a public entry point that a
+    FunctionDef-only scan does not see — exactly the kind of blind spot that
+    let five paths stay unguarded through round 2.
+    """
+    import ast
+    names = set(_top_level_functions(tree))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+            names.update(t.id for t in node.targets
+                         if isinstance(t, ast.Name))
+    return {n for n in names if not n.startswith("_")}
+
+
+def _strip_docstring(fn):
+    """Return ``fn.body`` without a leading docstring.
+
+    Prose must never be able to satisfy a wiring assertion (CLAUDE.md: a test
+    that inspects source must name the symbol that RUNS).
+    """
+    import ast
+    body = list(fn.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    return body
+
+
+def _direct_gate_index(fn, gate_name):
+    """Index of the DIRECT top-level statement that is exactly
+    ``gate_name(...)``; ``None`` if there is no such statement.
+
+    Deliberately NOT `ast.walk`: a call nested inside an ``If``/``Try``/loop
+    runs on only some paths and is exactly the spoof codex round-3 flagged.
+    """
+    import ast
+    for i, stmt in enumerate(_strip_docstring(fn)):
+        if (isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id == gate_name):
+            return i
+    return None
+
+
+def _gate_call(fn, gate_name):
+    import ast
+    for stmt in _strip_docstring(fn):
+        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id == gate_name):
+            return stmt.value
+    raise AssertionError(f"no direct {gate_name}(...) statement")
+
+
+def _parse_fn(src):
+    import ast
+    import textwrap
+    return ast.parse(textwrap.dedent(src)).body[0]
+
+
+class TestGateCheckerIsNonVacuous:
+    """The instrument itself, proven to reject what it claims to reject.
+
+    Per CLAUDE.md a source-inspecting test is UNTRUSTED until shown to fail
+    when the feature is removed.  These run that mutation IN MEMORY, so the
+    proof is cheap and permanent rather than a one-off manual edit.
     """
 
-    FACTORIES = (
-        "make_sharded_atm_latlon_step",
-        "make_sharded_atm_latlon_segment",
-        "make_sharded_atm_latlon_step_2d",
-        "make_sharded_atm_latlon_segment_2d",
-    )
+    GOOD = """
+        def f(model, mesh):
+            '''doc'''
+            _agree_spmd_entry(model, mesh, where="f")
+            if mesh is None:
+                return None
+            return 1
+    """
 
-    @staticmethod
-    def _body(fn_name):
-        import inspect
-        import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
-        src = inspect.getsource(getattr(m, fn_name))
-        # strip the docstring so its prose cannot satisfy a text assertion
-        import ast
-        tree = ast.parse(src.lstrip())
-        fn = tree.body[0]
-        if (fn.body and isinstance(fn.body[0], ast.Expr)
-                and isinstance(fn.body[0].value, ast.Constant)
-                and isinstance(fn.body[0].value.value, str)):
-            fn.body = fn.body[1:]
-        return fn
+    def test_accepts_the_correct_shape(self):
+        assert _direct_gate_index(_parse_fn(self.GOOD),
+                                  "_agree_spmd_entry") == 0
 
-    @pytest.mark.parametrize("fn_name", FACTORIES)
-    def test_gate_is_the_first_statement(self, fn_name):
+    def test_rejects_a_gate_nested_in_a_branch(self):
+        """THE round-3 MAJOR: a gate on one branch only.  The old
+        `ast.walk(first_statement)` instrument ACCEPTED this."""
         import ast
-        fn = self._body(fn_name)
-        assert fn.body, f"{fn_name} has an empty body"
-        first = fn.body[0]
-        calls = [n for n in ast.walk(first)
-                 if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Name)
-                 and n.func.id == "_agree_spmd_entry"]
-        assert calls, (
-            f"{fn_name}: the FIRST statement must be _agree_spmd_entry(...). "
-            f"Any rank-local check above it (n_steps validation, mesh shape "
-            f"checks, the `mesh is None` early return) lets one process raise "
-            f"or return while a peer blocks in a collective — a HANG, not an "
-            f"error. Got: {ast.dump(first)[:200]}")
+        mutated = _parse_fn("""
+            def f(model, mesh):
+                if mesh is None:
+                    _agree_spmd_entry(model, mesh, where="f")
+                    return None
+                return 1
+        """)
+        assert _direct_gate_index(mutated, "_agree_spmd_entry") is None
+        old_instrument_accepts = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_agree_spmd_entry"
+            for n in ast.walk(mutated.body[0]))
+        assert old_instrument_accepts, (
+            "fixture broken: this shape must be one the WEAK checker passed, "
+            "otherwise the strengthening proves nothing")
 
-    @pytest.mark.parametrize("fn_name", FACTORIES)
-    def test_no_raise_or_return_precedes_the_gate(self, fn_name):
-        """Even a gate present but not first is a deadlock (round-2 blocker)."""
-        import ast
-        fn = self._body(fn_name)
-        for stmt in fn.body:
-            has_gate = any(
-                isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                and n.func.id == "_agree_spmd_entry" for n in ast.walk(stmt))
-            if has_gate:
-                return
-            offending = [n for n in ast.walk(stmt)
-                         if isinstance(n, (ast.Raise, ast.Return))]
-            assert not offending, (
-                f"{fn_name}: a {type(offending[0]).__name__} occurs BEFORE "
-                f"_agree_spmd_entry; that is the exact round-2 deadlock.")
-        raise AssertionError(f"{fn_name} never calls _agree_spmd_entry")
+    def test_rejects_a_gate_nested_in_a_try(self):
+        mutated = _parse_fn("""
+            def f(model, mesh):
+                try:
+                    _agree_spmd_entry(model, mesh, where="f")
+                except Exception:
+                    pass
+                return 1
+        """)
+        assert _direct_gate_index(mutated, "_agree_spmd_entry") is None
 
-    def test_n_steps_is_agreed_by_both_segment_factories(self):
-        """Unequal positive n_steps => different STATIC scan lengths =>
-        different numbers of in-body collectives (round-2 blocker 3)."""
+    def test_rejects_outright_removal(self):
+        mutated = _parse_fn("""
+            def f(model, mesh):
+                '''doc mentioning _agree_spmd_entry so prose cannot pass'''
+                return 1
+        """)
+        assert _direct_gate_index(mutated, "_agree_spmd_entry") is None
+
+    def test_rejects_a_gate_that_is_not_first(self):
+        mutated = _parse_fn("""
+            def f(model, mesh):
+                if mesh is None:
+                    return None
+                _agree_spmd_entry(model, mesh, where="f")
+                return 1
+        """)
+        assert _direct_gate_index(mutated, "_agree_spmd_entry") == 1
+
+
+# (symbol -> gate that must be its FIRST direct top-level statement)
+_ATM_GATED = {
+    "make_sharded_atm_latlon_step": "_agree_spmd_entry",
+    "make_sharded_atm_latlon_segment": "_agree_spmd_entry",
+    "make_sharded_atm_latlon_step_2d": "_agree_spmd_entry",
+    "make_sharded_atm_latlon_segment_2d": "_agree_spmd_entry",
+    # codex round-3 blocker 4: these validate and LOOP on n_steps themselves,
+    # outside any factory, and are the production path via model_driver.
+    "run_atm_latlon_spmd_segment": "_agree_spmd_entry",
+    "run_atm_latlon_spmd": "_agree_spmd_entry",
+    # round 4: the GATHER direction runs a real cross-process replication
+    # (replicate_leaf -> jit identity with replicated out_shardings).
+    "gather_state_atm_latlon": "_agree_mesh_entry",
+    "gather_state_atm_latlon_2d": "_agree_mesh_entry",
+    "gather_atm_latlon_to_hydrostatic": "_agree_mesh_entry",
+}
+
+# SHRINK-ONLY.  Every entry is a CLAIM about what the function does; it was
+# read before being written here (CLAUDE.md: a plausible-sounding allow-list
+# reason permanently hides a real defect).
+_ATM_UNGATED = {
+    "lat_spec": "pure: returns P() from arr.ndim; no collective, no raise",
+    "tile_spec": "pure: returns P() from arr.ndim; no collective, no raise",
+    "atm_grid_array_field_names": "pure host introspection of grid._fields",
+    "atm_latlon_geometry_bytes": "pure host byte accounting",
+    "unroll_to_dtype_fixed_point":
+        "trace-time only (jax.eval_shape probe); no host collective",
+    "state_finite_scalar":
+        "runs INSIDE shard_map (in-graph psum), not a host entry point",
+    "build_band_grids_atm":
+        "pure host geometry; its divisibility ValueError is symmetric because "
+        "every caller has already agreed grid.n_lat and n_dev at its gate",
+    "build_tile_grids_atm_2d":
+        "pure host geometry; same symmetry argument as build_band_grids_atm",
+    "shard_state_atm_latlon":
+        "SCATTER: shard_leaf -> make_array_from_callback builds each "
+        "addressable shard locally; no legoesm collective helper on either "
+        "branch",
+    "shard_state_atm_latlon_2d":
+        "SCATTER: per-leaf device_put onto the tile mesh; no collective "
+        "helper and no rank-local skip of one",
+    "shard_hydrostatic_to_atm_latlon":
+        "SCATTER wrapper over shard_state_atm_latlon; same reason",
+    "build_sharded_held_suarez_state_atm_latlon":
+        "band-LOCAL construction via jax.make_array_from_callback (#1100); "
+        "no gather, no replicated put",
+}
+
+_OCEAN_GATED = {
+    "make_sharded_ocean_step": "_agree_ocean_spmd_entry",
+    "make_sharded_ocean_step_global": "_agree_ocean_spmd_entry",
+    "gather_state_latlon": "_agree_ocean_gather_entry",
+}
+
+_OCEAN_UNGATED = {
+    "build_band_grids":
+        "pure host geometry; divisibility raise is symmetric behind the "
+        "factory gate that already agreed grid dims + n_dev",
+    "append_vface_wall_row": "pure array op (concatenate a zero row)",
+    "shard_state_latlon":
+        "SCATTER: per-leaf device_put; no collective helper and no "
+        "rank-local skip of one. Its multi-process behaviour is the #1100 "
+        "shard_leaf migration, NOT the #1362 replicated-geometry class",
+    "shard_forcing_latlon": "SCATTER: same as shard_state_latlon",
+    "shard_forcing_stack_latlon": "SCATTER: same as shard_state_latlon",
+}
+
+_OPSPLIT_GATED = {
+    "make_sharded_operator_split_step": "_agree_opsplit_spmd_entry",
+}
+
+_OPSPLIT_UNGATED = {
+    "shard_operator_split_carry":
+        "SCATTER: per-leaf device_put of the carry; no collective helper and "
+        "no rank-local skip of one (#1100 scope, not #1362)",
+    "shard_operator_split_forcing": "SCATTER: same as the carry twin",
+    "need_rad_and_time":
+        "module ALIAS of the pure _need_rad_and_time cadence helper "
+        "(jnp arithmetic on step_index); no collective, no raise",
+}
+
+
+def _atm_module():
+    import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
+    return m
+
+
+def _ocean_module():
+    import legoesm.ocean.dynamics.sharded_ocean_step as m
+    return m
+
+
+def _opsplit_module():
+    import legoesm.driver.sharded_operator_split_step as m
+    return m
+
+
+_LANES = [
+    ("atm", _atm_module, _ATM_GATED, _ATM_UNGATED),
+    ("ocean", _ocean_module, _OCEAN_GATED, _OCEAN_UNGATED),
+    ("opsplit", _opsplit_module, _OPSPLIT_GATED, _OPSPLIT_UNGATED),
+]
+
+
+class TestEveryPublicEntryPointIsClassified:
+    """Fix the CLASS, not the instance.
+
+    Round 1 patched individual refusal functions; round 2 found five more
+    unguarded paths; round 3 found two more (the run wrappers).  The only way
+    off that treadmill is a check that FAILS when a NEW public symbol appears
+    ungated, instead of a list of the sites someone happened to look at.
+
+    A new public function in any of these three lat-band SPMD lanes must
+    either be gated or be classified in the shrink-only ``_*_UNGATED`` map
+    with a reason that is TRUE of the code.
+    """
+
+    @pytest.mark.parametrize("lane,mod_fn,gated,ungated", _LANES,
+                             ids=[l[0] for l in _LANES])
+    def test_no_unclassified_public_entry_point(self, lane, mod_fn, gated,
+                                                ungated):
+        public = _public_entry_names(_module_tree(mod_fn()))
+        classified = set(gated) | set(ungated)
+        missing = public - classified
+        assert not missing, (
+            f"{lane}: public SPMD entry point(s) {sorted(missing)} are "
+            f"neither gated nor classified. Every public entry of a lat-band "
+            f"SPMD lane must agree its rank-local inputs before any "
+            f"collective, or say in the allow-list why it needs no gate.")
+        stale = classified - public
+        assert not stale, (
+            f"{lane}: {sorted(stale)} are listed but no longer public — the "
+            f"allow-list must not carry dead entries that hide a rename")
+
+    @pytest.mark.parametrize("lane,mod_fn,gated,ungated", _LANES,
+                             ids=[l[0] for l in _LANES])
+    def test_every_ungated_entry_has_a_real_reason(self, lane, mod_fn, gated,
+                                                   ungated):
+        for name, reason in ungated.items():
+            assert isinstance(reason, str) and len(reason) > 20, (
+                f"{lane}.{name}: an allow-list entry needs a REASON, and "
+                f"every reason string is a claim that must be verified in "
+                f"code before it is written")
+
+
+class TestFactoryWiringOrder:
+    """The gate must be CALLED, called FIRST, and called UNCONDITIONALLY.
+
+    Strengthened after codex round-3 (MAJOR): the round-2 version used
+    `ast.walk(first_statement)` and returned on the first nested hit, so a
+    gate inside `if mesh is None:` satisfied it.  See
+    :class:`TestGateCheckerIsNonVacuous` for the in-memory mutation proof that
+    the current checker rejects that shape.
+    """
+
+    @pytest.mark.parametrize("fn_name", sorted(_ATM_GATED))
+    def test_gate_is_the_first_direct_statement(self, fn_name):
+        fns = _top_level_functions(_module_tree(_atm_module()))
+        idx = _direct_gate_index(fns[fn_name], _ATM_GATED[fn_name])
+        assert idx == 0, (
+            f"{fn_name}: {_ATM_GATED[fn_name]}(...) must be the FIRST DIRECT "
+            f"statement of the body (got index {idx}). A rank-local check "
+            f"above it — n_steps validation, mesh shape checks, the "
+            f"`mesh is None` early return — lets one process raise or return "
+            f"while a peer blocks in a collective: a HANG, not an error. A "
+            f"gate nested inside an `if` runs on only one path and is the "
+            f"same defect.")
+
+    @pytest.mark.parametrize("fn_name", sorted(_OCEAN_GATED))
+    def test_ocean_gate_is_the_first_direct_statement(self, fn_name):
+        fns = _top_level_functions(_module_tree(_ocean_module()))
+        idx = _direct_gate_index(fns[fn_name], _OCEAN_GATED[fn_name])
+        assert idx == 0, f"{fn_name}: gate must be first direct statement"
+
+    @pytest.mark.parametrize("fn_name", sorted(_OPSPLIT_GATED))
+    def test_opsplit_gate_is_the_first_direct_statement(self, fn_name):
+        fns = _top_level_functions(_module_tree(_opsplit_module()))
+        idx = _direct_gate_index(fns[fn_name], _OPSPLIT_GATED[fn_name])
+        assert idx == 0, f"{fn_name}: gate must be first direct statement"
+
+    def test_loop_count_inputs_are_passed_as_VARIABLES(self):
+        """Unequal loop counts => different numbers of SPMD steps.
+
+        Each of these functions must agree the loop-count argument it itself
+        consumes (round-2 blocker 3 for the factories; round-3 blocker 4 for
+        the run wrappers, which loop OUTSIDE any factory).
+        """
         import ast
-        for fn_name in ("make_sharded_atm_latlon_segment",
-                        "make_sharded_atm_latlon_segment_2d"):
-            fn = self._body(fn_name)
-            call = next(n for n in ast.walk(fn)
-                        if isinstance(n, ast.Call)
-                        and isinstance(n.func, ast.Name)
-                        and n.func.id == "_agree_spmd_entry")
+        expect = {
+            "make_sharded_atm_latlon_segment": {"n_steps": "n_steps"},
+            "make_sharded_atm_latlon_segment_2d": {"n_steps": "n_steps"},
+            "run_atm_latlon_spmd_segment": {"n_steps": "n_steps"},
+            "run_atm_latlon_spmd": {"n_steps": "n_steps",
+                                    "segment_steps": "segment_steps",
+                                    "compiled_segments": "compiled_segments"},
+        }
+        fns = _top_level_functions(_module_tree(_atm_module()))
+        for fn_name, wanted in expect.items():
+            call = _gate_call(fns[fn_name], "_agree_spmd_entry")
             kw = {k.arg: k.value for k in call.keywords}
-            assert "n_steps" in kw, f"{fn_name} must agree n_steps"
-            assert isinstance(kw["n_steps"], ast.Name), (
-                f"{fn_name} must pass the n_steps VARIABLE, not a literal")
-            assert kw["n_steps"].id == "n_steps"
+            for arg, var in wanted.items():
+                assert arg in kw, f"{fn_name} must agree {arg}"
+                assert isinstance(kw[arg], ast.Name), (
+                    f"{fn_name} must pass the {arg} VARIABLE, not a literal "
+                    f"— a literal agrees nothing")
+                assert kw[arg].id == var
 
-    def test_entry_flag_tuple_is_static_and_matches_payload_width(self):
-        """A payload width that depends on data is a deadlock, so the flag
-        names must be a module-level literal tuple."""
-        import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
-        assert isinstance(m._SPMD_ENTRY_FLAGS, tuple)
-        assert len(m._SPMD_ENTRY_FLAGS) >= 8
-        assert all(isinstance(x, str) for x in m._SPMD_ENTRY_FLAGS)
+
+# --- runtime (not source) checks on the gate payload ------------------------
+
+class _StubGrid:
+    def __init__(self, n_lat=8, n_lon=16, fold=None):
+        self.n_lat, self.n_lon, self.fold = n_lat, n_lon, fold
+
+
+class _StubConfig:
+    anchor_mass_to_initial = False
+    use_polar_filter = False
+
+
+class _StubModel:
+    def __init__(self, **grid_kw):
+        self.grid = _StubGrid(**grid_kw)
+        self.config = _StubConfig()
+
+
+class _StubMesh:
+    """Only what the entry gates read: axis_names, shape, devices.size."""
+
+    def __init__(self, axis_names=("lat",), sizes=(2,)):
+        self.axis_names = tuple(axis_names)
+        self.shape = dict(zip(self.axis_names, sizes))
+        self.devices = np.zeros(sizes)
+
+
+@pytest.fixture
+def capture_flags(monkeypatch):
+    """Capture the (names, values) the gate actually hands the collective."""
+    def _install(module):
+        seen = {}
+
+        def _fake(names, values, *, context):
+            seen["names"], seen["values"] = names, tuple(values)
+            seen["context"] = context
+        monkeypatch.setattr(module, "assert_flags_agree", _fake)
+        return seen
+    return _install
+
+
+class TestEntryPayloadShape:
+    def test_flag_names_and_values_have_the_SAME_length(self, capture_flags):
+        """codex round-3 (MAJOR): the old test only asserted
+        ``len(_SPMD_ENTRY_FLAGS) >= 8``, which cannot notice a value added
+        without a name (or a name without a value).  This reads the payload
+        the gate ACTUALLY builds at runtime and compares the two lengths."""
+        m = _atm_module()
+        seen = capture_flags(m)
+        m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps=4, where="t")
+        assert seen["names"] is m._SPMD_ENTRY_FLAGS, (
+            "the gate must pass the module-level STATIC tuple, not a locally "
+            "built one whose length could depend on data")
+        assert len(seen["values"]) == len(m._SPMD_ENTRY_FLAGS)
+        assert all(isinstance(v, float) for v in seen["values"])
+
+    def test_the_length_check_is_not_vacuous(self):
+        """Non-vacuity: the assertion above compares two INDEPENDENT lengths,
+        so a mismatched pair must fail it."""
+        names, values = ("a", "b", "c"), (1.0, 2.0)
+        with pytest.raises(AssertionError):
+            assert len(values) == len(names)
+
+    @pytest.mark.parametrize("kwargs", [
+        {},
+        {"n_steps": 3},
+        {"n_steps": 3, "segment_steps": 1, "compiled_segments": True,
+         "has_physics_fn": True, "has_on_segment": False,
+         "has_phys_state": None, "shard_geometry": True},
+    ])
+    def test_payload_width_is_INDEPENDENT_of_which_flags_are_supplied(
+            self, capture_flags, kwargs):
+        """A width that varies per call site is a deadlock: two processes
+        entering the same allgather with different shapes."""
+        m = _atm_module()
+        seen = capture_flags(m)
+        m._agree_spmd_entry(_StubModel(), _StubMesh(), where="t", **kwargs)
+        assert len(seen["values"]) == len(m._SPMD_ENTRY_FLAGS)
+
+    def test_mesh_None_keeps_the_same_width(self, capture_flags):
+        m = _atm_module()
+        seen = capture_flags(m)
+        m._agree_spmd_entry(_StubModel(), None, where="t")
+        assert len(seen["values"]) == len(m._SPMD_ENTRY_FLAGS)
+
+    def test_ocean_and_opsplit_payload_widths_match_their_name_tuples(
+            self, capture_flags):
+        om = _ocean_module()
+        seen = capture_flags(om)
+        om._agree_ocean_spmd_entry(_StubModel(), _StubMesh(), where="t")
+        assert seen["names"] is om._OCEAN_SPMD_ENTRY_FLAGS
+        assert len(seen["values"]) == len(om._OCEAN_SPMD_ENTRY_FLAGS)
+
+        cm = _opsplit_module()
+        seen2 = capture_flags(cm)
+        model = _StubModel()
+        model._polar_mask = None
+        cm._agree_opsplit_spmd_entry(model, _StubMesh(), fix_mass=True,
+                                     rad_update_steps=4, ghg_keys=("co2",),
+                                     where="t")
+        assert seen2["names"] is cm._OPSPLIT_SPMD_ENTRY_FLAGS
+        assert len(seen2["values"]) == len(cm._OPSPLIT_SPMD_ENTRY_FLAGS)
+
+
+class TestAxisOrderIsAgreed:
+    """codex round-3 BLOCKER 2.
+
+    A ``(lat, lon)`` mesh of shape ``(2, 3)`` and a peer's ``(lon, lat)`` mesh
+    of shape ``(3, 2)`` have the same axis COUNT and the same per-name sizes,
+    so every count-based flag agreed. The gate passed; then ``_check_2d_mesh``
+    rejected the swapped peer while the valid one walked into the geometry
+    collective — a hang.
+    """
+
+    def test_swapped_axis_ORDER_changes_the_payload(self, capture_flags):
+        m = _atm_module()
+        seen = capture_flags(m)
+        m._agree_spmd_entry(_StubModel(), _StubMesh(("lat", "lon"), (2, 3)),
+                            where="t")
+        ordered = seen["values"]
+        seen2 = capture_flags(m)
+        m._agree_spmd_entry(_StubModel(), _StubMesh(("lon", "lat"), (3, 2)),
+                            where="t")
+        swapped = seen2["values"]
+        # the confound the old payload had: these agree on count and on the
+        # per-NAME sizes, so only an ORDER-sensitive term can separate them
+        names = m._SPMD_ENTRY_FLAGS
+        for f in ("n_axes", "p_lat", "p_lon"):
+            i = names.index(f)
+            assert ordered[i] == swapped[i], (
+                f"fixture broken: {f} must MATCH, else this test could pass "
+                f"without any order sensitivity")
+        assert ordered != swapped, (
+            "the entry payload must fold in the ORDERED axis-name tuple")
+        i = names.index("axis_names")
+        assert ordered[i] != swapped[i]
+
+    def test_ocean_gate_is_axis_order_sensitive_too(self, capture_flags):
+        om = _ocean_module()
+        seen = capture_flags(om)
+        om._agree_ocean_spmd_entry(_StubModel(),
+                                   _StubMesh(("lat", "lon"), (2, 3)),
+                                   where="t")
+        a = seen["values"]
+        seen2 = capture_flags(om)
+        om._agree_ocean_spmd_entry(_StubModel(),
+                                   _StubMesh(("lon", "lat"), (3, 2)),
+                                   where="t")
+        assert a != seen2["values"]
+
+
+class TestGateNeverRaisesBeforeItsCollective:
+    """codex round-3 BLOCKER 3.
+
+    ``int(n_steps)`` used to run while BUILDING the payload, so a rank passed
+    ``"bad"`` died there while its peer blocked in ``process_allgather``.  The
+    decisive assertion in each test below is that the collective RAN
+    (``fake.seen`` non-empty) before the exception — a restored inline
+    ``int()`` still raises ValueError, but with nothing gathered.
+    """
+
+    @pytest.mark.parametrize("bad", ["bad", float("nan"), object()])
+    def test_uncoercible_n_steps(self, multiproc, bad):
+        m = _atm_module()
+        fake = multiproc()
+        with pytest.raises(ValueError, match="n_steps"):
+            m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps=bad,
+                                where="ctx")
+        assert fake.seen, (
+            "the entry collective must run BEFORE the refusal, or one rank "
+            "dies while its peers block forever")
+
+    def test_out_of_range_n_steps(self, multiproc):
+        m = _atm_module()
+        fake = multiproc()
+        with pytest.raises(ValueError, match="2\\*\\*53"):
+            m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps=2 ** 60,
+                                where="ctx")
+        assert fake.seen
+
+    def test_message_names_the_bad_value_and_the_context(self, multiproc):
+        m = _atm_module()
+        multiproc()
+        with pytest.raises(ValueError) as e:
+            m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps="bad",
+                                where="run_atm_latlon_spmd")
+        assert "'bad'" in str(e.value) and "run_atm_latlon_spmd" in str(e.value)
+
+    def test_bad_segment_steps_also_deferred(self, multiproc):
+        m = _atm_module()
+        fake = multiproc()
+        with pytest.raises(ValueError, match="segment_steps"):
+            m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps=4,
+                                segment_steps="two", where="ctx")
+        assert fake.seen
+
+    def test_bad_grid_dim_is_deferred_in_BOTH_lanes(self, multiproc):
+        m = _atm_module()
+        fake = multiproc()
+        with pytest.raises(ValueError, match="grid.n_lat"):
+            m._agree_spmd_entry(_StubModel(n_lat="eight"), _StubMesh(),
+                                where="ctx")
+        assert fake.seen
+
+        om = _ocean_module()
+        fake2 = multiproc()
+        with pytest.raises(ValueError, match="grid.n_lat"):
+            om._agree_ocean_spmd_entry(_StubModel(n_lat="eight"),
+                                       _StubMesh(), where="ctx")
+        assert fake2.seen
+
+    def test_a_GOOD_value_raises_nothing(self, multiproc):
+        m = _atm_module()
+        multiproc()
+        m._agree_spmd_entry(_StubModel(), _StubMesh(), n_steps=6,
+                            segment_steps=2, where="ctx")
 
 
 class TestOceanFactoryWiringOrder:
@@ -454,43 +1027,77 @@ class TestOceanFactoryWiringOrder:
     atmosphere and must be gated the same way.
 
     codex round-2 confirmed `_build_band_vertex_masks` can throw on one rank
-    (unprimed vertex-mask cache) while a peer blocks in the schema gate. The
-    round-2 fix only covered the four atmosphere factories, so the ocean half
-    of that blocker stayed open.
+    (unprimed vertex-mask cache) while a peer blocks in the schema gate.
+    Round-3 asked whether the ocean fix had actually landed; it had, in
+    539c81a82, and these assertions pin it.
     """
 
-    FACTORIES = ("make_sharded_ocean_step", "make_sharded_ocean_step_global")
-
-    @staticmethod
-    def _body(fn_name):
-        import ast
-        import inspect
-        import legoesm.ocean.dynamics.sharded_ocean_step as m
-        fn = ast.parse(inspect.getsource(getattr(m, fn_name)).lstrip()).body[0]
-        if (fn.body and isinstance(fn.body[0], ast.Expr)
-                and isinstance(fn.body[0].value, ast.Constant)
-                and isinstance(fn.body[0].value.value, str)):
-            fn.body = fn.body[1:]
-        return fn
-
-    @pytest.mark.parametrize("fn_name", FACTORIES)
+    @pytest.mark.parametrize("fn_name", sorted(_OCEAN_GATED))
     def test_gate_precedes_every_raise_and_return(self, fn_name):
         import ast
-        fn = self._body(fn_name)
-        for stmt in fn.body:
-            if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                   and n.func.id == "_agree_ocean_spmd_entry"
-                   for n in ast.walk(stmt)):
-                return
+        fns = _top_level_functions(_module_tree(_ocean_module()))
+        body = _strip_docstring(fns[fn_name])
+        idx = _direct_gate_index(fns[fn_name], _OCEAN_GATED[fn_name])
+        assert idx is not None, f"{fn_name} never calls its gate directly"
+        for stmt in body[:idx]:
             bad = [n for n in ast.walk(stmt)
                    if isinstance(n, (ast.Raise, ast.Return))]
             assert not bad, (
-                f"{fn_name}: a {type(bad[0]).__name__} precedes "
-                f"_agree_ocean_spmd_entry — one rank returns/raises while a "
-                f"peer blocks in a collective (HANG).")
-        raise AssertionError(f"{fn_name} never calls _agree_ocean_spmd_entry")
+                f"{fn_name}: a {type(bad[0]).__name__} precedes the gate — "
+                f"one rank returns/raises while a peer blocks (HANG).")
 
-    def test_entry_flag_tuple_is_static(self):
-        import legoesm.ocean.dynamics.sharded_ocean_step as m
-        assert isinstance(m._OCEAN_SPMD_ENTRY_FLAGS, tuple)
-        assert all(isinstance(x, str) for x in m._OCEAN_SPMD_ENTRY_FLAGS)
+    def test_entry_flag_tuples_are_static_literals(self):
+        for mod_fn, attr in ((_ocean_module, "_OCEAN_SPMD_ENTRY_FLAGS"),
+                             (_ocean_module, "_OCEAN_GATHER_ENTRY_FLAGS"),
+                             (_atm_module, "_SPMD_ENTRY_FLAGS"),
+                             (_atm_module, "_MESH_ENTRY_FLAGS"),
+                             (_opsplit_module, "_OPSPLIT_SPMD_ENTRY_FLAGS")):
+            t = getattr(mod_fn(), attr)
+            assert isinstance(t, tuple) and t
+            assert all(isinstance(x, str) for x in t)
+            assert len(set(t)) == len(t), f"{attr} has duplicate flag names"
+
+
+class TestOperatorSplitLaneIsGuarded:
+    """Round 4, found by enumerating the class rather than the reported sites.
+
+    ``make_sharded_operator_split_step`` is the THIRD lat-band SPMD lane. It
+    reuses ``build_band_grids_atm`` and hands the per-process-recomputed stack
+    to a REPLICATED ``device_put`` — the exact #1362 defect — and it had
+    neither the guarded broadcast nor an entry gate.
+    """
+
+    def test_geometry_goes_through_the_guarded_broadcast(self):
+        import ast
+        fns = _top_level_functions(_module_tree(_opsplit_module()))
+        fn = fns["make_sharded_operator_split_step"]
+        called = {n.func.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "broadcast_checked" in called, (
+            "the per-process band-geometry stack must be agreed + broadcast "
+            "before the replicated device_put, or #1362 reproduces here")
+        assert "assert_schema_agrees" in called, (
+            "the polar-mask fields are CONDITIONAL on model._polar_mask, so "
+            "the field LIST itself can differ across processes — that must "
+            "fail in the fixed-shape schema gate, not desynchronise the "
+            "per-field gathers")
+
+    def test_no_replicated_device_put_of_unchecked_geometry(self):
+        """The broadcast must actually WRAP the value that is put, not sit
+        beside it."""
+        import ast
+        fns = _top_level_functions(_module_tree(_opsplit_module()))
+        fn = fns["make_sharded_operator_split_step"]
+        puts = [n for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "device_put"]
+        assert puts, "fixture: this lane must still device_put its geometry"
+        guarded = [p for p in puts
+                   if any(isinstance(c, ast.Call)
+                          and isinstance(c.func, ast.Name)
+                          and c.func.id == "broadcast_checked"
+                          for c in ast.walk(p))]
+        assert guarded, (
+            "every replicated geometry device_put must take a "
+            "broadcast_checked(...) value as its argument")
