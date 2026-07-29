@@ -46,7 +46,23 @@ task. `--self-test` must keep passing every loop.
       ONE quantity.
       OPEN: the V-component does NOT close the same way (12.6% explained) — `pvv_b` has a second
       cause. Do not assume symmetry with u.
-      IN PROGRESS: why is zu_frc off by 8.03e-03? **KEY SOURCE FACT (verified from cpp_DINO.fcm =
+      **STAGE 7 DONE 2026-07-29 — static-weight hypothesis FALSIFIED; a structural gap found.**
+      Swapping NEMO's static e3u_0/r1_hu_0 onto legoESM's own du_dt made it 44x WORSE
+      (8.0266e-03 -> 3.5264e-01). Static and live must stay PAIRED with their own RHS; the weight
+      is not a drop-in. Residual sits at sloped-bathymetry columns near the channel walls, not the
+      seam (only 10% touch the wrap columns).
+      **NEXT / strongest lead: legoESM has NO `zu_trd` subtraction.** NEMO does
+      `zu_frc = zu_frc - zu_trd*ssumask` (dynspg_ts.F90:304, :367); our F_slow_u is finalised at
+      ocean_model_latlon_cgrid.py:2841 with nothing removed after. An ABSENCE, not a sign/mask
+      bug. BEFORE adding anything: check whether legoESM's formulation makes the removal
+      unnecessary by construction (i.e. never adds the component NEMO removes) — a wrong "fix"
+      here would be easy and would look plausible.
+      HINT ONLY, not evidence: RSS of dyn_ldf/dyn_vor/dyn_adv ZAD/dyn_cor_2d = 6.49e-3 vs zu_frc
+      8.03e-3, same order — consistent with zu_frc being their depth-mean, but NO per-level
+      correlation was run.
+      CONFIRMED ASYMMETRY: zv_frc err_norm 5.4290e-04, ~15x smaller than zu_frc — pvv_b's cause is
+      genuinely separate.
+      (original question) why is zu_frc off by 8.03e-03? **KEY SOURCE FACT (verified from cpp_DINO.fcm =
       `key_qco key_vco_3d`)**: under key_qco NEMO builds it with the **STATIC** reference ladder --
       `SUM(e3u_0 * puu(Krhs) * umask) * r1_hu_0` (dynspg_ts.F90:336) -- NOT the live e3u(Kmm),
       which is the `# else` branch DINO does not compile. The in-source comment gives the reason

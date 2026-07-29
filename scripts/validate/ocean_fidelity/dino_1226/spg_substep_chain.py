@@ -421,12 +421,40 @@ def main() -> int:
             captured["U_bar_seed"], captured["V_bar_seed"] = _local_davg[0]
         return result
 
+    # STAGE 7 (this iteration): also spy on the model's own ``tendencies``
+    # bound method to capture the 3-D momentum RHS (``tend.du_dt``/``dv_dt``,
+    # legoESM's ``puu(:,:,:,Krhs)`` equivalent -- the SAME array
+    # ocean_model_latlon_cgrid.py:2812-2813 reads to build F_slow_u/v) at the
+    # SAME call the F_slow_u/v spy above brackets, so STAGE 7 below can
+    # recompute the depth-integral with NEMO's OWN static e3u_0*umask/r1_hu_0
+    # weights instead of legoESM's live h_u_pre/H_u_pre, using legoESM's own
+    # RHS unchanged -- isolates the WEIGHT from the RHS with no re-derivation
+    # of either.
+    _real_tendencies = model.tendencies
+
+    def _spy_tend(state_arg, *a, **kw):
+        result = _real_tendencies(state_arg, *a, **kw)
+        # tendencies() is called for BOTH the advective and dissipative RK3
+        # passes; only capture once (first call == the pass whose du_dt/dv_dt
+        # feeds the F_slow_u/v this script already tracks via the seeded
+        # barotropic call above -- ocean_model_latlon_cgrid.py's own docstring
+        # confirms tendencies() is called once per _step_impl invocation, and
+        # _step_impl's ADVECTIVE (Nnn) pass is the one that runs first here).
+        if "du_dt_3d" not in captured:
+            captured["du_dt_3d"] = result.du_dt.data
+            captured["dv_dt_3d"] = result.dv_dt.data
+        return result
+
+    model.tendencies = _spy_tend
+
     ocmod.barotropic_substeps_latlon_cgrid = _spy
     try:
         with jax.disable_jit():
             _ = model.step(st, DT, surface_forcing=sf)
     finally:
         ocmod.barotropic_substeps_latlon_cgrid = _real_fn
+        model.tendencies = _real_tendencies
+    assert "du_dt_3d" in captured, "tendencies() was never called -- check the spy"
 
     assert captured, "barotropic_substeps_latlon_cgrid was never called -- check barotropic_solver"
     print(f"captured barotropic call: n_substeps={captured['n_substeps']} "
@@ -646,6 +674,106 @@ def main() -> int:
         err_k = float(np.sqrt(np.mean(
             (lego_ub_nemo[..., k][mk] - nemo_ub_restart[..., k][mk]) ** 2))) / rms_k
         print(f"    k={k:2d}  err_norm={err_k:.4e}  RMS(nemo)={rms_k:.4e}  n={int(mk.sum())}")
+
+    # --- STAGE 7 (this iteration): zu_frc weighting-vs-RHS isolation.
+    #
+    # (1) legoESM's own construction (ocean_model_latlon_cgrid.py:2812-2844):
+    #     h_k_pre = compute_layer_thickness(state.eta.data, state.H_bathy.data,
+    #                                        self.z_coord, ...)          [LIVE eta]
+    #     h_u_pre = min_cell_to_uface(h_k_pre)                            [min-rule face]
+    #     _u_pair = jnp.sum(jnp.stack([h_u_pre, du_dt*h_u_pre], -1), -2)
+    #     H_u_pre = jnp.maximum(_u_pair[...,0], 1e-10)
+    #     F_slow_u = _u_pair[...,1] / H_u_pre * state.u_mask.data
+    #   i.e. BOTH the thickness AND the column-depth normaliser are the LIVE,
+    #   min-rule-faced quantities recomputed from the current eta every step --
+    #   NOT NEMO's static e3u_0/r1_hu_0 (the branch NEMO's key_qco compiles).
+    #   This is the PRIMARY HYPOTHESIS the task named; confirmed by direct
+    #   quotation of the source above, not inferred.
+    #
+    # (2) THE DECISIVE TEST: recompute zu_frc with NEMO's own static
+    #   e3u_0*umask weights + r1_hu_0 normaliser (read from mesh_mask.nc,
+    #   already exposed as g.e3u_0/g.hu_0 by read_nemo_mesh_mask), applied to
+    #   legoESM's OWN 3-D momentum RHS (captured["du_dt_3d"], the tend.du_dt
+    #   this same step computed) -- isolates the WEIGHT from the RHS with no
+    #   re-derivation of either.
+    print("\n=== STAGE 7: zu_frc weighting isolation (static e3u_0/r1_hu_0 vs live) ===")
+    assert g.e3u_0 is not None and g.hu_0 is not None, (
+        "mesh_mask.nc has no e3u_0 -- STAGE 7 requires it (read_nemo_mesh_mask "
+        "derives hu_0 from it); cannot run the decisive test without the static ladder")
+    e3u_0 = np.asarray(g.e3u_0)          # (n_lat, n_lon, nlev) NEMO u-index convention
+    hu_0 = np.asarray(g.hu_0)            # (n_lat, n_lon) = sum_k(e3u_0*umask)
+    e3v_0 = np.asarray(g.e3v_0)
+    hv_0 = np.asarray(g.hv_0)
+    # legoESM's du_dt/dv_dt are FACE-shaped (n_lon+1 / n_lat+1, periodic wrap
+    # column/row) -- map to NEMO's u/v-index convention with the SAME
+    # _u_to_nemo/_v_to_nemo the rest of this script already uses (STAGE 0-3)
+    # BEFORE combining with NEMO-shaped e3u_0/umask/hu_0, so the weight and
+    # the RHS line up on the identical grid the mesh_mask ships.
+    du_dt_3d_n = _u_to_nemo(np.asarray(captured["du_dt_3d"]))
+    dv_dt_3d_n = _v_to_nemo(np.asarray(captured["dv_dt_3d"]))
+    n_lev_frc = min(du_dt_3d_n.shape[-1], e3u_0.shape[-1])
+    umask3_nemo = np.asarray(g.umask)[..., :n_lev_frc] > 0.5
+    vmask3_nemo = np.asarray(g.vmask)[..., :n_lev_frc] > 0.5
+
+    r1_hu_0 = 1.0 / np.maximum(hu_0, 1e-10)
+    r1_hv_0 = 1.0 / np.maximum(hv_0, 1e-10)
+    zu_frc_static = (
+        np.sum(e3u_0[..., :n_lev_frc] * du_dt_3d_n[..., :n_lev_frc]
+               * umask3_nemo, axis=-1) * r1_hu_0
+    ) * umask2
+    zv_frc_static = (
+        np.sum(e3v_0[..., :n_lev_frc] * dv_dt_3d_n[..., :n_lev_frc]
+               * vmask3_nemo, axis=-1) * r1_hv_0
+    ) * vmask2
+
+    _, e_zu_static = _report("zu_frc [STATIC e3u_0/r1_hu_0]",
+                              zu_frc_static, nemo_zu_frc, umask2)
+    _, e_zv_static = _report("zv_frc [STATIC e3v_0/r1_hv_0]",
+                              zv_frc_static, nemo_zv_frc, vmask2)
+    # cf. STAGE 0's live-weighted zu_frc/zv_frc err_norm (established: 8.03e-3 / ~12.6% of that)
+    lego_u_frc_live = np.asarray(captured["kw"]["F_slow_u"])
+    lego_v_frc_live = np.asarray(captured["kw"]["F_slow_v"])
+    _, e_zu_live = _report("zu_frc [LIVE h_u_pre/H_u_pre, STAGE-0 repeat]",
+                            _u_to_nemo(lego_u_frc_live), nemo_zu_frc, umask2)
+    _, e_zv_live = _report("zv_frc [LIVE h_v_pre/H_v_pre, STAGE-0 repeat]",
+                            _v_to_nemo(lego_v_frc_live), nemo_zv_frc, vmask2)
+    print(f"\nSTAGE 7 u-component: err_norm live={e_zu_live:.4e}  static={e_zu_static:.4e}  "
+          f"(collapse toward roundoff => weighting owns it; if static is NOT "
+          f"materially smaller than live, the 3-D RHS itself must be wrong instead)")
+    print(f"STAGE 7 v-component: err_norm live={e_zv_live:.4e}  static={e_zv_static:.4e}")
+
+    # --- STAGE 7 item (4): the zu_frc -= zu_trd*ssumask subtraction
+    # (dynspg_ts.F90:304/:367). legoESM's F_slow_u construction (:2839-2841)
+    # has NO analogous post-hoc subtraction of a separately-tracked drift/trend
+    # term after the depth-integral -- the only subtractive term in the whole
+    # F_slow_u chain is the barotropic_drag_substep block (:2901-2923, OFF by
+    # default) and the du_dt_pert split (:2876, which REMOVES F_slow_u from
+    # du_dt for the 3-D perturbation -- the opposite direction, computed AFTER
+    # F_slow_u is finalized, so it cannot be the missing zu_trd term). Checked:
+    print(f"\nSTAGE 7 item 4 (zu_trd subtraction): "
+          f"barotropic_drag_substep={getattr(mc, 'barotropic_drag_substep', False)}  "
+          "-- legoESM's F_slow_u has no zu_trd-equivalent post-hoc subtraction "
+          "at all (confirmed by reading ocean_model_latlon_cgrid.py:2836-2844: "
+          "F_slow_u is finalized at :2841 with nothing subtracted after); this "
+          "is a STRUCTURAL absence, not a sign/mask mismatch in an existing term.")
+
+    # --- STAGE 7 item (3): is 8.03e-3 quantitatively consistent with the
+    # depth-mean of the known 3-D trend-error rows (dyn_ldf 3.9e-3, dyn_vor EEN
+    # 1.2e-3, dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3)? Only meaningful if STAGE
+    # 7's static-weight test does NOT collapse the error (i.e. RHS-side, not
+    # weight-side) -- reported unconditionally as a magnitude sanity check,
+    # NOT asserted as a match (no NEMO per-term 3-D dump was read here to
+    # verify the individual level-by-level RHS agreement; this is a
+    # plausibility check on ROOT-SUM-SQUARE magnitude only).
+    _known_rows_rss = float(np.sqrt(3.9e-3**2 + 1.2e-3**2 + 4.9e-3**2 + 1.2e-3**2))
+    print(f"\nSTAGE 7 item 3 (magnitude plausibility ONLY, not a per-level "
+          f"verification): RSS of known 3-D trend-error rows "
+          f"(dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3, dyn_adv ZAD 4.9e-3, "
+          f"dyn_cor_2d 1.2e-3) = {_known_rows_rss:.4e} vs zu_frc's established "
+          f"8.03e-3 -- {'CONSISTENT-MAGNITUDE' if abs(_known_rows_rss-8.03e-3) < 3e-3 else 'NOT closely matched'} "
+          "(this is NOT proof of a shared root cause -- would need per-level "
+          "correlation of the actual du_dt error field against each term's own "
+          "error field, not run here).")
 
     print("\nSTAGE 4 VERDICT: if e_u3d_before/e_v3d_before (the raw 3-D before-level "
           "velocity, direct restart comparison, no depth-averaging involved at all) "
