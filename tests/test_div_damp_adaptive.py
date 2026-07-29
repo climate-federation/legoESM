@@ -428,6 +428,68 @@ def test_corner_div_damp_del4_active_without_d2(small_3d_state):
     assert jnp.all(jnp.isfinite(s_del4.u_d.data))
 
 
+def test_corner_div_damp_del4_term_isolated(small_3d_state):
+    """PE mirror of the NH dd8-isolation test: d2_bg=0, dddmp=0,
+    d4_bg>0, nord=1 must change winds through the dd8 term alone
+    (codex r1 P2)."""
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=35)
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev)))),
+        v_d=s.v_d.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev)))),
+    )
+
+    cfg_inert = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7, corner_div_damp_dddmp=0.0,
+    )
+    cfg_dd8 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0,
+        corner_div_damp_dddmp=0.0,
+        corner_div_damp_d4_bg=0.16,
+        corner_div_damp_nord=1,
+    )
+    model_inert = CDGridPrimitiveEquationModel(grid, coord, cfg_inert)
+    model_dd8 = CDGridPrimitiveEquationModel(grid, coord, cfg_dd8)
+
+    s_inert = model_inert.step(s, 100.0)
+    s_dd8 = model_dd8.step(s, 100.0)
+    diff = float(jnp.max(jnp.abs(s_inert.u_d.data - s_dd8.u_d.data)))
+    base = float(jnp.max(jnp.abs(s_inert.u_d.data)))
+    assert diff > 1e-6 * base, (
+        f"dd8 del-4 term alone must change winds on PE (diff={diff:.3e})"
+    )
+    assert jnp.all(jnp.isfinite(s_dd8.u_d.data))
+
+
+def test_corner_div_damp_factory_default_predicate():
+    """The component-fidelity factory defaults (nord=1, d4_bg=0.16,
+    d2_bg=0) must satisfy the activation predicate — they were dead
+    under the old d2_bg master gate (codex r1 P2 blast-radius ask)."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+        make_fv3_component_fidelity_pe_config,
+    )
+    from legoesm.core._fv3_divergence_corner import (
+        corner_div_damp_active,
+        corner_div_damp_higher_order_active,
+    )
+
+    cfg = make_fv3_component_fidelity_pe_config()
+    assert corner_div_damp_active(cfg)
+    assert corner_div_damp_higher_order_active(cfg)
+
+
 def test_corner_div_damp_stable_short_run(small_3d_state):
     """corner_div_damp_d2_bg=0.001 stable for 20 steps from HS init."""
     grid, cdgrid, coord, _ = small_3d_state

@@ -258,13 +258,15 @@ def test_nh_corner_div_damp_del4_active_without_d2(small_nh_state):
 
 
 def test_corner_div_damp_activation_helpers():
-    """Pure-helper truth table: activation matches FV3 semantics
+    """Pure-helper truth table.  Activation = enable selectors
     (d2_bg>0 OR (d4_bg>0 AND nord>0)); dddmp alone stays inert
     (deliberate deviation — its default 0.20 would flip every
-    all-zero config)."""
+    all-zero config).  Higher-order branch = active AND nord>0
+    (FV3 keys the branch on nord alone; d4_bg=0 just zeroes the
+    dd8 term — codex r1 P1)."""
     from legoesm.core._fv3_divergence_corner import (
         corner_div_damp_active,
-        corner_div_damp_del4_active,
+        corner_div_damp_higher_order_active,
     )
 
     def cfg(d2=0.0, d4=0.0, nord=0, dddmp=0.20):
@@ -279,8 +281,63 @@ def test_corner_div_damp_activation_helpers():
     assert not corner_div_damp_active(cfg(d4=0.16, nord=0))       # pair broken
     assert not corner_div_damp_active(cfg(nord=1))                # pair broken
     assert not corner_div_damp_active(cfg(dddmp=0.5))             # dddmp alone
-    assert corner_div_damp_del4_active(cfg(d4=0.16, nord=1))
-    assert not corner_div_damp_del4_active(cfg(d2=0.001))
+    assert corner_div_damp_higher_order_active(cfg(d4=0.16, nord=1))
+    assert corner_div_damp_higher_order_active(cfg(d2=0.001, nord=1))
+    assert not corner_div_damp_higher_order_active(cfg(d2=0.001))  # nord=0
+    assert not corner_div_damp_higher_order_active(cfg(nord=1))    # inactive
+
+
+def test_nh_corner_div_damp_del4_term_isolated(small_nh_state):
+    """del-4 term in isolation (d2_bg=0, dddmp=0, d4_bg>0, nord=1):
+    the dd8*laplacian(delpc) contribution alone must change winds and
+    carry finite reverse-mode gradients (codex r1 P2: the paired
+    tests set dddmp=0.20, so an implementation dropping the dd8 term
+    would still pass them)."""
+    grid, height_coord, terrain_metric, state = small_nh_state
+
+    n = grid.n
+    nlev = state.u.data.shape[-1]
+    rng = np.random.default_rng(seed=35)
+    s = state._replace(
+        u=state.u.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n, n, nlev)))),
+        v=state.v.replace(data=jnp.asarray(
+            rng.uniform(-3.0, 3.0, size=(6, n, n, nlev)))),
+    )
+
+    cfg_inert = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14, n_acoustic_substeps=4,
+        corner_div_damp_dddmp=0.0,
+    )
+    cfg_dd8 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14, n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0,
+        corner_div_damp_dddmp=0.0,
+        corner_div_damp_d4_bg=0.16,
+        corner_div_damp_nord=1,
+    )
+    model_inert = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_inert,
+    )
+    model_dd8 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_dd8,
+    )
+
+    s_inert = model_inert.step(s, 10.0)
+    s_dd8 = model_dd8.step(s, 10.0)
+    diff = float(jnp.max(jnp.abs(s_inert.u.data - s_dd8.u.data)))
+    base = float(jnp.max(jnp.abs(s_inert.u.data)))
+    assert diff > 1e-6 * base, (
+        f"dd8 del-4 term alone must change winds (diff={diff:.3e})"
+    )
+
+    def loss_fn(u_data):
+        st = s._replace(u=s.u.replace(data=u_data))
+        st = model_dd8.step(st, 10.0)
+        return jnp.mean(st.u.data ** 2 + st.v.data ** 2)
+
+    grad = jax.grad(loss_fn)(s.u.data)
+    assert jnp.all(jnp.isfinite(grad))
 
 
 def test_nh_corner_div_damp_differentiable(small_nh_state):

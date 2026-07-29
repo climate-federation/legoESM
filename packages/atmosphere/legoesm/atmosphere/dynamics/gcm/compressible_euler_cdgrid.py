@@ -95,6 +95,10 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     anchor_mass_to_initial: bool = False
     acoustic_off_centering: float = 0.0   # Off-centering beta; 0=centered, 0.1 long runs
     # FV3_3D iter 168: corner-div damping (mirror of PE iter-16/18; FV3 sw_core.F90:1641-1822 d_sw5)
+    # ENABLE SELECTORS: block activates when d2_bg>0 OR (d4_bg>0 AND nord>0)
+    # (corner_div_damp_active).  dddmp is a MODIFIER only — never activates
+    # alone (deviation from FV3's always-on d_sw; default 0.20 would flip
+    # every legacy all-zero config).
     corner_div_damp_d2_bg: float = 0.0
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
@@ -380,9 +384,9 @@ def cdgrid_compressible_euler_slow_tendencies(
     # d2_bg>0 (see corner_div_damp_active).
     from legoesm.core._fv3_divergence_corner import (
         corner_div_damp_active as _cdd_active,
-        corner_div_damp_del4_active as _cdd_del4_active,
+        corner_div_damp_higher_order_active as _cdd_ho_active,
     )
-    _need_zeta_a2b_for_smag = _cdd_del4_active(config)
+    _need_zeta_a2b_for_smag = _cdd_ho_active(config)
     _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
@@ -638,7 +642,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         # Step 3: del-(2*(nord+1)) damp (FV3 sw_core.F90:1725-1822, nord>0)
         # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
         # would break the iter-22 bit-for-bit test; mirror of PE-side rationale).
-        if _cdd_del4_active(config):
+        if _cdd_ho_active(config):
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
             )

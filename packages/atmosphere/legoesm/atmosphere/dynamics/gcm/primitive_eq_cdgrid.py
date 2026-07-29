@@ -174,12 +174,15 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt)). Stable range 0 to ~0.005.
         # iter-17 optimum HS C36: 0.0005.
     corner_div_damp_dddmp: float = 0.20
-        # FV3 sw_core.F90 default 0.20. Active when corner_div_damp_d2_bg>0.
+        # FV3 sw_core.F90 default 0.20.  MODIFIER only: block activates when
+        # d2_bg>0 OR (d4_bg>0 AND nord>0) (corner_div_damp_active); dddmp
+        # alone never activates.
     corner_div_damp_d4_bg: float = 0.0
         # FV3_3D iter 18: del-(2*(nord+1)) corner-div damp (FV3 sw_core.F90:1809-1817).
         # dd8 = (da_min_c*d4_bg)^(nord+1); vort = damp2*delpc + dd8*divg_d_iter. FV3 typical d4_bg=0.16, nord=2.
     corner_div_damp_nord: int = 0
-        # 0=del-2, 1=del-4, 2=del-6. Active when corner_div_damp_d4_bg>0.
+        # 0=del-2, 1=del-4, 2=del-6.  nord>0 selects the higher-order
+        # branch once the block is active; d4_bg=0 just zeroes dd8.
     rf_tau_days: float = 0.0
         # FV3_3D iter 449 (PE mirror of NH 448): Ray_fast (FV3 dyn_core.F90:2922-3020).
         # rff(k) = 1/(1 + dt/(tau*86400)*sin²(...)²); u_d,v_d *= rff for pfull<rf_cutoff_pa.
@@ -447,9 +450,9 @@ def fv3_hydrostatic_tendencies(
     # d2_bg>0 (see corner_div_damp_active).
     from legoesm.core._fv3_divergence_corner import (
         corner_div_damp_active as _cdd_active,
-        corner_div_damp_del4_active as _cdd_del4_active,
+        corner_div_damp_higher_order_active as _cdd_ho_active,
     )
-    _need_zeta_a2b_for_smag = _cdd_del4_active(config)
+    _need_zeta_a2b_for_smag = _cdd_ho_active(config)
     _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
@@ -632,7 +635,7 @@ def fv3_hydrostatic_tendencies(
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
         # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
         # would break the iter-22 bit-for-bit test).
-        if _cdd_del4_active(config):
+        if _cdd_ho_active(config):
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
             )
