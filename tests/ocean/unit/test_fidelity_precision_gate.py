@@ -112,3 +112,29 @@ def test_oracle_bridge_warns_once_under_fp32():
         warnings.simplefilter("always")
         bridge._warn_if_not_fp64()
     assert not caught
+
+
+def test_require_explicit_e3t_mode_rejects_an_inherited_default(monkeypatch):
+    """The e3t default has contaminated FOUR measurements (#1226).
+
+    It feeds NEMO's analytic e3t_1d where NEMO runs on e3t_0 -- up to 12.9%
+    apart below k=25. Most recently it produced a completely wrong root cause:
+    the barotropic seed read 2.31e-2 and was blamed on the depth-averaging
+    operator, when at e3t=both the seed is 2.19e-16 and the error actually
+    accumulates through the substeps instead.
+    """
+    from legoesm.ocean.fidelity.precision_gate import require_explicit_e3t_mode
+
+    monkeypatch.delenv("LEGOESM_NEMO_E3T", raising=False)
+    with pytest.raises(ValueError, match="NOT SET"):
+        require_explicit_e3t_mode(context="unit")
+
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "both")
+    assert require_explicit_e3t_mode(context="unit") == "both"
+
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "off")
+    assert require_explicit_e3t_mode(context="unit") == "off"
+
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "bogus")
+    with pytest.raises(ValueError, match="unknown LEGOESM_NEMO_E3T"):
+        require_explicit_e3t_mode(context="unit")

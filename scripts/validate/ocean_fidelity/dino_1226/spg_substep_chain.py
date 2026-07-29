@@ -678,7 +678,202 @@ def main() -> int:
           f"{e_uninit:.4e}/{e_vninit:.4e}. This is a CLEAN, unambiguous "
           "attribution to (B): the averaging/weighting -- NOT (A) the 3-D "
           "velocity -- introduces the seed error. (A) is EXONERATED.")
-    print("NEXT: per the task's (B) branch, compare legoESM's sum_k(h_face) "
+
+    # =========================================================================
+    # STAGE 5 (this iteration): the (B) denominator -- WET LEVEL COUNT at the
+    # u-face.  DINO's masked_zco path (dino_masked_zco_coordinate) builds
+    # h_partial via n_wet = sum_k(centers < H_bowl) -- a PER-T-COLUMN wet-
+    # level count from a continuous bowl bathymetry compared with STRICT `<`
+    # against the analytic level-centre ladder.  legoESM's u-face thickness
+    # is then min_cell_to_uface(h_k) = min(h_partial_W[k], h_partial_E[k]) per
+    # level -- i.e. the u-face is wet at level k iff BOTH neighbouring
+    # T-columns are wet at k.  NEMO's umask is whatever `dom_uvmsk`/mesh_mask
+    # actually stored for this run's bathymetry.  If legoESM's continuous-
+    # bowl-based n_wet disagrees with NEMO's own bathymetry-derived umask on
+    # a handful of columns (a familiar failure mode: ULP-tie level, bug #18),
+    # min-rule turns EVERY such T-column mismatch into a u-face mismatch on
+    # BOTH its faces, and the resulting Sum_k(h_face) denominator is wrong by
+    # exactly one dz_ref level there -- a large POINTWISE error concentrated
+    # on a few percent of faces, consistent with the ~2-3e-2 RMS seed error
+    # while corr stays high and most faces are exact.
+    print("\n=== STAGE 5: (B) localisation -- wet-level COUNT vs thickness VALUE "
+          "at u-faces ===")
+
+    eta0 = st.eta.data if hasattr(st, "eta") else st.eta
+    h_k_lego = compute_layer_thickness(
+        jnp.asarray(np.asarray(eta0) * 0.0), st.H_bathy.data, captured["z_coord"],
+        min_water_column_m=captured["config"].min_water_column_m)
+    h_k_lego_np = np.asarray(h_k_lego)  # (n_lat, n_lon, nlev), T-columns, eta=0 (reference)
+
+    n_lev5 = min(h_k_lego_np.shape[-1], g.umask.shape[-1], g.e3u_0.shape[-1]
+                 if g.e3u_0 is not None else h_k_lego_np.shape[-1])
+
+    # --- (1a) wet LEVEL COUNT at u-faces: legoESM (min-rule on h_k>0) vs NEMO umask
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    wet_lego_T = (h_k_lego_np[..., :n_lev5] > 0.0).astype(np.int32)  # (n_lat,n_lon,nlev)
+    h_u_lego = np.asarray(min_cell_to_uface(jnp.asarray(h_k_lego_np[..., :n_lev5])))
+    wet_u_lego = (h_u_lego > 0.0).astype(np.int32)
+    count_u_lego = wet_u_lego.sum(axis=-1)                      # (n_lat, n_lon+1)
+    count_u_lego_nemo = _u_to_nemo(count_u_lego)                 # -> NEMO u-column layout
+
+    umask_n = g.umask[..., :n_lev5] > 0.5
+    count_u_nemo = umask_n.sum(axis=-1)                          # (n_lat, n_lon)
+
+    diff_count = count_u_lego_nemo.astype(np.int64) - count_u_nemo.astype(np.int64)
+    wet_face_either = (count_u_lego_nemo > 0) | (count_u_nemo > 0)
+    n_diff = int(np.sum((diff_count != 0) & wet_face_either))
+    print(f"  wet u-face LEVEL COUNT: n_faces_differing={n_diff} / "
+          f"{int(wet_face_either.sum())} wet-either faces")
+    vals, counts = np.unique(diff_count[wet_face_either], return_counts=True)
+    print("  histogram (lego_count - nemo_count : n_faces):")
+    for v, c in zip(vals, counts):
+        print(f"    {int(v):+3d} : {int(c)}")
+    if n_diff > 0:
+        jj, ii = np.where((diff_count != 0) & wet_face_either)
+        print(f"  first {min(15, n_diff)} differing u-face (row=j,col=i in NEMO u-column "
+              "indexing), lego_count, nemo_count, H_bathy(T-west), H_bathy(T-east):")
+        H_bathy_np = np.asarray(st.H_bathy.data)
+        H_bathy_nemo_T = H_bathy_np  # T-column layout, legoESM convention
+        for j, i in list(zip(jj, ii))[:15]:
+            # NEMO u-column i is between legoESM T-columns i and i+1 (face i+1 in
+            # legoESM's own indexing, since _u_to_nemo = a[:, 1:]); report both
+            # neighbouring T-column bathymetries for context.
+            Hw = float(H_bathy_nemo_T[j, i]) if i < H_bathy_nemo_T.shape[1] else float("nan")
+            He = float(H_bathy_nemo_T[j, i + 1]) if i + 1 < H_bathy_nemo_T.shape[1] else float("nan")
+            print(f"    (j={j:3d}, i={i:3d})  lego={int(count_u_lego_nemo[j, i])}  "
+                  f"nemo={int(count_u_nemo[j, i])}  H_bathy(W)={Hw:.3f}  H_bathy(E)={He:.3f}")
+        # WHERE: bathymetry-step faces (H differs materially across the face)
+        # vs uniform-depth faces, and proximity to the periodic seam (i==0 or
+        # i==n_lon-1 in NEMO u-column indexing) or the deepest wet level.
+        Hw_all = H_bathy_nemo_T[jj, np.clip(ii, 0, H_bathy_nemo_T.shape[1] - 1)]
+        He_all = H_bathy_nemo_T[jj, np.clip(ii + 1, 0, H_bathy_nemo_T.shape[1] - 1)]
+        is_step = np.abs(Hw_all - He_all) > 1.0
+        n_lon_nemo = count_u_nemo.shape[1]
+        is_seam = (ii == 0) | (ii == n_lon_nemo - 1)
+        print(f"  of the {n_diff} differing faces: {int(is_step.sum())} are at a "
+              f"bathymetric STEP (|H_W-H_E|>1m), {int(is_seam.sum())} touch the "
+              "periodic seam (i=0 or i=n_lon-1).")
+
+    # --- (1b) sum_k(h_face) magnitude: legoESM vs NEMO's sum_k(e3u_0*umask)
+    if g.e3u_0 is not None:
+        Hu_nemo = (g.e3u_0[..., :n_lev5] * umask_n).sum(axis=-1)
+        Hu_lego_nemo_layout = _u_to_nemo(h_u_lego.sum(axis=-1))
+        m_wet = wet_face_either
+        rel = np.full(Hu_nemo.shape, np.nan)
+        nz = m_wet & (Hu_nemo > 0)
+        rel[nz] = np.abs(Hu_lego_nemo_layout[nz] - Hu_nemo[nz]) / Hu_nemo[nz]
+        finite_rel = rel[np.isfinite(rel)]
+        print(f"\n  sum_k(h_face) pointwise relative diff |lego-nemo|/nemo "
+              f"(one-signed positive quantity -- pointwise relative IS valid here):")
+        print(f"    median={np.median(finite_rel):.4e}  p99={np.percentile(finite_rel, 99):.4e}  "
+              f"max={np.max(finite_rel):.4e}  n_above_1e-9={int(np.sum(finite_rel > 1e-9))} "
+              f"/ {finite_rel.size}")
+    else:
+        print("\n  g.e3u_0 is None -- mesh_mask.nc lacks e3u_0, cannot run (1b)")
+
+    # --- (1c) decisive discriminator: on a handful of DISAGREEING columns,
+    # is it a thickness VALUE difference or purely a COUNT difference?
+    # NOTE: even when the wet-level COUNT agrees everywhere (n_diff==0, as
+    # measured), sum_k(h_face) can still disagree if the per-level THICKNESS
+    # VALUES differ (e.g. legoESM's static/eta=0 min-rule dz_ref vs NEMO's
+    # e3u_0, which for full-step DINO should be identical dz_ref values per
+    # wet level -- any nonzero here is a genuine value defect, not a count
+    # one).  Report value-level diffs on the worst relative-error faces
+    # regardless of whether the count differs.
+    if g.e3u_0 is not None and 'rel' in dir():
+        _rel_flat = np.where(np.isfinite(rel), rel, -1).ravel()
+        _worst_flat = np.argsort(_rel_flat)[::-1][:5]
+        jjr, iir = np.unravel_index(_worst_flat, rel.shape)
+        print("\n  (1c-value) level-by-level thickness at the 5 WORST relative-error "
+              "u-faces (count may agree -- this isolates VALUE-only mismatches):")
+        for j, i in zip(jjr, iir):
+            print(f"    (j={j}, i={i})  rel_diff={rel[j,i]:.4e}  "
+                  f"lego_count={int(count_u_lego_nemo[j,i])}  nemo_count={int(count_u_nemo[j,i])}")
+            for k in range(n_lev5):
+                lh = float(h_u_lego[j, i + 1, k]) if i + 1 < h_u_lego.shape[1] else float("nan")
+                nh = float(g.e3u_0[j, i, k]) if umask_n[j, i, k] else 0.0
+                nwet = bool(umask_n[j, i, k])
+                lwet = bool(wet_u_lego[j, i + 1, k]) if i + 1 < wet_u_lego.shape[1] else False
+                if abs(lh - nh) > 1e-6 or lwet != nwet:
+                    flag = "COUNT-DIFF" if lwet != nwet else "VALUE-DIFF"
+                    print(f"      k={k:2d}  lego_h={lh:.4f} (wet={lwet})  "
+                          f"nemo_e3u_0={nh:.4f} (wet={nwet})  <- {flag}")
+    if n_diff > 0 and g.e3u_0 is not None:
+        print("\n  (1c) level-by-level thickness at disagreeing u-faces (first 5):")
+        for j, i in list(zip(jj, ii))[:5]:
+            print(f"    (j={j}, i={i})  lego_count={int(count_u_lego_nemo[j,i])}  "
+                  f"nemo_count={int(count_u_nemo[j,i])}")
+            for k in range(n_lev5):
+                # NEMO u-column i -> legoESM u-face i+1 (per _u_to_nemo mapping)
+                lh = float(h_u_lego[j, i + 1, k]) if i + 1 < h_u_lego.shape[1] else float("nan")
+                nh = float(g.e3u_0[j, i, k]) if umask_n[j, i, k] else 0.0
+                nwet = bool(umask_n[j, i, k])
+                lwet = bool(wet_u_lego[j, i + 1, k]) if i + 1 < wet_u_lego.shape[1] else False
+                if lwet != nwet or (lwet and nwet and abs(lh - nh) > 1e-6):
+                    flag = "COUNT-DIFF" if lwet != nwet else "VALUE-DIFF"
+                    print(f"      k={k:2d}  lego_h={lh:.4f} (wet={lwet})  "
+                          f"nemo_e3u_0={nh:.4f} (wet={nwet})  <- {flag}")
+    else:
+        print("\n  (1c) skipped -- no disagreeing u-faces found, or e3u_0 unavailable")
+
+    # --- (2) THE PAYOFF TEST: recompute the seed U_bar/V_bar using NEMO's OWN
+    # e3u_0*umask (and e3v_0*vmask) as the weights, keeping legoESM's exact
+    # (bit-identical, per STAGE 4) 3-D before-level velocity as the numerator.
+    print("\n=== STAGE 5 PAYOFF: seed U_bar recomputed with NEMO's own e3u_0*umask weights ===")
+    if g.e3u_0 is not None and g.e3v_0 is not None:
+        # Build NEMO-weight h_u/h_v in legoESM's own face-array layout (n_lat,
+        # n_lon+1)/(n_lat+1,n_lon) by inverting _u_to_nemo/_v_to_nemo (pad a
+        # west/south column of zeros -- legoESM's own face 0 has no NEMO
+        # counterpart in this periodic mapping, matching the existing
+        # convention used everywhere else in this script).
+        def _nemo_to_u_face(a_2d_or_3d):
+            pad = np.zeros_like(a_2d_or_3d[:, :1, ...])
+            return np.concatenate([pad, a_2d_or_3d], axis=1)
+
+        def _nemo_to_v_face(a_2d_or_3d):
+            pad = np.zeros_like(a_2d_or_3d[:1, ...])
+            return np.concatenate([pad, a_2d_or_3d], axis=0)
+
+        h_u_nemo_wts = _nemo_to_u_face(g.e3u_0[..., :n_lev5] * umask_n)
+        vmask_n = g.vmask[..., :n_lev5] > 0.5
+        h_v_nemo_wts = _nemo_to_v_face(g.e3v_0[..., :n_lev5] * vmask_n)
+
+        u3d = np.asarray(lego_u_before[..., :n_lev5])
+        v3d = np.asarray(lego_v_before[..., :n_lev5])
+        num_u = np.sum(u3d * h_u_nemo_wts, axis=-1)
+        den_u = np.maximum(np.sum(h_u_nemo_wts, axis=-1),
+                            float(captured["config"].min_water_column_m))
+        U_bar_nemo_wts = num_u / den_u * (np.asarray(st.u_mask.data)[..., 0]
+                                            if np.asarray(st.u_mask.data).ndim == 3
+                                            else np.asarray(st.u_mask.data))
+        num_v = np.sum(v3d * h_v_nemo_wts, axis=-1)
+        den_v = np.maximum(np.sum(h_v_nemo_wts, axis=-1),
+                            float(captured["config"].min_water_column_m))
+        V_bar_nemo_wts = num_v / den_v * (np.asarray(st.v_mask.data)[..., 0]
+                                            if np.asarray(st.v_mask.data).ndim == 3
+                                            else np.asarray(st.v_mask.data))
+        _, e_u_payoff = _report("un_e_init (NEMO-weighted)", _u_to_nemo(U_bar_nemo_wts),
+                                 nemo_un_init, umask2)
+        _, e_v_payoff = _report("vn_e_init (NEMO-weighted)", _v_to_nemo(V_bar_nemo_wts),
+                                 nemo_vn_init, vmask2)
+        print(f"\n  PAYOFF RESULT: seed err_norm with legoESM weights = "
+              f"{e_uninit:.4e}/{e_vninit:.4e} (u/v)  ->  with NEMO's own "
+              f"e3u_0*umask/e3v_0*vmask weights = {e_u_payoff:.4e}/{e_v_payoff:.4e} (u/v).")
+        if e_u_payoff < 1e-6 and e_v_payoff < 1e-6:
+            print("  COLLAPSED TO ROUNDOFF -- the weighting/wet-level-count DOES "
+                  "own the seed error; STAGE 5's (1a)/(1c) count-diff localisation "
+                  "IS the exact defect.")
+        else:
+            print("  DID NOT COLLAPSE -- swapping in NEMO's own u-face weights does "
+                  "NOT reproduce NEMO's un_e_init/vn_e_init to roundoff. This FALSIFIES "
+                  "the (B)-weighting framing as the SOLE cause (or the face-index "
+                  "mapping / mask multiplication used in this substitution test is "
+                  "itself imperfect) -- reported plainly as a negative result, not "
+                  "papered over.")
+    else:
+        print("  e3u_0/e3v_0 unavailable in mesh_mask.nc -- cannot run the payoff test.")
+
+    print("\nNEXT: per the task's (B) branch, compare legoESM's sum_k(h_face) "
           "(the min-rule/nemo_ssh_avg face depth _depth_average_to_faces "
           "builds from H_bathy+eta) against NEMO's sum_k(e3u(Kbb)) per column "
           "-- since the 3-D velocity numerator is proven exact, the entire "
@@ -687,8 +882,8 @@ def main() -> int:
           "whether the gap is a UNIFORM per-column scale (metric/thickness "
           "convention) or CONCENTRATED on particular columns (shelf/thin/"
           "bathymetry-step, where barotropic_seed_face_depth's own docstring "
-          "already measured an 11% floor-interaction residual) -- this is "
-          "the next concrete, mechanical step, not yet measured here.")
+          "already measured an 11% floor-interaction residual) -- STAGE 5 above "
+          "measures this precisely.")
     return 0
 
 

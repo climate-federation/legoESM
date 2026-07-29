@@ -24,7 +24,7 @@ import jax.numpy as jnp
 
 from legoesm.core.precision import get_policy
 
-__all__ = ["require_fp64", "describe_float_leaves"]
+__all__ = ["require_fp64", "describe_float_leaves", "require_explicit_e3t_mode"]
 
 _POLICY_FIELDS = ("storage", "compute", "accumulate", "control")
 
@@ -103,3 +103,46 @@ def require_fp64(*objects, context: str = "oracle comparison") -> None:
             "miss: the values look right, the boxes holding them do not."
         )
     raise ValueError("\n".join(lines))
+
+
+def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
+    """Raise unless ``LEGOESM_NEMO_E3T`` is set EXPLICITLY; return its value.
+
+    ``bridge_nemo_to_legoesm_topo`` defaults this to ``"off"``, which feeds
+    legoESM NEMO's *analytic 1-D* ``e3t_1d`` while NEMO itself runs on the 3-D
+    ``e3t_0``.  Those two NEMO ladders differ by up to **12.9%** below k=25 --
+    NEMO builds its reference ladder in two passes (``zgr_lib.F90::zgr_sco_mi96``
+    re-anchors at ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's
+    ``rn_hco = 1000 m`` puts that at k=25 exactly) -- so the default silently
+    puts a 13% geometry error into the deepest third of the column.
+
+    It has now contaminated FOUR measurements.  The most recent cost a full
+    false root-cause: the barotropic seed measured 2.31e-2 and was attributed to
+    the depth-averaging operator, when at ``e3t=both`` the seed is 2.19e-16
+    (exact) and the error actually ACCUMULATES through the substeps -- the
+    opposite conclusion.
+
+    The default is NOT changed here: it exists because legoESM is unstable when
+    started from a NEMO restart on the true ladder (gate row "STABILITY on NEMO
+    true grid"), which is a real unfixed defect.  So the mode stays a choice --
+    but it must be a CONSCIOUS one, never an inherited silent default.
+    """
+    import os
+
+    mode = os.environ.get("LEGOESM_NEMO_E3T")
+    if mode is None:
+        raise ValueError(
+            f"{context}: LEGOESM_NEMO_E3T is NOT SET, so the bridge would "
+            'silently use "off" -- NEMO\'s analytic e3t_1d, which differs from '
+            "the e3t_0 NEMO actually runs on by up to 12.9% below k=25. That "
+            "default has already contaminated four measurements, most recently "
+            "producing a completely wrong root cause for the barotropic seed. "
+            'Set it explicitly: "both" (NEMO\'s true 3-D ladder, what a '
+            'fidelity comparison wants) or "off" (the 1-D ladder) -- and say '
+            "which in the report."
+        )
+    if mode not in ("off", "e3t_only", "gdept_only", "both"):
+        raise ValueError(
+            f"{context}: unknown LEGOESM_NEMO_E3T={mode!r}; expected "
+            '"off", "e3t_only", "gdept_only" or "both"')
+    return mode

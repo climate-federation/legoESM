@@ -26,7 +26,21 @@ task. `--self-test` must keep passing every loop.
       sharp at (0,0) on both a U-face and a T-point field; ssh EXACT at seed => velocity-specific,
       not shared with the eta/PGF chain. `puu_b`, `un_adv` and `pssh` are ALL INHERITED from the
       seed — the solver faithfully propagates a wrong initial condition.
-      **RESOLVED TO (B) 2026-07-29: the AVERAGING OPERATOR owns it; the 3-D velocity is
+      **CORRECTED AGAIN 2026-07-29 — it was the LEGOESM_NEMO_E3T DEFAULT.** The probe ran with
+      the env var UNSET -> NEMO's analytic e3t_1d, which differs from the e3t_0 NEMO runs on by
+      12.9% below k=25. A/B: e3t=off seed 2.3109e-02 / substep-1 2.3131e-02 / final 3.0949e-02;
+      **e3t=both seed 2.1872e-16 / substep-1 2.9656e-04 / final 1.9918e-02.** On the REAL ladder
+      the seed is EXACT and the error ACCUMULATES through the substeps — the opposite branch.
+      dyn_spg_ts DOES have a substep problem; the seed does not.
+      FALSIFIED: u-face wet-level count matches exactly (0/9758) — not the bug-#18 mask family.
+      NOT create_levy_stretched_z_star — the bridge never calls it (dz_ref == NEMO e3t_1d to
+      9e-16). That constructor feeds DINO's STANDALONE path only, where the missing second
+      mi96 pass (zgr_lib.F90 re-anchor at rn_hco=1000 m) may still be a separate real defect —
+      worth its own row, NOT yet measured.
+      GUARDED: precision_gate.require_explicit_e3t_mode() now refuses an inherited default
+      (4th contaminated measurement).
+      NEXT: with e3t=both, walk the SUBSTEP RECURRENCE (2.966e-04 -> 1.992e-02 over 68 substeps).
+      (superseded: RESOLVED TO (B): the AVERAGING OPERATOR owns it; the 3-D velocity is
       BIT-IDENTICAL to NEMO (err_norm 0.0 at all 35 levels, both components).** Since the
       numerator is exact, the entire 2.31e-2 lives in the thickness weighting
       (`_depth_average_to_faces`). Not upstream dynamics, not the bridge, not the solver.
