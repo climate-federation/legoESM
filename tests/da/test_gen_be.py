@@ -21,9 +21,11 @@ jax.config.update("jax_enable_x64", True)
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_latlon_grid(nlat=8, nlon=16):
     """Create a minimal LatLonGrid for testing."""
     from legoesm.grids.latlon import create_latlon_grid
+
     return create_latlon_grid(n_lat=nlat, n_lon=nlon)
 
 
@@ -40,14 +42,18 @@ def _make_hydrostatic_state(nlat=8, nlon=16, nlev=4, rng_key=None):
     k1, k2, k3, k4, k5, k6 = jax.random.split(rng_key, 6)
     return HydrostaticState(
         u=Field(data=jax.random.normal(k1, shape_3d) * 10.0, name="u", dims=(), units="m/s"),
-        v=Field(data=jax.random.normal(k2, shape_3d) * 5.0,  name="v", dims=(), units="m/s"),
+        v=Field(data=jax.random.normal(k2, shape_3d) * 5.0, name="v", dims=(), units="m/s"),
         T=Field(data=jax.random.normal(k3, shape_3d) * 5.0 + 280.0, name="T", dims=(), units="K"),
-        p_s=Field(data=jax.random.normal(k4, shape_2d) * 500.0 + 1e5, name="p_s", dims=(), units="Pa"),
+        p_s=Field(
+            data=jax.random.normal(k4, shape_2d) * 500.0 + 1e5, name="p_s", dims=(), units="Pa"
+        ),
         phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=(), units="m2/s2"),
         tracers={
             "q_v": Field(
                 data=jax.random.normal(k5, shape_3d) * 1e-3 + 5e-3,
-                name="q_v", dims=(), units="kg/kg",
+                name="q_v",
+                dims=(),
+                units="kg/kg",
             ),
         },
     )
@@ -61,36 +67,36 @@ def _make_ensemble(n_members=12, nlat=8, nlon=16, nlev=4):
         states.append(_make_hydrostatic_state(nlat, nlon, nlev, rng_key=key))
     # Subtract ensemble mean to get errors
     import jax.numpy as jnp
-    from legoesm.core.field import Field
 
     def mean_field(field_list):
         """Compute mean over a list of Field objects."""
         stacked = jnp.stack([f.data for f in field_list], axis=0)
         return stacked.mean(axis=0)
 
-    u_mean  = mean_field([s.u for s in states])
-    v_mean  = mean_field([s.v for s in states])
-    T_mean  = mean_field([s.T for s in states])
+    u_mean = mean_field([s.u for s in states])
+    v_mean = mean_field([s.v for s in states])
+    T_mean = mean_field([s.T for s in states])
     ps_mean = mean_field([s.p_s for s in states])
     qv_mean = mean_field([s.tracers["q_v"] for s in states])
 
     errors = []
     for s in states:
-        errors.append(s._replace(
-            u=s.u.replace(data=s.u.data - u_mean),
-            v=s.v.replace(data=s.v.data - v_mean),
-            T=s.T.replace(data=s.T.data - T_mean),
-            p_s=s.p_s.replace(data=s.p_s.data - ps_mean),
-            tracers={
-                "q_v": s.tracers["q_v"].replace(data=s.tracers["q_v"].data - qv_mean)
-            },
-        ))
+        errors.append(
+            s._replace(
+                u=s.u.replace(data=s.u.data - u_mean),
+                v=s.v.replace(data=s.v.data - v_mean),
+                T=s.T.replace(data=s.T.data - T_mean),
+                p_s=s.p_s.replace(data=s.p_s.data - ps_mean),
+                tracers={"q_v": s.tracers["q_v"].replace(data=s.tracers["q_v"].data - qv_mean)},
+            )
+        )
     return errors
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestFitGenBE:
     """fit_gen_be produces valid GenBEParams."""
@@ -136,9 +142,7 @@ class TestFitGenBE:
         errors = _make_ensemble()
         params = fit_gen_be(errors, grid)
 
-        assert jnp.all(params.len_scale > 0.0), (
-            "All horizontal length scales should be positive"
-        )
+        assert jnp.all(params.len_scale > 0.0), "All horizontal length scales should be positive"
 
     def test_tracer_names_recorded(self):
         from legoesm.da.gen_be import fit_gen_be
@@ -159,7 +163,7 @@ class TestFitGenBE:
         params = fit_gen_be(errors, grid)
 
         nlev = params.n_levels  # 4
-        n_3d = 2 + 1 + 1        # psi, chi, T, q_v
+        n_3d = 2 + 1 + 1  # psi, chi, T, q_v
         n_total = 1 + n_3d * nlev  # 1 + 4*4 = 17
         assert params.reg_coeff.shape == (n_total, nlev)
         assert params.len_scale.shape == (n_total,)
@@ -194,6 +198,28 @@ class TestFitGenBE:
         assert chi.shape == u.shape
         assert np.allclose(psi, 0.0)
         assert np.allclose(chi, 0.0)
+
+    def test_mpas_gradient_weights_remain_bounded_near_poles(self):
+        """Spherical tangent-plane weights avoid the cos(latitude) singularity."""
+        from types import SimpleNamespace
+
+        from legoesm.da.gen_be import _mpas_lsq_gradient_weights_np
+
+        grid = SimpleNamespace(
+            grid_n_columns=4,
+            grid_radius=6.371e6,
+            cellsOnCell=np.array([[1, 0, 3, 2], [2, 3, 0, 1]], dtype=np.int64),
+            nEdgesOnCell=np.array([2, 2, 2, 2], dtype=np.int64),
+            latCell=np.deg2rad(np.array([89.9, 89.8, 89.9, 89.8])),
+            lonCell=np.deg2rad(np.array([0.0, 90.0, 180.0, 270.0])),
+        )
+
+        _, wx, wy = _mpas_lsq_gradient_weights_np(grid)
+
+        assert np.all(np.isfinite(wx))
+        assert np.all(np.isfinite(wy))
+        assert np.max(np.abs(wx)) < 1.0e-2
+        assert np.max(np.abs(wy)) < 1.0e-2
 
 
 class TestGenBETransform:
@@ -233,6 +259,27 @@ class TestGenBETransform:
         assert jnp.allclose(out, 0.0, atol=1e-10), (
             f"Non-zero output for zero input: max={float(jnp.abs(out).max()):.2e}"
         )
+
+    def test_horizontal_normalization_scales_sqrt_output(self):
+        """A uniform horizontal normalization scales the complete square root."""
+        from legoesm.da.gen_be import GenBETransform
+
+        transform, spec, _ = self._setup()
+        normalized_params = transform.params._replace(
+            horiz_norm=jnp.full_like(transform.params.len_scale, 2.0)
+        )
+        normalized = GenBETransform(
+            normalized_params,
+            spec,
+            transform.grid,
+            n_diffusion_iter=transform.n_iter,
+        )
+        control = jax.random.normal(jax.random.PRNGKey(81), (spec.total_size,))
+
+        baseline = transform.sqrt_multiply(control)
+        scaled = normalized.sqrt_multiply(control)
+
+        assert jnp.allclose(scaled, 2.0 * baseline, rtol=1e-10, atol=1e-10)
 
     def test_inv_multiply_finite(self):
         """inv_multiply returns a finite array."""
@@ -336,9 +383,21 @@ class TestGenBEWithoutV:
         def _make_state(key):
             k1, k2, k3 = jax.random.split(key, 3)
             return HydrostaticState(
-                u=Field(data=jax.random.normal(k1, (nlat, nlon, nlev)), name="u", dims=(), units="m/s"),
-                T=Field(data=jax.random.normal(k2, (nlat, nlon, nlev)) + 280.0, name="T", dims=(), units="K"),
-                p_s=Field(data=jax.random.normal(k3, (nlat, nlon)) * 500.0 + 1e5, name="p_s", dims=(), units="Pa"),
+                u=Field(
+                    data=jax.random.normal(k1, (nlat, nlon, nlev)), name="u", dims=(), units="m/s"
+                ),
+                T=Field(
+                    data=jax.random.normal(k2, (nlat, nlon, nlev)) + 280.0,
+                    name="T",
+                    dims=(),
+                    units="K",
+                ),
+                p_s=Field(
+                    data=jax.random.normal(k3, (nlat, nlon)) * 500.0 + 1e5,
+                    name="p_s",
+                    dims=(),
+                    units="Pa",
+                ),
                 phis=Field(data=jnp.zeros((nlat, nlon)), name="phis", dims=(), units="m2/s2"),
                 v=None,
                 tracers=None,
@@ -370,4 +429,5 @@ class TestGenBEWithoutV:
 
 if __name__ == "__main__":
     import pytest
+
     pytest.main([__file__, "-v"])
