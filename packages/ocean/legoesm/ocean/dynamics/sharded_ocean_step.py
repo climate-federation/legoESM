@@ -46,7 +46,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.parallel.geometry_consistency import (
-    assert_schema_agrees, broadcast_checked)
+    assert_flags_agree, assert_schema_agrees, broadcast_checked)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 try:                                   # JAX >= 0.8 exposes shard_map at top level
@@ -444,6 +444,40 @@ def gather_state_latlon(state, mesh):
     return state._replace(**updates)
 
 
+# Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
+# width is fixed by this literal, never by rank-local data.
+_OCEAN_SPMD_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "grid_n_lat", "grid_n_lon", "fold_active",
+)
+
+
+def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
+    """Agree every rank-local input, as the FIRST statement of a public factory.
+
+    #1362 / codex round 2, ocean twin of the atmosphere's
+    ``_agree_spmd_entry``.  This lane has the same shape of hazard: the
+    ``mesh is None`` early return, ``build_band_grids``' divisibility
+    validation, and ``_build_band_vertex_masks`` (which throws if only THIS
+    rank lacks a primed vertex-mask cache) all execute BEFORE the schema
+    collective.  Any of them lets one process raise or return while a peer
+    blocks in ``process_allgather`` -- a HANG rather than an error.
+
+    Agreeing the mesh shape, grid dimensions and fold state up front makes
+    every downstream rank-local check symmetric by construction.
+    """
+    grid = model.grid
+    fold = getattr(grid, "fold", None)
+    flags = (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(mesh.axis_names) if mesh is not None else 0),
+        float(int(getattr(grid, "n_lat", 0) or 0)),
+        float(int(getattr(grid, "n_lon", 0) or 0)),
+        float(bool(fold is not None and getattr(fold, "is_active", False))),
+    )
+    assert_flags_agree(_OCEAN_SPMD_ENTRY_FLAGS, flags, context=where)
+
+
 def make_sharded_ocean_step(model, mesh):
     """Return ``step(state, dt, freshwater=None, surface_forcing=None,
     sponge=None, t_seconds=None) -> state`` running ``model.step``
@@ -483,6 +517,9 @@ def make_sharded_ocean_step(model, mesh):
     each band's ``nl+1`` v-faces, runs the step on the band geometry, and
     converts the result back to the ``v_lower`` representation.
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2).
+    _agree_ocean_spmd_entry(model, mesh, where="make_sharded_ocean_step")
     if mesh is None:                   # single-device: plain step
         return lambda state, dt, **forcing_kwargs: model.step(
             state, dt, **forcing_kwargs)
@@ -769,6 +806,9 @@ def make_sharded_ocean_step_global(model, mesh):
 
     ``mesh is None`` ⇒ the plain single-device ``model.step`` (no scatter/gather).
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2).
+    _agree_ocean_spmd_entry(model, mesh, where="make_sharded_ocean_step_global")
     if mesh is None:                   # single-device: plain step
         return lambda state, dt, surface_forcing=None, freshwater=None: (
             model.step(state, dt, freshwater=freshwater,

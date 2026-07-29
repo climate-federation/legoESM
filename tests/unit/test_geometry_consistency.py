@@ -447,3 +447,50 @@ class TestFactoryWiringOrder:
         assert isinstance(m._SPMD_ENTRY_FLAGS, tuple)
         assert len(m._SPMD_ENTRY_FLAGS) >= 8
         assert all(isinstance(x, str) for x in m._SPMD_ENTRY_FLAGS)
+
+
+class TestOceanFactoryWiringOrder:
+    """The ocean lane has the SAME pre-collective-throw shape as the
+    atmosphere and must be gated the same way.
+
+    codex round-2 confirmed `_build_band_vertex_masks` can throw on one rank
+    (unprimed vertex-mask cache) while a peer blocks in the schema gate. The
+    round-2 fix only covered the four atmosphere factories, so the ocean half
+    of that blocker stayed open.
+    """
+
+    FACTORIES = ("make_sharded_ocean_step", "make_sharded_ocean_step_global")
+
+    @staticmethod
+    def _body(fn_name):
+        import ast
+        import inspect
+        import legoesm.ocean.dynamics.sharded_ocean_step as m
+        fn = ast.parse(inspect.getsource(getattr(m, fn_name)).lstrip()).body[0]
+        if (fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)):
+            fn.body = fn.body[1:]
+        return fn
+
+    @pytest.mark.parametrize("fn_name", FACTORIES)
+    def test_gate_precedes_every_raise_and_return(self, fn_name):
+        import ast
+        fn = self._body(fn_name)
+        for stmt in fn.body:
+            if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id == "_agree_ocean_spmd_entry"
+                   for n in ast.walk(stmt)):
+                return
+            bad = [n for n in ast.walk(stmt)
+                   if isinstance(n, (ast.Raise, ast.Return))]
+            assert not bad, (
+                f"{fn_name}: a {type(bad[0]).__name__} precedes "
+                f"_agree_ocean_spmd_entry — one rank returns/raises while a "
+                f"peer blocks in a collective (HANG).")
+        raise AssertionError(f"{fn_name} never calls _agree_ocean_spmd_entry")
+
+    def test_entry_flag_tuple_is_static(self):
+        import legoesm.ocean.dynamics.sharded_ocean_step as m
+        assert isinstance(m._OCEAN_SPMD_ENTRY_FLAGS, tuple)
+        assert all(isinstance(x, str) for x in m._OCEAN_SPMD_ENTRY_FLAGS)
