@@ -1659,6 +1659,25 @@ def create_latlon_geometry(
         dy_v = dy_v_1d[:, jnp.newaxis] * jnp.ones((1, n_lon))
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
+    if metric_convention == "nemo_isotropic":
+        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # the SAME expression as pe1v.  Under the isotropic convention the
+        # meridional v-point scale factor IS the zonal one, evaluated at the
+        # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport
+        # metric).  legoESM's "exact" dy_v is the true finite-difference
+        # spacing instead, differing from NEMO's e2v by median 2.798e-05 /
+        # max 8.241e-03 -- which lands directly in ldf_slp's vslp, whose
+        # divisor is e2v (#1226; substituting NEMO's own e2v collapses vslp
+        # 1.609e-06 -> 3.807e-10, while the same substitution with e1u moves
+        # uslp 0.0%).
+        #
+        # This does NOT touch the #516 invariant: that governs dx_v (the
+        # ZONAL length of a v-face) via vface_zonal_cos_lat, and the
+        # strain/stress adjoint pair + divergence/advection mass consistency
+        # hold because every operator SHARES that metric, not because of its
+        # value.  dy_v is a different field and does not appear in either.
+        dy_v = (radius * dlon) * cos_lat_v_1d[:, jnp.newaxis] \
+            * jnp.ones((1, n_lon))
 
     # ------- Vertex (q-point) area (n_lat+1, n_lon+1) -------
     # Matches curl_vertex_cgrid: A_q(i) = R^2 * dlon * |sin(lat[i]) - sin(lat[i-1])|

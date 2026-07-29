@@ -23,7 +23,20 @@ CLAUDE_OUTPUT_FORMAT="json"
 # Tool permissions
 # Comma-separated list of allowed tools
 # Safe git subcommands only - broad Bash(git *) allows destructive commands like git clean/git rm (Issue #149)
-ALLOWED_TOOLS="Write,Read,Edit,Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pytest)"
+#
+# Added 2026-07-28 for the DINO fidelity task (.ralph/fix_plan.md). The task is
+# entirely about MEASUREMENT, so without these the loop could edit numerics and
+# commit but never check them -- strictly worse than not running it:
+#   Bash(.venv/bin/python *)  the fidelity gate, every probe, and this repo's
+#                             pytest invocation (bare `pytest` is not how
+#                             anything here runs). Effectively arbitrary code
+#                             execution -- the real guardrails are the gate and
+#                             .claude/ralph_dino_fidelity_to_bar_task.md, not
+#                             this allowlist.
+#   Grep, Glob                reading NEMO's Fortran, finding call sites
+#   Task                      the adversarial review the task file REQUIRES
+#                             before any production change is called done
+ALLOWED_TOOLS="Write,Read,Edit,Grep,Glob,Task,Bash(.venv/bin/python *),Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pytest)"
 
 # Session management
 SESSION_CONTINUITY=true
