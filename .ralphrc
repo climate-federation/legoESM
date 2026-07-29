@@ -14,7 +14,11 @@ CLAUDE_CODE_CMD="claude"
 
 # Loop settings
 MAX_CALLS_PER_HOUR=100
-CLAUDE_TIMEOUT_MINUTES=15
+# Raised 2026-07-28 from 15: one iteration of the DINO fidelity task is a chain
+# walk + a fix + the narrowest test suite + a mandated adversarial review.
+# Individual measurements alone ran 4-8 min; the ocean unit suite runs ~4 min.
+# At 15 min the loop would time out mid-task and leave work half-finished.
+CLAUDE_TIMEOUT_MINUTES=45
 CLAUDE_OUTPUT_FORMAT="json"
 # Token limit per hour (0 = disabled). One invocation can use 100k+ tokens.
 # Recommended: 500000 for light use, 2000000 for heavy use.
@@ -36,7 +40,12 @@ CLAUDE_OUTPUT_FORMAT="json"
 #   Grep, Glob                reading NEMO's Fortran, finding call sites
 #   Task                      the adversarial review the task file REQUIRES
 #                             before any production change is called done
-ALLOWED_TOOLS="Write,Read,Edit,Grep,Glob,Task,Bash(.venv/bin/python *),Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git push *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pytest)"
+#
+# REMOVED 2026-07-28: Bash(git push *).  An unattended loop making autonomous
+# numerics commits should not be able to reach the shared remote -- parallel
+# agents work these same files, and a local commit is recoverable where a
+# pushed bad numerics change is not.  The human pushes after reviewing.
+ALLOWED_TOOLS="Write,Read,Edit,Grep,Glob,Task,Bash(.venv/bin/python *),Bash(git add *),Bash(git commit *),Bash(git diff *),Bash(git log *),Bash(git status),Bash(git status *),Bash(git pull *),Bash(git fetch *),Bash(git checkout *),Bash(git branch *),Bash(git stash *),Bash(git merge *),Bash(git tag *),Bash(npm *),Bash(pytest)"
 
 # Session management
 SESSION_CONTINUITY=true
