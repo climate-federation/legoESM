@@ -516,6 +516,57 @@ def unroll_to_dtype_fixed_point(step1, state, n_left: int):
     return state, n_left
 
 
+# Ordered flag names for the SPMD entry gate. STATIC tuple: the payload width
+# is fixed by this literal, never by rank-local data.
+_SPMD_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "p_lat", "p_lon",
+    "grid_n_lat", "grid_n_lon",
+    "fold_active", "anchor_mass_to_initial", "use_polar_filter",
+    "n_steps",
+)
+
+
+def _agree_spmd_entry(model, mesh, *, n_steps=None, where: str) -> None:
+    """Agree EVERY rank-local input, as the FIRST statement of a public factory.
+
+    #1362 / codex round 2. Gating individual refusals was not enough: each
+    public factory performs several rank-local checks BEFORE reaching any
+    collective -- ``n_steps`` validation, ``_check_2d_mesh``, the ``mesh is
+    None`` early return, and ``build_band_grids_atm``'s divisibility check.
+    Any one of them lets a process raise (or return a serial closure) while a
+    peer walks into ``process_allgather`` and blocks forever. Patching them
+    one at a time is whack-a-mole; the invariant has to be established ONCE,
+    before anything can diverge.
+
+    So: agree the mesh shape, the grid dimensions, the config flags that gate
+    refusals, and ``n_steps`` -- all in a single fixed-width collective at the
+    very top. Every rank-local check downstream is then guaranteed symmetric,
+    because its inputs are proven identical on every process.
+
+    ``n_steps`` matters even when positive on all ranks: two processes with
+    different values capture different STATIC scan lengths and then execute
+    different numbers of in-body SPMD collectives (codex round-2 blocker 3).
+    ``-1`` encodes "not a segment factory".
+    """
+    grid = model.grid
+    fold = getattr(grid, "fold", None)
+    shape = dict(mesh.shape) if mesh is not None else {}
+    flags = (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(mesh.axis_names) if mesh is not None else 0),
+        float(shape.get("lat", 0)),
+        float(shape.get("lon", 0)),
+        float(int(getattr(grid, "n_lat", 0) or 0)),
+        float(int(getattr(grid, "n_lon", 0) or 0)),
+        float(bool(fold is not None and getattr(fold, "is_active", False))),
+        float(bool(getattr(model.config, "anchor_mass_to_initial", False))),
+        float(bool(getattr(model.config, "use_polar_filter", False))),
+        float(-1 if n_steps is None else int(n_steps)),
+    )
+    assert_flags_agree(_SPMD_ENTRY_FLAGS, flags, context=where)
+
+
 def _refuse_unsupported_spmd_config(model) -> None:
     """Dispatch-hardening shared by the step + segment factories: only a
     non-fold lat-lon grid with an SPMD-safe mass path is supported.  Fail
@@ -533,9 +584,6 @@ def _refuse_unsupported_spmd_config(model) -> None:
     fold_active = bool(fold is not None
                        and getattr(fold, "is_active", False))
     anchor = bool(getattr(model.config, "anchor_mass_to_initial", False))
-    assert_flags_agree(
-        ("fold_active", "anchor_mass_to_initial"), (fold_active, anchor),
-        context="atm lat-band SPMD config gate")
     if fold_active:
         raise NotImplementedError(
             "atm lat-band SPMD: tripole north-fold is a follow-up.")
@@ -615,6 +663,10 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None, *,
     band values either way, so the step is bit-identical (gated by
     ``tests/parallel/test_atm_latlon_segment.py``).
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2 blocker 1/2/3).
+    _agree_spmd_entry(model, mesh, n_steps=None,
+                      where="make_sharded_atm_latlon_step")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
 
@@ -780,6 +832,10 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     ``n_steps``.  Zero extra casts, zero numerical difference vs the
     per-step lane — never a silent precision change.
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2 blocker 1/2/3).
+    _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      where="make_sharded_atm_latlon_segment")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
     from legoesm.timestepping.integration import (
@@ -1337,8 +1393,6 @@ def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
     """
     _refuse_unsupported_spmd_config(model)
     polar = bool(getattr(model.config, "use_polar_filter", False))
-    assert_flags_agree(("use_polar_filter", "p_lon"), (polar, p_lon),
-                       context="atm 2-D SPMD config gate")
     if p_lon > 1 and polar:
         raise NotImplementedError(
             "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 is "
@@ -1385,6 +1439,10 @@ def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
     ``False`` replicates the all-tile stacks (indexed at the axis indices).
     Same tile values either way (bit-identical numerics).
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2 blocker 1/2/3).
+    _agree_spmd_entry(model, mesh, n_steps=None,
+                      where="make_sharded_atm_latlon_step_2d")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
     from legoesm.timestepping.integration import (
@@ -1446,6 +1504,10 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
     axes, leading steps unrolled to the scan-carry dtype fixed point via
     :func:`unroll_to_dtype_fixed_point`, STATELESS physics only,
     ``mesh=None`` -> the single-device compiled twin)."""
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2 blocker 1/2/3).
+    _agree_spmd_entry(model, mesh, n_steps=n_steps,
+                      where="make_sharded_atm_latlon_segment_2d")
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
     from legoesm.timestepping.integration import (

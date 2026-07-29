@@ -176,10 +176,16 @@ def assert_schema_agrees(names, n_dev, *, context: str, arrays=None) -> None:
     if arrays is None:
         kinds, ndims = (), ()
     else:
-        hosts = [np.asarray(a) for a in arrays]
-        kinds = [("exact" if h.dtype.kind in "biu" else "inexact")
-                 for h in hosts]
-        ndims = [h.ndim for h in hosts]
+        # Read dtype/ndim from array METADATA, never via np.asarray: a jax
+        # array exposes both without materialising, so forcing a host copy
+        # here would add a device sync per field AND could itself fail
+        # (transfer error / OOM) BEFORE the collective below — reintroducing
+        # the very "one rank exits while a peer blocks" hazard this gate
+        # exists to remove (codex round-2 minor). `broadcast_checked` does
+        # the single real materialisation later.
+        kinds = [("exact" if np.dtype(a.dtype).kind in "biu" else "inexact")
+                 for a in arrays]
+        ndims = [int(getattr(a, "ndim", np.ndim(a))) for a in arrays]
     gathered = multihost_utils.process_allgather(
         schema_fingerprint(names, n_dev, kinds, ndims))
     if not bool(np.all(gathered == gathered[0])):

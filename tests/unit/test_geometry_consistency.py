@@ -350,3 +350,100 @@ class TestDtypeRouting:
     ])
     def test_exactness_predicate(self, dtype, exact):
         assert (np.dtype(dtype).kind in "biu") is exact
+
+
+class TestFactoryWiringOrder:
+    """The gate must be CALLED, and called FIRST.
+
+    codex round-2 flagged that every previous test exercised the helpers in
+    isolation, so deleting `_agree_spmd_entry(...)` from the factories while
+    leaving the helper defined would have stayed green. These tests read the
+    production source and assert the wiring itself.
+
+    Source inspection is a weak instrument, so per CLAUDE.md each assertion
+    names the symbol that ACTUALLY RUNS (the public factory), not a wrapper,
+    and pins ORDER rather than mere presence — presence alone is what the
+    round-2 blocker already satisfied while still deadlocking.
+    """
+
+    FACTORIES = (
+        "make_sharded_atm_latlon_step",
+        "make_sharded_atm_latlon_segment",
+        "make_sharded_atm_latlon_step_2d",
+        "make_sharded_atm_latlon_segment_2d",
+    )
+
+    @staticmethod
+    def _body(fn_name):
+        import inspect
+        import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
+        src = inspect.getsource(getattr(m, fn_name))
+        # strip the docstring so its prose cannot satisfy a text assertion
+        import ast
+        tree = ast.parse(src.lstrip())
+        fn = tree.body[0]
+        if (fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)):
+            fn.body = fn.body[1:]
+        return fn
+
+    @pytest.mark.parametrize("fn_name", FACTORIES)
+    def test_gate_is_the_first_statement(self, fn_name):
+        import ast
+        fn = self._body(fn_name)
+        assert fn.body, f"{fn_name} has an empty body"
+        first = fn.body[0]
+        calls = [n for n in ast.walk(first)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "_agree_spmd_entry"]
+        assert calls, (
+            f"{fn_name}: the FIRST statement must be _agree_spmd_entry(...). "
+            f"Any rank-local check above it (n_steps validation, mesh shape "
+            f"checks, the `mesh is None` early return) lets one process raise "
+            f"or return while a peer blocks in a collective — a HANG, not an "
+            f"error. Got: {ast.dump(first)[:200]}")
+
+    @pytest.mark.parametrize("fn_name", FACTORIES)
+    def test_no_raise_or_return_precedes_the_gate(self, fn_name):
+        """Even a gate present but not first is a deadlock (round-2 blocker)."""
+        import ast
+        fn = self._body(fn_name)
+        for stmt in fn.body:
+            has_gate = any(
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_agree_spmd_entry" for n in ast.walk(stmt))
+            if has_gate:
+                return
+            offending = [n for n in ast.walk(stmt)
+                         if isinstance(n, (ast.Raise, ast.Return))]
+            assert not offending, (
+                f"{fn_name}: a {type(offending[0]).__name__} occurs BEFORE "
+                f"_agree_spmd_entry; that is the exact round-2 deadlock.")
+        raise AssertionError(f"{fn_name} never calls _agree_spmd_entry")
+
+    def test_n_steps_is_agreed_by_both_segment_factories(self):
+        """Unequal positive n_steps => different STATIC scan lengths =>
+        different numbers of in-body collectives (round-2 blocker 3)."""
+        import ast
+        for fn_name in ("make_sharded_atm_latlon_segment",
+                        "make_sharded_atm_latlon_segment_2d"):
+            fn = self._body(fn_name)
+            call = next(n for n in ast.walk(fn)
+                        if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name)
+                        and n.func.id == "_agree_spmd_entry")
+            kw = {k.arg: k.value for k in call.keywords}
+            assert "n_steps" in kw, f"{fn_name} must agree n_steps"
+            assert isinstance(kw["n_steps"], ast.Name), (
+                f"{fn_name} must pass the n_steps VARIABLE, not a literal")
+            assert kw["n_steps"].id == "n_steps"
+
+    def test_entry_flag_tuple_is_static_and_matches_payload_width(self):
+        """A payload width that depends on data is a deadlock, so the flag
+        names must be a module-level literal tuple."""
+        import legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step as m
+        assert isinstance(m._SPMD_ENTRY_FLAGS, tuple)
+        assert len(m._SPMD_ENTRY_FLAGS) >= 8
+        assert all(isinstance(x, str) for x in m._SPMD_ENTRY_FLAGS)
