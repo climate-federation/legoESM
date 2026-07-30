@@ -356,12 +356,19 @@ def main() -> int:
     # =====================================================================
     # compute_mixing_lengths(choice=3) contract: ``e``/``N2`` are the
     # INTERIOR interfaces only (NEMO jk=2..jpkm1, 0-based index 1..jpk-2 ->
-    # jpk-2 levels); ``dz_cell`` must be one level LONGER (nlev = e.shape[-1]
-    # + 1: the surface anchor row + the interior rows), matching NEMO's e3t
-    # rows jk=1..jpkm1 (0-based index 0..jpk-2 -> jpk-1 levels) that the
-    # lup/ldown scans index via e3t(jk-1)/e3t(jk+1).
+    # jpk-2 levels); ``dz_cell`` must be TWO levels LONGER (nlev =
+    # e.shape[-1] + 2: the surface anchor row + the interior rows + the
+    # TRUE bottommost e3t(jpk) row), matching NEMO's e3t rows jk=1..jpk
+    # (0-based index 0..jpk-1 -> jpk levels) that the lup/ldown scans index
+    # via e3t(jk-1)/e3t(jk+1) -- the ldown sweep's SEED step (jk=jpkm1)
+    # needs e3t(jpk), one row deeper than the interior interfaces
+    # themselves (#1226 zdftke_chain_walk STAGE 4 finding + tke.py fix:
+    # compute_mixing_lengths accepts this widened ``+2`` row count and
+    # reproduces NEMO exactly; the legacy ``+1`` row count -- production's
+    # contract, whose grid has no analog of NEMO's redundant jpk-th T-cell
+    # -- falls back to a documented, bounded e3t(jpkm1) proxy instead).
     n_interior = jpk - 2                          # NEMO jk=2..jpkm1 (35=jpk-1 rows total incl. sfc)
-    dz_cell = jnp.asarray(e3t_0[..., :jpk - 1])   # (nj,ni,jpk-1) e3t jk=1..jpkm1 (e3t=both)
+    dz_cell = jnp.asarray(e3t_0[..., :jpk])       # (nj,ni,jpk) e3t jk=1..jpk (e3t=both), TRUE bottom row
     e_interior = jnp.asarray(en_nemo[..., 1:1 + n_interior])   # jk=2..jpkm1
     N2_interior = jnp.asarray(np.maximum(rn2b[..., 1:1 + n_interior], 1e-12))
     taum_lego = np.asarray(sf.tau_x) ** 2 + np.asarray(sf.tau_y) ** 2

@@ -684,7 +684,7 @@ def compute_mixing_lengths(
                              dtype=l_int.dtype)
         # W-row stack: surface anchor + interior interfaces
         l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)
-        e3t = dz_cell                                              # (..., nlev)
+        e3t = dz_cell                                              # (..., nlev) or (..., nlev+1)
         # lup: downward scan  l(k) = min(l(k-1) + e3t(k-1), l(k))
         def _down(carry, xs):
             l_km1 = carry
@@ -692,15 +692,69 @@ def compute_mixing_lengths(
             out = jnp.minimum(l_km1 + e3_km1, l_k_)
             return out, out
         lT = jnp.moveaxis(l_w, -1, 0)                              # (nlev, ...)
-        e3T = jnp.moveaxis(e3t, -1, 0)
+        e3T_raw = jnp.moveaxis(e3t, -1, 0)
+        # ``e3T_raw`` normally has the SAME row count as ``lT`` (the legacy,
+        # documented ``dz_cell`` contract: ``e.shape[-1]+1`` rows, ending at
+        # NEMO's ``e3t(jpkm1)``). #1226 zdftke_chain_walk (STAGE 4 finding):
+        # the ldown sweep's seed step (below) actually needs NEMO's
+        # ``e3t(jpk)`` — ONE ROW DEEPER than ``e3t(jpkm1)`` — which legoESM's
+        # own (nlev T-cell -> nlev-1 interior-interface) grid has no analog
+        # of and the legacy contract cannot supply. A caller that DOES have
+        # that true extra row (e.g. an oracle-fidelity harness reading
+        # NEMO's own mesh_mask e3t through jpk) may pass ONE more row;
+        # detected here by STATIC shape (not traced), so every EXISTING
+        # caller (``e.shape[-1]+1`` rows) is completely unaffected —
+        # ``e3T``/``e3_bottom`` below are identical to the pre-fix arrays in
+        # that case.
+        n_e3 = e3T_raw.shape[0]
+        n_l = lT.shape[0]
+        if n_e3 == n_l + 1:
+            e3T = e3T_raw[:-1]        # (nlev,), UNCHANGED vs the legacy contract
+            e3_bottom = e3T_raw[-1]   # true e3t(jpk), the extra row
+        elif n_e3 == n_l:
+            e3T = e3T_raw             # legacy contract, bit-identical to before
+            e3_bottom = e3T_raw[-1]   # proxy: e3t(jpkm1) (documented residual gap)
+        else:
+            raise ValueError(
+                f"tke_mxl_choice=3: dz_cell has {n_e3} rows, expected "
+                f"{n_l} (legacy, e.shape[-1]+1) or {n_l + 1} (with the "
+                "extra true e3t(jpk) bottom row)."
+            )
         _, lup_rest = jax.lax.scan(_down, lT[0], (lT[1:], e3T[:-1]))
         lup = jnp.concatenate([lT[:1], lup_rest], axis=0)
-        # ldown: upward scan  l(k) = min(l(k+1) + e3t(k+1), l(k))
+        # ldown: upward scan  l(k) = min(l(k+1) + e3t(k+1), l(k)),
+        # jk = jpkm1 downto 2 (zdftke.F90:786-789, DINO MY_SRC copy).
+        #
+        # The carry MUST be seeded from ``cfg.mxl_min`` (NEMO's rmxl_min),
+        # not from ``lT[-1]`` (the raw buoyancy length at the deepest
+        # carried row, NEMO jk=jpkm1). NEMO's ``zmxlm(:,:)`` is initialised
+        # to ``rmxl_min`` for ALL jk (zdftke.F90:678) BEFORE the raw-fill
+        # loop, which only runs jk=2..jpkm1 (:739-742) — so ``zmxlm(jpk)``
+        # is NEVER overwritten and stays at ``rmxl_min``. The ldown sweep's
+        # FIRST iteration (jk=jpkm1) reads exactly that untouched
+        # ``zmxlm(jpk)`` as ``zmxlm(jk+1)`` (:786-789), together with the
+        # real ``e3t(jpk)`` (``e3_bottom`` above). The OLD code instead
+        # seeded the carry from the RAW (unbounded) buoyancy length at
+        # ``jk=jpkm1``, which can be arbitrarily large in a near-neutral
+        # deep column (N²→0), leaking an unbounded length into the whole
+        # ldown chain (the measured bug: legoESM l_k=3454.8m vs NEMO's
+        # dumped 617.5m). Verified against tke_dump_zmxlm.bin (pathological
+        # near-neutral column, #1226 walk, ``dz_cell`` widened by the extra
+        # true e3t(jpk) row): reproduces NEMO's dumped value at jk=jpkm1 to
+        # full float precision (max|diff|=0, standalone single-column
+        # transcription). Without the extra row (legacy ``+1``-row
+        # callers, e.g. production, whose grid has no jpk-th cell to
+        # supply), ``e3_bottom`` falls back to ``e3t(jpkm1)`` — a
+        # documented, BOUNDED proxy (was UNBOUNDED before this fix).
+        _seed = jnp.broadcast_to(
+            jnp.asarray(cfg.mxl_min, dtype=lT.dtype), lT.shape[1:])
+        first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
         _, ldn_rest = jax.lax.scan(
-            _down, lT[-1], (lT[:-1][::-1], e3T[1:][::-1]))
-        ldn = jnp.concatenate([lT[-1:], ldn_rest], axis=0)[::-1]
+            _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
+        ldn = jnp.concatenate(
+            [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
-        ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]
+        ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]                    # interior
         l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
         l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
     elif cfg.tke_mxl_choice == 1:
@@ -1273,10 +1327,13 @@ def _prandtl_number(
       K_M); in the stratified interior ``Pr -> 10`` (small abyssal K_H).
     - ``prandtl_mode="constant"``: ``Pr = Prandtl_tke0`` (Veros
       ``enable_Prandtl_tke=False`` fallback, default 10).
-    - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8, fixed #1226 item 11):
-      NEMO's EXACT nn_pdl=1 form (zdftke.F90:381-401):
-      ``zri = rn2b·p_avm / (p_sh2 + rn_bshear)``, ``pdlr = max(0.1,
-      ri_cri/max(ri_cri,zri))``, ``Pr = 1/pdlr`` — i.e.
+    - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8, fixed #1226 item 11;
+      sign-condition transcription fixed #1226 zdftke_chain_walk STAGE 2):
+      NEMO's EXACT nn_pdl=1 form (zdftke.F90:459-476, see the inline
+      comment below for the full 3-way branch — ``rn2b<=0 -> zri=0``;
+      ``zdiv==0`` exact-zero guard; else ``zri = rn2b·p_avm / zdiv`` taken
+      AS-IS including its sign): ``pdlr = max(0.1, ri_cri/max(ri_cri,
+      zri))``, ``Pr = 1/pdlr`` — i.e.
       ``Pr = max(1, min(10, (1/ri_cri)*zri))``, the SAME clamp/scaling as
       "richardson" but ``zri``'s denominator is the ``p_sh2`` AVM-WEIGHTED
       shear-production term [m²/s³] (``zdfsh2.F90:80-94``: face-averaged
@@ -1321,7 +1378,38 @@ def _prandtl_number(
         # The weighted form matters only where the floor competes (kappaM or
         # shear ~ 0) — keep it for faithfulness, but do not expect materially
         # different production behaviour (review of 4aeeb867d, #1226).
-        zri = N2 * kappaM / jnp.maximum(p_sh2 + bshear, 1e-30)
+        #
+        # #1226 zdftke_chain_walk (STAGE 2 finding): faithful transcription
+        # of the FULL nn_pdl==1 conditional, zdftke.F90:459-476 (DINO
+        # MY_SRC copy):
+        #   IF (rn2b <= 0)      THEN zri = 0
+        #   ELSE
+        #     zdiv = p_sh2 + rn_bshear
+        #     IF (zdiv == 0)    THEN zri = rn2b*p_avm / rn_bshear
+        #     ELSE                   zri = rn2b*p_avm / zdiv   (zdiv may be
+        #                            NEGATIVE — p_sh2 can be a tiny negative
+        #                            float-noise value, |p_sh2| > rn_bshear;
+        #                            NEMO takes the division AS-IS, no
+        #                            positivity clamp on zdiv)
+        # The old code applied ``jnp.maximum(p_sh2 + bshear, 1e-30)``
+        # unconditionally, which FLIPS a genuinely negative zdiv to a tiny
+        # POSITIVE floor — turning a negative zri (-> pdlr=1.0, Pr=1) into a
+        # huge positive one (-> pdlr=0.1, Pr=10): the opposite end of the
+        # same clamp. Fix: only the exact-zero special case divides by
+        # rn_bshear; a negative zdiv is used AS-IS (matching NEMO's sign).
+        #
+        # AD safety (JAX where-NaN-grad trap): jnp.where evaluates BOTH
+        # branches, so a raw division by a possibly-zero zdiv in the
+        # untaken branch can still produce inf/NaN and NaN gradients. Use
+        # the double-where idiom: substitute a safe (nonzero) denominator
+        # in the branch that will be masked out, then select the branch
+        # with the ORIGINAL (correctly-signed) value on the taken side —
+        # never let the safe substitute leak into the selected result.
+        is_zero_zdiv = p_sh2 + bshear == 0.0
+        safe_zdiv = jnp.where(is_zero_zdiv, 1.0, p_sh2 + bshear)  # avoid 1/0
+        zri_stratified = N2 * kappaM * jnp.where(
+            is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
+        zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "

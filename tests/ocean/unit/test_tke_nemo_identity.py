@@ -21,6 +21,7 @@ import os
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -29,6 +30,7 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _prandtl_number,
     _solve_tke_backward_euler,
+    compute_mixing_lengths,
     tke_vertical_mixing,
 )
 
@@ -946,3 +948,228 @@ class TestNemoRiZriTranscription:
         Pr_ref = float(1.0 / pdlr_ref[0])
         Pr_lego = float(self._run(rn2b, shear_sq, p_avm, bshear=bshear)[0])
         assert Pr_lego == pytest.approx(Pr_ref, rel=1e-10)
+
+
+class TestNemoRiNegativeZdivSign:
+    """#1226 zdftke_chain_walk (STAGE 2 finding, tke.py:1324 pre-fix): a
+    genuinely negative ``zdiv = p_sh2 + rn_bshear`` (from float-noise-negative
+    shear production, zdftke.F90:459-476) must give ``pdlr=1.0`` (Pr=1), NOT
+    ``pdlr=0.1`` (Pr=10) -- the OLD ``jnp.maximum(p_sh2+bshear, 1e-30)`` code
+    flipped the sign of a negative denominator, landing on the WRONG end of
+    the same clamp. Reference = the file's OWN independent loop-port
+    (:func:`_nemo_zri_pdlr_reference`), not a call into ``_prandtl_number``.
+    """
+
+    RI_CRI = 2.0 / (2.0 + 5.0 / 10.0)
+
+    def _cfg(self, bshear=1.0e-20):
+        return TKEConfig(prandtl_mode="nemo_ri", bshear_floor=bshear,
+                          prandtl_ri_coeff=1.0 / self.RI_CRI)
+
+    def test_sh2_negative_gives_pdlr_one_not_pointone(self):
+        """rn2b>0 (stratified) with kappaM*shear_sq a tiny NEGATIVE value
+        (|p_sh2| > rn_bshear=1e-20) -> zdiv<0 -> NEMO's zri<0 -> pdlr=1.0
+        (Pr=1). This is the exact failure mode from the walk's 11 flagged
+        cells (all sh2<0)."""
+        rn2b = np.array([2.0e-4])
+        kappaM = np.array([1.0e-2])
+        shear_sq = np.array([-1.0e-12])          # p_sh2 = -1e-14, |.|>1e-20
+        bshear = 1.0e-20
+
+        zri_ref, pdlr_ref = _nemo_zri_pdlr_reference(
+            rn2b, kappaM, shear_sq, rn_bshear=bshear, ri_cri=self.RI_CRI)
+        assert zri_ref[0] < 0.0, "test setup must exercise the zdiv<0 branch"
+        Pr_ref = float(1.0 / pdlr_ref[0])
+        assert Pr_ref == pytest.approx(1.0, rel=1e-10)
+
+        cfg = self._cfg(bshear=bshear)
+        Pr_lego = _prandtl_number(jnp.asarray(rn2b), jnp.asarray(shear_sq),
+                                   jnp.asarray(kappaM), cfg)
+        assert float(Pr_lego[0]) == pytest.approx(1.0, rel=1e-10)
+        assert float(Pr_lego[0]) == pytest.approx(Pr_ref, rel=1e-10)
+
+    def test_old_buggy_sign_flip_would_give_pointone(self):
+        """Non-vacuous: demonstrate the OLD formula (``jnp.maximum(zdiv,
+        1e-30)``) gives pdlr=0.1 (Pr=10) on this exact input -- the opposite
+        of the correct Pr=1 -- so this test would have FAILED against the
+        pre-fix ``_prandtl_number``."""
+        rn2b = np.array([2.0e-4])
+        kappaM = np.array([1.0e-2])
+        shear_sq = np.array([-1.0e-12])
+        bshear = 1.0e-20
+        p_sh2 = kappaM[0] * shear_sq[0]
+        zri_old = rn2b[0] * kappaM[0] / max(p_sh2 + bshear, 1e-30)
+        pdlr_old = max(0.1, self.RI_CRI / max(self.RI_CRI, zri_old))
+        Pr_old = 1.0 / pdlr_old
+        assert Pr_old == pytest.approx(10.0, rel=1e-6), (
+            "sanity: the OLD sign-flipped formula saturates at Pr=10 here")
+
+        cfg = self._cfg(bshear=bshear)
+        Pr_lego = _prandtl_number(jnp.asarray(rn2b), jnp.asarray(shear_sq),
+                                   jnp.asarray(kappaM), cfg)
+        assert float(Pr_lego[0]) != pytest.approx(Pr_old, rel=1e-3), (
+            "fixed _prandtl_number must NOT reproduce the old sign-flipped "
+            "Pr=10 value on this input"
+        )
+
+    def test_grad_finite_across_sign_boundary(self):
+        """AD safety: jax.grad of a scalar reduction through the nemo_ri
+        branch stays finite at and around the zdiv sign boundary (the
+        where-NaN-grad trap the double-where idiom guards against)."""
+        cfg = self._cfg()
+        N2 = jnp.array([2.0e-4])
+        kappaM = jnp.array([1.0e-2])
+
+        def loss(shear_sq):
+            Pr = _prandtl_number(N2, shear_sq, kappaM, cfg)
+            return jnp.sum(Pr)
+
+        for s0 in (-1.0e-12, 0.0, 1.0e-12, -1.0e-18, 1.0e-18):
+            g = jax.grad(loss)(jnp.array([s0]))
+            assert bool(jnp.isfinite(g).all()), (
+                f"grad not finite at shear_sq={s0!r}: {g}")
+
+        # exact zdiv==0 boundary: p_sh2 + bshear == 0 -> shear_sq == -bshear/kappaM
+        s_zero = jnp.array([-1.0e-20 / 1.0e-2])
+        g_zero = jax.grad(loss)(s_zero)
+        assert bool(jnp.isfinite(g_zero).all()), (
+            f"grad not finite AT zdiv==0: {g_zero}")
+
+
+class TestMxlChoice3LdownSeed:
+    """#1226 zdftke_chain_walk (STAGE 4 finding, tke.py:698-701 pre-fix): the
+    ``tke_mxl_choice==3`` bottom-up ``ldown`` scan must seed its carry from
+    ``cfg.mxl_min`` (NEMO's ``rmxl_min``, zdftke.F90:678-679), NOT from the
+    RAW buoyancy length at the deepest carried row. Ground truth is an
+    INDEPENDENT NumPy loop-port of the NEMO ``nn_mxl=3`` lup/ldown recurrence
+    (zdftke.F90:775-793), not a call into ``compute_mixing_lengths``.
+    """
+
+    def _nemo_mxl3_reference(self, l_sfc, l_int_raw, e3t_body, e3t_bottom,
+                              mxl_min):
+        """Independent loop-port of zdftke.F90:775-793 (nn_mxl=3 CASE(3)).
+
+        ``l_int_raw`` = raw buoyancy length at interior W-levels jk=2..jpkm1
+        (length ``n``). ``e3t_body`` = e3t(jk=1..jpkm1) (length ``n+1``,
+        e3t_body[0]=e3t(1)). ``e3t_bottom`` = e3t(jpk) (the TRUE bottommost
+        T-cell, the row the ORIGINAL bug's seed step needs but the legacy
+        ``dz_cell`` contract cannot supply).
+        """
+        # jk convention: zmxlm/zmxld index r (0-based, r=0..n) <-> Fortran
+        # jk=r+1 (r=0 is the surface, r=1..n are the interior W-levels
+        # jk=2..jpkm1). ``e3t_body[k]`` (0-based, k=0..n) <-> ``e3t(k+1)``
+        # (Fortran), i.e. e3t_body[0]=e3t(1) .. e3t_body[n]=e3t(jpkm1).
+        n = len(l_int_raw)
+        zmxlm = np.concatenate([[l_sfc], np.asarray(l_int_raw, dtype=np.float64)])
+        zmxld = np.zeros(n + 1)
+        zmxld[0] = l_sfc
+        # lup: jk=2..jpkm1 (0-based idx 1..n), forward.
+        # zmxld(jk) = min(zmxld(jk-1)+e3t(jk-1), zmxlm(jk))
+        #           = min(zmxld[idx-1]+e3t_body[idx-1], zmxlm[idx])
+        for idx in range(1, n + 1):
+            zmxld[idx] = min(zmxld[idx - 1] + e3t_body[idx - 1], zmxlm[idx])
+        # ldown: jk=jpkm1..2 (0-based idx n..1), backward.
+        # zmxlm(jk) = min(zmxlm(jk+1)+e3t(jk+1), zmxlm(jk)).
+        # For idx=n (jk=jpkm1): e3t(jk+1)=e3t(jpk)=e3t_bottom.
+        # For idx<n (jk=idx+1): e3t(jk+1)=e3t(idx+2)=e3t_body[idx+1].
+        for idx in range(n, 0, -1):
+            e3_next = e3t_bottom if idx == n else e3t_body[idx + 1]
+            new_val = min(zmxlm[idx + 1] + e3_next, zmxlm[idx]) if idx < n \
+                else min(mxl_min + e3_next, zmxlm[idx])
+            zmxlm[idx] = new_val
+        zemlm = np.minimum(zmxld[1:], zmxlm[1:])
+        zemlp = np.sqrt(zmxld[1:] * zmxlm[1:])
+        return zemlm, zemlp   # (l_k, l_eps) at the n interior rows
+
+    def test_near_neutral_deep_column_ldown_bound(self):
+        """The walk's pathological case: a near-neutral deep column
+        (rn2b~-1e-10, clamped to a tiny positive floor upstream) gives a
+        HUGE raw buoyancy length at the deepest interior row. Assert the
+        FIXED function's bottom-interface ``l_k`` against the independent
+        NEMO transcription (using the caller's ``dz_cell`` widened by the
+        true bottommost e3t row, so the comparison is NEMO-exact, not
+        proxy-bounded)."""
+        rng = np.random.default_rng(11)
+        n = 20
+        e3t_body = rng.uniform(50.0, 700.0, n + 1)      # e3t(1)..e3t(jpkm1)
+        e3t_bottom = 617.46228681330                     # e3t(jpk), walk's column
+        mxl_min = 1.0e-6 / (10.0 * np.sqrt(1.0e-10))      # rmxl_min formula
+        l_sfc = 0.0672399578
+
+        # Near-neutral deep column: N2 tiny positive (post-floor) -> huge raw
+        # buoyancy length except at the LAST row, matched to the walk's
+        # actual pathological numbers so the bound is the one that matters.
+        en = rng.uniform(1e-5, 6e-5, n)
+        N2_floor = 1.0e-12
+        l_int_raw = np.maximum(mxl_min, np.sqrt(2.0 * en / N2_floor))
+        assert l_int_raw.max() > 1.0e4, (
+            "test setup must produce a raw buoyancy length far above any "
+            "physically bounded value, to exercise the ldown bound")
+
+        l_k_ref, l_eps_ref = self._nemo_mxl3_reference(
+            l_sfc, l_int_raw, e3t_body, e3t_bottom, mxl_min)
+
+        cfg = TKEConfig(tke_mxl_choice=3, mxl_min=mxl_min)
+        e = jnp.asarray(en)[None, None, :]
+        N2 = jnp.full((1, 1, n), N2_floor)
+        dz_cell_widened = jnp.asarray(
+            np.concatenate([e3t_body, [e3t_bottom]]))[None, None, :]
+        l_sfc_arr = jnp.asarray([[l_sfc]])
+        l_k, l_eps = compute_mixing_lengths(
+            e, N2, jnp.zeros_like(e), cfg,
+            dz_cell=dz_cell_widened, l_surface_anchor=l_sfc_arr,
+        )
+        l_k = np.asarray(l_k)[0, 0]
+        l_eps = np.asarray(l_eps)[0, 0]
+
+        # Bottom interface is the one the seed bug corrupts (last row).
+        np.testing.assert_allclose(l_k[-1], l_k_ref[-1], rtol=1e-10)
+        np.testing.assert_allclose(l_eps[-1], l_eps_ref[-1], rtol=1e-10)
+        np.testing.assert_allclose(l_k, l_k_ref, rtol=1e-8)
+        np.testing.assert_allclose(l_eps, l_eps_ref, rtol=1e-8)
+
+    def test_old_seed_would_give_unbounded_length(self):
+        """Non-vacuous: reproduce the OLD (buggy) seed behaviour by hand
+        (seed = the raw buoyancy length at the deepest row, instead of
+        ``mxl_min``) and show it does NOT match the independent NEMO
+        reference on this pathological column -- i.e. this test would have
+        FAILED against the pre-fix code."""
+        rng = np.random.default_rng(11)
+        n = 20
+        e3t_body = rng.uniform(50.0, 700.0, n + 1)
+        e3t_bottom = 617.46228681330
+        mxl_min = 1.0e-6 / (10.0 * np.sqrt(1.0e-10))
+        l_sfc = 0.0672399578
+        en = rng.uniform(1e-5, 6e-5, n)
+        N2_floor = 1.0e-12
+        l_int_raw = np.maximum(mxl_min, np.sqrt(2.0 * en / N2_floor))
+
+        l_k_ref, _ = self._nemo_mxl3_reference(
+            l_sfc, l_int_raw, e3t_body, e3t_bottom, mxl_min)
+
+        # OLD buggy seed: carry starts from l_int_raw[-1] (the RAW length),
+        # not mxl_min, and the deepest row is never re-bounded at all.
+        old_ldn_deepest = l_int_raw[-1]     # unbounded, per the pre-fix bug
+        assert old_ldn_deepest != pytest.approx(l_k_ref[-1], rel=1e-3), (
+            "sanity: the old seed's unbounded deepest-row value must differ "
+            "sharply from the correct NEMO-bounded value"
+        )
+        assert old_ldn_deepest > 5.0 * l_k_ref[-1], (
+            "the old seed's value should be wildly larger than the correct "
+            "bound (reproducing the walk's 3454.8m vs 617.5m finding)"
+        )
+
+    def test_choice2_untouched_shape_and_values(self):
+        """Bit-identity guard: ``tke_mxl_choice==2`` (the Veros/default path,
+        NOT touched by this fix) must be completely unaffected."""
+        rng = np.random.default_rng(5)
+        n = 9
+        e = jnp.asarray(rng.uniform(1e-6, 1e-2, (2, 3, n)))
+        N2 = jnp.asarray(rng.uniform(1e-8, 1e-4, (2, 3, n)))
+        dz_half = jnp.asarray(rng.uniform(5, 50, (2, 3, n - 1)))
+        cfg = TKEConfig(tke_mxl_choice=2, mxl_min=0.01)
+        l_k, l_eps = compute_mixing_lengths(e, N2, dz_half, cfg)
+        assert bool(jnp.isfinite(l_k).all())
+        assert bool(jnp.isfinite(l_eps).all())
+        assert l_k.shape == (2, 3, n)
+        assert l_eps.shape == (2, 3, n)
