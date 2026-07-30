@@ -358,6 +358,39 @@ is the one open item; it is mitigated by the control arm rather than hidden.
 
 ---
 
+## 5b. Test evidence (decisive lines quoted)
+
+| suite | result | job |
+|---|---|---|
+| `test_convection_subsidence_solve_threading` + `test_scm_rce_subsidence_solve_override` | **85 passed** | 9249138 |
+| `test_scm_rce_convection_intercomparison_cli` + `test_train_scm_rce_params_cli` | **59 passed** | 9249089 |
+| `test_tiedtke` | 19 passed, 1 xfailed | 9249398 |
+| `test_emanuel` | 16 passed | 9249398 |
+| `test_zhang_mcfarlane` | 16 passed, 1 xfailed | 9249398 |
+| `test_kain_fritsch` | 18 passed | 9249398 |
+| `test_bechtold_implicit_flux` | 12 passed | 9249398 |
+| `test_edmf_convection_824` (invariant updated) | 8 passed | 9249398 |
+| `test_bechtold` | 98 passed | 9249398 |
+| `test_convection` (hydrostatic) | 68 passed, **1 failed** — see below | 9249398 |
+
+The scheme regression was run **split per file**: an earlier combined run
+crashed with a hard fault dump that `tail` truncated, which would have looked
+like a pass. Exit codes are quoted per file.
+
+**The one failure is PRE-EXISTING, confirmed by control** (job 9249950): the
+same test, run at `cf/main` (ed03b0af1) and on this branch (3279a2e4a) in the
+same job, fails identically on both with `assert 0.0 > 0.0`:
+
+```
+######## scmrce_baseline  sha=ed03b0af1 ########   1 failed
+######## scmrce_wt6       sha=3279a2e4a ########   1 failed
+```
+
+Likewise the two `test_no_hardcoded_constants` failures reproduce at `cf/main`
+(`2 failed, 3488 passed`) in files this branch never touches.
+
+---
+
 ## 6. Reproduce
 
 ```bash
