@@ -446,6 +446,25 @@ class HinesConfig(NamedTuple):
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
+    # Launch pressure [Pa].  ``None`` (default) launches at the SURFACE —
+    # the legacy behaviour, byte-identical.  A non-orographic wave launched
+    # at the surface is born SUPERSATURATED wherever the launch amplitude
+    # exceeds ``sigma_sat = N/m_star``, and N is SMALLEST in the well-mixed
+    # boundary layer: on the 2.5 deg AMIP state the default 2.0 m/s exceeds
+    # the 1.25 m/s sigma_sat at 140 m over 78.5% of the planet's area, so
+    # the wave breaks AT its own launch level and deposits 55% of its
+    # momentum below 1 km (only 35% above 12 km).  Setting a launch level
+    # above the BL makes the scheme behave like a non-orographic source:
+    # no drag is deposited below it and the wave starts propagating there.
+    # Sibling schemes all carry one (E3SMFrontalConfig.launch_p, E3SM
+    # ``gw_front`` kbotbg); Hines was the only one without.
+    #
+    # NOT in ``__param_spec__``: spec eligibility is computed from a plain
+    # ``: float`` annotation, and this is ``float | None``.  That is the
+    # right classification anyway — the value selects a level INDEX by
+    # argmin, so the drag is piecewise-constant in it and it is not usefully
+    # differentiable (mirrors E3SM's static init-time kbotbg selection).
+    launch_p: float | None = None
 
 
 class PrognosticSpectralConfig(NamedTuple):
