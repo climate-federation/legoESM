@@ -386,6 +386,15 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
         history.append(mean_loss)
         if on_epoch is not None:
             on_epoch(epoch, mean_loss, params, opt_state)   # CURRENT params (not a stale closure)
+    # #1364: report the trace count POSITIVELY. Reading the absence of the
+    # warning above requires knowing the guard was wired in at all; this line
+    # makes a healthy run state the fact ("traced 1x over N steps") in its own
+    # log, so the leak's absence is evidence rather than an inference.
+    if n_traces is not None:
+        import logging
+        logging.getLogger(__name__).info(
+            "#1364: rollout traced %dx over %d steps (1 = compiled once, "
+            "no per-step recompile)", n_traces(), n_steps_done)
     return params, opt_state, history
 
 

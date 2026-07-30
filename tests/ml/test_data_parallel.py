@@ -346,6 +346,29 @@ def test_retrace_guard_fires_on_varying_sample_shape(caplog):
         f"guard did not fire on varying shapes; records={msgs}"
 
 
+def test_healthy_run_logs_positive_trace_count(caplog):
+    """A healthy run must state its trace count POSITIVELY, so a clean log is
+    evidence rather than an inference from a missing warning."""
+    import logging
+
+    counter = {"n": 0}
+    loss = _scan_loss_with_trace_counter(counter)
+    w = jnp.array([0.5, 0.25])
+    optimizer = optax.sgd(0.01)
+    opt_state = optimizer.init(w)
+    samples = [jnp.array([1.0, 0.5]), jnp.array([0.5, 1.0])]
+
+    with caplog.at_level(logging.INFO,
+                         logger="legoesm.training.data_parallel"):
+        mpi_data_parallel_training_loop(
+            loss, w, opt_state, optimizer, samples, n_epochs=3, num_processes=1)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("rollout traced 1x over 6 steps" in m for m in msgs), \
+        f"missing positive trace-count line; records={msgs}"
+    assert not any("RETRACE DETECTED" in m for m in msgs)
+
+
 def test_dp_jit_matches_eager_reference_math():
     """The #1364 jit must not change the MATH.
 
