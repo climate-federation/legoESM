@@ -129,6 +129,37 @@ gap, now lands in the RESIDUAL bucket (not VERTMIX) — use RESIDUAL as the
 instrument's own error bar, and treat a RESIDUAL that is NOT small relative
 to the band's other terms as a reason to distrust the decomposition for
 that band/window, not as evidence of an unmodeled physical process.
+
+PRECISION — fp64 STORAGE IS REQUIRED TO READ THE REALIZED-INCREMENT BUCKETS.
+``k33`` and ``vertmix`` are measured as ``(T_after - T_before) / dt``, a
+difference of two O(10) degC temperatures: a CATASTROPHIC CANCELLATION. At the
+default fp32 policy any increment below ~``ULP(T)/dt`` (~2e-9 degC/s at
+T~20 degC) is UNRESOLVABLE and reports as exactly 0 or a small ULP multiple.
+MEASURED on the unit-test grid: at fp32 the k33 bucket's PEAK value was
+``max|dT_k33| = 2.1193e-09``, exactly **1.00 ULP**, with 95% of cells
+quantizing to 0 — and it was BIT-IDENTICAL between ``eos_depth="insitu"`` and
+``"geometric"`` even though the underlying K33 field differed (rel-L2
+2.003e-3), i.e. both conventions rounded to the same single quantum. The same
+comparison at fp64 storage gives ``1.9587e-09`` at **4.96e+08 ULP** of margin,
+with the eos_depth sensitivity now visible (``iso_redi`` rel-L2 3.810e-04).
+
+Two consequences, both learned the hard way (#1226):
+  * ``JAX_ENABLE_X64=1`` is NOT sufficient — it only PERMITS f64. The
+    ``legoesm.core.precision`` policy is an INDEPENDENT axis and
+    ``get_policy().storage`` defaults to float32. Constructors read it
+    (``init_latlon_cgrid.py:97,172,224,284`` all do ``dtype =
+    get_policy().storage``), so a state must be BUILT UNDER an fp64 policy —
+    reusing a state constructed earlier silently stays fp32.
+  * **A SMALL BUCKET READ UNDER fp32 IS NOT EVIDENCE OF PHYSICAL ABSENCE.**
+    It is the false-negative twin of the dropped-``K33_iso`` bug above: the
+    instrument lies by QUANTIZATION instead of by a missing kwarg, at
+    identical downstream cost. A deep-ocean fp32 ``vertmix`` or ``k33`` of
+    "≈0" is exactly the shape of the retracted "vertical mixing is 8x too
+    weak at 200-1000 m" reading. Confirm fp64 storage BEFORE concluding a
+    term contributes nothing.
+The #1226 drivers gate on ``ocean.fidelity.precision_gate.require_fp64``, so
+readings taken through them are sound; anything else must set the policy
+itself.
 """
 
 from __future__ import annotations
