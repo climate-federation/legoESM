@@ -1341,13 +1341,26 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
+        # Per-cell land fraction on the grid pytree (canonical name
+        # ``land_frac``) so the GWD integration's ``_extract_land_frac``
+        # finds it (e3sm_cam's driver-level oro landfrac scaling).  Reuses
+        # the ``self._f_land`` computed above — no new loader.  Attached
+        # only where the grid type carries the field (VoronoiMesh since
+        # 2026-07-30); other grids keep legacy behaviour.
+        if (getattr(self.grid, "land_frac", "no-field") is None
+                and self._f_land is not None):
+            self.grid = self.grid._replace(
+                land_frac=jnp.asarray(self._f_land, dtype=_sd).reshape(-1))
+
         # Per-column subgrid orographic stddev for the orographic GWD launch
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
         # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
         # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
         # uniform 500 m mountain over ocean columns too. Only loaded when the
-        # active GWD has an orographic member; otherwise the file is unused
-        # (and non-cube/Gaussian grids could not even carry the field).
+        # active GWD has an orographic member; otherwise the file is unused.
+        # ``load_subgrid_orography``'s regrid target handles cube (rank-3),
+        # structured lat-lon (rank-2) AND unstructured Voronoi (rank-1 cell
+        # centres) grids — see ``_target_grid_degrees``.
         sso_path = getattr(self.config, "subgrid_orography_path", "")
         if sso_path:
             _oro_members = ("mcfarlane", "lindzen", "e3sm_cam")
@@ -1367,7 +1380,8 @@ class ModelDriver:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                        f"field (supported: CubedSphereGrid, GaussianGrid)"
+                        f"field (supported: CubedSphereGrid, GaussianGrid, "
+                        f"VoronoiMesh)"
                     ) from e
                 logger.info(
                     f"  Subgrid orography: {sso_path} "

@@ -96,6 +96,20 @@ class VoronoiMesh(NamedTuple):
     edgeSignOnVertex: jnp.ndarray   # (vertexDegree, nVertices) ±1
     meshDensity: jnp.ndarray        # (nCells,)
 
+    # --- Optional per-cell surface fields (default None) ---------------
+    # Canonical attribute names shared with CubedSphereGrid/GaussianGrid so
+    # the GWD integration's ``_extract_subgrid_topo_stddev`` /
+    # ``_extract_land_frac`` (getattr-based) find them.  Without these the
+    # orographic schemes fall back to the scalar ``config.h_topo`` — a
+    # uniform 500 m pseudo-mountain over every OCEAN cell too, measured at
+    # 0.036 Pa of spurious column momentum sink on the 2.5° AMIP state
+    # (2026-07-30 GWD ablation).  Populated by the model driver from the
+    # existing loaders (``load_subgrid_orography``, whose regrid target
+    # already handles rank-1 Voronoi cell centres, and the driver's
+    # ``_f_land``); ``None`` = legacy behaviour, byte-identical.
+    subgrid_topo_stddev: jnp.ndarray | None = None   # (nCells,) [m]
+    land_frac: jnp.ndarray | None = None             # (nCells,) [0-1]
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
