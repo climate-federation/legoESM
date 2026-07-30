@@ -44,13 +44,55 @@ from legoesm import constants
 # -> node count).  Overridable for a non-128-core node.
 _SPMD_CPU_CORES_PER_NODE = int(os.environ.get("LEGOESM_SPMD_CPU_CORES_PER_NODE", "128"))
 
+#: Schema-v2 audit fields (``metadata.METADATA_SCHEMA_VERSION``) that make a
+#: row's transport + decomposition self-describing.  They are REQUIRED keys in
+#: every source record precisely so "a route-A mpi4jax row, a route-B NCCL row,
+#: a gloo/TCP fabric row ... are distinguishable from the record alone" — but
+#: they were being dropped on the way into the tidy CSV, which is the artifact
+#: everyone actually reads and plots.  Consequence: a 2-D-pencil route-A latlon
+#: ladder sat in a directory named ``routeb_cpu_latlon`` and the route had to be
+#: reverse-engineered from filenames and dt values.  Carry them through.
+PROVENANCE_FIELDS = (
+    "schema_version", "transport", "decomposition",
+    "gpu_direct_active", "host_staged_halo", "launcher",
+)
+
 FIELDS = [
     "component", "backend", "grid", "case", "precision", "mode",
     "n_devices", "cpus_per_task", "n_cores", "n_resource",
     "resolution", "resolution_km", "n_levels", "sypd", "time_per_step_ms",
     "total_cells", "mcells_per_s", "scaling_efficiency", "dt_seconds",
-    "physics_level", "fix_mass", "compile_time_s", "source",
+    "physics_level", "fix_mass", "compile_time_s",
+    *PROVENANCE_FIELDS,
+    "source",
 ]
+
+
+def _provenance(*records) -> dict:
+    """The schema-v2 audit fields, from the first record that carries each.
+
+    Each argument is a dict that may hold the fields at TOP LEVEL or under a
+    nested ``metadata`` dict — the benches differ (the flat
+    ``run_cpu_mpi_scaling`` JSONs nest them, the SPMD JSONL records nest grid
+    and precision, the nested reports carry some per-result and some
+    top-level), so both scopes are searched in the order given.
+
+    A field absent everywhere comes out ``""`` — an honest "this record
+    predates schema v2", never a guess. Do NOT infer transport from the
+    directory name here: that inference is exactly what this function exists
+    to retire.
+    """
+    out = {k: "" for k in PROVENANCE_FIELDS}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for scope in (rec, rec.get("metadata")):
+            if not isinstance(scope, dict):
+                continue
+            for k in PROVENANCE_FIELDS:
+                if out[k] == "" and scope.get(k) is not None:
+                    out[k] = scope[k]
+    return out
 
 
 def _resource_count(backend: str, n_dev: int, n_cores: int) -> int:
@@ -155,6 +197,7 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
         "dt_seconds": d.get("dt_seconds"),
         "physics_level": phys,
         "compile_time_s": d.get("compile_time_s"),
+        **_provenance(d),
         "source": str(source),
     }
 
@@ -250,6 +293,7 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
         "dt_seconds": (float(_dt) if _dt else None),
         "physics_level": phys,
         "compile_time_s": (rec.get("compile_ms") or 0) / 1000.0,
+        **_provenance(rec),
         "source": str(source),
     }
 
@@ -340,6 +384,9 @@ def _rows_from_nested(d: dict, source: Path, component: str = "ocean") -> list[d
             "dt_seconds": r.get("dt_seconds"),
             "physics_level": phys,
             "compile_time_s": r.get("compile_time_s"),
+            # per-result first, then the enclosing report (a nested report
+            # records the transport once at top level, not per result)
+            **_provenance(r, d),
             "source": str(source),
         })
     return out

@@ -81,7 +81,19 @@ GPU_RANKS="${GPU_RANKS//[:,]/ }"        # colon/comma-separated ok (survives qsu
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist); 'none'=dry
-PRECISION="${PRECISION:-float32}"       # cube --cs-spmd only
+# Precision applies to EVERY grid, not just the cube.  The latlon/ico SPMD
+# benches take no --precision flag: they read jax.config.jax_enable_x64 and
+# RECORD the result ("float64" if enabled else "float32"), so the knob for them
+# is the JAX_ENABLE_X64 env var, exported per-precision in the loop below.
+# Before this, PRECISION reached the cube branch ONLY and every latlon/ico row
+# in the route-B campaign was float32 with no way to ask for f64.
+# Default stays float32 = previous behaviour: this sweep is ONE job that loops
+# internally, so adding a precision DOUBLES its walltime rather than fanning out
+# to a second queue job (unlike route-A submit_scaling.sh, which submits one job
+# per precision).  Opt in explicitly and raise the PBS walltime to match:
+#   PRECISIONS="float32 float64"
+PRECISIONS="${PRECISIONS:-${PRECISION:-float32}}"
+PRECISIONS="${PRECISIONS//[:,]/ }"      # colon/comma-separated ok (survives qsub -v)
 
 # GPU cap = unique nodes x GPUs/node (PBS_NODEFILE is one line PER RANK; count
 # UNIQUE hosts -- a bare $NGPUS is the per-chunk value=4, see scaling_gpu.sh).
@@ -136,6 +148,16 @@ COORD_HOST="$(head -n 1 "${PBS_NODEFILE:-/dev/null}" 2>/dev/null || true)"
 _port="${COORD_PORT_BASE:-29800}"
 
 rc_all=0
+for PREC in $PRECISIONS; do
+  # The latlon/ico benches read this env var and record the precision they
+  # actually ran; the cube driver takes --precision. An unknown value is a HARD
+  # error -- a typo must never silently run f32 and get labelled f64.
+  case "$PREC" in
+    float32|fp32) export JAX_ENABLE_X64=0 ;;
+    float64|fp64) export JAX_ENABLE_X64=1 ;;
+    *) echo "ERROR: routeb_gpu_sweep PRECISIONS='$PREC' unsupported (float32|float64)." >&2; exit 2 ;;
+  esac
+  echo "=== precision $PREC (JAX_ENABLE_X64=$JAX_ENABLE_X64) ==="
 for RES in $RES_LIST; do
   for N in $GPU_RANKS; do
     if [ "$N" -gt "$TOTAL_GPUS" ]; then
@@ -161,14 +183,14 @@ for RES in $RES_LIST; do
                 --multicontroller --n-devices "$N" --coordinator "$_coord"
                 --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
-                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}.jsonl" ) ;;
+                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}_${PREC}.jsonl" ) ;;
       icosahedral)
         BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
                 --multicontroller --n-devices "$N" --reorder-for "$_reorder_for"
                 --coordinator "$_coord"
                 --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
-                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
+                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}_${PREC}.jsonl" ) ;;
       cubed-sphere|cubed_sphere)
         # run_cpu_mpi_scaling --cs-spmd writes its OWN flat-JSON filename into
         # --output-dir (grid_type=cubed-sphere + sypd) -> aggregator _row_from_json.
@@ -176,15 +198,16 @@ for RES in $RES_LIST; do
         BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
                 --grid cubed-sphere --cs-spmd --device gpu --coordinator "$_coord"
                 --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
-                --precision "$PRECISION" --n-levels "$NLEV"
+                --precision "$PREC" --n-levels "$NLEV"
                 --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
                 --output-dir "$OUTDIR/${_sub}" ) ;;
     esac
     (
         nccl_env
         mpiexec -n "$N" --ppn "$PPN" bash -c "$PIN" _ "${BENCH[@]}" < /dev/null
-    ) || { echo "route-B GPU $GRID res=$RES N=$N FAILED rc=$?"; rc_all=1; }
+    ) || { echo "route-B GPU $GRID res=$RES N=$N prec=$PREC FAILED rc=$?"; rc_all=1; }
   done
+done
 done
 
 echo "=== DONE rc=$rc_all ===   route-B GPU curve JSONL under: $OUTDIR/${_sub}/"

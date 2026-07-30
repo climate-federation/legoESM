@@ -445,3 +445,58 @@ def test_spmd_jsonl_blank_and_corrupt_lines_are_skipped(tmp_path):
         json.dumps(_spmd_rec()) + "\n\nnot-json{{{\n")
     rows, _ = agg.collect(tmp_path)
     assert len(rows) == 1
+
+
+# ---- schema-v2 provenance survives into the tidy CSV -------------------------
+# Regression: `transport` / `decomposition` are REQUIRED keys in every source
+# record (metadata schema v2) so a route-A mpi4jax row can be told from a
+# route-B NCCL row "from the record alone" -- but the aggregator dropped them,
+# so the tidy CSV everyone plots from could not answer "which route was this?".
+# A 2-D-pencil route-A latlon ladder consequently sat in a directory named
+# `routeb_cpu_latlon` and the route had to be inferred from filenames.
+
+def test_provenance_fields_are_in_the_tidy_schema():
+    for k in ("transport", "decomposition", "schema_version",
+              "gpu_direct_active", "host_staged_halo", "launcher"):
+        assert k in agg.FIELDS, f"{k} missing from the tidy CSV schema"
+
+
+def test_provenance_read_from_nested_metadata(tmp_path):
+    """The flat run_cpu_mpi_scaling JSONs nest the audit fields under
+    ``metadata`` -- the aggregator must look there, not only at top level."""
+    d = tmp_path / "dry_latlon_cpu_np128_1"
+    payload = _case("latlon", "none", "strong", 192, 128, "float32", 0.56)
+    payload["metadata"] = {
+        "schema_version": 2, "transport": "mpi4jax",
+        "decomposition": "latlon_2d_pencil", "gpu_direct_active": False,
+        "host_staged_halo": True, "launcher": "mpiexec",
+    }
+    _write(d, "a.json", payload)
+    rows, _ = agg.collect(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["transport"] == "mpi4jax"          # route A, not route B
+    assert rows[0]["decomposition"] == "latlon_2d_pencil"
+    assert rows[0]["launcher"] == "mpiexec"
+
+
+def test_provenance_read_from_top_level(tmp_path):
+    """Records that carry the audit fields at top level work too."""
+    d = tmp_path / "dry_latlon_gpu_g16_1"
+    payload = _case("latlon", "none", "strong", 1024, 16, "float32", 29.8)
+    payload.update(transport="nccl", decomposition="latlon_1d_band",
+                   schema_version=2)
+    _write(d, "b.json", payload)
+    rows, _ = agg.collect(tmp_path)
+    assert rows[0]["transport"] == "nccl"             # route B
+    assert rows[0]["decomposition"] == "latlon_1d_band"
+
+
+def test_legacy_record_gets_empty_not_guessed_transport(tmp_path):
+    """A pre-v2 record must yield EMPTY provenance, never a directory-name
+    guess -- inferring 'routeb_cpu_latlon' -> route B is the exact error this
+    change retires."""
+    d = tmp_path / "routeb_cpu_latlon"
+    _write(d, "c.json", _case("latlon", "none", "strong", 192, 128, "float32", 0.56))
+    rows, _ = agg.collect(tmp_path)
+    assert rows[0]["transport"] == ""
+    assert rows[0]["decomposition"] == ""

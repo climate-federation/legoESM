@@ -15,6 +15,8 @@
 #   LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
 #     scripts/cluster/scaling_derecho/submit_routeb.sh <outdir> [res1 res2 res3]
 #   GRIDS="icosahedral" ... submit_routeb.sh <outdir> 7 8   # one grid + custom res
+#   PRECISIONS="float32 float64" ... submit_routeb.sh <outdir>  # both precisions
+#     (each precision DOUBLES a lane's runtime -- raise -l walltime to match)
 #   RUN_CPU=0 ... submit_routeb.sh <outdir>                 # GPU curves only
 #   RUN_GPU=0 ... submit_routeb.sh <outdir>                 # CPU curves only
 #   DRYRUN=1 ... submit_routeb.sh <outdir>                  # preview, no jobs
@@ -52,6 +54,14 @@ shift || true
 _res_explicit=0; if [ "$#" -gt 0 ]; then _res_explicit=1; fi
 RES_LIST="${*:-${RES_LIST:-128 256 512}}"
 RES_JOINED="$(echo "$RES_LIST" | tr ' ' ':')"
+# PRECISIONS must be FORWARDED EXPLICITLY: `qsub -v` passes only the variables
+# it lists (unlike `-V`), so an exported PRECISIONS in the submitting shell is
+# silently DROPPED and the job runs the float32 default while the user believes
+# they asked for float64.  Same trap class as LEGOESM_REPO.  Colon-joined for
+# the same reason as RES_LIST (comma is PBS's `-v` delimiter); the PBS scripts
+# translate ':' back to spaces.  Empty unless the user set it, so the lanes keep
+# their float32 default and existing submissions are unchanged.
+PREC_JOINED="$(echo "${PRECISIONS:-}" | tr ' ' ':')"
 # Grids to fan the GPU sweep across (each -> its own job + subdir + curve).
 GRIDS="${GRIDS:-latlon icosahedral cubed-sphere}"
 _n_grids="$(echo $GRIDS | wc -w | tr -d ' ')"
@@ -90,6 +100,9 @@ if [ "${RUN_GPU:-1}" = "1" ]; then
           *) echo "  !!! SKIP unknown GRID='$g' (latlon|icosahedral|cubed-sphere)" >&2; continue ;;
         esac
         vars="OUTDIR=${OUT}/routeb_gpu_${g},LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-},GRID=${g}"
+        # `if`, not `[ ... ] &&`: under `set -e` a bare failing AND-list
+        # can abort the script, and the empty case is the DEFAULT path.
+        if [ -n "$PREC_JOINED" ]; then vars="PRECISIONS=${PREC_JOINED},${vars}"; fi
         # Shared RES override is only meaningful for a single-grid run (the axes
         # differ across grids); multi-grid uses each grid's per-grid default.
         if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
@@ -110,6 +123,9 @@ if [ "${RUN_CPU:-1}" = "1" ]; then
           *) continue ;;   # unknown grid already warned on the GPU pass
         esac
         vars="OUTDIR=${OUT}/routeb_cpu_${g},GRID=${g}"
+        # `if`, not `[ ... ] &&`: under `set -e` a bare failing AND-list
+        # can abort the script, and the empty case is the DEFAULT path.
+        if [ -n "$PREC_JOINED" ]; then vars="PRECISIONS=${PREC_JOINED},${vars}"; fi
         if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
             vars="RES_LIST=${RES_JOINED},${vars}"
         fi

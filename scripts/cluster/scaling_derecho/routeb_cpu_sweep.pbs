@@ -87,7 +87,17 @@ NODE_RANKS="${NODE_RANKS//[:,]/ }"       # = NODE counts (device count = _ppn * 
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist)
-PRECISION="${PRECISION:-float32}"       # cube --cs-spmd only
+# Precision applies to EVERY grid, not just the cube.  The latlon/ico SPMD
+# benches take no --precision flag: they read jax.config.jax_enable_x64 and
+# RECORD the result, so the knob for them is the JAX_ENABLE_X64 env var,
+# exported per-precision in the loop below.  Before this, PRECISION reached the
+# cube branch ONLY and every latlon/ico route-B row was float32 unasked.
+# Default stays float32 = previous behaviour: this sweep is ONE job that loops
+# internally, so each added precision DOUBLES its walltime instead of fanning
+# out to another queue job.  Opt in and raise the PBS walltime to match:
+#   PRECISIONS="float32 float64"
+PRECISIONS="${PRECISIONS:-${PRECISION:-float32}}"
+PRECISIONS="${PRECISIONS//[:,]/ }"      # colon/comma-separated ok (survives qsub -v)
 
 # Thread pool per SPMD process (1 core each when 128 procs pack a node).
 # _omp is AUTHORITATIVE lane protocol: login profiles commonly export
@@ -143,6 +153,16 @@ COORD_HOST="$(head -n 1 "${PBS_NODEFILE:-/dev/null}" 2>/dev/null || true)"
 SHIM='export OMPI_COMM_WORLD_RANK=${PALS_RANKID:-${OMPI_COMM_WORLD_RANK:-0}}; exec "$@"'
 
 rc_all=0
+for PREC in $PRECISIONS; do
+  # latlon/ico read this env var and record the precision they actually ran;
+  # the cube driver takes --precision.  Unknown value = HARD error, so a typo
+  # can never silently run f32 and be labelled f64.
+  case "$PREC" in
+    float32|fp32) export JAX_ENABLE_X64=0 ;;
+    float64|fp64) export JAX_ENABLE_X64=1 ;;
+    *) echo "ERROR: routeb_cpu_sweep PRECISIONS='$PREC' unsupported (float32|float64)." >&2; exit 2 ;;
+  esac
+  echo "=== precision $PREC (JAX_ENABLE_X64=$JAX_ENABLE_X64) ==="
 for RES in $RES_LIST; do
   for N in $NODE_RANKS; do
     if [ "$N" -gt "$NODE_CAP" ]; then
@@ -166,19 +186,19 @@ for RES in $RES_LIST; do
                 --multicontroller --n-devices "$_nd" --coordinator "$_coord"
                 --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
-                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${_nd}.jsonl" ) ;;
+                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${_nd}_${PREC}.jsonl" ) ;;
       icosahedral)
         BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
                 --multicontroller --n-devices "$_nd" --reorder-for "$_reorder_for"
                 --coordinator "$_coord"
                 --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
-                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${_nd}.jsonl" ) ;;
+                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${_nd}_${PREC}.jsonl" ) ;;
       cubed-sphere|cubed_sphere)
         BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
                 --grid cubed-sphere --cs-spmd --device cpu --coordinator "$_coord"
                 --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
-                --precision "$PRECISION" --n-levels "$NLEV"
+                --precision "$PREC" --n-levels "$NLEV"
                 --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
                 --output-dir "$OUTDIR/${_sub}" ) ;;
     esac
@@ -195,8 +215,9 @@ for RES in $RES_LIST; do
     fi
     echo "    launch: mpiexec -n $_nd --ppn $_ppn ${_BIND[*]:-<default binding>} (OMP=$OMP_NUM_THREADS)"
     mpiexec -n "$_nd" --ppn "$_ppn" "${_BIND[@]}" bash -c "$SHIM" _ "${BENCH[@]}" < /dev/null \
-      || { echo "route-B CPU $GRID res=$RES nodes=$N ($_nd dev) FAILED rc=$?"; rc_all=1; }
+      || { echo "route-B CPU $GRID res=$RES nodes=$N ($_nd dev) prec=$PREC FAILED rc=$?"; rc_all=1; }
   done
+done
 done
 
 echo "=== DONE rc=$rc_all ===   route-B CPU records under: $OUTDIR/${_sub}/"
