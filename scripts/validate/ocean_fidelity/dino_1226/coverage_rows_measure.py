@@ -628,7 +628,30 @@ def measure_tra_sbc(st) -> dict:
           "(want 0.0 -- tra_sbc is a surface-only k=0 term for DINO's "
           ".NOT.lk_linssh)")
 
+    # #1226 INSTRUMENT-DEFECT FIX (8th of this campaign): this probe used to
+    # hardcode dz_0 = z_coord.dz_ref[0] (the STATIC divisor) and never read
+    # cfg.surface_flux_divisor, so it silently measured the pre-fix static
+    # path even on a recipe (nemo_dino_kamm_mlf) that production resolves to
+    # "nemo_live" (dino.py:1204-1207 sets it on the kamm cards; dispatch at
+    # dino.py:3392-3402). Mirror that dispatch EXACTLY here -- same branch,
+    # same helper (eos.nemo_r3t_stretch), no re-derivation -- so the probe
+    # measures whatever path production actually runs for cfg.
     dz_0 = float(br.z_coord.dz_ref[0])
+    divisor = getattr(cfg, "surface_flux_divisor", "static")
+    print(f"  cfg.surface_flux_divisor = {divisor!r}  (resolved config value "
+          "actually driving this measurement -- dino.py:3392 dispatch)")
+    if divisor == "static":
+        dz_0_2d = np.broadcast_to(np.float64(dz_0), tmask2d.shape)
+    elif divisor == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        stretch = np.asarray(nemo_r3t_stretch(
+            br.z_coord, br.state.eta.data, br.state.H_bathy.data))
+        dz_0_2d = dz_0 * stretch
+    else:
+        raise ValueError(
+            f"Unknown DINOConfig.surface_flux_divisor {divisor!r}: expected "
+            "'static' or 'nemo_live'.")
+
     lat_deg_1d = np.degrees(np.asarray(br.geometry.lat))
     T_star_1d = np.asarray(dino_T_star_seasonal(jnp.asarray(lat_deg_1d), t_seconds, cfg))
     T_star_2d = np.broadcast_to(T_star_1d[:, None], (n_lat, n_lon))
@@ -638,8 +661,15 @@ def measure_tra_sbc(st) -> dict:
     Q_sr_1d = np.asarray(dino_Q_sr_seasonal(jnp.asarray(lat_deg_1d), t_seconds, cfg))
     Q_sr_2d = np.broadcast_to(Q_sr_1d[:, None], (n_lat, n_lon))
 
-    tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0)
-    tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0)
+    # tau_T/tau_S and the Q_sr-subtraction dz_0 kwarg both take the (possibly
+    # live, per-column) divisor -- same ordering as dino.py:3406-3419 (the
+    # live stretch feeds dz_0 BEFORE tau_T/tau_S are built, not an after-the-
+    # fact rescale of an implicit-Euler output; this probe uses implicit=False
+    # since trasbc.F90's own dump is the raw explicit Krhs increment, not the
+    # implicit-Euler final value -- an existing, deliberate divergence from
+    # production's implicit=True, unrelated to the divisor fix).
+    tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_2d)
+    tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_2d)
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S, T_star_array=jnp.asarray(T_star_2d),
         S_star_array=jnp.asarray(S_star_2d), subtract_qsr=True, implicit=False,
@@ -664,7 +694,7 @@ def measure_tra_sbc(st) -> dict:
     out = restoring_surface_forcing(
         T_Kbb, S_Kbb, _LatShim(jnp.zeros((n_lat, n_lon))), restoring_cfg,
         sw_down=jnp.asarray(Q_sr_2d), dt=cfg.dt, rho_0=cfg.rho_0, c_p=cfg.c_p,
-        dz_0=dz_0)
+        dz_0=dz_0_2d)
     # This is a genuine [K/s]/[PSU/s] SURFACE tendency, exactly comparable to
     # NEMO's own ts(:,:,1,jn,Krhs) -- NO unit re-multiplication needed (unlike
     # cancelling_rows_per_element.py's measure_sbc, which converts BACK to
@@ -684,27 +714,82 @@ def measure_tra_sbc(st) -> dict:
     with nc.Dataset(os.path.join(RUN_DIR, RESTART)) as r:
         sbc_hc_b = np.asarray(r["sbc_hc_b"][0]).squeeze()   # [K*m/s] (r1_rho0_rcp*qns_prev)
         sbc_sc_b = np.asarray(r["sbc_sc_b"][0]).squeeze()   # [PSU*m/s]
-    e3t_k0 = np.asarray(br.z_coord.dz_ref)[0] if np.ndim(br.z_coord.dz_ref) == 1 else None
-    if e3t_k0 is None:
-        e3t_k0 = float(br.z_coord.dz_ref[..., 0].mean())
     print(f"  l_1st_euler=False (ocean.output-confirmed) -> zfact=0.5 MLF "
           f"average of this-step forcing (dT_dt_now*e3t) and the restart's "
-          f"sbc_hc_b/sbc_sc_b (previous-step's forcing).  e3t(k=0)={float(e3t_k0):.4f} m")
-    sbc_tsc_now_T = dT_dt_now * e3t_k0    # convert back to [K*m/s] to average like trasbc.F90 does
-    sbc_tsc_now_S = dS_dt_now * e3t_k0
-    tem_lego = 0.5 * (sbc_hc_b + sbc_tsc_now_T) / e3t_k0
-    sal_lego = 0.5 * (sbc_sc_b + sbc_tsc_now_S) / e3t_k0
+          f"sbc_hc_b/sbc_sc_b (previous-step's forcing).  divisor={divisor!r}  "
+          f"dz_0_2d: min={float(dz_0_2d.min()):.4f}  max={float(dz_0_2d.max()):.4f}  "
+          f"(static divisor would be a single value = {dz_0:.4f} m everywhere)")
+    sbc_tsc_now_T = dT_dt_now * dz_0_2d    # convert back to [K*m/s] to average like trasbc.F90 does
+    sbc_tsc_now_S = dS_dt_now * dz_0_2d
+    tem_lego = 0.5 * (sbc_hc_b + sbc_tsc_now_T) / dz_0_2d
+    sal_lego = 0.5 * (sbc_sc_b + sbc_tsc_now_S) / dz_0_2d
 
     # SELF-CHECK (task requirement): manual (scalar Python loop) vs vectorized
     # recomputation of the MLF-average formula, on a handful of wet cells.
     wet_idx = np.argwhere(tmask2d)[::max(1, tmask2d.sum() // 5)][:5]
     manual_max_diff = 0.0
     for jy, ix in wet_idx:
-        manual_val = 0.5 * (sbc_hc_b[jy, ix] + dT_dt_now[jy, ix] * e3t_k0) / e3t_k0
+        d = float(dz_0_2d[jy, ix])
+        manual_val = 0.5 * (sbc_hc_b[jy, ix] + dT_dt_now[jy, ix] * d) / d
         manual_max_diff = max(manual_max_diff, abs(manual_val - tem_lego[jy, ix]))
     print(f"  [self-check] manual (scalar loop) vs vectorized tem_lego at "
           f"{len(wet_idx)} sample wet cells: max|diff|={manual_max_diff:.3e} "
           "(want 0.0)")
+
+    # SELF-CHECK (task requirement): forcing r3t->0 (as if eta==0 in the
+    # stretch only) must make the "nemo_live" branch bit-identical to the
+    # "static" branch -- proves branch selection is the ONLY difference
+    # between the two divisor modes, not some other silently-differing path
+    # (mirrors surface_flux_divisor_probe.py's self-check 1, reused pattern).
+    if divisor == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch as _stretch_fn
+        stretch_forced_zero = np.asarray(_stretch_fn(
+            br.z_coord, jnp.zeros_like(br.state.eta.data), br.state.H_bathy.data))
+        dz_0_2d_r3t0 = dz_0 * stretch_forced_zero
+        tau_T0 = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_2d_r3t0)
+        tau_S0 = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_2d_r3t0)
+        restoring_cfg0 = RestoringConfig(
+            tau_T=tau_T0, tau_S=tau_S0, T_star_array=jnp.asarray(T_star_2d),
+            S_star_array=jnp.asarray(S_star_2d), subtract_qsr=True, implicit=False,
+        )
+        out0 = restoring_surface_forcing(
+            T_Kbb, S_Kbb, _LatShim(jnp.zeros((n_lat, n_lon))), restoring_cfg0,
+            sw_down=jnp.asarray(Q_sr_2d), dt=cfg.dt, rho_0=cfg.rho_0, c_p=cfg.c_p,
+            dz_0=dz_0_2d_r3t0)
+        dT_dt_r3t0 = np.asarray(out0.dT_dt[..., 0])
+        dS_dt_r3t0 = np.asarray(out0.dS_dt[..., 0])
+        sbc_tsc_r3t0_T = dT_dt_r3t0 * dz_0_2d_r3t0
+        sbc_tsc_r3t0_S = dS_dt_r3t0 * dz_0_2d_r3t0
+        tem_r3t0 = 0.5 * (sbc_hc_b + sbc_tsc_r3t0_T) / dz_0_2d_r3t0
+        sal_r3t0 = 0.5 * (sbc_sc_b + sbc_tsc_r3t0_S) / dz_0_2d_r3t0
+        dz_0_static_2d = np.broadcast_to(np.float64(dz_0), tmask2d.shape)
+        tau_T_static = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_static_2d)
+        tau_S_static = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_static_2d)
+        restoring_cfg_static = RestoringConfig(
+            tau_T=tau_T_static, tau_S=tau_S_static, T_star_array=jnp.asarray(T_star_2d),
+            S_star_array=jnp.asarray(S_star_2d), subtract_qsr=True, implicit=False,
+        )
+        out_static = restoring_surface_forcing(
+            T_Kbb, S_Kbb, _LatShim(jnp.zeros((n_lat, n_lon))), restoring_cfg_static,
+            sw_down=jnp.asarray(Q_sr_2d), dt=cfg.dt, rho_0=cfg.rho_0, c_p=cfg.c_p,
+            dz_0=dz_0_static_2d)
+        dT_dt_static = np.asarray(out_static.dT_dt[..., 0])
+        dS_dt_static = np.asarray(out_static.dS_dt[..., 0])
+        sbc_tsc_static_T = dT_dt_static * dz_0_static_2d
+        sbc_tsc_static_S = dS_dt_static * dz_0_static_2d
+        tem_static = 0.5 * (sbc_hc_b + sbc_tsc_static_T) / dz_0_static_2d
+        sal_static = 0.5 * (sbc_sc_b + sbc_tsc_static_S) / dz_0_static_2d
+        d_tem_r3t0 = float(np.max(np.abs(tem_r3t0[tmask2d] - tem_static[tmask2d])))
+        d_sal_r3t0 = float(np.max(np.abs(sal_r3t0[tmask2d] - sal_static[tmask2d])))
+        print(f"  [self-check] forcing r3t->0 in the nemo_live branch (eta->0 "
+              f"in the stretch only, everything else identical) vs the "
+              f"'static' branch: max|tem diff|={d_tem_r3t0:.3e}  "
+              f"max|sal diff|={d_sal_r3t0:.3e}  (want 0.0 -- proves the ONLY "
+              "difference between 'static' and 'nemo_live' is the divisor "
+              "branch, not some other silently-differing path)")
+        assert d_tem_r3t0 == 0.0 and d_sal_r3t0 == 0.0, (
+            "'static' and 'nemo_live' (with r3t forced to 0) differ by more "
+            "than the divisor -- controlled-comparison premise VIOLATED")
 
     _shift_scan("tra_sbc tem", tem_lego[:, :, None], tem_nemo[:, :, None],
                 tmask2d[:, :, None])
