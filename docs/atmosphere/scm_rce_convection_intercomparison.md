@@ -108,6 +108,48 @@ Threading the selector surfaced three defects that the adversarial review
 | 3 | **EDMF — a real bug in shipped code.** EDMF ships `implicit_flux`, so the kernel debits vapor, but `edmf_convection` never supplied the matching warming. Every EDMF call was short by `L_v ∫dq_c`. | **CONFIRMED** by codex round 2. Fixed. **This changes shipped EDMF behaviour** (adds previously-missing heating) and would have biased the published ranking, since the campaign advertised `forced:edmf=implicit_flux`. |
 | 4 | **Bechtold over-heated on the advective arm** — its latent term was unconditional, so under the non-default `subsidence_solve="advective"` (which never debits vapor) it added `L_v ∫dq_c` of unowed heat. | **CONFIRMED**; now gated. Bechtold's shipped default is byte-identical. |
 
+### Independent confirmation of the EDMF fix (controlled, baseline-vs-branch)
+
+`scripts/validate/validate_convection_physics.py` is a *different* probe from
+the unit gates (its own tropical sounding, its own diagnostics). Running the
+**shipped validator at `cf/main`** (job 9249390) and on this branch (job
+9249138) — same probe, same sounding, only the code differs:
+
+| scheme | H [W/m²] | Q_v [W/m²] | vapor-MSE residual H+Q_v |
+|---|---:|---:|---:|
+| edmf @ `cf/main` (before) | **−0.1** | −21.3 | **−21.4** |
+| edmf @ this branch (after) | **+21.3** | −21.3 | **≈ 0.0** |
+| emanuel (both) | 26.7 | −25.9 | 0.8 (unchanged) |
+| tiedtke (both) | 38.3 | −24.5 | 13.8 (unchanged) |
+
+**CONFIRMED.** Before the fix EDMF dried the column by 21.3 W/m² while
+producing essentially *zero* heating — the vapor-MSE budget was off by the full
+latent throughput. After the fix the two balance to ≈0. Emanuel and Tiedtke are
+**bit-identical** across the two runs, which is the expected control: Emanuel
+was reverted entirely and Tiedtke's default is `advective`, where the helper is
+a documented no-op.
+
+**Validator status, stated honestly:** the validator exits non-zero on *both*
+sides. `cf/main` already fails with 3 Test-4 magnitude issues (edmf, emanuel,
+tiedtke); this branch reports 5. The two extra are **`dca`**, which this branch
+*added* to the validator's scheme list (it had never been covered — the
+validator ran 9 of the 10 schemes). Both are newly-exposed pre-existing DCA
+properties, not regressions:
+
+* `dca` fires in a CAPE ≈ 0 column (peak 112 K/day) — its trigger gating on the
+  stable sounding is poor;
+* `dca` column heating is ≈ 0 while its magnitude ratio vs SBM is ≈ 0.
+
+Test 4's magnitude band `[0.01, 100]` vs SBM is failed identically at baseline
+by emanuel and tiedtke, so it is a pre-existing property of that test's design
+on this probe, not something this branch introduced.
+
+**Also confirmed pre-existing, not mine:** the two
+`test_no_hardcoded_constants` failures (`packages/ocean/.../constants_config.py`,
+`tests/da/test_gen_be.py`) reproduce identically at `cf/main`
+(`2 failed, 3488 passed`), and `git diff --name-only cf/main...HEAD` shows this
+branch never touches either file.
+
 ### A claim I retracted
 
 I initially judged the missing condensation warming to be a self-consistent
