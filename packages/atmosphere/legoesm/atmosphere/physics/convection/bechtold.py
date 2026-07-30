@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     stratosphere_mass_flux_gate,
     compute_column_geometry,
 )
@@ -2805,7 +2806,23 @@ def bechtold_convection(
     # +L_v pairing (codex R1 #2 block below) — no share is heated twice.
     # Sub-cloud/downdraft re-evaporation books -L_v on evaporation, so the
     # formation (+L_v here) / evaporation (-L_v there) loop now closes.
-    dT_dt = dT_dt + (constants.L_v / constants.c_pd) * dq_c_conv_dt
+    # GATED on the solve (codex adversarial review r2, finding 2).  This term
+    # was previously UNCONDITIONAL, which over-heated the column by exactly
+    # ``L_v * int dq_c dp/g`` under the non-default
+    # ``BechtoldConfig(subsidence_solve="advective")``: that branch emits the
+    # condensate WITHOUT the implicit branch's ``-dq_c`` vapor debit, so no
+    # condensation enthalpy is owed there.  On the SHIPPED default
+    # ("implicit_flux") the helper returns exactly the previous expression, so
+    # default behaviour is byte-identical.
+    #
+    # DELIBERATE DEVIATION from the reviewer's suggested fix: the pairing keeps
+    # Bechtold's OWN ``dq_c_conv_dt`` rather than the kernel's third return.
+    # Bechtold recomputes that profile from the UNCLIPPED ``M_u_new`` while the
+    # kernel clips to ``M_b_max``, so substituting the kernel value would
+    # change this validated scheme's DEFAULT output.  Gating alone fixes the
+    # actual defect (advective over-heating) with zero default-path change.
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # -- Early precip split (IFS sub-cloud evap path only) -------------------
     # The Kessler evaporation needs the POST-SPLIT rain-source profile (only

@@ -1000,6 +1000,17 @@ def edmf_convection(
         dt=dt,
         theta_implicit=config.theta_implicit,
     )
+    # BUG FIX (codex adversarial review r2, finding 1): EDMF ships
+    # subsidence_solve="implicit_flux", so the kernel debits
+    # ``dq_v -= dq_c``, but EDMF never supplied the matching condensation
+    # warming -- unlike Kain-Fritsch and Bechtold, which both add it inline.
+    # The column was therefore short by ``L_v * int dq_c dp/g`` (a pure
+    # COOLING bias) on every EDMF call.  This CHANGES SHIPPED EDMF BEHAVIOUR:
+    # it adds previously-missing heating.  That is the point -- the previous
+    # behaviour violated the package's own already-condensed-condensate
+    # convention.  No-op if a caller selects "advective".
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # In-updraft precipitation: shared rain-split (EDMF config knob).
     dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(

@@ -61,7 +61,10 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
 from legoesm.atmosphere.physics.convection.config import (
+    BechtoldConfig,
+    ConvectiveEDMFConfig,
     KainFritschConfig,
     MassFluxConfig,
     TiedtkeConfig,
@@ -72,6 +75,7 @@ from legoesm.atmosphere.physics.convection.kain_fritsch import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel_implicit_flux,
+    edmf_convection,
     mass_flux_convection,
 )
 from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
@@ -151,6 +155,29 @@ def _run_mass_flux(ss, T_offset=0.0):
 
 # Schemes whose SHIPPED default is the leaky "advective" solve -- these are
 # the four this campaign newly threaded.
+def _run_edmf(ss, T_offset=0.0):
+    T, q_v, p_full, p_half, _u, _v = _column()
+    cfg = (ConvectiveEDMFConfig() if ss is None
+           else ConvectiveEDMFConfig(subsidence_solve=ss))
+    a_u = jnp.full((T.shape[0],), 0.05)
+    out, _ = edmf_convection(
+        T + T_offset, q_v, p_full, p_half, a_u=a_u, dt=DT_S, config=cfg)
+    return out
+
+
+def _run_bechtold(ss, T_offset=0.0):
+    T, q_v, p_full, p_half, u, v = _column()
+    cpp = jnp.zeros_like(T)
+    cfg = (BechtoldConfig(enable_stochastic=False, enable_cmt=False) if ss is None
+           else BechtoldConfig(enable_stochastic=False, enable_cmt=False,
+                               subsidence_solve=ss))
+    out, _, _ = bechtold_convection(
+        T + T_offset, q_v, p_full, p_half, u=u, v=v, conv_prog_profile=cpp,
+        conv_stoch_state=jnp.zeros((T.shape[0],)), prng_key=None,
+        dt=DT_S, config=cfg, moisture_convergence=jnp.zeros_like(T))
+    return out
+
+
 SCHEMES = {
     "tiedtke": (_run_tiedtke, TiedtkeConfig, "advective"),
     "zhang_mcfarlane": (_run_zm, ZhangMcFarlaneConfig, "advective"),
@@ -158,6 +185,13 @@ SCHEMES = {
     # Kain-Fritsch already shipped the conservative solve (hardcoded at its
     # call site, PR #988); the field promotes it with the SAME default.
     "kain_fritsch": (_run_kain_fritsch, KainFritschConfig, "implicit_flux"),
+    # EDMF and Bechtold already SHIPPED the conservative solve.  They are in
+    # this matrix because codex r2 found EDMF silently missing the paired
+    # condensation heating, and Bechtold applying it UNCONDITIONALLY (i.e.
+    # over-heating on the advective arm) -- both invisible until the gates
+    # below covered them.
+    "edmf": (_run_edmf, ConvectiveEDMFConfig, "implicit_flux"),
+    "bechtold": (_run_bechtold, BechtoldConfig, "implicit_flux"),
 }
 SCHEME_IDS = sorted(SCHEMES)
 
@@ -337,9 +371,11 @@ def test_implicit_kernel_vjp_matches_finite_differences():
     eps = 1e-6
     fd = (float(loss(1.0 + eps)) - float(loss(1.0 - eps))) / (2.0 * eps)
     assert np.isfinite(g) and abs(g) > 0.0, "kernel VJP is zero or non-finite"
-    assert abs(g - fd) <= 1e-5 * max(abs(fd), 1.0), (
-        f"implicit-solve VJP {g} disagrees with finite difference {fd}"
-    )
+    # Scale-aware: a `1e-5 * max(|fd|, 1.0)` bound degenerates to an ABSOLUTE
+    # 1e-5 whenever the derivative is below one, which a materially wrong VJP
+    # could slip through (codex r2 finding 4).  atol is set just above the
+    # central-difference truncation floor for this fp64 evaluation.
+    np.testing.assert_allclose(g, fd, rtol=1e-5, atol=1e-9)
 
 
 @pytest.mark.parametrize("name", SCHEME_IDS)
@@ -361,43 +397,46 @@ def test_implicit_flux_is_differentiable_end_to_end(name):
 # Gate 5 -- column MOIST STATIC ENERGY closes (the missing-latent blocker)
 # ---------------------------------------------------------------------------
 
-def _column_mse_residual(out, p_half):
-    """int (c_p dT + L_v dq_v + L_v dq_c) dp/g [W/m^2].
+def _vapor_mse_residual(out, p_half):
+    """int (c_p dT + L_v dq_v) dp/g [W/m^2] -- the VAPOR moist static energy.
 
-    SIGN CONVENTION: tendencies are SOURCES, ``dp > 0`` surface-LAST, and a
-    CLOSED convective column has residual 0 -- the scheme redistributes
-    enthalpy and water between reservoirs (vapor, cloud, sensible heat) but
-    must neither create nor destroy total moist static energy.
+    WHICH INVARIANT, AND WHY THIS ONE (the control that this gate initially got
+    wrong): under the convention this package uses -- and which Kain-Fritsch
+    and Bechtold already implement inline -- ``dq_c_conv_dt`` handed to
+    microphysics is ALREADY-CONDENSED cloud whose latent heat has ALREADY been
+    released into the air by the scheme.  The quantity the scheme must
+    therefore conserve is ``h = c_p T + L_v q_v``, WITHOUT a ``+L_v q_c`` term:
+    including one double-counts the enthalpy that the condensation warming just
+    deposited.
 
-    The ``+L_v dq_c`` term is what makes this a *total* MSE budget: the
-    implicit_flux solve debits ``dq_v -= dq_c`` and the scheme must pay the
-    matching ``+L_v dq_c`` condensation warming.  Omitting that warming -- the
-    defect this gate exists to catch -- leaves a residual of
-    ``-L_v int dq_c dp/g``, a pure COOLING bias.
+    Sign convention: tendencies are SOURCES (``state += dt*tend``), ``dp > 0``
+    surface-LAST.  A closed column has residual 0.
+
+    NON-VACUITY, exactly: the implicit_flux kernel books ``dq_v -= dq_c`` and
+    supplies no heating of its own, so DELETING
+    ``release_detrained_condensate_latent`` makes this residual exactly
+    ``-L_v int dq_c dp/g`` -- i.e. the normalised ratio below jumps from ~0 to
+    exactly 1.0.  (That is precisely what this gate measured before the
+    invariant was corrected, which is the evidence that the helper fires.)
     """
     dp = p_half[:, 1:] - p_half[:, :-1]
-    dq_c = out.dq_c_conv_dt
-    if getattr(out, "dq_r_conv_dt", None) is not None:
-        dq_c = dq_c + out.dq_r_conv_dt
-    integrand = (constants.c_pd * out.dT_dt
-                 + constants.L_v * out.dq_v_dt
-                 + constants.L_v * dq_c)
+    integrand = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
     return jnp.sum(integrand * dp, axis=1) / constants.g
 
 
 @pytest.mark.parametrize("name", SCHEME_IDS)
-def test_implicit_flux_closes_column_mse(name):
+def test_implicit_flux_closes_vapor_mse(name):
     """Under the vapor-debiting solve the scheme must release the detrained
     condensate's latent heat, or the column loses ``L_v * int dq_c`` [W/m^2].
 
-    Non-vacuous by construction: the assertion tolerance is scaled by the
-    latent throughput ``L_v * int dq_c``, which is the exact size of the error
-    that appears if ``release_detrained_condensate_latent`` is removed.
+    The tolerance is scaled by the latent throughput ``L_v * int dq_c``, which
+    IS the magnitude of the error that appears if the helper is removed -- so
+    the gate cannot pass vacuously.
     """
     run, _cfg_cls, _shipped = SCHEMES[name]
     _T, _q, _pf, p_half, _u, _v = _column()
     out = run("implicit_flux")
-    res = _column_mse_residual(out, p_half)
+    res = _vapor_mse_residual(out, p_half)
     latent_scale = constants.L_v * _column_condensate_throughput(out, p_half)
     assert jnp.max(latent_scale) > 1.0, (
         f"{name}: latent throughput {np.asarray(latent_scale)} W/m^2 is "
@@ -405,10 +444,11 @@ def test_implicit_flux_closes_column_mse(name):
     )
     rel = jnp.abs(res) / jnp.maximum(latent_scale, 1e-30)
     assert jnp.all(rel < 5e-2), (
-        f"{name}: column MSE residual {np.asarray(res)} W/m^2 is "
+        f"{name}: vapor-MSE residual {np.asarray(res)} W/m^2 is "
         f"{np.asarray(rel)} of the latent throughput "
         f"{np.asarray(latent_scale)} W/m^2 -- the detrained-condensate "
-        "condensation heating is missing or mispaired"
+        "condensation heating is missing or mispaired (ratio 1.0 = entirely "
+        "missing)"
     )
 
 
