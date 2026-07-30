@@ -191,6 +191,32 @@ _VAR_META = {
                        "units": "W m-2", "standard_name": "surface_upward_latent_heat_flux"},
     "Rnet":           {"long_name": "net radiation into the surface (SW absorbed + net LW)",
                        "units": "W m-2", "standard_name": "surface_net_downward_radiative_flux"},
+    # --- MET FORCING (as the model actually saw it, post-regrid/disaggregation) ---
+    # Taped so a budget can be closed against the SAME numbers the physics used,
+    # rather than against a re-read of the raw CRU-JRA files on a different grid.
+    "sw_down":        {"long_name": "downward shortwave at the surface", "units": "W m-2",
+                       "standard_name": "surface_downwelling_shortwave_flux_in_air"},
+    "lw_down":        {"long_name": "downward longwave at the surface", "units": "W m-2",
+                       "standard_name": "surface_downwelling_longwave_flux_in_air"},
+    "lw_up":          {"long_name": "upward longwave at the surface", "units": "W m-2",
+                       "standard_name": "surface_upwelling_longwave_flux_in_air"},
+    "T_air":          {"long_name": "air temperature at the forcing level", "units": "K",
+                       "standard_name": "air_temperature"},
+    "q_air":          {"long_name": "specific humidity at the forcing level",
+                       "units": "kg kg-1", "standard_name": "specific_humidity"},
+    "wind":           {"long_name": "wind speed at the forcing level", "units": "m s-1",
+                       "standard_name": "wind_speed"},
+    "p_surface":      {"long_name": "surface air pressure", "units": "Pa",
+                       "standard_name": "surface_air_pressure"},
+    "precip_snow":    {"long_name": "snowfall rate (solid precipitation)",
+                       "units": "kg m-2 s-1", "standard_name": "snowfall_flux"},
+    # Phase-correct vapour MASS flux.  The ``ET`` tape is lhflx / L_v, which is
+    # NOT the mass flux over snow (latent heat carries L_s there) -- so ET cannot
+    # close the water budget on its own.  This is the flux the model actually
+    # removed from the surface.
+    "evap_mass":      {"long_name": "surface vapour mass flux (phase-correct; "
+                                    "evaporation + transpiration + sublimation)",
+                       "units": "kg m-2 s-1", "standard_name": "water_evaporation_flux"},
     "G":              {"long_name": "ground heat flux into the soil column "
                                     "(post-phase-change; Rnet-SH-LH = G + melt_energy)",
                        "units": "W m-2", "standard_name": "downward_heat_flux_at_ground_level_in_soil"},
@@ -638,9 +664,13 @@ def run(args) -> int:
     # desync from the state it is summing.
     if is_multilayer:
         from legoesm.land.soil_grid import make_soil_grid
+        from legoesm.land.soil_thermal import (
+            compute_heat_capacity as _soil_heat_capacity,
+        )
         _soil_dz = jnp.asarray(make_soil_grid(config.soil_grid).dz)
     else:
         _soil_dz = None
+        _soil_heat_capacity = None
 
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
@@ -698,6 +728,17 @@ def run(args) -> int:
             "transp": transp,
             "soil_evap": soil_evap,
             "Rnet": rnet,
+            # met forcing as seen by the physics
+            "sw_down": forcing_t.sw_down,
+            "lw_down": forcing_t.lw_down,
+            "lw_up": resp.lw_up,
+            "T_air": forcing_t.T_lowest,
+            "q_air": forcing_t.q_lowest,
+            "wind": jnp.sqrt(forcing_t.u_lowest ** 2 + forcing_t.v_lowest ** 2),
+            "p_surface": forcing_t.p_surface,
+            "precip_snow": forcing_t.precip_snow,
+            # phase-correct vapour mass flux (see the registry note on ET)
+            "evap_mass": resp.surface_mass_flux,
         }
         if is_multilayer:
             values["T_soil_top"] = new_state.T_soil[:, 0]
@@ -708,7 +749,13 @@ def run(args) -> int:
             # defined as that residual, then the phase-change sink is removed), so
             # taping both makes the surface budget checkable rather than inferable.
             values["G"] = budget.g_soil
-            values["soil_heat"] = budget.soil_heat
+            # Column sensible heat content, derived HERE from the returned state
+            # rather than inside the step: it needs nothing the step discards, so
+            # it does not justify widening the step's return.
+            values["soil_heat"] = jnp.sum(
+                _soil_heat_capacity(new_state.theta_soil, config.hydraulics,
+                                    config.thermal)
+                * _soil_dz[None, :] * new_state.T_soil, axis=-1)
             values["melt_energy"] = budget.melt_energy
             # WATER: total column storage, so P - ET - R - dS/dt is closeable.
             # theta_soil_top alone is useless for this — it is the TOP layer only

@@ -63,11 +63,7 @@ _SOIL_TOP_DZ_HALF_MIN = 1e-4
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import (
-    compute_heat_capacity,
-    compute_thermal_conductivity,
-    solve_soil_thermal,
-)
+from legoesm.land.soil_thermal import compute_thermal_conductivity, solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
@@ -115,7 +111,6 @@ class LandStepDiagnostics(NamedTuple):
     All fluxes are per unit GROUND area.  Mass fluxes are rates [kg m-2 s-1],
     positive in the direction named; energies [W m-2].
     """
-    soil_heat: jnp.ndarray     # column sensible heat content rel. 0 K [J m-2]
     g_soil: jnp.ndarray        # heat flux INTO the soil column, post-phase-change
     melt_energy: jnp.ndarray   # energy consumed by melt (+) / released by refreeze (-)
     snowmelt: jnp.ndarray      # snow + ablation-ice melt leaving the pack as liquid
@@ -1216,19 +1211,7 @@ def _step_multilayer_land_impl(
         salt_flux=jnp.zeros(ncol),
     )
 
-    # Column SENSIBLE heat content, so the soil energy budget is closeable:
-    #     d(soil_heat)/dt  ==  G + Q_geothermal  (+ latent freeze/thaw exchange)
-    # A run where G is persistently non-zero while soil_heat is flat is losing
-    # energy somewhere between the surface flux and the column -- which no
-    # combination of the EXISTING tape variables could have revealed.
-    # Sensible only (uses the non-apparent C), so the freeze/thaw LATENT term
-    # shows up as the gap between d(soil_heat)/dt and G rather than being hidden
-    # inside it.
-    _C_sens = compute_heat_capacity(theta_new, config.hydraulics, config.thermal)
-    soil_heat = jnp.sum(_C_sens * grid.dz[None, :] * T_soil_new, axis=-1)
-
     step_diags = LandStepDiagnostics(
-        soil_heat=soil_heat,
         # G_surface at this point is the flux handed to the soil thermal solve:
         # the surface residual minus the phase-change sink (single/banded), or the
         # snow-column base flux + drained meltwater enthalpy (column).

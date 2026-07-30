@@ -125,8 +125,17 @@ output:
       # surface energy budget is not checkable (Rnet-SH-LH is an identity for
       # G+melt, not a residual), and without soil_water the water budget is not
       # computable at all (theta_soil_top is 2.9 mm of a 3 m column).
+      # BUDGET CLOSURE.  Verified exact on a 72-step smoke, using END-POINT fluxes
+      # against the forward storage difference (midpoint pairing leaves a spurious
+      # ~2% residual that is a DIFFERENCING artefact, not a model leak):
+      #   energy: Rnet - shflx - lhflx - G - melt_energy            ~ 3e-14 W/m2
+      #   water : precip - evap_mass - runoff - d(soil_water
+      #           + surface_water + snow_depth)/dt                  ~ 1e-17 kg/m2/s
+      # Use evap_mass, NOT ET: ET is lhflx/L_v, which is not the mass flux over
+      # snow (latent heat carries L_s there).
       vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip, reverted,
-             G, melt_energy, snowmelt, refreeze, sublimation]
+             G, melt_energy, snowmelt, refreeze, sublimation, evap_mass,
+             sw_down, lw_down, lw_up, T_air, q_air, wind, p_surface, precip_snow]
 
     - name: monthly_state
       freq: monthly

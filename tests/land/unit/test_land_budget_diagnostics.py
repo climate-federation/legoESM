@@ -135,6 +135,60 @@ def test_melt_energy_matches_the_melt_mass():
 # --------------------------------------------------------------------------
 # Water-budget storage terms
 # --------------------------------------------------------------------------
+def test_soil_heat_is_NOT_in_the_step_diagnostics():
+    """Column heat content is derivable from the returned state (T_soil,
+    theta_soil, config), so it must NOT widen the step's return.  Only terms the
+    step DISCARDS belong in LandStepDiagnostics."""
+    assert "soil_heat" not in LandStepDiagnostics._fields
+
+
+def test_every_diagnostic_is_genuinely_unrecoverable():
+    """Each field here must be something no returned object already carries.
+
+    TileResponse.surface_mass_flux is the TOTAL vapour flux (soil evap +
+    transpiration + sublimation), not the pack-only component; and
+    SurfaceFluxOutput.G_soil is the PRE-melt residual, not the flux that reaches
+    the soil.  If a future refactor exposes one of these elsewhere, drop it from
+    here rather than carrying two sources of the same number.
+    """
+    from legoesm.core.coupling_fields import TileResponse
+    from legoesm.land.state import MultiLayerLandState
+    from legoesm.land.surface_scheme import SurfaceFluxOutput
+    already = set(TileResponse._fields) | set(MultiLayerLandState._fields)
+    for name in LandStepDiagnostics._fields:
+        assert name not in already, f"{name} is already on a returned object"
+    # G_soil exists on SurfaceFluxOutput but is the PRE-melt value -> the
+    # post-melt g_soil is a distinct quantity and must stay.
+    assert "G_soil" in SurfaceFluxOutput._fields
+    assert "g_soil" in LandStepDiagnostics._fields
+
+
+def test_soil_heat_is_not_a_step_diagnostic():
+    """Column heat content is derivable from the RETURNED state (T_soil,
+    theta_soil, config), so it must not widen the step's return.  Only terms the
+    step DISCARDS belong in LandStepDiagnostics."""
+    assert "soil_heat" not in LandStepDiagnostics._fields
+
+
+def test_every_diagnostic_is_genuinely_unrecoverable():
+    """Each field must be something no already-returned object carries.
+
+    TileResponse.surface_mass_flux is the TOTAL vapour flux (soil evap +
+    transpiration + sublimation), not the pack-only component; and
+    SurfaceFluxOutput.G_soil is the PRE-melt residual, not the flux reaching the
+    soil.  If a refactor ever exposes one of these elsewhere, drop it here rather
+    than carry two sources of the same number.
+    """
+    from legoesm.core.coupling_fields import TileResponse
+    from legoesm.land.state import MultiLayerLandState
+    from legoesm.land.surface_scheme import SurfaceFluxOutput
+    already = set(TileResponse._fields) | set(MultiLayerLandState._fields)
+    for name in LandStepDiagnostics._fields:
+        assert name not in already, f"{name} already exists on a returned object"
+    assert "G_soil" in SurfaceFluxOutput._fields    # pre-melt
+    assert "g_soil" in LandStepDiagnostics._fields  # post-melt: a DIFFERENT number
+
+
 def test_soil_water_matches_a_hand_integral():
     """The taped column water must equal sum(theta*dz)*rho_w on the SAME grid the
     model integrates — the top-layer-only theta_soil_top cannot close a budget
