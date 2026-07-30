@@ -274,11 +274,24 @@ python scripts/plot/plot_scm_rce_convection_paper.py
 
 ## 7. Status
 
-* Phase 1 CRM reference: **running** (job 9248515), convecting and
-  mass-conserving, ~19 h to completion.
-* Phase 2 kernel threading + the four defect fixes: **complete**, 3 rounds of
-  adversarial review.
-* Phases 3–4: launchers and drivers ready; **the ranking tables are not yet
-  filled** — they require the CRM reference to finish first. No ranking numbers
-  are reported here, and none should be quoted until this section says
-  otherwise.
+* **Phase 1 CRM reference: running** (job 9248515). Convecting, dry-mass drift
+  at machine zero, ~19 h wall.
+* **Phase 2 kernel threading + four defect fixes: complete.** 3 rounds of
+  `codex exec` adversarial review; 85 threading/override tests pass.
+* **Phase 3: queued as an automatic dependency chain** — it fires the moment
+  the CRM job completes, no manual step required:
+
+| stage | PRIMARY (`implicit_flux`) | SECONDARY (`as_shipped`) | depends on |
+|---|---|---|---|
+| arms (a)+(b), 10-way array | 9249429 | 9249430 | `afterok` CRM 9248515 |
+| merge + figures | 9249431 | 9249432 | `afterany` arms |
+| arm (c) gradient, 10-way array | 9249433 | 9249434 | `afterok` merge |
+
+* **Phase 4: NOT YET FILLED.** The two ranking tables and the tuned-parameter
+  columns of the provenance table require the campaign above to finish.
+
+> **No ranking numbers appear in this document, and none should be quoted from
+> it, until this section says the Phase-3 chain has completed.** What is
+> established so far is the *protocol*, the *instrument* (the kernel threading,
+> the conservation gates and the four defects they exposed), and the
+> *feasibility* audit — not the ranking.
