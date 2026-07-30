@@ -335,6 +335,26 @@ default-substep ranking is confounded and the control is the one to publish.
   directory self-reports `MIXED`/`CONFOUNDED`.
 * Every sbatch runs from a **pinned detached git worktree** and echoes its SHA
   as the first log line, so no job can read a tree that is being edited.
+* **`run_cached`'s cache key is a SHA-256 over a payload containing
+  `"config": _to_jsonable(cfg)`** (`run_scm_rce_campaign.py:694-705`) — the full
+  `PhysicsConfig`, so `subsidence_solve` is in the key and the two kernel arms
+  cannot collide in the in-process cache. Independently verified.
+
+### Adversarial-review verdict on the anti-confound machinery
+
+Final focused review (`codex exec`, job 9249487), six targeted questions:
+
+| # | question | verdict |
+|---|---|---|
+| Q1 | per-scheme convection substepping | **BLOCKER** — see §4b; documented + control arm queued |
+| Q2 | `run_cached` cache key | **CLEAN** — full `PhysicsConfig` in the key |
+| Q3 | `_SIGNATURE_FIELDS` / checkpoint stamping | **CLEAN** |
+| Q4 | the two arms differ only in `--subsidence-solve`; arm (c) reads the matching arm's `tuned_parameters.json` | **CLEAN** |
+| Q5 | the new `--convection` SystemExit guard can it false-positive | **CLEAN** — cannot |
+| Q6 | any other per-scheme harness asymmetry | **CLEAN** — none found |
+
+Q1 was found independently by direct code read before the review returned, and
+is the one open item; it is mitigated by the control arm rather than hidden.
 
 ---
 
