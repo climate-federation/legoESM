@@ -273,3 +273,41 @@ def test_active_scheme_key_follows_the_chosen_convection_scheme(scheme, expected
         key for key, (comp, _c, _s) in by_key.items() if comp == "convection"
     ]
     assert convection_keys == [expected_key]
+
+
+# ---------------------------------------------------------------------------
+# --radiation protocol pin (added with the campaign launchers)
+# ---------------------------------------------------------------------------
+
+def test_radiation_defaults_to_none_and_follows_the_campaign_winner():
+    assert trainer.parse_args([]).radiation is None
+
+
+@pytest.mark.parametrize("rad", ["rrtmgp", "gray"])
+def test_radiation_choices_are_accepted(rad):
+    assert trainer.parse_args(["--radiation", rad]).radiation == rad
+
+
+def test_unknown_radiation_exits():
+    with pytest.raises(SystemExit):
+        trainer.parse_args(["--radiation", "sw_only"])
+
+
+def test_explicit_radiation_overrides_the_recommended_winner():
+    """PROTOCOL PIN: the gradient arm must not silently drift onto a different
+    radiation from the derivative-free arm it is initialised from."""
+    winners = trainer._recommended_scheme_winners(
+        {"winners": {"radiation": "gray", "turbulence": "louis",
+                     "microphysics": "kessler", "convection": "sbm",
+                     "gravity_wave_drag": "none"}},
+        None,
+    )
+    assert winners["radiation"] == "gray"
+    cfg, _w, _n, _s = trainer._build_recommended_base_config(
+        {"winners": {"radiation": "gray", "turbulence": "louis",
+                     "microphysics": "kessler", "convection": "sbm",
+                     "gravity_wave_drag": "none"}},
+        bechtold_policy="auto",
+        radiation="gray",
+    )
+    assert cfg.radiation.scheme == "gray"

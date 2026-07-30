@@ -279,6 +279,7 @@ def _build_recommended_base_config(
     *,
     bechtold_policy: str,
     convection: str | None = None,
+    radiation: str | None = None,
     subsidence_solve: str = "as_shipped",
 ) -> tuple[PhysicsConfig, dict[str, str], str, str]:
     recommended_cfg = None
@@ -301,6 +302,12 @@ def _build_recommended_base_config(
         bechtold_policy,
         convection_explicit=convection is not None,
     )
+    # PROTOCOL PIN: the gradient arm must use the SAME radiation as the
+    # derivative-free arm it is initialised from, and as the CRM reference.
+    # Taking it from recommended_defaults.json instead would let the arms
+    # drift apart silently -- a radiation confound, not a result.
+    if radiation is not None:
+        winners["radiation"] = str(radiation)
     rad_update_steps = (
         recommended_cfg.radiation.update_interval_steps
         if recommended_cfg is not None
@@ -1210,6 +1217,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         recommended,
         bechtold_policy=args.bechtold_policy,
         convection=args.convection,
+        radiation=args.radiation,
         subsidence_solve=args.subsidence_solve,
     )
     convection_scheme = str(base_cfg.convection.scheme)
@@ -1560,6 +1568,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "radiation/turbulence/microphysics/gravity_wave_drag are still "
             "resolved from the campaign recommendation.  Default None keeps "
             "the historical behaviour of following the recommended winner."
+        ),
+    )
+    parser.add_argument(
+        "--radiation",
+        default=None,
+        choices=("rrtmgp", "gray"),
+        help=(
+            "SCM radiation, PINNED for the arm.  Default None follows the "
+            "campaign recommended winner (previous behaviour).  Set it "
+            "explicitly whenever this gradient arm must match the "
+            "derivative-free arm it is initialised from and the CRM reference "
+            "-- otherwise the two arms can silently drift onto different "
+            "radiation, which is a confound, not a result."
         ),
     )
     parser.add_argument(

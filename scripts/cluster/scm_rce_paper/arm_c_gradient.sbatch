@@ -58,6 +58,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/train_scm_rce_params.py \
   --days 100 \
   --dt 600 \
   --analysis-days 5 \
+  --last-reference-files 5 \
   --radiation rrtmgp 2>&1
 echo "rc=$?"
 echo ALLDONE
