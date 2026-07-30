@@ -14,6 +14,7 @@ import pytest
 from legoesm.training.data_parallel import (
     shard_samples,
     all_reduce_grad_mean,
+    build_dp_value_and_grad,
     mpi_data_parallel_training_loop,
     data_parallel_value_and_grad,
     data_parallel_training_loop,
@@ -187,6 +188,200 @@ def test_mpi_loop_single_process_reduces_loss():
         loss, w, opt_state, optimizer, samples, n_epochs=5, num_processes=1)
     assert len(hist) == 5 and hist[-1] < hist[0]
     assert bool(jnp.all(jnp.isfinite(params)))
+
+
+# ---- #1364: the rollout is traced/compiled ONCE per run, not once per step ----
+
+def _scan_loss_with_trace_counter(counter, n_steps=8):
+    """Production-shaped loss: a ``jax.checkpoint``-ed ``lax.scan`` rollout, the
+    structure ``spectral_rollout`` builds and the one an EAGER path recompiles
+    on every call.
+
+    ``counter["n"]`` counts executions of the PYTHON body = TRACES (the body
+    runs once per trace, never per call). That makes the gate below independent
+    of JAX-internal compile counters, which move between versions.
+    """
+    def loss(p, x):
+        counter["n"] += 1
+        def step(s, _):
+            return s * jnp.tanh(p) + x, None
+        step_ck = jax.checkpoint(
+            step, prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable)
+        out, _ = jax.lax.scan(step_ck, x, None, length=n_steps)
+        return jnp.sum(out ** 2)
+    return loss
+
+
+def test_eager_value_and_grad_traces_every_step_nonvacuity_control():
+    """NON-VACUITY CONTROL for the #1364 gate below.
+
+    Reproduces the PRE-FIX structure — a bare ``jax.value_and_grad`` called per
+    step — and asserts it traces once PER STEP. If this ever reports 1, the
+    trace counter is broken and the gate below would pass while proving
+    nothing.
+    """
+    counter = {"n": 0}
+    loss = _scan_loss_with_trace_counter(counter)
+    w = jnp.array([0.5, 0.25])
+    x = jnp.array([1.0, 0.5])
+    n_calls = 5
+    for _ in range(n_calls):
+        jax.value_and_grad(loss)(w, x)
+    assert counter["n"] == n_calls, (
+        f"expected the un-jitted path to re-trace every call, got "
+        f"{counter['n']} traces in {n_calls} calls")
+
+
+def test_mpi_loop_traces_rollout_once_not_per_step():
+    """#1364 REGRESSION GATE: host-RAM leak ~0.27 GB/step/rank at T106.
+
+    The loop must jit the value+grad ONCE (``build_dp_value_and_grad``, hoisted
+    above BOTH loops) so the rollout + reverse adjoint is traced and compiled a
+    single time. With no jit — or with the jit rebuilt inside either loop — an
+    eager ``lax.scan`` recompiles per step and retains each executable, which
+    is what SIGKILLed the T106 4xA100 run at epoch 5/24.
+
+    Fails loudly if the fix is reverted: the pre-fix structure traces
+    ``n_epochs * len(samples)`` times (see the non-vacuity control above).
+    """
+    counter = {"n": 0}
+    loss = _scan_loss_with_trace_counter(counter)
+    w = jnp.array([0.5, 0.25])
+    optimizer = optax.sgd(0.01)
+    opt_state = optimizer.init(w)
+    samples = [jnp.array([1.0, 0.5]), jnp.array([0.5, 1.0]), jnp.array([0.25, 0.75])]
+    n_epochs = 4
+    n_steps = n_epochs * len(samples)
+
+    mpi_data_parallel_training_loop(
+        loss, w, opt_state, optimizer, samples, n_epochs=n_epochs,
+        num_processes=1)
+
+    assert n_steps == 12                      # the loop really ran 12 steps
+    assert counter["n"] == 1, (
+        f"the rollout was traced {counter['n']} times over {n_steps} steps; "
+        f"#1364 requires exactly 1 (jit hoisted outside both loops)")
+
+
+def test_build_dp_value_and_grad_single_trace_and_matches_eager():
+    """Direct test of the new public helper: one trace across many calls, and
+    the same (loss, grad) an eager ``jax.value_and_grad`` produces."""
+    counter = {"n": 0}
+    loss = _scan_loss_with_trace_counter(counter)
+    fn = build_dp_value_and_grad(loss)
+    w = jnp.array([0.5, 0.25])
+    samples = [jnp.array([1.0, 0.5]), jnp.array([0.5, 1.0]), jnp.array([2.0, 1.0])]
+
+    outs = [fn(w, x) for x in samples] + [fn(w, samples[0])]
+    assert fn.n_traces() == 1, f"retraced {fn.n_traces()} times over 4 calls"
+    assert counter["n"] == 1
+
+    for (l_jit, g_jit), x in zip(outs, samples + [samples[0]]):
+        l_ref, g_ref = jax.value_and_grad(loss)(w, x)
+        assert np.isclose(float(l_jit), float(l_ref), rtol=1e-10, atol=1e-12)
+        assert np.allclose(np.asarray(g_jit), np.asarray(g_ref),
+                           rtol=1e-10, atol=1e-12)
+
+
+def test_device_put_immunizes_python_scalar_leaf():
+    """#1286 fix A and the #1364 jit are COUPLED — document it so neither is
+    removed in isolation.
+
+    ``eqx.is_array(1.0) is False``: a per-sample-varying bare Python float leaf
+    is frozen STATIC by filter_jit and retraces every step. The loop's
+    ``jax.device_put(sample)`` arrays every leaf, Python scalars included, which
+    removes the hazard. Both arms are asserted, so dropping the ``device_put``
+    (or the jit) turns one of them red.
+    """
+    def loss(p, sample):
+        x, scale = sample                 # `scale`: bare python float
+        return jnp.sum((p * x) ** 2) * scale
+
+    w = jnp.array([0.5, 0.25])
+    raw = [(jnp.array([1.0, 0.5]), 1.0),
+           (jnp.array([0.5, 1.0]), 2.0),
+           (jnp.array([0.25, 0.75]), 3.0)]
+
+    no_put = build_dp_value_and_grad(loss)
+    for s in raw:
+        no_put(w, s)
+    assert no_put.n_traces() == len(raw), (
+        "expected a varying PYTHON-scalar leaf to retrace once per call "
+        "without device_put (the hazard this documents)")
+
+    with_put = build_dp_value_and_grad(loss)
+    for s in raw:
+        with_put(w, jax.device_put(s))    # exactly what the loop does
+    assert with_put.n_traces() == 1, (
+        "device_put must array every leaf so nothing goes static; got "
+        f"{with_put.n_traces()} traces")
+
+
+def test_retrace_guard_fires_on_varying_sample_shape(caplog):
+    """Synthetic-violation self-test for the #1364 retrace guard — proves it is
+    not vacuous.
+
+    A per-sample SHAPE change is what ``device_put`` cannot normalize (a ragged
+    shard, a stray sample at another resolution); it recompiles every step just
+    as #1364 did, so the loop must say so in the log.
+    """
+    import logging
+
+    def loss(p, x):
+        return jnp.sum(x ** 2) * jnp.sum(p)
+
+    w = jnp.array([0.5, 0.25])
+    optimizer = optax.sgd(0.01)
+    opt_state = optimizer.init(w)
+    samples = [jnp.ones(2), jnp.ones(3), jnp.ones(4)]   # varying shapes
+
+    with caplog.at_level(logging.WARNING,
+                         logger="legoesm.training.data_parallel"):
+        mpi_data_parallel_training_loop(
+            loss, w, opt_state, optimizer, samples, n_epochs=2, num_processes=1)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("RETRACE DETECTED" in m for m in msgs), \
+        f"guard did not fire on varying shapes; records={msgs}"
+
+
+def test_dp_jit_matches_eager_reference_math():
+    """The #1364 jit must not change the MATH.
+
+    Same params/samples/lr/order through the jitted loop and an explicitly
+    EAGER reference. jit is semantics-preserving, but XLA may fuse differently
+    from op-by-op dispatch, so this is a tight numerical tolerance rather than
+    bit-identity.
+    """
+    counter = {"n": 0}
+    w0 = jnp.array([0.5, 0.25])
+    samples = [jnp.array([1.0, 0.5]), jnp.array([0.5, 1.0])]
+    n_epochs = 3
+
+    optimizer = optax.sgd(0.01)
+    jit_params, _, jit_hist = mpi_data_parallel_training_loop(
+        _scan_loss_with_trace_counter(counter), w0, optimizer.init(w0),
+        optimizer, samples, n_epochs=n_epochs, num_processes=1)
+
+    # explicit eager reference: no jit anywhere, same update order
+    ref_loss = _scan_loss_with_trace_counter({"n": 0})
+    ref_optimizer = optax.sgd(0.01)
+    ref_params, ref_opt_state = w0, ref_optimizer.init(w0)
+    ref_hist = []
+    for _ in range(n_epochs):
+        losses = []
+        for x in samples:
+            loss, grad = jax.value_and_grad(ref_loss)(ref_params, x)
+            updates, ref_opt_state = ref_optimizer.update(
+                grad, ref_opt_state, ref_params)
+            ref_params = optax.apply_updates(ref_params, updates)
+            losses.append(float(loss))
+        ref_hist.append(sum(losses) / len(losses))
+
+    assert np.allclose(np.asarray(jit_params), np.asarray(ref_params),
+                       rtol=1e-10, atol=1e-12), (jit_params, ref_params)
+    assert np.allclose(jit_hist, ref_hist, rtol=1e-10, atol=1e-12)
 
 
 # ---- Task 3: training loop reduces the loss ----

@@ -7,7 +7,11 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from legoesm.training.data_parallel import all_reduce_grad_mean, mpi_data_parallel_train_step
+from legoesm.training.data_parallel import (
+    all_reduce_grad_mean,
+    build_dp_value_and_grad,
+    mpi_data_parallel_train_step,
+)
 
 
 def _nranks():
@@ -77,7 +81,10 @@ def test_mpi_train_step_synced_across_ranks():
 
     # each rank a different sample -> averaged grad -> IDENTICAL updated params
     x = jnp.array([1.0, 0.0]) if rank == 0 else jnp.array([0.0, 1.0])
-    params, _, _ = mpi_data_parallel_train_step(loss, w, opt_state, optimizer, x, nproc)
+    # #1364: the step takes a PREBUILT value_and_grad (built once per run), not
+    # a raw loss -- building it per step recompiles the rollout every step.
+    params, _, _ = mpi_data_parallel_train_step(
+        build_dp_value_and_grad(loss), w, opt_state, optimizer, x, nproc)
     # gather both ranks' params; they must match (synced replicas)
     from mpi4py import MPI
     allp = MPI.COMM_WORLD.allgather(np.asarray(params).tolist())
