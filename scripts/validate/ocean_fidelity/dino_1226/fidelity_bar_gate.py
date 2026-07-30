@@ -1065,17 +1065,80 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "ATF filter u): corr=0.999999/ratio=1.0003, n=340271. "
                                                               "UNCHANGED."),
     "ATF filter T/S/ssh":            (1.0,        1.0,        "exact"),
-    "dyn_ldf (dynldf_lev_lap) u":    (0.997855,   1.003865,   "[e3t=both per probe_1226_r2_item2_dynldf.py; same "
-                                                              "operator family (gradient_x/y_cgrid) as dyn_hpg -- "
-                                                              "(B) structurally a no-op here too, see module docstring]. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (same probe): offset scan "
-                                                              "{-1,0,+1} sharp offset=0 peak (-1=0.787440, +0=0.997855, "
-                                                              "+1=0.792236); corr 0.997855/ratio 1.003865, n=341530. "
-                                                              "UNCHANGED to 4-5 s.f."),
-    "dyn_ldf (dynldf_lev_lap) v":    (0.999400,   1.001755,   "[e3t=both]. RE-MEASURED at HEAD c8e5d305b (same run): "
-                                                              "offset scan {-1,0,+1} sharp offset=0 peak (-1=0.937450, "
-                                                              "+0=0.999400, +1=0.938908); corr 0.999400/ratio 1.001755, "
-                                                              "n=345380. UNCHANGED."),
+    # CORRECTED 2026-07-30 (Task B, ww_inheritance_walk.py::measure_dyn_ldf_
+    # corrected -- the only new probe script this task's file rules permit;
+    # dyn_zad_ldf_walk.py, which FIRST established this, is UNTOUCHABLE):
+    # the OLD tuple below was a MEASUREMENT-HARNESS time-level bug, not a
+    # physics defect. dynldf_lev_rot_scheme.h90:24-25,28-29 (dispatched via
+    # cfgs/DINO/MY_SRC/dynldf.F90:79-83 CASE(np_lap) -> dynldf.F90:83 CALL
+    # dynldf_lev_lap(kt, Kbb, Kmm, puu, pvv, Krhs)) reads velocity at Kbb
+    # ("before") for BOTH the curl and div inputs -- every #1226 probe for
+    # this row (including probe_1226_r2_item2_dynldf.py, cited in
+    # PROVENANCE_SCRIPT but NEVER COMMITTED) instead fed the NOW/Kmm-bridged
+    # state. legoESM's PRODUCTION integrator already does this correctly
+    # (ocean_model_latlon_cgrid.py:6947-6968, the "1b. DISSIPATIVE Nbb pass"
+    # -- READ-ONLY confirmed, line range still holds at HEAD 0f9f008d4)
+    # -- only the #1226 MEASUREMENT HARNESS never mirrored it for this term.
+    # Feeding legoESM's REAL nemo_ldf_lap_viscosity_cgrid operator (via the
+    # public tendencies_with_diagnostics API, not a transcription) the
+    # BEFORE-level state (state.u_before/v_before/T_before/S_before) drops
+    # err_norm from 4.4948e-02/2.7573e-02 (the OLD tuple's regime,
+    # independently reproduced below) to 4.5769e-05/4.5052e-05 (roundoff),
+    # and the corr/ratio pair (cancelling_rows_per_element.py convention)
+    # to corr=0.999999999/ratio=1.000001864 (u),
+    # corr=0.999999999/ratio=0.999992761 (v) -- recorded here in place of
+    # the old (0.997855,1.003865)/(0.999400,1.001755) corr/ratio, which
+    # were measuring the WRONG time level, not a real operator gap.
+    # RETRACTION (repeated here since zu_frc_term_walk.py, which carries the
+    # original wrong comment, is untouchable): that script's register_dump
+    # for ldf_dump_du.bin cites "dynldf.F90:85 dyn_ldf_iso(...)"/"np_lap_i
+    # (rotated laplacian)" as the active dispatch. The namelist
+    # (cfgs/DINO/RUN_GDB/namelist_cfg:365-366: ln_dynldf_lap=.true.,
+    # ln_dynldf_lev=.true.) and ldfdyn.F90's z-star dispatch actually select
+    # np_lap (plain iso-level Laplacian, dynldf_lev_lap), NOT np_lap_i/
+    # dyn_ldf_iso (rotated) -- this does not change any measured number
+    # (the Fortran ran np_lap regardless of the stale comment) but the
+    # comment itself was wrong; dyn_zad_ldf_walk.py already carries this
+    # same retraction in its own docstring.
+    # PER_ELEMENT: no entry exists for this row (classify() judges it on
+    # corr/ratio alone) -- adding one is out of scope for this task (the
+    # rule restricts edits to THIS row's entry/comments only, and
+    # PER_ELEMENT is a separate dict with its own row-addition bar); left
+    # for a follow-up PR.
+    # OLD tuple (kept for history, PROVEN to be a harness artifact, not a
+    # live regression -- do not resurrect without re-deriving the time
+    # level): "dyn_ldf (dynldf_lev_lap) u": (0.997855, 1.003865, ...
+    # offset-scan {-1,0,+1} sharp offset=0 peak (-1=0.787440, +0=0.997855,
+    # +1=0.792236); n=341530); "dyn_ldf (dynldf_lev_lap) v": (0.999400,
+    # 1.001755, ... offset-scan {-1,0,+1} sharp offset=0 peak (-1=0.937450,
+    # +0=0.999400, +1=0.938908); n=345380).
+    "dyn_ldf (dynldf_lev_lap) u":    (0.999999999, 1.000001864, "CORRECTED 2026-07-30 (Task B): measurement-harness "
+                                                              "time-level bug, not a physics defect -- "
+                                                              "dynldf_lev_rot_scheme.h90:24-25,28-29 reads velocity "
+                                                              "at Kbb ('before'), dispatched via "
+                                                              "cfgs/DINO/MY_SRC/dynldf.F90:79-83 (CASE(np_lap)) -> "
+                                                              "dynldf.F90:83 (CALL dynldf_lev_lap(kt, Kbb, Kmm, puu, "
+                                                              "pvv, Krhs)); every #1226 probe for this row fed the "
+                                                              "NOW/Kmm state instead. Fed BEFORE (state.u_before/"
+                                                              "v_before/T_before/S_before) via legoESM's REAL "
+                                                              "nemo_ldf_lap_viscosity_cgrid (tendencies_with_"
+                                                              "diagnostics, not a transcription): err_norm drops "
+                                                              "4.4948e-02 -> 4.5769e-05 (roundoff). corr/ratio "
+                                                              "(cancelling_rows_per_element.py convention) "
+                                                              "0.999999999/1.000001864, n reproduces the same wet "
+                                                              "u-face count as the OLD measurement. See module-level "
+                                                              "comment block above this entry for full provenance + "
+                                                              "the OLD tuple (kept for history). Independently "
+                                                              "re-derived (not trusted from the task prompt) via "
+                                                              "ww_inheritance_walk.py::measure_dyn_ldf_corrected."),
+    "dyn_ldf (dynldf_lev_lap) v":    (0.999999999, 0.999992761, "CORRECTED 2026-07-30 (Task B), same cause/fix as "
+                                                              "dyn_ldf u above (same call site, same before/now "
+                                                              "swap): err_norm drops 2.7573e-02 -> 4.5052e-05 "
+                                                              "(roundoff). corr/ratio 0.999999999/0.999992761. See "
+                                                              "the u row's comment + the module-level comment block "
+                                                              "above for full provenance + the OLD tuple (kept for "
+                                                              "history). Independently re-derived via "
+                                                              "ww_inheritance_walk.py::measure_dyn_ldf_corrected."),
     "ssh_nxt / div_hor":             (1.0,        1.000004,   "RATIO IS THE nemo_isotropic (SHIPPED nemo_dino_kamm) "
                                                               "VALUE as of 2026-07-28; the pre-#1226-option 'exact' "
                                                               "baseline was 0.999991. "
