@@ -1074,6 +1074,39 @@ LL1152@16 number elsewhere in this report (19.83 ms) used
 NO fold-cost claim. The only licensed fold cost remains the earlier
 same-job matched contrast (+1.2-3.7 %, job 26493837).
 
+## The MPAS mesh cap — lifted (subdiv-9 unblocked for 128 GPUs)
+
+The generator's hard subdiv-8 cap was the CPU-side resolution blocker
+and made 128-GPU MPAS floor-starved by construction (subdiv-8 at np128 =
+5.1k cells/GPU). Chain shipped 2026-07-30 (codex round-19 design,
+commit 70f3ce636):
+
+* **Cache-or-prewarm policy** for subdiv 9-10: a cache hit always loads;
+  a miss RAISES with prewarm instructions unless the process is the
+  designated single builder (opt-in env + per-key O_EXCL lockfile with
+  stale takeover — the opt-in alone would be a thundering herd across an
+  MPI launch). >10 stays hard-refused. Six policy tests + prewarm CLI
+  (`scripts/data/prewarm_voronoi_mesh.py`) with its direct test.
+* **lloyd=0 admitted as a LABELLED synthetic scaling mesh** after the
+  quality gate codex specified: identical topology to the production
+  SCVT, area CV 0.084 vs 0.061, 128-part imbalance 1.148 vs 1.095 (~5 %)
+  at subdiv-6. Scaling receipts only, never physics. This turns the
+  subdiv-9 prewarm from ~5 h (lloyd=50, measured 87 s/iteration at
+  subdiv-8) into ~1 h.
+* **subdiv-9 prewarmed** (job 26549180): 2,621,442 cells in 67 min,
+  1.8 GB npz in project space — ranks load in seconds forever after.
+* Payoff ladder submitted (job 26549775): subdiv-9 at 32/64/128 GPUs =
+  81.9k/41.0k/20.5k cells/GPU — the first MPAS many-GPU ladder whose
+  lower rungs sit ABOVE the ~30k floor.
+
+OPERATIONAL NOTE: a Lustre incident mid-implementation left the module
+with an undefined constant on disk for ~12 h; two queued jobs (mpas32
+26534061, and possibly mpas128's first attempt) died on that NameError
+window and were resubmitted post-fix. The git index inode went stale on
+the login node's client (kernel-hung D-state git processes); recovery =
+rebuild the index on a fresh inode and route git through a compute
+node's healthy Lustre client.
+
 ## Ocean GPU scale-out to 64 devices — and a CROSS-LANE memory defect (#1370)
 
 | arm | devices | tile | ms/step |
