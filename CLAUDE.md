@@ -115,6 +115,37 @@ explicitly that you did not. "I was careful" is not compliance.
   THEM.** Verify the resolved paths in the run log, not the flag you passed.
   FAILURE: `CENTURY_DECK=1` set era-correct ozone+volcanic but left 1979-2016
   SST.
+- **PROSE IS A POINTER, NEVER A CITABLE FACT.** A code comment, docstring,
+  `AMIP.md`/`docs/` entry or "Known issue" that names a limitation, a guard, or
+  a missing feature MUST be re-verified in the CURRENT code at the point of use
+  before it is repeated as a finding — this repo routinely fixes things without
+  updating its prose. When a comment names the module that imposes a guard,
+  OPEN THAT MODULE. FAILURES (2026-07-30, three in one day): quoted the
+  `_run_mpas` "turbulent surface fluxes are intentionally NOT applied" comment
+  and `AMIP.md` Known #3 to claim MPAS has no turbulence — the MPAS turbulence
+  path exists (`turbulence/integration.py`, Perot edge->cell) and the run
+  resolves `turbulence=louis` + `surface_bulk_scheme=coare3`; and doubted a
+  cloud_fraction comment that was exactly right.
+- **THE FIRST GUARD YOU FIND IS NOT THE ONLY GUARD — follow the value to its
+  CONSUMER before declaring it unclamped/unchecked.** FAILURE: reported "no
+  upper bound on r_eff" from `rrtmgp.py`'s `clip(x, 1e-6, None)`; the real
+  clamp to the lookup-table range is one call deeper in
+  `rrtmgp/optics/cloud_optics.py`. Same class as blaming a line without proving
+  its enclosing function runs.
+- **A GLOBAL STATISTIC ON A NON-UNIFORM GRID NEEDS AREA WEIGHTS.** Never
+  `np.mean(field)` for a global mean on lat-lon (or any stretched grid) — use
+  `cos(lat)` or the model's `areacella`. FAILURE: reported "+17 hPa of dry mass
+  created" from an unweighted `p_s` mean; the AREA-WEIGHTED mass was invariant
+  at 983.493 hPa to 6 digits, i.e. the defect did not exist. Habits carried
+  from the quasi-uniform MPAS/SCVT mesh are INVALID on lat-lon.
+- **A PROPOSED MECHANISM MUST SURVIVE A SCALING / PERTURBATION TEST BEFORE IT
+  IS CITED AS THE CAUSE.** If X is claimed to drive Y, change X by a known
+  factor and check Y responds as the mechanism predicts. FAILURE: proposed
+  "damp-to-rest pumps mass convergence" (predicts ~linear in the sponge
+  coefficient); quartering the coefficient slowed growth only 1.5x, refuting
+  it — the fix would have shipped on a false mechanism. Label every uncaught
+  claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
+  buys a code change and a relaunch.
 
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
