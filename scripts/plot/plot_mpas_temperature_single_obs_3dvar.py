@@ -13,9 +13,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
+from legoesm import constants
 from scipy.interpolate import griddata
 
-EARTH_RADIUS_M = 6_371_000.0
+# Canonical Earth radius. CLAUDE.md requires constants to come from
+# legoesm.constants, and the value previously hardcoded here is on the
+# no-hardcoded-constants ratchet's BANNED list. The canonical value differs from
+# it by ~230 m (3.6e-5 relative), which shifts this plot's local tangent-plane
+# axes by an amount well below one pixel.
+EARTH_RADIUS_M = constants.R_earth
 
 
 def _increment_colormap():
