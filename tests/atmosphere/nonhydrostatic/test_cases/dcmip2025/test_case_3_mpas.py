@@ -27,6 +27,9 @@ from legoesm import constants
 # Default parameters (same as cubed-sphere TC3)
 TC3_PARAMS = {
     "small_earth_factor": 60.0,
+    # Case rotation, read by the initialiser below so an explicit
+    # override reaches the mesh (codex r3 P2: omega was hard-coded).
+    "rotating": False,
     "H": 20000.0,
     "n_levels": 40,
     "T_s": 302.0,
@@ -122,7 +125,10 @@ def dcmip25_tc3_init_mpas(
     small_mesh = create_voronoi_mesh(
         level,
         radius=constants.R_earth / factor,
-        omega=0.0,  # No Coriolis for squall line
+        # No Coriolis for the squall line (DCMIP TC3 spec); driven by
+        # the case dict so an override is honoured, not hard-coded.
+        omega=(constants.Omega * factor
+               if p.get("rotating", True) else 0.0),
     )
 
     # Vertical coordinate with squall line sounding

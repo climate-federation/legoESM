@@ -57,6 +57,42 @@ from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
 
 
+def corner_div_damp_active(config) -> bool:
+    """True when the B-grid corner divergence damping executes at all.
+
+    FV3's d_sw has NO master switch on ``d2_bg`` — sw_core.F90:1641
+    branches only on ``nord`` and ``d2_bg`` enters solely as the
+    background floor ``max(d2_bg, min(0.20, dddmp*|delpc*dt|))``.
+    Gating the whole block on ``d2_bg > 0`` silently disabled the
+    del-4 corner damping under the standard FV3 configuration
+    (d2_bg=0, nord>=1, d4_bg=0.16) — the NH DCMIP TC2/TC3 cube
+    vertex blow-up (2026-07-29).
+
+    legoESM ENABLE SELECTORS (deliberate deviation from FV3's
+    always-on d_sw, so that legacy all-zero configs stay inert):
+    activation requires ``d2_bg > 0`` OR the del-4 pair
+    (``d4_bg > 0`` AND ``nord > 0``).  ``dddmp`` and the top-sponge
+    boosts (``d2_bg_k1``/``d2_bg_k2``) are MODIFIERS only — nonzero
+    values (dddmp defaults to 0.20) never activate the block by
+    themselves.  Duck-typed over the CE/PE CD-grid config
+    NamedTuples (both carry the ``corner_div_damp_*`` fields)."""
+    return (config.corner_div_damp_d2_bg > 0.0
+            or (config.corner_div_damp_d4_bg > 0.0
+                and config.corner_div_damp_nord > 0))
+
+
+def corner_div_damp_higher_order_active(config) -> bool:
+    """True when the FV3 ``nord>0`` higher-order branch executes
+    (sw_core.F90:1727 ``else`` of ``if (nord==0)``).
+
+    Faithful to FV3, the branch keys on ``nord`` alone once the block
+    is active — NOT on ``d4_bg``: with ``d4_bg=0`` the higher-order
+    formula still applies (Smagorinsky ``smag_vort`` cap) and the
+    del-4 term drops out naturally through
+    ``dd8 = (da_min_c*d4_bg)**(nord+1) = 0`` (codex r1 P1)."""
+    return corner_div_damp_active(config) and config.corner_div_damp_nord > 0
+
+
 def _to_fv3_normal_dgrid_2d(
     u_corner: jnp.ndarray, v_corner: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
