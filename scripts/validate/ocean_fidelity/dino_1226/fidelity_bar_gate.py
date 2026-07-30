@@ -173,6 +173,23 @@ PER_ELEMENT: dict[str, float] = {
     # pointwise |rel| median; one-signed and only 3.75% near-zero, so pointwise
     # IS valid here (verified: median barely moves when those cells are cut).
     "ldf_eiv kappa (aeiu)": 1.061e-6,
+    # RE-MEASURED 2026-07-30 by eiv_transport_walk.py (fp64, e3t=both, live
+    # z-star ladder = production config) AFTER the harness sign-artifact fix
+    # (commit 7e030db3e -- see MEASUREMENTS["eiv transport u"/"v"] for the
+    # full NEMO citation). u_eiv/v_eiv are SIGN-CHANGING fields (12.6%/6.5% of
+    # wet points have |nemo|<1e-3*RMS(nemo)), so pointwise |lego-nemo|/|nemo|
+    # is NOT trustworthy (verified: fraction near zero is large, matching the
+    # bn2/other sign-changing rows' own documented caveat) -- the
+    # conditioning-robust err_norm=|lego-nemo|/RMS(nemo) median is used
+    # instead, per this row's own report machinery (per_element_report,
+    # reused verbatim from ldf_slp_per_element.py, Rule 0).  Both values are
+    # ~3 orders above BAR_PER_ELEM_EPS=1e-9, same order as the still-open
+    # "ldf_eiv kappa (aeiu)" row directly above (1.061e-6) -- PLAUSIBLE
+    # (not confirmed) that this is inherited from aeiu's own residual via
+    # kappa_t, rather than an independent transport-formula defect; not
+    # isolated by holding aeiu fixed and varying only the transport formula.
+    "eiv transport u": 1.075e-7,
+    "eiv transport v": 1.282e-6,
     # --- the 6 former CANCELLING-ONLY rows, MEASURED per-element 2026-07-29 by
     # cancelling_rows_per_element.py (fp64, BEFORE-level, e3t=both).  Each had
     # been passing on aggregate statistics alone, which is exactly how bn2 sat
@@ -526,27 +543,105 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "remains separate DEBT."),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- _static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
-    "eiv transport u":               (0.999617,   0.996109,   "REOPENED - eos_depth='geometric' was not threaded into gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->0.999617, ratio 0.994097->0.996109; residual = static t_depth_ref vs NEMO's live z-star gdept (~1e-8 density bias, deepest 1-2 levels only) DEBT [MEASURED AT e3t=both. The superseding "
-                                                              "probe_eiv_transport_v2*.py did NOT set LEGOESM_NEMO_E3T, so the "
-                                                              "'off' default gives corr 0.995918 / ratio 1.0231 -- this term IS "
-                                                              "genuinely e3t-sensitive (unlike every other row audited). The "
-                                                              "0.998474->0.999617 gain is CONFOUNDED between the eos_depth fix "
-                                                              "and e3t=both; both are needed, neither isolated. Do not cite one cause. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (probe_eiv_transport_v2_e3tboth.py "
-                                                              "+ a pooled-stat/alignment-scan wrapper, since the in-repo probe "
-                                                              "only ever printed per-level/per-row breakdowns, not this pooled "
-                                                              "number): alignment scan {-2..+2} confirms a sharp offset=0 peak "
-                                                              "(corr 0.9996 vs runner-up 0.39 at offset -1); corr 0.999617/"
-                                                              "ratio 0.996109, n=326580 -- essentially UNCHANGED from the ratio "
-                                                              "recorded above (0.996234, small pooling-convention rounding)."),
-    "eiv transport v":               (0.999103,   0.990501,   "REOPENED - same eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990501; residual concentrated at bottom-adjacent rows (jj~130-136,189-191) + deepest 2 levels (k=32,33), same static-vs-live-gdept cause as u; still 0.9% low DEBT [MEASURED AT e3t=both; "
-                                                              "'off' default gives corr 0.994325 / ratio 1.0150. Same eos_depth-vs-e3t "
-                                                              "confound as the u-component -- see that row. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (same wrapper as eiv transport u): "
-                                                              "alignment scan {-2..+2} sharp offset=0 peak (corr 0.9991 vs "
-                                                              "runner-up 0.31 at offset -1); corr 0.999104/ratio 0.990501, "
-                                                              "n=330403 -- UNCHANGED from the ratio recorded above (0.990637, "
-                                                              "same pooling-rounding as u)."),
+    "eiv transport u":               (0.9999999995200128, 1.0000000916003544, "HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
+                                                              "NOT a model fix -- nemo_eiv_bolus_transport was already correct). "
+                                                              "ROOT CAUSE: NEMO applies puu(jk) -= (zpsi_uw(1)-zpsi_uw(2)) "
+                                                              "[ldftra.F90:833-834, a MINUS] but dumps eiv_dump_u.bin/"
+                                                              "eiv_dump_v.bin as zpsi_uw(1)-zpsi_uw(2) directly, WITHOUT the "
+                                                              "minus [ldftra.F90:864-865] -- the dump is the NEGATIVE of what "
+                                                              "NEMO actually applies. The comparison harness compared legoESM's "
+                                                              "true applied increment against the un-negated dump, producing a "
+                                                              "spurious ~0.4-0.9% residual that was never in the model. Fixed by "
+                                                              "negating the dump before comparison (eiv_transport_walk.py:229-230), "
+                                                              "matching ldftra.F90:833. CONFIRMED empirically, not just by "
+                                                              "source-reading: un-negated offset-0 corr was EXACTLY -1.000000 (the "
+                                                              "fingerprint of a sign bug); after negation, offset-0 corr= "
+                                                              "1.000000 with a sharp peak (corr 1.0 at offset 0 vs -0.04..-0.19 "
+                                                              "at offsets +-1, +-2 -- NOT a tie). Independent second route with no "
+                                                              "sign ambiguity: cumsum(u_eiv) vs eiv_dump_psi_uw.bin (ldftra.F90:847, "
+                                                              "written verbatim pre-subtraction) gives corr 1.000000, "
+                                                              "median|rel|=1.620e-6 -- confirms the sign/indexing chain via a "
+                                                              "route independent of the u_n negation above. "
+                                                              "RE-MEASURED (eiv_transport_walk.py, fp64, LEGOESM_NEMO_E3T=both, "
+                                                              "RUN_GDB kt=57601, live z-star ladder = production config): "
+                                                              "corr 0.999617->0.9999999995200128 (|1-corr|=4.800e-10), "
+                                                              "|x|ratio 0.996109->1.0000000916003544 (|ratio-1|=9.160e-08), "
+                                                              "n=336338 wet u-faces, offset=+0 sharp (corr 1.0 vs runner-up "
+                                                              "-0.04). Both clear BAR_CORR and BAR_RATIO_EPS on the aggregate. "
+                                                              "STILL DEBT under BAR_PER_ELEM_EPS=1e-9: see PER_ELEMENT["
+                                                              "'eiv transport u']=1.075e-7 (err_norm median, conditioning-robust "
+                                                              "-- 12.6% of wet points have |nemo|<1e-3*RMS so pointwise |rel| is "
+                                                              "untrustworthy here). Per-level err_norm is STRUCTURED (max/min="
+                                                              "56.7x over 35 levels, worst at k=34, the deepest wet level) -- the "
+                                                              "ladder-hypothesis check for THIS row is therefore not clean-flat "
+                                                              "like aeiu's, but the task's static-vs-live A/B (jacobian=None vs "
+                                                              "jacobian=st['jacobian'], one variable, ldf_slp/kappa builders only) "
+                                                              "shows the residual EXISTS even in the live-ladder (production) "
+                                                              "branch and is roughly 40x SMALLER than the static-ladder branch "
+                                                              "(med_en 1.075e-7 live vs 4.475e-6 static) -- i.e. the live z-star "
+                                                              "ladder is not the source of this residual, it is already the "
+                                                              "cleaner of the two, so this is NOT the same 'ladder' failure mode "
+                                                              "the eos_depth/aeiu campaign chased. PLAUSIBLE (not confirmed): the "
+                                                              "remaining ~1e-7 is INHERITED from the still-open 'ldf_eiv kappa "
+                                                              "(aeiu)' row (its own per-element residual is 1.061e-6, same order "
+                                                              "of magnitude, and u_eiv/v_eiv both consume kappa_t = "
+                                                              "compute_treguier_kappa_gm_nemo_native output directly) rather than "
+                                                              "an independent transport-formula defect; not verified by isolating "
+                                                              "aeiu's contribution here. CLOSING THIS ROW DELIVERS NO ACC LEVER: "
+                                                              "the model's applied bolus transport was already correct before this "
+                                                              "fix -- only the harness's own comparison was wrong. History "
+                                                              "(pre-fix, PRESERVED): corr 0.999617 ratio 0.996109 "
+                                                              "[REOPENED - eos_depth='geometric' was not threaded into "
+                                                              "gm_redi_density_and_jacobian (#1226); fixed, corr 0.998474->"
+                                                              "0.999617, ratio 0.994097->0.996109; residual then attributed to "
+                                                              "static t_depth_ref vs NEMO's live z-star gdept, deepest 1-2 levels "
+                                                              "only -- THAT attribution is now SUPERSEDED by the sign-artifact "
+                                                              "finding above, since re-measuring with the correct sign changes "
+                                                              "the residual by 4 orders of magnitude, which a ~1e-8 depth-ladder "
+                                                              "density bias cannot explain. MEASURED AT e3t=both; the superseding "
+                                                              "probe_eiv_transport_v2*.py (a script that ran historically but was "
+                                                              "never committed to the repo -- no longer resolvable to a tracked "
+                                                              "file) did NOT set LEGOESM_NEMO_E3T, so its 'off' default gave corr "
+                                                              "0.995918/ratio 1.0231; this term IS e3t-sensitive. RE-MEASURED at "
+                                                              "HEAD c8e5d305b: alignment scan confirms sharp offset=0 peak (corr "
+                                                              "0.9996 vs runner-up 0.39); corr 0.999617/ratio 0.996109, n=326580]."),
+    "eiv transport v":               (0.99999999949253,   1.00001863355075,   "HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
+                                                              "same sign bug as 'eiv transport u' -- see that row for the full "
+                                                              "NEMO citation (ldftra.F90:833-834 applies a MINUS; ldftra.F90:864-865 "
+                                                              "dumps WITHOUT it) and empirical confirmation (un-negated corr was "
+                                                              "EXACTLY -1.0, the sign-bug fingerprint). NOT a model fix. "
+                                                              "RE-MEASURED (eiv_transport_walk.py, fp64, LEGOESM_NEMO_E3T=both, "
+                                                              "RUN_GDB kt=57601, live z-star ladder): corr 0.999103->"
+                                                              "0.99999999949253 (|1-corr|=5.075e-10), |x|ratio 0.990501->"
+                                                              "1.00001863355075 (|ratio-1|=1.863e-05), n=340271 wet v-faces, "
+                                                              "offset=+0 sharp (corr 1.0 vs runner-up -0.19). corr clears "
+                                                              "BAR_CORR; ratio does NOT clear BAR_RATIO_EPS=1e-6 (1.863e-05 is "
+                                                              "~19x over). STILL DEBT, doubly: also fails BAR_PER_ELEM_EPS=1e-9 "
+                                                              "-- see PER_ELEMENT['eiv transport v']=1.282e-6 (err_norm median; "
+                                                              "6.5% of wet points have |nemo|<1e-3*RMS so pointwise |rel| is "
+                                                              "untrustworthy here, same conditioning caveat as u). Per-level "
+                                                              "err_norm is FLAT (max/min=7.9x over 35 levels) -- unlike u's own "
+                                                              "STRUCTURED signature, so u and v do not even share the same "
+                                                              "residual shape; treat them as two separate small residuals, not "
+                                                              "one shared mechanism. Static-vs-live A/B: live med_en=1.282e-6 vs "
+                                                              "static med_en=9.760e-6 (~7.6x smaller live) -- again the live "
+                                                              "z-star ladder is the cleaner branch, so the ladder-hypothesis for "
+                                                              "THIS row is REFUTED the same way as u. PLAUSIBLE (not confirmed): "
+                                                              "v's residual is also of the same order as the open 'ldf_eiv kappa "
+                                                              "(aeiu)' row's 1.061e-6, consistent with u's inheritance hypothesis, "
+                                                              "but v/u asymmetry is now 11.9x (was ~2.4x before the sign fix), so "
+                                                              "this is weaker evidence for a single shared cause than it looks at "
+                                                              "first glance. NO ACC LEVER: the model's applied transport was "
+                                                              "already correct; only the harness compared the wrong sign. History "
+                                                              "(pre-fix, PRESERVED): corr 0.999103 ratio 0.990501 [REOPENED - same "
+                                                              "eos_depth fix, corr 0.995437->0.999103, ratio 0.982351->0.990501; "
+                                                              "residual attributed to bottom-adjacent rows + deepest 2 levels, "
+                                                              "same static-vs-live-gdept cause as u -- SUPERSEDED by the sign-"
+                                                              "artifact finding above for the same reason as u's history note. "
+                                                              "MEASURED AT e3t=both; 'off' default gave corr 0.994325/ratio 1.0150. "
+                                                              "RE-MEASURED at HEAD c8e5d305b: alignment scan sharp offset=0 peak "
+                                                              "(corr 0.9991 vs runner-up 0.31); corr 0.999104/ratio 0.990501, "
+                                                              "n=330403]."),
     "traadv_fct fluxes":             (0.999999,   0.999990,   "[e3t=both per traadv_fct_probe.py]. RE-MEASURED at HEAD "
                                                               "e72923faa (traadv_fct_probe.py, RUN_GDB kt=57601): the "
                                                               "PREVIOUSLY recorded 0.9594-0.9799 (east/north face) / 0.9139 "
@@ -1581,8 +1676,8 @@ MEASURED_AT: dict[str, str] = {
     "ssh_nxt / div_hor": "c8e5d305b",
     "dom_qco_r3c r3t": "c8e5d305b",
     "dom_qco_r3c r3u/r3v": "c8e5d305b",
-    "eiv transport u": "c8e5d305b",
-    "eiv transport v": "c8e5d305b",
+    "eiv transport u": "7e030db3e",
+    "eiv transport v": "7e030db3e",
     "zdf_drg_nonlin T-point rate": "c8e5d305b",
     "dyn_drg_init RHS increment": "c8e5d305b",
     "dyn_cor_2d (69x/step)": "c8e5d305b",
