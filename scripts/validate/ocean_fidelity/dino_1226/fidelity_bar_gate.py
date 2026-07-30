@@ -1478,14 +1478,14 @@ MEASURED_AT: dict[str, str] = {
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
     # 2026-07-30 coverage_rows_measure.py (this task) -- b7872175b HEAD.
     "ldf_dyn coefficient": "b7872175b",
-    # tra_qsr RE-MEASURED at 9286b8309 (this probe-fix task): the STATIC-
-    # ladder number recorded at b7872175b did not reflect DINOConfig.
-    # shortwave_penetration_ladder="nemo_live" (a probe gap in
-    # coverage_rows_measure.py's measure_tra_qsr, which never passed
+    # tra_qsr RE-MEASURED at 22a0b93cd (this probe-fix task, model fix itself
+    # at 9286b8309): the STATIC-ladder number recorded at b7872175b did not
+    # reflect DINOConfig.shortwave_penetration_ladder="nemo_live" (a probe
+    # gap in coverage_rows_measure.py's measure_tra_qsr, which never passed
     # z_half_stretch= -- see the MEASUREMENTS note). Re-measured with the
     # fix's own eos.nemo_r3t_stretch live ladder threaded in, matching
     # production's dino.py:3471-3487 dispatch exactly.
-    "tra_qsr (shortwave penetration)": "9286b8309",
+    "tra_qsr (shortwave penetration)": "22a0b93cd",
     # ssh_atf RE-VERIFIED (this task, 5e9b0eb87): the plain-Asselin-term
     # numbers are UNCHANGED -- ssh_atf has no dependence on
     # DINOConfig.surface_flux_divisor (that's a trasbc.F90 tra_sbc-only
@@ -1493,17 +1493,18 @@ MEASURED_AT: dict[str, str] = {
     # confirmed algebraically zero for DINO, see coverage_rows_measure.py's
     # RETRACTED note) -- kept at its original 2026-07-30 measurement commit.
     "ssh_atf": "b7872175b",
-    # tra_sbc RE-MEASURED at 9286b8309 (this probe-fix task; the divisor fix
-    # itself landed at 5e9b0eb87, but the c_p truncation fix that ALSO moves
+    # tra_sbc RE-MEASURED at 22a0b93cd (this probe-fix task; the divisor fix
+    # itself landed at 5e9b0eb87, and the c_p truncation fix that ALSO moves
     # this row's numbers landed later, at 9286b8309 -- the number recorded
-    # here reflects that later commit's code, which is current HEAD). The
-    # STATIC-divisor number recorded at b7872175b did not reflect DINOConfig.
-    # surface_flux_divisor="nemo_live" (a probe gap in coverage_rows_
-    # measure.py's measure_tra_sbc, which never read that config field --
-    # see the MEASUREMENTS note). Re-measured with the fix's own
-    # eos.nemo_r3t_stretch live divisor threaded in, matching production's
-    # dino.py:3384-3391 dispatch exactly, AND with the c_p fix already live.
-    "tra_sbc": "9286b8309",
+    # here reflects re-running the SAME unmodified probe at the commit that
+    # re-measured it, current HEAD). The STATIC-divisor number recorded at
+    # b7872175b did not reflect DINOConfig.surface_flux_divisor="nemo_live"
+    # (a probe gap in coverage_rows_measure.py's measure_tra_sbc, which never
+    # read that config field -- see the MEASUREMENTS note). Re-measured with
+    # the fix's own eos.nemo_r3t_stretch live divisor threaded in, matching
+    # production's dino.py:3384-3391 dispatch exactly, AND with the c_p fix
+    # already live.
+    "tra_sbc": "22a0b93cd",
     # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
     # the commit that introduced _nemo_native_active_3d.
     "ldf_slp wslpi": "7816b514e",
