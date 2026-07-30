@@ -217,6 +217,36 @@ def hines_gwd(
         ))
     )
 
+    # --- Launch level ---------------------------------------------------
+    # STATIC Python branch on a build-time config constant (the JAX
+    # feature-gating exception): ``launch_p is None`` keeps the legacy
+    # surface-launch path with no extra HLO and byte-identical output.
+    #
+    # A non-orographic wave launched at the SURFACE is born supersaturated
+    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N
+    # is SMALLEST in the well-mixed boundary layer: on the 2.5 deg AMIP
+    # state 2.0 m/s exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of
+    # the area, so the wave breaks AT its own launch level (55% of its
+    # momentum below 1 km, only 35% above 12 km).
+    #
+    # Level selection mirrors the sibling scheme (e3sm_cam.py:1544): the
+    # column-mean pressure closest to ``launch_p``, kept as a 0-d TRACED
+    # int via jnp.argmin (NOT int(...)) so the kernel stays jit-safe.
+    #
+    # NB it is NOT enough to zero the drag below the launch level: the
+    # amplitude carry would still propagate up through the BL and SATURATE
+    # there, so the wave would arrive at the launch level already clipped
+    # and the drag ALOFT would be unchanged (verified: bit-identical above
+    # the launch level with output-masking alone).  The carry must be HELD
+    # AT the launch amplitude until the launch level is reached, so the
+    # wave genuinely starts there.
+    _k_launch = None
+    if config.launch_p is not None:
+        _pmean = jnp.mean(p_full, axis=0)                     # (nlev,)
+        _k_launch = jnp.clip(
+            jnp.argmin(jnp.abs(_pmean - config.launch_p)), 0, nlev - 1
+        ).astype(jnp.int32)
+
     # Bottom-up scan: propagate sigma_gw upward from surface.
     # ``rho_ratio_step[:, k]`` carries amplitude from level k+1 to level k;
     # at the surface (k = nlev-1) the step factor is 1 (initial condition).
@@ -265,6 +295,16 @@ def hines_gwd(
         drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
         drag = jnp.clip(drag, 0.0, config.Fmax)
 
+        # Launch gate: at and BELOW the launch level (arrays are top-down, so
+        # k >= k_launch) the wave does not exist yet — hold the carry at the
+        # launch amplitude and deposit no drag, so the wave genuinely STARTS
+        # at the launch level with an unclipped amplitude.  Static Python
+        # branch: absent for the legacy path (byte-identical HLO).
+        if _k_launch is not None:
+            _below = k >= _k_launch
+            sigma_new = jnp.where(_below, config.total_rms_wind, sigma_new)
+            drag = jnp.where(_below, 0.0, drag)
+
         # Pin the carry back to the launch-wind precision: under x64 the
         # Python-float ``config.*`` constants promote ``sigma_new`` to f64, but
         # the scan carry init (sigma_gw_init) is ``u.dtype`` (f32) — lax.scan
@@ -276,34 +316,6 @@ def hines_gwd(
     sigma_gw_init = jnp.full((ncol,), config.total_rms_wind, dtype=u.dtype)
     _, drag_stack = jax.lax.scan(scan_fn, sigma_gw_init, jnp.arange(nlev))
     drag_all = drag_stack.T[:, ::-1]  # (ncol, nlev), top-first
-
-    # --- Launch level ---------------------------------------------------
-    # STATIC Python branch on a build-time config constant (the JAX
-    # feature-gating exception): ``launch_p is None`` keeps the legacy
-    # surface-launch path BYTE-IDENTICAL, with no extra HLO.
-    #
-    # With a launch pressure set, the wave is a genuine NON-OROGRAPHIC
-    # source released above the boundary layer: zero drag at and below the
-    # launch level.  Without this the wave is born supersaturated in the
-    # weakly stratified BL (sigma_sat = N/m_star is smallest there) and
-    # breaks at its own launch level — the measured failure mode.
-    #
-    # Level selection mirrors the sibling scheme (e3sm_cam.py:1544): the
-    # column-mean pressure closest to ``launch_p``, kept as a 0-d TRACED
-    # int via jnp.argmin (NOT int(...)) so the kernel stays jit-safe.  The
-    # level choice itself is not differentiated (argmin), matching E3SM's
-    # static init-time selection; ``launch_p`` still carries a
-    # ``__param_spec__`` entry because the THRESHOLD is meaningful even
-    # though the index is piecewise-constant in it.
-    if config.launch_p is not None:
-        # Arrays are TOP-DOWN (index 0 = model top, nlev-1 = surface), so
-        # "at or below the launch level" is ``k >= k_launch``.
-        pmean = jnp.mean(p_full, axis=0)                      # (nlev,)
-        k_launch = jnp.clip(
-            jnp.argmin(jnp.abs(pmean - config.launch_p)), 0, nlev - 1
-        ).astype(jnp.int32)
-        k_idx = jnp.arange(nlev, dtype=jnp.int32)[None, :]    # (1, nlev)
-        drag_all = jnp.where(k_idx >= k_launch, 0.0, drag_all)
 
     # Convert to acceleration
     accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)

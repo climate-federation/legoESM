@@ -98,6 +98,32 @@ def test_launch_level_moves_the_deposition_upward():
     assert frac_lch == pytest.approx(0.0, abs=1e-12)
 
 
+def test_wave_starts_UNCLIPPED_at_the_launch_level():
+    """The defect a drag-output mask alone does NOT fix.
+
+    Zeroing the drag below the launch level still lets the amplitude CARRY
+    propagate up through the boundary layer and SATURATE there, so the wave
+    arrives at the launch level already clipped and the drag ALOFT is
+    bit-identical to a surface launch — the launch level would be cosmetic.
+    A real launch holds the carry at the launch amplitude until the launch
+    level, so the wave starts there unclipped and deposits MORE aloft.
+    """
+    _, _, _, p_full, *_ = _column()
+    pmean = np.asarray(p_full).mean(axis=0)
+    k = int(np.argmin(np.abs(pmean - _LAUNCH_P)))
+
+    sfc = np.abs(np.asarray(_run(HinesConfig()).du_dt))
+    lch = np.abs(np.asarray(_run(HinesConfig(launch_p=_LAUNCH_P)).du_dt))
+    above_sfc = sfc[:, :k].sum()
+    above_lch = lch[:, :k].sum()
+    assert not np.allclose(sfc[:, :k], lch[:, :k], rtol=1e-12, atol=1e-30), (
+        "drag above the launch level is bit-identical to the surface launch "
+        "-> the carry was still clipped in the BL (output-mask-only bug)")
+    assert above_lch > above_sfc, (
+        f"an unclipped launch must deposit MORE drag aloft "
+        f"({above_lch:.4e} vs surface-launch {above_sfc:.4e})")
+
+
 def test_jit_parity_and_finite():
     """Eager vs jit must agree (the level index is a traced argmin, not an
     int(), so the kernel has to stay jit-safe)."""
