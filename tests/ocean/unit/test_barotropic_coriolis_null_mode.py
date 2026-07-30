@@ -127,13 +127,32 @@ def _een_cfg(cfg):
         barotropic_coriolis="een"))
 
 
-def test_een_restores_the_checkerboard_null_mode():
-    """NEMO EEN (``barotropic_coriolis="een"``) EXERTS a restoring on the 2Δx
-    checkerboard the 4-pt average annihilates — the node-16 fix.
+def test_een_does_NOT_restore_the_checkerboard_null_mode():
+    """EEN CANNOT restore the zonal 2Δx mode — it reduces to the 4-pt average.
 
-    The 4-pt-avg Coriolis gives ~0 U response to the checkerboard (null mode);
-    the enstrophy-conserving EEN gives a response COMPARABLE to a smooth V
-    (the mode is no longer invisible to the discrete Coriolis).
+    REWRITTEN 2026-07-29.  This test previously asserted the OPPOSITE
+    ("EEN restores the null mode", ``cor_ck_een > 0.1 * cor_sm_een``) and
+    passed only because of a PERIODIC-SEAM INDEX BUG in
+    ``pv_flux_al81_partial_cell`` / ``pv_flux_ene`` (fixed 2026-07-29): the
+    west-neighbour v-flux was built by rolling an already-wrapped ``(n_lon+1)``
+    array, so u-face 0 received cell 0 instead of cell ``n-1``.  The measured
+    "restoration" lived ENTIRELY in that one column —
+
+        buggy: col 0 = 3.64e-02, col 1 = 1.13e-03, INTERIOR = 2.90e-07
+        fixed: uniform 2.58e-07 at every column
+
+    — and the metric here is ``np.max``, so a single bad column carried it.
+
+    The correct statement is ANALYTIC, not empirical: for a UNIFORM ``q`` the
+    AL81 12-point triad collapses to ``3q₀/12 = q₀/4`` on all four triads,
+    i.e. EXACTLY the 4-point average ``0.25·q₀·(F_SW+F_SE+F_NW+F_NE)``
+    (verified: ``|AL81 − 4pt| = 2.7e-20``).  The barotropic call uses ``ζ=0``,
+    so its ``q`` IS uniform up to ``f``.  The 4-point average annihilates the
+    zonal 2Δx checkerboard, therefore SO DOES EEN.  This matches
+    ``.claude/ralph_barotropic_coriolis_redesign_task.md:27``: "No
+    null-mode-free LINEAR C-grid f×U exists (the V→u lon-average always kills
+    2Δx-lon)."  Corroboration: a controlled 30-day nemo_dino_kamm probe found
+    ``avg`` and ``een`` give identical deep-equatorial KE growth.
     """
     r, cfg, s = _rest_setup()
     een = _een_cfg(cfg)
@@ -142,16 +161,62 @@ def test_een_restores_the_checkerboard_null_mode():
     cor_ck_avg = _coriolis_u(r, cfg, ck)
     cor_ck_een = _coriolis_u(r, een, ck)
     cor_sm_een = _coriolis_u(r, een, sm)
-    # avg annihilates the checkerboard...
+    # the 4-pt average annihilates the checkerboard (unchanged control)
     assert cor_ck_avg < 1e-3 * cor_sm_een, (
         f"control: avg should annihilate the checkerboard, got {cor_ck_avg:.2e}")
-    # ...EEN restores it: the checkerboard now drives a Coriolis U of the same
-    # order as a smooth field (no longer a null mode).
-    assert cor_ck_een > 0.1 * cor_sm_een, (
-        f"EEN failed to restore the null mode: cor_ck_een={cor_ck_een:.2e} "
-        f"vs cor_sm_een={cor_sm_een:.2e}")
-    # and EEN is a genuine change vs avg on the checkerboard.
-    assert cor_ck_een > 100.0 * max(cor_ck_avg, 1e-30)
+    # ...and EEN annihilates it too, because it REDUCES to that average.
+    assert cor_ck_een < 1e-3 * cor_sm_een, (
+        f"EEN should NOT restore the zonal 2Dx null mode (it reduces to the "
+        f"4-pt average for uniform q): cor_ck_een={cor_ck_een:.2e} vs "
+        f"cor_sm_een={cor_sm_een:.2e}.  A LARGE value here means the periodic "
+        f"seam has reopened -- see test_pv_flux_periodic_seam_is_closed.")
+
+
+def test_pv_flux_periodic_seam_is_closed():
+    """REGRESSION for the 2026-07-29 seam bug: u-face 0 == u-face n_lon.
+
+    On a zonally periodic grid the first and last columns of a ``(n_lon+1)``
+    u-face array are the SAME physical face.  ``divergence_cgrid`` telescopes a
+    row to ``(u[n_lon] − u[0])·dy``, so any disagreement is a FABRICATED VOLUME
+    SOURCE: before the fix the barotropic solver gained 1.86e10 m³ per
+    68-substep window in a CLOSED domain.
+
+    This asserts the invariant DIRECTLY on both PV-flux operators, which the
+    budget tests did not (``test_al81_budget.py`` explicitly skips i=0 as
+    "periodic wrap, not exercised").
+    """
+    import jax.numpy as _jnp
+    import numpy as _np
+
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        pv_flux_al81_partial_cell,
+        pv_flux_ene,
+    )
+    rng = _np.random.default_rng(0)
+    n_lat, n_lon, nlev = 6, 8, 2
+    f = lambda *sh: _jnp.asarray(rng.normal(size=sh))          # noqa: E731
+    zeta = f(n_lat + 1, n_lon + 1, nlev)
+    h_vtx = _jnp.abs(f(n_lat + 1, n_lon + 1, nlev)) + 1.0
+    h_v, v = _jnp.abs(f(n_lat + 1, n_lon, nlev)) + 1.0, f(n_lat + 1, n_lon, nlev)
+    h_u, u = _jnp.abs(f(n_lat, n_lon + 1, nlev)) + 1.0, f(n_lat, n_lon + 1, nlev)
+    # periodic inputs: the u-face seam column IS column 0
+    h_u = _jnp.concatenate([h_u[:, :-1], h_u[:, 0:1]], axis=1)
+    u = _jnp.concatenate([u[:, :-1], u[:, 0:1]], axis=1)
+    zeta = _jnp.concatenate([zeta[:, :-1], zeta[:, 0:1]], axis=1)
+    h_vtx = _jnp.concatenate([h_vtx[:, :-1], h_vtx[:, 0:1]], axis=1)
+    um = _jnp.ones((n_lat, n_lon + 1, nlev))
+    vm = _jnp.ones((n_lat + 1, n_lon, nlev))
+    vtx = _jnp.ones((n_lat + 1, n_lon + 1))
+
+    for name, fn in (("al81", pv_flux_al81_partial_cell), ("ene", pv_flux_ene)):
+        du, _ = fn(zeta, h_vtx, h_v, v, h_u, u, um, vm, vtx)
+        seam = float(_np.max(_np.abs(_np.asarray(du)[:, 0, :]
+                                     - _np.asarray(du)[:, n_lon, :])))
+        scale = float(_np.max(_np.abs(_np.asarray(du))))
+        assert seam <= 1e-12 * max(scale, 1e-300), (
+            f"{name}: periodic seam OPEN -- u-face 0 != u-face n_lon "
+            f"(|diff|={seam:.3e}, field max={scale:.3e}).  divergence_cgrid "
+            f"turns this into a spurious volume source.")
 
 
 def test_een_barotropic_coriolis_conserves_energy():
@@ -407,15 +472,40 @@ def test_een_metric_correction_scales_with_latitude():
     assert corr_hi > 10.0 * corr_eq, (
         f"metric correction does not scale with latitude: "
         f"eq={corr_eq:.2e} hi={corr_hi:.2e}")
-    # ...that measurably reduces the high-lat Coriolis energy-budget residual.
-    assert rel_m < rel_p, (
-        f"metric fold did not reduce the high-lat energy residual: "
-        f"plain={rel_p:.2e} metric={rel_m:.2e}")
+    # (iii) BOTH energy residuals stay small.
+    #
+    # REWRITTEN 2026-07-29.  This previously asserted ``rel_m < rel_p`` -- that
+    # the metric fold REDUCES the high-latitude energy residual.  That claim
+    # rested on the periodic-seam index bug fixed the same day: with the seam
+    # open the seam error DOMINATED this channel's energy budget, and the fold
+    # happened to reduce it.  Closing the seam improved BOTH residuals by 1-2
+    # orders of magnitude and FLIPPED their order:
+    #
+    #     buggy:  rel_plain 3.224e-03   rel_metric 2.810e-03   (fold "helps")
+    #     fixed:  rel_plain 1.935e-05   rel_metric 2.825e-04   (fold costs)
+    #
+    # i.e. the fold was never the thing reducing the residual; the seam bug was
+    # the thing inflating it.  Once the dominant error is gone the fold
+    # contributes its own, ~15x larger than plain.  So the ordering is NOT
+    # asserted either way -- what IS asserted is that both stay small, which is
+    # a real gate (it would catch the seam reopening: rel_plain would jump 167x).
+    assert rel_p < 1.0e-3, f"plain Coriolis energy residual too large: {rel_p:.2e}"
+    assert rel_m < 5.0e-3, f"metric Coriolis energy residual too large: {rel_m:.2e}"
 
 
-def test_een_metric_dispatches_and_restores_null_mode():
-    """The "een_metric" config value is accepted end-to-end through the substep
-    loop and (like "een") restores the 2Δx checkerboard the 4-pt avg kills."""
+def test_een_metric_dispatches_and_does_NOT_restore_null_mode():
+    """``een_metric`` is accepted end-to-end AND (like ``een``) annihilates 2Δx.
+
+    REWRITTEN 2026-07-29 alongside
+    :func:`test_een_does_NOT_restore_the_checkerboard_null_mode` -- the
+    "restores" half of the original assertion was the periodic-seam artifact.
+    The metric fold changes the Coriolis COEFFICIENT (a latitude-dependent
+    e3f/metric correction, still asserted in
+    :func:`test_een_metric_correction_scales_with_latitude`); it does not change
+    the fact that the triad reduces to the 4-point average for uniform ``q``,
+    which annihilates the zonal 2Δx mode.  The DISPATCH half is the part worth
+    keeping, so it is kept and strengthened.
+    """
     r, cfg, s = _rest_setup()
     metric = cfg._replace(barotropic=cfg.barotropic._replace(
         barotropic_coriolis="een_metric"))
@@ -424,8 +514,13 @@ def test_een_metric_dispatches_and_restores_null_mode():
     cor_ck_avg = _coriolis_u(r, cfg, ck)
     cor_ck_m = _coriolis_u(r, metric, ck)
     cor_sm_m = _coriolis_u(r, metric, sm)
+    # it dispatches and does real work on a SMOOTH field...
+    assert cor_sm_m > 1e-4, (
+        f"een_metric did not dispatch / did no work on a smooth V: {cor_sm_m:.2e}")
+    # ...and annihilates the checkerboard, exactly as the 4-pt average does.
     assert cor_ck_avg < 1e-3 * cor_sm_m
-    assert cor_ck_m > 0.1 * cor_sm_m, (
-        f"een_metric failed to restore the null mode: {cor_ck_m:.2e} "
-        f"vs smooth {cor_sm_m:.2e}")
-    assert cor_ck_m > 100.0 * max(cor_ck_avg, 1e-30)
+    assert cor_ck_m < 1e-3 * cor_sm_m, (
+        f"een_metric should NOT restore the zonal 2Dx null mode: "
+        f"{cor_ck_m:.2e} vs smooth {cor_sm_m:.2e}.  A large value means the "
+        f"periodic seam has reopened.")
+
