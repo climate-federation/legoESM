@@ -29,6 +29,9 @@ from legoesm import constants
 # Default parameters (same as cubed-sphere TC2)
 TC2_PARAMS = {
     "small_earth_factor": 20.0,
+    # Case rotation, read by the initialiser below so an explicit
+    # override reaches the mesh (codex r3 P2: omega was hard-coded).
+    "rotating": True,
     "T0": 250.0,
     "u0": 20.0,
     "H": 30000.0,
@@ -125,7 +128,8 @@ def dcmip25_tc2_init_mpas(
     small_mesh = create_voronoi_mesh(
         level,
         radius=constants.R_earth / factor,
-        omega=constants.Omega * factor,
+        omega=(constants.Omega * factor
+               if p.get("rotating", True) else 0.0),
     )
 
     # Isothermal reference state
