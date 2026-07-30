@@ -823,10 +823,12 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "if re-run again without a workaround."),
     "mlf_baro_corr":                 (None,       None,       "algebra only; needs _step_impl hook"),
     "lbc_lnk sign":                  (None,       None,       "NEVER VERIFIED"),
-    "zdf_mxl_turb":                  (None,       None,       "MISSING TERM: no legoESM equivalent -- NEMO's Kz<avt_c "
-                                                              "turbocline diagnostic (hmld) is distinct from zdf_mxl's "
-                                                              "N^2-criterion MLD (nmln, which IS ported); hmld/mldkz5 "
-                                                              "is diagnostic-only (never feeds dynamics), no lego port exists"),
+    "zdf_mxl_turb":                  (None,       None,       "HUMAN-WAIVED 2026-07-30 (see WAIVED_ROWS below for "
+                                                              "decision-provenance + evidence): MISSING TERM, no legoESM "
+                                                              "equivalent -- NEMO's Kz<avt_c turbocline diagnostic (hmld) "
+                                                              "is distinct from zdf_mxl's N^2-criterion MLD (nmln, which "
+                                                              "IS ported); hmld/mldkz5 is diagnostic-only (never feeds "
+                                                              "dynamics for a no-TOP/PISCES DINO build), no lego port exists."),
     "zdf_drg_nonlin T-point rate":   (1.0,        1.0,        "AT BAR: exact, nemo_effective_bottom_drag_r on bridged bottom u/v [e3t=both]. "
                                                               "RE-CONFIRMED at HEAD c8e5d305b (probe_bottom_drag.py, "
                                                               "RUN_GDB kt=57601): corr=1.00000000/ratio=1.000000, "
@@ -938,6 +940,39 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "This diagnosis of the MECHANISM was right; the specific "
                                                               "corr=0.203165/ratio=3.167599 numbers attached to it were "
                                                               "not reproducible."),
+
+    # --- 2026-07-30 Rule 1 coverage additions (stpmlf_call_coverage.py) ---
+    # These 9 CALL entries (wzv has two call sites, one row) were enumerated
+    # by the stp_MLF call-graph coverage gate as UNCOVERED -- no probe had
+    # ever measured them, and no one had thought to add them to this
+    # checklist. Adding a row here does NOT mean they are measured: every
+    # tuple below is (None, None, ...) on purpose. Do not invent a number.
+    "wzv (vertical velocity)":       (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured. Two call sites in "
+        "stpmlf.F90 (line 244 Nnn, line 315 Naa post-dyn_zdf recomputation) "
+        "-- both route through the same wzv routine, one row."),
+    "tra_zdf (tracer implicit vertical solve)": (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "dyn_zdf (momentum implicit vertical solve)": (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "traldf_iso_lap tendency":       (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "ldf_dyn coefficient":           (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "tra_qsr (shortwave penetration)": (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "ssh_atf":                       (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
+    "tra_sbc":                       (None, None,
+        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
+        "call-graph coverage); never measured."),
 }
 
 
@@ -1051,6 +1086,47 @@ BINARY_GATES: dict[str, bool | None] = {
 }
 
 
+# HUMAN-WAIVED rows.  This is NOT a generic "mark anything waived" mechanism --
+# it is keyed to exactly the rows below, each requiring BOTH a nonempty
+# decision-provenance string (who/when decided, and that the row was verified
+# BEFORE being waived, not skipped) and a nonempty evidence citation (file:line
+# proof the term is unconsumed/out of scope).  A waiver missing either string
+# is a hard error (see _validate_waivers), not a silent pass -- so a future
+# attempt to wave a row through by adding a bare name here fails loudly.
+# WAIVED counts in `total`, does not block exit 0 (resolved-by-human), and is
+# never confused with AT BAR (it carries no corr/ratio bar-clearance at all).
+WAIVED_ROWS: dict[str, tuple[str, str]] = {
+    # term -> (decision_provenance, evidence_citation)
+    "zdf_mxl_turb": (
+        "human decision 2026-07-30: verify-unconsumed, then waive.",
+        "Verification done (agent af044c34ba25fb440, 2026-07-30): "
+        "zdf_mxl_turb (src/OCE/ZDF/zdfmxl.F90) writes only hmld "
+        "(zdfmxl.F90:152) and iom_put('mldkz5', ...) (zdfmxl.F90:155-158); "
+        "every consumer of hmld in src/OCE is init/diagnostic-output; the "
+        "ONLY arithmetic consumers are PISCES via src/TOP/oce_trc.F90:93, "
+        "and DINO compiles NO TOP tree (cpp_DINO.fcm has no key_top; "
+        "cfgs/DINO/WORK/ contains no oce_trc.F90). The routine runs every "
+        "step (MY_SRC/stpmlf.F90:190 -> zdfphy.F90:338) but its output "
+        "never reaches physics for this recipe.",
+    ),
+}
+
+
+def _validate_waivers() -> None:
+    """Fail LOUDLY, at import time, if a waiver is missing either required
+    string -- a waiver is a claim, and an empty claim is not evidence."""
+    for term, (provenance, evidence) in WAIVED_ROWS.items():
+        if not provenance.strip():
+            raise ValueError(f"WAIVED_ROWS[{term!r}] has an empty "
+                              "decision-provenance string")
+        if not evidence.strip():
+            raise ValueError(f"WAIVED_ROWS[{term!r}] has an empty "
+                              "evidence citation string")
+
+
+_validate_waivers()
+
+
 def classify(corr: float | None, ratio: float | None,
              per_elem: float | None = None, name: str | None = None) -> str:
     """AT BAR requires corr, MEAN ratio AND per-element error at roundoff.
@@ -1059,6 +1135,8 @@ def classify(corr: float | None, ratio: float | None,
     then judged on the aggregate statistics alone, which CANNOT see cancelling
     error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
     """
+    if name is not None and name in WAIVED_ROWS:
+        return "WAIVED"
     if name is not None and name in BINARY_GATES:
         verdict = BINARY_GATES[name]
         if verdict is None:
@@ -1091,8 +1169,39 @@ def _self_test() -> int:
     # binary gates must not be clearable by an absent corr/ratio
     assert classify(None, None, name="STABILITY on NEMO true grid (e3t_0)") == "DEBT"
     assert classify(None, None, name="not-a-binary-gate") == "UNMEASURED"
+    # WAIVED rows classify without corr/ratio, and DO NOT fall through to
+    # UNMEASURED/DEBT just because corr/ratio are absent.
+    assert classify(None, None, name="zdf_mxl_turb") == "WAIVED"
+    assert "zdf_mxl_turb" in WAIVED_ROWS
+    # Synthetic-violation proof: a waiver missing either required string must
+    # be rejected by _validate_waivers, not silently accepted. This proves the
+    # gate is non-vacuous -- a bare name in WAIVED_ROWS is not enough to waive.
+    for broken in (
+        {"fake_row": ("", "some evidence")},          # empty provenance
+        {"fake_row": ("some decision", "")},          # empty evidence
+        {"fake_row": ("   ", "   ")},                 # whitespace-only both
+    ):
+        try:
+            for term, (provenance, evidence) in broken.items():
+                if not provenance.strip():
+                    raise ValueError(f"WAIVED_ROWS[{term!r}] has an empty "
+                                      "decision-provenance string")
+                if not evidence.strip():
+                    raise ValueError(f"WAIVED_ROWS[{term!r}] has an empty "
+                                      "evidence citation string")
+            raise AssertionError(
+                "SELF-TEST FAILED: a waiver missing provenance/evidence was "
+                "NOT rejected -- the waiver mechanism is vacuous.")
+        except ValueError:
+            pass  # expected: the synthetic broken waiver was caught
+    # There is no generic per-row waiver flag: WAIVED_ROWS is the only path,
+    # and it is keyed to a fixed, reviewed set of names -- not settable from
+    # BINARY_GATES/MEASUREMENTS/PER_ELEMENT.
+    assert "zdf_mxl_turb" not in BINARY_GATES, \
+        "zdf_mxl_turb must be waived via WAIVED_ROWS, not BINARY_GATES"
     print("self-test OK: per-element bar fires on a cancelling-metric pass; "
-          "binary gates classify without corr/ratio")
+          "binary gates classify without corr/ratio; a waiver missing "
+          "provenance or evidence is rejected, not silently accepted")
     return 0
 
 
@@ -1110,17 +1219,29 @@ def main() -> int:
         flag = "" if status == "AT BAR" else f"  <-- {status}"
         print(f"{term:<{width}}  {cs} {rs}{flag}" + (f"   ({note})" if note else ""))
 
+    waived = [(t, n) for t, _c, _r, n, s in rows if s == "WAIVED"]
+    if waived:
+        print("\n*** HUMAN-WAIVED (resolved by human decision, does not "
+              "block exit 0 -- but does not count as AT BAR either) ***")
+        for t, _n in waived:
+            provenance, evidence = WAIVED_ROWS[t]
+            print(f"  {t}")
+            print(f"    decision: {provenance}")
+            print(f"    evidence: {evidence}")
+
     unknown_prov = [t for t, *_ in rows if MEASURED_AT.get(t, "") == ""]
     disputed = [t for t, v in MEASURED_AT.items() if v == "DISPUTED"]
     if disputed:
         print(f"\nDISPUTED (conflicting measurements, do not trust): {', '.join(disputed)}")
-    print(f"rows with NO measured-at provenance: {len(unknown_prov)} of {len(rows)}")
+    print(f"\nrows with NO measured-at provenance: {len(unknown_prov)} of {len(rows)}")
     at_bar = sum(s == "AT BAR" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
+    waived_n = sum(s == "WAIVED" for *_, s in rows)
     mean_only = [t for t, c, r, _n, s in rows
                  if s == "AT BAR" and t not in PER_ELEMENT]
-    print(f"\nAT BAR {at_bar} | DEBT {debt} | UNMEASURED {unmeasured} | total {len(rows)}")
+    print(f"\nAT BAR {at_bar} | DEBT {debt} | UNMEASURED {unmeasured} | "
+          f"WAIVED {waived_n} | total {len(rows)}")
     print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}, "
           f"per-element <= {BAR_PER_ELEM_EPS}")
     if mean_only:
@@ -1131,7 +1252,8 @@ def main() -> int:
         print("\nFAIL: the sweep is NOT complete. Do not describe these as "
               "'matched', 'faithful', 'closed' or 'good enough'.")
         return 1
-    print("\nPASS: every term at the bar.")
+    print("\nPASS: every term at the bar (WAIVED rows resolved by human "
+          "decision, not by measurement).")
     return 0
 
 

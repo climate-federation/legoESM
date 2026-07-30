@@ -49,14 +49,21 @@ STPMLF = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
 # routine. WAIVED = deliberately out of scope, reason required. UNCOVERED =
 # no gate row measures it -- these are surfaced LOUDLY and ranked by
 # (my) judgment of climate leverage, labelled as judgment, not measurement.
-COVERED, WAIVED, UNCOVERED = "COVERED", "WAIVED", "UNCOVERED"
+# COVERED_UNMEASURED = a fidelity_bar_gate.py row now EXISTS for this routine
+# (so it is accounted for in the coverage sense -- it is no longer invisible
+# to the checklist), but that row's own status is UNMEASURED (None/None) --
+# a row existing is not the same claim as a row being measured. This is a
+# DISTINCT kind from plain UNCOVERED (no row at all, judgment-ranked) and from
+# COVERED (a row exists, whether or not its own measurement clears the bar).
+COVERED, WAIVED, UNCOVERED, COVERED_UNMEASURED = (
+    "COVERED", "WAIVED", "UNCOVERED", "COVERED (row UNMEASURED)")
 
 
 @dataclass(frozen=True)
 class CallEntry:
     line: int                 # line in stpmlf.F90 (MY_SRC override) of the CALL
     routine: str               # concrete routine DINO actually runs
-    disposition: str           # COVERED | WAIVED | UNCOVERED
+    disposition: str           # COVERED | WAIVED | UNCOVERED | COVERED_UNMEASURED
     note: str                  # gate row name(s) / reason / climate-leverage judgment
     rank: int | None = None    # UNCOVERED only: 1 = highest judged leverage
 
@@ -159,17 +166,18 @@ CALLS: list[CallEntry] = [
               'nn_aht_ijk_t=20)", "ldf_eiv kappa (aeiu)" -- l_ldftra_time/'
               "l_ldfeiv_time True per DINO &namtra_ldf nn_aht_ijk_t=20 / "
               "&namtra_eiv nn_aei_ijk_t=21 (both time-varying)."),
-    CallEntry(204, "ldf_dyn", UNCOVERED,
-              "no gate row measures ahmt/ahmf (the momentum lateral-viscosity "
-              "coefficient this computes) directly -- only its CONSUMER "
-              '"dyn_ldf (dynldf_lev_lap) u/v" is gated, which does not '
-              "isolate the coefficient from the tendency. l_ldfdyn_time is "
-              "True per DINO &namdyn_ldf nn_ahm_ijk_t=20. JUDGMENT (not "
-              "measurement): MODERATE leverage -- an error here would show "
+    CallEntry(204, "ldf_dyn", COVERED_UNMEASURED,
+              '2026-07-30: gate row "ldf_dyn coefficient" now exists '
+              "(UNMEASURED None/None) -- previously no gate row measured "
+              "ahmt/ahmf (the momentum lateral-viscosity coefficient this "
+              "computes) directly, only its CONSUMER "
+              '"dyn_ldf (dynldf_lev_lap) u/v", which does not isolate the '
+              "coefficient from the tendency. l_ldfdyn_time is True per DINO "
+              "&namdyn_ldf nn_ahm_ijk_t=20. JUDGMENT (not measurement, still "
+              "unmeasured): MODERATE leverage -- an error here would show "
               "up folded into the already-DEBT dynldf_lev_lap rows (corr "
               "0.9979-0.9994), so it is not fully invisible, but a "
-              "coefficient-only bug could masquerade as a scheme bug.",
-              rank=3),
+              "coefficient-only bug could masquerade as a scheme bug."),
     CallEntry(208, "bbl", WAIVED, "ln_trabbl=.false. (namelist_ref default) -- dead branch."),
 
     # --- dynamics: ssh/e3/hdiv (lines 214-236) ---
@@ -183,13 +191,16 @@ CALLS: list[CallEntry] = [
               "dead branch."),
 
     # --- momentum RHS accumulation, tiled loop 1 (lines 244-284) ---
-    CallEntry(244, "wzv (Nnn cross-level velocity)", UNCOVERED,
-              "no gate row measures ww (vertical velocity from the continuity "
-              "equation) directly. JUDGMENT: HIGH leverage -- ww feeds "
-              "tra_adv's vertical flux, dyn_zad, and wAimp; several DOWNSTREAM "
-              "rows (traadv_fct vertical upstream flux, dyn_adv ZAD) are "
-              "already DEBT, and ww itself has never been isolated as the "
-              "candidate common cause.", rank=1),
+    CallEntry(244, "wzv (Nnn cross-level velocity)", COVERED_UNMEASURED,
+              '2026-07-30: gate row "wzv (vertical velocity)" now exists '
+              "(UNMEASURED None/None, covers BOTH this call site and the "
+              "line-315 recomputation as one row) -- previously no gate row "
+              "measured ww (vertical velocity from the continuity equation) "
+              "directly. JUDGMENT (still unmeasured): HIGH leverage -- ww "
+              "feeds tra_adv's vertical flux, dyn_zad, and wAimp; several "
+              "DOWNSTREAM rows (traadv_fct vertical upstream flux, dyn_adv "
+              "ZAD) are already DEBT, and ww itself has never been isolated "
+              "as the candidate common cause."),
     CallEntry(245, "wAimp", WAIVED,
               "ln_zad_Aimp=.false. (namelist_ref default, DINO does not set "
               "it in &namdyn_adv) -- dead branch."),
@@ -240,24 +251,26 @@ CALLS: list[CallEntry] = [
               'covered by "dom_qco_r3c r3t"/"r3u/r3v" (same routine); r3f '
               "itself (F-point ratio) has no dedicated gate row -- see the "
               "UNCOVERED entry below."),
-    CallEntry(305, "dyn_zdf (dyn_zdf_imp, implicit)", UNCOVERED,
-              "no gate row measures the implicit vertical-momentum-diffusion "
+    CallEntry(305, "dyn_zdf (dyn_zdf_imp, implicit)", COVERED_UNMEASURED,
+              '2026-07-30: gate row "dyn_zdf (momentum implicit vertical '
+              'solve)" now exists (UNMEASURED None/None) -- previously no '
+              "gate row measured the implicit vertical-momentum-diffusion "
               "SOLVE itself (the tridiagonal solve output uu/vv(Naa)) -- only "
               "its INPUT avm (via zdftke) and a downstream barotropic-"
-              "reconciliation quantity (puu_b) are gated. JUDGMENT: HIGH "
-              "leverage -- this is the FINAL momentum-state-producing step of "
-              "the entire baroclinic branch every timestep (folds the RHS, "
-              "barotropic drag removal at ln_drgimp.AND.ln_dynspg_ts "
-              "dynzdf.F90:148-171, and vertical mixing into one solve) and "
-              "the #1226 dump instrumentation (stp_dump_state_and_bt(dynzdf), "
-              "line 312) exists specifically because this stage was "
-              "identified as needing scrutiny, yet no probe closes the loop "
-              "into a gate row.", rank=2),
-    CallEntry(315, "wzv (Naa cross-level velocity, 2nd call)", UNCOVERED,
-              "same routine as line 244 -- see that entry; this is the "
+              "reconciliation quantity (puu_b) are gated. JUDGMENT (still "
+              "unmeasured): HIGH leverage -- this is the FINAL "
+              "momentum-state-producing step of the entire baroclinic branch "
+              "every timestep (folds the RHS, barotropic drag removal at "
+              "ln_drgimp.AND.ln_dynspg_ts dynzdf.F90:148-171, and vertical "
+              "mixing into one solve) and the #1226 dump instrumentation "
+              "(stp_dump_state_and_bt(dynzdf), line 312) exists specifically "
+              "because this stage was identified as needing scrutiny, yet no "
+              "probe closes the loop into a gate row."),
+    CallEntry(315, "wzv (Naa cross-level velocity, 2nd call)", COVERED_UNMEASURED,
+              'same routine as line 244 -- covered by the same "wzv '
+              '(vertical velocity)" gate row (UNMEASURED); this is the '
               "post-dyn_zdf recomputation, guarded by ln_dynspg_ts=.true. "
-              "(stpmlf.F90:314-315).",
-              rank=1),
+              "(stpmlf.F90:314-315)."),
     CallEntry(319, "wAimp (2nd call)", WAIVED, "ln_zad_Aimp=.false. -- dead branch (see line 245)."),
 
     # --- cool skin / GEOMETRIC (lines 325-331) ---
@@ -294,16 +307,18 @@ CALLS: list[CallEntry] = [
     CallEntry(356, "dia_mlr", WAIVED, "l_diamlr requires ln_diamlr=.true. (namelist_ref default False) -- dead branch."),
 
     # --- ssh filtering (lines 361-362) ---
-    CallEntry(361, "ssh_atf", UNCOVERED,
-              '"ATF filter T/S/ssh" (COVERED, exact) measures the TRACER '
-              "Asselin-filter routine tra_atf_qco's ssh leg per that row's "
-              "own caveat ('the ssh leg is TAUTOLOGICAL'); ssh_atf itself "
-              "(sshwzv.F90, a DIFFERENT routine that time-filters ssh before "
-              "tra_atf_qco/dyn_atf_qco run) is never independently probed. "
-              "JUDGMENT: LOW-MODERATE leverage -- ssh is a slowly-evolving, "
-              "well-observed quantity and the tautological check above is a "
-              "weak but nonzero signal that the filtered value is "
-              "self-consistent.", rank=5),
+    CallEntry(361, "ssh_atf", COVERED_UNMEASURED,
+              '2026-07-30: gate row "ssh_atf" now exists (UNMEASURED '
+              'None/None) -- previously "ATF filter T/S/ssh" (COVERED, '
+              "exact) measures the TRACER Asselin-filter routine "
+              "tra_atf_qco's ssh leg per that row's own caveat ('the ssh leg "
+              "is TAUTOLOGICAL'); ssh_atf itself (sshwzv.F90, a DIFFERENT "
+              "routine that time-filters ssh before tra_atf_qco/dyn_atf_qco "
+              "run) is never independently probed. JUDGMENT (still "
+              "unmeasured): LOW-MODERATE leverage -- ssh is a "
+              "slowly-evolving, well-observed quantity and the tautological "
+              "check above is a weak but nonzero signal that the filtered "
+              "value is self-consistent."),
     CallEntry(362, "dom_qco_r3c (Nnn, filtered r3t_f/r3u_f/r3v_f)", COVERED,
               'covered by "dom_qco_r3c r3t"/"r3u/r3v" (same routine, filtered '
               "ssh input)."),
@@ -318,26 +333,30 @@ CALLS: list[CallEntry] = [
 
     # --- active tracers RHS, tiled loop (lines 386-402) ---
     CallEntry(386, "tra_asm_inc", WAIVED, "lk_asminc=.FALSE. at compile time -- see line 250."),
-    CallEntry(387, "tra_sbc", UNCOVERED,
-              "no gate row isolates the tracer surface-boundary-condition "
-              "RHS contribution on its own (the sbc() call at line 170 "
-              "gates utau/qsr/qns/sfx as FORCING FIELDS, not this routine's "
-              "application of them into ts(Krhs)). JUDGMENT: LOW leverage "
-              "-- it is a straight flux-into-tendency application with no "
-              "internal branching/scheme choice, and its own instrumentation "
+    CallEntry(387, "tra_sbc", COVERED_UNMEASURED,
+              '2026-07-30: gate row "tra_sbc" now exists (UNMEASURED '
+              "None/None) -- previously no gate row isolated the tracer "
+              "surface-boundary-condition RHS contribution on its own (the "
+              "sbc() call at line 170 gates utau/qsr/qns/sfx as FORCING "
+              "FIELDS, not this routine's application of them into "
+              "ts(Krhs)). JUDGMENT (still unmeasured): LOW leverage -- it is "
+              "a straight flux-into-tendency application with no internal "
+              "branching/scheme choice, and its own instrumentation "
               "(stp_dump_ts_krhs 'trasbc', line 393) exists precisely so a "
-              "future probe CAN close this gap cheaply.", rank=6),
-    CallEntry(394, "tra_qsr", UNCOVERED,
-              "penetrative solar radiation tendency; ln_traqsr=.true. for "
-              "DINO (&namsbc) and ln_qsr_2bd=.true. (&namtra_qsr, 2-band "
-              "light penetration). No gate row measures it, though the "
-              "underlying qsr FORCING FIELD is covered by 'sbc "
-              "(utau/qsr/qns/sfx)' -- that row certifies the surface qsr "
-              "value, not this routine's vertical redistribution of it. "
-              "JUDGMENT: MODERATE leverage -- a light-penetration bug would "
-              "bias the upper-ocean heat budget, but it has its own #1226 "
+              "future probe CAN close this gap cheaply."),
+    CallEntry(394, "tra_qsr", COVERED_UNMEASURED,
+              '2026-07-30: gate row "tra_qsr (shortwave penetration)" now '
+              "exists (UNMEASURED None/None) -- penetrative solar radiation "
+              "tendency; ln_traqsr=.true. for DINO (&namsbc) and "
+              "ln_qsr_2bd=.true. (&namtra_qsr, 2-band light penetration). "
+              "Previously no gate row measured it, though the underlying "
+              "qsr FORCING FIELD is covered by 'sbc (utau/qsr/qns/sfx)' -- "
+              "that row certifies the surface qsr value, not this routine's "
+              "vertical redistribution of it. JUDGMENT (still unmeasured): "
+              "MODERATE leverage -- a light-penetration bug would bias the "
+              "upper-ocean heat budget, but it has its own #1226 "
               "instrumentation (stp_dump_ts_krhs 'traqsr', line 397) ready "
-              "to be turned into a probe.", rank=4),
+              "to be turned into a probe."),
     CallEntry(398, "tra_isf", WAIVED, "ln_isf=.false. -- dead branch."),
     CallEntry(399, "tra_bbc", WAIVED, "ln_trabbc=.false. (namelist_ref default) -- dead branch."),
     CallEntry(400, "tra_bbl", WAIVED, "ln_trabbl=.false. -- dead branch."),
@@ -357,28 +376,32 @@ CALLS: list[CallEntry] = [
               "ln_traldf_triad=.false."),
     CallEntry(424, "tra_mfc", WAIVED, "ln_zdfmfc=.false. (namelist_ref default) -- dead branch."),
     CallEntry(425, "tra_osm", WAIVED, "ln_zdfosm=.false. -- dead branch."),
-    CallEntry(428, "tra_ldf -> traldf_iso_lap", UNCOVERED,
-              "np_lap_i selected because DINO &namtra_ldf sets "
-              "ln_traldf_iso=.true./ln_traldf_lap=.true. (traldf.F90:94-95). "
-              "The ahtu/ahtv COEFFICIENT INPUTS to this routine ARE gated "
-              '("ldftra ahtu/ahtv (Redi, nn_aht_ijk_t=20)"), but no row '
-              "certifies the TENDENCY traldf_iso_lap itself produces from "
-              "them (the isoneutral slope rotation + K33 term application). "
-              "JUDGMENT: MODERATE-HIGH "
-              "leverage -- this is the GM/Redi isoneutral diffusion "
-              "tendency, a first-order climate-relevant term, and the "
-              "wslpi/wslpj/uslp/vslp slope rows feeding it are THEMSELVES "
-              "still DEBT (not at bar), so an uncharacterized tendency-level "
-              "gate compounds an already-open residual.", rank=2),
-    CallEntry(430, "tra_zdf", UNCOVERED,
-              "no gate row measures the tracer implicit vertical-mixing "
-              "solve (the T/S analogue of the dyn_zdf gap above -- folds "
-              "avt/avs from zdf_tke into a tridiagonal solve producing "
-              "ts(Naa)). JUDGMENT: HIGH leverage -- same reasoning as "
-              "dyn_zdf: this is the FINAL tracer-state-producing step every "
-              "timestep, and the #1226 instrumentation (stp_dump_ts_krhs "
-              "'trazdf', line 435) exists specifically to support closing "
-              "this gap.", rank=1),
+    CallEntry(428, "tra_ldf -> traldf_iso_lap", COVERED_UNMEASURED,
+              '2026-07-30: gate row "traldf_iso_lap tendency" now exists '
+              "(UNMEASURED None/None) -- np_lap_i selected because DINO "
+              "&namtra_ldf sets ln_traldf_iso=.true./ln_traldf_lap=.true. "
+              "(traldf.F90:94-95). The ahtu/ahtv COEFFICIENT INPUTS to this "
+              'routine ARE gated ("ldftra ahtu/ahtv (Redi, '
+              'nn_aht_ijk_t=20)"), but no row certifies the TENDENCY '
+              "traldf_iso_lap itself produces from them (the isoneutral "
+              "slope rotation + K33 term application). JUDGMENT (still "
+              "unmeasured): MODERATE-HIGH leverage -- this is the GM/Redi "
+              "isoneutral diffusion tendency, a first-order "
+              "climate-relevant term, and the wslpi/wslpj/uslp/vslp slope "
+              "rows feeding it are THEMSELVES still DEBT (not at bar), so "
+              "an uncharacterized tendency-level gate compounds an "
+              "already-open residual."),
+    CallEntry(430, "tra_zdf", COVERED_UNMEASURED,
+              '2026-07-30: gate row "tra_zdf (tracer implicit vertical '
+              'solve)" now exists (UNMEASURED None/None) -- previously no '
+              "gate row measured the tracer implicit vertical-mixing solve "
+              "(the T/S analogue of the dyn_zdf gap above -- folds avt/avs "
+              "from zdf_tke into a tridiagonal solve producing ts(Naa)). "
+              "JUDGMENT (still unmeasured): HIGH leverage -- same reasoning "
+              "as dyn_zdf: this is the FINAL tracer-state-producing step "
+              "every timestep, and the #1226 instrumentation "
+              "(stp_dump_ts_krhs 'trazdf', line 435) exists specifically to "
+              "support closing this gap."),
     CallEntry(436, "tra_npc", WAIVED, "ln_zdfnpc=.false. (namelist_ref default) -- dead branch."),
 
     # --- finalize: boundary conditions, filtering, restart (lines 457-482) ---
@@ -434,7 +457,7 @@ def _validate(calls: list[CallEntry]) -> list[str]:
     UNCOVERED entry must carry a rank (so 'UNCOVERED' can never silently mean
     'forgot to rank it')."""
     errors = []
-    valid = {COVERED, WAIVED, UNCOVERED}
+    valid = {COVERED, WAIVED, UNCOVERED, COVERED_UNMEASURED}
     for i, c in enumerate(calls):
         if c.disposition not in valid:
             errors.append(f"entry {i} ({c.routine!r}): invalid disposition "
@@ -451,12 +474,13 @@ def _validate(calls: list[CallEntry]) -> list[str]:
 def _print_table(calls: list[CallEntry]) -> None:
     print(f"stp_MLF call-graph coverage  ({STPMLF})")
     print(f"total CALLs enumerated: {len(calls)}\n")
-    by_disp = {COVERED: 0, WAIVED: 0, UNCOVERED: 0}
+    by_disp = {COVERED: 0, WAIVED: 0, UNCOVERED: 0, COVERED_UNMEASURED: 0}
     for c in calls:
         by_disp[c.disposition] += 1
-    print(f"  COVERED   : {by_disp[COVERED]}")
-    print(f"  WAIVED    : {by_disp[WAIVED]}")
-    print(f"  UNCOVERED : {by_disp[UNCOVERED]}\n")
+    print(f"  COVERED             : {by_disp[COVERED]}")
+    print(f"  COVERED (row UNMEASURED) : {by_disp[COVERED_UNMEASURED]}")
+    print(f"  WAIVED              : {by_disp[WAIVED]}")
+    print(f"  UNCOVERED           : {by_disp[UNCOVERED]}\n")
 
     print(f"{'line':>5}  {'disp':<10} routine")
     print("-" * 100)
