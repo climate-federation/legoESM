@@ -110,3 +110,50 @@ def test_main_reports_waived_count_and_does_not_gate_exit_on_waiver_alone(capsys
     # the waiver), but the waiver itself must not be what is blocking it --
     # proven by the classify()-level check above, not by this exit code alone.
     assert rc in (0, 1)
+
+
+def test_unit_call_harness_rows_no_longer_phantom_provenance():
+    """The #1226 unit-call-harness phantom-provenance sweep re-cited three
+    rows' PROVENANCE_SCRIPT away from a script that does not exist:
+
+    - "dyn_adv ZAD" / "dom_qco_r3c r3t": now cite the committed
+      ``unit_harness/run_dyn_zad_probe.py`` / ``run_dom_qco_r3c_probe.py``
+      drivers (this task) instead of the never-committed
+      ``probe_1226_keg_zad_split.py`` / ``probe_1226_r2_item4_domqco.py``.
+    - "dyn_ldf (dynldf_lev_lap) u"/"v": now cite ``ww_inheritance_walk.py``
+      (which genuinely exists and measures this row's CURRENT, corrected
+      tuple via ``measure_dyn_ldf_corrected``) instead of the never-committed
+      ``probe_1226_r2_item2_dynldf.py`` -- a stale-citation bug this sweep
+      caught (the row's tuple had already been corrected by a concurrent
+      session, but PROVENANCE_SCRIPT still pointed at the old phantom name).
+
+    This is a synthetic-violation-shaped check in the sense that it proves
+    the fix is REAL: these five rows must NOT appear in
+    ``check_provenance_scripts_exist()``'s failing list any more.
+    """
+    mod = _load_module()
+    fixed_rows = {
+        "dyn_adv ZAD",
+        "dom_qco_r3c r3t",
+        "dyn_ldf (dynldf_lev_lap) u",
+        "dyn_ldf (dynldf_lev_lap) v",
+    }
+    failing = dict(mod.check_provenance_scripts_exist())
+    for term in fixed_rows:
+        assert term not in failing, (
+            f"{term!r} still flagged as phantom-provenance: {failing.get(term)!r}")
+    # "dom_qco_r3c r3u/r3v" is DELIBERATELY left phantom -- no legoESM
+    # production function computes the u-/v-face ratio (pre-impl search
+    # found none), so citing a real script here would be dishonest.
+    assert "dom_qco_r3c r3u/r3v" in failing
+
+
+def test_unit_call_harness_scripts_exist_on_disk():
+    """The two new unit-call-harness probe files this sweep committed are
+    real files, not just PROVENANCE_SCRIPT string literals (a typo in the
+    dict would still "look" fixed by eye but fail check_provenance_scripts_
+    exist -- assert the actual path resolves, independent of that check)."""
+    scripts_dir = SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"
+    assert (scripts_dir / "unit_harness" / "run_dyn_zad_probe.py").is_file()
+    assert (scripts_dir / "unit_harness" / "run_dom_qco_r3c_probe.py").is_file()
+    assert (scripts_dir / "ww_inheritance_walk.py").is_file()

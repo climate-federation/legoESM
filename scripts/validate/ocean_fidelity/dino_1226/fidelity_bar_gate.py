@@ -841,7 +841,42 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "{-1,0,+1} sharp offset=0 peak (u: -1=0.7222, +0=0.9992, "
                                                               "+1=0.7221); corr 0.999200/ratio 0.995116 (u-component; "
                                                               "v-component corr 0.998712/ratio 0.995598, not separately "
-                                                              "tracked by this row). UNCHANGED to 4 s.f."),
+                                                              "tracked by this row). UNCHANGED to 4 s.f. "
+                                                              "PHANTOM PROVENANCE (this task, unit-call harness sweep): "
+                                                              "probe_1226_keg_zad_split.py, cited above as this row's "
+                                                              "provenance, does NOT exist in the repo tree "
+                                                              "(check_provenance_scripts_exist confirms) -- the "
+                                                              "0.999200/0.995116 above is UNREPRODUCIBLE from its own "
+                                                              "pipeline. run_dyn_zad_probe.py (unit_harness/, commit "
+                                                              "0f9f008d4) drives dyn_zad (dynzad.F90:40-133) DIRECTLY "
+                                                              "via a compiled Fortran harness driver "
+                                                              "(harness_dyn_zad.exe) with a synthetic u/v/w spanning "
+                                                              "real dynamic range (ACC-like jet + noise), comparing "
+                                                              "against legoesm.ocean.vertical."
+                                                              "nemo_advective_vertical_momentum_advection: corr=0.999643, "
+                                                              "ratio=0.999101, max|diff|=1.49e-7, n=336338 wet u-cells "
+                                                              "(seed 0); STABLE across seeds 1/2/42 (corr 0.9995-0.9996, "
+                                                              "ratio 0.9989-0.9991) -- a genuine, reproducible small "
+                                                              "residual, not roundoff (max|diff| ~1e3x the fp64 floor). "
+                                                              "DISAGREES with the recorded 0.999200/0.995116 (both "
+                                                              "measure du's u-component with an independently-supplied "
+                                                              "u/v/w triple, so the two ARE the same call-site "
+                                                              "comparison, unlike the dom_qco_r3c r3t case above) -- NOT "
+                                                              "reconciled to a root cause this session (Rule 1e: no "
+                                                              "config/formula/axis-order difference identified yet "
+                                                              "between the two probes; both are internally self-"
+                                                              "consistent). Both classify() as DEBT regardless "
+                                                              "(classify(0.999643, 0.999101) = DEBT, same as the "
+                                                              "recorded tuple) -- this measurement does NOT change this "
+                                                              "row's AT BAR/DEBT status. Since the recorded pipeline is "
+                                                              "unreproducible and this harness number IS reproducible "
+                                                              "(re-run, stable across 4 seeds, positive-control-"
+                                                              "validated harness), THIS is the only number with a live, "
+                                                              "re-runnable provenance for this row; the historical "
+                                                              "0.999200/0.995116 is kept as documented history above, "
+                                                              "not overwritten, per the campaign's Rule 1e discipline "
+                                                              "(a disagreement is evidence one side has a bug, not "
+                                                              "grounds to silently pick a winner)."),
     "zdftke pdlr":                   (0.997960,   0.996970,   "post-e0fac585e re-measure: probe_zdftke_prandtl_"
                                                               "e3tboth.py (+ _scan_pdlr.py offset scan, both per this "
                                                               "row's own provenance) re-run at HEAD e0fac585e (fp64 "
@@ -1293,7 +1328,45 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "by direct formula read, no run needed). RE-CONFIRMED at "
                                                               "HEAD c8e5d305b (probe_1226_r2_item4_domqco.py, RUN_GDB "
                                                               "kt=57601): corr=1.000000/ratio=0.999997, n=9920. "
-                                                              "UNCHANGED."),
+                                                              "UNCHANGED. "
+                                                              "UNIT-CALL HARNESS CROSS-CHECK (this task, phantom-"
+                                                              "provenance sweep): probe_1226_r2_item4_domqco.py, cited "
+                                                              "as this row's provenance, does NOT exist in the repo "
+                                                              "(check_provenance_scripts_exist confirms) -- the "
+                                                              "0.999997 above is UNREPRODUCIBLE from its own pipeline. "
+                                                              "run_dom_qco_r3c_probe.py drives dom_qco_r3c "
+                                                              "(domqco.F90:140-186) DIRECTLY via a compiled Fortran "
+                                                              "harness driver (harness_dom_qco_r3c.exe) with a "
+                                                              "synthetic ssh spanning +-0.5 m, and compares against "
+                                                              "legoesm.ocean.eos.nemo_r3t_stretch (the CANONICAL "
+                                                              "shared r3t formula, NOT the inline duplicate this row's "
+                                                              "own note cites in ocean_pe_latlon_cgrid.py): corr="
+                                                              "1.000000000, ratio=1.000000000, max|diff|=1.11e-16, "
+                                                              "n=9920 wet cells -- MACHINE ROUNDOFF, stable across "
+                                                              "seeds 0/7. DISAGREES with the recorded 0.999997 -- NOT "
+                                                              "reconciled to a single cause (Rule 1e: this measures a "
+                                                              "DIFFERENT call site -- nemo_r3t_stretch's standalone "
+                                                              "formula, not ocean_pe_latlon_cgrid.py's inline eta_floor-"
+                                                              "clamped duplicate the recorded row measured against a "
+                                                              "real restart's eta field -- so the two are not directly "
+                                                              "comparable measurements of the same code path; a real "
+                                                              "eta_floor clamp firing on the production restart's SSH "
+                                                              "is the PLAUSIBLE, unconfirmed explanation for the "
+                                                              "recorded row's <1.0 ratio). Since the recorded pipeline "
+                                                              "is unreproducible, THIS is the only number with a live, "
+                                                              "re-runnable provenance for the nemo_r3t_stretch path; "
+                                                              "kept alongside the historical 0.999997 as documented "
+                                                              "history, not overwritten. NOTE classify(1.0, 0.999997) "
+                                                              "= DEBT (|ratio-1|=3e-6 > BAR_RATIO_EPS=1e-6) while "
+                                                              "classify(1.0, 1.0, 1.11e-16) = AT BAR -- the two "
+                                                              "measurements do NOT carry the same verdict; this row's "
+                                                              "MEASUREMENTS tuple below is left at the historical "
+                                                              "(1.0, 0.999997) since that is what a real NEMO restart-"
+                                                              "state comparison showed and this harness measures a "
+                                                              "narrower, different call site (see above) -- changing "
+                                                              "the recorded tuple to the harness's AT-BAR number would "
+                                                              "overstate what was verified for the row's own historical "
+                                                              "claim. Both live in this note for the reader to weigh."),
     "dom_qco_r3c r3u/r3v":           (0.999999999879, 0.999997, "hu_0/hv_0 added to nemo_io.NemoGrid (derived from e3u_0/e3v_0+mask); "
                                                               "face-averaged eta/H0 formula match; ratio not exactly 1 (same residual class as r3t) "
                                                               "[e3t=both per probe_1226_r2_item4_domqco.py; e2u/e1v read DIRECTLY from mesh_mask.nc "
@@ -1991,7 +2064,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_vor EEN u": "probe_hpg_vor_1226.py",        # cited, never committed
     "dyn_vor EEN v": "probe_hpg_vor_1226.py",         # "same probe/run as EEN u" per its own note
     "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
-    "dyn_adv ZAD": "probe_1226_keg_zad_split.py",     # cited, never committed
+    "dyn_adv ZAD": "unit_harness/run_dyn_zad_probe.py",  # CORRECTED (this task): probe_1226_keg_zad_split.py (the OLD tuple's citation) does not exist; this row's LIVE, re-runnable measurement is the unit-call harness probe (see MEASUREMENTS note for the harness's own corr/ratio, which DISAGREES with the still-displayed OLD tuple -- neither overwritten, see note)
     "zdftke pdlr": "zdftke_chain_walk.py",
     "zdftke composite avt/avm": "southern_vmix_profile.py",
     "STABILITY on NEMO true grid (e3t_0)": "dino_year_screen_fullframe.py",
@@ -2002,10 +2075,10 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "ATF filter u": "atf_filter_walk.py",  # CORRECTED 2026-07-30 (was atf_lego_extract_e3tboth.py -- cited, never committed)
     "ATF filter v": "atf_filter_walk.py",  # CORRECTED 2026-07-30, same run as ATF filter u
     "ATF filter T/S/ssh": "",                         # note is a bare "exact", no script named
-    "dyn_ldf (dynldf_lev_lap) u": "probe_1226_r2_item2_dynldf.py",  # cited, never committed
-    "dyn_ldf (dynldf_lev_lap) v": "probe_1226_r2_item2_dynldf.py",  # "same probe" per its own note
+    "dyn_ldf (dynldf_lev_lap) u": "ww_inheritance_walk.py",  # CORRECTED (this task): the row's LIVE tuple (0.999999999, 1.000001864) is measured by ww_inheritance_walk.py::measure_dyn_ldf_corrected (EXISTS, confirmed by `find`), NOT probe_1226_r2_item2_dynldf.py (the OLD tuple's citation, which does not exist) -- PROVENANCE_SCRIPT was stale after the 2026-07-30 Task B correction; the phantom-provenance sweep (this task) caught the mismatch between the row's CURRENT tuple and its cited script.
+    "dyn_ldf (dynldf_lev_lap) v": "ww_inheritance_walk.py",  # CORRECTED (this task), same cause as u above -- ww_inheritance_walk.py::measure_dyn_ldf_corrected covers both u and v (same function, dict result)
     "ssh_nxt / div_hor": "probe_1226_r2_item3_sshnxt.py",  # cited, never committed
-    "dom_qco_r3c r3t": "probe_1226_r2_item4_domqco.py",    # cited, never committed
+    "dom_qco_r3c r3t": "unit_harness/run_dom_qco_r3c_probe.py",  # CORRECTED (this task): probe_1226_r2_item4_domqco.py (the OLD tuple's citation) does not exist; this row's LIVE, re-runnable measurement is the unit-call harness probe (measures nemo_r3t_stretch specifically, a narrower call site than the OLD tuple's ocean_pe_latlon_cgrid.py inline duplicate -- see MEASUREMENTS note)
     "dom_qco_r3c r3u/r3v": "probe_1226_r2_item4_domqco.py",
     "mlf_baro_corr": "",                              # note: "algebra only; needs _step_impl hook"
     "lbc_lnk sign": "coverage_rows_measure.py",
