@@ -225,6 +225,24 @@ class DINOConfig:
     # ``nemo_dino_kamm_mlf``-family exactness presets set "nemo_live".
     # Unknown value raises (dispatch hardening).
     surface_flux_divisor: str = "static"
+    # NEMO traqsr.F90:665-712 qsr_2BD LIVE gdepw ladder (#1226, LADDER FAMILY
+    # 5th site alongside compute_ocean_rho / nemo_bn2_live_ladders /
+    # surface_flux_divisor): qsr_2BD evaluates the two-band absorption profile
+    # at the LIVE (z*-stretched) w-level depth ``gdepw(k+1,Kmm) = gdepw_0*
+    # (1+r3t)`` (domzgr_substitute.h90:139, r3t=ssh/ht_0 domqco.F90:160) --
+    # legoESM's shortwave_penetration_tendency instead used the STATIC
+    # ``z_coord.z_half_ref``, measured off by all-levels pointwise-|rel|
+    # err_norm median 2.022e-05 on the RUN_GDB kt=57601 twin
+    # (scripts/validate/ocean_fidelity/dino_1226/tra_sbc_tem_piece_decompose.py
+    # Part 2b). "static" (DEFAULT, bit-identical legacy) keeps the fixed
+    # reference ladder -- every existing DINO run is unaffected. "nemo_live"
+    # feeds shortwave_penetration_tendency's z_half_stretch= the SAME
+    # eos.nemo_r3t_stretch factor surface_flux_divisor="nemo_live" uses
+    # (reused verbatim -- not re-derived), shrinking the residual to
+    # err_norm median 4.979e-07 (~40x, below the c_p-truncation floor).
+    # Only the ``nemo_dino_kamm``/``nemo_dino_kamm_mlf``-family exactness
+    # presets set "nemo_live". Unknown value raises (dispatch hardening).
+    shortwave_penetration_ladder: str = "static"
     # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
     # / zdf_baroclinic_only docstrings for the full transcription. Threaded
     # 1:1 (same field names) to the model config. Default False on both =
@@ -470,11 +488,13 @@ class DINOConfig:
     # sees it). None (default, BIT-IDENTICAL) keeps kappaM_max=cfg.K_conv;
     # the kamm card sets this to float('inf') (no ceiling).
     tke_kappaM_max: float | None = None           # inf = NEMO (no ceiling)
-    # T4 — Burchard now×before shear (zdfsh2.F90:44-92). Requires
-    # outer_integrator="leapfrog" (construction raises otherwise); the FE
-    # kamm card keeps "squared_centered" (FE-frame fidelity ceiling — no
-    # before-velocity state, same class as this card's other FE-frame notes).
-    tke_shear_production: str = "squared_centered"  # "nemo_burchard" = MLF-only
+    # T4 — Burchard now×before shear (zdfsh2.F90:44-92), extended #1226
+    # sh2_walk.py Candidate E/F to the FULL face-native transcription
+    # (zdfsh2.F90:78-94). Requires outer_integrator="leapfrog" (construction
+    # raises otherwise); the FE kamm card keeps "squared_centered" (FE-frame
+    # fidelity ceiling — no before-velocity state, same class as this
+    # card's other FE-frame notes).
+    tke_shear_production: str = "squared_centered"  # "nemo_face_native" = MLF-only
     # T8/T13 — rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri + Langmuir PE.
     # Requires outer_integrator="leapfrog" (construction raises otherwise).
     tke_n2_time_level: str = "step_entry"          # "nemo_before" = MLF-only
@@ -1091,6 +1111,17 @@ DINO_RECIPES: dict[str, dict] = {
         # kappa (aeiu) amplitude bias (ratio 1.000608 at corr=1.0), traced to
         # zRo = 0.4*zn/|f| (linear in 1/omega) then squared into zaeiw.
         "omega": _NEMO_CONSTANTS.Omega,
+        # NEMO's exact seawater specific heat (eosbn2.F90:1899 rcp =
+        # 3991.86795711963_wp; phycst.F90:118 notes rho0/rcp are defined in
+        # eosbn2, not phycst) -- DINOConfig.c_p's paper-Table-1 default
+        # (3991.86) TRUNCATES this at 6 sig figs (relative error 1.9933e-06).
+        # #1226 tra_sbc_tem_piece_decompose.py: this truncation was the ENTIRE
+        # tra_sbc tem residual (err_norm median 9.657e-07 -> 0.0 bit-identical
+        # once NEMO's exact rcp is used); salinity has no rcp factor
+        # (trasbc.F90:137) so it was already exact. Same NEMO_CONSTANTS_CONFIG
+        # value already used by the Veros/OMIP-faithful paths
+        # (constants_config.py:56, 67) -- reused here, not re-derived.
+        "c_p": _NEMO_CONSTANTS.c_sw,
         # #1226: NEMO's usr_def_hgr.F90 DINO grid sets the T/u-face
         # meridional cell height EQUAL to the zonal width at every row
         # (pe1t = pe2t), a deliberate closed-form isotropic-Mercator
@@ -1203,6 +1234,9 @@ DINO_RECIPES: dict[str, dict] = {
         # trasbc.F90:152-153 live top-cell divisor (#1226) -- see
         # DINOConfig.surface_flux_divisor docstring.
         "surface_flux_divisor": "nemo_live",
+        # traqsr.F90:665-712 qsr_2BD live gdepw ladder (#1226) -- see
+        # DINOConfig.shortwave_penetration_ladder docstring.
+        "shortwave_penetration_ladder": "nemo_live",
     },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
@@ -1323,7 +1357,15 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # card (which has no before-state and keeps the FE-frame fidelity
     # ceiling: squared_centered shear + step_entry rn2b, the same class as
     # this card's other FE-frame notes).
-    "tke_shear_production": "nemo_burchard",  # zdfsh2 now×before shear
+    # #1226 sh2_walk.py Candidate E/F: "nemo_face_native" supersedes the
+    # earlier "nemo_burchard" (time-level-only) fix -- the walk found the
+    # T-point-collapse-before-differencing geometry, not the now×before
+    # cross term, is the DOMINANT gap (corr 0.982/ratio 0.975 vs the
+    # squared-centered form's undershoot; the cross term alone moved
+    # corr/ratio by <0.002 on top of the geometry fix). Requires
+    # outer_integrator="leapfrog" (construction raises otherwise) and a
+    # per-level wet mask (z_coord.is_active) -- both hold on this card.
+    "tke_shear_production": "nemo_face_native",  # zdfsh2 face-native shear
     "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
 }
 
@@ -3417,12 +3459,32 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # so total heat is conserved (eq 8 + eq 10 = A_θ(T*-T)).
     jacobian = jnp.ones_like(state.eta.data)
     sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
+    # traqsr.F90:665-712 qsr_2BD LIVE gdepw ladder (#1226, DINOConfig.
+    # shortwave_penetration_ladder docstring above): "static" (default)
+    # passes z_half_stretch=None, bit-identical to before this fix.
+    # "nemo_live" feeds the SAME eos.nemo_r3t_stretch factor
+    # surface_flux_divisor="nemo_live" uses above -- an INDEPENDENT gate
+    # (traqsr.F90 is a separate NEMO routine from trasbc.F90), so its own
+    # stretch is computed here rather than reusing the "stretch" local from
+    # the surface_flux_divisor branch (which is only bound when THAT field
+    # is also "nemo_live").
+    ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
+    if ladder == "static":
+        z_half_stretch = None
+    elif ladder == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        z_half_stretch = nemo_r3t_stretch(z_coord, state.eta.data, state.H_bathy.data)
+    else:
+        raise ValueError(
+            f"Unknown DINOConfig.shortwave_penetration_ladder {ladder!r}: "
+            "expected 'static' or 'nemo_live'.")
     dT_dt_sw = shortwave_penetration_tendency(
         sw_down=Q_sr_2d,
         z_coord_dz_ref=z_coord.dz_ref,
         z_coord_z_half_ref=z_coord.z_half_ref,
         jacobian=jacobian, config=sw_cfg,
         rho_0=cfg.rho_0, c_sw=cfg.c_p,
+        z_half_stretch=z_half_stretch,
     )
 
     # Combine: forward-Euler tracer update with all tendencies summed.
@@ -3430,8 +3492,8 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # Euler at given dt — stable for any dt). Mask land everywhere.
     # dT_dt_top/dS_dt_top carry the (possibly live-rescaled) restoring +
     # Q_sr-subtraction tendency at level 0 only; dT_dt_sw is the full-column
-    # Jerlov penetration (unaffected by surface_flux_divisor -- traqsr.F90
-    # is a separate NEMO routine, out of this fix's scope).
+    # Jerlov penetration, independently gated by shortwave_penetration_ladder
+    # (traqsr.F90 is a separate NEMO routine from trasbc.F90/surface_flux_divisor).
     mask3 = cell_mask[..., None]
     dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top)
     dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top)

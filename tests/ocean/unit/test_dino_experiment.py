@@ -2204,3 +2204,244 @@ class TestSurfaceFluxDivisor:
         np.testing.assert_array_equal(
             np.asarray(out_static.T.data[..., 1:]),
             np.asarray(out_live.T.data[..., 1:]))
+
+
+# ---------------------------------------------------------------------
+# #1226 c_p truncation (eosbn2.F90:1899 rcp)
+# ---------------------------------------------------------------------
+
+class TestCpNemoExact:
+    """DINOConfig.c_p paper-Table-1 default (3991.86) truncates NEMO's own
+    ``rcp = 3991.86795711963_wp`` (eosbn2.F90:1899, phycst.F90:118 notes
+    rho0/rcp are defined in eosbn2, not phycst) at 6 sig figs -- the ENTIRE
+    tra_sbc tem residual (#1226 tra_sbc_tem_piece_decompose.py), since
+    salinity's own conversion (trasbc.F90:137) has no rcp factor at all.
+    """
+
+    def test_default_cp_is_paper_table_value_not_nemo_exact(self):
+        # The plain (non-NEMO-card) default stays the paper's own truncated
+        # Table 1 value -- unaffected by this fix, exactly like
+        # test_default_construct above.
+        cfg = DINOConfig()
+        assert cfg.c_p == pytest.approx(3991.86)
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        assert cfg.c_p != NEMO_RCP_EXACT
+
+    def test_nemo_dino_kamm_recipe_uses_nemo_exact_rcp(self):
+        """The NEMO-fidelity card (nemo_dino_kamm / _mlf) must pin c_p to
+        NEMO's own eosbn2.F90:1899 rcp EXACTLY, not the paper's truncation --
+        same NEMO_CONSTANTS_CONFIG.c_sw value already used by g/omega on
+        this card (constants_config.py:56, 67)."""
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            cfg = dino.dino_config_for_recipe(recipe)
+            assert cfg.c_p == NEMO_RCP_EXACT, (recipe, cfg.c_p)
+
+    def test_tra_sbc_tem_reconstruction_bit_identical_with_nemo_exact_cp(self):
+        """Independent in-test transcription of trasbc.F90:136,152-153
+        (sbc_tsc(jp_tem) = r1_rho0_rcp*qns; pts(Krhs) += zfact*(sbc_tsc_b+
+        sbc_tsc)/e3t(Kmm,1)) at a synthetic qns/sbc_hc_b/dz_0: using the
+        NEMO card's c_p (NEMO_CONSTANTS_CONFIG.c_sw) reproduces a
+        reconstruction built directly from eosbn2.F90's own literal
+        bit-for-bit; using the paper's truncated default does NOT (this is
+        the PRE-FIX failure -- run with the paper default it does not match
+        to machine precision, matching #1226's measured 9.657e-07
+        err_norm)."""
+        rho_0 = 1026.0
+        qns = np.array([37.4, -12.9, 0.0, 121.7])       # synthetic W/m^2
+        sbc_hc_b = np.array([1.1e-5, -3.2e-6, 0.0, 4.0e-5])  # synthetic K*m/s
+        dz_0 = np.array([10.0, 9.5, 10.0, 8.7])           # synthetic live e3t
+
+        def reconstruct(c_p):
+            r1_rho0_rcp = 1.0 / (rho_0 * c_p)
+            this_step_rate = r1_rho0_rcp * qns
+            return 0.5 * (sbc_hc_b + this_step_rate) / dz_0
+
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        cfg_nemo = dino.dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert cfg_nemo.c_p == NEMO_RCP_EXACT
+
+        recon_nemo_card = reconstruct(cfg_nemo.c_p)
+        recon_exact = reconstruct(NEMO_RCP_EXACT)
+        np.testing.assert_array_equal(recon_nemo_card, recon_exact)
+
+        recon_paper_default = reconstruct(DINOConfig().c_p)
+        max_diff = float(np.max(np.abs(recon_paper_default - recon_exact)))
+        assert max_diff > 0.0, (
+            "paper Table-1 c_p truncation should NOT reconstruct bit-"
+            "identically -- if this is 0.0 the truncation stopped mattering "
+            "and the #1226 finding needs re-checking")
+
+
+# ---------------------------------------------------------------------
+# #1226 traqsr.F90:665-712 qsr_2BD live gdepw ladder
+# (shortwave_penetration_ladder="static"/"nemo_live")
+# ---------------------------------------------------------------------
+
+class TestShortwavePenetrationLadder:
+    """DINOConfig.shortwave_penetration_ladder: NEMO's qsr_2BD evaluates the
+    two-band absorption profile at the LIVE (z*-stretched) gdepw(Kmm) =
+    gdepw_0*(1+r3t) (domzgr_substitute.h90:139, r3t=ssh/ht_0 domqco.F90:160)
+    -- legoESM's default uses the STATIC z_coord.z_half_ref. "nemo_live"
+    rescales both the interface depths and the layer thickness by the same
+    stretch (eos.nemo_r3t_stretch), matching traqsr.F90's single live e3t.
+    """
+
+    def _fixture(self, eta_value, cfg=None):
+        from legoesm.core.field import Field
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = cfg if cfg is not None else DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        eta = jnp.full_like(st.eta.data, eta_value) * st.land_mask.data
+        st = st._replace(eta=Field(
+            data=eta, name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
+        return g, z, st, frc
+
+    def test_unknown_ladder_raises(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), shortwave_penetration_ladder="bogus")
+        g, z, st, frc = self._fixture(5.0, cfg)
+        with pytest.raises(ValueError, match="shortwave_penetration_ladder"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+    def test_static_is_bit_identical_to_legacy(self):
+        """Default (no opt-in): byte-identical to the pre-fix behaviour at
+        every eta -- the applicator passes z_half_stretch=None, which
+        shortwave_penetration_tendency treats identically to not having the
+        new kwarg at all. Isolate the SW-penetration piece (levels 1+, which
+        the restoring term never reaches) so this is a clean test of ONLY
+        the ladder gate, independent of surface_flux_divisor/eta-dependent
+        restoring terms."""
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = DINOConfig()
+        assert cfg.shortwave_penetration_ladder == "static"
+        g, z, st, frc = self._fixture(7.3, cfg)
+        out = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+        g0, z0, st0, frc0 = self._fixture(0.0, cfg)
+        out0 = apply_dino_lat_lon_surface_forcing(st0, frc0, z0, cfg, 2700.0)
+        max_diff_T_below = float(jnp.max(jnp.abs(
+            out.T.data[..., 1:] - out0.T.data[..., 1:])))
+        assert max_diff_T_below == 0.0, max_diff_T_below
+
+    def test_nemo_live_matches_independent_transcription(self):
+        """Live ladder: assert the FULL-COLUMN SW penetration tendency
+        equals an INDEPENDENT in-test transcription of traqsr.F90's
+        qsr_2BD formula (rn_abs*exp(-gdepw*r1_si0) + (1-rn_abs)*
+        exp(-gdepw*r1_si1), traqsr.F90:665-712) evaluated at the LIVE
+        r3t-stretched gdepw -- built from scratch here, never calling
+        shortwave_penetration_tendency.
+
+        PRE-FIX (shortwave_penetration_ladder field did not exist / the
+        applicator always used the static z_half_ref): this test's
+        "nemo_live" branch is unreachable with a bare DINOConfig(), and the
+        static-ladder tendency does not match this transcription once eta
+        is nonzero (measured #1226 all-levels err_norm median 2.022e-05).
+        """
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        from legoesm.ocean.physics.shortwave_penetration import JERLOV_TYPES
+        import dataclasses
+
+        eta_value = 15.0  # a few metres of ssh -> O(1e-3) r3t on H~2-4 km
+        dt = 2700.0
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(
+            cfg_static, shortwave_penetration_ladder="nemo_live")
+
+        g, z, st, frc = self._fixture(eta_value, cfg_static)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, dt)
+
+        # Independent transcription: qsr_2BD's own two-band formula at the
+        # LIVE gdepw ladder (traqsr.F90:665-712), reading only z_half_ref,
+        # dz_ref, eta, H_bathy, and the Jerlov params -- no call into
+        # shortwave_penetration_tendency at all.
+        params = JERLOV_TYPES[cfg_static.jerlov_water_type]
+        R, zeta1, zeta2 = params.R, params.zeta1, params.zeta2
+        stretch = np.asarray(nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data))
+        z_half_static = np.asarray(z.z_half_ref)          # (nlev+1,), negative
+        z_half_live = z_half_static[None, None, :] * stretch[:, :, None]
+        I_half = R * np.exp(z_half_live / zeta1) + (1.0 - R) * np.exp(z_half_live / zeta2)
+        frac = I_half[:, :, :-1] - I_half[:, :, 1:]
+        frac[:, :, -1] += I_half[:, :, -1]
+        dz_live = np.asarray(z.dz_ref)[None, None, :] * stretch[:, :, None]
+        Q_sr = np.asarray(frc["Q_sr_2d"])
+        expect_dT_dt_sw = Q_sr[:, :, None] * frac / (cfg_static.rho_0 * cfg_static.c_p * dz_live)
+        expect_dT_dt_sw = np.where(dz_live > 0.0, expect_dT_dt_sw, 0.0)
+
+        # Independent hand transcription of the applicator's OWN restoring
+        # contribution at level 0 (same analytic implicit-Euler algebra as
+        # TestSurfaceFluxDivisor.test_nemo_live_matches_independent_
+        # transcription above; surface_flux_divisor stays "static" on
+        # cfg_live -- an INDEPENDENT gate -- so dz_0 here is the plain
+        # static scalar, not the live-divisor array) to isolate the
+        # SW-penetration piece under test.
+        dz_0 = float(z.dz_ref[0])
+        rho_0, c_p = cfg_static.rho_0, cfg_static.c_p
+        T_top = np.asarray(st.T.data[..., 0])
+        T_star = np.asarray(frc["T_star_2d"])
+        tau_T = rho_0 * c_p * dz_0 / cfg_static.A_theta
+        surf_dT = -(T_top - T_star) / (tau_T + dt) - Q_sr / (rho_0 * c_p * dz_0)
+        expect_dT_top_total = dt * (surf_dT + expect_dT_dt_sw[..., 0])
+
+        wet = np.asarray(st.land_mask.data) > 0.5
+        got_dT_top = np.asarray(out_live.T.data[..., 0] - st.T.data[..., 0])
+        np.testing.assert_allclose(
+            got_dT_top[wet], expect_dT_top_total[wet], rtol=1e-9, atol=1e-14)
+
+        # Levels 1+ are the pure SW-penetration deposit (no restoring
+        # contribution reaches them at all).
+        got_dT_below = np.asarray(out_live.T.data[..., 1:] - st.T.data[..., 1:])
+        expect_dT_below = dt * expect_dT_dt_sw[..., 1:]
+        np.testing.assert_allclose(
+            got_dT_below[wet], expect_dT_below[wet], rtol=1e-9, atol=1e-14)
+
+    def test_below_water_surface_flux_divisor_untouched(self):
+        """shortwave_penetration_ladder is independent of
+        surface_flux_divisor -- switching the ladder must NOT change the
+        level-0 restoring tendency (only surface_flux_divisor touches it)."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_static = DINOConfig()
+        cfg_ladder_live = dataclasses.replace(
+            cfg_static, shortwave_penetration_ladder="nemo_live")
+        g, z, st, frc = self._fixture(12.0, cfg_static)
+        out_static = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_static, 2700.0)
+        out_ladder_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_ladder_live, 2700.0)
+        # Isolate the restoring-only piece: subtract each run's OWN
+        # level-0 SW deposit (which legitimately differs between the two
+        # ladders) rather than asserting level-0 equality directly.
+        from legoesm.ocean.physics.shortwave_penetration import (
+            shortwave_penetration_tendency, ShortwavePenetrationConfig)
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        jacobian = jnp.ones_like(st.eta.data)
+        sw_cfg = ShortwavePenetrationConfig(water_type=cfg_static.jerlov_water_type)
+        dT_dt_sw_static = shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p)
+        stretch = nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data)
+        dT_dt_sw_live = shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p, z_half_stretch=stretch)
+        restoring_static = out_static.T.data[..., 0] - st.T.data[..., 0] - 2700.0 * dT_dt_sw_static[..., 0]
+        restoring_ladder_live = out_ladder_live.T.data[..., 0] - st.T.data[..., 0] - 2700.0 * dT_dt_sw_live[..., 0]
+        np.testing.assert_allclose(
+            np.asarray(restoring_static), np.asarray(restoring_ladder_live),
+            rtol=1e-10, atol=1e-14)
