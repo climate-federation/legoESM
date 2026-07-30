@@ -15,9 +15,34 @@ the SAME production functions — no re-derived numerics):
   ISO_REDI — GM/Redi tracer tendency (``gm_redi_tracer_tendency_latlon``,
              the same call ``tendency_probe.probe_latlon_cgrid`` makes,
              evaluated on the state's own T/S — the online run has no NEMO
-             before-level twin, unlike ``tracer_tendency_compare.py``)
+             before-level twin, unlike ``tracer_tendency_compare.py``). When
+             ``config.gm_redi.implicit_K33=True`` (the DINO recipe default)
+             this EXCLUDES the vertical isoneutral diagonal K_33 — see K33
+             below.
   FORCING  — surface restoring + Jerlov SW penetration (the SAME functions
              ``apply_dino_lat_lon_surface_forcing`` calls)
+  K33      — (#1226 instrument fix) the vertical isoneutral diffusivity's
+             REALIZED backward-Euler increment, measured the SAME way as
+             VERTMIX below (via ``model._apply_implicit_vertical_mixing``),
+             isolated into its OWN bucket rather than folded into either
+             ISO_REDI or VERTMIX. K_33 is computed by
+             ``compute_isoneutral_K33_latlon`` — the IDENTICAL helper
+             ``ocean_model_latlon_cgrid.py``'s own step loop calls (as
+             ``k33_implicit``, e.g. line ~3905) and passes to
+             ``_apply_implicit_vertical_mixing(K33_iso=...)`` (e.g. lines
+             ~4350, ~4363, ~6591, ~6617, ~7056, ~7279) — and
+             ``tendency_probe.py:263`` (the single-snapshot probe) already
+             uses for its own K33 comparison. Kept SEPARATE (not folded
+             into VERTMIX) because NEMO's ISO_REDI diagnostic grouping is
+             ``ldf + (zdf - zdfp)`` — i.e. NEMO folds the isoneutral
+             vertical part INTO its lateral-mixing bucket, not into pure
+             vertical diffusion (``zdfp``). A caller wanting the
+             NEMO-comparable grouping computes ``iso_redi + k33`` (matches
+             NEMO ISO_REDI) and uses ``vertmix`` alone (matches NEMO
+             ``zdfp``); folding K33 into ``vertmix`` here would make that
+             NEMO-matching regrouping impossible to reconstruct after the
+             fact (the two are summed inside one realized backward-Euler
+             increment, inseparable once measured that way).
   VERTMIX  — DIRECTLY MEASURED (#1226 instrument fix): the model's own
              ``LatLonCGridOceanModel._apply_implicit_vertical_mixing``
              (T-only, ``do_momentum=False``) is called on the SAMPLED state
@@ -39,20 +64,52 @@ the SAME production functions — no re-derived numerics):
              through from the step's own tendency computation, so it is
              the production closure, evaluated on the sampled state rather
              than an in-step intermediate (the same convention ISO_REDI
-             already uses for GM/Redi above).
+             already uses for GM/Redi above). This bucket EXCLUDES K33 (see
+             above): the call leaves ``K33_iso`` at its ``None`` default, so
+             the fold is skipped (``if K33_iso is not None``) and VERTMIX
+             measures PURE vertical diffusion only, matching NEMO's
+             ``zdfp``. #1226: that ``None`` is now CORRECT-BY-DESIGN rather
+             than the accident it used to be — previously K33 was ALSO
+             absent from ISO_REDI (dropped there by ``implicit_K33=True``),
+             so it was missing from BOTH buckets, which invalidated the
+             ISO_REDI/VERTMIX per-term split for oracle comparison (their
+             SUM still closed, via the residual). See K33 above.
 
-  RESIDUAL — TOTAL − (ADV_H + ADV_V + ISO_REDI + FORCING + VERTMIX), where
-             TOTAL is the actual box heat-content tendency computed from
-             consecutive state samples. With VERTMIX now measured directly,
-             this is a genuine CLOSURE DIAGNOSTIC — it should be ≈0 if
-             every term is measured correctly, and a nonzero value signals
-             INSTRUMENT ERROR (endpoint-rate sampling bias, an operator
-             gap, or a masking mismatch between the direct terms and the
-             box integrator), not a real, unattributed physical process. A
-             signal in VERTMIX is now attributable to vertical mixing
-             itself; a signal in RESIDUAL means "something the four+1
-             direct terms are not capturing" and should be investigated as
-             an instrument gap, not folded silently into any physical term.
+  RESIDUAL — TOTAL − (ADV_H + ADV_V + ISO_REDI + FORCING + K33 + VERTMIX),
+             where TOTAL is the actual box heat-content tendency computed
+             from consecutive state samples. With VERTMIX (and now K33)
+             measured directly, this is a genuine CLOSURE DIAGNOSTIC — it
+             should be ≈0 if every term is measured correctly, and a
+             nonzero value signals INSTRUMENT ERROR (endpoint-rate sampling
+             bias, an operator gap, or a masking mismatch between the
+             direct terms and the box integrator), not a real, unattributed
+             physical process. A signal in VERTMIX/K33 is now attributable
+             to vertical mixing itself; a signal in RESIDUAL means
+             "something the direct terms are not capturing" and should be
+             investigated as an instrument gap, not folded silently into
+             any physical term.
+
+#1226 FIX (this module): ``compute_box_vertmix_dT`` previously called
+``model._apply_implicit_vertical_mixing`` WITHOUT a ``K33_iso`` argument, so
+it silently defaulted to ``None`` and K_33 was dropped from BOTH the
+ISO_REDI bucket (excluded there by ``implicit_K33=True``) and the VERTMIX
+bucket (never passed in here) — an instrument gap, not a real physical
+"vertical mixing is 8x too weak" signal at 200-1000 m as an earlier
+(retracted) reading of this accumulator concluded. K33 is now computed
+explicitly (see K33 above) and threaded through: ``vertmix`` measures pure
+diffusion (``K33_iso`` left at its ``None`` default, now CORRECT-BY-DESIGN
+rather than accidental — see VERTMIX above), and the new ``k33`` bucket
+measures the isoneutral-vertical increment on its own, so ``iso_redi + k33``
+reproduces NEMO's ISO_REDI grouping exactly and only the individual
+ISO_REDI/VERTMIX split (not their sums) was ever invalid.
+
+NEMO-COMPARABLE GROUPING (read this before comparing any bucket to NEMO):
+  NEMO ISO_REDI (``ldf + (zdf - zdfp)``)   ==  ``iso_redi + k33``
+  NEMO ``zdfp``  (pure vertical diffusion) ==  ``vertmix``
+``iso_redi + vertmix`` is NOT NEMO's ``ldf + zdf`` any more — post-fix it is
+``ldf + zdfp``, i.e. it silently EXCLUDES K33. Any consumer still summing
+``iso_redi + vertmix`` for a NEMO comparison is dropping the isoneutral
+vertical diagonal, which is the very error this fix exists to remove.
 
 Sampling: intended for a daily cadence inside a multi-year run loop (the
 caller decides N steps/sample). Diagnostics only — never mutates the
@@ -61,7 +118,7 @@ COPY of the sampled state's T field; its result is read, never written
 back).
 
 CAVEAT (endpoint-rate sampling, stated not hidden): each interval's ADV_H/
-ADV_V/ISO_REDI/FORCING/VERTMIX rate is evaluated ONCE, at the state CLOSING
+ADV_V/ISO_REDI/FORCING/K33/VERTMIX rate is evaluated ONCE, at the state CLOSING
 that interval (not a midpoint or trapezoidal average), then multiplied by
 the whole interval length. For a slowly-varying (multi-year-mean) signal
 this is negligible; for the SEASONAL cycle DINO's forcing runs (nn_ann_cyc)
@@ -96,6 +153,7 @@ from legoesm.ocean.experiments.dino import (
     dino_T_star_seasonal,
 )
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    compute_isoneutral_K33_latlon,
     gm_redi_tracer_tendency_latlon,
 )
 from legoesm.ocean.physics.shortwave_penetration import (
@@ -115,7 +173,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div,
 )
 
-TERM_NAMES = ("adv_h", "adv_v", "iso_redi", "forcing", "vertmix")
+TERM_NAMES = ("adv_h", "adv_v", "iso_redi", "forcing", "k33", "vertmix")
 
 
 class _GridShim:
@@ -128,13 +186,14 @@ class _GridShim:
 
 def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
                               dt_model: float, t_seconds: float):
-    """Per-cell dT/dt [degC/s] for ADV_H, ADV_V, ISO_REDI, FORCING.
+    """Per-cell dT/dt [degC/s] for ADV_H, ADV_V, ISO_REDI, FORCING, K33.
 
     Reuses the exact production functions (``_compute_advection_flux_div_pair``,
     ``_add_bolus_to_advecting_flux``, ``gm_redi_tracer_tendency_latlon``,
-    ``restoring_surface_forcing``, ``shortwave_penetration_tendency``) — same
-    call pattern as ``tracer_tendency_compare.py`` but on the state's OWN
-    T/S/eta (no NEMO before-level bridge; this is a lego-only online run).
+    ``compute_isoneutral_K33_latlon``, ``restoring_surface_forcing``,
+    ``shortwave_penetration_tendency``) — same call pattern as
+    ``tracer_tendency_compare.py``/``tendency_probe.py`` but on the state's
+    OWN T/S/eta (no NEMO before-level bridge; this is a lego-only online run).
 
     ``dt_model`` MUST be the model's own dynamical timestep (``DT``, e.g.
     2700 s for ``nemo_dino_kamm_mlf``), NOT the accumulator's (much longer)
@@ -153,9 +212,48 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     keeps the sampling interval OUT of this call and applies it only as the
     Joule-integration weight afterward.
 
+    K33 is returned SEPARATELY from ISO_REDI (module docstring) as the
+    per-cell dT/dt [degC/s] of the vertical isoneutral diffusivity's
+    EXPLICIT flux-divergence form (``-d/dz(K33 dT/dz)`` via
+    ``implicit_vertical_diffusion_ocean``'s realized increment on the
+    state's own T, at ``dt_model`` -- the SAME construction
+    ``tendency_probe.py:263-292`` already uses for its own K33 comparison,
+    reused here rather than re-derived). This is a SEPARATE call from the
+    one ``compute_box_vertmix_dT`` makes into
+    ``model._apply_implicit_vertical_mixing`` (which realizes K33 folded
+    into the SAME backward-Euler tridiagonal solve as the background K_v);
+    the two are numerically close but not bit-identical (one shared solve
+    vs two independent ones) -- acceptable for an additive decomposition
+    where each bucket is individually a faithful realized-tendency
+    measurement, not required to be a linear superposition of one shared
+    solve. Zero (not None) when ``config.gm_redi`` is absent or
+    ``implicit_K33`` is not set, so summing into ISO_REDI never introduces
+    a spurious accounting gap on recipes that don't use it.
+
+    Split-solve error magnitude (#1226 physics-validator review): for
+    per-interface implicit diffusion numbers ``a = dt*K_v/dz^2`` (background,
+    inside VERTMIX's solve) and ``b = dt*K33/dz^2`` (this call's solve), the
+    fractional discrepancy between ``vertmix + k33`` and the model's own
+    single combined ``solve(K_v + K33)`` scales like ``~a*b/(1+a+b)`` per
+    interface -- second-order-small (sub-percent) whenever the background
+    diffusivity is weak relative to K33 (the typical case: K33 from
+    kappa_Redi*S^2 is usually << the background K_v away from strong mixed
+    layers). Where OTHER diffusivities are large (strong TKE/KPP surface
+    mixing, double-diffusion), ``a`` is O(1) and this split-solve
+    approximation error migrates into RESIDUAL alongside the endpoint-
+    sampling bias already documented in the module CAVEAT -- a nonzero
+    RESIDUAL in a strongly-mixed band is therefore not necessarily an
+    "instrument gap" in the sense the module docstring's RESIDUAL entry
+    otherwise means; it can be this operator split itself. This is the SAME
+    approximation ``tendency_probe.py`` already makes (its combined ISO_REDI
+    total also mixes an explicit dT_gm with a separately-solved K33
+    increment, not one shared tridiagonal system), so it is not a NEW gap
+    this fix introduces, only one now visible via a second (K33) bucket.
+
     Returns
     -------
-    dict with keys "adv_h", "adv_v", "iso_redi", "forcing" -> (n_lat, n_lon, nlev)
+    dict with keys "adv_h", "adv_v", "iso_redi", "forcing", "k33" ->
+    (n_lat, n_lon, nlev)
     """
     mask = state.land_mask.data
     h_k = compute_layer_thickness(
@@ -201,6 +299,14 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
             kappa_redi_v_override=kappa_redi_v_ov,
             return_bolus_transport=through_fct,
             dt=dt_model,
+            # #1226: the DINO nemo_paper card sets eos_depth="geometric"
+            # (dino.py:909,933 -> dino_lat_lon_model_config, dino.py:2874) and
+            # production threads it into every GM/Redi + K33 call
+            # (ocean_model_latlon_cgrid.py:3885,3921). Omitting it silently
+            # takes the "insitu" default -- a DIFFERENT density convention
+            # from NEMO's, which is exactly the omission that invalidated an
+            # earlier probe measurement (fidelity_bar_gate.py:363 retraction).
+            eos_depth=getattr(config, "eos_depth", "insitu"),
         )
         if through_fct:
             dT_gm, dS_gm, bolus = gm_out
@@ -209,8 +315,54 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
             )
         else:
             dT_gm, dS_gm = gm_out
+
+        if getattr(config.gm_redi, "implicit_K33", False):
+            # #1226 FIX: K33 was previously dropped from BOTH buckets
+            # (excluded from dT_gm above by implicit_K33=True, and never
+            # passed to compute_box_vertmix_dT's _apply_implicit_vertical_
+            # mixing call). Compute it explicitly here, the SAME construction
+            # tendency_probe.py:263-292 already uses (compute_isoneutral_K33_
+            # latlon -> zero at non-wet interfaces -> implicit_vertical_
+            # diffusion_ocean realized increment) -- no re-derived numerics.
+            K33 = compute_isoneutral_K33_latlon(
+                state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                grid, z_coord, config.gm_redi,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask, rho_0=config.constants.rho_0, g=config.constants.g,
+                kappa_redi_override=kappa_redi_ov,
+                kappa_redi_v_override=kappa_redi_v_ov,
+                u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+                dt=dt_model,
+                # Same eos_depth requirement as the ISO_REDI call above --
+                # production passes it here too (ocean_model_latlon_cgrid.py
+                # :3921) and so does the sibling probe
+                # (tendency_probe.py:275). Dropping it would compute K33 on
+                # the WRONG density convention for the nemo_paper card.
+                eos_depth=getattr(config, "eos_depth", "insitu"),
+            )
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                # Same seafloor guard tendency_probe.py:283-285 applies:
+                # zero K33 at non-wet interfaces so partial-cell bottom
+                # cells never mix against below-bottom values.
+                K33 = K33 * z_coord.is_active[..., 1:].astype(K33.dtype)
+            from legoesm.ocean.physics.vertical_mixing import (
+                build_dz_half,
+                implicit_vertical_diffusion_ocean,
+            )
+            # h_k (computed above, z-star/partial-cell-aware per-cell
+            # thickness) IS dz_cell -- reuse it rather than re-deriving the
+            # Jacobian from scratch (that's what tendency_probe.py's
+            # z_coord.dz_ref * J[..., None] amounts to; this function
+            # already carries the true thickness in h_k).
+            dz_half = build_dz_half(h_k)
+            T_k33 = implicit_vertical_diffusion_ocean(
+                state.T.data, K33, h_k, dz_half, dt_model)
+            dT_k33 = (T_k33 - state.T.data) / dt_model * mask[:, :, jnp.newaxis]
+        else:
+            dT_k33 = jnp.zeros_like(state.T.data)
     else:
         dT_gm = jnp.zeros_like(state.T.data)
+        dT_k33 = jnp.zeros_like(state.T.data)
 
     wall_fill_mask = active_3d if getattr(config, "tracer_wall_neumann_fill", True) else None
     (dh_T, dv_T), _ = _compute_advection_flux_div_pair(
@@ -257,6 +409,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
         "adv_v": dT_adv_v,
         "iso_redi": dT_gm,
         "forcing": dT_forcing,
+        "k33": dT_k33,
     }
 
 
@@ -273,21 +426,33 @@ def compute_box_vertmix_dT(state, model, surface_forcing, dt_model: float):
     ``K*dt/dz^2 >> 1`` saturates the solve).
 
     Calls the model's OWN method (no re-derived K-profile/solver numerics):
-    ``K_v_phys=None``/``A_v_phys=None``/``K33_iso=None`` take the SAME
-    fallback branch (``compute_vertical_K_profiles`` recomputed from the
-    sampled state) the online run loop itself takes whenever the K
-    profile isn't threaded through from an in-step tendency computation —
-    the identical convention ``compute_box_heat_dT_terms`` already uses
-    for ISO_REDI (recomputed from the state's own T/S, not an in-step
-    carry). ``surface_forcing`` (the ``OceanSurfaceForcing`` the run loop
-    passes to ``model.step()``) is threaded through so the wind-driven TKE
-    surface production term is real, not silently zeroed.
-    ``tke_source=None`` (the additive TKE energy-recycling source, an
-    in-step-only intermediate) is the one input NOT reconstructable from a
-    bare state; its omission means the PROGNOSTIC TKE budget itself sees
-    no recycled dissipation for this one-off probe call, while the
-    returned diffusivity/mixing (what heats/cools T) is otherwise the
-    production closure evaluated on the sampled state.
+    ``K_v_phys=None``/``A_v_phys=None`` take the SAME fallback branch
+    (``compute_vertical_K_profiles`` recomputed from the sampled state) the
+    online run loop itself takes whenever the K profile isn't threaded
+    through from an in-step tendency computation — the identical convention
+    ``compute_box_heat_dT_terms`` already uses for ISO_REDI (recomputed from
+    the state's own T/S, not an in-step carry). ``surface_forcing`` (the
+    ``OceanSurfaceForcing`` the run loop passes to ``model.step()``) is
+    threaded through so the wind-driven TKE surface production term is
+    real, not silently zeroed. ``tke_source=None`` (the additive TKE
+    energy-recycling source, an in-step-only intermediate) is the one input
+    NOT reconstructable from a bare state; its omission means the
+    PROGNOSTIC TKE budget itself sees no recycled dissipation for this
+    one-off probe call, while the returned diffusivity/mixing (what
+    heats/cools T) is otherwise the production closure evaluated on the
+    sampled state.
+
+    K33 (#1226 instrument fix): this call NEVER passes ``K33_iso`` (stays
+    ``None``, i.e. pure vertical diffusion only) — the isoneutral vertical
+    diagonal is measured SEPARATELY as its own ``k33`` bucket by
+    ``compute_box_heat_dT_terms`` (via ``compute_isoneutral_K33_latlon`` +
+    ``implicit_vertical_diffusion_ocean``, the same construction
+    ``tendency_probe.py`` uses), NOT folded in here. Before this fix,
+    ``K33_iso`` silently defaulted to ``None`` here TOO, but K33 was ALSO
+    excluded from ISO_REDI (``implicit_K33=True`` drops it from the
+    explicit flux) — so K33 was dropped from BOTH buckets, not just kept
+    out of this one on purpose. That silent double-omission (not this
+    function's still-``None`` ``K33_iso``) was the bug.
 
     Read-only: solves on ``state``'s own T (a fresh JAX value), returns the
     tendency array — never mutates or feeds back into ``model.step()``.
@@ -505,12 +670,13 @@ class BoxHeatBudgetAccumulator:
 
         Returns
         -------
-        dict with per-band, per-term W and W/m^2 (all 5 terms, VERTMIX now
-        DIRECTLY measured), plus the RESIDUAL (sum of the 5 measured terms
-        vs measured dH/dt) — now a genuine closure DIAGNOSTIC: a nonzero
-        value signals instrument error (endpoint-rate sampling bias,
-        an operator gap, or a masking mismatch), not an unattributed
-        physical process (see module docstring).
+        dict with per-band, per-term W and W/m^2 (all 6 terms in
+        ``TERM_NAMES``, VERTMIX directly measured and K33 tracked as its
+        own bucket), plus the RESIDUAL (sum of the 6 measured terms vs
+        measured dH/dt) — a genuine closure DIAGNOSTIC: a nonzero value
+        signals instrument error (endpoint-rate sampling bias, an operator
+        gap, or a masking mismatch), not an unattributed physical process
+        (see module docstring).
         """
         if total_seconds is None:
             total_seconds = self.time_series_t[-1] - self.time_series_t[0]
@@ -540,7 +706,7 @@ class BoxHeatBudgetAccumulator:
             }
             # Backward-compat aliases (pre-#1226 key names): closure_residual_*
             # was the ONLY residual before VERTMIX was measured directly; now
-            # it is identical to "residual" above (both = dH - sum(5 terms)).
+            # it is identical to "residual" above (both = dH - sum(6 terms)).
             band_out["closure_residual_J"] = residual_J
             band_out["closure_residual_W_per_m2"] = (
                 residual_J / total_seconds / self._box_area
