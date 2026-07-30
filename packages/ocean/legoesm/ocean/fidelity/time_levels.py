@@ -36,6 +36,27 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "dump_beta_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "tke_dump_rn2b.bin": ("before", "rn2b = bn2(ts(...,Nbb)); zdfmxl.F90:98 integrates rn2b"),
+    # #1226 item-11 Prandtl-stage instrumentation (zdftke.F90:206-244, the
+    # SAME "IF(kt==nit000.AND.nn_pdl==1)" dump block as tke_dump_rn2b.bin
+    # above): sh2/avm_in are the INPUT p_sh2/p_avm arrays tke_tke receives
+    # (dumped verbatim at :218-219, not recomputed), and pdlr/zri are the
+    # Prandtl-branch outputs computed FROM rn2b (zdftke.F90:462-478 for pdlr
+    # itself; the dump's own recomputation at :229-238 for zri) -- all four
+    # are governed by the SAME before-level rn2b as tke_dump_rn2b.bin, so
+    # they are registered "before" for the identical reason.
+    "tke_dump_sh2.bin": ("before", "zdftke.F90:218 WRITE(8845) p_sh2 -- the "
+                                    "shear-production INPUT to the rn2b-"
+                                    "governed Prandtl branch, same dump block "
+                                    "as tke_dump_rn2b.bin"),
+    "tke_dump_avm_in.bin": ("before", "zdftke.F90:219 WRITE(8848) p_avm -- "
+                                       "the INPUT avm (pre tke_avn update), "
+                                       "same dump block as tke_dump_rn2b.bin"),
+    "tke_dump_pdlr.bin": ("before", "zdftke.F90:223/477 p_pdlr computed from "
+                                     "rn2b (before) in tke_tke's nn_pdl==1 "
+                                     "branch, zdftke.F90:462-478"),
+    "tke_dump_zri.bin": ("before", "zdftke.F90:229-238 zzri recomputed "
+                                    "verbatim from rn2b/p_avm/p_sh2 (before), "
+                                    "the SAME formula as tke_tke:462-474"),
     "eiv_dump_rn2b.bin": ("before", "same rn2b; NOTE only 35 levels — missing the deepest interface"),
     # zdf_mxl outputs are computed FROM rn2b, hence also before-level inputs.
     "dump_nmln.bin": ("before", "zdfmxl.F90:96-101, integrand is rn2b (before)"),
