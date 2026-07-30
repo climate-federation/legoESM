@@ -2018,3 +2018,189 @@ class TestNemoCentredBarotropic:
         assert isinstance(mc.barotropic.n_barotropic_substeps, int)
         assert (mc.barotropic.n_barotropic_substeps
                 == _dino_barotropic_substeps(g, cfg) >= 2)
+
+
+# ---------------------------------------------------------------------
+# #1226 trasbc.F90:152-153 live top-cell divisor
+# (surface_flux_divisor="static"/"nemo_live")
+# ---------------------------------------------------------------------
+
+class TestSurfaceFluxDivisor:
+    """DINOConfig.surface_flux_divisor: NEMO's trasbc.F90 divides the
+    combined non-solar flux by the LIVE e3t(:,:,1,Kmm) = e3t_0*(1+r3t)
+    (r3t = ssh/ht_0, domqco.F90:160) -- legoESM's default divides by the
+    STATIC dz_ref[0]. "nemo_live" rescales to the live divisor.
+    """
+
+    def _fixture(self, eta_value, cfg=None):
+        from legoesm.core.field import Field
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = cfg if cfg is not None else DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        # Nonzero eta, masked to zero on land (matches every other eta
+        # field in the state — dry columns carry eta=0, r3t=0 there).
+        eta = jnp.full_like(st.eta.data, eta_value) * st.land_mask.data
+        st = st._replace(eta=Field(
+            data=eta, name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
+        return g, z, st, frc
+
+    def test_unknown_divisor_raises(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), surface_flux_divisor="bogus")
+        g, z, st, frc = self._fixture(5.0, cfg)
+        with pytest.raises(ValueError, match="surface_flux_divisor"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+    def test_static_is_bit_identical_to_legacy(self):
+        """Fallback path (default / no live-divisor opt-in): byte-identical
+        to the pre-fix behaviour at every eta, since dz_0_live == dz_0
+        exactly when surface_flux_divisor="static" (max|diff|==0.0)."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = DINOConfig()
+        assert cfg.surface_flux_divisor == "static"
+        g, z, st, frc = self._fixture(7.3, cfg)
+        out = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+        # Independent pre-fix reconstruction: the static-divisor tendency
+        # is dz_0-independent of eta, so re-running at eta=0 on a config
+        # that cannot see eta (surface_flux_divisor="static" never reads
+        # state.eta) must give the IDENTICAL T/S update.
+        g0, z0, st0, frc0 = self._fixture(0.0, cfg)
+        out0 = apply_dino_lat_lon_surface_forcing(st0, frc0, z0, cfg, 2700.0)
+        max_diff_T = float(jnp.max(jnp.abs(out.T.data - out0.T.data)))
+        max_diff_S = float(jnp.max(jnp.abs(out.S.data - out0.S.data)))
+        assert max_diff_T == 0.0, max_diff_T
+        assert max_diff_S == 0.0, max_diff_S
+
+    def test_nemo_live_matches_independent_transcription(self):
+        """Live divisor: assert the top-layer T/S tendency equals an
+        INDEPENDENT in-test transcription of trasbc.F90:152-153's single-
+        division structure (not a call into the function under test, and
+        NOT a post-hoc rescale of the static tendency -- with
+        RestoringConfig.implicit=True the denominator is (tau_T + dt),
+        which is not simply proportional to 1/dz_0, so the transcription
+        must rebuild tau_T/tau_S from the LIVE dz_0 and re-run the SAME
+        analytic implicit-Euler formula restoring.py documents, entirely
+        without importing restoring.py or tau_from_flux_coefficient).
+
+        PRE-FIX (surface_flux_divisor field did not exist / the applicator
+        always divided by the static dz_ref[0]): this test's "nemo_live"
+        branch is unreachable with a bare DINOConfig(), and even patched in
+        naively as an after-the-fact rescale of the static output this
+        assertion measured ~1.2% off (retracted -- see the fix's docstring
+        in apply_dino_lat_lon_surface_forcing).
+        """
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        from legoesm.ocean.eos import nemo_r3t_stretch
+
+        eta_value = 12.0   # a few metres of ssh -> O(1e-3) r3t on H~2-4 km
+        dt = 2700.0
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(cfg_static, surface_flux_divisor="nemo_live")
+
+        g, z, st, frc = self._fixture(eta_value, cfg_static)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, dt)
+
+        # Independent transcription of trasbc.F90:152-153 + usrdef_sbc.F90:279
+        # + the restoring.py analytic-implicit-Euler algebra (restoring.py's
+        # own docstring: dT_dt_eff = (T*-T)/(tau_T+dt)) -- built from scratch
+        # here, reading only T*/T/Q_sr/A_theta/dz_0_live/dt, never calling
+        # tau_from_flux_coefficient or restoring_surface_forcing.
+        dz_0 = float(z.dz_ref[0])
+        stretch = np.asarray(nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data))
+        dz_0_live = dz_0 * stretch                              # e3t(:,:,1,Kmm)
+
+        rho_0, c_p = cfg_static.rho_0, cfg_static.c_p
+        T_top = np.asarray(st.T.data[..., 0])
+        S_top = np.asarray(st.S.data[..., 0])
+        T_star = np.asarray(frc["T_star_2d"])
+        S_star = np.asarray(frc["S_star_2d"])
+        Q_sr = np.asarray(frc["Q_sr_2d"])
+
+        tau_T_live = rho_0 * c_p * dz_0_live / cfg_static.A_theta
+        tau_S_live = rho_0 * 1.0 * dz_0_live / cfg_static.A_S
+        surf_dT = -(T_top - T_star) / (tau_T_live + dt) - Q_sr / (rho_0 * c_p * dz_0_live)
+        surf_dS = -(S_top - S_star) / (tau_S_live + dt)
+
+        # Plus the Jerlov SW-penetration tendency's OWN level-0 deposit (eq
+        # 10, traqsr.F90 -- a separate NEMO routine, untouched by this fix
+        # and still divided by the STATIC dz_ref; the applicator adds it to
+        # the SAME top layer as the restoring term). Calling the real
+        # (unmodified) shortwave_penetration_tendency here is legitimate --
+        # it is a dependency of the function under test, not the function
+        # under test itself.
+        from legoesm.ocean.physics.shortwave_penetration import (
+            shortwave_penetration_tendency, ShortwavePenetrationConfig,
+        )
+        jacobian = jnp.ones_like(st.eta.data)
+        sw_cfg = ShortwavePenetrationConfig(water_type=cfg_static.jerlov_water_type)
+        dT_dt_sw_top = np.asarray(shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p,
+        )[..., 0])
+
+        expect_dT_top = dt * surf_dT + dt * dT_dt_sw_top
+        expect_dS_top = dt * surf_dS
+
+        got_dT_top = np.asarray(out_live.T.data[..., 0] - st.T.data[..., 0])
+        got_dS_top = np.asarray(out_live.S.data[..., 0] - st.S.data[..., 0])
+
+        wet = np.asarray(st.land_mask.data) > 0.5
+        np.testing.assert_allclose(got_dT_top[wet], expect_dT_top[wet], rtol=1e-10, atol=1e-14)
+        np.testing.assert_allclose(got_dS_top[wet], expect_dS_top[wet], rtol=1e-10, atol=1e-14)
+
+        # A positive eta -> larger live top-cell thickness -> the SAME
+        # surface flux gives a SMALLER tendency magnitude (dilution, not
+        # concentration) -- the sign/units check (CLAUDE.md mandatory).
+        # Isolate the DIVISOR-AFFECTED piece (restoring + Q_sr-subtraction,
+        # i.e. `surf_dT` above) rather than the combined restoring+SW
+        # output: the Jerlov SW-penetration deposit at level 0 is IDENTICAL
+        # between static/live (out of this fix's scope) and mixing it in
+        # would dilute/mask the dilution signal under test.
+        dz_0_static = dz_0   # DINOConfig() default: scalar, r3t=0 baseline
+        tau_T_static = rho_0 * c_p * dz_0_static / cfg_static.A_theta
+        surf_dT_static = (-(T_top - T_star) / (tau_T_static + dt)
+                          - Q_sr / (rho_0 * c_p * dz_0_static))
+        assert eta_value > 0.0
+        assert float(np.mean(stretch[wet])) > 1.0
+        mag_static = np.abs(surf_dT_static[wet])
+        mag_live = np.abs(surf_dT[wet])
+        assert np.all(mag_live <= mag_static + 1e-15), (
+            "a larger top cell must DILUTE the flux (smaller |tendency|), "
+            "not amplify it")
+
+    def test_below_water_sw_penetration_untouched(self):
+        """dT_dt_sw (traqsr.F90, a separate NEMO routine) is out of this
+        fix's scope -- the live divisor changes ONLY the level-0 restoring
+        term, never the sub-surface Jerlov penetration tendency."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(cfg_static, surface_flux_divisor="nemo_live")
+        g, z, st, frc = self._fixture(12.0, cfg_static)
+        out_static = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_static, 2700.0)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, 2700.0)
+        # Levels 1+ (below the surface restoring layer) must be identical:
+        # only the SW penetration tendency reaches them, unaffected by the
+        # divisor switch.
+        np.testing.assert_array_equal(
+            np.asarray(out_static.T.data[..., 1:]),
+            np.asarray(out_live.T.data[..., 1:]))

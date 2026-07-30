@@ -209,6 +209,22 @@ class DINOConfig:
     # dynspg_ts.F90 ~L360).  Requires wind_through_step=True (the stress must
     # reach model.step's surface_forcing).  Default False = prior behaviour.
     surface_stress_implicit: bool = False
+    # NEMO trasbc.F90:152-153 surface-flux divisor (#1226): NEMO divides the
+    # MLF-averaged non-solar T/S flux by the LIVE top-cell thickness
+    # ``e3t(:,:,1,Kmm) = e3t_0*(1+r3t)`` (``r3t = ssh/ht_0``, domqco.F90:160)
+    # under ``key_qco`` -- legoESM's T/S restoring instead divided by the
+    # STATIC ``z_coord.dz_ref[0]``, measured off by ratio 0.99993829 (tem) /
+    # 0.99995924 (sal) on the RUN_GDB kt=57601 twin
+    # (scripts/validate/ocean_fidelity/dino_1226/surface_flux_divisor_probe.py).
+    # "static" (DEFAULT, bit-identical legacy) keeps the fixed reference
+    # thickness -- every existing DINO run (paper-faithful and prior NEMO
+    # cards) is unaffected. "nemo_live" rescales the restoring + Q_sr-
+    # subtraction tendency by the live r3t stretch (eos.nemo_r3t_stretch,
+    # reused verbatim -- not re-derived) so the SAME single-division
+    # structure as trasbc.F90 applies. Only the ``nemo_dino_kamm``/
+    # ``nemo_dino_kamm_mlf``-family exactness presets set "nemo_live".
+    # Unknown value raises (dispatch hardening).
+    surface_flux_divisor: str = "static"
     # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
     # / zdf_baroclinic_only docstrings for the full transcription. Threaded
     # 1:1 (same field names) to the model config. Default False on both =
@@ -855,6 +871,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         # (MLF) wires the before-state start.
         forcing_annual_cycle=True,
         wind_through_step=True,
+        surface_flux_divisor="nemo_live",   # trasbc.F90:152-153 live e3t (#1226)
     )
     # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
     base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
@@ -1183,6 +1200,9 @@ DINO_RECIPES: dict[str, dict] = {
         # -- Surface forcing (namusr_def: ln_ann_cyc=T seasonal cycle) --
         "forcing_annual_cycle": True,
         "wind_through_step": True,
+        # trasbc.F90:152-153 live top-cell divisor (#1226) -- see
+        # DINOConfig.surface_flux_divisor docstring.
+        "surface_flux_divisor": "nemo_live",
     },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
@@ -3339,10 +3359,42 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         Q_sr_2d = jnp.broadcast_to(
             dino_Q_sr_seasonal(_lat1, t_seconds, cfg)[:, None], _shape)
 
+    # trasbc.F90:152-153 divisor (#1226): NEMO's combined non-solar flux
+    # qns = A_theta*(T*-T) - Q_sr (usrdef_sbc.F90:279, a pure W/m^2 flux --
+    # dz_0-INDEPENDENT) is divided ONCE by the LIVE top-cell thickness
+    # e3t(:,:,1,Kmm) = e3t_0*(1+r3t) (domzgr_substitute.h90:139,
+    # r3t=ssh/ht_0 domqco.F90:160). legoESM expresses the SAME physical
+    # rate via a restoring TIMESCALE tau_T = rho_0*c_p*dz_0/A_theta (this
+    # is the K/s -> flux-content conversion, algebraically identical to
+    # dividing qns's flux-content form by dz_0) -- so the live divisor
+    # must feed dz_0 itself, BEFORE tau_T/tau_S and the Q_sr-subtraction
+    # term are built, not rescale the OUTPUT tendency after the fact: with
+    # RestoringConfig.implicit=True the denominator is (tau_T + dt), which
+    # is NOT proportional to 1/dz_0 in general (only the tau_T->dz_0 map
+    # itself is), so an after-the-fact dz_0/dz_0_live rescale of the
+    # implicit-Euler output is WRONG whenever dt is not negligible next to
+    # tau_T (this WAS tried and measured ~1.2% off against the independent
+    # transcription below -- retracted, see test file).
+    # "static" (DEFAULT, bit-identical legacy) keeps dz_0 a per-run SCALAR
+    # (z_coord.dz_ref[0]) exactly as before. "nemo_live" replaces it with
+    # the 2D live array dz_0*(1+r3t) -- tau_T/tau_S/the Q_sr subtraction
+    # all become per-column, matching NEMO's single live e3t division.
+    divisor = getattr(cfg, "surface_flux_divisor", "static")
+    if divisor == "static":
+        dz_0_live = dz_0
+    elif divisor == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        stretch = nemo_r3t_stretch(z_coord, state.eta.data, state.H_bathy.data)
+        dz_0_live = dz_0 * stretch
+    else:
+        raise ValueError(
+            f"Unknown DINOConfig.surface_flux_divisor {divisor!r}: expected "
+            "'static' or 'nemo_live'.")
+
     # T/S restoring via the legoESM module with implicit=True. Paper
     # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
-    tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0)
-    tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0)
+    tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_live)
+    tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_live)
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S,
         T_star_array=T_star_2d,
@@ -3354,8 +3406,10 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
         restoring_cfg,
         sw_down=Q_sr_2d, dt=dt,
-        rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0,
+        rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0_live,
     )
+    dT_dt_top = rest_out.dT_dt[..., 0]
+    dS_dt_top = rest_out.dS_dt[..., 0]
 
     # Jerlov SW penetration through the column (eq 10): 3D tendency.
     # Q_sr is added to the column distribution AND subtracted from the
@@ -3374,9 +3428,15 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # Combine: forward-Euler tracer update with all tendencies summed.
     # Restoring tendency is "effective" (already accounts for implicit
     # Euler at given dt — stable for any dt). Mask land everywhere.
+    # dT_dt_top/dS_dt_top carry the (possibly live-rescaled) restoring +
+    # Q_sr-subtraction tendency at level 0 only; dT_dt_sw is the full-column
+    # Jerlov penetration (unaffected by surface_flux_divisor -- traqsr.F90
+    # is a separate NEMO routine, out of this fix's scope).
     mask3 = cell_mask[..., None]
-    new_T = state.T.data + dt * (rest_out.dT_dt + dT_dt_sw) * mask3
-    new_S = state.S.data + dt * rest_out.dS_dt * mask3
+    dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top)
+    dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top)
+    new_T = state.T.data + dt * dT_dt_restoring * mask3
+    new_S = state.S.data + dt * dS_dt_col * mask3
 
     # u tendency at u-faces (eq 7) — SKIPPED when the wind goes through
     # model.step(surface_forcing=...) (wind_through_step: the dynamics-core
