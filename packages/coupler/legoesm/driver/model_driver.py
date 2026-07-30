@@ -235,6 +235,23 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
+        # Sub-grid cloud-optics inhomogeneity + the diagnostic-condensate
+        # selectors.  These were MISSING here while the FV pipeline forwarded
+        # them (physics_pipeline.py:2067-2077), so on the MPAS lane
+        # --cloud-optics-inhomogeneity / --cloud-inhomogeneity-factor /
+        # --cloud-fsd / --cloud-diagnostic-condensate-scheme /
+        # --cloud-adiabatic-lwc-rate were accepted by the CLI and then
+        # SILENTLY DROPPED — the run used the scheme defaults regardless of
+        # the flag (codex review, 2026-07-30).  The docstring above claims
+        # this function mirrors the FV call; it now actually does.
+        cloud_inhomogeneity_factor=getattr(
+            cfg, "cloud_inhomogeneity_factor", None),
+        cloud_optics_inhomogeneity=getattr(
+            cfg, "cloud_optics_inhomogeneity", None),
+        cloud_fsd=getattr(cfg, "cloud_fsd", None),
+        diagnostic_condensate_scheme=getattr(
+            cfg, "cloud_diagnostic_condensate_scheme", None),
+        adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
         p_xr=getattr(cfg, "cloud_p_xr", None),
         alpha_xr=getattr(cfg, "cloud_alpha_xr", None),
         clubb_cf_override_strength=getattr(

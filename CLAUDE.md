@@ -147,6 +147,49 @@ explicitly that you did not. "I was careful" is not compliance.
   claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
   buys a code change and a relaunch.
 
+## Compute Discipline — speculation costs GPU-hours, not just credibility
+User, 2026-07-30 (THIRD callout in five days): *"You keep making very
+speculative assumptions... be much more precise so we do not waste time with
+useless simulations."* The gates above stop wrong CLAIMS; these stop wrong
+RUNS. A simulation launched on a hypothesis that no measurement can refute is
+pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
+
+- **NO COMPUTE ON AN UNFALSIFIABLE HYPOTHESIS. Before submitting ANY job
+  costing >1 GPU-hour, write down three things: (a) the exact number the run
+  will produce, (b) the value that CONFIRMS and the value that REFUTES, (c)
+  why a cheaper offline/CPU test on an EXISTING checkpoint cannot answer it.
+  Cannot fill all three -> DO NOT SUBMIT; run the cheap test first.** Nearly
+  every question asked so far (fluxes, tendencies, radii, momentum budgets,
+  cloud optics) was answerable offline from a saved checkpoint in minutes.
+  FAILURE 2026-07-30: submitted two 5-YEAR full-physics runs (8 h walltime
+  each) while the model had a KNOWN unfixed +56 W/m2 albedo error and no
+  low-level circulation — five simulated years of a broken climate, answering
+  no question that had been asked.
+- **RANK ERRORS BY MAGNITUDE BEFORE CHOOSING WHAT TO WORK ON.** Run the full
+  scorecard FIRST and work the LARGEST term; re-rank after every fix. FAILURE
+  2026-07-30: spent most of a session on the hfls deficit (-40 W/m2) while the
+  dominant error was rsut (+56 W/m2) — and the scorecard naming it was already
+  sitting in the run directory, unread.
+- **ONE VARIABLE PER PRODUCTION RUN.** N simultaneous config changes answer
+  ZERO questions, because no output is attributable to any one of them. A
+  multi-change config is legitimate ONLY as a deliberate new BASELINE that is
+  labelled as such and never compared term-by-term against the old one.
+  FAILURE 2026-07-30: one launch flipped ~8 switches at once.
+- **A LONG RUN ON A MODEL WITH AN UNFIXED DOMINANT ERROR IS WASTE.** Before
+  extending past ~30 simulated days, state the largest outstanding scorecard
+  term and why the run is still worth its GPU-hours. Fix the big term, then
+  extend. Short validation windows (days) are for "does it run and is the new
+  physics behaving"; multi-year windows are for a model that already passes.
+- **NEVER LEAD WITH AN ARITHMETIC COINCIDENCE.** A hand-computed ratio that
+  "matches" an observed ratio is not evidence when the calculation omits
+  factors the code actually applies. State it as arithmetic, or don't state
+  it. FAILURE 2026-07-30: "cover x tau ~ 1.9x matches the 1.9x albedo" ignored
+  the sub-grid inhomogeneity factor the radiation applies to the cloud paths.
+- **PREFER THE INSTRUMENT THAT ALREADY EXISTS.** Before writing a probe, check
+  the run directory for a scorecard/manifest/diagnostic that answers the
+  question, and `scripts/validate/` for a validator. Reading an existing
+  artifact costs seconds; a new probe costs an hour and needs its own controls.
+
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
 - **Feature gating exception** (`fix_mass`, `fix_moisture`): Python `if` on static bool in closure — NOT `jnp.where` (traces both branches). `jnp.where` only for data-dependent traced selection.
