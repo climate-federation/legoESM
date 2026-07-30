@@ -844,9 +844,26 @@ _OPSPLIT_GATED = {
 }
 
 _OPSPLIT_UNGATED = {
+    # CORRECTED (codex round 4). The previous reason said "no raise", which is
+    # FALSE: `_need_rad_and_time` opens with `if rad_update_steps <= 1:`, a
+    # Python comparison that raises TracerBoolConversionError on a traced value
+    # and TypeError on a non-comparable one. CLAUDE.md treats every allow-list
+    # reason as a CLAIM to be verified in code — a plausible-sounding but wrong
+    # reason permanently hides a real defect — so the string is corrected here
+    # rather than the entry being quietly kept.
+    #
+    # It stays exempt because the raise is SYMMETRIC, which is the property
+    # that actually matters. `rad_update_steps` is agreed across processes by
+    # the entry gate (it is a member of _OPSPLIT_SPMD_ENTRY_FLAGS), so every
+    # rank evaluates this comparison on the same value: all raise or none do.
+    # A symmetric raise is a clean error, not a one-sided hang.
     "need_rad_and_time":
         "module ALIAS of the pure _need_rad_and_time cadence helper "
-        "(jnp arithmetic on step_index); no collective, no raise",
+        "(jnp arithmetic on step_index); NO COLLECTIVE. It CAN raise — "
+        "`if rad_update_steps <= 1` is a Python comparison — but "
+        "rad_update_steps is agreed by the entry gate "
+        "(_OPSPLIT_SPMD_ENTRY_FLAGS), so the raise is symmetric across "
+        "processes: all ranks raise or none, never a one-sided hang",
 }
 
 
