@@ -608,11 +608,17 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 constants_config.rho_0, h_actual=h_actual,
             )
         # NEMO bn2 trigger (n2_mode="nemo_bn2"): the geometric depth ladders
-        # (gdept / interior gdepw); ignored by every other n2_mode.
+        # (gdept / interior gdepw); ignored by every other n2_mode.  NEMO
+        # evaluates alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1 + eta/ht_0)
+        # -- see eos.nemo_bn2_live_ladders for the macro expansion.  NOT the
+        # z* Jacobian J above: that is (eta + H)/H_max, normalised by the
+        # GLOBAL maximum depth, and is off by 1.1e-1 vs 2.5e-8 relative
+        # against NEMO's own gdept(Kmm) dump (#1226).
         _bn2_t_depth = _bn2_w_depth = None
         if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "nemo_bn2":
-            from legoesm.ocean.eos import nemo_bn2_depth_ladders
-            _bn2_t_depth, _bn2_w_depth = nemo_bn2_depth_ladders(z_coord)
+            from legoesm.ocean.eos import nemo_bn2_live_ladders
+            _bn2_t_depth, _bn2_w_depth = nemo_bn2_live_ladders(
+                z_coord, state.eta.data, state.H_bathy.data)
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
         # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
@@ -936,11 +942,14 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             ConstantsConfig().rho_0, h_actual=ed_h_actual,
         )
     # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
-    # (gdept / interior gdepw); ignored by every other n2_mode.
+    # (gdept / interior gdepw); ignored by every other n2_mode.  gdept(Kmm)
+    # under z* is gdept_0*(1 + eta/ht_0) -- see eos.nemo_bn2_live_ladders.
+    # NOT the z* Jacobian J above ((eta + H)/H_max, global normalisation).
     ed_t_depth = ed_w_depth = None
     if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
-        from legoesm.ocean.eos import nemo_bn2_depth_ladders
-        ed_t_depth, ed_w_depth = nemo_bn2_depth_ladders(z_coord)
+        from legoesm.ocean.eos import nemo_bn2_live_ladders
+        ed_t_depth, ed_w_depth = nemo_bn2_live_ladders(
+            z_coord, state.eta.data, state.H_bathy.data)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);

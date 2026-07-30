@@ -835,6 +835,7 @@ def fct_tracer_advection(
     dt: float,
     high_order: str = "ppm",
     tracer_before: jnp.ndarray | None = None,
+    active_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -877,6 +878,23 @@ def fct_tracer_advection(
         ``0.5·pU·(pt(Kmm)+pt(Kmm))``.  ``None`` (forward-Euler / AB2 path)
         ⇒ base == ``tracer`` (Kbb == Kmm) ⇒ byte-identical to the FE-certified
         scheme.
+    active_mask : (n_lat, n_lon, nlev) or None
+        Per-cell wet mask (``is_active`` / ``active_3d``), truthy where
+        wet.  NEMO's ``nonosc`` masks the per-point bound to
+        ``MERGE(max(pbef,paft), -zbig, tmask==1)`` / ``MERGE(min(...),
+        +zbig, tmask==1)`` (traadv_fct.F90:911-915) BEFORE the 7-point
+        neighbourhood max/min, so a dry cell's ``q_td`` (an unconstrained
+        ``h_k→0`` division that legoESM does not bother to make sane,
+        since it is masked out of the tracer update anyway) never widens
+        a WET neighbour's box.  ``None`` (default) skips the mask — the
+        historical behaviour, which lets a dry cell's ``q_td`` blow-up
+        (``0/eps``) leak into the neighbourhood stencil and, downstream,
+        into that neighbour's ``R_in``/``R_out`` — the root cause of
+        legoESM's w-face clip count running ~1.9x NEMO's on the DINO
+        oracle (#1226 item 8: the flux values already matched NEMO at
+        corr > 0.9999 pre-fix; only the boundedness of the LIMITER inputs
+        at dry cells was unfaithful).  Passing the mask is a strict
+        no-op away from dry/wet boundaries.
 
     Returns
     -------
@@ -976,25 +994,59 @@ def fct_tracer_advection(
     ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
 
+    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
     # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
-    # Stencil bounds from the BEFORE (Kbb) base level (NEMO nonosc pbef=Kbb).
-    tr_west = jnp.roll(base, 1, axis=1)
-    tr_east = jnp.roll(base, -1, axis=1)
-    tr_south = jnp.concatenate([base[:1, :, :], base[:-1, :, :]], axis=0)
-    tr_north = jnp.concatenate([base[1:, :, :], base[-1:, :, :]], axis=0)
-    tr_above = jnp.concatenate([base[..., :1], base[..., :-1]], axis=-1)
-    tr_below = jnp.concatenate([base[..., 1:], base[..., -1:]], axis=-1)
-    q_min = jnp.minimum(
-        jnp.minimum(jnp.minimum(base, tr_west), jnp.minimum(tr_east, tr_south)),
-        jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
-    )
+    #
+    # NEMO nonosc (traadv_fct.F90:876-880, 912-920): the PER-POINT bound at
+    # each stencil cell is ``bnd_up = max(pbef, paft)`` / ``bnd_do =
+    # min(pbef, paft)`` where ``paft`` is ``zta_up1`` — the upstream
+    # provisional guess, i.e. exactly this function's ``q_td`` — NOT ``pbef``
+    # (Kbb/``base``) alone.  The 7-point neighbourhood max/min is then taken
+    # over that per-point ``bnd_up``/``bnd_do`` field.  Building the
+    # neighbourhood from ``base`` alone (the prior legoESM behaviour) drops
+    # the ``q_td`` contribution to the bound at every one of the 7 stencil
+    # points — under #1226 item 8's stage-by-stage oracle comparison this
+    # under/over-tightens the box at ~40-45% of wet cells (median diff tiny
+    # at nit000 since q_td ~ base after one step, but non-negligible: max
+    # 0.039 degC on the DINO Y5 restart) and is the first stage at which the
+    # legoESM limiter deviates from a faithful nonosc transcription.
+    bnd_up = jnp.maximum(base, q_td)
+    bnd_do = jnp.minimum(base, q_td)
+    if active_mask is not None:
+        # #1226 item 8: faithful dry-cell mask (traadv_fct.F90:911-915
+        # ``MERGE(..., -zbig/+zbig, tmask==1)``) BEFORE the neighbourhood
+        # max/min — a dry cell's ``q_td`` is an unconstrained ``h_k→0``
+        # division (legoESM never bothered to make it sane there since the
+        # tracer update masks the cell out anyway) and must not widen a
+        # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
+        # max (not ``inf``) so float32 callers stay finite under AD.
+        wet = active_mask > 0.5
+        zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
+        bnd_up = jnp.where(wet, bnd_up, -zbig)
+        bnd_do = jnp.where(wet, bnd_do, zbig)
+    tr_west = jnp.roll(bnd_up, 1, axis=1)
+    tr_east = jnp.roll(bnd_up, -1, axis=1)
+    tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
+    tr_north = jnp.concatenate([bnd_up[1:, :, :], bnd_up[-1:, :, :]], axis=0)
+    tr_above = jnp.concatenate([bnd_up[..., :1], bnd_up[..., :-1]], axis=-1)
+    tr_below = jnp.concatenate([bnd_up[..., 1:], bnd_up[..., -1:]], axis=-1)
     q_max = jnp.maximum(
-        jnp.maximum(jnp.maximum(base, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(bnd_up, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
-    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+    tr_west_do = jnp.roll(bnd_do, 1, axis=1)
+    tr_east_do = jnp.roll(bnd_do, -1, axis=1)
+    tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
+    tr_north_do = jnp.concatenate([bnd_do[1:, :, :], bnd_do[-1:, :, :]], axis=0)
+    tr_above_do = jnp.concatenate([bnd_do[..., :1], bnd_do[..., :-1]], axis=-1)
+    tr_below_do = jnp.concatenate([bnd_do[..., 1:], bnd_do[..., -1:]], axis=-1)
+    q_min = jnp.minimum(
+        jnp.minimum(jnp.minimum(bnd_do, tr_west_do), jnp.minimum(tr_east_do, tr_south_do)),
+        jnp.minimum(jnp.minimum(tr_north_do, tr_above_do), tr_below_do),
+    )
 
     alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
         ad_flux_u, ad_flux_v, ad_vert_int,
@@ -1432,6 +1484,28 @@ def _zalesak_signsplit_face_alphas(
         Q_up, jnp.maximum(inc_in, eps), inc_in > t_grad))
     R_out = jnp.minimum(1.0, grad_safe_ratio(
         Q_dn, jnp.maximum(inc_out, eps), inc_out > t_grad))
+
+    # #1226 item 8: dry-cell (h_k ~ 0) ratios are NOT a real Zalesak
+    # constraint — NEMO's own ``nonosc`` gives a dry point zbetup=zbetdo=
+    # zbig there (traadv_fct.F90: zpos/zneg are exactly 0 once the
+    # antidiffusive fluxes are wmask'ed, so the ``zpos/=0.`` guard falls
+    # through to the "no local extremum" branch, zcoef=1, no clip).
+    # legoESM's ad_vert_int/ad_flux_u/ad_flux_v are likewise ~0 at a dry
+    # cell (the advecting mass flux is masked upstream), but Q_up/Q_dn and
+    # inc_in/inc_out are each an O(1e-19)/O(h_k) ratio of that same
+    # float-noise residual over an h_k that floors to eps=1e-30 -- the
+    # *ratio* of two independent noise floors is unconstrained garbage
+    # (observed up to ~1e17 on the DINO oracle), NOT a small number, so it
+    # does not cancel in R_in/R_out and instead saturates one of them to 0.
+    # A near-zero R at a dry cell then forces alpha=0 (full clip) on the
+    # WET neighbour's face sharing that dry cell as sender/receiver --
+    # i.e. every subsurface-topography w-face over-clips, inflating
+    # legoESM's w-face clip count ~1.9x vs NEMO (662) purely from this
+    # noise, with no signal in the antidiffusive flux itself (the clipped
+    # face fluxes already matched NEMO at corr>0.9999 pre-fix). Force the
+    # faithful zbig-equivalent (unclipped, R=1) at dry cells.
+    R_in = jnp.where(h_ok, R_in, 1.0)
+    R_out = jnp.where(h_ok, R_out, 1.0)
 
     # ---- Per-face alpha selection ----
     # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).

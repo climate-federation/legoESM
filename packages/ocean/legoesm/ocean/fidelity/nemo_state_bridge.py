@@ -290,6 +290,7 @@ def bridge_nemo_to_legoesm_topo(
     radius: float = constants.R_earth,
     f_rtol: float = 1e-3,
     full_step: bool = False,
+    metric_convention: str = "exact",
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -335,6 +336,18 @@ def bridge_nemo_to_legoesm_topo(
         the west/east boundaries with walls.
     f_rtol : float
         Max relative error tolerance between the built ``f_T`` and NEMO ``ff_t``.
+    metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
+        Forwarded to :func:`create_latlon_geometry`. Default ``"exact"``
+        (the true finite-difference T/u-face metric legoESM has always
+        built here — BIT-IDENTICAL for every existing caller of this
+        bridge). ``"nemo_isotropic"`` reproduces NEMO's own
+        ``usr_def_hgr.F90`` DINO closed-form T/u-face metric
+        (``pe1t = pe2t``) instead of the exact one this bridge computes
+        from ``gphiv`` -- lets a fidelity probe compare against NEMO on
+        NEMO's OWN metric convention rather than legoESM's (geometrically
+        more exact but less NEMO-faithful) reconstruction. Does not touch
+        the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
+        which reads ``geom.f_T`` (unaffected by this flag).
 
     Raises
     ------
@@ -363,6 +376,7 @@ def bridge_nemo_to_legoesm_topo(
         n_lat, n_lon, radius=radius, omega=omega,
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
+        metric_convention=metric_convention,
     )
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried

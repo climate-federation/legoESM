@@ -295,6 +295,18 @@ campaign. Efficiency t1/(n*tn) by subdivision:
 | 5 | 1.02 | 0.88 | 1.15 | 0.56 | 0.58 | 0.30 |
 | 6 | 1.02 | 0.88 | 1.07 | 0.51 | 0.54 | 0.57 |
 | 7 | 1.03 | 0.92 | 1.02 | 0.51 | 0.51 | 0.52 |
+
+**REVISION 2026-07-27 — the subdiv-7 row was PLACEMENT-LIMITED, not
+comm-limited.** Re-running it with `--distribution=block:cyclic` (the
+Milan fix, discovered after this sweep) gives f64 np64 **efficiency 0.71,
+up from 0.52**, and the high-rank columns move most: placement alone is
+worth 2.00x at np16, 1.75x at np32, 1.38x at np64 (job 26495437 vs
+26452579). The f32 ladder at matched placement (job 26495083) reaches
+**0.88**. So the "np16 dip" visible across every row of this table is
+substantially the same NUMA effect found later in the packed CPU atm
+ladder — one fix, two symptoms. Precision itself is worth a near-constant
+~1.4x here; the naive cross-job comparison would have read 2.81x at np16
+and attributed placement to precision.
 | 8 | 1.04 | 0.93 | 1.18 | 0.61 | 0.49 | — |
 
 THE TILE-SIZE PATTERN, THIRD LANE (cube and ico are both atmosphere:
@@ -681,6 +693,545 @@ OMIP case with explicit_substep+wide at production dt and confirm the
 implicit_cn at 600 steps unforced) holds under forcing. That is a science
 review of ONE config field on ONE experiment, not a scheme-stability
 program.
+
+## Scale-out + the plateau question (2026-07-27)
+
+The figure showed plateaus at high device counts on several grids. Codex
+round-14 rejected the obvious "just run bigger ladders" plan — it MAPS a
+plateau without IDENTIFYING it — and prescribed matched pairs instead:
+at fixed device count vary the tile, and at fixed tile vary the device
+count. Only the second contrast can show a genuine comm/N effect.
+
+**CPU-MPI lane, first verdict (job 26495929, ico f64, block:cyclic
+throughout, 4 nodes, single runs).** Aligning both meshes by CELLS PER
+RANK rather than rank count:
+
+| cells/rank | subdiv-7 | subdiv-8 |
+|---|---|---|
+| 10 200 | — | np64 = 960 ms |
+| 5 100 | — | np128 = 526 |
+| **2 600** | **np64 = 165** | **np256 = 356** |
+| 1 300 | np128 = 92 | (np512 pending) |
+| 600 | np256 = 56 | — |
+| 300 | **np512 = 67 (REGRESSES)** | — |
+
+Both meshes still scale at 2 600 cells/rank; subdiv-7 keeps gaining down
+to 600 and only ANTI-SCALES at 300 (56 -> 67 ms). **The turnover tracks
+work per rank, not rank count** — the tile-floor hypothesis, confirmed
+on a lane where the two can be separated. Practical consequence: rank
+counts beyond the campaign's old 64 ceiling keep paying as long as
+resolution rises with them; subdiv-8 reaches 356 ms at 256 ranks, a
+count the campaign never previously tested.
+
+CAVEATS: single runs, no repeats. The np64 point here (165 ms) is FASTER
+than the same configuration measured on 1 node earlier (220.6 ms, job
+26495437) because this job spreads 64 ranks over 4 nodes — the
+node-spreading effect the campaign already documented; ladders are
+internally consistent but the two jobs are not interchangeable.
+The subdiv-8 np512 arm OOM-killed at 128 ranks/node (every rank derives
+the global mesh); rerun spread over 8 nodes as job 26497704.
+
+**GPU CEILING FOUND — the cubed-sphere cannot currently exceed 54 GPUs.**
+The tiled cube path is bit-identity-validated only at kt=2 (24 devices)
+and kt=3 (54) (`sharded_dynamics.py:754`); kt=4 (96) falls back to
+REPLICATING the global state, which is what killed the 96-GPU attempt
+(job 26495955: "byte size of input/output arguments (83247045120)
+exceeds the base limit"), and very likely the f64 cube retry that hit
+the walltime (26495388). This is a VALIDATION limit, not a hardware one,
+and it is the single biggest blocker to atmospheric scale-out: 28 idle
+GPU nodes were available and unusable by that lane. Matched triangle
+resubmitted inside the validated counts (job 26497294): C768@24 (147.5k
+cols/GPU anchor), C768@54 (65.5k), C1152@54 (147.5k — same tile as the
+anchor at 2.25x the devices).
+
+The lat-lon band decomposition has no such ceiling; its matched pair
+runs at 64 GPUs (job 26497323): LL720@16 and LL1440@64 both hold 64.8k
+columns/GPU, with LL720@64 (16.2k) as the sub-floor control.
+
+**Cube tile-floor arm, measured (job 26497294):** C768 L60 from 24 to 54
+GPUs = 19.33 -> 13.93 ms, **1.39x at 2.25x devices, efficiency 0.62** —
+and the tile only falls to 65.5k cols/GPU, still well ABOVE the ~30k
+floor. So unlike the CPU lane, the cube's loss here is NOT explained by
+the tile floor alone; there is real device-count cost to quantify.
+(Note the same-job C768@24 anchor reads 19.33 ms where the campaign's
+figure carries 14.09 ms for C768@24 — different lane/protocol between
+those jobs, so only the within-job 24-vs-54 contrast is used.)
+
+**THE CUBE PLATEAU, IDENTIFIED (job 26498347).** The fixed-tile contrast
+finally ran inside working configs — C512@24 vs C768@54, both 65.5k
+cols/GPU:
+
+| arm | tile | devices | ms/step |
+|---|---|---|---|
+| C512 kt=2 | 65.5k | 24 | 14.85 |
+| C768 kt=3 | 65.5k | 54 | **13.95** |
+
+**2.25x the devices carrying 2.25x the problem costs nothing** (1.06x, in
+the model's favour) — so communication does NOT grow with device count on
+this lane, and the strong-scaling loss is not a comm wall. Cross-job
+reproducibility is excellent: C768@54 reads 13.93 (job 26497294) and
+13.95 (26498347), 0.1 % apart, which licenses combining the two jobs.
+
+Solving the two fixed-device points for the per-device cost model:
+
+    t(tile) = 11.27 ms FIXED + 54.6 us per 1k columns
+
+At the production 147.5k tile the fixed term is already **58 %** of the
+step, and at 65.5k it is **76 %**. This is an Amdahl ceiling, not a
+network one: from a 24-GPU C768 base the step can never beat ~11.3 ms
+**however many GPUs are added** — a cap of 1.72x, of which the measured
+24->54 run already collected 1.39x. CONDITIONAL (codex round-15): this
+comes from a TWO-POINT fit and assumes the 11.27 ms term is constant as
+tiles shrink and device count rises. A perimeter-like halo term would
+FALL with tile size while collective latency could RISE with rank count;
+the 2.25x fixed-tile contrast supports only "little growth over the
+tested range", not universality. That single number explains
+the cube's efficiency 0.62, the empirical tile floor, and the plateau in
+the figure.
+
+**THE SAME STRUCTURE ON LAT-LON.** Two fixed-device (16 GPU) points —
+LL720 at 64.8k cols/GPU = 4.19 ms and LL1024 at 131k = 5.73 ms — give
+
+    t(tile) = 2.68 ms FIXED + 23.2 us per 1k columns
+
+so the fixed term is 64 % of the step at 64.8k and 47 % at 131k: the same
+fixed-cost-dominated structure as the cube, but roughly **4x smaller in
+absolute terms** (2.68 vs 11.27 ms). That is consistent with lat-lon
+scaling further before plateauing, and it makes the cube's 11.3 ms look
+like a lane-specific overhead rather than something intrinsic to the
+hardware or to SPMD. CAVEAT: these two points come from different jobs
+(26497323, 26498463) — same lane, protocol and day, but not the same-job
+contrast the cube pair enjoyed.
+
+**LAT-LON FIXED-TILE CONTRAST, MEASURED (job 26502539)** — 131.1k
+cols/GPU on both sides:
+
+| arm | devices | cells | ms/step |
+|---|---|---|---|
+| LL1024x2048 | 16 | 4.2 M | 5.73 |
+| **LL2048x4096** | **64** | **218.1 M** | **6.73** |
+
+4x the devices carrying 4x the problem costs **+17 %** — weak-scaling
+efficiency **0.85**, sustaining **32.4 GCells/s (506 Mcells/s/GPU) on
+218 million cells**, the campaign's largest atmospheric run by an order
+of magnitude. So communication grows only weakly with device count here
+too (the cube's equivalent contrast was free at 2.25x; lat-lon pays 17 %
+for 4x). Neither lane is comm-limited at these counts — both are limited
+by the per-step fixed cost above.
+
+Scale-out receipts on this lane: LL1536x3072 at 64 GPUs = 4.97 ms (job
+26498266) and the LL2048 point above.
+
+**WHAT THE FIXED TERM IS — ATTRIBUTED (nsys job 26504836): the halo
+exchange, scaling with tile PERIMETER.** Profiling both tiles at the
+SAME 24 GPUs isolates it by subtraction:
+
+| tile | NCCL time / 12 steps | launches | share of GPU time |
+|---|---|---|---|
+| C768, 147.5k cols/GPU | 498.7 ms | 1452 | 66.5 % |
+| C512, 65.5k cols/GPU | 280.7 ms | 1128 | 65.4 % |
+
+The comm term grows **1.78x for a 2.25x larger tile AREA** — close to the
+sqrt(2.25) = 1.50x a PERIMETER law predicts, and nowhere near the 2.25x
+an area law would give. That is the mechanism behind the fitted "fixed"
+11.27 ms: halo cost tracks the tile EDGE while compute tracks the tile
+AREA, so under strong scaling compute falls off faster than communication
+and the comm share rises until it dominates. It is NOT launch overhead
+and NOT host synchronisation.
+
+This also reconciles with the fixed-tile contrast (comm does not grow
+with DEVICE COUNT at constant tile, 1.06x for 2.25x devices): both
+statements are true because the comm cost is set by the tile geometry,
+not by how many devices exist.
+
+**LANE-MISMATCH CORRECTION (found while reading the kernel names).**
+That profile omitted `--closed-loop`, so it characterised the SINGLE-SHOT
+adapter lane (49.95 ms at C768), whereas the 11.27 ms fixed-cost model
+was fitted to CLOSED-LOOP runs (19.33 ms). I had attributed the 2.6x gap
+to nsys overhead; most of it is the lane difference. Consequences:
+* the perimeter ratio (1.78x for 2.25x area) is a within-lane ratio and
+  remains valid FOR THE SINGLE-SHOT LANE;
+* whether it explains the CLOSED-LOOP fixed term is NOT yet established.
+A matching closed-loop profile is running (job 26507936).
+
+WHAT THE KERNEL NAMES SHOW (single-shot lane, both tiles, 24 GPUs):
+
+| kernel | C768 | C512 | per step |
+|---|---|---|---|
+| `ncclDevKernel_SendRecv` (halo) | 311.8 ms / 1440 | 186.7 / 1116 | ~120 launches |
+| `AllReduce_Sum_f32_RING_LL` | 186.9 ms / **12** | 94.0 / **12** | **exactly 1** |
+
+The per-step all-reduce averages **15.6 ms at C768** and scales 1.99x
+with 2.25x tile area.
+
+**SOURCE MIS-ATTRIBUTED — corrected (codex round-15).** I cited the
+`(1,)` reshape in `tiled_production_cdgrid.py:2508` as the psum behind
+it. That is WRONG: that reshape lives in the closed-loop communicator
+WARM-UP, and the single-shot adapter explicitly REFUSES the mass fixer
+(`tiled_step_adapter.py:102`). So the origin of the per-step all-reduce
+in the profiled lane is **unidentified**, and my "scalar psum, therefore
+pure barrier" chain does not hold as stated.
+
+What survives: a 15.6 ms all-reduce IS compatible with early ranks
+spinning until a late rank arrives, but that is a hypothesis, not a
+measurement. The discriminating test (codex round-15) is per collective
+instance:
+
+    arrival skew = latest NCCL-kernel start - earliest NCCL-kernel start
+
+ms-scale skew with microsecond-scale service time on the last-arriving
+rank confirms the barrier reading; aligned starts implicate the
+collective or the scheduler instead.
+
+**CLOSED-LOOP PROFILE (job 26510470) — the production lane, isolated
+per-step with a marker kernel** (`loop_add_fusion_3`, exactly one per
+timed step; naive time-windowing was still catching setup and XLA
+autotune `RedzoneAllocatorKernel`, so a marker was required):
+
+| per step (mean of 3 inter-marker intervals) | ms |
+|---|---|
+| wall | 17.11 |
+| GPU kernel time | 15.08 |
+| **of which NCCL SendRecv (halo)** | **6.65 (44 %)** |
+| largest compute fusion | 0.90 |
+
+So in the lane the cost model was fitted to, the halo exchange is **6.65
+ms/step, 44 %** — substantial, but NOT the 66 % the single-shot lane
+showed, and NOT the whole 11.27 ms fixed term. The remaining ~8 ms is
+spread across many small compute fusions (the largest is 0.90 ms), which
+is the signature of a LAUNCH-BOUND step rather than one dominated by any
+single kernel.
+
+The per-step `AllReduce_Sum_f32_RING` that dominated the single-shot
+trace is ABSENT here (only tiny TREE all-reduces, 0.046 ms). It was an
+artifact of the single-shot lane, which is exactly why the lane mismatch
+mattered — the intervention it suggested would have targeted a
+collective the production lane does not issue.
+
+REVISED READING of the 11.27 ms fixed term: roughly half is halo
+exchange (perimeter-scaling, consistent with the single-shot ratio) and
+roughly half is many small compute kernels whose launch overhead does
+not shrink with tile size. Both halves point at the same two fixes —
+fewer/fatter halo messages, and kernel fusion to cut launch count.
+
+CONSEQUENCE FOR REACHING THE LIMIT: the lever is halo-cost-per-tile, not
+device count. Options in order of expected value: (a) larger tiles
+(raise resolution — already shown to work), (b) fewer/fatter exchanges
+per step (the ocean's wide-halo trick, 120 -> 4 messages, applied to the
+cube), (c) overlapping halo exchange with interior compute.
+
+**A THIRD cube limit — f64 is effectively unrunnable at 24 GPUs.** The
+tiled lane (the CORRECT >6-GPU vehicle) failed to complete even C384 L60
+in f64 within a 3 h wall (job 26512794), where the same arm in f32 runs
+in ~9 ms/step. No output, no error — it never finished compiling. That
+is consistent with #1370: if setup allocates global-sized buffers, f64
+doubles them, and the compile/allocation path degrades accordingly. So
+the cube's f64 GPU column stays EMPTY in the figure, and it is a
+capability gap rather than a measurement I skipped.
+
+**A SECOND cube ceiling, memory:** the fixed-tile arm C1152 L60 @54
+wanted **105.7 GB per device** (rematerialization stuck at 96.6 GB)
+against 80 GB of A100 HBM — job 26497294. So cube scale-out is bounded
+twice over: validation caps tiles at kt=3 (54 GPUs) and HBM caps
+resolution at that tile count. The fixed-tile comm contrast is
+resubmitted at L30 for BOTH arms (job 26497736), which halves the
+working set while holding 147.5k cols/GPU on each side.
+
+## The resolution lever is CAPPED on both transports — and my subdiv-9 runs were invalid
+
+The campaign's cure for every plateau is a larger tile via higher
+resolution. Testing that at the largest rank counts failed on BOTH
+transports, for two DIFFERENT reasons:
+
+**CPU (atm icosahedral): subdiv-9 is not supported by the generator.**
+Jobs 26512349 and 26514768 did not time out in mesh construction as I
+assumed — they raised immediately:
+
+    ValueError: subdivision_level=9 would create 2.62e+06 cells.
+    Maximum supported level is 8 (655,362 cells). For higher
+    resolutions, use load_mpas_mesh() with a pre-built mesh file.
+    (voronoi.py:1242)
+
+MY ERROR: I submitted two multi-node jobs at an unsupported level
+without checking the generator's range, and the error message even names
+the alternative. This is the THIRD time in this campaign that a library
+or bench guard stated the answer before I ran the job (the etopo dt
+warning and the n_lat divisibility check were the others). No pre-built
+finer mesh is present in the tree, so testing beyond subdiv-8 requires
+sourcing an MPAS mesh file first.
+
+**GPU: blocked by the global-allocation defect (#1370)** — LL2304 wanted
+102 GB/device, C1152 97-106 GB.
+
+**CONSEQUENCE, and it is the campaign's sharpest practical finding:**
+raising resolution is the ONLY measured cure for the tile-floor plateau,
+and it is currently unavailable on both transports — capped at subdiv-8
+on CPU by the mesh generator, and by per-device global allocation on GPU.
+So the useful rank/device ceilings measured here are NOT hardware limits:
+
+| lane | useful ceiling | what caps it |
+|---|---|---|
+| atm ico CPU | ~512-1024 ranks at subdiv-8 | mesh generator caps at subdiv-8 |
+| ocean MPAS CPU | 512 ranks at subdiv-8 | same generator cap + rank-count term |
+| atm/ocean GPU | 64 GPUs at LL1536-2048 | #1370 global per-device allocation |
+| cube GPU | 54 GPUs at C768 | kt validation (#1360) + #1370 |
+
+Unblocking #1370 and sourcing a subdiv-9+ mesh are therefore worth more
+than any further tuning: both lanes have headroom that is currently
+unreachable.
+
+## Cube optimisation: bounded BEFORE implementing — and the bound killed the plan
+
+Directive was to push the cube toward its limit. Codex round-16 defined
+the strategy first (per the standing pre-implementation rule) and its
+cheapest-bound step then REFUTED the intervention I was about to build.
+
+**Codex corrections to my reading:**
+* My "88 SendRecv / 4 rounds = 22 exchanges" was wrong. The kt=2 tile pad
+  emits **16 phases per logical scalar pad** (4 edges + 4 guards + 4
+  diagonals + 4 corner slivers) for serial-exact offset/corner handling
+  (`cubesphere_exchange.py:1276`); the RK body pads dp/B/zeta/invT/lnps/T
+  separately, the vector pad calls the scalar pad twice, x3 RK stages.
+* Vertical batching is ALREADY done (4-D pads carry all L60 levels), so
+  it cannot remove launches — my own payload arithmetic had hinted at
+  this (strips ~41x larger than a single-field depth-1 strip).
+* XLA already fuses much of it: ~384 source permutes become ~101
+  optimized HLO ops and 88 traced SendRecv. So field packing's ceiling
+  is the 6.65 ms NCCL time, NOT the 11.27 ms fixed term.
+* A once-per-step STALE deep halo (the ocean's trick) **changes answers**
+  on this dycore — it alters RK2/RK3 boundary tendencies. Exact
+  communication avoidance would need a 3 x radius = 6-cell overlap with
+  cube-edge interpolation, and the tiled transport supports only halo
+  1/2. That is a new algorithm, not a port.
+
+**THE BOUND (one step, 86 SendRecv, latency floor 17.8 us measured):**
+
+| class | n | total |
+|---|---|---|
+| <=25 us (latency-bound) | 39 | **0.61 ms** |
+| 25-100 us | 33 | 1.20 ms |
+| >100 us (payload/wait) | **14** | **7.54 ms** |
+
+Field packing removes LAUNCHES, so its absolute ceiling is the
+latency-bound class: **0.61 ms of a 17.11 ms step = 3.6 %**. Not worth
+the change.
+
+**What the tail actually is.** The largest single exchange is **4.86 ms**.
+At the measured 64.2 GB/s NVLink that would be ~310 MB, but the entire
+per-step halo volume is ~8 MB. So that call is not moving data — it is
+WAITING. Fourteen exchanges holding 7.54 ms is arrival skew absorbed at
+halo sync points, the same signature codex flagged for the single-shot
+all-reduce.
+
+**CONCLUSION: the cube's fixed cost is dominated by rank-arrival skew,
+not by launch count or bytes.** Packing fields, batching levels and
+fattening messages all target the wrong term.
+
+**SKEW LOCATED (4-rank profile, job 26526100).** Aligning SendRecv
+launches by sequence across ranks 0/1/12/23 over two steady steps:
+
+* 10 of 172 exchanges carry >1 ms of max duration, and **9 of the 10 are
+  skew-dominated** — arrival skew ~= max duration (e.g. 13.6 ms skew vs
+  12.6 ms duration with the last arriver's own service at 14 us: early
+  ranks WAIT the full skew).
+* The ordering is SYSTEMATIC: rank 23 arrives last 95/140 times, rank 0
+  44/140; rank 12 arrives FIRST 135/140. Median idle gap before a late
+  arrival is 20 us — the late rank was computing back-to-back, not
+  blocked upstream.
+* BUT total per-rank work is EQUAL: compute 8.2-8.5 ms/step in ~428
+  kernels on every rank.
+
+Equal totals + systematically late at fixed sequence points = **pipeline
+drift, not load imbalance**: the 16-phase pad sequence has
+rank-dependent participation (partial permutes let non-target ranks run
+ahead), the drift accumulates within the step, and the ~10
+full-participation exchanges act as resync barriers where the
+accumulated drift is paid as wait. The cost is real (~7.5 ms/step in the
+wait tail) but the remedy is ALGORITHMIC — reorder/merge pad phases so
+drift cannot accumulate, or overlap the resync exchanges with interior
+compute — a scoped dycore-scheduling follow-up, not a bench or config
+change. No further profiling is needed; the mechanism chain
+(launch-count -> bytes -> skew -> ordering) is now measured end to end.
+
+## Tripole (ORCA fold) past 4 GPUs — first receipts (job 26512798)
+
+The fold is the ocean's production topology but had only ever been
+measured to 4 GPUs. LL1152x2304 L20 f32, implicit_cn + forced PCG:
+
+| devices | tile | ms/step | GC/s |
+|---|---|---|---|
+| 8 | 331.8k cols/GPU | 33.97 | 1.56 |
+| 16 | 165.9k | **23.79** | 2.23 |
+
+8->16 = 1.43x, **efficiency 0.71** — the fold scales respectably at
+production tiles, and the topology is not a scale-out blocker at these
+counts.
+
+SCOPE, stated because it is tempting to misread: the regular-grid
+LL1152@16 number elsewhere in this report (19.83 ms) used
+**explicit_substep + wide-halo**, whereas this tripole ladder used
+**implicit_cn + PCG**. Those are DIFFERENT SOLVERS, so the pair licenses
+NO fold-cost claim. The only licensed fold cost remains the earlier
+same-job matched contrast (+1.2-3.7 %, job 26493837).
+
+## Ocean GPU scale-out to 64 devices — and a CROSS-LANE memory defect (#1370)
+
+| arm | devices | tile | ms/step |
+|---|---|---|---|
+| LL1152x2304 L20 | 16 | 165.9k cols/GPU | 19.83 |
+| LL1152x2304 L20 | 64 | 41.5k | **11.19** (4.75 GC/s) |
+| LL2304x4608 L20 | 64 | 165.9k | **OOM — 102 GB/device** |
+
+The strong arm reaches 64 GPUs (19.83 -> 11.19 ms, 1.77x for 4x devices,
+eff 0.44 — the tile falls to 41.5k, near the ~30k floor, so this is the
+floor behaving exactly as the atmosphere's does).
+
+**The fixed-tile arm could not run, and WHY it could not is the finding.**
+LL2304 at 64 GPUs asked for **102.04 GB per device**. The per-device
+SHARD is 3.3 M cells — about 0.2 GB for fifteen f32 fields. But the
+GLOBAL problem is 212 M cells = 12.7 GB per field-set, and ~8 such
+buffers is ~102 GB: an exact match. The allocation tracks the GLOBAL
+size, not the shard.
+
+This is the SAME signature as the cube's C1152 wall (105.7 GB at L60,
+97.5 GB at L30 — only 8 % for halving the levels, so level-INDEPENDENT).
+Two independent lanes, one defect class: **SPMD setup materialises
+global-sized buffers per device, so RESOLUTION is capped regardless of
+device count.** Both lanes shard correctly one size down (ocean LL1152
+@64, cube C768 @54), so the sharded step is sound — it is the
+setup/allocation path.
+
+**OCEAN FIXED-TILE CONTRAST, recovered by sizing under the wall (job
+26510472).** Instead of retrying LL2304, LL1632 @32 holds the anchor's
+tile (166.5k vs 165.9k cols/GPU) at HALF the global size:
+
+| arm | devices | tile | ms/step |
+|---|---|---|---|
+| LL1152x2304 | 16 | 165.9k | 19.83 |
+| LL1632x3264 | 32 | 166.5k | **19.55** (5.45 GC/s) |
+
+**2x the devices carrying 2x the problem costs NOTHING** (0.99x,
+weak-scaling efficiency 1.01). So the ocean GPU lane joins the
+atmosphere: comm does not grow with device count at constant tile
+(cube 1.06x at 2.25x, lat-lon 1.17x at 4x, ocean 0.99x at 2x). **All
+three GPU lanes are tile-limited, none is device-count-limited** over
+the tested ranges.
+
+**#1370 DIAGNOSED (probe job 26523157, after two harness failures the
+CPU smoke could not catch).** Matched 3.3M-cell shards at 2x global size
+(LL1152@16 vs LL1632@32):
+
+| signal | @16 | @32 | reading |
+|---|---|---|---|
+| compiled entry args | 0.06 GB | 0.06 GB | step is CLEAN |
+| compiled temps | 0.22 | 0.21 | not remat pressure |
+| state leaves (per-device) | 0.070 sharded / 0 replicated | same | sharding correct |
+| **bytes_in_use** | **1.58 GB** | **3.11 GB** | **tracks GLOBAL size** |
+
+Per-device residency is a constant **~7.4 global-field equivalents** —
+and 7.4x the LL2304 field size is the observed 102 GB wall. So the
+defect is NOT step-entry replication (my original hypothesis — refuted
+in its specific form) and NOT remat: it is **SETUP-TIME global device
+arrays that stay alive after sharding** — the globally-built initial
+state, the vertex-mask cache primed FROM the global state, and the
+replicated geometry stacks. The cube's level-independent wall fits: its
+setup residency is mesh tables + 2-D geometry.
+
+**FIX STAGE (i) SHIPPED AND MEASURED** (commits e1b502000/e5a541c65 +
+probe 26524423): building the global model/state under
+`jax.default_device(local cpu)` at nd>1 drops per-device residency
+**1.58 -> 0.30 GB (@16) and 3.11 -> 0.71 GB (@32) — a 5x reduction** —
+with the compiled step unchanged and parity at 1e-10. Getting there
+burned four probe attempts on real multicontroller facts, each recorded:
+lower/compile is COLLECTIVE (rank-0-only deadlocks the shutdown
+barrier); `jax.devices()` is the GLOBAL list under jax.distributed (use
+`local_devices`); `JAX_PLATFORMS=cuda` unregisters the cpu backend; and
+the host-side build needs `--mem=0` or the SLURM cgroup kills it.
+
+**STAGE (iii) SHIPPED — ACCEPTANCE MET** (commit 57494f2de, probe
+26526284): sharding the band-geometry stacks P("lat") removes the
+residual. Per-device residency is now **0.10 GB at BOTH probe sizes —
+ratio 1.00, meeting codex's pre-registered <= 1.10 exactly**. Full arc:
+1.58/3.11 GB (before) -> 0.30/0.71 (host-side build) -> **0.10/0.10**
+(sharded stacks): a 16-31x reduction, residency now independent of
+global size. All 13 SPMD gate suites (equivalence/tripole/wide-halo)
+pass. One diagnostic casualty, harmless to production: the probe's
+OUTER re-jit now refuses ("closing over a multi-process jax.Array"),
+because the wrapper closes over the now-sharded stacks — the production
+inner jit receives them as ARGUMENTS and is unaffected (the probe's own
+step invocation ran). Remaining acceptance: the LL2304@64 wall run.
+
+WHY THIS IS THE CAMPAIGN'S MOST IMPORTANT BLOCKER: the measured cure for
+every plateau is a LARGER TILE, i.e. raising resolution as devices are
+added. This defect makes that impossible — adding GPUs cannot buy
+resolution — so every GPU lane is pinned at the tile floor. Filed as
+**#1370** with the arithmetic; distinct from #1360 (the cube's kt
+validation ceiling), and validating kt=4 alone would NOT unblock C1152.
+
+## Ocean MPAS Voronoi scale-out — and a lane that does NOT obey the tile law
+
+Controlled ladder, **32 ranks/node fixed** so nodes scale with ranks and
+per-rank bandwidth is constant (job 26505286, f64, block:cyclic):
+
+| ranks | subdiv-7 | cells/rank | subdiv-8 | cells/rank |
+|---|---|---|---|---|
+| 32 | 190.22 ms | 5 120 | 861.25 ms | 20 480 |
+| 64 | 147.65 | 2 560 | 494.89 | 10 240 |
+| 128 | 102.93 | 1 280 | 309.05 | 5 120 |
+| 256 | **65.71** | 640 | **254.41** | 2 560 |
+
+32->256 efficiency 0.36 (s7) and 0.42 (s8) — the lane reaches 256 ranks
+but does not approach the limit.
+
+A PROTOCOL FIX FIRST: the previous ladder (26504842) let srun fill nodes,
+so np32 ran half-full (32 ranks/node) while np64-256 ran full (64) —
+per-rank bandwidth changed along the ladder, and efficiency appeared to
+RISE as tiles shrank, which is impossible. Fixing ranks-per-node changed
+every number (s7 np32 159.67 -> 190.22 ms).
+
+**THIS LANE BREAKS THE CELLS/RANK LAW that the atmosphere obeys.** At the
+SAME 5 120 cells/rank, s7@np32 costs 190 ms but s8@np128 costs 309 ms —
+1.63x more for 4x the ranks at identical per-rank work. On the atmosphere
+icosahedral lane, per-doubling speedup depended on cells/rank ALONE. So
+ocean-MPAS carries a genuine device-count cost the atmosphere lane does
+not, and raising resolution will NOT rescue it the way it does elsewhere.
+
+**CODEX ROUND-15 2x2 — BOTH effects are real, and separable** (jobs
+26508258/26508336). Both cells hold 5 120 cells/rank; measured load
+imbalance is near-identical (owned max/min within 6 %), so this is a
+partition-QUALITY contrast, not a load-balance one:
+
+| partition | s7 / 32 ranks | s8 / 128 ranks | B/A |
+|---|---|---|---|
+| geometric | 190.07 ms | 313.17 ms | **1.65x** |
+| sfc | 232.46 | 617.66 | 2.66x |
+
+* **Genuine device-count cost:** at the BEST partition, 4x the ranks at
+  identical per-rank work still costs **1.65x**. Not partition quality,
+  not load imbalance — a real rank-count term the atmosphere lane does
+  not have.
+* **Partition quality degrades WITH rank count:** sfc costs 1.22x at 32
+  ranks but **1.97x** at 128. So the two effects compound, and the
+  default `auto` is doing well to land near geometric.
+* Practical: pin `--partition-method geometric` (or auto) on this lane;
+  sfc is actively harmful at scale. pymetis is absent from `.venv-mpi`,
+  so the low-cut METIS arm codex wanted is still unmeasured.
+
+**512-RANK LADDER (job 26508063):** s7 63.83 ms, s8 194.80 ms.
+s8 keeps gaining 256->512 (254.41 -> 194.80 = **1.31x**, at 1 280
+cells/rank) while s7 goes flat (65.71 -> 63.83 = 1.03x, at 320
+cells/rank — below the 300-600 floor). Same floor as the atmosphere,
+reached at a different rank count because the mesh differs. So this lane
+DOES scale to 512 ranks when the mesh is large enough; it just pays the
+rank-count term on the way.
+
+UNEXPLAINED, flagged not resolved: s7's per-doubling speedup RISES
+(1.29 / 1.43 / 1.57) even in the controlled ladder. Efficiency improving
+as the tile shrinks has no physical mechanism I can name; the likeliest
+reading is that the np32 base point is anomalously slow (partition
+quality at low rank counts?) rather than the high-rank points being
+good. Under codex review (round 15) along with the discriminating
+experiment for device-count cost vs partition degradation.
 
 ## Precision + grid-coverage verification (2026-07-27, user request)
 

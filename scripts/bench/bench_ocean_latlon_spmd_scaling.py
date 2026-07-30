@@ -373,15 +373,46 @@ def main() -> int:
         # Trace-time switch — set BEFORE the sharded step is built/jitted.
         os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
-    model, s0 = build_model_and_state(
-        n_lat, args.n_lon, args.nlev, seed=args.seed,
-        wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
-        tripole=args.tripole, baro_solver=args.baro_solver,
-        force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
-        pcg_fixed_iters=args.pcg_fixed_iters)
-    # Prime the build-once vertex-mask cache from the CONCRETE state so the
-    # wrapper can build the per-band vertex masks host-side.
-    model._ensure_vertex_mask(s0)
+    # #1370 fix stage (i), codex round-18: build the GLOBAL model/state on
+    # the HOST cpu backend, not the accelerator. rest-state init runs jnp
+    # ops at GLOBAL shape; on the default (GPU) device that materialises
+    # ~7.4 global-field-equivalents of setup residency per device AND
+    # compiles a global-sized init program — the 102 GB wall that killed
+    # LL2304@64 (probe 26523157: the compiled STEP is clean; the residency
+    # is setup-time). Host-side globals are RAM, and only the per-band
+    # shards reach the accelerator via shard_state_latlon's device_put.
+    # Identical values on every process (deterministic init + the step
+    # factory's existing process-0 broadcast + content-hash guard).
+    # nd==1 keeps the old on-device build: that lane TIMES the
+    # single-device step, so its state belongs on the accelerator.
+    import contextlib
+    _build_ctx = contextlib.nullcontext()
+    if nd > 1:
+        try:
+            # local_devices, NOT devices: under multicontroller jax.devices()
+            # returns the GLOBAL list, so [0] is process 0's cpu device
+            # — non-addressable elsewhere (probe job 26524163).
+            _build_ctx = jax.default_device(
+                jax.local_devices(backend="cpu")[0])
+        except RuntimeError:
+            # cpu backend not registered (JAX_PLATFORMS=cuda). The fix
+            # needs JAX_PLATFORMS=cuda,cpu; fall back to the old on-device
+            # build LOUDLY rather than crash.
+            print("[#1370] WARNING: no cpu backend — global init will "
+                  "materialise on the accelerator (set "
+                  "JAX_PLATFORMS=cuda,cpu to enable the host-side build)",
+                  flush=True)
+    with _build_ctx:
+        model, s0 = build_model_and_state(
+            n_lat, args.n_lon, args.nlev, seed=args.seed,
+            wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
+            tripole=args.tripole, baro_solver=args.baro_solver,
+            force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
+            pcg_fixed_iters=args.pcg_fixed_iters)
+        # Prime the build-once vertex-mask cache from the CONCRETE state so
+        # the wrapper can build the per-band vertex masks host-side (global
+        # 2-D — stays on the host under the nd>1 context).
+        model._ensure_vertex_mask(s0)
 
     # Wet-cell weak metric (audit item 9): ACTIVE cell-levels from the state
     # land mask (2-D column mask, z-star: a wet column is wet at all nlev

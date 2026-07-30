@@ -57,6 +57,14 @@ _SEC_PER_DAY = 86400.0
 _SEC_PER_6H = 21600.0
 _YEAR_S = 365.0 * _SEC_PER_DAY
 _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
+# NEMO ldf_eiv (nn_aei_ijk_t=21) kappa_GM defaults, defined ONCE and shared by
+# `build_tripole`'s signature and the `--gm-aei0` / `--gm-kappa-min` argparse
+# defaults so the two can never drift.
+# aei0 = rn_Ue*rn_Le; ORCA1 namelist = 0.018 * 100e3.
+_GM_AEI0_DEFAULT = 1800.0
+# Equatorial-taper floor; matches VisbeckConfig.kappa_min, the coefficient the
+# OMIP tripole otherwise runs.
+_GM_KAPPA_MIN_DEFAULT = 200.0
 
 
 # NEMO eORCA geometry + WOA IC loaders now live in the ocean package so the
@@ -601,8 +609,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
-                  gm_treguier=False, gm_aei0=1800.0,
-                  gm_kappa_min=200.0):
+                  gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
+                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -699,15 +707,21 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # different closure.  Visbeck and Treguier are mutually exclusive
         # (gm_redi_latlon_cgrid raises), so this swaps one for the other and
         # leaves kappa_Redi / S_max at the proven tripole values.
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg as _validate_treguier_cfg,
+        )
         from legoesm.ocean.physics.lateral_mixing.config import (
             GMRediConfig as _GMRediConfig, TreguierConfig as _TreguierConfig,
             VisbeckConfig as _VisbeckConfig,
         )
         _base = run_omip._DEFAULT_BATHY_GM_REDI
+        _treg_cfg = _TreguierConfig(enabled=True, aei0=float(gm_aei0),
+                                    kappa_min=float(gm_kappa_min))
+        # Fail here rather than inside the first GM tendency.
+        _validate_treguier_cfg(_treg_cfg)
         _ovr["gm_redi"] = _base._replace(
             visbeck=_VisbeckConfig(enabled=False),
-            treguier=_TreguierConfig(enabled=True, aei0=float(gm_aei0),
-                                     kappa_min=float(gm_kappa_min)),
+            treguier=_treg_cfg,
         )
         print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
               f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
@@ -3606,6 +3620,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(Arctic-relevant: fresher shelf water freezes warmer). "
                         "Requires --freeze-floor and/or --ice-thermo (else no "
                         "consumer -> hard error).")
+    p.add_argument("--ice-ocean-heat-coeff", type=float, default=None,
+                   help="Ocean->ice basal turbulent heat-transfer coefficient "
+                        "[W/m^2/K] for --prognostic-sea-ice "
+                        "(SeaIceConfig.ocean_heat_transfer_coeff; default 20). "
+                        "The Antarctic-melt driver probe (2026-07-28) measured "
+                        "the constant 20 at 3-5x below NEMO's u*-dependent MIZ "
+                        "exchange — ~60-80 approximates NEMO's summer "
+                        "marginal-ice-zone melt rate pending the faithful "
+                        "u*-dependent scheme.")
     p.add_argument("--prognostic-sea-ice", action="store_true",
                    help="Wire legoESM's REAL prognostic sea-ice model "
                         "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
@@ -4034,14 +4057,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
                         "(rn_Ue=0.018, rn_Le=100e3 => aei0=1800 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
-    p.add_argument("--gm-kappa-min", type=float, default=200.0,
+    p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
                         "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
                         "sends kappa -> 0 AT THE EQUATOR (2.17%% of eORCA1 wet "
                         "cells measured below taper 0.05), which destabilised a "
                         "1-degree global run; Visbeck carries kappa_min=200 for "
-                        "the same reason. 0 disables the floor (raw NEMO form).")
-    p.add_argument("--gm-aei0", type=float, default=1800.0,
+                        "the same reason. NOT NEMO: a nonzero floor is a "
+                        "deliberate closure change that keeps a finite bolus "
+                        "transport at the equator, so oracle/fidelity runs must "
+                        "pass 0 (= raw NEMO capped-only form). Applied before "
+                        "the Hallberg resolution scaling, as Visbeck's is.")
+    p.add_argument("--gm-aei0", type=float, default=_GM_AEI0_DEFAULT,
                    help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
                         "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
     p.add_argument("--freshwater-salinity", type=str, default="s_ref",
@@ -4146,6 +4173,11 @@ def main() -> int:
     # ignored (dispatch footgun) — reject whenever the flag was typed
     # EXPLICITLY, even with the 'kpp' default value (codex LOW: an explicit
     # `--mpas-vmix kpp --grid tripole` is still a user error worth surfacing).
+    if (args.ice_ocean_heat_coeff is not None
+            and not args.prognostic_sea_ice):
+        raise SystemExit(
+            "--ice-ocean-heat-coeff configures the prognostic sea-ice model "
+            "and requires --prognostic-sea-ice (otherwise silently unused).")
     if args.grid != "mpas" and (args.mpas_vmix != "kpp"
                                 or "mpas_vmix" in _cli_flags_given()):
         raise SystemExit(
@@ -4414,6 +4446,25 @@ def main() -> int:
             "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
             "selects the NEMO ldf_eiv kappa_GM scheme, the latter disables "
             "GM/Redi entirely.")
+    # Symmetric guard: the two Treguier tunables are read ONLY inside the
+    # --gm-treguier branch of build_tripole, so a non-default value passed
+    # without the scheme flag would evaporate silently.
+    if not args.gm_treguier:
+        _stray = [f"--gm-aei0 {args.gm_aei0:g}"
+                  if args.gm_aei0 != _GM_AEI0_DEFAULT else None,
+                  f"--gm-kappa-min {args.gm_kappa_min:g}"
+                  if args.gm_kappa_min != _GM_KAPPA_MIN_DEFAULT else None]
+        _stray = [s for s in _stray if s]
+        if _stray:
+            raise SystemExit(
+                f"{' and '.join(_stray)} require --gm-treguier (they only "
+                f"configure the NEMO ldf_eiv kappa_GM block); without it the "
+                f"value is silently discarded.")
+    if args.gm_treguier and args.gm_kappa_min > args.gm_aei0:
+        raise SystemExit(
+            f"--gm-kappa-min {args.gm_kappa_min:g} exceeds --gm-aei0 "
+            f"{args.gm_aei0:g}: the floor would override the NEMO cap on every "
+            f"wet cell.")
     if args.river_mouth_restoring_gate and not args.runoff:
         raise ValueError(
             "--river-mouth-restoring-gate requires --runoff (the gate masks "
@@ -5226,6 +5277,9 @@ def main() -> int:
             # sw_transmittance_ice=0.0.
             sw_transmittance_const=float(args.ice_thermo_sw_trans),
         )
+        if args.ice_ocean_heat_coeff is not None:
+            ice_config = ice_config._replace(
+                ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
         ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
         # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)

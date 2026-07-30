@@ -42,7 +42,36 @@ Waiving becomes a deliberate act that leaves a reason in the diff. See
 `scripts/validate/ocean_fidelity/dino_1226/nemo_geometry_gate.py` for a working
 example (45 arrays, 0 unaccounted).
 
-Apply this to the mesh, the restart, AND the namelist.
+Apply this to the mesh, the restart, the namelist, **AND the oracle's STEP CALL
+GRAPH**. Enumerate every `CALL` in the oracle's step routine (descending one
+level through dispatch wrappers to the concrete routine the config runs) and
+force a disposition per routine: VERIFIED (number + where), WAIVED (reason), or
+UNVERIFIED (listed loudly, ranked by climate leverage). A term list built from
+"terms we had reason to suspect" is a checklist, not coverage — the #1226 sweep
+verified 11 suspected terms to ~1.0 while the barotropic solver and momentum
+advection pieces sat unenumerated, and "verified in an earlier phase" served as
+an implicit, unwritten waiver. Prior-phase verification does NOT carry over a
+raised bar: re-certify or waive explicitly, in writing.
+
+## Rule 1b — The bar is EXACT. Encode it in a gate, not in your judgment.
+
+If the user sets the bar at corr 1.0 / ratio 1.0, then 0.99x is **DEBT**, not
+"matched", "faithful", "closed", or "good enough". Those words are forbidden
+for any term whose measured numbers are not at the bar.
+
+Judgment drifts: measure 0.9923, write "FAITHFUL", move on — repeatedly, across
+a whole campaign, while being told the bar each time. So do not hold the bar in
+your head. Put every term's measured (corr, ratio) in a **gate script** that
+classifies AT BAR / DEBT / UNMEASURED and exits non-zero unless all are AT BAR
+(example: `scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py`).
+Report its output, not your impression. Never relax the bar constants; only add
+measurements.
+
+Corollary: a term is not clearable by an EXPLANATION of its residual
+("threshold chatter", "irreducible amplification", "branch flips"). Those are
+hypotheses. Clearing requires comparing the routine's INTERNALS stage by stage
+and either reaching the bar or proving the deviation lives in the oracle's own
+arithmetic.
 
 ## Rule 2 — Know what each gate CANNOT see
 

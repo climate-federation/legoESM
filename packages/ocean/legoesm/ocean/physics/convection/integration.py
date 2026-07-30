@@ -144,6 +144,7 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
             apply_diffusion=apply_diffusion,
             u=u_in, v=v_in,
             p_cell=p_cell, eos_fn=eos_fn,
+            eta=state.eta.data, H_bathy=state.H_bathy.data,
         )
         du = out.du_dt if out.du_dt is not None else None
         dv = out.dv_dt if out.dv_dt is not None else None

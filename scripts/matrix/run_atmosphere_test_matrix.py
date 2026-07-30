@@ -800,7 +800,7 @@ def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
         from legoesm import constants
         grid = create_fv3_native_cubed_sphere(
             n, omega=(0.0 if test_num == 8 else constants.Omega),
-            use_duogrid=True, k2e_nord=4)
+            use_duogrid=True, k2e_nord=2)
     else:
         grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
                 if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
@@ -2736,7 +2736,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from legoesm import constants
             grid = create_fv3_native_cubed_sphere(
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
-                use_duogrid=True, k2e_nord=4)
+                use_duogrid=True, k2e_nord=2)
         else:
             # LEGOESM_SW_MODON_K2E_NORD (modons only): duo halo Lagrange
             # order on the LEGACY equiangular grid — isolates halo order
