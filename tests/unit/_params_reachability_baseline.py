@@ -262,7 +262,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.gwd.McFarlaneConfig.h_topo',
     'atm.gwd.McFarlaneConfig.min_wind',
     # atm: MorrisonConfig (15; 5 wired 2026-07-26 + ice_snow_d_auto wired
-    # 2026-07-27 via _thread_morrison_scalars — anvil-ice tuning)
+    # 2026-07-27 via thread_morrison_scalars — anvil-ice tuning)
     'atm.micro.MorrisonConfig.N_i0',
     'atm.micro.MorrisonConfig.Nc_0',
     'atm.micro.MorrisonConfig.a_v_i',

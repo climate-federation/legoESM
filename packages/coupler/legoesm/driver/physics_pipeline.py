@@ -3145,7 +3145,7 @@ def validate_microphysics_tracer_slots(
     return need_slots
 
 
-def _thread_morrison_scalars(config, scheme, micro_config):
+def thread_morrison_scalars(config, scheme, micro_config):
     """Forward user-touched ``morrison_*`` flat scalars to the shared applier.
 
     Explicit attribute reads (not getattr-with-a-variable) so the
@@ -3313,7 +3313,7 @@ def _resolve_microphysics(config):
     # retuned them; codex 2026-07-26 Critical).  Only user-touched values are
     # forwarded, so a non-Morrison scheme with untouched defaults stays
     # silent and a Morrison config at defaults is byte-identical.
-    micro_config = _thread_morrison_scalars(config, scheme, micro_config)
+    micro_config = thread_morrison_scalars(config, scheme, micro_config)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (

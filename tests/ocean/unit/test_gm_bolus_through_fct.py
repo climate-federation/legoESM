@@ -28,7 +28,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     nemo_eiv_bolus_transport,
 )
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _add_bolus_to_advecting_flux,
+    add_bolus_to_advecting_flux,
 )
 from legoesm.ocean.advection import fct_tracer_advection
 from legoesm.grids.latlon import ensure_geometry
@@ -117,7 +117,7 @@ def test_bolus_conserves_and_preserves_constancy_through_fct():
     mfv = jnp.zeros((nlat + 1, nlon, nlev))
     um3 = st.u_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
     vm3 = st.v_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
-    mfu_tr, mfv_tr, w_tr = _add_bolus_to_advecting_flux(
+    mfu_tr, mfv_tr, w_tr = add_bolus_to_advecting_flux(
         bolus, mfu, mfv, um3, vm3, r.grid, r.z_coord)
     geom = ensure_geometry(r.grid)
     e1t, e2t = geom.dx_T, geom.dy_T
@@ -148,7 +148,7 @@ def test_bolus_through_fct_is_monotone():
     nlat, nlon, nlev = T.shape
     um3 = st.u_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
     vm3 = st.v_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
-    mfu_tr, mfv_tr, w_tr = _add_bolus_to_advecting_flux(
+    mfu_tr, mfv_tr, w_tr = add_bolus_to_advecting_flux(
         bolus, jnp.zeros((nlat, nlon + 1, nlev)), jnp.zeros((nlat + 1, nlon, nlev)),
         um3, vm3, r.grid, r.z_coord)
     _ztop = jnp.cumsum(r.z_coord.dz_ref) - r.z_coord.dz_ref
@@ -187,7 +187,7 @@ def test_smooth_limit_matches_centred_sign_and_amplitude():
     nlat, nlon, nlev = T.shape
     um3 = st.u_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
     vm3 = st.v_mask.data[:, :, None] * jnp.ones((1, 1, nlev))
-    mfu_tr, mfv_tr, w_tr = _add_bolus_to_advecting_flux(
+    mfu_tr, mfv_tr, w_tr = add_bolus_to_advecting_flux(
         bolus, jnp.zeros((nlat, nlon + 1, nlev)), jnp.zeros((nlat + 1, nlon, nlev)),
         um3, vm3, r.grid, r.z_coord)
     h_k = r.z_coord.dz_ref[None, None, :] * jnp.ones_like(eta)[:, :, None]
