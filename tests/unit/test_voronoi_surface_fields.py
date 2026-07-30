@@ -91,3 +91,28 @@ def test_partition_slicer_carries_the_fields(mesh):
     # the slicer source must reference both fields (a structural tripwire in
     # ADDITION to the behavioural tests above, which cover the extractors)
     assert "subgrid_topo_stddev" in src and "land_frac" in src
+
+
+def test_mesh_cache_round_trip_with_none_optionals(tmp_path):
+    """The mesh cache must survive the optional fields.
+
+    Regression: np.asarray(None) is a 0-d OBJECT array; savez pickles it and
+    the allow_pickle=False load then rejects the whole file — every
+    create_grid call regenerated the mesh AND re-saved a broken cache
+    (observed live in run gwdE_realoro, job 26573336)."""
+    import warnings as _w
+    from legoesm.grids.voronoi import (
+        _load_voronoi_cache, _save_voronoi_cache,
+    )
+
+    m = create_grid("mpas", 2, lloyd_iterations=5)
+    assert m.subgrid_topo_stddev is None          # the None-optional case
+    p = str(tmp_path / "mesh_cache.npz")
+    with _w.catch_warnings():
+        _w.simplefilter("error")                  # a cache-write warning FAILS
+        _save_voronoi_cache(p, m)
+        m2 = _load_voronoi_cache(p)
+    assert m2 is not None, "cache unreadable (the object-array regression)"
+    assert m2.nCells == m.nCells
+    assert m2.subgrid_topo_stddev is None and m2.land_frac is None
+    np.testing.assert_allclose(np.asarray(m2.latCell), np.asarray(m.latCell))

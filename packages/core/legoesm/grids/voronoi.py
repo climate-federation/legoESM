@@ -1150,11 +1150,21 @@ def _load_voronoi_cache(path: str):
         return None
     try:
         with np.load(path) as data:
-            if set(data.files) != set(VoronoiMesh._fields):
+            # Optional (defaulted) fields are EXCLUDED from the cache when
+            # None (np.savez would store them as object arrays, which the
+            # default allow_pickle=False load then rejects — permanently
+            # busting the cache). A valid cache carries every REQUIRED field
+            # and any subset of the optional ones; absent optionals take
+            # their NamedTuple default (None) at construction.
+            _optional = set(VoronoiMesh._field_defaults)
+            _required = set(VoronoiMesh._fields) - _optional
+            _files = set(data.files)
+            if not (_required <= _files
+                    and _files <= set(VoronoiMesh._fields)):
                 # Stale schema (fields added/removed) -> ignore, rebuild.
                 return None
             fields = {}
-            for field_name in VoronoiMesh._fields:
+            for field_name in _files:
                 arr = data[field_name]
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
@@ -1171,8 +1181,14 @@ def _load_voronoi_cache(path: str):
 def _save_voronoi_cache(path: str, mesh: "VoronoiMesh") -> None:
     """Atomically write *mesh* to *path* (tmp + os.replace; safe under the N-rank race)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    arrays = {field_name: np.asarray(getattr(mesh, field_name))
-              for field_name in mesh._fields}
+    # Skip None-valued optional fields: np.asarray(None) is a 0-d OBJECT
+    # array, np.savez stores it pickled, and the allow_pickle=False load
+    # then rejects the ENTIRE file — regenerating and re-saving broken on
+    # every call. The loader treats absent optional fields as their None
+    # defaults.
+    arrays = {field_name: np.asarray(v)
+              for field_name in mesh._fields
+              if (v := getattr(mesh, field_name)) is not None}
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
         with open(tmp, "wb") as f:
