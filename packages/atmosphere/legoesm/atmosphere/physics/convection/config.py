@@ -622,6 +622,27 @@ class MassFluxConfig(NamedTuple):
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # Selects the compensating-subsidence + detrainment solve in the SHARED
+    # kernel ``mass_flux.apply_mass_flux_kernel``; see
+    # ``BechtoldConfig.subsidence_solve`` for the full rationale and the
+    # measured leak numbers.  ``"advective"`` (DEFAULT HERE — preserves this
+    # scheme's shipped behaviour byte-for-byte) is the legacy donor-cell
+    # advective form, which leaves a non-telescoping ``(phi/rho) dM/dz``
+    # residual so column MSE / total water close only to truncation order.
+    # ``"implicit_flux"`` selects the IMPLICIT (backward-Euler, theta-blended)
+    # CONSERVATIVE flux-form solve: the flux divergence telescopes to the
+    # vanishing top/base boundary flux (machine-precision column closure) and
+    # the detrained condensate is paired with its vapor sink ``-dq_c``.
+    # NOTE the two solves are NOT merely different discretisations of one
+    # operator: implicit_flux additionally books that vapor sink, so switching
+    # changes the column water budget ON PURPOSE.  Unknown values raise
+    # ValueError at kernel entry (static Python str; dispatch-hardening).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler); the kernel clamps to [0.5, 1.0].  Unused when
+    # ``subsidence_solve == "advective"``.
+    theta_implicit: float = 1.0
 
 
 class ZhangMcFarlaneConfig(NamedTuple):
@@ -711,6 +732,14 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # existing scheme test fixtures were calibrated against.
     buoyancy_death_memory: bool = False
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class KainFritschConfig(NamedTuple):
@@ -1089,6 +1118,14 @@ class EmanuelConfig(NamedTuple):
     # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
     # ``EPMAX = 0.999``).
     precip_efficiency_max: float = 0.999
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class TiedtkeConfig(NamedTuple):
@@ -1222,6 +1259,14 @@ class TiedtkeConfig(NamedTuple):
     precip_split_scheme: str = "constant"
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class BechtoldConfig(NamedTuple):

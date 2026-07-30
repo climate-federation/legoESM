@@ -676,9 +676,18 @@ def mass_flux_convection_from_closure(
     p_half: jax.Array,
     closure: MassFluxClosureDiagnostics,
     config: MassFluxConfig = MassFluxConfig(),
+    dt: float | None = None,
 ) -> ConvectionOutput:
-    """Compute mass-flux tendencies from a supplied closure state."""
-    del p_half
+    """Compute mass-flux tendencies from a supplied closure state.
+
+    ``dt`` [s] is required ONLY when ``config.subsidence_solve ==
+    "implicit_flux"`` (the conservative flux-form solve is a backward-Euler
+    step, so it needs the step size).  It stays optional so the historical
+    ``advective`` default -- which never reads it -- keeps its existing
+    call signature; the shared kernel raises a clear ValueError if
+    ``implicit_flux`` is selected without it, rather than silently
+    degrading to the leaky solve.
+    """
     rho = closure.rho
     z = closure.z
     T_moist = closure.T_moist
@@ -726,6 +735,14 @@ def mass_flux_convection_from_closure(
         rho=rho,
         delta_0=config.delta_0,
         M_u_max=config.M_b_max,
+        # Selectable vertical solve (config default "advective" = shipped
+        # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed by
+        # the implicit_flux branch; the kernel raises on an unknown value
+        # (dispatch-hardening, static Python str).
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half,
+        dt=dt,
+        theta_implicit=config.theta_implicit,
     )
 
     # In-updraft precipitation: shared rain-split (same knob + mass proof as
@@ -769,6 +786,7 @@ def mass_flux_convection(
         p_half=p_half,
         closure=closure,
         config=config,
+        dt=dt,
     )
     return conv_out, closure.M_c_new
 

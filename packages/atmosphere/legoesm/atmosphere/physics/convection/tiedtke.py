@@ -442,6 +442,12 @@ def tiedtke_convection(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
         z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
+        # Selectable vertical solve (config default "advective" = shipped
+        # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed by
+        # the implicit_flux branch; passing them unconditionally keeps the
+        # call site single-form, and the kernel raises on an unknown value.
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
     )
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     # Reuse the same stratospheric gate the kernel applies so this

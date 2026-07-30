@@ -436,6 +436,12 @@ def emanuel_convection(
             T, q_v, p_full,
             plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
             z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,
+            # Selectable vertical solve (config default "advective" = shipped
+            # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed
+            # by the implicit_flux branch; the kernel raises on an unknown
+            # value (dispatch-hardening, static Python str).
+            subsidence_solve=config.subsidence_solve,
+            p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
         )
         # AD-safe floor on the divisor so the VJP cannot overflow.
         dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-15)
