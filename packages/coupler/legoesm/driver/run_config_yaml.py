@@ -251,6 +251,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # audit does not require it — it is mapped anyway because the same resolver
     # threads it and the map's contract is "what the pipeline actually threads".
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
+    "atm.gwd.HinesConfig.launch_p": "hines_launch_p",
     "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
     "atm.gwd.McFarlaneConfig.tau_max": "mcfarlane_tau_max",

@@ -277,6 +277,34 @@ def hines_gwd(
     _, drag_stack = jax.lax.scan(scan_fn, sigma_gw_init, jnp.arange(nlev))
     drag_all = drag_stack.T[:, ::-1]  # (ncol, nlev), top-first
 
+    # --- Launch level ---------------------------------------------------
+    # STATIC Python branch on a build-time config constant (the JAX
+    # feature-gating exception): ``launch_p is None`` keeps the legacy
+    # surface-launch path BYTE-IDENTICAL, with no extra HLO.
+    #
+    # With a launch pressure set, the wave is a genuine NON-OROGRAPHIC
+    # source released above the boundary layer: zero drag at and below the
+    # launch level.  Without this the wave is born supersaturated in the
+    # weakly stratified BL (sigma_sat = N/m_star is smallest there) and
+    # breaks at its own launch level — the measured failure mode.
+    #
+    # Level selection mirrors the sibling scheme (e3sm_cam.py:1544): the
+    # column-mean pressure closest to ``launch_p``, kept as a 0-d TRACED
+    # int via jnp.argmin (NOT int(...)) so the kernel stays jit-safe.  The
+    # level choice itself is not differentiated (argmin), matching E3SM's
+    # static init-time selection; ``launch_p`` still carries a
+    # ``__param_spec__`` entry because the THRESHOLD is meaningful even
+    # though the index is piecewise-constant in it.
+    if config.launch_p is not None:
+        # Arrays are TOP-DOWN (index 0 = model top, nlev-1 = surface), so
+        # "at or below the launch level" is ``k >= k_launch``.
+        pmean = jnp.mean(p_full, axis=0)                      # (nlev,)
+        k_launch = jnp.clip(
+            jnp.argmin(jnp.abs(pmean - config.launch_p)), 0, nlev - 1
+        ).astype(jnp.int32)
+        k_idx = jnp.arange(nlev, dtype=jnp.int32)[None, :]    # (1, nlev)
+        drag_all = jnp.where(k_idx >= k_launch, 0.0, drag_all)
+
     # Convert to acceleration
     accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)
 
