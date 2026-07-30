@@ -30,6 +30,22 @@ is the FIRST live contributor (tra_sbc, since ln_asminc=F zeroes everything
 before it) or (b) it is DIFFERENCED against the immediately-preceding
 bracketing dump (traqsr - trasbc = tra_qsr's own increment).
 
+ADDENDUM (2026-07-30, #1226 emp-terms task -- RETRACTION): the tra_sbc and
+ssh_atf verdicts below originally attributed their residuals (tem ratio
+0.99993829, sal 0.99995924, ssh_atf err_norm median 7.076e-07) to two
+"structural absences" -- a missing emp*T*rcp heat-content term in tra_sbc and
+a missing emp-forcing-removal correction in ssh_atf. Reading trasbc.F90,
+usrdef_sbc.F90 (MY_SRC), sshwzv.F90 (MY_SRC), cpp_DINO.fcm, namelist_cfg and
+RUN_GDB/ocean.output shows BOTH terms are algebraically ZERO for DINO's
+actual running configuration (nn_forcingtype=4, ln_emp_field=F,
+ln_qns_field=F -> emp(:,:)=0._wp unconditionally every step in
+usrdef_sbc.F90's active CASE(4)/ELSE branch; trasbc.F90's own emp term is
+separately gated `IF(lk_linssh)` and DINO's cpp keys give lk_linssh=.FALSE.).
+There is no live term to transcribe -- see the RETRACTED notes inside
+measure_ssh_atf/measure_tra_sbc below for the full derivation, independently
+confirmed by a fresh physics-validator review. The tem/sal/ssh_atf residuals'
+true cause is UNINVESTIGATED (out of the emp-terms task's scope).
+
 Verdicts, per row (measured numbers or the exact instrumentation gap):
 
   ldf_dyn coefficient   MEASURED  -- ldf_dump_ahmt.bin/ldf_dump_ahmf.bin are
@@ -554,14 +570,26 @@ def measure_ssh_atf(st) -> dict:
     ssh_naa = _load_haloed(os.path.join(RUN_DIR, "sshnxt_dump_ssh_after.bin"), jpi, jpj, hls)[..., 0]
 
     eta_f_lego = ssh_now + gamma * (ssh_before - 2.0 * ssh_now + ssh_naa)
-    print("  NOTE (scope, stated not hidden): this is the PLAIN Robert-Asselin "
-          "term only. NEMO's ssh_atf ALSO subtracts an emp-forcing-removal "
-          "correction when .NOT.lk_linssh (sshwzv.F90:450-459, "
-          "zcoef*(emp_b-emp+...)) -- legoESM's _asselin has no such term "
-          "(ocean_model_latlon_cgrid.py:7101-7102). This measurement is "
-          "therefore expected to show a real, structural residual from that "
-          "MISSING term, not a transcription bug in the plain filter -- "
-          "reported explicitly, not silently absorbed into the ratio.")
+    print("  RETRACTED (#1226 emp-terms task, 2026-07-30): this docstring "
+          "previously claimed NEMO's ssh_atf ALSO subtracts a live "
+          "emp-forcing-removal correction (sshwzv.F90:450-459, "
+          "zcoef*(emp_b-emp+...)) that legoESM's _asselin lacks, and that "
+          "this measurement's residual came from that MISSING term. Read "
+          "the source: for DINO the .NOT.lk_linssh gate at :450 DOES fire "
+          "(key_qco, no key_linssh -> lk_linssh=.FALSE.), but the term's "
+          "VALUE is exactly zero -- zwght=emp_b-emp with BOTH emp and emp_b "
+          "coming from usrdef_sbc.F90's active CASE(4)/ELSE branch (nn_"
+          "forcingtype=4, ln_emp_field=F, ln_qns_field=F, confirmed in "
+          "RUN_GDB/ocean.output), which sets emp(:,:)=0._wp unconditionally "
+          "every step (usrdef_sbc.F90:255); ln_rnf/ln_isf guards on :453-455 "
+          "are also both False. So zcoef*zwght=0.0 exactly (fp64 subtraction "
+          "of two exact zeros), not merely small. legoESM's _asselin "
+          "correctly omits a term that is algebraically absent for this "
+          "configuration -- there is no live physics gap here, and this "
+          "measurement's residual (err_norm median ~7e-7) must come from "
+          "something else, NOT investigated under the emp-terms task (out "
+          "of its scope). Independently re-derived and CONFIRMED by a "
+          "fresh physics-validator review of the same source lines.")
 
     _shift_scan("ssh_atf", eta_f_lego[:, :, None], ssh_f_nemo[:, :, None],
                 tmask2d[:, :, None])
@@ -687,13 +715,30 @@ def measure_tra_sbc(st) -> dict:
                                sign_changing=True)
     r_sal = per_element_stats("tra_sbc sal [PSU/s]", sal_lego, sal_nemo, tmask2d,
                                sign_changing=True)
-    print("  KNOWN GAP (documented, not hidden): legoESM's DINO surface "
-          "forcing has NO emp*T*rcp heat-content term (usrdef_sbc.F90:422 "
-          "`- emp(ji,jj)*ts(...,Kbb,jp_tem)*rcp`) -- apply_dino_lat_lon_"
-          "surface_forcing/restoring_surface_forcing carries only the "
-          "A_theta*(T*-T)-Q_sr restoring closure. This is a STRUCTURAL "
-          "omission (also absent from cancelling_rows_per_element.py's "
-          "own qns/sfx comparison), not a numerical bug in the code above.")
+    print("  RETRACTED (#1226 emp-terms task, 2026-07-30): this docstring "
+          "previously called the missing emp*T*rcp term (usrdef_sbc.F90:422 "
+          "`- emp(ji,jj)*ts(...,Kbb,jp_tem)*rcp`) a STRUCTURAL omission. "
+          "Read the source: DINO's active nn_forcingtype=4 CASE, with "
+          "ln_emp_field=F and ln_qns_field=F (both confirmed in RUN_GDB/"
+          "ocean.output), routes to usrdef_sbc.F90's CASE(4)/ELSE branch "
+          "(:254-259), which sets emp(:,:)=0._wp UNCONDITIONALLY on the "
+          "line immediately before the qtot loop -- so `- emp*ts*rcp` is "
+          "identically zero for every cell, every step, of the whole run "
+          "(same conclusion applies verbatim to :422's qns formula, which "
+          "reads from the same always-zero emp). trasbc.F90's OWN "
+          "concentration/dilution emp term (:139-148) is separately dead "
+          "for DINO because it is gated `IF( lk_linssh )` and DINO's cpp "
+          "keys (key_qco key_vco_3d, no key_linssh) make lk_linssh=.FALSE. "
+          "So there is NO live emp-heat-content term anywhere in DINO's "
+          "tra_sbc physics -- apply_dino_lat_lon_surface_forcing/"
+          "restoring_surface_forcing correctly omits a term that is "
+          "algebraically absent for this configuration, not a structural "
+          "gap. The tem/sal ratio residuals above (~0.9999) must come from "
+          "something else, NOT investigated under the emp-terms task (out "
+          "of its scope -- candidates worth a SEPARATE probe: the MLF "
+          "average's e3t divisor, dz_0 vs NEMO's per-cell z*-varying "
+          "e3t(Kmm) under key_qco). Independently re-derived and CONFIRMED "
+          "by a fresh physics-validator review of the same source lines.")
     return dict(tem=r_tem, sal=r_sal)
 
 
