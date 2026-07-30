@@ -1,0 +1,240 @@
+"""``--subsidence-solve`` kernel-ARM plumbing in the convection intercomparison.
+
+Ranking convection schemes against a CRM is confounded when the schemes do not
+share a vertical transport kernel, so the driver is run TWICE: once with every
+mass-flux scheme forced onto the conservative kernel (PRIMARY, isolates scheme
+physics) and once with the shipped defaults (SECONDARY, what users get today).
+The override itself is the campaign's shared selector and is tested in
+``test_scm_rce_subsidence_solve_override.py``; what is tested HERE is the
+driver-side plumbing that keeps the two arms from contaminating each other:
+
+* the flag exists on the real parser, defaults to ``as_shipped``, and rejects a
+  typo (a typo must not silently produce the as-shipped arm);
+* the arm is part of ``_run_signature``, so one arm's per-scheme checkpoint can
+  never be silently reused for the other — that would FABRICATE a number rather
+  than merely reuse a stale one.  This is the anti-confound gate: it fails if
+  anyone drops ``subsidence_solve`` from ``_SIGNATURE_FIELDS``;
+* the arm and the per-scheme override status are recorded on every artifact
+  (per-scheme JSON, ``intercomparison.csv`` row, ``summary.md``), so no score
+  can be read without knowing which kernel produced it.
+
+All checks are pure-CPU and fast: no CRM reference data, no SCM integration.
+"""
+from __future__ import annotations
+
+import json
+import types
+
+import pytest
+
+import scripts.run.run_scm_rce_convection_intercomparison as driver
+
+camp = driver.camp
+
+
+# --------------------------------------------------------------------------- #
+# Helpers — synthetic diagnostics; nothing here runs the SCM.
+# --------------------------------------------------------------------------- #
+def _args(*argv):
+    """Parse through the module's REAL parser.
+
+    Deliberately not a hand-rolled ``argparse.Namespace``: a hand-rolled one
+    would keep passing after the flag is renamed or removed.
+    """
+    return driver.build_parser().parse_args(list(argv))
+
+
+def _run(score: float = 1.0):
+    return camp.RunDiagnostics(
+        label="x", config={}, status="ok", reason="",
+        T_rmse=score, qv_rmse=score, cloud_rmse=score, precip_rmse=score,
+        score=score,
+        drift_T_rmse_K=0.1, drift_qv_rmse=1e-4, drift_qcond_rmse=1e-5,
+        moist_adiabat_mean_abs_K=2.0, moist_adiabat_max_abs_K=10.0,
+        cold_point_T_K=195.0, cold_point_z_km=17.0,
+        T_profile=[300.0], qv_profile=[0.01], qcond_profile=[0.0],
+    )
+
+
+def _result(scheme="tiedtke", *, arm="implicit_flux", status=None, score=1.0):
+    return driver.SchemeResult(
+        scheme=scheme, prior=_run(score + 1.0), tuned=_run(score), records=[],
+        subsidence_solve=arm,
+        subsidence_solve_status=(
+            status if status is not None else f"forced:{scheme}={arm}"),
+    )
+
+
+_SUMMARY_META = dict(
+    radiation="rrtmgp", dt=600.0, days=100.0, analysis_days=5.0,
+    tune_evals=48, surface_wind_m_s=5.0, large_scale_forcing="none",
+    last_reference_files=5,
+)
+
+
+# --------------------------------------------------------------------------- #
+# (a) the flag itself
+# --------------------------------------------------------------------------- #
+def test_flag_defaults_to_as_shipped():
+    """Default is the SECONDARY arm: adding the flag must not silently change
+    what an existing command line does."""
+    assert _args().subsidence_solve == "as_shipped"
+
+
+@pytest.mark.parametrize("mode", camp.SUBSIDENCE_SOLVE_MODES)
+def test_flag_accepts_every_campaign_mode(mode):
+    """The CLI choices track the campaign's mode tuple, so a mode added there is
+    reachable here rather than silently unusable."""
+    assert _args("--subsidence-solve", mode).subsidence_solve == mode
+
+
+def test_flag_rejects_unknown_mode():
+    """Dispatch-hardening: a typo must be a hard error, not a fallback to the
+    as-shipped arm reported as the matched-kernel one."""
+    with pytest.raises(SystemExit):
+        _args("--subsidence-solve", "implicitflux")
+
+
+# --------------------------------------------------------------------------- #
+# (d) THE ANTI-CONFOUND GATE — the arm is part of the checkpoint signature
+# --------------------------------------------------------------------------- #
+def test_subsidence_solve_is_a_signature_field():
+    assert "subsidence_solve" in driver._SIGNATURE_FIELDS
+
+
+def test_run_signature_differs_between_kernel_arms():
+    """A per-scheme checkpoint from one arm must NEVER be reusable in the other.
+
+    Reuse across arms would not merely be stale — it would report the shipped
+    kernel's score as the matched-kernel result (or vice versa), fabricating the
+    very comparison the two arms exist to make honest.  This assertion fails if
+    ``subsidence_solve`` is dropped from ``_SIGNATURE_FIELDS``.
+    """
+    shipped = driver._run_signature(_args("--subsidence-solve", "as_shipped"))
+    matched = driver._run_signature(_args("--subsidence-solve", "implicit_flux"))
+    assert shipped != matched
+    assert shipped["subsidence_solve"] == "as_shipped"
+    assert matched["subsidence_solve"] == "implicit_flux"
+    # everything ELSE is identical: the arm is the only variable (controlled
+    # comparison — if the two namespaces differed elsewhere the inequality above
+    # would be vacuous).
+    assert {k: v for k, v in shipped.items() if k != "subsidence_solve"} == {
+        k: v for k, v in matched.items() if k != "subsidence_solve"}
+    json.dumps(shipped)  # signature stays JSON-serializable
+
+
+def test_signature_compatible_rejects_cross_arm_checkpoint(tmp_path):
+    """End-to-end of the compute-path guard: a checkpoint stamped by one arm is
+    incompatible with the other, so ``main`` recomputes instead of reusing."""
+    shipped = driver._run_signature(_args("--subsidence-solve", "as_shipped"))
+    matched = driver._run_signature(_args("--subsidence-solve", "implicit_flux"))
+    assert not driver._signature_compatible(shipped, matched)
+    assert not driver._signature_compatible(matched, shipped)
+    assert driver._signature_compatible(matched, matched)
+
+    driver.save_scheme_result(tmp_path, _result("tiedtke", arm="implicit_flux"),
+                              matched)
+    ckpt = driver._scheme_json_path(tmp_path, "tiedtke")
+    assert driver._checkpoint_signature(ckpt) == matched
+    assert not driver._signature_compatible(
+        driver._checkpoint_signature(ckpt), shipped)
+
+
+# --------------------------------------------------------------------------- #
+# (b)/(c) the arm is threaded and recorded on every artifact
+# --------------------------------------------------------------------------- #
+def test_evaluate_scheme_takes_a_keyword_only_subsidence_solve():
+    """Keyword-only, so a positional call site can never bind the arm by
+    accident."""
+    import inspect
+
+    param = inspect.signature(driver.evaluate_scheme).parameters["subsidence_solve"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default == "as_shipped"
+
+
+def test_scheme_result_roundtrip_preserves_arm_fields(tmp_path):
+    res = _result("zhang_mcfarlane", arm="implicit_flux")
+    driver.save_scheme_result(tmp_path, res)
+    payload = json.loads(driver._scheme_json_path(tmp_path, "zhang_mcfarlane").read_text())
+    assert payload["subsidence_solve"] == "implicit_flux"
+    assert payload["subsidence_solve_status"] == "forced:zhang_mcfarlane=implicit_flux"
+
+    loaded = driver.load_scheme_result(
+        driver._scheme_json_path(tmp_path, "zhang_mcfarlane"))
+    assert loaded.subsidence_solve == res.subsidence_solve
+    assert loaded.subsidence_solve_status == res.subsidence_solve_status
+
+
+def test_legacy_checkpoint_loads_as_shipped_with_empty_status(tmp_path):
+    """Checkpoints written before the flag existed were necessarily run with the
+    shipped defaults; the empty status marks them as never explicitly stamped."""
+    path = tmp_path / "scheme_dca.json"
+    path.write_text(json.dumps({
+        "scheme": "dca", "signature": {},
+        "prior": driver.asdict(_run(2.0)), "tuned": driver.asdict(_run(1.0)),
+        "records": [],
+    }))
+    loaded = driver.load_scheme_result(path)
+    assert loaded.subsidence_solve == "as_shipped"
+    assert loaded.subsidence_solve_status == ""
+
+
+def test_row_and_csv_fields_include_the_arm_columns(tmp_path):
+    assert "subsidence_solve" in driver.CSV_FIELDS
+    assert "subsidence_solve_status" in driver.CSV_FIELDS
+    row = driver._row(_result("tiedtke", arm="implicit_flux"))
+    assert row["subsidence_solve"] == "implicit_flux"
+    assert row["subsidence_solve_status"] == "forced:tiedtke=implicit_flux"
+    # every declared column is produced (DictWriter would raise otherwise)
+    assert set(driver.CSV_FIELDS) <= set(row)
+
+    csv_path = tmp_path / "intercomparison.csv"
+    driver.write_csv(csv_path, [_result("tiedtke", arm="implicit_flux")])
+    header, first = csv_path.read_text().splitlines()[:2]
+    assert "subsidence_solve" in header.split(",")
+    assert "implicit_flux" in first
+
+
+def test_summary_names_the_kernel_arm(tmp_path):
+    """No table in summary.md may be readable without its arm."""
+    path = tmp_path / "summary.md"
+    driver.write_summary(
+        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        [_result("tiedtke", arm="implicit_flux"),
+         _result("dca", arm="implicit_flux", status="not_applicable:dca", score=2.0)],
+        meta=dict(_SUMMARY_META),
+    )
+    text = path.read_text()
+    assert "--subsidence-solve implicit_flux" in text
+    assert "PRIMARY" in text
+    # per-scheme status, including the honestly-unmatched scheme
+    assert "forced:tiedtke=implicit_flux" in text
+    assert "not_applicable:dca" in text
+
+
+def test_summary_labels_the_as_shipped_arm_as_secondary(tmp_path):
+    path = tmp_path / "summary.md"
+    driver.write_summary(
+        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        [_result("tiedtke", arm="as_shipped", status="as_shipped")],
+        meta=dict(_SUMMARY_META),
+    )
+    text = path.read_text()
+    assert "--subsidence-solve as_shipped" in text
+    assert "SECONDARY" in text
+
+
+def test_summary_flags_a_mixed_arm_table_as_confounded(tmp_path):
+    """If an outdir ever ends up holding both arms' checkpoints, the merged table
+    must say it is confounded rather than mislabel itself with one arm."""
+    path = tmp_path / "summary.md"
+    driver.write_summary(
+        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        [_result("tiedtke", arm="implicit_flux"),
+         _result("bechtold", arm="as_shipped", status="as_shipped", score=2.0)],
+        meta=dict(_SUMMARY_META),
+    )
+    text = path.read_text()
+    assert "CONFOUNDED" in text
+    assert "MIXED(" in text

@@ -150,7 +150,25 @@ def _physics_config_from_recommended_dict(data: dict[str, Any]) -> PhysicsConfig
 def _recommended_scheme_winners(
     recommended: dict[str, Any],
     recommended_cfg: PhysicsConfig | None,
+    *,
+    overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    """Resolve the per-component scheme the trainer runs.
+
+    ``overrides`` (from an explicit CLI flag such as ``--convection``) wins over
+    every campaign source for that component ONLY; every other component is
+    resolved exactly as before.  An overridden component also skips the
+    "recommended defaults do not specify a winner" error, so a per-scheme
+    gradient arm can run against a recommended_defaults.json that names a
+    different winner (or none at all) for it.
+    """
+    overrides = dict(overrides or {})
+    unknown_overrides = sorted(set(overrides) - set(CAMPAIGN_SCHEME_FIELDS))
+    if unknown_overrides:
+        raise ValueError(
+            f"scheme override(s) {unknown_overrides} are not campaign scheme "
+            f"fields; known={list(CAMPAIGN_SCHEME_FIELDS)}"
+        )
     winners_raw = recommended.get("winners", {})
     if winners_raw is None:
         winners_raw = {}
@@ -165,6 +183,9 @@ def _recommended_scheme_winners(
 
     winners: dict[str, str] = {}
     for field in CAMPAIGN_SCHEME_FIELDS:
+        if field in overrides:
+            winners[field] = str(overrides[field])
+            continue
         value = winners_raw.get(field)
         if value is None and recommended_cfg is not None:
             value = getattr(recommended_cfg, field).scheme
@@ -184,10 +205,32 @@ def _recommended_scheme_winners(
 def _apply_bechtold_policy_to_winners(
     winners: dict[str, str],
     policy: str,
+    *,
+    convection_explicit: bool = False,
 ) -> tuple[dict[str, str], str]:
+    """Apply the Bechtold AD policy, and report which arm the log describes.
+
+    ``convection_explicit`` marks that the convection scheme came from
+    ``--convection``, not from the campaign winner.  It must never be silently
+    replaced by the ``mass_flux`` fallback (that would mislabel a per-scheme
+    gradient arm), and the status strings must not claim the trainer is
+    "following the campaign winner" when it is not.
+    """
     out = dict(winners)
     convection = out["convection"]
     if policy == "mass_flux":
+        if convection_explicit:
+            if convection != "mass_flux":
+                raise ValueError(
+                    "`--bechtold-policy mass_flux` would overwrite the "
+                    f"explicitly requested `--convection {convection}`; pass "
+                    "only one of the two."
+                )
+            return (
+                out,
+                "convection scheme `mass_flux` was selected explicitly via "
+                "`--convection`; the `mass_flux` Bechtold policy is a no-op.",
+            )
         out["convection"] = "mass_flux"
         return (
             out,
@@ -195,10 +238,15 @@ def _apply_bechtold_policy_to_winners(
             f"recommended convection winner `{convection}`.",
         )
     if convection != "bechtold":
+        source = (
+            "selected explicitly via `--convection`"
+            if convection_explicit
+            else "the campaign recommended winner, which the trainer follows"
+        )
         return (
             out,
-            f"not applicable; campaign recommended convection winner is "
-            f"`{convection}`, so the trainer follows that winner.",
+            f"not applicable; the active convection scheme is `{convection}` "
+            f"({source}).",
         )
     if policy == "train_deterministic":
         return (
@@ -230,7 +278,9 @@ def _build_recommended_base_config(
     recommended: dict[str, Any],
     *,
     bechtold_policy: str,
-) -> tuple[PhysicsConfig, dict[str, str], str]:
+    convection: str | None = None,
+    subsidence_solve: str = "as_shipped",
+) -> tuple[PhysicsConfig, dict[str, str], str, str]:
     recommended_cfg = None
     recommended_cfg_raw = recommended.get("recommended_physics_config")
     if recommended_cfg_raw is not None:
@@ -241,10 +291,15 @@ def _build_recommended_base_config(
             )
         recommended_cfg = _physics_config_from_recommended_dict(recommended_cfg_raw)
 
-    winners = _recommended_scheme_winners(recommended, recommended_cfg)
+    winners = _recommended_scheme_winners(
+        recommended,
+        recommended_cfg,
+        overrides=None if convection is None else {"convection": convection},
+    )
     winners, bechtold_note = _apply_bechtold_policy_to_winners(
         winners,
         bechtold_policy,
+        convection_explicit=convection is not None,
     )
     rad_update_steps = (
         recommended_cfg.radiation.update_interval_steps
@@ -260,7 +315,15 @@ def _build_recommended_base_config(
         convection=winners["convection"],
         base=recommended_cfg,
     )
-    return cfg, winners, bechtold_note
+    # Matched-kernel arm: the ONE shared campaign selector (never re-derived
+    # here).  `status` is recorded next to every number so a gradient-arm
+    # result can never be read without knowing which transport kernel ran.
+    cfg, subsidence_status = campaign.apply_subsidence_solve_override(
+        cfg,
+        subsidence_solve,
+        category="convection",
+    )
+    return cfg, winners, bechtold_note, subsidence_status
 
 
 def _active_subconfig_by_scheme_key(
@@ -1004,10 +1067,20 @@ def _write_summary(
     grad_stats: dict[str, dict[str, float | bool]],
     parameter_rows: list[dict[str, Any]],
     bechtold_note: str,
+    convection_scheme: str,
+    subsidence_status: str,
 ) -> None:
     trained_count = sum(1 for row in parameter_rows if row["trained"])
+    convection_source = (
+        "explicit `--convection`" if args.convection is not None
+        else "campaign recommended winner"
+    )
     lines = [
         "# SCM RCE Gradient Training Summary",
+        "",
+        f"Convection scheme: `{convection_scheme}` ({convection_source}).",
+        f"Subsidence-solve arm: `--subsidence-solve {args.subsidence_solve}` "
+        f"-> status `{subsidence_status}`.",
         "",
         f"Reference files: last {len(ref.files_used)} CRM volume snapshots.",
         f"Training window: {args.train_days:g} days; analysis window: "
@@ -1086,6 +1159,28 @@ def _choose_active_scheme_keys(
         if component_name == "convection":
             convection_key = scheme_key
             break
+    # ANTI-CONFOUND (mandatory when the caller NAMED a convection scheme).
+    # ``active`` is the intersection of the schemes active in ``cfg`` with the
+    # schemes that have rows in the campaign's tuned_parameters.json.  If the
+    # chosen convection scheme has NO rows there, that intersection can still
+    # be non-empty via turbulence/microphysics -- so the job would run happily,
+    # gradient-train somebody ELSE's parameters, and write a JSON whose `arm`
+    # block says `convection_scheme: <chosen>`.  A published per-scheme
+    # gradient ranking built on that is silently wrong.  Fail LOUDLY instead.
+    # Only enforced for an explicit --convection: with the default (follow the
+    # campaign winner) the pre-existing RuntimeError below is the right guard.
+    if getattr(args, "convection", None) is not None and convection_key is not None:
+        if convection_key not in active:
+            raise SystemExit(
+                f"--convection {args.convection!r} was requested, but its "
+                f"scheme_key {convection_key!r} has no tuned-parameter rows in "
+                f"{args.tuned_parameters} (available: "
+                f"{sorted({str(row['scheme_key']) for row in records})}). "
+                "Refusing to run: the gradient arm would train OTHER "
+                "components' parameters while reporting this convection "
+                "scheme. Re-run the derivative-free campaign for this scheme "
+                "first, or point --tuned-parameters at a file that covers it."
+            )
     if convection_key == BECHTOLD_SCHEME_KEY and args.bechtold_policy == "train_deterministic":
         exclude |= BECHTOLD_STOCHASTIC_PARAMS
     elif convection_key == BECHTOLD_SCHEME_KEY and args.bechtold_policy in {
@@ -1093,6 +1188,14 @@ def _choose_active_scheme_keys(
         "freeze",
     }:
         active.discard(BECHTOLD_SCHEME_KEY)
+        if getattr(args, "convection", None) == "bechtold":
+            raise SystemExit(
+                "--convection bechtold with --bechtold-policy "
+                f"{args.bechtold_policy!r} discards the Bechtold scheme key, "
+                "so the gradient arm would train NOTHING for it while still "
+                "writing a bechtold-labelled result. Use "
+                "--bechtold-policy train_deterministic (or force)."
+            )
     return active, exclude
 
 
@@ -1103,9 +1206,17 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     records = _read_tuned_records(args.tuned_parameters)
     recommended = _read_recommended_defaults(args.recommended)
     ref = campaign.build_reference_profiles(args.reference_dir, args.last_reference_files)
-    base_cfg, winners, bechtold_note = _build_recommended_base_config(
+    base_cfg, winners, bechtold_note, subsidence_status = _build_recommended_base_config(
         recommended,
         bechtold_policy=args.bechtold_policy,
+        convection=args.convection,
+        subsidence_solve=args.subsidence_solve,
+    )
+    convection_scheme = str(base_cfg.convection.scheme)
+    print(
+        f"[arm] convection={convection_scheme} "
+        f"({'--convection' if args.convection is not None else 'campaign winner'}); "
+        f"subsidence_solve={args.subsidence_solve} -> {subsidence_status}"
     )
     campaign_tuned_cfg = _apply_static_record_values(base_cfg, records)
     initial_carry = None
@@ -1296,6 +1407,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
     all_grad_stats = {**preflight_stats, **final_grad_stats}
     output = {
+        # Arm identity: which scheme and which vertical transport kernel
+        # produced these numbers.  Required next to every gradient-arm result.
+        "arm": {
+            "convection_scheme": convection_scheme,
+            "convection_source": (
+                "cli:--convection" if args.convection is not None
+                else "campaign_recommended_winner"
+            ),
+            "convection_requested": args.convection,
+            "subsidence_solve_mode": args.subsidence_solve,
+            "subsidence_solve_status": subsidence_status,
+        },
         "optimizer": {
             "name": args.optimizer,
             "lr": args.lr,
@@ -1365,6 +1488,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         grad_stats=preflight_stats,
         parameter_rows=parameter_rows,
         bechtold_note=bechtold_note,
+        convection_scheme=convection_scheme,
+        subsidence_status=subsidence_status,
     )
     print(f"[done] wrote {args.outdir}")
     print(
@@ -1425,6 +1550,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--convection",
+        choices=tuple(campaign.SCHEME_SWEEPS["convection"]),
+        default=None,
+        help=(
+            "Gradient-train THIS convection scheme instead of the campaign "
+            "recommended winner (one job per scheme for the intercomparison "
+            "gradient arm).  Overrides the convection component only; "
+            "radiation/turbulence/microphysics/gravity_wave_drag are still "
+            "resolved from the campaign recommendation.  Default None keeps "
+            "the historical behaviour of following the recommended winner."
+        ),
+    )
+    parser.add_argument(
+        "--subsidence-solve",
+        choices=list(campaign.SUBSIDENCE_SOLVE_MODES),
+        default="as_shipped",
+        help=(
+            "Matched-kernel arm for the mass-flux family (shared campaign "
+            "selector).  'as_shipped' leaves every scheme default untouched."
+        ),
+    )
+    parser.add_argument(
         "--bechtold-policy",
         choices=("auto", "freeze", "train_deterministic", "force", "mass_flux"),
         default="auto",
@@ -1445,6 +1592,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.steps = min(args.steps, QUICK_STEPS)
         args.chunk_steps = min(args.chunk_steps, 2)
         args.last_reference_files = min(args.last_reference_files, 2)
+    if (
+        args.convection is not None
+        and args.bechtold_policy == "mass_flux"
+        and args.convection != "mass_flux"
+    ):
+        # Fail loud: the mass_flux policy would silently replace the scheme the
+        # arm claims to be training.
+        raise SystemExit(
+            "--bechtold-policy mass_flux conflicts with "
+            f"--convection {args.convection}; pass only one of the two."
+        )
     if args.analysis_days > args.train_days:
         raise SystemExit("--analysis-days must be <= --train-days")
     if args.spinup_days < 0.0:
