@@ -1095,6 +1095,13 @@ commit 70f3ce636):
   subdiv-8) into ~1 h.
 * **subdiv-9 prewarmed** (job 26549180): 2,621,442 cells in 67 min,
   1.8 GB npz in project space — ranks load in seconds forever after.
+* **subdiv-8 control arm at 64/128 GPUs (job 26538474)**: f32
+  5.27 -> 6.47 ms and f64 8.96 -> 11.41 across np64 -> np128 —
+  ANTI-scales exactly as the tile law predicts at 10.2k -> 5.1k
+  cells/GPU. MPAS *runs* at 128 GPUs; subdiv-8 just has nothing left to
+  parallelise there. Full f32 ladder np2->128:
+  19.90/14.12/6.92/7.10/5.27/6.47 (floor plateau from np8, shallow
+  minimum at np64).
 * Payoff ladder submitted (job 26549775): subdiv-9 at 32/64/128 GPUs =
   81.9k/41.0k/20.5k cells/GPU — the first MPAS many-GPU ladder whose
   lower rungs sit ABOVE the ~30k floor.
