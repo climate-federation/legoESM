@@ -84,6 +84,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0
     hyperdiff_rho_coeff: float = 0.0
     hyperdiff_w_coeff: float = 0.0
+    hyperdiff_compact_outer: bool = False
+        # When False (default) the outer del^2 of the biharmonic is the wide
+        # div(grad) form, whose reach-2 centred difference is IDENTICALLY ZERO
+        # on a (-1)^i grid mode: the composite del^4 has an exact 2*dx NULL and
+        # cannot damp the grid-scale checkerboard (operators_3d.hyperdiffusion_3d
+        # docstring).  True selects the compact outer stencil, whose transfer
+        # symbol 16 sin^4(k dx/2) is MAXIMAL at 2*dx — the behaviour of FV3's
+        # del6_vt_flux, whose fluxes are reach-1 adjacent differences
+        # (sw_core.F90:2066,2078).  Default kept False so existing tuned
+        # coefficients stay bit-identical.
     sponge_width: float = 10000.0
     sponge_coeff: float = 0.05
     n_acoustic_substeps: int = 6
@@ -948,17 +958,24 @@ def cdgrid_compressible_euler_slow_tendencies(
         _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
         # Inner ∇² (compact stencil) — shared across all four fields.
         _lap1 = laplacian_compact_3d(_hyper_flat, grid)
-        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
-        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
-        # iter-169: use the imported ``_pad_halo_4d_module`` alias —
-        _dg = getattr(grid, 'duogrid', None)
-        _offsets = None if _dg is not None else grid.halo_interp_offsets
-        _lap1_pad = _pad_halo_4d_module(_lap1, interp_offsets=_offsets, duogrid=_dg)
-        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
-        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
-        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
-            n_face_h, n_i_h, n_j_h, nlev_h, 4,
-        )
+        if config.hyperdiff_compact_outer:
+            # Compact outer ∇²: ∇⁴ = ∇²_compact(∇²_compact(f)), the
+            # (1,-4,6,-4,1) stencil that is MAXIMAL at 2Δx.
+            _lap2 = laplacian_compact_3d(_lap1, grid).reshape(
+                n_face_h, n_i_h, n_j_h, nlev_h, 4,
+            )
+        else:
+            # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
+            # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+            # iter-169: use the imported ``_pad_halo_4d_module`` alias —
+            _dg = getattr(grid, 'duogrid', None)
+            _offsets = None if _dg is not None else grid.halo_interp_offsets
+            _lap1_pad = _pad_halo_4d_module(_lap1, interp_offsets=_offsets, duogrid=_dg)
+            _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
+            _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
+            _lap2 = divergence_3d(_gx, _gy, grid).reshape(
+                n_face_h, n_i_h, n_j_h, nlev_h, 4,
+            )
         # Per-field hyperdiff coefficients
         du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
         dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
@@ -972,6 +989,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
         hyper_out_flat = hyperdiffusion_3d(
             hyper_flat, grid, _coeff_uvT,
+            compact_outer=config.hyperdiff_compact_outer,
         )
         hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
         du_dt = du_dt + hyper_out[..., 0]
@@ -980,6 +998,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     elif _coeff_rho > 0:
         drho_p_dt = drho_p_dt + hyperdiffusion_3d(
             rho_p, grid, _coeff_rho,
+            compact_outer=config.hyperdiff_compact_outer,
         )
 
     # --- 14. Sponge layer ---
@@ -1015,7 +1034,10 @@ def cdgrid_compressible_euler_slow_tendencies(
 
     dw_dt = horiz_adv_w_half - sponge_half * w
     if config.hyperdiff_w_coeff > 0:
-        dw_dt = dw_dt + hyperdiffusion_3d(w, grid, config.hyperdiff_w_coeff)
+        dw_dt = dw_dt + hyperdiffusion_3d(
+            w, grid, config.hyperdiff_w_coeff,
+            compact_outer=config.hyperdiff_compact_outer,
+        )
 
     # --- 16. Physics ---
     if physics_tendency is not None:

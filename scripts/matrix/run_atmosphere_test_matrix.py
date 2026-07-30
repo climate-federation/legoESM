@@ -5901,6 +5901,24 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         hd = _hyperdiff_cube(n)
 
+        # --- NH cube blow-up attribution knobs (2026-07-30) ---
+        # One env var per candidate, each DEFAULTING to the shipped value
+        # so an unset environment is bit-identical.  Mirrors the
+        # LEGOESM_CDD_* precedent used by the HS / baroclinic branches.
+        #   LEGOESM_NH_COMPACT_OUTER=1  compact outer del^2 => the
+        #       biharmonic actually damps 2*dx (default path has an exact
+        #       2*dx null; see CDGridCompressibleEulerConfig).
+        #   LEGOESM_NH_CDD_D4BG=<float> corner-divergence del-4
+        #       coefficient; 0 deactivates the corner-damp block entirely
+        #       (reproduces the pre-2026-07-29 dead-gate behaviour).
+        #   LEGOESM_NH_DAMP_W=<float>   FV3 del-n damping on w
+        #       (sw_core.F90:1078 del6_vt_flux), off by default.
+        _nh_compact_outer = (
+            os.environ.get("LEGOESM_NH_COMPACT_OUTER", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        _nh_cdd_d4bg = float(os.environ.get("LEGOESM_NH_CDD_D4BG", "0.16"))
+        _nh_damp_w = float(os.environ.get("LEGOESM_NH_DAMP_W", "0.0"))
+
         if test_case == "tc1":
             from tests.test_cases.dcmip2025 import dcmip25_tc1_init
             state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=nlev)
@@ -5969,7 +5987,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-17: corner-div damping del-4
                 # background pair (factory defaults).
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -6061,7 +6081,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -6132,7 +6154,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
@@ -6161,8 +6185,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-7: report total dry mass alongside |w|_max so mass
             # drift becomes visible in mean_timeseries.csv (cubed-sphere
             # NH supports anchored mass via fix_mass + compute_nh_dry_mass).
+            #
+            # 2026-07-30: ``max_abs_u`` and the argmax LOCATION of both
+            # |u| and |w| are logged too.  The blow-up trip metric in
+            # ``check_fn`` is max|u| (not |w|), and until now the series
+            # held only |w| — so a run could trip at |u| = 5069 m/s while
+            # the only logged field read a benign 9.8 m/s, with no record
+            # of WHERE either maximum sat.  face/i/j/k localise the burst
+            # (cube vertices are the 4 corners of every face).
             from legoesm.core.conservation import compute_nh_dry_mass
+            _u_abs = jnp.abs(s.u.data)
+            _w_abs = jnp.abs(s.w.data)
+            _u_at = jnp.unravel_index(jnp.argmax(_u_abs), _u_abs.shape)
+            _w_at = jnp.unravel_index(jnp.argmax(_w_abs), _w_abs.shape)
             return {
+                "max_abs_u": float(jnp.max(_u_abs)),
+                "u_argmax_face": float(_u_at[0]), "u_argmax_i": float(_u_at[1]),
+                "u_argmax_j": float(_u_at[2]), "u_argmax_k": float(_u_at[3]),
+                "w_argmax_face": float(_w_at[0]), "w_argmax_i": float(_w_at[1]),
+                "w_argmax_j": float(_w_at[2]), "w_argmax_k": float(_w_at[3]),
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),

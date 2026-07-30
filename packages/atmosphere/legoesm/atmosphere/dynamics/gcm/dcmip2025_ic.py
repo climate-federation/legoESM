@@ -176,6 +176,13 @@ TC1_PARAMS = {
 
 TC2_PARAMS = {
     "small_earth_factor": 20.0,      # Radius reduction factor
+    # NON-ROTATING small planet.  FV3 runs the reduced-radius HIWPP
+    # mountain-wave cases this test descends from with the Coriolis
+    # parameter identically zero: ``f0(:,:) = 0. / fC(:,:) = 0.`` for
+    # test_case 33/34/35 (tools/test_cases.F90:3082-3083).  The IC here
+    # carries no balancing pressure gradient for a rotating state, so an
+    # Omega*X-amplified f is a spurious momentum source.
+    "rotating": False,
     "T0": 250.0,                     # Isothermal temperature [K]
     "u0": 20.0,                      # Background zonal wind [m/s]
     "H": 30000.0,                    # Model top [m]
@@ -198,6 +205,10 @@ TC2_PARAMS = {
 
 TC3_PARAMS = {
     "small_earth_factor": 60.0,
+    # NON-ROTATING (FV3 HIWPP super-cell: f0 = fC = 0,
+    # tools/test_cases.F90:3319-3320); matches the MPAS sibling, which
+    # already passes omega=0.0 (test_case_3_mpas.py).
+    "rotating": False,
     "H": 20000.0,                     # Model top [m]
     "n_levels": 40,
     # Sounding parameters.
