@@ -1994,14 +1994,16 @@ class LatLonCGridOceanModel:
                     "(Nbb) tracers only exist as state.T_before/S_before "
                     "under the leap-frog (NEMO Modified-Leap-Frog) time "
                     f"integrator. Got outer_integrator={_outer_int!r}.")
-            if (getattr(_tke_cfg_ctor, "tke_shear_production",
-                        "squared_centered") == "nemo_burchard"
+            _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
+                                     "squared_centered")
+            if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int != "leapfrog"):
                 raise ValueError(
-                    'vertical_mixing.tke.tke_shear_production='
-                    '"nemo_burchard" requires outer_integrator="leapfrog": '
-                    "the Burchard now×before shear cross term only exists "
-                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f'vertical_mixing.tke.tke_shear_production='
+                    f'{_tke_shear_ctor!r} requires outer_integrator='
+                    '"leapfrog": both the Burchard now×before cross term '
+                    "and its face-native extension only exist as "
+                    "state.u_before/v_before under the leap-frog (NEMO "
                     f"Modified-Leap-Frog) time integrator. Got "
                     f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
@@ -4609,8 +4611,13 @@ class LatLonCGridOceanModel:
         machinery as ``zdf_drag_in_matrix``
         (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
         :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
-        re-derived drag coefficient. ``cc_state`` must already carry
-        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        re-derived drag coefficient. ``cc_state`` normally already carries
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``); under
+        ``tke_shear_production="nemo_face_native"`` the caller instead
+        passes the RAW (uncollapsed) face state (so ``_vmix_K_profiles`` can
+        reconstruct zdfsh2.F90's face-native shear) — this helper collapses
+        u/v to the T-point itself in that case, exactly like every other
+        caller of ``_vmix_K_profiles`` already does before this stage.
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4638,8 +4645,12 @@ class LatLonCGridOceanModel:
         h_k = self.z_coord.h_partial
         _bl = jnp.maximum(self.z_coord.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
-        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        u_cc, v_cc = cc_state.u.data, cc_state.v.data
+        if u_cc.shape[1] != h_k.shape[1]:
+            u_cc = 0.5 * (u_cc[:, :-1, :] + u_cc[:, 1:, :])
+            v_cc = 0.5 * (v_cc[:-1, :, :] + v_cc[1:, :, :])
+        u_bot = jnp.take_along_axis(u_cc, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(v_cc, _bl_idx, axis=-1)[..., 0]
         h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
         r_t = nemo_effective_bottom_drag_r(
             u_bot, v_bot, h_bot,
@@ -5349,12 +5360,32 @@ class LatLonCGridOceanModel:
                     vertical_mixing=VerticalMixingConfig(scheme="none"),
                     convection=OceanConvectionConfig(scheme="none"),
                 )
-            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
-            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
-            cc_state = state._replace(
-                u=state.u.replace(data=u_cell),
-                v=state.v.replace(data=v_cell),
+            # #1226 sh2_walk.py Candidate E/F (nemo_face_native): that TKE
+            # branch of _vmix_K_profiles self-detects face-staggered vs.
+            # cell-centred u/v (k_profiles.py:513) and needs the RAW
+            # (uncollapsed) faces to reconstruct zdfsh2.F90's face-native
+            # shear -- pre-collapsing here (as every OTHER scheme requires;
+            # richardson/catke pass state.u.data straight through with no
+            # staggering check of their own) would silently degrade
+            # nemo_face_native to the T-collapsed Burchard geometry. Skip
+            # the collapse ONLY for this scheme+option combination; every
+            # other scheme/option keeps the BIT-IDENTICAL pre-collapse.
+            _vmix_cfg_here = getattr(physics_config, "vertical_mixing", None)
+            _keep_raw_faces = (
+                _vmix_cfg_here is not None
+                and _vmix_cfg_here.scheme == "tke"
+                and getattr(_vmix_cfg_here.tke, "tke_shear_production",
+                           "squared_centered") == "nemo_face_native"
             )
+            if _keep_raw_faces:
+                cc_state = state
+            else:
+                u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+                v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+                cc_state = state._replace(
+                    u=state.u.replace(data=u_cell),
+                    v=state.v.replace(data=v_cell),
+                )
             # Use the model's own EOS for the vmix density / static-stability
             # N² so the TKE convection trigger (n2_mode="adiabatic") is
             # consistent with the dynamical core. None for Wright leaves the

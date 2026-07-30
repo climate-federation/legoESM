@@ -480,7 +480,32 @@ class TKEConfig(NamedTuple):
     #   before-velocities do not exist under forward_euler/ab2); the FE/AB2
     #   kamm cards keep "squared_centered" (a documented FE-frame fidelity
     #   ceiling, the same class as the existing FE-frame notes on those
-    #   cards).
+    #   cards). Still COLLAPSES u/v to the T-point BEFORE differencing —
+    #   only the TIME discretization is transcribed, not the face-native
+    #   geometry below.
+    # ``"nemo_face_native"`` (#1226 ``sh2_walk.py`` Candidate E/F —
+    #   :func:`_shared.vertical_shear_face_native`): the DOMINANT gap the
+    #   walk isolated, on top of "nemo_burchard"'s time-level fix — NEMO
+    #   differences the RAW u-/v-FACE velocities first (one vertical
+    #   difference PER FACE) and combines the two faces bracketing each
+    #   T-point (with the wet-only coast-doubling weight) ONLY AFTER
+    #   squaring/cross-multiplying (zdfsh2.F90:78-94), instead of collapsing
+    #   u/v to the T-point BEFORE differencing. Walk evidence: corr
+    #   0.982/ratio 0.975 unrestricted (0.912 restricted-to-signal) vs the
+    #   T-collapse-first form's corr 0.963/ratio 0.556 — roughly halves the
+    #   undershoot. ALWAYS built from the now×before cross term (real NEMO
+    #   has no "face-native but now-squared-only" branch), so this
+    #   SUPERSEDES "nemo_burchard" when selected — requires the SAME
+    #   leap-frog before-velocities (``outer_integrator="leapfrog"``,
+    #   construction raises otherwise) PLUS the raw (uncollapsed) C-grid
+    #   face state, threaded by the caller. Two scope limits carried over
+    #   from "nemo_burchard"/``nemo_ri`` (see :func:`_shared.
+    #   vertical_shear_face_native` docstring): the viscosity stays the
+    #   caller's single per-interface ``K_M`` (NEMO face-averages ``avm``
+    #   before combining; not transcribed) and the vertical metric stays the
+    #   static reference ``dz_half`` (NEMO's live QCO-stretched
+    #   ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO by the walk's
+    #   Candidate B, corr 1.000/ratio 0.9999).
     tke_shear_production: str = "squared_centered"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)

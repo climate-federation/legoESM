@@ -1723,6 +1723,11 @@ def tke_vertical_mixing(
     S_n2b: jnp.ndarray | None = None,
     u_before_cell: jnp.ndarray | None = None,
     v_before_cell: jnp.ndarray | None = None,
+    u_face_now: jnp.ndarray | None = None,
+    v_face_now: jnp.ndarray | None = None,
+    u_face_before: jnp.ndarray | None = None,
+    v_face_before: jnp.ndarray | None = None,
+    face_masks_3d: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1904,24 +1909,59 @@ def tke_vertical_mixing(
             dtype=rho_cell.dtype,
         )
 
-    # Shear-production discretization (T4, Phase-2 #1317): "squared_centered"
-    # (default, BIT-IDENTICAL) is the now-only squared form; "nemo_burchard"
-    # is the Burchard (2002) now×before energy-conserving cross term, which
-    # NEMO feeds to BOTH the shear-production source AND the Prandtl zri
-    # (zdftke.F90:392-395 reads the SAME p_sh2) — so ``shear_sq`` below feeds
-    # both consumers identically to NEMO either way.
+    # Shear-production discretization (T4, Phase-2 #1317; face-native
+    # #1226 sh2_walk.py Candidate E/F): "squared_centered" (default,
+    # BIT-IDENTICAL) is the now-only squared form; "nemo_burchard" is the
+    # Burchard (2002) now×before energy-conserving cross term (still
+    # T-point-collapsed); "nemo_face_native" is the FULL zdfsh2.F90:78-94
+    # transcription (face-native now×before + wet-only coast-doubling).
+    # NEMO feeds the SAME p_sh2 to BOTH the shear-production source AND the
+    # Prandtl zri (zdftke.F90:392-395) — so ``shear_sq`` below feeds both
+    # consumers identically to NEMO either way.
     _shear_disc = getattr(cfg, "tke_shear_production", "squared_centered")
-    if _shear_disc not in ("squared_centered", "nemo_burchard"):
+    if _shear_disc not in (
+            "squared_centered", "nemo_burchard", "nemo_face_native"):
         raise ValueError(
-            "Unknown TKEConfig.tke_shear_production: must be one of "
-            f"('squared_centered', 'nemo_burchard'), got {_shear_disc!r}.")
-    if _shear_disc == "nemo_burchard":
+            "Unknown TKEConfig.tke_shear_production shear-discretization: "
+            "must be one of ('squared_centered', 'nemo_burchard', "
+            f"'nemo_face_native'), got {_shear_disc!r}.")
+    _face_native_inputs = (u_face_now, v_face_now, u_face_before,
+                          v_face_before, face_masks_3d)
+    if _shear_disc == "nemo_face_native":
+        if u_before_cell is None or v_before_cell is None:
+            raise ValueError(
+                "TKEConfig.tke_shear_production='nemo_face_native' "
+                "requires u_before_cell and v_before_cell (the carried "
+                "leap-frog before-velocities) to be passed to "
+                "tke_vertical_mixing.")
+        if any(x is None for x in _face_native_inputs):
+            raise ValueError(
+                "TKEConfig.tke_shear_production='nemo_face_native' requires "
+                "u_face_now, v_face_now, u_face_before, v_face_before and "
+                "face_masks_3d (the RAW C-grid face state + per-level "
+                "wumask/wvmask/coast masks, zdfsh2.F90:78-94) to be passed "
+                "to tke_vertical_mixing.")
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native as _vertical_shear_face_native,
+        )
+        u_mask_3d, v_mask_3d = face_masks_3d
+        shear_sq = _vertical_shear_face_native(
+            u_face_now, v_face_now, u_face_before, v_face_before,
+            dz_half, u_mask_3d, v_mask_3d)
+    elif _shear_disc == "nemo_burchard":
         if u_before_cell is None or v_before_cell is None:
             raise ValueError(
                 "TKEConfig.tke_shear_production='nemo_burchard' requires "
                 "u_before_cell and v_before_cell (the carried leap-frog "
                 "before-velocities, state.u_before/v_before) to be passed "
                 "to tke_vertical_mixing.")
+        if any(x is not None for x in _face_native_inputs):
+            raise ValueError(
+                "u_face_now/v_face_now/u_face_before/v_face_before/"
+                "face_masks_3d were passed but "
+                "TKEConfig.tke_shear_production='nemo_burchard' — set "
+                "tke_shear_production='nemo_face_native' to actually use "
+                "them (silent-no-op guard).")
         from legoesm.ocean.physics.vertical_mixing._shared import (
             vertical_shear_burchard as _vertical_shear_burchard,
         )
@@ -1932,8 +1972,16 @@ def tke_vertical_mixing(
             raise ValueError(
                 "u_before_cell/v_before_cell were passed but "
                 "TKEConfig.tke_shear_production='squared_centered' — set "
-                "tke_shear_production='nemo_burchard' to actually use them "
-                "(silent-no-op guard).")
+                "tke_shear_production='nemo_burchard' or "
+                "'nemo_face_native' to actually use them (silent-no-op "
+                "guard).")
+        if any(x is not None for x in _face_native_inputs):
+            raise ValueError(
+                "u_face_now/v_face_now/u_face_before/v_face_before/"
+                "face_masks_3d were passed but "
+                "TKEConfig.tke_shear_production='squared_centered' — set "
+                "tke_shear_production='nemo_face_native' to actually use "
+                "them (silent-no-op guard).")
         shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
 
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
@@ -2107,18 +2155,21 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
             f"'pre_solve' or 'realized_veros'."
         )
     _tke_shear = getattr(cfg, "tke_shear_production", "squared_centered")
-    if _tke_shear not in ("squared_centered", "nemo_burchard"):
+    if _tke_shear not in ("squared_centered", "nemo_burchard",
+                          "nemo_face_native"):
         raise ValueError(
-            "Unknown TKEConfig.tke_shear_production: must be one of "
-            f"('squared_centered', 'nemo_burchard'), got {_tke_shear!r}.")
-    if timing == "post_mixing_veros" and _tke_shear == "nemo_burchard":
+            "Unknown TKEConfig.tke_shear_production shear-discretization: "
+            "must be one of ('squared_centered', 'nemo_burchard', "
+            f"'nemo_face_native'), got {_tke_shear!r}.")
+    if timing == "post_mixing_veros" and _tke_shear in (
+            "nemo_burchard", "nemo_face_native"):
         raise ValueError(
-            "TKEConfig.tke_shear_production='nemo_burchard' is not "
+            f"TKEConfig.tke_shear_production={_tke_shear!r} is not "
             "supported with buoyancy_timing='post_mixing_veros' — "
             "tke_set_diffusivities does not accept u_before_cell/"
-            "v_before_cell and would silently keep squared_centered. "
-            "Disable tke_shear_production or use the standard pre_mixing "
-            "path.")
+            "v_before_cell (or the raw face state nemo_face_native needs) "
+            "and would silently keep squared_centered. Disable "
+            "tke_shear_production or use the standard pre_mixing path.")
     if timing == "post_mixing_veros":
         if not (getattr(cfg, "prognostic", False)
                 and getattr(cfg, "veros_dz_slots", False)
@@ -2238,6 +2289,12 @@ def tke_set_diffusivities(
             f"got buoyancy_timing={getattr(cfg, 'buoyancy_timing', None)!r}."
         )
     dz_cell = dz_ref * jacobian[..., jnp.newaxis]
+    # _validate_post_mixing_cfg (above) raises for tke_shear_production in
+    # ("nemo_burchard", "nemo_face_native") under post_mixing_veros — this
+    # entry point has no u_before_cell/face-native inputs to honour either,
+    # so "squared_centered" is the ONLY value that can reach here; the call
+    # below is provably not a silent dispatch gap (unlike the pre-mixing
+    # orchestrator, which dispatches on tke_shear_production explicitly).
     shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
     # Diffusivity-stage N² time level (TKEConfig.n2_before_advection, NEMO
     # eosbn2 Nnow sequencing): when the caller supplies the BEFORE-advection
