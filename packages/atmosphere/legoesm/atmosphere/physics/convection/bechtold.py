@@ -2815,12 +2815,14 @@ def bechtold_convection(
     # ("implicit_flux") the helper returns exactly the previous expression, so
     # default behaviour is byte-identical.
     #
-    # DELIBERATE DEVIATION from the reviewer's suggested fix: the pairing keeps
-    # Bechtold's OWN ``dq_c_conv_dt`` rather than the kernel's third return.
-    # Bechtold recomputes that profile from the UNCLIPPED ``M_u_new`` while the
-    # kernel clips to ``M_b_max``, so substituting the kernel value would
-    # change this validated scheme's DEFAULT output.  Gating alone fixes the
-    # actual defect (advective over-heating) with zero default-path change.
+    # PAIRING: this keeps Bechtold's OWN ``dq_c_conv_dt`` rather than the
+    # kernel's third return.  VERIFIED EQUIVALENT (codex r3 finding 5 corrected
+    # an earlier claim of mine that they could differ): ``M_u_new`` is already
+    # clipped to ``M_b_max`` BEFORE both the kernel call and this recomputation,
+    # and both apply the same stratosphere gate, so the helper's input and the
+    # kernel's vapor debit are the same profile.  Using the local variable
+    # therefore changes nothing today and keeps the default byte-identical; a
+    # future edit to either formula must preserve that equality.
     dT_dt = release_detrained_condensate_latent(
         dT_dt, dq_c_conv_dt, config.subsidence_solve)
 

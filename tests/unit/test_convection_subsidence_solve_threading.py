@@ -156,7 +156,12 @@ def _run_mass_flux(ss, T_offset=0.0):
 # Schemes whose SHIPPED default is the leaky "advective" solve -- these are
 # the four this campaign newly threaded.
 def _run_edmf(ss, T_offset=0.0):
-    T, q_v, p_full, p_half, _u, _v = _column()
+    # EDMF needs a MOISTER, more unstable column than the shared fixture to
+    # produce condensate at all: on the default column its condensate
+    # throughput is 1.3e-11 kg/m^2/s (measured, job 9249132), which would make
+    # every conservation and AD gate below vacuous.  Settings chosen from that
+    # measured sweep: q_sfc=20 g/kg + lapse 8.5 K/km gives 2.1e-5 kg/m^2/s.
+    T, q_v, p_full, p_half, _u, _v = _column(q_sfc=20e-3, lapse_rate=8.5)
     cfg = (ConvectiveEDMFConfig() if ss is None
            else ConvectiveEDMFConfig(subsidence_solve=ss))
     a_u = jnp.full((T.shape[0],), 0.05)
@@ -194,6 +199,15 @@ SCHEMES = {
     "bechtold": (_run_bechtold, BechtoldConfig, "implicit_flux"),
 }
 SCHEME_IDS = sorted(SCHEMES)
+
+
+def _column_for(name):
+    """The SAME column the scheme's runner uses -- the diagnostics integrate
+    against ``p_half``, so a mismatched fixture would silently mis-weight the
+    residual."""
+    if name == "edmf":
+        return _column(q_sfc=20e-3, lapse_rate=8.5)
+    return _column()
 
 
 def _column_water_residual(out, p_half):
@@ -300,7 +314,7 @@ def _column_condensate_throughput(out, p_half):
 def test_fixture_actually_convects(name):
     """Every gate below is vacuous on a quiescent column -- prove activity first."""
     run, _cfg_cls, _shipped = SCHEMES[name]
-    _T, _q, _pf, p_half, _u, _v = _column()
+    _T, _q, _pf, p_half, _u, _v = _column_for(name)
     out = run("implicit_flux")
     throughput = _column_condensate_throughput(out, p_half)
     assert jnp.max(throughput) > 1e-8, (
@@ -321,7 +335,7 @@ def test_implicit_flux_closes_column_water_to_machine_precision(name):
     (ii) it is a strict, large improvement on the advective residual.
     """
     run, _cfg_cls, _shipped = SCHEMES[name]
-    _T, _q, _pf, p_half, _u, _v = _column()
+    _T, _q, _pf, p_half, _u, _v = _column_for(name)
     adv = run("advective")
     imp = run("implicit_flux")
     res_adv = _column_water_residual(adv, p_half)
@@ -434,7 +448,7 @@ def test_implicit_flux_closes_vapor_mse(name):
     the gate cannot pass vacuously.
     """
     run, _cfg_cls, _shipped = SCHEMES[name]
-    _T, _q, _pf, p_half, _u, _v = _column()
+    _T, _q, _pf, p_half, _u, _v = _column_for(name)
     out = run("implicit_flux")
     res = _vapor_mse_residual(out, p_half)
     latent_scale = constants.L_v * _column_condensate_throughput(out, p_half)
@@ -443,7 +457,12 @@ def test_implicit_flux_closes_vapor_mse(name):
         "negligible -- this gate would be vacuous"
     )
     rel = jnp.abs(res) / jnp.maximum(latent_scale, 1e-30)
-    assert jnp.all(rel < 5e-2), (
+    # Bound: the transport telescopes and the latent term uses the PAIRED
+    # source, so the expected residual is precision-limited, not percent-level.
+    # 1e-3 is still ~1000x below the "helper entirely missing" signature
+    # (ratio = exactly 1.0); the failure message prints the observed ratio so a
+    # future tightening can be justified by measurement rather than guessed.
+    assert jnp.all(rel < 1e-3), (
         f"{name}: vapor-MSE residual {np.asarray(res)} W/m^2 is "
         f"{np.asarray(rel)} of the latent throughput "
         f"{np.asarray(latent_scale)} W/m^2 -- the detrained-condensate "

@@ -277,6 +277,53 @@ def column_diagnostics(out: ConvectionOutput, p_half) -> Diagnostics:
     )
 
 
+def kernel_arm_residuals(out: ConvectionOutput, p_half) -> dict[str, float]:
+    """Separate VAPOR-MSE and TOTAL-WATER residuals for the kernel-arm sweep.
+
+    WHICH INVARIANT, AND WHY NOT ``column_diagnostics``: Tests 1-4 above report
+    ``H + Q_v + Q_c`` as their energy residual.  That is the RIGHT quantity for
+    a scheme that hands microphysics condensate whose latent heat has NOT been
+    released, but it is the WRONG one for this package's actual convention --
+    ``dq_c_conv_dt`` is ALREADY-CONDENSED cloud (Kain-Fritsch, Bechtold, EDMF,
+    Tiedtke, ZM and Arakawa-Wu all add ``+(L_v/c_p) dq_c`` in-scheme).  Under
+    that convention a perfectly paired scheme has ``H + Q_v = 0`` and
+    ``H + Q_v + Q_c = Q_c``, so reporting the latter would show a fictitious
+    "non-conservation" that scales with condensate -- and, because ``Q_c``
+    excludes ``dq_r_conv_dt``, would also move with precipitation routing while
+    the thermodynamics is unchanged.  That is exactly the kind of
+    arm-dependent, non-kernel residual that would corrupt a published ranking.
+
+    Reported instead, as three separate numbers:
+      * ``vapor_mse_residual_W_m2``  = int (c_p dT + L_v dq_v) dp/g  -> 0
+      * ``water_residual_kg_m2_s``   = int (dq_v + dq_c + dq_r) dp/g -> 0
+      * ``condensate_throughput_kg_m2_s`` = int dq_c dp/g  -- a SCALE for the
+        two residuals above, never itself part of an "error".
+
+    Sign convention: tendencies are SOURCES (``state += dt*tend``); arrays are
+    surface-LAST so ``dp = p_half[1:] - p_half[:-1] > 0``.
+    """
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dq_r = getattr(out, "dq_r_conv_dt", None)
+    dq_r = jnp.zeros_like(out.dq_c_conv_dt) if dq_r is None else dq_r
+    vapor_mse = float(jnp.mean(jnp.sum(
+        (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt) * dp,
+        axis=1) / constants.g))
+    water = float(jnp.mean(jnp.sum(
+        (out.dq_v_dt + out.dq_c_conv_dt + dq_r) * dp, axis=1) / constants.g))
+    thr = float(jnp.mean(jnp.sum(
+        (out.dq_c_conv_dt + dq_r) * dp, axis=1) / constants.g))
+    return {
+        "vapor_mse_residual_W_m2": vapor_mse,
+        "water_residual_kg_m2_s": water,
+        "condensate_throughput_kg_m2_s": thr,
+        "latent_throughput_W_m2": constants.L_v * thr,
+        "vapor_mse_rel_to_latent": (
+            abs(vapor_mse) / abs(constants.L_v * thr)
+            if abs(constants.L_v * thr) > 1e-12 else float("nan")
+        ),
+    }
+
+
 SCHEMES = (
     "sbm", "dca",
     "mass_flux", "edmf", "kuo",
@@ -441,8 +488,11 @@ def main(argv: list[str] | None = None) -> int:
     # so BOTH probe soundings are reported -- quoting one number as "the"
     # residual would be misleading.
     print()
-    print("  Test 5 - matched-kernel column-MSE conservation sweep")
-    print("    residual = H + Q_v + Q_c [W/m^2]; rel = |residual| / gross")
+    print("  Test 5 - matched-kernel conservation sweep")
+    print("    vaporMSE  = int (c_p dT + L_v dq_v) dp/g  [W/m^2]   -> 0")
+    print("    rel/latent= |vaporMSE| / (L_v * int dq_c dp/g)      -> 0")
+    print("      (a ratio of ~1.0 means the condensation heating is MISSING)")
+    print("    water     = int (dq_v + dq_c + dq_r) dp/g [kg/m^2/s] -> 0")
     print("    arm 'as_shipped' = scheme defaults; 'implicit_flux' = forced")
     print("    conservative kernel on every scheme that owns the knob.")
     print()
@@ -453,25 +503,21 @@ def main(argv: list[str] | None = None) -> int:
     ):
         pT, pq, ppf, pph = cols
         print(f"    -- probe: {probe_name} sounding --")
-        print(f"    {'scheme':>16}  {'arm':>14}  {'residual':>10}  "
-              f"{'rel_err':>8}  {'status':>28}")
+        print(f"    {'scheme':>16}  {'arm':>14}  {'vaporMSE':>11}  "
+              f"{'rel/latent':>10}  {'water':>11}  {'status':>26}")
         for name in SCHEMES:
             for arm in ("as_shipped", "implicit_flux"):
                 status = kernel_arm_status(name, arm)
                 out_k = call_scheme(
                     name, pT, pq, ppf, pph, subsidence_solve=arm)
-                dk = column_diagnostics(out_k, pph)
+                r = kernel_arm_residuals(out_k, pph)
+                r["status"] = status
                 kernel_report.setdefault(probe_name, {}).setdefault(
-                    name, {})[arm] = {
-                        "residual_W_m2": dk.residual,
-                        "rel_err": dk.rel_err,
-                        "H_W_m2": dk.H,
-                        "Q_v_W_m2": dk.Q_v,
-                        "Q_c_W_m2": dk.Q_c,
-                        "status": status,
-                    }
-                print(f"    {name:>16}  {arm:>14}  {dk.residual:10.2f}  "
-                      f"{dk.rel_err:8.3f}  {status:>28}")
+                    name, {})[arm] = r
+                print(f"    {name:>16}  {arm:>14}  "
+                      f"{r['vapor_mse_residual_W_m2']:11.3e}  "
+                      f"{r['vapor_mse_rel_to_latent']:10.3e}  "
+                      f"{r['water_residual_kg_m2_s']:11.3e}  {status:>26}")
         print()
 
     if args.json_out is not None:
@@ -488,7 +534,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    - {msg}")
         print("=" * 78)
         return 1
-    print("  VALIDATION PASSED — all 4 tests clean across the scheme matrix.")
+    print("  VALIDATION PASSED — tests 1-4 clean across the scheme matrix "
+          "(test 5 is a REPORT, not a gate).")
     print("=" * 78)
     return 0
 
