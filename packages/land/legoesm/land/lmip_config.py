@@ -34,6 +34,9 @@ An experiment is fully described by a YAML file with this schema::
       dt: float                        # seconds
       n_steps: int
       start_doy: float
+      forcing_chunk_steps: int         # 0 = stage a whole year (default); e.g. 744
+                                       # stages a month, cutting peak forcing memory
+                                       # ~12x with NO change to the physics
 
     restart:
       from: <path to a .npz or "">     # "" -> cold start
@@ -265,6 +268,18 @@ def validate_config(data: dict) -> LMIPConfig:
             f"valid keys: {sorted(LandUseChangeConfig._fields)}")
 
     req("time", ("dt", "n_steps", "start_doy"))
+    # Sub-year forcing staging.  0 (default) = one whole year resident, exactly
+    # the pre-existing behaviour.  A positive value stages that many steps at a
+    # time: the peak forcing pytree is what makes high resolution infeasible
+    # (1 deg hourly is ~59 GiB/year vs ~5 GiB/month), and chunking is
+    # bit-identical because lax.scan over [A|B] == scan A then scan B.
+    _t = data.setdefault("time", {})
+    _t.setdefault("forcing_chunk_steps", 0)
+    _fcs = _t["forcing_chunk_steps"]
+    if not isinstance(_fcs, int) or isinstance(_fcs, bool) or _fcs < 0:
+        raise ValueError(
+            f"time.forcing_chunk_steps must be a non-negative int "
+            f"(0 = whole year); got {_fcs!r}")
     time = data["time"]
     if time["n_steps"] <= 0:
         raise ValueError(f"time.n_steps must be > 0 (got {time['n_steps']})")

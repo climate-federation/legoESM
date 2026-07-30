@@ -252,6 +252,7 @@ def synthetic_land_forcing(
     year: int = 0,
     *,
     n_time: int = 4,
+    t_index0: int = 0,
     nlon: int = CRUJRA_NLON,
     nlat: int = CRUJRA_NLAT,
 ) -> LandForcing:
@@ -260,12 +261,19 @@ def synthetic_land_forcing(
     Physically-reasonable, smooth fields used by smoke runs and unit tests when
     the real CLM streams are unavailable.  Mirrors the role of
     ``ocean/forcing/jra55_do.synthetic_ocean_forcing``.
+
+    ``t_index0`` is the ABSOLUTE index (within the year's 6-hourly series) of the
+    first returned slice.  It must be honoured, because callers request a WINDOW:
+    :func:`stage_forcing` loads only the slices bracketing the requested model
+    times, and the disaggregator then interpolates on ``LandForcing.time_s``.
+    Ignoring it silently returns the wrong part of the year -- e.g. a run with
+    ``start_doy > 0``, or any sub-year forcing chunk, would be handed January.
     """
     lon = np.linspace(0.0, 360.0, nlon, endpoint=False, dtype=np.float64)
     lat = np.linspace(_LAT_SOUTH_DEG, _LAT_NORTH_DEG, nlat, dtype=np.float64)
     # Solar stamped at interval start; TPQWL/Prec at interval midpoint.
     step_s = _SEC_PER_DAY * float(CRUJRA_FREQ_HOURS) / _HOURS_PER_DAY
-    t_solar = np.arange(n_time, dtype=np.float64) * step_s
+    t_solar = (float(t_index0) + np.arange(n_time, dtype=np.float64)) * step_s
     t_state = t_solar + 0.5 * step_s
 
     lat_r = np.radians(lat)[None, :, None]
@@ -326,8 +334,12 @@ def load_cru_jra(
             f"CRU-JRA streams not found in {data_dir!r} for year {year}; "
             f"expected e.g. {prefix}.{_STREAM_SOLAR}.{year}{suffix}.nc"
         )
-    n_time = 4 if time_indices is None else len(time_indices)
-    return synthetic_land_forcing(year, n_time=n_time)
+    if time_indices is None:
+        n_time, t0 = 4, 0
+    else:
+        _ti = np.asarray(time_indices)
+        n_time, t0 = len(_ti), int(_ti[0])
+    return synthetic_land_forcing(year, n_time=n_time, t_index0=t0)
 
 
 def build_forcing_weights(

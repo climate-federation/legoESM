@@ -147,6 +147,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
         soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
         soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
+        forcing_chunk_steps=int(cfg.time.get("forcing_chunk_steps", 0) or 0),
         root_calibration=cfg.physics.get("root_calibration", "default"),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
@@ -394,6 +395,35 @@ def run(args) -> int:
     _BYTES_PER_ELEM = 8                           # float64
     _STEPS_PER_YEAR_MAX = int(365.0 * 86400.0 / max(float(args.dt), 1.0))
     peak_year_steps = min(int(args.n_steps), _STEPS_PER_YEAR_MAX)
+    # Forcing is staged one CHUNK at a time (default: a whole year).  A smaller
+    # chunk is what makes high resolution feasible: at 1 deg hourly a YEAR of
+    # forcing is ~59 GiB (does not fit a 40 GB A100), while a MONTH is ~5 GiB.
+    _chunk_steps = int(getattr(args, "forcing_chunk_steps", 0) or 0)
+    if _chunk_steps > 0:
+        # A chunk MUST tile whole 6-hourly forcing intervals.  The shortwave
+        # disaggregation conserves each interval's mean by averaging cos(zenith)
+        # over exactly the model substeps that tile it; a chunk boundary INSIDE an
+        # interval leaves a partial set, so the reconstructed SW differs and the
+        # run silently stops matching an unchunked one.  Measured on a 120-step
+        # C24 case: chunk=30 (5 whole intervals) is BIT-IDENTICAL to whole-year;
+        # chunk=31 diverges to 6.7e4 W/m2 in lhflx.
+        from legoesm.land.forcing.cru_jra import CRUJRA_FREQ_HOURS
+        _fint_s = float(CRUJRA_FREQ_HOURS) * 3600.0
+        if _fint_s % float(args.dt) != 0.0:
+            raise SystemExit(
+                f"time.forcing_chunk_steps requires dt to divide the "
+                f"{CRUJRA_FREQ_HOURS}-h forcing interval; dt={args.dt} does not.")
+        _steps_per_fint = int(_fint_s / float(args.dt))
+        if _chunk_steps % _steps_per_fint != 0:
+            raise SystemExit(
+                f"time.forcing_chunk_steps={_chunk_steps} must be a multiple of "
+                f"{_steps_per_fint} (= the {CRUJRA_FREQ_HOURS}-h forcing interval "
+                f"at dt={args.dt:.0f}s).  A chunk that splits a forcing interval "
+                f"changes the shortwave disaggregation and silently alters the "
+                f"physics.  Nearest valid values: "
+                f"{_steps_per_fint * (_chunk_steps // _steps_per_fint)} or "
+                f"{_steps_per_fint * (_chunk_steps // _steps_per_fint + 1)}.")
+        peak_year_steps = min(peak_year_steps, _chunk_steps)
     est_bytes = peak_year_steps * ncol * _ATM_TO_SURFACE_N_FIELDS * _BYTES_PER_ELEM
     est_gib = est_bytes / (1024 ** 3)
     _FORCING_BUDGET_GIB = 24.0
@@ -404,6 +434,9 @@ def run(args) -> int:
               f"~{_ATM_TO_SURFACE_N_FIELDS} fields x {_BYTES_PER_ELEM} B\n",
               file=sys.stderr)
         print("Options:", file=sys.stderr)
+        print("  - SMALLER time.forcing_chunk_steps (stage a month, not a year: "
+              "744 for hourly). This is the lever for high resolution — it does "
+              "NOT change the physics.", file=sys.stderr)
         print("  - Coarser grid (e.g. biophysics/smoke_4deg template)",
               file=sys.stderr)
         print("  - Larger dt (fewer steps per year)", file=sys.stderr)
@@ -945,24 +978,35 @@ def run(args) -> int:
         tq_year = tq[mask]
         n_step_year = tq_year.size
         tq_local = tq_year - k * _SEC_PER_YEAR
-        forcing_year = stage_forcing(
-            lat_rad, lon_rad, tq_local,
-            year=year, data_dir=(None if synthetic else args.forcing_dir),
-            prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
-        doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
-        # Transient cover: broadcast this chunk's calendar year across its steps as
-        # a TRACED scan input (not a Python constant baked into the closure) so
-        # interp_annual selects the right LUH2 slice WITHOUT recompiling the scan
-        # each year (SegmentForcing doctrine).
-        year_xs = jnp.full(n_step_year, float(year))
-        # Slice each tape's GLOBAL slot indices to just this year's steps.
-        slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
-        print(f"  year {year} ({n_step_year} steps) ...")
-        (state, tape_accums, revert_count), _ = jax.lax.scan(
-            _step_body, (state, tape_accums, revert_count),
-            (forcing_year, doy_year, year_xs, slot_year_xs))
-        del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
+        slot_year_all = {name: idx[mask] for name, idx in slot_idx_global.items()}
+        # Sub-year staging: forcing for ONE chunk is resident at a time.  0/absent
+        # keeps the whole year in one piece — bit-identical to the pre-chunking
+        # behaviour, since lax.scan over [A|B] equals scan over A then scan over B
+        # (the carry is threaded, nothing else crosses a chunk boundary).
+        _cs = n_step_year if _chunk_steps <= 0 else min(_chunk_steps, n_step_year)
+        _bounds = [(lo, min(lo + _cs, n_step_year))
+                   for lo in range(0, n_step_year, _cs)]
+        print(f"  year {year} ({n_step_year} steps"
+              + (f", {len(_bounds)} forcing chunk(s) of <={_cs}" if len(_bounds) > 1 else "")
+              + ") ...")
+        for lo, hi in _bounds:
+            n_c = hi - lo
+            forcing_c = stage_forcing(
+                lat_rad, lon_rad, tq_local[lo:hi],
+                year=year, data_dir=(None if synthetic else args.forcing_dir),
+                prefix=args.prefix, suffix=args.suffix,
+                k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
+            doy_c = jnp.asarray(tq_year[lo:hi] / _SEC_PER_DAY)
+            # Transient cover: broadcast this chunk's calendar year across its steps
+            # as a TRACED scan input (not a Python constant baked into the closure)
+            # so interp_annual selects the right LUH2 slice WITHOUT recompiling the
+            # scan each year (SegmentForcing doctrine).
+            year_xs = jnp.full(n_c, float(year))
+            slot_c = {name: idx[lo:hi] for name, idx in slot_year_all.items()}
+            (state, tape_accums, revert_count), _ = jax.lax.scan(
+                _step_body, (state, tape_accums, revert_count),
+                (forcing_c, doy_c, year_xs, slot_c))
+            del forcing_c, doy_c, year_xs, slot_c     # free before the next chunk
         steps_done += n_step_year
         # Flush THIS year's completed tape slots + a resumable restart, so a
         # wall-clock timeout keeps every finished year (annual output).  Only for
