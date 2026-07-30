@@ -107,7 +107,11 @@ __physics_contract__ = {
         "Hines-INSPIRED non-orographic gravity-wave drag (single bulk-amplitude "
         "heuristic, NOT the Doppler-spread spectrum): a launched rms wave amplitude "
         "grows with 1/sqrt(rho) upward, saturates against a bulk scalar scale "
-        "N/m_*, and deposits the per-layer stress decrement as a drag on the flow."
+        "N/m_*, and deposits the per-layer stress decrement as a drag on the "
+        "flow.  With ``launch_p`` set the wave is held at its launch amplitude "
+        "at and below that level (no source, no deposition) and starts "
+        "propagating there, so the stress-decrement statement applies only "
+        "ABOVE the launch level."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -229,9 +233,19 @@ def hines_gwd(
     # the area, so the wave breaks AT its own launch level (55% of its
     # momentum below 1 km, only 35% above 12 km).
     #
-    # Level selection mirrors the sibling scheme (e3sm_cam.py:1544): the
-    # column-mean pressure closest to ``launch_p``, kept as a 0-d TRACED
-    # int via jnp.argmin (NOT int(...)) so the kernel stays jit-safe.
+    # Level selection is PER COLUMN, not from a column-mean profile: the
+    # documented units are [Pa], so a nominal 700 hPa source must sit at
+    # 700 hPa over a mountain as well as over the ocean.  (The sibling
+    # e3sm_cam.py:1544 picks ONE global level from the column mean, which
+    # makes its threshold a reference-grid convention rather than a
+    # pressure; codex review 2026-07-31.)  ``jnp.argmin`` keeps the index
+    # TRACED (never ``int(...)``) so the kernel stays jit-safe; the index
+    # itself is not differentiated, matching E3SM's static selection.
+    #
+    # Columns whose SURFACE pressure is already below ``launch_p`` (high
+    # terrain) get NO source rather than a silently relocated one: the
+    # launch level is pushed past the bottom so every level reads as "below
+    # launch" and the column contributes zero drag.
     #
     # NB it is NOT enough to zero the drag below the launch level: the
     # amplitude carry would still propagate up through the BL and SATURATE
@@ -242,10 +256,18 @@ def hines_gwd(
     # wave genuinely starts there.
     _k_launch = None
     if config.launch_p is not None:
-        _pmean = jnp.mean(p_full, axis=0)                     # (nlev,)
-        _k_launch = jnp.clip(
-            jnp.argmin(jnp.abs(_pmean - config.launch_p)), 0, nlev - 1
+        # (ncol,) index of the level closest to launch_p in EACH column.
+        _k_launch = jnp.argmin(
+            jnp.abs(p_full - config.launch_p), axis=1
         ).astype(jnp.int32)
+        # No source where the whole column lies above the launch pressure
+        # (p_s < launch_p, i.e. high terrain).  The scan gate is
+        # ``below = k >= k_launch``, so the sentinel that marks EVERY level
+        # as below-launch is 0 (k >= 0 always holds) — NOT nlev, which
+        # would make the condition never true and mask nothing.
+        _p_sfc = p_full[:, -1]
+        _k_launch = jnp.where(
+            _p_sfc < config.launch_p, jnp.int32(0), _k_launch)
 
     # Bottom-up scan: propagate sigma_gw upward from surface.
     # ``rho_ratio_step[:, k]`` carries amplitude from level k+1 to level k;

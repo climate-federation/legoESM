@@ -124,6 +124,49 @@ def test_wave_starts_UNCLIPPED_at_the_launch_level():
         f"({above_lch:.4e} vs surface-launch {above_sfc:.4e})")
 
 
+def test_launch_level_is_PER_COLUMN_not_a_global_index():
+    """``launch_p`` is documented in [Pa], so a nominal 700 hPa source must sit
+    at 700 hPa over a MOUNTAIN as well as over the ocean.  A column-mean
+    profile would pick ONE global level index and make the threshold a
+    reference-grid convention instead of a pressure (codex 2026-07-31)."""
+    ncol, nlev = 3, 30
+    # column 0 = sea level, column 1 = elevated, column 2 = high terrain
+    p_s = np.array([1.0e5, 8.0e4, 6.5e4])
+    sh = np.linspace(0.005, 1.0, nlev + 1)
+    ds = np.diff(sh)
+    sig = np.cumsum(ds) - 0.5 * ds
+    p_full = jnp.asarray(sig[None, :] * p_s[:, None])
+    p_half = jnp.asarray(sh[None, :] * p_s[:, None])
+    T = jnp.asarray(np.linspace(215.0, 290.0, nlev)[None, :]
+                    * np.ones((ncol, 1)))
+    z_half = jnp.asarray(
+        _H_SCALE * np.log(_P_SFC / np.maximum(np.asarray(p_half), 1.0)))
+    z_full = jnp.asarray(
+        _H_SCALE * np.log(_P_SFC / np.maximum(np.asarray(p_full), 1.0)))
+    rho = p_full / (constants.R_d * T)
+    u = jnp.full((ncol, nlev), 20.0)
+    v = jnp.zeros((ncol, nlev))
+    out = hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho,
+                    jnp.zeros(ncol), 300.0, HinesConfig(launch_p=_LAUNCH_P))
+    du = np.abs(np.asarray(out.du_dt))
+    pf = np.asarray(p_full)
+
+    # columns 0 and 1 have surface pressure above 700 hPa -> a real source,
+    # and the deepest level receiving drag must sit at ~launch_p in EACH.
+    for j in (0, 1):
+        active = np.nonzero(du[j] > 0)[0]
+        assert active.size > 0, f"column {j} should have a source"
+        p_lowest_active = pf[j, active.max()]
+        assert abs(p_lowest_active - _LAUNCH_P) < 0.12 * _LAUNCH_P, (
+            f"column {j}: lowest active level at {p_lowest_active:.0f} Pa, "
+            f"not near launch_p={_LAUNCH_P:.0f} Pa -> index is not per-column")
+
+    # column 2 lies entirely above launch_p (p_s = 650 hPa) -> NO source,
+    # rather than a silently relocated one.
+    assert np.allclose(du[2], 0.0), (
+        "a column whose surface pressure is below launch_p must get no source")
+
+
 def test_jit_parity_and_finite():
     """Eager vs jit must agree (the level index is a traced argmin, not an
     int(), so the kernel has to stay jit-safe)."""
