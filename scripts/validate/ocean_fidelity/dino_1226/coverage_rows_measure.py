@@ -823,7 +823,22 @@ def measure_tra_sbc(st) -> dict:
           "of its scope -- candidates worth a SEPARATE probe: the MLF "
           "average's e3t divisor, dz_0 vs NEMO's per-cell z*-varying "
           "e3t(Kmm) under key_qco). Independently re-derived and CONFIRMED "
-          "by a fresh physics-validator review of the same source lines.")
+          "by a fresh physics-validator review of the same source lines.\n"
+          "  FOLLOW-UP (this comment's own candidate list -- RESOLVED): the "
+          "MLF-divisor candidate was confirmed and fixed (this file's own "
+          "cfg.surface_flux_divisor dispatch, live-e3t via eos.nemo_r3t_"
+          "stretch) -- see this row's tuples above, now tem "
+          "corr=1.00000000/ratio=1.00000100, sal corr=1.00000000/"
+          "ratio=1.00000000. tem's REMAINING per-element err_norm (median "
+          "9.657e-07, BAR METRIC -> NO) is a SEPARATE, smaller-order cause: "
+          "DINOConfig.c_p=3991.86 (dino.py) truncates NEMO's own "
+          "eosbn2.F90:1899 rcp=3991.86795711963_wp at 6 sig figs (relative "
+          "1.9933e-06); salinity's own trasbc.F90:137 conversion has no rcp "
+          "factor and is structurally immune, which is exactly why sal "
+          "clears to err_norm=0.0 while tem does not. See "
+          "tra_sbc_tem_piece_decompose.py (CONFIRMED: reconstructing tem's "
+          "dump from NEMO's own qns/sbc_hc_b with NEMO's exact rcp gives "
+          "err_norm=0.0; with cfg.c_p gives 9.657e-07 -- the SAME residual).")
     return dict(tem=r_tem, sal=r_sal)
 
 
