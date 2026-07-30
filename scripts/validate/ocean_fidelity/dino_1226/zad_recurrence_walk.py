@@ -498,6 +498,71 @@ def main() -> int:
     print(f"  steepest-mean-gradient level in this band: {steepest_level} (Fortran jk {steepest_level+1})")
     print("  (jump band established by prior scripts: Python levels 29-33)")
 
+    # =========================================================================
+    # STEP C: POPULATION DECOMPOSITION of the headline err_norm.
+    #
+    # WHY: the headline metric's mask is ``umask2 = g.umask[...,0] > 0.5`` --
+    # the SURFACE-level (k=0) u-mask, BROADCAST to every level. So the
+    # comparison population at depth INCLUDES cells that lie below the local
+    # u-face seafloor (legoESM zeros them; NEMO's raw dump does not). This
+    # decomposes the headline into the two subpopulations.
+    #
+    # COMPOSITION (exactly additive in squares -- mask2d is 2-D, so the cell
+    # count N is the SAME at every level):
+    #     err_by_level[k]^2 = S[k]/N,  S[k] = sum of err^2 over mask2d cells
+    #     numerator^2 = mean_k(err_by_level[k]^2) = (1/(N*nlev)) * sum_k S[k]
+    #     S[k] = S_active[k] + S_inactive[k]
+    #  => err_norm_total^2 = err_norm_active^2 + err_norm_inactive^2
+    # with the DENOMINATOR held FIXED at the full-population
+    # sqrt(mean_k(rms_by_level^2)) for all three, so the three numbers are
+    # directly comparable (same metric, same reducer, same normalizer).
+    # =========================================================================
+    print("\n" + "=" * 78)
+    print("STEP C: population decomposition of the headline u err_norm")
+    print("=" * 78)
+    u_mask_3d_np = np.asarray(g.umask) > 0.5
+    n_lat_d = min(err_u0.shape[0], u_mask_3d_np.shape[0], umask2.shape[0])
+    n_lon_d = min(err_u0.shape[1], u_mask_3d_np.shape[1], umask2.shape[1])
+    n_lev_d = min(err_u0.shape[2], u_mask_3d_np.shape[2])
+    err_d = err_u0[:n_lat_d, :n_lon_d, :n_lev_d]
+    act_d = u_mask_3d_np[:n_lat_d, :n_lon_d, :n_lev_d]
+    wet2d_d = umask2[:n_lat_d, :n_lon_d]
+    N = int(wet2d_d.sum())
+
+    # Denominator: FIXED, full-population, exactly as the headline builds it.
+    denom = float(np.sqrt(np.mean(rbl_u0[:n_lev_d] ** 2)))
+
+    S_act = np.zeros(n_lev_d)
+    S_inact = np.zeros(n_lev_d)
+    cnt_act = np.zeros(n_lev_d, dtype=int)
+    cnt_inact = np.zeros(n_lev_d, dtype=int)
+    for k in range(n_lev_d):
+        sel_act = wet2d_d & act_d[..., k]
+        sel_inact = wet2d_d & ~act_d[..., k]
+        S_act[k] = float(np.sum(err_d[..., k][sel_act] ** 2))
+        S_inact[k] = float(np.sum(err_d[..., k][sel_inact] ** 2))
+        cnt_act[k] = int(sel_act.sum())
+        cnt_inact[k] = int(sel_inact.sum())
+
+    num_act = float(np.sqrt(np.mean(S_act / N)))
+    num_inact = float(np.sqrt(np.mean(S_inact / N)))
+    num_tot = float(np.sqrt(np.mean((S_act + S_inact) / N)))
+    en_act, en_inact, en_tot = num_act / denom, num_inact / denom, num_tot / denom
+
+    print(f"  headline population = ALL wet2d cells (surface u-mask broadcast to depth), N={N} per level")
+    print(f"  denominator (FIXED, full-population sqrt(mean_k rms^2)) = {denom:.4e}")
+    print(f"    err_norm over interior-ACTIVE cells only   : {en_act:.4e}")
+    print(f"    err_norm over INACTIVE-but-wet2d cells only: {en_inact:.4e}")
+    print(f"    err_norm over the UNION (== headline)      : {en_tot:.4e}")
+    print(f"    additivity check  sqrt(act^2+inact^2) = {np.sqrt(en_act**2 + en_inact**2):.4e}  "
+          f"(must equal the union number)")
+    share = (en_inact ** 2) / (en_tot ** 2) if en_tot > 0 else float("nan")
+    print(f"    variance share owned by INACTIVE-but-wet2d cells: {share:.6f}")
+    print("\n  per-level cell counts + squared-error contributions, levels 28-35:")
+    for k in range(28, min(n_lev_d, 36)):
+        print(f"    lev {k:2d} (jk {k+1:2d}): n_active={cnt_act[k]:5d}  n_inactive_wet2d={cnt_inact[k]:5d}  "
+              f"S_act={S_act[k]:.3e}  S_inact={S_inact[k]:.3e}")
+
     print("\n" + "=" * 78)
     print("DONE -- see terminal output above for the report's numeric inputs.")
     print("=" * 78)
