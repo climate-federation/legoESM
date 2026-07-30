@@ -7,11 +7,14 @@ official case definition; TC3 (squall line) specifies NO Coriolis.
 
 Two real defects motivated these tests (2026-07-30):
 
-1. The spectral TC2/TC3 initialisers called ``create_gaussian_grid`` with
-   ``radius=R/factor`` but WITHOUT ``omega``, so they silently kept the
-   full-Earth Omega while the cube arm ran at Omega*X — a 20x (TC2) /
-   60x (TC3) cross-grid confound that invalidated every spectral-vs-cube
-   comparison of these cases.
+1. ``SpectralCompressibleEulerModel.__init__`` scaled ``grid.f`` by the
+   small-earth factor UNCONDITIONALLY, so the spectral TC3 arm ran at
+   f*60 while its cube and MPAS siblings ran at f=0 — a cross-grid
+   Coriolis mismatch that invalidated any spectral-vs-cube comparison of
+   TC3.  (An initialiser-local ``small_grid`` also omitted ``omega``, but
+   that grid is discarded: the model re-scales its own.  Testing the
+   initialiser would have passed while the model stayed wrong, so these
+   tests assert on the grid the MODEL holds.)
 2. TC2 was briefly defaulted to non-rotating by false analogy with FV3's
    HIWPP Schaer mountain-wave cases (tools/test_cases.F90:3079), which
    are a DIFFERENT test from DCMIP TC2.
@@ -34,12 +37,15 @@ from legoesm.grids.cubed_sphere import (
 )
 
 
-def _omega_of(grid):
-    """Rotation rate carried by a grid object, whatever it is called."""
-    for attr in ("omega", "Omega", "rotation_rate"):
-        if hasattr(grid, attr):
-            return float(getattr(grid, attr))
-    raise AssertionError(f"no rotation attribute on {type(grid).__name__}")
+def _max_f(grid):
+    """Peak |f| carried by the grid — the quantity the dycore consumes.
+
+    Asserting on a stored ``omega`` attribute would be asserting on
+    bookkeeping; ``f = 2 Omega sin(lat)`` is what reaches the momentum
+    equation, and it scales linearly with Omega.
+    """
+    import jax.numpy as jnp
+    return float(jnp.max(jnp.abs(grid.f)))
 
 
 def test_tc2_is_rotating_and_tc3_is_not():
@@ -54,14 +60,15 @@ def test_tc2_is_rotating_and_tc3_is_not():
 def test_small_earth_scaling_applies_omega_times_x():
     grid = create_cubed_sphere(8)
     scaled = apply_small_earth_scaling(grid, 20.0)
-    assert _omega_of(scaled) == pytest.approx(constants.Omega * 20.0)
+    assert _max_f(scaled) == pytest.approx(20.0 * _max_f(grid), rel=1e-10)
     assert float(scaled.radius) == pytest.approx(constants.R_earth / 20.0)
 
 
-def test_small_earth_scaling_non_rotating_zeroes_omega():
+def test_small_earth_scaling_non_rotating_zeroes_f():
     grid = create_cubed_sphere(8)
+    assert _max_f(grid) > 0.0                      # control: probe can fail
     scaled = apply_small_earth_scaling(grid, 60.0, rotating=False)
-    assert _omega_of(scaled) == 0.0
+    assert _max_f(scaled) == 0.0
     assert float(scaled.radius) == pytest.approx(constants.R_earth / 60.0)
 
 
@@ -75,40 +82,56 @@ def test_no_op_factor_with_non_rotating_raises_rather_than_rebuilding():
         apply_small_earth_scaling(grid, 1.0, rotating=False)
 
 
-@pytest.mark.parametrize("case,factor,rotating", [("tc2", 20.0, True),
-                                                  ("tc3", 60.0, False)])
-def test_spectral_initialiser_passes_a_consistent_omega(case, factor,
-                                                        rotating, monkeypatch):
-    """The spectral arm must build its small planet with the SAME rotation
-    rate as the cube arm.  Captures the omega actually handed to
-    ``create_gaussian_grid`` — a source-text assertion would pass on a
-    delegating wrapper while proving nothing."""
-    import legoesm.atmosphere.dynamics.gcm.spectral_nh as snh
+@pytest.mark.parametrize("rotating,factor,expect_ratio", [
+    (True, 20.0, 20.0),     # TC2 convention: f scales with the radius reduction
+    (False, 60.0, 0.0),     # TC3 convention: no Coriolis at all
+])
+def test_spectral_model_honours_case_rotation(rotating, factor, expect_ratio):
+    """The SPECTRAL MODEL must apply the case's rotation, not just its
+    initialiser.
 
-    seen: dict = {}
-    real = snh.create_gaussian_grid
+    codex r3 P1: the initialiser builds a local ``small_grid`` whose ``f``
+    the running model never consumes — the model re-scales ``grid.f`` itself
+    in ``__init__``.  A test that spied on the initialiser would pass while
+    the model ran at the wrong Coriolis, which is exactly the defect that
+    left the spectral TC3 arm at f*60 against f=0 on cube and MPAS.  So
+    assert on the grid the MODEL ends up holding.
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.atmosphere.dynamics.gcm.spectral_nh import (
+        SpectralCompressibleEulerModel, SpectralNHConfig,
+    )
+    from legoesm.grids.vertical import (
+        create_height_coordinate, compute_terrain_metric,
+    )
 
-    def spy(*args, **kwargs):
-        seen.update(kwargs)
-        return real(*args, **kwargs)
+    base = create_gaussian_grid(21)
+    f_base = float(jnp.max(jnp.abs(base.f)))
+    assert f_base > 0.0                            # control: probe can fail
 
-    monkeypatch.setattr(snh, "create_gaussian_grid", spy)
+    hcoord = create_height_coordinate(8, 20000.0)
+    tmetric = compute_terrain_metric(
+        jnp.zeros((base.n_lat, base.n_lon)), hcoord)
+    model = SpectralCompressibleEulerModel(
+        base, hcoord, tmetric,
+        SpectralNHConfig(small_earth_factor=factor, rotating=rotating),
+    )
+    f_model = float(jnp.max(jnp.abs(model.grid.f)))
+    assert f_model == pytest.approx(expect_ratio * f_base, abs=1e-12,
+                                    rel=1e-10)
 
-    from legoesm.grids.gaussian import create_gaussian_grid as _cgg
-    base = _cgg(21)
-    init = (snh.dcmip25_tc2_init_spectral if case == "tc2"
-            else snh.dcmip25_tc3_init_spectral)
-    try:
-        init(base, n_levels=10)
-    except Exception:
-        # The initialiser may fail downstream on this tiny grid; the grid
-        # construction we are asserting on has already happened.
-        pass
 
-    assert "omega" in seen, (
-        f"{case} spectral initialiser built its small planet without an "
-        "explicit omega — it therefore ran at full-Earth Omega while the "
-        "cube arm ran at Omega*X (cross-grid confound)")
-    expected = constants.Omega * factor if rotating else 0.0
-    assert seen["omega"] == pytest.approx(expected)
-    assert seen["radius"] == pytest.approx(constants.R_earth / factor)
+def test_spectral_matrix_branch_reads_case_rotation():
+    """The matrix's spectral branch must take ``rotating`` from the SAME
+    case parameter dicts the cube and MPAS arms read, so a change to a case
+    definition cannot silently desynchronise one grid."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[4]
+    text = (root / "scripts" / "matrix"
+            / "run_atmosphere_test_matrix.py").read_text()
+    assert "rotating=_rotating," in text, (
+        "spectral SpectralNHConfig no longer receives the case rotation")
+    assert re.search(r'_rotating = bool\(_TC3_P\.get\("rotating"', text), (
+        "spectral tc3 branch no longer reads TC3_PARAMS['rotating']")

@@ -123,6 +123,14 @@ class SpectralNHConfig(NamedTuple):
     # baseline for drift-measurement tests.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    rotating: bool = True
+        # False => Coriolis identically zero on the small planet.  The
+        # small-earth branch below scales ``grid.f`` by the reduction factor
+        # (Rossby-preserving, the DCMIP-2025 convention used by TC2); DCMIP
+        # TC3 (squall line) specifies NO Coriolis, which the cube and MPAS
+        # arms already honour.  Without this the spectral TC3 arm ran at
+        # f*60 while its cube/MPAS siblings ran at f=0 (codex r3 P1).
+
 
 
 # =============================================================================
@@ -745,8 +753,11 @@ class SpectralCompressibleEulerModel:
             factor = self.config.small_earth_factor
             grid = grid._replace(
                 radius=constants.R_earth / factor,
-                f=grid.f * factor,
+                f=(grid.f * factor if self.config.rotating
+                   else jnp.zeros_like(grid.f)),
             )
+        elif not self.config.rotating:
+            grid = grid._replace(f=jnp.zeros_like(grid.f))
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None

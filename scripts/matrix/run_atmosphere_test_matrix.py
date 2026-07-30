@@ -1954,6 +1954,23 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
             f"(day {blowup_info.get('day', 0):.2f}), "
             f"reason: {blowup_info['reason']}"
         )
+        # codex r3 P2: surface the scalars captured AT the blow-up state.
+        # They were being recorded and then discarded -- the CSV writer
+        # skips private keys, so the postmortem data never reached a
+        # reader.  Emit the extrema (and any argmax localisation the
+        # scalars carry) into the notes line, sorted for stable output.
+        _at = blowup_info.get("scalars_at_blowup")
+        if _at:
+            blowup_str += "; at blowup: " + ", ".join(
+                f"{k}={v:.4g}" for k, v in sorted(_at.items())
+                if v is not None)
+            _none = sorted(k for k, v in _at.items() if v is None)
+            if _none:
+                blowup_str += f"; non-finite at blowup: {','.join(_none)}"
+        elif blowup_info.get("scalars_at_blowup_error"):
+            blowup_str += (
+                "; at-blowup scalars UNAVAILABLE: "
+                f"{blowup_info['scalars_at_blowup_error']}")
         if original_notes:
             rows = {**rows, "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
@@ -6429,15 +6446,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             raise NotImplementedError(
                 f"Spectral NH: unsupported test case {test_case}")
 
-        # Small-Earth factor and sponge config per test case
+        # Small-Earth factor and sponge config per test case.
+        # ``rotating`` comes from the SAME case parameter dicts the cube and
+        # MPAS arms read, so all three grids agree on Coriolis: TC2 rotates
+        # (radius/X, f*X, the DCMIP small-planet convention), TC3 does not
+        # (the squall-line spec has no Coriolis).  Previously the spectral
+        # model scaled f by X unconditionally, so its TC3 arm ran at f*60
+        # against f=0 on cube and MPAS (codex r3 P1).
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
+        )
         if test_case == "tc2a":
             sef = 20.0
+            _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
             sef = 60.0
+            _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
             sef = 1.0
+            _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
@@ -6461,6 +6490,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_coeff=sponge_c,
             hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
+            rotating=_rotating,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,

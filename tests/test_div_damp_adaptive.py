@@ -518,11 +518,14 @@ def test_corner_div_damp_stable_short_run(small_3d_state):
 
 
 def test_corner_div_damp_d4_disabled_bit_for_bit_with_d2(small_3d_state):
-    """When d4_bg=0 OR nord=0, iter-18 is bit-for-bit identical to iter-16.
+    """When nord=0, the higher-order branch is skipped bit-for-bit.
 
-    The higher-order block in ``primitive_eq_cdgrid.py`` is gated by a
-    Python-static ``d4_bg > 0 AND nord > 0`` test, so disabling either
-    config knob skips the new code path entirely.  This guards against
+    UPDATED 2026-07-30: the gate is now ``corner_div_damp_higher_order_active``
+    = active AND nord>0, faithful to FV3, which selects the branch on ``nord``
+    alone (sw_core.F90:1641) and lets ``d4_bg`` only size the ``dd8`` term.  So
+    ``d4_bg=0`` with ``nord>0`` NO LONGER skips the branch — only ``nord=0``
+    does, and that is what this test pins.  The old docstring claimed
+    "d4_bg=0 OR nord=0" and the case below sets nord=0.  This guards against
     any accidental fall-through that would change the iter-16 baseline.
     """
     grid, cdgrid, coord, _ = small_3d_state

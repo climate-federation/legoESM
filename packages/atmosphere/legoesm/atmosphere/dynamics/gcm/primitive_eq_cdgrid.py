@@ -156,7 +156,8 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # (K). PE: skip k=0,1; cap k>=2. NH: 0.1x at k=0, 0.5x at k=1, 1x k>=2. FV3 default 1.0.
     corner_div_damp_d_con: float = 0.0
         # FV3_3D iter 221: KE→heat d_con for corner-div damp. dT/dt = -coeff*(u·du+v·dv)/c_pd.
-        # Gated by corner_div_damp_d2_bg>0. FV3 default 1.0. Capped by iter-218/219 delt_max.
+        # Gated by corner_div_damp_active(): d2_bg>0 OR (d4_bg>0 AND nord>0).
+        # FV3 default 1.0. Capped by iter-218/219 delt_max.
     use_fv3_cross_face_du_proj: bool = False
         # FV3_3D iter 370/384: cross-face halo for damp_v wind-increment projection. Requires
         # duogrid=True to actually transfer cross-face values (NO-OP without duogrid).
