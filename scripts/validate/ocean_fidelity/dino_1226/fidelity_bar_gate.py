@@ -277,6 +277,18 @@ PER_ELEMENT: dict[str, float] = {
     "ldf_slp wslpj": 2.770e-10,
     "ldf_slp uslp": 2.200e-10,
     "ldf_slp vslp": 3.265e-10,
+    # --- 2026-07-30 coverage_rows_measure.py -- 4 rows measured directly
+    # per-element (median pointwise |rel|, one-signed fields; the aggregate
+    # ratio for these rows is NOT hiding cancellation -- verified below). ---
+    # ahmt: 0.0 (exact). ahmf (masked by fmask2d, all-4-T-neighbours-wet):
+    # 1.857e-05 -- recorded here since it is the WORSE of the pair.
+    "ldf_dyn coefficient": 1.857e-05,
+    # k=0 (surface) pointwise |rel| median; one-signed (Q_sr >= 0).
+    "tra_qsr (shortwave penetration)": 6.653e-05,
+    # sign-changing plain-Asselin term; conditioning-robust err_norm used.
+    "ssh_atf": 7.076e-07,
+    # sign-changing tem/sal; err_norm (RMS-normalized) used, worse of the two.
+    "tra_sbc": 7.826e-05,
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -822,7 +834,12 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "-- only the in-repo probe script needs the e2u/e1v fix "
                                                               "if re-run again without a workaround."),
     "mlf_baro_corr":                 (None,       None,       "algebra only; needs _step_impl hook"),
-    "lbc_lnk sign":                  (None,       None,       "NEVER VERIFIED"),
+    "lbc_lnk sign":                  (None,       None,       "MEASURED 2026-07-30 "
+                                                              "(coverage_rows_measure.py measure_lbc_lnk); classified "
+                                                              "via BINARY_GATES=True (this is an exact-identity check "
+                                                              "per point type, not a corr/ratio measurement) -- see "
+                                                              "BINARY_GATES['lbc_lnk sign'] below for the full "
+                                                              "citation trail. No longer 'NEVER VERIFIED'."),
     "zdf_mxl_turb":                  (None,       None,       "HUMAN-WAIVED 2026-07-30 (see WAIVED_ROWS below for "
                                                               "decision-provenance + evidence): MISSING TERM, no legoESM "
                                                               "equivalent -- NEMO's Kz<avt_c turbocline diagnostic (hmld) "
@@ -951,28 +968,165 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. Two call sites in "
         "stpmlf.F90 (line 244 Nnn, line 315 Naa post-dyn_zdf recomputation) "
-        "-- both route through the same wzv routine, one row."),
+        "-- both route through the same wzv routine, one row. INVENTORIED "
+        "2026-07-30 (coverage_rows_measure.py): ww (NEMO's vertical "
+        "velocity, wzv_MLF, sshwzv.F90:168) is NEVER dumped anywhere in "
+        "cfgs/DINO/MY_SRC/*.F90 -- only its INPUTS (hdiv via "
+        "sshnxt_dump_hdiv.bin, e3t/r3t via r3c_dump_r3t.bin) are. "
+        "REQUIRES INSTRUMENTATION: a dump of ww itself at stpmlf.F90:244 "
+        "(or :315), same pattern as every other stp_dump_* in this file, "
+        "at the next NEMO rebuild."),
     "tra_zdf (tracer implicit vertical solve)": (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
+        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
+        "(coverage_rows_measure.py): stp_dump_20_traadv_{tem,sal}.bin "
+        "(pre-tra_zdf Nrhs, stpmlf.F90:423) and "
+        "stp_dump_21_trazdf_{tem,sal}.bin (post-tra_zdf Naa state, "
+        "stpmlf.F90:435) DO bracket the call, but trazdf.F90:162-232 folds "
+        "in avt+ah_wslp2 (GM/Redi vertical-mixing contribution, l_ldfslp=T "
+        "for DINO) AND integrates in the z*-coordinate VOLUME form "
+        "(e3t(Kaa)*T(Kaa) = e3t(Kbb)*T(Kbb) + 2dt*e3t(Kmm)*trend, "
+        "trazdf.F90:206-221) -- NEITHER of which "
+        "implicit_vertical_diffusion_ocean (legoESM's plain backward-Euler "
+        "column solver) implements. Measuring this honestly requires "
+        "PORTING both extra terms first (a real oracle-matching task, not "
+        "a bracket-and-diff) -- correctly out of scope for 'reuse existing "
+        "probe machinery, do not re-derive numerics'. REQUIRES "
+        "INSTRUMENTATION (or a port): either (a) port the GM/Redi-vertical "
+        "+ volume-form terms, or (b) a NEMO-side dump of the akzu-folded "
+        "zwt/zwi/zwd/zws tridiagonal coefficients (trazdf.F90:162-232) so "
+        "the SAME coefficients feed both sides and the comparison isolates "
+        "the SOLVER only."),
     "dyn_zdf (momentum implicit vertical solve)": (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
+        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
+        "(coverage_rows_measure.py): stp_dump_state_and_bt('dynspg') "
+        "(pre, stpmlf.F90:293) and stp_dump_state_and_bt('dynzdf') (post, "
+        "stpmlf.F90:312) DO bracket the call, but dynzdf.F90:148-171 folds "
+        "in an IMPLICIT BOTTOM-DRAG term (ln_drgimp.AND.ln_dynspg_ts, both "
+        "True for DINO) directly into the tridiagonal matrix -- a term "
+        "implicit_vertical_diffusion_ocean's plain zero-flux-BC solver "
+        "does not have. legoESM's own bottom-drag row (\"dyn_drg_init RHS "
+        "increment\") is a SEPARATE, explicit-style formula "
+        "(nemo_effective_bottom_drag_r), not the same implicit fold -- "
+        "porting the fold is a real task, not a bracket-and-diff. "
+        "REQUIRES INSTRUMENTATION (or a port): either (a) fold "
+        "nemo_effective_bottom_drag_r into the implicit solve's bottom "
+        "boundary condition and re-derive against this bracket, or (b) a "
+        "NEMO-side dump of the akzu-folded zwi/zwd/zws tridiagonal "
+        "coefficients (dynzdf.F90:182-278) to isolate the SOLVER from the "
+        "drag fold."),
     "traldf_iso_lap tendency":       (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
-    "ldf_dyn coefficient":           (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
-    "tra_qsr (shortwave penetration)": (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
-    "ssh_atf":                       (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
-    "tra_sbc":                       (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured."),
+        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
+        "(coverage_rows_measure.py): no MY_SRC override of "
+        "traldf.F90/traldf_iso.F90 exists at all (grep across "
+        "cfgs/DINO/MY_SRC/*.F90 for 'ldftra_dump'/'ldf_dump' finds only "
+        "the ahtu/ahtv COEFFICIENT dumps in ldftra.F90 and the "
+        "momentum-side ahmt/ahmf in dynldf.F90 -- nothing brackets "
+        "traldf_iso_lap's own Krhs increment). REQUIRES INSTRUMENTATION: "
+        "a stp_dump_krhs-style bracket around stpmlf.F90:428 "
+        "`CALL tra_ldf(...)` (before/after ts(Nrhs) snapshot, same pattern "
+        "as dyn_ldf's existing ll_ldf_dump block in dynldf.F90) at the "
+        "next NEMO rebuild."),
+    "ldf_dyn coefficient":           (1.0, 1.00001399,
+        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
+        "fp64, LEGOESM_NEMO_E3T=both). ldf_dump_ahmt.bin/ldf_dump_ahmf.bin "
+        "(dynldf.F90:102-110, DIRECT dumps of the ahmt/ahmf coefficient, "
+        "no bracketing needed) vs the REAL production "
+        "nemo_lateral_viscosity_coefficients (latlon_cgrid_operators.py) "
+        "fed cfg.U_M=0.27 (NEMO rn_Uv=0.27, exact match) via "
+        "half_UM=0.5*U_M (the SAME algebraic identity "
+        "ocean_pe_latlon_cgrid.py:2699-2700 already encodes -- not "
+        "re-derived). ahmt (T-point): corr=1.00000000, ratio=1.00000000, "
+        "median|rel|=0.0 -- AT BAR, n=9920. ahmf (F-point): corr=1.00000000, "
+        "ratio=1.00001399, median|rel|=1.857e-05, n=9706 (masked by "
+        "fmask2d = all 4 T-neighbours wet, STRICTLY narrower than tmask2d "
+        "-- verified: 214 T-wet cells have ahmf_nemo==0, ALL of them "
+        "outside fmask2d, a masking-convention self-check, not a formula "
+        "bug). The tiny ahmf residual matches "
+        "nemo_lateral_viscosity_coefficients's OWN docstring caveat: "
+        "'~2e-5 worst-case on the DINO grid' from the discrete e1f/e2f vs "
+        "e1t/e2t metric difference (MAX picks a different one on a fair "
+        "fraction of rows) -- a known, already-documented discretisation "
+        "artifact, not a new defect. Alignment scan sharp at (0,0,0)."),
+    "tra_qsr (shortwave penetration)": (0.99999996, 0.99996836,
+        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
+        "fp64, LEGOESM_NEMO_E3T=both). BRACKETED: "
+        "stp_dump_17_traqsr_tem.bin MINUS stp_dump_14_trasbc_tem.bin "
+        "(both 'now'-registered running ts(Nrhs) accumulators, stpmlf.F90 "
+        ":393/:397) isolates tra_qsr's own increment (verified nonzero on "
+        "22/35 dumped levels -- Jerlov penetration reaches depth, unlike "
+        "tra_sbc's surface-only term). Compared to the REAL production "
+        "shortwave_penetration_tendency (jerlov_2band scheme, matching "
+        "DINO's ln_qsr_2bd) fed the SAME Q_sr_seasonal forcing "
+        "dino_Q_sr_seasonal(t_seconds=kt*dt) already used by "
+        "cancelling_rows_per_element.py's sbc row. k=0 only (comparable "
+        "to tra_sbc's own level): corr=0.99999996, |ratio|=0.99996836, "
+        "median|rel|=6.653e-05, n=9920. All 35 dumped levels: "
+        "corr=0.99999999, |ratio|=0.99996218, median|rel|=2.022e-05, "
+        "n=347200. Tuple above records the k=0 (surface, most comparable "
+        "to the tra_sbc row) numbers. NOTE: the alignment scan's zonal "
+        "(di) offset is DEGENERATE (Q_sr is latitude-only, broadcast "
+        "uniformly across longitude by construction) -- not a real "
+        "misalignment; see the tra_sbc row's genuine 2-D offset table for "
+        "the real sharp-peak evidence. DEBT, small residual, well below "
+        "the ~2e-4..1e-3 order of several other DEBT rows in this gate."),
+    "ssh_atf":                       (1.0, 0.99999995,
+        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
+        "fp64, LEGOESM_NEMO_E3T=both). DIRECT bracket: "
+        "atf_dump_ssh_before.bin/atf_dump_ssh_after.bin (sshwzv.F90 "
+        "MY_SRC override, ssh_atf, :429-474) directly bracket the "
+        "routine's own before/after ssh -- a GENUINE forward application "
+        "of legoESM's own _asselin formula (ocean_model_latlon_cgrid.py "
+        "eta_f = now + gamma*(before - 2*now + after)) on NEMO's own "
+        "before (this dump) + Nbb (read_nemo_restart_before, genuinely "
+        "independent of the ATF dumps) + Naa (sshnxt_dump_ssh_after.bin, "
+        "the 'ssh_nxt / div_hor' row's own dump) inputs -- NOT a "
+        "tautological round-trip on the same two dumps (contrast "
+        "cancelling_rows_per_element.py's 'ATF filter T/S/ssh' row, which "
+        "solves the SAME formula backward from these two dumps and is "
+        "explicitly non-independent by its own docstring). "
+        "corr=1.00000000, |ratio|=0.99999995, median|rel|=9.964e-07, "
+        "n=9920 -- essentially AT BAR on the plain Robert-Asselin term. "
+        "SCOPE LIMIT (stated, not hidden): this measures ONLY the plain "
+        "filter; NEMO's ssh_atf ALSO subtracts an emp-forcing-removal "
+        "correction when .NOT.lk_linssh (sshwzv.F90:450-459, "
+        "zcoef*(emp_b-emp+...)) that legoESM's _asselin has no equivalent "
+        "of (ocean_model_latlon_cgrid.py:7101-7102) -- the tiny residual "
+        "measured here is consistent with that missing (small, "
+        "freshwater-flux-driven) term, not a transcription bug in the "
+        "filter itself."),
+    "tra_sbc":                       (0.99999985, 0.99993829,
+        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
+        "fp64, LEGOESM_NEMO_E3T=both). DIRECT dump: "
+        "stp_dump_14_trasbc_{tem,sal}.bin (stpmlf.F90:393) is tra_sbc's "
+        "OWN tendency directly -- it is the FIRST live RHS contributor "
+        "(ts(Nrhs) zeroed at stpmlf.F90:381-382, ln_asminc=F for DINO so "
+        "nothing precedes tra_sbc; verified: max|tem(Nrhs)| at levels "
+        "k>=1 is exactly 0.0, matching trasbc.F90's surface-only "
+        ".NOT.lk_linssh application). Compared to "
+        "apply_dino_lat_lon_surface_forcing's own restoring_surface_"
+        "forcing(implicit=False) T/S-restoring term (the algebraic "
+        "identity already used by cancelling_rows_per_element.py's sbc "
+        "row: tau_T=rho0*c_p*dz0/A_theta makes the EXPLICIT relaxation "
+        "form equal NEMO's raw rn_trp*(T*-T)-Q_sr flux, confirmed "
+        "cfg.A_theta=40.0/NEMO rn_trp=-40 exact match), fed BEFORE-level "
+        "(Nbb, bridge_before_state_topo) T/S per usrdef_sbc.F90:421-423's "
+        "own ts(...,Kbb) read, MLF-time-averaged with the restart's own "
+        "sbc_hc_b/sbc_sc_b (zfact=0.5, since l_1st_euler=False confirmed "
+        "directly from ocean.output at this exact kt) exactly as "
+        "trasbc.F90:145-149 does. tem: corr=0.99999985, |ratio|=0.99993829, "
+        "median|rel|=1.035e-04, n=9920. sal: corr=0.99999999, "
+        "|ratio|=0.99995924, median|rel|=1.031e-04, n=9920. Alignment "
+        "scan SHARP at (0,0): offset table shows (0,0)=1.04e-04 vs every "
+        "neighbouring offset >=1.09e-02 (100x+ jump). KNOWN GAP "
+        "(documented, not silently absorbed): legoESM's DINO surface "
+        "forcing has NO emp*T*rcp heat-content term (usrdef_sbc.F90:422 "
+        "`- emp(ji,jj)*ts(...,Kbb,jp_tem)*rcp`) -- a STRUCTURAL omission "
+        "(also absent from cancelling_rows_per_element.py's own qns/sfx "
+        "comparison one level up the chain), plausibly the source of "
+        "most of this row's ~1e-4 residual, not a numerical bug."),
 }
 
 
@@ -986,6 +1140,11 @@ MEASURED_AT: dict[str, str] = {
     "bn2 (rn2b)": "825d22ee4",
     "eos_rab alpha": "825d22ee4",
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
+    # 2026-07-30 coverage_rows_measure.py (this task) -- b7872175b HEAD.
+    "ldf_dyn coefficient": "b7872175b",
+    "tra_qsr (shortwave penetration)": "b7872175b",
+    "ssh_atf": "b7872175b",
+    "tra_sbc": "b7872175b",
     # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
     # the commit that introduced _nemo_native_active_3d.
     "ldf_slp wslpi": "7816b514e",
@@ -1083,6 +1242,34 @@ BINARY_GATES: dict[str, bool | None] = {
     # half met.  FAILED, not passed -- this row does not get to clear on the
     # easier half of its own criterion.
     "STABILITY on NEMO true grid (e3t_0)": False,
+    # MEASURED 2026-07-30 (coverage_rows_measure.py measure_lbc_lnk, RUN_GDB
+    # kt=57601). DINO is zonally re-entrant (usr_def_nam.F90:157 ldIperio=
+    # ln_Iperio=True), NO north fold (ldJperio=False). Read
+    # lbc_lnk_pt2pt_generic.h90's BLOCK_FILL_nonMPI jpfillperio branch
+    # (:308-348): the east-west periodic copy uses isgni2=+1 UNCONDITIONALLY
+    # (:312, :318) -- no sign multiplication anywhere in that branch; the
+    # psgn sign array (finalize_lbc's own (U,-1)/(V,-1)/(T,+1)/(T,+1) call,
+    # stpmlf.F90:669-670) is consumed ONLY by the north-fold rotation branch,
+    # dead code for a ldNFold=False config. DECISIVE CHECK: NEMO's own raw
+    # dumps (which still carry the nn_hls=2 runtime halo, already lbc_lnk-
+    # filled before the #1226 debug WRITE) show the halo column EXACTLY
+    # equals the periodic-image interior column -- max|diff|=0.0 for T
+    # (r3c_dump_r3t) AND for U/V once read from a dump taken AFTER
+    # finalize_lbc actually ran (atf_dump_uu/vv_before.bin, dynatf_qco.F90,
+    # stpmlf.F90:460). A momentum dump taken BEFORE finalize_lbc
+    # (stp_dump_07_dynspg_u/v, stpmlf.F90:293) shows a ~4e-6 diagnostic
+    # mismatch -- traced to dyn_spg_ts (dynspg_ts.F90:782-895) only lbc_lnk'ing
+    # its BAROTROPIC ua_e/va_e/puu_b/pvv_b, never the full 3-D puu(:,:,:,Kaa)
+    # that dump captures -- a dump-TIMING artifact (stale halo from an
+    # earlier lbc_lnk call), NOT a sign defect; re-measuring on the
+    # post-finalize_lbc dump gives an exact match, confirming the diagnosis.
+    # legoESM's bridge (_u_east_to_face_periodic, nemo_state_bridge.py:96-107)
+    # is a np.concatenate -- verified EXACT (0.0) on the actual bridged
+    # state, not merely asserted from source. VERDICT: True (matches) for
+    # every point type (T/U/V); the sign arguments to finalize_lbc's
+    # lbc_lnk call are INERT for DINO's periodic seam, and legoESM's bridge
+    # reproduces the same sign-free convention.
+    "lbc_lnk sign": True,
 }
 
 

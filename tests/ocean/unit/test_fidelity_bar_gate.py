@@ -67,23 +67,37 @@ def test_no_generic_waiver_mechanism():
 
 
 def test_nine_uncovered_routines_are_unmeasured_rows():
+    """4 of the original 8 coverage rows are STILL genuinely unmeasured
+    (bracketable dumps exist but the oracle-matching numerics they'd need are
+    out of scope for a bracket-and-diff -- see each row's own note); the
+    other 4 were measured 2026-07-30 (coverage_rows_measure.py) using ONLY
+    existing dumps + production entry points, so they must NOT regress back
+    to (None, None) silently."""
     mod = _load_module()
-    expected = {
+    still_unmeasured = {
         "wzv (vertical velocity)",
         "tra_zdf (tracer implicit vertical solve)",
         "dyn_zdf (momentum implicit vertical solve)",
         "traldf_iso_lap tendency",
+    }
+    now_measured = {
         "ldf_dyn coefficient",
         "tra_qsr (shortwave penetration)",
         "ssh_atf",
         "tra_sbc",
     }
-    assert expected.issubset(mod.MEASUREMENTS.keys())
-    for term in expected:
+    assert still_unmeasured.issubset(mod.MEASUREMENTS.keys())
+    assert now_measured.issubset(mod.MEASUREMENTS.keys())
+    for term in still_unmeasured:
         corr, ratio, note = mod.MEASUREMENTS[term]
         assert corr is None and ratio is None
         assert mod.classify(corr, ratio, name=term) == "UNMEASURED"
         assert "stpmlf_call_coverage.py" in note
+    for term in now_measured:
+        corr, ratio, note = mod.MEASUREMENTS[term]
+        assert corr is not None and ratio is not None
+        assert mod.classify(corr, ratio, name=term) in ("AT BAR", "DEBT")
+        assert "coverage_rows_measure.py" in note
 
 
 def test_main_reports_waived_count_and_does_not_gate_exit_on_waiver_alone(capsys):
