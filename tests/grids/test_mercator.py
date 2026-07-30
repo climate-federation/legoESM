@@ -240,3 +240,168 @@ def test_equator_on_tpoint_matches_nemo_dino():
     with pytest.raises(ValueError, match="ODD n_lat"):
         create_mercator_grid(n_lon=48, lat_max_deg=70.0, lon_west_deg=1.0,
                              lon_east_deg=49.0, equator_on_tpoint=True, n_lat=196)
+
+
+# =====================================================================
+# #1226: metric_convention="nemo_isotropic" — NEMO usr_def_hgr.F90 closed
+# form (DINO, vopikamm/DINO@v0.2.0): pe1t = pe2t = ra * rad *
+# cos(rad*phi_T) * rn_e1_deg.  Independent loop-port ground truth: this
+# reproduces that Fortran closed form from scratch (not by calling back
+# into create_mercator_grid's own formula) and checks BOTH directions —
+# "nemo_isotropic" MUST match it, "exact" (default) MUST NOT (so the test
+# is non-vacuous: it would fail if the dispatch were a silent no-op in
+# either direction).
+# =====================================================================
+
+class TestNemoIsotropicMetricConvention:
+    def _nemo_usr_def_hgr_pe1t(self, radius, rn_e1_deg_rad, lat_center_rad):
+        """Independent transcription of NEMO usr_def_hgr.F90's isotropic
+        DINO closed form (NOT calling create_mercator_grid): ``pe1t = ra *
+        rad * cos(rad*phi_T) * rn_e1_deg`` -- and by construction
+        ``pe2t = pe1t`` (the whole point of the "isotropic" convention)."""
+        return radius * rn_e1_deg_rad * np.cos(lat_center_rad)
+
+    def test_nemo_isotropic_matches_independent_fortran_transcription(self):
+        """metric_convention="nemo_isotropic" dy_T (single-cell, via
+        create_latlon_geometry) equals the from-scratch NEMO closed form."""
+        from legoesm.grids import create_latlon_geometry
+
+        n_lon, lat_max_deg = 48, 70.0
+        lon_west_deg, lon_east_deg = 1.0, 49.0
+        g = create_mercator_grid(
+            n_lon=n_lon, lat_max_deg=lat_max_deg,
+            lon_west_deg=lon_west_deg, lon_east_deg=lon_east_deg,
+            equator_on_tpoint=True, n_lat=195,
+            metric_convention="nemo_isotropic",
+        )
+        geom = create_latlon_geometry(
+            n_lat=g.n_lat, n_lon=g.n_lon, radius=g.radius,
+            lat_1d=g.lat, lon_1d=g.lon, lat_face_1d=g.lat_v,
+            metric_convention="nemo_isotropic",
+        )
+        rn_e1_deg_rad = np.deg2rad((lon_east_deg - lon_west_deg) / n_lon)
+        lat = np.asarray(g.lat, dtype=np.float64)
+        pe1t_ref = self._nemo_usr_def_hgr_pe1t(
+            float(g.radius), rn_e1_deg_rad, lat)
+
+        dy_T_single = np.asarray(geom.dy_T[:, 0], dtype=np.float64)
+        rel = np.abs(dy_T_single - pe1t_ref) / pe1t_ref
+        # float64 roundoff on this ~1e5 m magnitude (dlon computed as a
+        # degree-difference-then-radians vs a direct degree-to-radians
+        # conversion here) -- both are "the same formula", just re-derived
+        # independently, so agreement is to ~1e-7, not exact machine zero.
+        assert np.max(rel) < 1e-6, (
+            f"nemo_isotropic dy_T does not match the independent NEMO "
+            f"usr_def_hgr.F90 transcription: max relerr {np.max(rel):.3e}"
+        )
+        # pe1t == pe2t is the DEFINITION of "isotropic": dy_T must equal
+        # dx_T (single-cell) exactly, not merely match the reference.
+        dx_T_single = np.asarray(geom.dx_T[:, 0], dtype=np.float64)
+        np.testing.assert_allclose(dy_T_single, dx_T_single, rtol=0, atol=0)
+
+    def test_exact_convention_does_NOT_match_nemo_closed_form(self):
+        """Non-vacuity check: the DEFAULT ("exact") convention must NOT
+        reproduce NEMO's isotropic approximation -- if it did, this test
+        (and the #1226 diagnosis motivating the whole feature) would be
+        vacuous.  legoESM's exact dy_T is R*Δφ (true finite difference of
+        face latitudes), NEMO's is R*Δλ*cos(φ) (=dx) -- these differ
+        wherever cos(φ) is not exactly 1, i.e. away from the equator."""
+        from legoesm.grids import create_latlon_geometry
+
+        n_lon, lat_max_deg = 48, 70.0
+        lon_west_deg, lon_east_deg = 1.0, 49.0
+        g = create_mercator_grid(
+            n_lon=n_lon, lat_max_deg=lat_max_deg,
+            lon_west_deg=lon_west_deg, lon_east_deg=lon_east_deg,
+            equator_on_tpoint=True, n_lat=195,
+        )  # default metric_convention="exact"
+        geom = create_latlon_geometry(
+            n_lat=g.n_lat, n_lon=g.n_lon, radius=g.radius,
+            lat_1d=g.lat, lon_1d=g.lon, lat_face_1d=g.lat_v,
+        )  # default metric_convention="exact"
+        rn_e1_deg_rad = np.deg2rad((lon_east_deg - lon_west_deg) / n_lon)
+        lat = np.asarray(g.lat, dtype=np.float64)
+        pe1t_ref = self._nemo_usr_def_hgr_pe1t(
+            float(g.radius), rn_e1_deg_rad, lat)
+
+        dy_T_single = np.asarray(geom.dy_T[:, 0], dtype=np.float64)
+        rel = np.abs(dy_T_single - pe1t_ref) / pe1t_ref
+        # The #1226 diagnosis measured e2t vs e1t at -1.27e-5..+9.5e-6 on
+        # the real NEMO mesh_mask; this independent from-scratch check
+        # reproduces a mismatch of the SAME order (~1e-5), well above the
+        # ~1e-7 float64-roundoff floor the nemo_isotropic branch achieves
+        # in the sibling test above -- i.e. genuinely non-matching, not a
+        # coincidence of tolerance.
+        assert np.max(rel) > 1e-6, (
+            "exact convention unexpectedly matches the NEMO isotropic "
+            f"closed form (max relerr {np.max(rel):.3e}) -- this would make "
+            "the nemo_isotropic feature vacuous"
+        )
+
+    def test_default_is_bit_identical_to_exact_keyword(self):
+        """metric_convention default omission == explicit "exact" (every
+        pre-#1226 caller stays byte-identical)."""
+        from legoesm.grids import create_latlon_geometry
+
+        g_default = create_mercator_grid(n_lon=48, lat_max_deg=70.0)
+        g_exact = create_mercator_grid(
+            n_lon=48, lat_max_deg=70.0, metric_convention="exact")
+        for f in ("dy", "area", "dx", "lat", "lat_v", "cos_lat_v"):
+            np.testing.assert_array_equal(
+                getattr(g_default, f), getattr(g_exact, f))
+
+        geom_default = create_latlon_geometry(
+            n_lat=g_default.n_lat, n_lon=g_default.n_lon,
+            lat_1d=g_default.lat, lon_1d=g_default.lon,
+            lat_face_1d=g_default.lat_v)
+        geom_exact = create_latlon_geometry(
+            n_lat=g_default.n_lat, n_lon=g_default.n_lon,
+            lat_1d=g_default.lat, lon_1d=g_default.lon,
+            lat_face_1d=g_default.lat_v, metric_convention="exact")
+        for f in ("dy_T", "dy_u", "dy_v", "area_T", "area_q", "dx_v", "dx_T"):
+            np.testing.assert_array_equal(
+                getattr(geom_default, f), getattr(geom_exact, f))
+
+    def test_vface_metric_invariant_under_metric_convention(self):
+        """#516 constraint: the v-face metric (dx_v, dy_v, area_q,
+        cos_alpha_v) that ``vface_zonal_cos_lat`` and the strain/stress
+        adjoint pair depend on must be BIT-IDENTICAL between "exact" and
+        "nemo_isotropic" -- this flag only touches the T/u-face metric."""
+        from legoesm.grids import create_latlon_geometry
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            vface_zonal_cos_lat,
+        )
+
+        g = create_mercator_grid(n_lon=48, lat_max_deg=70.0,
+                                  lon_west_deg=1.0, lon_east_deg=49.0,
+                                  equator_on_tpoint=True, n_lat=195)
+        geom_exact = create_latlon_geometry(
+            n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
+            lat_face_1d=g.lat_v, metric_convention="exact")
+        geom_iso = create_latlon_geometry(
+            n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
+            lat_face_1d=g.lat_v, metric_convention="nemo_isotropic")
+
+        for f in ("dx_v", "dy_v", "area_q", "cos_alpha_v", "sin_alpha_v"):
+            np.testing.assert_array_equal(
+                getattr(geom_exact, f), getattr(geom_iso, f),
+                err_msg=f"v-face field {f!r} changed under metric_convention "
+                        "-- #516 invariant violated",
+            )
+        # The #516 helper itself: identical on grids that only differ by
+        # metric_convention (it reads grid.lat, which this flag never
+        # touches).
+        np.testing.assert_array_equal(
+            vface_zonal_cos_lat(g), vface_zonal_cos_lat(g))
+
+
+class TestMetricConventionDispatch:
+    def test_create_mercator_grid_raises_on_unknown_convention(self):
+        with pytest.raises(ValueError, match="metric_convention"):
+            create_mercator_grid(n_lon=8, lat_max_deg=70.0,
+                                 metric_convention="bogus")
+
+    def test_create_latlon_geometry_raises_on_unknown_convention(self):
+        from legoesm.grids import create_latlon_geometry
+        with pytest.raises(ValueError, match="metric_convention"):
+            create_latlon_geometry(n_lat=10, metric_convention="bogus")

@@ -622,18 +622,61 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     w-interface depths). Both positive-down [m], static ``(nlev,)`` /
     ``(nlev-1,)`` grid quantities.
 
-    Residual (documented): these are the REFERENCE ladders. NEMO's ``bn2``
-    uses the time-level ``gdept(Kmm)``; for the DINO linear-free-surface
-    (``key_linssh``) case that equals ``gdept_1d`` exactly, and for full z*
-    the ``eta``-perturbation on the thermobaric ``mu1·gdept`` term is
-    ``O(eta/H) ≈ 1e-3`` — negligible vs the dominant ``lambda1·zt`` and
-    ``ΔT`` signal (``mu1 = 1.5e-4`` /m). The zrw weight and e3w are grid-fixed.
+    These are the STATIC REFERENCE ladders (NEMO ``gdept_1d``/``gdepw_1d``).
+    NEMO's ``bn2``/``rab_3d_t`` evaluate at the LIVE ``gdept(Kmm)``; under
+    ``key_linssh`` that equals ``gdept_1d`` exactly, but under z* (``key_qco``)
+    it is the stretched ladder — use :func:`nemo_bn2_live_ladders` there.
+    Measured against NEMO's own ``kt==nit000`` ``gdept(Kmm)`` dump on DINO y5,
+    the static ladder is off by median ``1.5e-4`` relative vs ``2.5e-8`` for
+    the stretched one (#1226).
     """
     z_full = jnp.abs(z_coord.z_full_ref)
     t_depth = getattr(z_coord, "t_depth_ref", None)
     gdept = z_full if t_depth is None else jnp.asarray(t_depth)
     gdepw_int = jnp.abs(z_coord.z_half_ref[1:-1])
     return gdept, gdepw_int
+
+
+def nemo_bn2_live_ladders(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``(gdept, gdepw_int)`` at NEMO's LIVE ``gdept(Kmm)`` under z*.
+
+    NEMO ``key_qco`` (no ``key_isf``) expands ``gdept(i,j,k,t)`` to the PURE
+    multiplicative stretch ``gdept_0*(1 + r3t)`` with ``r3t = ssh/ht_0``
+    (``domzgr_substitute.h90:139`` with ``Tisf -> Time()`` at ``:56``,
+    ``domqco.F90:160``).  There is NO ``-ssh`` shift: that is the SEPARATE
+    ``gdept_z0`` macro (``:145``), a z=0-referenced depth whose only consumer
+    is ``dynhpg.F90``.  ``gdept`` is depth below the instantaneous free
+    surface, which is the pressure proxy the S-EOS wants
+    (``eosbn2.F90:1166`` uses the plain ``gdept`` macro).
+
+    ``r3t`` uses the LOCAL column depth ``H_bathy`` (NEMO ``ht_0``) — NOT the
+    z* Jacobian from :func:`~legoesm.ocean.vertical.compute_ocean_jacobian`,
+    which is ``(eta + H_bathy)/H_max`` (normalised by the GLOBAL maximum
+    depth) and is a different quantity: using it here is off by median 1.1e-1
+    relative vs 2.5e-8 for this form, measured against NEMO's own
+    ``gdept(Kmm)`` dump (#1226).
+
+    Parameters
+    ----------
+    z_coord : vertical coordinate — supplies the static reference ladders.
+    eta : array ``(...)`` — sea-surface height [m] at the SAME time level
+        NEMO evaluates (``Kmm``; ``rab_b``/``rn2b`` are BEFORE-level).
+    H_bathy : array ``(...)`` — local column depth [m], positive.
+
+    Returns
+    -------
+    tuple of array — ``(gdept, gdepw_int)``, shapes ``(..., nlev)`` /
+    ``(..., nlev-1)``, positive-down [m].
+    """
+    gdept, gdepw_int = nemo_bn2_depth_ladders(z_coord)
+    # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
+    # rather than eta/0 -> inf/NaN poisoning the downstream N^2 chain.
+    H = jnp.asarray(H_bathy)
+    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
+    stretch = (1.0 + r3t)[..., jnp.newaxis]
+    return gdept * stretch, gdepw_int * stretch
 
 
 # ==============================================================================

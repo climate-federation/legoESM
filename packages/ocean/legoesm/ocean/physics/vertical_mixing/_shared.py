@@ -253,6 +253,18 @@ def compute_N2(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
+        # NEMO evaluates alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1+r3t)
+        # and divides by the LIVE e3w(Kmm) = e3w_0*(1+r3t), r3t = eta/ht_0
+        # (domzgr_substitute.h90:131,139; eosbn2.F90 rab_3d_t/bn2_t).  The
+        # caller (k_profiles.py / enhanced_diffusion.py) applies that stretch
+        # via eos.nemo_bn2_live_ladders BEFORE this call, and
+        # compute_buoyancy_frequency_nemo_bn2 derives e3w as diff(t_depth)
+        # internally (NEMO's e3w_0 IS the gdept_0 centre-difference, verified
+        # exactly against mesh_mask), so the stretch propagates through
+        # alpha/beta AND e3w -- no separate division here (that would
+        # double-count it).  NB the stretch factor is the LOCAL 1+eta/H_bathy,
+        # NOT legoESM's z* Jacobian (eta+H)/H_max -- see the warning in
+        # eos.nemo_bn2_live_ladders (#1226).
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
             T_cell, S_cell, t_depth, w_depth, g=g,

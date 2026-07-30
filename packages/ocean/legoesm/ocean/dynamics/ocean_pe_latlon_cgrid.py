@@ -49,7 +49,7 @@ from legoesm.grids.operators_latlon_cgrid import (  # noqa: F401
     upwind_cell_to_uface as upwind_to_u_points,
     upwind_cell_to_vface as upwind_to_v_points,
 )
-from legoesm.ocean.eos import make_eos_fn
+from legoesm.ocean.eos import make_eos_fn, nemo_bn2_live_ladders
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -127,6 +127,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
+    nemo_advective_vertical_momentum_advection as _nemo_advective_vertical_momentum_advection,
     compute_centroid_depth,
 )
 
@@ -168,10 +169,17 @@ VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 #     unlimited, dispersive) flux of the FULL velocity u, including the
 #     w*U_bar barotropic-redistribution part.  Stability rests on dt_mom +
 #     A_v/TKE friction like Veros (no limiter, no implicit viscosity).
+#   "nemo_advective" (NEMO-faithful, #1226) — transcription of dynzad.F90's
+#     ADVECTIVE form w*du/dz (a centered difference of u weighted by an
+#     e1e2t-area-weighted-interpolated w), NOT the flux-divergence form
+#     d(w*u)/dz that "centered_full" computes.  The two differ by u*dw/dz at
+#     every interior level — the #1226 stage-chain audit measured this as
+#     the WHOLE dyn_zad mismatch (predicted-vs-observed residual corr
+#     -0.9992, ratio 0.998).  See nemo_advective_vertical_momentum_advection.
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full"}
+    {"upwind_perturbation", "centered_full", "nemo_advective"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -1271,11 +1279,19 @@ def _bc_geometry_and_density(
         ) if _pgf_quadrature == "nemo_trapezoid" else None,
         eos_depth=_eos_depth,
         # Geometric gdept ladder for the "geometric" EOS depth (NEMO gdept_1d).
+        # #1226 blocker 1: NEMO's eos_insitu/S-EOS (eosbn2.F90:1166) reads the
+        # LIVE gdept(Kmm) = gdept_0*(1+r3t), not the static gdept_0 -- same
+        # macro expansion as eos.nemo_bn2_live_ladders (already used for the
+        # bn2/eos_rab consumers). Apply the SAME live stretch here so the PGF's
+        # own density iteration sees the identical depth NEMO's rab_3d_t does.
+        # Bit-identical when t_depth_ref is None (no fidelity ladder carried,
+        # the pre-existing behaviour for every non-NEMO-bridged recipe).
         eos_geometric_depth_1d=(
-            jnp.abs(z_coord.z_full_ref)
-            if getattr(z_coord, "t_depth_ref", None) is None
-            else jnp.asarray(z_coord.t_depth_ref)
-        ) if _eos_depth == "geometric" else None,
+            (jnp.abs(z_coord.z_full_ref)
+             if getattr(z_coord, "t_depth_ref", None) is None
+             else nemo_bn2_live_ladders(z_coord, eta_safe, H_bathy)[0])
+            if _eos_depth == "geometric" else None
+        ),
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
@@ -1811,6 +1827,118 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
+def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
+    """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
+    over latitude in the SAME fused halo exchange (MPI audit lever O4).
+
+    Single production code path for the two ``een_e3f_scheme`` rules —
+    factored out of ``_bc_pv_flux`` (#1226 item 10 adversarial-review finding:
+    a test re-deriving this formula inline let a mutated divisor guard
+    (``maximum(wet_count, 1.0)`` -> ``maximum(wet_count, 4.0)``) pass
+    undetected). See the rule description in ``_bc_pv_flux``'s docstring
+    comment for the NEMO ``vor_een``/MITgcm ``hFacZ`` derivation.
+
+    Parameters
+    ----------
+    dz_ref : array, shape (nlev,), or None
+        Per-level reference thickness [m] (``z_coord.dz_ref``), used ONLY by
+        the ``"nemo_avg"`` branch at FULLY-DRY vertices (``wet_count == 0``)
+        — see NEMO ``dynvor.F90`` lines quoted below.  ``None`` reproduces
+        the legacy ``BIG_H``-everywhere dry-vertex behaviour (``"min"``
+        branch is dz_ref-independent and always bit-identical).
+
+    Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
+    ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
+    halo-padded fields ``_bc_pv_flux`` uses downstream to build ``Fu_at_v``.
+    """
+    BIG_H = 1.0e30
+    h_sw = jnp.roll(h_k, 1, axis=1)
+    h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
+    h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
+    t_k = (h_k > 0.0).astype(h_k.dtype)
+    t_sw = (h_sw > 0.0).astype(h_sw.dtype)
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    if een_e3f_scheme == "nemo_avg":
+        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
+         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+        e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
+        wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
+        # Fully-dry vertex (wet_count == 0) fallback.  NEMO's compiled path
+        # (key_qco, DINO's key_vco_3d — NOT key_vco_1d) does NOT leave
+        # ``e3f_0vor`` at zero here: dynvor.F90 dyn_vor_init overwrites it
+        # with the reference thickness e3f_0 (dynvor.F90:986,
+        # ``WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_0(:,:,:)``;
+        # under key_vco_1d, line 983, it would instead be
+        # ``e3f_0vor(:,:,jk) = e3f_0(:,:,jk)`` per level — same value, since
+        # e3f_0 is spatially uniform per level in DINO, see below). e3f_0 is
+        # a per-level-uniform field (domzgr_substitute.h90:100
+        # ``#define e3f_0(i,j,k) e3f_3d(i,j,k)`` for key_vco_3d; verified
+        # against DINO's own mesh_mask.nc e3f_0: every level has zero
+        # horizontal spread, e.g. k=33 -> 462.65859311661916 m everywhere).
+        # That per-level reference IS legoESM's ``z_coord.dz_ref`` for the
+        # full-step-z DINO bridge (``effective_vertical_scale_factors``
+        # builds dz_ref from the per-level mean of NEMO's own e3t_0, and a
+        # full-step wet cell is exactly dz_ref[k], no per-column stretch).
+        # So at a fully-dry vertex use dz_ref[k] instead of the BIG_H
+        # sentinel; q = zeta/h_vtx stays 0 there anyway (zeta's face masks
+        # are already zero), matching NEMO's e3f_0vor -> finite z1_e3f=0 exit.
+        if dz_ref is not None:
+            _dz_ref_bc = jnp.asarray(dz_ref, dtype=h_k.dtype).reshape(
+                (1,) * (e3f_sum.ndim - 1) + (-1,)
+            )
+            dry_fallback = jnp.broadcast_to(_dz_ref_bc, e3f_sum.shape)
+        else:
+            dry_fallback = BIG_H
+        h_vtx = jnp.where(
+            wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), dry_fallback,
+        )
+    else:  # "min" (validated at caller entry)
+        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active, Fu, u), halo=1,
+            south_values=(BIG_H, BIG_H, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H, 0.0, 0.0),
+        )
+        h_vtx = jnp.minimum(
+            jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
+            jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
+        )                                              # (n_lat+1, n_lon, nlev)
+    # At the fold, the vertex connects 4 cells: two local (fold row) and two
+    # fold-partner cells.  Overwrite the north row only on the owning rank.
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        fold = grid.fold
+        if een_e3f_scheme == "nemo_avg":
+            h_k_partner = h_k[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw[-1:, fold.perm_T, :]
+            t_k_partner = t_k[-1:, fold.perm_T, :]
+            t_sw_partner = t_sw[-1:, fold.perm_T, :]
+            e3f_sum_north = h_k[-1:] + h_sw[-1:] + h_k_partner + h_sw_partner
+            wet_count_north = t_k[-1:] + t_sw[-1:] + t_k_partner + t_sw_partner
+            # Same fully-dry-vertex fallback as the interior branch above
+            # (dry_fallback: dz_ref[k] when available, else legacy BIG_H).
+            h_vtx_north = jnp.where(
+                wet_count_north > 0.0,
+                e3f_sum_north / jnp.maximum(wet_count_north, 1.0),
+                dry_fallback[-1:] if dz_ref is not None else BIG_H,
+            )
+        else:
+            h_k_partner = h_k_active[-1:, fold.perm_T, :]
+            h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
+            h_vtx_north = jnp.minimum(
+                jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
+                jnp.minimum(h_k_partner, h_sw_partner),
+            )
+        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+    h_vtx = jnp.concatenate(
+        [h_vtx, h_vtx[:, 0:1, :]], axis=1,
+    )  # (n_lat+1, n_lon+1, nlev)
+    return h_vtx, Fu_ext, u_ext
+
+
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
     weno_smoothness="split",
@@ -1819,17 +1947,33 @@ def _bc_pv_flux(
     reconstruct_zeta=False,
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
+    een_e3f_scheme="min",
+    dz_ref=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
     weno5/weno7/weno9). Pure verbatim extraction (Q8). Threads the momentum
-    accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
+    accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``.
+
+    ``dz_ref`` : array, shape (nlev,), or None
+        Per-level reference thickness (``z_coord.dz_ref``), forwarded to
+        ``_een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
+        (#1226 item 10, final piece). ``None`` (default) keeps the legacy
+        ``BIG_H``-everywhere dry-vertex behaviour bit-identical.
+    """
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
     if vorticity_scheme not in ("al81", "ene", "ene_total", "een_total"):
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
             f"'al81', 'ene', 'ene_total', or 'een_total'"
+        )
+    # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
+    # config value) — see the h_vtx construction below for the two rules.
+    if een_e3f_scheme not in ("min", "nemo_avg"):
+        raise ValueError(
+            f"unknown een_e3f_scheme {een_e3f_scheme!r}; expected "
+            f"'min' or 'nemo_avg'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1876,47 +2020,47 @@ def _bc_pv_flux(
     # 1e-10)`` floor doesn't matter because the surrounding face
     # masks already zero ``ζ`` there.  Mirrors MITgcm's
     # ``hFacZ = min over active hFacC`` convention.
-    BIG_H = 1.0e30
-    h_sw = jnp.roll(h_k, 1, axis=1)
-    h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
-    h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
-    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell active-thickness
-    # over latitude so the vertex min at a partition cut includes the
-    # neighbour rank's adjacent T row (MPI halo exchange).  The pole pad
-    # value is BIG_H so a physical-pole vertex reduces to the local two-cell
-    # min (bit-identical to the previous boundary rows); interior partition
-    # cuts sendrecv the neighbour's real row instead.
+    #
+    # ``een_e3f_scheme`` (static config string) selects the F-point vertex
+    # thickness rule:
+    #   "min" (default, bit-identical legacy) — the MITgcm hFacZ convention
+    #     above.
+    #   "nemo_avg" — NEMO ``nn_e3f_typ=1`` (dynvor.F90 ``vor_een``,
+    #     src/OCE/DYN/dynvor.F90:733-745):
+    #       ze3f = ( e3t(ji,jj+1,jk)*tmask(ji,jj+1,jk) + e3t(ji+1,jj+1,jk)*tmask(ji+1,jj+1,jk) )
+    #            + ( e3t(ji,jj  ,jk)*tmask(ji,jj  ,jk) + e3t(ji+1,jj  ,jk)*tmask(ji+1,jj  ,jk) )
+    #       zmsk = tmask(ji,jj+1,jk) + tmask(ji+1,jj+1,jk) + tmask(ji,jj,jk) + tmask(ji+1,jj,jk)
+    #       IF (ze3f /= 0) THEN ; z1_e3f(ji,jj) = zmsk / ze3f ; ELSE ; z1_e3f(ji,jj) = 0 ; ENDIF
+    #     i.e. e3f = (masked sum of the 4 surrounding e3t) / (count of wet
+    #     surrounding cells) — the masked AVERAGE, not the min.  The two
+    #     coincide on a uniform-depth interior (all 4 e3t equal); at a step
+    #     vertex the min-rule is smaller (biased low, MITgcm hFacZ intent),
+    #     the average-rule is larger (NEMO intent) — see #1226 item 10.
+    #     ``z1_e3f = 0`` at a fully-dry vertex (``zmsk == 0``, division
+    #     skipped) is what NEMO computes in ``e3f_0vor`` -- but NEMO does NOT
+    #     leave it at zero: dyn_vor_init (dynvor.F90:986, key_qco+key_vco_3d,
+    #     the DINO build) overwrites the zero with the reference thickness
+    #     ``e3f_0`` (``WHERE( e3f_0vor(:,:,:) == 0._wp ) e3f_0vor(:,:,:) =
+    #     e3f_0(:,:,:)``), so ``q = zeta/e3f_0vor`` is FINITE, not zero, there
+    #     (the surrounding face masks already zero ``zeta`` at those points,
+    #     so this never changes the tendency where NEMO integrates from —
+    #     only how the intermediate q is computed). ``_een_e3f_h_vtx``
+    #     reproduces this with ``dz_ref[k]`` (== NEMO's per-level-uniform
+    #     ``e3f_0``, see that helper's docstring) instead of the plain
+    #     ``BIG_H`` sentinel when ``dz_ref`` is supplied; ``dz_ref=None``
+    #     (default) keeps the legacy BIG_H-only behaviour for both rules.
     # Thickness-weighted mass fluxes at faces — computed BEFORE the pad so
-    # the Fu / u lat pads ride the SAME fused exchange as the two
-    # active-thickness pads (audit lever O4: 4 pads -> 1 sendrecv pair per
-    # cut; all four fields are independent inputs at this point).
+    # the Fu / u lat pads ride the SAME fused exchange as the h_vtx-building
+    # active-thickness pads (audit lever O4: fused pads -> 1 sendrecv pair
+    # per cut; all fields are independent inputs at this point).
     Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
     Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
-        (h_k_active, h_sw_active, Fu, u), halo=1,
-        south_values=(BIG_H, BIG_H, 0.0, 0.0),
-        north_values=(BIG_H, BIG_H, 0.0, 0.0),
-    )
-    h_vtx = jnp.minimum(
-        jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
-        jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
-    )                                                  # (n_lat+1, n_lon, nlev)
-    # At the fold, the vertex connects 4 cells: two local (fold row) and two
-    # fold-partner cells.  Overwrite the north row only on the owning rank.
-    nmask = north_fold_mask(grid)
-    if fold_is_local(grid) or nmask is not None:
-        fold = grid.fold
-        h_k_partner = h_k_active[-1:, fold.perm_T, :]
-        h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
-        h_vtx_north = jnp.minimum(
-            jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
-            jnp.minimum(h_k_partner, h_sw_partner),
-        )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
-    h_vtx = jnp.concatenate(
-        [h_vtx, h_vtx[:, 0:1, :]], axis=1,
-    )  # (n_lat+1, n_lon+1, nlev)
+    # h_vtx construction (both een_e3f_scheme rules + fold overwrite) and the
+    # matching fused Fu/u halo pad live in the single shared helper
+    # ``_een_e3f_h_vtx`` — the production code path, also called directly by
+    # the ground-truth test (test_al81_budget.py) so no formula is
+    # re-derived in the test.
+    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
 
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)
@@ -2242,11 +2386,19 @@ def _bc_vertical_momentum_advection(
     - ``"upwind_perturbation"`` (default, bit-identical) — 1st-order
       interface upwind of the PERTURBATION velocity ``u_prime``/``v_prime``.
     - ``"centered_full"`` (Veros-faithful) — 2nd-order centered,
-      energy-conserving flux of the FULL velocity ``u_full``/``v_full``
+      energy-conserving FLUX of the FULL velocity ``u_full``/``v_full``
       (restoring the ``-d/dz(w*U_bar)`` barotropic-redistribution term and
       removing the upwind implicit vertical viscosity).  Requires
-      ``u_full``/``v_full`` to be passed.  The WENO momentum paths ignore
-      this field (they have their own vertical reconstruction).
+      ``u_full``/``v_full`` to be passed.
+    - ``"nemo_advective"`` (NEMO-faithful, #1226) — the ADVECTIVE form
+      ``w*du/dz`` transcribed from ``dynzad.F90``, with ``w``
+      e1e2t-area-weighted-interpolated to BOTH the u- and v-face (NEMO's
+      own interpolation; ``centered_full``'s FLUX form and the plain
+      unweighted face interpolation differ from this by ``u*dw/dz`` at
+      every level — the whole #1226 dyn_zad mismatch).  Also requires
+      ``u_full``/``v_full``.
+    The WENO momentum paths ignore this field (they have their own
+    vertical reconstruction).
 
     The ``adaptive_implicit_vertadv`` gate (Shchepetkin 2015 / NEMO
     ln_zad_Aimp) is applied here: when ``config.adaptive_implicit_vertadv``
@@ -2368,6 +2520,32 @@ def _bc_vertical_momentum_advection(
                     u_full, w_u, h_u_old, face_active=u_face_active)
                 diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
                     v_full, w_v, h_v_old, face_active=v_face_active)
+            elif _vert_mom_scheme == "nemo_advective":
+                # NEMO-faithful (#1226): dynzad.F90's ADVECTIVE form w*du/dz
+                # on the FULL velocity, with w e1e2t-AREA-WEIGHTED-
+                # interpolated to the u/v face (dynzad.F90:89-98) at BOTH
+                # faces — not the plain (unweighted) ``w_u``/``w_v`` the
+                # other branches use.  ``u_full``/``v_full`` MUST be
+                # supplied (same contract as ``centered_full``).
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='nemo_advective' requires "
+                        "u_full and v_full to be passed to "
+                        "_bc_vertical_momentum_advection.",
+                    )
+                area_w = grid.area_T[..., jnp.newaxis] * w
+                w_area_u = interp_cell_to_uface(area_w)
+                w_area_v = interp_cell_to_vface(area_w, grid=grid)
+                face_area_u = grid.dx_u * grid.dy_u
+                face_area_v = grid.dx_v * grid.dy_v
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _nemo_advective_vertical_momentum_advection(
+                    u_full, w_area_u, h_u_old, face_area_u[..., jnp.newaxis],
+                    face_active=u_face_active)
+                diag_vertadv_v = _nemo_advective_vertical_momentum_advection(
+                    v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
+                    face_active=v_face_active)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
@@ -3850,6 +4028,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_e3f_scheme=config.een_e3f_scheme,
+            dz_ref=z_coord.dz_ref,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

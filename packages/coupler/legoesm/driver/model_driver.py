@@ -6581,10 +6581,10 @@ class ModelDriver:
             # the FV lane (codex 2026-07-26: this lane previously ignored all
             # five, so a morrison_* override affected FV but not MPAS).
             from legoesm.driver.physics_pipeline import (
-                _thread_morrison_scalars,
+                thread_morrison_scalars,
             )
             _micro_cfg = _micro_cfg._replace(**{
-                cfg.microphysics: _thread_morrison_scalars(
+                cfg.microphysics: thread_morrison_scalars(
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })

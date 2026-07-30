@@ -47,4 +47,26 @@ VEROS_CONSTANTS_CONFIG = ConstantsConfig(
 )
 
 
-__all__ = ("ConstantsConfig", "VEROS_CONSTANTS_CONFIG")
+# NEMO 5.0.2 canonical values, for recipes that pin constants to NEMO. Read out
+# of NEMO itself, not from a reference table:
+#   grav  = 9.80665            src/OCE/DOM/phycst.F90:38
+#   omega = 7.292116e-05       src/OCE/DOM/phycst.F90:89
+#   ra    = 6371229.           src/OCE/DOM/phycst.F90:37
+#   rho0  = 1026.              src/OCE/TRA/eosbn2.F90:1898
+#   rcp   = 3991.86795711963   src/OCE/TRA/eosbn2.F90:1899
+#
+# ``g`` is the one that matters, and the one legoESM had wrong for the NEMO
+# oracle: ``legoesm.constants.g`` is the canonical Earth value, whereas NEMO
+# uses STANDARD gravity -- a 5.0e-5 relative difference that enters EVERY
+# buoyancy term (N^2, isopycnal slopes, the pressure gradient).  Measured on the
+# DINO y5 twin against NEMO's own dumped ``rn2b`` (#1226): adopting NEMO's g cut
+# the N^2 median relative error from 4.95e-05 to 6.96e-06 -- that single
+# constant WAS the whole remaining bn2 residual, once the live-e3w z-star
+# stretch was accounted for.
+NEMO_CONSTANTS_CONFIG = ConstantsConfig(
+    g=9.80665, rho_0=1026.0, c_sw=3991.86795711963,
+    Omega=7.292116e-05, R_earth=6371229.0,
+)
+
+
+__all__ = ("ConstantsConfig", "VEROS_CONSTANTS_CONFIG", "NEMO_CONSTANTS_CONFIG")
