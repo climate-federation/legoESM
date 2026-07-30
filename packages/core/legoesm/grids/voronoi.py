@@ -96,6 +96,20 @@ class VoronoiMesh(NamedTuple):
     edgeSignOnVertex: jnp.ndarray   # (vertexDegree, nVertices) ±1
     meshDensity: jnp.ndarray        # (nCells,)
 
+    # --- Optional per-cell surface fields (default None) ---------------
+    # Canonical attribute names shared with CubedSphereGrid/GaussianGrid so
+    # the GWD integration's ``_extract_subgrid_topo_stddev`` /
+    # ``_extract_land_frac`` (getattr-based) find them.  Without these the
+    # orographic schemes fall back to the scalar ``config.h_topo`` — a
+    # uniform 500 m pseudo-mountain over every OCEAN cell too, measured at
+    # 0.036 Pa of spurious column momentum sink on the 2.5° AMIP state
+    # (2026-07-30 GWD ablation).  Populated by the model driver from the
+    # existing loaders (``load_subgrid_orography``, whose regrid target
+    # already handles rank-1 Voronoi cell centres, and the driver's
+    # ``_f_land``); ``None`` = legacy behaviour, byte-identical.
+    subgrid_topo_stddev: jnp.ndarray | None = None   # (nCells,) [m]
+    land_frac: jnp.ndarray | None = None             # (nCells,) [0-1]
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
@@ -1136,11 +1150,21 @@ def _load_voronoi_cache(path: str):
         return None
     try:
         with np.load(path) as data:
-            if set(data.files) != set(VoronoiMesh._fields):
+            # Optional (defaulted) fields are EXCLUDED from the cache when
+            # None (np.savez would store them as object arrays, which the
+            # default allow_pickle=False load then rejects — permanently
+            # busting the cache). A valid cache carries every REQUIRED field
+            # and any subset of the optional ones; absent optionals take
+            # their NamedTuple default (None) at construction.
+            _optional = set(VoronoiMesh._field_defaults)
+            _required = set(VoronoiMesh._fields) - _optional
+            _files = set(data.files)
+            if not (_required <= _files
+                    and _files <= set(VoronoiMesh._fields)):
                 # Stale schema (fields added/removed) -> ignore, rebuild.
                 return None
             fields = {}
-            for field_name in VoronoiMesh._fields:
+            for field_name in _files:
                 arr = data[field_name]
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
@@ -1157,8 +1181,14 @@ def _load_voronoi_cache(path: str):
 def _save_voronoi_cache(path: str, mesh: "VoronoiMesh") -> None:
     """Atomically write *mesh* to *path* (tmp + os.replace; safe under the N-rank race)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    arrays = {field_name: np.asarray(getattr(mesh, field_name))
-              for field_name in mesh._fields}
+    # Skip None-valued optional fields: np.asarray(None) is a 0-d OBJECT
+    # array, np.savez stores it pickled, and the allow_pickle=False load
+    # then rejects the ENTIRE file — regenerating and re-saving broken on
+    # every call. The loader treats absent optional fields as their None
+    # defaults.
+    arrays = {field_name: np.asarray(v)
+              for field_name in mesh._fields
+              if (v := getattr(mesh, field_name)) is not None}
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
         with open(tmp, "wb") as f:

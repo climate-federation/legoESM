@@ -190,6 +190,69 @@ pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
   question, and `scripts/validate/` for a validator. Reading an existing
   artifact costs seconds; a new probe costs an hour and needs its own controls.
 
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+**This applies to THIS repo's own API too** — it is large enough that memory is
+unreliable. FAILURES in ONE session (2026-07-30): `AerosolConfig(reference_aod=)`
+(really `reference_aod_550`), `McFarlaneConfig(N_ref=)` (no such field),
+`run_amip.build_parser` (really `build_arg_parser`), `from legoesm.grids import
+create_grid` (really `legoesm.grids.factory`). Each cost a full probe round-trip.
+Worse, `RRTMGPConfig()` defaults `include_clouds=False`, so an offline harness
+that omits it returns CLEAR-SKY fluxes and EVERY cloud gradient is exactly 0.0 —
+a silently wrong number, not an error. Read the NamedTuple `_fields` /
+`_field_defaults` before constructing a config.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If the user's premise is wrong — if they have misdiagnosed the bug, or the thing
+being asked for will not work — say so BEFORE writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate between
+them, then test. Do not go straight to a fix. Do not agree with a cause the user
+suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here. (Applies
+  directly to `_sendrecv_vjp` in `halo_exchange.py` and any new MPI-AD path.)
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code the user did not ask about. Long unbroken generations drift into invention —
+prefer a small verified diff over a large plausible one.
+
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
 - **Feature gating exception** (`fix_mass`, `fix_moisture`): Python `if` on static bool in closure — NOT `jnp.where` (traces both branches). `jnp.where` only for data-dependent traced selection.
