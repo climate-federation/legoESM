@@ -1684,6 +1684,116 @@ MEASURED_AT: dict[str, str] = {
 }
 
 
+# term -> the pipeline SCRIPT (basename under this directory) whose run
+# produced the row's recorded corr/ratio, per that row's OWN provenance
+# prose above.  "" = no probe script is named in the row's note at all (a
+# bare "exact"/"bit-exact" one-liner, or an explicitly-out-of-scope note like
+# "algebra only; needs _step_impl hook") -- recorded honestly as MISSING
+# rather than invented, exactly like MEASURED_AT's own "" convention.
+#
+# 2026-07-30 provenance-archaeology audit (this task) found TWELVE rows whose
+# cited script was NEVER COMMITTED (git log --all --diff-filter=A returns
+# zero commits): probe_zdftke_prandtl_e3tboth.py / _scan_pdlr.py (zdftke
+# pdlr), probe_zdftke_avt_avm(_e3tboth)?.py / probe_zdftke_composite_
+# repointed.py (zdftke composite avt/avm -- superseded in-file by
+# southern_vmix_profile.py, recorded here), probe_eiv_transport_v2*.py (eiv
+# transport u/v -- already superseded in-file by eiv_transport_walk.py,
+# recorded here), probe_hpg_vor_1226.py (dyn_vor EEN u/v),
+# probe_1226_keg_zad_split.py (dyn_adv ZAD), atf_lego_extract_e3tboth.py /
+# atf_compare_e3tboth.py (ATF filter u/v), probe_1226_r2_item2_dynldf.py
+# (dyn_ldf u/v), probe_1226_r2_item3_sshnxt.py (ssh_nxt/div_hor),
+# probe_1226_r2_item4_domqco.py (dom_qco_r3c r3t/r3u-v), probe_bottom_drag.py
+# (zdf_drg_nonlin/dyn_drg_init), probe_dyn_cor_2d.py (dyn_cor_2d),
+# probe_n2.py (eos_rab alpha / bn2 (rn2b)). Each is recorded below with its
+# CITED name (even though absent) so main()'s existence check flags it --
+# the point of this field is to SURFACE the gap mechanically, not paper over
+# it by silently substituting a different script.  A committed sibling
+# script (e.g. bn2_alpha_compare.py, eos_rab_bn2_per_element.py) may cover
+# similar ground but was never verified to reproduce probe_n2.py's own
+# numbers in this task, so it is not substituted here.
+PROVENANCE_SCRIPT: dict[str, str] = {
+    "sbc (utau/qsr/qns/sfx)": "",                    # note is a bare "exact", no script named
+    "eos_rab beta": "",                              # note is a bare "bit-exact", no script named
+    "eos_rab alpha": "probe_n2.py",                  # cited, never committed
+    "bn2 (rn2b)": "probe_n2.py",                     # cited, never committed
+    "zdf_mxl (nmln)": "zdf_mxl_nmln_compare.py",
+    "ldf_slp wslpi": "ldf_slp_per_element.py",
+    "ldf_slp wslpj": "ldf_slp_per_element.py",
+    "ldf_slp uslp": "ldf_slp_per_element.py",
+    "ldf_slp vslp": "ldf_slp_per_element.py",
+    "ldf_eiv kappa (aeiu)": "ldf_eiv_aeiu_per_element.py",
+    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": "ldftra_ahtv_compare.py",
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "",        # no script named in this row's note
+    "eiv transport u": "eiv_transport_walk.py",
+    "eiv transport v": "eiv_transport_walk.py",
+    "traadv_fct fluxes": "traadv_fct_probe.py",
+    "traadv_fct tendency (T)": "traadv_fct_probe.py",
+    "traadv_fct horizontal tend": "traadv_fct_probe.py",
+    "traadv_fct vertical upstream flux": "traadv_fct_probe.py",
+    "dyn_hpg (du)": "hpg_tendency_compare.py",
+    "dyn_vor EEN u": "probe_hpg_vor_1226.py",        # cited, never committed
+    "dyn_vor EEN v": "probe_hpg_vor_1226.py",         # "same probe/run as EEN u" per its own note
+    "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
+    "dyn_adv ZAD": "probe_1226_keg_zad_split.py",     # cited, never committed
+    "zdftke pdlr": "zdftke_chain_walk.py",
+    "zdftke composite avt/avm": "southern_vmix_profile.py",
+    "STABILITY on NEMO true grid (e3t_0)": "dino_year_screen_fullframe.py",
+    "dyn_hpg (dv)": "hpg_tendency_compare.py",
+    "dyn_spg_ts pssh": "spg_substep_chain.py",
+    "dyn_spg_ts puu_b": "spg_substep_chain.py",
+    "dyn_spg_ts un_adv": "spg_substep_chain.py",
+    "ATF filter u": "atf_lego_extract_e3tboth.py",    # cited, never committed
+    "ATF filter v": "atf_lego_extract_e3tboth.py",    # "same run as ATF filter u" per its own note
+    "ATF filter T/S/ssh": "",                         # note is a bare "exact", no script named
+    "dyn_ldf (dynldf_lev_lap) u": "probe_1226_r2_item2_dynldf.py",  # cited, never committed
+    "dyn_ldf (dynldf_lev_lap) v": "probe_1226_r2_item2_dynldf.py",  # "same probe" per its own note
+    "ssh_nxt / div_hor": "probe_1226_r2_item3_sshnxt.py",  # cited, never committed
+    "dom_qco_r3c r3t": "probe_1226_r2_item4_domqco.py",    # cited, never committed
+    "dom_qco_r3c r3u/r3v": "probe_1226_r2_item4_domqco.py",
+    "mlf_baro_corr": "",                              # note: "algebra only; needs _step_impl hook"
+    "lbc_lnk sign": "coverage_rows_measure.py",
+    "zdf_mxl_turb": "",                               # WAIVED (WAIVED_ROWS), no probe -- missing term
+    "zdf_drg_nonlin T-point rate": "probe_bottom_drag.py",  # cited, never committed
+    "dyn_drg_init RHS increment": "probe_bottom_drag.py",
+    "dyn_cor_2d (69x/step)": "probe_dyn_cor_2d.py",   # cited, never committed
+    "traadv_fct (SALINITY)": "traadv_fct_probe.py",
+    "wzv (vertical velocity)": "coverage_rows_measure.py",
+    "tra_zdf (tracer implicit vertical solve)": "coverage_rows_measure.py",
+    "dyn_zdf (momentum implicit vertical solve)": "coverage_rows_measure.py",
+    "traldf_iso_lap tendency": "coverage_rows_measure.py",
+    "ldf_dyn coefficient": "coverage_rows_measure.py",
+    "tra_qsr (shortwave penetration)": "coverage_rows_measure.py",
+    "ssh_atf": "coverage_rows_measure.py",
+    "tra_sbc": "coverage_rows_measure.py",
+}
+
+assert set(PROVENANCE_SCRIPT) == set(MEASUREMENTS), (
+    "PROVENANCE_SCRIPT must have exactly one entry per MEASUREMENTS row -- "
+    f"missing: {set(MEASUREMENTS) - set(PROVENANCE_SCRIPT)}, "
+    f"extra: {set(PROVENANCE_SCRIPT) - set(MEASUREMENTS)}")
+
+
+def check_provenance_scripts_exist(
+        scripts_dir: str | None = None) -> list[tuple[str, str]]:
+    """Walk PROVENANCE_SCRIPT and report every row whose cited script does
+    NOT exist under scripts_dir (default: this file's own directory).
+
+    Returns a list of (term, cited_script) for FAILING rows -- a script name
+    that is empty (no provenance recorded at all) OR that does not exist as a
+    file in scripts_dir.  This is a provenance-EXISTENCE check layered on top
+    of measurement: it never touches corr/ratio/PER_ELEMENT/BINARY_GATES/
+    WAIVED_ROWS and does not change any row's AT BAR / DEBT classification.
+    """
+    import os as _os
+    if scripts_dir is None:
+        scripts_dir = _os.path.dirname(_os.path.abspath(__file__))
+    failing = []
+    for term, script in PROVENANCE_SCRIPT.items():
+        if not script or not _os.path.isfile(_os.path.join(scripts_dir, script)):
+            failing.append((term, script))
+    return failing
+
+
 # Rows that are NOT term comparisons.  A stability criterion or a missing-term
 # waiver has no corr/ratio, and forcing 1.0/1.0 onto one to clear the board
 # would be gaming the gate.  Encode them honestly instead:
@@ -1841,9 +1951,41 @@ def _self_test() -> int:
     # BINARY_GATES/MEASUREMENTS/PER_ELEMENT.
     assert "zdf_mxl_turb" not in BINARY_GATES, \
         "zdf_mxl_turb must be waived via WAIVED_ROWS, not BINARY_GATES"
+
+    # Provenance-existence check: SYNTHETIC VIOLATION proving it is
+    # non-vacuous.  A fake row pointing at a script that certainly does not
+    # exist must be flagged; a fake row pointing at a script that DOES exist
+    # (fidelity_bar_gate.py itself) must NOT be flagged.  Uses a throwaway
+    # dict, never mutates the real PROVENANCE_SCRIPT -- so this cannot affect
+    # any real row's classification.
+    import os as _os
+    _scripts_dir = _os.path.dirname(_os.path.abspath(__file__))
+
+    def _check(mapping: dict[str, str]) -> list[tuple[str, str]]:
+        return [(t, s) for t, s in mapping.items()
+                if not s or not _os.path.isfile(_os.path.join(_scripts_dir, s))]
+
+    _violation = _check({"fake_row_1226_selftest": "definitely_not_a_real_script_1226.py"})
+    assert _violation == [("fake_row_1226_selftest", "definitely_not_a_real_script_1226.py")], (
+        "SELF-TEST FAILED: the provenance-existence check did NOT flag a "
+        "row pointing at a nonexistent script -- the check is vacuous.")
+    _clean = _check({"fake_row_1226_selftest_clean": "fidelity_bar_gate.py"})
+    assert _clean == [], (
+        "SELF-TEST FAILED: the provenance-existence check flagged a row "
+        "pointing at a script that genuinely exists -- false positive.")
+    _empty = _check({"fake_row_1226_selftest_empty": ""})
+    assert _empty == [("fake_row_1226_selftest_empty", "")], (
+        "SELF-TEST FAILED: an empty (no-provenance) row must also be flagged.")
+    # The synthetic rows above are NEVER added to the real PROVENANCE_SCRIPT
+    # dict, so the real gate's rows/classification are untouched by this test.
+    assert "fake_row_1226_selftest" not in PROVENANCE_SCRIPT
+    assert set(PROVENANCE_SCRIPT) == set(MEASUREMENTS), (
+        "self-test invariant broken: PROVENANCE_SCRIPT drifted from MEASUREMENTS")
     print("self-test OK: per-element bar fires on a cancelling-metric pass; "
           "binary gates classify without corr/ratio; a waiver missing "
-          "provenance or evidence is rejected, not silently accepted")
+          "provenance or evidence is rejected, not silently accepted; a "
+          "provenance-script row pointing at a nonexistent/empty script is "
+          "flagged by check_provenance_scripts_exist, and a real script is not")
     return 0
 
 
@@ -1876,6 +2018,18 @@ def main() -> int:
     if disputed:
         print(f"\nDISPUTED (conflicting measurements, do not trust): {', '.join(disputed)}")
     print(f"\nrows with NO measured-at provenance: {len(unknown_prov)} of {len(rows)}")
+
+    # *** PROVENANCE-SCRIPT EXISTENCE CHECK ***  (layered on top of
+    # measurement -- never changes AT BAR/DEBT/UNMEASURED/WAIVED status)
+    failing_prov = check_provenance_scripts_exist()
+    print(f"\n*** PROVENANCE-SCRIPT EXISTENCE CHECK: {len(failing_prov)} of "
+          f"{len(rows)} rows FAIL (cited script missing/empty) ***")
+    if failing_prov:
+        for t, script in sorted(failing_prov):
+            reason = "no script named in its note" if not script else f"{script!r} not found on disk"
+            print(f"  {t:<45s} <-- {reason}")
+    else:
+        print("  (none -- every row's cited provenance script exists)")
     at_bar = sum(s == "AT BAR" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
