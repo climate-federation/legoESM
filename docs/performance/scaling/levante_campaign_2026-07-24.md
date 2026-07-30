@@ -1099,9 +1099,14 @@ commit 70f3ce636):
   5.27 -> 6.47 ms and f64 8.96 -> 11.41 across np64 -> np128 —
   ANTI-scales exactly as the tile law predicts at 10.2k -> 5.1k
   cells/GPU. MPAS *runs* at 128 GPUs; subdiv-8 just has nothing left to
-  parallelise there. Full f32 ladder np2->128:
-  19.90/14.12/6.92/7.10/5.27/6.47 (floor plateau from np8, shallow
-  minimum at np64).
+  parallelise there. Full f32 ladder np2->128 (np32 from job 26549646):
+  19.90 / 14.12 / 6.92 / 7.10 / **8.13** / 5.27 / 6.47 — NON-MONOTONE:
+  np32 is WORSE than np16 while np64 is the minimum, and f64 shows the
+  same pattern (np32 14.26 vs np64 8.96). This is the np4-dip signature
+  at another count — count-specific codegen/fusion behaviour layered on
+  the tile floor (the fusion pathology on this lane is already proven
+  shape-dependent). Recorded as observed; not chased further at subdiv-8
+  since the mesh is below the floor at all these counts anyway.
 * Payoff ladder submitted (job 26549775): subdiv-9 at 32/64/128 GPUs =
   81.9k/41.0k/20.5k cells/GPU — the first MPAS many-GPU ladder whose
   lower rungs sit ABOVE the ~30k floor.
