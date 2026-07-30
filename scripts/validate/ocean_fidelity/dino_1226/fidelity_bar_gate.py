@@ -358,6 +358,13 @@ PER_ELEMENT: dict[str, float] = {
     # max|diff|, which is 0.0 for all three point types measured -- an exact
     # per-element match, genuinely proven, not merely a cancelling mean.
     "lbc_lnk sign": 0.0,
+    # ADDED 2026-07-30 (atf_filter_walk.py): max|lego-nemo| over all wet
+    # u/v-faces, EVERY one of 35 levels -- genuinely 0.0, not a cancelling
+    # mean (see "ATF filter u"/"v" in MEASUREMENTS for the full mechanism +
+    # the two independent re-derivations that confirm it). n=336338 (u),
+    # n=340271 (v).
+    "ATF filter u": 0.0,
+    "ATF filter v": 0.0,
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -1054,17 +1061,97 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "matching the note. Corrected here -- this tuple appears "
                                                               "to have been wrong since the row was created, not a "
                                                               "recent drift."),
-    "ATF filter u":                  (0.999969,   0.995600,   "0.45% gap [e3t=both per atf_lego_extract_e3tboth.py -- "
-                                                              "filtered-field ratio 0.9956/corr 0.999969 reproduced "
-                                                              "exactly; harness (A) REFUTED]. RE-MEASURED at HEAD "
-                                                              "c8e5d305b (fresh atf_lego_extract_e3tboth.py + "
-                                                              "atf_compare_e3tboth.py run, RUN_GDB kt=57601): "
-                                                              "corr=0.999969/ratio(nemo/lego)=0.9956, n=336338. "
-                                                              "UNCHANGED."),
-    "ATF filter v":                  (0.999999,   1.000300,   "[e3t=both]. RE-MEASURED at HEAD c8e5d305b (same run as "
-                                                              "ATF filter u): corr=0.999999/ratio=1.0003, n=340271. "
-                                                              "UNCHANGED."),
+    "ATF filter u":                  (1.0,        1.0,        "CORRECTED 2026-07-30 (atf_filter_walk.py): the recorded "
+                                                              "DEBT (0.999969/0.995600) was a MEASUREMENT-HARNESS "
+                                                              "stale-dump artifact, not a physics defect -- same class "
+                                                              "as the dyn_ldf Kbb/now bug found earlier this campaign. "
+                                                              "MECHANISM: stpmlf.F90:457 CALL mlf_baro_corr(kstp, Nnn, "
+                                                              "Naa, uu, vv) -- subroutine signature mlf_baro_corr(kt, "
+                                                              "Kmm, Kaa, puu, pvv) (:556) binds its Kmm to the caller's "
+                                                              "Nnn. Because DINO's ACTIVE namelist_cfg sets ln_bt_fw="
+                                                              ".false. (RUN_GDB/namelist_cfg:353, confirmed active -- "
+                                                              "NOT just namelist_ref's default -- via ocean.output:1050 "
+                                                              "'ln_bt_fw=F => Centred integration'), the block at "
+                                                              "stpmlf.F90:624 'IF(.NOT.ln_bt_fw) THEN ... puu(:,:,jk,"
+                                                              "Kmm) = (puu(:,:,jk,Kmm) - un_adv*r1_hu(Kmm) + uu_b(Kmm))"
+                                                              "*umask ... ENDIF' executes and OVERWRITES puu at the "
+                                                              "Nnn ('now') level -- so mlf_baro_corr mutates BOTH "
+                                                              "puu(Kaa=Naa) (DO_3D correction, :606-609) AND puu(Kmm="
+                                                              "Nnn) (:624-632) BEFORE dyn_atf_qco (stpmlf.F90:460) ever "
+                                                              "runs. The retired probe (atf_lego_extract_e3tboth.py, "
+                                                              "PROVENANCE_SCRIPT below -- never committed, cannot be "
+                                                              "inspected) most likely fed the STALE pre-correction Kaa "
+                                                              "(stp_dump_08_dynzdf_u.bin, NEMO's own dump of puu(Naa) "
+                                                              "right after dyn_zdf at stpmlf.F90:312, i.e. BEFORE "
+                                                              "mlf_baro_corr's correction) instead of the CORRECTED Kaa "
+                                                              "(baro_dump_u_after.bin, a NEW dump written inside "
+                                                              "mlf_baro_corr at stpmlf.F90:611-621, right after the "
+                                                              "DO_3D correction loop) -- feeding the stale variant "
+                                                              "reproduces corr=0.999759/ratio=0.976307, in the same "
+                                                              "direction and order of magnitude as the old recorded "
+                                                              "tuple (not an exact match, so this is the BEST LEAD for "
+                                                              "the old probe's bug, not a proven identification). "
+                                                              "NAMING TRAP: atf_dump_uu_before.bin's '_before' token "
+                                                              "means PRE-FILTER STAGE (captured at dyn_atf_qco's own "
+                                                              "entry, dynatf_qco.F90:146-147, AFTER mlf_baro_corr "
+                                                              "already ran, i.e. genuinely Kmm=Nnn), NOT Nbb -- a "
+                                                              "different axis from the Nbb/Nnn/Naa leapfrog levels; "
+                                                              "Kbb itself comes from the restart's independent 3rd "
+                                                              "time level (ub/vb), unrelated to any atf_dump_* file. "
+                                                              "FORMULA (dynatf_qco.F90:165-166, DINO's ln_dynadv_vec="
+                                                              ".true. branch, confirmed active via namelist_cfg:321): "
+                                                              "puu(Kmm) = puu(Kmm) + rn_atfp*(puu(Kbb) - 2*puu(Kmm) + "
+                                                              "puu(Kaa)), rn_atfp=0.1 (namelist_ref:73, ocean.output:"
+                                                              "245) -- NO e3u/e3v thickness weighting in this branch "
+                                                              "(the weighted branch, :192-202, is ln_dynadv_vec=.false."
+                                                              ", dead for DINO). MEASURED: feeding Kmm=atf_dump_uu_"
+                                                              "before.bin, Kbb=restart ub, Kaa=baro_dump_u_after.bin "
+                                                              "into this exact formula and comparing against NEMO's "
+                                                              "own atf_dump_uu_after.bin gives max|diff|=0.0 at EVERY "
+                                                              "one of 35 levels, n=336338 wet u-faces -- BIT-EXACT. "
+                                                              "VERIFIED: (1) independently re-derived twice more -- "
+                                                              "once by a from-scratch numpy+netCDF4 script with zero "
+                                                              "imports from atf_filter_walk.py (raw dump/restart/mesh_"
+                                                              "mask reads), once by a fresh adversarial-review "
+                                                              "subagent's own independent script -- both reproduce "
+                                                              "max|diff|=0.0/corr=1.0/n=336338 exactly; (2) confirmed "
+                                                              "NOT a self-comparison -- atf_dump_uu_before.bin, "
+                                                              "baro_dump_u_after.bin, atf_dump_uu_after.bin and the "
+                                                              "restart's ub are four PAIRWISE-DISTINCT files (md5/cmp "
+                                                              "differ, max|u_now-u_aft|=0.0188, max|u_bef-u_now|="
+                                                              "0.0105); (3) NON-VACUITY proven -- substituting the "
+                                                              "stale stp_dump_08_dynzdf_u.bin for Kaa reproduces "
+                                                              "corr=0.999759/ratio=0.976307 (matches to 6 s.f.), i.e. "
+                                                              "the same check DOES go non-exact on a genuinely wrong "
+                                                              "input. Per-level profile: err_norm median AND max are "
+                                                              "0.0 at every level -- no depth-ladder signature, "
+                                                              "consistent with the no-e3t-weighting finding above. "
+                                                              "OLD tuple (0.999969, 0.995600, 'per atf_lego_extract_"
+                                                              "e3tboth.py -- 0.45% gap') kept for history below -- "
+                                                              "PROVEN a harness artifact, do not resurrect without "
+                                                              "re-deriving the retired probe's actual Kaa source."),
+    "ATF filter v":                  (1.0,        1.0,        "CORRECTED 2026-07-30 (atf_filter_walk.py), same cause/"
+                                                              "fix/verification as ATF filter u above (same call site, "
+                                                              "same stale-Kaa mechanism, same three independent "
+                                                              "re-derivations): max|diff|=0.0 at every one of 35 "
+                                                              "levels, n=340271 wet v-faces, corr=1.0/ratio=1.0. OLD "
+                                                              "tuple (0.999999, 1.000300) kept for history below -- "
+                                                              "PROVEN a harness artifact (same mechanism as u), do not "
+                                                              "resurrect without re-deriving the retired probe's "
+                                                              "actual Kaa source. See the u row's comment for the full "
+                                                              "NEMO citations, the '_before'-token naming trap, and the "
+                                                              "formula (dynatf_qco.F90:165-166, rn_atfp=0.1, no e3v "
+                                                              "weighting)."),
     "ATF filter T/S/ssh":            (1.0,        1.0,        "exact"),
+    # OLD tuples for "ATF filter u"/"v" (kept for history, PROVEN to be a
+    # measurement-harness stale-Kaa artifact per atf_filter_walk.py, not a
+    # live regression -- do not resurrect without re-deriving the retired
+    # atf_lego_extract_e3tboth.py probe's actual Kaa source):
+    #   "ATF filter u": (0.999969, 0.995600, "0.45% gap [e3t=both per
+    #     atf_lego_extract_e3tboth.py]... corr=0.999969/ratio(nemo/lego)=
+    #     0.9956, n=336338.")
+    #   "ATF filter v": (0.999999, 1.000300, "[e3t=both]... corr=0.999999/
+    #     ratio=1.0003, n=340271.")
     # CORRECTED 2026-07-30 (Task B, ww_inheritance_walk.py::measure_dyn_ldf_
     # corrected -- the only new probe script this task's file rules permit;
     # dyn_zad_ldf_walk.py, which FIRST established this, is UNTOUCHABLE):
@@ -1839,8 +1926,8 @@ MEASURED_AT: dict[str, str] = {
     "dyn_spg_ts pssh": "c8e5d305b",
     "dyn_spg_ts puu_b": "c8e5d305b",
     "dyn_spg_ts un_adv": "c8e5d305b",
-    "ATF filter u": "c8e5d305b",
-    "ATF filter v": "c8e5d305b",
+    "ATF filter u": "a8942794a",
+    "ATF filter v": "a8942794a",
     "dyn_ldf (dynldf_lev_lap) u": "c8e5d305b",
     "dyn_ldf (dynldf_lev_lap) v": "c8e5d305b",
     "ssh_nxt / div_hor": "c8e5d305b",
@@ -1912,8 +1999,8 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_spg_ts pssh": "spg_substep_chain.py",
     "dyn_spg_ts puu_b": "spg_substep_chain.py",
     "dyn_spg_ts un_adv": "spg_substep_chain.py",
-    "ATF filter u": "atf_lego_extract_e3tboth.py",    # cited, never committed
-    "ATF filter v": "atf_lego_extract_e3tboth.py",    # "same run as ATF filter u" per its own note
+    "ATF filter u": "atf_filter_walk.py",  # CORRECTED 2026-07-30 (was atf_lego_extract_e3tboth.py -- cited, never committed)
+    "ATF filter v": "atf_filter_walk.py",  # CORRECTED 2026-07-30, same run as ATF filter u
     "ATF filter T/S/ssh": "",                         # note is a bare "exact", no script named
     "dyn_ldf (dynldf_lev_lap) u": "probe_1226_r2_item2_dynldf.py",  # cited, never committed
     "dyn_ldf (dynldf_lev_lap) v": "probe_1226_r2_item2_dynldf.py",  # "same probe" per its own note
