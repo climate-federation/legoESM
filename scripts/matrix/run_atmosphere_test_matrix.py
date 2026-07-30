@@ -1578,6 +1578,22 @@ def _run_timeloop(
                              f"threshold {float(blowup_threshold):.1f}"
                     ),
                 }
+                # codex r2 P1: capture the diagnostic scalars AT the
+                # blow-up state itself.  The loop breaks here, before
+                # the ``step % diag_every`` block, so without this the
+                # series (and any argmax localisation it carries) stops
+                # at the last clean checkpoint and never records the
+                # event it exists to localise.  Stored separately from
+                # the clean series so a reader cannot mistake a
+                # blown-up sample for a healthy one.
+                try:
+                    diag["_blowup_info"]["scalars_at_blowup"] = {
+                        k: (float(v) if np.isfinite(v) else None)
+                        for k, v in scalar_fn(state).items()
+                        if isinstance(v, (int, float, np.floating))
+                    }
+                except Exception as _exc:      # diagnostics must never mask the blow-up
+                    diag["_blowup_info"]["scalars_at_blowup_error"] = repr(_exc)
                 blown_up = True
                 break
 
@@ -5902,9 +5918,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
 
         # --- NH cube blow-up attribution knobs (2026-07-30) ---
-        # One env var per candidate, each DEFAULTING to the shipped value
-        # so an unset environment is bit-identical.  Mirrors the
-        # LEGOESM_CDD_* precedent used by the HS / baroclinic branches.
+        # One env var per candidate, each DEFAULTING to the shipped value,
+        # so these knobs alone change nothing when unset.  (That is NOT a
+        # claim that the whole branch is unchanged: the corner-damp gate
+        # fix and the TC3 rotation change DO alter TC1/TC2/TC3 results —
+        # codex r2 P1.)  Mirrors the LEGOESM_CDD_* precedent used by the
+        # HS / baroclinic branches.
         #   LEGOESM_NH_COMPACT_OUTER=1  compact outer del^2 => the
         #       biharmonic actually damps 2*dx (default path has an exact
         #       2*dx null; see CDGridCompressibleEulerConfig).

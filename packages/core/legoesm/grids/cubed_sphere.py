@@ -3681,7 +3681,17 @@ def apply_small_earth_scaling(
     CubedSphereGrid
         New grid with scaled metrics.
     """
-    if factor == 1.0 and rotating:
+    if factor == 1.0:
+        # Never rebuild for a no-op reduction: create_cubed_sphere does not
+        # forward dtype/duogrid, so rebuilding an FV3-native or duogrid grid
+        # here would silently swap its halo topology (codex r2 P2).  A
+        # non-rotating full-size grid must be built by the caller instead.
+        if not rotating:
+            raise ValueError(
+                "apply_small_earth_scaling(factor=1.0, rotating=False) would "
+                "require rebuilding the grid, which drops dtype/duogrid "
+                "provenance; build the non-rotating grid directly with "
+                "create_cubed_sphere(..., omega=0.0)")
         return grid
 
     from legoesm import constants

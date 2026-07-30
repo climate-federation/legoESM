@@ -84,16 +84,6 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0
     hyperdiff_rho_coeff: float = 0.0
     hyperdiff_w_coeff: float = 0.0
-    hyperdiff_compact_outer: bool = False
-        # When False (default) the outer del^2 of the biharmonic is the wide
-        # div(grad) form, whose reach-2 centred difference is IDENTICALLY ZERO
-        # on a (-1)^i grid mode: the composite del^4 has an exact 2*dx NULL and
-        # cannot damp the grid-scale checkerboard (operators_3d.hyperdiffusion_3d
-        # docstring).  True selects the compact outer stencil, whose transfer
-        # symbol 16 sin^4(k dx/2) is MAXIMAL at 2*dx — the behaviour of FV3's
-        # del6_vt_flux, whose fluxes are reach-1 adjacent differences
-        # (sw_core.F90:2066,2078).  Default kept False so existing tuned
-        # coefficients stay bit-identical.
     sponge_width: float = 10000.0
     sponge_coeff: float = 0.05
     n_acoustic_substeps: int = 6
@@ -245,6 +235,22 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     use_fv3_d_con_cv: bool = False
         # FV3_3D iter 320: c_v denominator for NH d_con (FV3 dyn_core.F90:1795 cv_air branch).
         # NH conserves internal energy c_v·T; c_pd under-heats by c_v/c_p≈0.714 (~40%). PE unaffected.
+    # APPENDED at the end of the NamedTuple on purpose: inserting a field
+    # mid-definition silently corrupts any positional construction (codex r2 P1).
+    hyperdiff_compact_outer: bool = False
+        # When False (default, bit-identical) the OUTER del^2 of the biharmonic
+        # is the wide div(grad) form, whose reach-2 centred difference is
+        # IDENTICALLY ZERO on a (-1)^i grid mode: the composite del^4 has an
+        # exact 2*dx NULL and cannot damp the grid-scale checkerboard
+        # (operators_3d.hyperdiffusion_3d docstring).  True selects the compact
+        # outer stencil, transfer symbol 16 sin^4(k dx/2), MAXIMAL at 2*dx —
+        # the behaviour of FV3's del6_vt_flux, whose fluxes are reach-1 adjacent
+        # differences (sw_core.F90:2066,2078).
+        # NOT YET DEMONSTRATED area-conservative or energy-dissipative on the
+        # varying cubed-sphere metric (codex r2 P1): laplacian_compact_3d is a
+        # raw second difference over local dx^2/dy^2 with no area-weighted flux
+        # pairing, so sum(area*L(f)) need not telescope.  Diagnostic/attribution
+        # knob only until that is measured; do not enable in production configs.
 
 
 def _apply_top_sponge_damp_boost(damp_corner, da_min_c, config):
