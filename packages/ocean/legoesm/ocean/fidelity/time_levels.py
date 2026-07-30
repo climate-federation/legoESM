@@ -73,6 +73,52 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "atf_dump_ssh_after.bin": ("after", "dynatf_qco.F90, post-filter state"),
     "atf_dump_uu_after.bin": ("after", "dynatf_qco.F90, post-filter state"),
     "atf_dump_vv_after.bin": ("after", "dynatf_qco.F90, post-filter state"),
+
+    # --- zdftke chain instrumentation (#1226 term-by-term TKE walk). ---
+    # zdf_tke(kt, Kbb, Kmm, ...) is called from stpmlf.F90:190 as
+    # CALL zdf_phy(kstp, Nbb, Nnn, Nrhs) -> zdfphy.F90:286
+    # CALL zdf_tke(kt, Kbb, Kmm, sh2, avm_k, avt_k), i.e. Kbb=Nbb, Kmm=Nnn.
+    # These are TKE-closure OUTPUTS, not T/S fields themselves -- en/zmxlm/
+    # zmxld/avt/avm have no leapfrog time-level dimension of their own
+    # (zdf_oce.F90:53 declares en as a single "now" SAVE array, no Nbb/Nnn/Naa
+    # index). Each is registered by the time level of its DOMINANT governing
+    # N^2 input, exactly as hmlp/nmln above were registered by their rn2b
+    # integrand rather than by their own (non-existent) leapfrog index. Where
+    # a field mixes both (the Prandtl branch), the citation says so
+    # explicitly -- do not read the "now" label as "purely now-derived".
+    "tke_dump_en.bin": ("now", "zdftke.F90:496 en RHS stratification-destruction "
+                                "term uses rn2 (now, ts(...,Nnn) via stpmlf.F90:187); "
+                                "geometry (gdepw/e3t) also Kmm=Nnn. The Prandtl/Ri "
+                                "branch feeding p_pdlr (zdftke.F90:429-441 in the "
+                                "rebuilt file) uses rn2b (before) but does NOT modify "
+                                "en itself -- en's own RHS is now-only. Captured after "
+                                "tke_tke returns (zdftke.F90 zdf_tke, right after "
+                                "CALL tke_tke), i.e. fully final incl. nn_etau=1 "
+                                "penetration (zdftke.F90 tke_tke, nn_etau==1 branch)."),
+    "tke_dump_zmxlm.bin": ("now", "zdftke.F90:740 zrn2 = MAX(rn2(ji,jj,jk), rsmall) "
+                                   "in tke_avn's mixing-length buoyancy-scale calc "
+                                   "(rn2 = now, ts(...,Nnn)); captured after ALL "
+                                   "nn_mxl constraint sweeps (tke_avn nn_mxl SELECT "
+                                   "CASE, DINO nn_mxl=3 branch) have run."),
+    "tke_dump_zmxld.bin": ("now", "same rn2(now) dependency as tke_dump_zmxlm.bin "
+                                   "(zdftke.F90:740); captured after ALL nn_mxl "
+                                   "constraint sweeps, same insertion point."),
+    "tke_dump_avt_final.bin": ("now", "base closure avt=MAX(zav,avtb) (tke_avn, "
+                                        "zsqen=SQRT(en)/zmxlm branch) is now-derived "
+                                        "(en, zmxlm both now per above); the nn_pdl==1 "
+                                        "correction multiplies by p_pdlr, which DOES "
+                                        "depend on rn2b (before) via the Prandtl/Ri "
+                                        "branch in tke_tke -- avt_final is therefore a "
+                                        "MIXED now/before composite, registered 'now' "
+                                        "for its dominant (zmxlm, en) dependency. "
+                                        "Captured at zdf_tke routine exit, after "
+                                        "CALL tke_avn returns, i.e. what zdfphy.F90:"
+                                        "313-314 copies into avt_k immediately after."),
+    "tke_dump_avm_final.bin": ("now", "avm=MAX(zav,avmb) has no Prandtl correction "
+                                        "(nn_pdl only touches avt, tke_avn's "
+                                        "IF(nn_pdl==1) block) -- purely now-derived "
+                                        "(en, zmxlm). Captured at zdf_tke routine "
+                                        "exit alongside tke_dump_avt_final.bin."),
 }
 
 
