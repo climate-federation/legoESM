@@ -436,12 +436,22 @@ def emanuel_convection(
             T, q_v, p_full,
             plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
             z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,
-            # Selectable vertical solve (config default "advective" = shipped
-            # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed
-            # by the implicit_flux branch; the kernel raises on an unknown
-            # value (dispatch-hardening, static Python str).
-            subsidence_solve=config.subsidence_solve,
-            p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
+            # NOTE (SCM-RCE matched-kernel campaign): this scheme is
+            # deliberately NOT given a ``subsidence_solve`` selector.  Two
+            # reasons, both structural:
+            #   (a) This call is inside the ``use_genuine_mixing=False``
+            #       LEGACY surrogate branch.  The shipped default is
+            #       ``use_genuine_mixing=True`` (config.py), whose genuine
+            #       buoyancy-sorting mixing matrix computes its own
+            #       dT/dq tendencies and never touches this kernel -- so a
+            #       selector here would be dead code in production.
+            #   (b) The surrogate passes ``delta_0 * sort_multiplier`` IN but
+            #       divides only the RETURNED condensate by
+            #       ``sort_multiplier`` below.  Under a vapor-debiting solve
+            #       that leaves an unpaired ``-(s-1)*dq_c`` vapor sink, i.e.
+            #       it would NOT be "the same kernel" anyway.
+            # Emanuel is therefore reported as OUTSIDE the matched-kernel
+            # family rather than silently kernel-matched.
         )
         # AD-safe floor on the divisor so the VJP cannot overflow.
         dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-15)

@@ -390,6 +390,51 @@ def apply_mass_flux_kernel(
     return dT_dt, dq_v_dt, dq_c_conv_dt
 
 
+def release_detrained_condensate_latent(
+    dT_dt: jax.Array,
+    dq_c_conv_dt: jax.Array,
+    subsidence_solve: str,
+) -> jax.Array:
+    r"""Add the condensation latent heat of the kernel's DETRAINED condensate.
+
+    SIGN CONVENTION in scope: tendencies are SOURCES (``state += dt*tend``),
+    ``z`` up, condensation WARMS (``+L_v``), and the column budget on
+    ``h = c_p T + L_v q_v`` closes as ``in - out - d(storage) = 0``.
+
+    ``subsidence_solve="implicit_flux"`` books a vapor sink ``dq_v -= dq_c``
+    to pair the detrained condensate, but adds NO sensible heat for that
+    vapor->liquid conversion.  Left uncorrected the column is short by
+    ``L_v * int dq_c dp/g``, i.e.
+
+    .. math:: \int (c_p\,dT + L_v\,dq_v)\,dp/g = -L_v \int dq_c\,dp/g
+
+    -- a pure COOLING bias (measured elsewhere in this package at -549 W/m^2
+    for Kain-Fritsch and -56.85 W/m^2 for Bechtold on their leaf fixtures).
+    Both of those schemes already add this exact term inline; this helper is
+    the SHARED form so Tiedtke / Zhang-McFarlane / Arakawa-Wu do not
+    re-derive it (CLAUDE.md: no duplicated numerics across schemes).
+
+    ``subsidence_solve="advective"`` is deliberately a NO-OP: that solve emits
+    the condensate WITHOUT debiting vapor, so no condensation enthalpy is owed
+    -- adding the term there would create energy from nothing AND would change
+    shipped behaviour.  The branch is a Python ``if`` on a STATIC config string
+    (CLAUDE.md feature-gating exception), not ``jnp.where``, so the advective
+    path stays byte-identical and traces no extra ops.
+
+    ``dq_c_conv_dt`` MUST be the condensate the kernel actually debited vapor
+    for -- pass the kernel's own third return value, not a separately
+    recomputed profile, or the heating and the vapor sink can drift apart.
+    """
+    if subsidence_solve not in ("advective", "implicit_flux"):
+        raise ValueError(
+            f"release_detrained_condensate_latent: unknown subsidence_solve "
+            f"{subsidence_solve!r}; expected 'advective' or 'implicit_flux'"
+        )
+    if subsidence_solve == "advective":
+        return dT_dt
+    return dT_dt + (constants.L_v / constants.c_pd) * dq_c_conv_dt
+
+
 def apply_mass_flux_kernel_implicit_flux(
     T: jax.Array,
     q_v: jax.Array,
@@ -675,18 +720,16 @@ def mass_flux_convection_from_closure(
     p_full: jax.Array,
     p_half: jax.Array,
     closure: MassFluxClosureDiagnostics,
+    dt: float,
     config: MassFluxConfig = MassFluxConfig(),
-    dt: float | None = None,
 ) -> ConvectionOutput:
     """Compute mass-flux tendencies from a supplied closure state.
 
-    ``dt`` [s] is required ONLY when ``config.subsidence_solve ==
-    "implicit_flux"`` (the conservative flux-form solve is a backward-Euler
-    step, so it needs the step size).  It stays optional so the historical
-    ``advective`` default -- which never reads it -- keeps its existing
-    call signature; the shared kernel raises a clear ValueError if
-    ``implicit_flux`` is selected without it, rather than silently
-    degrading to the leaky solve.
+    ``dt`` [s] is REQUIRED: ``config.subsidence_solve == "implicit_flux"``
+    solves a backward-Euler step and needs the step size.  It is a positional
+    requirement rather than an optional kwarg so selecting ``implicit_flux``
+    can never fail late at execution time (both production callers already
+    have ``dt`` in scope).
     """
     rho = closure.rho
     z = closure.z
@@ -744,6 +787,10 @@ def mass_flux_convection_from_closure(
         dt=dt,
         theta_implicit=config.theta_implicit,
     )
+    # Condensation latent heat of the detrained condensate, paired against the
+    # kernel's own vapor debit.  No-op on the advective default.
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # In-updraft precipitation: shared rain-split (same knob + mass proof as
     # Tiedtke/Bechtold). precip_efficiency=0 (default) => no split, byte-identical.

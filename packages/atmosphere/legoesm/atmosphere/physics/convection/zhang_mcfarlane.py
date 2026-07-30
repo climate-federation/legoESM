@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -336,6 +337,8 @@ def zhang_mcfarlane_convection(
         subsidence_solve=config.subsidence_solve,
         p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
     )
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # -- Convective momentum transport --------------------------------------
     if config.enable_cmt:
