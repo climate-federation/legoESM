@@ -283,19 +283,38 @@ PER_ELEMENT: dict[str, float] = {
     # ahmt: 0.0 (exact). ahmf (masked by fmask2d, all-4-T-neighbours-wet):
     # 1.857e-05 -- recorded here since it is the WORSE of the pair.
     "ldf_dyn coefficient": 1.857e-05,
-    # k=0 (surface) pointwise |rel| median; one-signed (Q_sr >= 0).
-    "tra_qsr (shortwave penetration)": 6.653e-05,
+    # RE-MEASURED 2026-07-30 (9286b8309 traqsr live-gdepw-ladder fix +
+    # PROBE FIX this task: coverage_rows_measure.py's measure_tra_qsr used
+    # to hardcode jacobian=ones_like(...) and never pass z_half_stretch=,
+    # so it silently measured the STATIC ladder regardless of
+    # cfg.shortwave_penetration_ladder -- the same blindness class as
+    # measure_tra_sbc's surface_flux_divisor gap above. Fixed to read
+    # cfg.shortwave_penetration_ladder and mirror dino.py:3471-3487's own
+    # dispatch exactly; self-check (forcing z_half_stretch->1.0 reproduces
+    # z_half_stretch=None bit-for-bit, max|diff|=0.0) confirms branch
+    # selection is the ONLY difference). k=0 (surface) pointwise |rel|
+    # median one-signed (Q_sr >= 0); recorded as the WORSE of {k=0-only
+    # 1.324e-05, all-35-levels 5.223e-07} per this dict's convention.
+    # OLD (static-ladder, probe-blind) value 6.653e-05 preserved for history.
+    "tra_qsr (shortwave penetration)": 1.324e-05,  # OLD (probe blind to live ladder): 6.653e-05
     # sign-changing plain-Asselin term; conditioning-robust err_norm used.
     "ssh_atf": 7.076e-07,
-    # RE-MEASURED 2026-07-30 (5e9b0eb87 live-divisor fix; see MEASUREMENTS
-    # note for full derivation): sign-changing tem/sal; err_norm
-    # (RMS-normalized) used, worse of the two (sal clears at 0.0). tem still
-    # 3 orders above BAR_PER_ELEM_EPS=1e-9 despite corr/ratio both clearing
-    # the aggregate bar -- this is a real per-element residual the mean
-    # ratio was hiding, not a measurement error (the bn2-precedent pattern
-    # this dict exists to catch). OLD (static-divisor) value 7.826e-05
-    # preserved below for history.
-    "tra_sbc": 9.657e-07,  # OLD (static divisor, superseded): 7.826e-05
+    # RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309,
+    # measure_tra_sbc re-run UNMODIFIED -- this row's probe already read
+    # cfg.surface_flux_divisor correctly; only tra_qsr's probe needed a
+    # code fix this task). tem err_norm median 1.9356521671039942e-16
+    # (1.936e-16) NOW CLEARS BAR_PER_ELEM_EPS=1e-9 -- the c_p truncation fix
+    # (9286b8309, DINOConfig.c_p -> _NEMO_CONSTANTS.c_sw on the NEMO-fidelity
+    # card) landed AFTER the 5e9b0eb87 divisor fix that produced the
+    # 9.657e-07 value below, and closes exactly the residual that value
+    # measured (tem's tau_T reads cfg.c_p; sal's trasbc.F90:137 conversion
+    # has no rcp factor and was already immune, corr/med_en=0.0 both times).
+    # sign-changing tem/sal; err_norm (RMS-normalized) used, worse of the two
+    # recorded. OLD (post-divisor-fix, pre-c_p-fix) value 9.657e-07 and
+    # OLDER (static-divisor) value 7.826e-05 both preserved below for
+    # history -- this dict is shrink-only in VALUE-STRENGTH (never relax a
+    # bar), not in provenance: both priors are kept as comments.
+    "tra_sbc": 1.936e-16,  # OLD (post-divisor-fix, pre-c_p-fix): 9.657e-07; OLDER (static divisor): 7.826e-05
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -1217,28 +1236,74 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "e1t/e2t metric difference (MAX picks a different one on a fair "
         "fraction of rows) -- a known, already-documented discretisation "
         "artifact, not a new defect. Alignment scan sharp at (0,0,0)."),
-    "tra_qsr (shortwave penetration)": (0.99999996, 0.99996836,
-        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
-        "fp64, LEGOESM_NEMO_E3T=both). BRACKETED: "
-        "stp_dump_17_traqsr_tem.bin MINUS stp_dump_14_trasbc_tem.bin "
-        "(both 'now'-registered running ts(Nrhs) accumulators, stpmlf.F90 "
-        ":393/:397) isolates tra_qsr's own increment (verified nonzero on "
-        "22/35 dumped levels -- Jerlov penetration reaches depth, unlike "
-        "tra_sbc's surface-only term). Compared to the REAL production "
-        "shortwave_penetration_tendency (jerlov_2band scheme, matching "
-        "DINO's ln_qsr_2bd) fed the SAME Q_sr_seasonal forcing "
-        "dino_Q_sr_seasonal(t_seconds=kt*dt) already used by "
-        "cancelling_rows_per_element.py's sbc row. k=0 only (comparable "
-        "to tra_sbc's own level): corr=0.99999996, |ratio|=0.99996836, "
-        "median|rel|=6.653e-05, n=9920. All 35 dumped levels: "
-        "corr=0.99999999, |ratio|=0.99996218, median|rel|=2.022e-05, "
-        "n=347200. Tuple above records the k=0 (surface, most comparable "
-        "to the tra_sbc row) numbers. NOTE: the alignment scan's zonal "
-        "(di) offset is DEGENERATE (Q_sr is latitude-only, broadcast "
-        "uniformly across longitude by construction) -- not a real "
-        "misalignment; see the tra_sbc row's genuine 2-D offset table for "
-        "the real sharp-peak evidence. DEBT, small residual, well below "
-        "the ~2e-4..1e-3 order of several other DEBT rows in this gate."),
+    "tra_qsr (shortwave penetration)": (1.00000000, 1.00000625,
+        "RE-MEASURED 2026-07-30 (#1226 probe-fix task, HEAD 9286b8309). "
+        "CONFIRMED DEFECT (fixed by 9286b8309, exposed by this task's own "
+        "probe fix): NEMO's qsr_2BD (traqsr.F90:665-712, ln_qsr_2bd=T for "
+        "DINO) evaluates the two-band absorption at the LIVE z*-stretched "
+        "gdepw(k,Kmm)=gdepw_0*(1+r3t), r3t=ssh/ht_0 "
+        "(domzgr_substitute.h90:139, domqco.F90:160), dividing by the SAME "
+        "live e3t(:,:,:,Kmm) (traqsr.F90:698). legoESM's "
+        "shortwave_penetration_tendency used the STATIC z_coord.z_half_ref "
+        "throughout until 9286b8309 added z_half_stretch= (dispatched by "
+        "DINOConfig.shortwave_penetration_ladder, 'static' default "
+        "bit-identical, 'nemo_live' on the kamm cards, dino.py:3471-3487). "
+        "PROBE GAP FOUND AND FIXED (this task, 9th instrument-blindness "
+        "instance): coverage_rows_measure.py's measure_tra_qsr hardcoded "
+        "jacobian=jnp.ones_like(...) and never passed z_half_stretch= at "
+        "all, so it silently measured the STATIC path regardless of "
+        "cfg.shortwave_penetration_ladder -- the same class of defect as "
+        "measure_tra_sbc's surface_flux_divisor blindness above. Fixed to "
+        "read cfg.shortwave_penetration_ladder, print the resolved value "
+        "(printed z_half_stretch min=0.999369 max=1.000266 on this state -- "
+        "static would be exactly 1.0 everywhere), and mirror dino.py's "
+        "dispatch exactly (same eos.nemo_r3t_stretch call, not re-derived). "
+        "SELF-CHECK (task requirement): forcing z_half_stretch->1.0 in the "
+        "nemo_live branch reproduces the static branch (z_half_stretch=None) "
+        "bit-for-bit, max|diff|=0.000e+00 -- proves branch selection is the "
+        "ONLY difference between the two ladder modes, not some other "
+        "silently-differing path. RESULT (BRACKETED: "
+        "stp_dump_17_traqsr_tem.bin MINUS stp_dump_14_trasbc_tem.bin, both "
+        "'now'-registered running ts(Nrhs) accumulators, stpmlf.F90 "
+        ":393/:397, isolates tra_qsr's own increment; nonzero on 22/35 "
+        "dumped levels -- Jerlov penetration reaches depth, unlike "
+        "tra_sbc's surface-only term; same Q_sr_seasonal forcing "
+        "dino_Q_sr_seasonal(t_seconds=kt*dt) as cancelling_rows_per_"
+        "element.py's sbc row). All 35 dumped levels: corr 0.99999999 -> "
+        "1.00000000 (0.9999999998728235), |ratio| 0.99996218 -> 1.00000625 "
+        "(1.0000062512060126), median|rel| 2.022e-05 -> 5.223e-07 (~39x). "
+        "k=0 only (comparable to tra_sbc's own level): corr 0.99999996 -> "
+        "1.00000000 (0.9999999996617172), |ratio| 0.99996836 -> 1.00000625 "
+        "(1.0000062513284507), median|rel| 6.653e-05 -> 1.324e-05 (~5x). "
+        "These reproduce, to the last reported digit, the numbers already "
+        "cited in the task brief (all-levels median|rel| 5.223e-07, ratio "
+        "1.00000625, corr 1.00000000) -- NO reconciliation needed, both "
+        "measurements agree. Tuple above records the all-35-levels numbers "
+        "(corr, ratio) since they are the row's primary metric; per-element "
+        "PER_ELEMENT entry records the WORSE of the two per-element medians "
+        "(k=0's 1.324e-05), per this dict's convention. NOTE: the alignment "
+        "scan's zonal (di) offset is DEGENERATE (Q_sr is latitude-only, "
+        "broadcast uniformly across longitude by construction) -- not a "
+        "real misalignment; see the tra_sbc row's genuine 2-D offset table "
+        "for the real sharp-peak evidence. STILL DEBT under BAR_PER_ELEM_EPS "
+        "(1.324e-05 / 5.223e-07, both far above 1e-9) despite corr/ratio "
+        "both clearing the aggregate bar -- exactly the mechanism "
+        "PER_ELEMENT exists to catch. PLAUSIBLE (not measured) lead for the "
+        "remaining tail (all-levels p99 5.220e-04, worse than the median by "
+        "~1000x, concentrated at 68.4% near-zero cells per the printed "
+        "near0_frac): legoESM's shortwave_penetration_tendency applies ONE "
+        "two-band exponential profile uniformly over all levels, while "
+        "NEMO's qsr_2BD splits the profile at a shallow-water level index "
+        "nk0 (dz_o2 threshold from Jerlov absorption coefficients) with "
+        "per-level wmask gating (traqsr.F90:~670-690) -- a discretization "
+        "difference pre-existing and UNCHANGED by this fix (it only "
+        "corrected the depth LADDER, not the per-level profile-splitting "
+        "logic), and the natural next target if this row stays DEBT. Prior "
+        "(static-ladder, probe-blind) tuple: corr=0.99999996/"
+        "ratio=0.99996836 (k=0), corr=0.99999999/ratio=0.99996218 "
+        "(all-levels); median|rel| 6.653e-05 (k=0) / 2.022e-05 (all-"
+        "levels). State: RUN_GDB kt=57601, e3t=both, fp64, "
+        "DINO_00057600_restart.nc."),
     "ssh_atf":                       (1.0, 0.99999995,
         "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
         "fp64, LEGOESM_NEMO_E3T=both). DIRECT bracket: "
@@ -1277,9 +1342,41 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "err_norm median 7.076e-07 EXACTLY (identical to 4 sig figs in the "
         "err_norm). UNCHANGED, confirmed by direct re-measurement, not "
         "assumed from the (independently-retracted) emp-term reasoning."),
-    "tra_sbc":                       (1.00000000, 1.00000100,
-        "RE-MEASURED 2026-07-30 (#1226 static-vs-live-divisor task, HEAD "
-        "5e9b0eb87). CONFIRMED DEFECT (fixed by 5e9b0eb87): legoESM's DINO "
+    "tra_sbc":                       (1.00000000, 1.00000000,
+        "RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309, "
+        "coverage_rows_measure.py's measure_tra_sbc re-run UNMODIFIED at the "
+        "current HEAD -- this row's own probe already read "
+        "cfg.surface_flux_divisor correctly; only measure_tra_qsr needed a "
+        "code fix this task, see that row): tem corr=1.00000000, |x|ratio="
+        "0.9999999999999998 (rounds to 1.00000000), ratio_mean=1.0 exactly; "
+        "err_norm median 1.9356521671039942e-16 (1.936e-16) -- matches the "
+        "task brief's quoted post-fix number to the last digit, and is now "
+        "ALSO BELOW BAR_PER_ELEM_EPS=1e-9 (see PER_ELEMENT[\"tra_sbc\"] "
+        "below, updated to this same 1.936e-16 value) -- tra_sbc is AT BAR "
+        "on BOTH the aggregate and per-element gates. This SUPERSEDES the "
+        "1.00000100 tuple this note previously carried: that number was "
+        "measured at 5e9b0eb87, BEFORE 9286b8309's c_p truncation fix "
+        "(DINOConfig.c_p 3991.86 -> _NEMO_CONSTANTS.c_sw=3991.86795711963 on "
+        "the NEMO-fidelity card); tem's own tau_T is built from cfg.c_p "
+        "(tau_from_flux_coefficient), so the c_p fix moves tem's ratio AND "
+        "its per-element err_norm together -- exactly the reconciled "
+        "explanation for BOTH the 1.00000100->1.00000000 ratio shift and "
+        "the 9.657e-07->1.936e-16 per-element shift (not a new measurement "
+        "error -- verified by reading dino.py's own tau_T call site, which "
+        "reads cfg.c_p unconditionally, and by tra_sbc_tem_piece_decompose."
+        "py's independent reconstruction cited in the RETRACTED/FOLLOW-UP "
+        "paragraph further down, which already showed the SAME residual "
+        "moving 9.657e-07->0.0 when NEMO's exact rcp is substituted for "
+        "cfg.c_p). RECONCILIATION (Rule 1e): the two prior numbers "
+        "legitimately differ because a REAL production fix (9286b8309) "
+        "landed between them, not because either measurement was wrong. sal "
+        "unaffected by c_p (no rcp factor in trasbc.F90:137), corr="
+        "0.9999999999999998/ratio=1.0, med_en=0.0 as before -- both tem and "
+        "sal now clear err_norm=0.0-to-roundoff. PRIOR NOTE (5e9b0eb87, "
+        "kept below for full history of the static-vs-live-divisor fix "
+        "itself -- superseded on the corr/ratio/per-element NUMBERS only, "
+        "not on the divisor-fix mechanism, which is unchanged): "
+        "CONFIRMED DEFECT (fixed by 5e9b0eb87): legoESM's DINO "
         "surface forcing divided the combined non-solar flux by the STATIC "
         "z_coord.dz_ref[0], while NEMO divides by the LIVE top-cell "
         "thickness e3t(:,:,1,Kmm)=e3t_0*(1+r3t), r3t=ssh/ht_0 "
@@ -1329,17 +1426,22 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "reproduce, to the last reported digit, the numbers already cited "
         "in the task brief (tem ratio 1.00000100; sal ratio 1.00000000, "
         "per-element rel diff 0.0) -- NO reconciliation needed, both "
-        "measurements agree. PER-ELEMENT BAR (why this is still DEBT, not "
-        "AT BAR, despite corr/ratio both clearing BAR_CORR/BAR_RATIO_EPS "
-        "for tem): tem's own per-element err_norm median is 9.657e-07 "
+        "measurements agree. PER-ELEMENT BAR AS OF 5e9b0eb87 (this paragraph "
+        "describes the STATE AT THAT COMMIT, since superseded -- see the "
+        "9286b8309 re-measurement note above this one, which is current): "
+        "tem's own per-element err_norm median was 9.657e-07 "
         "(p99 1.769e-06, max 2.324e-06) -- three orders above "
-        "BAR_PER_ELEM_EPS=1e-9, so classify() correctly returns DEBT for "
-        "tem via the per-element gate, exactly the mechanism this gate's "
-        "PER_ELEMENT dict was built to catch (the bn2 precedent: aggregate "
-        "ratio can sit at roundoff while pointwise error does not). sal DOES "
-        "clear per-element (0.0). The recorded tuple is tem's (the worse of "
-        "the two, matching this gate's convention of recording the worst "
-        "sub-metric). OLD (STATIC-divisor, now-superseded, per-element "
+        "BAR_PER_ELEM_EPS=1e-9, so classify() correctly returned DEBT for "
+        "tem via the per-element gate at that commit, exactly the mechanism "
+        "this gate's PER_ELEMENT dict was built to catch (the bn2 "
+        "precedent: aggregate ratio can sit at roundoff while pointwise "
+        "error does not). sal DOES clear per-element (0.0). AS OF 9286b8309 "
+        "(current), tem's per-element err_norm median is 1.936e-16 (the c_p "
+        "fix closed the same residual this paragraph describes) and tra_sbc "
+        "is AT BAR on both tem and sal -- PER_ELEMENT[\"tra_sbc\"] above has "
+        "been updated accordingly; this paragraph is retained for the "
+        "per-element derivation method, not for its now-stale DEBT verdict. "
+        "OLD (STATIC-divisor, now-superseded, per-element "
         "measured at the SAME time) tuple: corr=0.99999985/ratio=0.99993829 "
         "(tem), corr=0.99999999/ratio=0.99995924 (sal); tem per-element "
         "err_norm median 7.826e-05, sal 4.521e-05 -- both DEBT. Method "
@@ -1376,7 +1478,14 @@ MEASURED_AT: dict[str, str] = {
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
     # 2026-07-30 coverage_rows_measure.py (this task) -- b7872175b HEAD.
     "ldf_dyn coefficient": "b7872175b",
-    "tra_qsr (shortwave penetration)": "b7872175b",
+    # tra_qsr RE-MEASURED at 9286b8309 (this probe-fix task): the STATIC-
+    # ladder number recorded at b7872175b did not reflect DINOConfig.
+    # shortwave_penetration_ladder="nemo_live" (a probe gap in
+    # coverage_rows_measure.py's measure_tra_qsr, which never passed
+    # z_half_stretch= -- see the MEASUREMENTS note). Re-measured with the
+    # fix's own eos.nemo_r3t_stretch live ladder threaded in, matching
+    # production's dino.py:3471-3487 dispatch exactly.
+    "tra_qsr (shortwave penetration)": "9286b8309",
     # ssh_atf RE-VERIFIED (this task, 5e9b0eb87): the plain-Asselin-term
     # numbers are UNCHANGED -- ssh_atf has no dependence on
     # DINOConfig.surface_flux_divisor (that's a trasbc.F90 tra_sbc-only
@@ -1384,14 +1493,17 @@ MEASURED_AT: dict[str, str] = {
     # confirmed algebraically zero for DINO, see coverage_rows_measure.py's
     # RETRACTED note) -- kept at its original 2026-07-30 measurement commit.
     "ssh_atf": "b7872175b",
-    # tra_sbc RE-MEASURED at 5e9b0eb87 (this task): the STATIC-divisor
-    # number recorded at b7872175b did not reflect DINOConfig.
+    # tra_sbc RE-MEASURED at 9286b8309 (this probe-fix task; the divisor fix
+    # itself landed at 5e9b0eb87, but the c_p truncation fix that ALSO moves
+    # this row's numbers landed later, at 9286b8309 -- the number recorded
+    # here reflects that later commit's code, which is current HEAD). The
+    # STATIC-divisor number recorded at b7872175b did not reflect DINOConfig.
     # surface_flux_divisor="nemo_live" (a probe gap in coverage_rows_
-    # measure.py's measure_tra_sbc, which never reads that config field --
+    # measure.py's measure_tra_sbc, which never read that config field --
     # see the MEASUREMENTS note). Re-measured with the fix's own
     # eos.nemo_r3t_stretch live divisor threaded in, matching production's
-    # dino.py:3384-3391 dispatch exactly.
-    "tra_sbc": "5e9b0eb87",
+    # dino.py:3384-3391 dispatch exactly, AND with the c_p fix already live.
+    "tra_sbc": "9286b8309",
     # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
     # the commit that introduced _nemo_native_active_3d.
     "ldf_slp wslpi": "7816b514e",

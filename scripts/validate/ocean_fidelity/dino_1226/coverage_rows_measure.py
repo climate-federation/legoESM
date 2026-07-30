@@ -827,18 +827,25 @@ def measure_tra_sbc(st) -> dict:
           "  FOLLOW-UP (this comment's own candidate list -- RESOLVED): the "
           "MLF-divisor candidate was confirmed and fixed (this file's own "
           "cfg.surface_flux_divisor dispatch, live-e3t via eos.nemo_r3t_"
-          "stretch) -- see this row's tuples above, now tem "
-          "corr=1.00000000/ratio=1.00000100, sal corr=1.00000000/"
-          "ratio=1.00000000. tem's REMAINING per-element err_norm (median "
-          "9.657e-07, BAR METRIC -> NO) is a SEPARATE, smaller-order cause: "
-          "DINOConfig.c_p=3991.86 (dino.py) truncates NEMO's own "
-          "eosbn2.F90:1899 rcp=3991.86795711963_wp at 6 sig figs (relative "
-          "1.9933e-06); salinity's own trasbc.F90:137 conversion has no rcp "
-          "factor and is structurally immune, which is exactly why sal "
-          "clears to err_norm=0.0 while tem does not. See "
-          "tra_sbc_tem_piece_decompose.py (CONFIRMED: reconstructing tem's "
-          "dump from NEMO's own qns/sbc_hc_b with NEMO's exact rcp gives "
-          "err_norm=0.0; with cfg.c_p gives 9.657e-07 -- the SAME residual).")
+          "stretch) -- see this row's tuples above. AT 5e9b0eb87 (divisor "
+          "fix only, BEFORE the c_p fix below) this gave tem "
+          "corr=1.00000000/ratio=1.00000100 with a REMAINING per-element "
+          "err_norm median 9.657e-07 (BAR METRIC -> NO), traced to a "
+          "SEPARATE, smaller-order cause: DINOConfig.c_p=3991.86 (dino.py) "
+          "truncating NEMO's own eosbn2.F90:1899 rcp=3991.86795711963_wp at "
+          "6 sig figs (relative 1.9933e-06); salinity's own trasbc.F90:137 "
+          "conversion has no rcp factor and is structurally immune, which "
+          "is exactly why sal cleared to err_norm=0.0 while tem did not. "
+          "See tra_sbc_tem_piece_decompose.py (CONFIRMED: reconstructing "
+          "tem's dump from NEMO's own qns/sbc_hc_b with NEMO's exact rcp "
+          "gives err_norm=0.0; with cfg.c_p gave 9.657e-07 -- the SAME "
+          "residual). FIXED at 9286b8309 (DINOConfig.c_p -> "
+          "_NEMO_CONSTANTS.c_sw on the NEMO-fidelity card): re-running THIS "
+          "SAME probe unmodified at 9286b8309 gives tem corr=1.00000000/"
+          "ratio=1.00000000, per-element err_norm median 1.936e-16 -- both "
+          "the aggregate ratio and the per-element residual this paragraph "
+          "traced are now at roundoff; the printed numbers above reflect "
+          "whatever HEAD this script is run at.")
     return dict(tem=r_tem, sal=r_sal)
 
 
@@ -870,13 +877,68 @@ def measure_tra_qsr(st) -> dict:
     Q_sr_1d = np.asarray(dino_Q_sr_seasonal(jnp.asarray(lat_deg_1d), t_seconds, cfg))
     Q_sr_2d = jnp.asarray(np.broadcast_to(Q_sr_1d[:, None], (n_lat, n_lon)))
 
+    # #1226 INSTRUMENT-DEFECT FIX (9th of this campaign): this probe used to
+    # hardcode jacobian=ones_like(...) and never pass z_half_stretch, so it
+    # silently measured the STATIC ladder regardless of cfg -- the same class
+    # of blindness as measure_tra_sbc's surface_flux_divisor gap above. Mirror
+    # dino.py's own dispatch EXACTLY (dino.py:3471-3487): read
+    # cfg.shortwave_penetration_ladder, and on "nemo_live" compute the SAME
+    # eos.nemo_r3t_stretch factor (not re-derived) and thread it through
+    # z_half_stretch=.
     sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
+    ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
+    print(f"  cfg.shortwave_penetration_ladder = {ladder!r}  (resolved config "
+          "value actually driving this measurement -- dino.py:3471 dispatch)")
+    if ladder == "static":
+        z_half_stretch = None
+    elif ladder == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        z_half_stretch = nemo_r3t_stretch(
+            br.z_coord, br.state.eta.data, br.state.H_bathy.data)
+        print(f"  resolved z_half_stretch: min={float(jnp.min(z_half_stretch)):.6f} "
+              f"max={float(jnp.max(z_half_stretch)):.6f} "
+              "(static ladder would be exactly 1.0 everywhere)")
+    else:
+        raise ValueError(
+            f"Unknown DINOConfig.shortwave_penetration_ladder {ladder!r}: "
+            "expected 'static' or 'nemo_live'.")
     dT_dt_sw = np.asarray(shortwave_penetration_tendency(
         sw_down=Q_sr_2d, z_coord_dz_ref=br.z_coord.dz_ref,
         z_coord_z_half_ref=br.z_coord.z_half_ref,
         jacobian=jnp.ones_like(br.state.eta.data), config=sw_cfg,
         rho_0=cfg.rho_0, c_sw=cfg.c_p,
+        z_half_stretch=z_half_stretch,
     ))
+
+    # SELF-CHECK (task requirement): forcing the live stretch to 1.0 (as if
+    # r3t==0) must reproduce the STATIC branch bit-for-bit -- proves branch
+    # selection is the ONLY difference between the two ladder modes (mirrors
+    # measure_tra_sbc's analogous r3t->0 self-check above).
+    if ladder == "nemo_live":
+        dT_dt_sw_forced_static = np.asarray(shortwave_penetration_tendency(
+            sw_down=Q_sr_2d, z_coord_dz_ref=br.z_coord.dz_ref,
+            z_coord_z_half_ref=br.z_coord.z_half_ref,
+            jacobian=jnp.ones_like(br.state.eta.data), config=sw_cfg,
+            rho_0=cfg.rho_0, c_sw=cfg.c_p,
+            z_half_stretch=jnp.ones_like(z_half_stretch),
+        ))
+        dT_dt_sw_static = np.asarray(shortwave_penetration_tendency(
+            sw_down=Q_sr_2d, z_coord_dz_ref=br.z_coord.dz_ref,
+            z_coord_z_half_ref=br.z_coord.z_half_ref,
+            jacobian=jnp.ones_like(br.state.eta.data), config=sw_cfg,
+            rho_0=cfg.rho_0, c_sw=cfg.c_p,
+            z_half_stretch=None,
+        ))
+        d_forced = float(np.max(np.abs(dT_dt_sw_forced_static - dT_dt_sw_static)))
+        print(f"  [self-check] forcing z_half_stretch->1.0 (nemo_live branch) "
+              f"vs z_half_stretch=None (static branch): max|diff|={d_forced:.3e} "
+              "(want 0.0 -- proves the ONLY difference between 'static' and "
+              "'nemo_live' is the stretch branch, not some other silently-"
+              "differing path)")
+        assert d_forced == 0.0, (
+            "'static' and 'nemo_live' (stretch forced to 1.0) differ by more "
+            "than the ladder branch -- controlled-comparison premise VIOLATED")
+
     nk_dump = tem_qsr_only_nemo.shape[-1]
     dT_dt_sw = dT_dt_sw[..., :nk_dump]
     mask3 = np.broadcast_to(tmask2d[:, :, None], dT_dt_sw.shape)
