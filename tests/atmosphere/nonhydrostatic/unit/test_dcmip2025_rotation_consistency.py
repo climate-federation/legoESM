@@ -50,17 +50,32 @@ def _max_f(grid):
 
 def test_tc2_is_rotating_and_tc3_is_not():
     """Case definitions, not incidental defaults."""
-    assert TC2_PARAMS.get("rotating", True) is True, (
+    # Require the key EXPLICITLY: ``.get(..., True)`` would pass if the
+    # entry were deleted, silently reverting the contract (codex r4 P2).
+    assert "rotating" in TC2_PARAMS and TC2_PARAMS["rotating"] is True, (
         "DCMIP-2025 TC2 is a ROTATING small planet (radius/X, Omega*X). "
         "The FV3 HIWPP Schaer cases that zero f0/fC are a different test.")
-    assert TC3_PARAMS.get("rotating", True) is False, (
+    assert "rotating" in TC3_PARAMS and TC3_PARAMS["rotating"] is False, (
         "DCMIP-2025 TC3 (squall line) specifies no Coriolis.")
+
+
+def _rel_tol(grid):
+    """Tolerance matched to the grid's own dtype.
+
+    ``f`` is cast to the grid dtype on construction, so a float32 grid
+    cannot support an fp64-tight comparison (this test first failed for
+    exactly that reason, not for a physics reason).
+    """
+    import numpy as _np
+    return 1e-12 if _np.dtype(grid.f.dtype).itemsize >= 8 else 1e-6
 
 
 def test_small_earth_scaling_applies_omega_times_x():
     grid = create_cubed_sphere(8)
     scaled = apply_small_earth_scaling(grid, 20.0)
-    assert _max_f(scaled) == pytest.approx(20.0 * _max_f(grid), rel=1e-10)
+    assert _max_f(grid) > 0.0                      # control: probe can fail
+    assert _max_f(scaled) == pytest.approx(20.0 * _max_f(grid),
+                                           rel=_rel_tol(grid))
     assert float(scaled.radius) == pytest.approx(constants.R_earth / 20.0)
 
 
@@ -135,3 +150,55 @@ def test_spectral_matrix_branch_reads_case_rotation():
         "spectral SpectralNHConfig no longer receives the case rotation")
     assert re.search(r'_rotating = bool\(_TC3_P\.get\("rotating"', text), (
         "spectral tc3 branch no longer reads TC3_PARAMS['rotating']")
+
+
+@pytest.mark.parametrize("case,factor,rotating", [("tc2", 20.0, True),
+                                                  ("tc3", 60.0, False)])
+def test_mpas_initialiser_honours_case_rotation(case, factor, rotating,
+                                                monkeypatch):
+    """The MPAS arms must build their mesh from the case's rotation too.
+
+    Their initialisers previously hard-coded omega, so an explicit
+    override was silently ignored (codex r3 P2).  Capture the omega
+    actually handed to ``create_voronoi_mesh`` -- and assert BOTH the
+    default and an override, so restoring the hard-coded value goes red
+    either way.
+    """
+    import importlib
+    mod = importlib.import_module(
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025."
+        f"test_case_{'2' if case == 'tc2' else '3'}_mpas")
+
+    seen: dict = {}
+    real = mod.create_voronoi_mesh
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "create_voronoi_mesh", spy)
+
+    from legoesm.grids.voronoi import create_voronoi_mesh as _cvm
+    base = _cvm(2)
+    init = getattr(mod, f"dcmip25_{case}_init_mpas")
+
+    # default
+    try:
+        init(base, n_levels=10)
+    except Exception:
+        pass
+    assert "omega" in seen, f"{case} MPAS mesh built without an explicit omega"
+    expected = constants.Omega * factor if rotating else 0.0
+    assert seen["omega"] == pytest.approx(expected), (
+        f"{case} MPAS default rotation disagrees with the cube/spectral arms")
+
+    # explicit override must be HONOURED, not hard-coded past
+    seen.clear()
+    try:
+        init(base, n_levels=10, params={"rotating": not rotating})
+    except Exception:
+        pass
+    flipped = 0.0 if rotating else constants.Omega * factor
+    assert seen.get("omega") == pytest.approx(flipped), (
+        f"{case} MPAS initialiser ignored an explicit rotating override "
+        "(omega is hard-coded)")
