@@ -29,6 +29,8 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -61,7 +63,11 @@ _SOIL_TOP_DZ_HALF_MIN = 1e-4
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import compute_thermal_conductivity, solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    compute_heat_capacity,
+    compute_thermal_conductivity,
+    solve_soil_thermal,
+)
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
@@ -86,6 +92,35 @@ from legoesm.land.snow_bands import (
     band_precip_snow,
     step_snow_bands,
 )
+
+
+class LandStepDiagnostics(NamedTuple):
+    """Per-step budget terms that close the land energy and water budgets.
+
+    The taped ``Rnet``/``shflx``/``lhflx`` alone CANNOT close the surface energy
+    budget, because ``SurfaceFluxOutput.G_soil`` is *defined* as the residual
+    ``Rnet - SH - LH`` and the snow phase change is then removed from it:
+
+        Rnet - SH - LH  ==  g_soil + melt_energy
+
+    so a diagnosed "residual" of ``Rnet - SH - LH`` is the ground heat flux
+    BEFORE melt, not an energy leak.  Taping ``g_soil`` and ``melt_energy``
+    separately makes the identity checkable instead of inferable.
+
+    Likewise the water budget needs the snow-phase fluxes: the ``ET`` tape is
+    ``lhflx / L_v``, which is NOT the mass flux over snow (where the latent heat
+    carries ``L_s``), and melt moves mass from the pack into the soil without
+    appearing in any existing tape variable.
+
+    All fluxes are per unit GROUND area.  Mass fluxes are rates [kg m-2 s-1],
+    positive in the direction named; energies [W m-2].
+    """
+    soil_heat: jnp.ndarray     # column sensible heat content rel. 0 K [J m-2]
+    g_soil: jnp.ndarray        # heat flux INTO the soil column, post-phase-change
+    melt_energy: jnp.ndarray   # energy consumed by melt (+) / released by refreeze (-)
+    snowmelt: jnp.ndarray      # snow + ablation-ice melt leaving the pack as liquid
+    refreeze: jnp.ndarray      # rain-on-snow refrozen in the pack (mass, +)
+    sublimation: jnp.ndarray   # pack -> vapour (+ = mass leaving; < 0 = frost deposition)
 
 
 def _get(lp, name: str, fallback):
@@ -191,9 +226,33 @@ def step_multilayer_land_with_diagnostics(
     The 4th element is the surface scheme's ``SurfaceFluxOutput`` with all
     scheme-specific diagnostic fields populated (``Tf_Sun``, ``Tf_Sh``,
     ``gs_Sun``, ``n_iters``, ``f_veg`` for the canopy scheme; the common
-    flux / radiation / state fields for both schemes).  Intended for
-    offline diagnostic runs — no performance cost beyond the extra pytree
-    allocation.
+    flux / radiation / state fields for both schemes).  Intended for offline
+    diagnostic runs — no performance cost beyond the extra pytree allocation.
+    For the energy/water budget-closure terms use
+    :func:`step_multilayer_land_with_budget`, which returns those as a 5th element.
+    """
+    return _step_multilayer_land_impl(
+        state, forcing, config, U_min, dt,
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)[:4]
+
+
+def step_multilayer_land_with_budget(
+    state: MultiLayerLandState,
+    forcing: AtmToSurface,
+    config: MultiLayerLandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None = None,
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+    land_params=None,
+):
+    """Like :func:`step_multilayer_land_with_diagnostics` plus a 5th element:
+    a :class:`LandStepDiagnostics` with the ENERGY and WATER budget-closure terms.
+
+    Separate from the 4-tuple variant on purpose — that signature has many call
+    sites (EC-site driver, canopy validators, tests) which have no use for the
+    budget terms, and widening it would churn all of them for no benefit.
     """
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
@@ -278,7 +337,7 @@ def step_multilayer_land(
     :func:`step_multilayer_land_with_diagnostics` to also receive the raw
     ``SurfaceFluxOutput`` for diagnostic inspection.
     """
-    new_state, response, carbon_new, _surface_out = _step_multilayer_land_impl(
+    new_state, response, carbon_new, _surface_out, _diags = _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
     return new_state, response, carbon_new
@@ -797,6 +856,10 @@ def _step_multilayer_land_impl(
         refreeze = jnp.zeros_like(snow_new)
         blow_subl = jnp.zeros_like(snow_new)
         cap_runoff = jnp.zeros_like(snow_new)
+    # Defined on EVERY branch: the multilayer snow column handles fusion inside
+    # the pack (enthalpy method), so its explicit melt_energy term is zero and the
+    # identity Rnet-SH-LH == g_soil + melt_energy still holds there.
+    melt_energy = jnp.zeros_like(G_surface)
     if not _use_snow_column:
         # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME
         # L_f; rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation
@@ -1153,7 +1216,31 @@ def _step_multilayer_land_impl(
         salt_flux=jnp.zeros(ncol),
     )
 
-    return new_state, response, carbon_state_new, surface_out
+    # Column SENSIBLE heat content, so the soil energy budget is closeable:
+    #     d(soil_heat)/dt  ==  G + Q_geothermal  (+ latent freeze/thaw exchange)
+    # A run where G is persistently non-zero while soil_heat is flat is losing
+    # energy somewhere between the surface flux and the column -- which no
+    # combination of the EXISTING tape variables could have revealed.
+    # Sensible only (uses the non-apparent C), so the freeze/thaw LATENT term
+    # shows up as the gap between d(soil_heat)/dt and G rather than being hidden
+    # inside it.
+    _C_sens = compute_heat_capacity(theta_new, config.hydraulics, config.thermal)
+    soil_heat = jnp.sum(_C_sens * grid.dz[None, :] * T_soil_new, axis=-1)
+
+    step_diags = LandStepDiagnostics(
+        soil_heat=soil_heat,
+        # G_surface at this point is the flux handed to the soil thermal solve:
+        # the surface residual minus the phase-change sink (single/banded), or the
+        # snow-column base flux + drained meltwater enthalpy (column).
+        g_soil=G_surface,
+        melt_energy=melt_energy,
+        # snow_melt / ice_melt / refreeze are MASSES over the step -> rates.
+        snowmelt=(snow_melt + ice_melt) / dt,
+        refreeze=refreeze / dt,
+        # sublim_actual is already a rate; blow_subl (blowing-snow) likewise.
+        sublimation=sublim_actual + blow_subl,
+    )
+    return new_state, response, carbon_state_new, surface_out, step_diags
 
 
 def init_multilayer_land_state(

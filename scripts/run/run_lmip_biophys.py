@@ -63,7 +63,7 @@ from legoesm.land.stomata import StomataConfig
 from legoesm import constants
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
-    step_multilayer_land_with_diagnostics,
+    step_multilayer_land_with_budget,
     init_multilayer_land_state,
 )
 from legoesm.land.slab_land import step_land
@@ -191,6 +191,23 @@ _VAR_META = {
                        "units": "W m-2", "standard_name": "surface_upward_latent_heat_flux"},
     "Rnet":           {"long_name": "net radiation into the surface (SW absorbed + net LW)",
                        "units": "W m-2", "standard_name": "surface_net_downward_radiative_flux"},
+    "G":              {"long_name": "ground heat flux into the soil column "
+                                    "(post-phase-change; Rnet-SH-LH = G + melt_energy)",
+                       "units": "W m-2", "standard_name": "downward_heat_flux_at_ground_level_in_soil"},
+    "soil_heat":      {"long_name": "column sensible heat content of the soil "
+                                    "(relative to 0 K); d/dt closes against G",
+                       "units": "J m-2"},
+    "melt_energy":    {"long_name": "energy consumed by snow/ice melt "
+                                    "(negative = refreeze release)", "units": "W m-2"},
+    "snowmelt":       {"long_name": "snow + ablation-ice melt leaving the pack as liquid",
+                       "units": "kg m-2 s-1", "standard_name": "surface_snow_melt_flux"},
+    "refreeze":       {"long_name": "rain-on-snow refrozen within the pack",
+                       "units": "kg m-2 s-1"},
+    "sublimation":    {"long_name": "snowpack sublimation (negative = frost deposition)",
+                       "units": "kg m-2 s-1", "standard_name": "surface_snow_sublimation_flux"},
+    "soil_water":     {"long_name": "total column soil water (all layers, liquid+ice)",
+                       "units": "kg m-2", "standard_name": "soil_moisture_content"},
+    "surface_water":  {"long_name": "surface ponding store", "units": "kg m-2"},
     "runoff":         {"long_name": "total runoff (surface + subsurface freshwater flux)",
                        "units": "kg m-2 s-1", "standard_name": "runoff_flux"},
     "precip":         {"long_name": "total precipitation rate", "units": "kg m-2 s-1",
@@ -452,7 +469,7 @@ def run(args) -> int:
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
         # computed, so this adds no cost.
-        step_fn = step_multilayer_land_with_diagnostics
+        step_fn = step_multilayer_land_with_budget
     elif args.land_mode == "slab":
         base_cfg = LandConfig(surface_scheme=surf)
         step_fn = step_land
@@ -616,6 +633,14 @@ def run(args) -> int:
         f"{t.name}(freq={t.freq},avg={t.average},vars={len(t.vars)})" for t in tape_specs))
 
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
+    # Layer thicknesses [m] for the total-column soil-water integral.  Taken from
+    # the SAME SoilGridConfig the model integrates on, so the diagnostic cannot
+    # desync from the state it is summing.
+    if is_multilayer:
+        from legoesm.land.soil_grid import make_soil_grid
+        _soil_dz = jnp.asarray(make_soil_grid(config.soil_grid).dz)
+    else:
+        _soil_dz = None
 
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
@@ -623,10 +648,11 @@ def run(args) -> int:
         forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
-        # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
-        # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
+        # Multilayer uses the BUDGET variant (5-tuple) so surface_out.gpp and the
+        # energy/water budget-closure terms are reachable; slab keeps the 3-tuple.
+        # ``is_multilayer`` is static.
         if is_multilayer:
-            new_state, resp, _, surf_out = step_fn(
+            new_state, resp, _, surf_out, budget = step_fn(
                 state, forcing_t, config, U_MIN, dt,
                 lat=lat_rad, land_params=land_params_t, doy=doy_t)
         else:
@@ -634,6 +660,7 @@ def run(args) -> int:
                 state, forcing_t, config, U_MIN, dt,
                 lat=lat_rad, land_params=land_params_t, doy=doy_t)
             surf_out = None
+            budget = None
         # GPP [gC/m2/day]: the canopy's gross primary production (surface_out.gpp,
         # gC/m2/s).  None for schemes that don't produce it (simple_seb biophysics)
         # -> reported as 0.  ET [mm/day]: latent-heat-equivalent evapotranspiration
@@ -676,10 +703,32 @@ def run(args) -> int:
             values["T_soil_top"] = new_state.T_soil[:, 0]
             values["theta_soil_top"] = new_state.theta_soil[:, 0]
             values["snow_depth"] = new_state.snow_depth
+            # --- budget-closure terms ---------------------------------------
+            # ENERGY: Rnet - SH - LH == G + melt_energy is an IDENTITY (G_soil is
+            # defined as that residual, then the phase-change sink is removed), so
+            # taping both makes the surface budget checkable rather than inferable.
+            values["G"] = budget.g_soil
+            values["soil_heat"] = budget.soil_heat
+            values["melt_energy"] = budget.melt_energy
+            # WATER: total column storage, so P - ET - R - dS/dt is closeable.
+            # theta_soil_top alone is useless for this — it is the TOP layer only
+            # (2.9 mm of a 3 m column under the AMIP-parity grid).
+            values["soil_water"] = (
+                jnp.sum(new_state.theta_soil * _soil_dz[None, :], axis=-1)
+                * constants.rho_water)
+            values["surface_water"] = (
+                _ZEROS if new_state.surface_water is None
+                else new_state.surface_water * constants.rho_water)
+            values["snowmelt"] = budget.snowmelt
+            values["refreeze"] = budget.refreeze
+            values["sublimation"] = budget.sublimation
         else:
             values["T_soil_top"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
+            for _k in ("G", "soil_heat", "melt_energy", "soil_water", "surface_water",
+                       "snowmelt", "refreeze", "sublimation"):
+                values[_k] = _ZEROS
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal
