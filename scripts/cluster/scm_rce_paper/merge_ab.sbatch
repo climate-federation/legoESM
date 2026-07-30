@@ -18,12 +18,17 @@ export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ARM=${ARM:-as_shipped}
 REF=/burg-archive/glab/users/pg2328/legoESM/results/rcemip1_n128_ocean
-OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/arms_ab_${ARM}
+# OUTBASE lets the substep-control arm merge ITS OWN directory rather than
+# the default one -- merging the wrong outdir would silently publish the
+# default-substep results under the control's name.
+OUTBASE=${OUTBASE:-arms_ab}
+OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/${OUTBASE}_${ARM}
 echo "KERNEL_ARM=$ARM  OUT=$OUT"
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --reference-dir $REF --outdir $OUT --subsidence-solve $ARM \
   --days 100 --dt 600 --analysis-days 5 --last-reference-files 5 \
   --radiation rrtmgp --tune-evals 48 --tune-seed 20260705 \
+  --scm-convection-substeps ${SUBSTEPS:-10} \
   --merge-only 2>&1 | tail -60
 echo "merge rc=${PIPESTATUS[0]}"
 echo "=== ranking table ==="; sed -n '1,80p' $OUT/summary.md 2>&1

@@ -283,6 +283,46 @@ Caveats to report with any arm-(c) ranking:
 
 ---
 
+## 4b. A confound in the campaign harness itself (found late, MUST be reported)
+
+**CONFIRMED** by direct read of `scripts/run/run_scm_rce_campaign.py:149-156`
+and `:657-659`:
+
+```python
+SCM_CONVECTION_SUBSTEP_SCHEMES = (
+    "dca", "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+)
+...
+    if convection_scheme in SCM_CONVECTION_SUBSTEP_SCHEMES:
+        return requested_substeps
+    return 1
+```
+
+The SCM sub-steps convection for **6 of the 10 schemes only**. At the pinned
+`--dt 600` with the default `--scm-convection-substeps 10`, those six run
+convection on a **60 s** effective step while `sbm`, `kuo`, `mass_flux` and
+`edmf` run it on **600 s** — a 10× difference in the convective time step,
+which for a CAPE-relaxation closure directly changes how much CAPE is consumed
+per outer step.
+
+This is **not** something the kernel arms control for, and it is not something
+this branch introduced — it is a pre-existing property of the shared harness.
+It is nevertheless an uncontrolled per-scheme numerical difference sitting
+underneath any ranking produced by this campaign, so:
+
+* it is stated next to the tables rather than discovered later, and
+* a **substep control arm** is provided: re-run with
+  `--scm-convection-substeps 1`, which gives every scheme the identical 600 s
+  convective step, and check whether the ranking order changes.
+  `scripts/cluster/scm_rce_paper/arms_ab_substep_control.sbatch` is that arm.
+
+If the ranking is stable between the default and the control, the asymmetry is
+harmless for the conclusion and can be reported as such. If it is not, the
+default-substep ranking is confounded and the control is the one to publish.
+**This must be resolved before any ranking is published.**
+
+---
+
 ## 5. Anti-confound machinery
 
 * `--subsidence-solve` is part of `_run_signature` in the intercomparison
