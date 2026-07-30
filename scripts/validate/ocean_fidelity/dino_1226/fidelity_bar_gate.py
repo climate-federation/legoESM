@@ -287,8 +287,15 @@ PER_ELEMENT: dict[str, float] = {
     "tra_qsr (shortwave penetration)": 6.653e-05,
     # sign-changing plain-Asselin term; conditioning-robust err_norm used.
     "ssh_atf": 7.076e-07,
-    # sign-changing tem/sal; err_norm (RMS-normalized) used, worse of the two.
-    "tra_sbc": 7.826e-05,
+    # RE-MEASURED 2026-07-30 (5e9b0eb87 live-divisor fix; see MEASUREMENTS
+    # note for full derivation): sign-changing tem/sal; err_norm
+    # (RMS-normalized) used, worse of the two (sal clears at 0.0). tem still
+    # 3 orders above BAR_PER_ELEM_EPS=1e-9 despite corr/ratio both clearing
+    # the aggregate bar -- this is a real per-element residual the mean
+    # ratio was hiding, not a measurement error (the bn2-precedent pattern
+    # this dict exists to catch). OLD (static-divisor) value 7.826e-05
+    # preserved below for history.
+    "tra_sbc": 9.657e-07,  # OLD (static divisor, superseded): 7.826e-05
 }
 
 # CLOSED 2026-07-28 -- fp64 + correct time level.  Under PrecisionPolicy.fp64()
@@ -1134,7 +1141,48 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "boundary condition and re-derive against this bracket, or (b) a "
         "NEMO-side dump of the akzu-folded zwi/zwd/zws tridiagonal "
         "coefficients (dynzdf.F90:182-278) to isolate the SOLVER from the "
-        "drag fold."),
+        "drag fold. "
+        "SECOND, SEPARATE GAP added 2026-07-30 (#1226 static-vs-live-"
+        "divisor task): a NEWLY CONFIRMED momentum-side divisor mismatch at "
+        "this same routine's TOP (surface) boundary, structurally parallel "
+        "to the tra_sbc divisor defect this task's tem/sal rows fixed, but "
+        "NOT itself fixed or ported -- UNMEASURED, no number invented. "
+        "legoESM's surface_stress_faces (ocean_pe_latlon_cgrid.py:3445-"
+        "3481, the single-owner tau sign/interp/rotation helper feeding "
+        "dyn_zdf's implicit surface BC via _bc_external_surface_forcing's "
+        "withhold_stress path) builds dz_0_T = z_coord.dz_ref[0] * J at "
+        ":3461, where J = compute_ocean_jacobian(...) = (eta+H_bathy)/"
+        "H_max -- GLOBALLY normalized by the domain MAXIMUM depth "
+        "(vertical.py). NEMO's own momentum surface-flux divisor is r3u = "
+        "eta/hu_0 (dynzdf.F90's e3u(:,:,1,Kmm) construction via the same "
+        "domzgr_substitute.h90 macros trasbc.F90 uses, LOCALLY normalized "
+        "by each column's OWN reference depth hu_0), evaluated at Kmm at "
+        "the call site -- but the call site itself is stpmlf.F90:305 `CALL "
+        "dyn_zdf(kstp, Nbb, Nnn, Nrhs, uu, vv, Naa)`, i.e. Naa = the AFTER "
+        "ssh level (dom_qco_r3c's SECOND call at stpmlf.F90:303, "
+        "`r3u(:,:,Naa)`, runs immediately before, one step ahead of the "
+        "Nnn/Kmm level tra_sbc itself reads) -- confirmed directly by "
+        "reading stpmlf.F90 (no key_RK3 in DINO's cpp_DINO.fcm, so the MLF "
+        "branch containing this exact call is the one that runs; the RK3 "
+        "branch, if it existed, would differ). GLOBAL-max-normalized J vs "
+        "LOCAL-column-normalized r3u/hu_0 are the SAME quantity only on "
+        "flat bathymetry; they diverge on SLOPED bathymetry, exactly the "
+        "kind of topographic-step location several other DEBT rows in this "
+        "gate already implicate (dyn_spg_ts puu_b's zu_frc residual, "
+        "ldf_slp's bottom-level structure). NOT measured: no probe dump "
+        "brackets surface_stress_faces's dz_0_u/dz_0_v against NEMO's own "
+        "r3u/r3v(Naa)-derived e3u/e3v(Kmm,1) at this call site (the "
+        "existing dom_qco_r3c r3u/r3v row measures r3u/r3v THEMSELVES "
+        "against mesh_mask-derived hu_0/hv_0, at ~1.0/0.999997 -- a "
+        "DIFFERENT, already-AT-BAR-adjacent comparison that does not touch "
+        "surface_stress_faces's J-based divisor at all). Do not conflate: "
+        "this is a genuinely separate, unmeasured code path. UNMEASURED, "
+        "no corr/ratio recorded -- this note states the mechanism and its "
+        "citations only; measuring it needs either a NEMO-side dump of the "
+        "surface-stress tridiagonal BC input (e3u(:,:,1,Kmm) or equivalent) "
+        "or porting compute_ocean_jacobian's caller to accept a per-column "
+        "LOCAL r3u/r3v-style stretch as an alternative to the GLOBAL J, "
+        "then bracketing the two the same way the tra_sbc fix did."),
     "traldf_iso_lap tendency":       (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
@@ -1215,37 +1263,104 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "of (ocean_model_latlon_cgrid.py:7101-7102) -- the tiny residual "
         "measured here is consistent with that missing (small, "
         "freshwater-flux-driven) term, not a transcription bug in the "
-        "filter itself."),
-    "tra_sbc":                       (0.99999985, 0.99993829,
-        "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
-        "fp64, LEGOESM_NEMO_E3T=both). DIRECT dump: "
-        "stp_dump_14_trasbc_{tem,sal}.bin (stpmlf.F90:393) is tra_sbc's "
-        "OWN tendency directly -- it is the FIRST live RHS contributor "
-        "(ts(Nrhs) zeroed at stpmlf.F90:381-382, ln_asminc=F for DINO so "
-        "nothing precedes tra_sbc; verified: max|tem(Nrhs)| at levels "
-        "k>=1 is exactly 0.0, matching trasbc.F90's surface-only "
-        ".NOT.lk_linssh application). Compared to "
-        "apply_dino_lat_lon_surface_forcing's own restoring_surface_"
-        "forcing(implicit=False) T/S-restoring term (the algebraic "
-        "identity already used by cancelling_rows_per_element.py's sbc "
-        "row: tau_T=rho0*c_p*dz0/A_theta makes the EXPLICIT relaxation "
-        "form equal NEMO's raw rn_trp*(T*-T)-Q_sr flux, confirmed "
-        "cfg.A_theta=40.0/NEMO rn_trp=-40 exact match), fed BEFORE-level "
-        "(Nbb, bridge_before_state_topo) T/S per usrdef_sbc.F90:421-423's "
-        "own ts(...,Kbb) read, MLF-time-averaged with the restart's own "
-        "sbc_hc_b/sbc_sc_b (zfact=0.5, since l_1st_euler=False confirmed "
-        "directly from ocean.output at this exact kt) exactly as "
-        "trasbc.F90:145-149 does. tem: corr=0.99999985, |ratio|=0.99993829, "
-        "median|rel|=1.035e-04, n=9920. sal: corr=0.99999999, "
-        "|ratio|=0.99995924, median|rel|=1.031e-04, n=9920. Alignment "
-        "scan SHARP at (0,0): offset table shows (0,0)=1.04e-04 vs every "
-        "neighbouring offset >=1.09e-02 (100x+ jump). KNOWN GAP "
-        "(documented, not silently absorbed): legoESM's DINO surface "
-        "forcing has NO emp*T*rcp heat-content term (usrdef_sbc.F90:422 "
-        "`- emp(ji,jj)*ts(...,Kbb,jp_tem)*rcp`) -- a STRUCTURAL omission "
-        "(also absent from cancelling_rows_per_element.py's own qns/sfx "
-        "comparison one level up the chain), plausibly the source of "
-        "most of this row's ~1e-4 residual, not a numerical bug."),
+        "filter itself. RE-VERIFIED 2026-07-30 (#1226 static-vs-live-"
+        "divisor task, HEAD 5e9b0eb87): the 'missing emp term' hypothesis "
+        "above was itself independently RETRACTED before this task (emp==0 "
+        "unconditionally for DINO, see coverage_rows_measure.py's own "
+        "RETRACTED docstring block -- so the SCOPE LIMIT paragraph's causal "
+        "claim no longer stands; only the measurement below it does). As "
+        "predicted (ssh_atf is the Robert-Asselin filter on ssh alone -- it "
+        "has no dependence on DINOConfig.surface_flux_divisor, which only "
+        "gates tra_sbc's T/S-restoring divisor), the fix does NOT move this "
+        "row: re-running coverage_rows_measure.py's measure_ssh_atf "
+        "unchanged at HEAD reproduces corr=1.00000000/|ratio|=0.99999995/ "
+        "err_norm median 7.076e-07 EXACTLY (identical to 4 sig figs in the "
+        "err_norm). UNCHANGED, confirmed by direct re-measurement, not "
+        "assumed from the (independently-retracted) emp-term reasoning."),
+    "tra_sbc":                       (1.00000000, 1.00000100,
+        "RE-MEASURED 2026-07-30 (#1226 static-vs-live-divisor task, HEAD "
+        "5e9b0eb87). CONFIRMED DEFECT (fixed by 5e9b0eb87): legoESM's DINO "
+        "surface forcing divided the combined non-solar flux by the STATIC "
+        "z_coord.dz_ref[0], while NEMO divides by the LIVE top-cell "
+        "thickness e3t(:,:,1,Kmm)=e3t_0*(1+r3t), r3t=ssh/ht_0 "
+        "(trasbc.F90:152-153; stpmlf.F90:387 -> Kmm=Nnn; "
+        "domzgr_substitute.h90:139; domqco.F90:160). Fix: new "
+        "DINOConfig.surface_flux_divisor ('static' default bit-identical, "
+        "'nemo_live' opt-in) threads the live per-column dz_0 into "
+        "tau_T/tau_S BEFORE the implicit solve (a post-hoc rescale of the "
+        "implicit OUTPUT was tried first and RETRACTED -- measured "
+        "1.2-3%% wrong, since the implicit-Euler denominator (tau_T+dt) is "
+        "not proportional to 1/dz_0 in general). Shared helper "
+        "eos.nemo_r3t_stretch extracted for the (1+r3t) factor. "
+        "PIPELINE GAP FOUND AND WORKED AROUND (not a wiring gap in the "
+        "recipe/config): dino_config_for_recipe('nemo_dino_kamm_mlf') DOES "
+        "resolve surface_flux_divisor='nemo_live' (printed directly: "
+        "cfg.surface_flux_divisor == 'nemo_live') -- DINO_RECIPES"
+        "['nemo_dino_kamm']['surface_flux_divisor']='nemo_live', inherited "
+        "unmodified by nemo_dino_kamm_mlf's dict-spread. But this row's OWN "
+        "measuring pipeline, coverage_rows_measure.py's measure_tra_sbc "
+        "(read-only per this task; not edited), hardcodes "
+        "'dz_0 = float(br.z_coord.dz_ref[0])' and calls "
+        "tau_from_flux_coefficient/restoring_surface_forcing directly -- it "
+        "NEVER reads cfg.surface_flux_divisor at all, so it silently ran "
+        "the STATIC path regardless of which recipe card was fed in. "
+        "Re-running that exact pipeline UNCHANGED at HEAD reproduces the "
+        "prior 'STATIC' tuple EXACTLY (corr=0.99999985/ratio=0.99993829, "
+        "identical to 8 sig figs) -- confirming the recorded tuple was "
+        "always the static-divisor number, not a live one, despite the "
+        "note text's claim to compare against apply_dino_lat_lon_surface_"
+        "forcing (that production function DOES dispatch on "
+        "cfg.surface_flux_divisor at dino.py:3382-3391; the standalone "
+        "probe code below it does not call that function at all). Isolated "
+        "the ONE variable honestly in a separate bounded script "
+        "(scratchpad remeasure_tra_sbc_live.py, reusing "
+        "coverage_rows_measure.build_state()/per_element_stats/_shift_scan "
+        "unmodified) by computing dz_0_live = dz_0_static * "
+        "eos.nemo_r3t_stretch(z_coord, br.state.eta.data, "
+        "br.state.H_bathy.data) -- the SAME call production makes -- and "
+        "feeding it through the identical tau_from_flux_coefficient / "
+        "restoring_surface_forcing(implicit=False) chain, everything else "
+        "byte-identical (same T_Kbb/S_Kbb, same sbc_hc_b/sbc_sc_b MLF "
+        "average, same alignment scan). RESULT: tem corr 0.99999985 -> "
+        "1.00000000, ratio 0.99993829 -> 1.00000100; sal corr 0.99999999 "
+        "-> 1.00000000, ratio 0.99995924 -> 1.00000000 (sal per-element "
+        "pointwise|rel| median/p99/max all <=4.4e-16, i.e. 0.0 to roundoff). "
+        "n=9920 both, alignment scan sharp at (0,0) unchanged. These "
+        "reproduce, to the last reported digit, the numbers already cited "
+        "in the task brief (tem ratio 1.00000100; sal ratio 1.00000000, "
+        "per-element rel diff 0.0) -- NO reconciliation needed, both "
+        "measurements agree. PER-ELEMENT BAR (why this is still DEBT, not "
+        "AT BAR, despite corr/ratio both clearing BAR_CORR/BAR_RATIO_EPS "
+        "for tem): tem's own per-element err_norm median is 9.657e-07 "
+        "(p99 1.769e-06, max 2.324e-06) -- three orders above "
+        "BAR_PER_ELEM_EPS=1e-9, so classify() correctly returns DEBT for "
+        "tem via the per-element gate, exactly the mechanism this gate's "
+        "PER_ELEMENT dict was built to catch (the bn2 precedent: aggregate "
+        "ratio can sit at roundoff while pointwise error does not). sal DOES "
+        "clear per-element (0.0). The recorded tuple is tem's (the worse of "
+        "the two, matching this gate's convention of recording the worst "
+        "sub-metric). OLD (STATIC-divisor, now-superseded, per-element "
+        "measured at the SAME time) tuple: corr=0.99999985/ratio=0.99993829 "
+        "(tem), corr=0.99999999/ratio=0.99995924 (sal); tem per-element "
+        "err_norm median 7.826e-05, sal 4.521e-05 -- both DEBT. Method "
+        "unchanged from the OLD tuple's provenance below except the ONE "
+        "variable (dz_0 static scalar vs live per-column array); DIRECT "
+        "dump stp_dump_14_trasbc_{tem,sal}.bin (stpmlf.F90:393, tra_sbc's "
+        "OWN tendency, first live RHS contributor, ts(Nrhs) zeroed at "
+        "stpmlf.F90:381-382 for DINO's ln_asminc=F; verified max|tem(Nrhs)| "
+        "at levels k>=1 is exactly 0.0) vs restoring_surface_forcing"
+        "(implicit=False) fed BEFORE-level (Nbb) T/S per usrdef_sbc.F90:"
+        "421-423, MLF-time-averaged with the restart's sbc_hc_b/sbc_sc_b "
+        "(zfact=0.5, l_1st_euler=False confirmed from ocean.output) exactly "
+        "as trasbc.F90:145-149 does. RETRACTED (superseded by the fix "
+        "above, kept for history): the OLD note attributed the residual to "
+        "a missing emp*T*rcp heat-content term; that hypothesis was itself "
+        "independently retracted 2026-07-30 (emp==0 unconditionally for "
+        "DINO's nn_forcingtype=4/ln_emp_field=F/ln_qns_field=F, see "
+        "coverage_rows_measure.py's own RETRACTED docstring block) BEFORE "
+        "this static-vs-live-divisor cause was identified -- the true cause "
+        "was the divisor, not a missing term. State: RUN_GDB kt=57601, "
+        "e3t=both, fp64, DINO_00057600_restart.nc."),
 }
 
 
@@ -1262,8 +1377,21 @@ MEASURED_AT: dict[str, str] = {
     # 2026-07-30 coverage_rows_measure.py (this task) -- b7872175b HEAD.
     "ldf_dyn coefficient": "b7872175b",
     "tra_qsr (shortwave penetration)": "b7872175b",
+    # ssh_atf RE-VERIFIED (this task, 5e9b0eb87): the plain-Asselin-term
+    # numbers are UNCHANGED -- ssh_atf has no dependence on
+    # DINOConfig.surface_flux_divisor (that's a trasbc.F90 tra_sbc-only
+    # quantity; ssh_atf's own emp-forcing-removal term was separately
+    # confirmed algebraically zero for DINO, see coverage_rows_measure.py's
+    # RETRACTED note) -- kept at its original 2026-07-30 measurement commit.
     "ssh_atf": "b7872175b",
-    "tra_sbc": "b7872175b",
+    # tra_sbc RE-MEASURED at 5e9b0eb87 (this task): the STATIC-divisor
+    # number recorded at b7872175b did not reflect DINOConfig.
+    # surface_flux_divisor="nemo_live" (a probe gap in coverage_rows_
+    # measure.py's measure_tra_sbc, which never reads that config field --
+    # see the MEASUREMENTS note). Re-measured with the fix's own
+    # eos.nemo_r3t_stretch live divisor threaded in, matching production's
+    # dino.py:3384-3391 dispatch exactly.
+    "tra_sbc": "5e9b0eb87",
     # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
     # the commit that introduced _nemo_native_active_3d.
     "ldf_slp wslpi": "7816b514e",
