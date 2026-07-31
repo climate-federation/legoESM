@@ -638,7 +638,19 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     "refinement at boundary (3.10e-6/6.61e-6/1.35e-5) and vertex "
     "(2.09e-6/4.39e-6/9.01e-6) for n=8/16/32 -- O(1/dx) on a field with NO "
     "physical seam jump. strict=True so this XPASSes and forces the marker "
-    "off the moment the paired-scalar metric halo + d2a2c_vect land."))
+    "off the moment the paired-scalar metric halo + d2a2c_vect land. "
+    "GATE-BLINDNESS WARNING (2026-07-31): the exact unit-metric assertions "
+    "(+8/+5/+1) CANNOT substitute for this test. They set sin=1 and cos=0, so "
+    "they stay GREEN even with a WRONG raw sin_sg/cos_sg seam permutation -- "
+    "the very layer still unported. This solid-body oracle is the only gate "
+    "here that samples boundary and vertex points with REAL metrics, so it is "
+    "the one that decides. BLOCKED ON a raw-slot halo, conceptually "
+    "pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg) -> (6,n+2,n+2,4), encoding the "
+    "8 axis-swap SLOT permutations plus the 4 vertex fills: divergence_corner "
+    "reads MIXED raw slots at boundaries -- (j-1,4)+(j,2) for uf and "
+    "(i-1,3)+(i,1) for vf (sw_core.F90:2187-2207) -- NOT staggered sina/cosa, "
+    "so pad_halo_dgrid_scalar_pair_4d cannot supply it and substituting the "
+    "staggered pair there would be a guess."))
 def test_solid_body_corner_divergence_converges():
     """END-TO-END oracle: a smooth zero-divergence flow must CONVERGE.
 
