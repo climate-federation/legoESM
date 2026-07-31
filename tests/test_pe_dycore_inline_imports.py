@@ -40,7 +40,10 @@ from tests.legoesm_paths import legoesm_source_path
 # on-disk file is resolved at test time via ``legoesm_source_path`` (namespace-
 # aware, spans every ``legoesm.__path__`` root) instead of a hardcoded
 # ``src/legoesm`` anchor.
-_ATMOS_DYN = PurePosixPath("atmosphere/dynamics")
+# a16e1493a moved every GCM dycore under the ``gcm`` bucket
+# (dynamics/{gcm,les,crm,shared,neural}); the pre-reorg anchor made all 11
+# entries below raise FileNotFoundError instead of counting anything.
+_ATMOS_DYN = PurePosixPath("atmosphere/dynamics/gcm")
 _OCEAN_DYN = PurePosixPath("ocean/dynamics")
 _ATMOS_PHYS = PurePosixPath("atmosphere/physics")
 _COUPLER = PurePosixPath("coupler")

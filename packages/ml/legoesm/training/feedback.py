@@ -12,7 +12,7 @@ it into a target scheme ``*Config`` as a per-column (traced-in-loss) leaf.
 * :func:`apply_column_parameter_field` — flatten the grid-shaped field to the
   per-column ``(ncol,)`` layout the physics expects, validate its length, and
   splice it into the scheme config via
-  :func:`legoesm.training.param_collector.apply_param_overrides` (which raises on
+  :func:`legoesm.core.param_overrides.apply_param_overrides` (which raises on
   an unknown field).  Applied **inside the loss** so the substituted leaf is
   traced; production keeps the static scalar default (SegmentForcing doctrine).
 
@@ -33,7 +33,7 @@ import sys
 
 import jax
 import jax.numpy as jnp
-from legoesm.training.param_collector import apply_param_overrides
+from legoesm.core.param_overrides import apply_param_overrides
 from legoesm.training.parameter_field import (
     environment_kernel_field,
     scatter_column_field,
