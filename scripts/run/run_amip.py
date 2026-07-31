@@ -692,6 +692,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that breaks the plane-parallel tau-saturation a "
                              "scalar cannot -- a thick cloud is reduced MORE than "
                              "a thin one).")
+    parser.add_argument("--cloud-partial-coverage-optics",
+                        dest="cloud_partial_coverage_optics",
+                        choices=["none", "two_column"], default="none",
+                        help="Partial-cloud-COVER optics. The radiation "
+                             "solver has no McICA/overlap: it sees ONE "
+                             "homogeneous column at the grid-mean water "
+                             "path, R(cf*tau_ic), which is ALWAYS brighter "
+                             "than the independent-column cf*R(tau_ic)+"
+                             "(1-cf)*R(0) because R is concave. "
+                             "'two_column' thins the path by the exact "
+                             "inversion of that identity (chi<=1, so it can "
+                             "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -1797,6 +1809,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
+        cloud_partial_coverage_optics=args.cloud_partial_coverage_optics,
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,

@@ -160,12 +160,22 @@ class CloudProperties(NamedTuple):
         bug cost 59 W/m² OSR at cf=0.6 and 113 W/m² at cf=0.3 (commit
         4c9591bb).
 
-        Since τ is linear in LWP, "grid-mean LWP, no cf scaling" is
-        mathematically identical to the correct "in-cloud LWP × cf
-        scaling".  This helper centralises the right behaviour so the
-        bug cannot resurface at a third call site (iter-15 restored
-        it in ``physics_pipeline.py``, iter-16 fixed an independent
-        copy in ``integration.py``).
+        Since τ is linear in LWP, "grid-mean LWP, no cf scaling" gives
+        the same OPTICAL DEPTH as "in-cloud LWP × cf scaling", so this
+        helper centralises the right behaviour and the ``cf²`` bug
+        cannot resurface at a third call site (iter-15 restored it in
+        ``physics_pipeline.py``, iter-16 fixed an independent copy in
+        ``integration.py``).
+
+        **That equality is in τ ONLY, not in flux.**  Both forms feed a
+        SINGLE homogeneous column of depth ``cf·τ_in-cloud``, whereas
+        the independent-column answer for a partly cloudy layer is
+        ``cf·R(τ_in-cloud) + (1−cf)·R(0)``.  ``R`` is concave, so this
+        path is always the BRIGHTER of the two — the partial-coverage
+        plane-parallel bias.  There is no McICA/subcolumn/overlap
+        machinery anywhere under ``radiation/rrtmgp`` to recover it.
+        ``cloud_partial_coverage_optics="two_column"`` corrects it by
+        thinning the path; see :func:`_partial_coverage_factor`.
         """
         return {
             "cloud_path_liq": self.lwp,
@@ -446,6 +456,116 @@ def _two_region_inhomogeneity_factor(
     # [1 - fsd^2, 1], smooth and finite (no clip/where; caller validates
     # fsd in [0, 1] via ExperimentConfig.validate_strict).
     return (1.0 - fsd2) + fsd2 * gamma0 / (gamma0 + tau)
+
+
+def _partial_coverage_factor(
+    tau_grid: jnp.ndarray, cf: jnp.ndarray, g,
+) -> jnp.ndarray:
+    r"""Partial-cloud-COVER optics factor (chi_cover) for the radiative path.
+
+    ``tau_grid`` is the GRID-MEAN optical depth of the layer (``cf tau_ic``),
+    summed over phases, and ``cf`` is the TRUE cloud fraction -- not the floored
+    one.  Both choices are deliberate; see NUMERICS and MIXED PHASE below.
+
+    The RRTMGP path solves ONE homogeneous column carrying the GRID-MEAN water
+    path, i.e. reflectance ``R(cf tau_ic)``.  The independent-column (ICA)
+    answer weights two SEPARATE solves,
+
+        R_ICA = cf R(tau_ic) + (1 - cf) R(0),   R(t) = t/(t + gamma0).
+
+    ``R`` is CONCAVE, so ``R(cf tau_ic) >= R_ICA`` for every ``cf < 1``: the
+    single-column form is ALWAYS too bright.  This is the partial-coverage
+    plane-parallel albedo bias, and it is INDEPENDENT of the in-cloud (fsd)
+    variability that :func:`_two_region_inhomogeneity_factor` corrects -- that
+    one subdivides the CLOUDY region, this one accounts for the CLEAR fraction.
+
+    Solving ``R(tau_eff) = R_ICA`` for the effective optical depth gives the
+    exact closed form ``tau_eff = gamma0 cf tau_ic/(gamma0 + (1-cf) tau_ic)``.
+    Substituting ``tau_ic = tau_grid/cf`` and dividing by ``tau_grid`` (the
+    optical depth is linear in the water path, so this IS the path scaling):
+
+        chi_cover = gamma0 cf / (gamma0 cf + (1 - cf) tau_grid).
+
+    NUMERICS -- this grid-mean form, not the algebraically equal
+    ``gamma0/(gamma0 + (1-cf) tau_ic)``, is what ships.  The latter needs
+    ``tau_ic = tau_grid/cf``, which forces a cf floor; the radiative path then
+    PLATEAUS at the artificial floor value instead of vanishing as the true
+    ``cf -> 0``, leaving a hidden optically-thick cloud in a layer that reports
+    ``cloud_fraction = 0`` (codex review, 2026-07-31).  The form above never
+    divides by ``cf``, so it takes the TRUE ``cf`` and reaches the right limit.
+    There is likewise no ``1/(1-R)`` division and no cancellation; the value is
+    analytically bounded in ``[0, 1]``, smooth, and jax.grad-safe.
+
+    ``tau_grid`` MUST be the optical depth the layer actually has AFTER any
+    in-cloud (fsd) correction -- see COMPOSITION below.
+
+    MIXED PHASE -- ``tau_grid`` is the SUM over liquid and ice, and the single
+    resulting factor is applied to BOTH paths.  Cloud cover is a property of the
+    LAYER, and RRTMGP adds the phase optical depths into one layer total
+    (rrtmgp/optics/cloud_optics.py), so inverting each phase separately and
+    summing is not the same function and leaves the layer too bright whenever
+    both phases are present.  This is the one place the coverage factor
+    deliberately differs from the fsd factor, which IS per-phase because
+    in-cloud VARIABILITY genuinely differs between a patchy liquid deck and a
+    uniform ice layer.
+
+    Limits (each exercised in tests/unit/test_partial_coverage_optics.py):
+      * ``cf -> 1``       => chi_cover -> 1 (overcast: nothing to correct).
+      * ``tau_grid -> 0`` => chi_cover -> 1 (thin: R already linear in tau).
+      * ``cf -> 0`` at fixed grid-mean water => chi_cover -> 0, i.e. no
+        radiative effect, the correct ICA limit.
+      * ``tau_ic -> inf`` => tau_eff -> gamma0 cf/(1-cf), BOUNDED -- a sky that
+        is only fraction ``cf`` cloudy cannot reflect more than ``cf``, which
+        the single-column form violates outright.
+
+    SIGN: ``chi_cover <= 1`` always, so this can only DIM the cloud, never
+    brighten it -- the same one-way guarantee the fsd factor carries.
+
+    COMPOSITION WITH ``two_region``.  The three-region subcolumn is: fraction
+    ``(1-cf)`` clear, and the cloudy ``cf`` split into equal-area ``tau(1±fsd)``
+    halves.  Its ICA reflectance is ``cf * Rbar_fsd = cf * R(tau chi_fsd)``, so
+    the coverage inversion must be evaluated at ``C = tau * chi_fsd``, NOT at
+    the raw ``tau``.  Evaluating at ``tau`` OVER-thins (codex review: cf=0.4,
+    fsd=0.75, tau=100 gives tau_eff 3.66 against the correct 6.17, a reflectance
+    0.101 too DIM).  The caller therefore applies the factors SEQUENTIALLY,
+    recomputing tau between them.
+
+    ACCURACY / SCOPE -- this factor is EXACT only for a SINGLE layer under a
+    grey conservative two-stream.  Known, deliberate approximations:
+      * SHORTWAVE, verified against the model's OWN RRTMGP by the committed
+        solver-level regression ``test_rrtmgp_single_layer_moves_toward_ica``:
+        the corrected TOA albedo lies strictly between the uncorrected value
+        and the two-column ICA reference.  Residual = grey-vs-per-band g /
+        Rayleigh / gas mismatch (RRTMGP spans g 0.71-0.98 and single-scatter
+        albedo 0.53-1.0 across bands and phases, against the single grey
+        gamma0 = 2/(1-0.85) here), so exact agreement is NOT expected or
+        claimed.
+      * LONGWAVE: the path also feeds LW, where the nonlinearity is
+        ``eps = 1-exp(-tau)``, not ``R``.  The corrected LW emissivity is never
+        FURTHER from the ICA value ``cf(1-exp(-tau_ic))`` than the uncorrected
+        one (cf=0.5, tau_ic=10: 0.993 uncorrected -> 0.974 here, against 0.500
+        ICA); equality holds at ``tau=0`` and at ``cf in {0,1}``.  This is an
+        improvement in sign but NOT an LW fix -- a proper treatment needs a
+        separate emissivity-space inversion.  NOTE the bound
+        ``cf(1-e^-t) <= 1-e^-x <= 1-e^-ct`` relies on ``gamma0 >= 2``, i.e.
+        ``g >= 0``, NOT merely on ``chi_cover <= 1``; a negative
+        ``cloud_optics_asymmetry_g`` would break it.  The pre-existing fsd
+        factor shares the SW-surrogate-applied-to-LW flaw -- precedent, not
+        justification.
+      * VERTICAL OVERLAP: applied per layer independently, because the solver
+        carries no overlap state.  For a multi-layer cloud that is between the
+        maximum- and random-overlap ICA answers (codex review, two identical
+        cf=0.4/tau=25 layers: 0.600 uncorrected, 0.414 here, 0.316 max-overlap,
+        0.439 random-overlap) -- i.e. still too bright under maximum overlap and
+        slightly too dim under random.  "Always too bright" holds per layer, NOT
+        for a deep cloud.
+    """
+    gamma0 = 2.0 / jnp.maximum(1.0 - g, 1.0e-6)   # g is a fixed numerics const
+    num = gamma0 * cf
+    # Floor only guards the 0/0 at cf=0 AND tau_grid=0 (a cloud-free layer,
+    # where the path it multiplies is itself zero); it never perturbs a real
+    # cloud, since the denominator is then >= min(gamma0 cf, tau_grid) >> eps.
+    return num / jnp.maximum(num + (1.0 - cf) * tau_grid, 1.0e-30)
 
 
 def compute_cloud_properties(
@@ -795,31 +915,69 @@ def compute_cloud_properties(
     # carrying the same mean water is too reflective (the plane-parallel albedo
     # bias).  This THINS the radiative lwp/iwp; SIGN: chi <= 1 (never brightens).
     # Dispatch raises on an unknown scheme (fn-entry, static config value).
+    # In-cloud optical depth tau = (3 Q_ext / 4) * WP_incloud / (rho_p r_eff)
+    # with Q_ext≈2 => coeff 1.5; WP_incloud = grid-mean WP / cf.  Computed ONCE
+    # here from the UNCORRECTED paths so the fsd and coverage factors below are
+    # both functions of the same physical tau_ic and cannot double-discount.
+    _cf_safe = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
+    _r_liq = jnp.maximum(r_eff_liq, _INHOM_R_EFF_FLOOR_M)
+    _r_ice = jnp.maximum(r_eff_ice, _INHOM_R_EFF_FLOOR_M)
+    _tau_liq = _TAU_GEOMETRIC_COEFF * (lwp / _cf_safe) / (constants.rho_water * _r_liq)
+    _tau_ice = _TAU_GEOMETRIC_COEFF * (iwp / _cf_safe) / (config.rho_cloud_ice * _r_ice)
+    _g = config.cloud_optics_asymmetry_g
+
     _inhom_scheme = getattr(config, "cloud_optics_inhomogeneity", "constant")
     if _inhom_scheme == "constant":
         # Cahalan et al. (1994) fixed scalar (legacy; chi=1 => byte-identical).
         _chi = getattr(config, "cloud_inhomogeneity_factor", 1.0)
         lwp = lwp * _chi
         iwp = iwp * _chi
+        # tau is linear in the path, so the in-cloud tau the COVER correction
+        # must see is scaled by the same factor.
+        _tau_liq = _tau_liq * _chi
+        _tau_ice = _tau_ice * _chi
     elif _inhom_scheme == "two_region":
-        # In-cloud optical depth tau = (3 Q_ext / 4) * WP_incloud / (rho_p r_eff)
-        # with Q_ext≈2 => coeff 1.5; WP_incloud = grid-mean WP / cf.  Apply the
-        # inhomogeneity factor PER PHASE, each from its OWN optical depth (a
-        # patchy LIQUID cloud must not thin a horizontally-uniform ICE layer).
-        # tau -> 0 => chi_eff -> 1 (no change).
-        cf_safe = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
-        r_liq = jnp.maximum(r_eff_liq, _INHOM_R_EFF_FLOOR_M)
-        r_ice = jnp.maximum(r_eff_ice, _INHOM_R_EFF_FLOOR_M)
-        tau_liq = _TAU_GEOMETRIC_COEFF * (lwp / cf_safe) / (constants.rho_water * r_liq)
-        tau_ice = _TAU_GEOMETRIC_COEFF * (iwp / cf_safe) / (config.rho_cloud_ice * r_ice)
+        # Apply the inhomogeneity factor PER PHASE, each from its OWN optical
+        # depth (a patchy LIQUID cloud must not thin a horizontally-uniform ICE
+        # layer).  tau -> 0 => chi_eff -> 1 (no change).
         _fsd = config.cloud_fsd
-        _g = config.cloud_optics_asymmetry_g
-        lwp = lwp * _two_region_inhomogeneity_factor(tau_liq, _fsd, _g)
-        iwp = iwp * _two_region_inhomogeneity_factor(tau_ice, _fsd, _g)
+        _chi_liq = _two_region_inhomogeneity_factor(_tau_liq, _fsd, _g)
+        _chi_ice = _two_region_inhomogeneity_factor(_tau_ice, _fsd, _g)
+        lwp = lwp * _chi_liq
+        iwp = iwp * _chi_ice
+        # SEQUENTIAL, not a product of two factors of the raw tau: the
+        # three-region ICA reflectance is cf*R(tau*chi_fsd), so the coverage
+        # inversion below must be evaluated at the fsd-THINNED optical depth.
+        # Evaluating both at the raw tau over-thins (codex review, 2026-07-31).
+        _tau_liq = _tau_liq * _chi_liq
+        _tau_ice = _tau_ice * _chi_ice
     else:
         raise ValueError(
             f"unknown cloud_optics_inhomogeneity {_inhom_scheme!r}; "
             "expected 'constant' or 'two_region'"
+        )
+
+    # --- Partial cloud COVER (the CLEAR fraction, not the in-cloud variance) -
+    # The radiative solver has no McICA / subcolumn / overlap machinery: it sees
+    # ONE homogeneous column at the grid-mean path, which is too bright whenever
+    # cf < 1.  SIGN: chi_cover <= 1 (never brightens).  Unknown scheme => raise.
+    _cover_scheme = getattr(config, "cloud_partial_coverage_optics", "none")
+    if _cover_scheme == "none":
+        pass                       # legacy path; byte-identical to before
+    elif _cover_scheme == "two_column":
+        # ONE factor for the layer, from the COMBINED grid-mean optical depth of
+        # both phases (RRTMGP sums tau_liq + tau_ice into a single layer total),
+        # and from the TRUE cf -- _cf_safe would plateau the correction at the
+        # 1e-3 floor instead of vanishing as cf -> 0.  _tau_* are in-cloud, so
+        # cf_safe * tau_ic recovers the grid-mean depth the solver will see.
+        _tau_grid = _cf_safe * (_tau_liq + _tau_ice)
+        _chi_cover = _partial_coverage_factor(_tau_grid, cf, _g)
+        lwp = lwp * _chi_cover
+        iwp = iwp * _chi_cover
+    else:
+        raise ValueError(
+            f"unknown cloud_partial_coverage_optics {_cover_scheme!r}; "
+            "expected 'none' or 'two_column'"
         )
 
     return CloudProperties(
