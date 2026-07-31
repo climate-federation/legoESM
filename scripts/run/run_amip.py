@@ -1743,7 +1743,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         div_damp_scale=args.div_damp_scale,
-        a_h_scale=args.a_h_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_vert4_t_filter=args.mpas_vert4_t_filter,
