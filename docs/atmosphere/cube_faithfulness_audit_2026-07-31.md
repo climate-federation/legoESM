@@ -142,3 +142,77 @@ assertions used elsewhere in this work (`+8` seam, `+5` vertex, `+1` sparse) set
 certify the velocity halo and nothing about the metrics; only the solid-body
 convergence oracle samples boundary and vertex points with real metrics. Any test
 for the raw-slot helper must use **non-unit** metrics.
+
+## Appendix: the raw-slot seam mapping, derived
+
+The primitive that blocks the corner-divergence port, derived from the oracle
+(round 5). Recorded here because it was previously only in a scratch file.
+Slots are `(W, S, E, N)` = indices `(0, 1, 2, 3)`.
+
+**Eight quarter-turn (axis-swapping) seams** — `sin` sign `+`, `cos` sign `−`:
+
+| destination ghost seam | neighbour edge | reverse | destination `(W,S,E,N)` gets source slots |
+|---|---|---|---|
+| `1:N` | `4:E` | no | `(S,E,N,W)` = `(1,2,3,0)` |
+| `4:E` | `1:N` | no | `(N,W,S,E)` = `(3,0,1,2)` |
+| `1:S` | `5:E` | yes | `(N,W,S,E)` |
+| `5:E` | `1:S` | yes | `(S,E,N,W)` |
+| `3:N` | `4:W` | yes | `(N,W,S,E)` |
+| `4:W` | `3:N` | yes | `(S,E,N,W)` |
+| `3:S` | `5:W` | no | `(S,E,N,W)` |
+| `5:W` | `3:S` | no | `(N,W,S,E)` |
+
+**Four half-turn seams** — destination `(W,S,E,N)` ← source `(E,N,W,S)` =
+`(2,3,0,1)`, reversed, `sin` and `cos` signs both `+`:
+`(2,S)←(5,S)`, `(2,N)←(4,N)`, `(4,N)←(2,N)`, `(5,S)←(2,S)`.
+
+The remaining twelve directed seams are identity-slot, positive-sign copies.
+
+**Four vertex fills**, applied after all side strips, identical for `sin` and
+`cos` with no sign change (`L = n+1`, padded coordinates):
+
+```text
+SW: p[:,0,0,E] = p[:,0,1,S]   ; p[:,0,0,N] = p[:,1,0,W]
+SE: p[:,L,0,W] = p[:,L,1,S]   ; p[:,L,0,N] = p[:,L-1,0,E]
+NE: p[:,L,L,W] = p[:,L,L-1,N] ; p[:,L,L,S] = p[:,L-1,L,E]
+NW: p[:,0,L,E] = p[:,0,L-1,N] ; p[:,0,L,S] = p[:,1,L,W]
+```
+
+This is the post-`fill_ghost` repair at `fv_grid_utils.F90:580` (SW/NW) and
+`:609` (SE/NE). **The other two slots in each diagonal ghost cell must remain
+invalid** — FV3 deliberately leaves them at `tiny_number = 1e-8` for `sin` and
+`big_number = 1e8` for `cos` (`fv_grid_utils.F90:51`). Do not invent values for
+them.
+
+The helper needs **its own cached table**: `_get_axis_swap_tables_h1(n)` encodes
+staggered `u(n,n+1)`/`v(n+1,n)` locations and *velocity-component* signs, whereas
+raw slots are square-cell data with a slot-channel permutation. The eight rows
+and reversal flags there are the right topology source (`dgrid_halo.py:284`) —
+its velocity signs are not.
+
+### Caveats and scope, stated by the deriver
+
+- **Face-ID correspondence is not independently locked.** The supplied FV3 source
+  does not include FMS's mosaic contact table, so face IDs come from this repo's
+  canonical gnomonic `CONNECTIVITY`. The permutation and sign derivation is not a
+  guess, but to lock the face-ID mapping independently, dump slots 1:4 immediately
+  after FV3's special repairs on a stretched C5 run and compare every side ghost
+  against the table above.
+- **This helper alone does not justify enabling `dgrid_ne_halo`.** It fixes the
+  raw-metric inconsistency; `ua/va` and the paired staggered metrics remain
+  separate blockers.
+- **It does not by itself touch the SW imprint or the dead jet.** There is a real,
+  testable connection to the imprint: production `c_sw`/`d2a2c` pad the W/S/E/N
+  `sin_sg` slots independently (`fv3_sw_core.py:299`, `:1369`) — the same wrong
+  abstraction — but those callers use interpolation offsets, so this copy-only
+  helper cannot be substituted mechanically; an offsets-aware version plus a C48
+  A/B is needed. The dead-jet link is **only a hypothesis** until that A/B shows a
+  seam-tendency or momentum-budget change.
+
+### Test requirement
+
+The test must use **non-unit metrics** and must go red for identity-slot copying,
+a wrong permutation, a wrong reversal, or a missing `cos` sign — none of which the
+existing `sin=1, cos=0` assertions can detect. Assert all eight vertex assignments
+and the two poisoned slots per diagonal cell. The real-metric solid-body
+convergence test remains the end-to-end gate.
