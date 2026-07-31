@@ -82,7 +82,7 @@ def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
     )
     u = jnp.full((6, n + 1, n + 1), 5.0)
     v = jnp.full_like(u, 3.0)
-    out = fv3_divergence_corner_2d(u, v, cd)
+    out = fv3_divergence_corner_2d(u, v, cd, dgrid_ne_halo=True)
 
     np.testing.assert_allclose(np.asarray(out[4, n, 1]), 8.0,
                                rtol=0.0, atol=1e-6)
@@ -555,7 +555,7 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
     u = jnp.zeros((6, n + 1, n + 1))
     v = jnp.zeros_like(u).at[1, :, :].set(1.0)
 
-    out = fv3_divergence_corner_2d(u, v, cd)
+    out = fv3_divergence_corner_2d(u, v, cd, dgrid_ne_halo=True)
 
     np.testing.assert_allclose(np.asarray(out[4, n, 0]), 1.0,
                                rtol=0.0, atol=1e-6)
@@ -614,7 +614,8 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
         u_east, v_north, cd.angle_corner,
     )
     divg = np.abs(np.asarray(
-        fv3_divergence_corner_2d(u_corner, v_corner, cd)))
+        fv3_divergence_corner_2d(u_corner, v_corner, cd,
+                                 dgrid_ne_halo=True)))
 
     edge = np.zeros((n + 1, n + 1), dtype=bool)
     edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
