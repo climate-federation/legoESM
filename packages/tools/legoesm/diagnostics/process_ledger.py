@@ -74,6 +74,13 @@ LEDGER_PROCESSES = (
 N_LEDGER = len(LEDGER_PROCESSES)
 LEDGER_COLUMNS = ("water", "energy")  # [kg/m²/s], [W/m²]
 
+#: Water MASS species [kg/kg] the ledger's water column sums over — the FV
+#: reference list (compiled_segments.py ``_led_q_names``).  NUMBER
+#: concentrations (N_c/N_i/N_r/N_s/N_g, [#/kg] or [#/m³]) are DELIBERATELY
+#: excluded: adding them to a [kg/kg] water budget is a units error (the same
+#: exclusion whose omission produced the 2026-07 conserving-borrow defect).
+LEDGER_WATER_SPECIES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
+
 # Row indices (module constants so instrumentation sites cannot drift
 # against the tuple order).
 ROW_TURBULENCE = LEDGER_PROCESSES.index("turbulence")
@@ -83,6 +90,94 @@ ROW_RADIATION = LEDGER_PROCESSES.index("radiation")
 ROW_OTHER = LEDGER_PROCESSES.index("other_physics")
 ROW_CLIPS = LEDGER_PROCESSES.index("clips")
 ROW_DYNAMICS = LEDGER_PROCESSES.index("dynamics")
+
+
+def ledger_entry_column(dq_total_dt, dT_dt, p_s, dsigma, dp=None):
+    """PER-COLUMN ledger row ``[water, energy]`` — no global reduction.
+
+    Same quantity and sign convention as :func:`ledger_entry`, but keeping
+    the horizontal dimension.  This is the form the MPAS lean loop needs:
+    a global mean cannot answer "which term sustains THIS column" when the
+    event of interest is one cell in 10242 (the 2026-07-31 day-311 / day-315
+    single-grid-point detonations), because the signal is ~1e-4 of the
+    global mean.  Reduce to the global row afterwards with
+    :func:`reduce_ledger_global`, which takes AREA WEIGHTS — on the SCVT
+    mesh ``areaCell`` varies by ~47% (measured max/min 1.471), so an
+    unweighted mean is not a global mean.
+
+    Parameters
+    ----------
+    dq_total_dt : jax.Array or None
+        Sum of the process's water-species tendencies [kg/kg/s]
+        (..., nlev).  ``None`` ⇒ water column 0 (e.g. radiation).
+    dT_dt : jax.Array or None
+        The process's temperature tendency [K/s] (..., nlev).
+        ``None`` ⇒ energy column 0.
+    p_s : jax.Array
+        Surface pressure [Pa] (...).
+    dsigma : array-like
+        Sigma layer thicknesses (nlev,).  Used only when ``dp`` is None.
+    dp : jax.Array, optional
+        Layer pressure thickness [Pa].  REQUIRED for correctness on a hybrid
+        column (#1400): the ``p_s * dsigma`` form is wrong by ``dA*(p_s -
+        p_ref)`` there.  Pass ``VerticalCoordProtocol.layer_thickness_dp``.
+
+    Returns
+    -------
+    jax.Array, shape (..., 2)
+        ``[column water rate kg/m²/s, column dry-enthalpy rate W/m²]``
+        per column.
+    """
+    ref = jnp.asarray(p_s)
+    zero = jnp.zeros(ref.shape, dtype=jnp.result_type(ref.dtype, jnp.float32))
+    water = (column_mass_integral(dq_total_dt, p_s, dsigma, dp=dp)
+             if dq_total_dt is not None else zero)
+    energy = (constants.c_pd
+              * column_mass_integral(dT_dt, p_s, dsigma, dp=dp)
+              if dT_dt is not None else zero)
+    return jnp.stack([water, jnp.asarray(energy, dtype=water.dtype)], axis=-1)
+
+
+def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None):
+    """PER-COLUMN ``[water_store, enthalpy_store]`` — no global reduction.
+
+    Per-column analogue of :func:`column_store_snapshot`; pair two snapshots
+    as ``(after − before)/dt`` to fill the ``dynamics`` / ``clips`` rows of a
+    per-column ledger.  ``None`` species are skipped.
+    """
+    total_q = None
+    for s in species:
+        if s is None:
+            continue
+        total_q = s if total_q is None else total_q + s
+    ref = jnp.asarray(p_s)
+    water = (column_mass_integral(total_q, p_s, dsigma, dp=dp)
+             if total_q is not None
+             else jnp.zeros(ref.shape,
+                            dtype=jnp.result_type(ref.dtype, jnp.float32)))
+    enthalpy = constants.c_pd * column_mass_integral(T, p_s, dsigma, dp=dp)
+    return jnp.stack([water, jnp.asarray(enthalpy, dtype=water.dtype)],
+                     axis=-1)
+
+
+def zero_ledger_column(n_columns, dtype=jnp.float64):
+    """A zeros ``(n_columns, N_LEDGER, 2)`` per-column accumulator seed."""
+    return jnp.zeros((n_columns, N_LEDGER, 2), dtype=dtype)
+
+
+def reduce_ledger_global(ledger_column, area=None):
+    """Reduce a per-column ledger ``(ncol, N_LEDGER, 2)`` to ``(N_LEDGER, 2)``.
+
+    ``area`` (ncol,) supplies AREA WEIGHTS; the result is
+    ``sum(row*area)/sum(area)``.  ``None`` falls back to an unweighted mean
+    and is correct ONLY on an equal-area mesh — on the production SCVT mesh
+    it is not (areaCell max/min = 1.471), so pass ``mesh.areaCell``.
+    """
+    if area is None:
+        return jnp.mean(ledger_column, axis=0)
+    w = jnp.asarray(area, dtype=ledger_column.dtype)
+    return (jnp.sum(ledger_column * w[:, None, None], axis=0)
+            / jnp.sum(w))
 
 
 def ledger_entry(dq_total_dt, dT_dt, p_s, dsigma):
