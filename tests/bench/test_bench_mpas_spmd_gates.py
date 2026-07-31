@@ -56,8 +56,33 @@ def test_gate_symbols_and_flags_exist():
     src = Path(_BENCH).read_text()
     for flag in ("--parity-gate", "--check-conservation", "--mass-rtol",
                  "--multicontroller", "--coordinator", "--partition-method",
-                 "--reorder-for"):
+                 "--reorder-for", "--lloyd"):
         assert flag in src
+
+
+def test_lloyd_flag_reaches_the_mesh_builder(monkeypatch):
+    """``--lloyd 0`` must select the synthetic scaling mesh, not lloyd=50.
+
+    Non-vacuous by construction: the sentinel records the kwarg
+    ``create_voronoi_mesh`` actually receives, so dropping the plumbing
+    (the state before this flag existed) makes the assertion fail rather
+    than silently building/loading the production SCVT cache key.
+    """
+    import legoesm.grids.voronoi as voronoi
+
+    mod = _load_bench()
+    seen = {}
+
+    def _spy(subdivision_level, **kwargs):
+        seen["level"] = subdivision_level
+        seen.update(kwargs)
+        raise RuntimeError("stop-after-mesh-request")
+
+    monkeypatch.setattr(voronoi, "create_voronoi_mesh", _spy)
+    with pytest.raises(RuntimeError, match="stop-after-mesh-request"):
+        mod.build_model_and_state(4, 4, 1, 1, "sfc", lloyd_iterations=0)
+    assert seen["level"] == 4
+    assert seen["lloyd_iterations"] == 0
 
 
 def test_gather_voronoi_state_spmd_round_trip():
