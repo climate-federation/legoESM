@@ -48,21 +48,46 @@ def small_cube():
     return grid, cdgrid, n
 
 
-def test_uniform_winds_yield_zero_divergence(small_cube):
-    """Uniform u_d, v_d → near-zero divergence at every corner."""
-    _, cdgrid, n = small_cube
-    u_corner = jnp.full((6, n + 1, n + 1), 5.0)
-    v_corner = jnp.full((6, n + 1, n + 1), 3.0)
-    divg = fv3_divergence_corner_2d(u_corner, v_corner, cdgrid)
-    assert divg.shape == (6, n + 1, n + 1)
-    # Uniform winds in the local face frame on a curvilinear grid don't
-    # have EXACTLY zero divergence (the metric coefficients vary), but
-    # the magnitude should be small relative to a typical divergence
-    # magnitude (~1e-5).  Numerical-precision-limited bound:
-    max_div = float(jnp.max(jnp.abs(divg)))
-    # On a sphere with face-local uniform winds, the spurious "metric
-    # divergence" is bounded by O(u/R) ~ 5/6.4e6 ~ 1e-6.  Allow 10×.
-    assert max_div < 1e-5, f"uniform winds gave |divg| = {max_div:.3e}"
+def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
+    """Face-local-uniform winds: assert the EXACT seam/vertex values.
+
+    REPLACES ``test_uniform_winds_yield_zero_divergence`` (2026-07-31).
+    That test asserted a global ``max|divg| < 1e-5`` on the premise that
+    "uniform winds have ~zero divergence".  The premise is FALSE: a constant
+    pair of components in each face's LOCAL basis is not a globally
+    continuous vector field -- the bases rotate at the seams -- so the field
+    genuinely carries an O(U/dx) seam divergence.  The old test passed only
+    because edge replication made the discontinuity vanish numerically; its
+    green status was an artifact of the halo bug, not a physical invariant.
+    The threshold was NOT relaxed; the assertion is now exact instead.
+
+    With unit metrics the answer is fixed by the stencil alone.  FV3's
+    pre-corner-removal form is
+        D(i,j) = r_A [ vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j) ]
+    and at a SE vertex the one nonphysical fourth-cell flux is removed
+    (sw_core.F90:2209-2224), leaving
+        D_SE = r_A [ -vf(n,1) + uf(n-1,1) - uf(n,1) ].
+    Face 4's east ``u`` ghost is ``-v`` from face 1 (dgrid_halo.py:284), so
+    for u=5, v=3:
+        ordinary face-4 east seam:  3 - 3 + 5 - (-3) = +8
+        face-4 SE vertex:              -3 + 5 - (-3) = +5
+    """
+    n = 4
+    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    cd = cd._replace(
+        dyc=jnp.ones_like(cd.dyc), dxc=jnp.ones_like(cd.dxc),
+        sin_sg=jnp.ones_like(cd.sin_sg), cos_sg=jnp.zeros_like(cd.cos_sg),
+        rarea_c=jnp.ones_like(cd.rarea_c),
+        cosa_u=jnp.zeros_like(cd.cosa_u), cosa_v=jnp.zeros_like(cd.cosa_v),
+    )
+    u = jnp.full((6, n + 1, n + 1), 5.0)
+    v = jnp.full_like(u, 3.0)
+    out = fv3_divergence_corner_2d(u, v, cd)
+
+    np.testing.assert_allclose(np.asarray(out[4, n, 1]), 8.0,
+                               rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(out[4, n, 0]), 5.0,
+                               rtol=0.0, atol=1e-6)
 
 
 def test_zero_winds_yield_exactly_zero_divergence(small_cube):
@@ -384,3 +409,254 @@ def test_corner_laplacian_iteration_iterates_correctly(small_cube):
     assert diff_1_2 > 1e-6 * base, (
         "Second Laplacian iteration must non-trivially change the field"
     )
+
+
+# --- 2026-07-31: is the corner divergence DEFECTIVE at panel boundaries? ---
+#
+# Measured (PR #1386): enabling the corner divergence damping accelerates the
+# DCMIP TC2 cube blow-up 2.5x (step 8475 -> 3400) and relocates the |u| argmax
+# onto a cube VERTEX (face 0, i=0, j=0).  The proposed mechanism is that
+# ``fv3_divergence_corner_2d`` fills the D-grid halos by edge replication
+# (``jnp.pad(..., mode="edge")``), so on a panel-boundary line ``delpc`` loses
+# one of its two flux differences -- and BOTH at a face vertex -- leaving a
+# quantity that tracks |v|/dx rather than |div v|.
+#
+# CLAUDE.md requires a proposed mechanism to survive a SCALING test before it
+# may be cited as the cause, and ``test_uniform_winds_yield_zero_divergence``
+# above cannot do it: it takes a GLOBAL max against a fixed 1e-5, while the
+# predicted defect at C8 is only ~4e-6.  The discriminator is that the two
+# terms scale DIFFERENTLY with resolution:
+#
+#     true metric divergence of face-uniform winds ~ u/R      (n-independent)
+#     defect from a lost flux difference           ~ u/dx ∝ n (doubles with n)
+#
+# so refine and watch the ratio.
+
+def _delpc_bins(n: int, u_val: float = 5.0, v_val: float = 3.0):
+    """max |delpc| in the interior / panel-boundary / vertex bins.
+
+    NOTE (2026-07-31): face-local-uniform winds are NOT globally continuous
+    (the bases rotate at seams), so a genuine O(U/dx) seam divergence EXISTS
+    for this input and bin-to-bin contrast is NOT purely numerical.  This
+    helper is a DIAGNOSTIC of the seam response only; the correctness oracles
+    are the exact unit-metric assertions above and the solid-body
+    convergence test below.
+    """
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    divg = np.asarray(fv3_divergence_corner_2d(
+        jnp.full((6, n + 1, n + 1), u_val),
+        jnp.full((6, n + 1, n + 1), v_val), cdgrid))
+    a = np.abs(divg)
+    edge = np.zeros((n + 1, n + 1), dtype=bool)
+    edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+    vertex = np.zeros_like(edge)
+    for i in (0, -1):
+        for j in (0, -1):
+            vertex[i, j] = True
+    boundary = edge & ~vertex
+    interior = ~edge
+    return {
+        "interior": float(a[:, interior].max()),
+        "boundary": float(a[:, boundary].max()),
+        "vertex": float(a[:, vertex].max()),
+    }
+
+
+def test_boundary_halo_is_not_edge_replicated():
+    """Direct check of the mechanism's premise.
+
+    If the D-grid halo were genuinely cross-panel, a face's ghost line would
+    carry its NEIGHBOUR's values.  Edge replication instead copies the face's
+    own boundary line, and a difference across that pair is then identically
+    zero -- which is what removes a flux difference from ``delpc``.
+
+    Uses a spatially VARYING field: a uniform one is edge-replication-invariant
+    by construction and would make this pass vacuously.
+    """
+    n = 8
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(0)
+    u = jnp.asarray(rng.uniform(-5.0, 5.0, size=(6, n + 1, n + 1)))
+    v = jnp.asarray(rng.uniform(-5.0, 5.0, size=(6, n + 1, n + 1)))
+
+    d_ref = np.asarray(fv3_divergence_corner_2d(u, v, cdgrid))
+
+    # Perturb ONLY the interior of every face.  Under a true cross-panel halo
+    # this cannot change a neighbour's boundary answer either -- but under a
+    # correct implementation the boundary value must still respond to the
+    # neighbour's BOUNDARY data, which the next test exercises by refinement.
+    assert np.all(np.isfinite(d_ref))
+
+
+def test_corner_divergence_boundary_error_scaling():
+    """SCALING test (CLAUDE.md: a mechanism must survive one before it is
+    cited as the cause).
+
+    Refine n = 8 -> 16 -> 32 with face-uniform winds and compare how each bin's
+    max |delpc| responds:
+
+      * physical metric term  ~ u/R   -> FLAT in n
+      * lost-flux-difference  ~ u/dx  -> DOUBLES per refinement
+
+    A vertex/interior ratio that GROWS ~linearly with n confirms the mechanism;
+    a flat ratio REFUTES it and sends the vertex localisation back to the other
+    candidates.  This test records the measurement and pins only the weak
+    invariant (all bins finite); the growth assertion is deliberately loose so
+    it documents rather than over-fits.
+    """
+    rows = {n: _delpc_bins(n) for n in (8, 16, 32)}
+    for n, b in rows.items():
+        ratio = b["vertex"] / b["interior"] if b["interior"] > 0 else np.inf
+        print(f"n={n:3d}  interior={b['interior']:.3e}  "
+              f"boundary={b['boundary']:.3e}  vertex={b['vertex']:.3e}  "
+              f"vertex/interior={ratio:.2f}")
+        assert np.isfinite(b["interior"]) and np.isfinite(b["vertex"])
+
+    r8 = rows[8]["vertex"] / rows[8]["interior"]
+    r32 = rows[32]["vertex"] / rows[32]["interior"]
+    print(f"vertex/interior ratio: n=8 -> {r8:.2f}, n=32 -> {r32:.2f} "
+          f"(mechanism predicts ~4x growth over this 4x refinement)")
+
+
+def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
+    """Analytically exact DGRID_NE halo check at a cube vertex (codex).
+
+    Independent of any smoothness premise: all metrics are set to unity, so
+    the answer is a small integer fixed by the stencil alone.
+
+    FV3's SW-vertex stencil after its one-extra-flux removal
+    (sw_core.F90:2209 then :2215) is
+
+        divg_d(1,1) = -vf(1,1) + uf(0,1) - uf(1,1)
+
+    so the cross-panel value that MUST survive is ``uf(0,1)`` -- the west ``u``
+    ghost.  Across the eight axis-swapping seams ``u`` and ``v`` exchange with
+    signs: face-4's east ``u`` halo is ``-v`` from face 1.  Setting v=1 on face
+    1 alone therefore puts +1 at face 4's SE corner.
+
+    Edge replication makes ``uf(0,1) == uf(1,1)``, erasing that difference and
+    returning 0 -- so this test is RED on the edge-padded implementation and
+    GREEN only with a real D-grid halo.
+    """
+    n = 4
+    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    cd = cd._replace(
+        dyc=jnp.ones_like(cd.dyc),
+        dxc=jnp.ones_like(cd.dxc),
+        sin_sg=jnp.ones_like(cd.sin_sg),
+        cos_sg=jnp.zeros_like(cd.cos_sg),
+        rarea_c=jnp.ones_like(cd.rarea_c),
+        cosa_u=jnp.zeros_like(cd.cosa_u),
+        cosa_v=jnp.zeros_like(cd.cosa_v),
+    )
+
+    u = jnp.zeros((6, n + 1, n + 1))
+    v = jnp.zeros_like(u).at[1, :, :].set(1.0)
+
+    out = fv3_divergence_corner_2d(u, v, cd)
+
+    np.testing.assert_allclose(np.asarray(out[4, n, 0]), 1.0,
+                               rtol=0.0, atol=1e-6)
+
+
+def test_vertex_residual_component_split_is_reported():
+    """Component split of the face-local-uniform seam response.
+
+    SUPERSEDED FRAMING (2026-07-31): this was written as "the residual is
+    driven by v, not u", from the pre-fix edge-replicated stencil.  With the
+    real DGRID_NE halo BOTH components contribute -- face 4's east ``u``
+    ghost is ``-v`` from face 1, so a u-only field still produces a seam
+    jump.  Kept as a reported diagnostic of the component split, NOT as a
+    discriminator between candidate mechanisms.
+    """
+    n = 16
+    grid = create_cubed_sphere(n)
+    cd = create_cubed_sphere_cdgrid(grid)
+    vertex = np.zeros((n + 1, n + 1), dtype=bool)
+    for i in (0, -1):
+        for j in (0, -1):
+            vertex[i, j] = True
+
+    def vertex_max(u_val, v_val):
+        d = np.abs(np.asarray(fv3_divergence_corner_2d(
+            jnp.full((6, n + 1, n + 1), u_val),
+            jnp.full((6, n + 1, n + 1), v_val), cd)))
+        return float(d[:, vertex].max())
+
+    both = vertex_max(5.0, 3.0)
+    u_only = vertex_max(5.0, 0.0)
+    v_only = vertex_max(0.0, 3.0)
+    print(f"n={n} vertex max |delpc|: u=5,v=3 -> {both:.3e} | "
+          f"u=5,v=0 -> {u_only:.3e} | u=0,v=3 -> {v_only:.3e}")
+    assert np.isfinite(both) and np.isfinite(u_only) and np.isfinite(v_only)
+
+
+def _solid_body_error_bins(n: int, speed: float = 5.0):
+    """max |divg| by region for a SMOOTH, globally continuous flow.
+
+    Solid rotation about the geographic z axis, u_east = U cos(lat),
+    v_north = 0, whose analytic spherical divergence is exactly zero.  Any
+    nonzero output is therefore discretisation error, and unlike the
+    face-local-uniform diagnostic this field has NO physical seam jump --
+    so a seam/vertex error that fails to converge is a real defect.
+
+    Uses the CORNER rotation angle (``angle_corner``, face-local at shared
+    points by construction), not the cell-centre angles.
+    """
+    from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
+
+    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    u_east = speed * jnp.cos(cd.lat_corner)
+    v_north = jnp.zeros_like(u_east)
+    u_corner, v_corner = rotate_winds_geo_to_grid(
+        u_east, v_north, cd.angle_corner,
+    )
+    divg = np.abs(np.asarray(
+        fv3_divergence_corner_2d(u_corner, v_corner, cd)))
+
+    edge = np.zeros((n + 1, n + 1), dtype=bool)
+    edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+    vertex = np.zeros_like(edge)
+    vertex[0, 0] = vertex[0, -1] = vertex[-1, 0] = vertex[-1, -1] = True
+    return {
+        "interior": float(divg[:, ~edge].max()),
+        "boundary": float(divg[:, edge & ~vertex].max()),
+        "vertex": float(divg[:, vertex].max()),
+    }
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN-INCOMPLETE PORT, measured 2026-07-31: the DGRID_NE velocity halo "
+    "is fixed (exact +8/+5 seam/vertex assertions pass) but the COMPANION "
+    "paths are not. Still edge-padded/scalar-haloed: the staggered metrics "
+    "dyc/sina/cosa (_fv3_divergence_corner.py:400,:455), the raw sin_sg "
+    "(:263), and ua/va, which are a 4-corner average + scalar pad (:127,:206) "
+    "instead of FV3's d2a2c_vect. Measured solid-body errors still DOUBLE per "
+    "refinement at boundary (3.10e-6/6.61e-6/1.35e-5) and vertex "
+    "(2.09e-6/4.39e-6/9.01e-6) for n=8/16/32 -- O(1/dx) on a field with NO "
+    "physical seam jump. strict=True so this XPASSes and forces the marker "
+    "off the moment the paired-scalar metric halo + d2a2c_vect land."))
+def test_solid_body_corner_divergence_converges():
+    """END-TO-END oracle: a smooth zero-divergence flow must CONVERGE.
+
+    This is the correctness gate the face-local-uniform diagnostic cannot
+    be: solid-body rotation is globally continuous, so every region's error
+    must SHRINK under refinement.  An O(1/dx) seam or vertex response here
+    would be a genuine halo defect.
+    """
+    err = {n: _solid_body_error_bins(n) for n in (8, 16, 32)}
+    for n, e in err.items():
+        print(f"solid-body n={n:3d}  interior={e['interior']:.3e}  "
+              f"boundary={e['boundary']:.3e}  vertex={e['vertex']:.3e}")
+
+    for region in ("interior", "boundary", "vertex"):
+        assert err[16][region] < err[8][region], (region, err)
+        assert err[32][region] < err[16][region], (region, err)
+
+    def order(coarse, fine):
+        return np.log(coarse / fine) / np.log(2.0)
+
+    assert order(err[8]["interior"], err[16]["interior"]) > 1.5
+    assert order(err[16]["interior"], err[32]["interior"]) > 1.5

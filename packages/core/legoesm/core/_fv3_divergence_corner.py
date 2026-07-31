@@ -215,23 +215,45 @@ def fv3_divergence_corner_2d(
         ua_pad = pad_halo(ua)
         va_pad = pad_halo(va)
 
-    # Step 3: pad u_fv3, v_fv3 with halo=1 in the cell-axis via
-    # mode='edge'.  For 4D input, leave the trailing nlev axis with
-    # zero pad widths.
-    if _is_4d:
-        u_fv3_pad = jnp.pad(
-            u_fv3, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+    # Step 3: halo the normal D-grid pair with a REAL cross-panel
+    # DGRID_NE exchange (FV3 dyn_core.F90:376 / :501 -- the vector halo
+    # completed before ``c_sw``), NOT edge replication.
+    #
+    # Why this matters (2026-07-31): FV3's SW-vertex value, after the
+    # one-extra-flux removal at sw_core.F90:2209/:2215, is
+    #
+    #     divg_d(1,1) = -vf(1,1) + uf(0,1) - uf(1,1)
+    #
+    # so the cross-panel WEST u GHOST ``uf(0,1)`` must survive.  Edge
+    # replication sets uf(0,1) == uf(1,1), erasing that difference and
+    # leaving ~ -vf(1,1)/area_corner -- an O(v/dx) residual at the 4 face
+    # vertices, which grows with resolution.  Across the eight
+    # axis-swapping seams u and v exchange WITH SIGNS (face 4's east u
+    # halo is -v from face 1); only the vector helper does that.
+    # ``pad_halo_dgrid_scalar_4d`` deliberately falls back to edge
+    # replication on exactly those seams (dgrid_halo.py:189-228) and is
+    # the wrong tool here.
+    _u4 = u_fv3 if _is_4d else u_fv3[..., None]
+    _v4 = v_fv3 if _is_4d else v_fv3[..., None]
+    from legoesm.grids.halo import get_halo_backend as _ghb_dc
+    if _ghb_dc() == "mpi":
+        from legoesm.grids.dgrid_halo import (
+            pad_halo_dgrid_vector_4d_replicated_mpi,
         )
-        v_fv3_pad = jnp.pad(
-            v_fv3, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+        from legoesm.grids.halo import get_mpi_topology
+        _u_full, _v_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+            _u4, _v4, get_mpi_topology(),
         )
     else:
-        u_fv3_pad = jnp.pad(
-            u_fv3, [(0, 0), (1, 1), (0, 0)], mode="edge",
-        )
-        v_fv3_pad = jnp.pad(
-            v_fv3, [(0, 0), (0, 0), (1, 1)], mode="edge",
-        )
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+        _u_full, _v_full = pad_halo_dgrid_vector_4d(_u4, _v4)
+    # The helper halos BOTH axes; this routine differences u only along
+    # the cell axis and v only along its own, so trim the other back.
+    u_fv3_pad = _u_full[:, :, 1:-1, :]      # (6, n+2, n+1, nlev)
+    v_fv3_pad = _v_full[:, 1:-1, :, :]      # (6, n+1, n+2, nlev)
+    if not _is_4d:
+        u_fv3_pad = u_fv3_pad[..., 0]
+        v_fv3_pad = v_fv3_pad[..., 0]
 
     # Step 4: extract sin_sg / cos_sg at the 4 sub-grid positions used.
     # FV3 indexing convention (0-based here): sg[0]=west, sg[1]=south,
