@@ -101,9 +101,76 @@ not refute exactness-first — the 1e-2 rows remain untested — but it bounds t
 Caveat: that run used `e3t=off` (the wrong 1-D ladder), matched to baseline for protocol
 identity; a true-ladder acceptance is blocked on the restart-start instability.
 
-## Open human decisions
-1. `sh2` — park vs keep walking (lean park; family climate-inert).
-2. Provenance policy — 16 rows still cite scripts never committed; machine-checked, but
-   re-measurement policy undecided.
-3. Does CONDITIONING-LIMITED count as done at this bar?
-4. `zu_frc` u — pause vs continue.
+## Human decisions — SETTLED 2026-07-30
+1. `sh2` — **PARKED** (exact transcription in; family climate-inert).
+2. Provenance — **re-measure only high-magnitude / fix-touched rows**; the machine check keeps
+   the remaining 16 visible.
+3. CONDITIONING-LIMITED — **counts as RESOLVED-WITH-NOTE** (the 4 `ldf_slp` rows).
+4. `zu_frc` u — **PAUSED**, with one named resumption condition (below).
+5. Push/PR — **done**: PR #1395, 91 commits.
+
+---
+
+# SESSION CLOSE 2026-07-30 — resume here
+
+## Model health (verified, not assumed)
+- **5-year from-rest DINO run completes clean** at the pushed HEAD with all six fixes active
+  (ACC 55.578 → 65.540 Sv, census gates exact, ~11 min/yr). Card values were verified
+  programmatically before launch, not assumed.
+- **205 unit tests pass** across every touched module (`dino.py`, `tke.py`, `vertical.py`,
+  `eos.py`, shortwave, box budget).
+- **Non-NEMO recipes are byte-identical.** Every fix is a gated option, default = prior
+  behaviour, each with a bit-identity test asserting `max|diff| == 0.0` (`==`, not `allclose`).
+- **Known broken, and PRE-EXISTING**: restart-start on the true 3-D ladder
+  (`LEGOESM_NEMO_E3T=both`) — max|u| 0.69 → ~3 m/s over 20 d. Predates this work (addendum 33).
+
+## The strategic result — read this before spending anything
+**TWO acceptance runs, both NULL.** Run 1: three 1e-6-class fixes. Run 2: the ZAD fix
+(4.9e-3 → 3e-5, >100×, with a deep shelf-edge signature across 7255 columns). Year-5 ΔACC
+**+0.0001 Sv**; upper contrast 0.8956 → 0.8954; the 5-year deep decay 0.4373 → 0.4370 untouched.
+**Per-term transcription fidelity is not what costs the 25 Sv.**
+**⚠ BUT BOTH RUNS USED THE WRONG LADDER** (`LEGOESM_NEMO_E3T` unset — 12.9% off below k=25),
+kept for protocol identity with the baseline. **The ACC deficit is sourced below 1000 m, which
+is exactly where that ladder is wrong.** So both nulls carry a background geometric error ~100×
+the size of the fixes under test. **The nulls may be measuring the ladder, not the fixes** —
+which is why the true-ladder instability is the campaign's critical path, not more gate rows.
+
+## Live threads, with resume conditions
+- **`zu_frc` u (8.03e-3)** — PAUSED. Nine candidates refuted. The **write ledger is provably
+  complete** (`zu_frc_write_ledger.py`, self-check regreps live source): active writes are
+  `:336` depth-mean, `:367` zu_trd subtraction, `:381-382` drag (measured, refuted),
+  `:432` CENTRED wind. **RESUMPTION CONDITION NOW MET** — `wnd_dump_z{u,v}_frc_inc.bin` exists
+  (batched rebuild `819ca1b59`). **One bounded comparison decides it**: lego's wind contribution
+  to `F_slow_u` vs the dumped increment — RMS share, error corr vs the `zu_frc` error field,
+  ripple/seam/asymmetry. Owns it → the largest row is solved. Doesn't → ledger exhausted, every
+  line measured, close it as a bounded negative.
+- **True-ladder instability** — the critical path. Eliminated by measurement: CFL, `ln_zad_Aimp`,
+  `kappa_GM` magnitude, thin cells, slope cap, derived `gdept`, **GM-bolus discrete divergence**
+  (2026-07-30: identical on both ladders, and structurally impossible — `nemo_eiv_bolus_transport`
+  uses only `e2u`/`e1v`, no `e3` term), **abyssal slope-cap population** (flat, within ~10%).
+  `use_gm_redi=False` (zeros κ_GM only, Redi untouched) still restores stability.
+  **THE OPEN CONTRADICTION and the next cheap check**: κ_GM, slopes and bolus divergence are all
+  ladder-insensitive, yet addendum 36 recorded the bolus entering the advecting flux **37% larger**
+  on the true grid. Since `psi = κ × slope`, those cannot all hold. **Reconcile the 37%: is it
+  real, and is it the same quantity?** (Five metric-identity incidents occurred on 2026-07-30 —
+  treat any un-reconciled cross-script figure as suspect.)
+- **zdftke composite** — real residual (corr 0.966; ~5% signal-weighted ratio), **INDEPENDENT of
+  sh2** (substituting NEMO's own sh2 moved corr 0.9633 → 0.9656). Candidates, all now unblocked by
+  the rebuild: buoyancy sink `p_avt*rn2` (`zdftke.F90:495`), `zmxlm` (`:814-819`), tridiagonal
+  `zzd_up`/`zzd_lw` (`:485-492`).
+- **MXL residual** — escalated; `tke_dump_rn2.bin` now exists. Re-walk with true `rn2`: expect
+  0.0099 → ~1e-9 (confirming the rn2b-proxy explanation) or a real escalation.
+- Also unblocked by `819ca1b59`: `wzv` row (`wzv_dump_ww_call1/2.bin` — **two calls per step**,
+  use call2 for `tra_adv` consumers), `traldf_iso_lap` bracket, `dynzdf` stress bracket.
+
+## Known harness flake — do not chase
+Intermittent `buf_write` SIGSEGV in ~50% of bare NEMO runs, ASLR-sensitive, identical backtrace
+in logs dated 2026-07-27. **Pre-existing, not ours.** Retry; registered dumps came from a clean run.
+
+## Token economy (measured, in force)
+Subagent lanes were **~95% of spend** (~30 lanes × 100–400k on 2026-07-30). In force: 3-hourly
+cron (a FLOOR — fire manually for bursts), **ONE lane per iteration**, **explicit scope caps**
+("do steps 1–2, report, STOP"), briefs point here instead of re-typing context.
+**Protected: the adversarial reviews** (they caught a stale test encoding a bug as correct, a
+wrong `Kmm` instruction, a missing mandatory `mask=`, a vacuous fp32 control) **and numeric
+precision in any compression** — reconciliation needs old numbers exact and findable.

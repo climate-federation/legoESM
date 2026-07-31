@@ -371,6 +371,23 @@ most advanced thread and the `zu_trd` ABSENCE (dynspg_ts.F90:304/:367) is a pure
       1.000000, avm_in cell ratios 1.04-1.10. Composite row re-measured closure-vs-closure
       (ablation spy, non-vacuity max|K_prod-K_closure|=100): 0.9666277701/1.0708326784 avt,
       0.9671/1.0649 avm (offset near-tie caveat recorded). Both DEBT, honestly.
+## 2026-07-30l — BATCHED REBUILD LANDED (commit 819ca1b59): 7 consumers unblocked. NEXT-TICK QUEUE:
+1. **`zu_frc` wind measurement — THE RESUMPTION CONDITION IS MET.** `wnd_dump_z{u,v}_frc_inc.bin`
+   now exists (CENTRED wind increment, bracket at dynspg_ts.F90:432/:451, mirrors the drag
+   bracket). ONE bounded comparison: lego's wind contribution to F_slow_u vs the dumped
+   increment — RMS share, error corr vs the zu_frc error field, ripple/seam/asymmetry check.
+   The LAST unmeasured active write. If it owns the 8.03e-3 -> the campaign's largest row is
+   solved; if not -> the ledger is exhausted and zu_frc pauses with EVERY line measured.
+2. **MXL residual re-walk with TRUE rn2** (`tke_dump_rn2.bin` now exists) — the escalated MXL
+   attribution: expect the walk's 0.0099 -> ~1e-9 (proving the rn2b-proxy explanation) or a
+   REAL escalation. Also unblocks the EN stage (dissl carry now dumped too).
+3. zdftke composite chase (zmxlm / buoyancy sink / tridiag — inputs now all dumped).
+4. wzv row first measurement (`wzv_dump_ww_call1/2.bin` — NOTE two calls/step, use call2 for
+   tra_adv consumers); traldf_iso_lap bracket rows (stp_dump_22/23).
+5. dynzdf stress bracket consumers (88h item).
+⚠ Known harness flake, pre-existing (2026-07-27 logs): intermittent buf_write SIGSEGV ~50% of
+bare NEMO runs, ASLR-sensitive, retry-then-clean. Not ours; do not chase; rerun on hit.
+
 ## 2026-07-30k iteration log (first under the tightened token economy)
 - Gate: `AT BAR 15 | DEBT 32 | UNMEASURED 5 | WAIVED 1 | total 53`. Lanes clear, GPUs free.
 - [x] **ZAD row RECORDED (commit `5c441e312`)** with the POPULATION stated explicitly — this
