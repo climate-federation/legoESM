@@ -12,6 +12,9 @@ Components exercised:
 * lat-lon Arakawa C-grid shallow water      — raw-array state
 * spectral (Gaussian/T5) shallow water      — Field-wrapped complex state
 * MPAS (Voronoi) shallow water              — Field-wrapped unstructured state
+* slab land surface (MOST bulk flux)        — NON-dycore component, so the
+  transform battery also covers the surface stack and its ``fori_loop``
+  flux iteration rather than dynamical cores alone
 
 Catches:
 * JIT tracing errors (Python side-effects leaking through ``jax.jit``)
@@ -222,6 +225,66 @@ def _make_mpas_sw():
     return _build_adapter(state, state.h.data, dt, step, wrap, readout)
 
 
+def _make_slab_land():
+    """Non-dycore component: the slab land surface.
+
+    Every other adapter is an atmospheric dynamical core, so the whole
+    transform battery (jit / vmap / scan / checkpoint) was previously
+    blind to the surface stack — which is where the ``lax.fori_loop``
+    MOST bulk-flux iteration and the snow/bucket branches live.  Its
+    per-step arithmetic is cheap, so adding it costs almost nothing.
+    """
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.land.config import LandConfig
+    from legoesm.land.slab_land import step_land
+    from legoesm.land.state import LandState
+
+    ncol = 16
+    # Spatially varying forcing so the gradient carries structure.
+    ramp = jnp.linspace(0.9, 1.1, ncol)
+    forcing = AtmToSurface(
+        sw_down=200.0 * ramp, lw_down=300.0 * ramp,
+        precip_total=1e-5 * ramp, precip_snow=0.0 * ramp,
+        T_lowest=280.0 * ramp, q_lowest=5e-3 * ramp,
+        u_lowest=5.0 * ramp, v_lowest=2.0 * ramp,
+        p_lowest=1e5 * ramp, p_surface=1.013e5 * ramp,
+        rho_lowest=1.2 * ramp, cos_zenith=0.7 * ramp,
+        co2_ppmv=400.0 * ramp, has_radiation=jnp.ones(ncol),
+        has_precipitation=jnp.ones(ncol),
+    )
+    # MOST bulk scheme -> the flux solve runs its fori_loop iteration.
+    config = LandConfig(bulk_scheme="most")
+    T0 = 280.0 + 2.0 * jax.random.normal(jax.random.PRNGKey(21), (ncol,))
+    state = LandState(
+        T_soil=Field(T0, name="T_soil"),
+        W_bucket=Field(jnp.full(ncol, 50.0), name="W_bucket"),
+        snow_depth=Field(jnp.zeros(ncol), name="snow_depth"),
+        snow_age=Field(jnp.zeros(ncol), name="snow_age"),
+    )
+    dt = 600.0
+
+    def step(s, _dt):
+        out, _resp, *_rest = step_land(s, forcing, config, U_min=1.0, dt=_dt)
+        return out
+
+    # ``LandState.runoff`` / ``.TgC`` are OPTIONAL fields that default to
+    # ``None`` but are POPULATED by ``step_land``.  A hand-built initial
+    # state therefore has a different pytree structure from the step
+    # output, and ``lax.scan`` rejects the carry ("carry input and carry
+    # output must have the same pytree structure").  Priming the state
+    # with one step gives a fixed point of the structure, so the same
+    # adapter works for the 1-step and N-step (scan) losses alike.
+    state = step(state, dt)
+
+    def wrap(x):
+        return state._replace(T_soil=state.T_soil.replace(data=x))
+
+    def readout(s):
+        return s.T_soil.data
+
+    return _build_adapter(state, state.T_soil.data, dt, step, wrap, readout)
+
+
 def _build_adapter(state, x0, dt, step, wrap, readout):
     """Assemble the uniform adapter contract from component primitives."""
 
@@ -265,6 +328,8 @@ _ADAPTER_FACTORIES = {
     "latlon_cgrid_sw": _make_latlon_cgrid_sw,
     "spectral_sw": _make_spectral_sw,
     "mpas_sw": _make_mpas_sw,
+    # Non-dycore component (surface stack + MOST fori_loop bulk flux).
+    "slab_land": _make_slab_land,
 }
 
 _ADAPTER_CACHE: dict[str, dict] = {}
