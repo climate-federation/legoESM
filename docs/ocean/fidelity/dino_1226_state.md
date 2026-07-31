@@ -71,10 +71,22 @@ that failed is a SUCCESS of the process.
   defect** — those u-faces are wet, so `dynzdf.F90:121` does not discard NEMO's result.
   active-only **3.0332e-02**, union 3.9993e-02. Fix in flight (gated option, default
   bit-identical, sign/conservation walk required).
-- **`zu_frc` u (8.03e-3)** — drives the largest barotropic rows. **Seven candidates refuted.**
+- **`zu_frc` u (8.03e-3)** — drives the largest barotropic rows. **Nine candidates refuted.**
   Signature: broad envelope + damped ~34-row ripple, enhanced at the **periodic seam**
-  (coincident with the sill). Recommend **pause**: unexplained, not shown climate-relevant,
-  and out of scope for the unit harness (emergent solver behaviour).
+  (coincident with the sill). `zu_frc_write_ledger.py` (2026-07-30) enumerated EVERY
+  `dynspg_ts.F90` write to `zu_frc`/`zv_frc` between :287-497 (self-check: table's write-line
+  set == live-source regrep, exact match) and measured the two ACTIVE lines the six-piece
+  budget omitted: `dyn_drg_init` (:381-382, dumped `drg_dump_zu_frc_inc.bin`) and the wind
+  CENTRED term (:432). **Drag REFUTED as owner**: own-share 0.0001 (RMS 1.6e-10 vs zu_frc's
+  3.0e-6), lego-vs-NEMO error RMS 1.56e-15 (machine-precision match, consistent with the
+  already-recorded 0.999937/1.000278 gate row), corr with zu_frc's error -0.18/-0.15 (u/v).
+  **Wind term UNMEASURED** — no NEMO-side increment-only dump exists (only raw `utau`); would
+  need a new dump bracketing :420-433 the way :373-399 already brackets the drag call. On
+  legoESM's side wind is structurally folded into the 3-D `du_dt` depth-mean (not a separate
+  additive line, `surface_stress_implicit=False` on this card), so it isn't cleanly isolable
+  without the NEMO-side dump either. Recommend **pause**: ledger now provably complete, drag
+  ruled out, wind is the one remaining untested line but requires new instrumentation: out of
+  scope for the unit harness (emergent solver behaviour).
 - **`zdftke sh2`** — ESCALATION 1: exact transcription in, restricted-to-signal ratio 0.904.
   Family measured **climate-inert**, so parking is defensible.
 - **`ldf_slp` ×4** — CONDITIONING-LIMITED, all three stopping-rule conditions verified.
