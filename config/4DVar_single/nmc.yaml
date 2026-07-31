@@ -25,6 +25,13 @@ gen_be:
   output_path: outputs/mpas_gen_be_r6_l40/mpas_gen_be
   vertical_correlation_length: 2.0
   default_horizontal_length_scale_km: 500.0
-  temperature_balance_scale: 1.0
-  surface_pressure_balance_scale: 0.0
-  minimum_eigenvalue_fraction: 1.0e-4
+  balance_predictor_modes: 20
+  balance_latitude_center_degrees: 40.4113
+  balance_latitude_half_width_degrees: 10.0
+  nmc_standard_deviation_scale: 0.3333333333333333
+  wind_length_scale: 0.5
+  final_horizontal_length_scale_multiplier: 2.0
+  final_standard_deviation_scale: 0.3
+  diffusion_iterations: 400
+  normalization_probes: 2
+  normalization_seed: 20260728
