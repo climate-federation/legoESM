@@ -6362,8 +6362,10 @@ class ModelDriver:
         # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
         # working path) is retained below only for MPI, where the per-rank
         # ledger gather is not yet wired.
+        # NOTE: _mpi_world_size EXISTS-but-is-None on the serial lane, so the
+        # getattr default never applies — the `or 1` covers the None.
         if (bool(getattr(self.config.output, "budget_ledger", False))
-                and (getattr(self, "_mpi_world_size", 1) > 1
+                and ((getattr(self, "_mpi_world_size", 1) or 1) > 1
                      or getattr(self, "_voronoi_layout", None) is not None)):
             raise ValueError(
                 "--budget-ledger on the MPAS lane is serial-only for now "

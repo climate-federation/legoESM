@@ -49,7 +49,7 @@ def test_mpi_refusal_is_narrowed_not_deleted(run_mpas_src):
     per-rank gather is unwired), but must be conditioned on world size —
     not the old unconditional refusal."""
     assert "serial-only" in run_mpas_src
-    assert '_mpi_world_size", 1) > 1' in run_mpas_src, (
+    assert '_mpi_world_size", 1) or 1) > 1' in run_mpas_src, (
         "the MPI guard is no longer keyed on world size — either the serial "
         "path refuses again (regression to the pre-port refusal) or the "
         "MPI path silently produces a rank-local ledger")
