@@ -752,6 +752,18 @@ class DINOConfig:
     # kamm card selects "nemo_advective" (the new transcription of
     # dynzad.F90:86-118, area-weighted w interpolation at both u- and v-face).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit b6d0d9877):
+    # ONLY consumed when vertical_momentum_scheme="nemo_advective". NEMO's
+    # dynzad.F90:86-119 has NO per-face umask/vmask guard inside its loop --
+    # masking is deferred entirely to dynzdf.F90:121's post-hoc
+    # ``* umask(ji,jj,jk)`` on the velocity update. legoESM's default
+    # "min_rule" instead zeroes the flux G at any interface bordering an
+    # inactive NEIGHBOUR cell, which incorrectly discards a straddling
+    # u-/v-face's still-wet deeper T-neighbour's genuine ww -- explained
+    # ~100% of the active-only dyn_zad row error at levels 29-34 (ratio
+    # 1.000, zero free parameters). The kamm card selects "nemo_faithful"
+    # (see VALID_ZAD_BOTTOM_FACE_MASK, legoesm.ocean.vertical).
+    zad_bottom_face_mask: str = "min_rule"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
     # Vector-invariant vorticity flux scheme (relative + optionally planetary).
@@ -1100,6 +1112,14 @@ DINO_RECIPES: dict[str, dict] = {
         # numbers).  "nemo_advective" is the literal transcription of
         # dynzad.F90:86-118.
         "vertical_momentum_scheme": "nemo_advective",
+        # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit
+        # b6d0d9877): dynzad.F90:86-119 has no per-face umask/vmask guard --
+        # masking is deferred to dynzdf.F90:121's post-hoc *umask(jk).  The
+        # default "min_rule" AND-of-neighbours mask incorrectly discards a
+        # straddling face's still-wet deeper T-neighbour ww (explained ~100%
+        # of the active-only ZAD row error at levels 29-34).  See
+        # DINOConfig.zad_bottom_face_mask docstring above.
+        "zad_bottom_face_mask": "nemo_faithful",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -2848,6 +2868,7 @@ def dino_lat_lon_model_config(
         momentum_advection=cfg.momentum_advection,
         momentum_flux_scheme=cfg.momentum_flux_scheme,
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
+        zad_bottom_face_mask=cfg.zad_bottom_face_mask,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,

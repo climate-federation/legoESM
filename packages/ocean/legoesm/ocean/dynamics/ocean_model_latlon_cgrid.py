@@ -1654,6 +1654,18 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
+        # #1226 level-29-onset fix: bottom/straddling-face mask convention for
+        # nemo_advective_vertical_momentum_advection (only consumed under
+        # vertical_momentum_scheme="nemo_advective"; validated unconditionally
+        # here so a typo on ANY recipe fails fast at config construction).
+        from legoesm.ocean.vertical import VALID_ZAD_BOTTOM_FACE_MASK
+        _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
+        if _zad_mask_mode not in VALID_ZAD_BOTTOM_FACE_MASK:
+            raise ValueError(
+                f"zad_bottom_face_mask must be one of "
+                f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
+                f"got {_zad_mask_mode!r}",
+            )
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
         # in-tendency vertical momentum advection ENTIRELY with an upwind

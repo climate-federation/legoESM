@@ -1146,12 +1146,35 @@ def flux_form_vertical_momentum_advection_centered(
     return -vert_flux_div / h_u_safe
 
 
+#: ``bottom_face_mask_mode`` literals for
+#: :func:`nemo_advective_vertical_momentum_advection` (#1226 level-29-onset
+#: finding, ``zad_level29_onset_walk.py``, commit ``b6d0d9877``):
+#:   "min_rule" (default, bit-identical) -- G at interface k is zeroed
+#:     whenever EITHER adjacent cell (k-1 or k) is inactive
+#:     (``active_above * active_below``).  NOT what NEMO does; see below.
+#:   "nemo_faithful" -- transcribes ``dynzad.F90:86-119`` exactly: the
+#:     ``DO_3D(0,0,0,0,1,jpk-2)`` loop has NO per-face umask/vmask guard on
+#:     ``ww`` or on the assembled flux, so G is built COMPLETELY UNMASKED
+#:     (a straddling u-face's still-wet deeper T-neighbour contributes its
+#:     genuine nonzero ``ww`` into the shallower face's last-wet cell).
+#:     NEMO defers ALL masking to the velocity update
+#:     (``dynzdf.F90:121``, ``puu(Kaa) = (puu(Kbb)+rDt*Krhs) * umask(jk)``)
+#:     which zeroes the FINAL TENDENCY using only the cell's OWN
+#:     ``face_active`` at that level jk -- not an AND of interface
+#:     neighbours.  Below any face's own seafloor both neighbouring cells
+#:     (and therefore u, w) are architecturally zero, so this produces the
+#:     same zero there as "min_rule"; the two modes differ ONLY at a
+#:     face's last-wet cell when its deeper T-neighbour is still wet.
+VALID_ZAD_BOTTOM_FACE_MASK = frozenset({"min_rule", "nemo_faithful"})
+
+
 def nemo_advective_vertical_momentum_advection(
     u: jnp.ndarray,
     w_area_half: jnp.ndarray,
     h_u: jnp.ndarray,
     face_area: jnp.ndarray,
     face_active: jnp.ndarray | None = None,
+    bottom_face_mask_mode: str = "min_rule",
 ) -> jnp.ndarray:
     """NEMO-faithful ADVECTIVE-form vertical momentum advection (dynzad.F90).
 
@@ -1230,9 +1253,17 @@ def nemo_advective_vertical_momentum_advection(
         e.g. ``grid.dx_u * grid.dy_u``.  NOT ``area_T`` interpolated.
     face_active : array | None, shape (..., nlev)
         Optional per-level face-activity mask (1 = wet, 0 = closed below
-        the partial seafloor).  Gates ``G`` at any interface bordering an
-        inactive face to exactly zero (same role as the other vertical-
-        momentum helpers).
+        the partial seafloor).
+    bottom_face_mask_mode : {"min_rule", "nemo_faithful"}
+        See :data:`VALID_ZAD_BOTTOM_FACE_MASK` above.  ``"min_rule"``
+        (default) gates ``G`` at any interface bordering an inactive face
+        to exactly zero (AND of the two neighbouring cells).
+        ``"nemo_faithful"`` (#1226 level-29-onset fix) leaves ``G``
+        UNMASKED (matching ``dynzad.F90`` having no umask/vmask call at
+        all) and instead masks only the FINAL per-cell tendency by that
+        cell's own ``face_active[..., k]`` -- reproducing
+        ``dynzdf.F90:121``'s ``* umask(ji,jj,jk)`` on the velocity update,
+        which is the ONLY masking NEMO ever applies to this term.
 
     Returns
     -------
@@ -1240,16 +1271,25 @@ def nemo_advective_vertical_momentum_advection(
         ``-0.25/(face_area*h_u) * (G[k] + G[k+1])`` — a per-thickness
         momentum tendency ready to add to ``du/dt``.
     """
+    if bottom_face_mask_mode not in VALID_ZAD_BOTTOM_FACE_MASK:
+        raise ValueError(
+            f"bottom_face_mask_mode must be one of "
+            f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
+            f"got {bottom_face_mask_mode!r}",
+        )
     nlev = u.shape[-1]
     # Interior interface k (1 <= k <= nlev-1): G[k] = 2*w_area_half[k]*(u[k-1]-u[k]).
     w_interior = w_area_half[..., 1:nlev]           # (..., nlev-1)
     du_interior = u[..., :-1] - u[..., 1:]           # u[k-1] - u[k], k=1..nlev-1
     G_interior = 2.0 * w_interior * du_interior
 
-    if face_active is not None:
+    if bottom_face_mask_mode == "min_rule" and face_active is not None:
         active_above = face_active[..., :-1]    # cell k-1 for k=1..nlev-1
         active_below = face_active[..., 1:]      # cell k   for k=1..nlev-1
         G_interior = G_interior * (active_above * active_below)
+    # "nemo_faithful": G_interior stays UNMASKED here (dynzad.F90:86-119 has
+    # no per-face umask/vmask guard on ww or on the assembled flux) -- the
+    # face_active gate is applied below, to the final tendency only.
 
     # Zero surface/bottom interface G via a single Pad HLO op (matches
     # NEMO's zWdzU=0 init at the surface and the never-read, architecturally
@@ -1267,7 +1307,13 @@ def nemo_advective_vertical_momentum_advection(
     # tendency is zero — but 0 (masked G) * inf (1/0 area) is nan, not 0,
     # without the floor.
     face_area_safe = jnp.maximum(face_area, 1.0e-10)
-    return -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
+    tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
+    if bottom_face_mask_mode == "nemo_faithful" and face_active is not None:
+        # dynzdf.F90:121 -- ``puu(Kaa) = (puu(Kbb) + rDt*Krhs) * umask(ji,jj,jk)``:
+        # the ONLY masking NEMO applies to this term, keyed on the cell's
+        # OWN level jk (not an interface-neighbour AND).
+        tend = tend * face_active
+    return tend
 
 
 # ---------------------------------------------------------------------------

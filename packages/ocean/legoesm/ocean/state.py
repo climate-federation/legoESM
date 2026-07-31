@@ -1693,6 +1693,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # upwind backward-Euler solve, so "centered_full"/"nemo_advective" would be
     # a silent no-op).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit b6d0d9877):
+    # ONLY consumed by vertical_momentum_scheme="nemo_advective". Selects how
+    # nemo_advective_vertical_momentum_advection masks its bottom/straddling
+    # u-/v-faces -- see VALID_ZAD_BOTTOM_FACE_MASK in
+    # legoesm.ocean.vertical for the full NEMO-transcription rationale.
+    # "min_rule" (default, bit-identical): AND-of-neighbours interface mask.
+    # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
+    # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
+    zad_bottom_face_mask: str = "min_rule"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
