@@ -103,8 +103,20 @@ class TestGrayRadiationGrad:
         key = jax.random.PRNGKey(42)
         k1, k2 = jax.random.split(key)
         self.T = 250.0 + 20.0 * jax.random.normal(k1, (ncol, nlev))
-        # Pressure decreasing with height
-        p_half = jnp.linspace(1e5, 100.0, nlev + 1)
+        # Vertical index convention: 0 = TOA, -1 = surface (``gray_radiation``
+        # reads ``p_s = p_half[:, -1]``), so pressure INCREASES with index.
+        #
+        # FIXED (this sweep): the fixture previously used
+        # ``jnp.linspace(1e5, 100.0, ...)`` — surface at index 0 — which
+        # made ``p_s`` = 100 Pa and ``dtau_dry = tau[1:] - tau[:-1]``
+        # NEGATIVE at every layer.  ``jnp.maximum(dtau, 0.0)`` then
+        # clamped the entire column optical depth to exactly zero, so the
+        # test was exercising a fully TRANSPARENT atmosphere: the LW
+        # fluxes reduced to bare surface emission and the gradients
+        # w.r.t. T and q_v were identically zero.  ``test_grad_wrt_sfc_temp``
+        # still passed (surface emission does not need the column), which
+        # is why the inversion went unnoticed.
+        p_half = jnp.linspace(100.0, 1e5, nlev + 1)
         self.p_half = jnp.broadcast_to(p_half, (ncol, nlev + 1))
         self.p_full = 0.5 * (self.p_half[:, :-1] + self.p_half[:, 1:])
         self.sfc_temp = 290.0 * jnp.ones(ncol)
@@ -124,6 +136,56 @@ class TestGrayRadiationGrad:
 
         grad = jax.grad(loss)(self.sfc_temp)
         assert_gradient_ok(grad, "Gray radiation w.r.t. sfc_temp")
+
+    def test_grad_wrt_T(self):
+        """Spec 2b: ``loss(T_col) = sum(radiation(T_col, ...)**2)``.
+
+        The LW heating rate is the term that feeds the atmospheric
+        temperature tendency, so it is the physically relevant target:
+        a dead d(heating)/dT would silently break any radiative-
+        equilibrium gradient (4D-Var, parameter estimation).
+        """
+        config = self.config
+
+        def loss(T):
+            out = self.gray_radiation(T, self.p_full, self.p_half,
+                                      self.sfc_temp, self.lat, self.q_v,
+                                      self.insolation, config)
+            return jnp.sum(out.lw_heating_rate ** 2)
+
+        grad = jax.grad(loss)(self.T)
+        assert_gradient_ok(grad, "Gray radiation lw_heating_rate w.r.t. T")
+
+    def test_grad_wrt_q_v(self):
+        """Moisture-LW feedback: dtau_k = tau_moist_coeff * q_v * dp_k / g.
+
+        A zero gradient here would mean the interactive-vapor LW term is
+        detached from the humidity field (the Byrne & O'Gorman add-on
+        silently reduced to the prescribed-dry Frierson optical depth).
+        """
+        config = self.config
+
+        def loss(q_v):
+            out = self.gray_radiation(self.T, self.p_full, self.p_half,
+                                      self.sfc_temp, self.lat, q_v,
+                                      self.insolation, config)
+            return jnp.sum(out.lw_flux_up ** 2)
+
+        grad = jax.grad(loss)(self.q_v)
+        assert_gradient_ok(grad, "Gray radiation w.r.t. q_v")
+
+    def test_grad_wrt_insolation_through_sw(self):
+        """SW heating must respond to the prescribed TOA insolation."""
+        config = self.config
+
+        def loss(insolation):
+            out = self.gray_radiation(self.T, self.p_full, self.p_half,
+                                      self.sfc_temp, self.lat, self.q_v,
+                                      insolation, config)
+            return jnp.sum(out.sw_heating_rate ** 2)
+
+        grad = jax.grad(loss)(self.insolation)
+        assert_gradient_ok(grad, "Gray radiation sw_heating_rate w.r.t. insolation")
 
 
 # ============================================================================
