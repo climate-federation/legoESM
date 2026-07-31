@@ -29,9 +29,9 @@ from legoesm.land.canopy.clm_ml_backend.offline_driver.TowerDataMod import tower
 # albsat(mxsoil_color, numrad): Wet soil albedo by color class and waveband
 # albdry(mxsoil_color, numrad): Dry soil albedo by color class and waveband
 # isoicol(begc:endc):           Column soil color class
-albsat: Array = jnp.empty((0, 0), dtype=jnp.float64)
-albdry: Array = jnp.empty((0, 0), dtype=jnp.float64)
-isoicol: Array = jnp.empty((0,), dtype=jnp.int32)
+albsat: np.ndarray = np.empty((0, 0), dtype=np.float64)
+albdry: np.ndarray = np.empty((0, 0), dtype=np.float64)
+isoicol: np.ndarray = np.empty((0,), dtype=np.int32)
 
 
 # ---------------------------------------------------------------------------
