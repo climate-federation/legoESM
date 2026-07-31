@@ -67,7 +67,13 @@ class TestNemoNnMxl2:
         assert not jnp.array_equal(l_k, l_eps)
 
     def test_choice4_dissipation_length_is_never_larger(self):
-        """min(lup,ldn) <= sqrt(lup*ldn) pointwise -> more dissipation."""
+        """min(lup,ldn) <= sqrt(lup*ldn) pointwise -> more DISSIPATION.
+
+        Note this is a statement about eps = c_eps e^{3/2}/l_eps only.  The
+        eddy coefficient uses l_k, which is identical in both schemes (see
+        test_eddy_length_is_identical_between_the_two), so nothing here says
+        the instantaneous diffusivity changes.
+        """
         _, eps4 = _lengths(4)
         _, eps3 = _lengths(3)
         assert bool(jnp.all(eps4 <= eps3 + 1e-12))
@@ -92,8 +98,12 @@ class TestNemoNnMxl2:
 
     def test_weak_stratification_makes_them_diverge(self):
         """The complementary case: a weakly stratified deep column, where the
-        slope bound (not buoyancy) sets the length, gives lup >> ldown near the
-        surface and a large l_eps ratio.
+        slope bound (not buoyancy) sets the length, so the two envelopes diverge
+        and the l_eps ratio is large.
+
+        DIRECTION (codex): with a surface anchor, ``lup`` starts SMALL at the top
+        and grows downward while ``ldn`` is large there -- so near the surface
+        ``lup << ldn``, not the reverse as this comment previously claimed.
         """
         _, eps4 = _lengths(4)          # defaults ARE the weak-stratification case
         _, eps3 = _lengths(3)
@@ -110,3 +120,85 @@ class TestNemoNnMxl2:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _nemo_case2_oracle(l_int, e3t, l_sfc):
+    """INDEPENDENT literal transcription of NEMO zdftke.F90 CASE(2).
+
+    Deliberately a plain-NumPy loop, written from the Fortran rather than from
+    our implementation: every other test in this file compares two branches that
+    SHARE the lup/ldown sweep, so a bug inside that sweep is invisible to all of
+    them (codex).  This reproduces the sequential in-place sweeps directly:
+
+        DO jk = 2, jpkm1     zmxlm(jk) = MIN(zmxlm(jk-1) + e3t(jk-1), zmxlm(jk))
+        DO jk = jpkm1, 2, -1 zemxl = MIN(zmxlm(jk+1) + e3t(jk+1), zmxlm(jk))
+                             zmxlm(jk) = zemxl ; zmxld(jk) = zemxl
+
+    Returns the single CASE(2) length (zmxlm == zmxld).
+    """
+    n = len(l_int)
+    z = np.asarray(l_int, dtype=np.float64).copy()
+    z[0] = l_sfc                                  # surface row = the anchor
+    for k in range(1, n):                         # downward
+        z[k] = min(z[k - 1] + e3t[k - 1], z[k])
+    for k in range(n - 2, 0, -1):                 # upward
+        z[k] = min(z[k + 1] + e3t[k + 1], z[k])
+    return z
+
+
+class TestAgainstIndependentOracle:
+    """Compare BOTH returned lengths with a literal NEMO transcription."""
+
+    def _case(self, n2, e, dz_cell, l_sfc=3.0):
+        nlev = len(dz_cell)
+        e_a = jnp.full((1, nlev - 1), e)
+        n2_a = jnp.full((1, nlev - 1), n2)
+        dz_half = jnp.asarray(dz_cell[:-1])[None, :]
+        l_k, l_eps = compute_mixing_lengths(
+            e_a, n2_a, dz_half, _cfg(4),
+            dz_cell=jnp.asarray(dz_cell)[None, :],
+            l_surface_anchor=jnp.array([l_sfc]))
+        # the buoyancy length our code builds at interior interfaces
+        l_int = np.maximum(np.sqrt(2.0) * np.sqrt(e) / np.sqrt(max(n2, 1e-12)),
+                           _cfg(4).mxl_min)
+        stack = np.concatenate([[l_sfc], np.full(nlev - 1, l_int)])
+        ref = _nemo_case2_oracle(stack, np.asarray(dz_cell), l_sfc)[1:]
+        return np.asarray(l_k)[0], np.asarray(l_eps)[0], ref
+
+    def test_matches_oracle_uniform_grid(self):
+        k, eps, ref = self._case(1.0e-9, 1.0e-3, [10.0] * 40)
+        assert np.allclose(k, ref, rtol=1e-12, atol=0.0), (k[:5], ref[:5])
+        assert np.allclose(eps, ref, rtol=1e-12, atol=0.0)
+
+    def test_matches_oracle_nonuniform_e3t(self):
+        """Stretched grid: catches an e3t indexing slip that a uniform grid
+        cannot (every offset looks the same when all thicknesses are equal)."""
+        dz = list(np.linspace(2.0, 120.0, 30))
+        k, eps, ref = self._case(1.0e-9, 1.0e-3, dz)
+        assert np.allclose(k, ref, rtol=1e-12, atol=0.0), (k[:5], ref[:5])
+        assert np.allclose(eps, ref, rtol=1e-12, atol=0.0)
+
+    def test_matches_oracle_thin_bottom_cell(self):
+        """Partial bottom cell -- the bottom row is where a sweep is most
+        likely to be off by one."""
+        dz = [10.0] * 19 + [0.4]
+        k, eps, ref = self._case(1.0e-9, 1.0e-3, dz)
+        assert np.allclose(k, ref, rtol=1e-12, atol=0.0), (k[-5:], ref[-5:])
+
+    def test_matches_oracle_with_nontrivial_anchor(self):
+        """A large wind-stress anchor must propagate downward through lup."""
+        k, eps, ref = self._case(1.0e-9, 1.0e-3, [10.0] * 25, l_sfc=45.0)
+        assert np.allclose(k, ref, rtol=1e-12, atol=0.0), (k[:5], ref[:5])
+
+    def test_oracle_disagrees_with_choice3(self):
+        """Non-vacuity: the oracle is CASE(2), so choice 3 must NOT match it."""
+        dz = [10.0] * 30
+        nlev = len(dz)
+        e_a = jnp.full((1, nlev - 1), 1.0e-3)
+        n2_a = jnp.full((1, nlev - 1), 1.0e-9)
+        _, eps3 = compute_mixing_lengths(
+            e_a, n2_a, jnp.asarray(dz[:-1])[None, :], _cfg(3),
+            dz_cell=jnp.asarray(dz)[None, :],
+            l_surface_anchor=jnp.array([3.0]))
+        _, _, ref = self._case(1.0e-9, 1.0e-3, dz)
+        assert not np.allclose(np.asarray(eps3)[0], ref, rtol=1e-6)

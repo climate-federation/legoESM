@@ -720,8 +720,16 @@ def compute_mixing_lengths(
             # Hence the only difference from nn_mxl=3 is l_eps.
             #
             # Because min(lup,ldown) <= sqrt(lup*ldown), nn_mxl=2 has the
-            # SMALLER dissipation length, hence LARGER eps = c_eps*e^{3/2}/l_eps
-            # and less retained TKE.  The two coincide where lup ~ ldown
+            # SMALLER dissipation length, hence LARGER eps =
+            # c_eps*e^{3/2}/l_eps.
+            #
+            # PRECISION (codex): this does NOT directly "mix less".  At a FIXED
+            # TKE the eddy coefficients avm/avt use l_k, which is IDENTICAL in
+            # choices 3 and 4 (it is computed before the split), so the
+            # instantaneous diffusivity is unchanged.  What changes directly is
+            # the DISSIPATION; a shallower mixed layer is a subsequent coupled
+            # effect once the larger eps has drawn TKE down, not an algebraic
+            # consequence of the branch.  The two coincide where lup ~ ldown
             # (strong stratification, both branches locally limited) and differ
             # most where they diverge (weakly stratified deep columns far from
             # both boundaries) -- which is why this is a HIGH-LATITUDE-selective
@@ -761,7 +769,8 @@ def compute_mixing_lengths(
         l_eps = l_k
     else:
         raise ValueError(
-            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2."
+            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2 "
+            "(Veros), 3 (NEMO nn_mxl=3) or 4 (NEMO nn_mxl=2)."
         )
     return l_k, l_eps
 
