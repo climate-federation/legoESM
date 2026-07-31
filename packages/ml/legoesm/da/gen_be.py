@@ -179,52 +179,6 @@ def _to_eof_modes(
     return flat @ (eig_vec / sqrt_lam[None, :])  # (N, nlev)
 
 
-def _fit_balance(
-    err_psi_modes: np.ndarray,
-    err_all_modes: np.ndarray,
-    psi_start: int,
-    psi_end: int,
-    n_predictor_modes: int | None = None,
-) -> np.ndarray:
-    """Fit linear balance regression: channel_i ≈ sum_j reg[i,j] * psi_mode[j].
-
-    Parameters
-    ----------
-    err_psi_modes : np.ndarray, shape (N, nlev)
-        Psi EOF modes (psi group only), N = n_ens * ncol.
-    err_all_modes : np.ndarray, shape (N, n_total_channels)
-        All channels flattened: surface + 3D groups in EOF mode space.
-    psi_start, psi_end : int
-        Slice into all_modes where psi modes live.
-
-    Returns
-    -------
-    reg_coeff : np.ndarray, shape (n_total_channels, nlev)
-        Psi modes have reg_coeff[psi_start:psi_end] = 0.
-    """
-    N, nlev = err_psi_modes.shape
-    n_predictor = nlev if n_predictor_modes is None else min(int(n_predictor_modes), nlev)
-    if n_predictor < 1:
-        raise ValueError("n_predictor_modes must be positive")
-    predictors = err_psi_modes[:, :n_predictor]
-
-    # Auto-covariance of psi modes
-    cov_psi = (predictors.T @ predictors) / N
-    # Regularise to avoid singular matrix (small ridge)
-    ridge = 1e-6 * np.trace(cov_psi) / max(n_predictor, 1)
-    cov_psi_inv = np.linalg.inv(cov_psi + ridge * np.eye(n_predictor))
-
-    # Vectorised cross-covariance: (n_ch, nlev) = (n_ch, N) @ (N, nlev) / N
-    cross_cov = (err_all_modes.T @ predictors) / N
-    reg_coeff = np.zeros((err_all_modes.shape[1], nlev), dtype=np.float64)
-    reg_coeff[:, :n_predictor] = cross_cov @ cov_psi_inv
-
-    # Psi channels must not regress against themselves (they are the source)
-    reg_coeff[psi_start:psi_end] = 0.0
-
-    return reg_coeff
-
-
 def _fit_len_scale(
     err_static: np.ndarray,
     grid,
@@ -433,52 +387,6 @@ def _mpas_lsq_gradient_weights_np(grid) -> tuple[np.ndarray, np.ndarray, np.ndar
     wx = np.where(mask, wx, 0.0)
     wy = np.where(mask, wy, 0.0)
     return neighbors, wx, wy
-
-
-def _mpas_grad_np(
-    field: np.ndarray,
-    neighbors: np.ndarray,
-    wx: np.ndarray,
-    wy: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply MPAS LSQ gradient weights to (..., nCells) scalar fields."""
-    neighbor_vals = field[..., neighbors]  # (..., maxEdges, nCells)
-    diff = neighbor_vals - field[..., None, :]
-    gx = np.sum(wx[None, :, :] * diff, axis=-2)
-    gy = np.sum(wy[None, :, :] * diff, axis=-2)
-    return gx, gy
-
-
-def _mpas_laplace_np(
-    field: np.ndarray,
-    neighbors: np.ndarray,
-    wx: np.ndarray,
-    wy: np.ndarray,
-) -> np.ndarray:
-    """Cell-neighbor Laplacian proxy: div(grad(field))."""
-    gx, gy = _mpas_grad_np(field, neighbors, wx, wy)
-    gxx, _ = _mpas_grad_np(gx, neighbors, wx, wy)
-    _, gyy = _mpas_grad_np(gy, neighbors, wx, wy)
-    return gxx + gyy
-
-
-def _mpas_inverse_laplace_np(
-    rhs: np.ndarray,
-    neighbors: np.ndarray,
-    wx: np.ndarray,
-    wy: np.ndarray,
-    n_iter: int = _MPAS_HELMHOLTZ_POISSON_ITER,
-) -> np.ndarray:
-    """Approximate mean-zero inverse Laplacian with fixed Richardson steps."""
-    rhs = rhs - rhs.mean(axis=-1, keepdims=True)
-    phi = np.zeros_like(rhs)
-    radius2 = 1.0 / np.maximum(np.mean(wx * wx + wy * wy), 1e-20)
-    step = _MPAS_HELMHOLTZ_RELAX * radius2
-    for _ in range(n_iter):
-        residual = rhs - _mpas_laplace_np(phi, neighbors, wx, wy)
-        phi = phi - step * residual
-        phi = phi - phi.mean(axis=-1, keepdims=True)
-    return phi
 
 
 def _mpas_cell_wind_to_helmholtz_np(

@@ -12,6 +12,8 @@ Tests:
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from legoesm import constants
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -177,7 +179,7 @@ class TestFitGenBE:
 
         grid = SimpleNamespace(
             grid_n_columns=4,
-            grid_radius=6.371e6,
+            grid_radius=constants.R_earth,
             cellsOnCell=np.array(
                 [
                     [1, 0, 3, 2],
@@ -199,28 +201,87 @@ class TestFitGenBE:
         assert np.allclose(psi, 0.0)
         assert np.allclose(chi, 0.0)
 
-    def test_mpas_gradient_weights_remain_bounded_near_poles(self):
-        """Spherical tangent-plane weights avoid the cos(latitude) singularity."""
+    def test_mpas_gradient_weights_recover_a_linear_field_near_the_pole(self):
+        """The LSQ weights must differentiate EXACTLY in log-map coordinates.
+
+        REPLACES ``test_mpas_gradient_weights_remain_bounded_near_poles``, which
+        asserted only ``isfinite`` and ``max|w| < 1e-2``.  Measured on this same
+        fixture the old equirectangular formula gives ``max|wx| = 2.86e-05`` and
+        the new log map ``8.99e-05`` -- both three orders of magnitude under the
+        bound, so that test PASSED WITH THE FIX REVERTED and pinned nothing.
+        Structurally an upper-bound-only assertion cannot separate two formulas
+        that both produce small weights.
+
+        What actually changed is the geometry: the log map sets the implied
+        displacement magnitude to the great-circle arc ``R*angle``, whereas
+        ``R*cos(lat)*dlon`` does not -- on this fixture the equirectangular form
+        puts a 180-deg-away neighbour at ``dx = -69.9 km`` where the true
+        separation is ``44.5 km``, a 57% error.
+
+        So assert the defining property of a gradient operator: for a field that
+        is exactly linear in the tangent-plane coordinates, ``sum w*(f_n - f_i)``
+        must return the coefficients themselves.  The anti-vacuity leg below
+        feeds the SAME weights a field built on equirectangular displacements and
+        requires the answer to be materially wrong -- so this test fails if the
+        log map is reverted.
+        """
         from types import SimpleNamespace
 
         from legoesm.da.gen_be import _mpas_lsq_gradient_weights_np
 
         grid = SimpleNamespace(
             grid_n_columns=4,
-            grid_radius=6.371e6,
+            grid_radius=constants.R_earth,
             cellsOnCell=np.array([[1, 0, 3, 2], [2, 3, 0, 1]], dtype=np.int64),
             nEdgesOnCell=np.array([2, 2, 2, 2], dtype=np.int64),
             latCell=np.deg2rad(np.array([89.9, 89.8, 89.9, 89.8])),
             lonCell=np.deg2rad(np.array([0.0, 90.0, 180.0, 270.0])),
         )
+        neighbors, wx, wy = _mpas_lsq_gradient_weights_np(grid)
+        assert np.all(np.isfinite(wx)) and np.all(np.isfinite(wy))
 
-        _, wx, wy = _mpas_lsq_gradient_weights_np(grid)
+        # Independent reference implementation of the spherical log map.
+        lat, lon, R = grid.latCell, grid.lonCell, constants.R_earth
+        pos = np.stack((np.cos(lat) * np.cos(lon),
+                        np.cos(lat) * np.sin(lon), np.sin(lat)), axis=-1)
+        east = np.stack((-np.sin(lon), np.cos(lon), np.zeros_like(lat)), axis=-1)
+        north = np.stack((-np.sin(lat) * np.cos(lon),
+                          -np.sin(lat) * np.sin(lon), np.cos(lat)), axis=-1)
+        cosang = np.clip(np.sum(pos[None, :, :] * pos[neighbors], axis=-1), -1.0, 1.0)
+        ang = np.arccos(cosang)
+        tang = ((pos[neighbors] - cosang[..., None] * pos[None, :, :])
+                / np.maximum(np.sin(ang)[..., None], 1.0e-15))
+        disp = R * ang[..., None] * tang
+        dx = np.sum(disp * east[None, :, :], axis=-1)
+        dy = np.sum(disp * north[None, :, :], axis=-1)
 
-        assert np.all(np.isfinite(wx))
-        assert np.all(np.isfinite(wy))
-        assert np.max(np.abs(wx)) < 1.0e-2
-        assert np.max(np.abs(wy)) < 1.0e-2
+        # Sanity on the reference itself: |displacement| IS the great-circle arc.
+        # rtol 1e-9, not tighter: the cell-0/cell-2 pair sits across the pole, so
+        # its `arccos` argument is near 1 and the arc carries ~1.8e-12 relative
+        # round-off (measured). That is precision, not a geometry error -- the
+        # 3-D norm of `disp` matches `hypot(dx, dy)` exactly and the radial
+        # component is ~7e-10 m against a 22 km arc.
+        np.testing.assert_allclose(np.hypot(dx, dy), R * ang, rtol=1e-9)
 
+        # A field exactly linear in tangent-plane coordinates must differentiate
+        # exactly, at every cell including the near-pole ones.
+        a, b = 3.0e-4, -7.0e-4
+        df = a * dx + b * dy
+        np.testing.assert_allclose(np.sum(wx * df, axis=0), a, rtol=1e-9, atol=1e-14)
+        np.testing.assert_allclose(np.sum(wy * df, axis=0), b, rtol=1e-9, atol=1e-14)
+
+        # ANTI-VACUITY: the same weights applied to a field built on the OLD
+        # equirectangular displacements must NOT recover (a, b). If the log map
+        # were reverted the two constructions would agree and this would fail.
+        dlon = (lon[neighbors] - lon[None, :] + np.pi) % (2 * np.pi) - np.pi
+        dx_eq = R * np.cos(lat)[None, :] * dlon
+        dy_eq = R * (lat[neighbors] - lat[None, :])
+        df_eq = a * dx_eq + b * dy_eq
+        gx_eq = np.sum(wx * df_eq, axis=0)
+        assert np.max(np.abs(gx_eq - a)) > 0.1 * abs(a), (
+            "equirectangular field differentiates the same as the log-map field; "
+            "the fixture no longer discriminates the two formulas"
+        )
 
 class TestGenBETransform:
     """GenBETransform.sqrt_multiply and inv_multiply correctness."""
