@@ -962,6 +962,16 @@ def compute_cloud_properties(
     # ONE homogeneous column at the grid-mean path, which is too bright whenever
     # cf < 1.  SIGN: chi_cover <= 1 (never brightens).  Unknown scheme => raise.
     _cover_scheme = getattr(config, "cloud_partial_coverage_optics", "none")
+    _overlap_scheme = getattr(config, "cloud_vertical_overlap_optics", "none")
+    if _cover_scheme != "none" and _overlap_scheme != "none":
+        # Both correct PARTIAL COVERAGE -- two_column horizontally per layer,
+        # max_random with real subcolumns. Enabling both discounts the cloud
+        # twice, which would read as a bigger "fix" while being wrong.
+        raise ValueError(
+            "cloud_partial_coverage_optics and cloud_vertical_overlap_optics "
+            "are mutually exclusive (both correct partial cloud coverage); "
+            f"got {_cover_scheme!r} and {_overlap_scheme!r}"
+        )
     if _cover_scheme == "none":
         pass                       # legacy path; byte-identical to before
     elif _cover_scheme == "two_column":
