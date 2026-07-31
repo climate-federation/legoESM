@@ -59,7 +59,10 @@ class TestJointNormalization:
         total = _salt_integral(dS, h_top, area)
         # scale by a representative term so the tolerance is relative
         scale = float(jnp.sum(jnp.abs(RHO_0 * h_top * dS * area)))
-        assert abs(total) <= 1e-10 * max(scale, 1.0), (total, scale)
+        # guard against the degenerate pass: an implementation returning
+        # G_phys == 0 would satisfy conservation AND scaling (codex round-3).
+        assert scale > 0.0, "physical channel is identically zero"
+        assert abs(total) <= 1e-10 * scale, (total, scale)
 
     def test_uncorrected_local_S_closure_does_NOT_conserve(self):
         """Control: the UNCORRECTED local-S closure leaves a real residual.
@@ -193,13 +196,18 @@ class TestJointNormalization:
         # denominator would be EXACTLY zero while the signed numerator is not.
         # Random values that merely include two negatives never exercise this
         # (codex round-2 #5).
-        n = 2
+        # THREE cells, not two.  With S=[10,-10] and F=[3e-4,0] at equal area
+        # the algebra collapses: F'=(+1.5e-4,-1.5e-4), b=(10,0), lambda=1.5e-4,
+        # so G == 0 IDENTICALLY and the conservation assertion has ZERO SIGNAL
+        # (codex round-3).  S=[10,20,-30] keeps the signed denominator at
+        # exactly zero while leaving a nonzero, genuinely conservative G.
+        n = 3
         area2 = jnp.full(n, 1.0e10)
         h2 = jnp.full(n, 5.0)
         mask2 = jnp.ones(n)
-        S_cancel = jnp.asarray([10.0, -10.0])
+        S_cancel = jnp.asarray([10.0, 20.0, -30.0])
         fw2 = FreshwaterForcing(
-            precip=jnp.asarray([3.0e-4, 0.0]), evap=jnp.zeros(n),
+            precip=jnp.asarray([3.0e-4, 0.0, 0.0]), evap=jnp.zeros(n),
             runoff=jnp.zeros(n), ice_fw=jnp.zeros(n))
         assert float(jnp.sum(S_cancel * area2)) == 0.0     # signed den == 0
         dS = joint_volume_salt_virtual_salt_flux(fw2, S_cancel, h2, RHO_0,
@@ -207,9 +215,11 @@ class TestJointNormalization:
         assert bool(jnp.all(jnp.isfinite(dS))), dS
         total = float(jnp.sum(RHO_0 * h2 * dS * area2))
         scale = float(jnp.sum(jnp.abs(RHO_0 * h2 * dS * area2)))
-        assert abs(total) <= 1e-12 * max(scale, 1.0), (total, scale)
+        # the flux must be NONZERO, else "conserved" is trivially true
+        assert scale > 0.0, "G collapsed to zero -- the test has no signal"
+        assert abs(total) <= 1e-12 * scale, (total, scale)
         # the negative cell must be INERT (support matches the basis)
-        assert float(dS[1]) == 0.0, float(dS[1])
+        assert float(dS[2]) == 0.0, float(dS[2])
 
     def test_jit_and_grad_are_finite(self):
         """Differentiability: the lambda guard must not leak a 0/0 NaN VJP."""
