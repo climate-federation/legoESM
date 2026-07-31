@@ -150,6 +150,20 @@ def test_nn_mxl3_scans_match_direct_loop():
     np.testing.assert_allclose(np.asarray(l_k), ref_k, rtol=0, atol=1e-14)
     np.testing.assert_allclose(np.asarray(l_eps), ref_e, rtol=0, atol=1e-14)
 
+    # --- NEMO nn_mxl=2 (tke_mxl_choice=4) on the SAME batch --------------
+    # CASE(2) applies both sweeps sequentially in place and sets
+    # zmxld = zmxlm, so the reference is ref_k for BOTH lengths.  Reuses this
+    # test's direct-loop machinery rather than standing up a second oracle.
+    cfg2 = TKEConfig(tke_mxl_choice=4)
+    l_k2, l_eps2 = compute_mixing_lengths(
+        e, N2, dz_half, cfg2, signed_n2=True, dz_cell=dz_cell,
+        l_surface_anchor=anchor)
+    np.testing.assert_allclose(np.asarray(l_k2), ref_k, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(l_eps2), ref_k, rtol=0, atol=1e-14)
+    # non-vacuity: the two schemes must actually DIFFER on this batch, else
+    # "choice 4 collapses l_eps" would be untestable here.
+    assert np.max(np.abs(ref_e - ref_k)) > 1e-6
+
 
 def test_dissipation_discretization_dispatch_and_forms():
     """NEMO 1.5/0.5 dissipation split: unknown value raises (dispatch
