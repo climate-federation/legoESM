@@ -140,6 +140,99 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "IF(nn_pdl==1) block) -- purely now-derived "
                                         "(en, zmxlm). Captured at zdf_tke routine "
                                         "exit alongside tke_dump_avt_final.bin."),
+
+    # --- #1226 batched-rebuild dumps (2026-07-30, MY_SRC line numbers). ---
+    "tke_dump_rn2.bin": ("now", "rn2 = bn2(ts(...,Nnn), rab_n, Nnn) at MY_SRC "
+                                 "stpmlf.F90:187 (NOW N^2, unlike rn2b at unit "
+                                 "8849). WRITE at MY_SRC zdftke.F90:236, in the "
+                                 "post-tke_tke/pre-tke_avn block: rn2 is read "
+                                 "(never written) by tke_tke's EN stratification "
+                                 "term (zdftke.F90:514) and tke_avn's mixing "
+                                 "length (:758), so the dump equals what BOTH "
+                                 "consumed/consume. Interior 52x199, jk=1..jpk."),
+    "tke_dump_dissl.bin": ("now", "dissl = SAVE'd dissipation carry (restart-"
+                                   "read, zdftke.F90 tke_rst) consumed by the "
+                                   "semi-implicit split (zdiag MY_SRC zdftke."
+                                   "F90:510, RHS :515) BEFORE the dump and only "
+                                   "rewritten by tke_avn at :837 AFTER it. WRITE "
+                                   "at MY_SRC zdftke.F90:237 (post-tke_tke, "
+                                   "pre-tke_avn) => exactly the carried-in value "
+                                   "the split used at this kt, PRE-overwrite "
+                                   "side. No leapfrog index of its own; 'now' "
+                                   "for its governing en/rn2 stage, as for "
+                                   "tke_dump_en.bin. Interior 52x199, jk=1..jpk."),
+    "wzv_dump_ww_call1.bin": ("now", "wzv_MLF diagnoses NOW w: pww integrated "
+                                      "from hdiv with e3t(:,:,:,Kmm) (sshwzv."
+                                      "F90:211), Kmm=Nnn. WRITE at MY_SRC "
+                                      "sshwzv.F90:295, end of wzv_MLF after ALL "
+                                      "pww writes. CALL 1 of 2 = stpmlf.F90:244 "
+                                      "(pre-dynamics, pre-barotropic hdiv). "
+                                      "Full 56x203, jk=1..jpk, w-grid."),
+    "wzv_dump_ww_call2.bin": ("now", "same WRITE site (MY_SRC sshwzv.F90:295), "
+                                      "CALL 2 of 2 = stpmlf.F90:315 under "
+                                      "ln_dynspg_ts, AFTER dyn_spg_ts + the 2nd "
+                                      "div_hor call -- this is the ww the SAME "
+                                      "step's tra_adv consumes. A single file "
+                                      "would have silently kept only this call; "
+                                      "hence two files. Full 56x203, jk=1..jpk."),
+    "stp_dump_22_before_traldf_tem.bin": ("now", "ts(:,:,:,jp_tem,Nrhs) -- the "
+                                                  "accumulated tracer RHS -- "
+                                                  "dumped at MY_SRC stpmlf.F90:"
+                                                  "436, immediately BEFORE CALL "
+                                                  "tra_ldf (:437). Nrhs is a "
+                                                  "TENDENCY accumulator, not a "
+                                                  "leapfrog state; registered "
+                                                  "'now' for its Nnn evaluation "
+                                                  "stage. Full 56x203, jk=1.."
+                                                  "jpkm1 (35 levels)."),
+    "stp_dump_22_before_traldf_sal.bin": ("now", "salinity twin of stp_dump_22_"
+                                                  "before_traldf_tem.bin (same "
+                                                  "WRITE, MY_SRC stpmlf.F90:436)."),
+    "stp_dump_23_after_traldf_tem.bin": ("now", "ts(:,:,:,jp_tem,Nrhs) dumped at "
+                                                 "MY_SRC stpmlf.F90:438, "
+                                                 "immediately AFTER CALL tra_ldf "
+                                                 "(:437). NOTHING writes ts(Nrhs) "
+                                                 "between dumps 22 and 23 except "
+                                                 "tra_ldf itself (dumps adjacent "
+                                                 "to the call), so 23-22 == the "
+                                                 "traldf_iso lap increment. Full "
+                                                 "56x203, jk=1..jpkm1."),
+    "stp_dump_23_after_traldf_sal.bin": ("now", "salinity twin of stp_dump_23_"
+                                                 "after_traldf_tem.bin (same "
+                                                 "WRITE, MY_SRC stpmlf.F90:438)."),
+    "zdf_dump_u1_prestress.bin": ("after", "puu(:,:,1,Kaa) captured per j-slab at "
+                                            "MY_SRC dynzdf.F90:350, immediately "
+                                            "BEFORE the MLF surface-stress add "
+                                            "(stock dynzdf.F90:333). Kaa mid-"
+                                            "solve RHS state entering the second "
+                                            "recurrence. Interior 52x199, 2-D."),
+    "zdf_dump_u1_poststress.bin": ("after", "puu(:,:,1,Kaa) captured at MY_SRC "
+                                             "dynzdf.F90:369, immediately AFTER "
+                                             "the stress add and BEFORE the "
+                                             "downward sweep / third-recurrence "
+                                             "upward sweep that rewrites level 1 "
+                                             "-- post-pre == zDt_2*(utau_b+utauU)"
+                                             "/(e3u(:,:,1,Kaa)*rho0)*umask, the "
+                                             "isolated stress application "
+                                             "(centred MLF branch; key_RK3 "
+                                             "undefined). Interior 52x199, 2-D."),
+    "zdf_dump_v1_prestress.bin": ("after", "v twin of zdf_dump_u1_prestress.bin "
+                                            "(capture MY_SRC dynzdf.F90:538, "
+                                            "stress line stock :507)."),
+    "zdf_dump_v1_poststress.bin": ("after", "v twin of zdf_dump_u1_poststress.bin "
+                                             "(capture MY_SRC dynzdf.F90:555)."),
+    "wnd_dump_zu_frc_inc.bin": ("now", "zu_frc wind-only increment: snapshot at "
+                                        "MY_SRC dynspg_ts.F90:432 immediately "
+                                        "before the wind IF/ELSE, dump of "
+                                        "(zu_frc - prewind) at :451 immediately "
+                                        "after -- brackets ONLY the wind add "
+                                        "(stock :420-433; DINO ln_bt_fw=F => "
+                                        "CENTRED branch zztmp*(utau_b+utauU)*"
+                                        "r1_hu(:,:,Kmm), Kmm=Nnn depth). Mirrors "
+                                        "the drag bracket (drg_dump_zu_frc_inc). "
+                                        "Interior 52x199, 2-D."),
+    "wnd_dump_zv_frc_inc.bin": ("now", "v twin of wnd_dump_zu_frc_inc.bin (same "
+                                        "bracket, vtau_b+vtauV, r1_hv(:,:,Kmm))."),
 }
 
 
