@@ -218,6 +218,17 @@ PER_ELEMENT: dict[str, float] = {
     # EXACTLY (max|full-(KEG+PGF)| = 0.0), and each vanishes exactly on its own
     # null state -- so this is a real decomposition, not a fitted one.
     "dyn_adv KEG": 3.578e-19,
+    # ITEM 1/2 (this task, scope-capped #1226 follow-up): RE-MEASURED with the
+    # CORRECTED population (NEMO's own 3-D umask, matching dynzdf.F90:121's
+    # `* umask(ji,jj,jk)` mask -- the row's prior harness broadcast only the
+    # SURFACE u-mask across every level, mixing in below-seafloor cells NEMO
+    # discards). _zad_gate_corr_ratio_1226.py, real RUN_GDB restart kt=57601,
+    # fp64, LEGOESM_NEMO_E3T=both. err_norm (|diff|/RMS(nemo)) pointwise:
+    # median 6.06e-8, p99 3.28e-5, max 3.51e-3 -- three+ orders above
+    # BAR_PER_ELEM_EPS=1e-9, so DEBT on per-element even though the aggregate
+    # corr/ratio are near-roundoff (same pattern as bn2's earlier lesson: a
+    # clean mean can hide a real per-element residual).
+    "dyn_adv ZAD": 3.278e-05,
     # T and S pointwise |rel| median 0.0 (max <= 2.2e-16), one-signed.
     # CAVEAT the probe itself raised: the ssh leg is TAUTOLOGICAL -- one unknown
     # is solved for and then re-substituted -- so it certifies TRANSCRIPTION of
@@ -836,47 +847,58 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "(-1=0.996937, +0=0.999932, +1=0.996976); corr 0.999932/"
                                                               "ratio 1.000717 exactly reproduced. UNCHANGED."),
     "dyn_adv KEG":                   (1.0,        1.000000,   "byte-exact"),
-    "dyn_adv ZAD":                   (0.999200,   0.995116,   "after nemo_advective fix [e3t=both per probe_1226_keg_zad_split.py]. "
-                                                              "RE-MEASURED at HEAD c8e5d305b (same probe): offset scan "
-                                                              "{-1,0,+1} sharp offset=0 peak (u: -1=0.7222, +0=0.9992, "
-                                                              "+1=0.7221); corr 0.999200/ratio 0.995116 (u-component; "
-                                                              "v-component corr 0.998712/ratio 0.995598, not separately "
-                                                              "tracked by this row). UNCHANGED to 4 s.f. "
-                                                              "PHANTOM PROVENANCE (this task, unit-call harness sweep): "
-                                                              "probe_1226_keg_zad_split.py, cited above as this row's "
-                                                              "provenance, does NOT exist in the repo tree "
-                                                              "(check_provenance_scripts_exist confirms) -- the "
-                                                              "0.999200/0.995116 above is UNREPRODUCIBLE from its own "
-                                                              "pipeline. run_dyn_zad_probe.py (unit_harness/, commit "
-                                                              "0f9f008d4) drives dyn_zad (dynzad.F90:40-133) DIRECTLY "
-                                                              "via a compiled Fortran harness driver "
-                                                              "(harness_dyn_zad.exe) with a synthetic u/v/w spanning "
-                                                              "real dynamic range (ACC-like jet + noise), comparing "
-                                                              "against legoesm.ocean.vertical."
-                                                              "nemo_advective_vertical_momentum_advection: corr=0.999643, "
-                                                              "ratio=0.999101, max|diff|=1.49e-7, n=336338 wet u-cells "
-                                                              "(seed 0); STABLE across seeds 1/2/42 (corr 0.9995-0.9996, "
-                                                              "ratio 0.9989-0.9991) -- a genuine, reproducible small "
-                                                              "residual, not roundoff (max|diff| ~1e3x the fp64 floor). "
-                                                              "DISAGREES with the recorded 0.999200/0.995116 (both "
-                                                              "measure du's u-component with an independently-supplied "
-                                                              "u/v/w triple, so the two ARE the same call-site "
-                                                              "comparison, unlike the dom_qco_r3c r3t case above) -- NOT "
-                                                              "reconciled to a root cause this session (Rule 1e: no "
-                                                              "config/formula/axis-order difference identified yet "
-                                                              "between the two probes; both are internally self-"
-                                                              "consistent). Both classify() as DEBT regardless "
-                                                              "(classify(0.999643, 0.999101) = DEBT, same as the "
-                                                              "recorded tuple) -- this measurement does NOT change this "
-                                                              "row's AT BAR/DEBT status. Since the recorded pipeline is "
-                                                              "unreproducible and this harness number IS reproducible "
-                                                              "(re-run, stable across 4 seeds, positive-control-"
-                                                              "validated harness), THIS is the only number with a live, "
-                                                              "re-runnable provenance for this row; the historical "
-                                                              "0.999200/0.995116 is kept as documented history above, "
-                                                              "not overwritten, per the campaign's Rule 1e discipline "
-                                                              "(a disagreement is evidence one side has a bug, not "
-                                                              "grounds to silently pick a winner)."),
+    "dyn_adv ZAD":                   (0.999999999594, 1.000001489, "RE-MEASURED (this task, #1226 ITEM 1/2, "
+                                                              "scope-capped follow-up to commit 5bdcf219e) on the "
+                                                              "CORRECTED population -- NEMO's real 3-D umask "
+                                                              "(dynzad.F90:86 DO_3D(0,0,0,0,1,jpk-2) has NO per-face "
+                                                              "umask/vmask guard so it unconditionally reads ww from "
+                                                              "both T-neighbours at interface k+1, dynzad.F90:93-97, "
+                                                              "100, 104-105, 113-118 -- the loop's OWN masking is "
+                                                              "deferred entirely to the velocity update one routine "
+                                                              "later, dynzdf.F90:121: "
+                                                              "puu(...,Kaa)=(puu(...,Kbb)+rDt*puu(...,Krhs))*"
+                                                              "umask(ji,jj,jk)). THIS ROW NOW RECORDS THE "
+                                                              "ACTIVE-ONLY population -- i.e. cells selected by the "
+                                                              "FULL 3-D umask, exactly the population dynzdf.F90:121 "
+                                                              "keeps -- NOT the union population (see PER_ELEMENT note "
+                                                              "and below for both numbers; this row has two "
+                                                              "legitimate metrics and this tuple is explicitly the "
+                                                              "active-only one). Fix commit 5bdcf219e (option "
+                                                              "zad_bottom_face_mask: 'min_rule' default bit-identical, "
+                                                              "'nemo_faithful' on the kamm cards) already applied "
+                                                              "before this measurement -- this is the POST-FIX number. "
+                                                              "Measured by zad_gate_corr_ratio_1226.py (this "
+                                                              "directory), real RUN_GDB restart kt=57601, fp64, "
+                                                              "LEGOESM_NEMO_E3T=both): active-only corr=0.9999999996 "
+                                                              "ratio=1.0000015 err_norm(|diff|/RMS(nemo))=2.854e-05, "
+                                                              "n=336338 wet u-cells. corr clears BAR_CORR (1-corr="
+                                                              "4.06e-10) but ratio-1=1.489e-6 sits just OUTSIDE "
+                                                              "BAR_RATIO_EPS=1e-6, and PER_ELEMENT (3.278e-5, this "
+                                                              "task) is 4+ orders above BAR_PER_ELEM_EPS -- classify() "
+                                                              "-> DEBT, not AT BAR (near-bar but not there; do not "
+                                                              "round up). SEPARATE UNION population (surface u-mask "
+                                                              "broadcast across every level, mixing in below-seafloor "
+                                                              "cells NEMO itself discards at dynzdf.F90:121 -- a "
+                                                              "harness artifact, NOT recorded to this row's tuple): "
+                                                              "corr=0.999660 ratio=0.999662 err_norm=2.607e-02. Both "
+                                                              "populations independently corroborated by "
+                                                              "zad_level29_onset_walk.py's SELF-CHECK 1 (union "
+                                                              "2.6066e-02, active-only 2.8532e-05, same restart/config) "
+                                                              "and dyn_zad_ldf_walk.py's ROW 1 (union u 2.6066e-02). "
+                                                              "HISTORY (superseded, kept for the audit trail, NOT this "
+                                                              "row's active tuple): the PRE-FIX tuple recorded here was "
+                                                              "(0.999200, 0.995116) [c8e5d305b, cited provenance "
+                                                              "probe_1226_keg_zad_split.py never committed -- confirmed "
+                                                              "phantom by check_provenance_scripts_exist]. A SEPARATE, "
+                                                              "independent synthetic-input unit-call harness "
+                                                              "(run_dyn_zad_probe.py, unit_harness/, commit 0f9f008d4) "
+                                                              "measured corr=0.999643/ratio=0.999101 on synthetic "
+                                                              "u/v/w (not the real restart) and was left UNRECONCILED "
+                                                              "against the (then-phantom-provenance) 0.999200/0.995116 "
+                                                              "tuple per Rule 1e -- both classified DEBT regardless, so "
+                                                              "that disagreement never changed this row's verdict and "
+                                                              "is superseded by this task's real-restart, root-cause-"
+                                                              "matched measurement."),
     "zdftke pdlr":                   (0.997960,   0.996970,   "post-e0fac585e re-measure: probe_zdftke_prandtl_"
                                                               "e3tboth.py (+ _scan_pdlr.py offset scan, both per this "
                                                               "row's own provenance) re-run at HEAD e0fac585e (fp64 "
@@ -2055,7 +2077,7 @@ MEASURED_AT: dict[str, str] = {
     "traadv_fct (SALINITY)": "c1ba30e39",
     "dyn_vor EEN u": "c8e5d305b",
     "dyn_vor EEN v": "c8e5d305b",
-    "dyn_adv ZAD": "c8e5d305b",
+    "dyn_adv ZAD": "5bdcf219e",  # RE-MEASURED this task (ITEM 1/2), post-fix, active-only population; supersedes c8e5d305b
     "zdftke pdlr": "e0fac585e",
     "zdftke composite avt/avm": "e0fac585e",
     "dyn_spg_ts pssh": "c8e5d305b",
@@ -2126,7 +2148,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_vor EEN u": "probe_hpg_vor_1226.py",        # cited, never committed
     "dyn_vor EEN v": "probe_hpg_vor_1226.py",         # "same probe/run as EEN u" per its own note
     "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
-    "dyn_adv ZAD": "unit_harness/run_dyn_zad_probe.py",  # CORRECTED (this task): probe_1226_keg_zad_split.py (the OLD tuple's citation) does not exist; this row's LIVE, re-runnable measurement is the unit-call harness probe (see MEASUREMENTS note for the harness's own corr/ratio, which DISAGREES with the still-displayed OLD tuple -- neither overwritten, see note)
+    "dyn_adv ZAD": "zad_gate_corr_ratio_1226.py",  # RE-CORRECTED (this task): real-restart, 3-D-umask (active-only) measurement post-fix 5bdcf219e; supersedes unit_harness/run_dyn_zad_probe.py (synthetic-input, independent, DEBT either way -- see MEASUREMENTS history note) and the phantom probe_1226_keg_zad_split.py
     "zdftke pdlr": "zdftke_chain_walk.py",
     "zdftke composite avt/avm": "southern_vmix_profile.py",
     "STABILITY on NEMO true grid (e3t_0)": "dino_year_screen_fullframe.py",

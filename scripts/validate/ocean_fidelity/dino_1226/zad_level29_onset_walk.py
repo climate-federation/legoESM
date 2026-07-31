@@ -129,15 +129,22 @@ def main() -> int:
     vertadv_u_f = _u_to_nemo(vertadv_u_3d)
 
     # =========================================================================
-    # SELF-CHECK 1 (mandatory, first): reproduce recorded headline (3.9993e-2
-    # union) AND active-only (3.0332e-2) numbers before anything else.
+    # SELF-CHECK 1 (mandatory, first): reproduce recorded headline (2.6066e-2
+    # union) AND active-only (2.8532e-05) numbers before anything else.
+    #
+    # POST-FIX baselines (commit 5bdcf219e, zad_bottom_face_mask -- transcribes
+    # dynzad.F90:86's absent per-face umask guard). PRE-FIX baselines, kept
+    # here as history only (do not reinstate): union 3.9993e-2, active-only
+    # 3.0332e-2 -- superseded the moment the fix landed, since production
+    # numbers moved for real; this self-check's PURPOSE is to catch harness
+    # drift against the CURRENT model, not to pin a historical number.
     # =========================================================================
     print("\n" + "=" * 78)
     print("SELF-CHECK 1: reproduce recorded baselines (union + active-only)")
     print("=" * 78)
     err_u0, ebl_u0, rbl_u0, tot_u0, maxabs_u0 = _err_norm(vertadv_u_f, nemo_zad_du, umask2)
-    print(f"  u UNION err_norm={tot_u0:.4e}  (recorded 3.9993e-2)  max|diff|={maxabs_u0:.4e}")
-    check1a = abs(tot_u0 - 3.9993e-2) < 2e-3
+    print(f"  u UNION err_norm={tot_u0:.4e}  (recorded 2.6066e-2, post-fix 5bdcf219e)  max|diff|={maxabs_u0:.4e}")
+    check1a = abs(tot_u0 - 2.6066e-2) < 2e-3
 
     n_lat_d = min(err_u0.shape[0], u_mask_3d_np.shape[0], umask2.shape[0])
     n_lon_d = min(err_u0.shape[1], u_mask_3d_np.shape[1], umask2.shape[1])
@@ -163,9 +170,9 @@ def main() -> int:
     num_act = float(np.sqrt(np.mean(S_act / N)))
     num_tot = float(np.sqrt(np.mean((S_act + S_inact) / N)))
     en_act, en_tot = num_act / denom, num_tot / denom
-    print(f"  u ACTIVE-ONLY err_norm={en_act:.4e}  (recorded 3.0332e-2)")
+    print(f"  u ACTIVE-ONLY err_norm={en_act:.4e}  (recorded 2.8532e-05, post-fix 5bdcf219e)")
     print(f"  reconstructed UNION from decomposition = {en_tot:.4e}  (must equal SELF-CHECK1's {tot_u0:.4e})")
-    check1b = abs(en_act - 3.0332e-2) < 2e-3
+    check1b = abs(en_act - 2.8532e-05) < 2e-3
     check1_ok = check1a and check1b
     print(f"  SELF-CHECK 1: {'PASSED' if check1_ok else 'FAILED -- STOP, harness unverified'}")
     if not check1_ok:
