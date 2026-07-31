@@ -2878,13 +2878,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 16
         # Duogrid mode → rsin_u = 1/sin² everywhere (including panel edges)
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        sina_u_helper, sina_v_helper = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_helper, sina_v_helper = sina_u_v_from_sin_sg(cdgrid)
 
         # Reconstruct sina_u from stored rsin_u.  Under duogrid,
         # rsin_u = 1/sina_u² uniformly, so sina_u = 1/sqrt(rsin_u).
@@ -2900,7 +2900,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         f"sina_v helper diverges from cdgrid.rsin_v: {max_v_diff}")
 
     def test_sina_u_v_from_sin_sg_matches_fortran_convention(self):
-        """Iter-87: `_sina_u_v_from_sin_sg` constructs sina_u/sina_v from
+        """Iter-87: `sina_u_v_from_sin_sg` constructs sina_u/sina_v from
         the sin_sg sub-grid per fv_grid_utils.F90:505-518.  Verify:
         1. interior: sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
         2. panel edges: single-side sin_sg
@@ -2908,13 +2908,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 16
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
 
         # Shape
         self.assertEqual(sina_u.shape, (6, n + 1, n))
@@ -7294,7 +7294,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
         from legoesm.core.fv3_sw_core import (
-            _vorticity_flux, _sina_u_v_from_sin_sg)
+            _vorticity_flux, sina_u_v_from_sin_sg)
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
@@ -7306,7 +7306,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc),
             jnp.asarray(vort_abs), cdgrid, use_duogrid=False)
 
-        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_j, sina_v_j = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         sina_v = np.asarray(sina_v_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
@@ -7347,7 +7347,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
         from legoesm.core.fv3_sw_core import (
-            _vorticity_flux, _sina_u_v_from_sin_sg)
+            _vorticity_flux, sina_u_v_from_sin_sg)
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
@@ -7359,7 +7359,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc),
             jnp.asarray(vort_abs), cdgrid, use_duogrid=True)
 
-        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_j, sina_v_j = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         sina_v = np.asarray(sina_v_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
@@ -7448,8 +7448,8 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         # sentinel — difference is linear in v_d delta).
         # Simpler lock: fy1_pois[:,0,:] must equal the formula value
         # using v_d_poison (not the sentinel directly).
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
-        sina_u_j, _ = _sina_u_v_from_sin_sg(cdgrid)
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
+        sina_u_j, _ = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
         eps = float(jnp.finfo(jnp.float32).eps)
@@ -7997,7 +7997,7 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
 
 
 class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
-    """Iter-641: Fortran-formula lock for `_sina_u_v_from_sin_sg` in
+    """Iter-641: Fortran-formula lock for `sina_u_v_from_sin_sg` in
     ``src/legoesm/core/fv3_sw_core.py`` (lines 685-718) against
     ``fv_grid_utils.F90:505-518``.
 
@@ -8056,25 +8056,25 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
             create_cubed_sphere(n=n, use_duogrid=False))
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
         sin_sg_np = np.asarray(cdgrid.sin_sg)
         sina_u_ref, sina_v_ref = self._ref_sina_u_v(sin_sg_np, n)
 
         np.testing.assert_allclose(
             np.asarray(sina_u), sina_u_ref, atol=1e-14,
-            err_msg=("_sina_u_v_from_sin_sg sina_u diverges from "
+            err_msg=("sina_u_v_from_sin_sg sina_u diverges from "
                      "fv_grid_utils.F90:505-518 reference — check the "
                      "interior sin_E[i-1] + sin_W[i] averaging AND the "
                      "panel-edge single-side boundaries at i=0, i=n."))
         np.testing.assert_allclose(
             np.asarray(sina_v), sina_v_ref, atol=1e-14,
-            err_msg=("_sina_u_v_from_sin_sg sina_v diverges from "
+            err_msg=("sina_u_v_from_sin_sg sina_v diverges from "
                      "fv_grid_utils.F90:505-518 reference — check "
                      "sin_N[j-1] + sin_S[j] averaging AND panel-edge "
                      "boundaries at j=0, j=n."))
@@ -8094,7 +8094,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 6
         cdgrid = create_cubed_sphere_cdgrid(
@@ -8107,7 +8107,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         sin_sg_rand = 0.5 + 0.3 * rng.standard_normal((6, n, n, 9))
         poisoned = cdgrid._replace(sin_sg=jnp.asarray(sin_sg_rand))
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(poisoned)
+        sina_u, sina_v = sina_u_v_from_sin_sg(poisoned)
         sina_u = np.asarray(sina_u); sina_v = np.asarray(sina_v)
         sin_W = sin_sg_rand[..., 0]
         sin_S = sin_sg_rand[..., 1]
