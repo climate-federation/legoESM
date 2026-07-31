@@ -167,8 +167,10 @@ _NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator [m*kg/(m*s^2)^-1... NEMO zdft
 
 def _mxl0_surface_anchor(cfg: "TKEConfig", taum, rho_0: float, g: float):
     """ln_mxl0 surface mixing-length anchor (single owner; zdftke:575+602):
-    l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum). None when choice != 3."""
-    if cfg.tke_mxl_choice != 3:
+    l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
+    NEMO nn_mxl scheme (3 = nn_mxl=3, 4 = nn_mxl=2); ORCA1 sets ln_mxl0=.true.
+    independently of nn_mxl, so BOTH need the anchor."""
+    if cfg.tke_mxl_choice not in (3, 4):
         return None
     return jnp.maximum(
         jnp.asarray(cfg.mxl0_min_m),
@@ -206,7 +208,8 @@ def nemo_surface_avm(
     ----------
     e_sfc : (...,) — surface Dirichlet TKE value (``en(1)``).
     l_sfc : (...,) or None — ``ln_mxl0`` surface mixing length
-        (:func:`_mxl0_surface_anchor`; None only when ``tke_mxl_choice != 3``,
+        (:func:`_mxl0_surface_anchor`; None only when the choice is not a
+        NEMO nn_mxl scheme (3 or 4),
         in which case NEMO's ``zmxlm(1)`` formula does not apply — the caller
         must not invoke this function in that regime).
 
@@ -662,12 +665,15 @@ def compute_mixing_lengths(
         )
         l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, cfg.mxl_min ** 2))
         l_eps = jnp.maximum(l_up, l_dn)
-    elif cfg.tke_mxl_choice == 3:
-        # --- NEMO nn_mxl=3 + ln_mxl0 (zdftke.F90:575, 588-614, 658-672) ---
+    elif cfg.tke_mxl_choice in (3, 4):
+        # --- NEMO nn_mxl=3 (choice 3) / nn_mxl=2 (choice 4) + ln_mxl0 ---
+        # (zdftke.F90:575, 588-614, 658-690).  Both share the lup/ldown sweeps;
+        # they differ ONLY in the final l_eps (see below).
         if dz_cell is None:
             raise ValueError(
-                "tke_mxl_choice=3 (NEMO nn_mxl=3) requires dz_cell (the e3t "
-                "cell thicknesses) for the |dl/dz|<=e3t bounding sweeps.")
+                f"tke_mxl_choice={cfg.tke_mxl_choice} (NEMO nn_mxl) requires "
+                "dz_cell (the e3t cell thicknesses) for the |dl/dz|<=e3t "
+                "bounding sweeps.")
         # buoyancy length sqrt(2e)/N at interior interfaces, AD-safe at the
         # negative-TKE debt (same double-where idiom as choice 1/2).
         sqrt2e = jnp.sqrt(2.0) * jnp.where(
@@ -702,7 +708,27 @@ def compute_mixing_lengths(
         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
         ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]
         l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
-        l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
+        if cfg.tke_mxl_choice == 4:
+            # --- NEMO nn_mxl=2 (zdftke.F90:680-688) ---
+            # CASE(2) applies BOTH slope sweeps sequentially IN PLACE to one
+            # array and sets zmxld = zmxlm, i.e. a SINGLE length for both the
+            # eddy coefficient and the dissipation.  That sequential result
+            # equals min(lup, ldown) exactly: the up-sweep of lup is the
+            # maximal function <= lup obeying the upward slope bound;
+            # min(lup,ldown) is <= lup and obeys both bounds, so up(lup) >=
+            # min; and lup <= l_int gives up(lup) <= ldown, so up(lup) <= min.
+            # Hence the only difference from nn_mxl=3 is l_eps.
+            #
+            # Because min(lup,ldown) <= sqrt(lup*ldown), nn_mxl=2 has the
+            # SMALLER dissipation length, hence LARGER eps = c_eps*e^{3/2}/l_eps
+            # and less retained TKE.  The two coincide where lup ~ ldown
+            # (strong stratification, both branches locally limited) and differ
+            # most where they diverge (weakly stratified deep columns far from
+            # both boundaries) -- which is why this is a HIGH-LATITUDE-selective
+            # lever, not a global one.  ORCA1's namelist runs nn_mxl=2.
+            l_eps = l_k
+        else:
+            l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
     elif cfg.tke_mxl_choice == 1:
         # Veros buoyancy length, ``tke_mxl_choice=1`` (veros/core/tke.py:30-47):
         #   sqrttke = sqrt(max(0, e));  mxl = sqrt(2)·sqrttke / sqrt(max(1e-12, N²))
@@ -1798,10 +1824,10 @@ def tke_vertical_mixing(
     # veros_slots-gated (dz_cell, dz_surface) pair untouched, so choices 1/2 and
     # every non-veros_slots recipe stay BIT-IDENTICAL.
     dz_cell_mxl = dz_cell
-    if cfg.tke_mxl_choice == 3 and dz_cell_mxl is None:
+    if cfg.tke_mxl_choice in (3, 4) and dz_cell_mxl is None:
         if dz_ref is None or jacobian is None:
             raise ValueError(
-                "tke_mxl_choice=3 (NEMO nn_mxl=3) requires dz_ref and jacobian "
+                "tke_mxl_choice=3/4 (NEMO nn_mxl) requires dz_ref and jacobian "
                 "(the e3t cell thicknesses) for the lup/ldown mixing-length "
                 "sweeps; pass them to tke_vertical_mixing."
             )
