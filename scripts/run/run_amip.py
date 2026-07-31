@@ -318,6 +318,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--a-h-scale", type=float,
+                        default=_DYCORE_DEFAULTS.a_h_scale,
+                        dest="a_h_scale",
+                        help="Second-order Laplacian viscosity multiplier "
+                             "(A_h = a_h_scale * 3e-3 * dx_min^2 / dt). NOT "
+                             "scale-selective: it damps as k^2, so it reaches "
+                             "the baroclinic eddies that drive the "
+                             "midlatitude jet. At 2.5 deg / dt=75 s the "
+                             "default 1.0 damps a 2000 km wave in 0.73 d and "
+                             "4000 km in 2.9 d, comparable to or faster than "
+                             "the ~1-2 d eddy growth time — the failure mode "
+                             "component_factory records at 16x this value "
+                             "(\'crushing the midlatitude eddy-driven "
+                             "jets\'). 0 relies on the scale-selective "
+                             "4th-order hyperdiff alone.")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -677,6 +692,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that breaks the plane-parallel tau-saturation a "
                              "scalar cannot -- a thick cloud is reduced MORE than "
                              "a thin one).")
+    parser.add_argument("--cloud-partial-coverage-optics",
+                        dest="cloud_partial_coverage_optics",
+                        choices=["none", "two_column"], default="none",
+                        help="Partial-cloud-COVER optics. The radiation "
+                             "solver has no McICA/overlap: it sees ONE "
+                             "homogeneous column at the grid-mean water "
+                             "path, R(cf*tau_ic), which is ALWAYS brighter "
+                             "than the independent-column cf*R(tau_ic)+"
+                             "(1-cf)*R(0) because R is concave. "
+                             "'two_column' thins the path by the exact "
+                             "inversion of that identity (chi<=1, so it can "
+                             "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -1642,6 +1669,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         discretization=args.discretization,
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
+        a_h_scale=args.a_h_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
@@ -1781,6 +1809,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
+        cloud_partial_coverage_optics=args.cloud_partial_coverage_optics,
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,

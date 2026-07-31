@@ -249,6 +249,8 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_optics_inhomogeneity=getattr(
             cfg, "cloud_optics_inhomogeneity", None),
         cloud_fsd=getattr(cfg, "cloud_fsd", None),
+        cloud_partial_coverage_optics=getattr(
+            cfg, "cloud_partial_coverage_optics", None),
         diagnostic_condensate_scheme=getattr(
             cfg, "cloud_diagnostic_condensate_scheme", None),
         adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
