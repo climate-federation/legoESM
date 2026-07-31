@@ -107,7 +107,11 @@ __physics_contract__ = {
         "Hines-INSPIRED non-orographic gravity-wave drag (single bulk-amplitude "
         "heuristic, NOT the Doppler-spread spectrum): a launched rms wave amplitude "
         "grows with 1/sqrt(rho) upward, saturates against a bulk scalar scale "
-        "N/m_*, and deposits the per-layer stress decrement as a drag on the flow."
+        "N/m_*, and deposits the per-layer stress decrement as a drag on the "
+        "flow.  With ``launch_p`` set the wave is held at its launch amplitude "
+        "at and below that level (no source, no deposition) and starts "
+        "propagating there, so the stress-decrement statement applies only "
+        "ABOVE the launch level."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -217,6 +221,54 @@ def hines_gwd(
         ))
     )
 
+    # --- Launch level ---------------------------------------------------
+    # STATIC Python branch on a build-time config constant (the JAX
+    # feature-gating exception): ``launch_p is None`` keeps the legacy
+    # surface-launch path with no extra HLO and byte-identical output.
+    #
+    # A non-orographic wave launched at the SURFACE is born supersaturated
+    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N
+    # is SMALLEST in the well-mixed boundary layer: on the 2.5 deg AMIP
+    # state 2.0 m/s exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of
+    # the area, so the wave breaks AT its own launch level (55% of its
+    # momentum below 1 km, only 35% above 12 km).
+    #
+    # Level selection is PER COLUMN, not from a column-mean profile: the
+    # documented units are [Pa], so a nominal 700 hPa source must sit at
+    # 700 hPa over a mountain as well as over the ocean.  (The sibling
+    # e3sm_cam.py:1544 picks ONE global level from the column mean, which
+    # makes its threshold a reference-grid convention rather than a
+    # pressure; codex review 2026-07-31.)  ``jnp.argmin`` keeps the index
+    # TRACED (never ``int(...)``) so the kernel stays jit-safe; the index
+    # itself is not differentiated, matching E3SM's static selection.
+    #
+    # Columns whose SURFACE pressure is already below ``launch_p`` (high
+    # terrain) get NO source rather than a silently relocated one: the
+    # launch level is pushed past the bottom so every level reads as "below
+    # launch" and the column contributes zero drag.
+    #
+    # NB it is NOT enough to zero the drag below the launch level: the
+    # amplitude carry would still propagate up through the BL and SATURATE
+    # there, so the wave would arrive at the launch level already clipped
+    # and the drag ALOFT would be unchanged (verified: bit-identical above
+    # the launch level with output-masking alone).  The carry must be HELD
+    # AT the launch amplitude until the launch level is reached, so the
+    # wave genuinely starts there.
+    _k_launch = None
+    if config.launch_p is not None:
+        # (ncol,) index of the level closest to launch_p in EACH column.
+        _k_launch = jnp.argmin(
+            jnp.abs(p_full - config.launch_p), axis=1
+        ).astype(jnp.int32)
+        # No source where the whole column lies above the launch pressure
+        # (p_s < launch_p, i.e. high terrain).  The scan gate is
+        # ``below = k >= k_launch``, so the sentinel that marks EVERY level
+        # as below-launch is 0 (k >= 0 always holds) — NOT nlev, which
+        # would make the condition never true and mask nothing.
+        _p_sfc = p_full[:, -1]
+        _k_launch = jnp.where(
+            _p_sfc < config.launch_p, jnp.int32(0), _k_launch)
+
     # Bottom-up scan: propagate sigma_gw upward from surface.
     # ``rho_ratio_step[:, k]`` carries amplitude from level k+1 to level k;
     # at the surface (k = nlev-1) the step factor is 1 (initial condition).
@@ -264,6 +316,16 @@ def hines_gwd(
         # transition region.  GWD on the mean flow is always a sink.
         drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
         drag = jnp.clip(drag, 0.0, config.Fmax)
+
+        # Launch gate: at and BELOW the launch level (arrays are top-down, so
+        # k >= k_launch) the wave does not exist yet — hold the carry at the
+        # launch amplitude and deposit no drag, so the wave genuinely STARTS
+        # at the launch level with an unclipped amplitude.  Static Python
+        # branch: absent for the legacy path (byte-identical HLO).
+        if _k_launch is not None:
+            _below = k >= _k_launch
+            sigma_new = jnp.where(_below, config.total_rms_wind, sigma_new)
+            drag = jnp.where(_below, 0.0, drag)
 
         # Pin the carry back to the launch-wind precision: under x64 the
         # Python-float ``config.*`` constants promote ``sigma_new`` to f64, but

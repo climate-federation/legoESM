@@ -49,7 +49,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid, compute_face_masks_3d, min_cell_to_uface, min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _add_bolus_to_advecting_flux,
+    add_bolus_to_advecting_flux,
 )
 from legoesm.ocean.advection import fct_tracer_advection
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
@@ -178,7 +178,7 @@ def build_bridge_and_fluxes():
         raise RuntimeError(
             "bolus is None -- gm_bolus_advection != 'through_fct' or "
             "kappa_GM disabled; check the recipe config.")
-    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = _add_bolus_to_advecting_flux(
+    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = add_bolus_to_advecting_flux(
         bolus, mass_flux_u, mass_flux_v, u_mask_3d, v_mask_3d, _grid, z_coord,
     )
     act = np.asarray(z_coord.is_active)

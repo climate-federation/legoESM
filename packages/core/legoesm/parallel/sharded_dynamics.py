@@ -1139,6 +1139,11 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
         edgeSignOnCell=pad2_col(mesh.edgeSignOnCell, pad_c, fill=0.0),
         edgeSignOnVertex=pad2_col(mesh.edgeSignOnVertex, pad_v, fill=0.0),
         meshDensity=pad1(mesh.meshDensity, pad_c, fill=0.0),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else pad1(mesh.subgrid_topo_stddev,
+                                       pad_c, fill=0.0)),
+        land_frac=(None if mesh.land_frac is None
+                   else pad1(mesh.land_frac, pad_c, fill=0.0)),
     )
 
 

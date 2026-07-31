@@ -76,11 +76,21 @@ def test_edmf_defaults_to_conservative_implicit_solve():
 
 
 def test_edmf_implicit_conserves_mse_far_better_than_advective():
-    """The default ``implicit_flux`` solve conserves column MSE
-    (c_p T + L_v(q_v + q_c)) and total water DRAMATICALLY better than the legacy
+    """The default ``implicit_flux`` solve conserves column VAPOR MSE
+    (c_p T + L_v q_v) and total water DRAMATICALLY better than the legacy
     ``advective`` solve — the non-conservation that accumulated to the day-5
-    blowup.  The implicit flux form telescopes, so ``H = ∫c_p dT = 0`` and
-    ``Q = -C`` hold by construction and the residual is fp ROUNDOFF of the ∫s
+    blowup.
+
+    INVARIANT UPDATED (EDMF unpaired-latent fix): this test previously asserted
+    ``H + Q + C ≈ 0``, which was the correct invariant only while EDMF handed
+    microphysics condensate whose latent heat had NOT been released.  EDMF now
+    adds the paired ``+(L_v/c_p) dq_c`` condensation warming (as Kain-Fritsch,
+    Bechtold, Tiedtke, ZM and Arakawa-Wu all do), so the conserved column
+    quantity is the VAPOR MSE ``h = c_p T + L_v q_v``: a correctly paired
+    scheme now has ``H + Q ≈ 0`` and hence ``H + Q + C ≈ C``.  Asserting the
+    old form would fail by exactly one latent throughput.
+
+    The implicit flux form telescopes, so the residual is fp ROUNDOFF of the ∫s
     telescoping (amplified by the large g·z carried in s and by the signal
     strength — the same kernel reaches ~1e-9 only on the strong hand-crafted
     Bechtold input, cf. test_bechtold_implicit_flux).  We therefore assert the
@@ -101,7 +111,8 @@ def test_edmf_implicit_conserves_mse_far_better_than_advective():
         mse_scale = jnp.abs(H) + jnp.abs(Q) + jnp.abs(C) + 1e-10
         water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
         water_scale = _col_int(jnp.abs(out.dq_v_dt), dp) + 1e-15
-        return (jnp.max(jnp.abs(H + Q + C) / mse_scale),
+        # VAPOR MSE (H + Q), not H + Q + C -- see the docstring.
+        return (jnp.max(jnp.abs(H + Q) / mse_scale),
                 jnp.max(jnp.abs(water) / water_scale), out)
 
     mse_imp, water_imp, out_imp = _residuals("implicit_flux")
@@ -110,7 +121,7 @@ def test_edmf_implicit_conserves_mse_far_better_than_advective():
     assert jnp.all(out_imp.dq_c_conv_dt >= -1e-12), "condensate source went negative"
     # Implicit conserves MSE + total water to roundoff (far below the advective
     # leak that drove the day-5 blowup).
-    assert float(mse_imp) < 1e-4, f"implicit MSE residual too large: {float(mse_imp):.2e}"
+    assert float(mse_imp) < 1e-4, f"implicit vapor-MSE residual too large: {float(mse_imp):.2e}"
     assert float(water_imp) < 1e-4, f"implicit total-water residual too large: {float(water_imp):.2e}"
     # Non-vacuous: implicit is at least ~20x more conservative than advective
     # (the real ratio is far larger), so the test FAILS if the fix is reverted.

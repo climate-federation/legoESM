@@ -491,6 +491,7 @@ def apply_physics_parameterization(
         p_half=p_half,
         closure=closure._replace(M_eq=predicted["M_eq"], M_c_new=M_c_new),
         config=mass_flux_config,
+        dt=dt,
     )
     turb_out = _apply_predicted_diffusivity_turbulence(
         u=u,

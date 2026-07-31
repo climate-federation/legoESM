@@ -299,6 +299,7 @@ class PhysicsPipeline:
         self._cloud_conv_cloud_condensate = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
+        self._cloud_partial_coverage_optics = None
         self._cloud_fsd = None
         self._cloud_p_xr = None
         self._cloud_alpha_xr = None
@@ -2069,6 +2070,8 @@ class PhysicsPipeline:
                 cloud_optics_inhomogeneity=getattr(
                     self, "_cloud_optics_inhomogeneity", None),
                 cloud_fsd=getattr(self, "_cloud_fsd", None),
+                cloud_partial_coverage_optics=getattr(
+                    self, "_cloud_partial_coverage_optics", None),
                 p_xr=getattr(self, "_cloud_p_xr", None),
                 alpha_xr=getattr(self, "_cloud_alpha_xr", None),
                 diagnostic_condensate_scheme=getattr(
@@ -3135,7 +3138,7 @@ def validate_microphysics_tracer_slots(
     return need_slots
 
 
-def _thread_morrison_scalars(config, scheme, micro_config):
+def thread_morrison_scalars(config, scheme, micro_config):
     """Forward user-touched ``morrison_*`` flat scalars to the shared applier.
 
     Explicit attribute reads (not getattr-with-a-variable) so the
@@ -3303,7 +3306,7 @@ def _resolve_microphysics(config):
     # retuned them; codex 2026-07-26 Critical).  Only user-touched values are
     # forwarded, so a non-Morrison scheme with untouched defaults stays
     # silent and a Morrison config at defaults is byte-identical.
-    micro_config = _thread_morrison_scalars(config, scheme, micro_config)
+    micro_config = thread_morrison_scalars(config, scheme, micro_config)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -3515,6 +3518,9 @@ def gwd_config_for(config):
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
         Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
+        # None (default) = legacy surface launch, byte-identical.
+        launch_p=(None if getattr(config, "hines_launch_p", 0.0) in (0.0, None)
+                  else float(config.hines_launch_p)),
     )
     return gc._replace(mcfarlane=mc, hines=hn)
 
@@ -3794,6 +3800,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(
         config, 'cloud_optics_inhomogeneity', None)
+    pipeline._cloud_partial_coverage_optics = getattr(
+        config, 'cloud_partial_coverage_optics', None)
     pipeline._cloud_fsd = getattr(config, 'cloud_fsd', None)
     pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
     pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)

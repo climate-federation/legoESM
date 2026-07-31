@@ -176,6 +176,15 @@ TC1_PARAMS = {
 
 TC2_PARAMS = {
     "small_earth_factor": 20.0,      # Radius reduction factor
+    # ROTATING, per the official DCMIP-2025 TC2 definition: radius is
+    # reduced by X=20 AND Coriolis is increased by X.  (An earlier edit
+    # set this False by analogy with FV3's HIWPP Schaer mountain-wave
+    # cases 33-35, which do zero f0/fC at tools/test_cases.F90:3079 —
+    # but those are a DIFFERENT test, not TC2's gap-flow / vortex-
+    # shedding case.  Non-rotation here is an explicit opt-in
+    # (``params={"rotating": False}``) for attribution experiments, not
+    # the case default.)
+    "rotating": True,
     "T0": 250.0,                     # Isothermal temperature [K]
     "u0": 20.0,                      # Background zonal wind [m/s]
     "H": 30000.0,                    # Model top [m]
@@ -198,6 +207,14 @@ TC2_PARAMS = {
 
 TC3_PARAMS = {
     "small_earth_factor": 60.0,
+    # NON-ROTATING: the official DCMIP-2025 TC3 (squall line) specifies
+    # no Coriolis, matching FV3's HIWPP super-cell (f0 = fC = 0,
+    # tools/test_cases.F90:3319-3320) and our own MPAS sibling, which
+    # already passes omega=0.0 (test_case_3_mpas.py:125).  NOTE the
+    # IC is still initialised with rho_prime = 0 rather than a
+    # cyclostrophically balanced state (test_case_3.py) — a separate,
+    # unclosed fidelity gap.
+    "rotating": False,
     "H": 20000.0,                     # Model top [m]
     "n_levels": 40,
     # Sounding parameters.

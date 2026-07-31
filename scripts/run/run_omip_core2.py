@@ -4033,13 +4033,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
-    p.add_argument("--tke-mxl-choice", type=int, default=None, choices=[2, 3],
+    p.add_argument("--tke-mxl-choice", type=int, default=None,
+                   choices=[2, 3, 4],
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
                         "None (default) keeps the card value (3 since #1326 = "
                         "NEMO nn_mxl=3: lup/ldown |dl/dz|<=e3t sweeps WITH the "
                         "ln_mxl0 wind-stress surface anchor). 2 = Veros "
                         "Bougeault-Lacarrere (the pre-#1326 behaviour, for "
-                        "A/B). Requires --tripole-vmix tke (else raises).")
+                        "A/B). 4 = NEMO nn_mxl=2, which is what the ORCA1 "
+                        "namelist actually runs: the SAME lup/ldown sweeps as "
+                        "3 but a SINGLE length (l_eps = l_k = min(lup,ldn)) "
+                        "instead of l_eps = sqrt(lup*ldn). Since min <= sqrt, "
+                        "choice 4 dissipates MORE and mixes LESS, and the two "
+                        "differ only where lup and ldn diverge (weakly "
+                        "stratified deep columns) -- a high-latitude-selective "
+                        "lever. NOTE the numbering is Veros-derived and does "
+                        "NOT match NEMO's nn_mxl values. Requires "
+                        "--tripole-vmix tke (else raises).")
     p.add_argument("--tke-prognostic", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="Prognostic TKE for --tripole-vmix tke. Unset (default) "

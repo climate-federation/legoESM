@@ -1701,7 +1701,7 @@ class TestIsoneutralRediOnly:
 
     def test_static_kappa_override_row_scaling(self):
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.experiments.dino import (
             DINOConfig, dino_lat_lon_grid,
@@ -1709,7 +1709,7 @@ class TestIsoneutralRediOnly:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        arr, arr_v = _static_kappa_redi_override(gm_on, g)
+        arr, arr_v = static_kappa_redi_override(gm_on, g)
         assert arr.shape == (g.n_lat, 12)
         assert arr_v.shape == (g.n_lat, 12)
         lat = np.asarray(g.lat)
@@ -1729,7 +1729,7 @@ class TestIsoneutralRediOnly:
         # by symmetry.
         assert not np.allclose(np.asarray(arr)[:, 0], np.asarray(arr_v)[:, 0])
         gm_off = GMRediConfig(kappa_Redi=100.0)
-        assert _static_kappa_redi_override(gm_off, g) == (None, None)
+        assert static_kappa_redi_override(gm_off, g) == (None, None)
 
     def test_static_kappa_override_on_cgrid_geometry(self):
         """cos_lat_v on LatLonCGridGeometry -- the from-rest path.
@@ -1739,7 +1739,7 @@ class TestIsoneutralRediOnly:
         (the tests all used the bridged LatLonGrid, which stores it).
         """
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.grids.latlon import create_latlon_geometry
         from legoesm.ocean.experiments.dino import (
@@ -1753,14 +1753,14 @@ class TestIsoneutralRediOnly:
             lat_face_1d=jnp.asarray(g.lat_v))
         assert geom.cos_lat_v.shape == (g.n_lat + 1,)
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        arr, arr_v = _static_kappa_redi_override(gm_on, geom)
+        arr, arr_v = static_kappa_redi_override(gm_on, geom)
         assert arr.shape == (g.n_lat, 12) and arr_v.shape == (g.n_lat, 12)
         # Same quantity as the LatLonGrid answer -- cos at the TRUE v-face
         # latitude.  Agreement to f32 eps, not bit-exact, only because the
         # two cast at different points (grid casts lat_v then cos; the
         # geometry cos's the f64 faces then casts).  A midpoint rebuild
         # would instead be off by 2.5e-4 here -- 3 orders larger.
-        ref, ref_v = _static_kappa_redi_override(gm_on, g)
+        ref, ref_v = static_kappa_redi_override(gm_on, g)
         np.testing.assert_allclose(np.asarray(arr_v), np.asarray(ref_v),
                                    rtol=1e-6)
         np.testing.assert_allclose(np.asarray(arr), np.asarray(ref), rtol=1e-6)
@@ -1773,7 +1773,7 @@ class TestIsoneutralRediOnly:
         half-cell reconstruction of zonal-mean latitudes.
         """
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         from legoesm.grids.latlon import create_latlon_geometry
@@ -1781,7 +1781,7 @@ class TestIsoneutralRediOnly:
         tri_like = g._replace(fold=g.fold._replace(is_active=True))
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
         with pytest.raises(ValueError, match="no 1-D v-face axis"):
-            _static_kappa_redi_override(gm_on, tri_like)
+            static_kappa_redi_override(gm_on, tri_like)
 
     def test_static_kappa_override_is_jit_safe(self):
         """The override runs INSIDE jit -- it must never inspect array values.
@@ -1791,7 +1791,7 @@ class TestIsoneutralRediOnly:
         """
         import jax
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         from legoesm.grids.latlon import create_latlon_geometry
@@ -1799,7 +1799,7 @@ class TestIsoneutralRediOnly:
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
         # Production shape: the geometry is closed over with STATIC ints but
         # z-star-live ARRAY leaves, so cos_lat_v arrives as a tracer.
-        f = jax.jit(lambda cv, lt: _static_kappa_redi_override(
+        f = jax.jit(lambda cv, lt: static_kappa_redi_override(
             gm_on, g._replace(cos_lat_v=cv, lat=lt)))
         kT, kv = f(jnp.asarray(g.cos_lat_v), jnp.asarray(g.lat))
         assert kT.shape == (8, 12) and kv.shape == (8, 12)
@@ -1820,13 +1820,13 @@ class TestIsoneutralRediOnly:
         from types import SimpleNamespace
 
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         gm = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
         fake = SimpleNamespace(lat=np.zeros((4, 5)), n_lon=5)
         with pytest.raises(ValueError, match="1-D latitudes"):
-            _static_kappa_redi_override(gm, fake)
+            static_kappa_redi_override(gm, fake)
 
 
 def _pytest_raises_valueerror(match):

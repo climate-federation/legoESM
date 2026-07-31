@@ -25,7 +25,7 @@ entry point.
 
 Per-row provenance:
 
-  * ``ldftra ahtu/ahtv`` -- ``_static_kappa_redi_override`` (the exact
+  * ``ldftra ahtu/ahtv`` -- ``static_kappa_redi_override`` (the exact
     function ``ldftra_ahtv_compare.py`` already calls), fed the REAL recipe's
     ``mc.gm_redi`` (not a hardcoded ``kappa_Redi`` literal).
   * ``dyn_hpg (du)`` / ``dyn_adv KEG`` -- BOTH read off the SAME
@@ -95,7 +95,7 @@ from legoesm.ocean.fidelity.nemo_state_bridge import (
 from legoesm.ocean.fidelity.precision_gate import require_fp64
 from legoesm.ocean.fidelity.time_levels import register_dump, time_level_for_dump
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _static_kappa_redi_override, _thickness_weighted_asselin,
+    static_kappa_redi_override, _thickness_weighted_asselin,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _bc_ke_and_pressure_gradients, compute_frozen_geom_density,
@@ -256,10 +256,10 @@ def measure_ldftra(st) -> dict:
     print(f"  kappa_redi_lat_scaling={gm_cfg.kappa_redi_lat_scaling}  "
           f"kappa_Redi={gm_cfg.kappa_Redi!r} (the REAL recipe config value, "
           "not a hardcoded literal)")
-    kappa_T, kappa_v = _static_kappa_redi_override(gm_cfg, br.geometry)
+    kappa_T, kappa_v = static_kappa_redi_override(gm_cfg, br.geometry)
     if kappa_T is None:
         print("  ABORTING: kappa_redi_lat_scaling is False on this recipe -- "
-              "_static_kappa_redi_override returns (None, None).")
+              "static_kappa_redi_override returns (None, None).")
         return dict(ahtu=dict(n=0, at_bar=False, bar_metric=float("nan"), sign_changing=False),
                     ahtv=dict(n=0, at_bar=False, bar_metric=float("nan"), sign_changing=False))
     kappa_T = np.asarray(kappa_T)

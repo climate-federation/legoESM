@@ -191,7 +191,7 @@ def dm95_taper_scalar(
 # resolution function stays physical (~coarse limit, f_res -> 1 on a coarse
 # grid) across the equator instead of collapsing to 0 as |f| -> 0.  This is a
 # PHYSICAL cap on the equatorial band width, deliberately far larger than the
-# 1e-10 denominator-safety floors (_TREGUIER_F_MIN / eke._DENOM_FLOOR) used
+# 1e-10 denominator-safety floors (TREGUIER_F_MIN / eke._DENOM_FLOOR) used
 # elsewhere in this stack -- a 1e-10 floor would let L_d blow up to ~2e13 m and
 # spuriously switch GM OFF (f_res -> 0) in a wide equatorial band.
 _RESFN_F_FLOOR_S = 1.0e-5
@@ -428,12 +428,12 @@ def compute_visbeck_kappa_gm(
 # --- NEMO ldf_eiv fixed scheme constants (ldftra.F90, nn_aei_ijk_t=21) ---
 # Fixed values hard-coded in the NEMO source (not namelist tunables); the ONE
 # genuine tunable is the cap aei0 = rn_Ue*rn_Le (TreguierConfig.aei0).
-_TREGUIER_RO_FACTOR = 0.4          # Ro = 0.4*(integral N dz)/|f|   (ldf_eiv "zRo = .4*zn/zfw")
-_TREGUIER_RO_MIN_M = 2.0e3         # Rossby-radius clamp, lower [m]
-_TREGUIER_RO_MAX_M = 4.0e4         # Rossby-radius clamp, upper [m]
-_TREGUIER_F_MIN = 1.0e-10          # |f| floor in the Ro division  (ldf_eiv zfw MAX)
-_TREGUIER_ZHW_OFFSET_M = 5.0       # zhw initialisation offset [m] (ldf_eiv "zhw(:,:) = 5.")
-_TREGUIER_TAPER_LAT_DEG = 20.0     # tropical taper reference latitude (z1_f20)
+TREGUIER_RO_FACTOR = 0.4          # Ro = 0.4*(integral N dz)/|f|   (ldf_eiv "zRo = .4*zn/zfw")
+TREGUIER_RO_MIN_M = 2.0e3         # Rossby-radius clamp, lower [m]
+TREGUIER_RO_MAX_M = 4.0e4         # Rossby-radius clamp, upper [m]
+TREGUIER_F_MIN = 1.0e-10          # |f| floor in the Ro division  (ldf_eiv zfw MAX)
+TREGUIER_ZHW_OFFSET_M = 5.0       # zhw initialisation offset [m] (ldf_eiv "zhw(:,:) = 5.")
+TREGUIER_TAPER_LAT_DEG = 20.0     # tropical taper reference latitude (z1_f20)
 
 
 def _static_bool(flag) -> bool:
@@ -572,16 +572,16 @@ def compute_treguier_kappa_gm(
         _TREGUIER_LENGTH_STUB, rho_ref,
     )
     del sigma_bar, _L
-    f_abs = jnp.maximum(jnp.abs(f_coriolis), _TREGUIER_F_MIN)
-    ro = jnp.clip(_TREGUIER_RO_FACTOR * int_N_dz / f_abs,
-                  _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M)
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
+    ro = jnp.clip(TREGUIER_RO_FACTOR * int_N_dz / f_abs,
+                  TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
     # T^-1 from the slope-weighted N² integral: sigma = N|S| at interfaces,
     # so sigma^2·dz = N²·(S_x²+S_y²)·dz  (ldf_eiv zah accumulation).
     zah = jnp.sum(sigma ** 2 * dz_half, axis=-1)
-    zhw = _TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
+    zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
     t_inv = jnp.sqrt(zah / zhw)
     f20 = 2.0 * omega * jnp.sin(
-        jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
+        jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
     kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
     # Optional floor (``TreguierConfig.kappa_min``, default 0.0 = inert /

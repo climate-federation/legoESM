@@ -111,7 +111,7 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
-def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
+def add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
                                  u_mask_3d, v_mask_3d, grid, z_coord):
     """Add the GM eddy-induced (bolus) transport to the TRACER advecting flux.
 
@@ -379,7 +379,7 @@ _LEVEL_SEPARABLE_H_SCHEMES = frozenset(
 )
 
 
-def _compute_advection_flux_div_pair(
+def compute_advection_flux_div_pair(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
     tracer_advection: str,
@@ -601,7 +601,7 @@ def _ssp_rk3_tracer_pair_step(
     Per-tracer arithmetic is kept statement-identical to
     :func:`_ssp_rk3_tracer_step`; the only change is that each stage's
     two flux divergences come from ONE
-    :func:`_compute_advection_flux_div_pair` call (3 fused horizontal
+    :func:`compute_advection_flux_div_pair` call (3 fused horizontal
     reconstructions + pads per step instead of 6).
 
     ``recon_fill_mask`` (#480) is forwarded to every stage's reconstruction
@@ -610,7 +610,7 @@ def _ssp_rk3_tracer_pair_step(
     """
 
     def _flux_div_pair(a_val, b_val):
-        (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
+        (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
@@ -791,7 +791,7 @@ def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
     )
 
 
-def _static_kappa_redi_override(gm_cfg, grid):
+def static_kappa_redi_override(gm_cfg, grid):
     """Per-column kappa_Redi override for kappa_redi_lat_scaling.
 
     NEMO ``nn_aht_ijk_t=20`` (``ldftra.F90:325-329`` -> ``ldf_c2d('TRA', ...)``,
@@ -1729,7 +1729,7 @@ class LatLonCGridOceanModel:
                     and getattr(config.gm_redi, "eke", None) is not None):
                 _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
             # gm_bolus_advection="through_fct" needs the bolus-transport export
-            # + _add_bolus_to_advecting_flux wiring, which only the split step
+            # + add_bolus_to_advecting_flux wiring, which only the split step
             # carries; without this gate the unsplit step would silently DROP
             # the entire GM bolus term (the in-operator centred add is gated
             # off and nothing re-adds it to the advecting flux).
@@ -3698,7 +3698,7 @@ class LatLonCGridOceanModel:
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
-            kappa_redi_override, kappa_redi_v_override = _static_kappa_redi_override(
+            kappa_redi_override, kappa_redi_v_override = static_kappa_redi_override(
                 gm_cfg, _grid)
             eke_new = None
             eke_diss_new = None
@@ -3902,7 +3902,7 @@ class LatLonCGridOceanModel:
                 dT_gm, dS_gm, _bolus = _gm_out
                 if _bolus is not None:
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
-                        _add_bolus_to_advecting_flux(
+                        add_bolus_to_advecting_flux(
                             _bolus, mass_flux_u, mass_flux_v,
                             u_mask_3d_tracer, v_mask_3d_tracer, _grid,
                             self.z_coord,
@@ -4044,7 +4044,7 @@ class LatLonCGridOceanModel:
 
             # T+S pair fast path: ONE fused horizontal reconstruction +
             # N-S pad per stage for both tracers (level-axis stack; see
-            # _compute_advection_flux_div_pair).  Bit-identical to the
+            # compute_advection_flux_div_pair).  Bit-identical to the
             # historical per-tracer calls; non-separable schemes fall
             # back to two single-tracer calls inside the pair helpers.
             # NEMO key_linssh: top-cell concentration/dilution flux (static
@@ -4072,7 +4072,7 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             else:
-                _pair_divs = _compute_advection_flux_div_pair(
+                _pair_divs = compute_advection_flux_div_pair(
                     T_mid, S_mid, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
@@ -7250,7 +7250,7 @@ class LatLonCGridOceanModel:
         k33_iso = None
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
-            _kri_static, _kri_v_static = _static_kappa_redi_override(gm_cfg, _grid)
+            _kri_static, _kri_v_static = static_kappa_redi_override(gm_cfg, _grid)
             _eos_depth = getattr(self.config, "eos_depth", "insitu")
             _gm_dj = None
             if gm_cfg.implicit_K33:

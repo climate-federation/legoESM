@@ -3,7 +3,7 @@
 
 Reads the live NEMO ``kt==nit000`` dump of ``ahtu``/``ahtv``/``gphiu``/``gphiv``
 (``MY_SRC/ldftra.F90``, units 8960-8963) from a NEMO DINO run directory and
-compares against legoESM's ``_static_kappa_redi_override`` (T-point field, feeds
+compares against legoESM's ``static_kappa_redi_override`` (T-point field, feeds
 the u-face flux unchanged) and its v-face companion field (the tier-2 item-1
 fix: NEMO's ``ahtv`` is evaluated independently at the v-point, NOT ``ahtu``
 broadcast onto the v-face).
@@ -24,7 +24,7 @@ import numpy as np
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
-    _static_kappa_redi_override,
+    static_kappa_redi_override,
 )
 from legoesm.ocean.experiments.dino import (  # noqa: E402
     dino_lat_lon_grid, nemo_faithful_dino_config,
@@ -73,7 +73,7 @@ def main() -> int:
     cfg = nemo_faithful_dino_config()
     grid = dino_lat_lon_grid(cfg)
     gm = GMRediConfig(kappa_Redi=1501.1854665553683, kappa_redi_lat_scaling=True)
-    kappa_T, kappa_v = _static_kappa_redi_override(gm, grid)
+    kappa_T, kappa_v = static_kappa_redi_override(gm, grid)
     kappa_T = np.asarray(kappa_T)
     kappa_v = np.asarray(kappa_v)
     n_lat, n_lon = kappa_T.shape

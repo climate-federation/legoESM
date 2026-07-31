@@ -22,7 +22,7 @@ from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
     _LEVEL_SEPARABLE_H_SCHEMES,
     _compute_advection_flux_div,
-    _compute_advection_flux_div_pair,
+    compute_advection_flux_div_pair,
     _ssp_rk3_tracer_pair_step,
     _ssp_rk3_tracer_step,
 )
@@ -57,7 +57,7 @@ def _problem(seed=0):
 )
 def test_pair_flux_div_matches_singles_bitwise(scheme):
     grid, T, S, mfu, mfv, w, h, h_u, h_v = _problem(1)
-    (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
+    (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
         T, S, scheme, mfu, mfv, w, h, h_u, h_v, grid, DT,
     )
     dh_T, dv_T = _compute_advection_flux_div(

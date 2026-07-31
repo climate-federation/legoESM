@@ -351,6 +351,137 @@ def _get_axis_swap_tables_h1(n):
     return _axis_swap_table_cache[n]
 
 
+# --- FV3 SCALAR_PAIR / CGRID_NE staggered-metric halo (2026-07-31) ---
+# Companion to ``pad_halo_dgrid_vector_4d``.  The corner-divergence routine
+# needs the SEAM METRICS (dyc/dxc, sina_v/sina_u, cosa_v/cosa_u) to cross
+# panels the same way the winds do; leaving them edge-replicated while the
+# winds use a real DGRID_NE halo is an INCONSISTENT pairing that measurably
+# broke DCMIP TC1 (PASS -> BLOWUP step 3950).  ``pad_halo_dgrid_scalar_4d``
+# cannot serve: it deliberately edge-replicates on exactly the eight
+# axis-swapping seams (see its ``axis_swap_fill`` argument).  Upstream FV3
+# exchanges dxc/dyc as SCALAR_PAIR, CGRID_NE and then fills C-grid corners at
+# grid-construction time (fv_grid_tools.F90:1071-1075); this compact CD-grid
+# stores no halo ring, so the exchange is reconstructed here at use time.
+# Unlike DGRID_NE winds, a metric pair carries ONE common sign, not
+# component-specific ones: +1 for dyc/dxc and sina_v/sina_u, -1 for
+# cosa_v/cosa_u.
+
+
+def pad_halo_dgrid_scalar_pair_4d(
+    u_like: jax.Array,
+    v_like: jax.Array,
+    *,
+    axis_swap_sign: float = 1.0,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo a paired C-grid staggered scalar metric field.
+
+    Parameters
+    ----------
+    u_like : (6, n, n+1, nlev)
+        ``dyc``, ``sina_v``, or ``cosa_v``-like field.
+    v_like : (6, n+1, n, nlev)
+        ``dxc``, ``sina_u``, or ``cosa_u``-like field.
+    axis_swap_sign : {+1.0, -1.0}
+        +1 for ``dyc/dxc`` and ``sina_v/sina_u``;
+        -1 for ``cosa_v/cosa_u``.
+
+    Returns
+    -------
+    u_padded : (6, n+2, n+3, nlev)
+    v_padded : (6, n+3, n+2, nlev)
+
+    Notes
+    -----
+    Same-axis edges are scalar copies.  On the eight axis-swapping
+    edges, components exchange but use one common metric-pair sign,
+    unlike DGRID_NE vector winds' component-specific signs.
+    """
+    if u_like.ndim != 4 or v_like.ndim != 4:
+        raise ValueError(
+            "pad_halo_dgrid_scalar_pair_4d requires 4D inputs; "
+            f"got u_like.ndim={u_like.ndim}, v_like.ndim={v_like.ndim}"
+        )
+    if u_like.shape[0] != 6 or v_like.shape[0] != 6:
+        raise ValueError("pad_halo_dgrid_scalar_pair_4d requires 6 faces")
+
+    n = u_like.shape[1]
+    if (
+        u_like.shape[2] != n + 1
+        or v_like.shape[1] != n + 1
+        or v_like.shape[2] != n
+        or u_like.shape[3] != v_like.shape[3]
+    ):
+        raise ValueError(
+            "Expected u_like (6, n, n+1, nlev) and "
+            "v_like (6, n+1, n, nlev); got "
+            f"{tuple(u_like.shape)} and {tuple(v_like.shape)}"
+        )
+    if axis_swap_sign not in (-1.0, 1.0):
+        raise ValueError(
+            f"axis_swap_sign must be +1.0 or -1.0, got {axis_swap_sign!r}"
+        )
+
+    # Seed same-axis edges using the existing scalar table.  Its axis-swap
+    # edge copies are overwritten below.
+    u_padded = pad_halo_dgrid_scalar_4d(
+        u_like, axis_swap_fill="edge",
+    )
+    v_padded = pad_halo_dgrid_scalar_4d(
+        v_like, axis_swap_fill="edge",
+    )
+
+    (
+        u_dst_f, u_dst_i, u_dst_j,
+        v_src_f, v_src_i, v_src_j, _u_vector_signs,
+        v_dst_f, v_dst_i, v_dst_j,
+        u_src_f, u_src_i, u_src_j, _v_vector_signs,
+    ) = _get_axis_swap_tables_h1(n)
+
+    if u_dst_f.size > 0:
+        u_padded = u_padded.at[u_dst_f, u_dst_i, u_dst_j].set(
+            v_like[v_src_f, v_src_i, v_src_j]
+            * jnp.asarray(axis_swap_sign, dtype=u_like.dtype)
+        )
+    if v_dst_f.size > 0:
+        v_padded = v_padded.at[v_dst_f, v_dst_i, v_dst_j].set(
+            u_like[u_src_f, u_src_i, u_src_j]
+            * jnp.asarray(axis_swap_sign, dtype=v_like.dtype)
+        )
+
+    # FV3 fill_corners(..., CGRID=.true.), with X=v_like and Y=u_like.
+    # Do this after side strips; these are paired C-grid corner values,
+    # not mode='edge' diagonal copies.
+    q_u = jnp.asarray(axis_swap_sign, dtype=u_like.dtype)
+    q_v = jnp.asarray(axis_swap_sign, dtype=v_like.dtype)
+
+    v_padded = v_padded.at[:, 0, 0, :].set(
+        u_padded[:, 1, 0, :]
+    )
+    v_padded = v_padded.at[:, 0, n + 1, :].set(
+        q_v * u_padded[:, 1, n + 2, :]
+    )
+    v_padded = v_padded.at[:, n + 2, 0, :].set(
+        q_v * u_padded[:, n, 0, :]
+    )
+    v_padded = v_padded.at[:, n + 2, n + 1, :].set(
+        u_padded[:, n, n + 2, :]
+    )
+
+    u_padded = u_padded.at[:, 0, 0, :].set(
+        v_padded[:, 0, 1, :]
+    )
+    u_padded = u_padded.at[:, 0, n + 2, :].set(
+        q_u * v_padded[:, 0, n, :]
+    )
+    u_padded = u_padded.at[:, n + 1, 0, :].set(
+        q_u * v_padded[:, n + 2, 1, :]
+    )
+    u_padded = u_padded.at[:, n + 1, n + 2, :].set(
+        v_padded[:, n + 2, n, :]
+    )
+    return u_padded, v_padded
+
+
 def pad_halo_dgrid_vector_4d(u_d, v_d):
     """FV3-faithful DGRID_NE staggered vector halo (iter-1078).
 
