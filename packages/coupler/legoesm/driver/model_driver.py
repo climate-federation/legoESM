@@ -2964,6 +2964,7 @@ class ModelDriver:
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
+            vcoord=self.sigma,
             dsigma=self.sigma.dsigma,
             experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,
