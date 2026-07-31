@@ -114,7 +114,7 @@ velocity halo is fixed and verified but **gated off** (`dgrid_ne_halo=False`),
 because on its own it pairs real cross-panel winds with still-edge-replicated
 seam metrics and regresses DCMIP TC1 from PASS to a blowup at step 3950.
 
-Completing it requires one primitive that has not been derived from the oracle:
+Completing it requires one primitive, now DERIVED from the oracle (see the appendix):
 a raw-slot halo `pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg) -> (6, n+2, n+2, 4)`
 encoding the eight axis-swap **slot** permutations and the four vertex fills.
 `divergence_corner` reads *mixed raw slots* at boundaries — `(j-1,4)+(j,2)` for
