@@ -3650,6 +3650,8 @@ def rotate_winds_geo_to_grid(
 def apply_small_earth_scaling(
     grid: CubedSphereGrid,
     factor: float,
+    *,
+    rotating: bool = True,
 ) -> CubedSphereGrid:
     """Create a small-Earth grid by scaling radius and rotation rate.
 
@@ -3665,6 +3667,14 @@ def apply_small_earth_scaling(
         Original grid at Earth radius.
     factor : float
         Reduction factor X. Earth radius becomes R_earth/X.
+    rotating : bool, default True
+        Keep the Rossby-number-preserving ``Omega * X`` scaling.  Set
+        False for a NON-ROTATING small planet (``omega = 0``), which is
+        what FV3 does for the reduced-radius HIWPP cases that DCMIP's
+        mountain-wave and supercell tests descend from: ``f0 = 0`` and
+        ``fC = 0`` for ``test_case`` 33/34/35 (tools/test_cases.F90:3082)
+        and 36/37 (:3319).  Those ICs carry no balancing pressure
+        gradient, so an amplified ``f`` is a spurious momentum source.
 
     Returns
     -------
@@ -3672,6 +3682,16 @@ def apply_small_earth_scaling(
         New grid with scaled metrics.
     """
     if factor == 1.0:
+        # Never rebuild for a no-op reduction: create_cubed_sphere does not
+        # forward dtype/duogrid, so rebuilding an FV3-native or duogrid grid
+        # here would silently swap its halo topology (codex r2 P2).  A
+        # non-rotating full-size grid must be built by the caller instead.
+        if not rotating:
+            raise ValueError(
+                "apply_small_earth_scaling(factor=1.0, rotating=False) would "
+                "require rebuilding the grid, which drops dtype/duogrid "
+                "provenance; build the non-rotating grid directly with "
+                "create_cubed_sphere(..., omega=0.0)")
         return grid
 
     from legoesm import constants
@@ -3681,7 +3701,7 @@ def apply_small_earth_scaling(
     return create_cubed_sphere(
         grid.n,
         radius=constants.R_earth / factor,
-        omega=constants.Omega * factor,
+        omega=(constants.Omega * factor) if rotating else 0.0,
         gnomonic=grid.gnomonic_form,
     )
 

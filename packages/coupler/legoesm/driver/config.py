@@ -1387,6 +1387,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    # HinesConfig.launch_p [Pa]; 0.0 = unset = legacy SURFACE launch.
+    # A non-orographic wave launched at the surface is born supersaturated
+    # in the weakly stratified BL and breaks at its own launch level
+    # (measured: 55% of its momentum deposited below 1 km).
+    hines_launch_p: float = 0.0
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:

@@ -123,6 +123,14 @@ class SpectralNHConfig(NamedTuple):
     # baseline for drift-measurement tests.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    rotating: bool = True
+        # False => Coriolis identically zero on the small planet.  The
+        # small-earth branch below scales ``grid.f`` by the reduction factor
+        # (Rossby-preserving, the DCMIP-2025 convention used by TC2); DCMIP
+        # TC3 (squall line) specifies NO Coriolis, which the cube and MPAS
+        # arms already honour.  Without this the spectral TC3 arm ran at
+        # f*60 while its cube/MPAS siblings ran at f=0 (codex r3 P1).
+
 
 
 # =============================================================================
@@ -745,8 +753,11 @@ class SpectralCompressibleEulerModel:
             factor = self.config.small_earth_factor
             grid = grid._replace(
                 radius=constants.R_earth / factor,
-                f=grid.f * factor,
+                f=(grid.f * factor if self.config.rotating
+                   else jnp.zeros_like(grid.f)),
             )
+        elif not self.config.rotating:
+            grid = grid._replace(f=jnp.zeros_like(grid.f))
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None
@@ -1236,8 +1247,16 @@ def dcmip25_tc2_init_spectral(
 
     p = {**TC2_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]
+    # The rotation rate MUST be scaled the same way as on the cube and MPAS
+    # (Omega*X preserves the Rossby number on a radius/X planet, which is the
+    # DCMIP-2025 small-planet convention).  This call previously omitted
+    # ``omega`` entirely, so the spectral arm silently ran at Omega while the
+    # cube arm ran at Omega*20 for the SAME case — a 20x cross-grid confound
+    # that invalidated any spectral-vs-cube comparison (codex r2 P1).
     small_grid = create_gaussian_grid(
-        grid.n_max, radius=constants.R_earth / factor)
+        grid.n_max, radius=constants.R_earth / factor,
+        omega=(constants.Omega * factor
+               if p.get("rotating", True) else 0.0))
 
     theta_fn = isothermal_theta_ref(T0=p["T0"])
     height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)
@@ -1335,8 +1354,12 @@ def dcmip25_tc3_init_spectral(
 
     p = {**TC3_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]
+    # Same-rotation requirement as TC2 above; TC3 is non-rotating by spec, so
+    # this resolves to omega=0 and now MATCHES the cube and MPAS arms.
     small_grid = create_gaussian_grid(
-        grid.n_max, radius=constants.R_earth / factor)
+        grid.n_max, radius=constants.R_earth / factor,
+        omega=(constants.Omega * factor
+               if p.get("rotating", True) else 0.0))
 
     theta_fn = _squall_line_theta_fn(p)
     height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)

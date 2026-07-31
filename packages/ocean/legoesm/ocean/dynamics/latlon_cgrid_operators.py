@@ -3838,8 +3838,23 @@ def pv_flux_ene(
     F_v_north = F_v[1:, :, :]
     F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
     F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
-    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
-    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+    # ROLL THE (n_lon) ARRAY FIRST, THEN WRAP -- the ordering the t_* triads in
+    # pv_flux_al81_partial_cell already use.  Rolling the ALREADY-WRAPPED
+    # (n_lon+1) array is a DIFFERENT operation: for A = [a_0 ... a_{n-1}, a_0],
+    # roll(A,1) = [a_0, a_0, a_1, ... a_{n-1}], so u-face 0 receives a_0 where
+    # its west neighbour is cell n-1.  Column 0 was wrong while column n was
+    # right, so the two disagreed and the PERIODIC SEAM OPENED.
+    # Measured consequence (#1226): diag_u came out with a 21% relative seam
+    # from seam-EXACT inputs; divergence_cgrid telescopes a row to
+    # (u[n_lon] - u[0])*dy, so the open seam is a FABRICATED VOLUME SOURCE, and
+    # legoESM's barotropic solver gained 1.86e10 m^3 (+2.78e-4 m of mean eta)
+    # per 68-substep window in a CLOSED domain.  NEMO's residual on the same
+    # invariant is 2e-7..1e-6 relative and flat.  Closing the seam also drops
+    # the spurious channel transport by 42x.
+    _F_v_S_W = jnp.roll(F_v_south, 1, axis=1)     # (n_lat, n_lon, nlev)
+    _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
+    F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
+    F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
     diag_vortcor_u = 0.25 * (
         q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
     )
@@ -4156,8 +4171,23 @@ def pv_flux_al81_partial_cell(
     # West/east neighbour in i, periodic, plus wrap to (n_lat, n_lon+1, nlev).
     F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
     F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
-    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
-    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+    # ROLL THE (n_lon) ARRAY FIRST, THEN WRAP -- the ordering the t_* triads in
+    # pv_flux_al81_partial_cell already use.  Rolling the ALREADY-WRAPPED
+    # (n_lon+1) array is a DIFFERENT operation: for A = [a_0 ... a_{n-1}, a_0],
+    # roll(A,1) = [a_0, a_0, a_1, ... a_{n-1}], so u-face 0 receives a_0 where
+    # its west neighbour is cell n-1.  Column 0 was wrong while column n was
+    # right, so the two disagreed and the PERIODIC SEAM OPENED.
+    # Measured consequence (#1226): diag_u came out with a 21% relative seam
+    # from seam-EXACT inputs; divergence_cgrid telescopes a row to
+    # (u[n_lon] - u[0])*dy, so the open seam is a FABRICATED VOLUME SOURCE, and
+    # legoESM's barotropic solver gained 1.86e10 m^3 (+2.78e-4 m of mean eta)
+    # per 68-substep window in a CLOSED domain.  NEMO's residual on the same
+    # invariant is 2e-7..1e-6 relative and flat.  Closing the seam also drops
+    # the spurious channel transport by 42x.
+    _F_v_S_W = jnp.roll(F_v_south, 1, axis=1)     # (n_lat, n_lon, nlev)
+    _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
+    F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
+    F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
 
     # AL81 contribution at u-faces.
     diag_vortcor_u = (
