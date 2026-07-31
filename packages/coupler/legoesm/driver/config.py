@@ -2548,6 +2548,7 @@ class ExperimentConfig(NamedTuple):
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
             hyperdiff_scale=getattr(amip_cfg, 'hyperdiff_scale', 1.0),
+            a_h_scale=getattr(amip_cfg, 'a_h_scale', 1.0),
         )
         output = OutputConfig(
             output_dir=getattr(amip_cfg, 'output_dir', ''),
