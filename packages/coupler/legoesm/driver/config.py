@@ -569,6 +569,14 @@ class ExperimentConfig(NamedTuple):
     # independent-column answer cf*R(tau_ic)+(1-cf)*R(0) is DARKER because R
     # is concave.  "two_column" applies the exact inversion of that identity.
     cloud_partial_coverage_optics: str = "none"
+    # VERTICAL overlap optics: "none" (legacy/byte-identical) or
+    # "max_random" (n_sub deterministic maximum-random-overlap subcolumns,
+    # measured -30% cloud albedo and +18 W/m2 OLR vs a Monte-Carlo
+    # reference; costs n_sub x the radiation time). MUTUALLY EXCLUSIVE with
+    # cloud_partial_coverage_optics="two_column" -- both correct partial
+    # coverage, so enabling both double-discounts the cloud.
+    cloud_vertical_overlap_optics: str = "none"
+    cloud_n_subcolumns: int = 8
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1607,6 +1615,28 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
                 f"got {self.cloud_partial_coverage_optics!r}"
+            )
+        _valid_overlap = ("none", "max_random")
+        if self.cloud_vertical_overlap_optics not in _valid_overlap:
+            errors.append(
+                f"cloud_vertical_overlap_optics must be one of "
+                f"{_valid_overlap}, got {self.cloud_vertical_overlap_optics!r}"
+            )
+        if (self.cloud_partial_coverage_optics != "none"
+                and self.cloud_vertical_overlap_optics != "none"):
+            # Caught here as well as at the scheme, so a bad config fails at
+            # startup rather than inside the first radiation call.
+            errors.append(
+                "cloud_partial_coverage_optics and "
+                "cloud_vertical_overlap_optics are mutually exclusive (both "
+                "correct partial cloud coverage); got "
+                f"{self.cloud_partial_coverage_optics!r} and "
+                f"{self.cloud_vertical_overlap_optics!r}"
+            )
+        if not 1 <= int(self.cloud_n_subcolumns) <= 64:
+            errors.append(
+                f"cloud_n_subcolumns must be in [1, 64], got "
+                f"{self.cloud_n_subcolumns}"
             )
         # External-forcing source selectors.  The driver activates each channel
         # with a ``cfg.<field> == "external"``-style equality gate

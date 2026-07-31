@@ -251,6 +251,9 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_fsd=getattr(cfg, "cloud_fsd", None),
         cloud_partial_coverage_optics=getattr(
             cfg, "cloud_partial_coverage_optics", None),
+        cloud_vertical_overlap_optics=getattr(
+            cfg, "cloud_vertical_overlap_optics", None),
+        cloud_n_subcolumns=getattr(cfg, "cloud_n_subcolumns", None),
         diagnostic_condensate_scheme=getattr(
             cfg, "cloud_diagnostic_condensate_scheme", None),
         adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
