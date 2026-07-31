@@ -267,6 +267,7 @@ def normalize_freshwater_net(
 
 
 _DEN_FLOOR = 1.0e-10   # empty-domain denominator floor [shared by both means]
+_THIN_CELL_M = 1.0e-3  # top-cell thickness below which the closure is inert [m]
 
 
 def _global_weighted_sums(num_field, den_field, w, owned_mask=None):
@@ -356,7 +357,8 @@ def joint_volume_salt_virtual_salt_flux(
     owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Top-layer virtual-salt tendency [PSU/s] with the LOCAL salinity closure
-    AND both global budgets closed -- the "joint volume+salt correction" that
+    AND both global budgets closed FOR THE PHYSICAL CHANNEL (restoring is
+    deliberately excepted; see SCOPE below) -- the "joint volume+salt correction" that
     :func:`normalized_virtual_salt_flux` names as the missing piece.
 
     WHY THIS EXISTS.  The fixed-``S_ref`` closure removes salt at the S_ref rate
@@ -389,10 +391,23 @@ def joint_volume_salt_virtual_salt_flux(
     ``-<S F'>``, which for a negative global mean drives that cell below zero.
     Instead the correction is distributed in proportion to the local salinity,
 
-        G = S*F' - lambda*S = S*(F' - lambda),   lambda = ∮S F' dA / ∮S dA
+        b = max(S_local, 0)
+        G = b*(F' - lambda),   lambda = ∮b F' dA / ∮b dA
 
-    which still gives ``∮G dA = 0`` EXACTLY, and gives ``G = 0`` exactly wherever
-    ``S <= 0``.
+    which gives ``∮G dA = 0`` EXACTLY, and ``G = 0`` exactly wherever ``S <= 0``.
+
+    The basis ``b`` is NONNEGATIVE and is used in BOTH the numerator and the
+    correction.  Two reasons, both load-bearing:
+
+    * Using signed ``S`` in the denominator is unsafe precisely in the state
+      this function repairs: with negative cells present ``∮S dA`` can pass
+      through zero while ``∮S F' dA`` does not, which would silently drop the
+      correction.
+    * Using signed ``S`` in the numerator against a ``max(S,0)`` correction is a
+      SUPPORT MISMATCH -- a cell with ``S < 0`` would get the flux ``S*F'`` and
+      no correction, so it would be neither inert nor conservative.  Matching
+      the support makes nonpositive cells fully inert, which is also the right
+      physics: there is no salt there to remove.
 
     SCOPE OF THE TWO CLAIMS (narrowed after adversarial review):
 
@@ -418,7 +433,7 @@ def joint_volume_salt_virtual_salt_flux(
     """
     F_phys = (freshwater.precip - freshwater.evap
               + freshwater.runoff + freshwater.ice_fw)
-    wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
+    wet = mask * (h_top > _THIN_CELL_M).astype(mask.dtype)
     # 1. volume: zero-area-mean freshwater (identical to the S_ref path)
     F_phys = normalize_freshwater_net(F_phys, area, wet, owned_mask=owned_mask)
     # 2. salt: remove ∮S F' dA, distributed in proportion to a NONNEGATIVE
@@ -432,24 +447,29 @@ def joint_volume_salt_virtual_salt_flux(
     #    ∮G dA = ∮S F' dA - lambda*∮b dA = 0 exactly, and G = 0 wherever S <= 0.
     #    The reduction is the SHARED one (`_global_weighted_sums`) so lambda
     #    cannot drift from the freshwater mean's owned-cell / lat-SPMD handling.
+    # The basis appears in BOTH the numerator and the correction.  Using signed
+    # S in the numerator with a max(S,0) correction is a SUPPORT MISMATCH: a
+    # cell with S < 0 would then receive the flux S*F' but no correction, so it
+    # is neither inert nor conservative, and the "G = 0 where S <= 0" claim
+    # would be false there (codex round-2 #2).
     basis = jnp.maximum(S_local, 0.0)
-    num, den = _global_weighted_sums(S_local * F_phys, basis, area * wet,
+    num, den = _global_weighted_sums(basis * F_phys, basis, area * wet,
                                      owned_mask=owned_mask)
     # Empty/all-fresh domain: nothing to redistribute.  The nested `where`
     # keeps the reverse-mode VJP finite (the false branch divides by 1.0, not
     # by the vanishing denominator).
     _ok = den > _DEN_FLOOR
     lam = jnp.where(_ok, num / jnp.where(_ok, den, 1.0), 0.0)
-    G_phys = (S_local * F_phys - lam * basis) * wet
+    G_phys = (basis * (F_phys - lam)) * wet
     restoring = getattr(freshwater, "restoring", None)
     # `restoring` is masked by `wet` too: without it a dry cell that happens to
     # carry h_top > 1 mm would receive a salinity tendency (the `is_wet` gate
     # below tests thickness, NOT the land mask).
-    G = G_phys if restoring is None else (G_phys + S_local * restoring * wet)
+    G = G_phys if restoring is None else (G_phys + basis * restoring * wet)
     # dS/dt = -G / (rho_0 * dz_0), with the same thin-cell guard as
     # virtual_salt_flux_from_net (dz_0 can be O(cm) on partial cells).
-    is_wet = h_top > 1.0e-3
-    dz_safe = jnp.maximum(h_top, 1.0e-3)
+    is_wet = h_top > _THIN_CELL_M
+    dz_safe = jnp.maximum(h_top, _THIN_CELL_M)
     return jnp.where(is_wet, -G / (rho_0 * dz_safe), 0.0)
 
 

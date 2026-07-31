@@ -127,7 +127,10 @@ class TestJointNormalization:
         d1 = joint_volume_salt_virtual_salt_flux(fw, S, h_top, RHO_0, area, mask)
         d2 = joint_volume_salt_virtual_salt_flux(fw, 2.0 * S, h_top, RHO_0,
                                                  area, mask)
-        # lambda(2S) = 2*lambda(S) and G is homogeneous of degree 1 in S, so
+        # lambda is homogeneous of degree ZERO (lambda(2S) == lambda(S), since
+        # numerator and denominator both scale linearly) while G = b*(F'-lambda)
+        # is degree ONE in b -- so d2 == 2*d1 exactly, up to round-off. The
+        # earlier comment misstated lambda's degree (codex round-2 #5).
         # this is EXACT up to float round-off -- assert elementwise, not a 5%
         # band (codex round-1 #9: the loose band could not distinguish the
         # corrected closure from the uncorrected one).
@@ -186,12 +189,27 @@ class TestJointNormalization:
         The nonnegative basis ``max(S,0)`` removes that failure mode.
         """
         fw, S, h_top, area, mask = _setup()
-        S_signed = S.at[0].set(-20.0).at[1].set(-15.0)
-        dS = joint_volume_salt_virtual_salt_flux(fw, S_signed, h_top, RHO_0,
-                                                 area, mask)
-        total = _salt_integral(dS, h_top, area)
-        scale = float(jnp.sum(jnp.abs(RHO_0 * h_top * dS * area)))
-        assert abs(total) <= 1e-10 * max(scale, 1.0), (total, scale)
+        # DETERMINISTIC cancellation: equal areas, S = +10 and -10, so a signed
+        # denominator would be EXACTLY zero while the signed numerator is not.
+        # Random values that merely include two negatives never exercise this
+        # (codex round-2 #5).
+        n = 2
+        area2 = jnp.full(n, 1.0e10)
+        h2 = jnp.full(n, 5.0)
+        mask2 = jnp.ones(n)
+        S_cancel = jnp.asarray([10.0, -10.0])
+        fw2 = FreshwaterForcing(
+            precip=jnp.asarray([3.0e-4, 0.0]), evap=jnp.zeros(n),
+            runoff=jnp.zeros(n), ice_fw=jnp.zeros(n))
+        assert float(jnp.sum(S_cancel * area2)) == 0.0     # signed den == 0
+        dS = joint_volume_salt_virtual_salt_flux(fw2, S_cancel, h2, RHO_0,
+                                                 area2, mask2)
+        assert bool(jnp.all(jnp.isfinite(dS))), dS
+        total = float(jnp.sum(RHO_0 * h2 * dS * area2))
+        scale = float(jnp.sum(jnp.abs(RHO_0 * h2 * dS * area2)))
+        assert abs(total) <= 1e-12 * max(scale, 1.0), (total, scale)
+        # the negative cell must be INERT (support matches the basis)
+        assert float(dS[1]) == 0.0, float(dS[1])
 
     def test_jit_and_grad_are_finite(self):
         """Differentiability: the lambda guard must not leak a 0/0 NaN VJP."""
