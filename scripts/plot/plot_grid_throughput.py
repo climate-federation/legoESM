@@ -213,7 +213,10 @@ def main(argv=None):
     import matplotlib
     matplotlib.use("Agg")
 
-    _none = lambda v: None if str(v).lower() == "any" else v
+    def _none(v):
+        """"any" disables a filter (and lets the duplicate check fire)."""
+        return None if str(v).lower() == "any" else v
+
     data = load(a.csv, mode=_none(a.mode), precision=_none(a.precision),
                 n_levels=a.n_levels)
     written = make_figure(data, a.out, a.name, show_best=not a.no_best)
