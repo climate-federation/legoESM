@@ -93,7 +93,20 @@ era5_cadence_hours: 6
 n_epochs: 24
 optimizer: "adamw"
 lr: 3.0e-4
-warmup_steps: 1000
+# WARMUP IS COUNTED IN PER-RANK STEPS, NOT GLOBAL SAMPLES.
+# train_weatherbench_scale.py sets total_steps = n_epochs * len(LOCAL shard),
+# so on N ranks the schedule is n_epochs * (240 / N) steps long -- NOT
+# n_epochs * 240.  The previous value (1000) was 17% of the global count
+# (24 * 240 = 5760), which is a sane warmup fraction, but against the actual
+# per-rank schedule it was 1000/1440 = 69% of the whole run at 4 ranks, and
+# _clamped_warmup would have capped it at 359/360 = 99.7% at 16 ranks -- i.e.
+# the LR would ramp for the entire run and never hold at peak. The physics
+# family (8 params) barely notices; the neural_gcm / sfno families are
+# directly limited by it.
+# 120 = ~8% of the 1440-step schedule at the 4-rank / 240-sample setup this
+# campaign runs. RE-DERIVE IT IF YOU CHANGE RANK COUNT, n_epochs, OR
+# train_windows: target ~5-10% of (n_epochs * 240 / n_ranks).
+warmup_steps: 120
 weight_decay: 1.0e-5
 grad_clip_norm: 1.0
 grad_accum: 1
