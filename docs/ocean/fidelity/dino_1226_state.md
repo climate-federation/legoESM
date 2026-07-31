@@ -1,0 +1,97 @@
+# DINO/NEMO fidelity campaign (#1226) — current state digest
+
+**Purpose.** One short file agent briefs can point at instead of re-typing context.
+Authoritative detail lives in the gate script's row provenance and in the campaign
+memory addenda; this is the map, not the territory. **Update it each iteration.**
+
+Gate (run it, do not quote from here — this line goes stale):
+```
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py
+```
+Last observed 2026-07-30: `AT BAR 15 | DEBT 32 | UNMEASURED 5 | WAIVED 1 | total 53`.
+Bar: `corr >= 1-1e-9`, `|ratio-1| <= 1e-6`, per-element `<= 1e-9`.
+
+---
+
+## THE RULE (human, 2026-07-30)
+Never guess. Every fix is a **transcription from NEMO source with `file:line` cited**.
+If an exact NEMO match does not clear the row or the behaviour, **PAUSE and ESCALATE** —
+no invented stabilizers, no plausible corrections. An escalation after an exact match
+that failed is a SUCCESS of the process.
+
+## Standing mechanical preconditions (each earned by a real failure)
+1. **fp64** — `precision_gate.require_fp64`. `JAX_ENABLE_X64=1` does NOT change the policy;
+   `get_policy().storage` defaults to float32 and **constructors read it at build time**,
+   so an fp64 state must be *built* under an fp64 policy.
+2. **Time level** — `time_levels.time_level_for_dump` (fails closed). NEMO routines mix
+   Kbb/Kmm/Kaa within one call; establish each input's level from source.
+3. **`LEGOESM_NEMO_E3T` explicit** — the default `"off"` is a known-wrong 1-D ladder
+   (12.9% off below k=25) and has contaminated four measurements.
+4. **Metric identity** — before comparing two numbers from different scripts/ledgers,
+   verify **same metric, same aggregation, same POPULATION, same reducer**.
+   Four false conclusions today came from violating this.
+5. **Dump provenance** — state which side of any later operation a dump sits on, with the
+   F90 write line. Six confirmed cases where the dumped quantity was not the applied one.
+
+## Recurring trap catalogue
+- `avt_k`/`avm_k` are **closure-only**; EVD is applied to copies and never written back
+  (`zdfphy.F90:313-323`). NEMO emits no post-EVD field.
+- An MLF dump of `ts(Naa)`/`uu(Naa)` **after** a stage carries the whole step's accumulated RHS.
+- A dump may predate a later overwrite (`ATF`: `mlf_baro_corr` rewrites `puu(Kaa)` *and*,
+  under `ln_bt_fw=.false.`, `puu(Kmm)`, before `dyn_atf_qco` runs).
+- A dump may omit an operation NEMO applies one line later (`eiv`: the minus at
+  `ldftra.F90:833` vs the dump at `:864`; signature = corr exactly **-1.000000**).
+- Filename tokens lie: `atf_dump_uu_before.bin` is **Kmm** (pre-filter *stage*, not Nbb).
+- Probes go **config-blind**: `coverage_rows_measure.py` twice measured a static path
+  regardless of the card. Fixing one blind dispatch does not fix its siblings.
+- **Unit harness**: smooth **synthetic inputs can hide mask/boundary errors** (a mandatory
+  `mask=` omission moved a synthetic case 0.9649→0.9673 but real data 0.706→0.9999999).
+  Dynamic range and boundary coverage are different properties — cross-check geometry-
+  sensitive routines on **real restart data**.
+- Fortran **explicit-shape dummies** with decomposition macros (`A2D(0)`, extent 52 not 56)
+  silently scramble (i,j,k) via sequence association; compiles and links clean.
+- Halo/domain: some dumps are full `56x203` (halo=2), others interior `52x199` — use `_load_full`.
+- legoESM raw `u`/`h_u` carry a **+1 column offset** vs NEMO's index (`_u_to_nemo` strips it).
+- `w`/`G` live on the **interface** grid (37) vs `u`/`h_u` on cell centres (36).
+
+## Harness artifacts found (rows that were never model defects)
+`eiv transport u/v` (missing minus) · `dyn_ldf u/v` (probe fed NOW, NEMO reads Kbb) ·
+`ATF filter u/v` (stale pre-`mlf_baro_corr` Kaa → **bit-exact**, now AT BAR) ·
+`zdftke composite` (post-EVD reference) · `lbc_lnk sign` (no per-element entry) ·
+`dyn_adv ZAD` **42.5% of the union metric** (dump carries below-seafloor Krhs that
+`dynzdf.F90:121` discards). **The DEBT list overstates the model's real infidelity.**
+
+## Live rows
+- **`dyn_adv ZAD`** — highest leverage (dominates the v-unification, corr 0.9845).
+  **ROOT CAUSE CONFIRMED**: `dynzad.F90:86` has no per-face `umask` guard, so NEMO averages
+  `ww` from both T-neighbours at interface k+1 including one that is genuinely deeper/wet;
+  legoESM's `face_active` min-rule mask (`vertical.py:1249-1252`) zeroes it. Explains
+  **100.00%** of the active-only row (ratio 1.000, zero free parameters). **Real fidelity
+  defect** — those u-faces are wet, so `dynzdf.F90:121` does not discard NEMO's result.
+  active-only **3.0332e-02**, union 3.9993e-02. Fix in flight (gated option, default
+  bit-identical, sign/conservation walk required).
+- **`zu_frc` u (8.03e-3)** — drives the largest barotropic rows. **Seven candidates refuted.**
+  Signature: broad envelope + damped ~34-row ripple, enhanced at the **periodic seam**
+  (coincident with the sill). Recommend **pause**: unexplained, not shown climate-relevant,
+  and out of scope for the unit harness (emergent solver behaviour).
+- **`zdftke sh2`** — ESCALATION 1: exact transcription in, restricted-to-signal ratio 0.904.
+  Family measured **climate-inert**, so parking is defensible.
+- **`ldf_slp` ×4** — CONDITIONING-LIMITED, all three stopping-rule conditions verified.
+
+## Measured strategic result — read before prioritising
+The 5-year ACC acceptance run (protocol byte-identical, harness self-validated first) found
+the campaign's **1e-6-class fixes are CLIMATE-INERT**: year-1 upper contrast 0.9082 → 0.9082,
+ΔACC noise-level with two sign flips. The fixes change the state in the **wrong place**
+(upper ocean, north of the channel band) while 80-98% of the missing thermal wind is sourced
+**below 1000 m in the southern channel**. **⇒ Priority follows residual magnitude.** This does
+not refute exactness-first — the 1e-2 rows remain untested — but it bounds the optimism.
+Caveat: that run used `e3t=off` (the wrong 1-D ladder), matched to baseline for protocol
+identity; a true-ladder acceptance is blocked on the restart-start instability.
+
+## Open human decisions
+1. `sh2` — park vs keep walking (lean park; family climate-inert).
+2. Provenance policy — 16 rows still cite scripts never committed; machine-checked, but
+   re-measurement policy undecided.
+3. Does CONDITIONING-LIMITED count as done at this bar?
+4. `zu_frc` u — pause vs continue.
