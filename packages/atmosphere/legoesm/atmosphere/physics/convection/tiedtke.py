@@ -130,6 +130,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     stratosphere_mass_flux_gate,
     compute_column_geometry,
 )
@@ -438,11 +439,24 @@ def tiedtke_convection(
     # shallow-only column with ``delta_shallow > delta_deep`` this
     # over-amplifies the subsidence drying / warming by the same factor
     # the detrainment is enhanced.
-    dT_dt, dq_v_dt, _ = apply_mass_flux_kernel(
+    dT_dt, dq_v_dt, dq_c_kernel = apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
         z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
+        # Selectable vertical solve (config default "advective" = shipped
+        # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed by
+        # the implicit_flux branch; passing them unconditionally keeps the
+        # call site single-form, and the kernel raises on an unknown value.
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
     )
+    # Condensation latent heat of the DETRAINED condensate.  Paired against
+    # ``dq_c_kernel`` -- the kernel's OWN third return, i.e. exactly the
+    # condensate whose vapor the implicit_flux solve debited -- so the heating
+    # and the vapor sink cannot drift apart if the local ``dq_c_conv_dt``
+    # formula below ever changes.  No-op on the advective default.
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_kernel, config.subsidence_solve)
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     # Reuse the same stratospheric gate the kernel applies so this
     # custom q_c path does not detrain condensate above the tropopause.

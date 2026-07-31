@@ -1663,6 +1663,64 @@ def _set_active_subconfig(top_cfg: PhysicsConfig, category: str, subcfg) -> Phys
     return top_cfg._replace(**{CATEGORY_CONFIG_FIELD[category]: component_new})
 
 
+# --------------------------------------------------------------------------- #
+# Matched-kernel override (convection-scheme intercomparison)
+# --------------------------------------------------------------------------- #
+SUBSIDENCE_SOLVE_MODES = ("as_shipped", "implicit_flux", "advective")
+
+
+def apply_subsidence_solve_override(
+    cfg: PhysicsConfig,
+    mode: str,
+    *,
+    category: str = "convection",
+) -> tuple[PhysicsConfig, str]:
+    """Force the mass-flux family onto ONE vertical transport kernel.
+
+    Rankings across convection schemes are confounded when the schemes do not
+    share a transport kernel: Bechtold/EDMF/Kain-Fritsch ship the conservative
+    ``"implicit_flux"`` solve while Tiedtke/Emanuel/Zhang-McFarlane/mass_flux
+    ship the leaky ``"advective"`` one, so a score difference partly measures
+    the KERNEL, not the scheme.  ``mode="implicit_flux"`` puts every scheme
+    that HAS the knob on the conservative solve, isolating scheme physics;
+    ``mode="as_shipped"`` leaves every default untouched (what users get).
+
+    Returns ``(cfg, status)``.  ``status`` is a short human-readable string
+    recorded next to every number so a reader can never mistake which arm a
+    table came from:
+
+    * ``"as_shipped"``                    -- nothing changed;
+    * ``"forced:<scheme>=<solve>"``       -- the knob was set;
+    * ``"not_applicable:<scheme>"``       -- this scheme has NO
+      ``subsidence_solve`` field, so it is OUTSIDE the matched-kernel family.
+      Reported explicitly rather than silently skipped, because a reader must
+      not assume such a scheme was kernel-matched.  Three distinct reasons:
+
+      - ``sbm``, ``dca``, ``kuo`` -- adjustment / Kuo-type closures with no
+        compensating-subsidence mass-flux kernel at all;
+      - ``emanuel`` -- its SHIPPED path (``use_genuine_mixing=True``) is a
+        buoyancy-sorting mixing matrix that never calls the shared kernel;
+        only the legacy surrogate branch does, and that branch's
+        ``sort_multiplier`` rescaling would leave an unpaired vapor debit
+        under a vapor-debiting solve.  So Emanuel cannot be kernel-matched.
+
+    Raises on an unknown ``mode`` (dispatch-hardening: a typo must not
+    silently select the as-shipped arm and be reported as the matched one).
+    """
+    if mode not in SUBSIDENCE_SOLVE_MODES:
+        raise ValueError(
+            f"apply_subsidence_solve_override: unknown mode {mode!r}; "
+            f"expected one of {SUBSIDENCE_SOLVE_MODES}"
+        )
+    _component, scheme, subcfg = _active_subconfig(cfg, category)
+    if mode == "as_shipped":
+        return cfg, "as_shipped"
+    if subcfg is None or not hasattr(subcfg, "subsidence_solve"):
+        return cfg, f"not_applicable:{scheme}"
+    new_subcfg = subcfg._replace(subsidence_solve=mode)
+    return _set_active_subconfig(cfg, category, new_subcfg), f"forced:{scheme}={mode}"
+
+
 def _raw_from_physical(value: float, constraint) -> jax.Array:
     arr = jnp.asarray(value, dtype=jnp.float64)
     if constraint.transform == "sigmoid":
