@@ -44,21 +44,65 @@ GRID_STYLE = [
 INK, MUTED = "#1a1a1a", "#666666"
 
 
-def load(csv_path):
-    """GPU rows -> {grid: {resolution: {n_devices: (sypd, mcells, km)}}}."""
+def load(csv_path, mode="strong", precision="float32", n_levels=None):
+    """GPU rows -> {grid: {resolution: {n_devices: (sypd, mcells, km)}}}.
+
+    The key is ``(grid, resolution, n_devices)``, which is NOT unique in a tidy
+    CSV: the same geometry also varies by ``mode`` (strong/weak), ``precision``
+    and ``n_levels``.  This used to filter on ``backend`` alone, so any such
+    sibling row silently OVERWROTE its predecessor -- last row in file wins.
+
+    That went unnoticed while every campaign was float32/strong-only.  The
+    moment the route-B sweeps gained a float64 fan-out, 18 of 39 GPU rows in a
+    real campaign collided and **float64 silently replaced float32**, depressing
+    every curve and reading as a performance regression.
+
+    So: filter explicitly, and treat a surviving duplicate as a HARD error
+    rather than resolving it by file order.  Pass ``None`` for any filter to
+    disable it (then a collision will raise, which is the point).
+    """
     if not csv_path:
         raise SystemExit("--csv is required: path to all_tidy.csv")
     if not os.path.exists(csv_path):
         raise SystemExit(f"--csv not found: {csv_path}")
     out: dict = {}
+    seen: dict = {}
+    kept = 0
     with open(csv_path) as fh:
         for r in csv.DictReader(fh):
             if r["backend"] != "GPU":
                 continue
+            if mode is not None and r.get("mode", "") != mode:
+                continue
+            if precision is not None and r.get("precision", "") != precision:
+                continue
+            if n_levels is not None and str(r.get("n_levels", "")) != str(n_levels):
+                continue
+            key = (r["grid"], int(r["resolution"]), int(r["n_devices"]))
+            if key in seen:
+                prev = seen[key]
+                raise SystemExit(
+                    f"duplicate rows for grid={key[0]} res={key[1]} "
+                    f"n_devices={key[2]} after filtering "
+                    f"(mode={mode}, precision={precision}, n_levels={n_levels}):\n"
+                    f"  A: precision={prev['precision']} mode={prev['mode']} "
+                    f"nlev={prev.get('n_levels')} mcells/s={prev['mcells_per_s']}\n"
+                    f"  B: precision={r['precision']} mode={r['mode']} "
+                    f"nlev={r.get('n_levels')} mcells/s={r['mcells_per_s']}\n"
+                    f"Narrow the selection (--mode/--precision/--n-levels); "
+                    f"silently keeping the last row is how a float64 series "
+                    f"once masqueraded as a float32 regression.")
+            seen[key] = r
+            kept += 1
             (out.setdefault(r["grid"], {})
                 .setdefault(int(r["resolution"]), {})[int(r["n_devices"])]) = (
-                    float(r["sypd"]), float(r["mcells_per_s"]),
+                    float(r["sypd"]) if r["sypd"] else float("nan"),
+                    float(r["mcells_per_s"]),
                     float(r["resolution_km"]))
+    if not kept:
+        raise SystemExit(
+            f"no GPU rows matched mode={mode!r} precision={precision!r} "
+            f"n_levels={n_levels!r} in {csv_path}")
     return out
 
 
@@ -155,12 +199,23 @@ def main(argv=None):
     p.add_argument("--name", default="fig1_grid_throughput")
     p.add_argument("--no-best", action="store_true",
                    help="plot only the 1-GPU curves")
+    # A tidy CSV holds several series per (grid, res, n_devices).  These pick
+    # ONE; "any" disables a filter and lets the duplicate check fire.
+    p.add_argument("--mode", default="strong",
+                   help="scaling mode to plot (strong|weak|any; default strong)")
+    p.add_argument("--precision", default="float32",
+                   help="precision to plot (float32|float64|any; default float32)")
+    p.add_argument("--n-levels", default=None,
+                   help="restrict to one vertical resolution (e.g. 26); a "
+                        "campaign that changed n_levels is NOT comparable")
     a = p.parse_args(argv)
 
     import matplotlib
     matplotlib.use("Agg")
 
-    data = load(a.csv)
+    _none = lambda v: None if str(v).lower() == "any" else v
+    data = load(a.csv, mode=_none(a.mode), precision=_none(a.precision),
+                n_levels=a.n_levels)
     written = make_figure(data, a.out, a.name, show_best=not a.no_best)
     for path in written:
         print(f"wrote {path}")

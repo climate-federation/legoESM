@@ -161,3 +161,76 @@ def test_make_figure_tolerates_a_missing_grid(tmp_path):
     data = plot.load(_csv(tmp_path, [_row("latlon", 512, 39.1, 1, 12.2, 1011)]))
     written = plot.make_figure(data, str(tmp_path / "out"), "fig_partial")
     assert all(os.path.exists(p) for p in written)
+
+
+# ---- mode / precision selection --------------------------------------------
+# The key (grid, resolution, n_devices) is NOT unique in a tidy CSV: the same
+# geometry also varies by mode, precision and n_levels.  `load` used to filter
+# on backend alone, so a sibling row silently OVERWROTE its predecessor (last
+# row in file wins).  Harmless while every campaign was float32/strong-only --
+# then the route-B sweeps gained a float64 fan-out and, in a real campaign,
+# 18 of 39 GPU rows collided with float64 replacing float32, depressing every
+# curve and reading as a performance regression.
+
+def _row2(grid, res, km, n, mcells, precision="float32", mode="strong",
+          nlev=26, backend="GPU"):
+    return (f"atm,{backend},{grid},dry,{precision},{mode},{n},1,1,{n},{res},"
+            f"{km},{nlev},1.0,1.0,1000,{mcells},1.0,60.0,none,True,1.0,src")
+
+
+def test_load_defaults_to_strong_float32(tmp_path):
+    path = _csv(tmp_path, [
+        _row2("latlon", 512, 39.1, 1, 1011, precision="float32"),
+        _row2("latlon", 512, 39.1, 1, 529, precision="float64"),
+        _row2("latlon", 512, 39.1, 1, 777, mode="weak"),
+    ])
+    data = plot.load(path)
+    assert data["latlon"][512][1][1] == pytest.approx(1011), \
+        "default selection must be strong/float32, not the last row in file"
+
+
+def test_load_can_select_float64(tmp_path):
+    path = _csv(tmp_path, [
+        _row2("latlon", 512, 39.1, 1, 1011, precision="float32"),
+        _row2("latlon", 512, 39.1, 1, 529, precision="float64"),
+    ])
+    data = plot.load(path, precision="float64")
+    assert data["latlon"][512][1][1] == pytest.approx(529)
+
+
+def test_load_filters_weak_mode_out(tmp_path):
+    """A weak row must never land on a strong curve -- resolution grows with
+    device count in weak mode, so mixing them is meaningless."""
+    path = _csv(tmp_path, [
+        _row2("latlon", 512, 39.1, 1, 1011, mode="strong"),
+        _row2("latlon", 512, 39.1, 2, 4242, mode="weak"),
+    ])
+    data = plot.load(path)
+    assert set(data["latlon"][512]) == {1}, "weak rung leaked into the strong curve"
+
+
+def test_duplicate_after_filtering_is_a_hard_error(tmp_path):
+    """Silently keeping the last row is what let float64 masquerade as a
+    float32 regression -- an unresolved duplicate must abort."""
+    path = _csv(tmp_path, [
+        _row2("latlon", 512, 39.1, 1, 1011, precision="float32"),
+        _row2("latlon", 512, 39.1, 1, 529, precision="float64"),
+    ])
+    with pytest.raises(SystemExit, match="duplicate rows"):
+        plot.load(path, precision=None)
+
+
+def test_n_levels_filter(tmp_path):
+    """A campaign that changed n_levels is not comparable; allow pinning it."""
+    path = _csv(tmp_path, [
+        _row2("icosahedral", 8, 27.9, 1, 380, nlev=26),
+        _row2("icosahedral", 8, 27.9, 1, 180, nlev=8),
+    ])
+    assert plot.load(path, n_levels=26)["icosahedral"][8][1][1] == pytest.approx(380)
+    assert plot.load(path, n_levels=8)["icosahedral"][8][1][1] == pytest.approx(180)
+
+
+def test_empty_selection_is_an_error_not_an_empty_figure(tmp_path):
+    path = _csv(tmp_path, [_row2("latlon", 512, 39.1, 1, 1011)])
+    with pytest.raises(SystemExit, match="no GPU rows matched"):
+        plot.load(path, precision="float64")
