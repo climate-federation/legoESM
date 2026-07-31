@@ -1217,10 +1217,17 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
+        "--a-h-scale", "0.25",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
 
+    # a_h_scale is the SECOND-ORDER Laplacian viscosity multiplier. It is not
+    # scale-selective (damps as k^2) so it reaches the baroclinic eddies that
+    # drive the midlatitude jet; component_factory records "crushing the
+    # midlatitude eddy-driven jets" at 16x the default. It was a DycoreConfig
+    # field with no CLI flag until 2026-07-31.
+    assert cfg.dycore.a_h_scale == 0.25
     assert cfg.dycore.hyperdiff_scale == 1.25
     assert cfg.dycore.div_damp_scale == 0.75
     assert cfg.dycore.a_h_scale == 0.5

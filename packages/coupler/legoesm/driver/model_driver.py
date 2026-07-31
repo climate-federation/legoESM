@@ -249,6 +249,8 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_optics_inhomogeneity=getattr(
             cfg, "cloud_optics_inhomogeneity", None),
         cloud_fsd=getattr(cfg, "cloud_fsd", None),
+        cloud_partial_coverage_optics=getattr(
+            cfg, "cloud_partial_coverage_optics", None),
         diagnostic_condensate_scheme=getattr(
             cfg, "cloud_diagnostic_condensate_scheme", None),
         adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
@@ -2963,6 +2965,7 @@ class ModelDriver:
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
+            vcoord=self.sigma,
             dsigma=self.sigma.dsigma,
             experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,

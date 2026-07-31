@@ -586,6 +586,12 @@ class ExperimentConfig(NamedTuple):
     # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
     cloud_optics_inhomogeneity: str = "constant"
     cloud_fsd: float | None = None
+    # Partial-cloud-COVER optics: "none" (legacy/byte-identical) or
+    # "two_column".  The solver has no McICA/overlap and sees ONE
+    # homogeneous column at the grid-mean path, i.e. R(cf*tau_ic); the
+    # independent-column answer cf*R(tau_ic)+(1-cf)*R(0) is DARKER because R
+    # is concave.  "two_column" applies the exact inversion of that identity.
+    cloud_partial_coverage_optics: str = "none"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1667,6 +1673,12 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
                 f"got {self.cloud_optics_inhomogeneity!r}"
             )
+        _valid_cover = ("none", "two_column")
+        if self.cloud_partial_coverage_optics not in _valid_cover:
+            errors.append(
+                f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
+                f"got {self.cloud_partial_coverage_optics!r}"
+            )
         # External-forcing source selectors.  The driver activates each channel
         # with a ``cfg.<field> == "external"``-style equality gate
         # (model_driver._setup_external_forcing), so a typo'd value is NOT an
@@ -2619,6 +2631,7 @@ class ExperimentConfig(NamedTuple):
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
             hyperdiff_scale=getattr(amip_cfg, 'hyperdiff_scale', 1.0),
+            a_h_scale=getattr(amip_cfg, 'a_h_scale', 1.0),
         )
         output = OutputConfig(
             output_dir=getattr(amip_cfg, 'output_dir', ''),

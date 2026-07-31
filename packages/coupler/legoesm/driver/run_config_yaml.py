@@ -221,6 +221,8 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
+    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
+        "cloud_partial_coverage_optics",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated

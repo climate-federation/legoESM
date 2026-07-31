@@ -299,6 +299,7 @@ class PhysicsPipeline:
         self._cloud_conv_cloud_condensate = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
+        self._cloud_partial_coverage_optics = None
         self._cloud_fsd = None
         self._cloud_p_xr = None
         self._cloud_alpha_xr = None
@@ -2069,6 +2070,8 @@ class PhysicsPipeline:
                 cloud_optics_inhomogeneity=getattr(
                     self, "_cloud_optics_inhomogeneity", None),
                 cloud_fsd=getattr(self, "_cloud_fsd", None),
+                cloud_partial_coverage_optics=getattr(
+                    self, "_cloud_partial_coverage_optics", None),
                 p_xr=getattr(self, "_cloud_p_xr", None),
                 alpha_xr=getattr(self, "_cloud_alpha_xr", None),
                 diagnostic_condensate_scheme=getattr(
@@ -3807,6 +3810,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(
         config, 'cloud_optics_inhomogeneity', None)
+    pipeline._cloud_partial_coverage_optics = getattr(
+        config, 'cloud_partial_coverage_optics', None)
     pipeline._cloud_fsd = getattr(config, 'cloud_fsd', None)
     pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
     pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)
