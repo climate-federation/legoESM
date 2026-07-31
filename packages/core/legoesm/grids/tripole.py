@@ -33,6 +33,7 @@ from legoesm import constants
 from legoesm.grids.latlon import (
     FoldDescriptor,
     LatLonCGridGeometry,
+    compute_v_face_coords,
     create_latlon_geometry,
 )
 
@@ -509,6 +510,14 @@ def create_tripole_grid(
     lat_1d = jnp.mean(lat_T, axis=1)
     lon_1d = lon_T[0, :]
     cos_lat_1d = jnp.maximum(jnp.cos(lat_1d), 1e-10)
+    # Legacy 1-D v-face REPRESENTATIVE, mirroring lat_1d/cos_lat_1d: a tripolar
+    # grid has no true 1-D v-face axis (the fold rows are curvilinear), so this
+    # is the same half-cell reconstruction on zonal-mean latitudes that lat_1d
+    # already is.  Consumers needing the REAL v-face metric must use the 2-D
+    # dx_v; the one lat-scaling consumer refuses on fold.is_active.  Deliberately
+    # NOT a NaN sentinel: this leaf flows through jit, where a value-inspecting
+    # guard is impossible and a NaN can only poison silently.
+    cos_lat_v_1d = compute_v_face_coords(lat_1d, lat_1d[1] - lat_1d[0])[1]
     sin_lat_1d = jnp.sin(lat_1d)
 
     if min_dx_m > 0.0:
@@ -546,6 +555,7 @@ def create_tripole_grid(
         fold=fold,
         cos_lat=cos_lat_1d,
         sin_lat=sin_lat_1d,
+        cos_lat_v=cos_lat_v_1d,
         lat=lat_1d,
         lon=lon_1d,
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing

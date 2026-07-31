@@ -831,7 +831,21 @@ def static_kappa_redi_override(gm_cfg, grid):
     n_lon = int(getattr(grid, "n_lon"))
     kappa_T = (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)
+    # cos at the TRUE v-face latitude, matching NEMO's cos(gphiv).  Carried by
+    # BOTH LatLonGrid and LatLonCGridGeometry (the from-rest path); do NOT
+    # rebuild it from midpoints of grid.lat -- on a stretched grid the true
+    # faces are not the midpoints (DINO: 2.5e-4) -- and do NOT substitute
+    # vface_zonal_cos_lat, which is the #516 pole-zeroed transport metric.
     cos_lat_v = jnp.asarray(grid.cos_lat_v)[1:]           # north face of cell j
+    if bool(getattr(getattr(grid, "fold", None), "is_active", False)):
+        # Tripole has NO 1-D v-face axis; its cos_lat_v is a zonal-mean
+        # representative, not the real face metric.  The ndim!=1 guard above
+        # does NOT catch it (tripole stores a zonal-mean 1-D lat), so refuse
+        # here rather than run a fabricated ahtv.  fold.is_active is a STATIC
+        # Python bool -- never inspect array VALUES here, this runs inside jit.
+        raise ValueError(
+            "kappa_redi_lat_scaling needs a 1-D v-face cos(lat_v); a tripolar "
+            "grid has no 1-D v-face axis. Supply a 2-D kappa_Redi field.")
     kappa_v = (gm_cfg.kappa_Redi * cos_lat_v)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat_v.dtype)
     return kappa_T, kappa_v
@@ -1640,6 +1654,18 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
+        # #1226 level-29-onset fix: bottom/straddling-face mask convention for
+        # nemo_advective_vertical_momentum_advection (only consumed under
+        # vertical_momentum_scheme="nemo_advective"; validated unconditionally
+        # here so a typo on ANY recipe fails fast at config construction).
+        from legoesm.ocean.vertical import VALID_ZAD_BOTTOM_FACE_MASK
+        _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
+        if _zad_mask_mode not in VALID_ZAD_BOTTOM_FACE_MASK:
+            raise ValueError(
+                f"zad_bottom_face_mask must be one of "
+                f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
+                f"got {_zad_mask_mode!r}",
+            )
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
         # in-tendency vertical momentum advection ENTIRELY with an upwind
@@ -1980,14 +2006,16 @@ class LatLonCGridOceanModel:
                     "(Nbb) tracers only exist as state.T_before/S_before "
                     "under the leap-frog (NEMO Modified-Leap-Frog) time "
                     f"integrator. Got outer_integrator={_outer_int!r}.")
-            if (getattr(_tke_cfg_ctor, "tke_shear_production",
-                        "squared_centered") == "nemo_burchard"
+            _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
+                                     "squared_centered")
+            if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int != "leapfrog"):
                 raise ValueError(
-                    'vertical_mixing.tke.tke_shear_production='
-                    '"nemo_burchard" requires outer_integrator="leapfrog": '
-                    "the Burchard now×before shear cross term only exists "
-                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f'vertical_mixing.tke.tke_shear_production='
+                    f'{_tke_shear_ctor!r} requires outer_integrator='
+                    '"leapfrog": both the Burchard now×before cross term '
+                    "and its face-native extension only exist as "
+                    "state.u_before/v_before under the leap-frog (NEMO "
                     f"Modified-Leap-Frog) time integrator. Got "
                     f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
@@ -4595,8 +4623,13 @@ class LatLonCGridOceanModel:
         machinery as ``zdf_drag_in_matrix``
         (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
         :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
-        re-derived drag coefficient. ``cc_state`` must already carry
-        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        re-derived drag coefficient. ``cc_state`` normally already carries
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``); under
+        ``tke_shear_production="nemo_face_native"`` the caller instead
+        passes the RAW (uncollapsed) face state (so ``_vmix_K_profiles`` can
+        reconstruct zdfsh2.F90's face-native shear) — this helper collapses
+        u/v to the T-point itself in that case, exactly like every other
+        caller of ``_vmix_K_profiles`` already does before this stage.
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4624,8 +4657,12 @@ class LatLonCGridOceanModel:
         h_k = self.z_coord.h_partial
         _bl = jnp.maximum(self.z_coord.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
-        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        u_cc, v_cc = cc_state.u.data, cc_state.v.data
+        if u_cc.shape[1] != h_k.shape[1]:
+            u_cc = 0.5 * (u_cc[:, :-1, :] + u_cc[:, 1:, :])
+            v_cc = 0.5 * (v_cc[:-1, :, :] + v_cc[1:, :, :])
+        u_bot = jnp.take_along_axis(u_cc, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(v_cc, _bl_idx, axis=-1)[..., 0]
         h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
         r_t = nemo_effective_bottom_drag_r(
             u_bot, v_bot, h_bot,
@@ -5335,12 +5372,32 @@ class LatLonCGridOceanModel:
                     vertical_mixing=VerticalMixingConfig(scheme="none"),
                     convection=OceanConvectionConfig(scheme="none"),
                 )
-            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
-            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
-            cc_state = state._replace(
-                u=state.u.replace(data=u_cell),
-                v=state.v.replace(data=v_cell),
+            # #1226 sh2_walk.py Candidate E/F (nemo_face_native): that TKE
+            # branch of _vmix_K_profiles self-detects face-staggered vs.
+            # cell-centred u/v (k_profiles.py:513) and needs the RAW
+            # (uncollapsed) faces to reconstruct zdfsh2.F90's face-native
+            # shear -- pre-collapsing here (as every OTHER scheme requires;
+            # richardson/catke pass state.u.data straight through with no
+            # staggering check of their own) would silently degrade
+            # nemo_face_native to the T-collapsed Burchard geometry. Skip
+            # the collapse ONLY for this scheme+option combination; every
+            # other scheme/option keeps the BIT-IDENTICAL pre-collapse.
+            _vmix_cfg_here = getattr(physics_config, "vertical_mixing", None)
+            _keep_raw_faces = (
+                _vmix_cfg_here is not None
+                and _vmix_cfg_here.scheme == "tke"
+                and getattr(_vmix_cfg_here.tke, "tke_shear_production",
+                           "squared_centered") == "nemo_face_native"
             )
+            if _keep_raw_faces:
+                cc_state = state
+            else:
+                u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+                v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+                cc_state = state._replace(
+                    u=state.u.replace(data=u_cell),
+                    v=state.v.replace(data=v_cell),
+                )
             # Use the model's own EOS for the vmix density / static-stability
             # N² so the TKE convection trigger (n2_mode="adiabatic") is
             # consistent with the dynamical core. None for Wright leaves the

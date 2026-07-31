@@ -637,6 +637,54 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     return gdept, gdepw_int
 
 
+def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.ndarray:
+    """NEMO ``key_qco`` T-point z* stretch factor ``(1 + r3t)``.
+
+    ``r3t = ssh/ht_0`` (``domqco.F90:160``, ``dom_qco_r3c``), used throughout
+    ``domzgr_substitute.h90`` macros as ``e3t(i,j,k,t) = e3t_0(i,j,k)*(1+r3t
+    (i,j,t))`` (``:139``) and ``gdept(i,j,k,t) = gdept_0(i,j,k)*(1+r3t(i,j,t))``
+    (``:145``/``:56``).  Standalone extraction of the stretch factor
+    previously embedded in :func:`nemo_bn2_live_ladders` (#1226 round-2)
+    so OTHER live-thickness/live-depth sites (e.g. the DINO ``trasbc.F90``
+    surface-flux divisor, #1226) reuse the identical formula instead of
+    re-deriving ``r3t``.
+
+    ``r3t`` uses the LOCAL column depth ``H_bathy`` (NEMO ``ht_0``) — NOT the
+    z* Jacobian from :func:`~legoesm.ocean.vertical.compute_ocean_jacobian`,
+    which is ``(eta + H_bathy)/H_max`` (normalised by the GLOBAL maximum
+    depth) and is a different quantity: using it here is off by median 1.1e-1
+    relative vs 2.5e-8 for this form, measured against NEMO's own
+    ``gdept(Kmm)`` dump (#1226).
+
+    Parameters
+    ----------
+    z_coord : vertical coordinate — only ``linear_free_surface`` is read.
+    eta : array ``(...)`` — sea-surface height [m] at the SAME time level
+        NEMO evaluates.
+    H_bathy : array ``(...)`` — local column depth [m], positive.
+
+    Returns
+    -------
+    array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
+    """
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
+        # never stretches.  Mirrors the same special case in
+        # vertical.compute_ocean_jacobian (:813-815).
+        return jnp.ones_like(jnp.asarray(eta))
+    # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
+    # rather than eta/0 -> inf/NaN poisoning the downstream chain.
+    H = jnp.asarray(H_bathy)
+    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
+    # Safety floor on the stretch, NOT on r3t: a column driven to
+    # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
+    # NON-POSITIVE geometric depth/thickness, which silently flips the sign
+    # of downstream terms.  Callers that already clamp eta (the PGF passes
+    # eta_safe) never reach this; it exists so an unclamped caller degrades
+    # loudly-wrong rather than silently-plausible.
+    return jnp.maximum(1.0 + r3t, 1.0e-6)
+
+
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -651,13 +699,6 @@ def nemo_bn2_live_ladders(
     surface, which is the pressure proxy the S-EOS wants
     (``eosbn2.F90:1166`` uses the plain ``gdept`` macro).
 
-    ``r3t`` uses the LOCAL column depth ``H_bathy`` (NEMO ``ht_0``) — NOT the
-    z* Jacobian from :func:`~legoesm.ocean.vertical.compute_ocean_jacobian`,
-    which is ``(eta + H_bathy)/H_max`` (normalised by the GLOBAL maximum
-    depth) and is a different quantity: using it here is off by median 1.1e-1
-    relative vs 2.5e-8 for this form, measured against NEMO's own
-    ``gdept(Kmm)`` dump (#1226).
-
     Parameters
     ----------
     z_coord : vertical coordinate — supplies the static reference ladders.
@@ -671,11 +712,16 @@ def nemo_bn2_live_ladders(
     ``(..., nlev-1)``, positive-down [m].
     """
     gdept, gdepw_int = nemo_bn2_depth_ladders(z_coord)
-    # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
-    # rather than eta/0 -> inf/NaN poisoning the downstream N^2 chain.
-    H = jnp.asarray(H_bathy)
-    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
-    stretch = (1.0 + r3t)[..., jnp.newaxis]
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: domqco is NOT active, so r3t == 0 and
+        # gdept(Kmm) == gdept_0 EXACTLY -- the column never stretches.
+        # Short-circuit BEFORE calling nemo_r3t_stretch: that helper
+        # broadcasts against eta's shape even when returning all-ones,
+        # which would change the STATIC ladders' shape here (adversarial
+        # review finding F1 regression guard,
+        # test_linear_free_surface_column_never_stretches).
+        return gdept, gdepw_int
+    stretch = nemo_r3t_stretch(z_coord, eta, H_bathy)[..., jnp.newaxis]
     return gdept * stretch, gdepw_int * stretch
 
 
@@ -2319,9 +2365,27 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
     if eos_depth == "geometric":
         # NEMO eos_insitu: density from the GEOMETRIC gdept, not the in-situ
         # hydrostatic integral.  p = rho0*g*gdept -> zh recovers gdept exactly.
-        depth = getattr(z_coord, "t_depth_ref", None)
-        if depth is None:
-            depth = jnp.abs(z_coord.z_full_ref)
+        # LIVE gdept(Kmm) = gdept_0*(1+r3t), matching eosbn2.F90:541 and the
+        # production GM/Redi path (gm_redi_density_and_jacobian).  Feeding the
+        # STATIC ladder here left this consumer -- reached via
+        # fidelity/tendency_probe.py, i.e. the ORACLE TENDENCY COMPARISON --
+        # on a different density convention from the model it is measuring
+        # (#1226; the same defect cost prd a depth-structured 2.559e-6).
+        # Gated exactly like its siblings: bit-identical when no fidelity
+        # ladder is carried, and nemo_bn2_live_ladders honours
+        # linear_free_surface (key_linssh: the column never stretches).
+        _td = getattr(z_coord, "t_depth_ref", None)
+        _H = getattr(getattr(state, "H_bathy", None), "data", None)
+        _eta = getattr(getattr(state, "eta", None), "data", None)
+        if _td is None:
+            depth = jnp.abs(z_coord.z_full_ref)          # unchanged
+        elif _H is None or _eta is None:
+            # No free-surface information on this state (e.g. an analytic
+            # column in a unit test): keep the STATIC ladder, bit-identical to
+            # the pre-change behaviour rather than silently switching ladders.
+            depth = jnp.asarray(_td)
+        else:
+            depth = nemo_bn2_live_ladders(z_coord, _eta, _H)[0]
         r0 = rho_0 if rho0 is None else rho0
         p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
         return eos_fn(state.T.data, state.S.data, p_eos)

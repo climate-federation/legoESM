@@ -382,12 +382,42 @@ class TestNemoIsotropicMetricConvention:
             n_lat=g.n_lat, n_lon=g.n_lon, lat_1d=g.lat, lon_1d=g.lon,
             lat_face_1d=g.lat_v, metric_convention="nemo_isotropic")
 
-        for f in ("dx_v", "dy_v", "area_q", "cos_alpha_v", "sin_alpha_v"):
+        # NARROWED 2026-07-28, deliberately, with the reason recorded.
+        # The #516 invariant is the strain/stress ADJOINT PAIR and the
+        # divergence/flux-form-advection MASS CONSISTENCY.  Both are properties
+        # of the ZONAL v-face metric dx_v (via vface_zonal_cos_lat), and both
+        # hold because every operator SHARES that metric -- not because of its
+        # value.  Verified structurally: strain_rate_cgrid /
+        # stress_divergence_cgrid take a LatLonGrid, which has no dy_v field at
+        # all, and vface_zonal_cos_lat reads grid.lat (asserted below).
+        # dy_v -- the MERIDIONAL v-point spacing -- was in this list
+        # conservatively, not because the invariant consumes it.  It is NEMO's
+        # e2v, and ldf_slp's vslp divides by it, so it MUST follow the
+        # convention (#1226: NEMO usrdef_hgr.F90:117 sets pe2v = pe1v).
+        for f in ("dx_v", "area_q", "cos_alpha_v", "sin_alpha_v"):
             np.testing.assert_array_equal(
                 getattr(geom_exact, f), getattr(geom_iso, f),
                 err_msg=f"v-face field {f!r} changed under metric_convention "
                         "-- #516 invariant violated",
             )
+        # dy_v MUST change -- pin it, so the new behaviour is asserted rather
+        # than merely permitted by the narrowing above.
+        assert not np.array_equal(
+            np.asarray(geom_exact.dy_v), np.asarray(geom_iso.dy_v)), (
+            "dy_v is unchanged under nemo_isotropic -- NEMO's e2v = e1v "
+            "(usrdef_hgr.F90:117) is then NOT being reproduced, and vslp "
+            "cannot reach the bar")
+        # It must equal NEMO's closed form e2v = ra*rad*COS(gphiv)*rn_e1_deg
+        # (usrdef_hgr.F90:117).  NOTE this is deliberately NOT compared against
+        # geom.dx_v: dx_v is the #516 TRANSPORT metric and is hard-zeroed at
+        # the poles (no meridional flux through the pole wall), whereas NEMO's
+        # e2v carries no such zeroing.  Same closed form, different boundary
+        # convention -- comparing them directly would be wrong.
+        expected = (float(g.radius) * float(g.dlon)) * np.asarray(g.cos_lat_v)
+        np.testing.assert_allclose(
+            np.asarray(geom_iso.dy_v)[:, 0], expected, rtol=1e-6,
+            err_msg="under nemo_isotropic, dy_v must be NEMO's e2v = "
+                    "R*dlon*cos(lat_v) (pe2v = pe1v, usrdef_hgr.F90:117)")
         # The #516 helper itself: identical on grids that only differ by
         # metric_convention (it reads grid.lat, which this flag never
         # touches).

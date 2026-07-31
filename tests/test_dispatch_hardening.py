@@ -327,6 +327,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # typo would silently run the Veros flux BC, a ~60x different surface
         # TKE under wind).
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_surface_tke_dirichlet"),
+        # TKE shear-production discretization dispatch (tke_shear_production:
+        # squared_centered | nemo_burchard | nemo_face_native; #1226
+        # sh2_walk.py Candidate E/F face-native zdfsh2.F90 transcription
+        # added 2026-07-30) — a typo would silently keep the T-collapsed
+        # squared form instead of the face-native shear NEMO actually
+        # computes.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "tke_vertical_mixing"),
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_validate_post_mixing_cfg"),
         ("packages/ocean/legoesm/ocean/scm.py", "__init__"),
         ("packages/tools/legoesm/forcing/amip.py", "get_amip_preset"),
         ("packages/tools/legoesm/forcing/experiments.py", "create_experiment_config"),

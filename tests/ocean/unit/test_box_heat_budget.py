@@ -346,6 +346,280 @@ def test_time_series_present_and_consistent_with_totals(grid, z_coord, config, d
             assert np.isfinite(summary["terms"][band][term]["W_per_m2"])
 
 
+@pytest.fixture
+def fp64_storage():
+    """fp64 STORAGE for the K33 tests -- matches how the #1226 instrument is
+    actually run (the drivers gate on ``require_fp64``), and is REQUIRED for
+    the k33 bucket to be meaningfully resolved.
+
+    Measured (#1226 review, fixture-exact probe): under the default fp32
+    storage policy the k33 realized increment is
+    ``(T_after - T_before)/dt`` where both T's are O(23 degC) -- a
+    catastrophic cancellation. float32's ULP at T~23.7 is ~2.8e-6, so an
+    increment of ~4e-9 degC/s (=3.8e-6 degC over dt=900 s) survives as only
+    ~1.4 ULP: nonzero (208 cells) but quantized to ULP multiples. At that
+    resolution the bucket cannot distinguish real physics from rounding --
+    e.g. the ``eos_depth`` insitu-vs-geometric K33 difference (rel-L2
+    1.436e-03, definitely present in the K33 FIELD) is invisible in the
+    fp32 increment (bit-identical), because it is far finer than one ULP.
+    fp64 makes the increment well-resolved and the assertions meaningful.
+
+    Saves/restores the global policy (same pattern as
+    ``tests/unit/test_cmor_output_dtype.py``) so no other test is affected.
+    """
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    saved = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(saved)
+
+
+@pytest.fixture
+def state_k33(grid, z_coord, fp64_storage):
+    """A rest state (built fp64, see ``fp64_storage``) plus a meridional
+    temperature FRONT CENTERED INSIDE the
+    box-budget's own channel rows (``ROW_SLICE = slice(4, 20)`` on this
+    ``n_lat=24`` grid) -- K_33 is ∝ (isoneutral slope)^2, which is exactly
+    zero on ``state``'s horizontally-uniform initial T
+    (rest_state_latlon_cgrid_ocean has no lon/lat T gradient), so a front
+    is REQUIRED to get a nonzero, demonstrably-real K33 rather than a
+    degenerate all-zero case.
+
+    A domain-edge-to-edge LINEAR ramp (tried first) puts essentially all of
+    its curvature/slope signal in the single row adjacent to the grid
+    boundary (row 22 of 24 here) -- OUTSIDE ``ROW_SLICE`` -- so the box
+    budget integrates a hard zero even though K33 is computed correctly
+    (verified directly with a scratch probe, #1226 instrument-fix review:
+    row-by-row max|K33| was 0 everywhere except row 22). A ``tanh`` front
+    CENTERED at the channel midpoint (row 12) with a few-row width puts the
+    slope signal on rows ~9-14, well inside ``ROW_SLICE`` -- verified
+    directly to give a nonzero, non-degenerate ``k33`` box-integrated
+    power. Amplitude (4 degC) and ``config_k33.gm_redi.kappa_Redi`` (below)
+    are tuned together (also probe-verified): K33 ~ kappa_Redi * slope^2
+    underflows the grid's per-step (K33 * dt / dz^2) realized increment
+    well below the base ``config`` fixture's kappa_Redi=50 -- numerically
+    negligible at that magnitude on this small grid, not a wiring bug.
+
+    Builds its OWN rest state rather than reusing the ``state`` fixture:
+    ``rest_state_latlon_cgrid_ocean`` reads ``get_policy().storage`` at
+    CONSTRUCTION time, so the state must be created while ``fp64_storage``
+    is active or it would be fp32 regardless of the policy override.
+    """
+    base = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=20.0, T_deep=4.0, S_uniform=35.0,
+        H_max=3000.0,
+    )
+    rng = np.random.default_rng(0)
+    u = 0.02 * rng.standard_normal((grid.n_lat, grid.n_lon + 1, z_coord.n_levels))
+    v = 0.02 * rng.standard_normal((grid.n_lat + 1, grid.n_lon, z_coord.n_levels))
+    base = base._replace(
+        u=base.u.replace(data=jnp.asarray(u, dtype=base.u.data.dtype)
+                         * (base.u_mask.data[..., None] > 0.5)),
+        v=base.v.replace(data=jnp.asarray(v, dtype=base.v.data.dtype)
+                         * (base.v_mask.data[..., None] > 0.5)),
+    )
+    rows = jnp.arange(grid.n_lat, dtype=base.T.data.dtype)[:, None, None]
+    front_center_row = 0.5 * (ROW_SLICE.start + ROW_SLICE.stop)
+    front_width_rows = 3.0
+    T_front = 4.0 * jnp.tanh(
+        (rows - front_center_row) / front_width_rows
+    ) * jnp.ones_like(base.T.data)
+    T_new = (base.T.data + T_front) * base.land_mask.data[:, :, None]
+    return base._replace(T=base.T.replace(data=T_new))
+
+
+@pytest.fixture
+def config_k33():
+    """Same as ``config`` but with ``implicit_K33=True`` -- the #1226
+    regression fixture: exercises the path where K_33 is dropped from the
+    explicit GM/Redi flux and must be recovered as its own bucket.
+    ``kappa_Redi=2000`` (vs the base ``config`` fixture's 50): K33 scales
+    with kappa_Redi, and 50 (paired with a physically modest T-front)
+    underflows to a degenerate all-zero realized increment on this small
+    grid/timestep -- verified directly (probe script, #1226 review) that
+    2000 (a realistic DINO-recipe magnitude; ``dino.py`` uses kappa_Redi
+    up to a few thousand m^2/s) gives a measurably nonzero k33 bucket.
+
+    ``eos_depth`` NOT set here (stays at the ``LatLonCGridOceanConfig``
+    default, ``"insitu"``) -- this fixture does NOT exercise the
+    eos_depth="geometric" convention the real DINO NEMO recipes pin
+    (``experiments/dino.py:909,933``). Verified directly (probe, #1226
+    review) on this small 8-level/24x16 test grid: switching this
+    fixture's config to ``eos_depth="geometric"`` DOES change ``iso_redi``
+    measurably (rel-L2 ~3.5e-4, not array-equal -- proving the kwarg is
+    correctly threaded and reaches production code), but the realized
+    ``k33`` bucket comes back ARRAY-EQUAL between conventions on this
+    grid/perturbation -- the K33 magnitude itself differs, but the
+    resulting implicit-diffusion number is small enough here that the
+    difference underflows the realized ``(T_after-T_before)/dt`` increment.
+    So this fixture (and any test built on it) is NOT a valid check that
+    the K33 bucket's own eos_depth threading matters numerically -- use
+    ``iso_redi`` (or ``compute_isoneutral_K33_latlon``'s raw output before
+    the implicit solve) for that, not this fixture's ``k33`` bucket. On the
+    real DINO grid (many more levels, real z-star stretching, kappa_Redi in
+    the thousands, deeper columns) the diffusion number is far larger and
+    the geometric-vs-insitu K33 difference is expected to survive into the
+    realized bucket."""
+    gm = GMRediConfig(kappa_GM=50.0, kappa_Redi=2000.0, slope_scheme="nemo_iso_lap",
+                      implicit_K33=True)
+    return LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e3, A_v=1.0e-3, K_h=0.0, K_v=1.0e-4,
+        bottom_drag_r=1.0e-3, gm_redi=gm,
+        implicit_vertical_mixing=True,
+        outer_integrator="forward_euler",
+    )
+
+
+def test_k33_bucket_closes_budget_and_is_nonzero(
+    grid, z_coord, config_k33, dino_cfg, fp64_storage, state_k33,
+):
+    """#1226 instrument-fix test 1 (required): with ``implicit_K33=True``
+    (the DINO recipe default), the accounting identity ``dH == sum(6
+    terms, incl. k33) + residual`` holds AND the k33 bucket is genuinely
+    nonzero -- i.e. K_33 is being measured, not silently zero. This is the
+    test that would have caught the original defect: before the fix,
+    ``compute_box_heat_dT_terms`` had no "k33" key at all, so this test
+    would fail outright (KeyError) rather than merely report a zero bucket.
+    """
+    model = LatLonCGridOceanModel(grid, z_coord, config_k33)
+    forcing = dino_lat_lon_surface_forcing_arrays(model.grid, dino_cfg)
+    sf = dino_step_surface_forcing(forcing)
+
+    n_steps, sample_every = 4, 2
+    _, acc, t_final = _run(state_k33, model, forcing, sf, dino_cfg,
+                           n_steps=n_steps, sample_every=sample_every,
+                           accumulate=True)
+    summary = acc.summary(t_final)
+
+    assert "k33" in TERM_NAMES
+    box_scale_J = max(
+        sum(abs(summary["terms"][b]["dH_J"]) for b in BANDS), 1.0,
+    )
+    # Deepest band on this 8-level/3000m fixture is a SINGLE z-level
+    # (z_cum ~ 2643 m, the only cell >= 2000 m -- see z_coord.dz_ref), with
+    # zero FORCING (no surface flux reaches it) and negligible K33 (GM/Redi's
+    # bottom taper suppresses the isoneutral slope there) -- the same
+    # pre-existing forcing-free-band operator-splitting-order residual
+    # ``test_accumulator_closure_and_nontrivial_terms`` documents (its own
+    # 5% bound), NOT specific to the K33 fix. Verified directly (probe,
+    # #1226 review): this band's k33 is exactly 0 on this fixture, so its
+    # closure is governed entirely by the pre-existing advection-order gap,
+    # not by anything this fix changes -- loosen ONLY this band's bound.
+    residual_tol_frac = {BANDS[0]: 0.05, BANDS[1]: 0.05, BANDS[2]: 0.15}
+    any_k33_nonzero = False
+    for band in BANDS:
+        band_out = summary["terms"][band]
+        term_sum_J = sum(band_out[t]["J"] for t in TERM_NAMES)
+        np.testing.assert_allclose(
+            term_sum_J + band_out["residual"]["J"], band_out["dH_J"],
+            rtol=1e-9, atol=1e-9 * max(abs(band_out["dH_J"]), 1.0),
+            err_msg=f"budget accounting identity broken for band {band} "
+                    "with K33 included",
+        )
+        tol = residual_tol_frac[band]
+        assert abs(band_out["residual"]["J"]) < tol * box_scale_J, (
+            f"band {band}: residual {band_out['residual']['J']:.3e} J is "
+            f"not small ({tol:.0%} bound) vs box heat-content scale "
+            f"{box_scale_J:.3e} J with implicit_K33=True -- the K33 bucket "
+            "is not closing the budget"
+        )
+        if abs(band_out["k33"]["J"]) > 1e-10:
+            any_k33_nonzero = True
+    assert any_k33_nonzero, (
+        "k33 bucket is degenerately zero with implicit_K33=True -- K_33 is "
+        "not actually being measured"
+    )
+
+
+def test_k33_bucket_is_nonvacuous_synthetic_violation(
+    grid, z_coord, config_k33, dino_cfg, fp64_storage, state_k33, monkeypatch,
+):
+    """#1226 instrument-fix test 2 (required, non-vacuous / synthetic-
+    violation check): reproduce the ORIGINAL defect -- K_33 silently
+    dropped -- by monkeypatching ``compute_isoneutral_K33_latlon`` in the
+    ``box_heat_budget`` module namespace (the symbol
+    ``compute_box_heat_dT_terms`` ACTUALLY calls to build the k33 bucket,
+    per its import at the top of the module -- not a delegating wrapper)
+    to return an all-zero diffusivity, matching the ORIGINAL bug's
+    observable effect (K33 = 0 everywhere). Confirm:
+      (a) with the real helper, the k33 bucket is measurably NONZERO
+          (baseline, no monkeypatch);
+      (b) with the helper forced to zero, the k33 bucket goes to EXACTLY
+          zero on every band -- i.e. the bucket really is sourced from
+          ``compute_isoneutral_K33_latlon`` and not some other pathway
+          that would leave it unchanged.
+    This proves test 1 above is exercising the real computation: if the
+    k33 bucket were hardcoded to zero (the pre-fix behaviour), (a) would
+    fail outright, so the synthetic violation is caught. (Note: this does
+    NOT also assert the closure RESIDUAL grows when K33 is zeroed. The
+    monkeypatch targets ONLY ``box_heat_budget.compute_isoneutral_K33_latlon``
+    -- the model's own step loop (``ocean_model_latlon_cgrid.py``) imports
+    the SAME symbol into its OWN module namespace and is unaffected by this
+    monkeypatch, so the real vs zeroed runs' PROGNOSTIC trajectories are
+    actually identical (this was verified, not merely assumed -- an earlier
+    docstring here incorrectly attributed the omission to a claimed
+    trajectory-feedback effect that does not exist for this monkeypatch).
+    The residual-growth check is skipped instead because the accumulator's
+    K33 bucket is computed via a SEPARATE standalone solve from the one
+    ``compute_box_vertmix_dT`` makes (see ``compute_box_heat_dT_terms``
+    docstring's "Split-solve error magnitude" note) -- zeroing K33 there
+    changes k33->0 exactly (asserted below) but the residual's response
+    also folds in that pre-existing split-solve approximation, so a
+    residual-growth bound would conflate two different effects. The
+    k33-bucket exact-zero identity check above is the robust,
+    assumption-free non-vacuity proof.)
+    """
+    import legoesm.ocean.fidelity.box_heat_budget as bhb
+
+    model = LatLonCGridOceanModel(grid, z_coord, config_k33)
+    forcing = dino_lat_lon_surface_forcing_arrays(model.grid, dino_cfg)
+    sf = dino_step_surface_forcing(forcing)
+
+    n_steps, sample_every = 4, 2
+    _, acc_real, t_real = _run(state_k33, model, forcing, sf, dino_cfg,
+                               n_steps=n_steps, sample_every=sample_every,
+                               accumulate=True)
+    summary_real = acc_real.summary(t_real)
+    k33_real_J = {b: summary_real["terms"][b]["k33"]["J"] for b in BANDS}
+    assert any(abs(v) > 1e-10 for v in k33_real_J.values()), (
+        "baseline (real K33) run has a degenerately-zero k33 bucket -- "
+        "the fixture is not exercising implicit_K33"
+    )
+
+    def _zero_k33(*args, **kwargs):
+        return jnp.zeros_like(state_k33.T.data[..., :-1])
+
+    monkeypatch.setattr(bhb, "compute_isoneutral_K33_latlon", _zero_k33)
+
+    _, acc_zeroed, t_zeroed = _run(state_k33, model, forcing, sf, dino_cfg,
+                                   n_steps=n_steps, sample_every=sample_every,
+                                   accumulate=True)
+    summary_zeroed = acc_zeroed.summary(t_zeroed)
+
+    for band in BANDS:
+        assert summary_zeroed["terms"][band]["k33"]["J"] == 0.0, (
+            "monkeypatched compute_isoneutral_K33_latlon should force the "
+            "k33 bucket to exactly zero -- if this fails, the k33 bucket "
+            "is not actually sourced from compute_isoneutral_K33_latlon"
+        )
+        # Non-vacuity: at least one band's real (non-monkeypatched) k33
+        # must differ from its (exactly-zero) monkeypatched counterpart --
+        # if the k33 bucket were hardcoded to zero (the pre-fix defect),
+        # real and zeroed would be IDENTICAL and this would fail, catching
+        # exactly the synthetic violation this test reproduces.
+    assert any(
+        abs(k33_real_J[band]) != abs(summary_zeroed["terms"][band]["k33"]["J"])
+        for band in BANDS
+    ), (
+        "real and monkeypatched-zero k33 buckets are identical on every "
+        "band -- the k33 bucket does not actually depend on "
+        "compute_isoneutral_K33_latlon's return value"
+    )
+
+
 def test_physics_dt_is_the_model_timestep_not_the_sampling_interval(
     grid, z_coord, config, dino_cfg, state,
 ):

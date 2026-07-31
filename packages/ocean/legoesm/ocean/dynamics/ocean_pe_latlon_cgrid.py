@@ -2540,12 +2540,20 @@ def _bc_vertical_momentum_advection(
                 face_area_v = grid.dx_v * grid.dy_v
                 u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
                 v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                # #1226 level-29-onset fix: which bottom/straddling-face mask
+                # convention nemo_advective_vertical_momentum_advection uses.
+                # Default "min_rule" is bit-identical; "nemo_faithful" is the
+                # dynzad.F90/dynzdf.F90:121 transcription (see
+                # VALID_ZAD_BOTTOM_FACE_MASK, legoesm.ocean.vertical).
+                _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
                 diag_vertadv_u = _nemo_advective_vertical_momentum_advection(
                     u_full, w_area_u, h_u_old, face_area_u[..., jnp.newaxis],
-                    face_active=u_face_active)
+                    face_active=u_face_active,
+                    bottom_face_mask_mode=_zad_mask_mode)
                 diag_vertadv_v = _nemo_advective_vertical_momentum_advection(
                     v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
-                    face_active=v_face_active)
+                    face_active=v_face_active,
+                    bottom_face_mask_mode=_zad_mask_mode)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
