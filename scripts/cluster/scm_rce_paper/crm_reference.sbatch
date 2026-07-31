@@ -53,7 +53,8 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_rcemip_plane.py \
   --radiation rrtmgp --radiation-interval 90 \
   --microphysics kessler \
   --precision float64 \
-  --theta-noise-amp 0.5 --seed-kind band_noise --seed-kmax 6 \
+  --theta-noise-amp 0.2 --seed-kind band_noise --seed-kmax 6 \
+  --si-w-filter-nu 0.35 \
   --print-every 360 \
   --snapshot-days 0.5 \
   --snapshot3d-days "62,64,66,68,70,72,74,76,78,80" \
@@ -64,4 +65,20 @@ rc=$?
 echo "run rc=$rc"
 echo "--- vol files ---"; ls -la $OUT/snapshots3d/ 2>&1 | tail -12
 echo "--- sfc files (count) ---"; ls $OUT/snapshots/ 2>&1 | wc -l
+
+# FAIL LOUD. Run 9248515 NaN'd at day 52.25 and STILL exited rc=0, so SLURM
+# reported COMPLETED/0:0 with zero volumes written — the downstream campaign
+# chain would have consumed a reference that does not exist. The runner's own
+# exit code is not trustworthy here, so gate on the ARTEFACT.
+N_VOL=$(ls -1 $OUT/snapshots3d/vol_*.npz 2>/dev/null | wc -l)
+echo "--- vol count: $N_VOL ---"
+if grep -qiE "NON-FINITE|nan" "$SLURM_SUBMIT_DIR/logs/scmrce_crm_${SLURM_JOB_ID}.out" 2>/dev/null; then
+  echo "CRM_STATUS=NONFINITE_DETECTED"
+fi
+if [ "$N_VOL" -lt 5 ]; then
+  echo "CRM_STATUS=FAILED (need >=5 vol_*.npz, have $N_VOL)"
+  echo ALLDONE
+  exit 1
+fi
+echo "CRM_STATUS=OK ($N_VOL volumes)"
 echo ALLDONE
