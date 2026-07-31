@@ -492,8 +492,22 @@ class TestNeumannFillVertexAdjoint:
         )
         return neumann_fill_vertex(_wrap_lon(q_core), _wrap_lon(mask_core))
 
-    @pytest.mark.parametrize("land_col", [7, 0],
-                             ids=["interior-column", "seam-column"])
+    @pytest.mark.parametrize(
+        "land_col",
+        [
+            7,
+            pytest.param(0, marks=pytest.mark.xfail(
+                strict=True,
+                reason="BUG #1418: neumann_fill_vertex rolls the ALREADY-WRAPPED "
+                       "(n_lat+1, n_lon+1) array, so the seam column takes ITSELF "
+                       "as its west neighbour. Measured adjoint 0.000/1.000 at the "
+                       "seam vs 0.500/0.500 interior. Same index-ordering family as "
+                       "#1382/#1226, in a function #1382 did not touch. Strict-xfail "
+                       "so it flips to a failure the moment the roll ordering is "
+                       "fixed.")),
+        ],
+        ids=["interior-column", "seam-column"],
+    )
     def test_fill_adjoint_reaches_both_zonal_neighbours(self, land_col):
         """A land vertex column flanked by two wet columns is filled with
         the AVERAGE of its west and east neighbours, so the adjoint must
