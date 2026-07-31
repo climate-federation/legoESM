@@ -22,6 +22,24 @@ ESCALATE to the human.** Do not invent stabilizers, plausible corrections, or
 "equivalent" formulations (skill Rules 0 and 9). An escalation after an exact
 match that failed is a SUCCESS of this process, not a failure.
 
+## TOKEN ECONOMY (human directive 2026-07-30 — MEASURED, not guessed)
+Subagent lanes are **~95% of this campaign's spend** (~30 lanes x 100-400k tokens on
+2026-07-30; single lanes hit 220k/364k/400k). My context is a cached prefix and costs
+single digits by comparison. So:
+- **ONE Sonnet lane per iteration.** If a lane is still running, do gate + housekeeping and
+  STOP — never stack a second.
+- **CAP THE SCOPE IN THE BRIEF: "do steps 1-2, report, STOP."** Open-ended
+  walk+A/B+decompose+generalise briefs ran 80-240 tool calls, long after the answer was
+  visible. This is FREE savings — it loses no findings.
+- **Briefs point at `docs/ocean/fidelity/dino_1226_state.md`** instead of re-typing the
+  refuted-hypothesis lists, preconditions and trap catalogue inline.
+- `Agent` calls set `model:"sonnet"` EXPLICITLY (omitting it inherits the expensive model).
+- Loop cadence 3-hourly is a FLOOR; the human fires it manually for bursts.
+**PROTECT: the adversarial reviews** (they caught a stale test encoding a bug as correct, a
+wrong `Kmm` instruction, a missing mandatory `mask=`, a vacuous fp32 control) **and numeric
+precision in any compression** — reconciling a new measurement against a recorded one is
+what repeatedly saved this campaign, and that needs old numbers exact and findable.
+
 ## The METHOD that works (use it; it produced every win on 2026-07-28)
 1. **Read the oracle's source first** for the term (`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/`,
    DINO overrides in `cfgs/DINO/MY_SRC/`). Write out the exact formula and its time levels.
