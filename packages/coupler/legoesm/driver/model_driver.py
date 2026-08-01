@@ -1381,7 +1381,11 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-                except (ValueError, AttributeError) as e:
+                # NamedTuple._replace raises TypeError ("Got unexpected field
+                # names"), NOT ValueError/AttributeError -- so this guard never
+                # fired and a raw collections traceback escaped instead of the
+                # message below. Found by a lat-lon run dying at setup.
+                except (TypeError, ValueError, AttributeError) as e:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
