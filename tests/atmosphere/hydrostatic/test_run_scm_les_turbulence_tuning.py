@@ -217,3 +217,57 @@ def test_mismatched_hours_is_refused_as_a_window_confound(tmp_path, monkeypatch)
     with pytest.raises(SystemExit, match="different times"):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--hours", "6"])
+
+
+# --- the rollout actually runs (would have caught the lax.cond shape bug) ---
+
+def _bomex_available() -> bool:
+    try:
+        from legoesm.atmosphere.forcing.scm.sam_case_scm import (
+            SAM_SCM_CASES, resolve_sam_case_dir,
+        )
+        resolve_sam_case_dir(SAM_SCM_CASES["bomex"].gsam_dir)
+    except Exception:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_rollout_runs_and_padding_shapes_match():
+    """Integrate a few steps on CPU with a chunk count that FORCES padding.
+
+    The first pipeline run failed with
+
+        cond branches must have equal output types ... float64[1] vs float64[]
+
+    because p_s.data is (1, 1, 1) so [0, 0] left a shape-(1,) entry while
+    masked_step's padding was scalar. nsteps=5 with chunk_steps=4 pads the
+    last chunk, so this exercises the lax.cond branch that mismatched.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm.atmosphere.forcing.scm.sam_case_scm import load_sam_scm_case
+
+    case = load_sam_scm_case("bomex", nlev=16, dt=60.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True)
+    hours = 5 * 60.0 / 3600.0                      # exactly 5 steps
+    means, ps_hist = drv._rollout_means(
+        None, base_cfg=cfg, case=case, dt=60.0, hours=hours,
+        analysis_hours=hours, chunk_steps=4,        # 2 chunks => 3 padded steps
+    )
+    import numpy as _np
+    assert ps_hist.shape == (5,), f"padding not sliced off: {ps_hist.shape}"
+    for name in ("T", "qv", "u", "v"):
+        arr = _np.asarray(means[name])
+        assert arr.shape == (16,), (name, arr.shape)
+        assert _np.all(_np.isfinite(arr)), name
+    # padding is zeros; if it leaked into the mean p_s would be far from p_s
+    drv._assert_surface_pressure_static(ps_hist, case.p_s)
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_padding_would_be_caught_by_the_pressure_assert():
+    """The p_s drift assert must actually fire on a bad history."""
+    import numpy as _np
+    with pytest.raises(RuntimeError, match="surface pressure drifted"):
+        drv._assert_surface_pressure_static(_np.zeros(5), 1.015e5)

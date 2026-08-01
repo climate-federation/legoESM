@@ -209,7 +209,10 @@ def _make_step_once(scm, dt: float):
             new_state.tracers["q_v"].data[0, 0, 0],
             new_state.u.data[0, 0, 0],
             new_state.v.data[0, 0, 0],
-            new_state.p_s.data[0, 0],
+            # p_s.data is (1, 1, 1) (a 2-D field with a singleton level axis),
+            # so index all three to get a SCALAR. [0, 0] leaves shape (1,) and
+            # mismatches the scalar padding in masked_step's lax.cond.
+            new_state.p_s.data[0, 0, 0],
         )
         return (new_state, new_phys), out
 
