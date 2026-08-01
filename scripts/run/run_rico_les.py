@@ -208,6 +208,7 @@ def main():
     if rec:
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
         frame = 0
+        _last_rec_h = [None]
 
         def _save(t_hours):
             nonlocal frame
@@ -219,6 +220,7 @@ def main():
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c))
             frame += 1
+            _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
     if rec:
@@ -256,7 +258,13 @@ def main():
             _save(t / 3600.0); next_rec += T / args.record_frames
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
-    if rec and frame < args.record_frames:
+    # ALWAYS record the terminal state. The initial-state frame consumes one
+    # slot of --record-frames, so the in-loop cadence stops one step short of
+    # t = T and the old `frame < record_frames` guard was already exhausted
+    # here -- every reference silently ended one cadence step early (measured:
+    # --record-frames 3 over 0.25 h gave t = 0, 0.083, 0.167 h, never 0.25).
+    # Guarded on the time, not the count, so it cannot emit a duplicate frame.
+    if rec and (_last_rec_h[0] is None or t / 3600.0 > _last_rec_h[0] + 1.0e-9):
         _save(t / 3600.0)
     d = bx.moist_profiles(st, g, ref)
     cc_avg = cc_sum / n_cavg if n_cavg else float(d["cloud_cover"])
