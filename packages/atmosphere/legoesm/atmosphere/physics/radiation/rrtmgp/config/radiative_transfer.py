@@ -15,7 +15,6 @@
 """Configuration for the RRTMGP radiation library."""
 
 import dataclasses
-import dataclasses_json  # Used for JSON serialization.
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -33,7 +32,12 @@ class RRTMOptics:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class OpticsParameters(dataclasses_json.DataClassJsonMixin):
+class OpticsParameters:
+  # Plain dataclass: the upstream swirl_jatmos source inherited
+  # ``dataclasses_json.DataClassJsonMixin``, but nothing in legoESM ever called
+  # its ``to_json``/``from_json``/``schema``, so the mixin cost a hard runtime
+  # dependency and bought nothing.  ``dataclasses.asdict`` + ``json`` covers it
+  # if serialisation is ever wanted.
   optics: RRTMOptics
 
 # iter-54 / iter-61 dead-code trim: removed ``AtmosphericStateCfg``,

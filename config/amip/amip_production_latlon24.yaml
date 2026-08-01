@@ -50,3 +50,27 @@ sponge_width_m: 17000.0   # sponge base ~17 km below the lid
 # convective_precip_efficiency (0.8) both inherit from amip_production.yaml;
 # gravity_wave_drag inherits the mcfarlane+hines composite (the +hines lid
 # braking bought +79 days on this lane: death day 100 -> 179).
+#
+# Upstream #1436 evidence (main, 2026-08-01), kept for the record because it
+# INDEPENDENTLY supports scheme-agnosticism at finer lat-lon grids:
+# AT 2.5 DEGREES sbm does NOT rescue the lane (resolution: 72, nlev: 30,
+# sigma, dt: 300, polar filter on, morrison, day-0 cold starts, one variable
+# between arms):
+#     convection: bechtold -> BLOWUP day 69, T min 161.8 K -> 71.5 K
+#     convection: sbm      -> BLOWUP day 73, T min  98.5 K
+# Both fail within 4 days with the same character, so at that resolution the
+# CONVECTION SCHEME IS NOT THE CAUSE.
+#
+# The 2.5-degree failure also sits somewhere ELSE than the 7.5-degree one.
+# Located offline from the day-60 checkpoint (9 days before failure):
+#     min T 161.8 K at latitude -83.8 deg (ANTARCTIC), LEVEL 3 of 30, i.e. near
+#     the MODEL TOP, not lev-1 at the surface;
+#     profile at that row: 228.9 218.8 216.1 [161.8] 169.6 174.6 181.9 ...
+#     — a SHARP SINGLE-LEVEL spike, not a deep polar-night radiative collapse.
+# So do NOT carry "mid-Feb / ~71N / lev-1 / it's bechtold" over to a finer grid:
+# at 2.5 deg it is 10 March, 83.8 SOUTH, near the model top, and scheme-agnostic.
+# Cause at 2.5 deg is UNKNOWN; remaining untested candidates are the
+# top-of-model sponge, vertical advection at the polar singularity, and the
+# Fourier polar filter aloft.  (GWD was already excluded at 7.5 deg above.)
+# (This branch keeps bechtold — no convection override; main's sbm pin and its
+# convective_precip_efficiency: null companion are deliberately NOT taken.)

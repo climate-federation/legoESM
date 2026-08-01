@@ -113,11 +113,9 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.ConvectiveEDMFConfig.M_b_max',
     'atm.conv.ConvectiveEDMFConfig.a_u_init',
     'atm.conv.ConvectiveEDMFConfig.cape_activation_scale',
-    'atm.conv.ConvectiveEDMFConfig.cape_threshold',
     'atm.conv.ConvectiveEDMFConfig.delta_0',
     'atm.conv.ConvectiveEDMFConfig.tau_a',
     # atm: DCAConfig (1)
-    'atm.conv.DCAConfig.cape_threshold',
     # atm: E3SMBeresConfig (6)
     'atm.gwd.E3SMBeresConfig.al',
     'atm.gwd.E3SMBeresConfig.cf',
@@ -141,7 +139,6 @@ UNREACHABLE_PARAMS = frozenset({
     # atm: EmanuelConfig (12)
     'atm.conv.EmanuelConfig.M_b_max',
     'atm.conv.EmanuelConfig.alpha_closure',
-    'atm.conv.EmanuelConfig.cape_threshold',
     'atm.conv.EmanuelConfig.cu_coefficient',
     'atm.conv.EmanuelConfig.damp_coefficient',
     'atm.conv.EmanuelConfig.delta_0',
@@ -249,7 +246,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.MassFluxConfig.M_b_max',
     'atm.conv.MassFluxConfig.M_scale',
     'atm.conv.MassFluxConfig.cape_activation_scale',
-    'atm.conv.MassFluxConfig.cape_threshold',
     'atm.conv.MassFluxConfig.delta_0',
     'atm.conv.MassFluxConfig.tau_adj',
     # atm: McFarlaneConfig (6) — directional_spread became reachable via the
@@ -381,7 +377,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.micro.ThompsonConfig.x_star',
     # atm: TiedtkeConfig (15)
     'atm.conv.TiedtkeConfig.M_b_max',
-    'atm.conv.TiedtkeConfig.cape_threshold',
     'atm.conv.TiedtkeConfig.cloud_depth_deep',
     'atm.conv.TiedtkeConfig.cloud_depth_shallow_max',
     'atm.conv.TiedtkeConfig.delta_deep',
@@ -419,7 +414,6 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.YSUConfig.ws_conv_coeff',
     # atm: ZhangMcFarlaneConfig (6)
     'atm.conv.ZhangMcFarlaneConfig.M_b_max',
-    'atm.conv.ZhangMcFarlaneConfig.cape_threshold',
     'atm.conv.ZhangMcFarlaneConfig.delta_0',
     'atm.conv.ZhangMcFarlaneConfig.dmpdz',
     'atm.conv.ZhangMcFarlaneConfig.tau_cape',

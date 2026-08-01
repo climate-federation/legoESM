@@ -84,3 +84,9 @@ export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
 
 export TMPDIR="${TMPDIR:-$SCRATCH/tmp}"
 mkdir -p "$TMPDIR" 2>/dev/null || true
+
+# #1361 memory preflight: target device whose HBM the benches gate against
+# (`--device-hbm`). Set in the SHARED env so the gate is on for every launcher
+# that sources this file — codex found the Derecho-only export left every
+# Levante bench ungated. Levante's GPU jobs request `--constraint=a100_80`.
+export LEGOESM_DEVICE_HBM="${LEGOESM_DEVICE_HBM:-a100-80}"
