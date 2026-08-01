@@ -482,10 +482,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         if getattr(first, "precip", None) is not None else None)
         # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
         # feed: each comes from exactly ONE module (TOA trio from radiation,
-        # shflx/lhflx from turbulence), so first-non-None across modules is
-        # the correct combine (no summing).
+        # shflx/lhflx and the surface stress tau_x/tau_y from turbulence),
+        # so first-non-None across modules is the correct combine (no
+        # summing).
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
-                        "shflx_sfc", "lhflx_sfc")
+                        "shflx_sfc", "lhflx_sfc", "tau_x_sfc", "tau_y_sfc")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Accumulate tracer tendencies from all physics modules

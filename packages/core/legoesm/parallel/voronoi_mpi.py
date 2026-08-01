@@ -1049,8 +1049,8 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
-        # Surface-flux diagnostic (8-slot contract: sw_net_sfc, lw_net_sfc,
-        # precip, then the CMOR TOA/turbulent-flux extras) the coupler reads
+        # Surface-flux diagnostic (12-slot contract: sw_net_sfc, lw_net_sfc,
+        # precip, then the CMOR TOA/turbulent-flux/stress extras) the coupler reads
         # from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
         # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
         # tendency and publish it (rank-local, matching the rank-local state the
@@ -1077,15 +1077,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
-            # CMOR TOA + surface turbulent-flux extras — mirror the serial
-            # producer's 8-slot contract (primitive_eq_mpas.step) EXACTLY so the
-            # one-rank MPI-voronoi coupled lane exports rlut/rsut/rsdt/hfss/hfls
-            # too. Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
-            # sw_down_toa, shflx, lhflx) — the consumer (model_driver
-            # _feed_mpas_cmip_accumulators) reads slots 3-7 by this order.
+            # CMOR TOA + surface flux extras — mirror the serial producer's
+            # 12-slot contract (primitive_eq_mpas.step) EXACTLY so the
+            # one-rank MPI-voronoi coupled lane exports the same fields.
+            # Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
+            # sw_down_toa, shflx, lhflx, sw_down_sfc, lw_down_sfc,
+            # tau_x_sfc, tau_y_sfc) — the consumer
+            # (model_driver._feed_mpas_cmip_accumulators) reads slots by
+            # this order; _marshal_land_forcing reads 8/9.
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc"))
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc",
+                "tau_x_sfc", "tau_y_sfc"))
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):

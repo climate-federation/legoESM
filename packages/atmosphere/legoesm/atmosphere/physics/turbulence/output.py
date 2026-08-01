@@ -50,6 +50,15 @@ class TurbulenceOutput(NamedTuple):
         (sundqvist / xu_randall).  A moist higher-order closure's cloud fraction
         is physically less overcast than the RH-diagnosed one over a saturated
         marine BL; ``cloud_scheme="clubb"`` routes THIS field to RRTMGP.
+    tau_x, tau_y : jax.Array or None
+        Optional surface wind stress components [Pa], shape (ncol,), in the
+        MODEL convention ``tau = -rho C_d |V| u`` (OPPOSES the wind — the
+        stress felt BY the atmosphere; see
+        ``core.bulk_flux.simple_bulk_fluxes``).  CMOR ``tauu``/``tauv``
+        (surface DOWNWARD momentum flux, positive with the wind) are the
+        NEGATIVE of these — the CMOR feed flips the sign.  ``None`` (the
+        default) for schemes that do not export their surface stress;
+        trailing optional fields so every existing constructor is unaffected.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -62,3 +71,5 @@ class TurbulenceOutput(NamedTuple):
     ustar: jax.Array
     h_pbl: jax.Array
     cloud_fraction: jax.Array | None = None
+    tau_x: jax.Array | None = None
+    tau_y: jax.Array | None = None

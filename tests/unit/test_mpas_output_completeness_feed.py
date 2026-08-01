@@ -554,6 +554,128 @@ def test_daily_rsut_uses_flux_midpoint_binning(mesh):
 
 
 # =====================================================================
+# tauu / tauv: surface wind stress (CMOR downward-positive)
+# =====================================================================
+
+def test_tauu_tauv_sign_pinned_eastward_wind_gives_positive_tauu(mesh):
+    """The MODEL exports tau = -rho C_d |V| u (opposes the wind), so an
+    eastward wind carries a NEGATIVE model tau_x in slot 10.  CMOR tauu is
+    the DOWNWARD flux of eastward momentum (positive with the wind): the
+    driver must flip the sign.  Slot 10 = -0.08 Pa => published tauu =
+    +0.08 Pa.  An unflipped feed publishes -0.08 and goes red."""
+    from legoesm.driver.model_driver import ModelDriver
+    import types as _t
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+
+    def _fld(v):
+        return _t.SimpleNamespace(data=np.full(n, float(v)))
+
+    sfc = (None, None, _t.SimpleNamespace(data=f["precip"]),
+           None, None, None, None, None, None, None,
+           _fld(-0.08), _fld(0.03))     # slots 10/11: model tau_x/tau_y
+    fake = _fake_driver(mesh, dc, f, sfc_diag=sfc)
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_2d_tauu" in out, "tauu never reached CMOR"
+    assert "field_2d_tauv" in out, "tauv never reached CMOR"
+    tauu = out["field_2d_tauu"]
+    tauv = out["field_2d_tauv"]
+    np.testing.assert_allclose(tauu[np.isfinite(tauu)], 0.08, rtol=1e-12)
+    np.testing.assert_allclose(tauv[np.isfinite(tauv)], -0.03, rtol=1e-12)
+
+
+def test_tau_skipped_when_turbulence_exports_none(mesh):
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    fake = _fake_driver(mesh, dc, f)      # 3-slot sfc_diag, no tau
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_2d_tauu" not in out
+    assert "field_2d_tauv" not in out
+
+
+def test_louis_exports_surface_stress_opposing_the_wind():
+    """The production MPAS turbulence scheme must fill TurbulenceOutput
+    .tau_x/.tau_y, with the model opposes-the-wind sign (eastward wind =>
+    tau_x < 0).  Red if the export is removed (None) or the sign flips."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+    from legoesm.thermo import saturation_mixing_ratio
+
+    ncol, nlev = 4, 8
+    sigma_full = np.linspace(0.05, 0.98, nlev)
+    sigma_half = np.concatenate([[0.0], 0.5 * (sigma_full[:-1] + sigma_full[1:]), [1.0]])
+    p_s = 1.0e5
+    p_full = jnp.asarray(np.broadcast_to(sigma_full * p_s, (ncol, nlev)))
+    p_half = jnp.asarray(np.broadcast_to(sigma_half * p_s, (ncol, nlev + 1)))
+    T = jnp.full((ncol, nlev), 280.0)
+    q_v = jnp.full((ncol, nlev), 1.0e-3)
+    u = jnp.full((ncol, nlev), 8.0)       # EASTWARD
+    v = jnp.full((ncol, nlev), -3.0)      # southward
+    z_full, z_half = compute_heights_from_sigma(T, p_half, q_v=q_v)
+    rho = p_full / (constants.R_d * T)
+    T_sfc = jnp.full((ncol,), 282.0)
+    q_sfc = saturation_mixing_ratio(T_sfc, jnp.full((ncol,), p_s))
+    cfg = TurbulenceConfig(scheme="louis").louis
+    out = louis_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
+                           T_sfc, q_sfc, rho, 300.0, cfg)
+    assert out.tau_x is not None, "louis no longer exports tau_x"
+    assert out.tau_y is not None, "louis no longer exports tau_y"
+    tau_x = np.asarray(out.tau_x)
+    tau_y = np.asarray(out.tau_y)
+    assert np.all(tau_x < 0.0), (
+        f"model tau_x must OPPOSE an eastward wind (got {tau_x})")
+    assert np.all(tau_y > 0.0), (
+        f"model tau_y must OPPOSE a southward wind (got {tau_y})")
+
+
+def test_mpas_turbulence_bridge_attaches_tau_to_the_tendency(mesh):
+    """The MPAS physics bridge must carry the scheme's tau on the
+    HydrostaticTendencies diagnostic channel (slots 10/11 producer side)."""
+    import types as _t
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        make_turbulence_physics,
+    )
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    nlev = 8
+    sigma = create_sigma_coordinate(nlev)
+    n = int(mesh.nCells)
+
+    def _fld(a, dims):
+        return Field(data=jnp.asarray(a), name="x", dims=dims, units="1")
+
+    state = _t.SimpleNamespace(
+        u=_fld(np.full((int(mesh.nEdges), nlev), 5.0), ("edge", "lev")),
+        T=_fld(np.full((n, nlev), 280.0), ("cell", "lev")),
+        p_s=_fld(np.full(n, 1.0e5), ("cell",)),
+        phis=_fld(np.zeros(n), ("cell",)),
+        tracers={"q_v": _fld(np.full((n, nlev), 1.0e-3), ("cell", "lev"))},
+        v=None,
+    )
+    turb_fn = make_turbulence_physics(
+        TurbulenceConfig(scheme="louis"), model_type="mpas", dt=300.0)
+    tend, _carry = turb_fn(state, mesh, sigma, phys_state=None, forcing=None)
+    assert tend.tau_x_sfc is not None, (
+        "MPAS turbulence bridge dropped tau_x_sfc — slots 10/11 would be "
+        "empty and tauu/tauv never published")
+    assert tend.tau_y_sfc is not None
+    assert tend.tau_x_sfc.units == "Pa"
+    assert np.all(np.isfinite(np.asarray(tend.tau_x_sfc.data)))
+    assert np.asarray(tend.tau_x_sfc.data).shape == (n,)
+
+
+# =====================================================================
 # Transactionality of the new inputs
 # =====================================================================
 

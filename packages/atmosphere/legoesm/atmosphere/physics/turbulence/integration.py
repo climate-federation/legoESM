@@ -684,6 +684,13 @@ def _make_mpas_turbulence(
         # unset, byte-identical to the pre-export tendency.
         _shf = getattr(turb_out, "shflx", None)
         _lhf = getattr(turb_out, "lhflx", None)
+        # Surface wind stress export for CMOR tauu/tauv: already cell-centred
+        # GEOGRAPHIC east/north components here (the scheme ran on the Perot
+        # reconstructed u_cell/v_cell), in the MODEL opposes-the-wind sign —
+        # the CMOR feed flips it (see HydrostaticTendencies.tau_x_sfc).
+        # None for schemes that do not export tau (skip semantics downstream).
+        _taux = getattr(turb_out, "tau_x", None)
+        _tauy = getattr(turb_out, "tau_y", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
             dv_dt=None,
@@ -699,6 +706,12 @@ def _make_mpas_turbulence(
             lhflx_sfc=None if _lhf is None else state.p_s.replace(
                 data=_lhf.reshape(p_s.shape), name="lhflx_sfc_turb",
                 units="W/m^2"),
+            tau_x_sfc=None if _taux is None else state.p_s.replace(
+                data=_taux.reshape(p_s.shape), name="tau_x_sfc_turb",
+                units="Pa"),
+            tau_y_sfc=None if _tauy is None else state.p_s.replace(
+                data=_tauy.reshape(p_s.shape), name="tau_y_sfc_turb",
+                units="Pa"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
