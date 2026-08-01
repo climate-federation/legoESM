@@ -21,6 +21,7 @@ import os
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -29,6 +30,7 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _prandtl_number,
     _solve_tke_backward_euler,
+    compute_mixing_lengths,
     tke_vertical_mixing,
 )
 
@@ -291,12 +293,16 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
         assert t.kappaM_max == float("inf")                 # T21
     # T4/T8/T13 — MLF-only axes (require the carried leap-frog before-state):
     # the FE card keeps the fidelity ceiling, the MLF card enables them.
+    # #1226 sh2_walk.py Candidate E/F: the MLF card now selects the FULL
+    # face-native transcription (supersedes the earlier now×before-only
+    # "nemo_burchard" fix -- see the DINO_RECIPES["nemo_dino_kamm_mlf"]
+    # comment in dino.py).
     fe = _dino_vertical_mixing_config(dino_config_for_recipe("nemo_dino_kamm")).tke
     mlf = _dino_vertical_mixing_config(
         dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
     assert fe.tke_shear_production == "squared_centered"
     assert fe.tke_n2_time_level == "step_entry"
-    assert mlf.tke_shear_production == "nemo_burchard"
+    assert mlf.tke_shear_production == "nemo_face_native"
     assert mlf.tke_n2_time_level == "nemo_before"
     for card in set(DINO_RECIPES) - {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}:
         vm = _dino_vertical_mixing_config(dino_config_for_recipe(card))
@@ -402,6 +408,8 @@ class TestBurchardShear:
         out = np.asarray(vertical_shear_burchard(u, v, u, v, dz_half))
         np.testing.assert_allclose(out, 0.0, atol=1e-15)
 
+
+
     def test_tke_shear_production_dispatch_and_gates(self):
         """Wired into tke_vertical_mixing: nemo_burchard changes K_M vs
         squared_centered (a strongly-sheared now/before pair, checked
@@ -476,6 +484,336 @@ def _n2b_test_column():
     dz_ref = jnp.full((nlev,), 25.0)
     jacobian = jnp.ones(T.shape[:-1])
     return u, v, T, S, rho, dz_half, z_int, tx, ty, p_cell, dz_ref, jacobian
+
+
+# ---------------------------------------------------------------------------
+# #1226 sh2_walk.py Candidate E/F: face-native shear (zdfsh2.F90:78-94) —
+# vertical_shear_face_native. The dominant gap the walk isolated: NEMO
+# differences u/v at their NATIVE C-grid faces (one vertical diff PER face)
+# and combines the two faces bracketing each T-point (wet-only
+# coast-doubling weight) ONLY AFTER squaring/cross-multiplying, instead of
+# collapsing u/v to the T-point BEFORE differencing.
+# ---------------------------------------------------------------------------
+def _nemo_zdfsh2_reference_loop(u_now, v_now, u_bef, v_bef, dz_half,
+                                u_mask, v_mask):
+    """Independent from-scratch pure-Python/NumPy transcription of
+    zdfsh2.F90:78-94 (no-Stokes branch), adapted to legoESM's
+    west-face-of-T(i)/south-face-of-T(j) C-grid convention (T(i) is
+    bracketed by faces i (west) and i+1 (east) -- the mirror image of
+    NEMO's literal (i-1, i) east-face-of-T(i) indexing).
+
+    NOT a call into ``vertical_shear_face_native`` -- explicit triple
+    Python loop over (j, i, k), re-deriving the formula term by term from
+    the NEMO source quoted in that function's docstring, so this is an
+    independent check of the vectorised implementation, not a tautology.
+    """
+    n_lat, n_lon, n_int = dz_half.shape
+    nlev = n_int + 1
+    dz_sq = dz_half * dz_half
+    # Pad each T column's dz_sq onto its adjacent (n_lon+1 / n_lat+1) face
+    # array by repeating the last column/row (see the function docstring's
+    # "no separate u/v-face metric" scope note).
+    dz_sq_u = np.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+    dz_sq_v = np.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+    p_sh2 = np.zeros((n_lat, n_lon, n_int))
+    for j in range(n_lat):
+        for i in range(n_lon):
+            for k in range(n_int):
+                zsh2u = {}
+                for ii in (i, i + 1):
+                    du_now = u_now[j, ii, k] - u_now[j, ii, k + 1]
+                    du_bef = u_bef[j, ii, k] - u_bef[j, ii, k + 1]
+                    zsh2u[ii] = (du_now * du_bef / dz_sq_u[j, ii, k]
+                                * wumask[j, ii, k])
+                zsh2v = {}
+                for jj in (j, j + 1):
+                    dv_now = v_now[jj, i, k] - v_now[jj, i, k + 1]
+                    dv_bef = v_bef[jj, i, k] - v_bef[jj, i, k + 1]
+                    zsh2v[jj] = (dv_now * dv_bef / dz_sq_v[jj, i, k]
+                                * wvmask[jj, i, k])
+                coast_u = 2.0 - u_mask[j, i, k + 1] * u_mask[j, i + 1, k + 1]
+                coast_v = 2.0 - v_mask[j, i, k + 1] * v_mask[j + 1, i, k + 1]
+                p_sh2[j, i, k] = 0.25 * (
+                    (zsh2u[i] + zsh2u[i + 1]) * coast_u
+                    + (zsh2v[j] + zsh2v[j + 1]) * coast_v
+                )
+    return p_sh2
+
+
+def _face_masks_3d_reference(is_active):
+    """Independent NumPy re-derivation of ``compute_face_masks_3d`` (a
+    face is wet at level k iff BOTH adjacent T-cells are wet at that
+    level; boundary faces are walls) -- used only to BUILD test fixtures,
+    not to validate the production mask helper (that helper is exercised
+    directly via ``compute_face_masks_3d`` in the wiring test below)."""
+    a = is_active.astype(np.float64)
+    u_interior = a * np.roll(a, 1, axis=1)
+    u_mask = np.concatenate([u_interior, u_interior[:, 0:1, :]], axis=1)
+    v_interior = a[:-1] * a[1:]
+    south = np.zeros_like(a[:1])
+    north = np.zeros_like(south)
+    v_mask = np.concatenate([south, v_interior, north], axis=0)
+    return u_mask, v_mask
+
+
+class TestFaceNativeShear:
+    def _synthetic_partial_cell_case(self, seed=0, n_lat=4, n_lon=5, nlev=6):
+        """A domain with VARYING per-column bottom levels, so wumask/wvmask
+        and the coast-doubling weight are genuinely non-trivial (exercises
+        Test 2 -- the coast/mask path)."""
+        rng = np.random.default_rng(seed)
+        u_face = rng.standard_normal((n_lat, n_lon + 1, nlev))
+        v_face = rng.standard_normal((n_lat + 1, n_lon, nlev))
+        u_face_b = rng.standard_normal((n_lat, n_lon + 1, nlev))
+        v_face_b = rng.standard_normal((n_lat + 1, n_lon, nlev))
+        dz_half = np.abs(rng.uniform(5.0, 20.0, (n_lat, n_lon, nlev - 1)))
+        bottom_level = rng.integers(2, nlev, size=(n_lat, n_lon))
+        k = np.arange(nlev).reshape(1, 1, nlev)
+        is_active = k <= bottom_level[:, :, None]
+        u_mask, v_mask = _face_masks_3d_reference(is_active)
+        return (u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask,
+                is_active)
+
+    def test_face_native_matches_independent_reference_loop(self):
+        """Test 1 (task spec): synthetic 3-D u/v field, asserted against an
+        independent in-test transcription of zdfsh2.F90's formula (pure
+        NumPy loops, NOT a call into the function under test)."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native,
+        )
+        (u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask,
+         _is_active) = self._synthetic_partial_cell_case()
+        ref = _nemo_zdfsh2_reference_loop(
+            u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask)
+        out = np.asarray(vertical_shear_face_native(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask)))
+        assert out.shape == ref.shape
+        np.testing.assert_allclose(out, ref, rtol=0, atol=1e-12)
+
+    def test_coast_doubling_exercised_and_matches_reference(self):
+        """Test 2 (task spec): a column adjacent to land must exercise the
+        "2 - mask*mask" doubling; assert it against the in-test reference.
+
+        Builds a case with an EXPLICIT single-cell island (one T column
+        dry at every level, all its neighbours wet) so the u-/v-faces
+        touching the island have coast_u/coast_v == 2.0 (not 1.0) by
+        direct construction -- not merely "some random mask happens to
+        produce a coast somewhere".
+        """
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native,
+        )
+        n_lat, n_lon, nlev = 4, 5, 3
+        rng = np.random.default_rng(1)
+        u_face = rng.standard_normal((n_lat, n_lon + 1, nlev))
+        v_face = rng.standard_normal((n_lat + 1, n_lon, nlev))
+        u_face_b = rng.standard_normal((n_lat, n_lon + 1, nlev))
+        v_face_b = rng.standard_normal((n_lat + 1, n_lon, nlev))
+        dz_half = np.full((n_lat, n_lon, nlev - 1), 10.0)
+        is_active = np.ones((n_lat, n_lon, nlev), dtype=bool)
+        island_j, island_i = 1, 2   # interior column -> 4 wet neighbours
+        is_active[island_j, island_i, :] = False
+        u_mask, v_mask = _face_masks_3d_reference(is_active)
+        # Self-check: the island's own faces (west=island_i, east=
+        # island_i+1) each border exactly one dry cell -> coast weight 2.0.
+        assert u_mask[island_j, island_i, -1] == 0.0  # island west face dry
+        coast_u_west = 2.0 - (u_mask[island_j, island_i - 1, -1]
+                              * u_mask[island_j, island_i, -1])
+        assert coast_u_west == 2.0, "island west face must hit the coast weight"
+
+        ref = _nemo_zdfsh2_reference_loop(
+            u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask)
+        out = np.asarray(vertical_shear_face_native(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask)))
+        np.testing.assert_allclose(out, ref, rtol=0, atol=1e-12)
+        # The neighbouring column (island_i - 1) must show the doubled
+        # weight actually CHANGED its p_sh2 vs an all-wet control (else the
+        # coast branch could be silently dead code that never fires).
+        u_mask_allwet, v_mask_allwet = _face_masks_3d_reference(
+            np.ones_like(is_active))
+        ref_allwet = _nemo_zdfsh2_reference_loop(
+            u_face, v_face, u_face_b, v_face_b, dz_half,
+            u_mask_allwet, v_mask_allwet)
+        assert not np.allclose(
+            ref[island_j, island_i - 1], ref_allwet[island_j, island_i - 1]), (
+            "coast-doubling weight must change p_sh2 next to the island "
+            "(test would pass vacuously if the coast branch were dead)")
+
+    def test_signed_like_burchard(self):
+        """Same signed-cross-term feature as vertical_shear_burchard: an
+        opposite-signed now/before gradient gives a NEGATIVE production."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native,
+        )
+        # n_lat=1, n_lon=1 T-grid -> u-face shape (1, 2, nlev), v-face
+        # shape (2, 1, nlev). BOTH u-faces (west=0, east=1) get the SAME
+        # now/before column so the T-combine (average of the two faces)
+        # doesn't cancel the sign.
+        nlev = 3
+        u_col_now = jnp.asarray([0.0, 1.0, 1.0])      # du/dz > 0 at k=0
+        u_col_before = jnp.asarray([1.0, 0.0, 0.0])   # du/dz < 0 at k=0
+        u_now = jnp.stack([u_col_now, u_col_now])[None, :, :]      # (1,2,3)
+        u_before = jnp.stack([u_col_before, u_col_before])[None, :, :]
+        v = jnp.zeros((2, 1, nlev))
+        dz_half = jnp.full((1, 1, nlev - 1), 1.0)
+        mask_u = jnp.ones((1, 2, nlev))
+        mask_v = jnp.ones((2, 1, nlev))
+        out = np.asarray(vertical_shear_face_native(
+            u_now, v, u_before, v, dz_half, mask_u, mask_v))
+        assert out[0, 0, 0] < 0.0
+
+    def test_dry_column_produces_zero(self):
+        """A fully-dry face pair (both u-faces bracketing T dry) must give
+        exactly zero shear production there, regardless of the velocity
+        noise on the dry faces (masked, not merely small)."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native,
+        )
+        n_lat, n_lon, nlev = 2, 2, 3
+        rng = np.random.default_rng(2)
+        u_face = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1, nlev)))
+        v_face = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon, nlev)))
+        dz_half = jnp.full((n_lat, n_lon, nlev - 1), 10.0)
+        u_mask = jnp.zeros((n_lat, n_lon + 1, nlev))
+        v_mask = jnp.zeros((n_lat + 1, n_lon, nlev))
+        out = np.asarray(vertical_shear_face_native(
+            u_face, v_face, u_face, v_face, dz_half, u_mask, v_mask))
+        np.testing.assert_allclose(out, 0.0, atol=0.0)
+
+
+def _face_native_orchestrator_inputs(n_lat=3, n_lon=4, nlev=6, seed=3):
+    """Full ``tke_vertical_mixing``-level fixture for the wiring/dispatch
+    tests: RAW C-grid face u/v (now + before), a per-level wet mask pair
+    (varying bottom levels -> exercises wumask/wvmask + coast-doubling),
+    plus the cell-centred T/S/rho/dz_half/tau the closure also needs."""
+    rng = np.random.default_rng(seed)
+    u_face = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1, nlev)) * 0.3)
+    v_face = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon, nlev)) * 0.3)
+    u_face_before = jnp.asarray(
+        rng.standard_normal((n_lat, n_lon + 1, nlev)) * 0.3)
+    v_face_before = jnp.asarray(
+        rng.standard_normal((n_lat + 1, n_lon, nlev)) * 0.3)
+    u_cell = 0.5 * (u_face[:, :-1, :] + u_face[:, 1:, :])
+    v_cell = 0.5 * (v_face[:-1, :, :] + v_face[1:, :, :])
+    u_cell_before = 0.5 * (u_face_before[:, :-1, :] + u_face_before[:, 1:, :])
+    v_cell_before = 0.5 * (v_face_before[:-1, :, :] + v_face_before[1:, :, :])
+    T = jnp.asarray(20.0 - 2.0 * np.arange(nlev))[None, None, :] * jnp.ones(
+        (n_lat, n_lon, nlev))
+    S = jnp.full((n_lat, n_lon, nlev), 35.0)
+    rho = jnp.asarray(1026.0 + 0.2 * np.arange(nlev))[None, None, :] * jnp.ones(
+        (n_lat, n_lon, nlev))
+    dz_half = jnp.full((n_lat, n_lon, nlev - 1), 25.0)
+    z_interface = -25.0 * jnp.arange(1, nlev)
+    tau_x = jnp.full((n_lat, n_lon), 0.1)
+    tau_y = jnp.zeros((n_lat, n_lon))
+    bottom_level = rng.integers(2, nlev, size=(n_lat, n_lon))
+    k = np.arange(nlev).reshape(1, 1, nlev)
+    is_active = jnp.asarray(k <= bottom_level[:, :, None])
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+    )
+    face_masks_3d = compute_face_masks_3d(is_active)
+    return dict(
+        u_cell=u_cell, v_cell=v_cell, T_cell=T, S_cell=S, rho_cell=rho,
+        dz_half=dz_half, tau_x_surface=tau_x, tau_y_surface=tau_y,
+        z_interface=z_interface,
+        u_before_cell=u_cell_before, v_before_cell=v_cell_before,
+        u_face_now=u_face, v_face_now=v_face,
+        u_face_before=u_face_before, v_face_before=v_face_before,
+        face_masks_3d=face_masks_3d,
+    )
+
+
+class TestFaceNativeShearWiring:
+    """End-to-end ``tke_vertical_mixing`` dispatch (Test 3/4, task spec):
+    bit-identical default, and unknown-value / silent-no-op / missing-input
+    raises through the FULL orchestrator, not just the bare ``_shared.py``
+    function (already covered by ``TestFaceNativeShear`` above)."""
+
+    def test_nemo_face_native_changes_result_and_stays_finite(self):
+        kwargs = _face_native_orchestrator_inputs()
+        tke_seed = jnp.full(kwargs["dz_half"].shape, 1e-2)
+        default_out = tke_vertical_mixing(
+            cfg=TKEConfig(), tke_old=tke_seed, dt=3600.0, rho_0=_RHO0,
+            n_iterations=1,
+            **{k: v for k, v in kwargs.items()
+               if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                            "v_face_now", "u_face_before", "v_face_before",
+                            "face_masks_3d")},
+        )
+        face_native_out = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="nemo_face_native"),
+            tke_old=tke_seed, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+            **kwargs,
+        )
+        assert bool(np.all(np.isfinite(np.asarray(face_native_out.tke_new))))
+        assert not np.allclose(
+            np.asarray(default_out.tke_new),
+            np.asarray(face_native_out.tke_new))
+
+    def test_default_is_byte_identical_through_orchestrator(self):
+        """Test 3 (task spec): default scheme value byte-identical pre/post
+        -- passing the face-native inputs alongside 'squared_centered'
+        must raise (silent-no-op guard), and 'squared_centered' alone must
+        reproduce the untouched historical call exactly."""
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        base = tke_vertical_mixing(
+            cfg=TKEConfig(), tke_old=None, dt=3600.0, rho_0=_RHO0,
+            n_iterations=3, **base_kwargs)
+        explicit = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="squared_centered"),
+            tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=3,
+            **base_kwargs)
+        np.testing.assert_array_equal(
+            np.asarray(base.tke_new), np.asarray(explicit.tke_new))
+
+    def test_unknown_value_raises(self):
+        """Test 4 (task spec): unknown scheme value raises ValueError."""
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        with pytest.raises(ValueError, match="tke_shear_production"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_production="bogus"),
+                tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                **base_kwargs)
+
+    def test_missing_face_native_inputs_raises(self):
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        with pytest.raises(ValueError, match="nemo_face_native"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_production="nemo_face_native"),
+                tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                **base_kwargs)
+
+    def test_silent_no_op_guard_squared_centered_with_face_inputs(self):
+        kwargs = _face_native_orchestrator_inputs()
+        with pytest.raises(ValueError, match="nemo_face_native"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(), tke_old=None, dt=3600.0, rho_0=_RHO0,
+                n_iterations=1, **kwargs)
 
 
 class TestRn2bTimeLevel:
@@ -946,3 +1284,228 @@ class TestNemoRiZriTranscription:
         Pr_ref = float(1.0 / pdlr_ref[0])
         Pr_lego = float(self._run(rn2b, shear_sq, p_avm, bshear=bshear)[0])
         assert Pr_lego == pytest.approx(Pr_ref, rel=1e-10)
+
+
+class TestNemoRiNegativeZdivSign:
+    """#1226 zdftke_chain_walk (STAGE 2 finding, tke.py:1324 pre-fix): a
+    genuinely negative ``zdiv = p_sh2 + rn_bshear`` (from float-noise-negative
+    shear production, zdftke.F90:459-476) must give ``pdlr=1.0`` (Pr=1), NOT
+    ``pdlr=0.1`` (Pr=10) -- the OLD ``jnp.maximum(p_sh2+bshear, 1e-30)`` code
+    flipped the sign of a negative denominator, landing on the WRONG end of
+    the same clamp. Reference = the file's OWN independent loop-port
+    (:func:`_nemo_zri_pdlr_reference`), not a call into ``_prandtl_number``.
+    """
+
+    RI_CRI = 2.0 / (2.0 + 5.0 / 10.0)
+
+    def _cfg(self, bshear=1.0e-20):
+        return TKEConfig(prandtl_mode="nemo_ri", bshear_floor=bshear,
+                          prandtl_ri_coeff=1.0 / self.RI_CRI)
+
+    def test_sh2_negative_gives_pdlr_one_not_pointone(self):
+        """rn2b>0 (stratified) with kappaM*shear_sq a tiny NEGATIVE value
+        (|p_sh2| > rn_bshear=1e-20) -> zdiv<0 -> NEMO's zri<0 -> pdlr=1.0
+        (Pr=1). This is the exact failure mode from the walk's 11 flagged
+        cells (all sh2<0)."""
+        rn2b = np.array([2.0e-4])
+        kappaM = np.array([1.0e-2])
+        shear_sq = np.array([-1.0e-12])          # p_sh2 = -1e-14, |.|>1e-20
+        bshear = 1.0e-20
+
+        zri_ref, pdlr_ref = _nemo_zri_pdlr_reference(
+            rn2b, kappaM, shear_sq, rn_bshear=bshear, ri_cri=self.RI_CRI)
+        assert zri_ref[0] < 0.0, "test setup must exercise the zdiv<0 branch"
+        Pr_ref = float(1.0 / pdlr_ref[0])
+        assert Pr_ref == pytest.approx(1.0, rel=1e-10)
+
+        cfg = self._cfg(bshear=bshear)
+        Pr_lego = _prandtl_number(jnp.asarray(rn2b), jnp.asarray(shear_sq),
+                                   jnp.asarray(kappaM), cfg)
+        assert float(Pr_lego[0]) == pytest.approx(1.0, rel=1e-10)
+        assert float(Pr_lego[0]) == pytest.approx(Pr_ref, rel=1e-10)
+
+    def test_old_buggy_sign_flip_would_give_pointone(self):
+        """Non-vacuous: demonstrate the OLD formula (``jnp.maximum(zdiv,
+        1e-30)``) gives pdlr=0.1 (Pr=10) on this exact input -- the opposite
+        of the correct Pr=1 -- so this test would have FAILED against the
+        pre-fix ``_prandtl_number``."""
+        rn2b = np.array([2.0e-4])
+        kappaM = np.array([1.0e-2])
+        shear_sq = np.array([-1.0e-12])
+        bshear = 1.0e-20
+        p_sh2 = kappaM[0] * shear_sq[0]
+        zri_old = rn2b[0] * kappaM[0] / max(p_sh2 + bshear, 1e-30)
+        pdlr_old = max(0.1, self.RI_CRI / max(self.RI_CRI, zri_old))
+        Pr_old = 1.0 / pdlr_old
+        assert Pr_old == pytest.approx(10.0, rel=1e-6), (
+            "sanity: the OLD sign-flipped formula saturates at Pr=10 here")
+
+        cfg = self._cfg(bshear=bshear)
+        Pr_lego = _prandtl_number(jnp.asarray(rn2b), jnp.asarray(shear_sq),
+                                   jnp.asarray(kappaM), cfg)
+        assert float(Pr_lego[0]) != pytest.approx(Pr_old, rel=1e-3), (
+            "fixed _prandtl_number must NOT reproduce the old sign-flipped "
+            "Pr=10 value on this input"
+        )
+
+    def test_grad_finite_across_sign_boundary(self):
+        """AD safety: jax.grad of a scalar reduction through the nemo_ri
+        branch stays finite at and around the zdiv sign boundary (the
+        where-NaN-grad trap the double-where idiom guards against)."""
+        cfg = self._cfg()
+        N2 = jnp.array([2.0e-4])
+        kappaM = jnp.array([1.0e-2])
+
+        def loss(shear_sq):
+            Pr = _prandtl_number(N2, shear_sq, kappaM, cfg)
+            return jnp.sum(Pr)
+
+        for s0 in (-1.0e-12, 0.0, 1.0e-12, -1.0e-18, 1.0e-18):
+            g = jax.grad(loss)(jnp.array([s0]))
+            assert bool(jnp.isfinite(g).all()), (
+                f"grad not finite at shear_sq={s0!r}: {g}")
+
+        # exact zdiv==0 boundary: p_sh2 + bshear == 0 -> shear_sq == -bshear/kappaM
+        s_zero = jnp.array([-1.0e-20 / 1.0e-2])
+        g_zero = jax.grad(loss)(s_zero)
+        assert bool(jnp.isfinite(g_zero).all()), (
+            f"grad not finite AT zdiv==0: {g_zero}")
+
+
+class TestMxlChoice3LdownSeed:
+    """#1226 zdftke_chain_walk (STAGE 4 finding, tke.py:698-701 pre-fix): the
+    ``tke_mxl_choice==3`` bottom-up ``ldown`` scan must seed its carry from
+    ``cfg.mxl_min`` (NEMO's ``rmxl_min``, zdftke.F90:678-679), NOT from the
+    RAW buoyancy length at the deepest carried row. Ground truth is an
+    INDEPENDENT NumPy loop-port of the NEMO ``nn_mxl=3`` lup/ldown recurrence
+    (zdftke.F90:775-793), not a call into ``compute_mixing_lengths``.
+    """
+
+    def _nemo_mxl3_reference(self, l_sfc, l_int_raw, e3t_body, e3t_bottom,
+                              mxl_min):
+        """Independent loop-port of zdftke.F90:775-793 (nn_mxl=3 CASE(3)).
+
+        ``l_int_raw`` = raw buoyancy length at interior W-levels jk=2..jpkm1
+        (length ``n``). ``e3t_body`` = e3t(jk=1..jpkm1) (length ``n+1``,
+        e3t_body[0]=e3t(1)). ``e3t_bottom`` = e3t(jpk) (the TRUE bottommost
+        T-cell, the row the ORIGINAL bug's seed step needs but the legacy
+        ``dz_cell`` contract cannot supply).
+        """
+        # jk convention: zmxlm/zmxld index r (0-based, r=0..n) <-> Fortran
+        # jk=r+1 (r=0 is the surface, r=1..n are the interior W-levels
+        # jk=2..jpkm1). ``e3t_body[k]`` (0-based, k=0..n) <-> ``e3t(k+1)``
+        # (Fortran), i.e. e3t_body[0]=e3t(1) .. e3t_body[n]=e3t(jpkm1).
+        n = len(l_int_raw)
+        zmxlm = np.concatenate([[l_sfc], np.asarray(l_int_raw, dtype=np.float64)])
+        zmxld = np.zeros(n + 1)
+        zmxld[0] = l_sfc
+        # lup: jk=2..jpkm1 (0-based idx 1..n), forward.
+        # zmxld(jk) = min(zmxld(jk-1)+e3t(jk-1), zmxlm(jk))
+        #           = min(zmxld[idx-1]+e3t_body[idx-1], zmxlm[idx])
+        for idx in range(1, n + 1):
+            zmxld[idx] = min(zmxld[idx - 1] + e3t_body[idx - 1], zmxlm[idx])
+        # ldown: jk=jpkm1..2 (0-based idx n..1), backward.
+        # zmxlm(jk) = min(zmxlm(jk+1)+e3t(jk+1), zmxlm(jk)).
+        # For idx=n (jk=jpkm1): e3t(jk+1)=e3t(jpk)=e3t_bottom.
+        # For idx<n (jk=idx+1): e3t(jk+1)=e3t(idx+2)=e3t_body[idx+1].
+        for idx in range(n, 0, -1):
+            e3_next = e3t_bottom if idx == n else e3t_body[idx + 1]
+            new_val = min(zmxlm[idx + 1] + e3_next, zmxlm[idx]) if idx < n \
+                else min(mxl_min + e3_next, zmxlm[idx])
+            zmxlm[idx] = new_val
+        zemlm = np.minimum(zmxld[1:], zmxlm[1:])
+        zemlp = np.sqrt(zmxld[1:] * zmxlm[1:])
+        return zemlm, zemlp   # (l_k, l_eps) at the n interior rows
+
+    def test_near_neutral_deep_column_ldown_bound(self):
+        """The walk's pathological case: a near-neutral deep column
+        (rn2b~-1e-10, clamped to a tiny positive floor upstream) gives a
+        HUGE raw buoyancy length at the deepest interior row. Assert the
+        FIXED function's bottom-interface ``l_k`` against the independent
+        NEMO transcription (using the caller's ``dz_cell`` widened by the
+        true bottommost e3t row, so the comparison is NEMO-exact, not
+        proxy-bounded)."""
+        rng = np.random.default_rng(11)
+        n = 20
+        e3t_body = rng.uniform(50.0, 700.0, n + 1)      # e3t(1)..e3t(jpkm1)
+        e3t_bottom = 617.46228681330                     # e3t(jpk), walk's column
+        mxl_min = 1.0e-6 / (10.0 * np.sqrt(1.0e-10))      # rmxl_min formula
+        l_sfc = 0.0672399578
+
+        # Near-neutral deep column: N2 tiny positive (post-floor) -> huge raw
+        # buoyancy length except at the LAST row, matched to the walk's
+        # actual pathological numbers so the bound is the one that matters.
+        en = rng.uniform(1e-5, 6e-5, n)
+        N2_floor = 1.0e-12
+        l_int_raw = np.maximum(mxl_min, np.sqrt(2.0 * en / N2_floor))
+        assert l_int_raw.max() > 1.0e4, (
+            "test setup must produce a raw buoyancy length far above any "
+            "physically bounded value, to exercise the ldown bound")
+
+        l_k_ref, l_eps_ref = self._nemo_mxl3_reference(
+            l_sfc, l_int_raw, e3t_body, e3t_bottom, mxl_min)
+
+        cfg = TKEConfig(tke_mxl_choice=3, mxl_min=mxl_min)
+        e = jnp.asarray(en)[None, None, :]
+        N2 = jnp.full((1, 1, n), N2_floor)
+        dz_cell_widened = jnp.asarray(
+            np.concatenate([e3t_body, [e3t_bottom]]))[None, None, :]
+        l_sfc_arr = jnp.asarray([[l_sfc]])
+        l_k, l_eps = compute_mixing_lengths(
+            e, N2, jnp.zeros_like(e), cfg,
+            dz_cell=dz_cell_widened, l_surface_anchor=l_sfc_arr,
+        )
+        l_k = np.asarray(l_k)[0, 0]
+        l_eps = np.asarray(l_eps)[0, 0]
+
+        # Bottom interface is the one the seed bug corrupts (last row).
+        np.testing.assert_allclose(l_k[-1], l_k_ref[-1], rtol=1e-10)
+        np.testing.assert_allclose(l_eps[-1], l_eps_ref[-1], rtol=1e-10)
+        np.testing.assert_allclose(l_k, l_k_ref, rtol=1e-8)
+        np.testing.assert_allclose(l_eps, l_eps_ref, rtol=1e-8)
+
+    def test_old_seed_would_give_unbounded_length(self):
+        """Non-vacuous: reproduce the OLD (buggy) seed behaviour by hand
+        (seed = the raw buoyancy length at the deepest row, instead of
+        ``mxl_min``) and show it does NOT match the independent NEMO
+        reference on this pathological column -- i.e. this test would have
+        FAILED against the pre-fix code."""
+        rng = np.random.default_rng(11)
+        n = 20
+        e3t_body = rng.uniform(50.0, 700.0, n + 1)
+        e3t_bottom = 617.46228681330
+        mxl_min = 1.0e-6 / (10.0 * np.sqrt(1.0e-10))
+        l_sfc = 0.0672399578
+        en = rng.uniform(1e-5, 6e-5, n)
+        N2_floor = 1.0e-12
+        l_int_raw = np.maximum(mxl_min, np.sqrt(2.0 * en / N2_floor))
+
+        l_k_ref, _ = self._nemo_mxl3_reference(
+            l_sfc, l_int_raw, e3t_body, e3t_bottom, mxl_min)
+
+        # OLD buggy seed: carry starts from l_int_raw[-1] (the RAW length),
+        # not mxl_min, and the deepest row is never re-bounded at all.
+        old_ldn_deepest = l_int_raw[-1]     # unbounded, per the pre-fix bug
+        assert old_ldn_deepest != pytest.approx(l_k_ref[-1], rel=1e-3), (
+            "sanity: the old seed's unbounded deepest-row value must differ "
+            "sharply from the correct NEMO-bounded value"
+        )
+        assert old_ldn_deepest > 5.0 * l_k_ref[-1], (
+            "the old seed's value should be wildly larger than the correct "
+            "bound (reproducing the walk's 3454.8m vs 617.5m finding)"
+        )
+
+    def test_choice2_untouched_shape_and_values(self):
+        """Bit-identity guard: ``tke_mxl_choice==2`` (the Veros/default path,
+        NOT touched by this fix) must be completely unaffected."""
+        rng = np.random.default_rng(5)
+        n = 9
+        e = jnp.asarray(rng.uniform(1e-6, 1e-2, (2, 3, n)))
+        N2 = jnp.asarray(rng.uniform(1e-8, 1e-4, (2, 3, n)))
+        dz_half = jnp.asarray(rng.uniform(5, 50, (2, 3, n - 1)))
+        cfg = TKEConfig(tke_mxl_choice=2, mxl_min=0.01)
+        l_k, l_eps = compute_mixing_lengths(e, N2, dz_half, cfg)
+        assert bool(jnp.isfinite(l_k).all())
+        assert bool(jnp.isfinite(l_eps).all())
+        assert l_k.shape == (2, 3, n)
+        assert l_eps.shape == (2, 3, n)

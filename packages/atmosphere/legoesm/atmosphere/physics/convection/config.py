@@ -182,6 +182,7 @@ __param_spec__ = {
             "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
             "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
             "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Kain & Fritsch (1990) stability cap", "shape": None},
@@ -230,6 +231,7 @@ __param_spec__ = {
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "M_c_init": "default 0 = disabled/off (initial base mass flux, enable via config, not training)",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the prognostic mass-flux core",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) stability cap", "shape": None},
@@ -266,6 +268,7 @@ __param_spec__ = {
             "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
@@ -299,6 +302,7 @@ __param_spec__ = {
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "parcel_tpert": "default 0 = disabled/off (optional PBL temperature perturbation)",
             "tp_fac": "default 0 = disabled/off (PBL-perturbation multiplier)",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Zhang & McFarlane (1995) stability cap", "shape": None},
@@ -623,6 +627,27 @@ class MassFluxConfig(NamedTuple):
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # Selects the compensating-subsidence + detrainment solve in the SHARED
+    # kernel ``mass_flux.apply_mass_flux_kernel``; see
+    # ``BechtoldConfig.subsidence_solve`` for the full rationale and the
+    # measured leak numbers.  ``"advective"`` (DEFAULT HERE — preserves this
+    # scheme's shipped behaviour byte-for-byte) is the legacy donor-cell
+    # advective form, which leaves a non-telescoping ``(phi/rho) dM/dz``
+    # residual so column MSE / total water close only to truncation order.
+    # ``"implicit_flux"`` selects the IMPLICIT (backward-Euler, theta-blended)
+    # CONSERVATIVE flux-form solve: the flux divergence telescopes to the
+    # vanishing top/base boundary flux (machine-precision column closure) and
+    # the detrained condensate is paired with its vapor sink ``-dq_c``.
+    # NOTE the two solves are NOT merely different discretisations of one
+    # operator: implicit_flux additionally books that vapor sink, so switching
+    # changes the column water budget ON PURPOSE.  Unknown values raise
+    # ValueError at kernel entry (static Python str; dispatch-hardening).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler); the kernel clamps to [0.5, 1.0].  Unused when
+    # ``subsidence_solve == "advective"``.
+    theta_implicit: float = 1.0
 
 
 class ZhangMcFarlaneConfig(NamedTuple):
@@ -712,6 +737,14 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # existing scheme test fixtures were calibrated against.
     buoyancy_death_memory: bool = False
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class KainFritschConfig(NamedTuple):
@@ -912,6 +945,16 @@ class KainFritschConfig(NamedTuple):
     # source down here leaked column water with no output channel to receive
     # the precipitating fraction.  The full detrained condensate is now handed
     # to microphysics, which applies precip efficiency via autoconversion.
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve``.  Kain-Fritsch DEFAULTS to
+    # ``"implicit_flux"`` (PR #988 hardcoded it at the call site; this promotes
+    # the hardcoded value to a config field with the SAME default, so shipped
+    # behaviour is unchanged and the matched-kernel campaign can address every
+    # member of the family uniformly).  Selecting ``"advective"`` also disables
+    # the paired detrained-condensate latent release, because the advective
+    # solve does not debit vapor for that condensate.
+    subsidence_solve: str = "implicit_flux"
+    theta_implicit: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
@@ -1090,6 +1133,15 @@ class EmanuelConfig(NamedTuple):
     # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
     # ``EPMAX = 0.999``).
     precip_efficiency_max: float = 0.999
+    # NOTE: Emanuel deliberately has NO ``subsidence_solve`` selector, unlike
+    # the rest of the mass-flux family.  Its SHIPPED path
+    # (``use_genuine_mixing=True``) is a buoyancy-sorting MIXING MATRIX that
+    # computes its own tendencies and never calls
+    # ``mass_flux.apply_mass_flux_kernel``; only the legacy surrogate branch
+    # does, and that branch's ``sort_multiplier`` rescaling would leave an
+    # unpaired vapor debit under a vapor-debiting solve.  See the comment at
+    # the kernel call in emanuel.py.  Emanuel is therefore reported as
+    # OUTSIDE the matched-kernel family, not silently kernel-matched.
 
 
 class TiedtkeConfig(NamedTuple):
@@ -1223,6 +1275,14 @@ class TiedtkeConfig(NamedTuple):
     precip_split_scheme: str = "constant"
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class BechtoldConfig(NamedTuple):

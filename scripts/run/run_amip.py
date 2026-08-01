@@ -732,6 +732,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that breaks the plane-parallel tau-saturation a "
                              "scalar cannot -- a thick cloud is reduced MORE than "
                              "a thin one).")
+    parser.add_argument("--cloud-vertical-overlap-optics",
+                        dest="cloud_vertical_overlap_optics",
+                        choices=["none", "max_random"], default="none",
+                        help="VERTICAL cloud-overlap optics. The solver has "
+                             "no McICA/overlap, so cloud spread thinly over "
+                             "many partly cloudy layers is solved as ONE "
+                             "deep uniform cloud. 'max_random' re-solves "
+                             "the column as --cloud-n-subcolumns "
+                             "deterministic maximum-random-overlap "
+                             "subcolumns and averages: measured -30%% cloud "
+                             "albedo and +18 W/m2 OLR. Costs n_sub x the "
+                             "radiation time. Mutually exclusive with "
+                             "--cloud-partial-coverage-optics=two_column.")
+    parser.add_argument("--cloud-n-subcolumns", dest="cloud_n_subcolumns",
+                        type=int, default=8,
+                        help="Subcolumns for --cloud-vertical-overlap-optics"
+                             "=max_random. Measured against a Monte-Carlo "
+                             "reference: 8 leaves 2.5%% of the signal, 4 "
+                             "leaves 18%%. Default 8.")
     parser.add_argument("--cloud-partial-coverage-optics",
                         dest="cloud_partial_coverage_optics",
                         choices=["none", "two_column"], default="none",
@@ -1886,6 +1905,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
         cloud_partial_coverage_optics=args.cloud_partial_coverage_optics,
+        cloud_vertical_overlap_optics=args.cloud_vertical_overlap_optics,
+        cloud_n_subcolumns=args.cloud_n_subcolumns,
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,

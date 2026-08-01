@@ -251,6 +251,9 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_fsd=getattr(cfg, "cloud_fsd", None),
         cloud_partial_coverage_optics=getattr(
             cfg, "cloud_partial_coverage_optics", None),
+        cloud_vertical_overlap_optics=getattr(
+            cfg, "cloud_vertical_overlap_optics", None),
+        cloud_n_subcolumns=getattr(cfg, "cloud_n_subcolumns", None),
         diagnostic_condensate_scheme=getattr(
             cfg, "cloud_diagnostic_condensate_scheme", None),
         adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
@@ -1379,7 +1382,11 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-                except (ValueError, AttributeError) as e:
+                # NamedTuple._replace raises TypeError ("Got unexpected field
+                # names"), NOT ValueError/AttributeError -- so this guard never
+                # fired and a raw collections traceback escaped instead of the
+                # message below. Found by a lat-lon run dying at setup.
+                except (TypeError, ValueError, AttributeError) as e:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "

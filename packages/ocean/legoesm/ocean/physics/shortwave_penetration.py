@@ -490,6 +490,7 @@ def shortwave_penetration_tendency(
     config: ShortwavePenetrationConfig = ShortwavePenetrationConfig(),
     rho_0: float = _RHO_0_DEFAULT,
     c_sw: float = _C_SW_DEFAULT,
+    z_half_stretch: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute 3D temperature tendency from subsurface SW absorption.
 
@@ -508,6 +509,20 @@ def shortwave_penetration_tendency(
         Reference seawater density [kg/m³].
     c_sw : float
         Specific heat of seawater [J/(kg·K)].
+    z_half_stretch : array, shape (..., 1) or (...,) or None
+        NEMO ``key_qco`` z* stretch factor ``(1 + r3t)`` (``eos.nemo_r3t_stretch``)
+        applied to BOTH the interface depths and the layer thickness before
+        the absorption profile is evaluated — i.e. NEMO's LIVE
+        ``gdepw(Kmm) = gdepw_0*(1+r3t)`` (``domzgr_substitute.h90:139``,
+        ``domqco.F90:160``), consumed by ``qsr_2BD`` at
+        ``traqsr.F90:665-712`` (``zatt(k+1) = [rn_abs*exp(-gdepw(k+1,Kmm)*
+        r1_si0) + (1-rn_abs)*exp(-gdepw(k+1,Kmm)*r1_si1)]*r1_rho0_rcp``).
+        ``None`` (default) keeps the STATIC reference ladder — BIT-IDENTICAL
+        to the prior behaviour, so non-bridged recipes (no live free-surface
+        stretch available) are unaffected. Measured on the DINO RUN_GDB
+        kt=57601 twin (#1226 ``tra_sbc_tem_piece_decompose.py`` Part 2b): the
+        live ladder shrinks the all-levels pointwise-|rel| err_norm median
+        2.022e-05 -> 4.979e-07 (~40x, below the c_p-truncation floor).
 
     Returns
     -------
@@ -525,18 +540,26 @@ def shortwave_penetration_tendency(
     zeta1 = params.zeta1
     zeta2 = params.zeta2
 
-    # Interface depths (negative), shape (nlev+1,).
-    # Uses reference z (not dynamic z*J) for the absorption profile.
+    # Interface depths (negative), shape (nlev+1,) for the STATIC reference
+    # ladder, or (..., nlev+1) once a per-column live stretch is applied.
+    # Uses reference z (not dynamic z*J) for the absorption profile UNLESS
+    # z_half_stretch is given (see the z_half_stretch docstring above).
     # Error is O(eta/H) ~ O(1e-4), negligible vs Jerlov parameter
     # uncertainty.  Standard practice in MOM6, NEMO, and POP.
-    z_half = z_coord_z_half_ref
+    if z_half_stretch is None:
+        z_half = z_coord_z_half_ref
+    else:
+        z_half = z_coord_z_half_ref * z_half_stretch[..., jnp.newaxis]
 
     # SW flux at each interface: I(z) = Q_sw * [R*exp(z/zeta1) + (1-R)*exp(z/zeta2)]
-    # z_half[0] = 0 (surface), z_half[-1] = -H_max (bottom)
+    # z_half[..., 0] = 0 (surface), z_half[..., -1] = -H_max (bottom)
     I_half = R * jnp.exp(z_half / zeta1) + (1.0 - R) * jnp.exp(z_half / zeta2)
-    # Shape: (nlev+1,)
+    # Shape: (nlev+1,) static, or (..., nlev+1) once per-column stretched.
 
-    # Fraction absorbed in each layer = I_half[k] - I_half[k+1].
+    # Fraction absorbed in each layer = I_half[k] - I_half[k+1] (last axis:
+    # the level axis in both the static (nlev+1,) and stretched (..., nlev+1)
+    # cases, so index the LAST axis explicitly rather than the bare [:-1]/
+    # [1:] this used before the stretched (batched) shape was introduced).
     # Without correction, frac_absorbed sums to 1 - I_half[-1] (the
     # remainder reaches the bathymetric bottom and is "lost" from the
     # column heat budget).  For deep open ocean (H >> zeta2 = 23 m)
@@ -545,11 +568,19 @@ def shortwave_penetration_tendency(
     # fraction to the bottom layer so the column always absorbs the
     # full surface SW (boundary condition: total absorption at the
     # bottom; backscatter from the seafloor is neglected).
-    frac_absorbed = I_half[:-1] - I_half[1:]  # (nlev,)
-    frac_absorbed = frac_absorbed.at[-1].add(I_half[-1])
+    frac_absorbed = I_half[..., :-1] - I_half[..., 1:]  # (..., nlev)
+    frac_absorbed = frac_absorbed.at[..., -1].add(I_half[..., -1])
 
-    # Actual layer thickness
-    dz_actual = z_coord_dz_ref * jacobian[..., jnp.newaxis]  # (..., nlev)
+    # Actual layer thickness. When z_half_stretch is given, the SAME stretch
+    # multiplies the reference thickness (NEMO's single live e3t(:,:,:,Kmm) =
+    # e3t_0*(1+r3t), domzgr_substitute.h90:139 — the identical factor used
+    # for z_half above, not a second independent quantity) instead of the
+    # dynamic jacobian; jacobian keeps its existing (non-live-ladder) role
+    # for callers that pass z_half_stretch=None.
+    if z_half_stretch is None:
+        dz_actual = z_coord_dz_ref * jacobian[..., jnp.newaxis]  # (..., nlev)
+    else:
+        dz_actual = z_coord_dz_ref * z_half_stretch[..., jnp.newaxis]  # (..., nlev)
 
     # Temperature tendency: dT/dt = Q_sw * frac / (rho_0 * c_sw * dz).
     # Dry / land cells have ``jacobian = 0`` → ``dz_actual = 0`` so the

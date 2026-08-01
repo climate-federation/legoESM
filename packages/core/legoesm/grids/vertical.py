@@ -32,11 +32,14 @@ References
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -858,12 +861,63 @@ def create_hybrid_coordinate(
     )
 
 
+def hybrid_min_valid_surface_pressure(
+    A_half, B_half, p_ref: float = constants.p_ref,
+) -> float:
+    """Lowest surface pressure [Pa] at which every layer still has ``dp > 0``.
+
+    ``dp_k = dA_k p_ref + dB_k p_s`` is LINEAR in ``p_s``, so a layer with
+    ``dA_k < 0`` (which the near-surface layers of a hybrid grid always have,
+    since ``A`` must return to 0 at the ground) collapses and then INVERTS once
+    ``p_s`` drops below ``-dA_k p_ref / dB_k``.  The binding layer is the one
+    with the largest such ratio.
+
+    Below the returned pressure the coordinate hands the dycore NEGATIVE layer
+    mass -- not a diagnostic nuisance: ``dp_from_hybrid`` feeds
+    ``primitive_eq_latlon_cgrid``, ``primitive_eq_cdgrid``, ``spectral_pe`` and
+    ``primitive_eq_mpas``.
+
+    Returns 0.0 when no layer can invert (e.g. ``dA >= 0`` everywhere).
+
+    Raises
+    ------
+    ValueError
+        If a layer is invalid at EVERY surface pressure rather than below some
+        threshold: ``dB < 0`` (non-monotone B), or ``dA <= 0`` with ``dB == 0``
+        (``dp = dA p_ref <= 0`` regardless of ``p_s``).  Returning a finite
+        "safe" pressure for those would be a false all-clear.
+    """
+    import numpy as np
+
+    dA = np.diff(np.asarray(A_half, dtype=np.float64))
+    dB = np.diff(np.asarray(B_half, dtype=np.float64))
+
+    if np.any(dB < 0.0):
+        raise ValueError(
+            f"hybrid B_half must be non-decreasing; got {int((dB < 0).sum())} "
+            "layer(s) with dB < 0 (dp would depend on p_s with the wrong sign)"
+        )
+    degenerate = (dB == 0.0) & (dA <= 0.0)
+    if np.any(degenerate):
+        raise ValueError(
+            f"{int(degenerate.sum())} hybrid layer(s) have dB == 0 and "
+            "dA <= 0, so dp = dA*p_ref <= 0 at EVERY surface pressure -- the "
+            "grid is invalid, not merely limited to high p_s"
+        )
+
+    bad = (dA < 0.0) & (dB > 0.0)
+    if not bad.any():
+        return 0.0
+    return float(np.max(-dA[bad] * p_ref / dB[bad]))
+
+
 def make_hybrid_levels(
     n_levels: int,
     p_top_Pa: float = 200.0,
     p_ref: float = constants.p_ref,
     transition_exponent: int = 3,
     stretching: float = 0.0,
+    p_s_min_Pa: float | None = None,
 ) -> HybridSigmaPressureCoordinate:
     """Generate hybrid coordinate with smooth sigma-to-pressure transition.
 
@@ -892,6 +946,26 @@ def make_hybrid_levels(
         2-3 = enhanced boundary layer resolution. The stretching maps
         eta -> sinh(s*eta)/sinh(s), concentrating levels near eta=1
         (the surface).
+    p_s_min_Pa : float, optional
+        Lowest surface pressure this grid must remain valid at.  When given,
+        a coordinate that would produce NEGATIVE layer mass at that pressure
+        is a hard error instead of silent garbage.  Pass the minimum ``p_s``
+        the orography actually produces.
+
+    Raises
+    ------
+    ValueError
+        If ``p_s_min_Pa`` is given and the generated levels invert above it.
+
+    Notes
+    -----
+    With the default ``B = eta**3`` the near-surface ``dB/deta -> 3``, so
+    ``dp > 0`` needs ``p_s > (2 p_ref + p_top)/3 ~= 667 hPa``.  Real orography
+    goes well below that: a 2.5-degree AMIP run reaches ``p_s = 543 hPa`` over
+    the Tibetan Plateau, with 0.91% of global area under the threshold.  A
+    warning naming the threshold is emitted whenever it exceeds 600 hPa, which
+    the default configuration does -- see
+    :func:`hybrid_min_valid_surface_pressure`.
 
     Returns
     -------
@@ -905,6 +979,25 @@ def make_hybrid_levels(
         eta = 1.0 - np.sinh(stretching * (1.0 - eta)) / np.sinh(stretching)
     B_half = eta ** transition_exponent
     A_half = eta - B_half + (p_top_Pa / p_ref) * (1.0 - eta)
+
+    # Validity gate: below this surface pressure the near-surface layers carry
+    # NEGATIVE mass, and dp_from_hybrid feeds the dycore, not just diagnostics.
+    p_s_min_valid = hybrid_min_valid_surface_pressure(A_half, B_half, p_ref)
+    if p_s_min_Pa is not None and p_s_min_valid >= p_s_min_Pa:
+        raise ValueError(
+            f"hybrid levels invert (dp <= 0) below p_s = "
+            f"{p_s_min_valid / 100.0:.1f} hPa, but p_s_min_Pa requires validity "
+            f"down to {p_s_min_Pa / 100.0:.1f} hPa. Lower transition_exponent "
+            f"(currently {transition_exponent}) or raise p_s_min_Pa."
+        )
+    if p_s_min_valid > 6.0e4:
+        logger.warning(
+            "hybrid levels (n=%d, exponent=%d, stretching=%.1f) carry NEGATIVE "
+            "layer mass for p_s < %.1f hPa; real orography reaches ~543 hPa "
+            "over Tibet (~0.9%% of global area). Pass p_s_min_Pa to make this "
+            "a hard error, or use vertical_coord='sigma'.",
+            n_levels, transition_exponent, stretching, p_s_min_valid / 100.0,
+        )
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
 

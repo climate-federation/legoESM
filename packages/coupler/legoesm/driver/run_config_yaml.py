@@ -223,6 +223,9 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
     "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
         "cloud_partial_coverage_optics",
+    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
+        "cloud_vertical_overlap_optics",
+    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -321,7 +324,7 @@ def _route_overrides_by_class(node, by_key: dict, *, applied: set):
             )
         applied.add(key)
         # apply_param_overrides validates every field is on the NamedTuple.
-        from legoesm.training.param_collector import apply_param_overrides
+        from legoesm.core.param_overrides import apply_param_overrides
         node = apply_param_overrides(node, by_key[key])
     return node
 

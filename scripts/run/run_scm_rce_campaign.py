@@ -95,26 +95,43 @@ from legoesm.training.scm_rce_metrics import (
     weighted_std as weighted_std_jax,
 )
 
+# Each fallback below narrows on ``exc.name``: only the module that actually
+# moved may trigger it.  Any OTHER ModuleNotFoundError (a broken install, a
+# renamed transitive dependency) must surface as itself rather than being
+# rerouted to an obsolete path and reported as the wrong error.
+try:
+    from legoesm.core.param_overrides import apply_param_overrides
+except ModuleNotFoundError as exc:  # pragma: no cover - older trees
+    if exc.name != "legoesm.core.param_overrides":
+        raise
+    try:  # the helper used to live next to the collector
+        from legoesm.training.param_collector import (  # type: ignore
+            apply_param_overrides,
+        )
+    except ModuleNotFoundError as exc2:
+        if exc2.name != "legoesm.training.param_collector":
+            raise
+        from legoesm.driver.param_collector import (  # type: ignore
+            apply_param_overrides,
+        )
+
 try:
     from legoesm.training.param_collector import (
-        apply_param_overrides,
         build_registry,
         build_trainable_params,
     )
-    from legoesm.training.trainable_params import (
-        TrainablePhysicsParams,
-        range_to_sigmoid_array,
-    )
-except ModuleNotFoundError:  # pragma: no cover - compatibility with older trees
+except ModuleNotFoundError as exc:  # pragma: no cover - older trees
+    if exc.name != "legoesm.training.param_collector":
+        raise
     from legoesm.driver.param_collector import (  # type: ignore
-        apply_param_overrides,
         build_registry,
         build_trainable_params,
     )
-    from legoesm.training.trainable_params import (  # type: ignore
-        TrainablePhysicsParams,
-        range_to_sigmoid_array,
-    )
+
+from legoesm.training.trainable_params import (
+    TrainablePhysicsParams,
+    range_to_sigmoid_array,
+)
 
 
 SECONDS_PER_DAY = 86_400.0
@@ -146,14 +163,23 @@ DEFAULT_SCM_CONVECTION_SUBSTEPS = 10
 CRM_CLEAR_SKY_COND_THRESHOLD = 1.0e-6
 SCM_RCE_LARGE_SCALE_FORCING_CHOICES = ("none", "crm_clear_sky_subsidence")
 DEFAULT_SCM_RCE_LARGE_SCALE_FORCING = "none"
-SCM_CONVECTION_SUBSTEP_SCHEMES = (
-    "dca",
-    "zhang_mcfarlane",
-    "kain_fritsch",
-    "emanuel",
-    "tiedtke",
-    "bechtold",
-)
+# EVERY convection scheme sub-steps identically. This used to be an opt-in
+# tuple naming 6 of the 10 schemes; the other 4 (sbm, kuo, mass_flux, edmf)
+# silently fell through to a 600 s convective step while these 6 took 60 s.
+#
+# That made the intercomparison UNCONTROLLED: a score gap between, say, sbm and
+# bechtold conflated the scheme with a 10x difference in convective timestep,
+# and no kernel arm controlled for it. Ranking schemes under different
+# timesteps measures the timestep as much as the physics.
+#
+# The gate is now removed rather than extended to all 10 names, deliberately:
+# a tuple that must list every scheme is a drift hazard — the next scheme added
+# would silently inherit the 600 s step and reintroduce exactly this bug. With
+# no gate, uniformity is structural.
+#
+# Retained as an explicitly empty marker so the two operator-facing messages
+# that used to enumerate it keep working and now state the uniform behaviour.
+SCM_CONVECTION_SUBSTEP_SCHEMES = ()  # (unused: all schemes sub-step uniformly)
 QUICK_DAYS = 0.03
 QUICK_TUNE_EVALS = 2
 RCEMIP_S0_W_M2 = 551.58
@@ -654,9 +680,18 @@ def _effective_scm_convection_substeps(
     convection_scheme: str,
     requested_substeps: int,
 ) -> int:
-    if convection_scheme in SCM_CONVECTION_SUBSTEP_SCHEMES:
-        return requested_substeps
-    return 1
+    """Convective sub-steps per outer step — IDENTICAL for every scheme.
+
+    Returns ``requested_substeps`` unconditionally. ``convection_scheme`` is
+    kept in the signature so every call site still reads as scheme-aware and
+    so a future scheme-specific need has an obvious home, but it MUST NOT be
+    used to vary the count: that is the uncontrolled-comparison bug this
+    replaced (6 of 10 schemes at 60 s, 4 at 600 s).
+
+    ``scheme == "none"`` is unaffected — callers already gate on
+    ``cfg.convection.scheme != "none"`` before sub-stepping.
+    """
+    return requested_substeps
 
 
 def _without_convection_config(cfg: PhysicsConfig) -> PhysicsConfig:
@@ -1663,6 +1698,64 @@ def _set_active_subconfig(top_cfg: PhysicsConfig, category: str, subcfg) -> Phys
     return top_cfg._replace(**{CATEGORY_CONFIG_FIELD[category]: component_new})
 
 
+# --------------------------------------------------------------------------- #
+# Matched-kernel override (convection-scheme intercomparison)
+# --------------------------------------------------------------------------- #
+SUBSIDENCE_SOLVE_MODES = ("as_shipped", "implicit_flux", "advective")
+
+
+def apply_subsidence_solve_override(
+    cfg: PhysicsConfig,
+    mode: str,
+    *,
+    category: str = "convection",
+) -> tuple[PhysicsConfig, str]:
+    """Force the mass-flux family onto ONE vertical transport kernel.
+
+    Rankings across convection schemes are confounded when the schemes do not
+    share a transport kernel: Bechtold/EDMF/Kain-Fritsch ship the conservative
+    ``"implicit_flux"`` solve while Tiedtke/Emanuel/Zhang-McFarlane/mass_flux
+    ship the leaky ``"advective"`` one, so a score difference partly measures
+    the KERNEL, not the scheme.  ``mode="implicit_flux"`` puts every scheme
+    that HAS the knob on the conservative solve, isolating scheme physics;
+    ``mode="as_shipped"`` leaves every default untouched (what users get).
+
+    Returns ``(cfg, status)``.  ``status`` is a short human-readable string
+    recorded next to every number so a reader can never mistake which arm a
+    table came from:
+
+    * ``"as_shipped"``                    -- nothing changed;
+    * ``"forced:<scheme>=<solve>"``       -- the knob was set;
+    * ``"not_applicable:<scheme>"``       -- this scheme has NO
+      ``subsidence_solve`` field, so it is OUTSIDE the matched-kernel family.
+      Reported explicitly rather than silently skipped, because a reader must
+      not assume such a scheme was kernel-matched.  Three distinct reasons:
+
+      - ``sbm``, ``dca``, ``kuo`` -- adjustment / Kuo-type closures with no
+        compensating-subsidence mass-flux kernel at all;
+      - ``emanuel`` -- its SHIPPED path (``use_genuine_mixing=True``) is a
+        buoyancy-sorting mixing matrix that never calls the shared kernel;
+        only the legacy surrogate branch does, and that branch's
+        ``sort_multiplier`` rescaling would leave an unpaired vapor debit
+        under a vapor-debiting solve.  So Emanuel cannot be kernel-matched.
+
+    Raises on an unknown ``mode`` (dispatch-hardening: a typo must not
+    silently select the as-shipped arm and be reported as the matched one).
+    """
+    if mode not in SUBSIDENCE_SOLVE_MODES:
+        raise ValueError(
+            f"apply_subsidence_solve_override: unknown mode {mode!r}; "
+            f"expected one of {SUBSIDENCE_SOLVE_MODES}"
+        )
+    _component, scheme, subcfg = _active_subconfig(cfg, category)
+    if mode == "as_shipped":
+        return cfg, "as_shipped"
+    if subcfg is None or not hasattr(subcfg, "subsidence_solve"):
+        return cfg, f"not_applicable:{scheme}"
+    new_subcfg = subcfg._replace(subsidence_solve=mode)
+    return _set_active_subconfig(cfg, category, new_subcfg), f"forced:{scheme}={mode}"
+
+
 def _raw_from_physical(value: float, constraint) -> jax.Array:
     arr = jnp.asarray(value, dtype=jnp.float64)
     if constraint.transform == "sigmoid":
@@ -1898,9 +1991,10 @@ def _write_summary(
         "SCM microphysics substeps for "
         f"{', '.join(SCM_MICROPHYSICS_SUBSTEP_SCHEMES)}: "
         f"{args.scm_microphysics_substeps}; "
-        "SCM convection substeps for "
-        f"{', '.join(SCM_CONVECTION_SUBSTEP_SCHEMES)}: "
-        f"{args.scm_convection_substeps}; "
+        "SCM convection substeps (ALL schemes, uniform): "
+        f"{args.scm_convection_substeps} "
+        f"({args.dt / max(args.scm_convection_substeps, 1):.0f} s convective "
+        f"step at --dt {args.dt:.0f}); "
         f"days: {args.days:.3g}; analysis window: {args.analysis_days:.3g} d.",
         f"CRM equilibrium surface precipitation: {ref.precip_ref_mm_day:.3f} mm/day "
         f"({ref.precip_unit_note}; {len(ref.precip_files_used)} surface files).",
@@ -2024,10 +2118,13 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_SCM_CONVECTION_SUBSTEPS,
         help=(
-            "Fixed SCM-only convection substeps per outer step for "
-            f"{', '.join(SCM_CONVECTION_SUBSTEP_SCHEMES)}. Default "
+            "Fixed SCM-only convection substeps per outer step, applied "
+            "UNIFORMLY to every convection scheme. Default "
             f"{DEFAULT_SCM_CONVECTION_SUBSTEPS} gives a 60 s convective "
-            "adjustment step at --dt 600 without changing the plane/CRM path."
+            "adjustment step at --dt 600 without changing the plane/CRM path. "
+            "Uniformity is required for the intercomparison to be controlled: "
+            "ranking schemes run at different convective timesteps measures "
+            "the timestep as much as the physics."
         ),
     )
     parser.add_argument("--analysis-days", type=float, default=DEFAULT_ANALYSIS_DAYS)

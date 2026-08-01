@@ -391,6 +391,53 @@ def schema_fingerprint(names, n_dev, dtype_kinds=(), ndims=()) -> np.ndarray:
         dtype=np.float64)
 
 
+def in_jax_trace() -> bool:
+    """True when the caller runs inside a JAX trace (``jit``/``scan``/``vmap``).
+
+    The host-side gates below call ``multihost_utils.process_allgather``, which
+    is an EAGER utility: it ``device_put``s its payload per addressable device.
+    Under an active trace those puts are staged into the jaxpr and come back as
+    tracers, so ``make_array_from_single_device_arrays`` is handed tracers and
+    raises — every multi-process lat-lon SPMD run died this way once the step
+    was wrapped in ``lax.scan``/``jax.jit`` (#1405, follow-up to #1362).
+
+    TWO LIMITATIONS, stated because a reader will otherwise assume they are
+    covered (both raised by codex adversarial review of this change, both
+    accepted deliberately — the alternative is a lane that cannot run at all):
+
+    1. The skip is symmetric only as long as every process reaches this call
+       in the SAME transform state, which is the SPMD lockstep property the
+       gate itself exists to enforce.  If one rank called the step eagerly
+       while another traced it, the eager rank would now BLOCK in
+       ``process_allgather`` instead of its peer crashing.  That divergence is
+       already fatal today (the traced rank dies here), so this trades a
+       guaranteed crash on every multi-process traced run for a hang in an
+       already-divergent one.  It is NOT a proof of symmetry.
+    2. Coverage IS lost on a lane that is only ever traced.  The build-time
+       gates (``_agree_spmd_entry``) agree the model/mesh/config; the per-CALL
+       payload — state pytree schema, ``phys_state``/forcing presence and its
+       schema — is agreed ONLY here, and under a trace it now goes unchecked.
+
+    The trace-safe design that would fix both (stage the digest comparison as
+    a mesh collective inside the traced program instead of a host allgather)
+    needs a real multi-process rig to validate and is deliberately left as
+    follow-up rather than written blind — see #1405.
+
+    ``jax.core.trace_state_clean`` was removed from the public ``jax.core`` in
+    jax 0.7 and survives only as ``jax._src.core``, so this reads the private
+    module.  The ``except`` returns False — i.e. the gate RUNS and the traced
+    lane crashes loudly again — deliberately: for a correctness gate a loud
+    crash beats a silent skip.  ``tests/unit/test_geometry_consistency_trace_
+    gate.py`` asserts this returns True inside ``jax.jit`` AND inside
+    ``lax.scan``, so a JAX version that moves the symbol turns CI red first.
+    """
+    try:
+        from jax._src import core as _jax_core
+        return not _jax_core.trace_state_clean()
+    except Exception:  # pragma: no cover - JAX internal moved; test goes red
+        return False
+
+
 def assert_flags_agree(names, values, *, context: str) -> None:
     """Raise unless every process agrees on a tuple of rank-local CONFIG flags.
 
@@ -402,8 +449,10 @@ def assert_flags_agree(names, values, *, context: str) -> None:
 
     ``names`` and ``values`` must be STATIC tuples written at the call site,
     so the payload length is fixed by the code path rather than by data.
+
+    No-op under a JAX trace — see :func:`in_jax_trace` (#1405).
     """
-    if jax.process_count() <= 1:
+    if jax.process_count() <= 1 or in_jax_trace():
         return
     from jax.experimental import multihost_utils
 

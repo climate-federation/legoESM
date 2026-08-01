@@ -116,3 +116,33 @@ def test_mesh_cache_round_trip_with_none_optionals(tmp_path):
     assert m2.nCells == m.nCells
     assert m2.subgrid_topo_stddev is None and m2.land_frac is None
     np.testing.assert_allclose(np.asarray(m2.latCell), np.asarray(m.latCell))
+
+
+def test_subgrid_orography_on_an_unsupported_grid_raises_a_CLEAR_error():
+    """The guard must actually fire.
+
+    `NamedTuple._replace` raises TypeError ("Got unexpected field names"), but
+    the guard caught only (ValueError, AttributeError) -- so a lat-lon run with
+    --subgrid-orography-file died with a raw collections traceback instead of
+    the message naming the supported grids. The guard existing is not the same
+    as the guard working.
+    """
+    import inspect
+    import pytest as _pytest
+
+    from legoesm.driver import model_driver
+
+    src = inspect.getsource(model_driver._ModelDriverTopographyProbe) \
+        if hasattr(model_driver, "_ModelDriverTopographyProbe") else \
+        inspect.getsource(model_driver)
+    i = src.index("subgrid_topo_stddev=sso")
+    seg = src[i:i + 400]
+    assert "TypeError" in seg, (
+        "the _replace guard must catch TypeError -- that is what "
+        "NamedTuple._replace actually raises")
+
+    # and prove the premise: _replace on a tuple lacking the field is TypeError
+    from collections import namedtuple
+    NT = namedtuple("NT", "a")
+    with _pytest.raises(TypeError):
+        NT(a=1)._replace(subgrid_topo_stddev=0.0)

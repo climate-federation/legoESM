@@ -99,26 +99,51 @@ diagnostics hook — NEMO dumps already exist), `lbc_lnk` sign convention,
   This is arguably the most important open defect: we cannot run faithfully on
   the oracle's own geometry.
 
-## 4. THE CLIMATE QUESTION — still open, honestly
+## 4. THE CLIMATE QUESTION — the target is the RATE, not an offset
 
-From rest, 5 years: legoESM ACC **67.6 Sv** vs NEMO **91.1 Sv** (0.74×). The gap
-opens roughly linearly, i.e. a persistent *rate* deficit.
+**Measured 2026-07-28 (controlled: same script, same NEMO file, ONLY the
+legoESM code differs).** Re-ran the from-rest 5-year at HEAD, i.e. with the
+whole 18-bug fix set including the ULP wet-mask fix (#18) and `ahtv`:
 
-**Not chaos** — ensemble spreads are 0.15 Sv (legoESM) and 0.24 Sv (NEMO), so
-the gap is ~100× the combined noise. Both models are near-deterministic at 1°
-with parameterized eddies.
+| year | legoESM pre-fixes | legoESM HEAD | NEMO | ratio |
+|---|---|---|---|---|
+| 1 | 55.1 | 55.1 | **60.0** | 0.92 |
+| 2 | 58.6 | 58.6 | — | — |
+| 3 | 60.8 | 60.5 | — | — |
+| 4 | 63.9 | 63.8 | — | — |
+| 5 | 67.6 | **67.7** | **91.1** | 0.74 |
 
-**Two distinct deficits, separated in time:**
-- Upper ocean (<1400 m): meridional ΔT ~13% weak, flat from year 1.
-- Deep (≥1400 m): matched at year 1 (0.95), collapses in year 2 (0.69) and
-  year 3 (0.40). NEMO *builds* deep contrast; legoESM stalls and reverses —
-  failing to build it, not losing it.
+NEMO continues 96.1, 104.4, 112.4, 117.6, 121.1 … 142.8 Sv by year 20
+(RUN_20Y_REBUILD). NEMO years 2-4 were written as a single 4-year mean, so
+no annual means exist for them — that is why those rows are blank.
+
+**Result 1 — the fix set is climate-inert.** 0.1 Sv of a 23.4 Sv gap
+(0.4%). SST corr, SSH small-scale ratio and SST bias are identical to 3
+decimals at every year. Eighteen genuine transcription bugs moved the ACC by
+nothing. Whatever causes the gap is not among them.
+
+**Result 2 — year 1 is only 8% low; the SPIN-UP RATE is 40% of NEMO's.**
+NEMO adds +7.8 Sv/yr over years 1→5, legoESM +3.15 Sv/yr. The gap is
+*manufactured over time*, not present at the start. This reframes the
+target: not a static offset to hunt down, but whatever limits the rate at
+which the ACC builds. Consistent with the earlier finding that legoESM
+fails to *build* deep meridional contrast in years 2-3.
+
+**Not chaos** — ensemble spreads are 0.15 Sv (legoESM) and 0.24 Sv (NEMO),
+~100x below the gap.
 
 **Exonerated by measurement (8):** tracer advection scheme (centered vs FCT
 identical to 4 decimals over 5 years), Redi coefficient, deep K_v, GM bolus
-(timescale 64–643 yr vs a 5-yr spin-up), ZAD momentum (fix was climate-inert),
-surface forcing + initial condition, tracer operator composition, vertical
-transport.
+(timescale 64-643 yr vs a 5-yr spin-up), ZAD momentum, surface forcing +
+initial condition, tracer operator composition, vertical transport.
+
+**HARNESS ERROR, logged so it is not repeated:** the first version of the
+table above pinned `DINO_CMP_GRID_T/U` to the year-5 NEMO file for every
+row, so the NEMO column read 91.1 five times and the growth comparison was
+meaningless on the NEMO side. Caught by the user on sight. The legoESM
+column was always per-year, so the pre-fix-vs-HEAD conclusion held, but the
+lesson is the standing one: state the provenance of BOTH sides of every
+comparison, not just the side under test.
 
 ## 5. METHOD — what this campaign learned the hard way
 
