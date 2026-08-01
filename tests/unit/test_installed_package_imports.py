@@ -78,8 +78,11 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 # packages/<member>/src/legoesm after the carve), reported repo-relative so the
 # scan + the parametrize IDs stay stable, plus scripts.
 from tests.legoesm_paths import legoesm_root_paths as _legoesm_root_paths
+# repo_root= keeps this working from a git WORKTREE: legoesm.__path__ reports
+# the EDITABLE INSTALL's paths, which point at the canonical checkout, and the
+# bare relative_to() below then raised ValueError naming a foreign path (#1389).
 PRODUCTION_ROOTS = tuple(
-    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths()
+    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths(REPO_ROOT)
 ) + ("scripts",)
 
 
