@@ -40,16 +40,49 @@ The tracer value carried across a face is the UPWIND (donor-cell) value.  That
 is a DIAGNOSTIC choice, stated rather than hidden: the model integrates tracers
 with a flux limiter (e.g. superbee) which is not reproduced here.
 
-The VOLUME transport is RECONSTRUCTED, not exact.  It is built from the
-POST-STEP state with the model's own face operators (``min_cell_to_uface`` /
-``min_cell_to_vface`` + ``compute_face_masks_3d``), which is the closest
-quantity recoverable from a state, but it is NOT the transport the model
-actually advected with.  Three terms are unrecoverable from the state alone:
-the barotropic solver's time-averaged ``Hu_avg``/``Hv_avg`` correction, the
-GM ``through_fct`` bolus flux, and the adaptive implicit vertical-advection
-split.  See ``mass_fluxes_from_state`` for the same caveat at the point of
-use.  Anyone comparing these numbers to a closed volume budget must expect a
-residual of the size of those omitted terms.
+*** THE VOLUME TRANSPORT IS RECONSTRUCTED AND IS MISSING THE BAROTROPIC
+*** CORRECTION.  READ THIS BEFORE QUOTING ANY NUMBER FROM THIS MODULE.
+
+It is built from the POST-STEP state with the model's own face operators
+(``min_cell_to_uface`` / ``min_cell_to_vface`` + ``compute_face_masks_3d``),
+which is the closest quantity recoverable from a state -- but it is NOT the
+transport the model advected with, and the gap is not small.
+
+``ocean/dynamics/ocean_model_latlon_cgrid.py:3547`` forms
+
+    u_corrected = u_3d + delta_U,   delta_U = (Hu_avg - Hu_3d) / H_u_old
+
+a DEPTH-UNIFORM (barotropic) increment that makes the depth-integrated
+transport equal the barotropic solver's time-averaged ``Hu_avg`` exactly, and
+line 3563 advects tracers with ``h_u_old * u_corrected``.  ``u_corrected`` is
+used ONLY there -- it is never written back to the state (it appears at
+3547 and 3563 and nowhere else).  So ``state.u`` lacks ``delta_U``, and this
+module reconstructs ``h_new * state.u``, not ``h_old * (state.u + delta_U)``.
+
+MEASURED SIZE (eORCA1 tripole, run nemolev_trp_icemelt70_d90, d30/d60/d90):
+comparing the section transport against the net convergence implied by the
+MEASURED sea-level change, the gap is 0.35-0.61 Sv at 60S/30S/0N/30N and
+1.14-1.28 Sv at 60N/66N.  At 66N that is ~100% of the apparent net transport
+(1.34 Sv reconstructed vs 0.06 Sv from eta).  The absolute gap is comparable
+at all latitudes -- the mode is missing everywhere; it merely looks worse
+where the true signal is small.
+
+CONSEQUENCE FOR THE ACCUMULATOR: ``gateway_step`` reads the POST-STEP state,
+so running it inside the driver's step loop does NOT recover ``delta_U``.
+The in-model accumulator has exactly the same omission as an offline probe.
+Fixing it requires the model to expose ``mass_flux_u``/``mass_flux_v`` (or
+``Hu_avg``/``Hv_avg``) as a step output; see the tracking issue.
+
+``Hu_avg`` itself is NOT on the state, so the correction cannot be recovered
+offline.  Its DIVERGENCE is: the barotropic solver guarantees
+``div(Hu_avg) == (eta_old - eta_new)/dt``
+(``ocean/dynamics/barotropic_latlon_cgrid.py:1041``), so the NET volume
+transport across a CLOSED section is recoverable from the eta tendency even
+though the per-face flux is not.  Prefer that for net-volume questions.
+
+Also omitted: the GM ``through_fct`` bolus flux and the adaptive implicit
+vertical-advection split.  See ``mass_fluxes_from_state`` for the same caveat
+at the point of use.
 
 All functions are pure and JAX-traceable (no host callbacks, stable shapes).
 
