@@ -108,3 +108,75 @@ def test_parse_months_range_and_list():
 def test_parse_months_rejects_out_of_range_or_reversed(spec):
     with pytest.raises(ValueError):
         _mod.parse_months(spec)
+
+
+# ---------------------------------------------------------------------------
+# Meridional mass streamfunction (Hadley panel): pin the integral against the
+# closed-form uniform-wind solution and the stated sign convention, so a
+# flipped sign or dropped cos(lat) can never mislabel the Hadley cells.
+# ---------------------------------------------------------------------------
+
+from legoesm import constants  # noqa: E402
+
+_A = constants.R_earth
+_G = constants.g
+
+PLEV = np.array([100e2, 300e2, 500e2, 700e2, 900e2])  # Pa, TOA first
+
+
+def test_streamfunction_uniform_v_matches_closed_form():
+    """[v] = v0 everywhere: psi(phi, p) = 2 pi a cos(phi) v0 (p - ptop) / g."""
+    v0 = 2.0
+    v = np.full((PLEV.size, LAT.size), v0)
+    psi = _mod.meridional_streamfunction(v, PLEV, LAT, _A, _G)
+    expect = (2.0 * np.pi * _A * np.cos(np.deg2rad(LAT))[None, :]
+              * v0 * (PLEV[:, None] - PLEV[0]) / _G)
+    np.testing.assert_allclose(psi, expect, rtol=1e-12)
+
+
+def test_streamfunction_zero_at_top_and_sign_convention():
+    """Positive (northward) v gives psi > 0 below TOA — the NH-Hadley sense
+    documented in the helper.  psi at the top level is identically zero."""
+    v = np.full((PLEV.size, LAT.size), 1.0)
+    psi = _mod.meridional_streamfunction(v, PLEV, LAT, _A, _G)
+    np.testing.assert_array_equal(psi[0], 0.0)
+    assert np.all(psi[1:, 1:-1] > 0.0)   # (poles excluded: cos ~ 0)
+
+
+def test_streamfunction_level_order_invariance():
+    """Descending-pressure input returns the same field in the caller's
+    order — CMOR plev direction must not flip the answer."""
+    rng = np.random.default_rng(7)
+    v = rng.normal(0.0, 5.0, size=(PLEV.size, LAT.size))
+    psi = _mod.meridional_streamfunction(v, PLEV, LAT, _A, _G)
+    psi_rev = _mod.meridional_streamfunction(
+        v[::-1], PLEV[::-1], LAT, _A, _G)
+    np.testing.assert_allclose(psi_rev, psi[::-1], rtol=1e-12)
+
+
+def test_streamfunction_nan_below_ground_contributes_zero():
+    """NaN [v] (below-ground plev) must act as zero mass flux, not poison
+    the column: identical to explicitly zeroed input."""
+    v = np.full((PLEV.size, LAT.size), 3.0)
+    v_nan = v.copy()
+    v_nan[-2:, :10] = np.nan
+    v_zero = v.copy()
+    v_zero[-2:, :10] = 0.0
+    psi_nan = _mod.meridional_streamfunction(v_nan, PLEV, LAT, _A, _G)
+    psi_zero = _mod.meridional_streamfunction(v_zero, PLEV, LAT, _A, _G)
+    assert np.all(np.isfinite(psi_nan))
+    np.testing.assert_allclose(psi_nan, psi_zero, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Near-sea-level mask (psl-vs-ERA5-ps row): the mask is what keeps orography
+# out of the circulation comparison, so its polarity must be pinned.
+# ---------------------------------------------------------------------------
+
+def test_low_elevation_mask_polarity_and_nan():
+    psl = np.array([[1013.0, 1013.0, 1013.0, np.nan]])
+    ps = np.array([[1012.0, 950.0, 1013.0, 1013.0]])
+    mask = _mod.low_elevation_mask(psl, ps, tol=3.0)
+    # sea-level cell kept, mountain cell (63 hPa apart) dropped, exact kept,
+    # NaN dropped
+    np.testing.assert_array_equal(mask, [[True, False, True, False]])

@@ -5,13 +5,20 @@ Complements the global-MEAN scorecards (``plot_amip_cmor_diagnostics.py`` /
 ``scripts/validate/amip_skill_score.py``) with the SPATIAL dimension the
 2026-07-24 ladder analysis needs:
 
-1. PATTERN evaluation of tas / pr / rlut / rsut: model map, reference map,
-   model−reference bias map, plus area-weighted bias, centered RMSE and
-   centered pattern correlation per field.  References: ERA5 (tas), GPCP
-   (pr), CERES-EBAF (rlut/rsut) from the ClimateEval reference store.
-2. ZONAL-MEAN pressure–latitude sections of ta and ua vs ERA5 (jet position/
-   strength, tropopause, polar inversions) + 2-D zonal-mean line profiles.
-3. Physicality table: TOA net budget, E−P closure, land Bowen ratio.
+1. PATTERN evaluation of tas / pr / rlut / rsut / prw / psl: model map,
+   reference map, model−reference bias map, plus area-weighted bias, centered
+   RMSE and centered pattern correlation per field.  References: ERA5 (tas,
+   prw, ps), GPCP (pr), CERES-EBAF (rlut/rsut) from the ClimateEval reference
+   store.  The reference store has no psl, so the psl row compares model psl
+   against ERA5 ps restricted to NEAR-SEA-LEVEL cells (model |psl−ps| < 3 hPa,
+   i.e. ocean + low land, where ps ≈ psl) — that isolates the circulation
+   signal (subtropical highs, Aleutian/Icelandic lows) instead of orography.
+2. ZONAL-MEAN pressure–latitude sections of ta / ua / hus vs ERA5 (jet
+   position/strength, tropopause, polar inversions, moisture structure).
+3. HADLEY panel: meridional mass streamfunction ψ(lat, p) from model va
+   (model-only — the reference store has no va), with the NH/SH tropical cell
+   extrema printed against the literature band.
+4. Physicality table: TOA net budget, E−P closure, land Bowen ratio.
 
 Calendar-month matching: the model mean uses whatever months the run wrote;
 the reference climatology is built from the SAME calendar months (a 30-day
@@ -21,7 +28,10 @@ them (epoch-matched); CERES-EBAF starts 2000-03, so rlut/rsut compare
 against its full-period per-month climatology — a stated protocol caveat,
 not a silent one (printed in the metrics table and figure titles).
 
-Pure numpy/xarray/matplotlib — no legoesm import; runs on any CMOR dir.
+Pure numpy/xarray/matplotlib; runs on any CMOR dir.  The only legoesm import
+is ``legoesm.constants`` (Earth radius + gravity for the streamfunction),
+function-scoped and optional — without it the Hadley panel is skipped with a
+printed note and everything else still runs.
 
 Usage::
 
@@ -81,20 +91,68 @@ def pattern_stats(model: np.ndarray, ref: np.ndarray,
     return {"bias": float(bias), "rmse_centered": rmse_c, "pattern_corr": corr}
 
 
+def low_elevation_mask(psl, ps, tol=3.0):
+    """True where the column is near sea level: |psl - ps| < tol.
+
+    ``psl``/``ps``/``tol`` must share one unit (hPa here).  Over these cells
+    surface pressure IS sea-level pressure to within ``tol``, so a reference
+    that only provides ps (ERA5 store) can stand in for psl without the
+    orography signal (Tibet/Antarctica ~500 hPa) drowning the ~30 hPa
+    circulation pattern.  NaN in either input yields False (excluded).
+    """
+    with np.errstate(invalid="ignore"):
+        return np.abs(np.asarray(psl, float) - np.asarray(ps, float)) < tol
+
+
+def meridional_streamfunction(v_zonal, plev_pa, lat_deg, radius, gravity):
+    """Meridional mass streamfunction psi(plev, lat) [kg/s] from zonal-mean v.
+
+    psi(phi, p) = (2 pi a cos(phi) / g) * integral_ptop^p [v] dp'
+
+    Sign convention (stated per the sign-check gate): pressure increases
+    downward and northward wind is positive, so psi > 0 is a thermally
+    direct NH-Hadley-sense cell (poleward flow aloft, equatorward below) —
+    NH Hadley positive, SH Hadley negative.  NaN [v] (below-ground pressure
+    levels) contributes zero mass flux rather than poisoning the integral.
+
+    ``v_zonal``: (nplev, nlat); ``plev_pa`` any monotonic order (result is
+    returned in the caller's level order); ``radius``/``gravity`` are passed
+    in (from ``legoesm.constants``) to keep this helper import-pure.
+    """
+    v = np.asarray(v_zonal, dtype=float)
+    p = np.asarray(plev_pa, dtype=float)
+    order = np.argsort(p)                      # ascending pressure: TOA first
+    p_s, v_s = p[order], v[order]
+    v_s = np.where(np.isfinite(v_s), v_s, 0.0)
+    dp = np.diff(p_s)[:, None]
+    layer = 0.5 * (v_s[1:] + v_s[:-1]) * dp    # trapezoid per layer
+    integ = np.concatenate(
+        [np.zeros((1, v.shape[1])), np.cumsum(layer, axis=0)], axis=0)
+    coslat = np.cos(np.deg2rad(np.asarray(lat_deg, dtype=float)))
+    psi_sorted = 2.0 * np.pi * radius * coslat[None, :] * integ / gravity
+    inv = np.empty_like(order)
+    inv[order] = np.arange(order.size)
+    return psi_sorted[inv]
+
+
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
 
 # (cmor var, ref dataset dir, ref var, unit scale to display, display unit,
 #  reference-epoch policy: "match" = slice ref to the model years when
-#  covered, "climatology" = full-period per-month climatology)
+#  covered, "climatology" = full-period per-month climatology,
+#  mask: None or "lowelev" = compare only near-sea-level cells, see
+#  low_elevation_mask — used for psl, whose only reference is ERA5 ps)
 PATTERN_FIELDS = (
-    ("tas", "reanalysis_ERA5", "tas", 1.0, "K", "match"),
-    ("pr", "observation_GPCP", "pr", 86400.0, "mm/day", "match"),
-    ("rlut", "observation_CERES-EBAF", "rlut", 1.0, "W/m2", "climatology"),
-    ("rsut", "observation_CERES-EBAF", "rsut", 1.0, "W/m2", "climatology"),
+    ("tas", "reanalysis_ERA5", "tas", 1.0, "K", "match", None),
+    ("pr", "observation_GPCP", "pr", 86400.0, "mm/day", "match", None),
+    ("rlut", "observation_CERES-EBAF", "rlut", 1.0, "W/m2", "climatology", None),
+    ("rsut", "observation_CERES-EBAF", "rsut", 1.0, "W/m2", "climatology", None),
+    ("prw", "reanalysis_ERA5", "prw", 1.0, "kg/m2", "match", None),
+    ("psl", "reanalysis_ERA5", "ps", 0.01, "hPa", "match", "lowelev"),
 )
-ZONAL3D_FIELDS = (("ta", "K", 1.0), ("ua", "m/s", 1.0))
+ZONAL3D_FIELDS = (("ta", "K", 1.0), ("ua", "m/s", 1.0), ("hus", "g/kg", 1000.0))
 
 
 def parse_months(spec):
@@ -231,7 +289,8 @@ def main() -> int:
     # ---- 1. Pattern maps -------------------------------------------------
     nf = len(PATTERN_FIELDS)
     fig, axes = plt.subplots(nf, 3, figsize=(16, 3.1 * nf))
-    for i, (var, refset, refvar, scale, unit, epoch) in enumerate(PATTERN_FIELDS):
+    for i, (var, refset, refvar, scale, unit, epoch, mask_kind) \
+            in enumerate(PATTERN_FIELDS):
         da = _open_cmor(run, var, months)
         if da is None:
             for ax in axes[i]:
@@ -252,6 +311,18 @@ def main() -> int:
                              method="linear")
         mv = np.asarray(model.values)
         rv = np.asarray(ref_i.values)
+        if mask_kind == "lowelev":
+            ps_da = _open_cmor(run, "ps", months)
+            if ps_da is None:
+                for ax in axes[i]:
+                    ax.set_axis_off()
+                axes[i, 0].set_title(f"{var}: lowelev mask needs model ps")
+                continue
+            mask = low_elevation_mask(
+                mv, np.asarray(ps_da.mean("time").values) * scale)
+            mv = np.where(mask, mv, np.nan)
+            rv = np.where(mask, rv, np.nan)
+            note += ", near-sea-level cells only"
         st = pattern_stats(mv, rv, model["lat"].values)
         st["ref"] = f"{refset} ({note})"
         metrics[var] = st
@@ -327,7 +398,59 @@ def main() -> int:
     fig2.savefig(f"{out_prefix}_zonal.png", dpi=130)
     plt.close(fig2)
 
-    # ---- 3. Physicality table -------------------------------------------
+    # ---- 3. Hadley circulation (meridional mass streamfunction) ---------
+    # Model-only: the reference store carries no va.  Scored against the
+    # literature band instead (reanalysis annual-mean tropical cell extrema
+    # are ~ +9 / -10 x 1e10 kg/s; NH positive / SH negative in this sign
+    # convention, see meridional_streamfunction).
+    hadley_lines = []
+    va_da = _open_cmor(run, "va", months)
+    if va_da is None:
+        hadley_lines.append("hadley: no va in CMOR output — panel skipped")
+    else:
+        try:
+            from legoesm import constants
+            radius, gravity = constants.R_earth, constants.g
+        except ImportError:
+            constants = None
+            hadley_lines.append(
+                "hadley: legoesm.constants unavailable — panel skipped")
+        if constants is not None:
+            va_z = va_da.mean("time").mean("lon")
+            psi = meridional_streamfunction(
+                np.asarray(va_z.values), va_z["plev"].values,
+                va_z["lat"].values, radius, gravity)
+            p_hpa = va_z["plev"].values / 100.0
+            lat = va_z["lat"].values
+            fig3, ax3 = plt.subplots(figsize=(8, 5))
+            a = np.nanpercentile(np.abs(psi) / 1e10, 99)
+            pm = ax3.pcolormesh(lat, p_hpa, psi / 1e10,
+                                vmin=-a, vmax=a, cmap="RdBu_r")
+            ax3.contour(lat, p_hpa, psi / 1e10, levels=11,
+                        colors="k", linewidths=0.5)
+            ax3.invert_yaxis()
+            ax3.set_xlabel("latitude")
+            ax3.set_ylabel("p [hPa]")
+            ax3.set_title(f"Meridional mass streamfunction [1e10 kg/s] — "
+                          f"{label}\n(NH Hadley > 0, SH Hadley < 0)")
+            plt.colorbar(pm, ax=ax3, shrink=0.9)
+            fig3.tight_layout()
+            fig3.savefig(f"{out_prefix}_hadley.png", dpi=130)
+            plt.close(fig3)
+            # tropical cell extrema: troposphere only, |lat| <= 40
+            trop = p_hpa >= 200.0
+            nh = (lat >= 0) & (lat <= 40)
+            sh = (lat >= -40) & (lat <= 0)
+            psi_nh = np.nanmax(psi[np.ix_(trop, nh)])
+            psi_sh = np.nanmin(psi[np.ix_(trop, sh)])
+            hadley_lines.append(
+                f"hadley NH cell max = {psi_nh / 1e10:+6.2f} x1e10 kg/s  "
+                "(reanalysis annual ~ +9; healthy ~ +4..+15)")
+            hadley_lines.append(
+                f"hadley SH cell min = {psi_sh / 1e10:+6.2f} x1e10 kg/s  "
+                "(reanalysis annual ~ -10; healthy ~ -15..-4)")
+
+    # ---- 4. Physicality table -------------------------------------------
     lines = [f"# AMIP pattern evaluation — {label}", ""]
     for k, v in metrics.items():
         lines.append(
@@ -352,11 +475,13 @@ def main() -> int:
         lines.append(f"global Bowen (hfss/hfls) = "
                      f"{extras['hfss'] / max(extras['hfls'], 1e-9):.2f} "
                      "(obs ~ 0.2-0.3)")
+    lines.extend([""] + hadley_lines)
     report = "\n".join(lines)
     print(report)
     with open(f"{out_prefix}_metrics.txt", "w") as fh:
         fh.write(report + "\n")
-    print(f"\nwrote {out_prefix}_maps.png / _zonal.png / _metrics.txt")
+    print(f"\nwrote {out_prefix}_maps.png / _zonal.png / _hadley.png / "
+          "_metrics.txt")
     return 0
 
 

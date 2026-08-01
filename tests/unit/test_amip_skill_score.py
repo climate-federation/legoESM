@@ -24,12 +24,23 @@ def test_area_weighted_global_mean_weighting():
     assert area_weighted_global_mean(f, w) == pytest.approx((10 + 60) / 4)
 
 
-def test_area_weighted_global_mean_drops_time_axis_and_nan():
+def test_area_weighted_global_mean_time_MEAN_not_last_step():
+    """The time axis is AVERAGED — scoring only the final month against
+    annual-mean references conflates seasonal cycle with bias (the December
+    netTOA +12.9 vs annual -2.9 incident, 2026-08-01)."""
     f = np.stack([np.full((2, 2), 1.0), np.full((2, 2), 5.0)])  # (time=2,2,2)
-    f[-1, 0, 0] = np.nan  # NaN excluded
     w = np.ones((2, 2))
-    # last step used; NaN cell dropped -> mean of the three 5.0 cells
-    assert area_weighted_global_mean(f, w) == pytest.approx(5.0)
+    assert area_weighted_global_mean(f, w) == pytest.approx(3.0)
+
+
+def test_area_weighted_global_mean_nan_month_drops_cell_whole():
+    """A cell with ANY NaN month is excluded entirely (plain mean, not
+    nanmean): partial coverage must not silently pass as a full-window mean."""
+    f = np.stack([np.full((2, 2), 1.0), np.full((2, 2), 5.0)])
+    f[-1, 0, 0] = np.nan
+    w = np.ones((2, 2))
+    # the NaN cell is dropped; remaining three cells average (1+5)/2 = 3
+    assert area_weighted_global_mean(f, w) == pytest.approx(3.0)
 
 
 def test_reference_table_wellformed():

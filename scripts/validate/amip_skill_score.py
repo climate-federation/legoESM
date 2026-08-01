@@ -55,7 +55,7 @@ _SCALE = {"pr": 86400.0}  # kg/m^2/s -> mm/day; others already in ref units
 
 
 def _load_var(cmor_dir: Path, var: str):
-    """Load a CMOR Amon variable's last-timestep field (2-D lat-lon or ncol)."""
+    """Load a CMOR variable's full array (time, lat, lon) or grid field."""
     try:
         import netCDF4 as nc
     except Exception:  # pragma: no cover - env fallback
@@ -80,12 +80,18 @@ def _amon_path(cmor_dir: Path, var: str) -> Path:
 def area_weighted_global_mean(field: np.ndarray, area: np.ndarray) -> float:
     """Area-weighted global mean over the horizontal axes.
 
-    ``field`` may carry a leading time axis (last step is used).  ``area`` is the
-    grid-cell area (areacella).  NaNs and zero-area cells are excluded.
+    ``field`` may carry a leading time axis, which is averaged (time MEAN over
+    every month the run wrote) — the reference values are annual/climatological
+    means, so scoring a single month against them conflates the seasonal cycle
+    with model bias (caught 2026-08-01: last-DECEMBER netTOA read +12.9 W/m2
+    on a run whose annual mean was -2.9).  ``area`` is the grid-cell area
+    (areacella).  NaNs and zero-area cells are excluded; a cell with ANY NaN
+    month is dropped whole (plain mean, not nanmean) so partial coverage can
+    never silently pass as a full-window mean.
     """
     f = np.asarray(field, dtype=float)
     if f.ndim == area.ndim + 1:
-        f = f[-1]
+        f = f.mean(axis=0)
     w = np.asarray(area, dtype=float)
     ok = np.isfinite(f) & (w > 0)
     if not np.any(ok):
