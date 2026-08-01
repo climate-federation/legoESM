@@ -1,0 +1,408 @@
+"""Build an SCM column from the SAM/gSAM case decks the LES cases already read.
+
+The LES drivers (``run_bomex_les.py``, ``run_rico_les.py``,
+``run_dycoms_les.py``) initialise from a gSAM deck via
+:mod:`legoesm.atmosphere.forcing.sam_case_forcing`.  This module maps the SAME
+deck onto a :class:`~legoesm.atmosphere.forcing.scm.scm.SingleColumnModel`, so
+an SCM run and its LES reference share one source of truth for the initial
+sounding, the large-scale forcing and the surface boundary condition.  That is
+what makes an LES-vs-SCM comparison a controlled one, and what makes the
+comparison across turbulence closures controlled: every scheme is handed a
+byte-identical column and forcing, and only ``PhysicsConfig.turbulence`` differs.
+
+The DEPHY loader (:mod:`legoesm.atmosphere.forcing.scm.dephy_scm`) plays the
+same role for DEPHY-format NetCDF cases; this is its gSAM-deck sibling, and it
+deliberately mirrors that module's ``load_* -> case.create_scm(...)`` shape.
+
+Two conversions in here are easy to get backwards, so both are stated
+explicitly and both are covered by tests:
+
+**Absolute-T vs potential-T tendencies.**  The deck's ``tls`` column is an
+ABSOLUTE-temperature tendency ``dT/dt`` (``sam_case_forcing.SAMForcing.T_ls``
+says so), while :attr:`SCMForcing.theta_adv` is a genuine POTENTIAL-temperature
+tendency — ``compute_forcing_tendencies`` multiplies it by the Exner function
+before adding it to ``dT/dt``.  So the deck value is divided by Exner here,
+exactly as ``plane_large_scale_forcing.make_plane_ls_forcing_from_sam_case``
+does for the LES side.
+
+**The surface heat flux is NOT a theta flux on the SCM side.**  ``w_th_s`` is
+added straight into ``dT_dt`` by ``compute_forcing_tendencies`` with no Exner
+factor (``scm_forcing.py``, the ``prescribe="fluxes"`` branch), unlike
+``theta_adv`` and the subsidence term which are both scaled by Exner.  It is
+therefore a kinematic ABSOLUTE-TEMPERATURE flux, and the deck's SHF converts as
+``SHF / (rho_sfc * c_pd)`` with NO Exner divide.  The LES wants the same
+physical flux expressed as a POTENTIAL-temperature flux, so its conversion
+(``run_bomex_les.py``) carries the extra ``/ Exner_sfc``.  Copying the LES
+number into ``w_th_s`` would bias the SCM surface heat flux by a factor of
+Exner.  Both models receive the same W/m^2; only the variable each one
+prognoses differs.
+
+Vertical layout: the SCM is a sigma-coordinate column indexed TOP-TO-BOTTOM,
+while every deck array is bottom-to-top in height.  Everything returned by this
+module is already in SCM (top-to-bottom) order.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from legoesm.atmosphere.forcing.sam_case_forcing import (
+    extend_sounding_to_top,
+    interp_forcing_to_levels,
+    interp_sounding_to_levels,
+    read_sam_lsf,
+    read_sam_sfc,
+    read_sam_snd,
+    resolve_sam_case_dir,
+    surface_at_day,
+)
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+from legoesm.atmosphere.physics._shared import exner_function
+from legoesm.grids.vertical import create_sigma_coordinate
+
+from legoesm import constants
+
+__all__ = [
+    "SAMSCMCase",
+    "SAM_SCM_CASES",
+    "load_sam_scm_case",
+    "surface_kinematic_temperature_flux",
+    "surface_kinematic_moisture_flux",
+]
+
+# Scale height used ONLY to pick a generous height to extend the deck sounding
+# to before the exact pressure->height inversion below. Over-covering is safe
+# (the inversion clamps at the sounding top and the coverage is asserted);
+# under-covering is not, so this is deliberately larger than R_d*T/g ~ 8.8 km.
+_EXTEND_SCALE_HEIGHT_M = 9.0e3
+
+
+@dataclass(frozen=True)
+class SAMSCMCaseSpec:
+    """Per-case metadata that is NOT in the deck itself."""
+    gsam_dir: str
+    latitude_deg: float
+    les_domain_top_m: float
+    default_dt_s: float
+    note: str
+
+
+# Only cases with a legoESM LES driver are registered: the whole point of this
+# module is a matched LES reference, so a case with no LES is not admissible
+# here even though its deck may be cached on disk.
+SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
+    "bomex": SAMSCMCaseSpec(
+        gsam_dir="BOMEX", latitude_deg=15.0, les_domain_top_m=3000.0,
+        default_dt_s=60.0,
+        note="Siebesma et al. 2003 shallow non-precipitating trade cumulus; "
+             "prescribed surface fluxes.",
+    ),
+    "rico": SAMSCMCaseSpec(
+        gsam_dir="RICO", latitude_deg=18.0, les_domain_top_m=4000.0,
+        default_dt_s=60.0,
+        note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
+             "bulk fluxes over a fixed SST.",
+    ),
+    "dycoms": SAMSCMCaseSpec(
+        gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
+        default_dt_s=30.0,
+        note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
+             "surface fluxes.",
+    ),
+}
+
+
+def surface_kinematic_temperature_flux(shf_w_m2: float, rho_sfc: float) -> float:
+    """Deck SHF [W/m^2] -> kinematic ABSOLUTE-temperature flux [K m/s].
+
+    This is the form ``SCMForcing.w_th_s`` consumes: ``compute_forcing_tendencies``
+    adds it to ``dT_dt`` directly, with no Exner factor. See the module
+    docstring — the LES equivalent carries an extra ``/ Exner_sfc`` because a
+    height-coordinate LES prognoses theta.
+
+    Sign convention: positive = UPWARD (surface heating the atmosphere), which
+    is the deck's convention and the convention of the lowest-cell tendency
+    ``+w_th_s / dz`` in ``compute_forcing_tendencies``.
+    """
+    if not np.isfinite(rho_sfc) or rho_sfc <= 0.0:
+        raise ValueError(f"rho_sfc must be finite and positive, got {rho_sfc!r}")
+    return float(shf_w_m2) / (float(rho_sfc) * constants.c_pd)
+
+
+def surface_kinematic_moisture_flux(lhf_w_m2: float, rho_sfc: float) -> float:
+    """Deck LHF [W/m^2] -> kinematic moisture flux [(kg/kg) m/s].
+
+    Positive = UPWARD (surface moistening the atmosphere).
+    """
+    if not np.isfinite(rho_sfc) or rho_sfc <= 0.0:
+        raise ValueError(f"rho_sfc must be finite and positive, got {rho_sfc!r}")
+    return float(lhf_w_m2) / (float(rho_sfc) * constants.L_v)
+
+
+def _const_profile_fn(values: np.ndarray):
+    """Time-independent (nlev,) profile callable, closed over a device array."""
+    arr = jnp.asarray(values)
+    return lambda _t: arr
+
+
+def _interp_profile_fn(days_s: np.ndarray, per_time: np.ndarray):
+    """Time-interpolating (nlev,) profile callable, pure JAX.
+
+    ``per_time`` is ``(n_time, nlev)``. Kept in JAX (``jnp.interp``, which
+    clamps outside the range) rather than re-reading the deck per call: the
+    callable is evaluated inside the traced physics step, where a NumPy read
+    would be a host callback.
+    """
+    t_arr = jnp.asarray(days_s)
+    p_arr = jnp.asarray(per_time)
+
+    def fn(t_seconds):
+        t = jnp.asarray(t_seconds, dtype=p_arr.dtype)
+        return jax.vmap(lambda col: jnp.interp(t, t_arr, col), in_axes=1)(p_arr)
+
+    return fn
+
+
+def _interp_scalar_fn(days_s: np.ndarray, values: np.ndarray):
+    """Time-interpolating scalar callable, pure JAX."""
+    t_arr = jnp.asarray(days_s)
+    v_arr = jnp.asarray(values)
+    if v_arr.size == 1:
+        scalar = v_arr.reshape(())
+        return lambda _t: scalar
+    return lambda t: jnp.interp(jnp.asarray(t, dtype=v_arr.dtype), t_arr, v_arr)
+
+
+def _scm_heights_from_deck(snd, p_full_pa: np.ndarray) -> np.ndarray:
+    """Height of each SCM pressure level, by inverting the deck's own p(z).
+
+    The deck carries matched ``p`` [mb] and ``z`` [m], so the SCM's sigma levels
+    are placed in height using the case's own sounding rather than a separate
+    hydrostatic integration that could disagree with it. Interpolation is linear
+    in ``ln p``, which is where ``z`` is closest to linear.
+    """
+    p_deck_pa = np.asarray(snd.p, dtype=np.float64) * 100.0
+    z_deck = np.asarray(snd.z, dtype=np.float64)
+    if np.any(np.diff(p_deck_pa) >= 0.0):
+        raise ValueError(
+            "deck sounding pressure must decrease monotonically with height; "
+            "got a non-monotonic p(z), refusing to invert it."
+        )
+    # np.interp needs ascending x: ln p ascends as z descends.
+    ln_p_asc = np.log(p_deck_pa[::-1])
+    z_desc = z_deck[::-1]
+    z_full = np.interp(np.log(np.asarray(p_full_pa, dtype=np.float64)),
+                       ln_p_asc, z_desc)
+    if np.any(np.diff(z_full) >= 0.0):
+        raise ValueError(
+            "SCM heights must decrease monotonically from level 0 (model top) "
+            "to the surface; got a non-monotonic z_full."
+        )
+    return z_full
+
+
+@dataclass(frozen=True)
+class SAMSCMCase:
+    """An SCM column + forcing built from a gSAM case deck.
+
+    All profile arrays are ``(nlev,)`` indexed TOP-TO-BOTTOM, matching
+    ``make_column_state``.
+    """
+    name: str
+    spec: SAMSCMCaseSpec
+    nlev: int
+    dt: float
+    sigma_top: float
+    p_s: float                      # [Pa]
+    T_profile: np.ndarray           # [K]
+    q_v_profile: np.ndarray         # [kg/kg]
+    u_profile: np.ndarray           # [m/s]
+    v_profile: np.ndarray           # [m/s]
+    z_full: np.ndarray              # [m] above surface
+    p_full: np.ndarray              # [Pa]
+    forcing: SCMForcing
+    surface: dict[str, float]       # raw deck surface values at ``day``
+    rho_sfc: float                  # [kg/m^3]
+    case_dir: str
+
+    @property
+    def latitude_deg(self) -> float:
+        return self.spec.latitude_deg
+
+    @property
+    def les_domain_top_m(self) -> float:
+        return self.spec.les_domain_top_m
+
+    def les_mask(self) -> np.ndarray:
+        """Boolean ``(nlev,)``: SCM levels inside the LES domain.
+
+        Scoring an SCM against an LES reference is only defined where the LES
+        actually has a domain; above its top the LES has a sponge and a lid and
+        represents nothing.
+        """
+        return np.asarray(self.z_full) <= self.les_domain_top_m
+
+    def scm_kwargs(self) -> dict[str, Any]:
+        return dict(
+            nlev=self.nlev,
+            dt=self.dt,
+            T_profile=jnp.asarray(self.T_profile),
+            q_v_profile=jnp.asarray(self.q_v_profile),
+            u=jnp.asarray(self.u_profile),
+            v=jnp.asarray(self.v_profile),
+            p_s=self.p_s,
+            latitude_deg=self.spec.latitude_deg,
+            sigma_top=self.sigma_top,
+            forcing=self.forcing,
+        )
+
+    def create_scm(self, *, physics_config, **overrides) -> SingleColumnModel:
+        """Build the SCM. ``overrides`` win over the case defaults."""
+        kwargs = self.scm_kwargs()
+        kwargs.update(overrides)
+        return SingleColumnModel.create(physics_config=physics_config, **kwargs)
+
+
+def load_sam_scm_case(
+    case: str,
+    *,
+    nlev: int = 64,
+    dt: float | None = None,
+    sigma_top: float = 0.01,
+    day: float = 0.0,
+    case_dir: str | None = None,
+    coriolis: bool = True,
+    geostrophic: bool = True,
+) -> SAMSCMCase:
+    """Load a gSAM case deck as an SCM column + :class:`SCMForcing`.
+
+    Parameters
+    ----------
+    case
+        Key of :data:`SAM_SCM_CASES` (``"bomex"``, ``"rico"``, ``"dycoms"``).
+    nlev, sigma_top
+        SCM vertical grid. The default ``sigma_top=0.01`` gives a full
+        atmospheric column; only the levels inside the LES domain
+        (:meth:`SAMSCMCase.les_mask`) are comparable to an LES reference.
+    dt
+        Physics timestep [s]; defaults to the case's ``default_dt_s``.
+    day
+        Deck time [days] at which the initial surface state is sampled. The
+        forcing callables interpolate in time from ``day`` onwards.
+    coriolis, geostrophic
+        Disable to run without rotation / without geostrophic relaxation.
+    """
+    if case not in SAM_SCM_CASES:
+        raise ValueError(
+            f"Unknown SAM SCM case {case!r}; choose from "
+            f"{sorted(SAM_SCM_CASES)}."
+        )
+    spec = SAM_SCM_CASES[case]
+    if nlev < 2:
+        raise ValueError(f"nlev must be >= 2, got {nlev}")
+    if not 0.0 < sigma_top < 1.0:
+        raise ValueError(f"sigma_top must be in (0, 1), got {sigma_top}")
+    resolved_dir = case_dir or resolve_sam_case_dir(spec.gsam_dir)
+    dt = float(spec.default_dt_s if dt is None else dt)
+
+    snd = read_sam_snd(f"{resolved_dir}/snd")
+    lsf = read_sam_lsf(f"{resolved_dir}/lsf")
+    sfc = read_sam_sfc(f"{resolved_dir}/sfc")
+
+    p_s = float(snd.pres0) * 100.0                      # mb -> Pa
+
+    # Extend the sounding well above the model top BEFORE inverting p(z), so
+    # the inversion never has to clamp inside the column.
+    z_est_top = -_EXTEND_SCALE_HEIGHT_M * float(np.log(sigma_top))
+    snd = extend_sounding_to_top(snd, z_est_top)
+
+    sigma = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=jnp.float64)
+    sigma_full = np.asarray(sigma.sigma_full, dtype=np.float64)
+    p_full = sigma_full * p_s                            # [Pa], top-to-bottom
+    z_full = _scm_heights_from_deck(snd, p_full)
+    if z_full[0] > float(snd.z[-1]):
+        raise ValueError(
+            f"deck sounding top {float(snd.z[-1]):.0f} m does not cover the SCM "
+            f"model top {z_full[0]:.0f} m after extension."
+        )
+
+    exner_full = np.asarray(exner_function(jnp.asarray(p_full)), dtype=np.float64)
+
+    ic = interp_sounding_to_levels(snd, z_full)
+    T_profile = np.asarray(ic["theta"], dtype=np.float64) * exner_full
+    q_v_profile = np.asarray(ic["q_v"], dtype=np.float64)
+    u_profile = np.asarray(ic["u"], dtype=np.float64)
+    v_profile = np.asarray(ic["v"], dtype=np.float64)
+
+    # --- large-scale forcing, interpolated in height then carried in time ---
+    days = np.asarray(lsf.days, dtype=np.float64)
+    n_time = days.shape[0]
+    per_time = {k: [] for k in ("w_ls", "T_adv", "qv_adv", "u_ls", "v_ls")}
+    for t in range(n_time):
+        f_t = interp_forcing_to_levels(lsf, z_full, day=float(days[t]))
+        for k in per_time:
+            per_time[k].append(np.asarray(f_t[k], dtype=np.float64))
+    stacked = {k: np.stack(v, axis=0) for k, v in per_time.items()}
+
+    # Deck tls is dT_abs/dt; SCMForcing.theta_adv is a POTENTIAL-temperature
+    # tendency (compute_forcing_tendencies multiplies it by Exner). Convert.
+    stacked["theta_adv"] = stacked["T_adv"] / exner_full[None, :]
+
+    days_s = (days - float(day)) * 86400.0
+
+    def _profile(key):
+        arr = stacked[key]
+        if n_time == 1:
+            return _const_profile_fn(arr[0])
+        return _interp_profile_fn(days_s, arr)
+
+    # --- surface boundary ---------------------------------------------------
+    sfc0 = surface_at_day(sfc, day)
+    # Surface air density from the lowest SCM level (p_s, lowest-level T).
+    rho_sfc = p_s / (constants.R_d * float(T_profile[-1]))
+
+    interactive = (abs(sfc0["shf"]) < 1.0e-10 and abs(sfc0["lhf"]) < 1.0e-10)
+    if interactive:
+        prescribe = "T_s"
+        surface_kwargs = dict(
+            T_s=_interp_scalar_fn((np.asarray(sfc.days) - day) * 86400.0,
+                                  np.asarray(sfc.sst, dtype=np.float64)),
+        )
+    else:
+        prescribe = "fluxes"
+        sfc_days_s = (np.asarray(sfc.days) - day) * 86400.0
+        w_T = np.array([surface_kinematic_temperature_flux(float(s), rho_sfc)
+                        for s in np.asarray(sfc.shf)], dtype=np.float64)
+        w_q = np.array([surface_kinematic_moisture_flux(float(s), rho_sfc)
+                        for s in np.asarray(sfc.lhf)], dtype=np.float64)
+        surface_kwargs = dict(
+            w_th_s=_interp_scalar_fn(sfc_days_s, w_T),
+            w_qv_s=_interp_scalar_fn(sfc_days_s, w_q),
+        )
+
+    f_c = (2.0 * constants.Omega * float(np.sin(np.deg2rad(spec.latitude_deg)))
+           if coriolis else 0.0)
+
+    forcing = SCMForcing(
+        f_c=f_c,
+        u_geo=_profile("u_ls") if geostrophic else None,
+        v_geo=_profile("v_ls") if geostrophic else None,
+        subsidence_w=_profile("w_ls"),      # deck w_ls is positive UP, as is
+                                            # SCMForcing.subsidence_w
+        theta_adv=_profile("theta_adv"),
+        qv_adv=_profile("qv_adv"),
+        prescribe=prescribe,
+        **surface_kwargs,
+    )
+
+    return SAMSCMCase(
+        name=case, spec=spec, nlev=nlev, dt=dt, sigma_top=sigma_top, p_s=p_s,
+        T_profile=T_profile, q_v_profile=q_v_profile,
+        u_profile=u_profile, v_profile=v_profile,
+        z_full=z_full, p_full=p_full, forcing=forcing,
+        surface=sfc0, rho_sfc=rho_sfc, case_dir=resolved_dir,
+    )
