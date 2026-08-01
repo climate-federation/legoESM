@@ -2950,6 +2950,36 @@ def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir,
         print(f"[transports] ACC@Drake diag skipped: {type(e).__name__}: {e}")
 
 
+def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
+    """APPEND time-mean Arctic gateway transports to transports.txt.
+
+    ``acc`` is the GatewayAccumulator carried through the step loop (None when
+    --gateway-transports is off).  Sign: POSITIVE = INTO the Arctic.  Volume in
+    Sv, salt in psu*m^3/s.  Non-fatal, like its siblings.
+    """
+    if acc is None:
+        return
+    try:
+        if acc.n == 0:
+            print("[gateway] no steps accumulated; nothing written")
+            return
+        rows = acc.as_dict()
+        if not io_proc:
+            return
+        print(f"[gateway] time-mean over {acc.n} steps (+ = INTO the Arctic):")
+        for nm, (vol_sv, salt) in rows.items():
+            print(f"[gateway]   {nm:<16} {vol_sv:+8.3f} Sv   "
+                  f"{salt:+.4e} psu m^3/s")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(out_dir) / "transports.txt", "a") as fh:
+            fh.write(f"gateway_n_steps {acc.n}\n")
+            for nm, (vol_sv, salt) in rows.items():
+                fh.write(f"gateway_{nm}_vol_Sv {vol_sv:.6f}\n")
+                fh.write(f"gateway_{nm}_salt_psu_m3s {salt:.6e}\n")
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] transport diag skipped: {type(e).__name__}: {e}")
+
+
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
     """Global meridional ocean heat transport (NH peak / SH min) [PW] from the
     LIVE state.  Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h
@@ -4094,6 +4124,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "over-salinifies ice growth by ~1.35x and "
                         "over-dilutes rivers (2026-07-18 Arctic "
                         "halocline-erosion audit). latlon/tripole/mpas.")
+    p.add_argument("--gateway-transports", action="store_true",
+                   help="Accumulate TIME-MEAN volume and salt transports "
+                        "through the Arctic gateways (Bering/Pacific, "
+                        "Davis/CAA, Atlantic/Nordic, Siberian) on the "
+                        "lat>=66N region boundary and append them to "
+                        "transports.txt. Pure diagnostic: reads the state "
+                        "after each step and never writes back, so the "
+                        "trajectory is bit-identical with the flag off. "
+                        "Sign: POSITIVE = INTO the Arctic. tripole / latlon "
+                        "host-loop runs only.")
     p.add_argument("--no-normalize-freshwater", action="store_true",
                    help="EXPLICITLY disable the global surface-freshwater "
                         "normalization the latlon/tripole/mpas setups enable "
@@ -5698,6 +5738,21 @@ def main() -> int:
                else "grid!=tripole or WOA-nudging / spin-up-drag / SSS-restoring "
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
+    # --gateway-transports lane guards.  MUST precede the `use_scan` branch,
+    # which RETURNS from main(): a guard after it never executes and the flag
+    # is silently ignored (codex H3).  The predicate lives in the ocean package
+    # so it is directly unit-testable; this call site is what makes it bite.
+    if getattr(args, "gateway_transports", False):
+        from legoesm.ocean.diagnostics_sections import validate_gateway_lanes
+        try:
+            validate_gateway_lanes(
+                use_scan=bool(use_scan),
+                spmd_persistent=bool(
+                    getattr(args, "spmd_persistent_state", False)),
+                app_grid_type=app_grid_type)
+        except ValueError as _gw_err:
+            raise SystemExit(str(_gw_err))
+
     if use_scan:
         # NEMO ln_crt_dwn relative winds are host-loop only: the on-device scan
         # body (compute_omip2_surface_forcing_jax) has no current-feedback wiring,
@@ -5882,6 +5937,26 @@ def main() -> int:
                   f"the first {args.diag_momentum_step} steps (debug window).",
                   flush=True)
     _pers_needs_prestep_global = bool(_pers_forced)
+
+    # --- Arctic gateway transport accumulator (pure diagnostic) ----------
+    _gw_acc = None
+    _gw_gates = None
+    if getattr(args, "gateway_transports", False):
+        if getattr(state, "v", None) is None:
+            print("[gateway] needs C-grid v faces; DISABLED for this run.")
+        else:
+            from legoesm.ocean.diagnostics_sections import (
+                setup_gateway_accumulator,
+            )
+            _gw_lat = (jnp.degrees(jnp.asarray(grid.lat_T))
+                       if hasattr(grid, "lat_T") else jnp.asarray(lat2d))
+            _gw_lon = (jnp.degrees(jnp.asarray(grid.lon_T))
+                       if hasattr(grid, "lon_T") else jnp.asarray(lon2d))
+            _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
+                _gw_lat, _gw_lon, state.land_mask.data)
+            print(f"[gateway] accumulating through {len(_gw_gates.names)} "
+                  f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
+                  f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); + = INTO Arctic")
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
@@ -6179,6 +6254,14 @@ def main() -> int:
             # fail-fasts at setup if the tide is enabled).
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
+        if _gw_acc is not None:
+            # READ-ONLY: `state` is never reassigned here, so the trajectory
+            # is bit-identical to a run without the flag.
+            from legoesm.ocean.diagnostics_sections import gateway_step
+            _gw_acc = gateway_step(
+                _gw_acc, _gw_gates, state, z_coord, grid,
+                min_water_column_m=getattr(model.config,
+                                           "min_water_column_m", None))
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
@@ -6412,6 +6495,7 @@ def main() -> int:
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()
     rate = n_steps / (time.time() - t_wall)
