@@ -214,7 +214,26 @@ def regenerate_golden() -> None:
 @pytest.mark.skipif(not GOLDEN_PATH.exists(), reason="golden not generated")
 def test_baroclinic_decomposition_bit_identical():
     """The (decomposed) function must reproduce the committed golden to within
-    float round-off on every case — the pure-extraction gate."""
+    float round-off on every case — the pure-extraction gate.
+
+    RE-BASELINED 2026-08-01 (#1388). The previous golden was written
+    2026-06-26 and every case had drifted past the rtol=1e-12 gate, worst-case
+    relative deviation per case:
+
+        implicit_gmredi_sponge_diag   6.14e+00
+        hollingsworth_ke              5.71e-01
+        explicit_biharmonic_smag_merid 3.54e-02
+        weno5_momentum_tracer         9.37e-03
+        flux_form_momentum            9.26e-03
+
+    That is a MONTH of intentional ocean physics changes (the Treguier GM
+    kappa_min floor 2026-07-28, the NEMO/DINO fidelity fixes, the GM/Redi
+    promotions), NOT a single attributable regression — and this gate cannot
+    tell the two apart on its own, which is why the deviations are recorded
+    here rather than silently overwritten. This re-baseline therefore asserts
+    "future changes must be deliberate", not "the current values are correct".
+    Anyone who suspects one of the drifts above is a defect should bisect that
+    case against the 2026-06-26 golden in git history."""
     golden = np.load(GOLDEN_PATH)
     checked = 0
     for name, kw in _cases():

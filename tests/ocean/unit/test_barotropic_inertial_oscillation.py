@@ -103,6 +103,21 @@ def _build(flat=False):
     state = rest_state_latlon_cgrid_ocean(
         grid, z, land_mask_override=wall, H_bathy_override=Hb,
         T_water_init_C=10.0, T_deep=10.0)
+    # The AB2 slow-forcing carry must be SEEDED before the first step: the
+    # model stores a Field each step, and a step-1 None->Field transition
+    # breaks the lax.scan carry, so the model now refuses an unseeded state.
+    # These tests predate that guard, which is why they read as failures rather
+    # than as a config error (#1388). Same idiom as
+    # build_silvestri_baroclinic_jet_setup.
+    if getattr(cfg.barotropic, "barotropic_slow_forcing_ab2", False):
+        from legoesm.core.field import Field as _F
+        state = state._replace(
+            F_slow_u_prev=_F(data=jnp.zeros_like(state.u.data[:, :, 0]),
+                             name="F_slow_u_prev", dims=("lat", "lon_u"),
+                             units="m/s^2"),
+            F_slow_v_prev=_F(data=jnp.zeros_like(state.v.data[:, :, 0]),
+                             name="F_slow_v_prev", dims=("lat_v", "lon"),
+                             units="m/s^2"))
     model = LatLonCGridOceanModel(grid, z, cfg)
     return grid, z, state, model
 

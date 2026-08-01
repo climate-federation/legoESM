@@ -176,16 +176,30 @@ def test_barotropic_coriolis_split_validation_and_nonvacuity():
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
             r.model_config._replace(barotropic_coriolis_split="live"))
-    # live remains valid on the face-f split form ("ene" relative-only card)
-    LatLonCGridOceanModel(
-        r.grid, r.z_coord,
-        r.model_config._replace(vorticity_scheme="ene",
-                                barotropic_coriolis_split="live"))
+    # live remains valid on the face-f split form ("ene" relative-only card).
+    # The recipe now selects the AB3-AM4 filter, which the live split rejects
+    # (the AB3 substep applies live Coriolis to the EXTRAPOLATED U_mid while the
+    # pre-step subtraction uses the plain pre-step U_bar, so substep 0 would not
+    # cancel bit-exactly). Take the guard's own instruction and pair live with
+    # the boxcar filter, NEMO's DINO selection (#1388).
+    _boxcar = r.model_config.barotropic._replace(
+        barotropic_time_filter="nemo_boxcar_centred")
+    _live_ok = r.model_config._replace(
+        vorticity_scheme="ene", barotropic_coriolis_split="live",
+        barotropic=_boxcar)
+    LatLonCGridOceanModel(r.grid, r.z_coord, _live_ok)
+    # ... and the pairing guard itself is live: AB3-AM4 + live must still raise.
+    with pytest.raises(ValueError, match="nemo_ab3am4"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(vorticity_scheme="ene",
+                                    barotropic_coriolis_split="live"))
 
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
     sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
-    cfg_ene = r.model_config._replace(vorticity_scheme="ene")
+    cfg_ene = r.model_config._replace(vorticity_scheme="ene",
+                                      barotropic=_boxcar)
     m_live = LatLonCGridOceanModel(
         r.grid, r.z_coord, cfg_ene._replace(barotropic_coriolis_split="live"))
     m_frozen = LatLonCGridOceanModel(r.grid, r.z_coord, cfg_ene)

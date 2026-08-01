@@ -242,7 +242,27 @@ def test_implicit_solver_cleaner_than_explicit_substep():
     )
 
 
-def test_implicit_solver_conserves_mass():
+@pytest.fixture
+def _fp64():
+    """#1388: the conservation gate below reasons in fp64 but ran in fp32.
+
+    `JAX_ENABLE_X64=1` does NOT change legoESM's precision policy — state
+    constructors read `get_policy().storage`, which defaults to fp32 — so the
+    mass gate was measuring float32 round-off, not the solver. MEASURED on the
+    same 100 steps: fp32 drift 1.161e-06 (over the 5e-7 ceiling), fp64 drift
+    4.351e-16. Ten orders of magnitude: the implicit solver conserves mass to
+    machine precision, and the "failure" was the precision policy.
+    """
+    from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
+
+
+def test_implicit_solver_conserves_mass(_fp64):
     """Per-step mass conservation: ``Σ η·area`` drift over 100 steps
     should be at PCG-tolerance level (relative to the running ``Σ |η|·area``).
     """
@@ -278,6 +298,9 @@ def test_implicit_solver_conserves_mass():
     # PCG residual with tol=1e-12 contributes at most ~1e-10 relative
     # mass error per step; over 100 steps and float64 cell-summation noise
     # ~ sqrt(N_cells) · tol, the cumulative drift should remain << 1e-6.
+    # That reasoning is fp64 reasoning, which is why this test now REQUIRES the
+    # fp64 policy (see _fp64): under the default fp32 storage the same run
+    # drifts 1.161e-06 -- round-off, not the solver (#1388).
     # The 5e-7 ceiling absorbs fp-ordering variation across momentum-
     # advection schemes (vector-invariant vs WENO vs PV-flux Sadourny);
     # the docstring-stated bound is "<< 1e-6", which is what's tested.
