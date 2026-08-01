@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.parallel.scaling_preflight import (
+from legoesm.scaling_preflight import (
     CS_SPMD_DEVICE_COUNTS,
     DEVICE_HBM_BYTES,
     estimate_bytes_per_device,

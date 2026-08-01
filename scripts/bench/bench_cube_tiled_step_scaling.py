@@ -85,7 +85,9 @@ def main() -> int:
     p.add_argument("--resolution", type=int, default=48,
                    help="Cells per cube edge N (must divide by kt).")
     p.add_argument("--nlev", type=int, default=30)
-    p.add_argument("--device-hbm", type=str, default=None,
+    p.add_argument("--device-hbm", type=str,
+                   default=os.environ.get("LEGOESM_DEVICE_HBM"),
+
                    help="#1361 memory preflight: target device whose HBM the "
                         "estimated per-device footprint must fit "
                         "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
@@ -128,7 +130,7 @@ def main() -> int:
     # #1361 preflight, BEFORE distributed init / jax import / any allocation.
     # The C1152 L60 kt=3 arm needed 105.7 GB/device against 80 GB HBM and only
     # found out during compile, two arms into the job.
-    from legoesm.parallel.scaling_preflight import (
+    from legoesm.scaling_preflight import (
         preflight_or_exit, validate_device_count, validate_memory,
     )
     _n_devices = 6 * args.kt * args.kt

@@ -76,3 +76,11 @@ export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
 # Scratch tmp (mirrors the user's reference Casper job script).
 export TMPDIR="${TMPDIR:-$SCRATCH/temp}"
 mkdir -p "$TMPDIR"
+
+# #1361 memory preflight: the target device whose HBM the benches gate against
+# (`--device-hbm`, keys of scaling_preflight.DEVICE_HBM_BYTES). Set here rather
+# than per-job so the gate is ON by default — a flag that every launcher forgot
+# to pass is a gate that never fires (codex High, PR #1376). Derecho's GPU
+# nodes are `gpu_type=a100`; the 40 GB entry is the CONSERVATIVE choice — if
+# the queue hands out 80 GB parts, override with LEGOESM_DEVICE_HBM=a100-80.
+export LEGOESM_DEVICE_HBM="${LEGOESM_DEVICE_HBM:-a100-40}"

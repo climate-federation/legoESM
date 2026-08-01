@@ -51,17 +51,17 @@ def nearest_divisible(n: int, divisor: int, *, n_candidates: int = 3) -> list[in
     """
     if divisor <= 0:
         raise ValueError(f"divisor must be positive, got {divisor}")
-    below = (n // divisor) * divisor
-    out: list[int] = []
-    step = 0
-    while len(out) < n_candidates and step < n_candidates + 2:
-        lo, hi = below - step * divisor, below + (step + 1) * divisor
-        if lo > 0 and lo not in out:
-            out.append(lo)
-        if hi not in out:
-            out.append(hi)
-        step += 1
-    return sorted(v for v in out if v > 0)[:n_candidates]
+    if n_candidates <= 0:
+        raise ValueError(
+            f"n_candidates must be positive, got {n_candidates} "
+            f"(the docstring promises a non-empty list)")
+    # Rank a window of multiples by ACTUAL distance to n, not by side. The
+    # side-alternating version returned [64, 128, 192] for (190, 64) and
+    # omitted 256, which is closer than 64 (codex, PR #1376).
+    k = max(1, n // divisor)
+    span = n_candidates + 2
+    cands = {m * divisor for m in range(max(1, k - span), k + span + 1)}
+    return sorted(sorted(cands, key=lambda v: (abs(v - n), v))[:n_candidates])
 
 
 def validate_divisibility(extent: int, n_devices: int, *,
@@ -135,8 +135,15 @@ def estimate_bytes_per_device(*, n_columns: int, nlev: int, n_devices: int,
     OVER-estimate, deliberately on the safe side: a false "fits" costs a
     multi-node allocation, a false "does not fit" costs one CLI flag.
     """
-    if n_devices <= 0:
-        raise ValueError(f"n_devices must be positive, got {n_devices}")
+    # Every term multiplies the estimate, so a zero/negative one silently
+    # produces a "fits" verdict (codex Medium, PR #1376). n_columns and nlev
+    # reach here from CLI flags that argparse only type-checks.
+    for _name, _val in (("n_devices", n_devices), ("n_columns", n_columns),
+                        ("nlev", nlev), ("bytes_per_value", bytes_per_value),
+                        ("n_fields", n_fields),
+                        ("working_set_factor", working_set_factor)):
+        if _val <= 0:
+            raise ValueError(f"{_name} must be positive, got {_val}")
     per_field = float(n_columns) * float(nlev) * float(bytes_per_value)
     total = per_field * n_fields * working_set_factor
     return total / float(n_devices) if sharded else total
