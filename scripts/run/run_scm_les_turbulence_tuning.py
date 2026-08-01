@@ -681,16 +681,23 @@ def main(argv=None) -> int:
     print(f"  surface: prescribe={case.forcing.prescribe}")
 
     configs = {}
+    profiles_default: dict[str, dict[str, np.ndarray]] = {}
     results: list[SchemeResult] = []
     for scheme in schemes:
         print(f"\n[eval] {scheme}", flush=True)
         res = SchemeResult(scheme=scheme, status="ok")
         t0 = time.time()
         try:
-            cfg, _means, components, combined, drift = evaluate_scheme(
+            cfg, means, components, combined, drift = evaluate_scheme(
                 scheme, case=case, reference=reference, args=args,
             )
             configs[scheme] = cfg
+            profiles_default[scheme] = {
+                "theta": np.asarray(_theta_from_T(means["T"], case.p_full)),
+                "qv": np.asarray(means["qv"]),
+                "u": np.asarray(means["u"]),
+                "v": np.asarray(means["v"]),
+            }
             res.score_default = float(combined)
             res.components_default = {k: float(v) for k, v in components.items()}
             res.ps_drift_pa = drift
@@ -739,8 +746,34 @@ def main(argv=None) -> int:
                       f"({res.n_trained} params trained)")
 
     _write_outputs(outdir, args, case, reference, results)
+    _write_profiles(outdir, case, reference, profiles_default)
     print(f"\nwrote {outdir}")
     return 0
+
+
+def _write_profiles(outdir: Path, case, reference,
+                    profiles_default: dict[str, dict]) -> None:
+    """Save the LES reference and every arm's mean profiles for plotting.
+
+    Saved on the SCM levels with the LES-domain mask alongside, so a plot
+    cannot silently draw the extrapolated region.
+    """
+    payload = {
+        "z_scm": np.asarray(case.z_full),
+        "p_full": np.asarray(case.p_full),
+        "mask": np.asarray(reference.mask),
+        "weights": np.asarray(reference.weights),
+        "z_les": np.asarray(reference.z_les),
+        "window_hours": np.asarray(reference.window_hours),
+    }
+    for name, profile in reference.profiles.items():
+        payload[f"les_scmlev_{name}"] = np.asarray(profile)
+    for name, profile in reference.profiles_les.items():
+        payload[f"les_native_{name}"] = np.asarray(profile)
+    for scheme, prof in profiles_default.items():
+        for name, values in prof.items():
+            payload[f"scm_{scheme}_{name}"] = np.asarray(values)
+    np.savez(outdir / "profiles.npz", **payload)
 
 
 def _half_pressures(case) -> np.ndarray:
