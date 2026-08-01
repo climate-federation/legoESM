@@ -108,8 +108,30 @@ the envelope 0.0236 / 0.0096; case-8 day-5 max|V| = 19.75 inside the oracle band
 
 ## The common blocker
 
-The confirmed cube-vertex divergence defect, the SW imprint gap, and possibly the
-weak jet all sit downstream of the cd-grid seam/vertex halo handling. The
+The confirmed cube-vertex divergence defect and the SW imprint gap sit
+downstream of the cd-grid seam/vertex halo handling.
+
+**RETRACTED (2026-08-01): the dead Held-Suarez jet is NOT downstream of these.**
+An earlier version of this section speculated that all three shared a cause. That
+was checked and refuted on the code paths, under default matrix settings:
+
+- The corner-divergence path is entered only when corner-divergence damping is
+  active (`primitive_eq_cdgrid.py:601`), whose gate requires nonzero CDD
+  selectors (`_fv3_divergence_corner.py:60`); the matrix defaults
+  `LEGOESM_CDD_D2BG`, `D4BG` and `NORD` to zero
+  (`run_atmosphere_test_matrix.py:4226`). So the `dgrid_ne_halo=False` branch and
+  the missing west ghost **cannot contribute to standard dry Held-Suarez at all**.
+- The raw-slot `d2a2c_vect` path is reached in PE only by the flux-form moisture
+  substep (`primitive_eq_cdgrid.py:1484`, `:1529`), which needs
+  `moisture_flux_form=True` and tracers (`:1986`); the default is false and dry
+  HS initialises no tracers (`held_suarez.py:296`).
+
+Their direct contribution to this lane is zero unless a run sets non-default CDD
+or moisture/tracer options. The 23× W2 imprint is **not transferable evidence** of
+a Held-Suarez momentum sink. Broader non-duogrid seam paths remain plausible, but
+that is a separate investigation with its own evidence bar.
+
+The
 velocity halo is fixed and verified but **gated off** (`dgrid_ne_halo=False`),
 because on its own it pairs real cross-panel winds with still-edge-replicated
 seam metrics and regresses DCMIP TC1 from PASS to a blowup at step 3950.
@@ -216,3 +238,27 @@ a wrong permutation, a wrong reversal, or a missing `cos` sign — none of which
 existing `sin=1, cos=0` assertions can detect. Assert all eight vertex assignments
 and the two poisoned slots per diagonal cell. The real-metric solid-body
 convergence test remains the end-to-end gate.
+
+## Held-Suarez dead jet — investigation ladder (2026-08-01)
+
+Cheapest-first, with the rule that a new 200-day run is **not** justified until
+the offline diagnostics show a difference:
+
+1. **Offline C↔D wind-transfer measurement** on saved state.
+2. **One-state term / angular-momentum / seam budget.**
+3. A **5-10 day persistent-D versus default pair** — only if 1-2 show a
+   difference.
+
+Interpretation, decided in advance so the result is not read after the fact:
+
+| early result | most likely direction |
+|---|---|
+| `T'` grows but EKE collapses | C↔D wind projection |
+| EKE grows but `u'v'` convergence is wrong | seam / metric / momentum route |
+| EKE and `v'T'` both fail | PE baroclinic conversion, or broad dissipation |
+| correct fluxes but weak mean acceleration | drag / AAM / mean-flow coupling |
+
+**Instrument warning.** `scripts/run/run_dry_held_suarez_cube.py:109` computes
+`eddy_ke` by subtracting **face-local** components rather than geographic winds.
+That diagnostic must be recomputed before it is used physically — on the cube,
+face-local and geographic eddy fields are different quantities.
