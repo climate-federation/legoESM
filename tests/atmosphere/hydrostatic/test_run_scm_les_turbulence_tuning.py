@@ -271,3 +271,44 @@ def test_padding_would_be_caught_by_the_pressure_assert():
     import numpy as _np
     with pytest.raises(RuntimeError, match="surface pressure drifted"):
         drv._assert_surface_pressure_static(_np.zeros(5), 1.015e5)
+
+
+# --- registry namespace: class names collide across components -------------
+
+@pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
+def test_collected_params_are_fields_of_the_target_config(scheme):
+    """Non-vacuous version of the earlier 'has tunable params' check.
+
+    The registry's class names are NOT unique: the ocean's vertical mixing also
+    registers a TKEConfig, so a name-only lookup collected ocean parameters and
+    apply_param_overrides then raised mid-rollout with "TKEConfig has no
+    field(s) ['Prandtl_tke0', 'lc_coeff', ...]". Assert every collected field
+    actually exists on the config the overrides are spliced into.
+    """
+    cfg = drv.build_physics_config(scheme, prescribed_fluxes=False)
+    sub = getattr(cfg.turbulence, scheme)
+    target = sub.params if scheme == "clubb" else sub
+    fields = set(type(target)._fields)
+    params = drv._initial_params(scheme, "extended")
+    assert params.constraints, scheme
+    for c in params.constraints:
+        assert c.field in fields, (
+            f"{scheme}: collected {c.field!r} which is not a field of "
+            f"{type(target).__name__}"
+        )
+
+
+def test_scheme_keys_are_all_atmospheric():
+    for scheme in drv.TURBULENCE_SCHEMES:
+        for key in drv._scheme_keys_for(scheme):
+            assert key.startswith("atm.turb."), (scheme, key)
+
+
+def test_ocean_tke_config_really_does_collide():
+    """Proves the guard is not vacuous: the collision it defends against
+    exists in the registry right now."""
+    from legoesm.training.param_collector import build_registry
+    keys = {m.scheme_key for m in build_registry()
+            if m.config_class == "TKEConfig"}
+    assert len(keys) > 1, "expected an atm/ocean TKEConfig name collision"
+    assert any(not k.startswith("atm.turb.") for k in keys)

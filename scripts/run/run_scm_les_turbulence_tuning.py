@@ -115,6 +115,9 @@ GRAD_NONZERO_TOL = 1.0e-14
 # case with weak shear) cannot divide the score by ~0.
 PROFILE_FLOOR = 1.0e-8
 _LINE_SEARCH_SCALES = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01, 0.005, 0.001)
+# Registry namespace for the ATMOSPHERIC turbulence configs. Class names alone
+# collide across components (the ocean also registers a TKEConfig).
+_ATM_TURB_NAMESPACE = "atm.turb."
 
 
 # --------------------------------------------------------------------------
@@ -357,12 +360,29 @@ def _scheme_keys_for(scheme: str) -> set[str]:
     sub = getattr(cfg.turbulence, scheme)
     target = sub.params if scheme == "clubb" else sub
     wanted = type(target).__name__
+    # Class name alone is NOT unique across the registry: the ocean's vertical
+    # mixing also registers a TKEConfig ('ocean.vm.tke'), so matching on the
+    # name collected the ocean's parameters and then tried to splice them into
+    # the atmospheric config ("TKEConfig has no field(s) ['Prandtl_tke0',
+    # 'lc_coeff', ...]"). Restrict to the atmospheric turbulence namespace.
     keys = {m.scheme_key for m in build_registry()
-            if m.config_class == wanted}
+            if m.config_class == wanted
+            and m.scheme_key.startswith(_ATM_TURB_NAMESPACE)}
     if not keys:
         raise RuntimeError(
-            f"no __param_spec__ registered for {wanted} (scheme {scheme!r}); "
-            "it cannot be tuned."
+            f"no __param_spec__ registered under {_ATM_TURB_NAMESPACE!r} for "
+            f"{wanted} (scheme {scheme!r}); it cannot be tuned."
+        )
+    # Every collected field must exist on the config the overrides are spliced
+    # into, or apply_param_overrides raises mid-rollout.
+    fields = set(type(target)._fields)
+    stray = {m.field for m in build_registry()
+             if m.scheme_key in keys and m.field not in fields}
+    if stray:
+        raise RuntimeError(
+            f"registry entries {sorted(stray)} for scheme {scheme!r} are not "
+            f"fields of {wanted}; the scheme_key lookup matched the wrong "
+            "config."
         )
     return keys
 
