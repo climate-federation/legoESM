@@ -1265,7 +1265,10 @@ class DiagnosticCollector:
             # out of the already-regridded 3-D ua/va arrays.
             if self._spatial_daily is not None:
                 daily_2d: dict[str, np.ndarray] = {}
-                for _name in ("tas", "pr", "psl"):
+                # rsut/rlut: registered in the ``day`` table — feed them on
+                # this (cube/lat-lon collect) lane too, for lane parity with
+                # the MPAS feed.
+                for _name in ("tas", "pr", "psl", "rsut", "rlut"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 # 850 hPa is index 16 in the ascending-sorted PLEV19 axis
@@ -1556,7 +1559,7 @@ class DiagnosticCollector:
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
                     "rsds", "rlds", "rsus", "rlus", "tauu", "tauv")
-        _FLUX_DAILY = ("pr",)
+        _FLUX_DAILY = ("pr", "rsut", "rlut")
         _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
@@ -1827,9 +1830,11 @@ class DiagnosticCollector:
                     fields_3d[_name] = r
 
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
-            # the 3-D arrays (same index convention as collect()).
+            # the 3-D arrays (same index convention as collect()).  rsut/rlut
+            # are registered in the ``day`` table too — flux fields, so they
+            # ride the _FLUX_DAILY midpoint binning like pr.
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl"):
+                for _name in ("tas", "pr", "psl", "rsut", "rlut"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)

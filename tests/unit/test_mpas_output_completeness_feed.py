@@ -511,6 +511,49 @@ def test_hur_skipped_without_q_v(mesh):
 
 
 # =====================================================================
+# Daily table: rsut / rlut
+# =====================================================================
+
+def test_daily_rsut_rlut_reach_the_day_accumulator(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    _feed(dc, f, rsut=np.full(n, 101.0), rlut=np.full(n, 240.0))
+    out = dc._spatial_daily.finalize(min_sample_fraction=0)
+    for name, val in (("rsut", 101.0), ("rlut", 240.0)):
+        key = f"field_2d_{name}"
+        assert key in out, f"day-table {name} never fed on the MPAS lane"
+        got = out[key]
+        assert np.allclose(got[np.isfinite(got)], val)
+
+
+def test_daily_rsut_uses_flux_midpoint_binning(mesh):
+    """An interval-mean rsut covering [14, 15] must land in the DAY-14
+    bucket (midpoint 14.5), while the state snapshot tas stays at day 15.
+    Red if rsut is dropped from _FLUX_DAILY (it would land at day 15)."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    dc.feed_cmip_accumulators_native(
+        15.0, T=f["T"], p_s=f["p_s"], lat_deg=f["lat_deg"],
+        phis=f["phis"], rsut=np.full(n, 101.0), rlut=np.full(n, 240.0),
+        flux_interval_days=1.0)
+    day_of = {}
+    for (yr, doy), bucket in dc._spatial_daily._data.items():
+        for name in bucket:
+            day_of[name] = doy
+    # Calendar doy is 1-based (day_to_calendar), so pin the RELATIVE
+    # offset: the flux midpoint (14.5) bins one day EARLIER than the
+    # state-snapshot endpoint (15.0).
+    assert day_of.get("tas") is not None and day_of.get("rsut") is not None
+    assert day_of["rsut"] == day_of["tas"] - 1, (
+        f"rsut daily bucket {day_of['rsut']} is not one day before the "
+        f"tas endpoint bucket {day_of['tas']} — not midpoint-binned "
+        f"(missing from _FLUX_DAILY?)")
+    assert day_of["rlut"] == day_of["tas"] - 1
+
+
+# =====================================================================
 # Transactionality of the new inputs
 # =====================================================================
 
