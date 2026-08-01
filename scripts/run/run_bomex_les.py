@@ -517,6 +517,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
                 np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
                 qr3=np.asarray(st.tracers[..., 2]),
@@ -770,6 +771,7 @@ def main():
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
                 np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c))
             frame += 1
