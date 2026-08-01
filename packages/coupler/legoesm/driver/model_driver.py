@@ -6122,6 +6122,12 @@ class ModelDriver:
             q_v = _tracer("q_v")
             q_c = _tracer("q_c")
             q_i = _tracer("q_i")
+            # Snow/graupel: part of the CMOR clivi/cli FROZEN-condensate
+            # convention (cloud ice + snow + graupel); absent (None) on
+            # warm-rain / two-category microphysics — the collector then
+            # sums whichever species exist.
+            q_s = _tracer("q_s")
+            q_g = _tracer("q_g")
             # Flux fields (slots of the sfc_diag contract: 2 precip
             # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
             # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
@@ -6273,6 +6279,8 @@ class ModelDriver:
                 q_v=q_v,
                 q_c=q_c,
                 q_i=q_i,
+                q_s=q_s,
+                q_g=q_g,
                 u_east=u_east,
                 v_north=v_north,
                 precip=precip,
@@ -6531,8 +6539,13 @@ class ModelDriver:
         if (self._mpas_cmip_feed_on and _diag is not None
                 and (float(cfg.output.diag_days) <= 0.0
                      or _true_cad_days >= 1.0)):
+            # State-derived (instantaneous end-of-interval) fields on this
+            # lane — includes every condensate/cloud/humidity/height field
+            # computed from the state at the feed, and ``clt`` (also a state
+            # snapshot here; it predates this set but was omitted from it).
             _diag.cmip_snapshot_vars = {
-                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts"}
+                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts",
+                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming

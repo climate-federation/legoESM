@@ -190,6 +190,149 @@ def test_ts_absent_when_not_supplied_never_air_T_fallback(mesh):
 
 
 # =====================================================================
+# Water paths clwvi/clivi + 3-D clw/cli
+# =====================================================================
+
+def test_clwvi_clivi_hand_checkable_and_include_snow(mesh):
+    """Vertically uniform tracers on pure sigma pin the integrals exactly:
+    path = q * p_s / g.  The clivi expectation INCLUDES q_s, so an
+    implementation that drops snow from the frozen sum goes red."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    q_c = np.full((n, NLEV), 1.0e-4)
+    q_i = np.full((n, NLEV), 3.0e-5)
+    q_s = np.full((n, NLEV), 2.0e-5)
+    assert _feed(dc, f, q_c=q_c, q_i=q_i, q_s=q_s)
+    p_s0 = 1.0e5
+    exp_clivi = (3.0e-5 + 2.0e-5) * p_s0 / constants.g
+    exp_clwvi = (1.0e-4 + 3.0e-5 + 2.0e-5) * p_s0 / constants.g
+    got_i = _mean2d(dc, "clivi")
+    got_w = _mean2d(dc, "clwvi")
+    assert got_i is not None, "clivi absent from the MPAS CMOR feed"
+    assert got_w is not None, "clwvi absent from the MPAS CMOR feed"
+    np.testing.assert_allclose(got_i[np.isfinite(got_i)], exp_clivi,
+                               rtol=1e-5)
+    np.testing.assert_allclose(got_w[np.isfinite(got_w)], exp_clwvi,
+                               rtol=1e-5)
+
+
+def test_graupel_contributes_to_the_frozen_path(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    q_c = np.full((n, NLEV), 1.0e-4)
+    q_g = np.full((n, NLEV), 4.0e-5)
+    _feed(dc, f, q_c=q_c, q_g=q_g)
+    got_i = _mean2d(dc, "clivi")
+    exp = 4.0e-5 * 1.0e5 / constants.g
+    np.testing.assert_allclose(got_i[np.isfinite(got_i)], exp, rtol=1e-5)
+
+
+def test_paths_skipped_not_zeroed_without_condensate(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    assert _feed(dc, f)          # no q_c
+    assert _mean2d(dc, "clwvi") is None
+    assert _mean2d(dc, "clivi") is None
+
+
+def test_both_lanes_share_one_condensate_reduction(mesh):
+    """collect() and the MPAS feed must call the SAME `_condensate_paths`.
+
+    Numerical half: the feed's published clivi equals the regrid of the
+    shared helper's output.  Structural half: BOTH lane symbols reference
+    the helper by name (each is the symbol its lane executes; removing the
+    shared call from either goes red)."""
+    import inspect
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    latc = np.asarray(mesh.latCell)
+    q_c = 1.0e-4 * np.cos(latc)[:, None] ** 2 * np.ones((1, NLEV))
+    q_i = 5.0e-5 * np.sin(latc)[:, None] ** 2 * np.ones((1, NLEV))
+    clwvi_native, clivi_native = dc._condensate_paths(
+        f["p_s"], q_c, q_i, None, None)
+    _feed(dc, f, q_c=q_c, q_i=q_i)
+    got_i = _mean2d(dc, "clivi")
+    exp_i = dc._regrid_to_latlon_2d(clivi_native)
+    m = np.isfinite(got_i) & np.isfinite(exp_i)
+    assert m.any()
+    np.testing.assert_allclose(got_i[m], exp_i[m], rtol=1e-12)
+
+    src_collect = inspect.getsource(DiagnosticCollector.collect)
+    src_feed = inspect.getsource(
+        DiagnosticCollector.feed_cmip_accumulators_native)
+    assert "_condensate_paths(" in src_collect
+    assert "_condensate_paths(" in src_feed
+
+
+def test_clw_cli_3d_reach_the_accumulator_with_species_convention(mesh):
+    """Vertically uniform mass fractions survive plev interp + regrid as
+    constants, pinning clw = q_c and cli = q_i + q_s (snow INCLUDED,
+    mirroring clivi)."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    q_c = np.full((n, NLEV), 1.0e-4)
+    q_i = np.full((n, NLEV), 3.0e-5)
+    q_s = np.full((n, NLEV), 2.0e-5)
+    _feed(dc, f, q_c=q_c, q_i=q_i, q_s=q_s)
+    clw = _mean3d(dc, "clw")
+    cli = _mean3d(dc, "cli")
+    assert clw is not None, "clw absent from the MPAS CMOR feed"
+    assert cli is not None, "cli absent from the MPAS CMOR feed"
+    np.testing.assert_allclose(clw[np.isfinite(clw)], 1.0e-4, rtol=1e-10)
+    np.testing.assert_allclose(cli[np.isfinite(cli)], 5.0e-5, rtol=1e-10)
+
+
+def test_cli_skipped_without_frozen_species(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    _feed(dc, f, q_c=np.full((n, NLEV), 1.0e-4))
+    assert _mean3d(dc, "clw") is not None
+    assert _mean3d(dc, "cli") is None, (
+        "cli fabricated on a warm-rain run — a zero plane would read as "
+        "ice-free with confidence")
+
+
+@pytest.mark.parametrize("bad_kwarg", ["q_s", "q_g"])
+def test_malformed_condensate_tracer_is_transactional(mesh, bad_kwarg):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    before_keys = set(dc._spatial_monthly._data_2d)
+    with pytest.raises(ValueError):
+        _feed(dc, f, q_c=np.full((n, NLEV), 1.0e-4),
+              **{bad_kwarg: np.zeros((n, NLEV - 1))})
+    assert set(dc._spatial_monthly._data_2d) == before_keys
+
+
+def test_driver_forwards_snow_and_graupel_to_the_frozen_path(mesh):
+    """The driver must extract q_s/q_g from state.tracers — a driver that
+    forwards only q_i under-counts clivi on Morrison/Thompson runs."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    tr = {"q_v": f["q_v"],
+          "q_c": np.full((n, NLEV), 1.0e-4),
+          "q_i": np.full((n, NLEV), 3.0e-5),
+          "q_s": np.full((n, NLEV), 2.0e-5),
+          "q_g": np.full((n, NLEV), 1.0e-5)}
+    fake = _fake_driver(mesh, dc, f, tracers=tr)
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_2d_clivi" in out
+    got = out["field_2d_clivi"]
+    exp = (3.0e-5 + 2.0e-5 + 1.0e-5) * 1.0e5 / constants.g
+    np.testing.assert_allclose(got[np.isfinite(got)], exp, rtol=1e-5)
+
+
+# =====================================================================
 # Transactionality of the new inputs
 # =====================================================================
 

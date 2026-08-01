@@ -689,6 +689,49 @@ class DiagnosticCollector:
         )
         return T_2m
 
+    @staticmethod
+    def _frozen_condensate(q_i=None, q_s=None, q_g=None):
+        """Sum of whichever FROZEN condensate species are present (CMIP
+        clivi/cli convention: cloud ice + snow + graupel), or ``None`` when
+        none is carried (warm-rain microphysics)."""
+        q_frozen = None
+        for q_frz in (q_i, q_s, q_g):
+            if q_frz is not None:
+                q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
+        return q_frozen
+
+    def _condensate_paths(self, p_s, q_c, q_i=None, q_s=None, q_g=None):
+        """Column condensate paths — CMOR ``clwvi``/``clivi`` [kg/m2].
+
+        SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
+        :meth:`feed_cmip_accumulators_native` path (same single-reduction
+        doctrine as :meth:`_clt_percent`): a drift between per-lane copies
+        would report different water paths for the SAME state depending only
+        on which dycore ran.
+
+        CMIP convention: ``clivi`` = column-integrated FROZEN condensate
+        (cloud ice ``q_i`` + snow ``q_s`` + graupel ``q_g``); ``clwvi`` =
+        TOTAL condensed water (liquid ``q_c`` + frozen).  Rain ``q_r`` is in
+        neither (falling liquid precip, not suspended condensate).  Species
+        the microphysics does not carry (``None``) contribute nothing.
+
+        Returns ``(clwvi, clivi)`` numpy arrays, or ``(None, None)`` when
+        ``q_c`` is absent (dry run / no condensate tracer) so callers SKIP
+        the fields rather than publish a zero that reads as condensate-free.
+        """
+        if q_c is None:
+            return None, None
+        dp = self._dp(p_s)
+        lwp = np.asarray(
+            column_water_vapor(q_c, p_s, self.dsigma, dp=dp))
+        q_frozen = self._frozen_condensate(q_i, q_s, q_g)
+        if q_frozen is not None:
+            iwp = np.asarray(
+                column_water_vapor(q_frozen, p_s, self.dsigma, dp=dp))
+        else:
+            iwp = np.zeros_like(lwp)
+        return lwp + iwp, iwp
+
     def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
         """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.
 
@@ -1101,28 +1144,17 @@ class DiagnosticCollector:
             # fraction (sigmoid on total condensate) — useful for spatial
             # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
             if q_c is not None:
-                lwp_field = np.asarray(
-                    column_water_vapor(q_c, state.p_s.data, self.dsigma,
-                                       dp=self._dp(state.p_s.data))
-                )
-                # Frozen condensate path: sum whichever ice species are present
-                # (None for warm-rain microphysics → contributes nothing).
-                q_frozen = None
-                for q_frz in (q_i, q_s, q_g):
-                    if q_frz is not None:
-                        q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
-                if q_frozen is not None:
-                    iwp_field = np.asarray(
-                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma,
-                                           dp=self._dp(state.p_s.data))
-                    )
-                else:
-                    iwp_field = np.zeros_like(lwp_field)
-                r_lwp = self._regrid_to_latlon_2d(lwp_field)
-                r_iwp = self._regrid_to_latlon_2d(iwp_field)
+                # Shared frozen-species reduction with the MPAS feed
+                # (``_condensate_paths``); the regrid is linear, so
+                # regridding (clwvi, clivi) equals the former per-path
+                # regrid-then-sum bit-for-bit up to float association.
+                clwvi_native, clivi_native = self._condensate_paths(
+                    state.p_s.data, q_c, q_i, q_s, q_g)
+                r_lwp = self._regrid_to_latlon_2d(clwvi_native)
+                r_iwp = self._regrid_to_latlon_2d(clivi_native)
                 if r_lwp is not None and r_iwp is not None:
                     fields_2d['clivi'] = r_iwp
-                    fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
+                    fields_2d['clwvi'] = r_lwp
 
                 # Total cloud cover (clt, CMIP %) from the MODEL's fractional
                 # layer cloud fraction — the SAME sundqvist/xu_randall/resolved
@@ -1354,6 +1386,8 @@ class DiagnosticCollector:
         q_v=None,
         q_c=None,
         q_i=None,
+        q_s=None,
+        q_g=None,
         u_east=None,
         v_north=None,
         precip=None,
@@ -1532,6 +1566,8 @@ class DiagnosticCollector:
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
+        q_s_np = None if q_s is None else np.asarray(q_s, dtype=_f64)
+        q_g_np = None if q_g is None else np.asarray(q_g, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
@@ -1585,6 +1621,8 @@ class DiagnosticCollector:
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
+            ("q_s", q_s_np, (_ncol, _nlev)),
+            ("q_g", q_g_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
         ]
@@ -1688,6 +1726,26 @@ class DiagnosticCollector:
                 if r is not None:
                     fields_2d['clt'] = r
 
+            # Condensed-water / ice-water paths (clwvi/clivi): the SHARED
+            # frozen-species reduction with collect() (``_condensate_paths``)
+            # so the two lanes cannot disagree on the SAME state.  Skipped
+            # (not zeroed) when no condensate tracer is supplied.
+            clwvi_native, clivi_native = self._condensate_paths(
+                p_s_np, q_c_np, q_i_np, q_s_np, q_g_np)
+            if clwvi_native is not None:
+                r_lwp = self._regrid_to_latlon_2d(clwvi_native)
+                r_iwp = self._regrid_to_latlon_2d(clivi_native)
+                if r_lwp is not None and r_iwp is not None:
+                    fields_2d['clwvi'] = r_lwp
+                    fields_2d['clivi'] = r_iwp
+
+            # 3-D condensate mass fractions on plev19: clw = suspended cloud
+            # LIQUID (q_c; rain q_r excluded — falling precip); cli = the
+            # FROZEN sum q_i + q_s + q_g, MIRRORING the clivi species
+            # convention above so the 3-D field vertically integrates to the
+            # published path.  Absent species => field skipped, never zeroed.
+            _q_frozen_np = self._frozen_condensate(q_i_np, q_s_np, q_g_np)
+
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
@@ -1696,6 +1754,8 @@ class DiagnosticCollector:
                 ('hus', q_v_np),
                 ('ua', u_east_np),
                 ('va', v_north_np),
+                ('clw', q_c_np),
+                ('cli', _q_frozen_np),
             ):
                 if _src is None:
                     continue
