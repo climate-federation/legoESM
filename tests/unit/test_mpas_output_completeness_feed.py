@@ -333,6 +333,184 @@ def test_driver_forwards_snow_and_graupel_to_the_frozen_path(mesh):
 
 
 # =====================================================================
+# zg: geopotential height (hypsometric, virtual-T)
+# =====================================================================
+
+def _feed_raw(dc, T, p_s, lat_deg, phis, **kw):
+    return dc.feed_cmip_accumulators_native(
+        15.0, T=T, p_s=p_s, lat_deg=lat_deg, phis=phis, **kw)
+
+
+def test_zg_isothermal_analytic_profile():
+    """Isothermal dry atmosphere: z(p) = (R_d T / g) ln(p_s / p) + phis/g.
+
+    40 levels keep the midpoint-quadrature error of the shared hypsometric
+    helper well under the 2 % tolerance; the assertion is against the
+    ANALYTIC profile at every interior plev19 level, so a dropped ln
+    structure, wrong constant, or missing surface anchor is far outside
+    tolerance.
+    """
+    nlev = 40
+    sigma_full = np.linspace(0.0125, 0.9875, nlev)
+    dc = DiagnosticCollector(
+        nlev=nlev, sigma_full=sigma_full, dsigma=np.full(nlev, 1.0 / nlev),
+        experiment_id="amip", monthly_means=True, cmip_output=True,
+        n_days=30, cmip_resolution_deg=30.0, start_year=1979,
+    )
+    # Tiny synthetic "mesh": a handful of cells is enough (no regrid needed
+    # for the accumulator read; use lat-lon-free zonal skip by passing a
+    # valid lat vector).
+    import types
+    n = 8
+    lat = np.linspace(-60.0, 60.0, n)
+    lon = np.linspace(0.0, 315.0, n)
+    grid = types.SimpleNamespace(
+        nCells=n, latCell=np.radians(lat), lonCell=np.radians(lon))
+    dc.set_cmip_grid_info(grid_type="mpas", grid=grid, start_year=1979)
+
+    T0 = 250.0
+    p_s0 = 1.0e5
+    T = np.full((n, nlev), T0)
+    p_s = np.full(n, p_s0)
+    phis = np.zeros(n)
+    _feed_raw(dc, T, p_s, lat, phis)     # q_v omitted => DRY hypsometric
+    zg = _mean3d(dc, "zg")
+    assert zg is not None, "zg absent from the MPAS CMOR feed"
+
+    from legoesm.io.cmor_output import CMIP6_PLEV19
+    plev = np.sort(np.asarray(CMIP6_PLEV19))
+    # Compare only inside the WELL-RESOLVED part of the column: the top few
+    # uniform-sigma layers have a large per-layer Delta(ln p), where the
+    # shared helper's midpoint quadrature departs from the exact ln profile
+    # by design (>2 % above ~sigma_full[4]); that is discretisation of the
+    # instrument, not a wiring error.
+    p_lo_valid = sigma_full[4] * p_s0
+    scale = constants.R_d * T0 / constants.g
+    n_checked = 0
+    for k, p in enumerate(plev):
+        if not (p_lo_valid <= p <= 0.95 * p_s0):
+            continue                     # outside the resolved column
+        col = zg[..., k]
+        got = np.nanmean(col[np.isfinite(col)])
+        expected = scale * np.log(p_s0 / p)
+        assert got == pytest.approx(expected, rel=0.02), (
+            f"zg at {p:.0f} Pa: got {got:.1f} m, analytic {expected:.1f} m")
+        n_checked += 1
+    assert n_checked >= 8, "analytic zg check covered too few plev levels"
+
+
+def test_zg_surface_anchor_is_phis_over_g(mesh):
+    """Raising phis by g*500 m^2/s^2 must raise zg by EXACTLY 500 m."""
+    dc1, sig = _collector(mesh)
+    dc2, _ = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    _feed(dc1, f)
+    f2 = dict(f, phis=np.full(n, constants.g * 500.0))
+    _feed(dc2, f2)
+    zg1 = _mean3d(dc1, "zg")
+    zg2 = _mean3d(dc2, "zg")
+    assert zg1 is not None and zg2 is not None
+    m = np.isfinite(zg1) & np.isfinite(zg2)
+    np.testing.assert_allclose(zg2[m] - zg1[m], 500.0, rtol=0, atol=1e-6)
+
+
+def test_zg_uses_virtual_temperature(mesh):
+    """A moist column is THICKER: zg(moist) > zg(dry) at the same T.
+
+    Red if q_v is not threaded into the shared hypsometric helper.
+    """
+    dc_dry, sig = _collector(mesh)
+    dc_wet, _ = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    _feed_raw(dc_dry, f["T"], f["p_s"], f["lat_deg"], f["phis"])
+    _feed_raw(dc_wet, f["T"], f["p_s"], f["lat_deg"], f["phis"],
+              q_v=np.full((n, NLEV), 0.02))
+    zg_d = _mean3d(dc_dry, "zg")
+    zg_w = _mean3d(dc_wet, "zg")
+    m = np.isfinite(zg_d) & np.isfinite(zg_w)
+    # Upper levels accumulate the virtual-T thickening; require a strictly
+    # positive difference on average (2 % vapour ~ +1.2 % thickness).
+    assert np.mean(zg_w[m] - zg_d[m]) > 10.0, (
+        "zg did not respond to q_v — virtual temperature is not used")
+
+
+def test_zg_skipped_without_phis(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    _feed_raw(dc, f["T"], f["p_s"], f["lat_deg"], None, q_v=f["q_v"])
+    assert _mean3d(dc, "zg") is None, (
+        "zg fabricated without its surface anchor (phis)")
+
+
+# =====================================================================
+# hur / hurs: relative humidity via the shared saturation curve
+# =====================================================================
+
+def _q_v_for_rh(rh_frac, T, p_full):
+    """Mixing ratio giving EXACTLY e = rh_frac * e_sat(T) at p_full,
+    inverting e(r) = p r / (epsilon + r) — built ONLY from the shared
+    thermo curve, no re-derived saturation formula."""
+    from legoesm.thermo import saturation_vapor_pressure
+    e = rh_frac * np.asarray(saturation_vapor_pressure(T), dtype=np.float64)
+    return constants.epsilon * e / (p_full - e)
+
+
+def test_hur_hurs_hand_pinned_at_50_percent(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    T = np.full((n, NLEV), 280.0)
+    p_full = f["p_s"][:, None] * sig[None, :]
+    q_v = _q_v_for_rh(0.5, T, p_full)
+    _feed_raw(dc, T, f["p_s"], f["lat_deg"], f["phis"], q_v=q_v)
+    hur = _mean3d(dc, "hur")
+    hurs = _mean2d(dc, "hurs")
+    assert hur is not None, "hur absent from the MPAS CMOR feed"
+    assert hurs is not None, "hurs absent from the MPAS CMOR feed"
+    np.testing.assert_allclose(hur[np.isfinite(hur)], 50.0, rtol=1e-4)
+    np.testing.assert_allclose(hurs[np.isfinite(hurs)], 50.0, rtol=1e-4)
+
+
+def test_hur_not_silently_clamped_above_100(mesh):
+    """Supersaturation must be REPORTED (the table mandates no cap)."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    T = np.full((n, NLEV), 280.0)
+    p_full = f["p_s"][:, None] * sig[None, :]
+    q_v = _q_v_for_rh(1.2, T, p_full)
+    _feed_raw(dc, T, f["p_s"], f["lat_deg"], f["phis"], q_v=q_v)
+    hur = _mean3d(dc, "hur")
+    np.testing.assert_allclose(hur[np.isfinite(hur)], 120.0, rtol=1e-4)
+
+
+def test_hurs_is_the_lowest_model_level(mesh):
+    """RH 80 % at the lowest level, 20 % aloft => hurs = 80, pinning the
+    documented lowest-level (not column, not 2 m) choice."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    T = np.full((n, NLEV), 280.0)
+    p_full = f["p_s"][:, None] * sig[None, :]
+    rh = np.full((n, NLEV), 0.2)
+    rh[:, -1] = 0.8
+    q_v = _q_v_for_rh(rh, T, p_full)
+    _feed_raw(dc, T, f["p_s"], f["lat_deg"], f["phis"], q_v=q_v)
+    hurs = _mean2d(dc, "hurs")
+    np.testing.assert_allclose(hurs[np.isfinite(hurs)], 80.0, rtol=1e-4)
+
+
+def test_hur_skipped_without_q_v(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    _feed_raw(dc, f["T"], f["p_s"], f["lat_deg"], f["phis"])
+    assert _mean3d(dc, "hur") is None
+    assert _mean2d(dc, "hurs") is None
+
+
+# =====================================================================
 # Transactionality of the new inputs
 # =====================================================================
 

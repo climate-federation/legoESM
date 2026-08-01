@@ -595,6 +595,24 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         return jnp.asarray(p_s)[..., None] * jnp.asarray(self.dsigma)
 
+    def _p_half(self, p_s):
+        """Half-level pressure [Pa] (TOA-first, ``nlev+1``), the companion of
+        :meth:`_p_full` / :meth:`_dp` for hypsometric column integrations.
+
+        ``vcoord.pressure_at_half`` when the coordinate object is present
+        (REQUIRED for correctness on the default hybrid grid, same caveat as
+        ``_p_full``).  The pure-sigma fallback reconstructs ``sigma_half``
+        from the layer thicknesses with the standard surface anchor
+        ``sigma_half[-1] = 1`` (``sigma_half[k] = 1 - sum(dsigma[k:])``),
+        which is CONSISTENT with ``_dp = p_s * dsigma`` by construction.
+        """
+        if self.vcoord is not None:
+            return self.vcoord.pressure_at_half(p_s)
+        dsig = np.asarray(self.dsigma, dtype=np.float64)
+        sigma_half = np.concatenate(
+            [1.0 - np.cumsum(dsig[::-1])[::-1], [1.0]])
+        return np.asarray(p_s)[..., None] * sigma_half
+
     def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
 
@@ -1746,6 +1764,46 @@ class DiagnosticCollector:
             # published path.  Absent species => field skipped, never zeroed.
             _q_frozen_np = self._frozen_condensate(q_i_np, q_s_np, q_g_np)
 
+            # Relative humidity — hur (3-D, %) and hurs (near-surface, %) —
+            # via the SHARED WMO saturation-ratio helper
+            # ``legoesm.thermo.relative_humidity`` (e/e_sat over the model's
+            # own Tetens curve; never a re-derived saturation formula).
+            # CMIP-typical choice: RH is computed on MODEL levels and RH
+            # ITSELF is interpolated to plev19 (not q then re-saturated).
+            # NOT clamped: supersaturation > 100 % is reported as such — the
+            # Amon table does not mandate a cap and a silent clamp would
+            # hide model supersaturation.  hurs is the LOWEST-MODEL-LEVEL
+            # value, not a 2 m MOST extrapolation (the MOST helper returns
+            # T_2m only) — a documented deviation from the table's 2 m
+            # ``height`` attribute.
+            hur_native = None
+            if q_v_np is not None:
+                from legoesm.thermo import relative_humidity
+                _p_full_np = np.asarray(self._p_full(p_s_np))
+                hur_native = 100.0 * np.asarray(
+                    relative_humidity(T_np, _p_full_np, q_v_np))
+                r = self._regrid_to_latlon_2d(hur_native[..., -1])
+                if r is not None:
+                    fields_2d['hurs'] = r
+
+            # zg: geopotential height [m] on plev19 — hypsometric column with
+            # VIRTUAL temperature via the SHARED physics helper
+            # ``atmosphere.physics._shared.compute_heights_from_sigma`` (the
+            # same column geometry turbulence/GWD/microphysics integrate),
+            # anchored at the surface: zg = z_above_surface + phis/g (z is
+            # positive UP; phis/g is the surface altitude, so zg is height
+            # above the geoid).  Needs *phis* — skipped without it.
+            zg_native = None
+            if phis_np is not None:
+                from legoesm.atmosphere.physics._shared import (
+                    compute_heights_from_sigma,
+                )
+                _p_half_np = np.asarray(self._p_half(p_s_np))
+                _z_full, _ = compute_heights_from_sigma(
+                    T_np, _p_half_np, q_v=q_v_np)
+                zg_native = (np.asarray(_z_full)
+                             + (phis_np / _c.g)[..., None])
+
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
@@ -1756,6 +1814,8 @@ class DiagnosticCollector:
                 ('va', v_north_np),
                 ('clw', q_c_np),
                 ('cli', _q_frozen_np),
+                ('hur', hur_native),
+                ('zg', zg_native),
             ):
                 if _src is None:
                     continue
