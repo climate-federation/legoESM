@@ -20,7 +20,9 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.conservation import conservation_accumulator
 from legoesm.grids.halo import (
+    get_mpi_topology,
     pad_halo,
     pad_halo_4d,
     pad_halo_pair_h2,
@@ -1042,7 +1044,6 @@ def _fv_tp_2d_setup(cdgrid) -> _TpSetup:
     # preserving bit-identity there.
     ppm_offsets_h2 = offsets_h2
     if offsets_h2 is not None and area.shape[0] != offsets_h2.shape[0]:
-        from legoesm.grids.halo import get_mpi_topology
         topo = get_mpi_topology()
         owned = (getattr(topo, "local_face_ids", None)
                  if topo is not None else None)
@@ -1240,7 +1241,6 @@ def _finalize_transport(h, fx, fy, area, mass_target):
     fp32 ``fx[:-1] - fx[1:]`` subtraction across ~6·N² cells.  Promotion
     preserves bit-clean flux closure; output cast back to input dtype.
     """
-    from legoesm.core.conservation import conservation_accumulator
     _acc = conservation_accumulator()
     h64 = h.astype(_acc)
     fx64 = fx.astype(_acc)
