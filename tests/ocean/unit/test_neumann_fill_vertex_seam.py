@@ -78,3 +78,24 @@ def test_result_is_zonally_shift_equivariant():
     b = np.asarray(neumann_fill_vertex(jnp.asarray(roll_core(q, 3)),
                                        jnp.asarray(roll_core(m, 3)), 1))
     np.testing.assert_allclose(roll_core(a, 3), b, atol=1e-12)
+
+
+def test_seam_fix_holds_for_the_3d_vertex_field():
+    """The production callers pass (n_lat+1, n_lon+1, nlev) (codex Low)."""
+    nlev = 4
+    mask = _mask_with_land_column(0)
+    rng = np.random.default_rng(2)
+    q = rng.normal(size=(N_LAT + 1, N_LON + 1, nlev))
+    q[:, -1] = q[:, 0]
+    out3d = np.asarray(neumann_fill_vertex(jnp.asarray(q), mask, n_passes=1))
+    for k in range(nlev):
+        out2d = np.asarray(neumann_fill_vertex(
+            jnp.asarray(q[..., k]), mask, n_passes=1))
+        np.testing.assert_allclose(out3d[..., k], out2d, atol=1e-12)
+
+    # And the seam column really is filled from BOTH sides, not one-sided.
+    j = 3
+    g = jax.grad(lambda x: neumann_fill_vertex(x, mask, 1)[j, 0, 0])(
+        jnp.asarray(q))
+    assert float(g[j, N_LON - 1, 0]) == pytest.approx(0.5)
+    assert float(g[j, 1, 0]) == pytest.approx(0.5)
