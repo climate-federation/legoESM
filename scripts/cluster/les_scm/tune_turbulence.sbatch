@@ -2,6 +2,14 @@
 #SBATCH --account=glab
 #SBATCH --partition=glab1
 #SBATCH --gres=gpu:1
+# NOT v100s. The gradient path of the `tke` closure reproducibly aborts with
+#   INTERNAL: CUDA error: CUDA_ERROR_ILLEGAL_ADDRESS
+# on Tesla V100S (sm_70) -- twice, on two DIFFERENT cards (g049, g050), each
+# time entering [tune] tke immediately after louis finished cleanly. The same
+# commit completed all nine arms on an A40 (g184), and tke's FORWARD evaluation
+# succeeds on V100S (it scores 0.1241), so this is the sm_70 backward pass, not
+# the model. Constrain until that is diagnosed separately.
+#SBATCH --constraint="a40|a100"
 #SBATCH --job-name=les_tune
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
