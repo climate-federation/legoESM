@@ -262,9 +262,11 @@ def _fp64():
         set_policy(prev)
 
 
-def test_implicit_solver_conserves_mass(_fp64):
-    """Per-step mass conservation: ``Σ η·area`` drift over 100 steps
-    should be at PCG-tolerance level (relative to the running ``Σ |η|·area``).
+def _mass_drift_100_steps() -> float:
+    """|Σ η·area| drift over 100 implicit-CN steps, relative to Σ|η|·area.
+
+    Shared by the fp64 gate and the fp32 bound so the two differ ONLY in the
+    precision policy — anything else would make them incomparable (#1388).
     """
     grid = create_latlon_grid(n_lat=18, n_lon=36)
     z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
@@ -280,33 +282,50 @@ def test_implicit_solver_conserves_mass(_fp64):
         grid, z_coord, T_water_init_C=10.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=80.0,
     )
-
     area = np.asarray(grid.area)
     mask = np.asarray(state.land_mask.data)
     V0 = float(np.sum(np.asarray(state.eta.data) * area * mask))
     abs_eta_sum = float(np.sum(np.abs(np.asarray(state.eta.data)) * area * mask))
-
     for _ in range(100):
         state = model.step(state, dt=600.0)
         abs_eta_sum = max(abs_eta_sum,
-                          float(np.sum(np.abs(np.asarray(state.eta.data)) *
-                                       area * mask)))
-
+                          float(np.sum(np.abs(np.asarray(state.eta.data))
+                                       * area * mask)))
     V1 = float(np.sum(np.asarray(state.eta.data) * area * mask))
-    # Reference scale: largest |Σ |η|·area| seen during the run.
-    rel_drift = abs(V1 - V0) / max(abs_eta_sum, 1.0e-30)
-    # PCG residual with tol=1e-12 contributes at most ~1e-10 relative
-    # mass error per step; over 100 steps and float64 cell-summation noise
-    # ~ sqrt(N_cells) · tol, the cumulative drift should remain << 1e-6.
-    # That reasoning is fp64 reasoning, which is why this test now REQUIRES the
-    # fp64 policy (see _fp64): under the default fp32 storage the same run
-    # drifts 1.161e-06 -- round-off, not the solver (#1388).
-    # The 5e-7 ceiling absorbs fp-ordering variation across momentum-
-    # advection schemes (vector-invariant vs WENO vs PV-flux Sadourny);
-    # the docstring-stated bound is "<< 1e-6", which is what's tested.
+    return abs(V1 - V0) / max(abs_eta_sum, 1.0e-30)
+
+
+def test_implicit_solver_mass_drift_fp32_is_bounded():
+    """FP32 coverage, kept deliberately (codex: the fp64 gate alone would let
+    an fp32-only regression through, and fp32 is a supported C-grid GPU mode).
+
+    The bound is the MEASURED fp32 behaviour (1.161e-06 over 100 steps) with
+    headroom, not an aspiration: it exists to catch a change of ORDER, not to
+    certify fp32 as conservative. The strict statement lives in the fp64 test.
+    """
+    _run = _mass_drift_100_steps
+    drift = _run()
+    assert drift < 5.0e-6, (
+        f"fp32 mass drift {drift:.3e} exceeds the measured-plus-headroom "
+        f"bound; the fp64 gate says the solver itself conserves to 4.4e-16, so "
+        f"a jump here is an fp32-path change, not the algorithm")
+
+
+def test_implicit_solver_conserves_mass(_fp64):
+    """Per-step mass conservation: ``Σ η·area`` drift over 100 steps
+    should be at PCG-tolerance level (relative to the running ``Σ |η|·area``).
+
+    REQUIRES the fp64 policy. The bound below is fp64 reasoning — PCG residual
+    at tol=1e-12 contributes ~1e-10 relative mass error per step, and over 100
+    steps with float64 cell-summation noise ~sqrt(N_cells)·tol the drift should
+    stay << 1e-6 — but `JAX_ENABLE_X64=1` does NOT set legoESM's precision
+    policy, so this ran in fp32 and measured round-off instead of the solver:
+    fp32 1.161e-06 vs fp64 4.351e-16 on the identical 100 steps (#1388). The
+    fp32 path keeps its own bounded test above.
+    """
+    rel_drift = _mass_drift_100_steps()
     assert rel_drift < 5.0e-7, (
-        f"Mass drift after 100 steps: {rel_drift:.3e} (relative to "
-        f"Σ |η|·area = {abs_eta_sum:.3e})")
+        f"Mass drift after 100 steps (fp64): {rel_drift:.3e}")
 
 
 def test_implicit_solver_grad_smoke():

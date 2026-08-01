@@ -145,7 +145,14 @@ def test_linssh_surface_dilution_sign():
 def test_barotropic_coriolis_split_validation_and_nonvacuity():
     """barotropic_coriolis_split: typo raises; "live" requires explicit_ab2 +
     explicit_substep; and the live split actually changes the step (non-vacuous)
-    while staying finite."""
+    while staying finite.
+
+    SCOPE, stated precisely (codex, #1388): the non-vacuity half is proven for
+    the constructed ``ene`` + ``nemo_boxcar_centred`` pairing and through ``u``
+    only. It does NOT cover the GYRE/AB3-AM4 recipe (that combination is
+    rejected outright, which this test now also asserts) nor the more exact
+    DINO ``nemo_boxcar_ab3`` path, which carries different outer-integrator
+    requirements."""
     import pytest
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (

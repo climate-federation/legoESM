@@ -109,6 +109,15 @@ def _build(flat=False):
     # These tests predate that guard, which is why they read as failures rather
     # than as a config error (#1388). Same idiom as
     # build_silvestri_baroclinic_jet_setup.
+    #
+    # SEEDING ZEROS IS A CHOICE, and it changes the initial-value problem:
+    # with prev=0 the first step is (3/2+eps)~1.6x the current slow forcing,
+    # i.e. these now cover the PRODUCTION cold start (the same convention the
+    # Silvestri recipe uses), not an unperturbed analytic oscillator. The
+    # assertions here are qualitative (u -> 0 over a quarter period, |v| spins
+    # up, bounded over a full period) and survive that transient; a test that
+    # wanted the clean analytic startup would seed F_slow_*_prev from the
+    # initial slow tendency instead (codex, #1388).
     if getattr(cfg.barotropic, "barotropic_slow_forcing_ab2", False):
         from legoesm.core.field import Field as _F
         state = state._replace(
