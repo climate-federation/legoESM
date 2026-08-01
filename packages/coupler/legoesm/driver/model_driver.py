@@ -6102,10 +6102,17 @@ class ModelDriver:
             # Geographic cell-centre winds from the edge-normal velocity.
             u_east, v_north = reconstruct_cell_velocity(
                 state.u.data, self.grid)
-            # Water vapour (moist runs only).
-            q_v = None
-            if (state.tracers is not None and "q_v" in state.tracers):
-                q_v = state.tracers["q_v"].data
+            # Water vapour + cloud condensate (moist runs only).  q_c/q_i
+            # feed the CMOR ``clt`` total-cloud-cover reduction; both are
+            # absent on a dry run and on warm-rain microphysics (no q_i),
+            # which the collector skips rather than publishing a zero.
+            def _tracer(name):
+                if state.tracers is None or name not in state.tracers:
+                    return None
+                return state.tracers[name].data
+            q_v = _tracer("q_v")
+            q_c = _tracer("q_c")
+            q_i = _tracer("q_i")
             # Flux fields (slots of the sfc_diag contract: 2 precip
             # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
             # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
@@ -6221,6 +6228,8 @@ class ModelDriver:
                 p_s=state.p_s.data,
                 lat_deg=lat_deg,
                 q_v=q_v,
+                q_c=q_c,
+                q_i=q_i,
                 u_east=u_east,
                 v_north=v_north,
                 precip=precip,
