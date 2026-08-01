@@ -120,7 +120,8 @@ _LINE_SEARCH_SCALES = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01, 0.005, 0.001)
 # configuration: identical across arms except turbulence
 # --------------------------------------------------------------------------
 
-def build_physics_config(scheme: str, *, prescribed_fluxes: bool) -> PhysicsConfig:
+def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
+                         microphysics: str = "none") -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
@@ -141,12 +142,17 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool) -> PhysicsConf
         sub = getattr(turb, scheme)
         surface = sub.surface._replace(Ch_neutral=0.0)
         turb = turb._replace(**{scheme: sub._replace(surface=surface)})
+    base = PhysicsConfig()
     return PhysicsConfig(
         turbulence=turb,
-        radiation=_scheme_none(PhysicsConfig().radiation),
-        convection=_scheme_none(PhysicsConfig().convection),
-        microphysics=_scheme_none(PhysicsConfig().microphysics),
-        gravity_wave_drag=_scheme_none(PhysicsConfig().gravity_wave_drag),
+        radiation=_scheme_none(base.radiation),
+        convection=_scheme_none(base.convection),
+        # Held identical across arms either way. "none" means the SCM has no
+        # condensation, so the cloud layer carries supersaturated vapour where
+        # the LES (Morrison) would condense -- a real SCM-vs-LES thermodynamic
+        # difference in the buoyancy, not an artefact of the comparison.
+        microphysics=base.microphysics._replace(scheme=microphysics),
+        gravity_wave_drag=_scheme_none(base.gravity_wave_drag),
     )
 
 
@@ -456,6 +462,7 @@ class SchemeResult:
 def evaluate_scheme(scheme: str, *, case, reference, args) -> tuple:
     cfg = build_physics_config(
         scheme, prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
+        microphysics=args.microphysics,
     )
     means, ps_hist = _rollout_means(
         None, base_cfg=cfg, case=case, dt=args.dt, hours=args.hours,
@@ -630,6 +637,11 @@ def parse_args(argv=None):
     p.add_argument("--optimizer", default="muon",
                    choices=("muon", "muon_partitioned", "adam", "adamw"))
     p.add_argument("--grad-nonzero-tol", type=float, default=GRAD_NONZERO_TOL)
+    p.add_argument("--microphysics", default="none",
+                   help="microphysics scheme, held identical across arms. "
+                        "'none' means the SCM cannot condense, so its cloud "
+                        "layer is supersaturated vapour where the LES "
+                        "condenses.")
     p.add_argument("--skip-tuning", action="store_true")
     p.add_argument("--allow-radiation-mismatch", action="store_true",
                    help="run a case whose LES radiation the SCM cannot match; "
@@ -808,7 +820,8 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
             "steps": args.steps,
             "surface_prescribe": case.forcing.prescribe,
-            "radiation": "none", "convection": "none", "microphysics": "none",
+            "radiation": "none", "convection": "none",
+            "microphysics": args.microphysics,
             "scored_variables": list(reference.scored_variables()),
             "note": (
                 "All arms share one column and forcing built from the same "
