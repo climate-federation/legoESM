@@ -515,14 +515,34 @@ def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
     ``--grid latlon`` -- has no ``dy_u``/``dx_v`` and is REJECTED rather than
     silently re-promoted per step with a possibly wrong metric convention.
     """
-    for _attr in ("dy_u", "dx_v"):
-        if not hasattr(geom, _attr):
-            raise TypeError(
-                f"gateway_step needs a promoted LatLonCGridGeometry (missing "
-                f"{_attr!r}); pass model.grid, or call "
-                "promote_gateway_geometry(grid, metric_convention=...) ONCE "
-                "before the step loop. Promoting per step rebuilds every "
-                "metric array and defaults the convention to 'exact'.")
+    from legoesm.grids.latlon import LatLonCGridGeometry
+
+    if not isinstance(geom, LatLonCGridGeometry):
+        # Attribute presence alone is NOT enough: a duck-typed object with the
+        # right names but the wrong staggering or units would silently
+        # mis-integrate every section (codex round-4 finding 2).  Accept a
+        # non-LatLonCGridGeometry only if it carries BOTH face metrics with
+        # the exact C-grid shapes implied by the state, which is what pins the
+        # staggering.
+        for _attr in ("dy_u", "dx_v"):
+            if not hasattr(geom, _attr):
+                raise TypeError(
+                    f"gateway_step needs a promoted LatLonCGridGeometry "
+                    f"(missing {_attr!r}); pass model.grid, or call "
+                    "promote_gateway_geometry(grid, metric_convention=...) "
+                    "ONCE before the step loop. Promoting per step rebuilds "
+                    "every metric array and defaults the convention to "
+                    "'exact'.")
+        n_lat, n_lon = jnp.shape(state.S.data)[0], jnp.shape(state.S.data)[1]
+        for _attr, _want in (("dy_u", (n_lat, n_lon + 1)),
+                             ("dx_v", (n_lat + 1, n_lon))):
+            _got = tuple(jnp.shape(getattr(geom, _attr)))
+            if _got != _want:
+                raise TypeError(
+                    f"gateway_step: {type(geom).__name__}.{_attr} has shape "
+                    f"{_got}, expected {_want} for a C-grid with tracer shape "
+                    f"({n_lat}, {n_lon}). The face metrics are mis-staggered; "
+                    "pass model.grid or promote_gateway_geometry(grid).")
     mfu, mfv = mass_fluxes_from_state(
         state, z_coord, geom, min_water_column_m=min_water_column_m)
     tr_u, tr_v = upwind_face_values(state.S.data, mfu, mfv, geom)

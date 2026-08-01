@@ -5951,21 +5951,30 @@ def main() -> int:
                        if hasattr(grid, "lat_T") else jnp.asarray(lat2d))
             _gw_lon = (jnp.degrees(jnp.asarray(grid.lon_T))
                        if hasattr(grid, "lon_T") else jnp.asarray(lon2d))
-            _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
-                _gw_lat, _gw_lon, state.land_mask.data)
-            # Promote ONCE, and prefer the model's own geometry: the ocean
-            # model already ran ensure_geometry(grid, metric_convention=
-            # config.metric_convention) in its constructor, so model.grid has
-            # the RIGHT face metrics.  Promoting inside the per-step call
-            # rebuilt every metric array each step and silently defaulted the
-            # convention to "exact" (codex round-3 finding 1).
-            _gw_geom = promote_gateway_geometry(
-                getattr(model, "grid", grid),
-                metric_convention=getattr(model.config, "metric_convention",
-                                          "exact"))
-            print(f"[gateway] accumulating through {len(_gw_gates.names)} "
-                  f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
-                  f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); + = INTO Arctic")
+            # Setup is inside the same non-fatal boundary as the per-step call
+            # (codex round-4 RED): a diagnostic must never abort the run.
+            try:
+                _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
+                    _gw_lat, _gw_lon, state.land_mask.data)
+                # Promote ONCE, and prefer the model's own geometry: the ocean
+                # model already ran ensure_geometry(grid, metric_convention=
+                # config.metric_convention) in its constructor, so model.grid
+                # has the RIGHT face metrics.  Promoting inside the per-step
+                # call rebuilt every metric array each step and silently
+                # defaulted the convention to "exact" (codex r3 finding 1).
+                _gw_geom = promote_gateway_geometry(
+                    getattr(model, "grid", grid),
+                    metric_convention=getattr(model.config,
+                                              "metric_convention", "exact"))
+            except Exception as _gw_e:
+                print(f"[gateway] setup FAILED, diagnostic disabled: "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                _gw_acc = _gw_gates = _gw_geom = None
+            if _gw_acc is not None:
+                print(f"[gateway] accumulating through {len(_gw_gates.names)} "
+                      f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
+                      f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); "
+                      "+ = INTO Arctic")
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
@@ -6266,11 +6275,25 @@ def main() -> int:
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
+            #
+            # NON-FATAL BOUNDARY (codex round-4 RED): this is a DIAGNOSTIC and
+            # must never abort a production run, exactly like its sibling
+            # _gateway_transport_diag.  gateway_step deliberately raises on a
+            # bad geometry, and that raise sits INSIDE the step loop, so
+            # without this guard a diagnostic could kill a multi-day run.  On
+            # any failure: log once, disable the accumulator, keep integrating.
+            # Note it does NOT fall back to per-step promotion -- that was the
+            # defect the raise exists to prevent.
             from legoesm.ocean.diagnostics_sections import gateway_step
-            _gw_acc = gateway_step(
-                _gw_acc, _gw_gates, state, z_coord, _gw_geom,
-                min_water_column_m=getattr(model.config,
-                                           "min_water_column_m", None))
+            try:
+                _gw_acc = gateway_step(
+                    _gw_acc, _gw_gates, state, z_coord, _gw_geom,
+                    min_water_column_m=getattr(model.config,
+                                               "min_water_column_m", None))
+            except Exception as _gw_e:
+                print(f"[gateway] DISABLED at step {step} after "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                _gw_acc = None
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses

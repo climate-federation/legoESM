@@ -231,11 +231,15 @@ def test_bsf_dy_uses_the_two_cell_span_convention():
     psi_fallback = barotropic_streamfunction(u, h, mask, _NoDyGrid())
     assert np.allclose(psi_two_cell, psi_fallback, rtol=1e-12, atol=0.0)
 
-    class _OneCellDyGrid(_NoDyGrid):
-        dy = np.full((N_LAT,), _Grid.radius * _Grid.dlat)
-
-    psi_one_cell = barotropic_streamfunction(u, h, mask, _OneCellDyGrid())
-    assert np.allclose(psi_one_cell, 0.5 * psi_two_cell, rtol=1e-12)
+    # And BOTH must equal the value hand-computed from the PHYSICAL one-cell
+    # height.  This is the assertion that actually pins the 0.5: an earlier
+    # draft compared a one-cell-dy proxy against 0.5 * psi_two_cell, which is
+    # circular -- it holds by linearity in dy whether or not the 0.5 is there
+    # (codex round-4 finding 4).
+    step_Sv = 0.1 * 100.0 * NLEV * (_Grid.radius * _Grid.dlat) / _SV
+    for psi in (psi_two_cell, psi_fallback):
+        d = np.diff(psi[:, 0])
+        assert d[0] == pytest.approx(-step_Sv, rel=1e-10)
 
 
 def test_bsf_is_linear_in_velocity():

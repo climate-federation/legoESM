@@ -380,5 +380,51 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
                    if "_gw_geom = promote_gateway_geometry(" in ln)
     assert promote < loop, (
         "promote_gateway_geometry must run BEFORE the step loop, not in it")
-    assert "_gw_geom" in "".join(lines[call:call + 4]), (
+    assert "_gw_geom" in "".join(lines[call:call + 6]), (
         "the per-step gateway_step call must be handed the promoted _gw_geom")
+    # The promotion must take the MODEL's convention, not the "exact" default.
+    # A live one-step test cannot catch a regression here because the test
+    # model's convention IS "exact" (codex round-4 finding 3), so pin the
+    # argument itself -- and test_promote_geometry_honours_metric_convention
+    # below proves the argument is load-bearing rather than decorative.
+    promo_src = "".join(lines[promote:promote + 5])
+    assert ("model.grid" in promo_src
+            or 'getattr(model, "grid"' in promo_src), (
+        "promotion must start from model.grid (already built with "
+        f"config.metric_convention), not the raw grid; got: {promo_src!r}")
+    assert "metric_convention" in promo_src, (
+        "promotion must forward the model's metric_convention")
+    # The per-step call must sit inside a non-fatal boundary: a DIAGNOSTIC
+    # must never abort a production run (codex round-4 RED).
+    guarded = "".join(lines[call - 3:call + 12])
+    assert "try:" in "".join(lines[call - 3:call]) and "except" in guarded, (
+        "gateway_step must be wrapped in a non-fatal try/except; it raises on "
+        "a bad geometry and that raise sits inside the step loop")
+
+
+def test_promote_geometry_honours_metric_convention():
+    """The metric_convention argument must change the metrics it produces.
+
+    Without this, `test_driver_calls_the_accumulator_inside_the_step_loop`'s
+    assertion that the driver forwards `metric_convention` would be checking
+    a decorative keyword.
+    """
+    import numpy as _np
+
+    from legoesm.ocean.diagnostics_sections import promote_gateway_geometry
+
+    grid, _z, _model, _state = _tiny_latlon()
+    assert not hasattr(grid, "dy_u"), (
+        "the convention is only applied when converting a RAW LatLonGrid, so "
+        "this test needs an unpromoted grid to be meaningful")
+    exact = promote_gateway_geometry(grid, metric_convention="exact")
+    nemo = promote_gateway_geometry(grid, metric_convention="nemo_isotropic")
+    # dy_u and dx_v are precisely the two metrics section_transport integrates
+    # with, so it is those that have to respond to the convention.
+    differs = [nm for nm in ("dy_u", "dx_v")
+               if not _np.allclose(_np.asarray(getattr(exact, nm)),
+                                   _np.asarray(getattr(nemo, nm)))]
+    assert differs, (
+        "neither dy_u nor dx_v responded to metric_convention -- the "
+        "convention the driver forwards would be decorative for this "
+        "diagnostic, and codex round-3 finding 1 would be moot")
