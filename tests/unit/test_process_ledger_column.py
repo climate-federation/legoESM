@@ -6,12 +6,15 @@ column" -- because the 2026-07-31 detonations were one cell in 10242, i.e.
 ~1e-4 of the global mean.  These tests pin the per-column forms, the
 area-weighted reduction, and the closure identity the ledger rests on.
 
-Run with JAX_ENABLE_X64=1: these are conservation/closure assertions.
+These are conservation/closure assertions at rtol ~1e-9: x64 is REQUIRED and
+enforced below (repo convention) — under fp32, #1424's layer-mass op-order
+change moves the answers by ~1e-6 rel, which is float32 noise, not a defect.
 """
 import numpy as np
 import pytest
 
 jax = pytest.importorskip("jax")
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402

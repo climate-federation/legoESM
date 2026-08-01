@@ -12,12 +12,14 @@ all.  These tests pin the physics half of the port:
      on the radiation row and nothing on convection);
   4. the row map cannot silently drift out of step with the module list.
 
-Run with JAX_ENABLE_X64=1 (conservation/closure assertions).
+Conservation/closure assertions: x64 REQUIRED and enforced below (under fp32,
+#1424's layer-mass op-order change moves answers by ~1e-6 rel — float noise).
 """
 import numpy as np
 import pytest
 
 jax = pytest.importorskip("jax")
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics  # noqa: E402
