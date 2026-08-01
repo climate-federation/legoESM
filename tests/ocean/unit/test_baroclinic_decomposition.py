@@ -214,7 +214,43 @@ def regenerate_golden() -> None:
 @pytest.mark.skipif(not GOLDEN_PATH.exists(), reason="golden not generated")
 def test_baroclinic_decomposition_bit_identical():
     """The (decomposed) function must reproduce the committed golden to within
-    float round-off on every case — the pure-extraction gate."""
+    float round-off on every case — the pure-extraction gate.
+
+    RE-BASELINED 2026-08-01 (#1388), and the earlier version of this note got
+    the attribution WRONG — recorded here because the wrong version is the kind
+    that gets repeated.
+
+    What actually moved: ONE absolute shift of 3.284e-09 in the u-tendency
+    (1.22e-10 in v), field-wide across all 544 elements, peaking at
+    [row 7, col 0, k 3] — the SEAM column of the last row. The headline
+    "6.14 relative" is not du_dt at all: it is
+    ``implicit_gmredi_sponge_diag::diag__vortcor_u``, whose old values are
+    ~3e-09, so the same 3.284e-09 absolute shift reads as 614%. Per case,
+    max relative / max absolute / |old|max:
+
+        implicit_gmredi_sponge_diag::diag__vortcor_u  6.14e+0 / 3.28e-9 / 3.09e-9
+        hollingsworth_ke::du_dt                       5.71e-1 / 3.28e-9 / 4.27e-6
+        implicit_gmredi_sponge_diag::du_dt            2.70e-1 / 3.28e-9 / 4.27e-6
+        explicit_biharmonic_smag_merid::du_dt         3.54e-2 / 3.28e-9 / 4.78e-6
+        weno5_momentum_tracer::dv_dt                  9.37e-3 / 1.22e-10 / 7.51e-7
+
+    46 of 77 stored arrays changed. Relative deviations alone are misleading
+    here: quote the absolute shift next to the scale it sits on.
+
+    ATTRIBUTION (PLAUSIBLE, not confirmed by bisect): commit 1bfea62e5,
+    "fix(ocean): #1226 periodic-seam index bug — barotropic solver leaking
+    mass", is an intentional physics fix landed after the 2026-06-26 golden
+    that touches the AL81/PV-flux path these fixture cases exercise, and the
+    delta peaks at the seam column, which is its signature. 2cbbd837e (the
+    #1418 vertex-Neumann seam fix) is a possible additional contributor. The
+    July-28 Treguier kappa_min floor is NOT a candidate: these cases run
+    GMRediConfig() with Treguier disabled.
+
+    So this re-baseline asserts "future changes must be deliberate", NOT "the
+    current values are correct". Anyone who suspects one of these drifts is a
+    defect should bisect that case against the 2026-06-26 golden in git
+    history — 1bfea62e5 is the first commit to try.
+    """
     golden = np.load(GOLDEN_PATH)
     checked = 0
     for name, kw in _cases():
