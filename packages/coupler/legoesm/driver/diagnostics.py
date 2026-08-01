@@ -1364,6 +1364,13 @@ class DiagnosticCollector:
         rsdt=None,
         hfss=None,
         hfls=None,
+        rsds=None,
+        rlds=None,
+        sw_net_sfc=None,
+        lw_net_sfc=None,
+        ts=None,
+        tauu=None,
+        tauv=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1383,7 +1390,12 @@ class DiagnosticCollector:
         * 2-D (``add_2d``): ``tas`` (2 m air temperature — MOST similarity when
           the caller supplies *tas*, else the lowest-model-level fallback),
           ``ps``, ``pr`` (when *precip* given), ``prw`` (column water vapour,
-          when *q_v* given), ``psl`` (hypsometric, when *phis* given).
+          when *q_v* given), ``psl`` (hypsometric, when *phis* given), the
+          TOA/surface flux block (``rlut``/``rsut``/``rsdt``/``hfss``/
+          ``hfls``/``evspsbl``/``rsds``/``rlds`` and the derived
+          ``rsus``/``rlus``), ``ts`` (surface skin temperature when the
+          driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
+          (surface wind stress, CMOR downward-positive).
         * 3-D on plev19 (``add_3d``): ``ta``, ``hus`` (*q_v*), ``ua``
           (*u_east*), ``va`` (*v_north*).
         * Daily (``SpatialDailyAccumulator``): ``tas``/``pr``/``psl`` plus
@@ -1490,7 +1502,8 @@ class DiagnosticCollector:
             flux_doy, flux_year = doy, year
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
-        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl")
+        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
+                    "rsds", "rlds", "rsus", "rlus", "tauu", "tauv")
         _FLUX_DAILY = ("pr",)
         _FLUX_ZONAL = ("precip",)
 
@@ -1531,6 +1544,18 @@ class DiagnosticCollector:
         rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
+        rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
+        rlds_np = None if rlds is None else np.asarray(rlds, dtype=_f64)
+        swnet_np = (None if sw_net_sfc is None
+                    else np.asarray(sw_net_sfc, dtype=_f64))
+        lwnet_np = (None if lw_net_sfc is None
+                    else np.asarray(lw_net_sfc, dtype=_f64))
+        ts_np = None if ts is None else np.asarray(ts, dtype=_f64)
+        # tauu/tauv arrive ALREADY in the CMOR convention (surface DOWNWARD
+        # eastward/northward stress, positive with the wind): the driver flips
+        # the model's opposes-the-wind tau sign at the feed call site.
+        tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
+        tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1550,6 +1575,13 @@ class DiagnosticCollector:
             ("rsdt", rsdt_np, (_ncol,)),
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
+            ("rsds", rsds_np, (_ncol,)),
+            ("rlds", rlds_np, (_ncol,)),
+            ("sw_net_sfc", swnet_np, (_ncol,)),
+            ("lw_net_sfc", lwnet_np, (_ncol,)),
+            ("ts", ts_np, (_ncol,)),
+            ("tauu", tauu_np, (_ncol,)),
+            ("tauv", tauv_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1565,6 +1597,24 @@ class DiagnosticCollector:
         # tas is the 2 m MOST temperature when supplied, else the lowest level.
         if tas_field is None:
             tas_field = T_low
+
+        # Surface UPWELLING fluxes derived from the exported net + downwelling
+        # pair.  Sign convention at the term (stated once, walked per term):
+        #   sw_net_sfc / lw_net_sfc  [W/m^2, positive INTO the surface]
+        #     (the radiation packer's convention, radiation/integration.py)
+        #   rsds / rlds  (CMOR)      [W/m^2, positive DOWN]
+        #   rsus / rlus  (CMOR)      [W/m^2, positive UP]
+        # net(+into surface) = down(+down) - up(+up)  =>  up = down - net.
+        # Budget closes by construction: rsds - rsus - sw_net_sfc == 0 and
+        # rlds - rlus - lw_net_sfc == 0 exactly (lw_net_sfc is typically
+        # NEGATIVE — the surface loses longwave — so rlus > rlds).
+        # Derived only when BOTH terms are present; otherwise SKIPPED, never
+        # zeroed (a zero rsus under real insolation would read as a black
+        # surface downstream).
+        rsus_np = (None if (rsds_np is None or swnet_np is None)
+                   else rsds_np - swnet_np)
+        rlus_np = (None if (rlds_np is None or lwnet_np is None)
+                   else rlds_np - lwnet_np)
 
         # Sea-level pressure (hypsometric) — shared by the spatial ``psl`` and
         # the zonal ``psl`` band; compute once when phis is available (shape
@@ -1601,6 +1651,20 @@ class DiagnosticCollector:
                 ('hfss', hfss_np),
                 ('hfls', hfls_np),
                 ('evspsbl', evspsbl_np),
+                # Surface radiation budget (sign conventions documented at
+                # the rsus/rlus derivation above).
+                ('rsds', rsds_np),
+                ('rlds', rlds_np),
+                ('rsus', rsus_np),
+                ('rlus', rlus_np),
+                # ts: surface SKIN temperature (blended sst/sic/ice-skin,
+                # supplied by the driver) — a STATE snapshot, not a flux,
+                # so it stays under the endpoint calendar bin.
+                ('ts', ts_np),
+                # Surface wind stress (CMOR downward-positive; sign flipped
+                # by the driver at the feed call site).
+                ('tauu', tauu_np),
+                ('tauv', tauv_np),
             ):
                 if _src is None:
                     continue

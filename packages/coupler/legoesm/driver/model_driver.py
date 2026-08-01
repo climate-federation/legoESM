@@ -312,10 +312,20 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
-    4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields.
-    State-derived fields (tas/ta/ua/...) stay snapshots; the collector
-    labels them honestly via ``cmip_snapshot_vars``.
+    Covers the flux slots of the ``_sfc_diag`` contract (0 sw_net_sfc,
+    1 lw_net_sfc, 2 precip, 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls,
+    8 sw_down_sfc, 9 lw_down_sfc, 10 tau_x_sfc, 11 tau_y_sfc) — the
+    strongly diurnal flux fields.  State-derived fields (tas/ta/ua/...)
+    stay snapshots; the collector labels them honestly via
+    ``cmip_snapshot_vars``.
+
+    Cross-version restore: a checkpoint written before a slot existed
+    simply carries no ``cmor_fluxsum_<slot>`` pair for it, and ``restore``
+    skips it — the NEW slots then average only the post-restart part of
+    that ONE resumed window (their per-slot count is honest, but the
+    window label covers the full interval).  Bounded, one-time, and
+    indistinguishable from a legitimately sparse slot (radiation off),
+    so it is documented rather than guarded.
 
     Sums stay on device (lazy ``jnp`` adds, no per-step host sync); the one
     device->host transfer happens in :meth:`mean` at diag cadence.  Upstream,
@@ -340,7 +350,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7)
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -6154,6 +6164,25 @@ class ModelDriver:
             rsdt = _sfc_slot(5)
             hfss = _sfc_slot(6)
             hfls = _sfc_slot(7)
+            # Surface radiation budget: slots 8/9 are the DOWNWELLING sw/lw
+            # (CMOR rsds/rlds, +down); slots 0/1 are the NET sw/lw
+            # [+into surface].  The collector derives the UPWELLING
+            # rsus/rlus = down - net inside the feed (sign walk documented
+            # there), only when both terms are present.
+            rsds = _sfc_slot(8)
+            rlds = _sfc_slot(9)
+            sw_net = _sfc_slot(0)
+            lw_net = _sfc_slot(1)
+            # Surface wind stress, slots 10/11 in the MODEL convention
+            # tau = -rho C_d |V| u  [Pa, opposes the wind = stress ON the
+            # atmosphere].  CMOR tauu/tauv are the surface DOWNWARD flux of
+            # eastward/northward momentum (stress the atmosphere exerts ON
+            # the surface, POSITIVE WITH the wind) — flip the sign here.
+            # (Sign verified at core/bulk_flux.py::simple_bulk_fluxes.)
+            _tau_x = _sfc_slot(10)
+            _tau_y = _sfc_slot(11)
+            tauu = None if _tau_x is None else -np.asarray(_tau_x)
+            tauv = None if _tau_y is None else -np.asarray(_tau_y)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -6162,6 +6191,7 @@ class ModelDriver:
             # to the lowest model level (logged once) so a tas-only glitch never
             # drops the whole CMOR feed.
             tas = None
+            ts = None
             _get_sst_sic = getattr(self, "get_sst_sic", None)
             if _get_sst_sic is not None:
                 try:
@@ -6177,6 +6207,20 @@ class ModelDriver:
                     if (getattr(self.config, "mpas_ice_skin_prognostic", False)
                             and getattr(self, "_ice_T_skin", None) is not None):
                         _tas_ice = self._ice_T_skin
+                    # CMOR ``ts`` (surface SKIN temperature): the SAME
+                    # sst/sic/ice-skin blend the 2 m tas extrapolation and
+                    # the radiation/turbulence boundary use — NEVER the
+                    # lowest-level air T (that would mislabel air T as skin
+                    # T).  Only available when prescribed sst/sic are on
+                    # this path; skipped otherwise.  CAVEAT (documented,
+                    # matching the surface-flux boundary itself): over LAND
+                    # cells this carries the nearest-ocean SST fill of the
+                    # AMIP loader, not an interactive land-tile skin.
+                    if _tas_ice is not None:
+                        from legoesm.forcing.surface_utils import (
+                            blend_surface_temperature,
+                        )
+                        ts = blend_surface_temperature(_sst, _sic, _tas_ice)
                     tas = diag._tas_2m(
                         state, q_v, _sst, _sic, _tas_ice,
                         u_low=u_east[..., -1], v_low=v_north[..., -1])
@@ -6239,6 +6283,13 @@ class ModelDriver:
                 rsdt=rsdt,
                 hfss=hfss,
                 hfls=hfls,
+                rsds=rsds,
+                rlds=rlds,
+                sw_net_sfc=sw_net,
+                lw_net_sfc=lw_net,
+                ts=ts,
+                tauu=tauu,
+                tauv=tauv,
                 flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
@@ -6481,7 +6532,7 @@ class ModelDriver:
                 and (float(cfg.output.diag_days) <= 0.0
                      or _true_cad_days >= 1.0)):
             _diag.cmip_snapshot_vars = {
-                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va"}
+                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
