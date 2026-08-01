@@ -65,6 +65,7 @@ from legoesm.atmosphere.physics.turbulence.config import (  # noqa: E402
 )
 from legoesm.ml.training import TrainingConfig, create_optimizer  # noqa: E402
 from legoesm.training.les_reference import (  # noqa: E402
+    SCORED_VARIABLES,
     load_les_reference,
 )
 from legoesm.training.param_collector import (  # noqa: E402
@@ -309,7 +310,7 @@ def _assert_surface_pressure_static(ps_history, p_s: float, tol_pa: float = 1.0)
 # scoring
 # --------------------------------------------------------------------------
 
-def score_against_les(means, *, reference, p_full):
+def score_against_les(means, *, reference, p_full, scored):
     """Per-variable and combined normalized profile score vs the LES.
 
     Each variable is normalized by the LES profile's own mass-weighted spread
@@ -325,7 +326,7 @@ def score_against_les(means, *, reference, p_full):
         "v": means["v"],
     }
     components = {}
-    for name in reference.scored_variables():
+    for name in scored:
         ref_profile = jnp.asarray(
             np.nan_to_num(reference.profiles[name], nan=0.0), dtype=jnp.float64
         )
@@ -470,7 +471,7 @@ def evaluate_scheme(scheme: str, *, case, reference, args) -> tuple:
     )
     drift = _assert_surface_pressure_static(ps_hist, case.p_s)
     components, combined = score_against_les(
-        means, reference=reference, p_full=case.p_full,
+        means, reference=reference, p_full=case.p_full, scored=args.scored,
     )
     return cfg, means, components, combined, drift
 
@@ -491,7 +492,7 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
             analysis_hours=args.analysis_hours, chunk_steps=args.chunk_steps,
         )
         _components, combined = score_against_les(
-            means, reference=reference, p_full=case.p_full,
+            means, reference=reference, p_full=case.p_full, scored=args.scored,
         )
         return combined
 
@@ -570,7 +571,7 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
     )
     result.ps_drift_pa = _assert_surface_pressure_static(ps_hist, case.p_s)
     components, combined = score_against_les(
-        means, reference=reference, p_full=case.p_full,
+        means, reference=reference, p_full=case.p_full, scored=args.scored,
     )
     result.score_tuned = float(combined)
     result.components_tuned = {k: float(v) for k, v in components.items()}
@@ -637,6 +638,14 @@ def parse_args(argv=None):
     p.add_argument("--optimizer", default="muon",
                    choices=("muon", "muon_partitioned", "adam", "adamw"))
     p.add_argument("--grad-nonzero-tol", type=float, default=GRAD_NONZERO_TOL)
+    p.add_argument("--score-variables", default="theta,qv",
+                   help="comma-separated scored profiles. Default excludes u "
+                        "and v: the SCM uses a constant-Cd surface drag while "
+                        "the LES uses a z0 log-law wall model, so the momentum "
+                        "profiles carry a surface-drag mismatch that tuning "
+                        "would absorb into the turbulence parameters. The heat "
+                        "and moisture fluxes ARE matched (both prescribed from "
+                        "the deck), so theta and qv are the well-posed target.")
     p.add_argument("--microphysics", default="none",
                    help="microphysics scheme, held identical across arms. "
                         "'none' means the SCM cannot condense, so its cloud "
@@ -661,6 +670,17 @@ def main(argv=None) -> int:
             "labelled a confound."
         )
 
+    args.scored = tuple(v.strip() for v in args.score_variables.split(",")
+                        if v.strip())
+    bad_scored = [v for v in args.scored if v not in SCORED_VARIABLES]
+    if bad_scored:
+        raise SystemExit(
+            f"unknown scored variable(s) {bad_scored}; choose from "
+            f"{list(SCORED_VARIABLES)}"
+        )
+    if not args.scored:
+        raise SystemExit("--score-variables selected nothing")
+
     schemes = (list(TURBULENCE_SCHEMES) if args.schemes == "all"
                else [s.strip() for s in args.schemes.split(",") if s.strip()])
     unknown = [s for s in schemes if s not in TURBULENCE_SCHEMES]
@@ -682,6 +702,18 @@ def main(argv=None) -> int:
     )
     if hours is None:
         hours = reference.window_hours[1]
+    # The SCM averages its trailing --analysis-hours, the LES averages its own
+    # trailing window ending at its last frame. Those are the SAME interval
+    # only if the SCM ends when the LES reference ends. A user-supplied --hours
+    # can silently compare SCM hours 4-6 against LES hours 21-23.
+    les_end = float(reference.window_hours[1])
+    if abs(float(hours) - les_end) > 1.0e-6:
+        raise SystemExit(
+            f"--hours {hours} would end the SCM at {hours} h while the LES "
+            f"reference ends at {les_end} h, so the two analysis windows would "
+            f"cover different times and the comparison would be a confound. "
+            f"Omit --hours to match the reference, or regenerate the reference."
+        )
     args.hours = hours
 
     print(f"case={args.case} nlev={args.nlev} dt={args.dt}s hours={hours} "
@@ -689,7 +721,14 @@ def main(argv=None) -> int:
     print(f"LES reference: {reference.source_dir}")
     print(f"  window={reference.window_label} levels_in_domain="
           f"{int(reference.mask.sum())}/{case.nlev}")
-    print(f"  scored variables: {list(reference.scored_variables())}")
+    missing = [v for v in args.scored
+               if v not in reference.scored_variables()]
+    if missing:
+        raise SystemExit(
+            f"LES reference has no {missing}; available: "
+            f"{list(reference.scored_variables())}"
+        )
+    print(f"  scored variables: {list(args.scored)}")
     print(f"  surface: prescribe={case.forcing.prescribe}")
 
     configs = {}
@@ -822,14 +861,29 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             "surface_prescribe": case.forcing.prescribe,
             "radiation": "none", "convection": "none",
             "microphysics": args.microphysics,
-            "scored_variables": list(reference.scored_variables()),
+            "scored_variables": list(args.scored),
             "note": (
                 "All arms share one column and forcing built from the same "
                 "gSAM deck as the LES; only PhysicsConfig.turbulence differs, "
-                "verified mechanically. Turbulent fluxes are not scored "
-                "because the SCM does not expose a per-level w'theta' for 8 "
-                "of the 9 schemes."
+                "verified mechanically. This makes the ACROSS-SCHEME "
+                "comparison controlled. It does NOT make the SCM a replica of "
+                "the LES: see known_scm_les_differences."
             ),
+            # Stated, not buried. Each of these is identical across arms, so
+            # the ranking stays controlled, but each degrades the absolute
+            # LES-match and could be absorbed into a tuned parameter.
+            "known_scm_les_differences": [
+                "Surface momentum: the SCM uses a constant-Cd bulk drag while "
+                "the LES uses a z0 log-law wall model. This is why u and v are "
+                "not scored by default.",
+                "Microphysics: the LES runs Morrison; the SCM runs "
+                f"{args.microphysics!r}. With 'none' the SCM cannot condense, "
+                "so its cloud layer holds supersaturated vapour where the LES "
+                "forms liquid, and for RICO the LES precipitates.",
+                "Resolved vs parameterized: the LES resolves the large eddies "
+                "the SCM closure must represent — that difference IS the "
+                "quantity being tuned, not an error.",
+            ],
         },
         "les_reference": {
             "source_dir": reference.source_dir,
@@ -867,7 +921,7 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         "surface boundary condition, all built from the same gSAM deck the LES "
         "read; only `PhysicsConfig.turbulence` differs, and that is checked "
         "mechanically rather than assumed. Scored on "
-        f"{', '.join(reference.scored_variables())} — normalized by the LES "
+        f"{', '.join(args.scored)} — normalized by the LES "
         "profile's own mass-weighted spread, combined in quadrature. Lower is "
         "better.", "",
         "| scheme | status | score (default) | score (tuned) | params trained |",
@@ -887,11 +941,19 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         "driver drops `Km`/`Kh`/`shflx`/`lhflx` from `TurbulenceOutput`, and "
         "only prognostic CLUBB carries a per-level `w'theta_l'`, so a flux "
         "score would exist for 1 of 9 schemes.",
-        "- Radiation, convection and microphysics are off, identically on "
-        "every arm. For BOMEX/RICO that matches the LES exactly: the deck's "
-        "`lsf` temperature tendency IS the case's radiative cooling "
-        "(-2.0 K/day below 1500 m, tapering to 0 by 2500 m for BOMEX) and both "
-        "models read it from the same file. It is why DYCOMS is refused.",
+        "- RADIATION matches the LES for BOMEX/RICO: the deck's `lsf` "
+        "temperature tendency IS the case's radiative cooling (-2.0 K/day "
+        "below 1500 m, tapering to 0 by 2500 m for BOMEX) and both models read "
+        "it from the same file. That is why DYCOMS, whose LES adds a Stevens "
+        "longwave parameterization, is refused.",
+        "- The SCM is NOT otherwise a replica of the LES. It uses a "
+        "constant-Cd surface drag against the LES's z0 log-law wall model "
+        "(which is why u and v are excluded from the score by default), and "
+        "the LES runs Morrison microphysics while the SCM's is set by "
+        "`--microphysics`. Each difference is identical across arms, so the "
+        "RANKING is controlled, but each also degrades the absolute LES-match "
+        "and can be absorbed into a tuned parameter. See "
+        "`known_scm_les_differences` in tuned_parameters.json.",
         "- The averaging WINDOW is identical on both sides, but the sampling "
         "inside it is not: the LES mean is over its saved frames (10-minute "
         "cadence), the SCM mean is over every timestep. Same interval, "

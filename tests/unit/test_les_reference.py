@@ -21,7 +21,7 @@ DOMAIN_TOP = 2000.0
 
 
 def _write_frames(tmp_path, n_frames=6, *, nz=NZ_LES, corrupt=None,
-                  drop_var=None, t_step=0.5, values=None):
+                  drop_var=None, t_step=0.5, values=None, case_label=None):
     """Write ``n_frames`` synthetic LES profile frames; return the dir."""
     prof = tmp_path / "profiles"
     prof.mkdir(parents=True, exist_ok=True)
@@ -38,6 +38,8 @@ def _write_frames(tmp_path, n_frames=6, *, nz=NZ_LES, corrupt=None,
             "wqv": 1.0e-5 * (1.0 - z / DOMAIN_TOP),
             "tke": 0.5 * np.ones(nz),
         }
+        if case_label is not None:
+            payload["case"] = np.asarray(case_label)
         if drop_var is not None:
             payload.pop(drop_var)
         if corrupt is not None and i == n_frames - 1:
@@ -207,3 +209,56 @@ def test_inconsistent_frame_variable_sets_are_refused(tmp_path):
              u=np.zeros(NZ_LES), v=np.zeros(NZ_LES), wth=np.zeros(NZ_LES))
     with pytest.raises(ValueError, match="different variable set"):
         _load(tmp_path, analysis_hours=1.0)
+
+
+# --- adversarial-review fixes ----------------------------------------------
+
+def test_frames_from_another_case_are_refused(tmp_path):
+    """--case rico --les-dir results/les_ref/bomex must not silently score
+    BOMEX profiles as RICO."""
+    _write_frames(tmp_path, n_frames=6, case_label="bomex")
+    with pytest.raises(ValueError, match="written by LES case"):
+        _load(tmp_path, case="rico")
+
+
+def test_matching_case_label_is_accepted(tmp_path):
+    _write_frames(tmp_path, n_frames=6, case_label="bomex")
+    ref = _load(tmp_path, case="bomex")
+    assert ref.case == "bomex"
+
+
+def test_deck_directory_spelling_is_accepted(tmp_path):
+    """DYCOMS_RF01 frames belong to case 'dycoms'; a naming cosmetic must not
+    reject a legitimate reference."""
+    _write_frames(tmp_path, n_frames=6, case_label="DYCOMS_RF01")
+    ref = _load(tmp_path, case="dycoms")
+    assert ref.n_frames >= 2
+
+
+def test_duplicate_timestamps_are_refused(tmp_path):
+    """Output dirs are reused and only matching indices overwritten, so a
+    shorter rerun leaves stale higher-index frames behind. Averaging two runs
+    together must fail loudly, not silently double-count."""
+    _write_frames(tmp_path, n_frames=6, t_step=0.5)
+    prof = tmp_path / "profiles"
+    z = np.linspace(25.0, DOMAIN_TOP, NZ_LES)
+    # a stale frame from an earlier, longer run at a time that already exists
+    np.savez(prof / "prof_009.npz", t_hours=np.asarray(3.0), z=z,
+             theta=300.0 + 0.003 * z, qv=1.0e-2 - 2.0e-6 * z,
+             u=-8.0 + 0.001 * z, v=np.zeros(NZ_LES),
+             wth=np.zeros(NZ_LES), wqv=np.zeros(NZ_LES),
+             tke=0.5 * np.ones(NZ_LES))
+    with pytest.raises(ValueError, match="share t_hours"):
+        _load(tmp_path)
+
+
+def test_mask_stops_at_the_top_les_cell_centre_not_the_domain_lid(tmp_path):
+    """np.interp right-CLAMPS, so a level between the top LES cell centre and
+    the lid would be scored against a copied top-cell value."""
+    _write_frames(tmp_path, n_frames=6)          # LES centres reach DOMAIN_TOP
+    z_scm = np.linspace(2600.0, 20.0, 30)
+    p_half = np.linspace(7.0e4, 1.0e5, 31)
+    # ask for a domain top ABOVE the highest LES cell centre
+    ref = _load(tmp_path, z_scm=z_scm, p_half=p_half, domain_top_m=5000.0)
+    assert np.all(ref.z_scm[ref.mask] <= ref.z_les[-1] + 1e-9)
+    assert not ref.mask[0], "level above the top LES centre must be excluded"

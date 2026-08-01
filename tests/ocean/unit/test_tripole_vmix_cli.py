@@ -209,7 +209,8 @@ def test_build_tripole_keyword_surface_bc_defaults_none():
 
 def test_orca1_zdftke_mxl_choice_override():
     """--tke-mxl-choice: None keeps the card value (now 3 = NEMO nn_mxl=3,
-    lup/ldown sweeps + ln_mxl0 anchor); 2 reverts to Veros; unknown raises."""
+    lup/ldown sweeps + ln_mxl0 anchor); 2 reverts to Veros; 4 selects NEMO
+    nn_mxl=2 (single length); unknown raises."""
     r = _runner()
     # 2026-07-24: card DEFAULT is now nn_mxl=3 (ln_mxl0 anchor); =2 reverts.
     assert r.orca1_zdftke_config().tke_mxl_choice == 3                # default
@@ -218,7 +219,13 @@ def test_orca1_zdftke_mxl_choice_override():
     assert c2.tke_mxl_choice == 2
     # ONLY the mixing-length choice changes; every other leaf byte-identical.
     assert c2._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
-    for bad in (1, 4, 0):
+    # 4 = NEMO nn_mxl=2 (the value the ORCA1 namelist actually runs): the same
+    # lup/ldown sweeps as 3 but a SINGLE length, l_eps = l_k = min(lup,ldn).
+    # It was in the `bad` list until it was implemented.
+    c4 = r.orca1_zdftke_config(mxl_choice=4)
+    assert c4.tke_mxl_choice == 4
+    assert c4._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
+    for bad in (1, 0, 5):
         with pytest.raises(ValueError, match="mxl_choice"):
             r.orca1_zdftke_config(mxl_choice=bad)
     # composes with surface_bc (both overrides apply, independent)

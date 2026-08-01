@@ -95,6 +95,12 @@ class SAMSCMCaseSpec:
     latitude_deg: float
     les_domain_top_m: float
     default_dt_s: float
+    # Surface mode MUST mirror what the case's LES driver actually does, not
+    # what the deck happens to contain. RICO's sfc file carries H=15 and
+    # LE=115 W/m2 but run_rico_les.py IGNORES them and computes interactive
+    # bulk fluxes over the fixed SST (SFC_FLX_FXD=.false.), so a "nonzero flux
+    # in the deck => prescribe it" heuristic gives RICO the wrong boundary.
+    surface_mode: str
     note: str
 
 
@@ -104,19 +110,19 @@ class SAMSCMCaseSpec:
 SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
     "bomex": SAMSCMCaseSpec(
         gsam_dir="BOMEX", latitude_deg=15.0, les_domain_top_m=3000.0,
-        default_dt_s=60.0,
+        default_dt_s=60.0, surface_mode="fluxes",
         note="Siebesma et al. 2003 shallow non-precipitating trade cumulus; "
              "prescribed surface fluxes.",
     ),
     "rico": SAMSCMCaseSpec(
         gsam_dir="RICO", latitude_deg=18.0, les_domain_top_m=4000.0,
-        default_dt_s=60.0,
+        default_dt_s=60.0, surface_mode="T_s",
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
-        default_dt_s=30.0,
+        default_dt_s=30.0, surface_mode="fluxes",
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
     ),
@@ -175,12 +181,24 @@ def _interp_profile_fn(days_s: np.ndarray, per_time: np.ndarray):
 
 
 def _interp_scalar_fn(days_s: np.ndarray, values: np.ndarray):
-    """Time-interpolating scalar callable, pure JAX."""
-    t_arr = jnp.asarray(days_s)
-    v_arr = jnp.asarray(values)
-    if v_arr.size == 1:
-        scalar = v_arr.reshape(())
+    """Time-interpolating scalar callable, pure JAX.
+
+    A CONSTANT series collapses to a constant rather than an interpolation.
+    Besides being cheaper, this keeps a prescribed surface temperature off the
+    traced path: inject_prescribed_T_sfc_into_phys_state validates T_s by
+    materialising it with numpy.asarray, on the stated assumption that the SCM
+    driver is not traced -- which is false inside this campaign's scanned,
+    differentiated rollout. Every deck used here (BOMEX, RICO, DYCOMS) stores a
+    time-invariant surface series, so the constant path is the one taken; a
+    genuinely time-varying T_s case would still hit that validator and is
+    rejected below rather than failing deep inside the first rollout.
+    """
+    v_np = np.asarray(values, dtype=np.float64)
+    if v_np.size == 1 or np.allclose(v_np, v_np.flat[0], rtol=0.0, atol=0.0):
+        scalar = jnp.asarray(v_np.flat[0])
         return lambda _t: scalar
+    t_arr = jnp.asarray(days_s)
+    v_arr = jnp.asarray(v_np)
     return lambda t: jnp.interp(jnp.asarray(t, dtype=v_arr.dtype), t_arr, v_arr)
 
 
@@ -199,10 +217,20 @@ def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
     """
     z_top = float(np.max(np.asarray(snd.z)))
     z_snd = jnp.asarray(np.asarray(snd.z, dtype=np.float64))
-    theta_snd = jnp.asarray(np.asarray(snd.theta, dtype=np.float64))
+    # VIRTUAL potential temperature, not dry theta. The hydrostatic balance is
+    # set by density, so a dry mapping displaces heights by ~epsilon*q_v: in
+    # BOMEX's ~17 g/kg boundary layer that is ~1%, and the matched spectral LES
+    # builds its own reference state from theta_v (make_anelastic_reference).
+    # A dry mapping here would place the SCM profiles and forcing at heights
+    # ~1% off the LES they are compared against.
+    theta_v_snd = jnp.asarray(
+        np.asarray(snd.theta, dtype=np.float64)
+        * (1.0 + (1.0 / constants.epsilon - 1.0)
+           * np.asarray(snd.q_v, dtype=np.float64))
+    )
 
     def theta_ref_fn(z):
-        return jnp.interp(z, z_snd, theta_snd)
+        return jnp.interp(z, z_snd, theta_v_snd)
 
     # dz_sfc must leave room for a stretch ratio > 1 (exactly H/n_aux is
     # rejected as "uniform layers would exceed H"), so use half of it: the
@@ -364,7 +392,14 @@ def load_sam_scm_case(
     z_aux, p_aux = _deck_pressure_profile(snd, p_s)
     z_snd_top = float(np.max(np.asarray(snd.z)))
     if sigma_top is None:
-        sigma_top = float(p_aux.min() / p_s)             # deck sounding top
+        # Column top = the LES DOMAIN top, not the sounding top. Masking
+        # out-of-domain levels only removes them from the SCORE; they would
+        # still set the SCM's upper boundary and change the gradients and
+        # entrainment feeding the levels that ARE scored. BOMEX's sounding
+        # reaches 4 km while its LES lid is at 3 km, so defaulting to the
+        # sounding top would evolve a materially different column.
+        top_m = min(float(spec.les_domain_top_m), z_snd_top)
+        sigma_top = float(np.interp(top_m, z_aux[::-1], p_aux[::-1]) / p_s)
     if not 0.0 < sigma_top < 1.0:
         raise ValueError(
             f"derived sigma_top={sigma_top} outside (0, 1); deck p_s={p_s} Pa."
@@ -414,12 +449,39 @@ def load_sam_scm_case(
 
     # --- surface boundary ---------------------------------------------------
     sfc0 = surface_at_day(sfc, day)
-    # Surface air density from the lowest SCM level (p_s, lowest-level T).
-    rho_sfc = p_s / (constants.R_d * float(T_profile[-1]))
+    # Surface air density from the VIRTUAL temperature of the lowest level.
+    # The LES converts its prescribed fluxes with a density derived from
+    # theta_v (make_anelastic_reference); a dry rho is ~1% high in BOMEX's
+    # moist sub-cloud layer, which would make BOTH prescribed kinematic fluxes
+    # ~1% too small from the first step.
+    T_v_bot = float(T_profile[-1]) * (
+        1.0 + (1.0 / constants.epsilon - 1.0) * float(q_v_profile[-1])
+    )
+    rho_sfc = p_s / (constants.R_d * T_v_bot)
 
-    interactive = (abs(sfc0["shf"]) < 1.0e-10 and abs(sfc0["lhf"]) < 1.0e-10)
-    if interactive:
+    if spec.surface_mode not in ("fluxes", "T_s"):
+        raise ValueError(
+            f"{case!r}: surface_mode={spec.surface_mode!r} must be 'fluxes' "
+            "or 'T_s'."
+        )
+    if spec.surface_mode == "T_s":
         prescribe = "T_s"
+        sst_series = np.asarray(sfc.sst, dtype=np.float64)
+        if sst_series.size > 1 and not np.allclose(sst_series, sst_series[0],
+                                                   rtol=0.0, atol=0.0):
+            # inject_prescribed_T_sfc_into_phys_state validates T_s by
+            # materialising it with numpy.asarray, on the stated assumption
+            # that the SCM driver is not traced. That assumption is false
+            # inside a scanned, differentiated rollout, so a time-varying T_s
+            # would raise TracerArrayConversionError deep in the first step.
+            # Refuse here, where the message is actionable.
+            raise NotImplementedError(
+                f"{case!r} has a time-varying SST "
+                f"({sst_series.min():.2f}-{sst_series.max():.2f} K). "
+                "SCMForcing.T_s is validated on the host, so it cannot be "
+                "traced; a time-varying prescribed surface temperature needs "
+                "that validator made trace-safe first."
+            )
         surface_kwargs = dict(
             T_s=_interp_scalar_fn((np.asarray(sfc.days) - day) * 86400.0,
                                   np.asarray(sfc.sst, dtype=np.float64)),

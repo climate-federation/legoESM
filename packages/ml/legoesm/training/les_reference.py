@@ -116,7 +116,7 @@ def _frame_time_hours(payload) -> float:
     return float(payload["t_hours"])
 
 
-def _read_frames(prof_dir: Path):
+def _read_frames(prof_dir: Path, *, expect_case: str | None = None):
     files = sorted(prof_dir.glob("prof_*.npz"))
     if not files:
         raise FileNotFoundError(
@@ -126,13 +126,49 @@ def _read_frames(prof_dir: Path):
     frames = []
     for path in files:
         with np.load(path, allow_pickle=True) as payload:
-            frames.append((
-                _frame_time_hours(payload),
-                path,
-                {k: np.asarray(payload[k]) for k in payload.files},
-            ))
+            data = {k: np.asarray(payload[k]) for k in payload.files}
+        # The frames record which case wrote them. Without this check,
+        # `--case rico --les-dir results/les_ref/bomex` loads BOMEX profiles,
+        # maps them with RICO geometry and forcing, and labels the result RICO.
+        if expect_case is not None and "case" in data:
+            wrote = str(data["case"])
+            if wrote and not _case_matches(wrote, expect_case):
+                raise ValueError(
+                    f"{path.name} was written by LES case {wrote!r} but this "
+                    f"reference is being built for {expect_case!r}. Pointing "
+                    "--les-dir at another case's output would silently score "
+                    "against the wrong reference."
+                )
+        frames.append((_frame_time_hours(data), path, data))
     frames.sort(key=lambda item: item[0])
+    # Directories are reused and only matching frame indices get overwritten,
+    # so a shorter rerun leaves higher-index files from an EARLIER run behind.
+    # Averaging those silently mixes two runs, and duplicate timestamps get
+    # double counted, so both are refused rather than warned about.
+    times = [t for t, _p, _d in frames]
+    for (t_a, path_a), (t_b, path_b) in zip(
+        [(t, p) for t, p, _ in frames], [(t, p) for t, p, _ in frames][1:]
+    ):
+        if abs(t_b - t_a) <= 1.0e-9:
+            raise ValueError(
+                f"LES frames {path_a.name} and {path_b.name} share t_hours="
+                f"{t_a:.6f}. The output directory holds frames from more than "
+                "one run; delete it and rerun the LES rather than averaging "
+                "two runs together."
+            )
+    del times
     return frames
+
+
+def _case_matches(wrote: str, expect: str) -> bool:
+    """Frame ``case`` labels are driver ``--case-label`` values.
+
+    They are compared case-insensitively and allow the deck-directory spelling
+    (``DYCOMS_RF01`` for case ``dycoms``) so a legitimate reference is not
+    rejected on a naming cosmetic.
+    """
+    a, b = wrote.strip().lower(), expect.strip().lower()
+    return a == b or a.startswith(b) or b.startswith(a)
 
 
 def _time_mean(frames, name: str) -> np.ndarray:
@@ -194,7 +230,7 @@ def load_les_reference(
     """
     les_dir = Path(les_dir)
     prof_dir = les_dir / "profiles"
-    frames = _read_frames(prof_dir)
+    frames = _read_frames(prof_dir, expect_case=case)
 
     t_end = frames[-1][0]
     t_start = t_end - float(analysis_hours)
@@ -224,13 +260,17 @@ def load_les_reference(
     z_scm = np.asarray(z_scm, dtype=np.float64)
     if np.any(np.diff(z_scm) >= 0.0):
         raise ValueError("z_scm must be top-to-bottom (strictly descending).")
-    # Only levels the LES actually resolves: inside its domain AND not below
-    # its lowest cell centre (the SCM's lowest level can sit under it).
-    mask = (z_scm <= float(domain_top_m)) & (z_scm >= float(z_les[0]))
+    # Only levels the LES actually RESOLVES: between its lowest and highest
+    # cell centres, and inside the requested domain. The upper bound is
+    # z_les[-1], not domain_top_m: np.interp right-CLAMPS, so a level between
+    # the top LES cell centre and the lid would otherwise be scored against a
+    # copied top-cell value rather than being excluded.
+    top = min(float(domain_top_m), float(z_les[-1]))
+    mask = (z_scm <= top) & (z_scm >= float(z_les[0]))
     if not mask.any():
         raise ValueError(
-            f"no SCM level lies inside the LES domain "
-            f"[{z_les[0]:.1f}, {domain_top_m:.1f}] m; SCM spans "
+            f"no SCM level lies inside the LES-resolved range "
+            f"[{z_les[0]:.1f}, {top:.1f}] m; SCM spans "
             f"[{z_scm[-1]:.1f}, {z_scm[0]:.1f}] m."
         )
     weights = mass_weights_from_pressure(p_half, mask)

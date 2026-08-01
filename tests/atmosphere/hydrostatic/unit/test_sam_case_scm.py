@@ -118,14 +118,27 @@ def test_bomex_column_is_top_to_bottom_and_physical():
 
 
 @requires_bomex
-def test_les_mask_selects_the_les_domain_only():
+def test_column_top_is_the_les_domain_top_not_the_sounding_top():
+    """Levels above the LES lid would still set the SCM's upper boundary and
+    change the gradients feeding the scored levels, so masking them from the
+    score is not enough — the column must not extend there at all."""
     case = load_sam_scm_case("bomex", nlev=64)
+    snd_top = 4000.0            # BOMEX sounding reaches 4 km
+    assert case.les_domain_top_m == 3000.0
+    assert case.z_full[0] <= case.les_domain_top_m + 1.0
+    assert case.z_full[0] < snd_top - 500.0, "column still spans the sounding"
     mask = case.les_mask()
     assert mask.dtype == bool and mask.shape == (64,)
-    assert mask.sum() >= 4, "too few SCM levels inside the LES domain"
+    assert mask.all(), "whole column should now lie inside the LES domain"
+
+
+@requires_bomex
+def test_les_mask_excludes_levels_above_an_explicit_taller_column():
+    """With an explicit taller column the mask must still exclude the top."""
+    case = load_sam_scm_case("bomex", nlev=64, sigma_top=0.55)
+    mask = case.les_mask()
     assert np.all(case.z_full[mask] <= case.les_domain_top_m)
     assert np.all(case.z_full[~mask] > case.les_domain_top_m)
-    # the mask is contiguous at the bottom of a top-to-bottom column
     assert mask[-1] and not mask[0]
 
 
@@ -244,3 +257,75 @@ def test_every_registered_case_loads(case_name):
     assert np.all(np.isfinite(case.T_profile))
     assert case.forcing.prescribe in ("fluxes", "T_s")
     assert case.les_mask().sum() >= 3
+
+
+# --- adversarial-review fixes ----------------------------------------------
+
+@requires_bomex
+def test_height_mapping_uses_virtual_potential_temperature():
+    """A dry mapping displaces heights by ~0.608*q_v (~1% in BOMEX's moist
+    sub-cloud layer) against an LES whose reference state is built from
+    theta_v. Compare the shipped mapping to a deliberately dry one."""
+    import jax.numpy as jnp
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+    from legoesm.atmosphere.physics._shared import exner_to_pressure
+    from legoesm.atmosphere.forcing.scm import sam_case_scm as mod
+
+    case = load_sam_scm_case("bomex", nlev=48)
+    snd = read_sam_snd(f"{case.case_dir}/snd")
+    z_top = float(np.max(np.asarray(snd.z)))
+    z_snd = jnp.asarray(np.asarray(snd.z, dtype=np.float64))
+    theta_dry = jnp.asarray(np.asarray(snd.theta, dtype=np.float64))
+    hc = create_stretched_height_coordinate(
+        mod._AUX_LEVELS, H=z_top, dz_sfc=0.5 * z_top / mod._AUX_LEVELS,
+        theta_ref_fn=lambda z: jnp.interp(z, z_snd, theta_dry),
+        p_sfc=case.p_s,
+    )
+    p_dry = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    z_aux, p_moist = mod._deck_pressure_profile(snd, case.p_s)
+    # the two mappings must differ measurably where the air is moist
+    rel = np.abs(p_moist - p_dry) / p_dry
+    assert rel.max() > 1.0e-4, "virtual correction had no effect"
+    assert rel.max() < 5.0e-2, "virtual correction implausibly large"
+
+
+@requires_bomex
+def test_rho_sfc_uses_virtual_temperature():
+    """A dry rho is ~1% high in a moist sub-cloud layer, which would make BOTH
+    prescribed kinematic fluxes ~1% too small from the first step."""
+    from legoesm import constants
+    case = load_sam_scm_case("bomex", nlev=48)
+    dry = case.p_s / (constants.R_d * float(case.T_profile[-1]))
+    assert case.rho_sfc < dry, "rho_sfc is not the virtual (moist) density"
+    assert abs(case.rho_sfc - dry) / dry > 1.0e-3
+
+
+def test_surface_mode_is_declared_per_case_not_inferred_from_the_deck():
+    """RICO's deck carries H=15/LE=115 W/m2 but its LES IGNORES them and uses
+    interactive bulk fluxes over a fixed SST, so a flux-magnitude heuristic
+    would give RICO the wrong boundary condition."""
+    assert SAM_SCM_CASES["rico"].surface_mode == "T_s"
+    assert SAM_SCM_CASES["bomex"].surface_mode == "fluxes"
+    assert SAM_SCM_CASES["dycoms"].surface_mode == "fluxes"
+
+
+@pytest.mark.skipif(not _deck_available("rico"), reason="RICO deck not cached")
+def test_rico_gets_interactive_surface_despite_nonzero_deck_fluxes():
+    sfc = read_sam_sfc(f"{resolve_sam_case_dir('RICO')}/sfc")
+    assert float(sfc.shf[0]) != 0.0 and float(sfc.lhf[0]) != 0.0
+    case = load_sam_scm_case("rico", nlev=32)
+    assert case.forcing.prescribe == "T_s"
+    assert case.forcing.T_s is not None
+    assert case.forcing.w_th_s is None and case.forcing.w_qv_s is None
+
+
+@requires_bomex
+def test_constant_surface_series_collapses_to_a_constant_callable():
+    """Keeps a prescribed T_s off the traced path, and is cheaper."""
+    import jax
+    case = load_sam_scm_case("bomex", nlev=24)
+    fn = case.forcing.w_th_s
+    a, b = float(fn(0.0)), float(fn(1.0e6))
+    assert a == b, "constant deck series must not vary in time"
+    # a constant closure traces without touching jnp.interp
+    assert np.isfinite(float(jax.jit(fn)(0.0)))

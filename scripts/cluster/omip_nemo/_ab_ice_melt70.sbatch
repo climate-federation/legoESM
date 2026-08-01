@@ -6,12 +6,19 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="rtx8000|a40"
 #SBATCH --mem=96G
-#SBATCH --time=32:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trp_melt70_%j.out
 # Antarctic under-melt A/B (2026-07-28): the trpsbc_win_d90 config VERBATIM
 # (from its run_manifest command_line — the controlled-comparison baseline)
-# with ONE change: --ice-ocean-heat-coeff 70 (vs default 20) + 62-day window
-# (covers the SH melt season; control = trpsbc_win_d90's own d60 snapshot).
+# with ONE change: --ice-ocean-heat-coeff 70 (vs default 20).
+#
+# 90-day window (--years 0.2466), NOT 62 (2026-07-30): day 90 = 1 Apr is the
+# ONLY date with a stitched NEMO ice state (restart_ice_10920_global.npz, from
+# the RUN_TRD re-run) — NEMO monthly output carries no ice fields and RUN_REF
+# restarts are yearly.  A shorter window can only show A/B direction, never
+# faithfulness.  Control at the same date = the existing trpsbc_win_d90 run
+# (same command, coeff 20), so the comparison stays single-variable.
+# Wall time: ~22 min/model-day measured on rtx8000 => ~33 h for 90 d.
 set +e
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT
 export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
@@ -27,6 +34,6 @@ nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
 export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \
   --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
 echo "[gpu] pinned CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-XLA_PYTHON_CLIENT_PREALLOCATE=false LEGOESM_JIT_CACHE_DIR="" JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.17 --snapshot-every-days 30 --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic --iwm --iwm-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc --dm2dc --isf --isf-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc --bbl-adv --woa-init --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc --nemo-monthly-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc --sss-restore-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc --tripole-vmix tke --ice-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/Ice_initialization.nc --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --sw-rgb-chl --output /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nemolev_trp_icemelt70_d60 --ice-ocean-heat-coeff 70 2>&1 | tail -40
+XLA_PYTHON_CLIENT_PREALLOCATE=false LEGOESM_JIT_CACHE_DIR="" JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.2466 --snapshot-every-days 30 --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic --iwm --iwm-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc --dm2dc --isf --isf-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc --bbl-adv --woa-init --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc --nemo-monthly-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc --sss-restore-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc --tripole-vmix tke --ice-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/Ice_initialization.nc --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --sw-rgb-chl --output /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nemolev_trp_icemelt70_d90 --ice-ocean-heat-coeff 70 2>&1 | tail -40
 echo "run_rc=${PIPESTATUS[0]}"; date
 echo "=== DONE ==="

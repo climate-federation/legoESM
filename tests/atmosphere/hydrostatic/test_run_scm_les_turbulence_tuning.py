@@ -172,3 +172,48 @@ def test_scored_variables_exclude_fluxes():
     from legoesm.training.les_reference import SCORED_VARIABLES
     assert "wth" not in SCORED_VARIABLES and "wqv" not in SCORED_VARIABLES
     assert set(SCORED_VARIABLES) == {"theta", "qv", "u", "v"}
+
+
+# --- adversarial-review fixes ----------------------------------------------
+
+def test_scored_variables_default_excludes_the_wind():
+    """The SCM uses a constant-Cd drag against the LES's z0 log-law wall model,
+    so tuning against u/v would absorb a surface-drag mismatch into the
+    turbulence parameters. Heat and moisture fluxes ARE matched."""
+    args = drv.parse_args(["--case", "bomex", "--les-dir", "x"])
+    assert args.score_variables == "theta,qv"
+
+
+def test_unknown_scored_variable_is_a_hard_error():
+    with pytest.raises(SystemExit, match="unknown scored variable"):
+        drv.main(["--case", "bomex", "--les-dir", "/nonexistent",
+                  "--score-variables", "theta,notavar"])
+
+
+def test_empty_scored_variable_selection_is_a_hard_error():
+    with pytest.raises(SystemExit, match="selected nothing"):
+        drv.main(["--case", "bomex", "--les-dir", "/nonexistent",
+                  "--score-variables", " , "])
+
+
+def test_mismatched_hours_is_refused_as_a_window_confound(tmp_path, monkeypatch):
+    """A user --hours that does not end where the LES reference ends would
+    compare different time windows (e.g. SCM 4-6 h vs LES 21-23 h)."""
+    import types
+
+    fake_ref = types.SimpleNamespace(
+        source_dir=str(tmp_path), window_hours=(21.0, 23.0), n_frames=5,
+        mask=__import__("numpy").ones(4, dtype=bool),
+        weights=__import__("numpy").full(4, 0.25),
+        scored_variables=lambda: ("theta", "qv"),
+    )
+    monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
+    monkeypatch.setattr(drv, "load_sam_scm_case",
+                        lambda *a, **k: types.SimpleNamespace(
+                            nlev=4, p_s=1.0e5, sigma_top=0.7,
+                            z_full=__import__("numpy").linspace(3000, 20, 4),
+                            les_domain_top_m=3000.0,
+                            forcing=types.SimpleNamespace(prescribe="fluxes")))
+    with pytest.raises(SystemExit, match="different times"):
+        drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
+                  "--hours", "6"])
