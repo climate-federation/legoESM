@@ -689,6 +689,67 @@ class DiagnosticCollector:
         )
         return T_2m
 
+    def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
+        """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.
+
+        SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
+        :meth:`feed_cmip_accumulators_native` path.  The two lanes must not
+        carry separate copies of this reduction: a drift between them would
+        report a different cloud cover for the SAME state depending only on
+        which dycore ran.
+
+        Arrays are ``(*horiz, nlev)`` with ``p_s`` ``(*horiz,)``.  The
+        horizontal dims are flattened to the ``(ncol, nlev)`` column layout
+        ``compute_cloud_properties`` documents and the scalar overlap result is
+        reshaped back — C-order round-trips exactly, so cells map back for the
+        downstream regridder.  Works for cubed-sphere ``(6,n,n,nlev)``,
+        lat-lon ``(nlat,nlon,nlev)`` and native MPAS ``(nCells,nlev)``.
+
+        Returns ``None`` when the run has no cloud scheme (``cloud_scheme=
+        "none"``) or carries no liquid/vapour tracer, so a caller can simply
+        skip the field rather than publish a zero that reads as "clear".
+
+        CAVEAT -- this is MAXIMUM-RANDOM overlap, the CMIP convention for
+        ``clt``, which is NOT necessarily the overlap the radiation applied.
+        The subcolumn generator (``clouds/subcolumns.py``) is OPT-IN, so on the
+        default path radiation sees no vertical-overlap treatment at all.
+        ``clt`` is therefore a statement about the model's CLOUD FIELD, not a
+        readout of what the radiation integrated: do not difference it against
+        a shortwave bias and call the residual an overlap error.
+        """
+        if self._cloud_config is None or q_c is None or q_v is None:
+            return None
+        from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+            compute_cloud_properties,
+        )
+        horiz_shape = T.shape[:-1]
+        nlev = T.shape[-1]
+        ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
+        # Level pressures from the ACTUAL vertical coordinate -- p_s *
+        # sigma_full is wrong on the (default) hybrid grid.
+        p_s_col = jnp.reshape(p_s, (ncol,))
+        p_full = jnp.asarray(self._p_full(p_s_col))
+        dp = jnp.asarray(self._dp(p_s_col))
+        # Cloud fraction takes CLOUD ice q_i only (matching the radiation
+        # call, physics_pipeline ``q_ice=q_i_col``) -- NOT the precipitating
+        # q_i+q_s+q_g used for the clivi ice PATH, which would over-count
+        # condensate for the condensate-dependent schemes
+        # (xu_randall/resolved).
+        q_ice_col = None if q_i is None else jnp.reshape(q_i, (ncol, nlev))
+        cloud_props = compute_cloud_properties(
+            jnp.reshape(T, (ncol, nlev)),
+            p_full,
+            jnp.reshape(q_v, (ncol, nlev)),
+            dp,
+            self._cloud_config,
+            q_cloud=jnp.reshape(q_c, (ncol, nlev)),
+            q_ice=q_ice_col,
+        )
+        return np.asarray(
+            jnp.reshape(maximum_random_overlap(cloud_props.cloud_fraction),
+                        horiz_shape)
+        ) * 100.0  # CMIP units: %
+
     def collect(
         self,
         elapsed_day: float,
@@ -1075,48 +1136,9 @@ class DiagnosticCollector:
                 # ``convective_cloud=False`` (see ModelDriver._create_diagnostics),
                 # so this is the model's STRATIFORM cloud cover — the opt-in
                 # convective radiative-tuning add-on is intentionally not counted.
-                if self._cloud_config is not None:
-                    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-                        compute_cloud_properties,
-                    )
-                    # Flatten the horizontal dims to the (ncol, nlev) column
-                    # layout compute_cloud_properties documents, then reshape the
-                    # scalar overlap result back — C-order round-trips exactly, so
-                    # cells map back for the downstream regridder.  Works for
-                    # cubed-sphere (6,n,n,nlev) and lat-lon (nlat,nlon,nlev).
-                    T_data = state.T.data
-                    horiz_shape = T_data.shape[:-1]
-                    nlev = T_data.shape[-1]
-                    ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
-                    # Level pressures from the ACTUAL vertical coordinate --
-                    # p_s * sigma_full is wrong on the (default) hybrid grid.
-                    p_s_col = jnp.reshape(state.p_s.data, (ncol,))
-                    p_full = jnp.asarray(self._p_full(p_s_col))
-                    dp = jnp.asarray(self._dp(p_s_col))
-                    # Cloud fraction takes CLOUD ice q_i only (matching the
-                    # radiation call, physics_pipeline ``q_ice=q_i_col``) — NOT
-                    # the precipitating q_i+q_s+q_g used for the clivi ice PATH
-                    # above, which would over-count condensate for the
-                    # condensate-dependent schemes (xu_randall/resolved).
-                    q_ice_col = (
-                        None if q_i is None
-                        else jnp.reshape(q_i, (ncol, nlev))
-                    )
-                    cloud_props = compute_cloud_properties(
-                        jnp.reshape(T_data, (ncol, nlev)),
-                        p_full,
-                        jnp.reshape(q_v, (ncol, nlev)),
-                        dp,
-                        self._cloud_config,
-                        q_cloud=jnp.reshape(q_c, (ncol, nlev)),
-                        q_ice=q_ice_col,
-                    )
-                    clt_field = np.asarray(
-                        jnp.reshape(
-                            maximum_random_overlap(cloud_props.cloud_fraction),
-                            horiz_shape,
-                        )
-                    ) * 100.0  # CMIP units: %
+                clt_field = self._clt_percent(
+                    state.T.data, state.p_s.data, q_v, q_c, q_i)
+                if clt_field is not None:
                     r_clt = self._regrid_to_latlon_2d(clt_field)
                     if r_clt is not None:
                         fields_2d['clt'] = r_clt
@@ -1330,6 +1352,8 @@ class DiagnosticCollector:
         p_s,
         lat_deg=None,
         q_v=None,
+        q_c=None,
+        q_i=None,
         u_east=None,
         v_north=None,
         precip=None,
@@ -1349,7 +1373,7 @@ class DiagnosticCollector:
         This is the lean-driver counterpart to :meth:`collect`'s spatial
         block.  The MPAS (Voronoi) execution path materialises only a handful
         of diagnostic arrays per interval and never assembles :meth:`collect`'s
-        full kwarg set (radiation fluxes, cloud tracers), so it historically
+        full kwarg set (the surface/radiation flux block), so it historically
         fed NOTHING into the CMOR accumulators (manifests showed
         ``call_counts: []`` / ``max_count_ever: 0`` even though the sidecar
         SAVE ran).  This feeds the subset the lean path CAN provide through the
@@ -1493,6 +1517,8 @@ class DiagnosticCollector:
         _f64 = np.float64
         tas_field = None if tas is None else np.asarray(tas, dtype=_f64)
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
+        q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
+        q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
@@ -1525,6 +1551,8 @@ class DiagnosticCollector:
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
+            ("q_c", q_c_np, (_ncol, _nlev)),
+            ("q_i", q_i_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
         ]
@@ -1586,6 +1614,15 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(cwv_field)
                 if r is not None:
                     fields_2d['prw'] = r
+            # Total cloud cover: the SAME shared reduction the cube/lat-lon
+            # ``collect`` path uses, so the MPAS lane cannot report a
+            # different cloud cover for an identical state.  Skipped (not
+            # zeroed) on a cloud-free run -- see ``_clt_percent``.
+            clt_field = self._clt_percent(T_np, p_s_np, q_v_np, q_c_np, q_i_np)
+            if clt_field is not None:
+                r = self._regrid_to_latlon_2d(clt_field)
+                if r is not None:
+                    fields_2d['clt'] = r
 
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
