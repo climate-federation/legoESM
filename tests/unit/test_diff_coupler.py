@@ -345,32 +345,6 @@ class TestFluxAccumulatorGrad:
         shape = (6, 4, 4)
         ones = jnp.ones(shape)
 
-        def make_sfc_to_atm(T_sfc):
-            return SurfaceToAtm(
-                T_sfc=T_sfc,
-                T_rad=T_sfc,
-                albedo=0.1 * ones,
-                emissivity=0.97 * ones,
-                z0=1e-4 * ones,
-                q_surface=5e-3 * ones,
-                shflx=20.0 * ones,
-                lhflx=10.0 * ones,
-                tau_x=0.1 * ones,
-                tau_y=0.05 * ones,
-                lw_up=350.0 * ones,
-                u_ocean_sfc=jnp.zeros(shape),
-                v_ocean_sfc=jnp.zeros(shape),
-                co2_flux=jnp.zeros(shape),
-                freshwater_flux=jnp.zeros(shape),
-                ocean_heat_extraction=jnp.zeros(shape),
-                ocean_stress_x=jnp.zeros(shape),
-                ocean_stress_y=jnp.zeros(shape),
-                surface_mass_flux=jnp.zeros(shape),
-                salt_flux=jnp.zeros(shape),
-                river_runoff_flux=jnp.zeros(shape),
-                ice_lake_freshwater_flux=jnp.zeros(shape),
-            )
-
         def loss(T_sfc):
             acc = reset_accumulator(shape)
             sfc1 = self._make_sfc_to_atm(T_sfc, ones, shape)

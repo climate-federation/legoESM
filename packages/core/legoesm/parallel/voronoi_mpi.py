@@ -1139,11 +1139,9 @@ def make_voronoi_mpi_step(
             # column-local, so it needs no halo/allreduce and is identical on
             # owned and halo cells.
             if getattr(config, "conservative_tracer_clamp", False):
-                from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-                    is_borrow_eligible_tracer,
-                )
                 from legoesm.core.conservation import (
                     conservative_positive_clip_global,
+                    is_borrow_eligible_tracer,
                 )
                 # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
                 # mirrors the serial floors exactly (see primitive_eq_mpas:

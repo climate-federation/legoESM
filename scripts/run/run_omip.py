@@ -28,7 +28,12 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:  # annotation-only; the runtime import stays function-scoped
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
 
 sys.stdout.reconfigure(line_buffering=True)
 

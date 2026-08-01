@@ -481,7 +481,7 @@ def validate_treguier_cfg(cfg: TreguierConfig) -> None:
     exists to impose.
 
     TRACING: ``aei0`` is a ``tunable_tier=2`` parameter, and
-    ``param_collector.apply_param_overrides`` splices trained leaves into the
+    ``legoesm.core.param_overrides.apply_param_overrides`` splices trained leaves into the
     config as TRACERS inside the loss.  A Python ``>`` on a tracer raises
     ``TracerBoolConversionError``, so this validator SKIPS any non-concrete
     leaf and is a fail-early convenience for concrete configs ONLY.  The
