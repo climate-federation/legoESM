@@ -697,6 +697,7 @@ class TestCRPS:
 
     # BUG: ``area_weighted_afcrps`` omits the ``n_lat / sum(weights)``
     # resolution-independence correction that ``area_weighted_mse``,
+    # (HISTORICAL, fixed in #1413 — kept because it records the measurement.)
     # ``per_variable_mse`` and ``weighted_mae`` all apply (see the explicit
     # "Same resolution-independence correction as area_weighted_mse" comments
     # in ml/loss.py).  It returns ``jnp.mean(crps * w)``, which for a CONSTANT
@@ -710,9 +711,8 @@ class TestCRPS:
     # weighted_mae in validate_s2s_step, so the three metrics are on
     # different, resolution-dependent scales and the effective S2S learning
     # rate silently changes with grid size.
-    @pytest.mark.xfail(strict=True, reason="BUG: area_weighted_afcrps omits the n_lat/sum(w) resolution-independence correction its three siblings apply "
-                              "(area_weighted_mse, per_variable_mse, weighted_mae). Strict-xfail so the defect stays pinned and this flips to a "
-                              "failure the moment it is fixed. See the tracking issue.")
+    # FIXED in #1413 — the strict xfail did its job and flipped; kept as a
+    # live regression test.
     def test_afcrps_is_a_resolution_independent_area_mean(self):
         from legoesm.ml.loss import area_weighted_afcrps
         # Two members straddling the target by +/-1 => pointwise CRPS is a
