@@ -105,7 +105,11 @@ INLINE_IMPORT_BUDGET = {
     _COUPLER / "mpas_adapter.py": 0,
     # Ice + land surface modules (iter-245 sweep, in progress).
     _ICE / "state.py": 0,
-    _ICE / "sea_ice.py": 8,
+    # Hoist sweep tranche 1: all 9 inline imports moved to module level (six
+    # grid-type imports used only for isinstance checks, plus ice.state's
+    # slab_to_dynamic and ice.rheology's strain_rates -- neither module imports
+    # sea_ice back, and sea_ice already imports both at module scope).
+    _ICE / "sea_ice.py": 0,
     _LAND / "slab_land.py": 0,
     _LAND / "multilayer_land.py": 0,
     # Core modules (iter-247 sweep, in progress).  precision.py keeps
@@ -117,7 +121,10 @@ INLINE_IMPORT_BUDGET = {
     _CORE / "precision.py": 1,
     _CORE / "field.py": 0,
     _CORE / "tracers.py": 0,
-    _CORE / "fv_tp_2d.py": 1,
+    # get_mpi_topology is the ACCESSOR, not the mutable singleton: it reads
+    # the module global on every call, so a module-level binding still observes
+    # set_halo_backend().  Importing the accessor is what CLAUDE.md prescribes.
+    _CORE / "fv_tp_2d.py": 0,
     _CORE / "operators_fv_latlon.py": 0,
     # core/hardware.py is the legacy wrapper for runtime.backend; hoisting
     # its 4 inline imports recreates the same precision.py cycle (it's in
@@ -182,4 +189,46 @@ def test_inline_legoesm_import_budget(path: PurePosixPath, budget: int):
         f"(``_halo_backend``, ``_mpi_topology``, ``_spmd_mesh``) "
         f"are the *only* legitimate reason to keep an inline import "
         f"in these files."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Cold-import gate for the hoisted edges.
+#
+# Hoisting an inline import to module level is only safe while the target does
+# not import its way back to the host.  A back-edge added later would surface as
+# a partially-initialised module, and ONLY on a cold interpreter whose first
+# ``legoesm`` import is the affected module — a session that already imported
+# the package (which every other test does) will not reproduce it.  So each
+# module below is imported in a FRESH subprocess, first, on its own.
+#
+# Grow this list whenever a further hoist-sweep tranche lands.
+# --------------------------------------------------------------------------- #
+COLD_IMPORT_MODULES = (
+    "legoesm.core.fv3_sw_core",
+    "legoesm.core.fv_tp_2d",
+    "legoesm.grids.halo",
+    "legoesm.ice.sea_ice",
+    "legoesm.ice.state",
+    "legoesm.ice.rheology",
+    "legoesm.ice.dynamics",
+)
+
+
+@pytest.mark.parametrize("module", COLD_IMPORT_MODULES)
+def test_module_imports_cold(module: str):
+    """Importing *module* first, in a fresh interpreter, must not cycle."""
+    import subprocess
+    import sys
+
+    r = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        capture_output=True, text=True, timeout=300,
+    )
+    assert r.returncode == 0, (
+        f"cold import of {module} failed — a module-level import hoisted out of "
+        f"a function body has (re)introduced a circular import. Move the "
+        f"offending import back into the function that uses it and raise that "
+        f"file's INLINE_IMPORT_BUDGET with the cycle named in a comment.\n"
+        f"{r.stderr[-2000:]}"
     )

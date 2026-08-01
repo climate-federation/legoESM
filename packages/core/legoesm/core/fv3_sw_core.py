@@ -35,6 +35,11 @@ from legoesm.core.operators_cdgrid import (
     pad_halo_auto,
 )
 from legoesm.grids.duogrid import ext_vector_dgrid
+from legoesm.grids.duogrid_bgrid_ring import (
+    apply_bgrid_ring1,
+    build_bgrid_ring1_map,
+    build_d5_metric_bundle,
+)
 from legoesm.grids.halo import (
     CONNECTIVITY,
     EAST,
@@ -2134,8 +2139,6 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # the BOUNDED gridstruct's D5 geometry (real native halo
         # strips) in create layout, built once per n (trace-time
         # numpy, jnp constants under jit).
-        from legoesm.grids.duogrid_bgrid_ring import build_d5_metric_bundle
-
         d5_bundle = build_d5_metric_bundle(n)
         dxc = jnp.asarray(d5_bundle["dxc"], dtype=dxc.dtype)
         dyc = jnp.asarray(d5_bundle["dyc"], dtype=dyc.dtype)
@@ -2279,11 +2282,6 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                 # code's output (duogrid_bgrid_ring).  Map is
                 # grid-static: built once per n (disk-cached), applied
                 # as a jit-safe gather/segment-sum.
-                from legoesm.grids.duogrid_bgrid_ring import (
-                    apply_bgrid_ring1,
-                    build_bgrid_ring1_map,
-                )
-
                 _grid_nord = int(getattr(
                     getattr(cdgrid.base, "duogrid", None), "k2e_nord",
                     2))
