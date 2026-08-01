@@ -50,7 +50,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.atmosphere.forcing.sam_case_forcing import (
-    extend_sounding_to_top,
     interp_forcing_to_levels,
     interp_sounding_to_levels,
     read_sam_lsf,
@@ -61,8 +60,11 @@ from legoesm.atmosphere.forcing.sam_case_forcing import (
 )
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
-from legoesm.atmosphere.physics._shared import exner_function
-from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.atmosphere.physics._shared import exner_function, exner_to_pressure
+from legoesm.grids.vertical import (
+    create_sigma_coordinate,
+    create_stretched_height_coordinate,
+)
 
 from legoesm import constants
 
@@ -74,11 +76,10 @@ __all__ = [
     "surface_kinematic_moisture_flux",
 ]
 
-# Scale height used ONLY to pick a generous height to extend the deck sounding
-# to before the exact pressure->height inversion below. Over-covering is safe
-# (the inversion clamps at the sounding top and the coverage is asserted);
-# under-covering is not, so this is deliberately larger than R_d*T/g ~ 8.8 km.
-_EXTEND_SCALE_HEIGHT_M = 9.0e3
+# Levels of the auxiliary height coordinate used to reconstruct the deck's
+# missing pressure column. Fine enough that the SCM's p->z inversion does not
+# depend on it; it is thrown away immediately afterwards.
+_AUX_LEVELS = 512
 
 
 @dataclass(frozen=True)
@@ -177,24 +178,53 @@ def _interp_scalar_fn(days_s: np.ndarray, values: np.ndarray):
     return lambda t: jnp.interp(jnp.asarray(t, dtype=v_arr.dtype), t_arr, v_arr)
 
 
-def _scm_heights_from_deck(snd, p_full_pa: np.ndarray) -> np.ndarray:
-    """Height of each SCM pressure level, by inverting the deck's own p(z).
+def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
+    """Hydrostatic ``p(z)`` for a deck whose ``p`` column is the ``-999`` sentinel.
 
-    The deck carries matched ``p`` [mb] and ``z`` [m], so the SCM's sigma levels
-    are placed in height using the case's own sounding rather than a separate
-    hydrostatic integration that could disagree with it. Interpolation is linear
-    in ``ln p``, which is where ``z`` is closest to linear.
+    Every gSAM deck used here (BOMEX, RICO, DYCOMS_RF01) stores ``p = -999`` at
+    every level and carries only ``pres0``; pressure is meant to be integrated
+    from the sounding's potential temperature. That integration is NOT redone
+    here — an auxiliary :class:`HeightCoordinate` is built over the sounding's
+    own depth with ``theta_ref_fn`` set to the deck sounding, which is the same
+    integrator ``build_sam_case_height_coord`` gives the LES, and its Exner
+    reference is inverted with the shared :func:`exner_to_pressure`.
+
+    Returns ``(z_aux, p_aux)``, both descending in height (top-to-bottom).
     """
-    p_deck_pa = np.asarray(snd.p, dtype=np.float64) * 100.0
-    z_deck = np.asarray(snd.z, dtype=np.float64)
-    if np.any(np.diff(p_deck_pa) >= 0.0):
+    z_top = float(np.max(np.asarray(snd.z)))
+    z_snd = jnp.asarray(np.asarray(snd.z, dtype=np.float64))
+    theta_snd = jnp.asarray(np.asarray(snd.theta, dtype=np.float64))
+
+    def theta_ref_fn(z):
+        return jnp.interp(z, z_snd, theta_snd)
+
+    # dz_sfc == H/n_aux makes the geometric stretch solve to ~1 (near-uniform),
+    # so the reconstructed p(z) is insensitive to this auxiliary grid.
+    hc = create_stretched_height_coordinate(
+        n_aux, H=z_top, dz_sfc=z_top / n_aux,
+        theta_ref_fn=theta_ref_fn, p_sfc=float(p_s_pa),
+    )
+    z_aux = np.asarray(hc.z_full, dtype=np.float64)
+    p_aux = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    if np.any(np.diff(z_aux) >= 0.0):
+        raise ValueError("auxiliary height coordinate is not top-to-bottom.")
+    if np.any(np.diff(p_aux) <= 0.0):
         raise ValueError(
-            "deck sounding pressure must decrease monotonically with height; "
-            "got a non-monotonic p(z), refusing to invert it."
+            "hydrostatic pressure must increase downward; got a non-monotonic "
+            "p(z) from the deck sounding."
         )
+    return z_aux, p_aux
+
+
+def _heights_from_pressure(z_aux, p_aux, p_full_pa: np.ndarray) -> np.ndarray:
+    """Height of each SCM pressure level, by inverting ``p(z)``.
+
+    Interpolation is linear in ``ln p``, which is where ``z`` is closest to
+    linear.
+    """
     # np.interp needs ascending x: ln p ascends as z descends.
-    ln_p_asc = np.log(p_deck_pa[::-1])
-    z_desc = z_deck[::-1]
+    ln_p_asc = np.log(p_aux[::-1])
+    z_desc = z_aux[::-1]
     z_full = np.interp(np.log(np.asarray(p_full_pa, dtype=np.float64)),
                        ln_p_asc, z_desc)
     if np.any(np.diff(z_full) >= 0.0):
@@ -272,7 +302,7 @@ def load_sam_scm_case(
     *,
     nlev: int = 64,
     dt: float | None = None,
-    sigma_top: float = 0.01,
+    sigma_top: float | None = None,
     day: float = 0.0,
     case_dir: str | None = None,
     coriolis: bool = True,
@@ -284,10 +314,15 @@ def load_sam_scm_case(
     ----------
     case
         Key of :data:`SAM_SCM_CASES` (``"bomex"``, ``"rico"``, ``"dycoms"``).
-    nlev, sigma_top
-        SCM vertical grid. The default ``sigma_top=0.01`` gives a full
-        atmospheric column; only the levels inside the LES domain
-        (:meth:`SAMSCMCase.les_mask`) are comparable to an LES reference.
+    nlev
+        Number of SCM levels spanning the case column.
+    sigma_top
+        Top of the SCM column, as a fraction of surface pressure. ``None``
+        (default) puts the column top at the DECK SOUNDING TOP, which is the
+        depth the case actually specifies (1.5-4.5 km for these cases) and the
+        depth the matching LES runs. Extrapolating a stratosphere the case
+        never defined would invent the profile the closure is scored against,
+        so the default deliberately does not do it.
     dt
         Physics timestep [s]; defaults to the case's ``default_dt_s``.
     day
@@ -304,7 +339,7 @@ def load_sam_scm_case(
     spec = SAM_SCM_CASES[case]
     if nlev < 2:
         raise ValueError(f"nlev must be >= 2, got {nlev}")
-    if not 0.0 < sigma_top < 1.0:
+    if sigma_top is not None and not 0.0 < sigma_top < 1.0:
         raise ValueError(f"sigma_top must be in (0, 1), got {sigma_top}")
     resolved_dir = case_dir or resolve_sam_case_dir(spec.gsam_dir)
     dt = float(spec.default_dt_s if dt is None else dt)
@@ -315,20 +350,28 @@ def load_sam_scm_case(
 
     p_s = float(snd.pres0) * 100.0                      # mb -> Pa
 
-    # Extend the sounding well above the model top BEFORE inverting p(z), so
-    # the inversion never has to clamp inside the column.
-    z_est_top = -_EXTEND_SCALE_HEIGHT_M * float(np.log(sigma_top))
-    snd = extend_sounding_to_top(snd, z_est_top)
+    # These decks store p = -999 at every level, so reconstruct p(z)
+    # hydrostatically from the sounding's own theta before anything else.
+    z_aux, p_aux = _deck_pressure_profile(snd, p_s)
+    z_snd_top = float(np.max(np.asarray(snd.z)))
+    if sigma_top is None:
+        sigma_top = float(p_aux.min() / p_s)             # deck sounding top
+    if not 0.0 < sigma_top < 1.0:
+        raise ValueError(
+            f"derived sigma_top={sigma_top} outside (0, 1); deck p_s={p_s} Pa."
+        )
 
     sigma = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=jnp.float64)
     sigma_full = np.asarray(sigma.sigma_full, dtype=np.float64)
     p_full = sigma_full * p_s                            # [Pa], top-to-bottom
-    z_full = _scm_heights_from_deck(snd, p_full)
-    if z_full[0] > float(snd.z[-1]):
+    if p_full.min() < p_aux.min() - 1.0:
         raise ValueError(
-            f"deck sounding top {float(snd.z[-1]):.0f} m does not cover the SCM "
-            f"model top {z_full[0]:.0f} m after extension."
+            f"SCM column top ({p_full.min():.1f} Pa) is above the deck sounding "
+            f"top ({p_aux.min():.1f} Pa, z={z_snd_top:.0f} m); the sounding "
+            "does not define the profile there. Lower nlev/sigma_top or pick a "
+            "case with a deeper sounding."
         )
+    z_full = _heights_from_pressure(z_aux, p_aux, p_full)
 
     exner_full = np.asarray(exner_function(jnp.asarray(p_full)), dtype=np.float64)
 
