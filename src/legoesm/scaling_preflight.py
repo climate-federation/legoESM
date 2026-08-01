@@ -61,7 +61,7 @@ def nearest_divisible(n: int, divisor: int, *, n_candidates: int = 3) -> list[in
     k = max(1, n // divisor)
     span = n_candidates + 2
     cands = {m * divisor for m in range(max(1, k - span), k + span + 1)}
-    return sorted(sorted(cands, key=lambda v: (abs(v - n), v))[:n_candidates])
+    return sorted(cands, key=lambda v: (abs(v - n), v))[:n_candidates]
 
 
 def validate_divisibility(extent: int, n_devices: int, *,

@@ -351,15 +351,27 @@ def main() -> int:
                           axis="n_lat")
     _n_lat_est = (args.n_lat if args.mode == "strong"
                   else args.nlat_per_dev * args.n_devices)
-    # sharded=False: the ocean SPMD lane still allocates GLOBAL-sized buffers
-    # on every device (#1370), and its no-CPU-backend fallback below builds the
-    # global state on the accelerator outright. Dividing by n_devices here
+    # Whether the estimate may be divided by n_devices depends on WHERE the
+    # global rest-state init lands, which is decided by the cpu-backend
+    # availability this bench keys its own fallback on (see the
+    # `jax.local_devices(backend="cpu")` block below). With a cpu backend the
+    # globals are built in HOST RAM and only per-band shards are device_put ->
+    # sharded. Without one (JAX_PLATFORMS=cuda), the fallback materialises the
+    # global state ON the accelerator -> NOT sharded, and dividing by n_devices
     # would under-estimate by exactly n_devices and wave through the OOM this
-    # preflight exists to reject (codex High, PR #1376). Flip to True when
-    # #1370 lands.
+    # preflight exists to reject. Both directions matter: codex flagged the
+    # missing case first, then the unconditional sharded=False as a FALSE
+    # "does not fit" for the documented JAX_PLATFORMS=cuda,cpu lane
+    # (LL2304/L60 on 64 devices: 170.9 GiB unsharded vs 2.67 GiB/device).
+    # Read from the env, never from jax — the preflight runs before any import.
+    _platforms = [p.strip() for p in
+                  os.environ.get("JAX_PLATFORMS", "").split(",") if p.strip()]
+    _host_side_global_init = (args.n_devices > 1
+                              and (not _platforms or "cpu" in _platforms))
     _est = preflight_or_exit(
         validate_memory, n_columns=_n_lat_est * args.n_lon, nlev=args.nlev,
-        n_devices=args.n_devices, device=args.device_hbm, sharded=False)
+        n_devices=args.n_devices, device=args.device_hbm,
+        sharded=_host_side_global_init)
     print(f"[preflight] ok: n_lat={_n_lat_est} n_lon={args.n_lon} "
           f"nlev={args.nlev} n_devices={args.n_devices} "
           f"est={_est / 1024**3:.1f} GB/device", flush=True)
