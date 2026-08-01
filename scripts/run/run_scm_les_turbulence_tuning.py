@@ -875,8 +875,15 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         "only prognostic CLUBB carries a per-level `w'theta_l'`, so a flux "
         "score would exist for 1 of 9 schemes.",
         "- Radiation, convection and microphysics are off, identically on "
-        "every arm. For BOMEX/RICO that matches the LES exactly (their LES "
-        "applies no radiation); it is why DYCOMS is refused.",
+        "every arm. For BOMEX/RICO that matches the LES exactly: the deck's "
+        "`lsf` temperature tendency IS the case's radiative cooling "
+        "(-2.0 K/day below 1500 m, tapering to 0 by 2500 m for BOMEX) and both "
+        "models read it from the same file. It is why DYCOMS is refused.",
+        "- The averaging WINDOW is identical on both sides, but the sampling "
+        "inside it is not: the LES mean is over its saved frames (10-minute "
+        "cadence), the SCM mean is over every timestep. Same interval, "
+        "different estimator variance — not a window confound, but do not "
+        "quote a difference smaller than the LES frame-to-frame scatter.",
         "",
     ]
     (outdir / "summary.md").write_text("\n".join(lines))
