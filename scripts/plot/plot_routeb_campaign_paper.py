@@ -64,12 +64,25 @@ FIGS = [
      ]),
 ]
 
-def load(csv_path):
+def load(csv_path, mode="strong", precision="float32", n_levels=None):
     """Load GPU rows from the aggregated campaign CSV.
 
     Deliberately no embedded-snapshot fallback: a hardcoded copy silently
     diverges from the aggregated results (it did — the 2026-07-17 snapshot
     carried pre-rerun icosahedral values), so a missing CSV must fail loudly.
+
+    ``(grid, resolution, n_devices)`` is NOT a unique key: the same geometry
+    also varies by ``mode`` (strong/weak), ``precision`` and ``n_levels``.
+    Filtering on ``backend`` alone let a sibling row silently OVERWRITE its
+    predecessor, resolved by file order — the twin of the defect fixed in
+    ``plot_grid_throughput``. It bit twice in one campaign: a float64 fan-out
+    replaced float32 across 18 of 39 GPU rows, and an icosahedral rerun at
+    nlev=26 landed beside stale nlev=8 rows of the same geometry. Both read as
+    performance regressions; neither was one.
+
+    So filter explicitly and make a surviving duplicate a HARD error. Pass
+    ``None`` for any filter to disable it (the duplicate check then fires,
+    which is the point).
     """
     if not csv_path:
         raise SystemExit(
@@ -78,12 +91,37 @@ def load(csv_path):
         raise SystemExit(f"--csv not found: {csv_path}")
     import csv
     out: dict = {}
+    seen: dict = {}
     with open(csv_path) as fh:
         for r in csv.DictReader(fh):
             if r["backend"] != "GPU":
                 continue
+            if mode is not None and r.get("mode", "") != mode:
+                continue
+            if precision is not None and r.get("precision", "") != precision:
+                continue
+            if n_levels is not None and str(r.get("n_levels", "")) != str(n_levels):
+                continue
+            key = (r["grid"], int(r["resolution"]), int(r["n_devices"]))
+            if key in seen:
+                p = seen[key]
+                raise SystemExit(
+                    f"duplicate rows for grid={key[0]} res={key[1]} "
+                    f"n_devices={key[2]} after filtering (mode={mode}, "
+                    f"precision={precision}, n_levels={n_levels}):\n"
+                    f"  A: precision={p['precision']} mode={p['mode']} "
+                    f"nlev={p.get('n_levels')} mcells/s={p['mcells_per_s']}\n"
+                    f"  B: precision={r['precision']} mode={r['mode']} "
+                    f"nlev={r.get('n_levels')} mcells/s={r['mcells_per_s']}\n"
+                    f"Narrow the selection (--mode/--precision/--n-levels).")
+            seen[key] = r
             out.setdefault((r["grid"], int(r["resolution"])), {})[int(r["n_devices"])] = (
-                float(r["sypd"]), float(r["mcells_per_s"]))
+                float(r["sypd"]) if r["sypd"] else float("nan"),
+                float(r["mcells_per_s"]))
+    if not out:
+        raise SystemExit(
+            f"no GPU rows matched mode={mode!r} precision={precision!r} "
+            f"n_levels={n_levels!r} in {csv_path}")
     return out
 
 
@@ -199,10 +237,24 @@ def main(argv=None):
                         "and anti-scaling reads directly as <1x)")
     p.add_argument("--suffix", default="",
                    help="appended to output filenames (compare variants)")
+    # A tidy CSV holds several series per (grid, res, n_devices); pick ONE.
+    # "any" disables a filter and lets the duplicate check fire.
+    p.add_argument("--mode", default="strong",
+                   help="scaling mode (strong|weak|any; default strong)")
+    p.add_argument("--precision", default="float32",
+                   help="precision (float32|float64|any; default float32)")
+    p.add_argument("--n-levels", default=None,
+                   help="restrict to one vertical resolution (e.g. 26); a "
+                        "campaign that changed n_levels is NOT comparable")
     a = p.parse_args(argv)
     import matplotlib
     matplotlib.use("Agg")
-    data = load(a.csv)
+    def _none(v):
+        """"any" disables a filter (and lets the duplicate check fire)."""
+        return None if str(v).lower() == "any" else v
+
+    data = load(a.csv, mode=_none(a.mode), precision=_none(a.precision),
+                n_levels=a.n_levels)
     os.makedirs(a.out, exist_ok=True)
     for title, outname, grid, ramp, res in FIGS:
         make_figure(data, title, outname + a.suffix, grid, ramp, res, a.out,
