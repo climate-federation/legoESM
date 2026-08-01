@@ -235,10 +235,21 @@ class DiagnosticCollector:
         cmip_resolution_deg: float = 5.0,
         start_year: int = 1979,
         cloud_config=None,
+        vcoord=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
         self.dsigma = dsigma
+        # Vertical coordinate object (``SigmaCoordinate`` or
+        # ``HybridSigmaPressureCoordinate``).  REQUIRED to get level pressures
+        # right on a HYBRID grid, which is the driver DEFAULT
+        # (``GridConfig.vertical_coord = "hybrid"``): there
+        # ``sigma_full`` is only a COMPATIBILITY VIEW returning ``A_full +
+        # B_full``, so ``p = sigma_full * p_s`` is wrong by ``A*(p_s - p_ref)``
+        # -- a few hPa near sea level but ~80 hPa over high terrain, which
+        # lands CMOR ``ta``/``ua``/``hus`` on the wrong pressure surfaces.
+        # ``None`` keeps the pure-sigma formula (exact when A == 0).
+        self.vcoord = vcoord
         self.clear_sky_diag = clear_sky_diag
         # Cloud config (``atmosphere.physics.clouds.CloudConfig`` or ``None``)
         # for the total-cloud-cover ``clt`` diagnostic — the SAME scheme
@@ -564,6 +575,26 @@ class DiagnosticCollector:
             return arr
         return None
 
+    def _p_full(self, p_s):
+        """Full-level pressure [Pa] for this vertical coordinate.
+
+        ``p = A p_ref + B p_s`` for hybrid, ``p = sigma p_s`` for pure sigma.
+        Never assume the latter: on a hybrid grid ``sigma_full`` is the
+        ``A_full + B_full`` compatibility view, whose own docstring warns it is
+        for utilities that do NOT assume pure-sigma pressure dependence.
+        """
+        if self.vcoord is not None:
+            return self.vcoord.pressure_at_full(p_s)
+        import jax.numpy as jnp
+        return jnp.asarray(p_s)[..., None] * jnp.asarray(self.sigma_full)
+
+    def _dp(self, p_s):
+        """Layer pressure thickness [Pa]; ``dA p_ref + dB p_s`` for hybrid."""
+        if self.vcoord is not None:
+            return self.vcoord.layer_thickness_dp(p_s)
+        import jax.numpy as jnp
+        return jnp.asarray(p_s)[..., None] * jnp.asarray(self.dsigma)
+
     def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
 
@@ -577,13 +608,13 @@ class DiagnosticCollector:
         Returns (..., 19) numpy array on CMIP6 standard pressure levels,
         or None if sigma_full is not available.
         """
-        sigma = np.asarray(self.sigma_full)
         p_s_np = np.asarray(p_s)
         field_np = np.asarray(field_3d)
 
-        # Model pressure at each level: p_k = sigma_k * p_s
+        # Model pressure at each level, from the ACTUAL vertical coordinate:
+        # p_k = A_k p_ref + B_k p_s (hybrid) or sigma_k p_s (pure sigma).
         # Shape: (..., nlev)
-        p_model = p_s_np[..., None] * sigma
+        p_model = np.asarray(self._p_full(p_s_np))
 
         # Target pressure levels (ascending for interpolation)
         plev_target = np.sort(CMIP6_PLEV19)  # ascending (100 Pa → 100000 Pa)
@@ -601,15 +632,18 @@ class DiagnosticCollector:
         # pass per field.
         n_target = len(plev_target)
 
-        # target_sigma shape: (..., n_target).  ``sigma`` is the ascending
-        # 1-D array of model layer-mid sigmas; for each cell we want the
-        # model-level index whose sigma first exceeds the target.
-        target_sigma = (
-            plev_target.reshape((1,) * p_s_np.ndim + (n_target,))
-            / np.maximum(p_s_np[..., None], 1e-10)
-        )
-        idx_hi = np.searchsorted(sigma, target_sigma)
-        idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
+        # Bracketing index per cell, shape (..., n_target).  This counts the
+        # model levels below each target pressure, which is exactly
+        # ``searchsorted`` on the (ascending) per-column pressure profile.
+        #
+        # It replaces a 1-D ``searchsorted(sigma, plev/p_s)``: converting a
+        # target PRESSURE to a single sigma and searching one shared 1-D
+        # column is only valid for a PURE-sigma grid, where p = sigma*p_s makes
+        # the level sigmas identical in every column.  On the (default) hybrid
+        # grid p = A p_ref + B p_s, so the bracketing levels genuinely differ
+        # per column and that shortcut selects the wrong pair over terrain.
+        idx_hi = np.sum(p_model[..., None] < plev_target, axis=-2)
+        idx_hi = np.clip(idx_hi, 1, p_model.shape[-1] - 1)
         idx_lo = idx_hi - 1
 
         f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
@@ -643,7 +677,7 @@ class DiagnosticCollector:
         v_low = state.v.data[..., -1] if v_low is None else v_low
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         p_s = state.p_s.data
-        p_low = p_s * jnp.asarray(self.sigma_full)[-1]
+        p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
         T_sfc = blend_surface_temperature(sst, sic, T_ice)
         q_sfc = saturation_mixing_ratio(T_sfc, p_s)
@@ -729,7 +763,8 @@ class DiagnosticCollector:
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
-        cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma,
+                                 dp=self._dp(state.p_s.data))
         _aw = self._area_w
         # Build a zero-padded sentinel for optional fields (shflx, lhflx,
         # sw_down_toa) so they can be fused into the single device→host
@@ -831,6 +866,8 @@ class DiagnosticCollector:
             sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
+            dp=self._dp(state.p_s.data),
+            p_full=self._p_full(state.p_s.data),
         )
 
         # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
@@ -843,6 +880,7 @@ class DiagnosticCollector:
             lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
+            dp=self._dp(state.p_s.data),
         )
 
         # Monthly means
@@ -1003,7 +1041,8 @@ class DiagnosticCollector:
             # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
             if q_c is not None:
                 lwp_field = np.asarray(
-                    column_water_vapor(q_c, state.p_s.data, self.dsigma)
+                    column_water_vapor(q_c, state.p_s.data, self.dsigma,
+                                       dp=self._dp(state.p_s.data))
                 )
                 # Frozen condensate path: sum whichever ice species are present
                 # (None for warm-rain microphysics → contributes nothing).
@@ -1013,7 +1052,8 @@ class DiagnosticCollector:
                         q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
                 if q_frozen is not None:
                     iwp_field = np.asarray(
-                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma)
+                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma,
+                                           dp=self._dp(state.p_s.data))
                     )
                 else:
                     iwp_field = np.zeros_like(lwp_field)
@@ -1048,11 +1088,11 @@ class DiagnosticCollector:
                     horiz_shape = T_data.shape[:-1]
                     nlev = T_data.shape[-1]
                     ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
-                    # p_full = sigma_full * p_s, dp = dsigma * p_s (the sigma
-                    # pressures the collector's other column diagnostics assume).
-                    p_s_col = jnp.reshape(state.p_s.data, (ncol, 1))
-                    p_full = p_s_col * self.sigma_full
-                    dp = p_s_col * self.dsigma
+                    # Level pressures from the ACTUAL vertical coordinate --
+                    # p_s * sigma_full is wrong on the (default) hybrid grid.
+                    p_s_col = jnp.reshape(state.p_s.data, (ncol,))
+                    p_full = jnp.asarray(self._p_full(p_s_col))
+                    dp = jnp.asarray(self._dp(p_s_col))
                     # Cloud fraction takes CLOUD ice q_i only (matching the
                     # radiation call, physics_pipeline ``q_ice=q_i_col``) — NOT
                     # the precipitating q_i+q_s+q_g used for the clivi ice PATH
@@ -1097,7 +1137,8 @@ class DiagnosticCollector:
 
             # prw: column water vapor [kg/m2]
             cwv_field = np.asarray(
-                column_water_vapor(q_v, state.p_s.data, self.dsigma)
+                column_water_vapor(q_v, state.p_s.data, self.dsigma,
+                                   dp=self._dp(state.p_s.data))
             )
             r = self._regrid_to_latlon_2d(cwv_field)
             if r is not None:
@@ -1216,7 +1257,8 @@ class DiagnosticCollector:
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
-        cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma,
+                                 dp=self._dp(state.p_s.data))
         _aw = self._area_w
         _stats = jnp.stack([
             area_weighted_mean(sst, _aw),
@@ -1539,7 +1581,8 @@ class DiagnosticCollector:
                     fields_2d[_name] = r
             if q_v_np is not None:
                 cwv_field = np.asarray(
-                    column_water_vapor(q_v_np, p_s_np, self.dsigma))
+                    column_water_vapor(q_v_np, p_s_np, self.dsigma,
+                                       dp=self._dp(p_s_np)))
                 r = self._regrid_to_latlon_2d(cwv_field)
                 if r is not None:
                     fields_2d['prw'] = r

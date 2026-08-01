@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -329,7 +330,15 @@ def zhang_mcfarlane_convection(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
         z, rho, config.delta_0, M_u_max=config.M_b_max,
+        # Selectable vertical solve (config default "advective" = shipped
+        # behaviour, byte-identical).  ``p_half``/``dt`` are only consumed by
+        # the implicit_flux branch; the kernel raises on an unknown value
+        # (dispatch-hardening, static Python str).
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half, dt=dt, theta_implicit=config.theta_implicit,
     )
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # -- Convective momentum transport --------------------------------------
     if config.enable_cmt:

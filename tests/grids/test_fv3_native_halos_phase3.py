@@ -180,8 +180,11 @@ class TestK2EOracle:
                                  use_duogrid=True, k2e_nord=2)
         assert int(g2.duogrid.k2e_nord) == 2
         g = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
-                                use_duogrid=True)  # default: order 4
-        assert int(g.duogrid.k2e_nord) == 4
+                                use_duogrid=True)  # default: order 2
+        assert int(g.duogrid.k2e_nord) == 2      # faithful default
+        g4 = create_cubed_sphere(8, dtype=np.float64, gnomonic="ed",
+                                 use_duogrid=True, k2e_nord=4)
+        assert int(g4.duogrid.k2e_nord) == 4     # historical, explicit
 
     def test_fp32_constant_field_tolerance(self):
         # codex p3 P3: cube_rmp casts coefficients to field dtype; fp32

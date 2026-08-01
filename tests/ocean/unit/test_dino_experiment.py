@@ -449,6 +449,20 @@ class TestDINORecipes:
         mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
         assert mc.barotropic.barotropic_een_seed == "nemo_kmm"
 
+    def test_een_e3f_scheme_mlf_card_only(self):
+        # #1226 item 10 (NEMO nn_e3f_typ=1, dynvor.F90::vor_een:733-745 —
+        # masked-average e3f, not the min-rule). Only the leapfrog/EEN-total
+        # card selects it; every other recipe keeps the bit-identical
+        # min-rule default (MITgcm hFacZ convention).
+        mlf = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert mlf.een_e3f_scheme == "nemo_avg"
+        for recipe in ("nemo_dino_kamm", "legoesm_default", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            assert dino_config_for_recipe(recipe).een_e3f_scheme == "min", recipe
+        grid = dino_lat_lon_grid(mlf, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, mlf, physics=True)
+        assert mc.een_e3f_scheme == "nemo_avg"
+
     def test_nemo_paper_convection_is_nemo_hard_switch(self):
         # NEMO zdfevd is a HARD rn2<0 switch on the adiabatic (eosbn2) N^2. The
         # legoESM sigmoid default leaks enhanced mixing into weakly-stable water
@@ -1687,7 +1701,7 @@ class TestIsoneutralRediOnly:
 
     def test_static_kappa_override_row_scaling(self):
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.experiments.dino import (
             DINOConfig, dino_lat_lon_grid,
@@ -1695,14 +1709,100 @@ class TestIsoneutralRediOnly:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
         gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
-        arr = _static_kappa_redi_override(gm_on, g)
+        arr, arr_v = static_kappa_redi_override(gm_on, g)
         assert arr.shape == (g.n_lat, 12)
+        assert arr_v.shape == (g.n_lat, 12)
         lat = np.asarray(g.lat)
         # grid.lat is stored float32 -> f32-appropriate tolerance
         np.testing.assert_allclose(
             np.asarray(arr)[:, 0], 100.0 * np.cos(lat), rtol=1e-6)
+        # v-face (#1226 tier-2 item 1): NEMO evaluates ahtv INDEPENDENTLY at
+        # the v-point (ldftra.F90:325-329 -> ldfc1d_c2d.F90:141-145,
+        # ahtv=zUfac*MAX(e1v,e2v)**inn), NOT ahtu broadcast onto the v-face —
+        # ground-truth against grid.cos_lat_v at the north-face-of-cell-j
+        # convention (matches grid.dx_v[1:,:] used by the operator).
+        cos_lat_v = np.asarray(g.cos_lat_v)[1:]
+        np.testing.assert_allclose(
+            np.asarray(arr_v)[:, 0], 100.0 * cos_lat_v, rtol=1e-6)
+        # The two must differ (this is the whole point of the fix) except at
+        # the equator-straddling row where cos(lat_T) and cos(lat_v) coincide
+        # by symmetry.
+        assert not np.allclose(np.asarray(arr)[:, 0], np.asarray(arr_v)[:, 0])
         gm_off = GMRediConfig(kappa_Redi=100.0)
-        assert _static_kappa_redi_override(gm_off, g) is None
+        assert static_kappa_redi_override(gm_off, g) == (None, None)
+
+    def test_static_kappa_override_on_cgrid_geometry(self):
+        """cos_lat_v on LatLonCGridGeometry -- the from-rest path.
+
+        Regression for the #1226 tier-2 ahtv fix, which read grid.cos_lat_v
+        directly and so crashed EVERY from-rest run while every test passed
+        (the tests all used the bridged LatLonGrid, which stores it).
+        """
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            static_kappa_redi_override,
+        )
+        from legoesm.grids.latlon import create_latlon_geometry
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
+        geom = create_latlon_geometry(
+            g.n_lat, 12, radius=float(g.radius),
+            lat_1d=jnp.asarray(g.lat), lon_1d=jnp.asarray(g.lon),
+            lat_face_1d=jnp.asarray(g.lat_v))
+        assert geom.cos_lat_v.shape == (g.n_lat + 1,)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        arr, arr_v = static_kappa_redi_override(gm_on, geom)
+        assert arr.shape == (g.n_lat, 12) and arr_v.shape == (g.n_lat, 12)
+        # Same quantity as the LatLonGrid answer -- cos at the TRUE v-face
+        # latitude.  Agreement to f32 eps, not bit-exact, only because the
+        # two cast at different points (grid casts lat_v then cos; the
+        # geometry cos's the f64 faces then casts).  A midpoint rebuild
+        # would instead be off by 2.5e-4 here -- 3 orders larger.
+        ref, ref_v = static_kappa_redi_override(gm_on, g)
+        np.testing.assert_allclose(np.asarray(arr_v), np.asarray(ref_v),
+                                   rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(arr), np.asarray(ref), rtol=1e-6)
+
+    def test_static_kappa_override_refuses_tripole(self):
+        """Tripole has no 1-D v-face axis -- refuse, never fabricate ahtv.
+
+        The ndim!=1 guard does not catch tripole (it stores a zonal-mean 1-D
+        lat), so without this the consumer would silently build ahtv from a
+        half-cell reconstruction of zonal-mean latitudes.
+        """
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.grids.latlon import create_latlon_geometry
+        g = create_latlon_geometry(8, 12)
+        tri_like = g._replace(fold=g.fold._replace(is_active=True))
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        with pytest.raises(ValueError, match="no 1-D v-face axis"):
+            static_kappa_redi_override(gm_on, tri_like)
+
+    def test_static_kappa_override_is_jit_safe(self):
+        """The override runs INSIDE jit -- it must never inspect array values.
+
+        Regression: a NaN-scanning tripole guard raised
+        TracerArrayConversionError and killed every production run.
+        """
+        import jax
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.grids.latlon import create_latlon_geometry
+        g = create_latlon_geometry(8, 12)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        # Production shape: the geometry is closed over with STATIC ints but
+        # z-star-live ARRAY leaves, so cos_lat_v arrives as a tracer.
+        f = jax.jit(lambda cv, lt: static_kappa_redi_override(
+            gm_on, g._replace(cos_lat_v=cv, lat=lt)))
+        kT, kv = f(jnp.asarray(g.cos_lat_v), jnp.asarray(g.lat))
+        assert kT.shape == (8, 12) and kv.shape == (8, 12)
 
     def test_mpas_builder_rejects_isoneutral(self):
         import dataclasses
@@ -1720,13 +1820,13 @@ class TestIsoneutralRediOnly:
         from types import SimpleNamespace
 
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            _static_kappa_redi_override,
+            static_kappa_redi_override,
         )
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         gm = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
         fake = SimpleNamespace(lat=np.zeros((4, 5)), n_lon=5)
         with pytest.raises(ValueError, match="1-D latitudes"):
-            _static_kappa_redi_override(gm, fake)
+            static_kappa_redi_override(gm, fake)
 
 
 def _pytest_raises_valueerror(match):
@@ -1918,3 +2018,430 @@ class TestNemoCentredBarotropic:
         assert isinstance(mc.barotropic.n_barotropic_substeps, int)
         assert (mc.barotropic.n_barotropic_substeps
                 == _dino_barotropic_substeps(g, cfg) >= 2)
+
+
+# ---------------------------------------------------------------------
+# #1226 trasbc.F90:152-153 live top-cell divisor
+# (surface_flux_divisor="static"/"nemo_live")
+# ---------------------------------------------------------------------
+
+class TestSurfaceFluxDivisor:
+    """DINOConfig.surface_flux_divisor: NEMO's trasbc.F90 divides the
+    combined non-solar flux by the LIVE e3t(:,:,1,Kmm) = e3t_0*(1+r3t)
+    (r3t = ssh/ht_0, domqco.F90:160) -- legoESM's default divides by the
+    STATIC dz_ref[0]. "nemo_live" rescales to the live divisor.
+    """
+
+    def _fixture(self, eta_value, cfg=None):
+        from legoesm.core.field import Field
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = cfg if cfg is not None else DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        # Nonzero eta, masked to zero on land (matches every other eta
+        # field in the state — dry columns carry eta=0, r3t=0 there).
+        eta = jnp.full_like(st.eta.data, eta_value) * st.land_mask.data
+        st = st._replace(eta=Field(
+            data=eta, name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
+        return g, z, st, frc
+
+    def test_unknown_divisor_raises(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), surface_flux_divisor="bogus")
+        g, z, st, frc = self._fixture(5.0, cfg)
+        with pytest.raises(ValueError, match="surface_flux_divisor"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+    def test_static_is_bit_identical_to_legacy(self):
+        """Fallback path (default / no live-divisor opt-in): byte-identical
+        to the pre-fix behaviour at every eta, since dz_0_live == dz_0
+        exactly when surface_flux_divisor="static" (max|diff|==0.0)."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = DINOConfig()
+        assert cfg.surface_flux_divisor == "static"
+        g, z, st, frc = self._fixture(7.3, cfg)
+        out = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+        # Independent pre-fix reconstruction: the static-divisor tendency
+        # is dz_0-independent of eta, so re-running at eta=0 on a config
+        # that cannot see eta (surface_flux_divisor="static" never reads
+        # state.eta) must give the IDENTICAL T/S update.
+        g0, z0, st0, frc0 = self._fixture(0.0, cfg)
+        out0 = apply_dino_lat_lon_surface_forcing(st0, frc0, z0, cfg, 2700.0)
+        max_diff_T = float(jnp.max(jnp.abs(out.T.data - out0.T.data)))
+        max_diff_S = float(jnp.max(jnp.abs(out.S.data - out0.S.data)))
+        assert max_diff_T == 0.0, max_diff_T
+        assert max_diff_S == 0.0, max_diff_S
+
+    def test_nemo_live_matches_independent_transcription(self):
+        """Live divisor: assert the top-layer T/S tendency equals an
+        INDEPENDENT in-test transcription of trasbc.F90:152-153's single-
+        division structure (not a call into the function under test, and
+        NOT a post-hoc rescale of the static tendency -- with
+        RestoringConfig.implicit=True the denominator is (tau_T + dt),
+        which is not simply proportional to 1/dz_0, so the transcription
+        must rebuild tau_T/tau_S from the LIVE dz_0 and re-run the SAME
+        analytic implicit-Euler formula restoring.py documents, entirely
+        without importing restoring.py or tau_from_flux_coefficient).
+
+        PRE-FIX (surface_flux_divisor field did not exist / the applicator
+        always divided by the static dz_ref[0]): this test's "nemo_live"
+        branch is unreachable with a bare DINOConfig(), and even patched in
+        naively as an after-the-fact rescale of the static output this
+        assertion measured ~1.2% off (retracted -- see the fix's docstring
+        in apply_dino_lat_lon_surface_forcing).
+        """
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        from legoesm.ocean.eos import nemo_r3t_stretch
+
+        eta_value = 12.0   # a few metres of ssh -> O(1e-3) r3t on H~2-4 km
+        dt = 2700.0
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(cfg_static, surface_flux_divisor="nemo_live")
+
+        g, z, st, frc = self._fixture(eta_value, cfg_static)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, dt)
+
+        # Independent transcription of trasbc.F90:152-153 + usrdef_sbc.F90:279
+        # + the restoring.py analytic-implicit-Euler algebra (restoring.py's
+        # own docstring: dT_dt_eff = (T*-T)/(tau_T+dt)) -- built from scratch
+        # here, reading only T*/T/Q_sr/A_theta/dz_0_live/dt, never calling
+        # tau_from_flux_coefficient or restoring_surface_forcing.
+        dz_0 = float(z.dz_ref[0])
+        stretch = np.asarray(nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data))
+        dz_0_live = dz_0 * stretch                              # e3t(:,:,1,Kmm)
+
+        rho_0, c_p = cfg_static.rho_0, cfg_static.c_p
+        T_top = np.asarray(st.T.data[..., 0])
+        S_top = np.asarray(st.S.data[..., 0])
+        T_star = np.asarray(frc["T_star_2d"])
+        S_star = np.asarray(frc["S_star_2d"])
+        Q_sr = np.asarray(frc["Q_sr_2d"])
+
+        tau_T_live = rho_0 * c_p * dz_0_live / cfg_static.A_theta
+        tau_S_live = rho_0 * 1.0 * dz_0_live / cfg_static.A_S
+        surf_dT = -(T_top - T_star) / (tau_T_live + dt) - Q_sr / (rho_0 * c_p * dz_0_live)
+        surf_dS = -(S_top - S_star) / (tau_S_live + dt)
+
+        # Plus the Jerlov SW-penetration tendency's OWN level-0 deposit (eq
+        # 10, traqsr.F90 -- a separate NEMO routine, untouched by this fix
+        # and still divided by the STATIC dz_ref; the applicator adds it to
+        # the SAME top layer as the restoring term). Calling the real
+        # (unmodified) shortwave_penetration_tendency here is legitimate --
+        # it is a dependency of the function under test, not the function
+        # under test itself.
+        from legoesm.ocean.physics.shortwave_penetration import (
+            shortwave_penetration_tendency, ShortwavePenetrationConfig,
+        )
+        jacobian = jnp.ones_like(st.eta.data)
+        sw_cfg = ShortwavePenetrationConfig(water_type=cfg_static.jerlov_water_type)
+        dT_dt_sw_top = np.asarray(shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p,
+        )[..., 0])
+
+        expect_dT_top = dt * surf_dT + dt * dT_dt_sw_top
+        expect_dS_top = dt * surf_dS
+
+        got_dT_top = np.asarray(out_live.T.data[..., 0] - st.T.data[..., 0])
+        got_dS_top = np.asarray(out_live.S.data[..., 0] - st.S.data[..., 0])
+
+        wet = np.asarray(st.land_mask.data) > 0.5
+        np.testing.assert_allclose(got_dT_top[wet], expect_dT_top[wet], rtol=1e-10, atol=1e-14)
+        np.testing.assert_allclose(got_dS_top[wet], expect_dS_top[wet], rtol=1e-10, atol=1e-14)
+
+        # A positive eta -> larger live top-cell thickness -> the SAME
+        # surface flux gives a SMALLER tendency magnitude (dilution, not
+        # concentration) -- the sign/units check (CLAUDE.md mandatory).
+        # Isolate the DIVISOR-AFFECTED piece (restoring + Q_sr-subtraction,
+        # i.e. `surf_dT` above) rather than the combined restoring+SW
+        # output: the Jerlov SW-penetration deposit at level 0 is IDENTICAL
+        # between static/live (out of this fix's scope) and mixing it in
+        # would dilute/mask the dilution signal under test.
+        dz_0_static = dz_0   # DINOConfig() default: scalar, r3t=0 baseline
+        tau_T_static = rho_0 * c_p * dz_0_static / cfg_static.A_theta
+        surf_dT_static = (-(T_top - T_star) / (tau_T_static + dt)
+                          - Q_sr / (rho_0 * c_p * dz_0_static))
+        assert eta_value > 0.0
+        assert float(np.mean(stretch[wet])) > 1.0
+        mag_static = np.abs(surf_dT_static[wet])
+        mag_live = np.abs(surf_dT[wet])
+        assert np.all(mag_live <= mag_static + 1e-15), (
+            "a larger top cell must DILUTE the flux (smaller |tendency|), "
+            "not amplify it")
+
+    def test_below_water_sw_penetration_untouched(self):
+        """dT_dt_sw (traqsr.F90, a separate NEMO routine) is out of this
+        fix's scope -- the live divisor changes ONLY the level-0 restoring
+        term, never the sub-surface Jerlov penetration tendency."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(cfg_static, surface_flux_divisor="nemo_live")
+        g, z, st, frc = self._fixture(12.0, cfg_static)
+        out_static = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_static, 2700.0)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, 2700.0)
+        # Levels 1+ (below the surface restoring layer) must be identical:
+        # only the SW penetration tendency reaches them, unaffected by the
+        # divisor switch.
+        np.testing.assert_array_equal(
+            np.asarray(out_static.T.data[..., 1:]),
+            np.asarray(out_live.T.data[..., 1:]))
+
+
+# ---------------------------------------------------------------------
+# #1226 c_p truncation (eosbn2.F90:1899 rcp)
+# ---------------------------------------------------------------------
+
+class TestCpNemoExact:
+    """DINOConfig.c_p paper-Table-1 default (3991.86) truncates NEMO's own
+    ``rcp = 3991.86795711963_wp`` (eosbn2.F90:1899, phycst.F90:118 notes
+    rho0/rcp are defined in eosbn2, not phycst) at 6 sig figs -- the ENTIRE
+    tra_sbc tem residual (#1226 tra_sbc_tem_piece_decompose.py), since
+    salinity's own conversion (trasbc.F90:137) has no rcp factor at all.
+    """
+
+    def test_default_cp_is_paper_table_value_not_nemo_exact(self):
+        # The plain (non-NEMO-card) default stays the paper's own truncated
+        # Table 1 value -- unaffected by this fix, exactly like
+        # test_default_construct above.
+        cfg = DINOConfig()
+        assert cfg.c_p == pytest.approx(3991.86)
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        assert cfg.c_p != NEMO_RCP_EXACT
+
+    def test_nemo_dino_kamm_recipe_uses_nemo_exact_rcp(self):
+        """The NEMO-fidelity card (nemo_dino_kamm / _mlf) must pin c_p to
+        NEMO's own eosbn2.F90:1899 rcp EXACTLY, not the paper's truncation --
+        same NEMO_CONSTANTS_CONFIG.c_sw value already used by g/omega on
+        this card (constants_config.py:56, 67)."""
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+            cfg = dino.dino_config_for_recipe(recipe)
+            assert cfg.c_p == NEMO_RCP_EXACT, (recipe, cfg.c_p)
+
+    def test_tra_sbc_tem_reconstruction_bit_identical_with_nemo_exact_cp(self):
+        """Independent in-test transcription of trasbc.F90:136,152-153
+        (sbc_tsc(jp_tem) = r1_rho0_rcp*qns; pts(Krhs) += zfact*(sbc_tsc_b+
+        sbc_tsc)/e3t(Kmm,1)) at a synthetic qns/sbc_hc_b/dz_0: using the
+        NEMO card's c_p (NEMO_CONSTANTS_CONFIG.c_sw) reproduces a
+        reconstruction built directly from eosbn2.F90's own literal
+        bit-for-bit; using the paper's truncated default does NOT (this is
+        the PRE-FIX failure -- run with the paper default it does not match
+        to machine precision, matching #1226's measured 9.657e-07
+        err_norm)."""
+        rho_0 = 1026.0
+        qns = np.array([37.4, -12.9, 0.0, 121.7])       # synthetic W/m^2
+        sbc_hc_b = np.array([1.1e-5, -3.2e-6, 0.0, 4.0e-5])  # synthetic K*m/s
+        dz_0 = np.array([10.0, 9.5, 10.0, 8.7])           # synthetic live e3t
+
+        def reconstruct(c_p):
+            r1_rho0_rcp = 1.0 / (rho_0 * c_p)
+            this_step_rate = r1_rho0_rcp * qns
+            return 0.5 * (sbc_hc_b + this_step_rate) / dz_0
+
+        NEMO_RCP_EXACT = 3991.86795711963  # eosbn2.F90:1899, verbatim
+        cfg_nemo = dino.dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert cfg_nemo.c_p == NEMO_RCP_EXACT
+
+        recon_nemo_card = reconstruct(cfg_nemo.c_p)
+        recon_exact = reconstruct(NEMO_RCP_EXACT)
+        np.testing.assert_array_equal(recon_nemo_card, recon_exact)
+
+        recon_paper_default = reconstruct(DINOConfig().c_p)
+        max_diff = float(np.max(np.abs(recon_paper_default - recon_exact)))
+        assert max_diff > 0.0, (
+            "paper Table-1 c_p truncation should NOT reconstruct bit-"
+            "identically -- if this is 0.0 the truncation stopped mattering "
+            "and the #1226 finding needs re-checking")
+
+
+# ---------------------------------------------------------------------
+# #1226 traqsr.F90:665-712 qsr_2BD live gdepw ladder
+# (shortwave_penetration_ladder="static"/"nemo_live")
+# ---------------------------------------------------------------------
+
+class TestShortwavePenetrationLadder:
+    """DINOConfig.shortwave_penetration_ladder: NEMO's qsr_2BD evaluates the
+    two-band absorption profile at the LIVE (z*-stretched) gdepw(Kmm) =
+    gdepw_0*(1+r3t) (domzgr_substitute.h90:139, r3t=ssh/ht_0 domqco.F90:160)
+    -- legoESM's default uses the STATIC z_coord.z_half_ref. "nemo_live"
+    rescales both the interface depths and the layer thickness by the same
+    stretch (eos.nemo_r3t_stretch), matching traqsr.F90's single live e3t.
+    """
+
+    def _fixture(self, eta_value, cfg=None):
+        from legoesm.core.field import Field
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = cfg if cfg is not None else DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        eta = jnp.full_like(st.eta.data, eta_value) * st.land_mask.data
+        st = st._replace(eta=Field(
+            data=eta, name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
+        return g, z, st, frc
+
+    def test_unknown_ladder_raises(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), shortwave_penetration_ladder="bogus")
+        g, z, st, frc = self._fixture(5.0, cfg)
+        with pytest.raises(ValueError, match="shortwave_penetration_ladder"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+    def test_static_is_bit_identical_to_legacy(self):
+        """Default (no opt-in): byte-identical to the pre-fix behaviour at
+        every eta -- the applicator passes z_half_stretch=None, which
+        shortwave_penetration_tendency treats identically to not having the
+        new kwarg at all. Isolate the SW-penetration piece (levels 1+, which
+        the restoring term never reaches) so this is a clean test of ONLY
+        the ladder gate, independent of surface_flux_divisor/eta-dependent
+        restoring terms."""
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = DINOConfig()
+        assert cfg.shortwave_penetration_ladder == "static"
+        g, z, st, frc = self._fixture(7.3, cfg)
+        out = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+
+        g0, z0, st0, frc0 = self._fixture(0.0, cfg)
+        out0 = apply_dino_lat_lon_surface_forcing(st0, frc0, z0, cfg, 2700.0)
+        max_diff_T_below = float(jnp.max(jnp.abs(
+            out.T.data[..., 1:] - out0.T.data[..., 1:])))
+        assert max_diff_T_below == 0.0, max_diff_T_below
+
+    def test_nemo_live_matches_independent_transcription(self):
+        """Live ladder: assert the FULL-COLUMN SW penetration tendency
+        equals an INDEPENDENT in-test transcription of traqsr.F90's
+        qsr_2BD formula (rn_abs*exp(-gdepw*r1_si0) + (1-rn_abs)*
+        exp(-gdepw*r1_si1), traqsr.F90:665-712) evaluated at the LIVE
+        r3t-stretched gdepw -- built from scratch here, never calling
+        shortwave_penetration_tendency.
+
+        PRE-FIX (shortwave_penetration_ladder field did not exist / the
+        applicator always used the static z_half_ref): this test's
+        "nemo_live" branch is unreachable with a bare DINOConfig(), and the
+        static-ladder tendency does not match this transcription once eta
+        is nonzero (measured #1226 all-levels err_norm median 2.022e-05).
+        """
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        from legoesm.ocean.physics.shortwave_penetration import JERLOV_TYPES
+        import dataclasses
+
+        eta_value = 15.0  # a few metres of ssh -> O(1e-3) r3t on H~2-4 km
+        dt = 2700.0
+        cfg_static = DINOConfig()
+        cfg_live = dataclasses.replace(
+            cfg_static, shortwave_penetration_ladder="nemo_live")
+
+        g, z, st, frc = self._fixture(eta_value, cfg_static)
+        out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, dt)
+
+        # Independent transcription: qsr_2BD's own two-band formula at the
+        # LIVE gdepw ladder (traqsr.F90:665-712), reading only z_half_ref,
+        # dz_ref, eta, H_bathy, and the Jerlov params -- no call into
+        # shortwave_penetration_tendency at all.
+        params = JERLOV_TYPES[cfg_static.jerlov_water_type]
+        R, zeta1, zeta2 = params.R, params.zeta1, params.zeta2
+        stretch = np.asarray(nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data))
+        z_half_static = np.asarray(z.z_half_ref)          # (nlev+1,), negative
+        z_half_live = z_half_static[None, None, :] * stretch[:, :, None]
+        I_half = R * np.exp(z_half_live / zeta1) + (1.0 - R) * np.exp(z_half_live / zeta2)
+        frac = I_half[:, :, :-1] - I_half[:, :, 1:]
+        frac[:, :, -1] += I_half[:, :, -1]
+        dz_live = np.asarray(z.dz_ref)[None, None, :] * stretch[:, :, None]
+        Q_sr = np.asarray(frc["Q_sr_2d"])
+        expect_dT_dt_sw = Q_sr[:, :, None] * frac / (cfg_static.rho_0 * cfg_static.c_p * dz_live)
+        expect_dT_dt_sw = np.where(dz_live > 0.0, expect_dT_dt_sw, 0.0)
+
+        # Independent hand transcription of the applicator's OWN restoring
+        # contribution at level 0 (same analytic implicit-Euler algebra as
+        # TestSurfaceFluxDivisor.test_nemo_live_matches_independent_
+        # transcription above; surface_flux_divisor stays "static" on
+        # cfg_live -- an INDEPENDENT gate -- so dz_0 here is the plain
+        # static scalar, not the live-divisor array) to isolate the
+        # SW-penetration piece under test.
+        dz_0 = float(z.dz_ref[0])
+        rho_0, c_p = cfg_static.rho_0, cfg_static.c_p
+        T_top = np.asarray(st.T.data[..., 0])
+        T_star = np.asarray(frc["T_star_2d"])
+        tau_T = rho_0 * c_p * dz_0 / cfg_static.A_theta
+        surf_dT = -(T_top - T_star) / (tau_T + dt) - Q_sr / (rho_0 * c_p * dz_0)
+        expect_dT_top_total = dt * (surf_dT + expect_dT_dt_sw[..., 0])
+
+        wet = np.asarray(st.land_mask.data) > 0.5
+        got_dT_top = np.asarray(out_live.T.data[..., 0] - st.T.data[..., 0])
+        np.testing.assert_allclose(
+            got_dT_top[wet], expect_dT_top_total[wet], rtol=1e-9, atol=1e-14)
+
+        # Levels 1+ are the pure SW-penetration deposit (no restoring
+        # contribution reaches them at all).
+        got_dT_below = np.asarray(out_live.T.data[..., 1:] - st.T.data[..., 1:])
+        expect_dT_below = dt * expect_dT_dt_sw[..., 1:]
+        np.testing.assert_allclose(
+            got_dT_below[wet], expect_dT_below[wet], rtol=1e-9, atol=1e-14)
+
+    def test_below_water_surface_flux_divisor_untouched(self):
+        """shortwave_penetration_ladder is independent of
+        surface_flux_divisor -- switching the ladder must NOT change the
+        level-0 restoring tendency (only surface_flux_divisor touches it)."""
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_static = DINOConfig()
+        cfg_ladder_live = dataclasses.replace(
+            cfg_static, shortwave_penetration_ladder="nemo_live")
+        g, z, st, frc = self._fixture(12.0, cfg_static)
+        out_static = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_static, 2700.0)
+        out_ladder_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_ladder_live, 2700.0)
+        # Isolate the restoring-only piece: subtract each run's OWN
+        # level-0 SW deposit (which legitimately differs between the two
+        # ladders) rather than asserting level-0 equality directly.
+        from legoesm.ocean.physics.shortwave_penetration import (
+            shortwave_penetration_tendency, ShortwavePenetrationConfig)
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        jacobian = jnp.ones_like(st.eta.data)
+        sw_cfg = ShortwavePenetrationConfig(water_type=cfg_static.jerlov_water_type)
+        dT_dt_sw_static = shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p)
+        stretch = nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data)
+        dT_dt_sw_live = shortwave_penetration_tendency(
+            sw_down=frc["Q_sr_2d"], z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref, jacobian=jacobian, config=sw_cfg,
+            rho_0=cfg_static.rho_0, c_sw=cfg_static.c_p, z_half_stretch=stretch)
+        restoring_static = out_static.T.data[..., 0] - st.T.data[..., 0] - 2700.0 * dT_dt_sw_static[..., 0]
+        restoring_ladder_live = out_ladder_live.T.data[..., 0] - st.T.data[..., 0] - 2700.0 * dT_dt_sw_live[..., 0]
+        np.testing.assert_allclose(
+            np.asarray(restoring_static), np.asarray(restoring_ladder_live),
+            rtol=1e-10, atol=1e-14)

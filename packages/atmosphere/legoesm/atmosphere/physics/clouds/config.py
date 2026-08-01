@@ -281,6 +281,27 @@ class CloudConfig(NamedTuple):
     # reflectance R(t) = t/(t + 2/(1-g)).  ~0.85 for liquid clouds (Mie, SW).
     # A numerics constant of the optic (the real per-band g lives in RRTMGP).
     cloud_optics_asymmetry_g: float = 0.85
+    # --- Partial-CLOUD-COVER optics (distinct from the in-cloud fsd above) ---
+    # "none" (legacy, byte-identical) or "two_column".  The RRTMGP path solves a
+    # SINGLE homogeneous column at the grid-mean optical depth cf*tau_ic, i.e.
+    # R(cf*tau_ic), whereas the independent-column answer is the cf-weighted
+    # average of separate cloudy and clear solves, cf*R(tau_ic)+(1-cf)*R(0).
+    # R is CONCAVE so the single-column form is always the BRIGHTER one -- the
+    # partial-coverage plane-parallel bias.  "two_column" thins the radiative
+    # path by the exact inversion of that identity.  Unknown => raise.
+    cloud_partial_coverage_optics: str = "none"
+    # --- VERTICAL overlap optics (distinct from both corrections above) ---
+    # "none" (legacy, byte-identical) or "max_random". The solver carries no
+    # McICA/overlap machinery, so cloud spread thinly over many partly cloudy
+    # layers is solved as ONE deep uniform cloud. "max_random" re-solves the
+    # column as n_sub deterministic maximum-random-overlap subcolumns and
+    # averages: measured -30% cloud albedo and +18 W/m2 OLR against a
+    # Monte-Carlo reference. Costs n_sub x the radiation time. Unknown => raise.
+    # MUTUALLY EXCLUSIVE with cloud_partial_coverage_optics="two_column":
+    # both correct partial coverage (that one horizontally per layer, this one
+    # with real subcolumns), so enabling both double-discounts the cloud.
+    cloud_vertical_overlap_optics: str = "none"
+    cloud_n_subcolumns: int = 8
 
 
 def build_cloud_config(
@@ -294,6 +315,9 @@ def build_cloud_config(
     cloud_inhomogeneity_factor: float | None = None,
     cloud_optics_inhomogeneity: str | None = None,
     cloud_fsd: float | None = None,
+    cloud_partial_coverage_optics: str | None = None,
+    cloud_vertical_overlap_optics: str | None = None,
+    cloud_n_subcolumns: int | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
     diagnostic_condensate_scheme: str | None = None,
@@ -326,6 +350,12 @@ def build_cloud_config(
         overrides["cloud_optics_inhomogeneity"] = cloud_optics_inhomogeneity
     if cloud_fsd is not None:
         overrides["cloud_fsd"] = cloud_fsd
+    if cloud_partial_coverage_optics is not None:
+        overrides["cloud_partial_coverage_optics"] = cloud_partial_coverage_optics
+    if cloud_vertical_overlap_optics is not None:
+        overrides["cloud_vertical_overlap_optics"] = cloud_vertical_overlap_optics
+    if cloud_n_subcolumns is not None:
+        overrides["cloud_n_subcolumns"] = cloud_n_subcolumns
     if p_xr is not None:
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:

@@ -351,6 +351,313 @@ def _get_axis_swap_tables_h1(n):
     return _axis_swap_table_cache[n]
 
 
+# --- FV3 raw sin_sg/cos_sg SLOT halo (2026-08-01) ---------------------------
+# ``divergence_corner`` reads MIXED RAW slots at panel boundaries -- Fortran
+# ``(j-1,4)+(j,2)`` for ``uf`` and ``(i-1,3)+(i,1)`` for ``vf``
+# (sw_core.F90:2187-2207) -- NOT staggered sina/cosa.  So neither the scalar
+# helper (which edge-replicates the eight axis-swap seams) nor the metric-pair
+# helper (two inputs + one common sign cannot express a four-slot permutation)
+# can supply the ghost values it needs.
+#
+# Slot order is (W, S, E, N) = (0, 1, 2, 3), matching sin_sg[..., k].
+# Derived against the oracle; the eight quarter-turn rows below agree row-for-row
+# with this package's own CONNECTIVITY table.
+#
+# CAVEAT kept with the code: the supplied FV3 tree carries no FMS mosaic contact
+# table, so the FACE IDs come from our canonical gnomonic CONNECTIVITY.  The
+# permutation and signs are derived, not guessed, but to lock face-ID
+# correspondence independently, dump slots 1:4 right after FV3's special repairs
+# on a stretched C5 run and compare every side ghost against _SG_QUARTER_TURN.
+
+# dest (W,S,E,N) <- source slots, as an index array: dst k takes src perm[k].
+_SG_PERM_SENW = (1, 2, 3, 0)     # "(S,E,N,W)"
+_SG_PERM_NWSE = (3, 0, 1, 2)     # "(N,W,S,E)"
+_SG_PERM_HALF = (2, 3, 0, 1)     # "(E,N,W,S)" -- the four half-turn seams
+
+# (dest_face, dest_edge) -> slot permutation, for the eight quarter-turn seams.
+# sin sign +1, cos sign -1 on every one of these.
+_SG_QUARTER_TURN: dict[tuple[int, int], tuple[int, ...]] = {
+    (1, NORTH): _SG_PERM_SENW,   # <- 4:E
+    (4, EAST):  _SG_PERM_NWSE,   # <- 1:N
+    (1, SOUTH): _SG_PERM_NWSE,   # <- 5:E   (reversed)
+    (5, EAST):  _SG_PERM_SENW,   # <- 1:S   (reversed)
+    (3, NORTH): _SG_PERM_NWSE,   # <- 4:W   (reversed)
+    (4, WEST):  _SG_PERM_SENW,   # <- 3:N   (reversed)
+    (3, SOUTH): _SG_PERM_SENW,   # <- 5:W
+    (5, WEST):  _SG_PERM_NWSE,   # <- 3:S
+}
+
+# The four half-turn seams: same permutation, and cos does NOT flip sign.
+_SG_HALF_TURN: frozenset[tuple[int, int]] = frozenset({
+    (2, SOUTH), (2, NORTH), (4, NORTH), (5, SOUTH),
+})
+
+# FV3 leaves the two outward-facing slots of each diagonal ghost cell INVALID on
+# purpose (fv_grid_utils.F90:51).  We reproduce that rather than inventing
+# values, so a consumer that reads them gets an obviously wrong number instead of
+# a plausible one.
+SG_TINY_NUMBER = 1.0e-8      # sin slots
+SG_BIG_NUMBER = 1.0e8        # cos slots
+
+
+def pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg):
+    """Halo the raw four-slot ``sin_sg``/``cos_sg`` cell metrics.
+
+    Parameters
+    ----------
+    sin_sg, cos_sg : (6, n, n, 4)
+        Raw sub-grid metrics, slot order (W, S, E, N).
+
+    Returns
+    -------
+    (6, n+2, n+2, 4) each, with physical cells at ``[1:-1, 1:-1]``.
+
+    Notes
+    -----
+    Identity seams are plain copies; the eight quarter-turn seams permute the
+    slot channel and negate ``cos``; the four half-turn seams permute without
+    negating.  The four diagonal ghost cells get FV3's two explicit
+    inward-facing assignments (fv_grid_utils.F90:580 SW/NW, :609 SE/NE); their
+    other two slots are left poisoned at
+    :data:`SG_TINY_NUMBER` / :data:`SG_BIG_NUMBER`.
+    """
+    if sin_sg.ndim != 4 or cos_sg.ndim != 4:
+        raise ValueError(
+            "pad_halo_dgrid_sg_slots_4d requires (6, n, n, 4) inputs; got "
+            f"{tuple(sin_sg.shape)} and {tuple(cos_sg.shape)}")
+    if sin_sg.shape != cos_sg.shape:
+        raise ValueError(
+            f"sin_sg {tuple(sin_sg.shape)} and cos_sg {tuple(cos_sg.shape)} "
+            "must have identical shapes")
+    if sin_sg.shape[0] != 6 or sin_sg.shape[3] != 4:
+        raise ValueError(
+            "expected 6 faces and 4 slots; got "
+            f"{tuple(sin_sg.shape)}")
+    n = sin_sg.shape[1]
+    if sin_sg.shape[2] != n:
+        raise ValueError(f"cells must be square; got {tuple(sin_sg.shape)}")
+
+    # Identity baseline for the twelve identity seams: pad_halo_4d treats the
+    # trailing slot axis as levels, which is exactly a per-slot scalar copy.
+    from legoesm.grids.halo import pad_halo_4d
+    sin_p = pad_halo_4d(sin_sg)
+    cos_p = pad_halo_4d(cos_sg)
+
+    # Override the twelve permuting seams.
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            key = (face, edge)
+            quarter = key in _SG_QUARTER_TURN
+            half = key in _SG_HALF_TURN
+            if not (quarter or half):
+                continue
+            perm = _SG_QUARTER_TURN[key] if quarter else _SG_PERM_HALF
+            cos_sign = -1.0 if quarter else 1.0
+            nbr_face, nbr_edge, reversed_ = CONNECTIVITY[face][edge]
+
+            strip_sin = _sg_neighbour_strip(sin_sg, nbr_face, nbr_edge,
+                                            reversed_)
+            strip_cos = _sg_neighbour_strip(cos_sg, nbr_face, nbr_edge,
+                                            reversed_)
+            for dst_slot in range(4):
+                src_slot = perm[dst_slot]
+                sin_p = _sg_write_ghost(sin_p, face, edge, dst_slot,
+                                        strip_sin[..., src_slot])
+                cos_p = _sg_write_ghost(cos_p, face, edge, dst_slot,
+                                        cos_sign * strip_cos[..., src_slot])
+
+    return _sg_fill_diagonals(sin_p, cos_p, n)
+
+
+def _sg_neighbour_strip(field, nbr_face, nbr_edge, reversed_):
+    """The neighbour's outermost cell line along ``nbr_edge``, (n, 4)."""
+    if nbr_edge == WEST:
+        strip = field[nbr_face, 0, :, :]
+    elif nbr_edge == EAST:
+        strip = field[nbr_face, -1, :, :]
+    elif nbr_edge == SOUTH:
+        strip = field[nbr_face, :, 0, :]
+    else:                                    # NORTH
+        strip = field[nbr_face, :, -1, :]
+    return strip[::-1, :] if reversed_ else strip
+
+
+def _sg_write_ghost(padded, face, edge, slot, values):
+    """Write one ghost line (excluding the diagonal cells) for one slot."""
+    if edge == WEST:
+        return padded.at[face, 0, 1:-1, slot].set(values)
+    if edge == EAST:
+        return padded.at[face, -1, 1:-1, slot].set(values)
+    if edge == SOUTH:
+        return padded.at[face, 1:-1, 0, slot].set(values)
+    return padded.at[face, 1:-1, -1, slot].set(values)
+
+
+def _sg_fill_diagonals(sin_p, cos_p, n):
+    """FV3's post-fill_ghost diagonal repair (fv_grid_utils.F90:580, :609).
+
+    Two inward-facing slots per diagonal ghost cell are assigned; the other two
+    are left POISONED, as FV3 leaves them, so nobody reads a plausible-looking
+    wrong value.
+    """
+    W, S, E, N = 0, 1, 2, 3
+    L = n + 1
+    for p_is_sin, p in ((True, sin_p), (False, cos_p)):
+        poison = SG_TINY_NUMBER if p_is_sin else SG_BIG_NUMBER
+        p = p.at[:, 0, 0, :].set(poison)
+        p = p.at[:, L, 0, :].set(poison)
+        p = p.at[:, L, L, :].set(poison)
+        p = p.at[:, 0, L, :].set(poison)
+        # SW
+        p = p.at[:, 0, 0, E].set(p[:, 0, 1, S])
+        p = p.at[:, 0, 0, N].set(p[:, 1, 0, W])
+        # SE
+        p = p.at[:, L, 0, W].set(p[:, L, 1, S])
+        p = p.at[:, L, 0, N].set(p[:, L - 1, 0, E])
+        # NE
+        p = p.at[:, L, L, W].set(p[:, L, L - 1, N])
+        p = p.at[:, L, L, S].set(p[:, L - 1, L, E])
+        # NW
+        p = p.at[:, 0, L, E].set(p[:, 0, L - 1, N])
+        p = p.at[:, 0, L, S].set(p[:, 1, L, W])
+        if p_is_sin:
+            sin_p = p
+        else:
+            cos_p = p
+    return sin_p, cos_p
+
+
+# --- FV3 SCALAR_PAIR / CGRID_NE staggered-metric halo (2026-07-31) ---
+# Companion to ``pad_halo_dgrid_vector_4d``.  The corner-divergence routine
+# needs the SEAM METRICS (dyc/dxc, sina_v/sina_u, cosa_v/cosa_u) to cross
+# panels the same way the winds do; leaving them edge-replicated while the
+# winds use a real DGRID_NE halo is an INCONSISTENT pairing that measurably
+# broke DCMIP TC1 (PASS -> BLOWUP step 3950).  ``pad_halo_dgrid_scalar_4d``
+# cannot serve: it deliberately edge-replicates on exactly the eight
+# axis-swapping seams (see its ``axis_swap_fill`` argument).  Upstream FV3
+# exchanges dxc/dyc as SCALAR_PAIR, CGRID_NE and then fills C-grid corners at
+# grid-construction time (fv_grid_tools.F90:1071-1075); this compact CD-grid
+# stores no halo ring, so the exchange is reconstructed here at use time.
+# Unlike DGRID_NE winds, a metric pair carries ONE common sign, not
+# component-specific ones: +1 for dyc/dxc and sina_v/sina_u, -1 for
+# cosa_v/cosa_u.
+
+
+def pad_halo_dgrid_scalar_pair_4d(
+    u_like: jax.Array,
+    v_like: jax.Array,
+    *,
+    axis_swap_sign: float = 1.0,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo a paired C-grid staggered scalar metric field.
+
+    Parameters
+    ----------
+    u_like : (6, n, n+1, nlev)
+        ``dyc``, ``sina_v``, or ``cosa_v``-like field.
+    v_like : (6, n+1, n, nlev)
+        ``dxc``, ``sina_u``, or ``cosa_u``-like field.
+    axis_swap_sign : {+1.0, -1.0}
+        +1 for ``dyc/dxc`` and ``sina_v/sina_u``;
+        -1 for ``cosa_v/cosa_u``.
+
+    Returns
+    -------
+    u_padded : (6, n+2, n+3, nlev)
+    v_padded : (6, n+3, n+2, nlev)
+
+    Notes
+    -----
+    Same-axis edges are scalar copies.  On the eight axis-swapping
+    edges, components exchange but use one common metric-pair sign,
+    unlike DGRID_NE vector winds' component-specific signs.
+    """
+    if u_like.ndim != 4 or v_like.ndim != 4:
+        raise ValueError(
+            "pad_halo_dgrid_scalar_pair_4d requires 4D inputs; "
+            f"got u_like.ndim={u_like.ndim}, v_like.ndim={v_like.ndim}"
+        )
+    if u_like.shape[0] != 6 or v_like.shape[0] != 6:
+        raise ValueError("pad_halo_dgrid_scalar_pair_4d requires 6 faces")
+
+    n = u_like.shape[1]
+    if (
+        u_like.shape[2] != n + 1
+        or v_like.shape[1] != n + 1
+        or v_like.shape[2] != n
+        or u_like.shape[3] != v_like.shape[3]
+    ):
+        raise ValueError(
+            "Expected u_like (6, n, n+1, nlev) and "
+            "v_like (6, n+1, n, nlev); got "
+            f"{tuple(u_like.shape)} and {tuple(v_like.shape)}"
+        )
+    if axis_swap_sign not in (-1.0, 1.0):
+        raise ValueError(
+            f"axis_swap_sign must be +1.0 or -1.0, got {axis_swap_sign!r}"
+        )
+
+    # Seed same-axis edges using the existing scalar table.  Its axis-swap
+    # edge copies are overwritten below.
+    u_padded = pad_halo_dgrid_scalar_4d(
+        u_like, axis_swap_fill="edge",
+    )
+    v_padded = pad_halo_dgrid_scalar_4d(
+        v_like, axis_swap_fill="edge",
+    )
+
+    (
+        u_dst_f, u_dst_i, u_dst_j,
+        v_src_f, v_src_i, v_src_j, _u_vector_signs,
+        v_dst_f, v_dst_i, v_dst_j,
+        u_src_f, u_src_i, u_src_j, _v_vector_signs,
+    ) = _get_axis_swap_tables_h1(n)
+
+    if u_dst_f.size > 0:
+        u_padded = u_padded.at[u_dst_f, u_dst_i, u_dst_j].set(
+            v_like[v_src_f, v_src_i, v_src_j]
+            * jnp.asarray(axis_swap_sign, dtype=u_like.dtype)
+        )
+    if v_dst_f.size > 0:
+        v_padded = v_padded.at[v_dst_f, v_dst_i, v_dst_j].set(
+            u_like[u_src_f, u_src_i, u_src_j]
+            * jnp.asarray(axis_swap_sign, dtype=v_like.dtype)
+        )
+
+    # FV3 fill_corners(..., CGRID=.true.), with X=v_like and Y=u_like.
+    # Do this after side strips; these are paired C-grid corner values,
+    # not mode='edge' diagonal copies.
+    q_u = jnp.asarray(axis_swap_sign, dtype=u_like.dtype)
+    q_v = jnp.asarray(axis_swap_sign, dtype=v_like.dtype)
+
+    v_padded = v_padded.at[:, 0, 0, :].set(
+        u_padded[:, 1, 0, :]
+    )
+    v_padded = v_padded.at[:, 0, n + 1, :].set(
+        q_v * u_padded[:, 1, n + 2, :]
+    )
+    v_padded = v_padded.at[:, n + 2, 0, :].set(
+        q_v * u_padded[:, n, 0, :]
+    )
+    v_padded = v_padded.at[:, n + 2, n + 1, :].set(
+        u_padded[:, n, n + 2, :]
+    )
+
+    u_padded = u_padded.at[:, 0, 0, :].set(
+        v_padded[:, 0, 1, :]
+    )
+    u_padded = u_padded.at[:, 0, n + 2, :].set(
+        q_u * v_padded[:, 0, n, :]
+    )
+    u_padded = u_padded.at[:, n + 1, 0, :].set(
+        q_u * v_padded[:, n + 2, 1, :]
+    )
+    u_padded = u_padded.at[:, n + 1, n + 2, :].set(
+        v_padded[:, n + 2, n, :]
+    )
+    return u_padded, v_padded
+
+
 def pad_halo_dgrid_vector_4d(u_d, v_d):
     """FV3-faithful DGRID_NE staggered vector halo (iter-1078).
 

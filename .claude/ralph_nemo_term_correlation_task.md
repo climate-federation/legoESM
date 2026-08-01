@@ -5,11 +5,14 @@
 > "we need corr of 1, these minor differences will leak in as problems that we have
 > been trying to chase down for very long now"
 
-**1.0, not "close".** Today's evidence for why: N² is off by 54% at the top of the
-chain, yet κ_GM reads 0.985 (column integrals average the error out) and the
-slopes read 0.959 (N² sits in a denominator dominated by the slope cap). Three
-layers of plausible-looking agreement hiding a factor-1.5 error in the input.
-A term that "looks fine" downstream proves nothing about its inputs.
+**1.0, not "close".** NOTE the original motivating example here ("N² off by 54%")
+was RETRACTED — it was an index off-by-one in the comparison, not physics. The
+bar still stands, but on better evidence: the slopes really WERE biased by a
+wrong N² (parcel-displacement instead of NEMO's rn2b), and because that error
+grows with PRESSURE it was invisible in shallow water and reached 1.5% at depth.
+A term that "looks fine" downstream proves nothing about its inputs — and a
+metric that looks fine can hide the input error entirely (see the METRIC LESSON
+below, where a signed sum manufactured a 9% gap that did not exist).
 
 ## Why a loop NOW (and not before)
 
@@ -44,43 +47,126 @@ established method — a loop then would have amplified false leads. It won't no
 Also available with NO rebuild: **gdb call tracing** (the binary is not stripped).
 `gdb -batch -x cfgs/DINO/RUN_GDB/trace.gdb ./nemo` gives the per-step call order.
 
-## Current scoreboard (all vs NEMO's own dumped arrays, same y5 restart state)
+## Work in NEMO's OWN EXECUTION ORDER (user directive)
 
-| term | corr | ratio | status |
-|---|---|---|---|
-| N² (`rn2b`) | **0.486–0.545** | **1.54–1.76** | OPEN — biggest gap, most upstream |
-| `wslpi` (slope) | 0.9585 | 0.975 | OPEN |
-| `aeiu` (κ_GM) | 0.9847 | 1.002 | OPEN (close, but not 1.0) |
-| eiv transport | 0.7727 | 1.040 | OPEN — amplified by ψ's vertical difference |
-| `e3w`, `gdept` ladders | ~1e-4 | 1.000 | **MATCHED** |
+> "this bit by bit fix approach should start right at the start of when a model
+> step cycle starts and fix every type of equation/terms it comes across...
+> jumping the middle of a model step may lead to issues from earlier in the step
+> that we didn't solve"
+> "Don't go to next routine till a routine is 1.0 corr and ratio 1."
 
-## N² — what is already eliminated (do NOT re-chase)
+Order from `stpmlf.F90` (MLF; key_qco, key_vco_3d, no key_RK3).
 
-- **Formulation**: legoESM's adiabatic N² (0.5378/1.544) and its NEMO-faithful
-  linearised-α/β `compute_buoyancy_frequency_nemo_bn2` (0.5450/1.5366) agree with
-  EACH OTHER and disagree with NEMO identically. Not the α/β-vs-parcel choice.
-- **e3w divisor / gdept ladder**: match NEMO to ~1e-4 (dumped and compared).
-- **T/S time level**: identical result from `tn/sn` and `tb/sb` (0.486204 vs
-  0.486212) — and verified non-vacuous (the before-state genuinely differs:
-  max|ΔT| = 0.245 K).
-- **Vertical index offset**: k-shift scan gives −1→0.36, 0→0.54, +1→0.62. No
-  clean offset, but the sensitivity means **the level convention of the
-  comparison itself is the prime remaining suspect** — re-derive which interface
-  each side assigns N² to, from `eosbn2.F90` (NEMO computes only jk=2..jpkm1,
-  surface/bottom zeroed in `istate.F90`) and from legoESM's function.
+## Current scoreboard (vs NEMO's own dumped arrays, same y5 restart state)
 
-**START HERE**: settle the N² level convention. Everything downstream inherits it.
+| # | routine | corr | ratio | status |
+|---|---|---|---|---|
+| 1 | `sbc` (utau/qsr/qns/sfx) | 1.000000 | 1.000000 | **PASS** |
+| 2 | `eos_rab` (α, β) | 1.000000 | 1.000007 | **PASS** |
+| 3 | `bn2` (`rn2b`) | 1.00000000 | 0.99997 | near — see below |
+| 4 | `zdf_mxl` (`nmln`/`hmlp`) | 99.859% levels | — | near — 14/9920 cols |
+| 5 | `ldf_slp` `wslpi` | 0.999177 | 0.998943 | **CLOSED** (\|x\| ratio) |
+| 5 | `ldf_slp` `wslpj` | 0.998875 | 0.998447 | **CLOSED** |
+| 5 | `ldf_slp` `uslp`  | 0.999340 | 0.998697 | **CLOSED** |
+| 5 | `ldf_slp` `vslp`  | 0.999012 | 0.997594 | **CLOSED** |
+| 6 | `ldf_eiv` (`aeiu`) | **1.000000** | 1.000608 (\|x\|) | **CLOSED** — seam bug fixed |
+| 7 | eiv transport u/v | **0.9985 / 0.9954** | 0.994 / 0.982 (\|x\|) | near — residual DIFFUSE (not walls/seam) |
+| 10 | eiv transport | 0.7727 | 1.040 | OPEN |
+
+### Item 3/4 — fixed 2026-07-27 (commit `634ee4aee`)
+
+Two REAL transcription bugs, both found by reading the Fortran:
+
+- **`zdfmxl.F90:96-101` bottom cap** — NEMO advances `nmln` on every level still
+  BELOW threshold, clamped `MIN(jk,mbkt)+1`, so a never-reaching column ends at
+  the SEAFLOOR, not the deepest interface. We had no cap → 339 columns 1-5
+  levels too deep. **353 → 14 mismatched columns.**
+- **`eosbn2.F90:1459` zrw depth** — α/β are evaluated at T-points and
+  interpolated to the w-point using the TRUE `gdepw`, which equals the gdept
+  midpoint ONLY on a uniform ladder. We passed the midpoint → 3.7e-4 median N²
+  bias. MLD integrand: median rel err **3.66e-4 → 4.95e-5**, corr → **1.00000000**.
+
+Also settled: **`hmlp = gdepw_0[nmln-1] * (1 + ssh/H)`** — validated by a control
+test that reproduces NEMO's own dumped `hmlp` to **0.0 m** over 9920 columns.
+The criterion itself is THICKNESS-FREE (eosbn2 divides by `e3w`, zdfmxl
+multiplies it back — exact cancellation), so no z-star stretch belongs in the
+integral; only in the depth.
+
+**RETRACTED**: the earlier "N² off by 54%" (an off-by-one — correctly aligned it
+was corr 1.000000) and "hmlp 14% too deep" (unvalidated depth lookup).
+
+**NEXT (item 3 → 1.0)**: lego divides N² by the REFERENCE `e3w`; NEMO uses the
+LIVE `e3w(jk,Kmm) = e3w_0*(1+r3t)` (`domzgr_substitute.h90:131`). That is the
+3.0e-5 ratio deficit (ssh/H ~ 1e-4).
+**CORRECTION**: `z_coord.h_partial` is NOT a route to `1+r3t` — it is the STATIC
+at-rest thickness (`vertical.py:42`) and measures identically 1.0x on every DINO
+column. `eta` must actually be threaded. See the unified root-cause section at
+the end of this file.
+
+Eliminated for the residual 14 columns (do NOT re-chase): `mbkt` (0 disagreements
+globally), `nlb10` (=2 on both sides), the level/index convention (validated).
+
+### Item 5 `ldf_slp` — RETRACTION + re-baselined 2026-07-27
+
+**"wslpi corr 0.9585" is WITHDRAWN.** Re-measured with a proper ±2 offset scan
+over 342,134 wet W-points (production call chain, before-state, `bef.ssh`):
+
+| offset | corr | ratio |
+|---|---|---|
+| −1 | 0.983733 | 1.2436 |
+| **0** | **0.999110** | **1.0907** |
+| +1 | 0.968548 | 0.9460 |
+
+Sharply peaked at offset 0 ⇒ the convention is right and 0.9585 was itself an
+alignment artifact. **The real gap is the RATIO: slopes 9.07% TOO LARGE**
+(median rel err 0.83%, p90 3.35%; the p99 62% tail is near-zero-crossing cells,
+not a fidelity signal). Corr is already ~1 — do NOT chase correlation here.
+
+### ★★ METRIC LESSON — never score a SIGN-CHANGING field with a signed sum ★★
+
+**"slopes 9% too large" was ALSO withdrawn.** `wslpi` changes sign, and the
+signed sum near-cancels between shallow (negative-dominant) and deep
+(positive-dominant) levels, so a ~1% asymmetric bias inflates ~9×:
+
+    signed ratio  1.0907   <- ILL-CONDITIONED, meaningless here
+    |wslpi| ratio 1.0121   <- the true aggregate magnitude bias
+    RMS ratio     1.0079
+
+**Always quote `|x|` and RMS ratios for sign-changing fields** (slopes,
+velocities, tendencies). Keep signed sums only for sign-definite quantities.
+
+### Item 5 RESOLVED 2026-07-27 (commit `874fb35c6`)
+
+Root cause: the slope path fed a PARCEL-DISPLACEMENT (adiabatic) N², but NEMO's
+`ldf_slp` consumes `rn2b` — the linearised α/β bn2 (`eosbn2.F90:1455-1468`).
+The two diverge with PRESSURE, so the error GREW WITH DEPTH — matching the
+measured signature exactly (bottom 8 levels carried ~60% of the excess).
+
+New selectable `GMRediConfig.slope_n2` = `adiabatic` (default, byte-identical)
+| `nemo_bn2`, surfaced as `DINOConfig.gm_redi_slope_n2`, on the kamm card.
+
+                        adiabatic     nemo_bn2
+    |wslpi| ratio        1.012076     0.998943
+      levels k>=18       1.014793     0.999518   <- depth-growing bias GONE
+      levels k<18        1.002542     0.996925
+    corr                 0.999110     0.999177
+
+ELIMINATED by measurement, do NOT re-chase: (a) the `S_max` cap — both sides use
+0.01 from `rn_slpmax`, points at cap 530 lego vs 514 NEMO, <1% of the excess;
+(b) the mixed-layer ramp — levels k<18 carry no excess.
+
+NEMO re-instrumented + rebuilt with `wslpj`/`uslp`/`vslp` dumps (units 8818-8820)
+so all four slope components can be checked, not just `wslpi`.
+**BUILD GOTCHA**: `makenemo` needs the `nemo-build` conda env on PATH
+(`Text::Balanced` Perl module); otherwise FCM dies with a confusing Perl error:
+    env PATH="/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH" ./makenemo -n DINO -m linux_gfortran -j 8
 
 ## Term list (work down; each is one cycle)
 
-1. N² `rn2b` ← in progress
-2. `wslpi` / `wslpj` slopes (after N² is 1.0 — it feeds them via `zdzr`)
-3. `aeiu` κ_GM
-4. eiv transport (should follow once 1–3 are 1.0)
-5. tracer advection fluxes (`traadv_fct`: upstream, high-order, limited)
-6. PGF (`hpg_sco`)
-7. Coriolis / EEN vorticity
-8. vertical mixing (`zdftke`), EVD trigger
+1. ~~`sbc`~~ PASS · 2. ~~`eos_rab`~~ PASS · 3. `bn2` ← live e3w divisor
+4. `zdf_mxl` (14 cols) · 5. `ldf_slp` · 6. `ldf_eiv` · 7. eiv transport
+8. tracer advection (`traadv_fct`) · 9. PGF (`hpg_sco`)
+10. Coriolis / EEN vorticity · 11. `zdftke`, EVD trigger
 
 ## Guardrails (each earned by a failure TODAY)
 
@@ -119,3 +205,138 @@ Also available with NO rebuild: **gdb call tracing** (the binary is not stripped
 - Full history: memory `project_dino_nemo_oracle.md` addenda 30–47.
 - Skill: `.claude/skills/oracle-fidelity/SKILL.md` (Rule 0 = read the oracle's
   source first; Rule 1 = coverage, not a checklist).
+
+
+## ★ ONE ROOT CAUSE BEHIND THE items-3/4 RESIDUAL: static vs LIVE vertical grid
+
+Checked lego's α/β against NEMO's own dumped `rab_b` (342,134 wet cells):
+- **β is BIT-EXACT** (rel err 0.00e+00)
+- α: median 4.70e-06, p99 1.11e-04
+⇒ the EOS is NOT the floor.
+
+`gdept` lego(static `t_depth_ref`) vs NEMO(live `gdept(Kmm)`):
+**median rel 1.03e-04, max 6.32e-04** — the same order as EVERY remaining
+residual (`bn2` ratio 3.0e-5, MLD integrand 4.95e-5, α p99 1.11e-4). It is all
+`r3t = ssh/H`.
+
+**NEXT for 1.0 on items 3/4**: thread `eta` so `gdept`/`e3w` are the LIVE
+`gdept_0*(1+r3t)`. The stretch is column-UNIFORM (r3t is 2-D) ⇒ a per-column
+scalar, not a new 3-D array. It CANCELS in the MLD criterion (thickness-free
+identity) except via α/β's depth dependence, so expect more gain in `bn2` and
+the slopes than in the 14 MLD columns.
+**DO NOT use `z_coord.h_partial`** — it is the STATIC at-rest thickness and is
+identically 1.0x (measured).
+
+The slope residual (0.15-0.25% low) EXCEEDS this 1e-4 effect ⇒ a second,
+unidentified contributor remains in `ldf_slp`.
+
+
+## Seam bug (2026-07-27, commit c0eaaa9b7) — CLOSED item 6
+
+Shapiro smoothers zero-padded LON = treated the periodic seam as a WALL
+(`_shap`, `smooth()`, `wE/wW`), while NEMO fills a periodic halo
+(`ldfslp.F90:319`). Seam slopes 0.75x -> squared into zah 0.55. Fixed:
+wrap-pad lon / zero-pad lat. Seam cols 0.88/0.76 -> 1.0013/1.0013.
+`gm_bolus_kappa_face_average` wired (kamm=True; NEMO face-averages,
+`ldftra.F90:718`).
+
+**Dump-sign note (item 7):** `eiv_dump_u` = psi_above - psi_below = MINUS the
+applied transport (`puu -= (1)-(2)`); lego's in-model sign VERIFIED identical
+to NEMO's applied sign. Flip the dump, not the model.
+
+Remaining: interior slope |x| +0.30% (was hidden by the seam columns);
+item 4's 13 knife-edge cols; re-measure item 7 after the seam fix.
+
+
+## Item 7 post-seam re-measure (2026-07-27)
+
+kfa=True (kamm card; NEMO's aeiu is genuinely face-averaged):
+  u_eiv corr 0.998474  |x| 0.994097  rel-err med 0.16%
+  v_eiv corr 0.995437  |x| 0.982351  rel-err med 0.15%
+Seam columns CURED: 0.51-0.77 -> 0.996-1.001 (within interior scatter).
+v-lag localised by j-band scan: worst band is MID-BASIN j=[123,148)
+(corr 0.9806), walls are fine (southern band corr 0.999991) => NOT a
+boundary artifact; residual is diffuse. kfa=False on record: clearly worse
+(rel err ~20-30x) — it compares against a kappa NEMO didn't use.
+
+## Item 4 ACCEPTANCE (recommendation, flagged to user)
+
+12 knife-edge columns remain (99.88%). Both identified mechanisms measured
+nearly inert (ladder consistency 14->13, live-gdept alpha 13->12). Margins
+~7e-4 vs input agreement median ~7e-6 => the tail of input precision. Two
+consecutive near-inert cycles = STOP per escalation rule. Recommended
+criterion: "every discrete decision matched except columns whose threshold
+margin is below input precision."
+
+## NEXT: item 8 `traadv_fct` (first unstarted term)
+
+Instrument NEMO MY_SRC traadv_fct.F90 with first-call dumps (upstream flux,
+antidiffusive flux, limited flux, tendency), rebuild, run RUN_GDB, then
+lego-side comparison via the proven cycle.
+
+
+## Item 8 `traadv_fct` (2026-07-27): FAITHFUL — fluxes corr 0.99994
+
+Upstream fluxes 0.99994 / anti-correction 0.9991 / pure total tendency 0.9923
+(median rel-err 0.1%). Residual = cancellation amplification of known input
+diffs, not the scheme. TRAP: trd dumps contaminated (Krhs carries
+sbc/qsr/bbc/bbl/dmp accumulated BEFORE tra_adv, stpmlf.F90:342-363) — compare
+via flux-reconstructed pure tendency only, or re-instrument with a Krhs
+snapshot before tra_adv_fct.
+
+
+## Items 9/10 (2026-07-27)
+
+Item 9 hpg_sco: u/v corr **1.000000** — MACHINE-EXACT, CLOSED.
+Item 10 EEN: u 0.999896 / v 0.999932, med rel-err 4e-4. STOPPED (two inert
+cycles): e3f avg rule (c6d34a20e, ~inert), dry-vertex e3f_0 fallback
+(9b6aca6ac, byte-identical inert — mechanism falsified by controlled A/B).
+Bottom-4-level |x| 1.04-1.07 (~2.4% of mass) UNATTRIBUTED. Review fix
+d5ff9d15f (helper factoring, mutation-kill proven).
+NEXT item 11 zdftke: avt/avm dumps already exist (8814/8815).
+
+
+## USER DECISIONS (2026-07-27)
+
+- Items 4 (99.88%, 12 knife-edge cols) and 10 (0.9999, bottom-4-levels) —
+  **ACCEPTED AS-IS** (revisit if needed).
+- Open residuals: CHASE, order = item 11 composite (lead: face-averaged
+  old-avm in sh2) -> interior slope +0.30% -> re-measure item 7 v after those.
+
+
+## FINAL BOARD (2026-07-27, residual chase complete)
+
+| # | term | final | class |
+|---|---|---|---|
+| 1 sbc | 1.000000 | EXACT |
+| 2 eos_rab | beta bit-exact, alpha 4.7e-6 | EXACT |
+| 3 bn2 | corr 1.0, med 6.96e-6 | EXACT |
+| 4 zdf_mxl | 99.88% | ACCEPTED (knife-edge, sub-precision) |
+| 5 ldf_slp x4 | >=0.9988; interior |x| 1.0011 | CLOSED (bottom row 1.0255 = irreducible amplification) |
+| 6 ldf_eiv kappa | corr 1.000000 | EXACT |
+| 7 eiv transport | u 0.9985 / v 0.9954, med 0.15% | residual diffuse, no lead — accepted-for-now |
+| 8 traadv_fct | fluxes 0.99994 | FAITHFUL |
+| 9 dyn_hpg | corr 1.000000 | MACHINE-EXACT |
+| 10 dyn_vor EEN | 0.9999, med 4e-4 | ACCEPTED (bottom levels unattributed) |
+| 11 zdftke | pdlr 0.998; composite 1.0 excl. 257 threshold-chatter cells | CLOSED |
+
+NEXT: 90-day twin re-run with the full fixed card (integration test), then push/PR.
+
+
+## ★ ACCEPTANCES REVOKED (user directive, 2026-07-27) ★
+
+"Good enough" is NOT the bar — NEMO-faithful is. Every term below was accepted
+on a SINGLE analysis, several with an "irreducible" label that was never proven.
+Given this campaign's retraction record, treat every such label as provisional.
+REOPENED (drive to ~1.0 or prove the deviation is in NEMO's own arithmetic):
+  item 8  traadv_fct 0.9923  <- IN PROGRESS (nonosc is DETERMINISTIC; a faithful
+          transcription must reproduce it to roundoff; suspected source of the
+          spurious diapycnal mixing collapsing deep stratification)
+  item 4  zdf_mxl 99.88% (12 knife-edge cols)
+  item 10 EEN 0.9999 (bottom levels 1.04-1.07)
+  item 7  eiv transport u 0.9985 / v 0.9954
+  item 11 composite avt/avm 0.9976 (257 "threshold chatter" cells)
+  item 5  slope bottom row 1.0255 ("difference-of-small-numbers amplification")
+Each needs: NEMO-side dumps of the INTERNALS (not just inputs/outputs), a
+stage-by-stage comparison, and a named first-deviating stage. "Amplification"
+and "chatter" are hypotheses, not verdicts, until the internals are compared.

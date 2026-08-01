@@ -250,9 +250,7 @@ class TestAllTracersBorrowed:
         """Per-mass fields (mixing ratios + N_i/N_s/N_g) are borrowed;
         per-volume N_c/N_r are not (dsigma weight has no conservation
         meaning for #/m^3 — codex 2026-07-28)."""
-        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            is_borrow_eligible_tracer,
-        )
+        from legoesm.core.conservation import is_borrow_eligible_tracer
         for k in ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
                   "N_i", "N_s", "N_g", "trc_N_i"):
             assert is_borrow_eligible_tracer(k), k

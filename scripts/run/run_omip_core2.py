@@ -3620,6 +3620,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(Arctic-relevant: fresher shelf water freezes warmer). "
                         "Requires --freeze-floor and/or --ice-thermo (else no "
                         "consumer -> hard error).")
+    p.add_argument("--ice-ocean-heat-coeff", type=float, default=None,
+                   help="Ocean->ice basal turbulent heat-transfer coefficient "
+                        "[W/m^2/K] for --prognostic-sea-ice "
+                        "(SeaIceConfig.ocean_heat_transfer_coeff; default 20). "
+                        "The Antarctic-melt driver probe (2026-07-28) measured "
+                        "the constant 20 at 3-5x below NEMO's u*-dependent MIZ "
+                        "exchange — ~60-80 approximates NEMO's summer "
+                        "marginal-ice-zone melt rate pending the faithful "
+                        "u*-dependent scheme.")
     p.add_argument("--prognostic-sea-ice", action="store_true",
                    help="Wire legoESM's REAL prognostic sea-ice model "
                         "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
@@ -4024,13 +4033,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
-    p.add_argument("--tke-mxl-choice", type=int, default=None, choices=[2, 3],
+    p.add_argument("--tke-mxl-choice", type=int, default=None,
+                   choices=[2, 3, 4],
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
                         "None (default) keeps the card value (3 since #1326 = "
                         "NEMO nn_mxl=3: lup/ldown |dl/dz|<=e3t sweeps WITH the "
                         "ln_mxl0 wind-stress surface anchor). 2 = Veros "
                         "Bougeault-Lacarrere (the pre-#1326 behaviour, for "
-                        "A/B). Requires --tripole-vmix tke (else raises).")
+                        "A/B). 4 = NEMO nn_mxl=2, which is what the ORCA1 "
+                        "namelist actually runs: the SAME lup/ldown sweeps as "
+                        "3 but a SINGLE length (l_eps = l_k = min(lup,ldn)) "
+                        "instead of l_eps = sqrt(lup*ldn). Since min <= sqrt, "
+                        "choice 4 dissipates MORE and mixes LESS, and the two "
+                        "differ only where lup and ldn diverge (weakly "
+                        "stratified deep columns) -- a high-latitude-selective "
+                        "lever. NOTE the numbering is Veros-derived and does "
+                        "NOT match NEMO's nn_mxl values. Requires "
+                        "--tripole-vmix tke (else raises).")
     p.add_argument("--tke-prognostic", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="Prognostic TKE for --tripole-vmix tke. Unset (default) "
@@ -4164,6 +4183,11 @@ def main() -> int:
     # ignored (dispatch footgun) — reject whenever the flag was typed
     # EXPLICITLY, even with the 'kpp' default value (codex LOW: an explicit
     # `--mpas-vmix kpp --grid tripole` is still a user error worth surfacing).
+    if (args.ice_ocean_heat_coeff is not None
+            and not args.prognostic_sea_ice):
+        raise SystemExit(
+            "--ice-ocean-heat-coeff configures the prognostic sea-ice model "
+            "and requires --prognostic-sea-ice (otherwise silently unused).")
     if args.grid != "mpas" and (args.mpas_vmix != "kpp"
                                 or "mpas_vmix" in _cli_flags_given()):
         raise SystemExit(
@@ -5263,6 +5287,9 @@ def main() -> int:
             # sw_transmittance_ice=0.0.
             sw_transmittance_const=float(args.ice_thermo_sw_trans),
         )
+        if args.ice_ocean_heat_coeff is not None:
+            ice_config = ice_config._replace(
+                ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
         ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
         # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)

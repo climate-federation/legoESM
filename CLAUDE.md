@@ -57,6 +57,59 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
 - **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
 
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If my premise is wrong — if I've misdiagnosed the bug, or the thing I'm asking
+for won't work — say so before writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate
+between them, then test. Do not go straight to a fix. Do not agree with a cause
+I suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here.
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code I didn't ask about. Long unbroken generations drift into invention — prefer
+a small verified diff over a large plausible one.
+
 ## Attribution Gates — MANDATORY, each from a real 2026-07 failure
 Model is near operational. Every rule below is mechanical: satisfy it or state
 explicitly that you did not. "I was careful" is not compliance.
@@ -115,6 +168,143 @@ explicitly that you did not. "I was careful" is not compliance.
   THEM.** Verify the resolved paths in the run log, not the flag you passed.
   FAILURE: `CENTURY_DECK=1` set era-correct ozone+volcanic but left 1979-2016
   SST.
+- **PROSE IS A POINTER, NEVER A CITABLE FACT.** A code comment, docstring,
+  `AMIP.md`/`docs/` entry or "Known issue" that names a limitation, a guard, or
+  a missing feature MUST be re-verified in the CURRENT code at the point of use
+  before it is repeated as a finding — this repo routinely fixes things without
+  updating its prose. When a comment names the module that imposes a guard,
+  OPEN THAT MODULE. FAILURES (2026-07-30, three in one day): quoted the
+  `_run_mpas` "turbulent surface fluxes are intentionally NOT applied" comment
+  and `AMIP.md` Known #3 to claim MPAS has no turbulence — the MPAS turbulence
+  path exists (`turbulence/integration.py`, Perot edge->cell) and the run
+  resolves `turbulence=louis` + `surface_bulk_scheme=coare3`; and doubted a
+  cloud_fraction comment that was exactly right.
+- **THE FIRST GUARD YOU FIND IS NOT THE ONLY GUARD — follow the value to its
+  CONSUMER before declaring it unclamped/unchecked.** FAILURE: reported "no
+  upper bound on r_eff" from `rrtmgp.py`'s `clip(x, 1e-6, None)`; the real
+  clamp to the lookup-table range is one call deeper in
+  `rrtmgp/optics/cloud_optics.py`. Same class as blaming a line without proving
+  its enclosing function runs.
+- **A GLOBAL STATISTIC ON A NON-UNIFORM GRID NEEDS AREA WEIGHTS.** Never
+  `np.mean(field)` for a global mean on lat-lon (or any stretched grid) — use
+  `cos(lat)` or the model's `areacella`. FAILURE: reported "+17 hPa of dry mass
+  created" from an unweighted `p_s` mean; the AREA-WEIGHTED mass was invariant
+  at 983.493 hPa to 6 digits, i.e. the defect did not exist. Habits carried
+  from the quasi-uniform MPAS/SCVT mesh are INVALID on lat-lon.
+- **A PROPOSED MECHANISM MUST SURVIVE A SCALING / PERTURBATION TEST BEFORE IT
+  IS CITED AS THE CAUSE.** If X is claimed to drive Y, change X by a known
+  factor and check Y responds as the mechanism predicts. FAILURE: proposed
+  "damp-to-rest pumps mass convergence" (predicts ~linear in the sponge
+  coefficient); quartering the coefficient slowed growth only 1.5x, refuting
+  it — the fix would have shipped on a false mechanism. Label every uncaught
+  claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
+  buys a code change and a relaunch.
+
+## Compute Discipline — speculation costs GPU-hours, not just credibility
+User, 2026-07-30 (THIRD callout in five days): *"You keep making very
+speculative assumptions... be much more precise so we do not waste time with
+useless simulations."* The gates above stop wrong CLAIMS; these stop wrong
+RUNS. A simulation launched on a hypothesis that no measurement can refute is
+pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
+
+- **NO COMPUTE ON AN UNFALSIFIABLE HYPOTHESIS. Before submitting ANY job
+  costing >1 GPU-hour, write down three things: (a) the exact number the run
+  will produce, (b) the value that CONFIRMS and the value that REFUTES, (c)
+  why a cheaper offline/CPU test on an EXISTING checkpoint cannot answer it.
+  Cannot fill all three -> DO NOT SUBMIT; run the cheap test first.** Nearly
+  every question asked so far (fluxes, tendencies, radii, momentum budgets,
+  cloud optics) was answerable offline from a saved checkpoint in minutes.
+  FAILURE 2026-07-30: submitted two 5-YEAR full-physics runs (8 h walltime
+  each) while the model had a KNOWN unfixed +56 W/m2 albedo error and no
+  low-level circulation — five simulated years of a broken climate, answering
+  no question that had been asked.
+- **RANK ERRORS BY MAGNITUDE BEFORE CHOOSING WHAT TO WORK ON.** Run the full
+  scorecard FIRST and work the LARGEST term; re-rank after every fix. FAILURE
+  2026-07-30: spent most of a session on the hfls deficit (-40 W/m2) while the
+  dominant error was rsut (+56 W/m2) — and the scorecard naming it was already
+  sitting in the run directory, unread.
+- **ONE VARIABLE PER PRODUCTION RUN.** N simultaneous config changes answer
+  ZERO questions, because no output is attributable to any one of them. A
+  multi-change config is legitimate ONLY as a deliberate new BASELINE that is
+  labelled as such and never compared term-by-term against the old one.
+  FAILURE 2026-07-30: one launch flipped ~8 switches at once.
+- **A LONG RUN ON A MODEL WITH AN UNFIXED DOMINANT ERROR IS WASTE.** Before
+  extending past ~30 simulated days, state the largest outstanding scorecard
+  term and why the run is still worth its GPU-hours. Fix the big term, then
+  extend. Short validation windows (days) are for "does it run and is the new
+  physics behaving"; multi-year windows are for a model that already passes.
+- **NEVER LEAD WITH AN ARITHMETIC COINCIDENCE.** A hand-computed ratio that
+  "matches" an observed ratio is not evidence when the calculation omits
+  factors the code actually applies. State it as arithmetic, or don't state
+  it. FAILURE 2026-07-30: "cover x tau ~ 1.9x matches the 1.9x albedo" ignored
+  the sub-grid inhomogeneity factor the radiation applies to the cloud paths.
+- **PREFER THE INSTRUMENT THAT ALREADY EXISTS.** Before writing a probe, check
+  the run directory for a scorecard/manifest/diagnostic that answers the
+  question, and `scripts/validate/` for a validator. Reading an existing
+  artifact costs seconds; a new probe costs an hour and needs its own controls.
+
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+**This applies to THIS repo's own API too** — it is large enough that memory is
+unreliable. FAILURES in ONE session (2026-07-30): `AerosolConfig(reference_aod=)`
+(really `reference_aod_550`), `McFarlaneConfig(N_ref=)` (no such field),
+`run_amip.build_parser` (really `build_arg_parser`), `from legoesm.grids import
+create_grid` (really `legoesm.grids.factory`). Each cost a full probe round-trip.
+Worse, `RRTMGPConfig()` defaults `include_clouds=False`, so an offline harness
+that omits it returns CLEAR-SKY fluxes and EVERY cloud gradient is exactly 0.0 —
+a silently wrong number, not an error. Read the NamedTuple `_fields` /
+`_field_defaults` before constructing a config.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If the user's premise is wrong — if they have misdiagnosed the bug, or the thing
+being asked for will not work — say so BEFORE writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate between
+them, then test. Do not go straight to a fix. Do not agree with a cause the user
+suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here. (Applies
+  directly to `_sendrecv_vjp` in `halo_exchange.py` and any new MPI-AD path.)
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code the user did not ask about. Long unbroken generations drift into invention —
+prefer a small verified diff over a large plausible one.
 
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
@@ -252,7 +442,7 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
   - The collector selects tiers `1..N` (`build_trainable_params(config, tier="core"/"extended"/"aggressive", include=, exclude=)`); flip a param's status with a 1-line `tunable_tier` edit. See [[param-hygiene-spec-effort]].
 - **Loop-iteration COUNTS are never config/trainable** → module constant (e.g. `_N_EVP_DEFAULT = 120`), not a config field, not a kwarg-default literal. Structurally guaranteed: ints are not spec-eligible, so an iteration count can never reach the trainable collector. See [[loop-counts-never-trainable]].
 - **A tunable closure whose default is a `constants.X` reference** (e.g. `S_ice_new = constants.S_ice_bulk_default`) is *eligible* (may be a `__param_spec__` param with explicit bounds + tier) though not *required* (the AST gate won't force it). Expose genuine calibratable closures; keep environmental references (ocean salinity) fixed/excluded.
-- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `param_collector.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
+- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `legoesm.core.param_overrides.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
 
 ## Naming
 - Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.

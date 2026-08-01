@@ -63,6 +63,16 @@ class NemoGrid(NamedTuple):
     e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
     gdept_0: np.ndarray | None = None    # (n_lat, n_lon, nlev) [m]
     gphiv: np.ndarray | None = None
+    # #1226 item 2 (dom_qco_r3c r3u/r3v): NEMO's reference u-/v-column depths
+    # ``hu_0 = sum_k(e3u_0*umask)`` / ``hv_0 = sum_k(e3v_0*vmask)``
+    # (dom_oce.F90:345-346, domain.F90:140-146) — the denominator of the
+    # face-point z-star ratios ``r3u = ssh_face/hu_0``, ``r3v = ssh_face/hv_0``
+    # (domqco.F90:166-169). Derived here from ``e3u_0``/``e3v_0`` (already in
+    # mesh_mask.nc) + ``umask``/``vmask``, not re-dumped from NEMO.
+    e3u_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    e3v_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]
+    hu_0: np.ndarray | None = None       # (n_lat, n_lon) [m]
+    hv_0: np.ndarray | None = None       # (n_lat, n_lon) [m]
     # Partial-periodic seam-wall profile, shape ``(n_lat,)``, 1.0 = the
     # zonal periodic-seam u-face is WALLED at that latitude row, 0.0 =
     # open/re-entrant.  Derived from the RAW (un-stripped) surface
@@ -152,16 +162,37 @@ def read_nemo_mesh_mask(path: str, *, nn_hls: int = 1) -> NemoGrid:
         if not (_seam_wall.any() and (_seam_wall < 0.5).any()):
             _seam_wall = None
 
+    umask_3d = m3("umask")
+    vmask_3d = m3("vmask")
+    # #1226 item 2: hu_0/hv_0 = sum_k(e3u_0*umask) / sum_k(e3v_0*vmask)
+    # (domain.F90:140-146), computed here from e3u_0/e3v_0 (in mesh_mask.nc)
+    # -- only when the thickness field is present (umask/vmask are mandatory
+    # NemoGrid fields, read unconditionally above; a mesh_mask.nc missing
+    # them KeyErrors earlier, so no separate guard is needed here).
+    if "e3u_0" in m:
+        e3u_0_arr = m3("e3u_0")
+        hu_0_arr = (e3u_0_arr * umask_3d).sum(axis=-1)
+    else:
+        e3u_0_arr = None
+        hu_0_arr = None
+    if "e3v_0" in m:
+        e3v_0_arr = m3("e3v_0")
+        hv_0_arr = (e3v_0_arr * vmask_3d).sum(axis=-1)
+    else:
+        e3v_0_arr = None
+        hv_0_arr = None
+
     return NemoGrid(
         glamt=h2("glamt"), gphit=h2("gphit"),
         e1t=h2("e1t"), e2t=h2("e2t"), e1u=h2("e1u"), e2v=h2("e2v"),
         ff_t=h2("ff_t"), ff_f=h2("ff_f"),
         e3t_1d=v1("e3t_1d"), gdept_1d=v1("gdept_1d"), gdepw_1d=v1("gdepw_1d"),
-        tmask=m3("tmask"), umask=m3("umask"), vmask=m3("vmask"),
+        tmask=m3("tmask"), umask=umask_3d, vmask=vmask_3d,
         e3t_0=(m3("e3t_0") if "e3t_0" in m else None),
         gdept_0=(m3("gdept_0") if "gdept_0" in m else None),
         gphiv=(h2("gphiv") if "gphiv" in m else None),
         seam_wall_rows=_seam_wall,
+        e3u_0=e3u_0_arr, e3v_0=e3v_0_arr, hu_0=hu_0_arr, hv_0=hv_0_arr,
     )
 
 

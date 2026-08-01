@@ -868,6 +868,75 @@ class BarotropicConfig(NamedTuple):
     # options only differ under the MLF before-level seed.  Unknown value
     # raises at the substep entry (dispatch hardening).
     barotropic_een_seed: str = "window_start"
+    # Loop-ENTRY seed convention for the barotropic substep integration's
+    # initial (eta, U_bar, V_bar) — i.e. which face-thickness weights the
+    # 3-D-to-barotropic depth average AT THE MOMENT the substep loop is
+    # seeded (#1226 round 2 item 1; distinct from ``barotropic_face_depth``,
+    # which governs the IN-SUBSTEP flux/drag face thickness once the loop is
+    # already running).  NEMO does not literally recompute this every step —
+    # it carries a persistent barotropic state ``puu_b``/``pvv_b`` and seeds
+    # ``un_e(:,:) = puu_b(:,:,Kbb)`` / ``vn_e(:,:) = pvv_b(:,:,Kbb)``
+    # (dynspg_ts.F90:496-497, the ln_bt_fw=.FALSE. MLF branch).  That
+    # persistent ``puu_b`` is itself finalized, at the END of the PRIOR
+    # step, from the accumulated transport sum divided by NEMO's own
+    # ssh-averaged face depth — the non-RK3 (MLF) nn_bt_flt=2 branch:
+    #   puu_b(Kaa) = puu_b(Kaa) / (hu_0 + zsshu_a)                (:978)
+    #   zsshu_a = 0.5*r1_e1e2u*(e1e2t(j)*pssh(j) + e1e2t(j+1)*pssh(j+1))
+    #                                                              (:963-964)
+    # i.e. the SAME NEMO ssh-average rule as ``barotropic_face_depth=
+    # "nemo_ssh_avg"`` (``nemo_ssh_avg_face_depth`` in
+    # barotropic_latlon_cgrid.py — reused verbatim, not re-derived), just
+    # evaluated once at loop entry instead of every substep.  lego has no
+    # persistent barotropic state; it re-derives the loop-entry (U_bar,
+    # V_bar) fresh each step from the 3-D velocity via
+    # ``_depth_average_to_faces``, whose face-thickness weight is this
+    # option.  "min_rule" (DEFAULT, bit-identical legacy): lego's C-grid
+    # min-rule 3-D face thickness (``min_cell_to_uface``/``min_cell_to_vface``
+    # applied to the per-level layer thickness ``h_k``) — matches every
+    # other 3-D-to-barotropic depth average in the model.  "nemo_ssh_avg":
+    # rescale the min-rule 3-D face thickness by the ratio of the NEMO-rule
+    # TOTAL column face depth to the min-rule TOTAL column face depth (both
+    # evaluated at the seed eta), i.e. ``h_u_seed = h_u_minrule *
+    # (H_u_nemo / H_u_minrule)``.  Exact for z-star (a single per-column
+    # Jacobian scales every level identically, so the ratio equals the
+    # z-star Jacobian ratio at every k); for partial cells this is the same
+    # proportional total-depth correction the rest of the split-explicit
+    # solver already applies via a scalar column factor (documented
+    # approximation, not a new one).  Unknown value raises at the substep
+    # entry (dispatch hardening, same pattern as ``barotropic_face_depth``).
+    #
+    # MEASURED INERT AWAY FROM THE WATER-COLUMN FLOOR (2026-07-27, DINO Y5
+    # restart twin, probe_spg_barotropic vs NEMO RUN_GDB spg dumps): a
+    # per-COLUMN scalar weight rescale cancels identically in the
+    # thickness-weighted mean (sum(u*h*r)/sum(h*r) == sum(u*h)/sum(h)
+    # whenever ``max(sum_k h_face, min_water_column_m)`` does NOT bind), so
+    # the seeded U_bar/V_bar are bit-identical between the two modes on
+    # DINO's deep-basin columns (outputs differ only by ~1e-16
+    # re-association round-off).  NEMO's own qco stretch
+    # e3u(Kbb) = e3u_0*(1+r3u(Kbb)) is ALSO a per-column scalar, so NEMO's
+    # sum_k(u*e3u(Kbb))/sum_k(e3u(Kbb)) seed is equally invariant away from
+    # its own (purely land/dry-cell) ``1-ssumask`` guard — the hypothesized
+    # min-rule-vs-ssh-avg seed convention gap cancels in BOTH models on
+    # DINO's twin (entry-seed un_e/vn_e corr 1.000000, |x|ratio 1.0000).
+    #
+    # NOT INERT ON A SHELF COLUMN AT THE PRODUCTION FLOOR: the production
+    # default ``min_water_column_m=0.5`` (state.py) can bind the two
+    # face-depth rules ASYMMETRICALLY on a thin/shelf column (the
+    # ssh-average rescale changes which side of the floor a face lands
+    # on) — an 11% loop-entry velocity difference between "min_rule" and
+    # "nemo_ssh_avg" was reproduced at this default (see
+    # ``TestBarotropicSeedFaceDepth::
+    # test_shelf_column_floor_breaks_inertness_at_production_default`` in
+    # test_barotropic_continuity_and_drag.py).  NEMO's own floor
+    # (``hu_0 + zsshu_a + 1 - ssumask``) is a pure land-mask
+    # divide-by-zero guard (``ssumask`` is static 0/1; the ``+1`` only
+    # activates on masked/dry faces) and never binds on a wet cell no
+    # matter how thin — legoESM's physical ``min_water_column_m`` floor
+    # binds on wet-but-thin columns, which NEMO's guard structurally
+    # cannot do.  So the earlier "inertness" claim held only in the
+    # basins/tests that never exercised the floor; kept as the documented
+    # convention knob, not a validated no-op everywhere.
+    barotropic_seed_face_depth: str = "min_rule"
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
@@ -1212,6 +1281,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     fields group as:
 
     - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Grid metric convention** (#1226): ``metric_convention`` ("exact"
+      default | "nemo_isotropic" for the NEMO DINO oracle cards).
     - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
       ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
       ``A_h_merid``, ``A_h_cap_*``.
@@ -1262,6 +1333,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     ConstantsConfig for a reference-model recipe) ---
     g: float = constants.g
     rho_0: float = constants.rho_ocean
+    # Earth rotation rate [rad/s], feeds the GM/Redi Treguier ldf_eiv f20
+    # tropical-taper reference (gm_redi_tracer_tendency_latlon's ``omega``
+    # kwarg) -- MUST equal the value that built ``grid.f``/``f_coriolis``,
+    # same reasoning as ``g`` above (#1226: legoESM's canonical rounded
+    # constants.Omega vs NEMO's full-precision value was the entire ldf_eiv
+    # kappa amplitude residual, ratio 1.000608 at corr=1.0).
+    omega: float = constants.Omega
+
+    # T/u-face horizontal metric convention (#1226) fed to
+    # ``legoesm.grids.latlon.ensure_geometry`` at model construction.
+    # ``"exact"`` (default, BIT-IDENTICAL to every prior release) is the
+    # true finite-difference ``dy_T = R*dphi`` + exact spherical-cap
+    # ``area_T``. ``"nemo_isotropic"`` reproduces NEMO's DINO
+    # usr_def_hgr.F90 closed form ``pe1t = pe2t`` (see
+    # create_mercator_grid's docstring for the full citation) -- ONLY the
+    # nemo_dino_kamm*/nemo_faithful_grid oracle cards set this; every other
+    # recipe stays on "exact". Does NOT touch the v-face metric (#516
+    # vface_zonal_cos_lat invariant) -- see ensure_geometry/
+    # create_latlon_geometry docstrings. Dispatch raises in
+    # LatLonCGridOceanModel._validate_config on an unknown value.
+    metric_convention: str = "exact"
 
     # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
     lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
@@ -1404,6 +1496,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
     # triads; select on NEMO-faithful cards). Unknown raises in the operator.
     een_q_boundary: str = "neumann_fill"
+    # F-point (vertex) layer-thickness rule for the AL81/EEN PV flux:
+    # "min" (default, bit-identical legacy) — MITgcm hFacZ convention, min
+    #   over the 4 surrounding ACTIVE cells (Adcroft-Hill-Marshall 1997 /
+    #   Pacanowski-Gnanadesikan 1998; see pv_flux_al81_partial_cell docstring).
+    # "nemo_avg" — NEMO nn_e3f_typ=1 (dynvor.F90::vor_een, masked AVERAGE:
+    #   sum of the 4 surrounding e3t·tmask / count of wet surrounding cells).
+    #   The two coincide on a uniform-depth interior; at step vertices the
+    #   min-rule undervalues e3f (biased low) while nemo_avg matches NEMO's
+    #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
+    #   value raises in the operator.
+    een_e3f_scheme: str = "min"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
@@ -1576,13 +1679,29 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     redistribution and removes the upwind implicit viscosity. UNLIMITED ⇒
     #     dispersive (no monotonicity, no implicit viscosity): stability rests on
     #     dt_mom + A_v/TKE friction, like Veros. The ACC recipe opts in.
+    #   "nemo_advective" (NEMO-FAITHFUL, #1226) — the ADVECTIVE form w·du/dz
+    #     transcribed from dynzad.F90, with w e1e2t-area-weighted-interpolated
+    #     to BOTH the u- and v-face (NEMO's own interpolation). Differs from
+    #     "centered_full"'s FLUX form d(w·u)/dz by u·dw/dz at every level —
+    #     measured as the WHOLE #1226 dyn_zad mismatch (residual corr -0.9992,
+    #     ratio 0.998 against NEMO's own dumped dyn_zad trend).
     # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
     # vertical reconstruction and ignore this field. Literal default -> safe
     # after `constants`. Validated at config construction; unknown -> ValueError.
     # REJECTED in combination with adaptive_implicit_vertadv=True (that path
     # replaces the explicit in-tendency vertical advection entirely with an
-    # upwind backward-Euler solve, so "centered_full" would be a silent no-op).
+    # upwind backward-Euler solve, so "centered_full"/"nemo_advective" would be
+    # a silent no-op).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit b6d0d9877):
+    # ONLY consumed by vertical_momentum_scheme="nemo_advective". Selects how
+    # nemo_advective_vertical_momentum_advection masks its bottom/straddling
+    # u-/v-faces -- see VALID_ZAD_BOTTOM_FACE_MASK in
+    # legoesm.ocean.vertical for the full NEMO-transcription rationale.
+    # "min_rule" (default, bit-identical): AND-of-neighbours interface mask.
+    # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
+    # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
+    zad_bottom_face_mask: str = "min_rule"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian

@@ -42,7 +42,162 @@ Waiving becomes a deliberate act that leaves a reason in the diff. See
 `scripts/validate/ocean_fidelity/dino_1226/nemo_geometry_gate.py` for a working
 example (45 arrays, 0 unaccounted).
 
-Apply this to the mesh, the restart, AND the namelist.
+Apply this to the mesh, the restart, the namelist, **AND the oracle's STEP CALL
+GRAPH**. Enumerate every `CALL` in the oracle's step routine (descending one
+level through dispatch wrappers to the concrete routine the config runs) and
+force a disposition per routine: VERIFIED (number + where), WAIVED (reason), or
+UNVERIFIED (listed loudly, ranked by climate leverage). A term list built from
+"terms we had reason to suspect" is a checklist, not coverage — the #1226 sweep
+verified 11 suspected terms to ~1.0 while the barotropic solver and momentum
+advection pieces sat unenumerated, and "verified in an earlier phase" served as
+an implicit, unwritten waiver. Prior-phase verification does NOT carry over a
+raised bar: re-certify or waive explicitly, in writing.
+
+## Rule 1b — The bar is EXACT. Encode it in a gate, not in your judgment.
+
+If the user sets the bar at corr 1.0 / ratio 1.0, then 0.99x is **DEBT**, not
+"matched", "faithful", "closed", or "good enough". Those words are forbidden
+for any term whose measured numbers are not at the bar.
+
+Judgment drifts: measure 0.9923, write "FAITHFUL", move on — repeatedly, across
+a whole campaign, while being told the bar each time. So do not hold the bar in
+your head. Put every term's measured (corr, ratio) in a **gate script** that
+classifies AT BAR / DEBT / UNMEASURED and exits non-zero unless all are AT BAR
+(example: `scripts/validate/ocean_fidelity/dino_1226/fidelity_bar_gate.py`).
+Report its output, not your impression. Never relax the bar constants; only add
+measurements.
+
+Corollary: a term is not clearable by an EXPLANATION of its residual
+("threshold chatter", "irreducible amplification", "branch flips"). Those are
+hypotheses. Clearing requires comparing the routine's INTERNALS stage by stage
+and either reaching the bar or proving the deviation lives in the oracle's own
+arithmetic.
+
+## Rule 1c — Match the oracle's PRECISION, and verify it by printing the dtype
+
+NEMO, MITgcm and Veros are **fp64** models. An oracle comparison run in
+float32 is measuring your own rounding, not your physics. f32 eps = 1.19e-7,
+so anything you "find" in the 1e-8..1e-5 band may be the dtype.
+
+**Every oracle-fidelity evaluation runs fp64.** Set it explicitly:
+
+```python
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64())
+```
+
+**`JAX_ENABLE_X64=1` IS NOT ENOUGH.** It permits f64 arrays; it does NOT change
+legoESM's precision policy. Constructors cast to `get_policy().control`, which
+**defaults to float32** — so a harness can run with x64 enabled and still build
+its grid in single precision.
+
+DOUBLE-CHECK IT — do not assume (this is Rule 10 applied to dtype). Print the
+dtype of the arrays you are comparing *and* of the GEOMETRY behind them:
+
+```python
+for f in ("t_depth_ref", "dz_ref", "z_full_ref", "z_half_ref", "h_partial"):
+    print(f, np.asarray(getattr(z_coord, f)).dtype)   # want float64
+```
+
+A ladder that is f32 while T/S are f64 is the easy case to miss: the state
+looks right and the geometry silently is not (Rule 2's blind spot again).
+
+Real case (#1226): `create_z_star_from_thicknesses` cast NEMO's f64 `gdept_1d`
+to the policy control dtype = f32, losing ~7 digits — median |rel| 2.555e-8 =
+**0.21 x f32 eps**, the fingerprint of single precision. Under fp64:
+
+```
+live gdept vs NEMO   2.163e-8  ->  1.199e-16
+eos_rab alpha        1.322e-9  ->  0.000e+00
+bn2 (err_norm)       4.322e-9  ->  1.413e-17
+zdf_mxl nmln          10/9920  ->  0/9920
+```
+
+Four terms, one dtype. Weeks had gone into hunting a physical cause for an
+"unexplained 3e-6..5e-5 residual band" that was substantially float32.
+
+**Diagnostic tell:** if a residual's median sits near a fixed fraction of
+machine eps (~0.2-0.5 x eps) and is roughly FLAT across unrelated terms, suspect
+the dtype before the physics. A real discretisation error has structure; a
+rounding floor does not.
+
+Corollary for the gate: record the precision every measurement was taken at,
+next to the number. A figure measured at a different precision than the current
+default is STALE, exactly like a figure measured at a different commit.
+
+## Rule 1d — Pin the oracle's TIME LEVEL per dump, in a registry that raises
+
+A leapfrog oracle carries three time levels, and a routine is routinely called
+with T/S at one and geometry at another:
+
+```fortran
+CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nnn )   ! stpmlf.F90:184  T/S BEFORE, geom NOW
+CALL eos_rab( ts(:,:,:,:,Nnn), rab_n, Nnn )   ! stpmlf.F90:185
+```
+
+Compare a dump against the wrong level and you silently substitute
+`|T_now - T_before|` for "error". **This does not look like noise.** That
+difference is largest in the thermocline, so it renders as a beautifully
+depth-structured signal — the most convincing possible disguise.
+
+Real case (#1226), the same mistake made TWICE in one day: feeding NOW T/S
+against BEFORE-level dumps produced a 7074-cell "tail", three 1.8% alpha
+"outliers", and a "levels 6-8 structure" that got a written mechanistic
+explanation. At the correct level: tail EMPTY, zero outliers, no structure.
+The wrong-level numbers had already been committed to the gate.
+
+**Never infer the level from the field name or from what you loaded last.**
+Read the oracle's call site, then record it ONCE in a registry that
+FAILS CLOSED on anything unregistered
+(`ocean/fidelity/time_levels.py::time_level_for_dump`, which raises rather than
+defaulting to "now"), and let `select_ts(dump, now=, before=)` pick — so the
+correct level is the DEFAULT ACTION, not a thing to remember. Registering a
+dump requires citing the `file:line` that proves it; an unsourced entry is a
+guess, and a guess here is the whole failure mode.
+
+**Tell:** a residual that is near-zero in a well-mixed layer, peaks at the
+thermocline, and decays with depth has the shape of a T-tendency, not of a
+discretisation error. Suspect the time level before you write a mechanism.
+
+**How it got caught** (worth copying): invert the oracle's own polynomial for
+the input it implies. NEMO's dumped alpha at one "outlier" implied T = 7.103 C
+where we had fed 6.858 C — not roundoff, a *different temperature*. Numbers can
+be argued about; an implied input that is 0.245 C off cannot.
+
+## Rule 1e — Reconcile a disagreeing measurement BEFORE you record it
+
+When a new probe disagrees with a recorded number, the temptation is to explain
+why the OLD one was untrustworthy (wrong run directory, stale commit, worse
+precision) and record the new one. That reasoning is backwards: a disagreement
+is evidence that **one of them has a bug**, and you do not know which yet.
+
+Real case (#1226, twice in one session): a rebuilt `ldf_slp` probe — with
+better provenance in every respect, fp64 and both preconditions wired —
+reported `wslpi` 0.999876/1.0028 against a recorded 0.999963/1.000524. I
+attributed the gap to the old probe's known flaws and committed the new
+numbers as "superseding on provenance". The new probe was the broken one: it
+omitted `eos_depth="geometric"` from the config and silently took a different
+density convention. Corrected, it reproduced the historical value exactly.
+
+**A better harness does not make a measurement right.** Provenance is a reason
+to *trust*, never a reason to *skip reconciling*.
+
+Procedure when two measurements of the same quantity disagree:
+1. Do NOT record either yet.
+2. Find a quantity both probes should agree on exactly and check it — an input,
+   a mask count, a cell census. Disagreement upstream localises the bug.
+3. Diff the two CONFIGS field by field, not just the code. The #1226 bug was
+   one missing kwarg that changed a physical convention, invisible in the
+   numerics and silent at runtime because it had a default.
+4. Only record once you can say WHY they differed.
+
+Two independent probes that CONVERGE are much stronger evidence than either
+alone — that convergence is the thing worth chasing, and it is what finally
+established these four rows.
+
+Corollary: a config field with a silent default is a trap for oracle work.
+Prefer an explicit value at every probe call site, and diff the assembled
+config against the production one rather than trusting that defaults match.
 
 ## Rule 2 — Know what each gate CANNOT see
 

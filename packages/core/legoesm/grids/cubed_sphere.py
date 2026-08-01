@@ -483,16 +483,19 @@ def create_cubed_sphere(
             # monolith order the historical fixtures were pinned at
             # (2026-07-27: 4-point corner-adjacent ring Lagrange has
             # oscillating extrapolation lobes and is the measured
-            # vertex amplifier).  DEFAULT (None) maps to 4 for
-            # back-compat with the certified fixtures; any other
-            # explicit value fails loudly.
+            # vertex amplifier — the C48 case-8 root cause, PR #1372).
+            # DEFAULT (None) now maps to 2 — the FAITHFUL order — after
+            # the acceptance battery (case-8 d5 in the oracle band, W2
+            # max+RMS inside the Zenodo envelope, symmetry residuals at
+            # the oracle floor); pass 4 explicitly for the historical
+            # fixture order.
             if k2e_nord is not None and k2e_nord not in (2, 4):
                 raise NotImplementedError(
                     f"gnomonic='ed' duogrid: k2e_nord={k2e_nord}; "
                     "supported orders are 2 (authoritative live "
                     "default) and 4 (mirror-monolith fixture order)")
             duogrid = create_fv3_native_duogrid_data(
-                n, ng=ng, k2e_nord=4 if k2e_nord is None else k2e_nord)
+                n, ng=ng, k2e_nord=2 if k2e_nord is None else k2e_nord)
         else:
             from legoesm.grids.duogrid import create_duogrid_data
             duogrid = create_duogrid_data(
@@ -3647,6 +3650,8 @@ def rotate_winds_geo_to_grid(
 def apply_small_earth_scaling(
     grid: CubedSphereGrid,
     factor: float,
+    *,
+    rotating: bool = True,
 ) -> CubedSphereGrid:
     """Create a small-Earth grid by scaling radius and rotation rate.
 
@@ -3662,6 +3667,14 @@ def apply_small_earth_scaling(
         Original grid at Earth radius.
     factor : float
         Reduction factor X. Earth radius becomes R_earth/X.
+    rotating : bool, default True
+        Keep the Rossby-number-preserving ``Omega * X`` scaling.  Set
+        False for a NON-ROTATING small planet (``omega = 0``), which is
+        what FV3 does for the reduced-radius HIWPP cases that DCMIP's
+        mountain-wave and supercell tests descend from: ``f0 = 0`` and
+        ``fC = 0`` for ``test_case`` 33/34/35 (tools/test_cases.F90:3082)
+        and 36/37 (:3319).  Those ICs carry no balancing pressure
+        gradient, so an amplified ``f`` is a spurious momentum source.
 
     Returns
     -------
@@ -3669,6 +3682,16 @@ def apply_small_earth_scaling(
         New grid with scaled metrics.
     """
     if factor == 1.0:
+        # Never rebuild for a no-op reduction: create_cubed_sphere does not
+        # forward dtype/duogrid, so rebuilding an FV3-native or duogrid grid
+        # here would silently swap its halo topology (codex r2 P2).  A
+        # non-rotating full-size grid must be built by the caller instead.
+        if not rotating:
+            raise ValueError(
+                "apply_small_earth_scaling(factor=1.0, rotating=False) would "
+                "require rebuilding the grid, which drops dtype/duogrid "
+                "provenance; build the non-rotating grid directly with "
+                "create_cubed_sphere(..., omega=0.0)")
         return grid
 
     from legoesm import constants
@@ -3678,7 +3701,7 @@ def apply_small_earth_scaling(
     return create_cubed_sphere(
         grid.n,
         radius=constants.R_earth / factor,
-        omega=constants.Omega * factor,
+        omega=(constants.Omega * factor) if rotating else 0.0,
         gnomonic=grid.gnomonic_form,
     )
 

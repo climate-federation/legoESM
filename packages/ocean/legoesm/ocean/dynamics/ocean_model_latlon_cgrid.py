@@ -111,7 +111,7 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
-def _add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
+def add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
                                  u_mask_3d, v_mask_3d, grid, z_coord):
     """Add the GM eddy-induced (bolus) transport to the TRACER advecting flux.
 
@@ -248,6 +248,11 @@ def _compute_advection_flux_div(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
+            # #1226 item 8: same wet mask already threaded as
+            # recon_fill_mask (is_active/active_3d) — faithfully masks
+            # the NEMO nonosc per-point bound at dry cells (see
+            # fct_tracer_advection's active_mask docstring).
+            active_mask=recon_fill_mask,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -374,7 +379,7 @@ _LEVEL_SEPARABLE_H_SCHEMES = frozenset(
 )
 
 
-def _compute_advection_flux_div_pair(
+def compute_advection_flux_div_pair(
     tr_a: jnp.ndarray,
     tr_b: jnp.ndarray,
     tracer_advection: str,
@@ -596,7 +601,7 @@ def _ssp_rk3_tracer_pair_step(
     Per-tracer arithmetic is kept statement-identical to
     :func:`_ssp_rk3_tracer_step`; the only change is that each stage's
     two flux divergences come from ONE
-    :func:`_compute_advection_flux_div_pair` call (3 fused horizontal
+    :func:`compute_advection_flux_div_pair` call (3 fused horizontal
     reconstructions + pads per step instead of 6).
 
     ``recon_fill_mask`` (#480) is forwarded to every stage's reconstruction
@@ -605,7 +610,7 @@ def _ssp_rk3_tracer_pair_step(
     """
 
     def _flux_div_pair(a_val, b_val):
-        (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
+        (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
             a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
@@ -786,19 +791,35 @@ def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
     )
 
 
-def _static_kappa_redi_override(gm_cfg, grid):
+def static_kappa_redi_override(gm_cfg, grid):
     """Per-column kappa_Redi override for kappa_redi_lat_scaling.
 
-    NEMO nn_aht_ijk_t=20 on a Mercator grid: aht(φ) = ½·U_d·Δx(φ)
-    ∝ cos φ, with ``gm_cfg.kappa_Redi`` the equator value.  Returns a
-    (n_lat, n_lon) array (the kernels' 2-D per-column kappa form) or
-    ``None`` when the flag is off — the scalar paths stay bit-identical.
-    Runtime closures (EKE / Treguier / Visbeck kappa fields) overwrite
-    this where they apply; the flag is meant for the static
-    Redi-only recipe (DINO R1) where no adaptive κ is active.
+    NEMO ``nn_aht_ijk_t=20`` (``ldftra.F90:325-329`` -> ``ldf_c2d('TRA', ...)``,
+    ``ldfc1d_c2d.F90:141-145``) does NOT build one T-point field and average it
+    onto the faces: ``ahtu`` and ``ahtv`` are TWO INDEPENDENTLY-EVALUATED
+    arrays, ``ahtu(ji,jj) = zUfac·MAX(e1u,e2u)^inn`` and
+    ``ahtv(ji,jj) = zUfac·MAX(e1v,e2v)^inn`` — i.e. ``∝ cos(lat_u)`` and
+    ``∝ cos(lat_v)`` respectively, each AT ITS OWN POINT.  On this regular
+    lat-lon grid ``cos(lat_u) == cos(lat_T)`` exactly (the u-face shares its
+    T-row's latitude), so the u-face/T-point field below is exact; the
+    v-face sits at a genuinely different (shifted) latitude and needs its own
+    ``cos(lat_v)`` evaluation — reusing the T-point field for both (the
+    pre-#1226-tier-2 code) left a real ~1e-5-level v-face amplitude error
+    that does NOT vanish with grid refinement in the same way (it is not an
+    interpolation artifact; there never was an interpolation).
+
+    Returns ``(kappa_T, kappa_v)``: ``kappa_T`` = ``(n_lat, n_lon)``
+    ``kappa_Redi·cos(lat_T)`` (feeds the T-point broadcast used by zfu/zft
+    unchanged); ``kappa_v`` = ``(n_lat, n_lon)`` ``kappa_Redi·cos(lat_v)`` at
+    the v-face (north-face-of-cell-j convention, matching ``grid.dx_v[1:,:]``)
+    for the v-face-specific consumer (``kappa_Redi_v`` /
+    ``kappa_redi_v_override``).  ``(None, None)`` when the flag is off — the
+    scalar paths stay bit-identical.  Runtime closures (EKE / Treguier /
+    Visbeck kappa fields) overwrite this where they apply; the flag is meant
+    for the static Redi-only recipe (DINO R1) where no adaptive κ is active.
     """
     if not bool(getattr(gm_cfg, "kappa_redi_lat_scaling", False)):
-        return None
+        return None, None
     lat = jnp.asarray(grid.lat)
     if lat.ndim != 1:
         raise ValueError(
@@ -808,8 +829,26 @@ def _static_kappa_redi_override(gm_cfg, grid):
             "kappa field via the runtime override instead.")
     cos_lat = jnp.cos(lat)                                # (n_lat,)
     n_lon = int(getattr(grid, "n_lon"))
-    return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
+    kappa_T = (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)
+    # cos at the TRUE v-face latitude, matching NEMO's cos(gphiv).  Carried by
+    # BOTH LatLonGrid and LatLonCGridGeometry (the from-rest path); do NOT
+    # rebuild it from midpoints of grid.lat -- on a stretched grid the true
+    # faces are not the midpoints (DINO: 2.5e-4) -- and do NOT substitute
+    # vface_zonal_cos_lat, which is the #516 pole-zeroed transport metric.
+    cos_lat_v = jnp.asarray(grid.cos_lat_v)[1:]           # north face of cell j
+    if bool(getattr(getattr(grid, "fold", None), "is_active", False)):
+        # Tripole has NO 1-D v-face axis; its cos_lat_v is a zonal-mean
+        # representative, not the real face metric.  The ndim!=1 guard above
+        # does NOT catch it (tripole stores a zonal-mean 1-D lat), so refuse
+        # here rather than run a fabricated ahtv.  fold.is_active is a STATIC
+        # Python bool -- never inspect array VALUES here, this runs inside jit.
+        raise ValueError(
+            "kappa_redi_lat_scaling needs a 1-D v-face cos(lat_v); a tripolar "
+            "grid has no 1-D v-face axis. Supply a 2-D kappa_Redi field.")
+    kappa_v = (gm_cfg.kappa_Redi * cos_lat_v)[:, None] * jnp.ones(
+        (1, n_lon), dtype=cos_lat_v.dtype)
+    return kappa_T, kappa_v
 
 
 def thickness_weighted_tracer_combine(t_before, t_now, t_expl, d_diss,
@@ -976,15 +1015,18 @@ class LatLonCGridOceanModel:
         *,
         iwm_forcing=None,
     ):
+        self.z_coord = z_coord
+        self.config = config or LatLonCGridOceanConfig.from_flat()
+        self._validate_config(self.config)
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
         # access (legacy fields are identical); for a tripolar grid the
         # geometry carries fold descriptor and rotation angles.
-        self.grid = ensure_geometry(grid)
-        self.z_coord = z_coord
-        self.config = config or LatLonCGridOceanConfig.from_flat()
-        self._validate_config(self.config)
+        # ``metric_convention`` (#1226) is validated above, so the raise on
+        # an unknown value happens before this call.
+        self.grid = ensure_geometry(
+            grid, metric_convention=self.config.metric_convention)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
         # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
@@ -1327,6 +1369,16 @@ class LatLonCGridOceanModel:
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
 
+        # #1226: T/u-face metric convention dispatch -- raise on an unknown
+        # value rather than silently falling through to create_latlon_geometry's
+        # own raise deep inside ensure_geometry (fail at config-validation time,
+        # before any grid conversion work happens).
+        if config.metric_convention not in ("exact", "nemo_isotropic"):
+            raise ValueError(
+                "metric_convention must be 'exact' or 'nemo_isotropic', got "
+                f"{config.metric_convention!r}"
+            )
+
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
         # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the
         # top-level config.gm_redi field (applied in the model step). The
@@ -1602,19 +1654,32 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
-        # Reject centered_full + adaptive-implicit vertadv: the adaptive-
-        # implicit path (ln_zad_Aimp) replaces the explicit in-tendency
-        # vertical momentum advection ENTIRELY with an upwind backward-Euler
-        # solve at the step level, so "centered_full" (an explicit-stage
-        # option) would be a silent no-op.  Fail fast rather than mislead.
-        if (_vert_mom_scheme == "centered_full"
+        # #1226 level-29-onset fix: bottom/straddling-face mask convention for
+        # nemo_advective_vertical_momentum_advection (only consumed under
+        # vertical_momentum_scheme="nemo_advective"; validated unconditionally
+        # here so a typo on ANY recipe fails fast at config construction).
+        from legoesm.ocean.vertical import VALID_ZAD_BOTTOM_FACE_MASK
+        _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
+        if _zad_mask_mode not in VALID_ZAD_BOTTOM_FACE_MASK:
+            raise ValueError(
+                f"zad_bottom_face_mask must be one of "
+                f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
+                f"got {_zad_mask_mode!r}",
+            )
+        # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
+        # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
+        # in-tendency vertical momentum advection ENTIRELY with an upwind
+        # backward-Euler solve at the step level, so an explicit-stage
+        # option here would be a silent no-op.  Fail fast rather than mislead.
+        if (_vert_mom_scheme in ("centered_full", "nemo_advective")
                 and getattr(config, "adaptive_implicit_vertadv", False)):
             raise ValueError(
-                "vertical_momentum_scheme='centered_full' is incompatible "
-                "with adaptive_implicit_vertadv=True: the adaptive-implicit "
-                "scheme replaces the explicit vertical momentum advection "
-                "entirely (upwind backward-Euler at the step level), so the "
-                "centered explicit flux would never be applied. Choose one.",
+                f"vertical_momentum_scheme={_vert_mom_scheme!r} is "
+                "incompatible with adaptive_implicit_vertadv=True: the "
+                "adaptive-implicit scheme replaces the explicit vertical "
+                "momentum advection entirely (upwind backward-Euler at the "
+                "step level), so the explicit tendency would never be "
+                "applied. Choose one.",
             )
 
         # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY
@@ -1664,7 +1729,7 @@ class LatLonCGridOceanModel:
                     and getattr(config.gm_redi, "eke", None) is not None):
                 _unsupported.append("gm_redi with prognostic EKE (gm_redi.eke)")
             # gm_bolus_advection="through_fct" needs the bolus-transport export
-            # + _add_bolus_to_advecting_flux wiring, which only the split step
+            # + add_bolus_to_advecting_flux wiring, which only the split step
             # carries; without this gate the unsplit step would silently DROP
             # the entire GM bolus term (the in-operator centred add is gated
             # off and nothing re-adds it to the advecting flux).
@@ -1941,14 +2006,16 @@ class LatLonCGridOceanModel:
                     "(Nbb) tracers only exist as state.T_before/S_before "
                     "under the leap-frog (NEMO Modified-Leap-Frog) time "
                     f"integrator. Got outer_integrator={_outer_int!r}.")
-            if (getattr(_tke_cfg_ctor, "tke_shear_production",
-                        "squared_centered") == "nemo_burchard"
+            _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
+                                     "squared_centered")
+            if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int != "leapfrog"):
                 raise ValueError(
-                    'vertical_mixing.tke.tke_shear_production='
-                    '"nemo_burchard" requires outer_integrator="leapfrog": '
-                    "the Burchard now×before shear cross term only exists "
-                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f'vertical_mixing.tke.tke_shear_production='
+                    f'{_tke_shear_ctor!r} requires outer_integrator='
+                    '"leapfrog": both the Burchard now×before cross term '
+                    "and its face-native extension only exist as "
+                    "state.u_before/v_before under the leap-frog (NEMO "
                     f"Modified-Leap-Frog) time integrator. Got "
                     f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
@@ -3631,7 +3698,8 @@ class LatLonCGridOceanModel:
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
-            kappa_redi_override = _static_kappa_redi_override(gm_cfg, _grid)
+            kappa_redi_override, kappa_redi_v_override = static_kappa_redi_override(
+                gm_cfg, _grid)
             eke_new = None
             eke_diss_new = None
             # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
@@ -3737,9 +3805,13 @@ class LatLonCGridOceanModel:
                     )
                     eke_new = Field(data=E_new * lm, name="eke",
                                     dims=("lat", "lon"), units="m^3/s^2")
-                    # κ_n (Eq. 7) → Redi tracer diffusivity (EKE-GM+N).
+                    # κ_n (Eq. 7) → Redi tracer diffusivity (EKE-GM+N).  A
+                    # genuinely T-point field (unlike the static lat-scaling
+                    # case) -> clear any stale v-face override so it is not
+                    # silently paired with the wrong T-value.
                     if geom.kappa_n_coupling:
                         kappa_redi_override = kappa_n_geom
+                        kappa_redi_v_override = None
                 else:
                     if state.eke is not None:
                         E = state.eke.data
@@ -3772,8 +3844,11 @@ class LatLonCGridOceanModel:
                                     dims=("lat", "lon"), units="m^2/s^2")
                 # K_iso = K_gm (Veros enable_eke_isopycnal_diffusion): drive the
                 # Redi tracer diffusivity from the same prognostic kappa as GM.
+                # kappa_gm_override is a T-point field -> clear any stale
+                # static-override v-face field (same reasoning as kappa_n_geom).
                 if eke_cfg.isopycnal_diffusion:
                     kappa_redi_override = kappa_gm_override
+                    kappa_redi_v_override = None
             # Hoist the shared in-situ density (2-iteration EOS coupling) +
             # z* Jacobian: when implicit_K33 the tracer tendency AND the K_33
             # diagonal both need EXACTLY these from the same
@@ -3789,6 +3864,7 @@ class LatLonCGridOceanModel:
                     mask=state.land_mask.data,
                     rho_0=self.config.constants.rho_0,
                     g=self.config.constants.g,
+                    eos_depth=getattr(self.config, "eos_depth", "insitu"),
                 )
             # GM bolus THROUGH the FCT limiter (NEMO traadv): when the config
             # selects it (nemo_iso_lap + gm_bolus_advection="through_fct"), the
@@ -3806,17 +3882,27 @@ class LatLonCGridOceanModel:
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                # self.config.omega (NOT self.config.constants.Omega): the
+                # same split as g's momentum-path/GM-Redi-path divergence
+                # elsewhere in this function -- self.config.omega is the
+                # field dino_lat_lon_model_config actually threads
+                # cfg.omega into (from_flat top-level field); constants.Omega
+                # stays the unused NamedTuple default. See LatLonCGridOceanConfig
+                # docstring / #1226.
+                omega=self.config.omega,
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
+                kappa_redi_v_override=kappa_redi_v_override,
                 density_jacobian=_gm_dens_jac,
                 return_bolus_transport=_want_bolus,
                 dt=dt,
+                eos_depth=getattr(self.config, "eos_depth", "insitu"),
             )
             if _want_bolus:
                 dT_gm, dS_gm, _bolus = _gm_out
                 if _bolus is not None:
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
-                        _add_bolus_to_advecting_flux(
+                        add_bolus_to_advecting_flux(
                             _bolus, mass_flux_u, mass_flux_v,
                             u_mask_3d_tracer, v_mask_3d_tracer, _grid,
                             self.z_coord,
@@ -3837,6 +3923,7 @@ class LatLonCGridOceanModel:
                     mask=state.land_mask.data,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
+                    kappa_redi_v_override=kappa_redi_v_override,
                     density_jacobian=_gm_dens_jac,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
@@ -3845,6 +3932,7 @@ class LatLonCGridOceanModel:
                     u_mask=state.u_mask.data,
                     v_mask=state.v_mask.data,
                     dt=dt,
+                    eos_depth=getattr(self.config, "eos_depth", "insitu"),
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
@@ -3956,7 +4044,7 @@ class LatLonCGridOceanModel:
 
             # T+S pair fast path: ONE fused horizontal reconstruction +
             # N-S pad per stage for both tracers (level-axis stack; see
-            # _compute_advection_flux_div_pair).  Bit-identical to the
+            # compute_advection_flux_div_pair).  Bit-identical to the
             # historical per-tracer calls; non-separable schemes fall
             # back to two single-tracer calls inside the pair helpers.
             # NEMO key_linssh: top-cell concentration/dilution flux (static
@@ -3984,7 +4072,7 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             else:
-                _pair_divs = _compute_advection_flux_div_pair(
+                _pair_divs = compute_advection_flux_div_pair(
                     T_mid, S_mid, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_u_old, h_v_old, _grid, dt,
@@ -4535,8 +4623,13 @@ class LatLonCGridOceanModel:
         machinery as ``zdf_drag_in_matrix``
         (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
         :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
-        re-derived drag coefficient. ``cc_state`` must already carry
-        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        re-derived drag coefficient. ``cc_state`` normally already carries
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``); under
+        ``tke_shear_production="nemo_face_native"`` the caller instead
+        passes the RAW (uncollapsed) face state (so ``_vmix_K_profiles`` can
+        reconstruct zdfsh2.F90's face-native shear) — this helper collapses
+        u/v to the T-point itself in that case, exactly like every other
+        caller of ``_vmix_K_profiles`` already does before this stage.
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4564,8 +4657,12 @@ class LatLonCGridOceanModel:
         h_k = self.z_coord.h_partial
         _bl = jnp.maximum(self.z_coord.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
-        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        u_cc, v_cc = cc_state.u.data, cc_state.v.data
+        if u_cc.shape[1] != h_k.shape[1]:
+            u_cc = 0.5 * (u_cc[:, :-1, :] + u_cc[:, 1:, :])
+            v_cc = 0.5 * (v_cc[:-1, :, :] + v_cc[1:, :, :])
+        u_bot = jnp.take_along_axis(u_cc, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(v_cc, _bl_idx, axis=-1)[..., 0]
         h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
         r_t = nemo_effective_bottom_drag_r(
             u_bot, v_bot, h_bot,
@@ -5275,12 +5372,32 @@ class LatLonCGridOceanModel:
                     vertical_mixing=VerticalMixingConfig(scheme="none"),
                     convection=OceanConvectionConfig(scheme="none"),
                 )
-            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
-            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
-            cc_state = state._replace(
-                u=state.u.replace(data=u_cell),
-                v=state.v.replace(data=v_cell),
+            # #1226 sh2_walk.py Candidate E/F (nemo_face_native): that TKE
+            # branch of _vmix_K_profiles self-detects face-staggered vs.
+            # cell-centred u/v (k_profiles.py:513) and needs the RAW
+            # (uncollapsed) faces to reconstruct zdfsh2.F90's face-native
+            # shear -- pre-collapsing here (as every OTHER scheme requires;
+            # richardson/catke pass state.u.data straight through with no
+            # staggering check of their own) would silently degrade
+            # nemo_face_native to the T-collapsed Burchard geometry. Skip
+            # the collapse ONLY for this scheme+option combination; every
+            # other scheme/option keeps the BIT-IDENTICAL pre-collapse.
+            _vmix_cfg_here = getattr(physics_config, "vertical_mixing", None)
+            _keep_raw_faces = (
+                _vmix_cfg_here is not None
+                and _vmix_cfg_here.scheme == "tke"
+                and getattr(_vmix_cfg_here.tke, "tke_shear_production",
+                           "squared_centered") == "nemo_face_native"
             )
+            if _keep_raw_faces:
+                cc_state = state
+            else:
+                u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+                v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+                cc_state = state._replace(
+                    u=state.u.replace(data=u_cell),
+                    v=state.v.replace(data=v_cell),
+                )
             # Use the model's own EOS for the vmix density / static-stability
             # N² so the TKE convection trigger (n2_mode="adiabatic") is
             # consistent with the dynamical core. None for Wright leaves the
@@ -7133,22 +7250,26 @@ class LatLonCGridOceanModel:
         k33_iso = None
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
-            _kri_static = _static_kappa_redi_override(gm_cfg, _grid)
+            _kri_static, _kri_v_static = static_kappa_redi_override(gm_cfg, _grid)
+            _eos_depth = getattr(self.config, "eos_depth", "insitu")
             _gm_dj = None
             if gm_cfg.implicit_K33:
                 _gm_dj = gm_redi_density_and_jacobian(
                     state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                     _grid, self.z_coord, eos=self.config.eos,
                     eos_linear=self.config.eos_linear, mask=cmask,
-                    rho_0=self.config.constants.rho_0, g=self.config.constants.g)
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    eos_depth=_eos_depth)
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(  # noqa: N806
                 state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                 _grid, self.z_coord, gm_cfg, eos=self.config.eos,
                 eos_linear=self.config.eos_linear, mask=cmask,
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                omega=self.config.omega,  # see the sibling call's comment above
                 kappa_redi_override=_kri_static,
-                density_jacobian=_gm_dj, dt=dt)
+                kappa_redi_v_override=_kri_v_static,
+                density_jacobian=_gm_dj, dt=dt, eos_depth=_eos_depth)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
             if gm_cfg.implicit_K33:
@@ -7158,9 +7279,10 @@ class LatLonCGridOceanModel:
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=_kri_static,
+                    kappa_redi_v_override=_kri_v_static,
                     density_jacobian=_gm_dj,
                     # #1226: same wall masks as the tendency call above.
-                    u_mask=u_mask, v_mask=v_mask, dt=dt)
+                    u_mask=u_mask, v_mask=v_mask, dt=dt, eos_depth=_eos_depth)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None

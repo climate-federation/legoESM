@@ -1938,11 +1938,30 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 # gated by bit-identity, not wall-clock.
 # ===========================================================================
 
+# Tile counts whose 6*kt^2 assembly is bit-identity-validated against the
+# global step (tiled-vs-global + multi-controller runs; see the validation
+# note in sharded_dynamics.py and validate_tiled_fv3_sw_multinode.py).
+# An UNVALIDATED kt must raise here: during the 2026-07 scale-out, kt=4
+# silently fell back to replicating the global state per device, which
+# surfaced as an opaque 83 GB arg-size error at 96 GPUs (issue #1360)
+# after a 24-node allocation — the guard turns that into an instant,
+# named error. Grow ONLY with a new bit-identity receipt.
+_VALIDATED_KT = frozenset({2, 3})
+
+
 def _validate_tiled_step_factory_args(where, mesh, cdgrid, coord, n, kt,
                                       nlev, p_floor, dt):
     """Shared factory-entry validation for the tiled STEP builders (dry /
     moist / blocked) — one copy of the fail-loud guards (n%kt, mesh shape,
     cdgrid.n, duogrid refusal, coord levels, p_floor, dt)."""
+    if kt not in _VALIDATED_KT:
+        raise ValueError(
+            f"{where}: unsupported kt={kt} (6*kt^2={6*kt*kt} devices) — "
+            f"must be one of the bit-identity-validated tile counts "
+            f"{sorted(_VALIDATED_KT)}. An unvalidated kt previously fell "
+            f"back to replicating the global state per device (issue "
+            f"#1360). Validate the new kt (tiled-vs-global bit identity + "
+            f"a multi-controller run) and add it to _VALIDATED_KT.")
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     _check_tiled_mesh(mesh, n, kt)
