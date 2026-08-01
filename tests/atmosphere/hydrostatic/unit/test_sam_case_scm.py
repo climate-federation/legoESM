@@ -101,7 +101,12 @@ def test_bomex_column_is_top_to_bottom_and_physical():
     assert np.all(np.diff(case.z_full) < 0.0)
     assert np.all(np.diff(case.p_full) > 0.0)
     assert case.z_full[-1] < case.z_full[0]
-    assert case.p_full[-1] == pytest.approx(case.p_s, rel=1e-12)
+    # p_full[-1] is the lowest FULL level, which sits above the surface, so it
+    # is strictly below p_s (sigma_full[-1] < sigma_half[-1] == 1). Asserting
+    # equality here was the test being wrong, not the column.
+    assert case.p_full[-1] < case.p_s
+    assert case.p_full[-1] > 0.985 * case.p_s      # within one layer of ground
+    assert case.z_full[-1] > 0.0
 
     assert np.all(np.isfinite(case.T_profile))
     assert np.all((case.T_profile > 150.0) & (case.T_profile < 340.0))
