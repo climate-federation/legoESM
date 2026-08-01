@@ -101,6 +101,13 @@ class SAMSCMCaseSpec:
     # bulk fluxes over the fixed SST (SFC_FLX_FXD=.false.), so a "nonzero flux
     # in the deck => prescribe it" heuristic gives RICO the wrong boundary.
     surface_mode: str
+    # Bulk exchange coefficients the case's LES actually uses, for
+    # surface_mode="T_s". None means the SCM default stands. RICO's LES uses
+    # the van Zanten (2011) C_H=0.001094 / C_Q=0.001133 while the SCM default
+    # is a single Ch=0.0015, a 32-37% error that the closures would be tuned
+    # to compensate for.
+    bulk_ch: float | None
+    bulk_ce: float | None
     note: str
 
 
@@ -111,18 +118,22 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
     "bomex": SAMSCMCaseSpec(
         gsam_dir="BOMEX", latitude_deg=15.0, les_domain_top_m=3000.0,
         default_dt_s=60.0, surface_mode="fluxes",
+        bulk_ch=None, bulk_ce=None,
         note="Siebesma et al. 2003 shallow non-precipitating trade cumulus; "
              "prescribed surface fluxes.",
     ),
     "rico": SAMSCMCaseSpec(
         gsam_dir="RICO", latitude_deg=18.0, les_domain_top_m=4000.0,
         default_dt_s=60.0, surface_mode="T_s",
+        # run_rico_les.py _C_H / _C_Q (van Zanten et al. 2011, at 20 m).
+        bulk_ch=0.001094, bulk_ce=0.001133,
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
         default_dt_s=30.0, surface_mode="fluxes",
+        bulk_ch=None, bulk_ce=None,
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
     ),
@@ -449,15 +460,22 @@ def load_sam_scm_case(
 
     # --- surface boundary ---------------------------------------------------
     sfc0 = surface_at_day(sfc, day)
-    # Surface air density from the VIRTUAL temperature of the lowest level.
-    # The LES converts its prescribed fluxes with a density derived from
-    # theta_v (make_anelastic_reference); a dry rho is ~1% high in BOMEX's
-    # moist sub-cloud layer, which would make BOTH prescribed kinematic fluxes
-    # ~1% too small from the first step.
-    T_v_bot = float(T_profile[-1]) * (
-        1.0 + (1.0 / constants.epsilon - 1.0) * float(q_v_profile[-1])
+    # Surface air density from the DECK sounding at the surface, using the
+    # virtual temperature. Deliberately NOT the lowest SCM level: that would
+    # make the W/m^2 -> kinematic flux conversion depend on nlev, so changing
+    # the SCM resolution would silently change the surface forcing even though
+    # the LES deck is unchanged. The LES uses its own lowest cell-centre
+    # density from the same deck, which is likewise resolution-independent
+    # for a fixed LES grid.
+    theta_sfc = float(np.interp(0.0, np.asarray(snd.z, dtype=np.float64),
+                                np.asarray(snd.theta, dtype=np.float64)))
+    q_v_sfc = float(np.interp(0.0, np.asarray(snd.z, dtype=np.float64),
+                              np.asarray(snd.q_v, dtype=np.float64)))
+    exner_sfc = float(np.asarray(exner_function(jnp.asarray(p_s))))
+    T_v_sfc = theta_sfc * exner_sfc * (
+        1.0 + (1.0 / constants.epsilon - 1.0) * q_v_sfc
     )
-    rho_sfc = p_s / (constants.R_d * T_v_bot)
+    rho_sfc = p_s / (constants.R_d * T_v_sfc)
 
     if spec.surface_mode not in ("fluxes", "T_s"):
         raise ValueError(

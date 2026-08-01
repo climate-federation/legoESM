@@ -125,7 +125,9 @@ _ATM_TURB_NAMESPACE = "atm.turb."
 # --------------------------------------------------------------------------
 
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
-                         microphysics: str = "none") -> PhysicsConfig:
+                         microphysics: str = "none",
+                         bulk_ch: float | None = None,
+                         bulk_ce: float | None = None) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
@@ -142,10 +144,19 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
     turb = TurbulenceConfig(scheme=scheme)
     if scheme == "clubb" and getattr(turb, "clubb", None) is None:
         turb = turb._replace(clubb=CLUBBConfig())
+    sub = getattr(turb, scheme)
+    surface = sub.surface
     if prescribed_fluxes:
-        sub = getattr(turb, scheme)
-        surface = sub.surface._replace(Ch_neutral=0.0)
-        turb = turb._replace(**{scheme: sub._replace(surface=surface)})
+        surface = surface._replace(Ch_neutral=0.0)
+    else:
+        # Interactive surface: adopt the case's LES bulk exchange coefficients
+        # so the closures are not ranked on their ability to compensate for a
+        # surface-flux error. Applied identically on every arm.
+        if bulk_ch is not None:
+            surface = surface._replace(Ch_neutral=float(bulk_ch))
+        if bulk_ce is not None and hasattr(surface, "Ce_neutral"):
+            surface = surface._replace(Ce_neutral=float(bulk_ce))
+    turb = turb._replace(**{scheme: sub._replace(surface=surface)})
     base = PhysicsConfig()
     return PhysicsConfig(
         turbulence=turb,
@@ -487,6 +498,7 @@ def evaluate_scheme(scheme: str, *, case, reference, args) -> tuple:
     cfg = build_physics_config(
         scheme, prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
         microphysics=args.microphysics,
+        bulk_ch=case.spec.bulk_ch, bulk_ce=case.spec.bulk_ce,
     )
     means, ps_hist = _rollout_means(
         None, base_cfg=cfg, case=case, dt=args.dt, hours=args.hours,
@@ -730,6 +742,17 @@ def main(argv=None) -> int:
     # only if the SCM ends when the LES reference ends. A user-supplied --hours
     # can silently compare SCM hours 4-6 against LES hours 21-23.
     les_end = float(reference.window_hours[1])
+    # Check the SIMULATED endpoint, not the requested scalar: nsteps is a
+    # rounded integer, so e.g. --hours 1 --dt 70 integrates 51*70 = 3570 s
+    # while passing a check on the nominal 1.0.
+    _nsteps = max(1, int(round(float(hours) * 3600.0 / args.dt)))
+    simulated_h = _nsteps * args.dt / 3600.0
+    if abs(simulated_h - float(hours)) > 1.0e-6:
+        raise SystemExit(
+            f"--dt {args.dt} does not divide {hours} h: {_nsteps} steps "
+            f"integrate {simulated_h:.6f} h, so the SCM would not end where "
+            "the LES reference does. Pick a dt that divides the run."
+        )
     if abs(float(hours) - les_end) > 1.0e-6:
         raise SystemExit(
             f"--hours {hours} would end the SCM at {hours} h while the LES "
@@ -738,6 +761,18 @@ def main(argv=None) -> int:
             f"Omit --hours to match the reference, or regenerate the reference."
         )
     args.hours = hours
+    # The SCM must average the window the LES ACTUALLY averaged, which is
+    # [first retained frame, last frame] -- not the requested --analysis-hours.
+    # With sparse frames the loader may retain a shorter span, and averaging
+    # the requested span on the SCM side would compare different intervals.
+    actual_analysis_h = les_end - float(reference.window_hours[0])
+    if abs(actual_analysis_h - args.analysis_hours) > 1.0e-6:
+        print(f"  NOTE: LES retained frames span {actual_analysis_h:.4f} h, "
+              f"not the requested {args.analysis_hours:.4f} h; the SCM will "
+              "average the LES's actual window so both sides match.")
+    if actual_analysis_h <= 0.0:
+        raise SystemExit("LES analysis window has zero span.")
+    args.analysis_hours = actual_analysis_h
 
     print(f"case={args.case} nlev={args.nlev} dt={args.dt}s hours={hours} "
           f"analysis={args.analysis_hours}h")
@@ -860,19 +895,32 @@ def _half_pressures(case) -> np.ndarray:
 
 
 def _write_outputs(outdir: Path, args, case, reference, results) -> None:
-    ranked = sorted(
-        results,
-        key=lambda r: (r.score_tuned if r.score_tuned is not None
-                       else r.score_default if r.score_default is not None
-                       else float("inf")),
-    )
+    # A failed or gradient-dead arm must NOT be ranked: one that fails after a
+    # single favourable update would otherwise be reported as the winner.
+    _RANKABLE = {"ok", "tuned", "no_tunable_params", "no_active_gradient"}
+
+    def _score_of(r):
+        if r.score_tuned is not None:
+            return r.score_tuned
+        if r.score_default is not None:
+            return r.score_default
+        return float("inf")
+
+    rankable = [r for r in results
+                if r.status in _RANKABLE and r.score_default is not None]
+    excluded = [r for r in results if r not in rankable]
+    ranked = sorted(rankable, key=_score_of) + sorted(
+        excluded, key=lambda r: r.scheme)
     with (outdir / "ranking.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["scheme", "status", "score_default", "score_tuned",
-                    "n_trained", "wall_s", "error"])
-        for r in ranked:
-            w.writerow([r.scheme, r.status, r.score_default, r.score_tuned,
-                        r.n_trained, f"{r.wall_s:.1f}", r.error or ""])
+        w.writerow(["rank", "scheme", "status", "score_default",
+                    "score_tuned", "n_trained", "n_frozen", "wall_s", "error"])
+        for i, r in enumerate(ranked):
+            rankable = r.status in _RANKABLE and r.score_default is not None
+            w.writerow([(i + 1) if rankable else "EXCLUDED",
+                        r.scheme, r.status, r.score_default, r.score_tuned,
+                        r.n_trained, len(r.frozen or {}),
+                        f"{r.wall_s:.1f}", r.error or ""])
 
     payload = {
         "case": args.case,
@@ -947,13 +995,17 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         f"{', '.join(args.scored)} — normalized by the LES "
         "profile's own mass-weighted spread, combined in quadrature. Lower is "
         "better.", "",
-        "| scheme | status | score (default) | score (tuned) | params trained |",
-        "|---|---|---|---|---|",
+        "| rank | scheme | status | score (default) | score (tuned) | "
+        "trained | frozen |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for r in ranked:
+    for i, r in enumerate(ranked):
         d = "—" if r.score_default is None else f"{r.score_default:.4f}"
         t = "—" if r.score_tuned is None else f"{r.score_tuned:.4f}"
-        lines.append(f"| {r.scheme} | {r.status} | {d} | {t} | {r.n_trained} |")
+        rankable = r.status in _RANKABLE and r.score_default is not None
+        pos = str(i + 1) if rankable else "excl."
+        lines.append(f"| {pos} | {r.scheme} | {r.status} | {d} | {t} | "
+                     f"{r.n_trained} | {len(r.frozen or {})} |")
     failures = [r for r in ranked if r.error]
     if failures:
         lines += ["", "## Failures", ""]

@@ -329,3 +329,44 @@ def test_constant_surface_series_collapses_to_a_constant_callable():
     assert a == b, "constant deck series must not vary in time"
     # a constant closure traces without touching jnp.interp
     assert np.isfinite(float(jax.jit(fn)(0.0)))
+
+
+@pytest.mark.skipif(not _deck_available("rico"), reason="RICO deck not cached")
+def test_rico_prescribed_T_s_is_constant_and_traceable():
+    """The earlier constant-series test exercised BOMEX's w_th_s, not a
+    prescribed T_s, so it did not cover the traced-T_s hazard at all.
+
+    inject_prescribed_T_sfc_into_phys_state validates T_s by materialising it
+    with numpy.asarray; inside a scanned rollout a traced T_s would raise. The
+    constant collapse is what keeps it concrete.
+    """
+    import jax
+    case = load_sam_scm_case("rico", nlev=24)
+    assert case.forcing.prescribe == "T_s"
+    fn = case.forcing.T_s
+    a, b = float(fn(0.0)), float(fn(9.9e5))
+    assert a == b, "RICO SST series must collapse to a constant"
+    assert 280.0 < a < 310.0
+    # concrete under jit: no tracer reaches the host-side validator
+    assert np.isfinite(float(jax.jit(fn)(0.0)))
+    import numpy as _np
+    assert _np.asarray(fn(0.0)).shape == ()
+
+
+@pytest.mark.skipif(not _deck_available("rico"), reason="RICO deck not cached")
+def test_rico_carries_the_les_bulk_exchange_coefficients():
+    """Otherwise closures are ranked on compensating a 32-37% flux error."""
+    spec = SAM_SCM_CASES["rico"]
+    assert spec.bulk_ch == pytest.approx(0.001094)
+    assert spec.bulk_ce == pytest.approx(0.001133)
+    assert SAM_SCM_CASES["bomex"].bulk_ch is None   # prescribed-flux case
+
+
+@requires_bomex
+def test_rho_sfc_does_not_depend_on_nlev():
+    """rho_sfc sets the W/m2 -> kinematic flux conversion; if it followed the
+    lowest SCM level, changing resolution would change the surface forcing
+    even though the LES deck is unchanged."""
+    a = load_sam_scm_case("bomex", nlev=24).rho_sfc
+    b = load_sam_scm_case("bomex", nlev=96).rho_sfc
+    assert a == pytest.approx(b, rel=1e-12), (a, b)

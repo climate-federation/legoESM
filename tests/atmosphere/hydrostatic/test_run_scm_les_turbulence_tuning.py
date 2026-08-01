@@ -129,12 +129,36 @@ def test_clubb_targets_the_nested_params_tuple():
 
 
 @pytest.mark.parametrize("scheme", ["louis", "ysu", "clubb"])
-def test_apply_trainable_params_changes_the_config(scheme):
+def test_apply_trainable_params_actually_moves_a_parameter(scheme):
+    """Non-vacuous: a no-op _apply_trainable_params must FAIL this.
+
+    The previous version only reasserted the scheme name and the radiation
+    config, both of which survive a no-op, so it proved nothing.
+    """
+    import jax.numpy as jnp
+    from legoesm.training.trainable_params import TrainablePhysicsParams
+
     cfg = drv.build_physics_config(scheme, prescribed_fluxes=False)
     params = drv._initial_params(scheme, "extended")
-    out = drv._apply_trainable_params(cfg, params)
+    c = params.constraints[0]
+    # perturb one raw leaf well away from its default
+    bumped = TrainablePhysicsParams(
+        raw_values={**params.raw_values,
+                    c.name: params.raw_values[c.name] + jnp.asarray(1.5)},
+        constraints=params.constraints,
+    )
+    out = drv._apply_trainable_params(cfg, bumped)
+
+    def _target(config):
+        sub = getattr(config.turbulence, scheme)
+        return sub.params if scheme == "clubb" else sub
+
+    before = float(getattr(_target(cfg), c.field))
+    after = float(getattr(_target(out), c.field))
+    assert after != before, (
+        f"{scheme}.{c.field} unchanged ({before}); overrides were not applied"
+    )
     assert out.turbulence.scheme == scheme
-    # non-turbulence components untouched
     assert out.radiation == cfg.radiation
 
 

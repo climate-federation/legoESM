@@ -44,6 +44,10 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export JAX_PLATFORMS=cuda
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/les_ref/$LES_CASE
+# Clear the directory: the drivers overwrite only MATCHING frame indices, so a
+# shorter rerun would leave higher-index frames from the previous run behind
+# and the reference would silently average two runs together.
+rm -rf $OUT
 mkdir -p $OUT
 
 t0=$SECONDS
