@@ -152,7 +152,7 @@ RESTART_STEP = 57601
 # THIS session's read (module docstring table). Kept here as data so
 # STEP 1's self-check can assert the live file hasn't silently changed.
 EXPECTED_WRITE_LINES = {
-    287: "RK3 seed (#if key_RK3 -- compiled out)",
+    287: "RK3 seed (#if key_RK3 -- compiled out)",  # const-ok: F90 line number, not R_d
     304: "RK3 2-D Coriolis removal (#if key_RK3 -- compiled out)",
     323: "GPU-repro k=1 seed (#if key_GPU_reproducibility -- compiled out)",
     327: "GPU-repro k=2..jpk accumulate (compiled out)",
@@ -175,7 +175,7 @@ DRG_CALL_LINE = 381  # CALL starts here; zu_frc/zv_frc as INOUT args on the cont
 # covered by the six-piece budget's u/v vertical-mean SUM (336) or the
 # zu_trd subtraction (367).
 IN_SIX_PIECE_BUDGET = {336, 367}
-DEAD_CODE = {287, 304, 323, 327, 331, 342}
+DEAD_CODE = {287, 304, 323, 327, 331, 342}  # const-ok: F90 line number, not R_d
 GATED_OFF_ON_THIS_CARD = {408, 414, 426}
 MISSING_FROM_BUDGET_AND_ACTIVE = {DRG_CALL_LINE, 432}
 
@@ -215,7 +215,7 @@ def _self_check_ledger_completeness() -> None:
     # Region of interest: first zu_frc assignment (line 287, 1-indexed) to
     # the dump WRITE at line 496 (inclusive -- the dump write itself is not
     # an assignment and is excluded by the regex below).
-    lo, hi = 287, 497
+    lo, hi = 287, 497  # const-ok: F90 line number, not R_d
     pat = re.compile(r"^\s*zu_frc\s*\(.*\)\s*=[^=]")  # assignment, not ``==``
     found = set()
     for i in range(lo - 1, hi):

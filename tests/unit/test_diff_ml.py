@@ -1559,9 +1559,8 @@ class TestParamCollector:
         """``apply_param_overrides`` must produce a config whose spliced
         field is a TRACED array — a ``_replace`` that dropped the tracer
         (or a copy that re-froze the default) zeroes the gradient."""
-        from legoesm.training.param_collector import (
-            build_trainable_params, apply_param_overrides,
-        )
+        from legoesm.training.param_collector import build_trainable_params
+        from legoesm.core.param_overrides import apply_param_overrides
         from legoesm.ice.sea_ice import SeaIceConfig
         p = build_trainable_params(tier="core",
                                    active_scheme_keys={"ice.sea_ice"})
@@ -1579,7 +1578,7 @@ class TestParamCollector:
             _finite_and_nonzero(v, f"apply_param_overrides dL/draw[{k}]")
 
     def test_override_splice_rejects_unknown_fields(self):
-        from legoesm.training.param_collector import apply_param_overrides
+        from legoesm.core.param_overrides import apply_param_overrides
         from legoesm.ice.sea_ice import SeaIceConfig
         with pytest.raises(ValueError, match="has no field"):
             apply_param_overrides(SeaIceConfig(),
