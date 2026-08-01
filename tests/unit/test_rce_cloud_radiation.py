@@ -182,8 +182,8 @@ def test_rrtmgp_runs_with_liquid_clouds_rce():
     # Liquid cloud at low levels (k = 20-22).
     lwp = _cloud_layer((NCOL, NLEV), (20, 23), 50.0)  # g/m²
     iwp = jnp.zeros_like(lwp)
-    r_eff_liq = jnp.full_like(lwp, 12.0)  # μm
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg = RRTMGPConfig(include_clouds=True)
     out = rrtmgp_radiation(
         T, p_full, p_half, T_sfc, q_v, cos_zen, cfg,
@@ -209,8 +209,8 @@ def test_cloud_alters_heating_rate_in_cloud_band():
     T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
     lwp = _cloud_layer((NCOL, NLEV), (20, 23), 50.0)
     iwp = jnp.zeros_like(lwp)
-    r_eff_liq = jnp.full_like(lwp, 12.0)
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg_clear = RRTMGPConfig()
     cfg_cloudy = RRTMGPConfig(include_clouds=True)
     out_clear = rrtmgp_radiation(
@@ -239,8 +239,8 @@ def test_ice_cloud_alters_heating_rate_at_cirrus_band():
     T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
     lwp = jnp.zeros((NCOL, NLEV), dtype=jnp.float64)
     iwp = _cloud_layer((NCOL, NLEV), (3, 6), 20.0)
-    r_eff_liq = jnp.full_like(lwp, 12.0)
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg = RRTMGPConfig(include_clouds=True)
     out_cloudy = rrtmgp_radiation(
         T, p_full, p_half, T_sfc, q_v, cos_zen, cfg,
@@ -271,8 +271,8 @@ def test_rrtmgp_with_clouds_jit_compilable():
     T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
     lwp = _cloud_layer((NCOL, NLEV), (20, 23), 50.0)
     iwp = jnp.zeros_like(lwp)
-    r_eff_liq = jnp.full_like(lwp, 12.0)
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg = RRTMGPConfig(include_clouds=True)
 
     @jax.jit
@@ -298,8 +298,8 @@ def test_rrtmgp_supports_jax_grad_through_lwp():
     T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
     lwp = _cloud_layer((NCOL, NLEV), (20, 23), 50.0)
     iwp = jnp.zeros_like(lwp)
-    r_eff_liq = jnp.full_like(lwp, 12.0)
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg = RRTMGPConfig(include_clouds=True)
 
     def loss_fn(lwp_arg):
@@ -359,8 +359,8 @@ def test_rrtmgp_with_clouds_float32():
     f32 = lambda x: x.astype(jnp.float32)
     lwp = f32(_cloud_layer((NCOL, NLEV), (20, 23), 50.0))
     iwp = jnp.zeros_like(lwp)
-    r_eff_liq = jnp.full_like(lwp, 12.0)
-    r_eff_ice = jnp.full_like(iwp, 50.0)
+    r_eff_liq = jnp.full_like(lwp, 12.0e-6)  # 12 um in METRES (#1422)
+    r_eff_ice = jnp.full_like(iwp, 50.0e-6)  # 50 um in METRES (#1422)
     cfg = RRTMGPConfig(include_clouds=True)
     out = rrtmgp_radiation(
         f32(T), f32(p_full), f32(p_half), f32(T_sfc),
