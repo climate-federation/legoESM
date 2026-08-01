@@ -866,6 +866,8 @@ class DiagnosticCollector:
             sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
+            dp=self._dp(state.p_s.data),
+            p_full=self._p_full(state.p_s.data),
         )
 
         # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
@@ -878,6 +880,7 @@ class DiagnosticCollector:
             lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
+            dp=self._dp(state.p_s.data),
         )
 
         # Monthly means
