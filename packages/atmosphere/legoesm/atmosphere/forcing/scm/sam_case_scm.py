@@ -78,8 +78,14 @@ __all__ = [
 
 # Levels of the auxiliary height coordinate used to reconstruct the deck's
 # missing pressure column. Fine enough that the SCM's p->z inversion does not
-# depend on it; it is thrown away immediately afterwards.
-_AUX_LEVELS = 512
+# depend on it (12-35 m over these 1.5-4.5 km cases); it is thrown away
+# immediately afterwards.
+#
+# MUST stay well under ~308: create_stretched_height_coordinate brackets its
+# bisection at r_hi = 10.0 and evaluates r_hi**n_levels, so any n_levels above
+# ~308 raises OverflowError from 10**n exceeding float64 range, before the
+# grid is ever built.
+_AUX_LEVELS = 128
 
 
 @dataclass(frozen=True)
