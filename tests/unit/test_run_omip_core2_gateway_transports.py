@@ -147,11 +147,13 @@ def test_one_step_driver_chain_writes_n_steps_1_and_every_gateway_key(tmp_path):
     import jax.numpy as jnp
 
     from legoesm.ocean.diagnostics_sections import (
-        ARCTIC_GATEWAYS, gateway_step, setup_gateway_accumulator,
+        ARCTIC_GATEWAYS, gateway_step, promote_gateway_geometry,
+        setup_gateway_accumulator,
     )
     from scripts.run import run_omip_core2 as R
 
     grid, z_coord, model, state = _tiny_latlon()
+    geom = promote_gateway_geometry(getattr(model, "grid", grid))
     lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
                         * np.ones((1, grid.n_lon)))
     lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
@@ -162,9 +164,24 @@ def test_one_step_driver_chain_writes_n_steps_1_and_every_gateway_key(tmp_path):
         "the test grid produced no boundary faces -- it cannot detect anything")
     assert acc.n == 0
 
+    # The rest state has u = v = 0, so EVERY gateway transport would be
+    # exactly zero and a finiteness-only assertion would pass without the
+    # transport code doing anything at all (codex round-3 finding 2).  Seed a
+    # known uniform NORTHWARD v so the expected SIGN is known a priori: the
+    # region is lat >= 0, so northward flow is INTO it, i.e. POSITIVE.
     state1 = model.step(state, 600.0)
-    acc = gateway_step(acc, stack, state1, z_coord, grid)
+    v0 = 0.05
+    state1 = state1._replace(
+        v=state1.v.replace(data=jnp.full_like(state1.v.data, v0)))
+    acc = gateway_step(acc, stack, state1, z_coord, geom)
     assert acc.n == 1, "the accumulator did not advance -- it is not wired"
+
+    total = float(jnp.sum(acc.volume))
+    assert total > 0.0, (
+        f"uniform northward v={v0} m/s must give a POSITIVE (into-region) "
+        f"total volume transport; got {total:.6e} m^3/s")
+    assert float(jnp.max(jnp.abs(acc.volume))) > 0.0, (
+        "no single gateway carried any transport")
 
     R._gateway_transport_diag(acc, tmp_path, io_proc=True)
     txt = (tmp_path / "transports.txt").read_text()
@@ -176,10 +193,54 @@ def test_one_step_driver_chain_writes_n_steps_1_and_every_gateway_key(tmp_path):
     for line in txt.splitlines():
         if line.startswith("gateway_") and "n_steps" not in line:
             assert np.isfinite(float(line.split()[1])), f"non-finite: {line}"
+    # ... and at least one WRITTEN volume must be non-zero, so the file itself
+    # (not just the in-memory accumulator) carries a real number.
+    vols = [float(ln.split()[1]) for ln in txt.splitlines()
+            if ln.startswith("gateway_") and ln.split()[0].endswith("_vol_Sv")]
+    assert any(v != 0.0 for v in vols), f"every written volume was zero: {vols}"
 
 
-def test_one_step_chain_is_a_pure_diagnostic(tmp_path):
-    """gateway_step must not perturb the state it is handed."""
+def test_gateway_volume_is_signed_and_linear_in_velocity():
+    """Flip v -> -v flips every gateway sign; 2v doubles every gateway.
+
+    A transport diagnostic that returned |flux|, dropped the orientation, or
+    normalised by something velocity-dependent would pass the smoke checks
+    above and fail here.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import (
+        gateway_step, promote_gateway_geometry, setup_gateway_accumulator,
+    )
+
+    grid, z_coord, model, state = _tiny_latlon()
+    geom = promote_gateway_geometry(getattr(model, "grid", grid))
+    lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
+                        * np.ones((1, grid.n_lon)))
+    lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
+                        * np.ones((grid.n_lat, 1)))
+    acc0, stack, _f = setup_gateway_accumulator(
+        lat2d, lon2d, state.land_mask.data, lat_min_deg=0.0)
+    s1 = model.step(state, 600.0)
+
+    def _vol(scale):
+        st = s1._replace(
+            v=s1.v.replace(data=jnp.full_like(s1.v.data, 0.05 * scale)))
+        return np.asarray(gateway_step(acc0, stack, st, z_coord, geom).volume)
+
+    base = _vol(1.0)
+    assert np.any(base != 0.0), "the seeded flow produced no transport at all"
+    np.testing.assert_allclose(_vol(-1.0), -base, rtol=1e-10, atol=0.0)
+    np.testing.assert_allclose(_vol(2.0), 2.0 * base, rtol=1e-10, atol=0.0)
+
+
+def test_gateway_step_rejects_an_unpromoted_grid():
+    """The per-step promotion was removed; a raw LatLonGrid must RAISE.
+
+    Non-vacuity: ``_tiny_latlon`` returns exactly such a raw grid, and it is
+    what the driver used to pass.  Silently re-promoting it every step both
+    rebuilt every metric array and defaulted metric_convention to "exact".
+    """
     import jax.numpy as jnp
 
     from legoesm.ocean.diagnostics_sections import (
@@ -187,6 +248,28 @@ def test_one_step_chain_is_a_pure_diagnostic(tmp_path):
     )
 
     grid, z_coord, model, state = _tiny_latlon()
+    assert not hasattr(grid, "dy_u"), (
+        "this test needs an UNPROMOTED grid to be meaningful")
+    lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
+                        * np.ones((1, grid.n_lon)))
+    lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
+                        * np.ones((grid.n_lat, 1)))
+    acc, stack, _f = setup_gateway_accumulator(
+        lat2d, lon2d, state.land_mask.data, lat_min_deg=0.0)
+    with pytest.raises(TypeError, match="promoted LatLonCGridGeometry"):
+        gateway_step(acc, stack, state, z_coord, grid)
+
+
+def test_one_step_chain_is_a_pure_diagnostic(tmp_path):
+    """gateway_step must not perturb the state it is handed."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import (
+        gateway_step, promote_gateway_geometry, setup_gateway_accumulator,
+    )
+
+    grid, z_coord, model, state = _tiny_latlon()
+    geom = promote_gateway_geometry(getattr(model, "grid", grid))
     lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
                         * np.ones((1, grid.n_lon)))
     lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
@@ -196,12 +279,12 @@ def test_one_step_chain_is_a_pure_diagnostic(tmp_path):
     s1 = model.step(state, 600.0)
     S_before = np.asarray(s1.S.data).copy()
     u_before = np.asarray(s1.u.data).copy()
-    gateway_step(acc, stack, s1, z_coord, grid)
+    gateway_step(acc, stack, s1, z_coord, geom)
     np.testing.assert_array_equal(np.asarray(s1.S.data), S_before)
     np.testing.assert_array_equal(np.asarray(s1.u.data), u_before)
     # and stepping again from s1 is unaffected
     a = np.asarray(model.step(s1, 600.0).S.data)
-    gateway_step(acc, stack, s1, z_coord, grid)
+    gateway_step(acc, stack, s1, z_coord, geom)
     b = np.asarray(model.step(s1, 600.0).S.data)
     np.testing.assert_array_equal(a, b)
 
@@ -289,3 +372,13 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
                  if "_gateway_transport_diag(_gw_acc" in ln)
     assert loop < call < write, (
         "the accumulation must sit inside the step loop and before the writer")
+    # The geometry must be promoted ONCE, BEFORE the loop, and the per-step
+    # call must pass that promoted object -- not the raw grid.  Promoting per
+    # step rebuilt every metric array and defaulted the metric convention to
+    # "exact" regardless of the run's config (codex round-3 finding 1).
+    promote = next(i for i, ln in enumerate(lines)
+                   if "_gw_geom = promote_gateway_geometry(" in ln)
+    assert promote < loop, (
+        "promote_gateway_geometry must run BEFORE the step loop, not in it")
+    assert "_gw_geom" in "".join(lines[call:call + 4]), (
+        "the per-step gateway_step call must be handed the promoted _gw_geom")

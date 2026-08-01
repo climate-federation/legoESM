@@ -38,8 +38,18 @@ transport is therefore ``mfu * dy_u`` (u) or ``mfv * dx_v`` (v) in m^3/s.
 
 The tracer value carried across a face is the UPWIND (donor-cell) value.  That
 is a DIAGNOSTIC choice, stated rather than hidden: the model integrates tracers
-with a flux limiter (e.g. superbee) which is not reproduced here.  The VOLUME
-transport is exact — it uses the model's own mass flux.
+with a flux limiter (e.g. superbee) which is not reproduced here.
+
+The VOLUME transport is RECONSTRUCTED, not exact.  It is built from the
+POST-STEP state with the model's own face operators (``min_cell_to_uface`` /
+``min_cell_to_vface`` + ``compute_face_masks_3d``), which is the closest
+quantity recoverable from a state, but it is NOT the transport the model
+actually advected with.  Three terms are unrecoverable from the state alone:
+the barotropic solver's time-averaged ``Hu_avg``/``Hv_avg`` correction, the
+GM ``through_fct`` bolus flux, and the adaptive implicit vertical-advection
+split.  See ``mass_fluxes_from_state`` for the same caveat at the point of
+use.  Anyone comparing these numbers to a closed volume budget must expect a
+residual of the size of those omitted terms.
 
 All functions are pure and JAX-traceable (no host callbacks, stable shapes).
 
@@ -470,24 +480,49 @@ def setup_gateway_accumulator(lat_deg, lon_deg, land_mask,
     return new_gateway_accumulator(stack.names), stack, faces
 
 
+def promote_gateway_geometry(grid, *, metric_convention: str = "exact"):
+    """Promote a grid to ``LatLonCGridGeometry`` ONCE, before the step loop.
+
+    ``ensure_geometry``'s own docstring says it "should be called **once** at
+    model-construction time ... not per operator call", so calling it inside
+    ``gateway_step`` rebuilt every metric array on every timestep AND silently
+    defaulted to ``metric_convention="exact"`` even for a ``nemo_isotropic``
+    run -- the diagnostic would then integrate over different face lengths
+    than the model (codex round-3 finding 1).
+
+    Prefer passing ``model.grid``: the ocean model already ran
+    ``ensure_geometry(grid, metric_convention=config.metric_convention)`` in
+    its constructor, so ``model.grid`` is promoted with the RIGHT convention
+    and this call is a no-op early return.  ``metric_convention`` here only
+    matters when a raw ``LatLonGrid`` is passed instead.
+    """
+    from legoesm.grids.latlon import ensure_geometry
+
+    return ensure_geometry(grid, metric_convention=metric_convention)
+
+
 def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
-                 grid, *, min_water_column_m: float | None = None
+                 geom, *, min_water_column_m: float | None = None
                  ) -> GatewayAccumulator:
     """Accumulate ONE timestep from a post-step state.  Pure: reads only.
 
     This is the single entry point the driver calls per step, so a test that
     exercises it is testing what the driver runs.
 
-    ``grid`` may be a plain ``LatLonGrid`` (what ``_create_setup`` returns for
-    ``--grid latlon``) or an already-promoted ``LatLonCGridGeometry`` (what it
-    returns for tripole).  A plain LatLonGrid has NO ``dy_u``/``dx_v``, so the
-    face metrics are taken through the model's own ``ensure_geometry``, which
-    is idempotent on an already-promoted grid.  Reading ``grid.dy_u`` directly
-    crashed ``--grid latlon --gateway-transports`` on the first step.
+    ``geom`` MUST already be a promoted ``LatLonCGridGeometry`` (pass
+    ``model.grid``, or ``promote_gateway_geometry(grid)`` once before the
+    loop).  A raw ``LatLonGrid`` -- what ``_create_setup`` returns for
+    ``--grid latlon`` -- has no ``dy_u``/``dx_v`` and is REJECTED rather than
+    silently re-promoted per step with a possibly wrong metric convention.
     """
-    from legoesm.grids.latlon import ensure_geometry
-
-    geom = ensure_geometry(grid)
+    for _attr in ("dy_u", "dx_v"):
+        if not hasattr(geom, _attr):
+            raise TypeError(
+                f"gateway_step needs a promoted LatLonCGridGeometry (missing "
+                f"{_attr!r}); pass model.grid, or call "
+                "promote_gateway_geometry(grid, metric_convention=...) ONCE "
+                "before the step loop. Promoting per step rebuilds every "
+                "metric array and defaults the convention to 'exact'.")
     mfu, mfv = mass_fluxes_from_state(
         state, z_coord, geom, min_water_column_m=min_water_column_m)
     tr_u, tr_v = upwind_face_values(state.S.data, mfu, mfv, geom)
@@ -517,6 +552,7 @@ __all__ = [
     "prepare_gateway_stack",
     "new_gateway_accumulator",
     "gateway_step",
+    "promote_gateway_geometry",
     "region_boundary_faces",
     "setup_gateway_accumulator",
     "validate_gateway_lanes",

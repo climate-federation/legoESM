@@ -43,7 +43,16 @@ class _Grid:
                                np.pi / 2 - 0.5 * self.dlat, N_LAT)
         self.lat_v = np.concatenate([[self.lat[0] - 0.5 * self.dlat],
                                      self.lat + 0.5 * self.dlat])
-        self.dy = np.full((N_LAT,), self.radius * self.dlat)
+        # PRODUCTION CONVENTION: ``LatLonGrid.dy`` is documented at
+        # grids/latlon.py:74 as "distance over 2 cells in lat [m]" and is
+        # built as ``radius * 2.0 * dlat`` (latlon.py:313/482/974).
+        # ``barotropic_streamfunction`` therefore halves it to recover the
+        # one-cell height.  A proxy carrying the ONE-cell width instead makes
+        # BSF integrate half the true cell height, and an expected value
+        # derived from the same wrong proxy hides it -- the assertion still
+        # passes while certifying a magnitude 2x off a real grid (codex
+        # round-3 finding 5).  Use the two-cell span, like production.
+        self.dy = np.full((N_LAT,), 2.0 * self.radius * self.dlat)
 
 
 def _uniform_fields(v0=0.1, theta0=10.0, h0=100.0):
@@ -156,8 +165,14 @@ def test_moc_matches_the_hand_computed_value_on_a_uniform_section():
     j = N_LAT // 2
     dx = g.radius * g.dlon * np.cos(g.lat_v[j])
     one_layer_Sv = v0 * h0 * dx * N_LON / _SV
-    assert abs(psi[j, 0]) == pytest.approx(one_layer_Sv, rel=1e-10)
-    assert abs(psi[j, -1]) == pytest.approx(NLEV * one_layer_Sv, rel=1e-10)
+    # SIGNED, not abs: psi = -cumsum(V_zonal), so a NORTHWARD (v0 > 0) flow
+    # must give a NEGATIVE psi.  An abs() assertion passes under a flipped
+    # sign convention and would certify nothing about direction.
+    assert psi[j, 0] == pytest.approx(-one_layer_Sv, rel=1e-10)
+    assert psi[j, -1] == pytest.approx(-NLEV * one_layer_Sv, rel=1e-10)
+    # psi at the BOTTOM is minus the net zonally-integrated meridional volume
+    # transport -- the identity the residual-transport probe relies on.
+    assert -psi[j, -1] == pytest.approx(NLEV * one_layer_Sv, rel=1e-10)
 
 
 def test_moc_magnitude_is_linear_in_velocity():
@@ -181,11 +196,46 @@ def test_bsf_matches_the_hand_computed_value_on_a_uniform_section():
     h = np.full((N_LAT, N_LON, NLEV), h0)
     mask = np.ones((N_LAT, N_LON))
     psi = barotropic_streamfunction(u, h, mask, g)
-    dy = g.radius * g.dlat * 0.5
+    # The PHYSICAL one-cell meridional height.  ``g.dy`` is the two-cell span
+    # (production convention) and BSF halves it, so this is what the row
+    # integral must use -- derived from the geometry, NOT from the code's
+    # internal 0.5 factor (that would be circular).
+    dy = g.radius * g.dlat
     step_Sv = u0 * h0 * NLEV * dy / _SV
     d = np.diff(psi[:, 0])
     assert np.allclose(d, d[0], rtol=1e-10)
-    assert abs(d[0]) == pytest.approx(step_Sv, rel=1e-10)
+    # SIGNED: psi_bt = -cumsum(U_dz*dy), so an EASTWARD u must step psi DOWN.
+    assert d[0] == pytest.approx(-step_Sv, rel=1e-10)
+
+
+def test_bsf_dy_uses_the_two_cell_span_convention():
+    """``grid.dy`` is a TWO-cell span; BSF must halve it.
+
+    Non-vacuity by construction: ``barotropic_streamfunction`` falls back to a
+    ONE-cell ``R*dlat`` when the grid exposes no ``dy`` at all.  So a proxy
+    carrying the production two-cell ``dy`` and a proxy carrying no ``dy``
+    must agree EXACTLY.  If the 0.5 were dropped (or a caller passed a
+    one-cell ``dy``), the two answers differ by exactly 2x.  This is the
+    check that the previous version of this file could not make, because its
+    proxy and its expected value shared the same wrong convention.
+    """
+    class _NoDyGrid:
+        radius = _Grid.radius
+        dlon = _Grid.dlon
+        dlat = _Grid.dlat
+
+    u = np.full((N_LAT, N_LON + 1, NLEV), 0.1)
+    h = np.full((N_LAT, N_LON, NLEV), 100.0)
+    mask = np.ones((N_LAT, N_LON))
+    psi_two_cell = barotropic_streamfunction(u, h, mask, _Grid())
+    psi_fallback = barotropic_streamfunction(u, h, mask, _NoDyGrid())
+    assert np.allclose(psi_two_cell, psi_fallback, rtol=1e-12, atol=0.0)
+
+    class _OneCellDyGrid(_NoDyGrid):
+        dy = np.full((N_LAT,), _Grid.radius * _Grid.dlat)
+
+    psi_one_cell = barotropic_streamfunction(u, h, mask, _OneCellDyGrid())
+    assert np.allclose(psi_one_cell, 0.5 * psi_two_cell, rtol=1e-12)
 
 
 def test_bsf_is_linear_in_velocity():
