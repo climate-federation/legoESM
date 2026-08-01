@@ -31,19 +31,31 @@ import numpy as np
 
 __all__ = [
     "LESReference",
-    "REFERENCE_VARIABLES",
+    "SCORED_VARIABLES",
+    "DIAGNOSTIC_VARIABLES",
     "load_les_reference",
     "mass_weights_from_pressure",
 ]
 
-# Variables scored against the LES. The state variables are what the closure
-# controls; the fluxes are what it directly parameterizes. `qc` is carried for
-# plotting/diagnosis and is only scored when the SCM produces condensate.
-REFERENCE_VARIABLES: tuple[str, ...] = (
-    "theta", "qv", "u", "v", "wth", "wqv",
-)
+# Variables the SCM is SCORED against: the mean state the closure controls.
+#
+# The turbulent fluxes are deliberately NOT here. The SCM never exposes a
+# per-level w'theta': the hydrostatic turbulence driver
+# (turbulence/integration.py, the branch that calls each kernel) consumes only
+# du_dt/dv_dt/dT_dt/dq_v_dt and cloud_fraction from TurbulenceOutput and drops
+# Km, Kh, shflx, lhflx, ustar and h_pbl on the floor, and PhysicsState has no
+# slot for them. Exactly one of the nine schemes (prognostic CLUBB) carries a
+# genuine w'theta_l' in its packed moment state, so a flux score would be
+# available for one scheme and unavailable for eight -- which is not a
+# controlled comparison. Under an IDENTICAL forcing and surface BC the mean
+# state is set by the flux divergence anyway, so matching the state profile is
+# the well-posed uniform target.
+SCORED_VARIABLES: tuple[str, ...] = ("theta", "qv", "u", "v")
 
-_OPTIONAL_VARIABLES: tuple[str, ...] = ("qc", "cloud_frac", "tke")
+# Carried on the reference for plotting and diagnosis, never scored.
+DIAGNOSTIC_VARIABLES: tuple[str, ...] = (
+    "wth", "wqv", "qc", "cloud_frac", "tke", "uw", "vw", "ww",
+)
 
 
 @dataclass(frozen=True)
@@ -72,7 +84,7 @@ class LESReference:
         return f"{t0:.2f}-{t1:.2f} h ({self.n_frames} frames)"
 
     def scored_variables(self) -> tuple[str, ...]:
-        return tuple(v for v in REFERENCE_VARIABLES if v in self.profiles)
+        return tuple(v for v in SCORED_VARIABLES if v in self.profiles)
 
 
 def mass_weights_from_pressure(p_half: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -223,13 +235,20 @@ def load_les_reference(
         )
     weights = mass_weights_from_pressure(p_half, mask)
 
-    wanted = [v for v in REFERENCE_VARIABLES + _OPTIONAL_VARIABLES
+    wanted = [v for v in SCORED_VARIABLES + DIAGNOSTIC_VARIABLES
               if v in available]
-    missing_required = [v for v in REFERENCE_VARIABLES if v not in available]
-    if "theta" in missing_required or "wth" in missing_required:
+    missing_scored = [v for v in SCORED_VARIABLES if v not in available]
+    if missing_scored:
         raise ValueError(
-            f"LES frames in {prof_dir} lack {missing_required}; they predate "
-            "the turbulent-flux recording in les_record.py. Rerun the LES."
+            f"LES frames in {prof_dir} lack the scored variable(s) "
+            f"{missing_scored}; available: {sorted(available)}. A dry case has "
+            "no 'qv' and cannot score a moist case's variables."
+        )
+    if "wth" not in available:
+        raise ValueError(
+            f"LES frames in {prof_dir} have no 'wth'; they predate the "
+            "turbulent-flux recording in les_record.py. Rerun the LES so the "
+            "reference carries the fluxes for diagnosis."
         )
 
     profiles_les, profiles = {}, {}

@@ -230,11 +230,12 @@ def _heights_from_pressure(z_aux, p_aux, p_full_pa: np.ndarray) -> np.ndarray:
     Interpolation is linear in ``ln p``, which is where ``z`` is closest to
     linear.
     """
-    # np.interp needs ascending x: ln p ascends as z descends.
-    ln_p_asc = np.log(p_aux[::-1])
-    z_desc = z_aux[::-1]
+    # Both inputs are already top-to-bottom, so p_aux ASCENDS (small at the
+    # model top, p_s at the surface) exactly as np.interp needs its xp, and
+    # z_aux descends alongside it. Reversing either one silently feeds np.interp
+    # a descending xp and returns garbage.
     z_full = np.interp(np.log(np.asarray(p_full_pa, dtype=np.float64)),
-                       ln_p_asc, z_desc)
+                       np.log(p_aux), z_aux)
     if np.any(np.diff(z_full) >= 0.0):
         raise ValueError(
             "SCM heights must decrease monotonically from level 0 (model top) "
