@@ -198,10 +198,12 @@ def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
     def theta_ref_fn(z):
         return jnp.interp(z, z_snd, theta_snd)
 
-    # dz_sfc == H/n_aux makes the geometric stretch solve to ~1 (near-uniform),
-    # so the reconstructed p(z) is insensitive to this auxiliary grid.
+    # dz_sfc must leave room for a stretch ratio > 1 (exactly H/n_aux is
+    # rejected as "uniform layers would exceed H"), so use half of it: the
+    # solved ratio stays near 1 (dz_top/dz_sfc ~ 4 at n_aux=512) and the extra
+    # near-surface resolution is where the hydrostatic integral matters most.
     hc = create_stretched_height_coordinate(
-        n_aux, H=z_top, dz_sfc=z_top / n_aux,
+        n_aux, H=z_top, dz_sfc=0.5 * z_top / n_aux,
         theta_ref_fn=theta_ref_fn, p_sfc=float(p_s_pa),
     )
     z_aux = np.asarray(hc.z_full, dtype=np.float64)
