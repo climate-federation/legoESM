@@ -135,7 +135,7 @@ def test_column_top_is_the_les_domain_top_not_the_sounding_top():
 @requires_bomex
 def test_les_mask_excludes_levels_above_an_explicit_taller_column():
     """With an explicit taller column the mask must still exclude the top."""
-    case = load_sam_scm_case("bomex", nlev=64, sigma_top=0.55)
+    case = load_sam_scm_case("bomex", nlev=64, sigma_top=0.645)
     mask = case.les_mask()
     assert np.all(case.z_full[mask] <= case.les_domain_top_m)
     assert np.all(case.z_full[~mask] > case.les_domain_top_m)

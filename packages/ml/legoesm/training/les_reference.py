@@ -110,8 +110,10 @@ def mass_weights_from_pressure(p_half: np.ndarray, mask: np.ndarray) -> np.ndarr
     return w / total
 
 
-def _frame_time_hours(payload) -> float:
-    if "t_hours" not in payload.files:
+def _frame_time_hours(payload: dict) -> float:
+    """``payload`` is the frame's contents as a plain dict (already read off
+    disk, so the npz handle is closed before this runs)."""
+    if "t_hours" not in payload:
         raise ValueError("LES profile frame has no 't_hours' entry.")
     return float(payload["t_hours"])
 
