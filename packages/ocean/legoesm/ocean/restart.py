@@ -4,21 +4,33 @@ Saves the full ocean prognostic state to disk as a numpy ``.npz``
 archive and loads it back into an empty state container of the
 matching grid.
 
-SCOPE OF THE GUARANTEE -- read this before requoting it (codex r6 HIGH)
-=======================================================================
-What the ARCHIVE delivers is exact and tested: every persisted array
-round-trips under ``np.array_equal`` (no dtype coercion, no lossy
-compression), and the RUN pair below additionally persists every
-integrator carry, the unmangled sea-ice state and the ABSOLUTE step
-counter -- and every OMIP forcing index is a pure function of
-``(step, dt, n_records)``, all three of which are recorded and checked.
+SCOPE OF THE GUARANTEE -- read this before requoting it (codex r6/r7)
+=====================================================================
+WHAT IS DELIVERED.  The RUN pair (:func:`save_run_restart` /
+:func:`load_run_restart`) persists every PROGNOSTIC and STATIC slot --
+including the integrator carries that are not ``Field``s -- the
+unmangled sea-ice state, and the ABSOLUTE step counter.  Arrays
+round-trip losslessly through the ``.npz``, and the run LOADER refuses a
+dtype demotion outright (``_decode_slot._as_jnp``), so an f64 archive
+read back under ``JAX_ENABLE_X64`` unset raises instead of silently
+resuming at f32.  Structurally, the loader demands an EXACT slot layout:
+manifest, inventory and payload key names must agree in both directions,
+unknown metadata keys are refused, and a diagnostic-persisting archive is
+rejected.
 
-What this module does NOT deliver is a cryptographically strict or
-bit-identical continuation.  It is a correct, heavily guarded resume
-that detects configuration DRIFT, archive CORRUPTION and
-TAMPERING-BY-EDITING.  It is NOT a proof that the resumed leg reproduces
-an uninterrupted run bit for bit.  Concretely, and by design:
+WHAT IS NOT DELIVERED -- a cryptographically strict or bit-identical
+continuation.  This is a guarded RECOVERY resume.  It detects
+configuration DRIFT, archive TRUNCATION/CORRUPTION and STRUCTURAL
+tampering (a slot renamed, relabelled, removed, or smuggled into the
+reserved metadata namespace).  It is NOT a proof that the resumed leg
+reproduces an uninterrupted run bit for bit.  Concretely, and by design:
 
+* THERE IS NO PAYLOAD CHECKSUM.  An edit to the VALUES of a persisted
+  array that keeps its shape and dtype -- overwriting ``T`` with a
+  different temperature field, say -- passes every check and resumes
+  silently (codex r7 HIGH).  Structural tampering is caught; value
+  tampering is not.  Closing it needs a per-array digest or a signature
+  over the whole archive, which this format does not carry;
 * a SOURCE-REVISION mismatch WARNS and resumes (``run_omip_core2``):
   chaining a multi-day production run across a bug fix is a legitimate
   and expected workflow, so the model code may differ between legs;
@@ -36,6 +48,20 @@ an uninterrupted run bit for bit.  Concretely, and by design:
 * nothing here pins the accelerator, the XLA version or the reduction
   order, so even a byte-identical state can step to different last bits
   on different hardware or a different backend.
+
+FORCING REPRODUCTION IS CONDITIONAL ON THE CALLER (codex r7).  Every OMIP
+forcing index is a pure function of ``(step, dt, n_records)``, but
+``dt_seconds`` / ``n_forcing_records`` are OPTIONAL arguments on both
+sides.  ``run_omip_core2`` always supplies them, so its resumes are
+checked; a direct caller that omits them gets the step counter only.  The
+loader does refuse the asymmetric case -- a caller that supplies a value
+the archive lacks raises rather than silently skipping the check.
+
+THE LEGACY PAIR IS WEAKER.  :func:`save_restart` / :func:`load_restart`
+serialise ``Field``-valued slots ONLY (non-``Field`` carries are dropped
+silently) and rebuild via a bare ``jnp.asarray``, which DEMOTES f64 to
+f32 when ``JAX_ENABLE_X64`` is unset.  Use the run pair to resume an
+integration; the legacy pair is for offline analysis snapshots.
 
 Currently supports the three production grids:
 
@@ -56,7 +82,9 @@ Usage::
     save_restart(state, "results/ocean/restart_t0.npz",
                  time_s=86400.0 * 30, step=10_000)
     state_loaded = load_restart("results/ocean/restart_t0.npz", state)
-    # every persisted array of state_loaded is np.array_equal to state's.
+    # Field-valued slots come back np.array_equal -- PROVIDED
+    # JAX_ENABLE_X64 matches the writing run (this legacy loader does
+    # NOT check that; the run loader does).
 
 For RESUMING a driver mid-integration use the run-restart pair instead
 (:func:`save_run_restart` / :func:`load_run_restart`): it persists every
@@ -809,6 +837,52 @@ def save_run_restart(path: str | Path, state, *,
     return _atomic_savez(out_path, payload)
 
 
+def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
+    """Structural schema for a slot manifest — checked BEFORE any array read.
+
+    An unknown ``kind`` used to survive every key-name and layout check and was
+    only rejected inside :func:`_decode_slot`, i.e. AFTER the entire payload had
+    been inflated (codex r7 MEDIUM).  A malformed TUPLE entry was worse: the
+    key-name expansion does ``int(entry["n"])``, so a missing or non-numeric
+    ``n`` surfaced as a bare ``KeyError``/``ValueError`` with no diagnosis of
+    what was actually wrong with the archive.
+    """
+    if not isinstance(kinds, dict):
+        raise ValueError(
+            f"{in_path}: the {what} slot manifest decodes to "
+            f"{type(kinds).__name__}, expected an object; the archive is "
+            "corrupt or hand-edited.")
+    known = (_KIND_FIELD, _KIND_ARRAY, _KIND_TUPLE)
+    for name, entry in kinds.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{in_path}: {what} manifest slot {name!r} decodes to "
+                f"{type(entry).__name__}, expected an object with a 'kind'.")
+        kind = entry.get("kind")
+        if kind not in known:
+            raise ValueError(
+                f"{in_path}: {what} manifest slot {name!r} declares kind "
+                f"{kind!r}, which this build cannot decode (known: "
+                f"{', '.join(known)}).  The archive was written by an "
+                "incompatible writer or hand-edited; refusing to resume "
+                "rather than inflate a payload we cannot rebuild.")
+        if kind != _KIND_TUPLE:
+            continue
+        n = entry.get("n")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(
+                f"{in_path}: {what} manifest slot {name!r} is a tuple carry "
+                f"with element count {n!r}; expected a non-negative integer.")
+        elems = entry.get("elems")
+        if elems is not None and (not isinstance(elems, list)
+                                  or len(elems) != n):
+            got = len(elems) if isinstance(elems, list) else repr(elems)
+            raise ValueError(
+                f"{in_path}: {what} manifest slot {name!r} declares n={n} but "
+                f"carries {got} element-metadata entries; the two records "
+                "disagree, so neither can be trusted.")
+
+
 def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
     """Extract + validate the header from an ALREADY-OPEN ``NpzFile``.
 
@@ -843,14 +917,20 @@ def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
             "archive is corrupt or was edited to smuggle a payload array into "
             "the reserved namespace; refusing to resume.")
 
-    # RANK GUARD (codex r6 LOW): every metadata value this writer emits is a
-    # 0-d ``np.asarray(scalar)``.  ``ndarray.item()`` also accepts any SIZE-ONE
-    # array, and ``str()`` of one silently yields ``"['x']"`` — so a payload
-    # array reshaped to (1,) and renamed to a declared metadata key would be
-    # read as that scalar (and simultaneously vanish from the orphan check,
-    # which skips the underscore namespace).  Demanding rank 0 closes it: a
-    # size-one payload can no longer masquerade as a header field.
-    def _scalar(key: str):
+    # HEADER SCHEMA (codex r6 LOW rank guard, tightened to a full type/range
+    # schema at codex r7).  Every metadata value this writer emits is a 0-d
+    # ``np.asarray(scalar)`` of a KNOWN dtype class:
+    #  * rank: ``ndarray.item()`` also accepts any SIZE-ONE array and ``str()``
+    #    of one silently yields ``"['x']"``, so a payload array reshaped to
+    #    (1,) and renamed to a declared metadata key would be read as that
+    #    scalar (and would simultaneously vanish from the orphan check, which
+    #    skips the underscore namespace);
+    #  * dtype/range: rank alone still accepted a 0-d FLOAT ``_step`` such as
+    #    2.5.  With ``_time_days`` edited to match, every other check passed
+    #    and ``run_omip_core2`` then truncated it with ``int()`` — resuming the
+    #    state at one step and the forcing index at another.  ``_step`` and the
+    #    record count are integral by construction, so demand it.
+    def _scalar(key: str, kinds: str, *, lo=None, integral: bool = False):
         val = f[key]
         if val.ndim != 0:
             raise ValueError(
@@ -859,24 +939,75 @@ def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
                 "array here means the archive was edited (a payload array "
                 "renamed into the reserved metadata namespace); refusing to "
                 "resume.")
+        if val.dtype.kind not in kinds:
+            raise ValueError(
+                f"{in_path}: metadata key {key!r} has dtype {val.dtype} "
+                f"(kind {val.dtype.kind!r}), but this field is written with a "
+                f"dtype of kind {kinds!r}.  The archive was edited or written "
+                "by an incompatible writer; refusing to resume.")
+        if val.dtype.kind in "fc" and not np.isfinite(val):
+            raise ValueError(
+                f"{in_path}: metadata key {key!r} is {val.item()!r}, which is "
+                "not finite.  Refusing to resume on an unusable header.")
+        if integral and val.dtype.kind == "f" and float(val) != int(val):
+            raise ValueError(
+                f"{in_path}: metadata key {key!r} is {val.item()!r}, but it "
+                "counts whole steps/records.  A fractional value would be "
+                "TRUNCATED by the driver, placing the state at one step and "
+                "the forcing index at another; refusing to resume.")
+        if lo is not None and float(val) < lo:
+            raise ValueError(
+                f"{in_path}: metadata key {key!r} is {val.item()!r}, below the "
+                f"minimum {lo}.  Refusing to resume on an impossible header.")
         return val
 
+    # key -> (allowed dtype kinds, minimum, must-be-integral)
+    _HDR = {
+        "_format": ("iu", 1, True),
+        "_step": ("iuf", 0, True),
+        "_n_forcing_records": ("iuf", 1, True),
+        "_time_days": ("fiu", 0, False),
+        "_dt_seconds": ("fiu", None, False),   # >0 enforced just below
+        "_x64": ("b", None, False),
+        "_grid_type": ("US", None, False),
+        "_sha": ("US", None, False),
+        "_state_class": ("US", None, False),
+        "_ice_class": ("US", None, False),
+        "_config_fingerprint": ("US", None, False),
+        "_parent": ("US", None, False),
+    }
     out: dict[str, Any] = {}
-    for key in ("_format", "_step", "_time_days", "_grid_type", "_sha",
-                "_dt_seconds", "_n_forcing_records", "_x64",
-                "_state_class", "_ice_class", "_config_fingerprint",
-                "_parent"):
+    for key, (kinds, lo, integral) in _HDR.items():
         if key in files:
-            val = _scalar(key)
+            val = _scalar(key, kinds, lo=lo, integral=integral)
             out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
                             else val.item())
-    out["inventory"] = json.loads(str(_scalar("_inventory")))
-    out["ice_inventory"] = json.loads(str(_scalar("_ice_inventory")))
-    out["slots"] = json.loads(str(_scalar("_slot_kinds")))
-    out["ice_slots"] = json.loads(str(_scalar("_ice_slot_kinds")))
+    # dt must be strictly positive: 0 would make the step<->day cross-check
+    # below vacuous and the forcing index undefined.
+    if "dt_seconds" in out and float(out["dt_seconds"]) <= 0.0:
+        raise ValueError(
+            f"{in_path}: metadata key '_dt_seconds' is {out['dt_seconds']!r}; "
+            "a non-positive timestep cannot have produced this archive.")
+    out["inventory"] = json.loads(str(_scalar("_inventory", "US")))
+    out["ice_inventory"] = json.loads(str(_scalar("_ice_inventory", "US")))
+    out["slots"] = json.loads(str(_scalar("_slot_kinds", "US")))
+    out["ice_slots"] = json.loads(str(_scalar("_ice_slot_kinds", "US")))
     # Slots the writer deliberately did NOT persist (policy DIAGNOSTIC), so a
     # reader can distinguish "absent by design" from "lost".
-    out["excluded"] = json.loads(str(_scalar("_excluded")))
+    out["excluded"] = json.loads(str(_scalar("_excluded", "US")))
+    # The JSON blobs must decode to the CONTAINER the readers assume: a bare
+    # string or list here would sail through `.items()`-free code paths and
+    # only fail much later, with a confusing message.
+    for _k, _want in (("inventory", dict), ("ice_inventory", dict),
+                      ("slots", dict), ("ice_slots", dict),
+                      ("excluded", list)):
+        if not isinstance(out[_k], _want):
+            raise ValueError(
+                f"{in_path}: metadata '_{_k}' decodes to "
+                f"{type(out[_k]).__name__}, expected {_want.__name__}; the "
+                "archive is corrupt or hand-edited.")
+    _validate_manifest_schema(out["slots"], "ocean", in_path)
+    _validate_manifest_schema(out["ice_slots"], "sea-ice", in_path)
     # A no-ice archive must be consistent across all three ice records
     # (codex r5 LOW): an empty manifest with a populated class, or vice versa,
     # means one of them was edited.
@@ -1220,10 +1351,12 @@ def load_run_restart(path: str | Path, template_state, *,
     present/absent mismatch is a hard error.  Silence here would mean resuming
     a 60-day-spun-up ocean under a cold-start carry.
 
-    These guards detect configuration DRIFT, archive CORRUPTION and
-    TAMPERING-BY-EDITING.  They do NOT certify a bit-identical continuation —
-    see the module docstring's SCOPE OF THE GUARANTEE before quoting them as
-    one.
+    These guards detect configuration DRIFT, archive TRUNCATION/CORRUPTION and
+    STRUCTURAL tampering (a slot renamed, relabelled, removed or smuggled into
+    the reserved metadata namespace).  THERE IS NO PAYLOAD CHECKSUM: an edit to
+    a persisted array's VALUES that keeps its shape and dtype resumes silently.
+    They do NOT certify a bit-identical continuation — see the module
+    docstring's SCOPE OF THE GUARANTEE before quoting them as one.
     """
     in_path = Path(path)
     # ONE open for header AND payload (codex r5 HIGH): the writer replaces the

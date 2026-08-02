@@ -92,7 +92,35 @@ def test_cli_restart_flags_are_documented():
 # Source-revision provenance (codex r6 MEDIUM)
 # ============================================================================
 
-def _init_git_repo(root, content="x = 1\n"):
+@pytest.fixture
+def hermetic_git(tmp_path, monkeypatch):
+    """Neutralise the AMBIENT git configuration for this test (codex r7 LOW).
+
+    Without this the fixture repos inherit the developer's ``~/.gitconfig``
+    and the system config — a global ``core.hooksPath``, a commit template, a
+    ``commit.gpgsign``, or an ``init.defaultBranch`` policy can make
+    ``git commit`` fail or behave differently on someone else's machine, and
+    the test would then be measuring the environment rather than the helper.
+    """
+    empty = tmp_path / "_no_git_config"
+    empty.mkdir()
+    hooks = tmp_path / "_no_hooks"
+    hooks.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(empty))
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "restart test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "restart test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.invalid")
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"):
+        monkeypatch.delenv(var, raising=False)
+    return str(hooks)
+
+
+def _init_git_repo(root, hooks_dir, content="x = 1\n"):
     """Create a one-commit git repo at ``root``; return a runner for it."""
     import subprocess
 
@@ -101,16 +129,94 @@ def _init_git_repo(root, content="x = 1\n"):
                               capture_output=True, text=True, check=True)
 
     g("init", "-q")
+    g("config", "core.hooksPath", hooks_dir)   # no ambient hooks
+    g("config", "commit.gpgsign", "false")
     g("config", "user.email", "t@example.invalid")
     g("config", "user.name", "restart test")
-    g("config", "commit.gpgsign", "false")
     (root / "src.py").write_text(content)
     g("add", "src.py")
     g("commit", "-q", "-m", "init")
     return g
 
 
-def test_source_revision_scopes_dirty_state_and_explicit_failure(tmp_path):
+def test_source_revision_reports_a_status_failure_rather_than_a_clean_tree(
+        monkeypatch):
+    """codex r7 LOW: the ``-dirty-unknown`` branch (HEAD resolved but
+    ``git status`` did not) had no test.  A status failure must NOT be reported
+    as a clean tree, and a timeout must fall through to 'unavailable'."""
+    import subprocess
+
+    from scripts.run.run_omip_core2 import (
+        _SOURCE_REV_UNAVAILABLE, _source_revision,
+    )
+
+    sha = "c" * 40
+    real_run = subprocess.run
+
+    def _fake(cmd, **kw):
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, "", "fatal: nope")
+        if "--show-toplevel" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "/some/root\n", "")
+        return subprocess.CompletedProcess(cmd, 0, sha + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert _source_revision("/anywhere") == f"{sha}-dirty-unknown"
+
+    def _timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 10)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+    assert _source_revision("/anywhere") == _SOURCE_REV_UNAVAILABLE
+    monkeypatch.setattr(subprocess, "run", real_run)
+
+
+def test_source_revision_flags_a_mixed_driver_and_package_tree(monkeypatch):
+    """codex r7 MEDIUM: the driver script and the imported ``legoesm`` packages
+    need not come from the same checkout — every sbatch wrapper sets PYTHONPATH
+    explicitly, and a wrong value runs this driver against ANOTHER worktree's
+    model code with no warning.  One sha cannot describe both."""
+    import subprocess
+
+    from scripts.run import run_omip_core2 as _c2
+
+    driver_sha, pkg_sha = "d" * 40, "e" * 40
+    here = str(Path(_c2.__file__).resolve().parent)
+
+    def _fake(cmd, **kw):
+        cwd = cmd[2]                       # ["git", "-C", <cwd>, ...]
+        driver_side = cwd == here
+        if "--show-toplevel" in cmd:
+            root = "/tree/driver" if driver_side else "/tree/packages"
+            return subprocess.CompletedProcess(cmd, 0, root + "\n", "")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(
+            cmd, 0, (driver_sha if driver_side else pkg_sha) + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    got = _c2._source_revision()
+    assert got == f"{driver_sha}+mixedtree:{pkg_sha[:12]}", got
+    # ...and the ambiguity must be reported, not silently equal.
+    assert _c2._revision_ambiguity(got) is not None
+    assert _c2._source_revision_drift_note(got, got) is not None
+
+    # CONTROL: same toplevel on both sides -> the plain sha, and silent.
+    def _same_root(cmd, **kw):
+        if "--show-toplevel" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "/tree/one\n", "")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, driver_sha + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _same_root)
+    assert _c2._source_revision() == driver_sha
+    assert _c2._revision_ambiguity(driver_sha) is None
+    assert _c2._source_revision_drift_note(driver_sha, driver_sha) is None
+
+
+def test_source_revision_scopes_dirty_state_and_explicit_failure(
+        tmp_path, hermetic_git):
     """codex r6 MEDIUM: the old capture was ``git rev-parse HEAD`` with no
     ``-C``, so it resolved against the CWD — a job launched from ``$HOME`` or
     from a different worktree recorded ANOTHER repository's HEAD.  It also
@@ -126,8 +232,8 @@ def test_source_revision_scopes_dirty_state_and_explicit_failure(tmp_path):
     a, b = tmp_path / "repo_a", tmp_path / "repo_b"
     a.mkdir()
     b.mkdir()
-    ga = _init_git_repo(a, "x = 1\n")
-    _init_git_repo(b, "x = 2\n")
+    ga = _init_git_repo(a, hermetic_git, "x = 1\n")
+    _init_git_repo(b, hermetic_git, "x = 2\n")
     head_a = ga("rev-parse", "HEAD").stdout.strip()
 
     # SCOPING: each call describes the tree it was POINTED AT, independent of
@@ -168,9 +274,25 @@ def test_source_revision_of_this_checkout_is_recorded_and_scoped():
                            capture_output=True, text=True)
     if probe.returncode != 0:              # not a checkout (e.g. installed)
         assert got == _c2._SOURCE_REV_UNAVAILABLE
-    else:
-        assert got.startswith(probe.stdout.strip())
-        assert got == probe.stdout.strip() or got.endswith("-dirty")
+        return
+    sha = probe.stdout.strip()
+    assert got.startswith(sha)
+    # The suffix, when present, must be one this build actually produces
+    # (codex r7 LOW: the earlier assertion rejected the valid
+    # '-dirty-unknown' fallback and would have gone red on a real status
+    # failure).  Anything else means a marker was added without updating the
+    # consumers that branch on it.
+    suffix = rest = got[len(sha):]
+    for marker in ("-dirty-unknown", "-dirty"):
+        if rest.startswith(marker):
+            rest = rest[len(marker):]
+            break
+    if rest.startswith("+mixedtree:"):
+        rest = ""
+    assert rest == "", f"unrecognised source-revision suffix {suffix!r}"
+    if suffix:
+        assert _c2._revision_ambiguity(got) is not None, (
+            f"suffix {suffix!r} is not reported as an ambiguity")
 
 
 def test_resume_drift_note_distinguishes_unknown_from_a_match():
@@ -202,10 +324,12 @@ def test_resume_drift_note_distinguishes_unknown_from_a_match():
         assert n is not None, f"{pair} silently skipped the drift check"
         assert "SKIPPED" in n, f"{pair} did not say the check could not run"
 
-    # Equal but DIRTY: identical markers do not identify identical code, so
-    # this may not be silent either.
-    n = note(f"{sha}-dirty", f"{sha}-dirty")
-    assert n is not None and "dirty" in n
+    # Equal but AMBIGUOUS: identical markers do not identify identical code,
+    # so these may not be silent either.
+    for amb in (f"{sha}-dirty", f"{sha}-dirty-unknown",
+                f"{sha}+mixedtree:0123456789ab"):
+        n = note(amb, amb)
+        assert n is not None, f"{amb} was silently accepted as a match"
 
 
 def test_scan_lane_refuses_restarts():

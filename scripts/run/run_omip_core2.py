@@ -2275,29 +2275,57 @@ def _source_revision(start_dir=None) -> str:
        ``_SOURCE_REV_UNAVAILABLE`` so the resume can say the check could not
        run rather than implying it passed.
 
+    4. **Mixed trees** (codex r7 MEDIUM).  The DRIVER script and the imported
+       ``legoesm`` packages need not come from the same checkout — every
+       sbatch wrapper here sets ``PYTHONPATH`` explicitly, and a wrong value
+       silently runs this script against ANOTHER worktree's model code, which
+       is exactly the shared-checkout hazard the pinned-worktree workflow
+       exists to avoid.  The two roots are compared and a divergence is
+       recorded as ``+mixedtree:<other-sha12>`` (or ``+mixedtree:unknown``),
+       so the archive shows that one SHA does not describe all the running
+       code.  ``start_dir`` skips the cross-check (unit testing of the
+       git-plumbing itself).
+
     Returns the revision string; never raises.
     """
     import subprocess as _sp
     here = str(Path(__file__).resolve().parent if start_dir is None
                else Path(start_dir))
 
-    def _git(*a):
+    def _git(cwd, *a):
         # check=False: a non-repo / missing git is an expected outcome here,
         # not an exception path.
-        return _sp.run(["git", "-C", here, *a], capture_output=True,
+        return _sp.run(["git", "-C", cwd, *a], capture_output=True,
                        text=True, timeout=10, check=False)
 
-    try:
-        rev = _git("rev-parse", "HEAD")
+    def _describe(cwd):
+        """``(toplevel, revision-string)`` for one directory, or ``(None, …)``."""
+        rev = _git(cwd, "rev-parse", "HEAD")
         if rev.returncode != 0 or not rev.stdout.strip():
-            return _SOURCE_REV_UNAVAILABLE
+            return None, _SOURCE_REV_UNAVAILABLE
         sha = rev.stdout.strip()
-        st = _git("status", "--porcelain", "--untracked-files=no")
+        top = _git(cwd, "rev-parse", "--show-toplevel")
+        root = top.stdout.strip() if top.returncode == 0 else None
+        st = _git(cwd, "status", "--porcelain", "--untracked-files=no")
         if st.returncode != 0:
             # HEAD resolved but the dirty check did not: say so rather than
             # implying a clean tree.
-            return f"{sha}-dirty-unknown"
-        return f"{sha}-dirty" if st.stdout.strip() else sha
+            return root, f"{sha}-dirty-unknown"
+        return root, (f"{sha}-dirty" if st.stdout.strip() else sha)
+
+    try:
+        root, rev = _describe(here)
+        if root is None or start_dir is not None:
+            return rev
+        # Cross-check the tree that actually supplies the model code.
+        import legoesm.ocean.restart as _rs_mod
+        pkg_dir = str(Path(_rs_mod.__file__).resolve().parent)
+        pkg_root, pkg_rev = _describe(pkg_dir)
+        if pkg_root is not None and Path(pkg_root) == Path(root):
+            return rev
+        tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
+               else pkg_rev.split("-")[0][:12])
+        return f"{rev}+mixedtree:{tag}"
     except Exception:                       # noqa: BLE001 — provenance only
         return _SOURCE_REV_UNAVAILABLE
 
@@ -2305,13 +2333,14 @@ def _source_revision(start_dir=None) -> str:
 def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
     """Warning text for a resume across a source change, or ``None`` if silent.
 
-    THREE OUTCOMES, KEPT DISTINCT (codex r6 MEDIUM).  The pre-fix code stored
-    ``None`` on failure and skipped the comparison whenever either side was
-    falsy, so "the check could not run" was indistinguishable from "the check
-    ran and matched" — the resume looked verified when nothing had been
-    verified.  A ``-dirty`` marker present on both sides is a third case: it
-    does not identify WHICH uncommitted edits were present, so equality of the
-    markers is not equality of the code.
+    OUTCOMES KEPT DISTINCT (codex r6 MEDIUM).  The pre-fix code stored ``None``
+    on failure and skipped the comparison whenever either side was falsy, so
+    "the check could not run" was indistinguishable from "the check ran and
+    matched" — the resume looked verified when nothing had been verified.
+    EQUAL-BUT-AMBIGUOUS is a further case: a ``-dirty`` marker does not
+    identify WHICH uncommitted edits were present, and ``+mixedtree`` says the
+    SHA describes only part of the running code, so equality of two such
+    strings is not equality of the code.
 
     Pure function of the two strings so it is directly testable; ``main`` only
     prints the result.
@@ -2328,11 +2357,34 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
                 "the model code changed between legs.  The state and "
                 "configuration still validated, so the resume proceeds — but "
                 "attribute results to BOTH revisions.")
-    if str(this_sha).endswith(("-dirty", "-dirty-unknown")):
-        return (f"[warn] both legs report {this_sha}: a '-dirty' marker does "
-                "not identify WHICH uncommitted changes were present, so "
-                "matching markers do not prove matching code.")
+    why = _revision_ambiguity(this_sha)
+    if why:
+        return (f"[warn] both legs report {this_sha}, but that string does not "
+                f"pin the code: {why}  Matching markers do not prove matching "
+                "source.")
     return None
+
+
+def _revision_ambiguity(rev) -> str | None:
+    """Why a revision string fails to identify the running code, or ``None``.
+
+    ``-dirty`` / ``-dirty-unknown`` = uncommitted (or unknown) tracked edits;
+    ``+mixedtree`` = the driver and the imported ``legoesm`` packages came from
+    different checkouts, so ONE sha cannot describe both.
+    """
+    s = str(rev)
+    reasons = []
+    if "-dirty-unknown" in s:
+        reasons.append("the dirty-state check itself failed, so uncommitted "
+                       "tracked edits can neither be confirmed nor ruled out;")
+    elif "-dirty" in s:
+        reasons.append("the tree had uncommitted changes to tracked files, "
+                       "which the sha does not describe;")
+    if "+mixedtree" in s:
+        reasons.append("the driver script and the imported legoesm packages "
+                       "came from DIFFERENT checkouts (PYTHONPATH), so this "
+                       "sha describes only the driver;")
+    return " ".join(reasons) if reasons else None
 
 
 def _diag(state, lat2d=None, lon2d=None) -> dict:
@@ -3143,8 +3195,10 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
         save_kw["eta"] = np.asarray(eta.data)
     # Prognostic TKE carry (tke closure prognostic=True, any grid): recorded so
     # an offline re-seed does not re-spin the turbulence from the background
-    # value (the #1310 lesson: an uncheckpointed carry breaks bit-exact
-    # restart).  Again NOT the --restart-from path — see the note above.
+    # value — an uncheckpointed carry cold-starts and the re-seeded run is not
+    # a continuation of this one (the #1310 lesson, there an uncheckpointed
+    # mass-fixer anchor in the SPECTRAL model).  Again NOT the --restart-from
+    # path — see the note above.
     # EXTRA key only — scorers and old readers are unaffected.
     tke = getattr(state, "tke", None)
     if tke is not None:
@@ -4095,10 +4149,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(hard errors); a source-revision change only WARNS, "
                         "since chaining across a bug fix is a supported "
                         "workflow. SCOPE: this is a guarded RECOVERY resume "
-                        "that catches configuration drift, archive corruption "
-                        "and tampering-by-editing — NOT a cryptographically "
-                        "strict or bit-identical continuation (forcing/mesh "
-                        "inputs are pinned by PATH, not by content hash).")
+                        "that catches configuration drift, archive truncation/"
+                        "corruption and STRUCTURAL tampering (a renamed, "
+                        "relabelled or removed slot) — NOT a cryptographically "
+                        "strict or bit-identical continuation. There is no "
+                        "payload checksum, so an edit to an array's VALUES at "
+                        "the same shape resumes silently, and forcing/mesh "
+                        "inputs are pinned by PATH, not by content hash.")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -5638,12 +5695,15 @@ def main() -> int:
                   "git unavailable): the restart archive will record "
                   f"{_SOURCE_REV_UNAVAILABLE!r} and the leg-to-leg code-drift "
                   "check cannot run.", flush=True)
-        elif _restart_src_sha.endswith(("-dirty", "-dirty-unknown")):
-            print(f"[warn] source revision {_restart_src_sha}: this checkout "
-                  "has uncommitted changes to TRACKED files, so the recorded "
-                  "SHA does NOT describe the code being executed.  Results "
-                  "from this leg are not reproducible from the SHA alone — "
-                  "commit before a production leg.", flush=True)
+        else:
+            _amb = _revision_ambiguity(_restart_src_sha)
+            if _amb:
+                print(f"[warn] source revision {_restart_src_sha} does not "
+                      f"describe the code being executed: {_amb} Results from "
+                      "this leg are not reproducible from the recorded "
+                      "revision alone — commit, and run the driver and the "
+                      "packages from ONE checkout, before a production leg.",
+                      flush=True)
 
     start_step = 0
     if args.restart_save or args.restart_from:

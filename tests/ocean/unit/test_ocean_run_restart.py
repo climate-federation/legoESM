@@ -673,6 +673,7 @@ class _KeyAccessSpy:
     def __init__(self, inner, touched):
         self._inner = inner
         self._touched = touched
+        self._entered = 0
 
     @property
     def files(self):
@@ -713,9 +714,11 @@ def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
                      config_fingerprint="parent-config")
 
     touched: list[str] = []
+    opens: list[str] = []
     real_load = np.load
 
     def _spy_load(*a, **kw):
+        opens.append(str(a[0]) if a else "")
         return _KeyAccessSpy(real_load(*a, **kw), touched)
 
     monkeypatch.setattr(np, "load", _spy_load)
@@ -732,9 +735,15 @@ def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
     # It DID read the header (else the assertion above would be trivially
     # satisfied by a loader that read nothing at all).
     assert "_config_fingerprint" in touched
+    # ...and the r5 SINGLE-OPEN property still holds (codex r7): two opens
+    # raced with the writer's atomic cadence replacement, yielding state from
+    # archive B under archive A's header.  Counting opens here means a
+    # regression to two opens cannot slip past this test either.
+    assert opens == [str(path)], f"expected exactly one np.load, got {opens}"
 
     # --- CONTROL: the same spy sees the arrays on the success path --------
     touched.clear()
+    opens.clear()
     got, _, _ = load_run_restart(path, _base_state()[2], grid_type="latlon",
                                  dt_seconds=21600.0, n_forcing_records=8,
                                  config_fingerprint="parent-config")
@@ -742,7 +751,75 @@ def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
     assert {"T", "S", "tke"} <= payload_read, (
         f"the spy saw only {sorted(payload_read)} on a successful load, so the "
         "rejection-path assertion proves nothing")
+    assert opens == [str(path)], f"expected exactly one np.load, got {opens}"
     _assert_slot_equal("tke", got.tke, state.tke)
+
+
+@pytest.mark.parametrize("key,forged,msg", [
+    # A 0-d FLOAT step: rank 0, so the r6 guard passed it.  With _time_days
+    # edited to match, every other check passed and the driver's int() then
+    # truncated it — state at one step, forcing index at another.
+    ("_step", np.asarray(2.5), "counts whole steps"),
+    ("_format", np.asarray("2"), "dtype"),        # string where an int is due
+    ("_time_days", np.asarray(float("nan")), "not finite"),
+    ("_dt_seconds", np.asarray(0.0), "non-positive timestep"),
+])
+def test_header_values_must_satisfy_their_schema(tmp_path, key, forged, msg):
+    """codex r7 LOW: rank 0 alone is not a schema.  Each header field has a
+    known dtype class and range because the writer emits it from a known Python
+    type; anything else means the archive was edited or written by an
+    incompatible writer."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=2, time_days=0.5, grid_type="latlon",
+                     dt_seconds=21600.0)
+    # CONTROL: untouched, it loads.
+    load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload[key] = forged
+    if key == "_step":
+        # Keep step*dt == time_days so the EXISTING provenance cross-check
+        # cannot be what rejects it — the schema must.
+        payload["_time_days"] = np.asarray(2.5 * 21600.0 / 86400.0)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match=msg):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+@pytest.mark.parametrize("entry,msg", [
+    ({"kind": "blob"}, "cannot decode"),
+    ({"kind": "tuple", "n": -1}, "non-negative integer"),
+    ({"kind": "tuple"}, "non-negative integer"),
+    ({"kind": "tuple", "n": 2, "elems": [None]}, "element-metadata"),
+    ("not-a-dict", "expected an object"),
+])
+def test_a_malformed_manifest_entry_is_rejected_before_the_payload_is_read(
+        tmp_path, monkeypatch, entry, msg):
+    """codex r7 MEDIUM: an unknown manifest ``kind`` survived every key-name and
+    layout check and was only rejected inside ``_decode_slot`` — after the whole
+    payload had been inflated.  A malformed tuple entry was worse: the key
+    expansion does ``int(entry['n'])`` and raised a bare KeyError."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    slots = json.loads(str(payload["_slot_kinds"]))
+    slots["tke"] = entry
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    np.savez(path, **payload)
+
+    touched: list[str] = []
+    real_load = np.load
+    monkeypatch.setattr(
+        np, "load", lambda *a, **kw: _KeyAccessSpy(real_load(*a, **kw), touched))
+    with pytest.raises(ValueError, match=msg):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+    assert [k for k in touched if not k.startswith("_")] == [], (
+        "a malformed manifest inflated the payload before being rejected")
 
 
 @pytest.mark.parametrize("key,forged", [
