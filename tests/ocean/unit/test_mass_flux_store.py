@@ -331,14 +331,18 @@ def test_stored_triple_is_matched_and_state_w_is_not_part_of_it():
 def test_the_bolus_increment_the_triple_carries_is_divergence_free():
     """The invariant the stored triple ACTUALLY satisfies.
 
-    RETRACTED CLAIM (codex round 7, and it was right): an earlier version of
-    the ``mass_flux_u`` field comment asserted
-    ``div_h(mass_flux_u, mass_flux_v) + dz(mass_flux_w) == 0``.  FALSE under
-    the moving z* free surface -- ``w_baro`` carries the layer-thickness
-    (sigma) tendency, so that sum equals ``-dh/dt`` and vanishes only where
-    the column is not stretching.  The tracer update is a MOVING-CELL budget
-    (``h_new*T_new = h_old*T_mid - dt*[...]``), not a divergence-free one.
-    Do not reinstate the zero claim.
+    RETRACTED CLAIMS (both refuted by review, both kept here as warnings):
+      * ``div_h(mass_flux_u, mass_flux_v) + dz(mass_flux_w) == 0`` -- FALSE on
+        the default moving z* column, where ``w_baro`` carries the
+        layer-thickness (sigma) tendency.  The tracer update is a MOVING-CELL
+        budget (``h_new*T_new = h_old*T_mid - dt*[...]``), not a
+        divergence-free one.
+      * the replacement ``... == -dh/dt`` -- ALSO FALSE, and do not reinstate
+        it either: thickness additionally moves through the freshwater eta
+        forcing, the eta floor and the volume-drift projection, none of which
+        are advective and none of which appear in these arrays.
+    NO closed-budget identity is implied by this test.  It asserts one thing:
+    the bolus INCREMENT cancels.
 
     What IS exactly true, and what ``add_bolus_to_advecting_flux`` guarantees:
     the BOLUS INCREMENT is discretely non-divergent, because the bolus is
@@ -823,6 +827,42 @@ def test_fast_path_rejects_a_difference_in_ANY_pytree_aux_member(slot, attr,
         f"{slot}.{attr} was not restored to the canonical value")
     assert (jax.tree_util.tree_structure(fixed)
             == jax.tree_util.tree_structure(stepped))
+
+
+def test_seed_normalizes_a_wrong_dtype_stored_slot():
+    """Codex round-9 YELLOW 3: dtype is dynamic, so ``tree_flatten`` misses it.
+
+    A same-shape, same-metadata slot at a DIFFERENT precision passes an
+    aux-only canonical check, and then the step re-emits it at the storage
+    precision -- a ``lax.scan`` carry mismatch on dtype rather than structure.
+    The seeder must normalize it (and must not take the fast path on it).
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs JAX_ENABLE_X64=1 to build an f64 slot")
+    _g, _z, model, state = _setup(store=True)
+    stepped = model.step(_perturbed(state), _DT)
+    want = np.asarray(stepped.mass_flux_u.data).dtype
+    assert want == np.float32, "the preset no longer stores at f32"
+
+    promoted = stepped._replace(
+        mass_flux_u=stepped.mass_flux_u.replace(
+            data=stepped.mass_flux_u.data.astype(jnp.float64)))
+    fixed = seed_mass_flux_carry(promoted, True)
+    assert fixed is not promoted, "an f64 slot took the canonical fast path"
+    assert np.asarray(fixed.mass_flux_u.data).dtype == want, (
+        "the f64 slot was not normalized to the donor's storage precision")
+    # And the normalized carry really does survive a scan.
+    seeded = model.seed_scan_carry(fixed, _DT)
+
+    def _body(carry, _x):
+        return model.step(carry, _DT), None
+
+    final, _ = jax.lax.scan(_body, seeded, xs=None, length=2)
+    assert final.mass_flux_u is not None
 
 
 def test_seed_rejects_a_wrong_shaped_stored_slot():

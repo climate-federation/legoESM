@@ -572,16 +572,25 @@ class LatLonCGridOceanState(NamedTuple):
     # conservation fixer) are not represented here at all.  Reconstructing an
     # applied tendency needs that history too.
     #
-    # NO BUDGET IDENTITY IS CLAIMED, and that is the third and final version of
-    # this note -- both earlier ones asserted one and both were wrong.  It is
-    # NOT divergence-free (``w_baro`` carries the moving-z* layer-thickness
-    # tendency), and it is not ``-dh/dt`` either: thickness also moves through
-    # the freshwater eta forcing, the eta floor, and the volume-drift
-    # projection, none of which are advective and none of which appear in these
-    # arrays.  A closed 3-D budget needs BOTH thickness time levels plus those
+    # NO BUDGET IDENTITY IS CLAIMED IN GENERAL, and that is the fourth version
+    # of this note -- the first three each asserted one and each was refuted:
+    #   v1 "divergence-free"       -- false under a moving z* column;
+    #   v2 "== -dh/dt"             -- also false: thickness ALSO moves through
+    #      the freshwater eta forcing, the eta floor and the volume-drift
+    #      projection, none of them advective, none of them in these arrays;
+    #   v3 "not divergence-free"   -- overstated, see the exception below.
+    # A closed 3-D budget needs BOTH thickness time levels PLUS those
     # source/projection terms; a consumer can rebuild the thicknesses from
     # ``eta``/``H_bathy`` with ``legoesm.ocean.vertical.compute_layer_thickness``
     # (the routine the step itself uses).  Do not re-derive a shortcut here.
+    #
+    # THE ONE CONFIGURATION WHERE THE TRIPLE *IS* NON-DIVERGENT:
+    # ``linear_free_surface`` (NEMO key_linssh).  There
+    # ``compute_ocean_jacobian`` pins the column to its eta = 0 reference, so
+    # the layer thickness is time-INVARIANT, ``dh/dt`` is identically zero, and
+    # the diagnosed ``w`` is the pure continuity integral of the horizontal
+    # divergence -- i.e. ``div_h + delta_z(w) == 0`` holds there.  It is the
+    # MOVING-z* (default) column that carries the sigma/thickness tendency.
     #
     # The ONE exact invariant, and the one a test pins: the GM BOLUS INCREMENT
     # carried by the triple is discretely NON-DIVERGENT (the bolus is

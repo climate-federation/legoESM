@@ -147,7 +147,7 @@ def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     )
 
 
-def _is_canonical_mass_flux(field, canonical, want_shape) -> bool:
+def _is_canonical_mass_flux(field, canonical, want_shape, want_dtype) -> bool:
     """True when ``field`` already matches what the step writes, exactly.
 
     The exit condition for :func:`seed_mass_flux_carry`'s fast path.  It must
@@ -164,13 +164,18 @@ def _is_canonical_mass_flux(field, canonical, want_shape) -> bool:
     Comparing the flattened aux tuple cannot omit a member, and it keeps
     tracking ``Field`` if that class ever gains one.
 
-    SHAPE is compared too: the slow path raises on a mismatch, so a fast path
-    that skipped it would silently accept a ``v_lower``-shaped slot in a
-    global state.
+    SHAPE and DTYPE are compared too -- they are dynamic, not aux, so
+    ``tree_flatten`` does not cover them, and a ``lax.scan`` rejects a carry on
+    either.  The slow path raises on a shape mismatch and zero-fills at the
+    donor's dtype, so a fast path that skipped them would silently accept a
+    ``v_lower``-shaped slot in a global state, or an f64 slot in an f32 state
+    that the step then re-emits at storage precision (codex round-9 YELLOW 3).
     """
     if field is None:
         return False
     if tuple(jnp.shape(field.data)) != tuple(want_shape):
+        return False
+    if jnp.asarray(field.data).dtype != want_dtype:
         return False
     return field.tree_flatten()[1] == canonical.tree_flatten()[1]
 
@@ -231,14 +236,20 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     # separately against ``_shapes``.
     _canon = mass_flux_fields(state.u, state.v, state.w,
                               state.u.data, state.v.data, state.w.data)
-    if all(_is_canonical_mass_flux(getattr(state, _n), _c, _shapes[_n])
+    _dtype = jnp.asarray(state.u.data).dtype
+    if all(_is_canonical_mass_flux(getattr(state, _n), _c, _shapes[_n], _dtype)
            for _n, _c in zip(MASS_FLUX_SLOTS, _canon)):
         return state
 
     def _data(slot, donor_shape):
         cur = getattr(state, slot)
         if cur is None:
-            return jnp.zeros(donor_shape, dtype=state.u.data.dtype)
+            return jnp.zeros(donor_shape, dtype=_dtype)
+        # Dtype is normalized to the donor's: a slot at a different precision
+        # is a lax.scan carry mismatch once the step re-emits it at storage
+        # precision (codex round-9 YELLOW 3).
+        if jnp.asarray(cur.data).dtype != _dtype:
+            return jnp.asarray(cur.data).astype(_dtype)
         got = tuple(jnp.shape(cur.data))
         if got != tuple(donor_shape):
             raise ValueError(
