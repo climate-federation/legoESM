@@ -1738,6 +1738,13 @@ def main():
             if bad or badtr:
                 print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
                       f"— aborting.")
+                # Record the abort so it reaches the EXIT CODE, not just
+                # stdout. Without this the `break` falls through to a normal
+                # exit 0: job 9248515 went non-finite at day 52, wrote zero
+                # volumes, and still reported SLURM COMPLETED / ExitCode 0:0,
+                # so an `afterok` chain consumed a reference that had never
+                # been written. Undetected for 20 h. Checked at __main__.
+                globals()["_NONFINITE_ABORT"] = True
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
