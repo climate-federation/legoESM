@@ -5,7 +5,8 @@ Monin-Obukhov similarity theory (MOST). Three schemes:
 
 1. ``constant`` — Fixed neutral transfer coefficients (no iteration)
 2. ``coare3`` — COARE 3.0 (Fairall et al. 2003): Charnock + smooth-flow
-   roughness, Businger-Dyer stability functions
+   roughness, Fairall Kansas + free-convective unstable blend, BH91-form
+   native stable branch (selectable via ``stability_scheme``)
 3. ``large_yeager`` — Large & Yeager 2009 (CORE/OMIP): empirical C_DN(U_10N)
    with high-wind quintic correction, stability-dependent Stanton/Dalton
    numbers
@@ -40,9 +41,13 @@ References
 
 The stable-regime (zeta>0) similarity functions are selectable via the
 ``stability_scheme`` argument to :func:`psi_m` / :func:`psi_h` /
-:func:`compute_most_fluxes`; the unstable branch stays Businger-Dyer for every
-scheme. Coefficient values cross-checked against CliMA ``SurfaceFluxes.jl``
-(``UniversalFunctions``).
+:func:`psi_m_coare` / :func:`psi_h_coare` / :func:`compute_most_fluxes`; the
+unstable branch is never affected by the selector — Businger-Dyer on the
+``psi_m``/``psi_h`` path, the Fairall (1996/2003) Kansas + free-convective
+blend on the COARE path.  On ``coare3`` the default ``"dyer1974"`` is a
+sentinel for the byte-identical COARE-native stable form (itself the BH91 fit
+with rounded constants — see :func:`psi_m_coare`).  Coefficient values
+cross-checked against CliMA ``SurfaceFluxes.jl`` (``UniversalFunctions``).
 """
 
 from __future__ import annotations
@@ -387,6 +392,49 @@ def _grachev_psi_h(zeta_pos):
     return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
 
 
+def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
+    """Stable-branch (zeta > 0) psi_m for ``stability_scheme``.
+
+    The SINGLE dispatch for the selectable stable momentum similarity
+    function, consumed by :func:`psi_m` (Businger-Dyer unstable side) AND by
+    :func:`psi_m_coare` (COARE unstable side, non-default schemes only) so
+    the published fits are never duplicated.  ``stable_beta`` acts only on
+    the linear ``dyer1974`` form.  Unknown scheme -> ``ValueError`` (dispatch
+    hardening; static Python string, raises at trace time).
+    """
+    if stability_scheme == "dyer1974":
+        return -stable_beta * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        return _beljaars_holtslag_psi_m(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        return _grachev_psi_m(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        return _gryanik_psi_m(zeta_pos)
+    raise ValueError(
+        f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+        f"{_VALID_STABILITY_SCHEMES}."
+    )
+
+
+def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
+    """Stable-branch (zeta > 0) psi_h for ``stability_scheme``.
+
+    Heat/moisture twin of :func:`_stable_psi_m` (same dispatch contract).
+    """
+    if stability_scheme == "dyer1974":
+        return -stable_beta * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        return _beljaars_holtslag_psi_h(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        return _grachev_psi_h(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        return _gryanik_psi_h(zeta_pos)
+    raise ValueError(
+        f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+        f"{_VALID_STABILITY_SCHEMES}."
+    )
+
+
 def psi_m(zeta, stability_scheme="dyer1974", *,
           unstable_gamma=_DYER_UNSTABLE_GAMMA,
           stable_beta=_DYER_STABLE_BETA):
@@ -439,19 +487,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
 
     # Stable branch: static ``stability_scheme`` -> Python dispatch (only the
     # selected expression is traced), not ``jnp.where`` (which would trace all).
-    if stability_scheme == "dyer1974":
-        stable = -stable_beta * zeta_pos
-    elif stability_scheme == "beljaars_holtslag1991":
-        stable = _beljaars_holtslag_psi_m(zeta_pos)
-    elif stability_scheme == "grachev2007_sheba":
-        stable = _grachev_psi_m(zeta_pos)
-    elif stability_scheme == "gryanik2020":
-        stable = _gryanik_psi_m(zeta_pos)
-    else:  # unreachable: validate_stability_scheme already guarded at entry
-        raise ValueError(
-            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
-            f"{_VALID_STABILITY_SCHEMES}."
-        )
+    stable = _stable_psi_m(zeta_pos, stability_scheme, stable_beta)
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
@@ -484,24 +520,12 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     y = jnp.sqrt(1.0 - _gamma * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
 
-    if stability_scheme == "dyer1974":
-        stable = -stable_beta * zeta_pos
-    elif stability_scheme == "beljaars_holtslag1991":
-        stable = _beljaars_holtslag_psi_h(zeta_pos)
-    elif stability_scheme == "grachev2007_sheba":
-        stable = _grachev_psi_h(zeta_pos)
-    elif stability_scheme == "gryanik2020":
-        stable = _gryanik_psi_h(zeta_pos)
-    else:  # unreachable: validate_stability_scheme already guarded at entry
-        raise ValueError(
-            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
-            f"{_VALID_STABILITY_SCHEMES}."
-        )
+    stable = _stable_psi_h(zeta_pos, stability_scheme, stable_beta)
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
-def psi_m_coare(zeta):
+def psi_m_coare(zeta, stability_scheme="dyer1974"):
     """COARE 3.0 momentum stability function (Fairall et al. 1996, 2003).
 
     Unstable (ζ < 0): blend of the Kansas form and the free-convective
@@ -510,9 +534,29 @@ def psi_m_coare(zeta):
         ψ_conv:   y = (1 − 10.15ζ)^{1/3}
                   ψ = 1.5 ln((1 + y + y²)/3) − √3 arctan((1 + 2y)/√3) + π/√3
         blend:    f = ζ²/(1 + ζ²);  ψ = (1 − f) ψ_kansas + f ψ_conv
-    Stable (ζ > 0): COARE stable form
+    Stable (ζ > 0): COARE native stable form (``stability_scheme="dyer1974"``,
+    the config default — see below)
         c = min(50, 0.35ζ)
         ψ = −[(1 + ζ) + 0.6667 (ζ − 14.28) e^{−c} + 8.525]
+
+    ``stability_scheme`` swaps ONLY the stable (ζ > 0) branch, so the
+    experiment-level ``surface_stability_scheme`` knob is not silently inert
+    on a ``bulk_scheme="coare3"`` lane (it was: the 2026-08 dyer-vs-BH AMIP
+    A/B was bit-identical because every executed psi call was this function).
+    The unstable branch ALWAYS keeps the Fairall Kansas + free-convective
+    blend that defines COARE.  Semantics of the selector here:
+
+    - ``"dyer1974"`` (the ``SurfaceLayerConfig`` default) is a SENTINEL for
+      "COARE native" and is byte-identical to the pre-selector behaviour.
+      COARE 3.0's native stable form above IS the Beljaars & Holtslag (1991)
+      fit with rounded constants (Fairall et al. 2003 adopted BH91 for the
+      stable side: 0.6667 ≈ b = 2/3, 14.28 ≈ c/d = 5/0.35, 8.525 ≈ b·c/d − 1),
+      so there is no meaningful linear ``−5ζ`` COARE variant to expose and the
+      default must not silently change.
+    - ``"beljaars_holtslag1991"`` swaps to the canonical BH91 constants — a
+      rounding-level change vs native (max |Δψ| ≈ 4.5e-3 over ζ ∈ (0, 10]).
+    - ``"grachev2007_sheba"`` / ``"gryanik2020"`` give the genuinely
+      different strong-stability (SHEBA) tails.
 
     Safe branching (min/max on inputs) keeps gradients NaN-free in the
     inactive branch, matching :func:`psi_m`.
@@ -538,21 +582,30 @@ def psi_m_coare(zeta):
     f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
     unstable = (1.0 - f) * psi_k + f * psi_c
 
-    c = jnp.minimum(50.0, 0.35 * zeta_pos)
-    stable = -(
-        (1.0 + zeta_pos)
-        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-        + 8.525
-    )
+    if stability_scheme == "dyer1974":
+        # COARE native stable branch (byte-identical default; see docstring).
+        c = jnp.minimum(50.0, 0.35 * zeta_pos)
+        stable = -(
+            (1.0 + zeta_pos)
+            + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+            + 8.525
+        )
+    else:
+        stable = _stable_psi_m(zeta_pos, stability_scheme)
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
-def psi_h_coare(zeta):
+def psi_h_coare(zeta, stability_scheme="dyer1974"):
     """COARE 3.0 heat/moisture stability function (Fairall et al. 1996, 2003).
 
     Unstable: Kansas ψ = 2 ln((1+x)/2), x = (1 − 15ζ)^{1/2}, blended with
     the free-convective form (y = (1 − 34.15ζ)^{1/3}) via f = ζ²/(1+ζ²).
-    Stable: ψ = −[(1 + 2ζ/3)^{3/2} + 0.6667 (ζ − 14.28) e^{−c} + 8.525].
+    Stable (native): ψ = −[(1 + 2ζ/3)^{3/2} + 0.6667 (ζ − 14.28) e^{−c} + 8.525].
+
+    ``stability_scheme`` swaps ONLY the stable (ζ > 0) branch; ``"dyer1974"``
+    (the config default) is the SENTINEL for the byte-identical COARE native
+    form, which is itself the Beljaars & Holtslag (1991) ψ_h with rounded
+    constants — see :func:`psi_m_coare` for the full semantics and why.
     """
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
@@ -570,12 +623,16 @@ def psi_h_coare(zeta):
     f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
     unstable = (1.0 - f) * psi_k + f * psi_c
 
-    c = jnp.minimum(50.0, 0.35 * zeta_pos)
-    stable = -(
-        jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
-        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-        + 8.525
-    )
+    if stability_scheme == "dyer1974":
+        # COARE native stable branch (byte-identical default; see psi_m_coare).
+        c = jnp.minimum(50.0, 0.35 * zeta_pos)
+        stable = -(
+            jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
+            + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+            + 8.525
+        )
+    else:
+        stable = _stable_psi_h(zeta_pos, stability_scheme)
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
@@ -710,13 +767,21 @@ def compute_most_fluxes(
         that shock; ocean/atmosphere callers never approach the floor.
     stability_scheme : str
         Stable-regime (zeta > 0) similarity functions ``psi_m``/``psi_h``.
-        ``"dyer1974"`` (default) is the historical linear ``-5 zeta`` and is
-        BYTE-IDENTICAL to the prior behaviour for every existing caller. The
+        ``"dyer1974"`` (default) is BYTE-IDENTICAL to the prior behaviour for
+        every existing caller: the historical linear ``-5 zeta`` on the
+        ``constant``/``most``/``large_yeager`` Businger-Dyer path, and the
+        COARE NATIVE stable form on ``coare3`` (which is itself the Beljaars &
+        Holtslag 1991 fit with rounded constants — Fairall et al. 2003 §3
+        adopted BH91 for the stable side; see :func:`psi_m_coare`).  The
         non-linear alternatives ``"beljaars_holtslag1991"``,
         ``"grachev2007_sheba"`` and ``"gryanik2020"`` do not collapse the fluxes
-        to zero under strong stability (Arctic sea-ice / nocturnal SBL). The
-        unstable branch (zeta < 0) stays Businger-Dyer regardless. Validated at
-        function entry (a typo raises ``ValueError``).
+        to zero under strong stability (Arctic sea-ice / nocturnal SBL); on
+        ``coare3`` they swap ONLY the stable branch (the Fairall unstable blend
+        is COARE-defining and always kept), so on that scheme
+        ``"beljaars_holtslag1991"`` is a rounding-level change vs the default
+        and the genuinely different tails are grachev/gryanik. The unstable
+        branch (zeta < 0) stays Businger-Dyer (Fairall blend for coare3)
+        regardless. Validated at function entry (a typo raises ``ValueError``).
     unstable_gamma : float
         Businger-Dyer / Dyer (1974) UNSTABLE-branch coefficient gamma in
         ``x = (1 - gamma zeta)^{1/4}`` (psi_m) / ``y = (1 - gamma zeta)^{1/2}``
@@ -967,13 +1032,17 @@ def compute_most_fluxes(
         zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
         # Scheme-matched stability functions (static Python dispatch at trace
         # time): COARE 3.0 uses the Fairall 1996/2003 Kansas + free-convective
-        # blend and the COARE stable form; large_yeager/constant/most keep
-        # Businger-Dyer with the selectable ``stability_scheme`` stable branch
-        # ("dyer1974" default = the historical -5*zeta that LY09/NEMO ncar use).
+        # blend on the unstable side and the ``stability_scheme``-selectable
+        # STABLE branch (default "dyer1974" = the byte-identical COARE native
+        # stable form — itself BH91, see psi_m_coare); large_yeager/constant/
+        # most keep Businger-Dyer with the same selectable stable branch
+        # ("dyer1974" default = the historical -5*zeta that LY09/NEMO ncar
+        # use).  Without threading the selector here the knob was silently
+        # inert on every coare3 lane (the 2026-08 bit-identical AMIP A/B).
         if scheme == "coare3":
-            psi_m_u = psi_m_coare(zeta_u)
-            psi_h_t = psi_h_coare(zeta_t)
-            psi_h_q = psi_h_coare(zeta_q)
+            psi_m_u = psi_m_coare(zeta_u, stability_scheme)
+            psi_h_t = psi_h_coare(zeta_t, stability_scheme)
+            psi_h_q = psi_h_coare(zeta_q, stability_scheme)
         else:
             psi_m_u = psi_m(zeta_u, stability_scheme,
                             unstable_gamma=unstable_gamma, stable_beta=stable_beta)
@@ -1169,11 +1238,13 @@ def compute_most_fluxes(
         inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
         zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
         # Scheme-match the diagnostic psi_h to the MAIN loop (static Python
-        # dispatch): COARE 3.0 uses the Fairall free-convective psi_h_coare,
-        # every other scheme uses the stability_scheme-selected psi_h.  Using
-        # the non-COARE psi_h here for coare3 made the 2 m T inconsistent with
-        # the converged coare3 profile.
-        _psi_h_d = (psi_h_coare(zeta_d) if scheme == "coare3"
+        # dispatch): COARE 3.0 uses the Fairall free-convective psi_h_coare
+        # WITH the same stability_scheme-selected stable branch as the main
+        # loop, every other scheme uses the stability_scheme-selected psi_h.
+        # Using the non-COARE psi_h here for coare3 made the 2 m T
+        # inconsistent with the converged coare3 profile.
+        _psi_h_d = (psi_h_coare(zeta_d, stability_scheme)
+                    if scheme == "coare3"
                     else psi_h(zeta_d, stability_scheme,
                                unstable_gamma=unstable_gamma,
                                stable_beta=stable_beta))

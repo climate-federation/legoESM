@@ -37,12 +37,18 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    compute_surface_fluxes,
+)
 from legoesm.core.bulk_flux import (
     _DYER_STABLE_BETA,
     _DYER_UNSTABLE_GAMMA,
     compute_most_fluxes,
     psi_h,
+    psi_h_coare,
     psi_m,
+    psi_m_coare,
     validate_stability_scheme,
 )
 
@@ -741,3 +747,260 @@ def test_aimip_param_roundtrip_z0h_z0_ratio():
     )
     assert float(params2.to_surface_config().z0h_z0_ratio) != float(
         cfg.z0h_z0_ratio)
+
+
+# ---------------------------------------------------------------------------
+# 8. coare3 lane: the STABLE branch is selectable (the inert-knob fix).
+#
+# The 2026-08 latlon AMIP A/B (surface_stability_scheme dyer1974 vs
+# beljaars_holtslag1991, surface_bulk_scheme=coare3, turbulence=
+# holtslag_boville) was BIT-IDENTICAL after 10 days: the injected
+# ``SurfaceLayerConfig.stability_scheme`` reached ``compute_most_fluxes`` but
+# the coare3 branch used ``psi_m_coare``/``psi_h_coare`` unconditionally, so
+# the knob was consumed by no executed psi call.  These tests exercise the
+# LANE-LEVEL surface-flux entry — ``compute_surface_fluxes`` in
+# ``surface_layer.py``, the exact symbol ``holtslag_boville_turbulence``
+# calls (holtslag_boville.py:263) on the latlon compiled lane — with the same
+# coare3 + gustiness_zi=300 config the run resolved.
+#
+# NOTE on magnitudes: COARE 3.0's NATIVE stable form IS the Beljaars &
+# Holtslag (1991) fit with rounded constants (Fairall et al. 2003 adopted
+# BH91; measured max |Δψ| ≈ 4.5e-3 over ζ ∈ (0, 10]), so on coare3 the
+# dyer-default vs BH91 difference is real but rounding-level, and NO
+# magnitude ordering is asserted for that pair.  The "long tail" magnitude
+# claim (|SH_BH| > |SH_dyer|) is asserted on the most/large_yeager schemes,
+# whose default stable branch really is the collapsing linear -5ζ.  The
+# genuinely different coare3 tails are grachev2007_sheba / gryanik2020.
+# ---------------------------------------------------------------------------
+def _stable_column():
+    """Strongly stable synthetic column: 10 m/s wind, +80 K surface inversion."""
+    return dict(
+        u=jnp.asarray([10.0, 10.0]), v=jnp.asarray([0.0, 0.0]),
+        T=jnp.asarray([300.0, 300.0]), q_v=jnp.asarray([0.002, 0.002]),
+        T_sfc=jnp.asarray([220.0, 220.0]), q_sfc=jnp.asarray([3e-4, 3e-4]),
+        rho=jnp.asarray([1.4, 1.4]),
+    )
+
+
+def _lane_cfg(bulk_scheme, stability_scheme):
+    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B)."""
+    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=300.0,
+                              stability_scheme=stability_scheme)
+
+
+def _lane_fluxes(bulk_scheme, stability_scheme, col=None):
+    col = col or _stable_column()
+    return compute_surface_fluxes(
+        col["u"], col["v"], col["T"], col["q_v"], col["T_sfc"], col["q_sfc"],
+        col["rho"], _lane_cfg(bulk_scheme, stability_scheme))
+
+
+def test_coare3_lane_stable_branch_now_selectable():
+    """(i) On the executed coare3 lane entry the knob is LIVE: dyer(default)
+    vs beljaars_holtslag1991 differ (pre-fix they were array-equal — the
+    bit-identical A/B reproduced at unit level), and grachev2007_sheba gives
+    a substantially different strong-stability tail."""
+    sh_dyer = np.asarray(_lane_fluxes("coare3", "dyer1974")[2])
+    sh_bh = np.asarray(_lane_fluxes("coare3", "beljaars_holtslag1991")[2])
+    sh_gr = np.asarray(_lane_fluxes("coare3", "grachev2007_sheba")[2])
+
+    # Live knob: BH swaps the stable branch to canonical BH91 constants — a
+    # small (rounding-level, ~3e-4 relative) but strictly nonzero change.
+    assert np.all(sh_dyer != sh_bh), (
+        "coare3 sensible flux is invariant to stability_scheme — the knob "
+        "is still inert on the coare3 branch (pre-fix behaviour)")
+    # Genuinely different SHEBA tail: > 5% shift in the stable sensible flux.
+    assert np.all(np.abs(sh_gr - sh_dyer) > 0.05 * np.abs(sh_dyer))
+
+
+@pytest.mark.parametrize("bulk_scheme", ("most", "large_yeager"))
+def test_bh_long_tail_larger_flux_on_dyer_baseline_schemes(bulk_scheme):
+    """(i, magnitude) Where the default stable branch really is the linear
+    -5ζ (most / large_yeager), BH91 keeps the SBL long tail: the stable
+    sensible flux magnitude is LARGER than collapsed Dyer (measured ~4.8x on
+    this column)."""
+    sh_dyer = np.asarray(_lane_fluxes(bulk_scheme, "dyer1974")[2])
+    sh_bh = np.asarray(_lane_fluxes(bulk_scheme, "beljaars_holtslag1991")[2])
+    assert np.all(sh_dyer < 0.0) and np.all(sh_bh < 0.0)  # downward (stable)
+    assert np.all(np.abs(sh_bh) > np.abs(sh_dyer)), (
+        f"{bulk_scheme}: BH91 stable flux should be larger in magnitude than "
+        "the collapsing dyer1974 -5*zeta form")
+
+
+# Verbatim PRE-CHANGE psi_m_coare/psi_h_coare (HEAD a8c6ad91a, before the
+# selectable stable branch), same pattern as _old_psi_m/_old_psi_h above:
+# the STRICT byte-identity guard for the default path, independent of dtype,
+# platform, and pinned-constant tolerance.
+def _old_psi_m_coare(zeta):
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    x = jnp.power(1.0 - 15.0 * zeta_neg, 0.25)
+    psi_k = (
+        2.0 * jnp.log((1.0 + x) / 2.0)
+        + jnp.log((1.0 + x ** 2) / 2.0)
+        - 2.0 * jnp.arctan(x)
+        + jnp.pi / 2.0
+    )
+    y = jnp.power(1.0 - 10.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        (1.0 + zeta_pos)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+def _old_psi_h_coare(zeta):
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    x = jnp.sqrt(1.0 - 15.0 * zeta_neg)
+    psi_k = 2.0 * jnp.log((1.0 + x) / 2.0)
+    y = jnp.power(1.0 - 34.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+def test_coare3_default_byte_identical_pinned():
+    """(ii) Default stability_scheme keeps coare3 byte-identical: the default
+    and explicit-"dyer1974" calls reproduce the VERBATIM pre-change psi
+    functions EXACTLY (array-equal over both regimes — the strict guard), and
+    the lane fluxes match the pre-change pinned values (captured at HEAD
+    a8c6ad91a, fp64, this exact column/config) as a cross-machine anchor."""
+    z = jnp.linspace(-10.0, 10.0, 401)
+    for new_fn, old_fn in ((psi_m_coare, _old_psi_m_coare),
+                           (psi_h_coare, _old_psi_h_coare)):
+        np.testing.assert_array_equal(
+            np.asarray(new_fn(z)), np.asarray(old_fn(z)))
+        np.testing.assert_array_equal(
+            np.asarray(new_fn(z, "dyer1974")), np.asarray(old_fn(z)))
+
+    tau_x, tau_y, shflx, lhflx, ustar = _lane_fluxes("coare3", "dyer1974")
+    # fp64 pins; loose enough for a float32 default run, tight enough that
+    # any stable-branch drift (BH swap is ~3e-4 relative) trips it.
+    rtol = 1e-12 if shflx.dtype == jnp.float64 else 2e-5
+    np.testing.assert_allclose(float(shflx[0]), -2.024613552826373e+02, rtol=rtol)
+    np.testing.assert_allclose(float(lhflx[0]), -1.071036570631257e+01, rtol=rtol)
+    np.testing.assert_allclose(float(tau_x[0]), -2.848185923255397e-02, rtol=rtol)
+    np.testing.assert_allclose(float(ustar[0]), 1.426330793967515e-01, rtol=rtol)
+
+
+def test_dyer_baseline_schemes_full_path_pinned():
+    """Full-path baselines for the Businger-Dyer schemes through the SAME
+    lane entry (codex R1: the psi_m/psi_h stable-dispatch factoring must be
+    pure code motion on most/large_yeager too).  Pre-change pinned values,
+    HEAD a8c6ad91a, fp64, stable column + gustiness_zi=300."""
+    pins = {
+        ("most", "dyer1974"): -4.586232399544879e+01,
+        ("most", "beljaars_holtslag1991"): -2.228467342408366e+02,
+        ("large_yeager", "dyer1974"): -4.196968866111251e+01,
+        ("large_yeager", "beljaars_holtslag1991"): -1.981186252362987e+02,
+    }
+    for (bs, stab), expected in pins.items():
+        shflx = _lane_fluxes(bs, stab)[2]
+        rtol = 1e-12 if shflx.dtype == jnp.float64 else 2e-5
+        np.testing.assert_allclose(float(shflx[0]), expected, rtol=rtol,
+                                   err_msg=f"{bs}/{stab}")
+
+
+def test_coare3_return_2m_scheme_sensitive():
+    """The 2 m diagnostic follows the selected stable branch on coare3 (the
+    scheme-matched ``psi_h_coare(zeta_d, stability_scheme)`` call): on the
+    stable column T_2m moves by ~18 K between the default and the SHEBA
+    tail, and stays inside the physical [T_sfc, T_atm] bracket (unclipped
+    interior values at z_diag = 2 m < z_t).
+
+    The PINNED grachev value also locks the DIAGNOSTIC psi call in
+    isolation: reverting only ``psi_h_coare(zeta_d, stability_scheme)`` to
+    the unthreaded ``psi_h_coare(zeta_d)`` (keeping the main-loop threading)
+    was measured to shift T_2m from 277.078 K to 296.031 K on this column —
+    an interior, unclipped 19 K move — so the pin fails loudly on it
+    (codex R2 non-vacuity check, verified empirically 2026-08-02).
+    """
+    col = _stable_column()
+    kw = dict(z_ref=10.0, z0_init=1e-4, scheme="coare3", n_iter=5,
+              gustiness_w_zi=300.0, return_2m=True)
+    out_d = compute_most_fluxes(col["u"], col["v"], col["T"], col["q_v"],
+                                col["T_sfc"], col["q_sfc"], col["rho"],
+                                stability_scheme="dyer1974", **kw)
+    out_g = compute_most_fluxes(col["u"], col["v"], col["T"], col["q_v"],
+                                col["T_sfc"], col["q_sfc"], col["rho"],
+                                stability_scheme="grachev2007_sheba", **kw)
+    t2m_d, t2m_g = np.asarray(out_d[5]), np.asarray(out_g[5])
+    assert np.all(np.abs(t2m_g - t2m_d) > 1.0), (t2m_d, t2m_g)
+    for t2m in (t2m_d, t2m_g):
+        assert np.all(t2m > 220.0) and np.all(t2m < 300.0)
+    # Pinned pre-captured fp64 values (HEAD a8c6ad91a + fix, this column).
+    rtol = 1e-12 if out_d[5].dtype == jnp.float64 else 2e-5
+    np.testing.assert_allclose(float(t2m_d[0]), 258.915887220388, rtol=rtol)
+    np.testing.assert_allclose(float(t2m_g[0]), 277.077916797258, rtol=rtol)
+
+    # psi-level lock of the scheme-matched contract (stable side only).
+    z_pos = jnp.linspace(1e-3, 10.0, 200)
+    for scheme in NONLINEAR:
+        np.testing.assert_array_equal(
+            np.asarray(psi_h_coare(z_pos, scheme)),
+            np.asarray(psi_h(z_pos, scheme)))
+        np.testing.assert_array_equal(
+            np.asarray(psi_m_coare(z_pos, scheme)),
+            np.asarray(psi_m(z_pos, scheme)))
+
+
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_psi_coare_gradients_finite_all_schemes(scheme):
+    """AD safety of the selectable coare stable swap: d(psi)/d(zeta) is
+    finite (no NaN) at exact neutral zeta = 0, at the +-1e-10 branch floors,
+    and in both regimes, for every selectable scheme (codex R2: the existing
+    gradient coverage only exercised psi_m/psi_h, not psi_*_coare)."""
+    for fn in (psi_m_coare, psi_h_coare):
+        g = jax.grad(lambda z, _fn=fn: jnp.sum(_fn(z, scheme)))
+        for z0 in (-2.0, -1e-10, 0.0, 1e-10, 0.5, 2.0, 9.5):
+            val = g(jnp.asarray(z0))
+            assert np.all(np.isfinite(np.asarray(val))), (
+                f"{fn.__name__}/{scheme}: non-finite gradient at zeta={z0}")
+
+
+def test_coare3_unstable_side_invariant_across_schemes():
+    """(iii) The unstable branch is COARE's Fairall blend for EVERY
+    stability_scheme: warm-surface (unstable) fluxes are array-equal across
+    all schemes."""
+    col = _stable_column()
+    col["T_sfc"] = jnp.asarray([310.0, 310.0])   # +10 K warm surface
+    col["q_sfc"] = jnp.asarray([0.03, 0.03])
+    base = _lane_fluxes("coare3", "dyer1974", col)
+    for scheme in NONLINEAR:
+        out = _lane_fluxes("coare3", scheme, col)
+        for b, o in zip(base, out):
+            np.testing.assert_array_equal(np.asarray(b), np.asarray(o))
+
+
+def test_psi_coare_unknown_scheme_raises():
+    """Dispatch hardening: a typo'd stability_scheme on the coare psi
+    functions fails loudly (via the shared _stable_psi_* dispatch)."""
+    z = jnp.asarray(2.0)
+    for fn in (psi_m_coare, psi_h_coare):
+        with pytest.raises(ValueError, match="stability_scheme"):
+            fn(z, "beljaars_holtslag91")

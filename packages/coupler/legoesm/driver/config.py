@@ -733,9 +733,12 @@ class ExperimentConfig(NamedTuple):
     # surface bulk schemes.  Threaded into BOTH the atmosphere
     # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
     # run_coupled so the two sides of the interface always use the SAME
-    # stable functions ("dyer1974" default = byte-identical -5*zeta;
-    # "grachev2007_sheba"/"gryanik2020" = SHEBA Arctic forms;
-    # "beljaars_holtslag1991").
+    # stable functions ("dyer1974" default = byte-identical: -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the COARE-native
+    # stable form on coare3 — itself BH91 with rounded constants, so on
+    # coare3 selecting "beljaars_holtslag1991" is a rounding-level change and
+    # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
+    # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted

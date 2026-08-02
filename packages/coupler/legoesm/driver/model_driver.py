@@ -2982,6 +2982,13 @@ class ModelDriver:
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
             cloud_config=diag_cloud_config,
+            # tas 2 m profile uses the SAME MOST bulk scheme and stable-branch
+            # functions as the surface fluxes (defaults are byte-identical:
+            # "constant" keeps the historical coare3 profile stand-in).
+            surface_stability_scheme=getattr(
+                self.config, "surface_stability_scheme", "dyer1974"),
+            surface_bulk_scheme=getattr(
+                self.config, "surface_bulk_scheme", "constant"),
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
