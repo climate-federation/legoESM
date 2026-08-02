@@ -444,7 +444,13 @@ def test_slab_ice_archive_into_a_dynamic_template_is_a_hard_error(tmp_path):
 def test_a_carry_the_parent_lacked_cannot_be_continued(tmp_path):
     """A gate turned ON between legs is a new experiment, not a continuation:
     the parent has no tke to hand over, so resuming a TKE-carrying run from it
-    must raise rather than silently seed the carry."""
+    must raise rather than silently seed the carry.
+
+    SCOPE: this fires only when the resuming run PRE-SEEDS the carry (as the
+    template here does).  run_omip_core2 loads into an all-None rest state, so
+    its gate-flip case is NOT covered by this check — see the limitation note
+    in load_run_restart.
+    """
     _, _, state = _base_state()
     save_run_restart(tmp_path / "r.npz", state, step=1, time_days=0.0,
                      grid_type="latlon")
@@ -612,7 +618,9 @@ def _config_for_gates(gates):
      "coriolis_scheme": "explicit_ab2",
      "_needs_forcing": True},
     {"_slow_ab2": True,                       # -> F_slow_{u,v}_prev
-     "coriolis_scheme": "explicit_ab2"},
+     "coriolis_scheme": "explicit_ab2",       #    (+ the incr_prev quartet:
+     "outer_integrator": "ab2"},              #    explicit_ab2 Coriolis is
+                                              #    unstable under forward Euler)
     {"_tke": True},                           # -> tke (+ dtke when advected)
     {"_tke_adv": True},                       # -> tke + dtke
     {"_eke": True},                           # -> eke

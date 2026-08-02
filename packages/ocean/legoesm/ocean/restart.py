@@ -857,6 +857,13 @@ def load_run_restart(path: str | Path, template_state, *,
                     f"load_run_restart: {in_path} declares {what} slot(s) "
                     f"{missing} as persisted but the manifest does not carry "
                     "them.  Refusing to resume with those cold-started.")
+            # LIMITATION, stated plainly: this only fires when the resuming
+            # run PRE-SEEDS the carry before loading.  run_omip_core2 builds a
+            # rest state with every optional slot None and loads before the
+            # first step, so a gate flipped ON between legs is NOT caught here
+            # — closing that needs a resolved-config fingerprint, which is
+            # listed as not-done (a naive config hash false-aborts a
+            # --visc-schedule chain, whose model is rebuilt mid-leg).
             live = sorted(n for n, lab in inventory.items()
                           if lab == _INV_ABSENT
                           and getattr(template, n, None) is not None)
