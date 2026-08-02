@@ -1146,10 +1146,16 @@ def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
     log = [i for i, ln in enumerate(lines)
            if "[gateway] DISABLED at step" in _code(ln)]
     assert len(log) == 1, f"expected one disable site, found {log}"
-    tail = lines[log[0]:log[0] + 20]
-    drop = next(i for i, ln in enumerate(tail)
-                if _code(ln).strip() == "_gw_acc = None")
-    window = [_code(ln) for ln in tail[:drop]]
+    # No arbitrary line cap and no bare next(): scan to the END of the file and
+    # assert.  A fixed window is what made the first version of this test raise
+    # a message-less StopIteration when the handler grew (codex round-2 RED),
+    # and codex round-3 pointed out a forward cap can recreate it.
+    drops = [i for i, ln in enumerate(lines)
+             if i > log[0] and _code(ln).strip() == "_gw_acc = None"]
+    assert drops, (
+        "no `_gw_acc = None` follows the disable log -- either the handler was "
+        "restructured or the accumulator is never dropped")
+    window = [_code(ln) for ln in lines[log[0]:drops[0]]]
     assert any("_gateway_cumulative_row(" in ln for ln in window), (
         "the accumulator is discarded without dumping what it reached")
     assert any("step - 1" in ln for ln in window), (
