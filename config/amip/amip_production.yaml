@@ -50,6 +50,25 @@ dt: 75.0
 vertical_coord: sigma
 precision: fp64             # dycore fp64; rrtmgp runs fp32 on the MPAS path
                             # (mpas_rrtmgp_fp32 default, perf — validated)
+a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
+                            # * 3e-3 * dx_min^2/dt).  The default 1.0 gives
+                            # A_h ~ 1.4e6 m2/s on this mesh — tau ~ 0.8 d for
+                            # a 2000 km eddy, at baroclinic growth rate — and
+                            # KILLED the midlatitude storm tracks (2026-08
+                            # production year: synoptic psl std 5-10x low, psl
+                            # pattern r = -0.37; ERA5-inherited eddies dead by
+                            # week 3).  One-variable A/Bs: 0.25 sustains eddies
+                            # through 120 d (2-8 d bandpassed psl std, 40-70N,
+                            # d60-120: 0.58 hPa vs 0.05-0.10 at 1.0) with the
+                            # matched m1-4 scorecard IMPROVED (rlut bias -31.9
+                            # -> -18.4, rsut +35.4 -> +27.2, psl r -0.23 ->
+                            # -0.07); 0.5 still decays the NH track (0.29 by
+                            # d90-120); 0.0 sustains eddies but blows up day 37
+                            # (#1354 hot-bottom mode — the Laplacian partially
+                            # masks the vertical-solve instability, so do NOT
+                            # go below 0.25 until #1354 is fixed).  MESH-
+                            # SPECIFIC: the dx^2/dt scaling is resolution-
+                            # blind (see the a_h follow-up issue).
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
