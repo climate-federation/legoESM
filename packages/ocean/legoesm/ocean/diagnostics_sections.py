@@ -441,10 +441,16 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
     of the barotropic correction, NOT bit-equality; do not describe transports
     built from this as "the model's exact transport".
 
-    Beyond the barotropic correction, the model may also add a GM bolus
-    transport (``gm_bolus_advection="through_fct"``) and may rewrite w under
-    adaptive implicit vertical advection AFTER the tracer flux is formed;
-    neither is exposed on the state.
+    Beyond the barotropic correction, the model adds a GM bolus transport to
+    the advecting flux when -- and ONLY when -- GM runs with
+    ``gm_bolus_advection="through_fct"`` (under the default ``"centred"`` the
+    bolus is an in-operator flux and never enters the advecting pair, so the
+    reconstruction is not missing it).  Neither term is recoverable from the
+    state.
+
+    (An earlier version of this note also blamed ``adaptive_implicit_vertadv``
+    for rewriting ``w`` after the tracer flux is formed.  RETRACTED: that block
+    rewrites ``state_new.u``/``.v``, not ``w``.  Do not reinstate it.)
 
     ``source`` -- WHICH FLUX YOU GET, STATED EXPLICITLY
     --------------------------------------------------
@@ -452,8 +458,9 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
         Use the STORED ``mass_flux_u``/``mass_flux_v`` when the run set
         ``LatLonCGridOceanConfig.store_mass_flux=True`` (#1442) and the slots
         are populated -- the ACTUAL tracer-advecting flux, with the barotropic
-        correction and the GM bolus already in it, so nothing said above about
-        reconstruction applies.  Otherwise reconstruct.
+        correction (and, under through-FCT GM, the bolus) already in it, so
+        nothing said above about reconstruction applies.  Otherwise
+        reconstruct.
     ``"stored"``
         Require the stored flux; ``ValueError`` if the slots are ``None``
         (rather than silently reconstructing a different quantity under a name
@@ -475,9 +482,11 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
     caller can match the model config's own floor.  It applies to the
     RECONSTRUCTION only.
 
-    HORIZONTAL ONLY.  The returned pair is not a matched advecting triple with
-    ``state.w`` under through-FCT GM -- see the ``mass_flux_u`` field comment
-    in ``ocean/state.py`` (codex YELLOW 9).
+    HORIZONTAL ONLY, by design -- this function computes section transports.
+    The stored pair's matching VERTICAL partner is ``state.mass_flux_w``, NOT
+    ``state.w`` (which stays the base, bolus-free ``w_baro``); a 3-D budget
+    must use the stored triple together.  See the ``mass_flux_u`` field comment
+    in ``ocean/state.py``.
     """
     if source not in MASS_FLUX_SOURCES:
         raise ValueError(
@@ -592,9 +601,16 @@ def promote_gateway_geometry(grid, *, metric_convention: str = "exact"):
 
 
 def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
-                 geom, *, min_water_column_m: float | None = None
-                 ) -> GatewayAccumulator:
+                 geom, *, min_water_column_m: float | None = None,
+                 source: str = "auto") -> GatewayAccumulator:
     """Accumulate ONE timestep from a post-step state.  Pure: reads only.
+
+    ``source`` is forwarded to :func:`mass_fluxes_from_state`.  A driver that
+    KNOWS it enabled ``store_mass_flux`` should pass ``source="stored"``: then
+    a config path that silently switched the capture back off (a YAML override
+    landing after the builder, an unwired grid branch) RAISES instead of
+    quietly downgrading the diagnostic to the ``h*u`` reconstruction under a
+    flag that promises the exact flux (codex round-6 RED 3).
 
     This is the single entry point the driver calls per step, so a test that
     exercises it is testing what the driver runs.
@@ -633,13 +649,13 @@ def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
                     f"{_got}, expected {_want} for a C-grid with tracer shape "
                     f"({n_lat}, {n_lon}). The face metrics are mis-staggered; "
                     "pass model.grid or promote_gateway_geometry(grid).")
-    # source="auto": integrate the STORED tracer-advecting flux when the run
-    # enabled store_mass_flux (#1442), else the h*u reconstruction with its
-    # barotropic/GM caveat.  Explicit rather than implied, so the accumulator's
-    # provenance is readable at the call site (codex YELLOW 8).
+    # Provenance is the CALLER's choice, not a hidden precedence rule (codex
+    # YELLOW 8): "auto" takes the stored flux when the run enabled
+    # store_mass_flux (#1442) and reconstructs otherwise, "stored" refuses to
+    # reconstruct at all.
     mfu, mfv = mass_fluxes_from_state(
         state, z_coord, geom, min_water_column_m=min_water_column_m,
-        source="auto")
+        source=source)
     tr_u, tr_v = upwind_face_values(state.S.data, mfu, mfv, geom)
     return accumulate_gateways(acc, stack, mfu, mfv,
                                jnp.asarray(geom.dy_u), jnp.asarray(geom.dx_v),

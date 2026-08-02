@@ -549,20 +549,30 @@ class LatLonCGridOceanState(NamedTuple):
     # (n_lat+1, n_lon, nlev); UNITS are ``m^2/s`` (thickness x velocity), NOT
     # the ``m/s`` of the ``u``/``v`` Fields whose dims/staggering they inherit.
     #
-    # HORIZONTAL ONLY -- and under through-FCT GM they are NOT a matched triple
-    # with ``state.w`` (codex YELLOW 9).  ``_step_impl`` diagnoses ``w_baro``
-    # from the BASE pair and only afterwards forms the bolus-inclusive ``_tr``
-    # pair (``add_bolus_to_advecting_flux`` returns its own ``w_baro_tr``, which
-    # advects tracers but is NOT what ``state.w`` is built from).  So with
+    # A MATCHED ADVECTING TRIPLE with ``mass_flux_w`` below -- NOT with
+    # ``state.w`` (codex YELLOW 9).  ``_step_impl`` diagnoses ``w_baro`` from
+    # the BASE horizontal pair and only afterwards forms the bolus-inclusive
+    # ``_tr`` pair, whose own re-diagnosed vertical partner is
+    # ``add_bolus_to_advecting_flux``'s ``w_baro_tr``.  ``state.w`` stays the
+    # BASE ``w_baro`` (it is the momentum/continuity/eta vertical velocity and
+    # must not change), so under
     # ``gm_redi.gm_bolus_advection="through_fct"``:
-    #     div_h(mass_flux_u, mass_flux_v) + d(state.w)/dz  !=  0
-    # because the two sides come from different advecting fields.  Use these for
-    # HORIZONTAL section transports (their purpose); do NOT pair them with
-    # ``state.w`` in a 3-D volume budget under through-FCT GM.  Pinned by
-    # ``test_mass_flux_store.py::test_stored_pair_is_bolus_inclusive_while_w_is_not``
-    # so the asymmetry cannot be silently "fixed" on one side only.
+    #     div_h(mass_flux_u, mass_flux_v) + d(state.w)/dz     != 0   (WRONG)
+    #     div_h(mass_flux_u, mass_flux_v) + d(mass_flux_w)/dz == 0   (RIGHT)
+    # The FIRST version of #1442 stored only the horizontal pair and documented
+    # the mismatch; a documented hole is still a hole, so the vertical partner
+    # is stored too and the triple is self-consistent.  Pair these three with
+    # each other; never mix one of them with ``state.w``.
     mass_flux_u: object = None
     mass_flux_v: object = None
+    # The VERTICAL partner of the pair above [m/s], at layer INTERFACES:
+    # ``add_bolus_to_advecting_flux``'s ``w_baro_tr``, re-diagnosed from the
+    # bolus-augmented horizontal divergence by the SAME continuity operator
+    # that built ``w_baro``.  Shape ``(n_lat, n_lon, nlev+1)`` -- one MORE
+    # level than ``state.w`` (which is the interface pair averaged to cell
+    # centres), and cell-centred horizontally, so it shards/scatters exactly
+    # like a tracer.  Equals the base ``w_baro`` when GM through-FCT is off.
+    mass_flux_w: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):

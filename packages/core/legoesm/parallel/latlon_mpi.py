@@ -2161,11 +2161,16 @@ def scatter_state_latlon_cgrid_ocean(state, layout: LatLonBandLayout):
         S_som=_maybe_field_slice_lat(state.S_som, s, e),
         T_flux_div_prev=_maybe_field_slice_lat(state.T_flux_div_prev, s, e),
         S_flux_div_prev=_maybe_field_slice_lat(state.S_flux_div_prev, s, e),
-        # #1442 store_mass_flux: u-face like ``u``, v-face like ``v``.
+        # #1442 store_mass_flux: u-face like ``u``, v-face like ``v``, and the
+        # vertical partner cell-centred like ``w`` (it is (n_lat, n_lon,
+        # nlev+1) -- staggered in the VERTICAL only, which the lat-band
+        # decomposition never splits).
         mass_flux_u=_maybe_field_slice_lat(
             getattr(state, "mass_flux_u", None), s, e),
         mass_flux_v=_maybe_field_slice_lat(
             getattr(state, "mass_flux_v", None), s, e + 1),
+        mass_flux_w=_maybe_field_slice_lat(
+            getattr(state, "mass_flux_w", None), s, e),
     )
 
 
@@ -2217,13 +2222,15 @@ def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
                                 layout)
     mfv_g = _gather_field_ocean(getattr(local_state, "mass_flux_v", None),
                                 layout, is_v_face=True)
+    mfw_g = _gather_field_ocean(getattr(local_state, "mass_flux_w", None),
+                                layout)
     if layout.rank == 0:
         return local_state._replace(
             u=u_g, v=v_g, T=T_g, S=S_g, eta=eta_g, H_bathy=H_g,
             land_mask=lm_g, u_mask=um_g, v_mask=vm_g, w=w_g,
             T_som=tsom_g, S_som=ssom_g,
             T_flux_div_prev=tfd_g, S_flux_div_prev=sfd_g,
-            mass_flux_u=mfu_g, mass_flux_v=mfv_g,
+            mass_flux_u=mfu_g, mass_flux_v=mfv_g, mass_flux_w=mfw_g,
         )
     return None
 

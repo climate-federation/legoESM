@@ -114,38 +114,49 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 # the "m/s" of the u/v Fields whose dims/staggering these inherit (codex
 # YELLOW 7 -- a mislabelled Field silently mis-scales any CF/netCDF export).
 MASS_FLUX_UNITS = "m^2/s"
+# The vertical partner is a VELOCITY at layer interfaces, not a thickness-
+# weighted face flux -- the continuity operator already divided by thickness.
+MASS_FLUX_W_UNITS = "m/s"
+MASS_FLUX_W_DIMS = ("lat", "lon", "level_interface")
+MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
 
 
-def mass_flux_fields(u_field, v_field, mfu_data, mfv_data):
-    """Wrap the tracer-advecting mass fluxes as ``mass_flux_u``/``mass_flux_v``.
+def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
+    """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
-    THE SINGLE CONSTRUCTOR for these two Fields (#1442).  Both the hot-path
-    capture in ``_step_impl`` and the ``seed_scan_carry`` / SPMD pre-seed go
-    through here, so the seeded carry's metadata is IDENTICAL to what the step
-    writes.  That identity is load-bearing, not cosmetic: ``Field`` carries its
+    THE SINGLE CONSTRUCTOR for these Fields (#1442).  Both the hot-path capture
+    in ``_step_impl`` and the ``seed_scan_carry`` / SPMD pre-seed go through
+    here, so the seeded carry's metadata is IDENTICAL to what the step writes.
+    That identity is load-bearing, not cosmetic: ``Field`` carries its
     ``name``/``dims``/``units``/``staggering`` as pytree AUX DATA, so a seed
     that differs in ANY of them is a different treedef and ``lax.scan`` rejects
     the carry (the same trap the leapfrog ``u_before`` seeding comment records).
 
-    Dims and staggering are inherited from the ``u``/``v`` Fields (identical
-    face layout); only ``name`` and ``units`` are overridden.
+    ``u_field``/``v_field`` donate dims and staggering (identical face layout);
+    only ``name`` and ``units`` are overridden.  ``w_field`` donates only its
+    staggering -- ``mass_flux_w`` lives at layer INTERFACES (nlev+1), one more
+    level than ``state.w``, so it carries its own dims.
     """
     return (
         u_field.replace(data=mfu_data, name="mass_flux_u",
                         units=MASS_FLUX_UNITS),
         v_field.replace(data=mfv_data, name="mass_flux_v",
                         units=MASS_FLUX_UNITS),
+        w_field.replace(data=mfw_data, name="mass_flux_w",
+                        dims=MASS_FLUX_W_DIMS, units=MASS_FLUX_W_UNITS),
     )
 
 
 def seed_mass_flux_carry(state, store_mass_flux: bool):
-    """Pre-seed ``mass_flux_u``/``mass_flux_v`` to zeros for a constant pytree.
+    """Pre-seed the ``mass_flux_*`` slots to zeros for a constant pytree.
 
     With ``store_mass_flux`` on, the step turns these slots from ``None`` into
-    ``Field``s, which CHANGES THE STATE TREEDEF.  Unseeded that breaks three
-    things (codex RED 2 / RED 3), all silently until they crash:
+    ``Field``s, which CHANGES THE STATE TREEDEF.  Unseeded that breaks every
+    multi-step entry path, silently until it crashes:
 
-    * ``lax.scan`` -- carry-in structure != carry-out structure;
+    * ``lax.scan`` -- carry-in structure != carry-out structure (the model's
+      own ``integrate``/``integrate_scan``, the JRA55 block scans in
+      ``run_omip``, the CORE2 ``--scan-block`` in ``omip2_applicator``);
     * a direct jitted ``step`` loop -- the first step retraces and recompiles;
     * the SPMD ``shard_map`` -- ``out_specs`` is derived from the INPUT state,
       so an output leaf with no matching spec is an error.
@@ -155,28 +166,51 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     they are written unconditionally every step when the flag is on -- so the
     seed value can never reach the trajectory.
 
-    SHAPE-AGNOSTIC: shapes come from ``state.u``/``state.v``, so this is
-    correct for the full-domain state AND for the SPMD ``v_lower`` carrier
-    (where ``state.v`` already has the n_lat, not n_lat+1, leading dim).
+    SHAPE-AGNOSTIC: shapes come from ``state.u``/``state.v``/``state.w``, so
+    this is correct for the full-domain state AND for the SPMD ``v_lower``
+    carrier (where ``state.v`` already has the n_lat, not n_lat+1, leading
+    dim).
 
-    Idempotent, and a no-op when the flag is off.  Seeds as a PAIR: a partial
-    carry (one Field, one ``None``) would flip None->Field mid-scan on the
-    missing one, so an already-seeded component is preserved and only the
-    missing one is zero-filled.
+    CANONICALIZING, not merely filling (codex round-6 YELLOW 4).  Every slot is
+    rebuilt through :func:`mass_flux_fields`, INCLUDING ones that arrive
+    already populated: a pair restored from a state built by an earlier commit
+    carries the old ``units="m/s"`` metadata, and since Field metadata is
+    pytree aux data that alone is a treedef mismatch against what the step
+    writes.  Preserving such a Field verbatim -- which the first version of
+    this function did -- would reintroduce exactly the scan crash it exists to
+    prevent.  Data is preserved; only metadata is normalized.  A populated slot
+    whose SHAPE disagrees with its donor field is a hard error, not something
+    to normalize around.
+
+    Idempotent, and a no-op when the flag is off.
     """
     if not store_mass_flux:
         return state
-    if state.mass_flux_u is not None and state.mass_flux_v is not None:
-        return state
-    zeros_u, zeros_v = mass_flux_fields(
-        state.u, state.v,
-        jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data))
-    return state._replace(
-        mass_flux_u=(state.mass_flux_u if state.mass_flux_u is not None
-                     else zeros_u),
-        mass_flux_v=(state.mass_flux_v if state.mass_flux_v is not None
-                     else zeros_v),
-    )
+    nlev_i = state.w.data.shape[-1] + 1          # interfaces = nlev + 1
+
+    def _data(slot, donor_shape):
+        cur = getattr(state, slot)
+        if cur is None:
+            return jnp.zeros(donor_shape, dtype=state.u.data.dtype)
+        got = tuple(jnp.shape(cur.data))
+        if got != tuple(donor_shape):
+            raise ValueError(
+                f"seed_mass_flux_carry: {slot} has shape {got}, expected "
+                f"{tuple(donor_shape)}.  A stored mass flux must match its "
+                "u/v/w face layout; a mismatch means the state was assembled "
+                "for a different grid or a different (v_lower vs global) "
+                "staggering carrier.")
+        return cur.data
+
+    u_shape = tuple(jnp.shape(state.u.data))
+    v_shape = tuple(jnp.shape(state.v.data))
+    w_shape = tuple(jnp.shape(state.w.data))[:-1] + (nlev_i,)
+    mfu, mfv, mfw = mass_flux_fields(
+        state.u, state.v, state.w,
+        _data("mass_flux_u", u_shape),
+        _data("mass_flux_v", v_shape),
+        _data("mass_flux_w", w_shape))
+    return state._replace(mass_flux_u=mfu, mass_flux_v=mfv, mass_flux_w=mfw)
 
 
 # ---------------------------------------------------------------------------
@@ -4305,20 +4339,23 @@ class LatLonCGridOceanModel:
         # branch (the CLAUDE.md feature-gating exception): only one side is
         # ever traced and the pytree structure is fixed for the whole run.
         #
-        # HORIZONTAL ONLY: the bolus-inclusive vertical partner ``w_baro_tr``
-        # is deliberately NOT stored, and ``state.w`` below is built from the
-        # BASE ``w_baro`` -- so under through-FCT GM the stored pair and
-        # ``state.w`` are not a matched advecting triple.  See the
-        # ``mass_flux_u`` field comment in ocean/state.py (codex YELLOW 9).
+        # A MATCHED TRIPLE: ``w_baro_tr`` is stored alongside the horizontal
+        # pair.  ``state.w`` above is built from the BASE ``w_baro`` (it is the
+        # momentum/continuity/eta vertical velocity and must not change), so
+        # under through-FCT GM the stored pair and ``state.w`` are NOT
+        # consistent -- storing the pair's own vertical partner is what closes
+        # that (codex YELLOW 9).  With GM off, ``w_baro_tr is w_baro``.
         #
         # Metadata comes from the SHARED ``mass_flux_fields`` constructor that
         # ``seed_mass_flux_carry`` also uses, so the scan carry's treedef
         # (Field name/dims/units are pytree AUX data) matches this exactly.
         if self.config.store_mass_flux:
-            _mfu_field, _mfv_field = mass_flux_fields(
-                state.u, state.v, mass_flux_u_tr, mass_flux_v_tr)
+            _mfu_field, _mfv_field, _mfw_field = mass_flux_fields(
+                state.u, state.v, state.w,
+                mass_flux_u_tr, mass_flux_v_tr, w_baro_tr)
             state_new = state_new._replace(mass_flux_u=_mfu_field,
-                                           mass_flux_v=_mfv_field)
+                                           mass_flux_v=_mfv_field,
+                                           mass_flux_w=_mfw_field)
 
         # 8. Freshwater forcing (virtual salt flux only)
         #
@@ -7600,6 +7637,16 @@ class LatLonCGridOceanModel:
                 f"zero steps; increase duration or reduce dt "
                 f"(duration={duration!r}, dt={dt!r})",
             )
+
+        # store_mass_flux (#1442, codex round-6 YELLOW 5): seed BEFORE the
+        # first step and before trajectory[0] is captured.  Unseeded, the
+        # jitted step sees a different input treedef on iteration 2 (None ->
+        # Field) and RETRACES, and trajectory[0] carries a different pytree
+        # structure from every later entry -- so a caller that stacks the
+        # trajectory gets a structure error rather than an array.  No-op when
+        # the flag is off.
+        state = seed_mass_flux_carry(
+            state, getattr(self.config, "store_mass_flux", False))
 
         trajectory = [state]
         step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step

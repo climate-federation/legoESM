@@ -119,7 +119,8 @@ def _perturbed(state):
         T=state.T.replace(data=jnp.asarray(T_p)))
 
 
-_NEW_SLOTS = ("mass_flux_u", "mass_flux_v")
+_NEW_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+_HORIZ_SLOTS = ("mass_flux_u", "mass_flux_v")
 
 
 def _digest(state) -> str:
@@ -147,8 +148,8 @@ def test_default_is_off_and_fields_are_none():
     _g, _z, model, state = _setup(store=False)
     assert model.config.store_mass_flux is False
     out = model.step(_perturbed(state), _DT)
-    assert out.mass_flux_u is None
-    assert out.mass_flux_v is None
+    for nm in _NEW_SLOTS:
+        assert getattr(out, nm) is None, f"{nm} populated with the flag off"
 
 
 def test_storing_the_flux_does_not_perturb_the_trajectory():
@@ -176,6 +177,38 @@ def test_stored_flux_is_populated_finite_and_nonzero():
         np.asarray(out.u.data).shape
     assert np.asarray(out.mass_flux_v.data).shape == \
         np.asarray(out.v.data).shape
+    # The vertical partner is at layer INTERFACES: one MORE level than
+    # state.w, which is the interface pair averaged to cell centres.
+    w_shape = np.asarray(out.w.data).shape
+    assert np.asarray(out.mass_flux_w.data).shape == \
+        w_shape[:-1] + (w_shape[-1] + 1,)
+
+
+def test_stored_w_is_the_base_w_baro_when_gm_is_off():
+    """With GM off, ``mass_flux_w`` IS the ``w_baro`` ``state.w`` averages.
+
+    ``state.w = 0.5*(w_baro[..., :-1] + w_baro[..., 1:])`` and, with no bolus,
+    the stored interface field is that same ``w_baro`` -- so averaging the
+    stored field must reproduce ``state.w`` to ROUND-OFF.
+
+    Not bit-equality, and the reason is measured rather than assumed: the step
+    forms ``w_full`` at working precision and its single closing
+    ``cast_pytree(..., "storage")`` then rounds ``w`` and ``mass_flux_w``
+    INDEPENDENTLY, so averaging the rounded interfaces is not the rounded
+    average.  Observed max relative difference 8.3e-8 < 1 eps(float32).  The
+    bar is therefore in ULP of the stored dtype -- tight enough that a
+    genuinely different array (the h*u-scale differences elsewhere in this
+    file are 1e-5 and up) cannot slip under it.
+    """
+    _g, _z, model, state = _setup(store=True)
+    assert model.config.gm_redi is None
+    out = model.step(_perturbed(state), _DT)
+    mfw = np.asarray(out.mass_flux_w.data, dtype=np.float64)
+    eps = float(np.finfo(np.asarray(out.mass_flux_w.data).dtype).eps)
+    np.testing.assert_allclose(
+        0.5 * (mfw[..., :-1] + mfw[..., 1:]),
+        np.asarray(out.w.data, dtype=np.float64), rtol=4.0 * eps, atol=0,
+        err_msg="mass_flux_w is not the w_baro that state.w is built from")
 
 
 # ---------------------------------------------------------------------------
@@ -240,32 +273,48 @@ def test_stored_pair_is_the_tr_pair_not_the_raw_pair():
         "v capture is the raw pair")
 
 
-def test_stored_pair_is_bolus_inclusive_while_w_is_not():
-    """Pins the documented HORIZONTAL-ONLY scope (codex YELLOW 9).
+def test_stored_triple_is_matched_and_state_w_is_not_part_of_it():
+    """Closes YELLOW 9: the stored VERTICAL partner tracks the stored pair.
 
-    Under ``gm_bolus_advection="through_fct"`` the step stores the
-    bolus-inclusive ``_tr`` pair but builds ``state.w`` from the BASE
-    ``w_baro`` (``add_bolus_to_advecting_flux``'s ``w_baro_tr`` is used for
-    tracer advection and then discarded).  So the stored pair and ``state.w``
-    are NOT a matched advecting triple, and a 3-D budget that pairs them is
-    wrong.  This is a KNOWN, DOCUMENTED asymmetry, not an accident -- pinning
-    it here means it cannot be silently "fixed" on one side only: a change
-    that starts storing the base pair fails the test above, and a change that
-    starts building ``state.w`` from ``w_baro_tr`` fails this one.
+    Under ``gm_bolus_advection="through_fct"`` the step advects tracers with
+    the bolus-inclusive ``_tr`` pair AND its own re-diagnosed ``w_baro_tr``,
+    while ``state.w`` stays the BASE ``w_baro`` (the momentum/continuity/eta
+    vertical velocity, which must not change).  Round 5 stored only the
+    horizontal pair and DOCUMENTED the mismatch; codex round 6 rejected that
+    ("documentation plus a mismatch test do not close the 3-D-budget hole"),
+    so the vertical partner is stored too.
+
+    Two things are asserted against the ``"centred"`` control, and they are
+    what make the triple usable:
+      * ``mass_flux_w`` RESPONDS to the bolus arm (it is the ``_tr`` vertical
+        velocity, not a copy of the base one) -- if it did not, storing it
+        would be pointless;
+      * ``state.w`` does NOT respond (it is bit-identical across arms), which
+        is what makes it the WRONG partner and the stored triple the right
+        one.
     """
     _gB, _zB, mB, sB = _setup(store=True, gm_bolus="centred")
     _gC, _zC, mC, sC = _setup(store=True, gm_bolus="through_fct")
-    wB = np.asarray(mB.step(_perturbed(sB), _DT).w.data, dtype=np.float64)
-    wC = np.asarray(mC.step(_perturbed(sC), _DT).w.data, dtype=np.float64)
-    # state.w is built from the BASE pair, which is identical in both arms, so
-    # w is bit-identical even though the STORED flux differs (asserted above).
-    np.testing.assert_allclose(wC, wB, rtol=0.0, atol=0.0,
-                               err_msg=(
-                                   "state.w now responds to the GM bolus arm; "
-                                   "if w is intentionally built from w_baro_tr, "
-                                   "update the HORIZONTAL-ONLY note on "
-                                   "LatLonCGridOceanState.mass_flux_u and this "
-                                   "test together"))
+    outB = mB.step(_perturbed(sB), _DT)
+    outC = mC.step(_perturbed(sC), _DT)
+
+    wB = np.asarray(outB.w.data, dtype=np.float64)
+    wC = np.asarray(outC.w.data, dtype=np.float64)
+    np.testing.assert_allclose(wC, wB, rtol=0.0, atol=0.0, err_msg=(
+        "state.w now responds to the GM bolus arm.  It is supposed to stay "
+        "the BASE w_baro (momentum/continuity/eta); if it is intentionally "
+        "built from w_baro_tr, that is a physics change, not a diagnostic "
+        "one -- update the field comment on "
+        "LatLonCGridOceanState.mass_flux_u and this test together"))
+
+    mfwB = np.asarray(outB.mass_flux_w.data, dtype=np.float64)
+    mfwC = np.asarray(outC.mass_flux_w.data, dtype=np.float64)
+    scale = float(np.max(np.abs(mfwB)))
+    assert scale > 0.0, "the base w_baro is zero -- the test cannot discriminate"
+    assert float(np.max(np.abs(mfwC - mfwB))) > 1e-10 * scale, (
+        "mass_flux_w is IDENTICAL across the centred/through-FCT arms, so it "
+        "is the BASE w_baro and not the _tr vertical partner -- the stored "
+        "triple is then no more consistent than pairing with state.w was")
 
 
 def test_stored_flux_differs_from_the_reconstruction():
@@ -462,7 +511,7 @@ def test_stored_fields_carry_mass_flux_units_not_velocity_units():
     the staggering metadata.
     """
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        MASS_FLUX_UNITS,
+        MASS_FLUX_W_DIMS, MASS_FLUX_W_UNITS, MASS_FLUX_UNITS,
     )
 
     _g, _z, model, state = _setup(store=True)
@@ -480,6 +529,16 @@ def test_stored_fields_carry_mass_flux_units_not_velocity_units():
         assert f.name == nm
         assert f.dims == s.dims, "face dims must be inherited from u/v"
         assert f.staggering == s.staggering
+    # The vertical partner is a VELOCITY (the continuity operator already
+    # divided by thickness), on INTERFACES -- so it must NOT inherit state.w's
+    # cell-centred level dim, and it must not carry the m^2/s of the pair.
+    mfw = out.mass_flux_w
+    assert mfw.name == "mass_flux_w"
+    assert mfw.units == MASS_FLUX_W_UNITS == "m/s"
+    assert mfw.dims == MASS_FLUX_W_DIMS
+    assert mfw.dims != out.w.dims, (
+        "mass_flux_w must not claim state.w's dims -- it has one more level")
+    assert mfw.staggering == out.w.staggering
 
 
 def test_seeded_carry_metadata_matches_what_the_step_writes():
@@ -511,12 +570,16 @@ def test_seeded_carry_metadata_matches_what_the_step_writes():
 def test_seed_scan_carry_seeds_the_mass_flux_slots():
     _g, _z, model, state = _setup(store=True)
     seeded = model.seed_scan_carry(_perturbed(state), _DT)
-    for nm, src in (("mass_flux_u", "u"), ("mass_flux_v", "v")):
+    for nm in _NEW_SLOTS:
         f = getattr(seeded, nm)
         assert f is not None, f"{nm} was not seeded -- lax.scan would crash"
-        assert np.asarray(f.data).shape == \
-            np.asarray(getattr(seeded, src).data).shape
         assert not np.any(np.asarray(f.data)), "the seed must be zeros"
+    for nm, src in (("mass_flux_u", "u"), ("mass_flux_v", "v")):
+        assert np.asarray(getattr(seeded, nm).data).shape == \
+            np.asarray(getattr(seeded, src).data).shape
+    w_shape = np.asarray(seeded.w.data).shape
+    assert np.asarray(seeded.mass_flux_w.data).shape == \
+        w_shape[:-1] + (w_shape[-1] + 1,)
     # Idempotent: re-seeding an already-prepared carry is a no-op.
     again = model.seed_scan_carry(seeded, _DT)
     np.testing.assert_array_equal(np.asarray(again.mass_flux_u.data),
@@ -526,8 +589,88 @@ def test_seed_scan_carry_seeds_the_mass_flux_slots():
 def test_seed_is_a_noop_when_the_flag_is_off():
     _g, _z, model, state = _setup(store=False)
     seeded = model.seed_scan_carry(_perturbed(state), _DT)
-    assert seeded.mass_flux_u is None
-    assert seeded.mass_flux_v is None
+    for nm in _NEW_SLOTS:
+        assert getattr(seeded, nm) is None
+
+
+def test_seed_canonicalizes_legacy_metadata_and_partial_pairs():
+    """Codex round-6 YELLOW 4: a populated slot must be REBUILT, not kept.
+
+    A state produced by an earlier commit carries ``units="m/s"`` on the
+    stored pair (the metadata bug YELLOW 7 fixed).  ``Field`` metadata is
+    pytree AUX data, so preserving such a Field verbatim -- which the first
+    version of ``seed_mass_flux_carry`` did for any non-``None`` slot -- is
+    itself a treedef mismatch against what the step writes, i.e. exactly the
+    scan crash the seeding exists to prevent.
+
+    Also covers the PARTIAL carry (some slots Field, some ``None``), which was
+    the other way to end up with a mixed-provenance pytree.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    _g, _z, model, state = _setup(store=True)
+    stepped = model.step(_perturbed(state), _DT)
+
+    # A "legacy" state: right data, WRONG (pre-fix) metadata, and one slot
+    # missing entirely.
+    legacy = stepped._replace(
+        mass_flux_u=stepped.mass_flux_u.replace(units="m/s"),
+        mass_flux_w=None,
+    )
+    assert legacy.mass_flux_u.units == "m/s"
+    fixed = seed_mass_flux_carry(legacy, True)
+    for nm in _NEW_SLOTS:
+        a, b = getattr(fixed, nm), getattr(stepped, nm)
+        assert (a.name, a.dims, a.units, a.staggering) == \
+               (b.name, b.dims, b.units, b.staggering), (
+            f"{nm} kept its legacy metadata; the carry treedef still differs "
+            "from what the step writes")
+    assert (jax.tree_util.tree_structure(fixed)
+            == jax.tree_util.tree_structure(stepped))
+    # DATA is preserved for the slot that had it, zero-filled for the one that
+    # did not -- canonicalizing metadata must not silently discard values.
+    np.testing.assert_array_equal(
+        np.asarray(fixed.mass_flux_u.data),
+        np.asarray(stepped.mass_flux_u.data))
+    assert not np.any(np.asarray(fixed.mass_flux_w.data))
+
+
+def test_seed_rejects_a_wrong_shaped_stored_slot():
+    """Canonicalizing must not paper over a genuinely wrong layout."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    _g, _z, model, state = _setup(store=True)
+    stepped = model.step(_perturbed(state), _DT)
+    bad = stepped._replace(
+        mass_flux_v=stepped.mass_flux_v.replace(
+            data=stepped.mass_flux_v.data[:-1]))     # v_lower, not v
+    with pytest.raises(ValueError, match="mass_flux_v has shape"):
+        seed_mass_flux_carry(bad, True)
+
+
+def test_integrate_seeds_before_the_first_step(monkeypatch):
+    """Codex round-6 YELLOW 5: ``integrate()`` did not seed its own state.
+
+    Unseeded, ``trajectory[0]`` has a different pytree structure from every
+    later entry (its slots are ``None``, theirs are ``Field``s), so a caller
+    that stacks the trajectory gets a structure error; and the jitted step
+    retraces between iteration 1 and 2.
+    """
+    _g, _z, model, state = _setup(store=True)
+    final, traj = model.integrate(_perturbed(state), duration=2 * _DT, dt=_DT)
+    assert len(traj) >= 2
+    structs = {jax.tree_util.tree_structure(s) for s in traj}
+    structs.add(jax.tree_util.tree_structure(final))
+    assert len(structs) == 1, (
+        "integrate() returned a trajectory whose entries have DIFFERENT "
+        "pytree structures -- trajectory[0] was not seeded")
+    for nm in _NEW_SLOTS:
+        assert getattr(traj[0], nm) is not None, f"trajectory[0].{nm} is None"
+        assert getattr(final, nm) is not None
 
 
 def test_seeded_carry_survives_lax_scan():
@@ -630,12 +773,75 @@ def test_spmd_shard_and_gather_round_trip_the_mass_flux_pair():
     assert np.asarray(sharded.mass_flux_u.data).shape == \
         np.asarray(out.mass_flux_u.data).shape, (
         "mass_flux_u is a u-face field and must keep its n_lat leading dim")
+    assert np.asarray(sharded.mass_flux_w.data).shape == \
+        np.asarray(out.mass_flux_w.data).shape, (
+        "mass_flux_w is cell-centred horizontally and must keep its shape")
     back = gather_state_latlon(sharded, mesh)
+    np.testing.assert_allclose(np.asarray(back.mass_flux_w.data),
+                               np.asarray(out.mass_flux_w.data),
+                               rtol=0, atol=0)
     np.testing.assert_allclose(np.asarray(back.mass_flux_v.data), mfv,
                                rtol=0, atol=0)
     np.testing.assert_allclose(np.asarray(back.mass_flux_u.data),
                                np.asarray(out.mass_flux_u.data),
                                rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("fused_halo", ["0", "1"])
+def test_sharded_ocean_step_runs_with_the_flag_on(monkeypatch, fused_halo):
+    """Codex round-6 YELLOW 7: exercise ``make_sharded_ocean_step`` ITSELF.
+
+    The shard/gather round-trip above never calls the sharded STEP, so it
+    would stay green with the ``sharded_step`` pre-seed removed while a
+    production run died on ``out_specs`` (which is derived from the INPUT
+    state, so a step that ADDS leaves has no spec for them).  This runs the
+    real 2-device step from a RAW (unseeded) sharded state -- the exact
+    production entry -- and compares it against the serial answer.
+
+    Parametrized over ``LEGOESM_LATLON_SPMD_FUSED_HALO`` because the fused
+    v-carrier reconstruction now packs THREE staggered carriers (v, v_mask,
+    mass_flux_v) instead of two, and that path is selected at trace time.
+    """
+    from jax.sharding import Mesh
+
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon, make_sharded_ocean_step, shard_state_latlon,
+    )
+
+    devices = jax.devices()
+    if len(devices) < 2:
+        pytest.skip("needs >= 2 devices "
+                    "(XLA_FLAGS=--xla_force_host_platform_device_count=2)")
+    monkeypatch.setenv("LEGOESM_LATLON_SPMD_FUSED_HALO", fused_halo)
+
+    _g, _z, model, state = _setup(store=True)
+    p = _perturbed(state)
+    serial = model.step(p, _DT)
+
+    mesh = Mesh(np.asarray(devices[:2]).reshape(2), ("lat",))
+    # RAW state: slots are None.  The sharded step must seed them itself.
+    assert p.mass_flux_u is None
+    sharded_in = shard_state_latlon(p, mesh)
+    assert sharded_in.mass_flux_u is None, (
+        "the input to the sharded step must be UNSEEDED for this test to "
+        "exercise the pre-seed inside sharded_step")
+
+    step = make_sharded_ocean_step(model, mesh)
+    out = step(sharded_in, _DT)
+    got = gather_state_latlon(out, mesh)
+
+    for nm in _NEW_SLOTS:
+        f = getattr(got, nm)
+        assert f is not None, (
+            f"{nm} is None after the sharded step -- the pre-seed did not run")
+        a = np.asarray(f.data)
+        assert np.all(np.isfinite(a)), f"{nm} has non-finite entries"
+        assert np.any(a != 0.0), f"{nm} is all zeros -- still the seed"
+        np.testing.assert_allclose(
+            a, np.asarray(getattr(serial, nm).data),
+            rtol=2e-5, atol=1e-9,
+            err_msg=(f"{nm} from the 2-device sharded step disagrees with the "
+                     f"serial step (fused_halo={fused_halo})"))
 
 
 def test_mpi_band_scatter_slices_both_mass_flux_faces():
@@ -953,6 +1159,114 @@ def test_every_supported_gateway_grid_branch_passes_store_mass_flux():
         f"{sorted(SUPPORTED_APP_GRIDS)}")
 
 
+def test_each_gateway_builder_body_actually_enables_the_flag():
+    """Codex round-6 RED 3 (test vacuity): the parameter must be USED.
+
+    The two tests above check the SIGNATURE and the CALL SITE.  Both would
+    stay green if a builder accepted ``store_mass_flux`` and then ignored it,
+    which is the same silent-reconstruction failure RED 6 was about, one level
+    down.  This asserts each builder body puts the flag into the ``_ovr``
+    override dict that gets applied to the config.
+    """
+    import inspect
+
+    from scripts.run import run_omip_core2
+
+    for fn_name in ("build_tripole", "build_latlon_bathy"):
+        src = inspect.getsource(getattr(run_omip_core2, fn_name))
+        assert "if store_mass_flux:" in src, (
+            f"{fn_name} never branches on its store_mass_flux parameter")
+        assert '_ovr["store_mass_flux"] = True' in src, (
+            f"{fn_name} accepts store_mass_flux but never puts it into the "
+            "config override dict -- the flag is dead on that grid")
+
+
+def test_gateway_driver_demands_the_stored_flux_not_auto():
+    """Codex round-6 RED 3: the per-step call must pass ``source="stored"``.
+
+    Both supported grid branches turn the capture ON for
+    ``--gateway-transports``, so a state WITHOUT it means some config path
+    (a YAML override landing after the builder, a new unwired grid) silently
+    disabled it.  With ``source="auto"`` the accumulator would quietly
+    integrate the ``h*u`` reconstruction instead -- reporting a wrong number
+    under a flag that promises the exact flux.  ``"stored"`` makes it raise.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    src = (root / "scripts/run/run_omip_core2.py").read_text()
+    m = re.search(r"_gw_acc = gateway_step\((.*?)\)\n", src, re.S)
+    assert m, "the driver's gateway_step call site moved -- update this test"
+    assert 'source="stored"' in m.group(1), (
+        "the driver calls gateway_step without source='stored'; a silently "
+        "disabled store_mass_flux would be masked by the h*u fallback")
+
+
+def test_gateway_transports_rejects_a_yaml_that_disables_the_capture():
+    """Codex round-6 RED 3: YAML is applied AFTER the gateway builders.
+
+    ``--config ocean.store_mass_flux=false`` would therefore switch the
+    capture back off behind ``--gateway-transports``' back.  The driver must
+    refuse the combination, exactly as it refuses ``--kpp-ri-crit`` against a
+    YAML ``ocean.physics`` block for the same reason.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    lines = (root / "scripts/run/run_omip_core2.py").read_text().splitlines()
+    guard = [i for i, ln in enumerate(lines)
+             if '"store_mass_flux" in _ovr' in ln]
+    assert guard, (
+        "no guard rejecting a YAML store_mass_flux override against "
+        "--gateway-transports")
+    apply_at = next(i for i, ln in enumerate(lines)
+                    if "model.config.replace_flat(**_ovr)" in ln)
+    assert guard[0] < apply_at, (
+        f"the guard (line {guard[0] + 1}) runs AFTER the YAML override is "
+        f"applied (line {apply_at + 1}) -- it would never prevent anything")
+    block = "\n".join(lines[guard[0]:apply_at])
+    assert re.search(r"raise ValueError", block), (
+        "the YAML/CLI store_mass_flux conflict is detected but not raised")
+
+
+def test_scan_drivers_seed_the_carry_before_their_lax_scan():
+    """Codex round-6 RED 1 / RED 2: every scan boundary must pre-seed.
+
+    ``_step_impl`` turns the mass_flux_* slots from ``None`` into ``Field``s,
+    which is a ``lax.scan`` carry-structure mismatch.  The SPMD pre-seed is
+    INSIDE the sharded step, i.e. inside these scans' bodies -- too late.
+    Each driver must seed before its own scan.  Asserting the ORDER of the two
+    named symbols in the source is the only cheap way to pin that inside these
+    long closures; it goes red if a seed call is dropped or moved after.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    checks = [
+        ("scripts/run/run_omip.py", "_seed_mass_flux_for_scan(model, state)",
+         "init = (state, ice_state) if enable_sea_ice else state", 2),
+        ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py",
+         "state = seed_mass_flux_carry(state, True)",
+         "lax.scan(_body, (state, step0), idx_t_block)", 1),
+    ]
+    for rel, seed_tok, scan_tok, n_expected in checks:
+        lines = (root / rel).read_text().splitlines()
+        # CALL sites only -- the `def` line contains the same token.
+        seeds = [i for i, ln in enumerate(lines)
+                 if seed_tok in ln and not ln.lstrip().startswith("def ")]
+        scans = [i for i, ln in enumerate(lines) if scan_tok in ln]
+        assert len(seeds) == n_expected, (
+            f"{rel}: expected {n_expected} seed call(s) {seed_tok!r}, found "
+            f"{len(seeds)} -- a scan boundary lost its pre-seed")
+        assert len(scans) == n_expected
+        for s, c in zip(seeds, scans):
+            assert s < c, (
+                f"{rel}: the seed at line {s + 1} comes AFTER the scan at "
+                f"line {c + 1}")
+
+
 def test_run_omip_restart_does_not_persist_the_diagnostic_flux():
     """YELLOW 10: the npz lane wrote them on save and DROPPED them on load.
 
@@ -992,7 +1306,9 @@ def test_restart_round_trip_drops_nothing_it_wrote(tmp_path):
         f"the restart persists {sorted(written & set(_NEW_SLOTS))}, which "
         "_load_restart silently drops (fresh template slot is None)")
 
-    template = out._replace(mass_flux_u=None, mass_flux_v=None)
+    # A FRESH template has every optional diagnostic slot at None, which is
+    # what makes the load side drop anything the writer put there.
+    template = out._replace(**{nm: None for nm in _NEW_SLOTS})
     loaded, day, step = _load_restart(path, template, grid_type="latlon")
     assert (day, step) == (1.0, 1)
     for name in out._fields:

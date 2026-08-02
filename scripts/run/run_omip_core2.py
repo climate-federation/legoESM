@@ -4840,6 +4840,23 @@ def main() -> int:
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
                     "section and use the CLI flags -- not both.")
+            # Same class of conflict for #1442 (codex round-6 RED 3): this
+            # rebuild happens AFTER the gateway builders set store_mass_flux
+            # from --gateway-transports, so a YAML
+            # ``ocean: {store_mass_flux: false}`` would silently switch the
+            # capture back off and the gateway accumulator would quietly
+            # integrate the h*u reconstruction under a flag that promises the
+            # exact flux.  Fail loud; YAML never wins over the explicit CLI.
+            if ("store_mass_flux" in _ovr
+                    and getattr(args, "gateway_transports", False)
+                    and not _ovr["store_mass_flux"]):
+                raise ValueError(
+                    "--gateway-transports conflicts with --config "
+                    "ocean.store_mass_flux=false: the flag turns the capture ON "
+                    "so the diagnostic integrates the flux the model actually "
+                    "advected with, and the YAML would turn it back off AFTER "
+                    "the builder, silently downgrading the diagnostic to the "
+                    "h*u reconstruction. Drop one of the two.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config.replace_flat(**_ovr),
                 # Preserve the zdfiwm maps through the YAML rebuild (codex
@@ -6315,7 +6332,16 @@ def main() -> int:
                 _gw_acc = gateway_step(
                     _gw_acc, _gw_gates, state, z_coord, _gw_geom,
                     min_water_column_m=getattr(model.config,
-                                               "min_water_column_m", None))
+                                               "min_water_column_m", None),
+                    # source="stored", not "auto" (#1442, codex round-6 RED 3):
+                    # BOTH supported grid branches turn store_mass_flux ON for
+                    # this flag, so a state without the capture means a config
+                    # path silently disabled it.  "auto" would hide that by
+                    # falling back to the h*u reconstruction -- the very thing
+                    # #1442 exists to stop the diagnostic from integrating.
+                    # The non-fatal boundary below still keeps the run alive;
+                    # it just prints WHY instead of reporting a wrong number.
+                    source="stored")
             except Exception as _gw_e:
                 print(f"[gateway] DISABLED at step {step} after "
                       f"{type(_gw_e).__name__}: {_gw_e}")
