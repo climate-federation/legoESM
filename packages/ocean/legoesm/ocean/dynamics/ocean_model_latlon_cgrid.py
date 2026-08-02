@@ -213,14 +213,15 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     this function did -- would reintroduce exactly the scan crash it exists to
     prevent.
 
-    VALUES are preserved; METADATA and DTYPE are normalized.  The dtype cast is
-    deliberate and can be lossy (f64 -> the f32 storage donor): a slot at a
-    different precision is a ``lax.scan`` carry mismatch the moment the step
-    re-emits it at storage precision, and these slots are pure diagnostics
-    rewritten every step, so narrowing one costs nothing a consumer can
-    observe.  A populated slot whose SHAPE disagrees with its donor field is a
-    hard error instead -- checked BEFORE the cast, so a slot that is wrong in
-    both still raises.
+    VALUES are RETAINED SUBJECT TO THE DTYPE CONVERSION; metadata is
+    normalized.  The cast is deliberate and can be lossy (f64 -> the f32
+    storage donor), and a caller CAN observe the narrowed values on the seeded
+    carry before the next step overwrites them -- so "preserved" would be too
+    strong.  It is done because a slot at a different precision is a
+    ``lax.scan`` carry mismatch the moment the step re-emits it at storage
+    precision, and these are per-step diagnostics.  A populated slot whose
+    SHAPE disagrees with its donor field is a hard error instead -- checked
+    BEFORE the cast, so a slot that is wrong in both still raises.
 
     Idempotent, and a no-op when the flag is off.  The already-canonical fast
     path below is keyed on the METADATA, not merely on "every slot is
@@ -4408,9 +4409,14 @@ class LatLonCGridOceanModel:
         # what lines ~3961/3965 actually advect T and S with: they start as
         # ``h_u_old * u_corrected`` -- i.e. WITH the barotropic transport
         # correction ``(Hu_avg - Hu_3d)/H_u_old`` that never reaches
-        # ``state.u`` -- and are REPLACED by the bolus-inclusive flux when GM
-        # ``gm_bolus_advection`` is active.  Storing the ``_tr`` pair therefore
-        # closes BOTH the barotropic and the GM-bolus omission at once.
+        # ``state.u`` -- and are REPLACED by the bolus-inclusive flux under the
+        # EXACT condition ``_want_bolus`` tests above, namely BOTH
+        # ``gm_redi.gm_bolus_advection == "through_fct"`` AND
+        # ``gm_redi.slope_scheme == "nemo_iso_lap"`` (the default "centred"
+        # bolus is an in-operator flux and never enters this pair; no other
+        # slope scheme exports a bolus transport at all).  Storing the ``_tr``
+        # pair therefore closes the barotropic omission always, and the
+        # GM-bolus omission in that configuration.
         #
         # Static Python bool on a config leaf, so this is a compile-time
         # branch (the CLAUDE.md feature-gating exception): only one side is

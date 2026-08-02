@@ -2,14 +2,18 @@
 
 ``state.u``/``state.v`` are the velocity BEFORE the barotropic transport
 correction.  ``_step_impl`` forms ``u_corrected = u + (Hu_avg - Hu_3d)/H_u_old``
-and advects tracers with ``h_u_old * u_corrected`` (plus the GM bolus when
-active), but never writes ``u_corrected`` back.  So every transport diagnostic
+and advects tracers with ``h_u_old * u_corrected`` (plus the GM bolus under the
+exact condition ``gm_bolus_advection="through_fct"`` AND
+``slope_scheme="nemo_iso_lap"``, which is what ``_want_bolus`` tests -- the
+default "centred" bolus never enters this pair), but never writes
+``u_corrected`` back.  So every transport diagnostic
 built from a state or a snapshot was reconstructing a DIFFERENT quantity --
 measured at 0.35-1.28 Sv per zonal section on eORCA1.
 
 These tests pin, in order of strength:
   1. the flag is inert by default and the trajectory is BIT-IDENTICAL with it
-     on (SHA-256 digest of every array in the state),
+     on (SHA-256 digest of every PRE-EXISTING array leaf -- the three new
+     slots are excluded by design; see ``_digest``),
   2. the stored pair is the ``_tr`` (tracer-advecting) pair and NOT the raw
      momentum pair -- discriminated by a GM through-FCT control triple, the
      only configuration in which the two arrays differ at all,
@@ -149,7 +153,13 @@ _HORIZ_SLOTS = ("mass_flux_u", "mass_flux_v")
 
 
 def _digest(state) -> str:
-    """SHA-256 over every array leaf, EXCLUDING the two new fields."""
+    """SHA-256 over every PRE-EXISTING array leaf.
+
+    The three new ``mass_flux_*`` slots are excluded BY DESIGN: they are the
+    thing being added, so including them would make the flag-off vs flag-on
+    comparison trivially unequal instead of testing what it is meant to test --
+    that nothing ELSE moved.
+    """
     h = hashlib.sha256()
     for name in state._fields:
         if name in _NEW_SLOTS:

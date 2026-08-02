@@ -94,7 +94,10 @@ Also omitted BY THE RECONSTRUCTION: the GM bolus flux when (and only when)
 ``gm_bolus_advection="through_fct"``.  See ``mass_fluxes_from_state`` for the
 same caveat at the point of use.
 
-All functions are pure and JAX-traceable (no host callbacks, stable shapes).
+The NUMERIC KERNELS are pure and JAX-traceable (no host callbacks, stable
+shapes).  That claim does NOT extend to the whole module: ``GatewayAccumulator``
+carries Python strings and ``as_dict()`` pulls values to the host with
+``float()``.  See the scope limit immediately below.
 
 SCOPE LIMIT: ``GatewayAccumulator`` carries the gateway NAMES (Python strings),
 so it is NOT a valid ``lax.scan`` carry -- strings are not JAX types.  It is

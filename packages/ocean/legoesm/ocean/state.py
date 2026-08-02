@@ -531,15 +531,23 @@ class LatLonCGridOceanState(NamedTuple):
     tau_x_prev: object = None
     tau_y_prev: object = None
     freshwater_eta_prev: object = None
-    # THE TRACER-ADVECTING MASS FLUXES [m^2/s] at u/v faces, exactly as used by
-    # this step's flux-form tracer update (#1442).  Populated ONLY when
+    # THE TRACER-ADVECTING MASS FLUXES [m^2/s] at u/v faces: a STORAGE-PRECISION
+    # SNAPSHOT of the volume flux this step's flux-form tracer update was
+    # evaluated with (#1442).  Not bit-exact "as used" -- the step's closing
+    # ``cast_pytree(..., "storage")`` rounds these along with everything else,
+    # so a run computing in f64 and storing in f32 keeps the f32 value.  VOLUME
+    # flux only: tracer transports built from it still apply their own face
+    # scheme (the gateway accumulator's salt transport remains a post-step
+    # UPWIND diagnostic, not the model's own tracer flux).  Populated ONLY when
     # ``LatLonCGridOceanConfig.store_mass_flux`` is True; default None => inert,
     # zero behaviour change (same None-seeding pattern as ``tke``/``bt_hist``).
     #
     # WHY THIS EXISTS: ``u``/``v`` are the velocity BEFORE the barotropic
     # transport correction.  The step forms
     # ``u_corrected = u + (Hu_avg - Hu_3d)/H_u_old`` and advects tracers with
-    # ``h_u_old * u_corrected`` (plus the GM bolus flux when active), but
+    # ``h_u_old * u_corrected`` (plus the GM bolus flux under the exact
+    # condition below: gm_bolus_advection="through_fct" AND
+    # slope_scheme="nemo_iso_lap"), but
     # ``u_corrected`` is never written back to the state.  So no consumer of a
     # state or a snapshot could reconstruct the flux the model actually used:
     # the reconstruction ``h_new * u`` was measured to differ by 0.35-1.28 Sv
@@ -596,12 +604,19 @@ class LatLonCGridOceanState(NamedTuple):
     # paragraph as a POINTER, not a citable fact: verify it for your config
     # before relying on it.
     #
-    # The ONE exact invariant, and the one a test pins: the GM BOLUS INCREMENT
-    # carried by the triple is discretely NON-DIVERGENT (the bolus is
-    # column-non-divergent by construction and ``w_baro_tr`` is re-diagnosed
-    # through the SAME continuity operator), so the through-FCT and centred
-    # arms have IDENTICAL total divergence.  That is what makes the FCT limiter
+    # The one invariant a test pins: the GM BOLUS INCREMENT carried by the
+    # triple is discretely NON-DIVERGENT (the bolus is column-non-divergent by
+    # construction and ``w_baro_tr`` is re-diagnosed through the SAME
+    # continuity operator), so the through-FCT and centred arms have IDENTICAL
+    # total divergence.  That is what makes the FCT limiter
     # constancy-preserving on the bolus-augmented field.
+    #
+    # EXACT IN THE OPERATORS, TO ROUND-OFF IN THESE ARRAYS.  The relation holds
+    # exactly for the pre-cast fields inside the step; the three legs stored
+    # here are independently rounded to the storage precision, so a consumer
+    # measures it to a few ULP, not to zero.  The test asserts it with a
+    # tolerance for exactly that reason -- do not read "exact" off this
+    # paragraph and then report a residual as a defect.
     mass_flux_u: object = None
     mass_flux_v: object = None
     # The VERTICAL partner of the pair above [m/s], at layer INTERFACES:
