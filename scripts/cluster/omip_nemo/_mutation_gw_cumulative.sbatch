@@ -260,6 +260,41 @@ swap "$DRIVER" '    _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
 run M22 "$DRV_T::test_driver_writes_a_run_end_row_and_closes_after_the_loop"
 restore scripts/run/run_omip_core2.py
 
+# ========================================== codex round-2 fixes (M23 - M26)
+echo "#### M23: emit CRLF from the transports.txt writer ####"
+echo "####      read_text() would normalise this away; read_bytes() must not."
+swap "$DRIVER" '        with open(Path(out_dir) / "transports.txt", "a") as fh:
+            fh.write(f"gateway_n_steps {acc.n}\n")' \
+               '        with open(Path(out_dir) / "transports.txt", "a",
+                  newline="\r\n") as fh:   # MUTATION: CRLF
+            fh.write(f"gateway_n_steps {acc.n}\n")'
+run M23 "$DRV_T::test_transports_txt_content_is_pinned_exactly"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M24: key the duplicate-endpoint guard on STEP instead of n ####"
+swap "$DRIVER" '        if gw_csv.last_n is not None and n == gw_csv.last_n:' \
+               '        if gw_csv.last_n is not None and int(step) == gw_csv.last_n:   # MUTATION'
+run M24 "$DRV_T::test_a_repeated_dump_point_is_not_written_twice"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M25: leak the handle when the header write fails ####"
+swap "$DRIVER" '        if fh is not None:
+            try:
+                fh.close()
+            except Exception:  # noqa: BLE001 -- already failing; nothing to add
+                pass
+        return None' \
+               '        return None  # MUTATION: handle leaked'
+run M25 "$DRV_T::test_a_failed_header_write_closes_the_handle"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M26: COMMENT OUT the run-end whole-run block ####"
+echo "####      (the selector that codex round-2 found unstripped) ####"
+swap "$DRIVER" '    _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)' \
+               '    # MUTATION _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)'
+run M26 "$DRV_T::test_driver_writes_a_run_end_row_and_closes_after_the_loop"
+restore scripts/run/run_omip_core2.py
+
 # ==================================================================== control
 echo "=== CONTROL: unmutated worktree must be GREEN ==="
 DIRTY="$(git -C "$WT" status --porcelain --untracked-files=no | tr '\n' ' ')"

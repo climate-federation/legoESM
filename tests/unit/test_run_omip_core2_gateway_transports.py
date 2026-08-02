@@ -352,7 +352,8 @@ def test_guard_call_precedes_the_use_scan_early_return_in_the_driver():
     src = (Path(_ROOT) / "scripts/run/run_omip_core2.py").read_text()
     lines = src.splitlines()
     guard = next(i for i, ln in enumerate(lines)
-                 if "validate_gateway_lanes(" in ln and "import" not in ln)
+                 if "validate_gateway_lanes(" in _code(ln)
+                 and "import" not in ln)
     scan = next(i for i, ln in enumerate(lines) if ln == "    if use_scan:")
     assert guard < scan, (
         f"validate_gateway_lanes is called at line {guard + 1}, AFTER the "
@@ -367,9 +368,9 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
     loop = next(i for i, ln in enumerate(lines)
                 if ln.strip().startswith("for step in range(1, n_steps"))
     call = next(i for i, ln in enumerate(lines)
-                if "_gw_acc = gateway_step(" in ln)
+                if "_gw_acc = gateway_step(" in _code(ln))
     write = next(i for i, ln in enumerate(lines)
-                 if "_gateway_transport_diag(_gw_acc" in ln)
+                 if "_gateway_transport_diag(_gw_acc" in _code(ln))
     assert loop < call < write, (
         "the accumulation must sit inside the step loop and before the writer")
     # The geometry must be promoted ONCE, BEFORE the loop, and the per-step
@@ -377,7 +378,7 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
     # step rebuilt every metric array and defaulted the metric convention to
     # "exact" regardless of the run's config (codex round-3 finding 1).
     promote = next(i for i, ln in enumerate(lines)
-                   if "_gw_geom = promote_gateway_geometry(" in ln)
+                   if "_gw_geom = promote_gateway_geometry(" in _code(ln))
     assert promote < loop, (
         "promote_gateway_geometry must run BEFORE the step loop, not in it")
     assert "_gw_geom" in "".join(lines[call:call + 6]), (
@@ -934,8 +935,14 @@ def test_driver_writes_a_run_end_row_and_closes_after_the_loop():
     """`step != n_steps` excludes the last step, so the final window is only
     recoverable if the run-end row is written."""
     lines = _driver_lines()
-    write = next(i for i, ln in enumerate(lines)
-                 if "_gateway_transport_diag(_gw_acc" in ln)
+    # A list + explicit assert, not `next(...)`: a StopIteration from a
+    # generator is an ERROR with no message, and the assertion that matters
+    # ("the whole-run block is still called") should say so.
+    writes = [i for i, ln in enumerate(lines)
+              if "_gateway_transport_diag(_gw_acc" in _code(ln)]
+    assert len(writes) == 1, (
+        f"expected exactly one run-end whole-run block call, found {writes}")
+    write = writes[0]
     final_row = [i for i, ln in enumerate(lines)
                  if "_gateway_cumulative_row(_gw_csv, _gw_acc, n_steps" in _code(ln)]
     assert len(final_row) == 1, (
@@ -964,7 +971,7 @@ def test_driver_dumps_and_closes_on_the_blowup_abort_path():
     loop = next(i for i, ln in enumerate(lines)
                 if ln.strip().startswith("for step in range(1, n_steps"))
     aborts = [i for i, ln in enumerate(lines)
-              if 'print("[ABORT] non-finite state", flush=True)' in ln]
+              if 'print("[ABORT] non-finite state", flush=True)' in _code(ln)]
     assert len(aborts) >= 2, (
         "expected a scan-lane and a host-loop abort; the anchor rotted")
     abort = next(i for i in aborts if i > loop)
@@ -1036,14 +1043,22 @@ def test_a_repeated_dump_point_is_not_written_twice(tmp_path):
     acc = GatewayAccumulator(("davis_caa",), jnp.asarray([2.0e6]),
                              jnp.asarray([3.0e6]), 42)
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    # The STEP LABEL differs on the two calls that carry the SAME acc.n --
+    # exactly what the driver does (the abort path labels its salvage row
+    # step-1 while the cadence row that preceded it used step).  A guard keyed
+    # on the step index instead of on n would let the duplicate through, and
+    # a fixture that repeated the step too could not tell them apart (codex
+    # round-2 YELLOW 3).
     R._gateway_cumulative_row(csv, acc, 42, 1.0)
-    R._gateway_cumulative_row(csv, acc, 42, 1.0)      # same n -> suppressed
+    R._gateway_cumulative_row(csv, acc, 77, 1.5)      # same n -> suppressed
     grown = acc._replace(volume=jnp.asarray([3.0e6]), n=43)
     R._gateway_cumulative_row(csv, grown, 43, 1.1)    # n moved -> written
     R._gateway_cumulative_close(csv)
     _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
     ns = [int(r["n_steps"]) for r in rows]
     assert ns == [42, 43], f"expected one row per dump point, got {ns}"
+    assert [int(r["step"]) for r in rows] == [42, 43], (
+        "the suppressed row (step 77) was written and the first one dropped")
 
 
 def test_a_write_failure_disables_the_writer_instead_of_retrying_it(tmp_path):
@@ -1103,12 +1118,15 @@ def test_transports_txt_content_is_pinned_exactly(tmp_path):
                              jnp.asarray([2.0e6, 6.0e6]),
                              jnp.asarray([4.0e6, 8.0e6]), 2)
     R._gateway_transport_diag(acc, tmp_path, io_proc=True)
-    assert (tmp_path / "transports.txt").read_text() == (
-        "gateway_n_steps 2\n"
-        "gateway_bering_pacific_vol_Sv 1.000000\n"
-        "gateway_bering_pacific_salt_psu_m3s 2.000000e+06\n"
-        "gateway_atlantic_nordic_vol_Sv 3.000000\n"
-        "gateway_atlantic_nordic_salt_psu_m3s 4.000000e+06\n"
+    # read_BYTES, not read_text: text mode normalises newlines, so a writer
+    # that emitted CRLF would compare equal and the "literal bytes" claim
+    # would be false (codex round-2 YELLOW 4).
+    assert (tmp_path / "transports.txt").read_bytes() == (
+        b"gateway_n_steps 2\n"
+        b"gateway_bering_pacific_vol_Sv 1.000000\n"
+        b"gateway_bering_pacific_salt_psu_m3s 2.000000e+06\n"
+        b"gateway_atlantic_nordic_vol_Sv 3.000000\n"
+        b"gateway_atlantic_nordic_salt_psu_m3s 4.000000e+06\n"
     ), "the transports.txt output contract moved"
 
 
@@ -1125,7 +1143,8 @@ def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
     # on `_gw_acc = None` and reading back over a fixed window -- the comment
     # block between them is longer than any window worth hard-coding, and a
     # too-small one made this test raise StopIteration instead of asserting.
-    log = [i for i, ln in enumerate(lines) if "[gateway] DISABLED at step" in ln]
+    log = [i for i, ln in enumerate(lines)
+           if "[gateway] DISABLED at step" in _code(ln)]
     assert len(log) == 1, f"expected one disable site, found {log}"
     tail = lines[log[0]:log[0] + 20]
     drop = next(i for i, ln in enumerate(tail)
@@ -1136,3 +1155,40 @@ def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
     assert any("step - 1" in ln for ln in window), (
         "the salvage row must be labelled with the LAST GOOD step (step - 1); "
         "gateway_step raised on `step`, so that step never accumulated")
+
+
+def test_a_failed_header_write_closes_the_handle(tmp_path, monkeypatch):
+    """A header-write failure must not leak the file it already opened.
+
+    Non-vacuity: the test asserts a file WAS opened before the failure -- if
+    the injected error fired earlier than the ``open``, there would be nothing
+    to leak and the check would pass for the wrong reason.
+    """
+    import builtins
+
+    import legoesm.ocean.diagnostics_sections as DS
+    from scripts.run import run_omip_core2 as R
+
+    opened = []
+    real_open = builtins.open
+
+    def _recording_open(*a, **kw):
+        fh = real_open(*a, **kw)
+        opened.append(fh)
+        return fh
+
+    def _boom(_names):
+        raise RuntimeError("header build failed")
+
+    monkeypatch.setattr(builtins, "open", _recording_open)
+    # The driver imports this name INSIDE the function but CALLS it after the
+    # open, so patching the module attribute injects the failure at exactly
+    # the point where a handle is live.
+    monkeypatch.setattr(DS, "gateway_cumulative_columns", _boom)
+    csv = R._gateway_cumulative_open(tmp_path, ("davis_caa",), io_proc=True)
+    assert csv is None, "the writer reported success despite the failure"
+    assert opened, (
+        "no file was opened before the injected failure -- this test would "
+        "pass without the fix")
+    assert all(fh.closed for fh in opened), (
+        "the CSV handle was left open after the header write failed")

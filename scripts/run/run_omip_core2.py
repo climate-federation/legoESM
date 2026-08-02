@@ -3045,6 +3045,10 @@ def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
     """
     if not io_proc:
         return None
+    # Bound OUTSIDE the try so the except can close a handle that was opened
+    # before the header write failed; returning None with the file still open
+    # leaked it for the rest of the run (codex round-2 YELLOW 2).
+    fh = None
     try:
         from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns
         names = tuple(names)
@@ -3055,6 +3059,11 @@ def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
         return _GatewayCumulativeCsv(fh, names)
     except Exception as e:  # a diagnostic must never crash the run
         print(f"[gateway] cumulative CSV disabled: {type(e).__name__}: {e}")
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:  # noqa: BLE001 -- already failing; nothing to add
+                pass
         return None
 
 
