@@ -256,6 +256,74 @@ def test_factory_threads_scale_times_hyperdiff_into_nu_del4_T():
         assert model.config.K_h == pytest.approx(diff.A_h)
 
 
+def test_k_h_scale_decouples_the_scalar_laplacian_from_the_momentum_one():
+    """THE CONFOUND: a_h_scale drives BOTH nu_del2 (momentum) and K_h (scalar
+    T), so every a_h_scale experiment moves two variables.  mpas_k_h_scale
+    overrides K_h alone, on the SAME scale, leaving nu_del2 untouched."""
+    from legoesm.driver.component_factory import (
+        compute_diffusion, create_atmosphere_dycore,
+    )
+    mesh = _mesh()
+    coord = create_sigma_coordinate(NLEV, sigma_top=1e-3)
+
+    # Legacy contract preserved when the knob is unset.
+    legacy = _mpas_experiment_cfg(a_h_scale=0.25)
+    m = create_atmosphere_dycore(legacy, mesh, coord)
+    A_h_025 = compute_diffusion(mesh, legacy.dycore).A_h
+    assert m.config.nu_del2 == pytest.approx(A_h_025)
+    assert m.config.K_h == pytest.approx(A_h_025)
+    assert m.config.K_h == m.config.nu_del2
+
+    # Arm B of the separation: momentum Laplacian OFF, scalar Laplacian kept.
+    armB = _mpas_experiment_cfg(a_h_scale=0.0, mpas_k_h_scale=0.25)
+    mB = create_atmosphere_dycore(armB, mesh, coord)
+    assert mB.config.nu_del2 == 0.0
+    assert mB.config.K_h == pytest.approx(A_h_025)
+
+    # Arm C: momentum Laplacian kept, scalar Laplacian OFF.
+    armC = _mpas_experiment_cfg(a_h_scale=0.25, mpas_k_h_scale=0.0)
+    mC = create_atmosphere_dycore(armC, mesh, coord)
+    assert mC.config.nu_del2 == pytest.approx(A_h_025)
+    assert mC.config.K_h == 0.0
+
+
+def test_k_h_override_reuses_the_production_A_h_formula():
+    """The override must go through ``compute_diffusion`` itself — a re-derived
+    A_h formula would silently drift from the production one."""
+    from legoesm.driver.component_factory import (
+        compute_diffusion, create_atmosphere_dycore,
+    )
+    mesh = _mesh()
+    coord = create_sigma_coordinate(NLEV, sigma_top=1e-3)
+    for s in (0.0, 0.1, 0.25, 1.0):
+        cfg = _mpas_experiment_cfg(a_h_scale=0.0, mpas_k_h_scale=s)
+        m = create_atmosphere_dycore(cfg, mesh, coord)
+        expected = compute_diffusion(
+            mesh, cfg.dycore._replace(a_h_scale=s)).A_h
+        assert m.config.K_h == pytest.approx(expected)
+
+
+def test_k_h_scale_validation():
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+
+    _mpas_experiment_cfg(mpas_k_h_scale=None).validate_strict()
+    _mpas_experiment_cfg(mpas_k_h_scale=0.0).validate_strict()
+    _mpas_experiment_cfg(mpas_k_h_scale=0.25).validate_strict()
+
+    for bad in (-0.1, float("nan"), float("inf"), 1.0e9):
+        with pytest.raises(ValueError, match="mpas_k_h_scale"):
+            _mpas_experiment_cfg(mpas_k_h_scale=bad).validate_strict()
+
+    latlon = ExperimentConfig(
+        grid=GridConfig(grid_type="lat_lon", resolution=24, nlev=NLEV),
+        dycore=DycoreConfig(discretization="finite_volume",
+                            model_type="hydrostatic", dt=75.0,
+                            mpas_k_h_scale=0.25),
+    )
+    with pytest.raises(ValueError, match="mpas_k_h_scale"):
+        latlon.validate_strict()
+
+
 def test_validate_strict_bounds_and_lane_guard():
     from legoesm.driver.config import DycoreConfig
 

@@ -578,11 +578,24 @@ def create_atmosphere_dycore(
         _ti = dc.time_integrator
         if _ti == "auto":
             _ti = MPASPrimitiveEquationConfig().time_integrator
+        # Scalar (T) Laplacian.  Legacy contract: K_h == nu_del2 == A_h, both
+        # driven by ``a_h_scale`` — which makes every a_h_scale experiment a
+        # TWO-variable change (momentum viscosity AND T's only horizontal
+        # dissipation move together).  ``mpas_k_h_scale`` overrides ONLY the
+        # scalar one, reusing ``compute_diffusion`` itself (never a re-derived
+        # A_h formula) so both knobs stay on one common scale.  ``None`` keeps
+        # the legacy coupling bit-identically.
+        _k_h_scale = getattr(dc, "mpas_k_h_scale", None)
+        _K_h = (
+            diff.A_h if _k_h_scale is None
+            else compute_diffusion(grid, dc._replace(
+                a_h_scale=float(_k_h_scale))).A_h
+        )
         cfg = MPASPrimitiveEquationConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
-            K_h=diff.A_h,
+            K_h=_K_h,
             # conservation_fixer=False overrides fix_mass=True (lat-lon
             # contract; codex 2026-07-12 round 2 — this branch predates
             # the audit but had the same gap).

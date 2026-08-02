@@ -2310,6 +2310,27 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     assert cfg_off.dycore.moisture_flux_form is False
 
 
+def test_mpas_k_h_scale_flag_flows_to_dycore_config():
+    """#1354 second mode: --mpas-k-h-scale decouples the scalar (T) Laplacian
+    from the momentum one, which --a-h-scale otherwise drives together (so
+    every a_h_scale experiment is a two-variable change).  Unset by default =
+    legacy coupling."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_k_h_scale is None
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-k-h-scale", "0.25",
+    ]), parser))
+    assert cfg_set.dycore.mpas_k_h_scale == pytest.approx(0.25)
+
+    cfg_zero = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-k-h-scale", "0",
+    ]), parser))
+    assert cfg_zero.dycore.mpas_k_h_scale == 0.0
+
+
 def test_mpas_nu_del4_t_scale_flag_flows_to_dycore_config():
     """#1354 second mode: --mpas-nu-del4-t-scale must reach DycoreConfig
     (component_factory multiplies it by the momentum nu_del4 to build

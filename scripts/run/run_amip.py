@@ -362,6 +362,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "parity with the coupled cube/latlon pipeline — "
                              "the ERA5-IC lane's extreme Antarctic columns are "
                              "a suspected fp32-optics NaN trigger).")
+    parser.add_argument("--mpas-k-h-scale", type=float, default=None,
+                        dest="mpas_k_h_scale",
+                        help="MPAS: decouple the SCALAR (temperature) "
+                             "Laplacian K_h from the momentum one. Both "
+                             "normally come from --a-h-scale, so every "
+                             "a_h_scale experiment is a TWO-variable change. "
+                             "Same scale as --a-h-scale; unset (default) "
+                             "keeps the legacy K_h == nu_del2 coupling. Use "
+                             "--a-h-scale 0 --mpas-k-h-scale 0.25 to isolate "
+                             "the momentum Laplacian, and --a-h-scale 0.25 "
+                             "--mpas-k-h-scale 0 to isolate the scalar one.")
     parser.add_argument("--mpas-nu-del4-t-scale", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_del4_T_scale,
                         dest="mpas_nu_del4_T_scale",
@@ -1784,6 +1795,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_nu_del4_T_scale=args.mpas_nu_del4_T_scale,
+        mpas_k_h_scale=args.mpas_k_h_scale,
         mpas_vert4_t_filter=args.mpas_vert4_t_filter,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         conservation_fixer=args.conservation_fixer,

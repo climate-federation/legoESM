@@ -281,6 +281,19 @@ class DycoreConfig(NamedTuple):
     # Only wired to the MPAS PE dycore.  0.0 (default) is an exact no-op.
     # Appended last to preserve positional ABI.
     mpas_nu_del4_T_scale: float = 0.0
+    # DECOUPLE the scalar (temperature) Laplacian from the momentum one on the
+    # MPAS PE dycore.  ``component_factory`` sets ``nu_del2 = K_h = A_h``, both
+    # from ``a_h_scale``, so EVERY ``a_h_scale`` experiment is a TWO-variable
+    # change: it moves the momentum vector Laplacian AND T's only horizontal
+    # dissipation together.  ``None`` (default) keeps that legacy coupling
+    # bit-identically; a float overrides ONLY ``K_h``, using the SAME
+    # ``compute_diffusion`` formula with ``a_h_scale`` replaced by this value,
+    # so ``mpas_k_h_scale`` and ``a_h_scale`` are on one common scale.  This
+    # exists to make the confound separable as a pure config experiment
+    # (a_h_scale=0 + mpas_k_h_scale=0.25 isolates the momentum Laplacian;
+    # a_h_scale=0.25 + mpas_k_h_scale=0 isolates the scalar one).
+    # Appended last to preserve positional ABI.
+    mpas_k_h_scale: float | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -1493,6 +1506,19 @@ class ExperimentConfig(NamedTuple):
                 "dycore.mpas_nu_del4_T_scale is an MPAS-lane knob; "
                 f"discretization={d.discretization!r} would silently ignore "
                 "it. Set it to 0.0 or select discretization='mpas'.")
+        if d.mpas_k_h_scale is not None:
+            if not (math.isfinite(d.mpas_k_h_scale)
+                    and 0.0 <= d.mpas_k_h_scale <= 1.0e3):
+                errors.append(
+                    "dycore.mpas_k_h_scale (scalar-diffusion scale, decoupled "
+                    "from a_h_scale) must be None or a finite value in "
+                    f"[0, 1e3], got {d.mpas_k_h_scale!r}")
+            elif d.discretization != "mpas":
+                errors.append(
+                    "dycore.mpas_k_h_scale is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} would silently "
+                    "ignore it. Set it to None or select "
+                    "discretization='mpas'.")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
