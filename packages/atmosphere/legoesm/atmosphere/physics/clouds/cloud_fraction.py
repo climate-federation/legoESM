@@ -860,7 +860,32 @@ def compute_cloud_properties(
         # Where the prognostic droplet number is 0/garbage (SAM specified-Nc
         # Morrison, dopredictNc=.false., keeps the Nc slot at 0), fall back to the
         # specified Nc_default so r_eff is the SAM constant-Nc value, not 35 um.
+        # The PSD ratio N_c/q_c must pair LIKE WITH LIKE.  ``N_c`` is a tracer,
+        # hence a GRID-MEAN number density, and ``q_c`` above is a grid-mean
+        # mixing ratio (:833-836), so where the prognostic tracer is live the
+        # ratio is already the in-cloud ratio and needs no cf.  ``Nc_default``
+        # is NOT a grid mean: it is SAM's specified IN-CLOUD concentration
+        # (dopredictNc=.false.), exact there because a CRM cell is either fully
+        # cloudy or fully clear.  Pairing that in-cloud number with a grid-mean
+        # q_c makes LAMC too large by cf^(-1/3), so reffc = (PGAM+3)/(2 LAMC)
+        # comes out too SMALL by cf^(1/3) and the in-cloud tau below too LARGE
+        # by cf^(-1/3), a spurious brightening that is ~1 for overcast layers
+        # and grows without limit as the layer breaks up, i.e. it lands hardest
+        # on exactly the subsidence regimes that should be the DARK end of the
+        # shortwave contrast.  Reconstruct the in-cloud condensate there, with
+        # the same floor the in-cloud water path uses for ``_cf_safe`` below so
+        # the two agree on what "in-cloud" means; the LAMMIN clip below bounds
+        # the result for vanishing cf (r_eff saturates near 36 um, well inside
+        # the 60 um DIAMETER bound), so no column can run away as cover goes to
+        # zero.  NB ``has_liq`` below still gates on the GRID-MEAN q_c against
+        # SAM's QSMALL, unchanged: a cell whose grid mean is under 1e-14 but
+        # whose reconstructed in-cloud value is above it takes the constant
+        # r_eff_liq rather than the PSD.  Radiatively irrelevant at those water
+        # paths, but the gate and the PSD do look at different condensate.
+        _nc_is_specified = n_cloud <= 1.0
         n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
+        _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
+        q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
@@ -869,7 +894,7 @@ def compute_cloud_properties(
             config.pgam_min, config.pgam_max,
         )
         cons26 = jnp.pi * constants.rho_water / 6.0
-        q_c_pos = jnp.maximum(jnp.clip(q_c, 0.0), 1.0e-15)
+        q_c_pos = jnp.maximum(jnp.clip(q_c_psd, 0.0), 1.0e-15)
         nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)
                       / jnp.maximum(rho_air, 0.1))  # coeff-ok: density floor [kg/m^3]
         lamc = (cons26 * nc_permass * (pgam + 1.0) * (pgam + 2.0) * (pgam + 3.0)
