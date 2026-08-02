@@ -1270,6 +1270,11 @@ def parse_args():
     return p.parse_args()
 
 
+# Set True by the integration loop when a field goes non-finite; checked at
+# __main__ so the abort reaches the EXIT CODE (see the note there).
+_NONFINITE_ABORT = False
+
+
 def main():
     args = parse_args()
     if args.land:
@@ -1917,3 +1922,12 @@ def _emit_surface_snapshot_png(snap_dir: Path, step: int, t_s: float,
 
 if __name__ == "__main__":
     main()
+    # A non-finite abort MUST surface in the exit code. Without this the
+    # integration loop's `break` fell through to a normal exit 0, so a run
+    # that blew up mid-integration reported success: SLURM logged
+    # COMPLETED / ExitCode 0:0, and an `afterok` chain consumed a reference
+    # that had never been written (job 9248515, day-52 NaN, zero volumes,
+    # undetected for 20 h). Callers gate on this; it must not lie.
+    if _NONFINITE_ABORT:
+        print("EXIT 1: integration aborted on non-finite fields.")
+        sys.exit(1)
