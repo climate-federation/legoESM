@@ -310,8 +310,10 @@ def build_cloud_config(
     convective_cloud: bool = False,
     rh_crit: float | None = None,
     q_c_diagnostic: float | None = None,
+    conv_cloud_coeff: float | None = None,
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
+    Nc_default: float | None = None,
     cloud_inhomogeneity_factor: float | None = None,
     cloud_optics_inhomogeneity: str | None = None,
     cloud_fsd: float | None = None,
@@ -340,8 +342,12 @@ def build_cloud_config(
         overrides["rh_crit"] = rh_crit
     if q_c_diagnostic is not None:
         overrides["q_c_diagnostic"] = q_c_diagnostic
+    if conv_cloud_coeff is not None:
+        overrides["conv_cloud_coeff"] = conv_cloud_coeff
     if conv_cloud_max is not None:
         overrides["conv_cloud_max"] = conv_cloud_max
+    if Nc_default is not None:
+        overrides["Nc_default"] = Nc_default
     if conv_cloud_condensate is not None:
         overrides["conv_cloud_condensate"] = conv_cloud_condensate
     if cloud_inhomogeneity_factor is not None:

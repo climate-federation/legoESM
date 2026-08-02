@@ -233,8 +233,14 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         convective_cloud=(_conv_cloud and allow_convective_cloud),
         rh_crit=getattr(cfg, "cloud_rh_crit", None),
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
+        conv_cloud_coeff=getattr(cfg, "cloud_conv_cloud_coeff", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
+        # Specified droplet number for the M2005 liquid-r_eff PSD: the SW/albedo
+        # lever on the MPAS lane, where every column of a specified-Nc morrison
+        # run falls back to it.  Missing here would be the same silent-drop the
+        # inhomogeneity block below documents.
+        Nc_default=getattr(cfg, "cloud_Nc_default", None),
         # Sub-grid cloud-optics inhomogeneity + the diagnostic-condensate
         # selectors.  These were MISSING here while the FV pipeline forwarded
         # them (physics_pipeline.py:2067-2077), so on the MPAS lane

@@ -179,8 +179,18 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
+    # conv_cloud_coeff is the Slingo cloud-amount SLOPE; its neighbour
+    # conv_cloud_max is only the CAP, which with the production defaults
+    # (0.04 / 0.15) does not bind below ~43x the P0 reference precip — so a
+    # member that could only move the cap had no lever on tropical anvil cover.
+    "atm.clouds.CloudConfig.conv_cloud_coeff": "cloud_conv_cloud_coeff",
     "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
     "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
+    # Specified droplet number for the M2005 liquid effective-radius PSD — the
+    # SW/albedo lever a specified-Nc (morrison predict_Nc=False) run reads in
+    # EVERY column.  Wired 2026-08-02: it had a __param_spec__ entry but no flat
+    # ExperimentConfig scalar, so a calibration member could not vary it at all.
+    "atm.clouds.CloudConfig.Nc_default": "cloud_Nc_default",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",

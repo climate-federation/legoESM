@@ -807,6 +807,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg/m] for --diagnostic-condensate-scheme="
                              "adiabatic (None=CloudConfig default 1.5e-6 ~ "
                              "1.5 g/kg per km; bounds 5e-7..3e-6).")
+    parser.add_argument("--cloud-nc-default", dest="cloud_Nc_default",
+                        type=float, default=None,
+                        help="Specified cloud-droplet number concentration "
+                             "[1/m^3] for the M2005 gamma-PSD liquid effective "
+                             "radius (CloudConfig.Nc_default). Read in EVERY "
+                             "column of a specified-Nc double-moment run "
+                             "(morrison with predict_Nc=False), where the "
+                             "default 1e8 is a CONTINENTAL value applied "
+                             "globally; marine air is ~1e7-5e7. LOWER => larger "
+                             "droplets => less reflective liquid cloud (the "
+                             "SW/albedo lever). None=CloudConfig default 1e8; "
+                             "bounds 1e7..1e9.")
+    parser.add_argument("--cloud-conv-cloud-coeff",
+                        dest="cloud_conv_cloud_coeff",
+                        type=float, default=None,
+                        help="Slingo (1987) convective cloud amount per e-fold "
+                             "of convective precip (CloudConfig.conv_cloud_coeff). "
+                             "HIGHER => more anvil cover for the same convective "
+                             "rain. With the defaults (coeff 0.04, cap 0.15) the "
+                             "companion --cloud-conv-cloud-max cap only binds "
+                             "above ~43x the P0 reference rate, so this is the "
+                             "lever that actually moves tropical anvil cover. "
+                             "None=CloudConfig default 0.04; bounds 0.0..0.5.")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
@@ -1916,6 +1939,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
+        cloud_Nc_default=args.cloud_Nc_default,
+        cloud_conv_cloud_coeff=args.cloud_conv_cloud_coeff,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,

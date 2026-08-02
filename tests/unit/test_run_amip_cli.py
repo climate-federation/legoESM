@@ -1747,6 +1747,115 @@ def test_conv_cloud_condensate_out_of_bounds_rejected():
         cfg.validate_strict()
 
 
+def test_cloud_nc_default_flag_resolves_to_cloudconfig():
+    """--cloud-nc-default round-trips into ExperimentConfig and resolves onto
+    the hot-loop ``CloudConfig.Nc_default`` (the specified droplet number the
+    M2005 liquid-r_eff PSD reads in every column of a specified-Nc run).  Before
+    2026-08-02 the parameter had a ``__param_spec__`` entry but NO flat scalar,
+    so a calibration member could not vary the strongest liquid-cloud SW lever
+    at all.  Unset => None => CloudConfig default 1e8 (byte-identical)."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-nc-default", "4e7",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_Nc_default == pytest.approx(4e7)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(cfg.cloud_scheme,
+                                  Nc_default=cfg.cloud_Nc_default)
+    assert resolved.Nc_default == pytest.approx(4e7)
+    # Unset => scheme default (the continental 1e8 applied globally).
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_Nc_default is None
+    assert build_cloud_config(
+        cfg_def.cloud_scheme,
+        Nc_default=cfg_def.cloud_Nc_default).Nc_default == pytest.approx(
+            CloudConfig._field_defaults["Nc_default"])
+
+
+def test_cloud_nc_default_out_of_bounds_rejected():
+    """An Nc_default outside the __param_spec__ range (1e7, 1e9) must fail
+    strict validation rather than reach the PSD."""
+    parser = build_arg_parser()
+    for bad in ("1e6", "1e10"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--cloud-nc-default", bad,
+        ]), parser))
+        with pytest.raises((ValueError, AssertionError)):
+            cfg.validate_strict()
+
+
+def test_cloud_conv_cloud_coeff_flag_resolves_to_cloudconfig():
+    """--cloud-conv-cloud-coeff round-trips and resolves onto the hot-loop
+    ``CloudConfig.conv_cloud_coeff``.  It is the Slingo cloud-amount SLOPE; the
+    already-exposed ``conv_cloud_max`` is only the CAP, which with the
+    production defaults (0.04 / 0.15) does not bind until ~43x the P0 reference
+    precip -- so the cap alone is an inert lever over most of the tropics."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-conv-cloud-coeff", "0.12",
+    ]), parser))
+    assert cfg.cloud_conv_cloud_coeff == pytest.approx(0.12)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(cfg.cloud_scheme,
+                                  conv_cloud_coeff=cfg.cloud_conv_cloud_coeff)
+    assert resolved.conv_cloud_coeff == pytest.approx(0.12)
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_conv_cloud_coeff is None
+    assert build_cloud_config(
+        cfg_def.cloud_scheme,
+        conv_cloud_coeff=cfg_def.cloud_conv_cloud_coeff
+    ).conv_cloud_coeff == pytest.approx(
+        CloudConfig._field_defaults["conv_cloud_coeff"])
+
+
+def test_cloud_conv_cloud_coeff_out_of_bounds_rejected():
+    """A conv_cloud_coeff outside (0.0, 0.5) must fail strict validation."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-conv-cloud-coeff", "0.9",
+    ]), parser))
+    with pytest.raises((ValueError, AssertionError)):
+        cfg.validate_strict()
+
+
+def test_cloud_nc_default_and_conv_coeff_reach_the_fv_pipeline():
+    """End-to-end on the FV lane: the flat scalars must be threaded by
+    ``build_physics_pipeline`` into the attributes the pipeline's own
+    ``build_cloud_config`` call reads.  A flag that stops at ExperimentConfig
+    is the exact dead-knob class this wiring exists to close."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+    )
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import make_hybrid_levels
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=10),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        cloud_scheme="sundqvist",
+        cloud_Nc_default=4.0e7,
+        cloud_conv_cloud_coeff=0.12,
+    )
+    pipe = build_physics_pipeline(create_cubed_sphere(4),
+                                  make_hybrid_levels(10), cfg)
+    assert pipe._cloud_Nc_default == pytest.approx(4.0e7)
+    assert pipe._cloud_conv_cloud_coeff == pytest.approx(0.12)
+
+
 def test_subgrid_autoconv_flag_threads_to_config():
     """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
     parser = build_arg_parser()

@@ -619,8 +619,25 @@ class ExperimentConfig(NamedTuple):
     # may leave (breaks the cloud-temperature runaway that full reduction caused).
     # None => CloudConfig default (0.0 = no floor).
     cloud_clubb_cf_override_floor: float | None = None
+    # Slingo (1987) convective cloud-amount per e-fold of convective precip
+    # (CloudConfig.conv_cloud_coeff).  HIGHER => more cumulus/anvil cover for
+    # the same convective rain.  Its neighbour ``cloud_conv_cloud_max`` is a
+    # CAP, so with the production defaults (coeff 0.04, cap 0.15) the cap only
+    # binds above ~43x the P0 reference rate; without this knob a calibration
+    # member could only move the cap, which is inert over most of the tropics.
+    # None => CloudConfig default 0.04.  Bounds (0.0, 0.5).
+    cloud_conv_cloud_coeff: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
+    # Specified cloud-droplet number concentration [1/m^3] for the M2005
+    # gamma-PSD liquid effective radius (CloudConfig.Nc_default), used wherever
+    # the prognostic droplet-number tracer is 0/garbage — i.e. EVERY column of a
+    # specified-Nc double-moment run (morrison with predict_Nc=False).  The
+    # default 1.0e8 is a CONTINENTAL concentration applied globally, including
+    # over ocean where ~1e7-5e7 is observed; LOWER => larger droplets => less
+    # reflective liquid cloud (the shortwave/albedo lever).  None => CloudConfig
+    # default 1.0e8.  Bounds (1e7, 1e9).
+    cloud_Nc_default: float | None = None
     # Diagnostic in-cloud condensate vertical structure for the stratiform
     # radiative floor (CloudConfig.diagnostic_condensate_scheme):
     #   "constant"  — flat q_c_diagnostic at every cloudy level (validated
@@ -2331,8 +2348,10 @@ class ExperimentConfig(NamedTuple):
         for _f, _lo, _hi in (
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            ("cloud_conv_cloud_coeff", 0.0, 0.5),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
+            ("cloud_Nc_default", 1.0e7, 1.0e9),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
             ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),

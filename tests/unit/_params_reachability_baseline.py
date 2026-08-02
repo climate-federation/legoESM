@@ -100,10 +100,11 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBParams.nu8',
     'atm.turb.CLUBBParams.nu9',
     'atm.turb.CLUBBParams.slope_coef_spread_DG_means_w',
-    # atm: CloudConfig (8)
-    'atm.clouds.CloudConfig.Nc_default',
+    # atm: CloudConfig (6)
+    # (Nc_default + conv_cloud_coeff wired 2026-08-02: flat ExperimentConfig
+    #  scalars cloud_Nc_default / cloud_conv_cloud_coeff, threaded by
+    #  build_cloud_config on both the FV pipeline and the MPAS standalone lane.)
     'atm.clouds.CloudConfig.T_ice_only',
-    'atm.clouds.CloudConfig.conv_cloud_coeff',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',

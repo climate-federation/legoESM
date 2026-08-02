@@ -207,9 +207,12 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 "sundqvist",
                 rh_crit=getattr(pipe, "_cloud_rh_crit", None),
                 q_c_diagnostic=getattr(pipe, "_cloud_q_c_diagnostic", None),
+                conv_cloud_coeff=getattr(
+                    pipe, "_cloud_conv_cloud_coeff", None),
                 conv_cloud_max=getattr(pipe, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     pipe, "_cloud_conv_cloud_condensate", None),
+                Nc_default=getattr(pipe, "_cloud_Nc_default", None),
                 cloud_inhomogeneity_factor=getattr(
                     pipe, "_cloud_inhomogeneity_factor", None),
                 cloud_optics_inhomogeneity=getattr(
