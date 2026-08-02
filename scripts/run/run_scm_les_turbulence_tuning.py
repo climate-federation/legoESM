@@ -71,8 +71,8 @@ from legoesm.training.les_reference import (  # noqa: E402
     SCORED_VARIABLES,
     load_les_reference,
 )
+from legoesm.core.param_overrides import apply_param_overrides  # noqa: E402
 from legoesm.training.param_collector import (  # noqa: E402
-    apply_param_overrides,
     build_registry,
     build_trainable_params,
 )
