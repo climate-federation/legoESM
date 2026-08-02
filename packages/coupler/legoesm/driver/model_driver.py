@@ -6215,6 +6215,23 @@ class ModelDriver:
             # drops the whole CMOR feed.
             tas = None
             ts = None
+            # CMOR ``ts`` (surface SKIN temperature) — NEVER the lowest-level
+            # air T (that would mislabel air T as skin T).  Read the anchor
+            # ``_run_mpas`` actually handed the physics
+            # (``forcing["T_sfc"]``, stashed per step): that is the field the
+            # radiation emitted from, so ``rlus = rlds - lw_net_sfc`` and
+            # ``ts`` stay a consistent pair.  Reconstructing the bare
+            # sst/sic blend instead DROPPED the land-lapse correction and
+            # the interactive multilayer-land skin, driving the published
+            # implied emissivity to 0.27 .. 1.08 over land (>1 is
+            # thermodynamically impossible).
+            #
+            # Read OUTSIDE the get_sst_sic try/except below: the anchor is
+            # self-sufficient, so an SST-loader failure must not drop a ``ts``
+            # we already hold.
+            _anchor = getattr(self, "_mpas_T_sfc_anchor", None)
+            if _anchor is not None:
+                ts = jnp.asarray(_anchor).reshape(-1)
             _get_sst_sic = getattr(self, "get_sst_sic", None)
             if _get_sst_sic is not None:
                 try:
@@ -6230,16 +6247,12 @@ class ModelDriver:
                     if (getattr(self.config, "mpas_ice_skin_prognostic", False)
                             and getattr(self, "_ice_T_skin", None) is not None):
                         _tas_ice = self._ice_T_skin
-                    # CMOR ``ts`` (surface SKIN temperature): the SAME
-                    # sst/sic/ice-skin blend the 2 m tas extrapolation and
-                    # the radiation/turbulence boundary use — NEVER the
-                    # lowest-level air T (that would mislabel air T as skin
-                    # T).  Only available when prescribed sst/sic are on
-                    # this path; skipped otherwise.  CAVEAT (documented,
-                    # matching the surface-flux boundary itself): over LAND
-                    # cells this carries the nearest-ocean SST fill of the
-                    # AMIP loader, not an interactive land-tile skin.
-                    if _tas_ice is not None:
+                    # ``ts`` FALLBACK (no stashed anchor): the sst/sic blend,
+                    # the pre-existing behaviour — correct over open ocean,
+                    # and the only surface information available on a lane
+                    # that never built a ``T_sfc`` forcing, or before the
+                    # first step of a restart link.
+                    if ts is None and _tas_ice is not None:
                         from legoesm.forcing.surface_utils import (
                             blend_surface_temperature,
                         )
@@ -7921,6 +7934,21 @@ class ModelDriver:
                 # structurally stable — no retrace).
                 if _land_beta_cells is not None:
                     _forcing["beta_land"] = _land_beta_cells
+                # CMOR ``ts`` source: stash the FULLY RESOLVED per-cell
+                # surface anchor the physics is about to consume — AFTER the
+                # land-lapse correction (inside _blend_T_sfc) and AFTER the
+                # interactive-land skin blend above.  The CMOR feed used to
+                # RECONSTRUCT ts from get_sst_sic as the bare ocean/ice
+                # blend, which is a DIFFERENT field: it omits both terms, so
+                # the published ts disagreed with the surface the radiation
+                # actually emitted from and the implied emissivity
+                # rlus / (sigma ts^4) ran to 0.27 .. 1.08 over land (rlus is
+                # rlds - lw_net_sfc, both derived from THIS anchor).
+                # Publishing the anchor makes the pair consistent by
+                # construction.  Cheap: binds one (nCells,) device array per
+                # step, no host sync and no retrace.
+                if "T_sfc" in _forcing:
+                    self._mpas_T_sfc_anchor = _forcing["T_sfc"]
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
