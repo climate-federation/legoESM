@@ -124,11 +124,6 @@ class DycoreConfig(NamedTuple):
     # 37 m/s).  a_h_scale=0 relies on the scale-selective 4th-order hyperdiff
     # alone for grid-noise control.
     a_h_scale: float = 1.0
-    # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
-    # a_h_scale exactly as before, byte-identical).  Decouples the circulation
-    # lever (momentum nu_del2) from the thermal smoothing that damps vertical
-    # computational modes.
-    k_h_scale: float | None = None
     conservation_fixer: bool = True
     fix_mass: bool = True
     # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit
@@ -248,6 +243,14 @@ class DycoreConfig(NamedTuple):
     # sponge/polar-filter passthrough).  Appended last to preserve
     # positional ABI (codex #1029 r3 #2).
     sb81_omega_conversion: bool = False
+    # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
+    # a_h_scale exactly as before, byte-identical).  Decouples the circulation
+    # lever (momentum nu_del2) from the thermal smoothing that damps vertical
+    # computational modes.  WIRED ONLY into the MPAS thermal diffusion path;
+    # validate_strict refuses it on other discretizations (silently-inert
+    # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
+    # to preserve the positional ABI (codex review).
+    k_h_scale: float | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -2185,6 +2188,20 @@ class ExperimentConfig(NamedTuple):
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
             )
+        # k_h_scale: negative is anti-diffusive (rejected); wired ONLY into
+        # the MPAS thermal diffusion — refuse elsewhere rather than run inert.
+        if d.k_h_scale is not None:
+            if not isinstance(d.k_h_scale, (int, float)) or not (
+                    0.0 <= float(d.k_h_scale) <= 100.0):
+                errors.append(
+                    f"dycore.k_h_scale must be None or finite in [0, 100]; "
+                    f"got {d.k_h_scale!r}.")
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.k_h_scale is only wired into the MPAS thermal "
+                    "diffusion path; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Unset it or use the MPAS lane.")
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
         if self.hb_kvf_min is not None and (
