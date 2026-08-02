@@ -1849,3 +1849,65 @@ high.)
   ocean-lane null for these flags came from a different
   implicit-PCG/dependency mix — not predictive for the atm lane either
   way.
+
+## Distance-to-modeled-limit: MPAS GPU (2026-08-02 late)
+
+Codex r9 caught the first census at the WRONG topology
+(`reorder_target=nd` vs the rows' `--reorder-for 128`); numbers below
+are from the topology-correct recensus (job 26636684, cells/dev
+40,968/40,962 exactly matching the timed rows). The CP payloads are
+edge-coloured max-round-padded STATIC buffers — byte sums are payload
+shapes, not measured wire bytes. Wrong-topology values (33 CP/24.0 MB
+@s8, 39 CP/30.6 MB @s9) are retained in the r9 transcript only.
+
+Same treatment as the lat-lon lane (probe twin
+`scripts/tmp/_probe_mpas_halo_census.py`; virtual-CPU lowering of the
+REAL `make_voronoi_sharded_step`, one compile, count-asserted):
+
+* **The MPAS CP count is nd- AND reorder-target-DEPENDENT** — 9 / 21 /
+  30 at nd=4(s7) / 8(s6) / 16(s6) with reorder_target=nd (early
+  wrong-topology probes, historical), and 24 / 33 at nd=16(s8) /
+  64(s9) with the rows' actual reorder-for-128 — Voronoi
+  neighbour-round schedules grow with parts, unlike the 1-D band's
+  fixed 41. Each MPAS bound must census ITS OWN row topology.
+* **s8@nd16, reorder-for 128 (the real s8-lloyd0 np16 row topology)**:
+  24 CP + 1 AR per step, 23,860,920 B static payload at 40,968
+  cells/dev L26 f32.
+* **Same-tile nd=1 anchor (job 26635847)**: subdiv-6 lloyd0 GLOBAL
+  mesh (40,962 natural cells ~= the 41k tile) on one A100: **2.010 ms**
+  — the SERIAL same-size compute PROXY used by the model (codex r9: it
+  is un-reordered, lacks the sharded halo-local max_lc/max_le rows and
+  pack/scatter path, and runs the bench's serial-leg dt — model-grade,
+  not "the compute term").
+* **Bound for s8-lloyd0@np16 (measured 6.43 ms, job 26628076)**, IB
+  constants 26.3 us / 23.5 GB/s, serialized-latency comm model:
+  comm = 24 x 26.3 us + 23.86 MB / 23.5 GB/s = 0.631 + 1.015 = 1.647 ms;
+  t_bound = max(2.010, 1.647) + 0.026 = **2.036 ms** (compute-limited);
+  **measured/bound = 3.16** — the SAME ~3x regime as the lat-lon panel
+  (2.35-3.20). Both directive lanes sit ~3x above their fabric+compute
+  MODEL at healthy tiles.
+* **s9@nd64, reorder-for 128**: 33 CP + 1 AR per step, 29,489,064 B
+  static payload at 40,962 cells/dev — payload GROWS +24 % at matched
+  tile vs s8@nd16 (more neighbour rounds with parts; PLAUSIBLE
+  partition-quality decay; recorded).
+* **Bound for s9@np64 (measured 9.60 ms, job 26600095)**:
+  comm = 33 x 26.3 us + 29.49 MB / 23.5 GB/s = 0.868 + 1.255 = 2.123;
+  t_bound = max(2.010, 2.123) + 0.026 = **2.149 ms**;
+  **measured/bound = 4.47**.
+* **Matched-tile gap decomposition (topology-correct census)**: the
+  s8@16 -> s9@64 measured gap is +3.17 ms; the MODELED comm growth
+  (CP 24->33 = +0.237 ms latency, payload +5.63 MB = +0.240 ms BW; net
+  bound growth +0.113 ms at the max() edge) covers <= 0.48 ms =
+  **~15 %**. The
+  UNDER THE FIXED-IB MODEL, direct count/payload growth accounts for
+  at most ~15 % of the gap; its ACHIEVED-runtime contribution is
+  unresolved (the unmeasured per-CP effective overhead could itself
+  scale with count — codex r9). PLAUSIBLE residual mechanisms
+  (uninstrumented): per-CP effective overhead growing with rank count
+  (4 -> 16 nodes), and jitter/straggler amplification across the
+  dependency-chained CP syncs per step (33 + 1 AR at nd64); "more neighbours +
+  partition-quality decay" for the byte growth is likewise PLAUSIBLE.
+  The 26630576 CP-combining A/B tests the LAT-LON lane only; the MPAS
+  exchange is a hand-rolled edge-coloured ppermute schedule, so an
+  MPAS combining test would need its own arm (and may not be
+  XLA-combinable at all).
