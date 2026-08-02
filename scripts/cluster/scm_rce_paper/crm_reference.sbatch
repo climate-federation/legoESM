@@ -8,7 +8,7 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/scmrce_crm_%j.out
 set +e
-WT=/burg/glab/users/pg2328/scmrce_wt
+WT=${WT:-/burg/glab/users/pg2328/scmrce_wt}
 cd $WT
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "host: $(hostname)"; nvidia-smi -L
