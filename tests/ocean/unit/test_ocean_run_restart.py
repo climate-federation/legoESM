@@ -2,13 +2,14 @@
 / ``load_run_restart`` (+ ``run_restart_metadata``).
 
 This is the checkpoint an OMIP driver resumes from, so its contract is
-stricter than the older ``save_restart``: EVERY non-``None`` slot of the state
-is persisted, including the carries that are NOT ``Field``s and that
-``save_restart`` therefore drops silently — the rigid-lid streamfunction
-quintet (``psi``/``dpsi``/``dpsi_prev``/``dpsin``/``dpsin_prev``, raw arrays)
-and the NEMO AB3/AM4 barotropic history ``bt_hist`` (a tuple of arrays) —
-plus the UNMANGLED 12-field ``DynamicSeaIceState`` and the absolute step
-counter (every OMIP forcing index is a pure function of it).
+stricter than the older ``save_restart``: every PROGNOSTIC and STATIC slot is
+persisted (see ``_SLOT_POLICY``), including the carries that are NOT ``Field``s
+and that ``save_restart`` therefore drops silently — the rigid-lid
+streamfunction quintet (``psi``/``dpsi``/``dpsi_prev``/``dpsin``/``dpsin_prev``,
+raw arrays) and the NEMO AB3/AM4 barotropic history ``bt_hist`` (a tuple of
+arrays) — plus the UNMANGLED 12-field ``DynamicSeaIceState`` and the absolute
+step counter (every OMIP forcing index is a pure function of it).  DIAGNOSTIC
+slots are deliberately excluded, and a slot in neither bucket raises.
 
 The tests here are deliberately mechanical ratchets:
 

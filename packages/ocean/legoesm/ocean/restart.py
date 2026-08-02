@@ -28,11 +28,13 @@ Usage::
     # state_loaded is bit-identical to state.
 
 For RESUMING a driver mid-integration use the run-restart pair instead
-(:func:`save_run_restart` / :func:`load_run_restart`): it persists EVERY
-non-``None`` state slot — including the non-``Field`` carries ``save_restart``
-drops silently (rigid-lid ``psi``/``dpsi``/``dpsin``, the ``bt_hist`` tuple) —
-plus the unmangled sea-ice state and the absolute step counter that every OMIP
-forcing index is a pure function of::
+(:func:`save_run_restart` / :func:`load_run_restart`): it persists every
+PROGNOSTIC and STATIC state slot — including the non-``Field`` carries
+``save_restart`` drops silently (rigid-lid ``psi``/``dpsi``/``dpsin``, the
+``bt_hist`` tuple) — plus the unmangled sea-ice state and the absolute step
+counter that every OMIP forcing index is a pure function of.  Slots labelled
+DIAGNOSTIC in :data:`_SLOT_POLICY` are deliberately excluded, and a slot in
+neither bucket raises::
 
     save_run_restart("results/omip/restart.npz", state, step=n, time_days=d,
                      grid_type="tripole", ice_state=ice)
@@ -403,13 +405,16 @@ def save_mld_snapshot(state, path: str | Path, *,
 #   ``dpsin_prev``, raw arrays) and the NEMO AB3/AM4 barotropic history
 #   ``bt_hist`` (a 6-tuple of arrays) — so it drops them SILENTLY.
 #
-# The contract here is the inverse: EVERY non-``None`` slot of the state is
-# serialised, the value kind is recorded per slot, and an unrecognised value
-# kind is a hard error at save time.  A carry added to the state in future is
-# therefore persisted automatically, and a carry whose container type the
-# serialiser does not understand fails LOUDLY instead of resuming from a
-# cold-start seed.  The step counter is recorded because every forcing index in
-# the OMIP drivers is a pure function of it (``_idx_t``,
+# The contract here is the inverse, and it is CLOSED rather than best-effort:
+# every non-``None`` slot is looked up in :data:`_SLOT_POLICY`, the PROGNOSTIC
+# and STATIC ones are serialised (with their value kind and Field aux-data
+# recorded per slot), the DIAGNOSTIC ones are deliberately excluded and listed
+# in the archive's ``_excluded`` record, and a slot in NEITHER bucket — or one
+# whose container type the serialiser does not understand — is a hard error at
+# save time.  So a field added to the state in future cannot be silently
+# dropped (resuming from its cold-start seed) nor silently resurrected (a stale
+# diagnostic restored over a fresh one).  The step counter is recorded because
+# every forcing index in the OMIP drivers is a pure function of it (``_idx_t``,
 # ``_runoff_month_idx``), so persisting it reproduces the forcing exactly.
 
 
