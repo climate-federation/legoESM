@@ -48,7 +48,9 @@ fraction has its own surface state and its own bulk solve:
   through ``physics_pipeline._tiled_surface_flux`` ->
   :func:`legoesm.atmosphere.physics.turbulence.surface_layer.compute_tiled_surface_fluxes`)
   are COVERED: the atmospheric land tile and the land SEB now call the same
-  entry point, so matched inputs give identical fluxes.
+  entry point, so matched inputs give identical fluxes.  Production config on
+  this side: ``config/amip/amip_sota.yaml`` (cubed-sphere C48,
+  ``surface_tiled: true``, ``surface_z0_land: 0.1``).
 * The MPAS lane runs ``surface_tiled=False`` (see
   ``config/amip/amip_production.yaml``): its turbulence scheme solves ONE
   bulk flux on a land/ocean-BLENDED surface temperature and a land-fraction-
