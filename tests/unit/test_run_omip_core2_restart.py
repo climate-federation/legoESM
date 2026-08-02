@@ -442,6 +442,107 @@ def test_restart_fingerprint_covers_the_resolved_forcing_archive():
     assert use < digest, "the forcing archive is appended after the digest"
 
 
+def test_restart_fingerprint_covers_behaviour_changing_env_vars():
+    """codex r9 HIGH: several numerics levers are ENV-gated, not CLI flags
+    (LEGOESM_BAROCLINIC_F32, LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED,
+    LEGOESM_TRACER_PAIR).  Two legs with identical command lines could
+    integrate different numerics and match on every other fingerprint term.
+    Hashed as a sorted LEGOESM_ prefix sweep so a lever added later is covered
+    automatically."""
+    import inspect
+
+    from scripts.run import run_omip_core2 as _c2
+
+    src = inspect.getsource(_c2.main)
+    assert 'startswith("LEGOESM_")' in src, (
+        "main() no longer folds the LEGOESM_* environment into the restart "
+        "configuration fingerprint")
+    lines = src.splitlines()
+    use = next(i for i, ln in enumerate(lines) if 'startswith("LEGOESM_")' in ln)
+    digest = next(i for i, ln in enumerate(lines)
+                  if "_restart_cfg_fp = " in ln and "None" not in ln)
+    assert use < digest, "the environment sweep runs after the digest is taken"
+
+
+def test_mixed_tree_tag_is_unknown_when_the_root_cannot_be_resolved(
+        monkeypatch):
+    """codex r9 LOW: the docstring promises ``+mixedtree:unknown`` for a
+    portion whose repository root does not resolve; it was tagged with that
+    portion's SHA instead, which claims more than is known."""
+    import subprocess
+
+    from scripts.run import run_omip_core2 as _c2
+
+    here = str(Path(_c2.__file__).resolve().parent)
+    driver_sha = "7" * 40
+
+    def _fake(cmd, **kw):
+        cwd = cmd[2]
+        if "--show-toplevel" in cmd:
+            if cwd == here:
+                return subprocess.CompletedProcess(cmd, 0, "/tree/main\n", "")
+            return subprocess.CompletedProcess(cmd, 128, "", "fatal")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, driver_sha + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    got = _c2._source_revision()
+    assert got == f"{driver_sha}+mixedtree:unknown", got
+    assert _c2._revision_ambiguity(got) is not None
+
+
+def test_provenance_probe_work_and_output_are_bounded(monkeypatch):
+    """codex r9 MEDIUM: each foreign portion costs up to three 10 s git
+    subprocesses at SETUP, and the recorded string goes into the archive.  The
+    common case (one checkout) must cost ONE command per portion, and neither
+    the probe count nor the tag list may grow without bound."""
+    import subprocess
+
+    from scripts.run import run_omip_core2 as _c2
+
+    here = str(Path(_c2.__file__).resolve().parent)
+    calls: list[list[str]] = []
+
+    # (a) FAST PATH: every portion in the driver's tree -> one command each.
+    def _same(cmd, **kw):
+        calls.append(cmd)
+        if "--show-toplevel" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "/tree/one\n", "")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "8" * 40 + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _same)
+    assert _c2._source_revision() == "8" * 40
+    per_portion = [c for c in calls if c[2] != here]
+    assert all("--show-toplevel" in c for c in per_portion), (
+        "the same-checkout fast path issued more than the root probe: "
+        f"{[c[3:] for c in per_portion if '--show-toplevel' not in c]}")
+
+    # (b) BOUNDED OUTPUT: many distinct foreign roots -> a truncated tag list.
+    monkeypatch.setattr(_c2, "_MAX_TREE_TAGS", 2)
+    counter = {"n": 0}
+
+    def _all_different(cmd, **kw):
+        cwd = cmd[2]
+        if "--show-toplevel" in cmd:
+            if cwd == here:
+                return subprocess.CompletedProcess(cmd, 0, "/tree/main\n", "")
+            counter["n"] += 1
+            return subprocess.CompletedProcess(
+                cmd, 0, f"/tree/other{counter['n']}\n", "")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        sha = ("9" * 39 + str(counter["n"] % 10)) if cwd != here else "8" * 40
+        return subprocess.CompletedProcess(cmd, 0, sha + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _all_different)
+    got = _c2._source_revision()
+    tags = got.split("+mixedtree:")[1].split(",")
+    assert len(tags) <= 2, f"tag list not truncated: {tags}"
+
+
 def test_scan_lane_refuses_restarts():
     """codex r2 HIGH: the --scan-block body steps model._step_impl directly and
     never seeds the scan carry, so it can PROMOTE an optional slot None->Field

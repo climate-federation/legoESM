@@ -2248,6 +2248,14 @@ def _idx_t(step: int, dt: float, n_rec: int) -> int:
 
 
 _SOURCE_REV_UNAVAILABLE = "unavailable"
+# Bounds on the provenance probe (codex r9).  Each foreign namespace portion
+# costs up to three `git` subprocesses at setup, so on a slow shared filesystem
+# an unbounded sweep is a real startup stall; and the recorded string ends up
+# in the archive, so it must not grow without limit either.  legoesm has ~10
+# portions today and they are normally all in ONE checkout, which the cheap
+# `--show-toplevel` fast path settles in a single command each.
+_MAX_TREE_PROBES: int = 16
+_MAX_TREE_TAGS: int = 4
 
 
 def _source_revision(start_dir=None) -> str:
@@ -2339,21 +2347,40 @@ def _source_revision(start_dir=None) -> str:
             # ambiguous rather than reporting a clean, fully-describing
             # revision (codex r8).
             return f"{rev}+mixedtree:unknown"
-        # Cross-check EVERY tree that supplies model code.
+        # Cross-check EVERY tree that supplies model code.  BOUNDED WORK
+        # (codex r9): the cheap `--show-toplevel` probe runs first and, for the
+        # overwhelmingly common case of one checkout, is the ONLY command per
+        # portion; the two extra commands run only for a portion that actually
+        # differs.  Portions are capped and the suffix is truncated so neither
+        # the setup latency nor the recorded string can grow without bound on a
+        # slow shared filesystem.
         import legoesm as _lego
-        others = []
-        seen = set()
+        others: list[str] = []
+        seen: set[str] = set()
+        probes = 0
         for portion in list(getattr(_lego, "__path__", [])):
             pkg_dir = str(Path(portion).resolve())
             if pkg_dir in seen:
                 continue
             seen.add(pkg_dir)
-            pkg_root, pkg_rev = _describe(pkg_dir)
-            if pkg_root is not None and Path(pkg_root) == Path(root):
-                continue
-            tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
-                   else pkg_rev.split("-")[0][:12])
-            if tag not in others:
+            probes += 1
+            if probes > _MAX_TREE_PROBES:
+                if "..." not in others:
+                    others.append("...")
+                break
+            top = _git(pkg_dir, "rev-parse", "--show-toplevel")
+            pkg_root = top.stdout.strip() if top.returncode == 0 else None
+            if pkg_root and Path(pkg_root) == Path(root):
+                continue          # same checkout: nothing more to ask
+            if pkg_root is None:
+                # Root unresolved -> we cannot say WHICH tree it is; the
+                # docstring promises 'unknown' here (codex r9 LOW).
+                tag = "unknown"
+            else:
+                _, pkg_rev = _describe(pkg_dir)
+                tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
+                       else pkg_rev.split("-")[0][:12])
+            if tag not in others and len(others) < _MAX_TREE_TAGS:
                 others.append(tag)
         if not others:
             return rev
@@ -5484,6 +5511,16 @@ def main() -> int:
     )
     n_rec = int(forcing.u10.shape[0])
     print(f"[setup] grid {lat2d.shape}, forcing records {n_rec}, dt={args.dt}s")
+    # RESOLVED forcing archive, always logged.  With --forcing-path unset the
+    # loader picks an environment/home-dependent cache, so two chained legs can
+    # read DIFFERENT forcing from identical command lines.  It is hashed into
+    # the restart fingerprint (a mismatch is then a hard error on resume), but
+    # the digest is opaque — printing the path is what makes that error
+    # DIAGNOSABLE from the two legs' logs.
+    from legoesm.ocean.forcing import core2_nyf_path as _core2_path
+    print("[setup] forcing archive: "
+          f"{_core2_path(Path(args.forcing_path) if args.forcing_path else None)}",
+          flush=True)
 
     # Prognostic sea-ice (--prognostic-sea-ice): build the canonical SeaIceConfig
     # + a zero-ice cold-start state on the OCEAN grid.  The REAL model
@@ -5715,6 +5752,18 @@ def main() -> int:
         _fp_forcing = core2_nyf_path(
             Path(args.forcing_path) if args.forcing_path else None)
         _fp_items.append(f"forcing_archive={_fp_forcing.resolve()}")
+        # BEHAVIOUR-CHANGING ENVIRONMENT (codex r9 HIGH).  Several numerics
+        # levers are env-gated rather than CLI flags (LEGOESM_BAROCLINIC_F32,
+        # LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED, LEGOESM_TRACER_PAIR,
+        # ...), so two legs with IDENTICAL command lines can integrate
+        # different numerics and still match on every other term.  Hashed as a
+        # sorted PREFIX SWEEP so a lever added later is covered automatically
+        # (fail-closed, like the CLI exclusion list); JAX_ENABLE_X64 is already
+        # pinned separately by the archive's _x64 record.
+        import os as _os_fp
+        _fp_env = sorted((k, v) for k, v in _os_fp.environ.items()
+                         if k.startswith("LEGOESM_"))
+        _fp_items.append(f"env={_fp_env!r}")
         _restart_cfg_fp = _hashlib.sha256(
             "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
     # SOURCE REVISION (codex r5 HIGH; scoping/dirty/explicit-failure fixed in

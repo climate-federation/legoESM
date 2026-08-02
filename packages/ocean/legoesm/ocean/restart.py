@@ -4,6 +4,23 @@ Saves the full ocean prognostic state to disk as a numpy ``.npz``
 archive and loads it back into an empty state container of the
 matching grid.
 
+THREAT MODEL -- a stated NON-GOAL, not an oversight
+===================================================
+This is a scientific checkpoint format on a shared HPC filesystem.  It
+defends against CONFIGURATION DRIFT between chained legs, archive
+TRUNCATION / CORRUPTION, and ACCIDENTAL mixed-tree or mixed-configuration
+resumes -- i.e. against the author's own mistakes, which is what actually
+goes wrong here.
+
+It is NOT SIGNED and does NOT defend against an ADVERSARY.  A coordinated
+hand-edit (rewriting the manifest, the inventory and the payload together)
+or a poisoned execution environment defeats every check below, by design.
+Closing that would need a MAC/signature over the whole archive and a
+trusted execution path; neither is in scope, and no check here should be
+requoted as if it were.  The structural checks exist because a corrupt or
+half-edited archive is a REAL failure mode on this filesystem, not because
+they are a security boundary.
+
 SCOPE OF THE GUARANTEE -- read this before requoting it (codex r6/r7)
 =====================================================================
 WHAT IS DELIVERED.  The RUN pair (:func:`save_run_restart` /
@@ -599,6 +616,17 @@ def _encode_slot(name: str, value, payload: dict) -> dict:
     # EXACT tuple, not any sequence: a list or a NamedTuple would be restored
     # as a plain tuple, silently changing the pytree treedef (codex r1 LOW).
     if type(value) is tuple:
+        # WRITER/READER SYMMETRY (codex r9): the loader refuses n >
+        # _MAX_TUPLE_CARRY, so a writer that emitted a longer tuple would
+        # produce an archive it could never load back.  Fail at SAVE, where the
+        # message can name the slot, rather than hours later on resume.
+        if len(value) > _MAX_TUPLE_CARRY:
+            raise ValueError(
+                f"save_run_restart: carry slot {name!r} is a tuple of "
+                f"{len(value)} arrays, above the format's limit of "
+                f"{_MAX_TUPLE_CARRY}.  The loader would refuse the archive; "
+                "raise _MAX_TUPLE_CARRY on both sides if a longer carry is "
+                "genuinely needed.")
         metas: list = []
         specs: list = []
         for i, elem in enumerate(value):
@@ -910,6 +938,24 @@ def save_run_restart(path: str | Path, state, *,
     return _atomic_savez(out_path, payload)
 
 
+def _require_run_format(fmt: Any, in_path: Path) -> None:
+    """Refuse an archive this build cannot read — FIRST, before any schema.
+
+    A format-2 archive carries no per-slot shape/dtype records, so the manifest
+    schema would reject it with a confusing "records shape None" rather than
+    naming the real incompatibility (codex r9).  One helper, used by both
+    :func:`_parse_run_metadata` and :func:`_validate_run_header`, so the two
+    can never disagree about what this build reads.
+    """
+    got = int(fmt) if fmt is not None else 0
+    if got != _RUN_RESTART_FORMAT:
+        raise ValueError(
+            f"load_run_restart: {in_path} has format version {got}, this build "
+            f"reads version {_RUN_RESTART_FORMAT}.  Regenerate the restart with "
+            "this build; older archives lack the per-slot shape/dtype records "
+            "the loader cross-checks the payload against.")
+
+
 def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
     """Structural schema for a slot manifest — checked BEFORE any array read.
 
@@ -946,9 +992,25 @@ def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
                 f"{in_path}: {where} records dtype {spec.get('dtype')!r}; "
                 "expected a non-empty dtype string.")
 
-    def _check_field_meta(where, meta):
-        """``_field_from_meta`` unpacks EXACTLY five entries (codex r8)."""
+    def _check_field_meta(where, meta, *, required: bool):
+        """``_field_from_meta`` unpacks EXACTLY five entries (codex r8).
+
+        ``required`` for a ``field`` slot: the writer ALWAYS emits metadata
+        there, and ``_field_from_meta``'s ``meta is None`` fallback rebuilds a
+        generic ``Field`` whose name/dims/units/staggering differ from the
+        writer's.  Those are pytree AUX DATA, so a silently rebuilt Field
+        changes the carry's TREEDEF and breaks ``lax.scan`` reconciliation
+        (codex r9).  Tuple ELEMENTS legitimately carry ``None`` — that is how
+        a raw-array element is encoded.
+        """
         if meta is None:
+            if required:
+                raise ValueError(
+                    f"{in_path}: {where} is a Field carry with no metadata. "
+                    "The writer always records it; rebuilding with generic "
+                    "metadata would change the Field's pytree aux-data "
+                    "(name/dims/units/staggering) and break the scan carry's "
+                    "treedef.  Refusing to resume.")
             return
         if not isinstance(meta, list) or len(meta) != 5:
             raise ValueError(
@@ -979,7 +1041,8 @@ def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
         if kind != _KIND_TUPLE:
             _check_spec(where, entry)
             if kind == _KIND_FIELD:
-                _check_field_meta(where, entry.get("meta"))
+                _check_field_meta(where, entry.get("meta"),
+                                  required=True)
             continue
         n = entry.get("n")
         # BOUNDED (codex r8): the key expansion below materialises n names, so
@@ -1000,7 +1063,7 @@ def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
                 "element-metadata entries; the two records disagree, so "
                 "neither can be trusted.")
         for i, m in enumerate(elems or []):
-            _check_field_meta(f"{where} element {i}", m)
+            _check_field_meta(f"{where} element {i}", m, required=False)
         specs = entry.get("specs")
         if not isinstance(specs, list) or len(specs) != n:
             got = len(specs) if isinstance(specs, list) else repr(specs)
@@ -1116,6 +1179,7 @@ def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
         raise ValueError(
             f"{in_path}: metadata key '_dt_seconds' is {out['dt_seconds']!r}; "
             "a non-positive timestep cannot have produced this archive.")
+    _require_run_format(out.get("format"), in_path)
     out["inventory"] = json.loads(str(_scalar("_inventory", "US")))
     out["ice_inventory"] = json.loads(str(_scalar("_ice_inventory", "US")))
     out["slots"] = json.loads(str(_scalar("_slot_kinds", "US")))
@@ -1196,11 +1260,7 @@ def _validate_run_header(meta: dict, in_path: Path, *,
                          n_forcing_records: int | None,
                          config_fingerprint: str | None) -> None:
     """Refuse a wrong-format / wrong-grid / wrong-configuration archive."""
-    fmt = int(meta.get("format", 0))
-    if fmt != _RUN_RESTART_FORMAT:
-        raise ValueError(
-            f"load_run_restart: {in_path} has format version {fmt}, this build "
-            f"reads version {_RUN_RESTART_FORMAT}.")
+    _require_run_format(meta.get("format"), in_path)
     if grid_type is not None and meta.get("grid_type") != grid_type:
         raise ValueError(
             f"load_run_restart: restart grid_type {meta.get('grid_type')!r} "

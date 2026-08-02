@@ -846,24 +846,129 @@ def test_the_manifest_records_shape_and_dtype_for_every_persisted_array(
     _, _, state = _base_state()
     state = _fill_all_slots(state)
     path = tmp_path / "r.npz"
-    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    # WITH sea ice (codex r9 LOW): the ice payload lives under the ``ice_``
+    # prefix, so an ocean-only check would not establish that those slots get
+    # specs too.
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon",
+                     ice_state=_ice_state())
     meta = run_restart_metadata(path)
+    assert meta["ice_slots"], "the ice manifest must be populated here"
     with np.load(path, allow_pickle=False) as f:
         arrays = {k: (f[k].shape, str(f[k].dtype))
                   for k in f.files if not k.startswith("_")}
     seen = 0
-    for name, entry in meta["slots"].items():
-        if entry["kind"] == "tuple":
-            for i, spec in enumerate(entry["specs"]):
-                got = arrays[f"{name}::{i}"]
-                assert (tuple(spec["shape"]), spec["dtype"]) == got, name
+    for kinds, prefix in ((meta["slots"], ""), (meta["ice_slots"], "ice_")):
+        for name, entry in kinds.items():
+            if entry["kind"] == "tuple":
+                for i, spec in enumerate(entry["specs"]):
+                    got = arrays[f"{prefix}{name}::{i}"]
+                    assert (tuple(spec["shape"]), spec["dtype"]) == got, name
+                    seen += 1
+            else:
+                got = arrays[prefix + name]
+                assert (tuple(entry["shape"]), entry["dtype"]) == got, name
                 seen += 1
-        else:
-            got = arrays[name]
-            assert (tuple(entry["shape"]), entry["dtype"]) == got, name
-            seen += 1
     assert seen == len(arrays), (
         f"{len(arrays) - seen} payload array(s) have no shape/dtype record")
+
+
+def test_an_ice_payload_is_cross_checked_against_its_manifest(tmp_path):
+    """The shape/dtype cross-check must reach the ``ice_``-prefixed slots too
+    (codex r9 LOW): the ice template IS fully populated, so its slots also have
+    the template shape guard — this proves the manifest check is wired for the
+    prefix, independent of that."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    ice = _ice_state()
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon",
+                     ice_state=ice)
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    key = "ice_h_ice"
+    assert key in payload
+    payload[key] = payload[key].astype(
+        np.float32 if payload[key].dtype == np.float64 else np.float64)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match=r"ice_h_ice.*records .*float"):
+        load_run_restart(path, _base_state()[2], ice_template=_ice_state(),
+                         grid_type="latlon")
+
+
+def test_save_refuses_a_tuple_carry_the_loader_could_not_read(tmp_path):
+    """codex r9 MEDIUM: the loader refuses n > _MAX_TUPLE_CARRY, so a writer
+    that emitted a longer tuple produced an archive it could never load back.
+    Fail at SAVE, where the message can name the slot."""
+    from legoesm.ocean.restart import _MAX_TUPLE_CARRY
+
+    _, _, state = _base_state()
+    long_tuple = tuple(jnp.zeros((N_LAT, N_LON))
+                       for _ in range(_MAX_TUPLE_CARRY + 1))
+    bad = state._replace(bt_hist=long_tuple)
+    with pytest.raises(ValueError, match="above the format's limit"):
+        save_run_restart(tmp_path / "r.npz", bad, step=1, time_days=0.0,
+                         grid_type="latlon")
+    # CONTROL: exactly at the limit is accepted and round-trips.
+    ok = state._replace(bt_hist=tuple(jnp.zeros((N_LAT, N_LON))
+                                      for _ in range(_MAX_TUPLE_CARRY)))
+    save_run_restart(tmp_path / "ok.npz", ok, step=1, time_days=0.0,
+                     grid_type="latlon")
+    got, _, _ = load_run_restart(tmp_path / "ok.npz", _base_state()[2],
+                                 grid_type="latlon")
+    assert len(got.bt_hist) == _MAX_TUPLE_CARRY
+
+
+def test_a_field_slot_without_metadata_is_a_hard_error(tmp_path):
+    """codex r9 HIGH: ``_field_from_meta``'s ``meta is None`` fallback rebuilds
+    a GENERIC Field, and name/dims/units/staggering are pytree AUX DATA — so a
+    Field carry whose metadata went missing would come back with a different
+    treedef and break ``lax.scan`` reconciliation.  Required for ``field``
+    slots; tuple ELEMENTS may legitimately be None (that is a raw array)."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    slots = json.loads(str(payload["_slot_kinds"]))
+    assert slots["tke"]["kind"] == "field"
+    slots["tke"]["meta"] = None
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="Field carry with no metadata"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+    # CONTROL: a tuple element's None metadata is NOT an error (bt_hist stores
+    # raw arrays exactly that way).
+    got, _, _ = load_run_restart(
+        _resave(tmp_path, state), _base_state()[2], grid_type="latlon")
+    assert isinstance(got.bt_hist, tuple)
+
+
+def _resave(tmp_path, state):
+    p = tmp_path / "again.npz"
+    save_run_restart(p, state, step=1, time_days=0.0, grid_type="latlon")
+    return p
+
+
+def test_an_older_format_archive_says_so_plainly(tmp_path):
+    """codex r9 MEDIUM: a format-2 archive has no per-slot shape/dtype records,
+    so the manifest schema rejected it with a confusing 'records shape None'
+    instead of naming the incompatibility.  The version is checked first."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    # Downgrade exactly as a format-2 writer would have: retag, drop specs.
+    payload["_format"] = np.asarray(2)
+    slots = json.loads(str(payload["_slot_kinds"]))
+    for entry in slots.values():
+        entry.pop("shape", None)
+        entry.pop("dtype", None)
+        entry.pop("specs", None)
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="has format version 2"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
 
 
 @pytest.mark.parametrize("entry,msg", [
