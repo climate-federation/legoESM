@@ -633,3 +633,30 @@ def test_ps_hyperdiffusion_degrades_conservation_only_linearly(cname, cbuild):
     assert res[1.0e15] < 1e-6 * res_adv, (
         f"[{cname}] with p_s hyperdiffusion on, flux form ({res[1.0e15]:.3e}) "
         f"is no longer decisively better than advective ({res_adv:.3e})")
+
+
+def test_kernel_nonzero_boundary_flux_is_handled_not_zeroed():
+    """Boundary interfaces replicate the adjacent layer value.
+
+    With the dycore's own ``F`` (exactly 0 at both ends) this is unobservable,
+    so it needs its own probe: feed a nonzero SURFACE mass flux and check the
+    bottom layer changes by the correct ``-F·q_bottom/δp`` rather than by
+    ``-F·0/δp`` (which a zero-pad would give, i.e. no change at all).
+    """
+    mesh = _mesh()
+    n_c, n_e = mesh.nCells, mesh.nEdges
+    dp_c = jnp.full((n_c, NLEV), 1.0e5 / NLEV, _F64)
+    q0 = 4.0e-3
+    q = jnp.full((n_c, NLEV, 1), q0, _F64)
+    f_sfc = 50.0                       # [Pa/s] downward, OUT of the column
+    F = jnp.zeros((n_c, NLEV + 1), _F64).at[:, -1].set(f_sfc)
+    out = tracer_flux_form_tendency(
+        q, jnp.zeros((n_e, NLEV), _F64), jnp.ones((n_e, NLEV), _F64),
+        dp_c, jnp.zeros((n_c, NLEV), _F64), F, mesh)
+    # d(q dp)/dt = -F·q ; d(dp)/dt = -F ; dq/dt = (-F q + q F)/dp = 0.
+    # i.e. exporting mass at the LOCAL mixing ratio leaves q unchanged — the
+    # free-stream property, which a zero-padded interface would break (it would
+    # export mass with q=0 and leave dq/dt = +q·F/dp = +2e-6 /s).
+    assert float(jnp.max(jnp.abs(out))) / q0 < 1e-14, (
+        "boundary interface is not using the adjacent-layer upwind value: "
+        f"max|dq/dt|/q = {float(jnp.max(jnp.abs(out))) / q0:.3e} /s")

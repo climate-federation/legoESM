@@ -242,9 +242,15 @@ def tracer_flux_form_tendency(
     # interface j came from layer j-1 (ABOVE) ⇒ upwind value q_{j-1}.
     f_interior = vert_mass_flux[:, 1:-1, None]                 # (nCells, nlev-1, 1)
     q_upwind = jnp.where(f_interior > 0, q[:, :-1, :], q[:, 1:, :])
-    # Pad the two boundary interfaces; F = 0 there, so the padded value is
-    # multiplied by zero and never enters the budget.
-    q_iface = jnp.pad(q_upwind, ((0, 0), (1, 1), (0, 0)))       # (nCells, nlev+1, ntr)
+    # Boundary interfaces: REPLICATE the adjacent layer value rather than pad
+    # with zero.  With the dycore's own F (exactly 0 at both ends) the two are
+    # identical — but a caller that ever supplies a nonzero boundary mass flux
+    # (a surface tracer flux) then gets the correct zero-gradient upwind value
+    # instead of a silent q=0, and the budget still closes.  Explicit
+    # concatenate, not ``mode="edge"``: at nlev == 1 ``q_upwind`` is empty along
+    # the level axis and edge-padding an empty axis is undefined.
+    q_iface = jnp.concatenate(
+        [q[:, :1, :], q_upwind, q[:, -1:, :]], axis=1)          # (nCells, nlev+1, ntr)
     vflux = vert_mass_flux[..., None] * q_iface                 # (nCells, nlev+1, ntr)
     d_vflux = vflux[:, 1:, :] - vflux[:, :-1, :]                # bottom minus top
     d_f = (vert_mass_flux[:, 1:] - vert_mass_flux[:, :-1])[..., None]
