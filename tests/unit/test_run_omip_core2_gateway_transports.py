@@ -281,8 +281,13 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
     """The per-step call must be INSIDE `for step in range(...)`, after it."""
     src = (Path(_ROOT) / "scripts/run/run_omip_core2.py").read_text()
     lines = src.splitlines()
+    # Match the loop by its END bound, not its start: the start is
+    # `start_step + 1` once --restart-from can resume mid-integration, and
+    # pinning the literal `range(1, ...)` made this test fail on a change that
+    # did not move the accumulator at all.
     loop = next(i for i, ln in enumerate(lines)
-                if ln.strip().startswith("for step in range(1, n_steps"))
+                if ln.strip().startswith("for step in range(")
+                and "n_steps + 1)" in ln)
     call = next(i for i, ln in enumerate(lines)
                 if "_gw_acc = gateway_step(" in ln)
     write = next(i for i, ln in enumerate(lines)
