@@ -865,6 +865,21 @@ def load_run_restart(path: str | Path, template_state, *,
         loaded = {k: f[k] for k in f.files if k not in _RUN_RESERVED_KEYS}
 
     def _rebuild(template, kinds, prefix, inventory, saved_class, what):
+        # Diagnostic-persisted check FIRST: it is the most specific diagnosis
+        # of a policy-mismatched archive, and the generic inventory
+        # cross-check below would otherwise mask it with a vaguer message.
+        # An archive that persisted a DIAGNOSTIC slot came from a writer with a
+        # different policy; restoring it resurrects a stale value and can flip
+        # an optional slot None->Field, breaking a scan carry's treedef.  This
+        # is the run_omip asymmetry (write-but-drop) made impossible.
+        diag = sorted(n for n in kinds
+                      if _SLOT_POLICY.get(n) == _SLOT_DIAGNOSTIC)
+        if diag:
+            raise ValueError(
+                f"load_run_restart: {in_path} persists diagnostic slot(s) "
+                f"{diag}, which this build recomputes every step and refuses "
+                "to restore (a stale diagnostic is not a continuation). "
+                "Regenerate the restart with a matching build.")
         # --- EXACT layout, not a subset (codex r1 HIGH) --------------------
         # Without this, a manifest that simply OMITS a slot leaves the fresh
         # template's cold-start value in place and the resume is silently not
@@ -929,18 +944,6 @@ def load_run_restart(path: str | Path, template_state, *,
         return _rebuild_slots(template, kinds, prefix)
 
     def _rebuild_slots(template, kinds, prefix):
-        # An archive that persisted a DIAGNOSTIC slot came from a writer with a
-        # different policy; restoring it resurrects a stale value and can flip
-        # an optional slot None->Field, breaking a scan carry's treedef.  This
-        # is the run_omip asymmetry (write-but-drop) made impossible.
-        diag = sorted(n for n in kinds
-                      if _SLOT_POLICY.get(n) == _SLOT_DIAGNOSTIC)
-        if diag:
-            raise ValueError(
-                f"load_run_restart: {in_path} persists diagnostic slot(s) "
-                f"{diag}, which this build recomputes every step and refuses "
-                "to restore (a stale diagnostic is not a continuation). "
-                "Regenerate the restart with a matching build.")
         known = set(_iter_state_fields(template))
         unknown = sorted(set(kinds) - known)
         if unknown:
