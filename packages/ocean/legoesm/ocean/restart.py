@@ -178,25 +178,33 @@ def _iter_state_fields(state) -> list[str]:
     return [k for k in dir(state) if isinstance(getattr(state, k), Field)]
 
 
-def _atomic_savez(out_path: Path, payload: dict, *,
-                  compress: bool = True) -> Path:
+def _atomic_savez(out_path: Path, payload: dict) -> Path:
     """Write ``payload`` to ``out_path`` atomically (temp file + rename).
 
     A killed process (or two runs sharing an output directory) must never
     leave a partial/corrupt ``.npz`` that a later reader silently mis-reads.
     A UNIQUE temp name (``mkstemp``) — not a fixed ``.tmp.npz`` — so two
     writers targeting the same ``out_path`` cannot truncate each other's temp.
-    Shared by :func:`save_mld_snapshot` and :func:`save_run_restart`.
+    Shared by :func:`save_mld_snapshot` and :func:`save_run_restart`, both of
+    which wrote compressed archives before this was factored out.
+    (:func:`save_restart` is deliberately NOT routed through here: it is the
+    older format with existing consumers, and this change set does not alter
+    its behaviour.)
+
+    NOTE on the ``.npz`` suffix: ``np.savez*`` APPENDS ``.npz`` to a *path*
+    that lacks it, but not to an open *file handle*.  Writing through a handle
+    (as here) means the file lands at exactly ``out_path``, so the returned
+    Path is always the file that was actually written — callers must pass the
+    full name including ``.npz``.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(out_path.parent), prefix=out_path.name + ".", suffix=".tmp.npz",
     )
     tmp_path = Path(tmp_name)
-    writer = np.savez_compressed if compress else np.savez
     try:
         with os.fdopen(fd, "wb") as fh:
-            writer(fh, **payload)
+            np.savez_compressed(fh, **payload)
         tmp_path.replace(out_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -384,7 +392,7 @@ def save_mld_snapshot(state, path: str | Path, *,
     if step is not None:
         save_kw["_step"] = np.asarray(int(step))
     # Atomic write (shared helper): a killed process must not leave a partial
-    # npz that a later scorer silently mis-reads.
+    # npz that a later scorer silently mis-reads.  Compressed, as before.
     return _atomic_savez(out_path, save_kw)
 
 
