@@ -336,3 +336,142 @@ def test_ocean_tke_config_really_does_collide():
             if m.config_class == "TKEConfig"}
     assert len(keys) > 1, "expected an atm/ocean TKEConfig name collision"
     assert any(not k.startswith("atm.turb.") for k in keys)
+
+
+# --- CLUBB: prognostic path makes most parameters live ----------------------
+
+def test_clubb_defaults_to_the_prognostic_path():
+    """The diagnostic default reads only 6 CLUBBParams fields and just 4 have a
+    live gradient, so tuning it exercises almost nothing."""
+    cfg = drv.build_physics_config("clubb", prescribed_fluxes=False)
+    assert cfg.turbulence.clubb is not None
+    assert cfg.turbulence.clubb.prognostic is True
+
+
+def test_clubb_prognostic_can_be_disabled():
+    cfg = drv.build_physics_config("clubb", prescribed_fluxes=False,
+                                   clubb_prognostic=False)
+    assert cfg.turbulence.clubb.prognostic is False
+
+
+def test_unimplemented_clubb_params_are_named_and_real():
+    """Each listed parameter must exist on CLUBBParams (so the list cannot rot
+    into naming nonsense) AND appear nowhere in clubb.py as an attribute read.
+    """
+    import re
+    from pathlib import Path
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBParams
+
+    fields = set(CLUBBParams._fields)
+    src = Path(
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py"
+    ).read_text()
+    assert drv.CLUBB_UNIMPLEMENTED_PARAMS, "list should not be empty"
+    for name in drv.CLUBB_UNIMPLEMENTED_PARAMS:
+        assert name in fields, f"{name} is not a CLUBBParams field"
+        # an attribute read would look like `.name` / `params.name`
+        assert not re.search(rf"\.{re.escape(name)}\b", src), (
+            f"{name} IS read in clubb.py; it should be removed from "
+            "CLUBB_UNIMPLEMENTED_PARAMS"
+        )
+
+
+# --- surface layer: one derived config, identical on every arm --------------
+
+def _bomex_case(nlev=32):
+    from legoesm.atmosphere.forcing.scm.sam_case_scm import load_sam_scm_case
+    return load_sam_scm_case("bomex", nlev=nlev, dt=60.0)
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_surface_cd_is_the_neutral_log_law_at_the_les_roughness():
+    """The SCM default Cd=1.5e-3 gives u*=0.339 m/s at BOMEX's 8.75 m/s trade
+    wind; the LES wall model at z0=1e-4 gives 0.287. Derive it instead."""
+    import math
+    from legoesm import constants
+    case = _bomex_case()
+    surf = drv.build_surface_config(case)
+    expect = (constants.kappa_vk / math.log(surf.z_ref / surf.z0)) ** 2
+    assert surf.Cd_neutral == pytest.approx(expect, rel=1e-12)
+    assert surf.z0 == pytest.approx(case.spec.les_z0_m)
+    # z_ref must be the level whose wind the flux routine is handed
+    assert surf.z_ref == pytest.approx(float(case.z_full[-1]))
+    assert surf.Cd_neutral < 1.5e-3, "should be below the generic SCM default"
+    u_ref = float(abs(case.u_profile[-1]))
+    ustar = surf.Cd_neutral ** 0.5 * u_ref
+    assert 0.24 < ustar < 0.33, f"u*={ustar} far from the LES 0.287 m/s"
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_prescribed_flux_case_zeroes_the_heat_coefficient():
+    case = _bomex_case()
+    assert case.forcing.prescribe == "fluxes"
+    assert drv.build_surface_config(case).Ch_neutral == 0.0
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_most_is_refused_when_the_heat_flux_is_prescribed():
+    """The MOST path derives heat from its own scaling and ignores Ch_neutral,
+    so combining it with a prescribed flux double-counts."""
+    case = _bomex_case()
+    with pytest.raises(ValueError, match="counted twice"):
+        drv.build_surface_config(case, bulk_scheme="most")
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_every_arm_gets_the_identical_surface_config():
+    """The surface boundary must not be a per-scheme degree of freedom."""
+    case = _bomex_case()
+    surf = drv.build_surface_config(case)
+    seen = {}
+    for scheme in drv.TURBULENCE_SCHEMES:
+        cfg = drv.build_physics_config(
+            scheme, prescribed_fluxes=True, surface=surf,
+        )
+        sub = getattr(cfg.turbulence, scheme)
+        seen[scheme] = sub.surface
+    first = seen[drv.TURBULENCE_SCHEMES[0]]
+    for scheme, s in seen.items():
+        assert s == first, f"{scheme} has a different surface config"
+        assert s == surf
+
+
+@pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
+def test_surface_config_rejects_an_unknown_bulk_scheme():
+    with pytest.raises(ValueError, match="not supported here"):
+        drv.build_surface_config(_bomex_case(), bulk_scheme="nonsense")
+
+
+def test_scm_refuses_most_with_a_prescribed_heat_flux():
+    """Regression for a gap in the SCM's own guard.
+
+    surface_layer.compute_surface_fluxes routes ("most", "coare3",
+    "large_yeager") to the SAME compute_most_fluxes path, which ignores
+    Ch_neutral, but _validate_prescribed_fluxes_no_double_count only listed
+    coare3 and large_yeager -- so prescribe="fluxes" + bulk_scheme="most"
+    silently double-counted the prescribed surface heat flux. The Ch_neutral
+    check below it cannot catch that, because under MOST Ch_neutral is inert
+    and is legitimately 0.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+
+    forcing = SCMForcing(prescribe="fluxes",
+                         w_th_s=lambda _t: jnp.asarray(0.01))
+    for bad in ("most", "coare3", "large_yeager"):
+        cfg = drv.build_physics_config(
+            "louis", prescribed_fluxes=True,
+            surface=SurfaceLayerConfig(bulk_scheme=bad, Ch_neutral=0.0),
+        )
+        with pytest.raises(ValueError, match="double-count"):
+            SingleColumnModel._validate_prescribed_fluxes_no_double_count(
+                cfg, forcing,
+            )
+    # the constant path with Ch_neutral=0 remains allowed
+    ok = drv.build_physics_config(
+        "louis", prescribed_fluxes=True,
+        surface=SurfaceLayerConfig(bulk_scheme="constant", Ch_neutral=0.0),
+    )
+    SingleColumnModel._validate_prescribed_fluxes_no_double_count(ok, forcing)

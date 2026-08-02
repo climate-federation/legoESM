@@ -108,6 +108,9 @@ class SAMSCMCaseSpec:
     # to compensate for.
     bulk_ch: float | None
     bulk_ce: float | None
+    # Aerodynamic roughness the case's LES wall model uses (its --z0). The SCM
+    # derives its neutral drag from this so both models see the same log law.
+    les_z0_m: float
     note: str
 
 
@@ -118,7 +121,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
     "bomex": SAMSCMCaseSpec(
         gsam_dir="BOMEX", latitude_deg=15.0, les_domain_top_m=3000.0,
         default_dt_s=60.0, surface_mode="fluxes",
-        bulk_ch=None, bulk_ce=None,
+        bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
         note="Siebesma et al. 2003 shallow non-precipitating trade cumulus; "
              "prescribed surface fluxes.",
     ),
@@ -126,14 +129,14 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         gsam_dir="RICO", latitude_deg=18.0, les_domain_top_m=4000.0,
         default_dt_s=60.0, surface_mode="T_s",
         # run_rico_les.py _C_H / _C_Q (van Zanten et al. 2011, at 20 m).
-        bulk_ch=0.001094, bulk_ce=0.001133,
+        bulk_ch=0.001094, bulk_ce=0.001133, les_z0_m=1.0e-4,
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
         default_dt_s=30.0, surface_mode="fluxes",
-        bulk_ch=None, bulk_ce=None,
+        bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
     ),
