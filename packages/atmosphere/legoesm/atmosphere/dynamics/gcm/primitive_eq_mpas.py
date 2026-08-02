@@ -561,6 +561,19 @@ def mpas_hydrostatic_tendencies(
     # ``+K_h·∇²T`` Laplacian above (whose operator is already negative).  The
     # INNER Laplacian is exactly the ``_div_grad_T`` the K_h batch produced, so
     # only the OUTER grad+div is extra work.
+    #
+    # DISTRIBUTED SCOPE (exclusion deliberately inherited, not overlooked):
+    # ``operators_voronoi.vector_laplacian_del4_3d`` offers a ``mid_refresh``
+    # hook because a two-pass stencil spans 4 hops — twice an explicit-MPI
+    # ``halo_depth=2`` budget — so the outer pass would read a stale ring.
+    # This dycore passes ``mid_refresh`` NOWHERE: its momentum del4 (above) and
+    # its ``nu_del4_ps`` two-pass (below) both omit it, because the atmosphere
+    # MPAS lane is distributed by SPMD SHARDING (XLA inserts the collectives
+    # behind the ``cellsOnEdge``/``edgesOnCell`` gathers), not by an explicit
+    # halo ring with a hop budget.  Only ``ocean/dynamics/ocean_pe_mpas.py``,
+    # which owns a real ``halo_refresh``, threads it.  This term keeps the same
+    # scope as its two siblings; if this dycore ever gains an explicit-halo
+    # path, all THREE two-pass operators need the refresh together.
     if config.nu_del4_T > 0:
         _del4_T = divergence_cell_3d(
             gradient_edge_3d(_div_grad_T, mesh), mesh)

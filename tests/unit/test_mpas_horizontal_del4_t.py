@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
-
-from legoesm import constants
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+    MPASPrimitiveEquationConfig,
+    mpas_hydrostatic_tendencies,
+)
 from legoesm.core.field import Field
 from legoesm.core.operators_voronoi import (
     divergence_cell_3d,
@@ -37,10 +39,8 @@ from legoesm.core.operators_voronoi import (
 from legoesm.core.state import MPASHydrostaticState
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.grids.voronoi import create_voronoi_mesh
-from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig,
-    mpas_hydrostatic_tendencies,
-)
+
+from legoesm import constants
 
 pytestmark = pytest.mark.skipif(
     not jax.config.read("jax_enable_x64"),
@@ -243,7 +243,8 @@ def _mpas_experiment_cfg(**dycore_kw):
 
 def test_factory_threads_scale_times_hyperdiff_into_nu_del4_T():
     from legoesm.driver.component_factory import (
-        compute_diffusion, create_atmosphere_dycore,
+        compute_diffusion,
+        create_atmosphere_dycore,
     )
     mesh = _mesh()
     coord = create_sigma_coordinate(NLEV, sigma_top=1e-3)
@@ -261,7 +262,8 @@ def test_k_h_scale_decouples_the_scalar_laplacian_from_the_momentum_one():
     T), so every a_h_scale experiment moves two variables.  mpas_k_h_scale
     overrides K_h alone, on the SAME scale, leaving nu_del2 untouched."""
     from legoesm.driver.component_factory import (
-        compute_diffusion, create_atmosphere_dycore,
+        compute_diffusion,
+        create_atmosphere_dycore,
     )
     mesh = _mesh()
     coord = create_sigma_coordinate(NLEV, sigma_top=1e-3)
@@ -291,7 +293,8 @@ def test_k_h_override_reuses_the_production_A_h_formula():
     """The override must go through ``compute_diffusion`` itself — a re-derived
     A_h formula would silently drift from the production one."""
     from legoesm.driver.component_factory import (
-        compute_diffusion, create_atmosphere_dycore,
+        compute_diffusion,
+        create_atmosphere_dycore,
     )
     mesh = _mesh()
     coord = create_sigma_coordinate(NLEV, sigma_top=1e-3)
