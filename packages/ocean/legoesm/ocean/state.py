@@ -584,13 +584,17 @@ class LatLonCGridOceanState(NamedTuple):
     # ``eta``/``H_bathy`` with ``legoesm.ocean.vertical.compute_layer_thickness``
     # (the routine the step itself uses).  Do not re-derive a shortcut here.
     #
-    # THE ONE CONFIGURATION WHERE THE TRIPLE *IS* NON-DIVERGENT:
-    # ``linear_free_surface`` (NEMO key_linssh).  There
-    # ``compute_ocean_jacobian`` pins the column to its eta = 0 reference, so
-    # the layer thickness is time-INVARIANT, ``dh/dt`` is identically zero, and
-    # the diagnosed ``w`` is the pure continuity integral of the horizontal
-    # divergence -- i.e. ``div_h + delta_z(w) == 0`` holds there.  It is the
-    # MOVING-z* (default) column that carries the sigma/thickness tendency.
+    # CONFIGURATIONS WHERE THE TRIPLE IS NON-DIVERGENT TO ROUND-OFF (not
+    # exactly -- these arrays are stored at the run's storage precision, so
+    # even an analytically exact relation shows a few ULP, and NONE of this is
+    # covered by a test): a FIXED column, i.e. ``linear_free_surface`` (NEMO
+    # key_linssh, where ``compute_ocean_jacobian`` pins the column to its
+    # eta = 0 reference) or the rigid lid.  There the layer thickness is
+    # time-INVARIANT, ``dh/dt`` vanishes, and the diagnosed ``w`` is the pure
+    # continuity integral of the horizontal divergence.  It is the MOVING-z*
+    # (default) column that carries the sigma/thickness tendency.  Treat this
+    # paragraph as a POINTER, not a citable fact: verify it for your config
+    # before relying on it.
     #
     # The ONE exact invariant, and the one a test pins: the GM BOLUS INCREMENT
     # carried by the triple is discretely NON-DIVERGENT (the bolus is
@@ -2311,10 +2315,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_forcing_centred: bool = False
     # Store the TRACER-ADVECTING mass fluxes on the returned state (#1442).
     # PURE DIAGNOSTIC: it changes nothing the step computes, it only stops
-    # throwing the flux away.  Off by default because it costs two extra
-    # face-shaped arrays of state (~145 MB at eORCA1 L75 in fp64).  Static
-    # Python bool read in a closure, so both branches are NOT traced and
-    # enabling it cannot cause a retrace mid-run.
+    # throwing the flux away.  Off by default because it costs THREE extra
+    # arrays of state -- the u/v face pair plus the vertical partner
+    # ``mass_flux_w`` at layer interfaces (~215 MB at eORCA1 L75 in fp64;
+    # ~107 MB in fp32, the default storage precision).  Static Python bool read
+    # in a closure, so both branches are NOT traced and enabling it cannot
+    # cause a retrace mid-run.
     #
     # APPENDED AT THE END of the NamedTuple, like every field above it, to
     # preserve positional construction for legacy call sites (codex RED 1: the

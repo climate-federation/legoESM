@@ -67,22 +67,32 @@ MEASURED sea-level change, the gap is 0.35-0.61 Sv at 60S/30S/0N/30N and
 at all latitudes -- the mode is missing everywhere; it merely looks worse
 where the true signal is small.
 
-CONSEQUENCE FOR THE ACCUMULATOR: ``gateway_step`` reads the POST-STEP state,
-so running it inside the driver's step loop does NOT recover ``delta_U``.
-The in-model accumulator has exactly the same omission as an offline probe.
-Fixing it requires the model to expose ``mass_flux_u``/``mass_flux_v`` (or
-``Hu_avg``/``Hv_avg``) as a step output; see the tracking issue.
+EVERYTHING ABOVE IS THE ``store_mass_flux=False`` (RECONSTRUCTION) CASE.  That
+was the only case when this module was written; #1442 closed it.  With
+``LatLonCGridOceanConfig.store_mass_flux=True`` the step KEEPS the flux it
+advected with and ``mass_fluxes_from_state`` returns it unchanged, so the
+accumulator integrates the exact transport -- ``delta_U`` and the GM bolus
+included -- and none of the caveats below apply.  ``--gateway-transports``
+turns it on for both supported grids and the driver passes ``source="stored"``,
+so a config path that silently disabled the capture RAISES rather than falling
+back here.
+
+CONSEQUENCE FOR THE ACCUMULATOR *WHEN RECONSTRUCTING*: ``gateway_step`` reads
+the POST-STEP state, so running it inside the driver's step loop does NOT
+recover ``delta_U``.  The in-model accumulator then has exactly the same
+omission as an offline probe.
 
 ``Hu_avg`` itself is NOT on the state, so the correction cannot be recovered
-offline.  Its DIVERGENCE is: the barotropic solver guarantees
-``div(Hu_avg) == (eta_old - eta_new)/dt``
+offline from a state that predates the flag.  Its DIVERGENCE is: the barotropic
+solver guarantees ``div(Hu_avg) == (eta_old - eta_new)/dt``
 (``ocean/dynamics/barotropic_latlon_cgrid.py:1041``), so the NET volume
 transport across a CLOSED section is recoverable from the eta tendency even
-though the per-face flux is not.  Prefer that for net-volume questions.
+though the per-face flux is not.  Prefer that for net-volume questions on an
+archived run.
 
-Also omitted: the GM ``through_fct`` bolus flux and the adaptive implicit
-vertical-advection split.  See ``mass_fluxes_from_state`` for the same caveat
-at the point of use.
+Also omitted BY THE RECONSTRUCTION: the GM bolus flux when (and only when)
+``gm_bolus_advection="through_fct"``.  See ``mass_fluxes_from_state`` for the
+same caveat at the point of use.
 
 All functions are pure and JAX-traceable (no host callbacks, stable shapes).
 

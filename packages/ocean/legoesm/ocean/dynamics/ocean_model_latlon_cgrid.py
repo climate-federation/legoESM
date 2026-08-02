@@ -211,9 +211,16 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     pytree aux data that alone is a treedef mismatch against what the step
     writes.  Preserving such a Field verbatim -- which the first version of
     this function did -- would reintroduce exactly the scan crash it exists to
-    prevent.  Data is preserved; only metadata is normalized.  A populated slot
-    whose SHAPE disagrees with its donor field is a hard error, not something
-    to normalize around.
+    prevent.
+
+    VALUES are preserved; METADATA and DTYPE are normalized.  The dtype cast is
+    deliberate and can be lossy (f64 -> the f32 storage donor): a slot at a
+    different precision is a ``lax.scan`` carry mismatch the moment the step
+    re-emits it at storage precision, and these slots are pure diagnostics
+    rewritten every step, so narrowing one costs nothing a consumer can
+    observe.  A populated slot whose SHAPE disagrees with its donor field is a
+    hard error instead -- checked BEFORE the cast, so a slot that is wrong in
+    both still raises.
 
     Idempotent, and a no-op when the flag is off.  The already-canonical fast
     path below is keyed on the METADATA, not merely on "every slot is
@@ -245,11 +252,12 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
         cur = getattr(state, slot)
         if cur is None:
             return jnp.zeros(donor_shape, dtype=_dtype)
-        # Dtype is normalized to the donor's: a slot at a different precision
-        # is a lax.scan carry mismatch once the step re-emits it at storage
-        # precision (codex round-9 YELLOW 3).
-        if jnp.asarray(cur.data).dtype != _dtype:
-            return jnp.asarray(cur.data).astype(_dtype)
+        # SHAPE FIRST, then dtype (codex round-10 RED 1).  The round-9 version
+        # normalized dtype and RETURNED before validating the shape, so a slot
+        # that was wrong in BOTH was silently narrowed and accepted -- the
+        # guard stopped firing for exactly the states it most needed to catch.
+        # A wrong shape is a hard error; a wrong dtype is a fixable
+        # normalization, so the error has to come first.
         got = tuple(jnp.shape(cur.data))
         if got != tuple(donor_shape):
             raise ValueError(
@@ -258,6 +266,11 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
                 "u/v/w face layout; a mismatch means the state was assembled "
                 "for a different grid or a different (v_lower vs global) "
                 "staggering carrier.")
+        # Dtype is normalized to the donor's: a slot at a different precision
+        # is a lax.scan carry mismatch once the step re-emits it at storage
+        # precision (codex round-9 YELLOW 3).
+        if jnp.asarray(cur.data).dtype != _dtype:
+            return jnp.asarray(cur.data).astype(_dtype)
         return cur.data
 
     mfu, mfv, mfw = mass_flux_fields(

@@ -16,8 +16,10 @@ These tests pin, in order of strength:
   3. the stored flux reproduces the step's own w-diagnostic chain to round-off
      while the ``h*u`` reconstruction does not,
   4. the carry survives every entry path that changed shape when the flag
-     turned two ``None`` slots into ``Field``s: ``lax.scan``, the SPMD
-     ``shard_map``, and the MPI band scatter/gather.
+     turned THREE ``None`` slots (the u/v face pair plus the vertical partner
+     ``mass_flux_w``) into ``Field``s: ``lax.scan``, ``integrate``, the
+     driver-level JRA55 and CORE2 scan blocks, the SPMD ``shard_map``, the MPI
+     band scatter/gather, and both npz restart lanes.
 
 WHY (2) IS THE LOAD-BEARING TEST.  With GM off, ``mass_flux_u_tr`` IS
 ``mass_flux_u`` -- the same array under two names.  A regression that stored
@@ -878,6 +880,17 @@ def test_seed_rejects_a_wrong_shaped_stored_slot():
             data=stepped.mass_flux_v.data[:-1]))     # v_lower, not v
     with pytest.raises(ValueError, match="mass_flux_v has shape"):
         seed_mass_flux_carry(bad, True)
+
+    # WRONG IN BOTH shape AND dtype must STILL raise (codex round-10 RED 1).
+    # The round-9 version normalized dtype and RETURNED before validating the
+    # shape, so this exact combination -- the one most likely to come from a
+    # genuinely mis-assembled state -- was silently narrowed and accepted.
+    if jax.config.jax_enable_x64:
+        worse = stepped._replace(
+            mass_flux_v=stepped.mass_flux_v.replace(
+                data=stepped.mass_flux_v.data[:-1].astype(jnp.float64)))
+        with pytest.raises(ValueError, match="mass_flux_v has shape"):
+            seed_mass_flux_carry(worse, True)
 
 
 def test_integrate_seeds_before_the_first_step(monkeypatch):
