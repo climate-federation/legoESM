@@ -3,14 +3,18 @@
 Covers ``RadiationConfig.clear_sky_diag`` and the cloud-free second radiation
 pass in ``_make_hydrostatic_radiation`` (the factory MPAS uses:
 ``_make_mpas_radiation`` is an ALIAS of it, asserted below), i.e. the
-``HydrostaticTendencies.sw_up_toa_clearsky`` / ``lw_up_toa_clearsky`` channel
-that feeds ``_sfc_diag`` slots 12/13.
+``HydrostaticTendencies.{sw_up_toa,lw_up_toa,sw_down_sfc,lw_down_sfc}
+_clearsky`` channel that feeds ``_sfc_diag`` slots 12-15 — the CMIP6 clear-sky
+QUARTET rsutcs/rlutcs (TOA outgoing) + rsdscs/rldscs (surface downwelling).
+All four come from ONE cloud-free solve.
 
 Definition under test (CMIP6): clear-sky = the SAME radiative transfer with
 CLOUDS removed and everything else — gases, ozone, AEROSOL — retained.  So:
-  * ``rsutcs <= rsut``  (clouds add reflection)  =>  SW_CRE = rsut - rsutcs > 0
-  * ``rlutcs >= rlut``  (clouds trap OLR)        =>  LW_CRE = rlutcs - rlut > 0
-Both are asserted against a REAL RRTMGP solve, not a mock.
+  * ``rsutcs <  rsut``  (clouds add reflection)  =>  SW_CRE = rsut - rsutcs > 0
+  * ``rlutcs >  rlut``  (clouds trap OLR)        =>  LW_CRE = rlutcs - rlut > 0
+  * ``rsdscs >  rsds``  (clouds shade the surface)
+  * ``rldscs <  rlds``  (clouds emit downward LW from cloud base)
+All four are asserted against a REAL RRTMGP solve, not a mock.
 
 The gate is a STATIC Python bool read in the factory closure (never a traced
 ``jnp.where``), so the default-off path emits no extra radiation HLO at all —
@@ -38,6 +42,17 @@ from legoesm.grids.factory import create_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 
 NLEV = 10
+
+# The clear-sky quartet in _sfc_diag slot order (12, 13, 14, 15) and its
+# all-sky partner per slot — the pairing every sign assertion rests on.
+CLEARSKY_FIELDS = ("sw_up_toa_clearsky", "lw_up_toa_clearsky",
+                   "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+CLEARSKY_ALLSKY_PARTNER = {
+    "sw_up_toa_clearsky": "sw_up_toa",      # rsutcs <-> rsut   (+up)
+    "lw_up_toa_clearsky": "lw_up_toa",      # rlutcs <-> rlut   (+up)
+    "sw_down_sfc_clearsky": "sw_down_sfc",  # rsdscs <-> rsds   (+down)
+    "lw_down_sfc_clearsky": "lw_down_sfc",  # rldscs <-> rlds   (+down)
+}
 
 
 def test_modules_under_test_resolve_in_this_checkout():
@@ -119,12 +134,9 @@ def test_tendency_carries_the_clear_sky_slots_last():
     """Trailing optionals only: an existing positional constructor must be
     unaffected."""
     from legoesm.core.state import HydrostaticTendencies
-    assert HydrostaticTendencies._fields[-2:] == (
-        "sw_up_toa_clearsky", "lw_up_toa_clearsky")
-    assert HydrostaticTendencies._field_defaults[
-        "sw_up_toa_clearsky"] is None
-    assert HydrostaticTendencies._field_defaults[
-        "lw_up_toa_clearsky"] is None
+    assert HydrostaticTendencies._fields[-4:] == CLEARSKY_FIELDS
+    for _k in CLEARSKY_FIELDS:
+        assert HydrostaticTendencies._field_defaults[_k] is None, _k
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +166,8 @@ def test_off_runs_exactly_one_solve_and_leaves_slots_none(
     n_calls, _cfgs, tend = _count_backend_calls(
         monkeypatch, _cfg(False), mesh, sigma, state)
     assert n_calls == 1, "clear_sky_diag=False must not add a radiation solve"
-    assert tend.sw_up_toa_clearsky is None
-    assert tend.lw_up_toa_clearsky is None
+    for _k in CLEARSKY_FIELDS:
+        assert getattr(tend, _k) is None, _k
 
 
 def test_on_with_clouds_runs_a_second_cloud_free_solve(
@@ -178,8 +190,8 @@ def test_on_with_clouds_runs_a_second_cloud_free_solve(
     for _k in ("scheme", "rrtmgp", "ozone", "orbit", "diurnal_cycle",
                "rce_fixed_cos_zenith"):
         assert getattr(cfgs[1], _k) == getattr(cfgs[0], _k), _k
-    assert tend.sw_up_toa_clearsky is not None
-    assert tend.lw_up_toa_clearsky is not None
+    for _k in CLEARSKY_FIELDS:
+        assert getattr(tend, _k) is not None, _k
 
 
 @pytest.mark.parametrize("scheme,cloud_scheme", [
@@ -196,12 +208,10 @@ def test_on_without_active_clouds_aliases_instead_of_solving_twice(
         monkeypatch, _cfg(True, scheme=scheme, cloud_scheme=cloud_scheme),
         mesh, sigma, state)
     assert n_calls == 1, "aliasing must not run a second radiation solve"
-    np.testing.assert_array_equal(
-        np.asarray(tend.sw_up_toa_clearsky.data),
-        np.asarray(tend.sw_up_toa.data))
-    np.testing.assert_array_equal(
-        np.asarray(tend.lw_up_toa_clearsky.data),
-        np.asarray(tend.lw_up_toa.data))
+    for _clr, _all in CLEARSKY_ALLSKY_PARTNER.items():
+        np.testing.assert_array_equal(
+            np.asarray(getattr(tend, _clr).data),
+            np.asarray(getattr(tend, _all).data), err_msg=_clr)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +234,7 @@ def test_all_sky_fluxes_are_unchanged_by_enabling_the_diagnostic(cloudy_pair):
     all-sky solve (or the heating that drives the model)."""
     off, on = cloudy_pair
     for _k in ("sw_up_toa", "lw_up_toa", "sw_down_toa", "sw_net_sfc",
-               "lw_net_sfc", "dT_dt"):
+               "lw_net_sfc", "sw_down_sfc", "lw_down_sfc", "dT_dt"):
         np.testing.assert_array_equal(
             np.asarray(getattr(on, _k).data),
             np.asarray(getattr(off, _k).data), err_msg=_k)
@@ -256,6 +266,64 @@ def test_clear_sky_longwave_emits_more_than_all_sky(cloudy_pair):
         f"rlutcs={rlutcs.mean():.2f}")
 
 
+def test_clear_sky_surface_shortwave_is_brighter_than_all_sky(cloudy_pair):
+    """rsdscs > rsds: removing cloud stops shading the surface.  Positive
+    DOWN — the same orientation as its all-sky partner ``sw_down_sfc``."""
+    _off, on = cloudy_pair
+    rsds = np.asarray(on.sw_down_sfc.data)
+    rsdscs = np.asarray(on.sw_down_sfc_clearsky.data)
+    assert np.all(np.isfinite(rsdscs))
+    assert np.all(rsdscs >= 0.0), "downwelling SW cannot be negative"
+    assert np.all(rsdscs > rsds), (
+        f"clear sky must let MORE sunlight reach the surface; got "
+        f"rsds={rsds.mean():.2f} rsdscs={rsdscs.mean():.2f}")
+
+
+def test_clear_sky_surface_longwave_is_dimmer_than_all_sky(cloudy_pair):
+    """rldscs < rlds: cloud base emits downward LW, so removing it REDUCES
+    the surface downwelling longwave — the OPPOSITE direction to the
+    shortwave, which is exactly why the sign is worth pinning."""
+    _off, on = cloudy_pair
+    rlds = np.asarray(on.lw_down_sfc.data)
+    rldscs = np.asarray(on.lw_down_sfc_clearsky.data)
+    assert np.all(np.isfinite(rldscs))
+    assert np.all(rldscs > 0.0)
+    assert np.all(rldscs < rlds), (
+        f"clear sky must emit LESS downward LW at the surface; got "
+        f"rlds={rlds.mean():.2f} rldscs={rldscs.mean():.2f}")
+
+
+def test_clear_sky_equals_an_INDEPENDENT_cloud_free_run(mesh, sigma):
+    """The strongest available check, and the one that validates the
+    instrument: the quartet produced by the second pass must equal, to the
+    bit, the ALL-SKY output of a separately built genuinely cloud-free
+    model (``cloud_scheme='none'``) on the SAME state.
+
+    This is what a weaker "clear-sky doesn't track q_c" assertion misses: a
+    twin that merely stopped receiving the q_c TRACER but kept a cloud
+    SCHEME would still diagnose cloud from RH, be independent of q_c, and
+    silently publish a partly-cloudy field as clear-sky.
+    """
+    state = _cloudy_state(mesh, sigma)
+    on = make_radiation_physics(_cfg(True), "mpas")(state, mesh, sigma)
+    # Independent reference: no cloud scheme at all, no clear-sky machinery.
+    ref = make_radiation_physics(
+        _cfg(False, cloud_scheme="none"), "mpas")(state, mesh, sigma)
+    for _clr, _all in CLEARSKY_ALLSKY_PARTNER.items():
+        np.testing.assert_allclose(
+            np.asarray(getattr(on, _clr).data),
+            np.asarray(getattr(ref, _all).data),
+            rtol=1e-12, atol=1e-12, err_msg=(
+                f"{_clr} does not match an independent cloud-free solve — "
+                f"the 'clear-sky' pass still sees cloud"))
+    # Control: the reference really IS radiatively different from all-sky,
+    # so the equality above is a match, not a tautology.
+    assert not np.allclose(np.asarray(ref.sw_up_toa.data),
+                           np.asarray(on.sw_up_toa.data)), (
+        "control failed: the cloud-free reference did not differ from "
+        "all-sky, so this test proves nothing")
+
+
 def test_clear_sky_is_insensitive_to_the_cloud_amount(mesh, sigma):
     """The decisive check that the second pass really is CLOUD-FREE: doubling
     q_c must move rsut/rlut but leave rsutcs/rlutcs bit-identical.  A pass
@@ -268,23 +336,22 @@ def test_clear_sky_is_insensitive_to_the_cloud_amount(mesh, sigma):
     assert not np.allclose(np.asarray(thin.sw_up_toa.data),
                            np.asarray(thick.sw_up_toa.data)), (
         "control failed: q_c change did not move the all-sky SW")
-    # Clear-sky does NOT.
-    np.testing.assert_array_equal(
-        np.asarray(thin.sw_up_toa_clearsky.data),
-        np.asarray(thick.sw_up_toa_clearsky.data))
-    np.testing.assert_array_equal(
-        np.asarray(thin.lw_up_toa_clearsky.data),
-        np.asarray(thick.lw_up_toa_clearsky.data))
+    # Clear-sky does NOT — for ANY member of the quartet.
+    for _k in CLEARSKY_FIELDS:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(thin, _k).data),
+            np.asarray(getattr(thick, _k).data), err_msg=_k)
 
 
 def test_clear_sky_fields_have_cmor_units_and_shape(cloudy_pair, mesh):
     _off, on = cloudy_pair
     n = int(mesh.nCells)
-    for f in (on.sw_up_toa_clearsky, on.lw_up_toa_clearsky):
-        assert f.units == "W/m^2"
-        assert np.asarray(f.data).shape == (n,)
-        # Same 2-D cell dims as the all-sky TOA pair they are published with.
-        assert f.dims == on.sw_up_toa.dims
+    for _clr, _all in CLEARSKY_ALLSKY_PARTNER.items():
+        f = getattr(on, _clr)
+        assert f.units == "W/m^2", _clr
+        assert np.asarray(f.data).shape == (n,), _clr
+        # Same 2-D cell dims as the all-sky partner it is published with.
+        assert f.dims == getattr(on, _all).dims, _clr
 
 
 # ---------------------------------------------------------------------------
@@ -304,12 +371,10 @@ def test_jit_parity_of_the_clear_sky_pass(mesh, sigma):
             u=state.u, T=state.T.replace(data=T_data), p_s=state.p_s,
             phis=state.phis, v=None, tracers=state.tracers)
         t = fn(s, mesh, sigma)
-        return t.sw_up_toa_clearsky.data, t.lw_up_toa_clearsky.data
+        return tuple(getattr(t, _k).data for _k in CLEARSKY_FIELDS)
 
-    sw_j, lw_j = jax.jit(_run)(state.T.data)
-    np.testing.assert_allclose(
-        np.asarray(sw_j), np.asarray(eager.sw_up_toa_clearsky.data),
-        rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(
-        np.asarray(lw_j), np.asarray(eager.lw_up_toa_clearsky.data),
-        rtol=1e-10, atol=1e-10)
+    jitted = jax.jit(_run)(state.T.data)
+    for _k, _got in zip(CLEARSKY_FIELDS, jitted):
+        np.testing.assert_allclose(
+            np.asarray(_got), np.asarray(getattr(eager, _k).data),
+            rtol=1e-10, atol=1e-10, err_msg=_k)

@@ -433,11 +433,14 @@ class RadiationConfig(NamedTuple):
     # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
     # fraction (byte-identical).
     use_clubb_cloud_fraction: bool = False
-    # CLEAR-SKY TOA diagnostic (CMIP6 ``rsutcs`` / ``rlutcs``).  When True the
-    # standalone hydrostatic/MPAS radiation physics_fn additionally exports the
-    # TOA outgoing SW/LW computed with CLOUDS REMOVED (gases + ozone + aerosol
-    # unchanged — the CMIP6 clear-sky definition), on
-    # ``HydrostaticTendencies.sw_up_toa_clearsky`` / ``lw_up_toa_clearsky``.
+    # CLEAR-SKY radiation diagnostic — the CMIP6 clear-sky QUARTET
+    # ``rsutcs``/``rlutcs`` (TOA outgoing) and ``rsdscs``/``rldscs`` (surface
+    # downwelling).  When True the standalone hydrostatic/MPAS radiation
+    # physics_fn additionally exports all four computed with CLOUDS REMOVED
+    # (gases + ozone + aerosol unchanged — the CMIP6 clear-sky definition), on
+    # ``HydrostaticTendencies.{sw_up_toa,lw_up_toa,sw_down_sfc,lw_down_sfc}
+    # _clearsky``.  All four come from ONE cloud-free solve, so the surface
+    # pair is free once the TOA pair is paid for.
     #
     # COST: clear-sky is NOT a by-product of the all-sky solve — RRTMGP's
     # ``solve_columns`` returns only the fluxes for the optical state it was

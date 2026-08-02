@@ -998,24 +998,28 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # sfc_diag tuple contract shared with the driver feed:
             # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
             #  shflx, lhflx, sw_down_sfc, lw_down_sfc, tau_x_sfc, tau_y_sfc,
-            #  sw_up_toa_clearsky, lw_up_toa_clearsky).
+            #  sw_up_toa_clearsky, lw_up_toa_clearsky,
+            #  sw_down_sfc_clearsky, lw_down_sfc_clearsky).
             # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
             # interactive multilayer land forcing (AtmToSurface.sw_down/
             # lw_down; model_driver._marshal_land_forcing reads these slots).
             # ...appended (slots 10/11): surface wind stress [Pa, MODEL
             # opposes-the-wind sign] — the CMOR feed flips it to the CMOR
             # downward-positive tauu/tauv.
-            # ...appended (slots 12/13): CLEAR-SKY TOA outgoing SW/LW
-            # [W/m^2, positive UP — the SAME orientation as slots 3/4, no
-            # flip anywhere downstream] for CMOR rsutcs/rlutcs.  None unless
-            # RadiationConfig.clear_sky_diag is on, and None on
+            # ...appended (slots 12-15): the CLEAR-SKY quartet — 12/13 TOA
+            # outgoing SW/LW [W/m^2, positive UP, SAME orientation as slots
+            # 3/4] for CMOR rsutcs/rlutcs, 14/15 SURFACE downwelling SW/LW
+            # [W/m^2, positive DOWN, SAME orientation as slots 8/9] for CMOR
+            # rsdscs/rldscs.  No flip anywhere downstream.  All four are None
+            # unless RadiationConfig.clear_sky_diag is on, and None on
             # held-radiation sub-steps (held slot-wise like slots 3/4/5).
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
                 "sw_down_sfc", "lw_down_sfc",
                 "tau_x_sfc", "tau_y_sfc",
-                "sw_up_toa_clearsky", "lw_up_toa_clearsky"))
+                "sw_up_toa_clearsky", "lw_up_toa_clearsky",
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

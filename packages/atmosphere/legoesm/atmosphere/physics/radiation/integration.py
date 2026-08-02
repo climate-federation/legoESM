@@ -458,7 +458,9 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
                                  sw_up_toa_clearsky=None,
-                                 lw_up_toa_clearsky=None):
+                                 lw_up_toa_clearsky=None,
+                                 sw_down_sfc_clearsky=None,
+                                 lw_down_sfc_clearsky=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -544,6 +546,16 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                       "sw_up_toa_clearsky_rad"),
         lw_up_toa_clearsky=_toa_field(lw_up_toa_clearsky,
                                       "lw_up_toa_clearsky_rad"),
+        # Clear-sky SURFACE downwelling (CMOR rsdscs/rldscs).  SAME
+        # positive-DOWN orientation as sw_down_sfc / lw_down_sfc above — both
+        # come from the solver's ``*_flux_down[:, -1]`` (the surface is the
+        # LAST half level), so again no sign flip anywhere.  ``_toa_field`` is
+        # a plain (ncol,)->2D Field packer despite the name; reused so the
+        # dtype/dims/units handling is defined in exactly one place.
+        sw_down_sfc_clearsky=_toa_field(sw_down_sfc_clearsky,
+                                        "sw_down_sfc_clearsky_rad"),
+        lw_down_sfc_clearsky=_toa_field(lw_down_sfc_clearsky,
+                                        "lw_down_sfc_clearsky_rad"),
     )
 
 
@@ -1335,6 +1347,8 @@ def _make_hydrostatic_radiation(
         # static bool: the disabled path emits no HLO at all.
         _sw_up_toa_clr = None
         _lw_up_toa_clr = None
+        _sw_down_sfc_clr = None
+        _lw_down_sfc_clr = None
         if _clear_sky_second_pass:
             _rad_out_clr = _call_radiation_backend(
                 radiation_config=_rad_cfg_clearsky,
@@ -1363,14 +1377,21 @@ def _make_hydrostatic_radiation(
                 conv_precip=None,
                 solar_spectral_fraction=_ssf_ext,
             )
+            # TOA is the FIRST half level, the surface the LAST — the same
+            # indexing the all-sky block below uses, so the clear-sky quartet
+            # is read off exactly where its all-sky partners are.
             _sw_up_toa_clr = _rad_out_clr.sw_flux_up[:, 0]
             _lw_up_toa_clr = _rad_out_clr.lw_flux_up[:, 0]
+            _sw_down_sfc_clr = _rad_out_clr.sw_flux_down[:, -1]
+            _lw_down_sfc_clr = _rad_out_clr.lw_flux_down[:, -1]
         elif _clear_sky_diag:
             # No cloud is radiatively active (gray, or cloud_scheme='none'),
             # so the all-sky solve already IS the clear-sky solve: alias it
             # rather than paying for a second, provably identical, call.
             _sw_up_toa_clr = rad_out.sw_flux_up[:, 0]
             _lw_up_toa_clr = rad_out.lw_flux_up[:, 0]
+            _sw_down_sfc_clr = rad_out.sw_flux_down[:, -1]
+            _lw_down_sfc_clr = rad_out.lw_flux_down[:, -1]
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
         # Surface net radiative fluxes [W/m^2, +into surface], carried so the
@@ -1401,7 +1422,9 @@ def _make_hydrostatic_radiation(
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
             sw_up_toa_clearsky=_sw_up_toa_clr,
-            lw_up_toa_clearsky=_lw_up_toa_clr)
+            lw_up_toa_clearsky=_lw_up_toa_clr,
+            sw_down_sfc_clearsky=_sw_down_sfc_clr,
+            lw_down_sfc_clearsky=_lw_down_sfc_clr)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

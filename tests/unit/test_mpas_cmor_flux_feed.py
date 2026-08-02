@@ -11,6 +11,8 @@ surface-flux suites were skipped.  This covers the new chain:
     ``evspsbl = hfls / L_v`` derivation, backward-compat when absent.
 """
 
+import types
+
 import numpy as np
 import pytest
 
@@ -89,6 +91,133 @@ class TestFeed:
             assert f"field_2d_{k}" not in out
 
 
+# CMIP6 clear-sky QUARTET (sfc_diag slots 12-15) with values chosen to be
+# physically ordered against their all-sky partners in FLUXES:
+#   rsutcs < rsut (99)   rlutcs > rlut (238)   rsdscs/rldscs are surface.
+CLEARSKY = dict(rsutcs=41.0, rlutcs=266.0, rsdscs=250.0, rldscs=290.0)
+
+
+class TestClearSkyFeed:
+    """CMOR ``rsutcs``/``rlutcs``/``rsdscs``/``rldscs`` publication on the
+    MPAS lane (PR #1437 dead-plumbing closure): the clear-sky quartet must
+    reach the SAME spatial monthly accumulator as its all-sky partners."""
+
+    def test_clear_sky_quartet_reaches_monthly_accumulator(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        fed = dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()})
+        assert fed is True
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k, v in CLEARSKY.items():
+            assert f"field_2d_{k}" in out, (
+                f"{k} never reached the CMOR accumulator — the #1437 "
+                f"dead-plumbing symptom")
+            # Uniform field -> IDW (partition of unity) regrid is EXACT.
+            np.testing.assert_allclose(out[f"field_2d_{k}"], v, rtol=1e-9)
+
+    def test_published_values_are_not_flipped_or_swapped(self, mesh):
+        """Each clear-sky field must carry ITS OWN value with ITS OWN sign —
+        a swapped pair or a stray negation would still 'publish four
+        fields'."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k, v in CLEARSKY.items():
+            got = float(np.mean(out[f"field_2d_{k}"]))
+            assert got == pytest.approx(v, rel=1e-9), (
+                f"{k} published {got}, expected {v} (swap or sign flip)")
+        # Cloud radiative effect signs survive the whole feed.
+        assert float(np.mean(out["field_2d_rsut"])) > \
+            float(np.mean(out["field_2d_rsutcs"]))
+        assert float(np.mean(out["field_2d_rlutcs"])) > \
+            float(np.mean(out["field_2d_rlut"]))
+
+    def test_clear_sky_variables_are_in_the_amon_table(self):
+        """A field the CMOR writer has no entry for is published nowhere."""
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        for k in CLEARSKY:
+            table, entry = lookup_cmor_entry(k)
+            assert table == "Amon", k
+            assert entry["units"] == "W m-2", k
+            assert "assuming_clear_sky" in entry["standard_name"], k
+
+    def test_clear_sky_fields_are_treated_as_interval_means(self):
+        """They come from the per-step accumulator like rsut/rlut, so they
+        must sit in the _FLUX_2D midpoint-binned set — NOT the endpoint
+        snapshot set, which would shift them one interval late."""
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        for k in CLEARSKY:
+            assert f'"{k}"' in flux_block, (
+                f"{k} is not a _FLUX_2D member — it would be calendar-binned "
+                f"as an endpoint snapshot, not an interval mean")
+
+    @pytest.mark.parametrize("bad", sorted(CLEARSKY))
+    def test_malformed_clear_sky_input_raises_and_commits_nothing(
+            self, mesh, bad):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match=bad):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, **{bad: np.zeros(n - 1)})
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_absent_clear_sky_is_skipped_never_zeroed(self, mesh):
+        """Backward compatibility: with the diagnostic off the fields must be
+        ABSENT.  A zero rsutcs would read as a black planet downstream."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, **{k: np.full(n, v) for k, v in FLUXES.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k in CLEARSKY:
+            assert f"field_2d_{k}" not in out
+
+    def test_accumulator_covers_the_clear_sky_slots(self):
+        """``_MPASSfcFluxAccum`` must average slots 12-15 — a slot missing
+        from SLOTS is silently dropped from every interval mean."""
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        for slot in (12, 13, 14, 15):
+            assert slot in _MPASSfcFluxAccum.SLOTS, slot
+        acc = _MPASSfcFluxAccum()
+        for v in (10.0, 20.0, 60.0):
+            row = [None] * 16
+            row[12] = types.SimpleNamespace(data=np.full(4, v))
+            row[15] = types.SimpleNamespace(data=np.full(4, 2.0 * v))
+            acc.add(tuple(row))
+        np.testing.assert_allclose(acc.mean(12), 30.0)   # (10+20+60)/3
+        np.testing.assert_allclose(acc.mean(15), 60.0)
+        assert acc.mean(13) is None                      # never fed
+
+    def test_driver_reads_the_clear_sky_slots_by_index(self):
+        """The consumer that RUNS (``_feed_mpas_cmip_accumulators``) must map
+        slots 12-15 onto the four CMOR names and forward them to the feed."""
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(
+            ModelDriver._feed_mpas_cmip_accumulators)
+        for name, slot in (("rsutcs", 12), ("rlutcs", 13),
+                           ("rsdscs", 14), ("rldscs", 15)):
+            assert f"{name} = _sfc_slot({slot})" in src, (
+                f"{name} is not read from slot {slot}")
+            assert f"{name}={name}," in src, (
+                f"{name} is read but never forwarded to the CMOR feed — "
+                f"exactly the #1437 dead-plumbing failure mode")
+
+
 class TestRadiationPacker:
     def _pack(self, mesh, **kw):
         from legoesm.atmosphere.physics.radiation.integration import (
@@ -150,7 +279,11 @@ def _tend_with_extras():
         sw_down_toa=_f("sw_down_toa", 6.0),
         shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0),
         sw_down_sfc=_f("sw_down_sfc", 9.0), lw_down_sfc=_f("lw_down_sfc", 10.0),
-        tau_x_sfc=_f("tau_x", 11.0), tau_y_sfc=_f("tau_y", 12.0))
+        tau_x_sfc=_f("tau_x", 11.0), tau_y_sfc=_f("tau_y", 12.0),
+        sw_up_toa_clearsky=_f("sw_up_toa_clr", 13.0),
+        lw_up_toa_clearsky=_f("lw_up_toa_clr", 14.0),
+        sw_down_sfc_clearsky=_f("sw_down_sfc_clr", 15.0),
+        lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0))
 
 
 # Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
@@ -158,18 +291,20 @@ def _tend_with_extras():
 _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
                 "sw_down_sfc", "lw_down_sfc",
-                "tau_x_sfc", "tau_y_sfc")
+                "tau_x_sfc", "tau_y_sfc",
+                "sw_up_toa_clearsky", "lw_up_toa_clearsky",
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
 
 
 class TestSfcDiagContract:
-    """Lock the 12-slot sfc_diag tuple contract shared by BOTH producers
+    """Lock the 16-slot sfc_diag tuple contract shared by BOTH producers
     (serial + MPI-voronoi) and the driver consumer's slot mapping."""
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 12
+        assert len(sfc_diag) == 16
         # Consumer (_feed_mpas_cmip_accumulators): slot 0->sw_net (rsus
         # derivation), 1->lw_net (rlus), 3->rlut, 4->rsut, 5->rsdt,
         # 6->hfss, 7->hfls, 8->rsds, 9->rlds (+ _marshal_land_forcing),
@@ -185,6 +320,13 @@ class TestSfcDiagContract:
         assert sfc_diag[9].name == "lw_down_sfc"    # rlds
         assert sfc_diag[10].name == "tau_x"         # tauu = -slot10
         assert sfc_diag[11].name == "tau_y"         # tauv = -slot11
+        # Clear-sky quartet: 12/13 TOA outgoing (+up, pair with 3/4),
+        # 14/15 surface downwelling (+down, pair with 8/9).  NO sign flip
+        # on any of the four.
+        assert sfc_diag[12].name == "sw_up_toa_clr"    # rsutcs
+        assert sfc_diag[13].name == "lw_up_toa_clr"    # rlutcs
+        assert sfc_diag[14].name == "sw_down_sfc_clr"  # rsdscs
+        assert sfc_diag[15].name == "lw_down_sfc_clr"  # rldscs
 
     def test_both_producers_extract_the_same_extra_order(self):
         """The serial and MPI producers must list the SAME extras keys in

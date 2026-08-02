@@ -315,7 +315,8 @@ class _MPASSfcFluxAccum:
     Covers the flux slots of the ``_sfc_diag`` contract (0 sw_net_sfc,
     1 lw_net_sfc, 2 precip, 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls,
     8 sw_down_sfc, 9 lw_down_sfc, 10 tau_x_sfc, 11 tau_y_sfc,
-    12 rsutcs, 13 rlutcs) — the strongly diurnal flux fields.  State-derived fields (tas/ta/ua/...)
+    12 rsutcs, 13 rlutcs, 14 rsdscs, 15 rldscs) — the strongly diurnal
+    flux fields.  State-derived fields (tas/ta/ua/...)
     stay snapshots; the collector labels them honestly via
     ``cmip_snapshot_vars``.
 
@@ -350,7 +351,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -6192,14 +6193,19 @@ class ModelDriver:
             _tau_y = _sfc_slot(11)
             tauu = None if _tau_x is None else -np.asarray(_tau_x)
             tauv = None if _tau_y is None else -np.asarray(_tau_y)
-            # Clear-sky TOA outgoing, slots 12/13 — ALREADY in the CMOR
-            # convention (positive UP / outgoing, same orientation as slots
-            # 3/4 which they pair with), so NO sign flip here.  Both are
-            # None unless ExperimentConfig.output.clear_sky_diag is on (the
-            # radiation factory then runs the cloud-free second pass); the
-            # collector skips an absent field rather than publishing zeros.
+            # CLEAR-SKY quartet, slots 12-15 — all four ALREADY in their CMOR
+            # conventions, so NO sign flip here: 12/13 are TOA OUTGOING
+            # (positive UP, pairing with slots 3/4 = rlut/rsut) and 14/15 are
+            # SURFACE DOWNWELLING (positive DOWN, pairing with slots 8/9 =
+            # rsds/rlds).  All four are None unless
+            # ExperimentConfig.output.clear_sky_diag is on (the radiation
+            # factory then runs ONE cloud-free second pass that yields the
+            # whole quartet); the collector skips an absent field rather than
+            # publishing zeros.
             rsutcs = _sfc_slot(12)
             rlutcs = _sfc_slot(13)
+            rsdscs = _sfc_slot(14)
+            rldscs = _sfc_slot(15)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -6311,6 +6317,8 @@ class ModelDriver:
                 tauv=tauv,
                 rsutcs=rsutcs,
                 rlutcs=rlutcs,
+                rsdscs=rsdscs,
+                rldscs=rldscs,
                 flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard

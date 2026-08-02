@@ -554,11 +554,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # summing).
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
                         "shflx_sfc", "lhflx_sfc", "tau_x_sfc", "tau_y_sfc",
-                        # Clear-sky TOA outgoing (CMOR rsutcs/rlutcs) — from
-                        # radiation only, and only when RadiationConfig.
-                        # clear_sky_diag is on (None otherwise, so the
-                        # first-non-None combine is a no-op).
-                        "sw_up_toa_clearsky", "lw_up_toa_clearsky")
+                        # Clear-sky quartet (CMOR rsutcs/rlutcs TOA +
+                        # rsdscs/rldscs surface) — from radiation only, and
+                        # only when RadiationConfig.clear_sky_diag is on
+                        # (None otherwise, so the first-non-None combine is
+                        # a no-op).
+                        "sw_up_toa_clearsky", "lw_up_toa_clearsky",
+                        "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
