@@ -165,6 +165,29 @@ def tracer_flux_form_tendency(
     divergence reduction.  No wind field, terrain or coordinate can then
     manufacture a tracer extremum out of a uniform field.
 
+    KNOWN CONSISTENCY LIMIT — ``nu_del4_ps`` (and any ``physics_tendency
+    .dp_s_dt``).  ``d(δp)/dt`` above is the ADIABATIC continuity closure, which
+    is what ``F``/``σ̇`` are diagnosed from.  The dycore may then ADD a
+    surface-pressure hyperdiffusion ``-ν∇⁴p_s`` (and a caller may add a physics
+    ``dp_s/dt``) that carries mass with NO matching tracer flux, so the model's
+    actual ``d(δp)/dt`` exceeds the closure by that term.  Consequences,
+    measured on the level-2 test mesh with a ±80 hPa p_s wave:
+
+    * FREE-STREAM is UNAFFECTED — exactly ``2.8e-20 /s`` at
+      ``nu_del4_ps`` = 0, 1e15 and 1e16 alike (the cancellation is internal to
+      this function and does not involve ``dp_s/dt``).
+    * CONSERVATION degrades from ``1.1e-17`` of the gross transport terms at
+      ``nu_del4_ps = 0`` to ``5.4e-12`` at ``1e15`` and ``5.4e-11`` at ``1e16``
+      — i.e. the residual is LINEAR in ν, as a term the closure omits must be.
+      For scale, the advective operator it replaces sits at ``3.1e-2`` of the
+      same gross terms, so flux form is still ~9 orders of magnitude better in
+      the hyperdiffused configuration the AMIP lane actually runs
+      (``component_factory`` sets ``nu_del4_ps = diff.hyperdiff``).
+
+    Closing the last decades would mean giving ``p_s`` hyperdiffusion a
+    matching tracer-mass flux — a separate change to the dycore's damping, not
+    to this operator.
+
     LIMITER.  Like the advective form this operator uses a CENTRED
     (``cell_to_edge_avg_3d``) edge value and an UPWIND interface value; it is
     conservative and free-stream preserving but NOT monotone, so it can still

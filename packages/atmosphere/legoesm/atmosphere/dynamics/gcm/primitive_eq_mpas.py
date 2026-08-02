@@ -683,11 +683,16 @@ def mpas_hydrostatic_tendencies(
         # (same exclusion as the column-conserving positivity clamp; see
         # ``conservation.BORROW_ELIGIBLE_TRACERS``).  Static Python
         # partition on the (compile-time) tracer names.
+        # An UNKNOWN tracer name (a bespoke passive tracer) is not on the
+        # per-mass list, so it stays on the advective operator — fail-safe:
+        # the wrong answer for an unclassified tracer would be to assume its
+        # column integral is a mass.
         _flux_idx = (
             [_i for _i, k in enumerate(_tnames)
              if is_borrow_eligible_tracer(k)]
             if config.moisture_flux_form else []
         )
+        _flux_set = set(_flux_idx)
 
         def _advective_dq(q_sub):
             """Legacy advective transport (horizontal + matching vertical)."""
@@ -725,7 +730,7 @@ def mpas_hydrostatic_tendencies(
                 div_dp_3d, _F_vert, mesh,
             )
             _adv_idx = [_i for _i in range(len(_tnames))
-                        if _i not in set(_flux_idx)]
+                        if _i not in _flux_set]
             if _adv_idx:
                 dq = (jnp.zeros_like(q)
                       .at[..., _flux_idx].set(_dq_flux)

@@ -579,3 +579,57 @@ def test_grad_flows_through_the_mixed_flux_advective_scatter():
     for k, g in zip(names, gs):
         assert jnp.all(jnp.isfinite(g)), f"non-finite gradient for {k}"
         assert float(jnp.max(jnp.abs(g))) > 0.0, f"zero gradient for {k}"
+
+
+@pytest.mark.parametrize("cname,cbuild", _COORDS)
+def test_ps_hyperdiffusion_degrades_conservation_only_linearly(cname, cbuild):
+    """Pin the ONE known consistency limit, so it cannot silently grow.
+
+    ``d(δp)/dt`` inside the operator is the ADIABATIC continuity closure (what
+    ``σ̇``/``F`` are diagnosed from).  ``nu_del4_ps`` then adds a
+    surface-pressure hyperdiffusion that moves mass with no matching tracer
+    flux, so the model's true ``d(δp)/dt`` exceeds the closure by that term.
+
+    Asserted: (a) FREE-STREAM is untouched by ν — the cancellation is internal
+    to the operator; (b) the conservation residual is LINEAR in ν (10x ν ⇒ 10x
+    residual, which is what an omitted linear term must do — a superlinear
+    growth would mean something else is wrong); (c) even at the production
+    ``nu_del4_ps`` the residual stays far below the advective operator's.
+    """
+    mesh, coord = _mesh(), cbuild()
+    st = _state(mesh, coord, seed=3)
+    q = st.tracers["q_v"].data
+    dp = _layer_mass(st, coord)
+    area = mesh.areaCell.astype(_F64)[:, None]
+    st_c = _state(mesh, coord, q_const=1.0e-2)
+
+    res, gross = {}, {}
+    for nu in (0.0, 1.0e15, 1.0e16):
+        cfg = _cfg(moisture_flux_form=True, nu_del4_ps=nu)
+        t = mpas_hydrostatic_tendencies(st, mesh, coord, cfg)
+        dq = t.tracer_tendencies["q_v"].data
+        res[nu] = abs(float(jnp.sum(
+            area * (dp * dq + q * _d_dp_dt(coord, t.dp_s_dt.data)))))
+        gross[nu] = float(jnp.sum(jnp.abs(area * dp * dq)))
+        # (a) free-stream is ν-independent
+        fs = float(jnp.max(jnp.abs(mpas_hydrostatic_tendencies(
+            st_c, mesh, coord, cfg).tracer_tendencies["q_v"].data))) / 1.0e-2
+        assert fs < 1e-14, f"[{cname}] nu={nu:.0e}: free-stream broke ({fs:.3e})"
+        print(f"[{cname}] nu_del4_ps={nu:8.1e} residual/gross="
+              f"{res[nu] / gross[nu]:.3e} free-stream={fs:.3e}/s")
+
+    # (b) linear in nu (allow a factor-2 band around the 10x expectation)
+    ratio = res[1.0e16] / res[1.0e15]
+    assert 5.0 < ratio < 20.0, (
+        f"[{cname}] residual scales as {ratio:.2f}x for a 10x nu — not the "
+        "linear behaviour an omitted linear closure term must show")
+
+    # (c) still vastly better than advective at the production setting
+    t_adv = mpas_hydrostatic_tendencies(
+        st, mesh, coord, _cfg(moisture_flux_form=False, nu_del4_ps=1.0e15))
+    dq_adv = t_adv.tracer_tendencies["q_v"].data
+    res_adv = abs(float(jnp.sum(
+        area * (dp * dq_adv + q * _d_dp_dt(coord, t_adv.dp_s_dt.data)))))
+    assert res[1.0e15] < 1e-6 * res_adv, (
+        f"[{cname}] with p_s hyperdiffusion on, flux form ({res[1.0e15]:.3e}) "
+        f"is no longer decisively better than advective ({res_adv:.3e})")
