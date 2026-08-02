@@ -1791,3 +1791,61 @@ meshes pad +126 cells; tiles NEAR-matched to 0.015 %:
   partition-cut explanations, on the CPU lane at least).
 * The non-monotone tile dependence of the ratio (largest at the
   LARGEST tile, 1.90 at 81.9k) is unexplained; recorded, not theorised.
+
+## Distance-to-modeled-limit: atm lat-lon GPU (2026-08-02, "near theoretical limit" directive)
+
+Closed the bench's own honest-null bound gap (audit item 4) for the
+lat-lon lane, using only repo instruments:
+
+* **Halo census** (new probe `scripts/tmp/_probe_latlon_halo_census.py`,
+  virtual-CPU forced-host-platform lowering of the REAL
+  `make_sharded_atm_latlon_step`): **41 collective-permutes + 1
+  all-reduce per step**, nd-INDEPENDENT (identical at nd=8 and nd=16 —
+  the 1-D band structure check). Exact CP payload from compiled-HLO
+  result shapes: 4,635,408 B/dev/step at n_lon=1024 L26 f32 = 1.06x the
+  single-row slab model; linear in n_lon (checked 1024 vs 2048, 0.07 %
+  residual) -> **18.5 MB/dev/step at n_lon=4096 f32**. CAVEAT: CPU
+  lowering; GPU-side collective combining could change the executed
+  count (metadata.py:214) — the bound is a MODEL.
+* **Same-tile nd=1 compute baselines** (job 26630370, roofline recipe):
+  16x4096 f32 1.659 ms, 32x4096 f32 2.837, 16x4096 f64 2.973.
+  Approximation, recorded: nd=1 includes pole tiles; the bias
+  DIRECTION on the compute term is PLAUSIBLE-high, not proven
+  (matters most for the compute-dominated f64 row).
+* **Calibrated bound** (`metadata.calibrated_bound`, measured fabric
+  constants: IB 26.3 us / 23.5 GB/s, NVLink 17.8 / 64.2):
+
+| row | measured | t_bound (IB) | measured/bound |
+|---|---|---|---|
+| LL2048@64 f32 | 6.732 | 2.863 | **2.35** |
+| LL2048@128 f32 | 5.577 | 1.894 | **2.94** |
+| LL2048@128 f64 | 9.602 | 2.999 | **3.20** |
+
+(Codex r7 corrected the @128 f32 row: the first draft fed the slab-byte
+lower bound into a table labelled exact-bytes — 1.848/3.02 was the
+mixed-input artefact; with the exact 18,541,632 B payload the bound is
+1.894 ms. r7 also independently RERAN the census at nd=128 — 41 CP + 1
+AR confirmed at the target device count, not just extrapolated from
+8/16 — and measured the f64 census directly: 9,270,800 B at n_lon=1024,
+four 4-byte scalar CPs staying f32, so the x2 extrapolation was 16 B
+high.)
+
+* **The lat-lon GPU panel sits ~2.4-3.2x ABOVE this MODEL** (2.35-3.20)
+  — the eff-0.60 strong leg is not close to the fabric+compute MODEL
+  (a heuristic, not a proven floor). The 2-node/8-process IB
+  calibration is extrapolated to a 32-node/128-process communicator. Leading
+  PLAUSIBLE mechanism (uninstrumented): effective per-CP cost
+  (launch + schedule + stream sync) well above the raw 26 us fabric
+  latency across 41 dependency-chained exchanges — the arXiv:2607.16100
+  small-collective regime. The model itself notes the serialized-latency
+  vs overlap biases pull opposite ways; treat measured/bound as a
+  consistency diagnostic, not proven headroom.
+* **Lever test submitted (job 26630576)**: 4-run CP-combining A/B at
+  LL2048@128 (A default / B combine-8MB / C combine+pipelined-p2p /
+  A2 default repeat),
+  same-job control + trailing A2 drift bracket. Interpretation limit:
+  without a GPU post-pass CP census per arm, a null refutes THIS
+  threshold/implementation, not combinable-CP count in general. The
+  ocean-lane null for these flags came from a different
+  implicit-PCG/dependency mix — not predictive for the atm lane either
+  way.
