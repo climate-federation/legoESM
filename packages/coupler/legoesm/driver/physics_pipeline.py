@@ -3432,6 +3432,16 @@ def turbulence_config_for(config):
                     and "cloudtop_entrainment_efficiency" in getattr(nested, "_fields", ())):
                 tc = tc._replace(**{scheme: nested._replace(
                     cloudtop_entrainment_efficiency=eff)})
+        # Same single-source-of-truth threading for the free-atmosphere
+        # diffusivity-floor override (schemes carrying ``kvf_min``:
+        # holtslag_boville).  None (default) => byte-identical (no _replace).
+        kvf = getattr(config, "hb_kvf_min", None)
+        if kvf is not None:
+            scheme = tc.scheme
+            nested = getattr(tc, scheme, None)
+            if (nested is not None
+                    and "kvf_min" in getattr(nested, "_fields", ())):
+                tc = tc._replace(**{scheme: nested._replace(kvf_min=kvf)})
         return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the

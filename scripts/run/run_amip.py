@@ -653,6 +653,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
+                        default=None,
+                        help="Free-atmosphere diffusivity floor override "
+                             "[m^2/s] for turbulence schemes carrying kvf_min "
+                             "(holtslag_boville; scheme default 0.01). "
+                             "Causality probe for the polar-night stable-"
+                             "transport runaway; None keeps the scheme "
+                             "default byte-identically.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -1835,6 +1843,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        hb_kvf_min=args.hb_kvf_min,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
