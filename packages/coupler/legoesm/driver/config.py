@@ -124,6 +124,11 @@ class DycoreConfig(NamedTuple):
     # 37 m/s).  a_h_scale=0 relies on the scale-selective 4th-order hyperdiff
     # alone for grid-noise control.
     a_h_scale: float = 1.0
+    # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
+    # a_h_scale exactly as before, byte-identical).  Decouples the circulation
+    # lever (momentum nu_del2) from the thermal smoothing that damps vertical
+    # computational modes.
+    k_h_scale: float | None = None
     conservation_fixer: bool = True
     fix_mass: bool = True
     # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit

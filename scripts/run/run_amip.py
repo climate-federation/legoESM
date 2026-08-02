@@ -333,6 +333,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(\'crushing the midlatitude eddy-driven "
                              "jets\'). 0 relies on the scale-selective "
                              "4th-order hyperdiff alone.")
+    parser.add_argument("--k-h-scale", dest="k_h_scale", type=float,
+                        default=None,
+                        help="Separate scale for horizontal THERMAL diffusivity "
+                             "K_h (None = follow --a-h-scale, byte-identical). "
+                             "Lets momentum viscosity be reduced for the "
+                             "eddy-driven-jet response while keeping the "
+                             "thermal smoothing that suppresses vertical "
+                             "computational modes.")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -1735,6 +1743,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
+        k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
