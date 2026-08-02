@@ -1366,7 +1366,7 @@ class ExperimentConfig(NamedTuple):
     # LW deficit is tens of W/m^2); the paper-grade remedy is an interior
     # stable-tail selector, not this floor.  Appended at the tuple END to
     # preserve the positional ABI.
-    hb_kvf_min: Any = None
+    hb_kvf_min: float | None = None
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2182,7 +2182,9 @@ class ExperimentConfig(NamedTuple):
             )
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
-        if self.hb_kvf_min is not None and not (0.0 < self.hb_kvf_min <= 10.0):
+        if self.hb_kvf_min is not None and (
+                not isinstance(self.hb_kvf_min, (int, float))
+                or not (0.0 < float(self.hb_kvf_min) <= 10.0)):
             errors.append(
                 f"hb_kvf_min (free-atmosphere diffusivity floor [m^2/s]) must "
                 f"be None or finite in (0, 10]; got {self.hb_kvf_min!r}."
