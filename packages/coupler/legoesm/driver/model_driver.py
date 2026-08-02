@@ -2230,6 +2230,7 @@ class ModelDriver:
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
                     f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    f"interface_flux={self.physics.land_interface_flux}, "
                     f"tiled_surface={self.physics.surface_tiled}"
                     + (f", z0_land={self.physics.surface_z0_land:g}m"
                        if self.physics.surface_tiled else "")
@@ -2254,6 +2255,35 @@ class ModelDriver:
             # unused (the land/ocean blend reads the multilayer surface T+albedo).
             if getattr(self.config, "use_multilayer_land", False):
                 self._setup_multilayer_land(_sd)
+
+        # Runtime fail-fast (codex R3): land_interface_flux='unified' exists
+        # to fix an energy-conservation defect — if the slab tile did NOT
+        # actually activate (e.g. an all-zero land-mask file, or a topography
+        # that derived no land, both of which pass validate_strict), the flag
+        # would silently never apply.  Refuse instead of running a config the
+        # user believes is conservative.  Under MPI the activation is
+        # rank-local (an ocean-only rank legitimately has no land while a
+        # neighbour does — codex R4), so the guard tests the GLOBAL
+        # any-rank activation; every rank reaches this collective (the
+        # guard is unconditional in _create_physics).
+        if (getattr(self.config, "land_interface_flux",
+                    "legacy_dual") == "unified"):
+            _slab_on = bool(self.physics.slab_land_active)
+            from legoesm.grids.halo import get_mpi_topology
+            if get_mpi_topology() is not None:
+                from legoesm.parallel.reductions import global_max_mpi
+                _slab_on = bool(
+                    float(global_max_mpi(
+                        jnp.asarray(1.0 if _slab_on else 0.0))) > 0.0)
+            if not _slab_on:
+                raise ValueError(
+                    "land_interface_flux='unified' was requested but the "
+                    "slab land tile did not activate on any rank (no land "
+                    "in the mask/topography, or no activation flag) — the "
+                    "unified interface law would silently never apply. "
+                    "Check --land-mask-file / --topography / "
+                    "--slab-land-active."
+                )
 
     def _setup_multilayer_land(self, storage_dtype) -> None:
         """Activate the differentiable multilayer (Richards) land tile.
