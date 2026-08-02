@@ -134,7 +134,7 @@ def _style(ax, INK="#1a1a1a"):
 
 
 def make_figure(data, title, outname, grid, ramp, resolutions, out,
-                panel_b="efficiency"):
+                panel_b="efficiency", min_devices=2):
     """Two-panel scaling figure.
 
     ``panel_b`` selects how panel (b) normalises, both baselined at N=2:
@@ -157,14 +157,23 @@ def make_figure(data, title, outname, grid, ramp, resolutions, out,
         s = data.get((grid, res))
         if not s:
             continue
-        Ns = sorted(s)
+        # BOTH panels anchor at N=2.  N=1 is deliberately excluded from the
+        # ladder: a single device runs NO halo exchange at all, so the 1->2 leg
+        # measures the one-time onset of communication rather than scaling, and
+        # including it charges that onset against every curve.  Panel (b)
+        # already baselined at N=2; anchoring panel (a) at N=1 while panel (b)
+        # used N=2 made the two panels disagree about what "ideal" meant.
+        Ns = [n for n in sorted(s) if n >= min_devices]
+        if not Ns:
+            continue
         # index 1 = Mcells/s (index 0 = SYPD). Mcells/s is timestep-free.
         axa.plot(Ns, [s[n][1] for n in Ns], ls, color=col, marker=mk,
                  markersize=6.5, linewidth=2.0, label=label, zorder=5,
                  markeredgecolor="white", markeredgewidth=0.7)
-        # Faint ideal-scaling ray from this curve's own N=1 anchor.
-        if 1 in s:
-            axa.plot(Ns, [s[1][1] * n for n in Ns], ":", color=col,
+        # Faint ideal-scaling ray from this curve's own N=min_devices anchor.
+        if min_devices in s:
+            a0 = s[min_devices][1]
+            axa.plot(Ns, [a0 * (n / min_devices) for n in Ns], ":", color=col,
                      linewidth=1.1, alpha=0.45, zorder=3)
         if 2 in s:
             base = s[2][1]
@@ -179,7 +188,8 @@ def make_figure(data, title, outname, grid, ramp, resolutions, out,
                      markeredgewidth=0.7)
 
     axa.set_xscale("log", base=2); axa.set_yscale("log")
-    axa.set_xticks([1, 2, 4, 8, 16]); axa.set_xticklabels([1, 2, 4, 8, 16])
+    _ticks = [n for n in (1, 2, 4, 8, 16) if n >= min_devices]
+    axa.set_xticks(_ticks); axa.set_xticklabels(_ticks)
     axa.set_xlabel("A100 GPUs", fontsize=10, color=INK)
     axa.set_ylabel("throughput (Mcells / s)", fontsize=10, color=INK)
     axa.set_title("(a) throughput vs GPUs", fontsize=11, color=INK, loc="left")
@@ -243,6 +253,10 @@ def main(argv=None):
                    help="scaling mode (strong|weak|any; default strong)")
     p.add_argument("--precision", default="float32",
                    help="precision (float32|float64|any; default float32)")
+    p.add_argument("--min-devices", type=int, default=2,
+                   help="lowest device count on the ladder (default 2; N=1 "
+                        "runs no halo exchange, so the 1->2 leg is the comm "
+                        "ONSET, not scaling). Set 1 to restore the old view.")
     p.add_argument("--n-levels", default=None,
                    help="restrict to one vertical resolution (e.g. 26); a "
                         "campaign that changed n_levels is NOT comparable")
@@ -258,7 +272,7 @@ def main(argv=None):
     os.makedirs(a.out, exist_ok=True)
     for title, outname, grid, ramp, res in FIGS:
         make_figure(data, title, outname + a.suffix, grid, ramp, res, a.out,
-                    panel_b=a.panel_b)
+                    panel_b=a.panel_b, min_devices=a.min_devices)
     names = ",".join(f[1] + a.suffix for f in FIGS)
     print(f"wrote {a.out}/{{{names}}}.{{png,pdf}} "
           f"(panel b = {a.panel_b})")
