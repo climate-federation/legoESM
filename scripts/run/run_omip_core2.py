@@ -2257,6 +2257,66 @@ _SOURCE_REV_UNAVAILABLE = "unavailable"
 _MAX_TREE_PROBES: int = 16
 _MAX_TREE_TAGS: int = 4
 
+# --- LEGOESM_* environment in the restart fingerprint ----------------------
+# Several numerics levers are ENV-gated rather than CLI flags
+# (LEGOESM_BAROCLINIC_F32, LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED,
+# LEGOESM_TRACER_PAIR, ...), so two legs with identical command lines can
+# integrate different numerics.  They are hashed as a fail-CLOSED SWEEP with an
+# EXCLUSION list — the same doctrine as _RESTART_FP_EXCLUDE for CLI args, so a
+# lever added later is covered automatically.
+#
+# BUT a BARE prefix sweep is a FALSE-ABORT regression (codex tail-round RED):
+# ~120 LEGOESM_* variables exist and many are per-job INFRASTRUCTURE
+# (LEGOESM_JIT_CACHE_DIR, LEGOESM_NCPUS, LEGOESM_COORD_PORT, ...) that
+# legitimately differ between chained legs.  Hashing those aborts every real
+# restart — breaking exactly the feature this exists to protect.
+#
+# The exclusions are STRUCTURAL FAMILIES, not a hand-listed set of names:
+# filesystem locations, interpreters, resource counts, ports and debug dumps
+# cannot change the trajectory.  Everything else stays hashed.  If a legitimate
+# chain false-aborts, EXTEND THIS LIST — and never add a variable that changes
+# numerics.
+_RESTART_ENV_EXCLUDE_SUFFIX: tuple[str, ...] = (
+    "_DIR", "_PATH", "_ROOT", "_CACHE", "_SRC", "_URL", "_FILE", "_PORT",
+    "_LIB", "_REF",
+)
+_RESTART_ENV_EXCLUDE_EXACT: frozenset[str] = frozenset({
+    # interpreters / environments / repo locations
+    "LEGOESM_PYTHON", "LEGOESM_PY", "LEGOESM_CONDA_ENV", "LEGOESM_REPO",
+    "LEGOESM_CLIMATEEVAL_PYTHON",
+    # scheduler + resource shape: these change per job by construction and the
+    # model's answer is invariant across them
+    "LEGOESM_NCPUS", "LEGOESM_NGPUS", "LEGOESM_SLURM_ACCOUNT",
+    "LEGOESM_JAX_COORDINATOR",
+    # compile / mesh cache policy switches
+    "LEGOESM_JIT_CACHE_MIN_SECS", "LEGOESM_JAX_CACHE_DISABLE",
+    "LEGOESM_MESH_CACHE_DISABLE", "LEGOESM_ALLOW_CPU_COMPILE_CACHE",
+    # data staging locations carrying none of the suffixes above
+    "LEGOESM_CLM_SURFDATA", "LEGOESM_CMIP7_RAW",
+    # diagnostics / profiling / test-selection switches
+    "LEGOESM_PROFILE_MPI", "LEGOESM_VARIANT_COLORS", "LEGOESM_REGEN_GOLDEN",
+    "LEGOESM_SCALING_KIND", "LEGOESM_DEBUG_HELD", "LEGOESM_DUMP_RAD",
+    "LEGOESM_JAX_DISTRIBUTED_TEST", "LEGOESM_RUN_AMIP_INTEGRATION",
+    "LEGOESM_RUN_SLOW_RCE",
+})
+
+
+def _restart_env_items(environ=None) -> list[tuple[str, str]]:
+    """The ``LEGOESM_*`` settings that belong in the restart fingerprint.
+
+    SORTED, so the digest cannot depend on environment iteration order.
+    Factored out of ``main`` so BOTH directions are directly testable: a
+    numerics gate must be included, an infrastructure path must not.
+    """
+    import os as _os
+    env = _os.environ if environ is None else environ
+    return sorted(
+        (k, v) for k, v in env.items()
+        if k.startswith("LEGOESM_")
+        and k not in _RESTART_ENV_EXCLUDE_EXACT
+        and not k.endswith(_RESTART_ENV_EXCLUDE_SUFFIX)
+    )
+
 
 def _source_revision(start_dir=None) -> str:
     """Git revision of the checkout this driver is RUNNING FROM.
@@ -2355,18 +2415,18 @@ def _source_revision(start_dir=None) -> str:
         # the setup latency nor the recorded string can grow without bound on a
         # slow shared filesystem.
         import legoesm as _lego
-        others: list[str] = []
+        found: set[str] = set()
         seen: set[str] = set()
         probes = 0
-        for portion in list(getattr(_lego, "__path__", [])):
+        truncated = False
+        for portion in sorted(getattr(_lego, "__path__", [])):
             pkg_dir = str(Path(portion).resolve())
             if pkg_dir in seen:
                 continue
             seen.add(pkg_dir)
             probes += 1
             if probes > _MAX_TREE_PROBES:
-                if "..." not in others:
-                    others.append("...")
+                truncated = True
                 break
             top = _git(pkg_dir, "rev-parse", "--show-toplevel")
             pkg_root = top.stdout.strip() if top.returncode == 0 else None
@@ -2380,11 +2440,20 @@ def _source_revision(start_dir=None) -> str:
                 _, pkg_rev = _describe(pkg_dir)
                 tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
                        else pkg_rev.split("-")[0][:12])
-            if tag not in others and len(others) < _MAX_TREE_TAGS:
-                others.append(tag)
-        if not others:
+            found.add(tag)
+        if not found and not truncated:
             return rev
-        return f"{rev}+mixedtree:{','.join(others)}"
+        # CANONICAL + HONEST ABOUT TRUNCATION (codex tail round): the portions
+        # are visited in sorted order and the tags are sorted before capping,
+        # so the recorded provenance is deterministic rather than dependent on
+        # __path__ order; and when tags ARE dropped the string says so instead
+        # of looking complete.
+        tags = sorted(found)
+        if len(tags) > _MAX_TREE_TAGS:
+            tags = tags[:_MAX_TREE_TAGS] + [f"+{len(found) - _MAX_TREE_TAGS}-more"]
+        if truncated:
+            tags.append("probe-cap-reached")
+        return f"{rev}+mixedtree:{','.join(tags)}"
     except Exception:                       # noqa: BLE001 — provenance only
         return _SOURCE_REV_UNAVAILABLE
 
@@ -5752,18 +5821,11 @@ def main() -> int:
         _fp_forcing = core2_nyf_path(
             Path(args.forcing_path) if args.forcing_path else None)
         _fp_items.append(f"forcing_archive={_fp_forcing.resolve()}")
-        # BEHAVIOUR-CHANGING ENVIRONMENT (codex r9 HIGH).  Several numerics
-        # levers are env-gated rather than CLI flags (LEGOESM_BAROCLINIC_F32,
-        # LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED, LEGOESM_TRACER_PAIR,
-        # ...), so two legs with IDENTICAL command lines can integrate
-        # different numerics and still match on every other term.  Hashed as a
-        # sorted PREFIX SWEEP so a lever added later is covered automatically
-        # (fail-closed, like the CLI exclusion list); JAX_ENABLE_X64 is already
-        # pinned separately by the archive's _x64 record.
-        import os as _os_fp
-        _fp_env = sorted((k, v) for k, v in _os_fp.environ.items()
-                         if k.startswith("LEGOESM_"))
-        _fp_items.append(f"env={_fp_env!r}")
+        # BEHAVIOUR-CHANGING ENVIRONMENT (codex r9 HIGH; narrowed in the tail
+        # round to stop it false-aborting on per-job cache dirs and ports).
+        # See _restart_env_items / _RESTART_ENV_EXCLUDE_* above.
+        # JAX_ENABLE_X64 is pinned separately by the archive's _x64 record.
+        _fp_items.append(f"env={_restart_env_items()!r}")
         _restart_cfg_fp = _hashlib.sha256(
             "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
     # SOURCE REVISION (codex r5 HIGH; scoping/dirty/explicit-failure fixed in

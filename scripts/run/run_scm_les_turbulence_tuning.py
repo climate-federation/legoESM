@@ -989,6 +989,16 @@ def main(argv=None) -> int:
     _write_outputs(outdir, args, case, reference, results)
     _write_profiles(outdir, case, reference, profiles_default)
     print(f"\nwrote {outdir}")
+
+    # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
+    # campaign, but the EXIT CODE must still report them: a run where every arm
+    # failed was previously indistinguishable from a clean sweep, and a wrapper
+    # script checking $? would have called it success.
+    failed = [r for r in results if r.status in ("failed", "tune_failed")]
+    if failed:
+        print(f"\n{len(failed)} of {len(results)} arm(s) FAILED: "
+              + ", ".join(f"{r.scheme} ({r.status})" for r in failed))
+        return 1
     return 0
 
 

@@ -7,10 +7,20 @@ matching grid.
 THREAT MODEL -- a stated NON-GOAL, not an oversight
 ===================================================
 This is a scientific checkpoint format on a shared HPC filesystem.  It
-defends against CONFIGURATION DRIFT between chained legs, archive
-TRUNCATION / CORRUPTION, and ACCIDENTAL mixed-tree or mixed-configuration
-resumes -- i.e. against the author's own mistakes, which is what actually
-goes wrong here.
+defends against CONFIGURATION DRIFT between chained legs and against
+STRUCTURAL damage to the archive -- truncation, a slot renamed, relabelled
+or resized, a manifest that disagrees with the payload -- i.e. against the
+author's own mistakes, which is what actually goes wrong here.
+
+Two limits INSIDE even that scope, stated so they cannot be requoted away:
+
+* VALUE-ONLY corruption is NOT detected.  There is no payload checksum, so
+  a bit-flip or an overwrite that preserves shape and dtype resumes
+  silently.  "Corruption" above means STRUCTURAL corruption only.
+* A MIXED-TREE resume is DETECTED AND WARNED, not refused.  The driver
+  records ``+mixedtree:`` in the archive and prints a warning, then
+  proceeds -- chaining a production run across a bug fix has to stay
+  possible, so this is provenance, not a gate.
 
 It is NOT SIGNED and does NOT defend against an ADVERSARY.  A coordinated
 hand-edit (rewriting the manifest, the inventory and the payload together)
@@ -286,19 +296,35 @@ _SLOT_POLICY: dict[str, str] = {
     # rewritten unconditionally every step from the flux divergence.  MPAS
     # declares the same ("Diagnostic field computed from flux divergence").
     "w": _SLOT_DIAGNOSTIC,
-    # ``mass_flux_u``/``mass_flux_v``/``mass_flux_w`` (#1442, opt-in
+    # ``mass_flux_u``/``mass_flux_v``/``mass_flux_w`` (#1440/#1442, opt-in
     # ``store_mass_flux``): the h*u / h*v / w the step used for tracer
     # advection, captured for the transport diagnostic and recomputed from the
     # prognostic state on the next step.  The VERTICAL partner ``mass_flux_w``
     # is what makes the exported flux a coherent 3-D tracer transport rather
-    # than horizontal-only; it is diagnostic for exactly the same reason as the
-    # other two.  All three are pre-registered here so #1440/#1442 lands
-    # without tripping the unclassified-slot gate, and so none of them can
-    # repeat the run_omip asymmetry (written on save, silently dropped on load
-    # because the fresh template slot is None).
+    # than horizontal-only.  Pre-registered so that PR lands without tripping
+    # the unclassified-slot gate, and so none of the three can repeat the
+    # run_omip asymmetry (written on save, silently dropped on load because the
+    # fresh template slot is None).
+    #
+    # UNVERIFIED IN THIS TREE, and deliberately labelled as such: none of the
+    # three is a state field here yet, so there is no producer or reader to
+    # check the DIAGNOSTIC claim against.  It is taken from #1442's design, not
+    # from code — which is exactly the kind of claim this repo requires to be
+    # re-verified at the point of use.  ``test_pre_registered_mass_flux_slots_
+    # are_not_yet_state_fields`` is the tripwire: it goes RED the day any of
+    # them becomes a real slot, forcing whoever lands #1440/#1442 to CONFIRM
+    # that the step recomputes it before any consumer reads it.  If it turns
+    # out to be a carry, move it to _SLOT_PROGNOSTIC there — do not delete the
+    # test to make it pass.
     "mass_flux_u": _SLOT_DIAGNOSTIC, "mass_flux_v": _SLOT_DIAGNOSTIC,
     "mass_flux_w": _SLOT_DIAGNOSTIC,
 }
+# The three slots above are classified from #1442's DESIGN, not from a
+# producer in this tree.  Named here so the tripwire test and the policy stay
+# in one place.
+_PRE_REGISTERED_UNVERIFIED: tuple[str, ...] = (
+    "mass_flux_u", "mass_flux_v", "mass_flux_w",
+)
 
 # Derived from the policy so the two can never drift apart.
 _STATIC_GEOMETRY_SLOTS: tuple[str, ...] = tuple(

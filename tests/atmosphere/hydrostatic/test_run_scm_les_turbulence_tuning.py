@@ -475,3 +475,45 @@ def test_scm_refuses_most_with_a_prescribed_heat_flux():
         surface=SurfaceLayerConfig(bulk_scheme="constant", Ch_neutral=0.0),
     )
     SingleColumnModel._validate_prescribed_fluxes_no_double_count(ok, forcing)
+
+
+def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
+    """A campaign whose arms all failed must not look like a clean sweep.
+
+    Per-arm exceptions are caught deliberately, so without this the exit code
+    was 0 no matter how many arms died -- which is exactly how a V100S run with
+    a faulting arm was first mistaken for a success.
+    """
+    import types
+    import numpy as _np
+
+    fake_ref = types.SimpleNamespace(
+        source_dir=str(tmp_path), window_hours=(4.0, 6.0), n_frames=13,
+        mask=_np.ones(4, dtype=bool), weights=_np.full(4, 0.25),
+        z_les=_np.linspace(20.0, 3000.0, 8), profiles={}, profiles_les={},
+        scored_variables=lambda: ("theta", "qv"),
+        window_label="4.00-6.00 h (13 frames)",
+    )
+    fake_case = types.SimpleNamespace(
+        nlev=4, p_s=1.0e5, sigma_top=0.7, spec=types.SimpleNamespace(
+            les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
+        z_full=_np.linspace(3000.0, 20.0, 4),
+        p_full=_np.linspace(7e4, 1e5, 4),
+        u_profile=_np.full(4, -8.0), v_profile=_np.zeros(4),
+        les_domain_top_m=3000.0,
+        forcing=types.SimpleNamespace(prescribe="fluxes"),
+    )
+    monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
+    monkeypatch.setattr(drv, "load_sam_scm_case", lambda *a, **k: fake_case)
+    monkeypatch.setattr(drv, "_half_pressures",
+                        lambda case: _np.linspace(7e4, 1e5, 5))
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated CUDA fault")
+
+    monkeypatch.setattr(drv, "evaluate_scheme", _boom)
+
+    rc = drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
+                   "--outdir", str(tmp_path / "out"),
+                   "--schemes", "louis", "--skip-tuning"])
+    assert rc == 1, "a failed arm must produce a nonzero exit code"
