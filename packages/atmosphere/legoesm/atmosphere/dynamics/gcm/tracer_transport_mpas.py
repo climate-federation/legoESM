@@ -107,6 +107,135 @@ def tracer_horizontal_advection(q, u_edge, mesh):
     return -(div_qu - q * div_u_3d[..., None])
 
 
+def tracer_flux_form_tendency(
+    q, u_edge, dp_edge, dp_cell, div_dp_cell, vert_mass_flux, mesh,
+):
+    """Mass-CONSISTENT flux-form tracer tendency ``dq/dt`` on the MPAS C-grid.
+
+    Transports the layer tracer MASS ``q·δp`` with the SAME discrete edge mass
+    flux ``u·δp_edge`` and the SAME half-level vertical mass flux ``F`` the
+    dycore's own continuity closure uses, then converts back to a mixing-ratio
+    tendency by subtracting the co-transported layer-mass tendency::
+
+        d(q δp_k)/dt = -div(u q_e δp_e) - (F_{k+1/2} q*_{k+1/2}
+                                           - F_{k-1/2} q*_{k-1/2})
+        d(δp_k)/dt   = -div(u δp_e)     - (F_{k+1/2} - F_{k-1/2})
+        dq_k/dt      = [ d(q δp_k)/dt - q_k · d(δp_k)/dt ] / δp_k
+
+    WHAT THIS BUYS OVER THE ADVECTIVE FORM — be precise, the obvious answer is
+    wrong.  ``-(div(q u) - q div(u))`` (:func:`tracer_horizontal_advection`) is
+    a CONSISTENT discretisation of the same continuous equation (``∂q/∂t =
+    -v·∇q - σ̇ ∂q/∂σ`` IS the flux form minus ``q``× continuity) and it IS
+    free-stream preserving — it is identically zero for constant ``q``.  What
+    it is not is discretely CONSERVATIVE: it differences ``q`` against the
+    *unweighted* ``div(u)`` while this dycore's continuity carries layer mass
+    with the *δp-weighted* ``div(u δp_e)``, so the per-cell errors no longer
+    telescope and ``Σ_cells areaCell Σ_k q δp`` drifts.  Measured on a level-2
+    mesh with a ±80 hPa surface-pressure wave
+    (``tests/atmosphere/dycore/unit/test_mpas_flux_form_tracers.py``): the
+    advective operator's global tracer-mass tendency is ~1.5e-7 of the total
+    tracer mass per SECOND; this operator's is round-off (~1e-17 of the gross
+    transport terms).  The error is largest where the layer-mass gradient and
+    the divergence are both large — steep terrain under a divergent wind.
+
+    SIGN / COORDINATE CONVENTION (the whole file inherits it from
+    :class:`~legoesm.grids.vertical.SigmaCoordinate`):
+
+    * ``k = 0`` is the MODEL TOP; σ (and pressure) INCREASE DOWNWARD, so
+      ``δp_k > 0``.
+    * Interface index ``j`` in ``vert_mass_flux`` sits ABOVE layer ``j``:
+      layer ``k`` is bounded by interfaces ``k`` (top) and ``k+1`` (bottom).
+    * ``F_j > 0`` means mass moving DOWNWARD (toward larger σ/p) through
+      interface ``j`` [Pa/s] — the same sign convention
+      :func:`~legoesm.grids.vertical.vertical_advection` upwinds against
+      (``σ̇ > 0`` selects the backward/above difference).
+    * ``F_0 = F_nlev = 0`` (rigid lid, material lower boundary).  The vertical
+      flux difference therefore TELESCOPES to zero over a column, and the
+      horizontal divergence telescopes to zero over the mesh (each edge enters
+      its two cells with opposite ``edgeSignOnCell``), so ``Σ_cells areaCell ·
+      Σ_k δp_k dq_k/dt + q_k d(δp_k)/dt`` — i.e. the rate of change of global
+      column tracer mass — vanishes to round-off with no sources.
+    * ``div(u δp_e) > 0`` is mass EXPORT, hence the leading minus signs.
+
+    FREE-STREAM PRESERVATION (necessary, but NOT what distinguishes this from
+    the advective form).  For a spatially and vertically CONSTANT ``q``:
+    ``q_e = q`` exactly (a two-cell 0.5-average of equal values), ``q* = q``
+    exactly (an upwind select between equal values), so the vertical terms
+    cancel BIT-exactly and the horizontal terms cancel to the round-off of the
+    divergence reduction.  No wind field, terrain or coordinate can then
+    manufacture a tracer extremum out of a uniform field.
+
+    LIMITER.  Like the advective form this operator uses a CENTRED
+    (``cell_to_edge_avg_3d``) edge value and an UPWIND interface value; it is
+    conservative and free-stream preserving but NOT monotone, so it can still
+    undershoot.  The MPAS floors stage (``conservative_positive_clamp``) is
+    still required, and with it the chain conserves column tracer mass.
+
+    Parameters
+    ----------
+    q : jax.Array, (nCells, nlev, n_tracers)
+        Mixing ratios [per unit MASS].  Per-VOLUME fields (``N_c``/``N_r``,
+        [#/m³]) must NOT be routed here — a δp-weighted transport conserves
+        ``∫ q dp/g`` which has no meaning for them; the caller filters with
+        ``legoesm.core.conservation.is_borrow_eligible_tracer``.
+    u_edge : jax.Array, (nEdges, nlev)
+        Edge-normal advecting velocity [m/s] — the dycore's own ``u``.
+    dp_edge : jax.Array, (nEdges, nlev)
+        Layer thickness at edges [Pa] — the SAME array the continuity's
+        ``div(u δp_e)`` was formed from.
+    dp_cell : jax.Array, (nCells, nlev)
+        Layer thickness at cells [Pa], strictly positive.
+    div_dp_cell : jax.Array, (nCells, nlev)
+        ``div(u δp_e)`` at cells [Pa/s] — the dycore's flux-form layer-mass
+        divergence, passed in so the tracer differences against the SAME
+        discrete operator (re-deriving it would reintroduce the defect).
+    vert_mass_flux : jax.Array, (nCells, nlev+1)
+        Half-level vertical mass flux ``F`` [Pa/s], positive DOWNWARD, zero at
+        both boundaries.  σ coordinate: ``p_s·σ̇``.  Hybrid: ``mass_flux``.
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, (nCells, nlev, n_tracers)
+        Mixing-ratio tendency [1/s].
+    """
+    n_cells, nlev, n_tracers = q.shape
+
+    # --- Horizontal: div(u · q_edge · δp_edge) --------------------------
+    # Fold tracers into the level axis so the gather + divergence run ONCE
+    # for all tracers (same batching trick as tracer_horizontal_advection).
+    q_flat = q.reshape(n_cells, nlev * n_tracers)
+    q_edge = cell_to_edge_avg_3d(q_flat, mesh)                # (nEdges, nlev*ntr)
+    n_edges = q_edge.shape[0]
+    q_edge = q_edge.reshape(n_edges, nlev, n_tracers)
+    # (nEdges, nlev, 1): the edge MASS flux the continuity already uses.
+    mass_flux_edge = (u_edge * dp_edge)[..., None]
+    div_q_mass = divergence_cell_3d(
+        (q_edge * mass_flux_edge).reshape(n_edges, nlev * n_tracers), mesh,
+    ).reshape(n_cells, nlev, n_tracers)                        # [Pa/s]
+
+    # --- Vertical: Δ_k( F · q* ) ----------------------------------------
+    # Interface j lies above layer j.  F_j > 0 (downward) ⇒ the mass crossing
+    # interface j came from layer j-1 (ABOVE) ⇒ upwind value q_{j-1}.
+    f_interior = vert_mass_flux[:, 1:-1, None]                 # (nCells, nlev-1, 1)
+    q_upwind = jnp.where(f_interior > 0, q[:, :-1, :], q[:, 1:, :])
+    # Pad the two boundary interfaces; F = 0 there, so the padded value is
+    # multiplied by zero and never enters the budget.
+    q_iface = jnp.pad(q_upwind, ((0, 0), (1, 1), (0, 0)))       # (nCells, nlev+1, ntr)
+    vflux = vert_mass_flux[..., None] * q_iface                 # (nCells, nlev+1, ntr)
+    d_vflux = vflux[:, 1:, :] - vflux[:, :-1, :]                # bottom minus top
+    d_f = (vert_mass_flux[:, 1:] - vert_mass_flux[:, :-1])[..., None]
+
+    # d(q δp)/dt and the co-transported d(δp)/dt, from the SAME fluxes.
+    d_qdp_dt = -div_q_mass - d_vflux
+    d_dp_dt = -div_dp_cell[..., None] - d_f
+
+    # δp_k > 0 by construction (p_s is clipped to [p_floor, p_ceil] upstream
+    # and every coordinate layer has positive thickness), so no guard here —
+    # a degenerate coordinate must fail loudly, not be silently floored.
+    return (d_qdp_dt - q * d_dp_dt) / dp_cell[..., None]
+
+
 def tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord):
     """Full sigma-coordinate advective tracer tendency = shared horizontal
     (:func:`tracer_horizontal_advection`) + sigma vertical advection.  Used by

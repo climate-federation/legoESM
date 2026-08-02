@@ -403,3 +403,66 @@ class TestConservativeClampMPIStep:
                 got[owned], serial_local[owned], rtol=1e-7, atol=1e-10,
                 err_msg=f"clamp-ON MPI tracer {k} mismatch vs serial "
                         f"on rank {rank}")
+
+
+class TestFluxFormTracerMPIStep:
+    """#1354: the mass-CONSISTENT flux-form tracer transport under MPI.
+
+    The claim being tested is that flux form needs NO new communication.  Its
+    stencil footprint is identical to the advective operator it replaces —
+    ``cell_to_edge_avg_3d(q)`` and ``divergence_cell_3d(u·q_e·δp_e)`` read the
+    same one ring of neighbour CELLS (``q`` and ``p_s``, both already exchanged
+    every RK stage by ``_exchange_mpas_state``) and the same edges of the owned
+    cell.  ``div_dp`` and the half-level mass flux ``F`` are cell-local
+    reductions of quantities the dycore already forms for its own continuity.
+    If that claim were wrong, boundary-owned cells would read stale halo values
+    and the owned-cell result would differ from serial — which is exactly what
+    this asserts does not happen.
+
+    Compares LOCAL owned cells against the scattered serial reference because
+    ``gather_state_voronoi`` does not carry ``tracers`` (pre-existing gap,
+    mirrored from ``TestConservativeClampMPIStep``).
+    """
+
+    @_xfail_mpi_stack
+    def test_flux_form_step_matches_serial(self, mesh, sigma, config):
+        _skip_if_no_mpi()
+        rank, n_ranks = _get_mpi_info()
+
+        from legoesm.parallel.voronoi_partition import (
+            partition_cells_geometric,
+            scatter_to_local,
+        )
+        cell_owner = partition_cells_geometric(mesh, n_ranks)
+        layout = make_voronoi_partition_layout(
+            mesh, rank, n_ranks, cell_owner=cell_owner)
+
+        cfg = config._replace(moisture_flux_form=True)
+        global_state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+        ncell, nlev = global_state.T.data.shape
+        rng = np.random.default_rng(11)
+        # A per-MASS tracer (flux form) AND a per-VOLUME one (kept advective):
+        # both lanes must reproduce serial under the same exchange.
+        tracers = {}
+        for k in ("q_v", "N_c"):
+            scale = 1e-3 if k == "q_v" else 1e8
+            tracers[k] = global_state.p_s.replace(
+                data=jnp.asarray(rng.uniform(0.1, 1.0, (ncell, nlev)) * scale))
+        global_state = global_state._replace(tracers=tracers)
+
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        serial_state = model.step(global_state, DT)
+
+        local_state = scatter_state_voronoi(global_state, layout.partition)
+        mpi_step = make_voronoi_mpi_step(model, layout, sigma, cfg)
+        local_result = mpi_step(local_state, DT)
+
+        owned = np.asarray(layout.owned_mask_cells)
+        for k in ("q_v", "N_c"):
+            serial_local = np.asarray(scatter_to_local(
+                serial_state.tracers[k].data, layout.partition, "cell"))
+            got = np.asarray(local_result.tracers[k].data)
+            np.testing.assert_allclose(
+                got[owned], serial_local[owned], rtol=1e-7, atol=1e-12,
+                err_msg=f"flux-form MPI tracer {k} mismatch vs serial "
+                        f"on rank {rank} (stale halo in the new operator?)")

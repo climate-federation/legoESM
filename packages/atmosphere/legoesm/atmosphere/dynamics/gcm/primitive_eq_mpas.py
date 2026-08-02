@@ -162,6 +162,32 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # AMIP lane, too dissipative to default ON for wave-resolving studies.
     # 0.0 = off (exact no-op).
     vert4_T_filter: float = 0.0
+    # #1354: transport the per-MASS tracers with the mass-CONSISTENT flux form
+    # (``tracer_transport_mpas.tracer_flux_form_tendency``) instead of the
+    # advective ``-(div(q u) - q div(u))``.  The advective operator is a
+    # CONSISTENT (and free-stream-preserving) discretisation of the same
+    # continuous equation, but it differences ``q`` against the UNWEIGHTED
+    # ``div(u)`` while this dycore's continuity carries mass with the
+    # δp-WEIGHTED ``div(u δp_e)`` (see "--- 4. Surface pressure tendency ---"),
+    # so it is NOT discretely conservative: the per-cell errors stop
+    # telescoping and Σ area·Σ_k q·δp drifts (measured ~1.5e-7 of the total
+    # tracer mass per SECOND on the level-2 test mesh with a ±80 hPa p_s wave).
+    # Flux form conserves it to round-off.
+    #
+    # SCOPE: only per-MASS tracers (``conservation.is_borrow_eligible_tracer``
+    # — the water mixing ratios and the per-mass numbers N_i/N_s/N_g) are
+    # routed through it.  The per-VOLUME numbers N_c/N_r [#/m³] keep the
+    # advective operator: a δp-weighted transport conserves ∫q dp/g, which has
+    # no meaning for a per-volume field.  This is the SAME exclusion the
+    # column-conserving positivity clamp uses, and porting it is deliberate —
+    # the 2026-07 conserving-borrow defect came from applying a water-MASS
+    # operation to number concentrations.
+    #
+    # 0/False (default) reproduces the pre-#1354 dycore bit-for-bit: the whole
+    # new path is behind a Python ``if`` on this STATIC bool, so with it off
+    # not one operation in the tracer block changes.  Last field to preserve
+    # positional ABI.
+    moisture_flux_form: bool = False
 
 
 # ============================================================================
@@ -626,27 +652,86 @@ def mpas_hydrostatic_tendencies(
 
     # --- 7. Tracer transport (moisture etc.) ---
     # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
-    # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
-    # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
-    # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
-    # operator the dycore uses for T.  Physics (microphysics/convection)
-    # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
+    # vertical mass flux (mass_flux for hybrid / sigma_dot for σ) — same
+    # horizontal operator and same vertical velocity the dycore uses for T.
+    #
+    # Two forms, selected by ``config.moisture_flux_form`` (#1354):
+    #   * DEFAULT (False) — ADVECTIVE ``-(div(q u) - q div(u))``.  Consistent
+    #     with the T transport above and free-stream preserving, but NOT
+    #     discretely CONSERVATIVE: it differences q against the UNWEIGHTED
+    #     ``div(u)`` while this dycore's own continuity closure carries layer
+    #     mass with the δp-WEIGHTED ``div_dp_3d = div(u δp_e)`` (step 4), so
+    #     the per-cell errors do not telescope and column tracer mass drifts.
+    #   * True — mass-CONSISTENT FLUX form on the per-MASS tracers: transports
+    #     q·δp with the SAME edge mass flux and the SAME half-level F, so
+    #     column tracer mass is conserved to round-off (and a spatially
+    #     constant q stays invariant).
+    # Physics (microphysics/convection) tracer tendencies add on.
+    # ``tracers=None`` ⇒ dry, no extra work.
     tracer_tends_out = None
     if state.tracers is not None and len(state.tracers) > 0:
         from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+            tracer_flux_form_tendency,
             tracer_horizontal_advection,
         )
         _tnames = list(state.tracers.keys())
         q = jnp.stack([state.tracers[k].data for k in _tnames], axis=-1)
-        dq = tracer_horizontal_advection(q, u_3d, mesh)
-        if _hybrid:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord),
-                in_axes=-1, out_axes=-1)(q)
-        else:
-            dq = dq + jax.vmap(
+
+        # #1354: split the tracer set ONLY when flux form is requested.  The
+        # per-VOLUME numbers N_c/N_r [#/m³] stay on the advective operator —
+        # a δp-weighted transport conserves ∫q dp/g, meaningless for them
+        # (same exclusion as the column-conserving positivity clamp; see
+        # ``conservation.BORROW_ELIGIBLE_TRACERS``).  Static Python
+        # partition on the (compile-time) tracer names.
+        _flux_idx = (
+            [_i for _i, k in enumerate(_tnames)
+             if is_borrow_eligible_tracer(k)]
+            if config.moisture_flux_form else []
+        )
+
+        def _advective_dq(q_sub):
+            """Legacy advective transport (horizontal + matching vertical)."""
+            _d = tracer_horizontal_advection(q_sub, u_3d, mesh)
+            if _hybrid:
+                return _d + jax.vmap(
+                    lambda qk: vertical_advection_hybrid(
+                        qk, mass_flux, p_s, sigma_coord),
+                    in_axes=-1, out_axes=-1)(q_sub)
+            return _d + jax.vmap(
                 lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
-                in_axes=-1, out_axes=-1)(q)
+                in_axes=-1, out_axes=-1)(q_sub)
+
+        if not _flux_idx:
+            # DEFAULT path — byte-for-byte the pre-#1354 sequence of ops.
+            dq = _advective_dq(q)
+        else:
+            # Layer mass + half-level vertical mass flux, taken from the SAME
+            # quantities the flux-form continuity closure above is built on:
+            #   σ:      δp = p_s·Δσ            F = p_s·σ̇      [Pa/s]
+            #   hybrid: δp = dA·p_ref + dB·p_s F = mass_flux  [Pa/s]
+            # F > 0 is DOWNWARD (increasing σ/p) and F = 0 at both boundaries,
+            # matching ``vertical_advection``'s upwind convention.
+            if _hybrid:
+                _dp_cell = dp
+                _F_vert = mass_flux
+            else:
+                _dp_cell = (
+                    p_s[:, None]
+                    * sigma_coord.dsigma.astype(p_s.dtype)[None, :]
+                )
+                _F_vert = p_s[:, None] * sigma_dot
+            _dq_flux = tracer_flux_form_tendency(
+                q[..., _flux_idx], u_3d, dp_edge_3d, _dp_cell,
+                div_dp_3d, _F_vert, mesh,
+            )
+            _adv_idx = [_i for _i in range(len(_tnames))
+                        if _i not in set(_flux_idx)]
+            if _adv_idx:
+                dq = (jnp.zeros_like(q)
+                      .at[..., _flux_idx].set(_dq_flux)
+                      .at[..., _adv_idx].set(_advective_dq(q[..., _adv_idx])))
+            else:
+                dq = _dq_flux
         # #930 vertical checkerboard damper on TRACERS (same operator + rate
         # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
         # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling

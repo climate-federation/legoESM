@@ -1132,10 +1132,14 @@ class TestMoistureFluxFormNotSilentlyInert:
         refuse_unwired_moisture_flux_form(
             DycoreConfig(moisture_flux_form=False), "SOME LANE")
 
-    @pytest.mark.parametrize("model_type", ["hydrostatic", "nonhydrostatic"])
+    @pytest.mark.parametrize("model_type", ["nonhydrostatic"])
     def test_mpas_factory_refuses_unwired_lane(self, model_type):
         """End-to-end through the factory: the MPAS lane(s) that do NOT
-        implement flux-form transport refuse the flag instead of ignoring it."""
+        implement flux-form transport refuse the flag instead of ignoring it.
+
+        (The MPAS *hydrostatic* PE lane implements it since #1354 — see
+        ``test_mpas_hydrostatic_forwards_flux_form`` below.)
+        """
         from legoesm.grids.factory import create_grid
 
         grid = create_grid("mpas", 1, lloyd_iterations=2)
@@ -1148,3 +1152,21 @@ class TestMoistureFluxFormNotSilentlyInert:
         )
         with pytest.raises(ValueError, match="moisture_flux_form"):
             create_atmosphere_dycore(config, grid, _make_sigma(2))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_mpas_hydrostatic_forwards_flux_form(self, flag):
+        """#1354: the driver-level flag reaches MPASPrimitiveEquationConfig —
+        it must be honoured, not dropped (which is the same silent-inertness
+        defect the refusal above guards)."""
+        from legoesm.grids.factory import create_grid
+
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="mpas", dt=300.0,
+                moisture_flux_form=flag,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.moisture_flux_form is flag

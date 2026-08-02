@@ -57,7 +57,8 @@ class TestVoronoiShardedEquivalence:
 
     def _run(self, *, devices: int, reorder_for: int | None = None,
              n_steps: int = 5, subdivision_level: int = 4,
-             physics_fn=None, outer_scan: bool = False):
+             physics_fn=None, outer_scan: bool = False,
+             moist: bool = False, moisture_flux_form: bool = False):
         """Run the SSP-RK3 evolution on a Voronoi mesh that has been
         pre-reordered for ``reorder_for``-way sharding (default:
         same as ``devices``).  When comparing single-device against
@@ -98,11 +99,15 @@ class TestVoronoiShardedEquivalence:
             nu_del4=1e16, nu_del4_ps=1e16,
             fix_mass=True, pv_scheme='energy',
             time_integrator='ssp_rk3',
+            # #1354: mass-consistent flux-form tracer transport.  Off by
+            # default, so every pre-existing case here is untouched.
+            moisture_flux_form=moisture_flux_form,
         )
 
         if devices == 1:
             model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
-            state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+            state = baroclinic_wave_init_mpas(
+                mesh, sigma, perturbed=True, moist=moist)
             for _ in range(n_steps):
                 state = model.step(state, dt, physics_fn=physics_fn)
             return state
@@ -122,7 +127,8 @@ class TestVoronoiShardedEquivalence:
         mesh_replicated = replicate_pytree(mesh, dev_config)
 
         model = MPASPrimitiveEquationModel(mesh_replicated, sigma, cfg)
-        state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+        state = baroclinic_wave_init_mpas(
+            mesh, sigma, perturbed=True, moist=moist)
         step_fn = make_voronoi_sharded_step(model, dev_config)
 
         if outer_scan:
@@ -272,3 +278,50 @@ class TestVoronoiShardedEquivalence:
                 o, r, atol=atol, rtol=rtol,
                 err_msg=f"{name}: {devices}-device drift exceeds float-pt envelope",
             )
+
+    def test_2device_moist_flux_form_matches_1device(self):
+        """#1354: the mass-CONSISTENT flux-form tracer transport under SPMD
+        cell-sharding.
+
+        The claim under test is that flux form needs NO new communication: its
+        stencil footprint is identical to the advective operator it replaces
+        (``cell_to_edge_avg_3d(q)`` + ``divergence_cell_3d(u·q_e·δp_e)`` read
+        the same one ring of neighbour CELLS — ``q`` and ``p_s``, both already
+        in the packed ppermute payload — and the same edges of the owned cell;
+        ``div_dp`` and the half-level ``F`` are cell-local reductions the
+        dycore already forms for its own continuity).  If that were wrong the
+        sharded tracers would read stale halos and diverge from single-device.
+
+        Non-vacuity: a companion single-device run with the flag OFF must
+        differ from the flag-ON reference by MORE than the equivalence
+        envelope, so "sharded matches single-device" cannot be satisfied by
+        the flag being silently dropped on the sharded path.
+        """
+        _need_multi_device(2)
+        common = dict(reorder_for=2, n_steps=1, subdivision_level=4,
+                      moist=True)
+        ref = self._run(devices=1, moisture_flux_form=True, **common)
+        ref_adv = self._run(devices=1, moisture_flux_form=False, **common)
+        out = self._run(devices=2, moisture_flux_form=True, **common)
+
+        q_ref = np.asarray(ref.tracers["q_v"].data)
+        q_adv = np.asarray(ref_adv.tracers["q_v"].data)
+        signal = np.max(np.abs(q_ref - q_adv))
+        assert signal > 1e-9, (
+            "flux-form vs advective q_v difference is inside the equivalence "
+            f"envelope ({signal:.3e}) — this test cannot detect a dropped flag")
+
+        for name, atol, rtol in (("u", 1e-6, 1e-6), ("T", 1e-6, 1e-7),
+                                 ("p_s", 1e-1, 1e-6)):
+            np.testing.assert_allclose(
+                np.asarray(getattr(out, name).data),
+                np.asarray(getattr(ref, name).data),
+                atol=atol, rtol=rtol,
+                err_msg=f"{name}: 2-device moist flux-form drift")
+        for k in ("q_v", "q_c", "q_r"):
+            np.testing.assert_allclose(
+                np.asarray(out.tracers[k].data),
+                np.asarray(ref.tracers[k].data),
+                atol=1e-12, rtol=1e-6,
+                err_msg=f"tracer {k}: 2-device flux-form drift vs single-device "
+                        "(stale halo in the new operator?)")

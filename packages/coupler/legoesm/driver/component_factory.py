@@ -561,7 +561,6 @@ def create_atmosphere_dycore(
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
-        refuse_unwired_moisture_flux_form(dc, "MPAS hydrostatic PE")
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
         )
@@ -595,6 +594,10 @@ def create_atmosphere_dycore(
             vert4_T_filter=getattr(dc, "mpas_vert4_t_filter", 0.0),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
+            # #1354: mass-CONSISTENT flux-form transport of the per-mass
+            # tracers (the driver-level field, previously silently inert on
+            # this lane).  Default off = advective path bit-identical.
+            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
