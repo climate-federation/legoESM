@@ -91,6 +91,83 @@ def compute_pkappa_half(
     return p_half_safe ** constants.kappa
 
 
+def geopotential_half_from_pressures(
+    T: jax.Array,
+    phis: jax.Array,
+    p_half: jax.Array,
+    p_full: jax.Array,
+) -> jax.Array:
+    """FV3-style half-level geopotential from PRECOMPUTED pressures.
+
+    Grid- and coordinate-agnostic core of
+    :func:`compute_geopotential_half_fv3`: the caller supplies the
+    half- and full-level pressures (hybrid ``A·p_ref + B·p_s`` or pure
+    sigma ``σ·p_s``), so the same bottom-up recurrence serves the
+    cubed-sphere AND lat-lon Lin (1997) PGF paths on either vertical
+    coordinate.  See :func:`compute_geopotential_half_fv3` for the
+    derivation of ``dgz = cp·T·p_full^(−κ)·δ(p^κ)``.
+
+    Parameters
+    ----------
+    T : jax.Array, shape ``(..., nlev)`` (K).
+    phis : jax.Array, shape ``(...)`` (m²/s²).
+    p_half : jax.Array, shape ``(..., nlev+1)`` (Pa).
+    p_full : jax.Array, shape ``(..., nlev)`` (Pa).
+
+    Returns
+    -------
+    gz_half : jax.Array, shape ``(..., nlev+1)`` (m²/s²); index 0 is
+        the model top, index ``nlev`` the surface (= ``phis``).
+    """
+    cp = constants.c_pd
+    kappa = constants.kappa
+
+    pk_half = jnp.clip(p_half, 1.0, None) ** kappa
+    dpk = pk_half[..., 1:] - pk_half[..., :-1]          # (..., nlev)
+    p_full_safe = jnp.clip(p_full, 1.0, None)
+    dgz = cp * T * p_full_safe ** (-kappa) * dpk        # (..., nlev)
+
+    cum_from_bottom = jnp.cumsum(dgz[..., ::-1], axis=-1)[..., ::-1]
+    gz_half_top = phis[..., None] + cum_from_bottom     # (..., nlev)
+    return jnp.concatenate([gz_half_top, phis[..., None]], axis=-1)
+
+
+def _lin1997_cross_product(
+    gz_lo: jax.Array,
+    gz_hi: jax.Array,
+    pk_lo: jax.Array,
+    pk_hi: jax.Array,
+    rd: jax.Array,
+) -> jax.Array:
+    """Lin (1997) cross-product PGF tendency for ONE face family.
+
+    ``lo``/``hi`` are the neighbour-cell half-level stacks on either
+    side of the face (W/E for x-faces, S/N for y-faces), shape
+    ``(..., nlev+1)``; ``rd`` is the reciprocal face distance
+    broadcastable against the ``(..., nlev)`` output.  Returns the face
+    wind tendency to ADD (``du_face/dt += ...``) — the cross-product
+    carries the physical sign (see the sign-convention note in
+    :func:`fv3_lin1997_pgf_3d_cgrid`).
+    """
+    wk_lo = pk_lo[..., 1:] - pk_lo[..., :-1]
+    wk_hi = pk_hi[..., 1:] - pk_hi[..., :-1]
+    cross = (
+        (gz_lo[..., 1:] - gz_hi[..., :-1]) * (pk_hi[..., 1:] - pk_lo[..., :-1])
+        + (gz_lo[..., :-1] - gz_hi[..., 1:]) * (pk_lo[..., 1:] - pk_hi[..., :-1])
+    )
+    denom = wk_lo + wk_hi
+    # Safety floor (FV3 uses none): keep autodiff / float32 NaN-safe.
+    # ``jnp.sign(0) == 0`` would zero the floor and reintroduce a 0/0
+    # exactly at ``denom == 0`` — map the sign-of-zero to +1.
+    _sgn = jnp.sign(denom)
+    _floor_sign = _sgn + (1.0 - jnp.abs(_sgn))
+    denom_safe = jnp.where(
+        jnp.abs(denom) > _PGF_DENOM_FLOOR, denom,
+        _floor_sign * _PGF_DENOM_FLOOR,
+    )
+    return rd * cross / denom_safe
+
+
 def compute_geopotential_half_fv3(
     T: jax.Array,
     p_s: jax.Array,
@@ -141,36 +218,14 @@ def compute_geopotential_half_fv3(
         0 is the model top, index ``nlev`` is the surface
         (``gz_half[..., -1] = phis``).
     """
-    p_ref = constants.p_ref
-    cp = constants.c_pd
-    kappa = constants.kappa
-
-    # δp^κ per layer at full level k.
-    pk_half = compute_pkappa_half(p_s, coord)  # (6, n, n, nlev+1)
-    dpk = pk_half[..., 1:] - pk_half[..., :-1]  # (6, n, n, nlev)
-
-    # p_full at layer mid-pressures (used as the p^(-κ) weight).
-    p_full = coord.A_full * p_ref + coord.B_full * p_s[..., None]
-    p_full_safe = jnp.clip(p_full, 1.0, None)
-
-    # δgz per layer (positive — gz increases upward, layer index k
-    # increases downward).  ``cp * T * p_full^(-κ) * dpk`` per the
-    # hydrostatic relation derivation above.
-    dgz = cp * T * p_full_safe ** (-kappa) * dpk  # (6, n, n, nlev)
-
-    # Cumsum from the SURFACE upward.  Reverse along level axis,
-    # cumsum, reverse back.
-    cum_from_bottom = jnp.cumsum(dgz[..., ::-1], axis=-1)[..., ::-1]
-    # ``cum_from_bottom[..., k]`` = sum_{l=k}^{nlev-1} dgz(l)
-    # = gz_half(k) - gz_half(nlev) = gz_half(k) - phis.
-
-    # Pre-allocate gz_half then fill: index nlev is phis, indices 0..nlev-1
-    # are phis + cum_from_bottom.
-    gz_half_top = phis[..., None] + cum_from_bottom         # (6, n, n, nlev)
-    gz_half = jnp.concatenate(
-        [gz_half_top, phis[..., None]], axis=-1,
-    )                                                        # (6, n, n, nlev+1)
-    return gz_half
+    # Hybrid half/full pressures, then the coordinate-agnostic recurrence
+    # (``geopotential_half_from_pressures``) — bit-identical to the former
+    # inline form (same clip floors, same op order).  p_half mirrors
+    # ``compute_pkappa_half`` (coord.p_ref); p_full mirrors the former
+    # inline ``constants.p_ref`` weight.
+    p_half = coord.A_half * coord.p_ref + coord.B_half * p_s[..., None]
+    p_full = coord.A_full * constants.p_ref + coord.B_full * p_s[..., None]
+    return geopotential_half_from_pressures(T, phis, p_half, p_full)
 
 
 def fv3_lin1997_pgf_3d_cgrid(
@@ -250,36 +305,6 @@ def fv3_lin1997_pgf_3d_cgrid(
     gz_W = gz_pad[:, 0:n + 1, 1:n + 1, :]
     gz_E = gz_pad[:, 1:n + 2, 1:n + 1, :]
 
-    # Layer δp^κ at each side cell (Fortran ``wk(i-1) = pkc(i-1, k+1) - pkc(i-1, k)``).
-    wk_W = pk_W[..., 1:] - pk_W[..., :-1]    # (6, n+1, n, nlev)
-    wk_E = pk_E[..., 1:] - pk_E[..., :-1]
-
-    # Cross-product (Fortran:
-    #   (gz_W(k+1) - gz_E(k))   * (pkc_E(k+1) - pkc_W(k))
-    # + (gz_W(k)   - gz_E(k+1)) * (pkc_W(k+1) - pkc_E(k))).
-    cross_x = (
-        (gz_W[..., 1:] - gz_E[..., :-1]) * (pk_E[..., 1:] - pk_W[..., :-1])
-        + (gz_W[..., :-1] - gz_E[..., 1:]) * (pk_W[..., 1:] - pk_E[..., :-1])
-    )  # (6, n+1, n, nlev)
-
-    denom_x = wk_W + wk_E
-    # Safety floor for the denominator (FV3 uses no floor — relies on the
-    # dynamics never producing zero δp^κ in a stable atmosphere; we add a
-    # conservative epsilon to keep autodiff and float32 paths NaN-safe).
-    # NOTE: ``jnp.sign(0) == 0`` would zero the floor and reintroduce a
-    # 0/0 (NaN value AND NaN gradient) exactly at ``denom == 0``.  Map the
-    # sign-of-zero to +1 so the floor is ALWAYS strictly nonzero.
-    _sgn_x = jnp.sign(denom_x)
-    _floor_sign_x = _sgn_x + (1.0 - jnp.abs(_sgn_x))  # +1 where denom_x == 0
-    denom_x_safe = jnp.where(
-        jnp.abs(denom_x) > _PGF_DENOM_FLOOR,
-        denom_x,
-        _floor_sign_x * _PGF_DENOM_FLOOR,
-    )
-
-    # rdxc shape: (6, n+1, n).  Broadcast over the trailing nlev axis.
-    rdxc = cdgrid.rdxc[..., None]                       # (6, n+1, n, 1)
-
     # Sign convention: Fortran is ``u += dt * (rdxc/sum) * cross``,
     # i.e. ``du/dt = +rdxc/sum * cross``.  The cross-product itself
     # already carries the correct PHYSICAL sign — for an eastward
@@ -290,7 +315,10 @@ def fv3_lin1997_pgf_3d_cgrid(
     # negative → driver term in ``cross_x``), so ``du_c/dt`` is
     # westward as expected.  Match Fortran sign exactly: NO negation.
     # The caller then ADDS this directly: ``du_c/dt += pgf_x_c``.
-    pgf_x_c = rdxc * cross_x / denom_x_safe             # (6, n+1, n, nlev)
+    # (Cross-product + denominator floor live in the shared
+    # ``_lin1997_cross_product`` — same ops, bit-identical.)
+    rdxc = cdgrid.rdxc[..., None]                       # (6, n+1, n, 1)
+    pgf_x_c = _lin1997_cross_product(gz_W, gz_E, pk_W, pk_E, rdxc)
 
     # Y-faces: between cells (i, j-1) and (i, j).  X-cell i ∈ [0, n-1]
     # → padded i+1.  Y-face j ∈ [0, n] → between padded j (=S) and j+1 (=N).
@@ -299,27 +327,104 @@ def fv3_lin1997_pgf_3d_cgrid(
     gz_S = gz_pad[:, 1:n + 1, 0:n + 1, :]
     gz_N = gz_pad[:, 1:n + 1, 1:n + 2, :]
 
-    wk_S = pk_S[..., 1:] - pk_S[..., :-1]
-    wk_N = pk_N[..., 1:] - pk_N[..., :-1]
-
-    cross_y = (
-        (gz_S[..., 1:] - gz_N[..., :-1]) * (pk_N[..., 1:] - pk_S[..., :-1])
-        + (gz_S[..., :-1] - gz_N[..., 1:]) * (pk_S[..., 1:] - pk_N[..., :-1])
-    )
-
-    denom_y = wk_S + wk_N
-    _sgn_y = jnp.sign(denom_y)
-    _floor_sign_y = _sgn_y + (1.0 - jnp.abs(_sgn_y))  # +1 where denom_y == 0
-    denom_y_safe = jnp.where(
-        jnp.abs(denom_y) > _PGF_DENOM_FLOOR,
-        denom_y,
-        _floor_sign_y * _PGF_DENOM_FLOOR,
-    )
-
     rdyc = cdgrid.rdyc[..., None]                       # (6, n, n+1, 1)
-    pgf_y_c = rdyc * cross_y / denom_y_safe             # (6, n, n+1, nlev)
+    pgf_y_c = _lin1997_cross_product(gz_S, gz_N, pk_S, pk_N, rdyc)
 
     return pgf_x_c, pgf_y_c
+
+
+def lin1997_pgf_latlon_cgrid(
+    T: jax.Array,
+    p_s: jax.Array,
+    phis: jax.Array,
+    p_half: jax.Array,
+    p_full: jax.Array,
+    grid,
+) -> tuple[jax.Array, jax.Array]:
+    """Lin (1997) cross-product hydrostatic PGF at lat-lon C-grid faces.
+
+    Same cross-product operator as :func:`fv3_lin1997_pgf_3d_cgrid`
+    (shared ``_lin1997_cross_product``), applied on the regular lat-lon
+    C-grid where the prognostic winds already LIVE at the faces — no
+    D-grid projection step.  Motivated by #1029: the two-term
+    ``−∇(Φ) − R_d T ∇ln p`` PGF on terrain-following coordinates is a
+    linearly UNSTABLE discretisation over steep ridged topography on
+    this grid (DCMIP 2-0-0 rest state grows at ~2.6 e-folds/day at
+    72x144 L40, dt-independent), while the cross-product form is
+    zero-by-construction in any hydrostatically balanced column.
+
+    Pads and metrics mirror ``gradient_x_cgrid`` / ``gradient_y_cgrid``
+    exactly (periodic lon wrap via ``pad_lon_cgrid``, pole-BC lat halo
+    via ``pad_halo_latlon_3d``, ``dx_u = R·Δλ·cosφ``, staggered
+    ``dy_v``), so MPI band decomposition and the polar wall BC behave
+    identically to the two-term path.
+
+    Parameters
+    ----------
+    T : jax.Array, shape ``(n_lat, n_lon, nlev)`` (K).
+    p_s : jax.Array, shape ``(n_lat, n_lon)`` (Pa).  (Kept for parity
+        with the cube signature / future non-hydrostatic use; the
+        pressures arrive precomputed.)
+    phis : jax.Array, shape ``(n_lat, n_lon)`` (m²/s²).
+    p_half : jax.Array, shape ``(n_lat, n_lon, nlev+1)`` (Pa) — hybrid
+        ``A·p_ref + B·p_s`` or sigma ``σ_half·p_s``.
+    p_full : jax.Array, shape ``(n_lat, n_lon, nlev)`` (Pa).
+    grid : LatLonGrid (regular; tripolar is an ocean-only layout).
+
+    Returns
+    -------
+    pgf_x : jax.Array, shape ``(n_lat, n_lon+1, nlev)`` (m/s²).
+        ADD to ``du/dt`` (same sign convention as the cube variant).
+    pgf_y : jax.Array, shape ``(n_lat+1, n_lon, nlev)`` (m/s²).
+        ADD to ``dv/dt``; zeroed at the physical pole faces (wall BC,
+        matching ``gradient_y_cgrid``).
+    """
+    from legoesm.grids.operators_latlon_cgrid import is_tripolar, pad_lon_cgrid
+    from legoesm.grids.halo_latlon import (
+        pad_halo_latlon_3d,
+        zero_polar_lat_ends,
+    )
+
+    if is_tripolar(grid):
+        raise NotImplementedError(
+            "lin1997_pgf_latlon_cgrid: tripolar grids are ocean-only; "
+            "the atmosphere lat-lon PE runs on regular grids.")
+
+    kappa = constants.kappa
+    pk_half = jnp.clip(p_half, 1.0, None) ** kappa       # (n_lat, n_lon, nlev+1)
+    gz_half = geopotential_half_from_pressures(T, phis, p_half, p_full)
+
+    # --- x-faces (periodic lon).  Face j sits between cell (j-1) mod
+    # n_lon (west) and cell j (east) — same convention as
+    # ``gradient_x_cgrid``.  Padded index: W = pad[:, :-1], E = pad[:, 1:].
+    pk_pad_x = pad_lon_cgrid(pk_half, halo=1)            # (n_lat, n_lon+2, nlev+1)
+    gz_pad_x = pad_lon_cgrid(gz_half, halo=1)
+    pk_W = pk_pad_x[:, :-1]
+    pk_E = pk_pad_x[:, 1:]
+    gz_W = gz_pad_x[:, :-1]
+    gz_E = gz_pad_x[:, 1:]
+    dx_u = grid.radius * grid.dlon * grid.cos_lat        # (n_lat,)
+    rdx = (1.0 / dx_u)[:, None, None]
+    pgf_x = _lin1997_cross_product(gz_W, gz_E, pk_W, pk_E, rdx)
+
+    # --- y-faces (pole wall BC).  Face i sits between cell i-1 (south)
+    # and cell i (north); pad lat by one row (pole-BC / MPI halo), strip
+    # the lon halo — the exact ``gradient_y_cgrid`` pattern, including
+    # the staggered dy_v metric and the polar zeroing.
+    pk_pad_y = pad_halo_latlon_3d(pk_half, halo=1)[:, 1:-1]  # (n_lat+2, n_lon, nlev+1)
+    gz_pad_y = pad_halo_latlon_3d(gz_half, halo=1)[:, 1:-1]
+    pk_S = pk_pad_y[:-1]
+    pk_N = pk_pad_y[1:]
+    gz_S = gz_pad_y[:-1]
+    gz_N = gz_pad_y[1:]
+    dy_h = grid.dy * 0.5                                 # (n_lat,)
+    dy_h_padded = jnp.pad(dy_h, (1, 1), mode="edge")
+    dy_v = 0.5 * (dy_h_padded[1:] + dy_h_padded[:-1])    # (n_lat+1,)
+    rdy = (1.0 / dy_v)[:, None, None]
+    pgf_y = _lin1997_cross_product(gz_S, gz_N, pk_S, pk_N, rdy)
+    pgf_y = zero_polar_lat_ends(pgf_y)
+
+    return pgf_x, pgf_y
 
 
 def project_cgrid_pgf_to_dgrid_corners(

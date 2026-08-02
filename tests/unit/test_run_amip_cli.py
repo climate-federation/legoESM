@@ -453,6 +453,22 @@ def test_canopy_scheme_requires_multilayer_land():
     ]), parser)
 
 
+def test_surface_stability_scheme_flag_flows_to_config():
+    """--surface-stability-scheme round-trips (Pierre #5: the new stable-BL MOST
+    similarity functions); default = historical Dyer-1974 linear stable branch,
+    'beljaars_holtslag1991' selects the stable-flux-collapse-avoiding form."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.surface_stability_scheme == "dyer1974"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-stability-scheme", "beljaars_holtslag1991",
+    ]), parser))
+    assert cfg.surface_stability_scheme == "beljaars_holtslag1991"
+
+
 def test_sponge_flags_flow_to_config():
     """--sponge / --sponge-coeff-per-day / --sponge-sigma-top round-trip (#836
     top-of-atmosphere sponge); default OFF with the config default coeff/base."""
@@ -570,6 +586,44 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     assert cfg_off.mpas_land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
+
+
+def test_diag_days_fractional_flows_to_config():
+    """--diag-days accepts fractional (sub-daily) values — required for
+    diurnally-unaliased CMOR monthly means of day/night fields (rsut/pr/tas);
+    integer values keep byte-identical behavior."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "0.125",
+    ]), parser))
+    assert cfg.output.diag_days == pytest.approx(0.125)
+    cfg_int = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "1",
+    ]), parser))
+    assert cfg_int.output.diag_days == pytest.approx(1.0)
+
+
+def test_bechtold_cape_relaxation_sink_flag_round_trip():
+    """--bechtold-cape-relaxation-sink threads the heating-ceiling gate from
+    CLI to ExperimentConfig (default False = bit-exact legacy Bechtold); the
+    --no- form overrides a config-file pin."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+    ]), parser))
+    assert cfg.bechtold_cape_relaxation_sink is False
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--bechtold-cape-relaxation-sink",
+    ]), parser))
+    assert cfg_on.bechtold_cape_relaxation_sink is True
+    parser2 = build_arg_parser()
+    parser2.set_defaults(bechtold_cape_relaxation_sink=True)  # YAML pin
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-bechtold-cape-relaxation-sink",
+    ]), parser2))
+    assert cfg_off.bechtold_cape_relaxation_sink is False
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -1138,6 +1192,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--dataset", "analytical",
         "--hyperdiff-scale", "1.25",
         "--div-damp-scale", "0.75",
+        "--a-h-scale", "0.5",
         "--no-conservation-fixer",
         "--no-fix-mass",
         "--max-wallclock-seconds", "7200",
@@ -1162,7 +1217,6 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
-        "--a-h-scale", "0.25",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1172,9 +1226,9 @@ def test_issue484_new_amip_flags_flow_to_config():
     # drive the midlatitude jet; component_factory records "crushing the
     # midlatitude eddy-driven jets" at 16x the default. It was a DycoreConfig
     # field with no CLI flag until 2026-07-31.
-    assert cfg.dycore.a_h_scale == 0.25
     assert cfg.dycore.hyperdiff_scale == 1.25
     assert cfg.dycore.div_damp_scale == 0.75
+    assert cfg.dycore.a_h_scale == 0.5
     assert cfg.dycore.conservation_fixer is False
     assert cfg.dycore.fix_mass is False
     assert cfg.output.max_wallclock_seconds == 7200
@@ -1793,13 +1847,15 @@ def test_amip_sota_config_builds_valid_experiment_config():
     assert cfg.microphysics == "morrison"
     assert cfg.aerosol_forcing == "external"
     assert cfg.convective_cloud is False
-    assert cfg.convection == "sbm"
+    # AMIP convection is bechtold/tiedtke only (directive 2026-07-08); 'sbm'
+    # here was the historical tiedtke-overcast-trap workaround
+    assert cfg.convection == "bechtold"
 
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
     production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
-    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
+    directive 2026-07-07; revalidation gate = the physics-combo screen)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
@@ -1807,20 +1863,35 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is the C48/L40 publication lane (#899 restored it from
-    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
-    assert args.resolution == 48
-    assert args.nlev == 40
-    assert args.discretization == "cdgrid"
-    assert args.grid_type == "cubed_sphere"
+    # production YAML is the MPAS lane (2026-07-24: cube retired per Pierre
+    # directive + #1296): SCVT level 5 / L30 sigma / dt 75 — the proven-stable
+    # recipe (Pierre's day-247+ climeval_bech + the replica chains); the lane
+    # is recipe-sensitive, so these five keys are load-bearing together.
+    assert args.resolution == 5
+    assert args.nlev == 30
+    assert args.discretization == "mpas"
+    # the YAML says grid_type: voronoi; _postprocess_args normalizes the
+    # alias to the canonical "mpas"
+    assert args.grid_type == "mpas"
+    assert args.dt == pytest.approx(75.0)
+    assert args.vertical_coord == "sigma"
     cfg = build_config_from_args(args)
+    # The MPAS-lane Bechtold stabilizer (both no-hard-sat chains NaN'd d25/d40)
+    assert cfg.hard_saturation_adjustment is True
+    # MPAS runs UNTILED (tiled surface not ported to the standalone path)
+    assert cfg.surface_tiled is False
+    # passive/slab land-tile knobs shared by both arms of the land A/B
+    assert cfg.mpas_land_lapse_K_per_km == pytest.approx(6.5)
+    assert cfg.mpas_land_beta == pytest.approx(0.6)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    assert cfg.gravity_wave_drag == "mcfarlane"
+    # oro (McFarlane) + non-oro (Hines) composite, directive 2026-07-15:
+    # +hines pushed the latlon24 topo-wave blowup day 100->179 and is
+    # metric-neutral on cube (matched d31-60 A/B vs mcfarlane-only).
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"         # required by the tiled surface
-    assert cfg.surface_tiled is True
+    assert cfg.turbulence == "louis"         # directive turbulence
     assert cfg.start_year == 1979
     # convective_cloud ON — mirrors the canonical tuned base
     # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
@@ -1832,9 +1903,14 @@ def test_config_yaml_round_trips_authoritative_values():
     # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
     assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
-    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
-    # non-tiedtke scheme trips run_amip's hard guard at argparse.
-    assert cfg.convective_precip_efficiency == 0.0
+    # PINNED 0.8 (2026-07-14): the bechtold rain-split (#929) is on this
+    # branch, and the C12/60d one-variable dose-response (0 -> 0.5 -> 0.8 vs
+    # the 365d pilot control) moved EVERY hydro/TOA metric monotonically
+    # toward obs (pr 0.60->1.40 mm/d, hfls 49.9->65.9, prw 30.6->26.1,
+    # clivi 0.10->0.03 = obs).  The 0-value legacy no-split remains an A/B
+    # option only.  A silent drop of this pin re-opens the global-overcast
+    # TOA pathology (rsut 231 / rlut 175 / clt 94% vs obs 99/240/67).
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -1873,6 +1949,39 @@ def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
         cfg, load_params_config(str(p)), driver="run_amip",
         scalar_param_map=build_atm_scalar_param_map())
     assert out.cloud_q_c_diagnostic == 3.0e-4
+
+
+def test_params_calibration_reaches_bechtold_tunables(tmp_path):
+    """The Bechtold mass-flux cap + CMT coefficients round-trip from a --params
+    file through the atm scalar-param map to the ExperimentConfig scalars AND
+    into the pipeline-resolved BechtoldConfig (#869 campaign levers; the
+    class-router cannot reach BechtoldConfig, which is built inside
+    _resolve_convection)."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]),
+        parser))
+    p = tmp_path / "params.yaml"
+    p.write_text(
+        "atm.conv.BechtoldConfig.M_b_max: 0.08\n"
+        "atm.conv.BechtoldConfig.cmt_c_u: 0.5\n"
+        "atm.conv.BechtoldConfig.cmt_c_d: 0.4\n")
+    out = apply_params_to_config(
+        cfg, load_params_config(str(p)), driver="run_amip",
+        scalar_param_map=build_atm_scalar_param_map())
+    assert out.bechtold_m_b_max == 0.08
+    assert out.bechtold_cmt_c_u == 0.5
+    assert out.bechtold_cmt_c_d == 0.4
+    _, conv_config = _resolve_convection(out)
+    assert conv_config.M_b_max == 0.08
+    assert conv_config.cmt_c_u == 0.5
+    assert conv_config.cmt_c_d == 0.4
 
 
 def test_aimip_louis_preserves_resolved_surface_scheme():
@@ -2221,6 +2330,22 @@ def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
 
+def test_mpas_vert4_t_filter_flag_flows_to_dycore_config():
+    """Shapiro-form per-step 2Δσ filter (the ERA5-IC MPAS lane cure):
+    --mpas-vert4-t-filter must reach DycoreConfig.mpas_vert4_t_filter (which
+    the component factory threads into MPASPrimitiveEquationConfig.
+    vert4_T_filter).  Default OFF (0.0) — opt-in, unlike the rate form."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_vert4_t_filter == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-t-filter", "0.5",
+    ]), parser))
+    assert cfg_set.dycore.mpas_vert4_t_filter == pytest.approx(0.5)
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
@@ -2264,6 +2389,52 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_energy_consistency_flags_flow_to_dycore_config():
+    """#1029: --energy-paired-conversion / --pgf-scheme round-trip into
+    DycoreConfig; defaults preserve the legacy discretisation bit-for-bit."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.energy_paired_conversion is False   # legacy default
+    assert cfg_off.dycore.pgf_scheme == "two_term"
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--energy-paired-conversion",
+        "--pgf-scheme", "lin1997",
+    ]), parser))
+    assert cfg_on.dycore.energy_paired_conversion is True
+    assert cfg_on.dycore.pgf_scheme == "lin1997"
+
+    # BooleanOptionalAction: a YAML-true value stays CLI-overridable (#872).
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-energy-paired-conversion",
+    ]), parser))
+    assert cfg_neg.dycore.energy_paired_conversion is False
+
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--pgf-scheme", "lin97"])   # choices-validated
+
+
+def test_topo_diffusive_smoothing_flows_to_config():
+    """#1029 stability lever: --topo-diffusive-smoothing round-trips into
+    ExperimentConfig.topo_diffusive_smoothing; default 0 = bit-identical
+    legacy topography (the anchored --topo-smoothing passes saturate, so
+    this is the only knob that actually strengthens terrain smoothing)."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.topo_diffusive_smoothing == 0       # legacy default
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--topo-diffusive-smoothing", "4",
+    ]), parser))
+    assert cfg_on.topo_diffusive_smoothing == 4
 
 
 def test_sb81_omega_conversion_flag_flows_to_dycore_config():
@@ -2725,21 +2896,31 @@ def test_latlon24_production_variant_pins_polar_filter():
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     assert args.use_polar_filter is True
-    assert args.dt == 600.0
+    # dt=300 (2026-07-14): dt=600 dies at day ~125 in a deterministic
+    # fast-wave non-finite-winds event (probes 26243424/26: dt=600 restart
+    # re-dies, dt=300 from the same day-124 checkpoint runs 70 clean days).
+    # Return to 600 only if the seeding operator is found and fixed.
+    assert args.dt == 300.0
     assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
     assert args.resolution == 24 and args.nlev == 20
-    # Physics inherited from the production include (one source of truth),
-    # except convection: this lane pins `sbm` (#869) because bechtold
-    # re-develops a polar-night temperature runaway that blows the run at day
-    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
-    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
+    # Physics inherited from the production include (one source of truth):
+    # bechtold convection + the mcfarlane+hines GWD composite + cpe 0.8
+    # (user directive 2026-07-15, reversing the #869 sbm pin — the bechtold
+    # polar-night day-47 runaway is cured by parcel_theta_cap + the CAPE
+    # sink; +hines pushed the lane's topo-wave blowup day 100->179).
+    # Top sponge (2026-07-14): the EDDY-ONLY DYCORE sponge, not the driver
+    # damp-to-rest sponge — damp-to-rest exerts a Coriolis torque on the
+    # damped zonal-mean flow -> poleward mass drift -> p_s 1134 hPa deaths;
+    # the eddy sponge (dycore default sponge_eddy_only=True) cures the jet
+    # runaway (55 vs 208 m/s) with no mass drift.  A silent flip of any of
+    # these re-opens a validated failure mode.
+    assert args.sponge_enabled is False
+    assert args.sponge_coeff == pytest.approx(1.157e-4)
+    assert args.sponge_width_m == pytest.approx(17000.0)
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
-    # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
-    # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
-    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
-    assert cfg.convective_precip_efficiency is None
+    assert cfg.convection == "bechtold"
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_enable_tiled_dycore_flag_flows_to_config():

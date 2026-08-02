@@ -108,6 +108,28 @@ the point of `--evaluate` is "how far off is legoESM from ERA5," not a
 multi-model intercomparison. Restrict with e.g.
 `--evaluation-suite Tier2_atmosphere_monthly` for a single suite.
 
+### Short runs and per-variable metric failures
+
+A single-year (or otherwise short) run legitimately cannot satisfy every
+diagnostic in a suite: `Tier2_atmosphere_monthly`'s `AnnualMeanTimeSeries`
+diagnostic reduces both the model cube and the (multi-decade) ERA5
+reference cube to one point per year, then requires the two resulting
+series to be the *same length* to compute `weighted_rmse` — a 1-year run
+produces a 1-point series against ERA5's multi-decade series, which is a
+real, expected failure for that diagnostic+variable, not a bug.
+
+By default the runner does **not** let that one failure take down the
+whole suite: `--fail-on-metric-error` (default off, same convention as
+`--fail-on-missing-data`) makes ClimateEval log the failing variable as a
+warning and keep scoring every other diagnostic in the suite (`Map`,
+`ZonalLine`, `ZonalProfile`, …). Passing `--fail-on-metric-error` restores
+ClimateEval's own default (`fail_on_metric_error=True`), which raises on
+the first such failure — since the runner's per-suite `try`/`except`
+around `Suite.get_database()` then catches that exception, the entire
+suite gets dropped from the report, including diagnostics that would have
+scored fine. Prefer the default unless you specifically want a suite to be
+all-or-nothing.
+
 ## Standalone use
 
 The runner script doubles as a standalone CLI for scoring an *existing*

@@ -707,18 +707,7 @@ class DiagnosticCollector:
         )
         return T_2m
 
-    @staticmethod
-    def _frozen_condensate(q_i=None, q_s=None, q_g=None):
-        """Sum of whichever FROZEN condensate species are present (CMIP
-        clivi/cli convention: cloud ice + snow + graupel), or ``None`` when
-        none is carried (warm-rain microphysics)."""
-        q_frozen = None
-        for q_frz in (q_i, q_s, q_g):
-            if q_frz is not None:
-                q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
-        return q_frozen
-
-    def _condensate_paths(self, p_s, q_c, q_i=None, q_s=None, q_g=None):
+    def _condensate_paths(self, p_s, q_c, q_i=None):
         """Column condensate paths — CMOR ``clwvi``/``clivi`` [kg/m2].
 
         SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
@@ -727,11 +716,19 @@ class DiagnosticCollector:
         would report different water paths for the SAME state depending only
         on which dycore ran.
 
-        CMIP convention: ``clivi`` = column-integrated FROZEN condensate
-        (cloud ice ``q_i`` + snow ``q_s`` + graupel ``q_g``); ``clwvi`` =
-        TOTAL condensed water (liquid ``q_c`` + frozen).  Rain ``q_r`` is in
-        neither (falling liquid precip, not suspended condensate).  Species
-        the microphysics does not carry (``None``) contribute nothing.
+        CMIP6 convention (#1443): ``clivi`` = column-integrated frozen
+        condensate that is RADIATIVELY ACTIVE — here cloud ice ``q_i``
+        ALONE.  CMIP6 includes precipitating frozen hydrometeors "ONLY IF
+        the precipitating hydrometeor affects the calculation of radiative
+        transfer in model", and this model's radiation reads
+        ``tracers["q_i"]`` only (``radiation/integration.py``), never snow
+        (slot 4) or graupel (slot 5).  Do NOT re-add a ``q_s``/``q_g`` sum
+        here: it is not even dimensionally valid across schemes (P3 aliases
+        slots 4/5 to rime MASS and rime VOLUME) — see the #1443 rationale
+        in :meth:`collect`.  ``clwvi`` = liquid ``q_c`` + the same
+        radiatively-used ice term (the CMIP6 conditional applies to it
+        identically).  Rain ``q_r`` is in neither (falling liquid precip,
+        not suspended condensate).
 
         Returns ``(clwvi, clivi)`` numpy arrays, or ``(None, None)`` when
         ``q_c`` is absent (dry run / no condensate tracer) so callers SKIP
@@ -742,10 +739,9 @@ class DiagnosticCollector:
         dp = self._dp(p_s)
         lwp = np.asarray(
             column_water_vapor(q_c, p_s, self.dsigma, dp=dp))
-        q_frozen = self._frozen_condensate(q_i, q_s, q_g)
-        if q_frozen is not None:
+        if q_i is not None:
             iwp = np.asarray(
-                column_water_vapor(q_frozen, p_s, self.dsigma, dp=dp))
+                column_water_vapor(q_i, p_s, self.dsigma, dp=dp))
         else:
             iwp = np.zeros_like(lwp)
         return lwp + iwp, iwp
@@ -791,9 +787,9 @@ class DiagnosticCollector:
         p_s_col = jnp.reshape(p_s, (ncol,))
         p_full = jnp.asarray(self._p_full(p_s_col))
         dp = jnp.asarray(self._dp(p_s_col))
-        # Cloud fraction takes CLOUD ice q_i only (matching the radiation
-        # call, physics_pipeline ``q_ice=q_i_col``) -- NOT the precipitating
-        # q_i+q_s+q_g used for the clivi ice PATH, which would over-count
+        # Cloud fraction takes CLOUD ice q_i only, matching the radiation
+        # call (physics_pipeline ``q_ice=q_i_col``) and now also the clivi ice
+        # path.  Including the precipitating q_s/q_g would over-count
         # condensate for the condensate-dependent schemes
         # (xu_randall/resolved).
         q_ice_col = None if q_i is None else jnp.reshape(q_i, (ncol, nlev))
@@ -1153,21 +1149,48 @@ class DiagnosticCollector:
 
             # Cloud-ice path (clivi), condensed-water path (clwvi) and total
             # cloud cover (clt).  CMIP convention: clivi = column-integrated
-            # FROZEN condensate (cloud ice + snow + graupel); clwvi = TOTAL
-            # condensed water (liquid + frozen).  Morrison carries prognostic
-            # q_i/q_s/q_g, so sum the frozen species into the ice path and add
-            # them to the condensate path — earlier code hardcoded clivi=0
-            # (a warm-rain-era placeholder) which threw away all model ice.
+            # frozen condensate that is RADIATIVELY ACTIVE (here cloud ice
+            # only — see the q_frozen block below); clwvi = that plus the
+            # liquid path.  Earlier code hardcoded clivi=0 (a warm-rain-era
+            # placeholder) which threw away all model ice; the fix then
+            # over-corrected by summing q_i+q_s+q_g.
             # clt is a random-overlap approximation of a soft layer cloud
             # fraction (sigmoid on total condensate) — useful for spatial
             # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
             if q_c is not None:
-                # Shared frozen-species reduction with the MPAS feed
+                # Frozen condensate path: CLOUD ICE ONLY.
+                #
+                # CMIP6 defines ``clivi`` as the column ice mass, "including
+                # precipitating frozen hydrometeors ONLY IF the precipitating
+                # hydrometeor affects the calculation of radiative transfer in
+                # model".  Radiation here takes cloud ice alone --
+                # ``radiation/integration.py`` reads ``tracers["q_i"]`` (:411)
+                # / tracer slot 3 (:1436) and never receives snow (slot 4) or
+                # graupel (slot 5) -- so snow and graupel are radiatively INERT
+                # and must NOT be reported.
+                #
+                # They previously were, and it is not a small correction:
+                # snow+graupel were roughly half the published clivi on
+                # lat-lon and ~70% on MPAS in this campaign's checkpoints.
+                # (Sizes are indicative only -- observational IWP products
+                # differ in whether they include precipitating ice, so this
+                # does NOT by itself establish the sign of a model bias.)
+                #
+                # If precipitating ice is ever made radiatively active, CMIP6
+                # requires it here -- but NOT by re-summing ``q_s``/``q_g``.
+                # That sum is not even dimensionally valid across schemes: P3
+                # aliases the slot-4/5 tracers to rime MASS and rime VOLUME
+                # (``microphysics/p3.py``), so adding them to a mass mixing
+                # ratio is wrong.  Any future treatment must be SCHEME-AWARE
+                # and carry its own PSD/effective radius, exactly as the
+                # optics would need.
+                q_frozen = q_i
+                # Column reduction SHARED with the MPAS feed
                 # (``_condensate_paths``); the regrid is linear, so
                 # regridding (clwvi, clivi) equals the former per-path
                 # regrid-then-sum bit-for-bit up to float association.
                 clwvi_native, clivi_native = self._condensate_paths(
-                    state.p_s.data, q_c, q_i, q_s, q_g)
+                    state.p_s.data, q_c, q_frozen)
                 r_lwp = self._regrid_to_latlon_2d(clwvi_native)
                 r_iwp = self._regrid_to_latlon_2d(clivi_native)
                 if r_lwp is not None and r_iwp is not None:
@@ -1748,11 +1771,14 @@ class DiagnosticCollector:
                     fields_2d['clt'] = r
 
             # Condensed-water / ice-water paths (clwvi/clivi): the SHARED
-            # frozen-species reduction with collect() (``_condensate_paths``)
-            # so the two lanes cannot disagree on the SAME state.  Skipped
-            # (not zeroed) when no condensate tracer is supplied.
+            # radiative-ice-only reduction with collect() (``_condensate_
+            # paths``) so the two lanes cannot disagree on the SAME state.
+            # Snow/graupel (``q_s``/``q_g``) are deliberately NOT passed:
+            # radiation never sees them, so CMIP6 excludes them (#1443 —
+            # rationale at the collect() clivi block).  Skipped (not zeroed)
+            # when no condensate tracer is supplied.
             clwvi_native, clivi_native = self._condensate_paths(
-                p_s_np, q_c_np, q_i_np, q_s_np, q_g_np)
+                p_s_np, q_c_np, q_i_np)
             if clwvi_native is not None:
                 r_lwp = self._regrid_to_latlon_2d(clwvi_native)
                 r_iwp = self._regrid_to_latlon_2d(clivi_native)
@@ -1761,11 +1787,14 @@ class DiagnosticCollector:
                     fields_2d['clivi'] = r_iwp
 
             # 3-D condensate mass fractions on plev19: clw = suspended cloud
-            # LIQUID (q_c; rain q_r excluded — falling precip); cli = the
-            # FROZEN sum q_i + q_s + q_g, MIRRORING the clivi species
-            # convention above so the 3-D field vertically integrates to the
-            # published path.  Absent species => field skipped, never zeroed.
-            _q_frozen_np = self._frozen_condensate(q_i_np, q_s_np, q_g_np)
+            # LIQUID (q_c; rain q_r excluded — falling precip); cli = cloud
+            # ice ``q_i`` ALONE, MIRRORING the clivi radiative-ice-only
+            # convention above (the CMIP6 ``cli`` entry carries the same
+            # "precipitating hydrometeors ONLY if radiatively active"
+            # conditional as ``clivi``) so the 3-D field vertically
+            # integrates to the published path.  Absent => skipped, never
+            # zeroed.
+            _q_frozen_np = q_i_np
 
             # Relative humidity — hur (3-D, %) and hurs (near-surface, %) —
             # via the SHARED WMO saturation-ratio helper

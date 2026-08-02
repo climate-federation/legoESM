@@ -9,8 +9,14 @@
 #     point blowup.  The 12-day one-variable A/B convicted filter-off (blowup
 #     day 1 vs COMPLETED 12 d), and the 30-day soak of the fixed config ran
 #     clean past the old day-9/10 wall.
-#   * dt: 600.0 — the filter handles the pole CFL, lifting the pole-cell
-#     auto-clamp (dt 60-145 s -> 600 s, ~10x throughput; 30-day soak clean).
+#   * dt: 300.0 — dt=600 dies at day ~125 in a sudden (<1 day, CFL 0.20 the
+#     day before) non-finite-winds fast-wave event, DETERMINISTICALLY
+#     reproducible from the day-124 checkpoint (2026-07-14 probes 26243424/26:
+#     dt=600 restart re-dies day 125; dt=300 from the SAME checkpoint runs 70
+#     clean days through every previous death day). The polar filter still
+#     lifts the pole-cell auto-clamp (dt 60-145 s floor). The seeding operator
+#     is unlocalized (JAX_DEBUG_NANS stops at the scan boundary; eager mode
+#     cannot trace this stack) — if it is found and fixed, dt may return to 600.
 # Physics/forcing/diagnostics inherit the production set via `include`.
 # Pinned by the production-YAML round-trip test (test_run_amip_cli).
 include: amip_production.yaml
@@ -19,30 +25,41 @@ discretization: latlon_cgrid
 resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
-dt: 600.0
+dt: 300.0
+# Top sponge — EDDY-ONLY DYCORE sponge (zonal-mean-preserving), NOT the #836
+# driver damp-to-rest sponge. The lane needs lid braking (McFarlane GWD
+# deliberately RADIATES stress reaching the top; the 2026-07-13 pilot year ran
+# away in the top ~5 levels and died day 128 with no sponge at all), but the
+# driver damp-to-rest sponge exerts a Coriolis torque on the damped zonal-mean
+# flow -> poleward mass drift -> p_s 1120-1134 hPa deaths (sweep_ll24_L30 day
+# 142 autopsy). The dycore eddy sponge (sponge_eddy_only=True default, commit
+# c33d06993) damps u - [u]_zonal only: jet runaway cured (55 vs 208 m/s) with
+# no mass drift (validated 2026-07-13/14, incl. the 70-day dt=300 leg).
+sponge_enabled: false     # driver damp-to-rest sponge OFF (mass-drift hazard)
+sponge_coeff: 1.157e-4    # dycore eddy-only sponge: 10/day at the lid
+sponge_width_m: 17000.0   # sponge base ~17 km below the lid
 
-# Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
+# Convection: BECHTOLD, inherited from the base (user directive 2026-07-15,
+# reversing the #869 sbm pin — sbm is purged from the AMIP campaign).  The
+# historical bechtold polar-night day-47 runaway that motivated sbm here is
+# CURED by parcel_theta_cap (commit 2b4c94e90) + the CAPE-relaxation sink:
+# the 2026-07-15 bechtold leg (ll24_bech_gwd) sailed through the old day-47
+# and day-100 walls and died only at day 179 from an unrelated topographic
+# lid-wave mode (#1029 family; stationary Andes wave at lev 1, mitigation
+# A/B via stronger eddy-sponge in flight).  convection and
+# convective_precip_efficiency (0.8) both inherit from amip_production.yaml;
+# gravity_wave_drag inherits the mcfarlane+hines composite (the +hines lid
+# braking bought +79 days on this lane: death day 100 -> 179).
 #
-# EVIDENCE BELOW IS SCOPED TO THIS LANE'S RESOLUTION (resolution: 24 = 7.5 deg,
-# nlev: 20, dt: 600).  It does NOT generalise to a finer lat-lon grid — see the
-# 2.5-degree measurements at the end of this block.
-#
-# At 7.5 deg: a controlled single-variable bisect from the day-45 restart state
-# (conv carry stripped) showed bechtold re-develops a polar-night
-# (mid-Feb, ~71N/lev-1) temperature runaway that blows the run at day ~47
-# REGARDLESS of every numerics lever (polar filter on/off, GWD off/hines-swap,
-# fp32/fp64, hyperdiff x2, sponge x2, dt/2, stale-carry) — while sbm from the
-# SAME state completes to day 60 and a 95-day soak is stable.  sbm also lifts
-# hfls from ~40 to ~70 W/m2 (#847).  The cube C12 lane (amip_production.yaml)
-# keeps bechtold.
-#
-# AT 2.5 DEGREES, sbm DOES NOT RESCUE IT (measured 2026-08-01, resolution: 72,
-# nlev: 30, vertical_coord: sigma, dt: 300, polar filter on, morrison, from
-# day 0 — one variable changed between the two arms):
+# Upstream #1436 evidence (main, 2026-08-01), kept for the record because it
+# INDEPENDENTLY supports scheme-agnosticism at finer lat-lon grids:
+# AT 2.5 DEGREES sbm does NOT rescue the lane (resolution: 72, nlev: 30,
+# sigma, dt: 300, polar filter on, morrison, day-0 cold starts, one variable
+# between arms):
 #     convection: bechtold -> BLOWUP day 69, T min 161.8 K -> 71.5 K
 #     convection: sbm      -> BLOWUP day 73, T min  98.5 K
-# Both fail within 4 days of each other with the same character, so at this
-# resolution the CONVECTION SCHEME IS NOT THE CAUSE.
+# Both fail within 4 days with the same character, so at that resolution the
+# CONVECTION SCHEME IS NOT THE CAUSE.
 #
 # The 2.5-degree failure also sits somewhere ELSE than the 7.5-degree one.
 # Located offline from the day-60 checkpoint (9 days before failure):
@@ -55,11 +72,5 @@ dt: 600.0
 # Cause at 2.5 deg is UNKNOWN; remaining untested candidates are the
 # top-of-model sponge, vertical advection at the polar singularity, and the
 # Fourier polar filter aloft.  (GWD was already excluded at 7.5 deg above.)
-convection: sbm
-# The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
-# rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so
-# clear it here.  null = UNSET -> each scheme uses its own default (the #929
-# sentinel: an explicit 0.0 would now mean "force legacy no-split", NOT "unset");
-# sbm ignores the bechtold/tiedtke knob, so null just avoids the
-# "requires --convection tiedtke/bechtold" guard without pinning an explicit 0.
-convective_precip_efficiency: null
+# (This branch keeps bechtold — no convection override; main's sbm pin and its
+# convective_precip_efficiency: null companion are deliberately NOT taken.)

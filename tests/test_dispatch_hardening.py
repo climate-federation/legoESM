@@ -148,6 +148,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else`` silently fell back to the energy-conserving PV flux).
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        # #1029: latlon C-grid PE pgf_scheme guards (fn-entry + ctor) — a
+        # typo must never silently run the terrain-unstable legacy PGF.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py", "cgrid_latlon_hydrostatic_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py", "__init__"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
@@ -356,6 +360,12 @@ CRITICAL_FACTORIES: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/eos.py", "make_eos_fn"),
         ("packages/core/legoesm/timestepping/dispatch.py", "dispatch_integrator"),
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
+        # #1029: latlon C-grid PE pgf_scheme guards (fn-entry + ctor) — a
+        # typo must never silently run the terrain-unstable legacy PGF.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py",
+         "cgrid_latlon_hydrostatic_tendencies"),
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_latlon_cgrid.py",
+         "__init__"),
     }
 )
 

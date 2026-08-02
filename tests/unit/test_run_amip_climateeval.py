@@ -100,6 +100,7 @@ def test_build_arg_parser_defaults():
     assert args.model_id == "legoESM-1-0"
     assert args.report_name == "climateeval_report.html"
     assert args.fail_on_missing_data is False
+    assert args.fail_on_metric_error is False
     assert args.download_missing_data is False
 
 
@@ -129,12 +130,14 @@ def test_build_arg_parser_multiple_suites_flow_through():
         "--data-root-dir", "/tmp/climateeval_data",
         "--timerange", "19790101/19791231",
         "--fail-on-missing-data",
+        "--fail-on-metric-error",
         "--download-missing-data",
         "--output-dir", "/tmp/run",
     ])
     assert args.suites == ["Tier1_sanity_checks", "Tier2_atmosphere_monthly"]
     assert args.timerange == "19790101/19791231"
     assert args.fail_on_missing_data is True
+    assert args.fail_on_metric_error is True
     assert args.download_missing_data is True
 
 

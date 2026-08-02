@@ -170,6 +170,18 @@ class DycoreConfig(NamedTuple):
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
 
+    # #1029: lat-lon C-grid PE energy-consistency options (threaded into
+    # ``CGridLatLonPrimitiveEquationConfig`` by ``component_factory``).
+    # ``energy_paired_conversion=True`` computes the κT v·∇ln p part of the
+    # adiabatic conversion as the face-averaged product u·pg_corr/c_p —
+    # discretely adjoint to the momentum PGF-correction work.  The legacy
+    # product-of-cell-averages (False) is a spurious energy source over
+    # steep terrain ridges: the DCMIP 2-0-0 rest state grows at 2.6
+    # e-folds/day (the AMIP latlon Andes lid-wave killer; ablation probe
+    # 26276143).  ``pgf_scheme`` selects the momentum PGF discretisation
+    # ("two_term" legacy | "lin1997" FV3-faithful cross-product).
+    energy_paired_conversion: bool = False
+    pgf_scheme: str = "two_term"
 
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
@@ -224,6 +236,12 @@ class DycoreConfig(NamedTuple):
     # (``component_factory``).  Set 0.0 to reproduce the pre-#930 dycore exactly.
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
+    # Shapiro-form per-step strength of the same vertical del4 operator
+    # (fraction of the 2Δσ mode removed per step, unconditionally stable in
+    # (0,1]).  The ERA5-IC MPAS lane needs ~0.5 (the physics-forced
+    # checkerboard outgrows the explicit rate form's stability-limited
+    # damping at production dt); default 0.0 = off.
+    mpas_vert4_t_filter: float = 0.0
     # Column-CONSERVING tracer positivity clamp in the MPAS floors stage.
     # The default plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
     # ``tracer_transport_mpas``, horizontal advection undershoot alone made it
@@ -290,7 +308,12 @@ class EvaluationConfig(NamedTuple):
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
-    diag_days: int = 5
+    # Fractional values give sub-daily diagnostics; the CMOR monthly means
+    # average one snapshot per diag interval, so diag_days=1 is diurnally
+    # aliased at the fixed diagnostic phase (00 UTC) — day/night fields
+    # (rsut, pr, tas, hfss/hfls) need diag_days<=0.125 for evaluation-grade
+    # monthly means (see feed_cmip_accumulators_native docstring).
+    diag_days: float = 5
     checkpoint_days: int = 0
     monthly_means: bool = False
     cmip_output: bool = False
@@ -833,6 +856,14 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Extra truly-diffusive (unanchored) smoothing passes applied after the
+    # anchored ``topo_smoothing`` passes.  The anchored smoother SATURATES
+    # (re-blends with the original field each pass, so values beyond ~4 are
+    # a no-op); these passes keep removing grid-scale terrain power.  #1029:
+    # 4 passes eliminate the episodic mountain-wave breaking blowup of the
+    # coarse lat-lon lane over real ETOPO terrain (~84% Tibet peak retained
+    # at 24x48).  0 = bit-identical legacy topography.
+    topo_diffusive_smoothing: int = 0
     # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
@@ -1075,6 +1106,15 @@ class ExperimentConfig(NamedTuple):
     # the lever for the AMIP convective-precipitation deficit.  Default matches
     # BechtoldConfig.cape_threshold (byte-identical when unset).
     bechtold_cape_threshold: float = 70.0
+    # Remaining spec'd Bechtold tunables threaded through the pipeline
+    # (#869 polar-night campaign levers): cloud-base mass-flux stability cap
+    # [kg/m^2/s] and the Gregory-1997 CMT coefficients.  Defaults match
+    # BechtoldConfig (byte-identical when unset).  M_b_max's default 0.02
+    # sits at the BOTTOM of its __param_spec__ bounds (0.02-0.15) and the
+    # mass flux runs pinned there — a first-class tuning lever.
+    bechtold_m_b_max: float = 0.02
+    bechtold_cmt_c_u: float = 0.7
+    bechtold_cmt_c_d: float = 0.7
     # Bechtold compensating-subsidence vertical solve (BechtoldConfig.
     # subsidence_solve): "implicit_flux" (conservative, the 2026-07-22
     # default) or "advective" (legacy, truncation-order conservation only,
@@ -1082,6 +1122,16 @@ class ExperimentConfig(NamedTuple):
     # escape hatch while the implicit bottom-boundary behaviour is under
     # investigation — day-65 pilot blowup bisect, 2026-07-22).
     bechtold_subsidence_solve: str = "implicit_flux"
+    # Quasi-equilibrium heating-ceiling ratio (BechtoldConfig.
+    # cape_sink_heating_ratio; the C12 warm-runaway sink lever).
+    bechtold_cape_sink_heating_ratio: float = 5.0
+    # Gate for the heating ceiling itself (BechtoldConfig.
+    # cape_relaxation_sink).  False = bit-exact legacy Bechtold; True
+    # throttles the column-integrated positive convective heating to
+    # ratio·M_b·CAPE (uniform tendency rescale — budgets preserved).  The
+    # MPAS thermal-runaway lever (hot-column detonation family, day-166
+    # clamp-arm blowup 2026-07-27).
+    bechtold_cape_relaxation_sink: bool = False
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1203,6 +1253,11 @@ class ExperimentConfig(NamedTuple):
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
     debug_precision: bool = False     # log warnings when array dtypes mismatch policy
+    # MPAS-standalone RRTMGP optics precision (the coupled pipeline runs
+    # fp64 optics): True = fp32 tables+RTE (perf default), False = fp64
+    # (parity with cube/latlon; the ERA5-IC lane's extreme Antarctic
+    # columns are a suspected fp32-optics NaN trigger).
+    mpas_rrtmgp_fp32: bool = True
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
     # descends from this via ``legoesm.runtime.rng.split_keys``, so the run is
@@ -1423,12 +1478,11 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
                 f"got {d.discretization!r}"
             )
-        # NOTE (2026-07-23 fix-forward): the dycore.pgf_scheme membership
-        # check (3fa76cc7b) referenced a field added by a3b450b7f, which is
-        # on ap/amip-cmip6-integration and NOT yet on main — every
-        # validate_strict() call died on AttributeError.  Re-add the check
-        # (and its bogus-teeth coverage in test_validate_strict_coverage)
-        # together with the a3b450b7f DycoreConfig.pgf_scheme field.
+        if d.pgf_scheme not in ("two_term", "lin1997"):
+            errors.append(
+                f"dycore.pgf_scheme must be one of ('two_term', 'lin1997'), "
+                f"got {d.pgf_scheme!r}"
+            )
         _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
         if self.precision not in _valid_precisions:
             errors.append(
@@ -1524,11 +1578,28 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_cape_threshold must be >= 0, got "
                 f"{self.bechtold_cape_threshold}"
             )
+        if self.bechtold_m_b_max <= 0:
+            errors.append(
+                f"bechtold_m_b_max must be > 0, got {self.bechtold_m_b_max}"
+            )
         if self.bechtold_subsidence_solve not in ("implicit_flux", "advective"):
             errors.append(
                 f"bechtold_subsidence_solve must be one of "
                 f"('implicit_flux', 'advective'), got "
                 f"{self.bechtold_subsidence_solve!r}"
+            )
+        if self.bechtold_cmt_c_u < 0:
+            errors.append(
+                f"bechtold_cmt_c_u must be >= 0, got {self.bechtold_cmt_c_u}"
+            )
+        if self.bechtold_cmt_c_d < 0:
+            errors.append(
+                f"bechtold_cmt_c_d must be >= 0, got {self.bechtold_cmt_c_d}"
+            )
+        if self.bechtold_cape_sink_heating_ratio <= 0:
+            errors.append(
+                f"bechtold_cape_sink_heating_ratio must be > 0, got "
+                f"{self.bechtold_cape_sink_heating_ratio}"
             )
         if (self.convective_precip_efficiency is not None
                 and not (0.0 <= self.convective_precip_efficiency <= 1.0)):
@@ -2655,6 +2726,8 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            topo_diffusive_smoothing=getattr(
+                amip_cfg, 'topo_diffusive_smoothing', 0),
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
@@ -2723,6 +2796,13 @@ class ExperimentConfig(NamedTuple):
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
             bechtold_cape_threshold=getattr(
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
+            bechtold_m_b_max=getattr(amip_cfg, 'bechtold_m_b_max', 0.02),
+            bechtold_cmt_c_u=getattr(amip_cfg, 'bechtold_cmt_c_u', 0.7),
+            bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
+            bechtold_cape_sink_heating_ratio=getattr(
+                amip_cfg, 'bechtold_cape_sink_heating_ratio', 5.0),
+            bechtold_cape_relaxation_sink=getattr(
+                amip_cfg, 'bechtold_cape_relaxation_sink', False),
             bechtold_conv_top_pa=getattr(
                 amip_cfg, 'bechtold_conv_top_pa', 15000.0),
             bechtold_downdraft_evap=getattr(
@@ -2856,6 +2936,7 @@ class ExperimentConfig(NamedTuple):
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,
+            topo_diffusive_smoothing=self.topo_diffusive_smoothing,
             T_init=self.T_init,
             rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,

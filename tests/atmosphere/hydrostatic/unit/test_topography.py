@@ -179,6 +179,58 @@ class TestLandFraction(unittest.TestCase):
         self.assertGreater(float(f_land[0]), 0.2)
         self.assertLess(float(f_land[0]), 0.8)
 
+    def test_seam_cell_all_land(self):
+        """A lon=0 target cell over all-land source must get f_land=1.
+
+        Regression for the phantom-ocean seam bug: sub-samples reaching
+        past the interpolator's 1-column wrap pad (e.g. lon -3.75 for a
+        7.5 deg cell centered at 0) read fill_value=0 and were counted
+        as ocean, giving f_land = 0.6 on the lon-0 column of latlon24
+        (the Antarctic polar-night blowup heat source). Samples must be
+        wrapped mod 360 into the source frame instead.
+        """
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        elev = np.full((181, 360), 500.0)
+
+        # latlon24-like cells: 7.5 deg spacing, first column centered at 0
+        target_lat = np.array([-86.25, -78.75, 0.0])
+        target_lon = np.array([0.0, 0.0, 0.0])
+
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev, target_lat, target_lon, 7.5
+        )
+        npt.assert_allclose(f_land, 1.0)
+
+    def test_seam_cell_land_across_seam(self):
+        """Land spanning the 350E-10E seam scores fully at a lon=0 cell."""
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        _, lon2d = np.meshgrid(lat_src, lon_src, indexing="ij")
+        # Land only within 10 deg of the prime meridian (both sides)
+        elev = np.where((lon2d <= 10.0) | (lon2d >= 350.0), 500.0, -3000.0)
+
+        target_lat = np.array([0.0, 0.0])
+        target_lon = np.array([0.0, 180.0])
+
+        f_land = _derive_land_fraction(
+            lat_src, lon_src, elev, target_lat, target_lon, 7.5
+        )
+        npt.assert_allclose(f_land[0], 1.0)
+        npt.assert_allclose(f_land[1], 0.0)
+
+    def test_regrid_negative_lon_convention(self):
+        """_regrid_to_target must wrap [-180,180) target lons (not fill 0)."""
+        lat_src = np.linspace(-90, 90, 181)
+        lon_src = np.linspace(0, 359, 360)
+        elev = np.full((181, 360), 500.0)
+
+        target_lat = np.array([0.0])
+        target_lon = np.array([-90.0])  # == 270E
+
+        z = _regrid_to_target(lat_src, lon_src, elev, target_lat, target_lon)
+        npt.assert_allclose(z, 500.0)
+
 
 class TestSmoothing(unittest.TestCase):
     """Test Laplacian smoothing."""
@@ -216,6 +268,72 @@ class TestSmoothing(unittest.TestCase):
         arr = rng.normal(500, 100, (32, 64))
         smoothed = _laplacian_smooth_gaussian(arr, passes=4)
         npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
+
+    # ---- anchored-vs-diffusive semantics (#1029 stability lever) ----
+
+    @staticmethod
+    def _steep_peak(n_lat=24, n_lon=48):
+        arr = np.zeros((n_lat, n_lon))
+        arr[8, 12] = 3.8e4  # ETOPO-Tibet-like single-cell spike
+        return arr
+
+    def test_gaussian_anchored_saturates(self):
+        """Anchored passes converge: 8 vs 16 passes nearly identical.
+
+        This is the documented reason ``smoothing_passes`` is not a usable
+        strength knob (production smooth-4 vs smooth-8 changed the Tibet
+        peak by only 0.2%).
+        """
+        arr = self._steep_peak()
+        s8 = _laplacian_smooth_gaussian(arr, passes=8)
+        s16 = _laplacian_smooth_gaussian(arr, passes=16)
+        npt.assert_allclose(s16.max(), s8.max(), rtol=0.01)
+        # and the fixed point retains much of the peak (an isolated delta
+        # keeps ~59%; the broad real-ETOPO Tibet plateau keeps ~99.8%)
+        self.assertGreater(s16.max(), 0.55 * arr.max())
+
+    def test_gaussian_diffusive_keeps_reducing(self):
+        """Unanchored passes keep removing peak amplitude monotonically."""
+        arr = self._steep_peak()
+        peaks = [
+            _laplacian_smooth_gaussian(arr, passes=p, anchor=False).max()
+            for p in (4, 8, 16)
+        ]
+        self.assertGreater(peaks[0], peaks[1])
+        self.assertGreater(peaks[1], peaks[2])
+        # meaningfully stronger than the anchored fixed point
+        anchored = _laplacian_smooth_gaussian(arr, passes=16).max()
+        self.assertLess(peaks[2], 0.9 * anchored)
+
+    def test_gaussian_anchor_default_unchanged(self):
+        """Default anchor=True is bit-identical to the legacy behaviour."""
+        rng = np.random.default_rng(7)
+        arr = rng.normal(500, 100, (16, 32))
+        npt.assert_array_equal(
+            _laplacian_smooth_gaussian(arr, passes=4),
+            _laplacian_smooth_gaussian(arr, passes=4, anchor=True),
+        )
+
+    def test_gaussian_diffusive_preserves_mean(self):
+        """Diffusive smoothing is still (approximately) conservative."""
+        rng = np.random.default_rng(42)
+        arr = rng.normal(500, 100, (32, 64))
+        smoothed = _laplacian_smooth_gaussian(arr, passes=8, anchor=False)
+        npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
+
+    def test_cubed_sphere_diffusive_keeps_reducing(self):
+        """Cube smoother has the same anchored/diffusive semantics."""
+        arr = np.zeros((6, 16, 16))
+        arr[2, 8, 8] = 3.8e4
+        anchored = _laplacian_smooth_cubed_sphere(arr, passes=16).max()
+        diffusive = _laplacian_smooth_cubed_sphere(
+            arr, passes=16, anchor=False).max()
+        self.assertLess(diffusive, 0.9 * anchored)
+
+    def test_topography_config_diffusive_default_off(self):
+        """diffusive_smoothing_passes defaults to 0 (bit-identical legacy)."""
+        from legoesm.grids.topography import TopographyConfig
+        self.assertEqual(TopographyConfig().diffusive_smoothing_passes, 0)
 
 
 class TestSmoothPhisGaussian(unittest.TestCase):

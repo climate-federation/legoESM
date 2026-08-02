@@ -12,6 +12,23 @@ suite). With no ``--suite``, runs ALL bundled suites (every tier); a suite
 whose reference / model data is missing is **skipped and reported**, not
 fatal, so the report always contains whatever could be scored.
 
+Graceful degradation is per-VARIABLE inside ClimateEval itself
+(``SimpleDiagnostic._handle_metric_error``), but only if constructed with
+``fail_on_metric_error=False`` -- ClimateEval's own default is ``True``,
+which raises ``MetricError`` on the first variable a diagnostic cannot
+score (e.g. ``AnnualMeanTimeSeries`` needs a multi-year timerange to build
+a same-length model/reference series; a short run legitimately can't
+satisfy that for that one diagnostic+variable). Left at the ClimateEval
+default, that single failure propagates out of ``Suite.get_database()``
+and is caught by this script's per-SUITE ``try/except`` below, discarding
+every OTHER diagnostic in the suite (``map``/``zonal_line``/
+``zonal_profile``/etc.) along with it -- so one inapplicable variable in
+one diagnostic silently zeroed out the whole suite's report, including the
+diagnostics that would have scored fine. ``--fail-on-metric-error`` is
+therefore False by default here (log + skip that one variable, keep the
+rest of the suite), matching the existing ``--fail-on-missing-data``
+convention; pass it to restore ClimateEval's fail-hard behavior.
+
 Usage:
     <climateeval-env>/bin/python scripts/validate/run_amip_climateeval.py \\
         --cmor-dir /scratch/.../amip_run/cmor \\
@@ -106,6 +123,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Variable timerange override, e.g. 19790101/19791231. "
                               "Empty = use the model output's own time span.")
     parser.add_argument("--fail-on-missing-data", action="store_true", default=False)
+    parser.add_argument("--fail-on-metric-error", action="store_true", default=False,
+                         help="ClimateEval's own default (True) turns ANY single "
+                              "variable's metric-calculation error (e.g. a "
+                              "diagnostic requiring a longer timerange than a "
+                              "short run provides) into a MetricError that our "
+                              "SUITE-level try/except then catches, discarding "
+                              "every OTHER diagnostic in that suite too. Default "
+                              "here is False: log the failing variable as a "
+                              "warning and keep scoring the rest of the suite.")
     parser.add_argument("--download-missing-data", action="store_true", default=False)
     parser.add_argument("--output-dir", required=True,
                          help="Directory to write per-suite .ddb files and the "
@@ -152,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     diagnostic_kwargs = {
         "data_root_dir": Path(args.data_root_dir),
         "fail_on_missing_data": args.fail_on_missing_data,
+        "fail_on_metric_error": args.fail_on_metric_error,
         "download_missing_data": args.download_missing_data,
     }
     variable_kwargs = {"timerange": args.timerange} if args.timerange else {}
