@@ -598,6 +598,13 @@ def create_atmosphere_dycore(
             # tracers (the driver-level field, previously silently inert on
             # this lane).  Default off = advective path bit-identical.
             moisture_flux_form=getattr(dc, "moisture_flux_form", False),
+            # Horizontal biharmonic on T, as a MULTIPLE of the momentum
+            # ``nu_del4`` (``diff.hyperdiff``) so the two share one
+            # coefficient.  Lets ``a_h_scale`` -> 0 (storm-track recovery)
+            # WITHOUT leaving T — whose only horizontal dissipation is the
+            # ``K_h = diff.A_h`` above — undamped at every scale.
+            nu_del4_T=(getattr(dc, "mpas_nu_del4_T_scale", 0.0)
+                       * diff.hyperdiff),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 

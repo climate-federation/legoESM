@@ -266,6 +266,21 @@ class DycoreConfig(NamedTuple):
     # sponge/polar-filter passthrough).  Appended last to preserve
     # positional ABI (codex #1029 r3 #2).
     sb81_omega_conversion: bool = False
+    # HORIZONTAL biharmonic hyperdiffusion of T on the MPAS hydrostatic dycore,
+    # as a MULTIPLE of the momentum ``nu_del4`` this same ``hyperdiff_scale``
+    # already produces (so 1.0 gives T exactly the biharmonic u has, and there
+    # is no second magic coefficient).  Why it exists: ``component_factory``
+    # feeds ``a_h_scale`` to BOTH ``nu_del2`` (momentum Laplacian) and ``K_h``
+    # (scalar T Laplacian), and ``K_h`` is the ONLY horizontal dissipation T
+    # ever gets — so ``a_h_scale=0``, the setting that recovers midlatitude
+    # storm tracks, leaves T with NO horizontal damping at any scale while
+    # momentum keeps its biharmonic.  Setting this > 0 restores T's grid-scale
+    # control scale-selectively (res-5 SCVT, dt=75 s: single-cell spike
+    # τ = 2.56 h at scale 1.0 vs 9.8 h for the a_h=0.25 Laplacian; 2000 km wave
+    # τ = 6.34 d vs 2.91 d — more grid-noise control, LESS eddy damping).
+    # Only wired to the MPAS PE dycore.  0.0 (default) is an exact no-op.
+    # Appended last to preserve positional ABI.
+    mpas_nu_del4_T_scale: float = 0.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -1464,6 +1479,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        if not (math.isfinite(d.mpas_nu_del4_T_scale)
+                and 0.0 <= d.mpas_nu_del4_T_scale <= 1.0e3):
+            errors.append(
+                "dycore.mpas_nu_del4_T_scale (horizontal T biharmonic, as a "
+                "multiple of the momentum nu_del4) must be a finite value in "
+                f"[0, 1e3], got {d.mpas_nu_del4_T_scale!r}")
+        elif d.mpas_nu_del4_T_scale > 0.0 and d.discretization != "mpas":
+            # Fail loudly rather than silently ignore: only the MPAS PE
+            # factory branch forwards nu_del4_T (same contract as
+            # ``mpas_qv_smooth_del2_m2s`` / ``refuse_unwired_moisture_flux_form``).
+            errors.append(
+                "dycore.mpas_nu_del4_T_scale is an MPAS-lane knob; "
+                f"discretization={d.discretization!r} would silently ignore "
+                "it. Set it to 0.0 or select discretization='mpas'.")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.

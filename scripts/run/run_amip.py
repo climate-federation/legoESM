@@ -362,6 +362,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "parity with the coupled cube/latlon pipeline — "
                              "the ERA5-IC lane's extreme Antarctic columns are "
                              "a suspected fp32-optics NaN trigger).")
+    parser.add_argument("--mpas-nu-del4-t-scale", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_del4_T_scale,
+                        dest="mpas_nu_del4_T_scale",
+                        help="MPAS HORIZONTAL biharmonic hyperdiffusion of T, "
+                             "as a multiple of the momentum nu_del4 that "
+                             "--hyperdiff-scale already sets (1.0 = same "
+                             "coefficient). K_h — T's ONLY horizontal "
+                             "dissipation — is tied to --a-h-scale, so "
+                             "a_h_scale=0 leaves T undamped at every scale "
+                             "while momentum keeps its biharmonic; this "
+                             "restores grid-scale T control scale-selectively "
+                             "(res-5, dt=75 s: single-cell spike tau 2.56 h at "
+                             "1.0 vs 9.8 h for the a_h=0.25 Laplacian, but "
+                             "2000 km wave 6.34 d vs 2.91 d). 0 disables "
+                             "(default).")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -1768,6 +1783,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_nu_del4_T_scale=args.mpas_nu_del4_T_scale,
         mpas_vert4_t_filter=args.mpas_vert4_t_filter,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         conservation_fixer=args.conservation_fixer,

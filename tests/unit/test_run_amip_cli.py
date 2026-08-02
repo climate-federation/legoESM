@@ -2310,6 +2310,22 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     assert cfg_off.dycore.moisture_flux_form is False
 
 
+def test_mpas_nu_del4_t_scale_flag_flows_to_dycore_config():
+    """#1354 second mode: --mpas-nu-del4-t-scale must reach DycoreConfig
+    (component_factory multiplies it by the momentum nu_del4 to build
+    MPASPrimitiveEquationConfig.nu_del4_T — T's only horizontal grid-scale
+    damping once a_h_scale, and with it K_h, goes to 0).  Default OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_del4_T_scale == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-del4-t-scale", "0.5",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_del4_T_scale == pytest.approx(0.5)
+
+
 def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     """#930: --mpas-nu-vert4-t must reach the DycoreConfig (which the component
     factory threads into MPASPrimitiveEquationConfig.nu_vert4_T — the vertical

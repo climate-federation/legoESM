@@ -188,6 +188,27 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # not one operation in the tracer block changes.  Last field to preserve
     # positional ABI.
     moisture_flux_form: bool = False
+    # #1354 second mode: HORIZONTAL biharmonic hyperdiffusion of T [m⁴/s] —
+    # ``dT/dt -= nu_del4_T · ∇²(∇²T)`` — the scalar analogue of the momentum
+    # ``nu_del4``.  Motivation: ``K_h`` is the ONLY horizontal dissipation this
+    # dycore ever applies to T (``nu_del4`` acts on ``u`` only, ``nu_del4_ps``
+    # on ``p_s`` only, and the tracers get none at all), and the driver ties
+    # ``K_h`` to the SAME ``a_h_scale`` as ``nu_del2``.  Setting
+    # ``a_h_scale = 0`` to recover storm tracks therefore drops T's horizontal
+    # damping to ZERO AT EVERY SCALE, while momentum keeps its biharmonic —
+    # measured on the res-5 SCVT mesh (dc_min = 200.6 km, dt = 75 s) a
+    # single-cell T spike decays with τ = 9.8 h under ``K_h`` at
+    # ``a_h_scale = 0.25`` and not at all at 0.  The biharmonic restores
+    # grid-scale control SCALE-SELECTIVELY: at ``nu_del4_T = nu_del4``
+    # (1.87e16 m⁴/s) the same single-cell spike decays with τ = 2.56 h (3.8×
+    # FASTER than the a_h=0.25 Laplacian) while a 2000 km wave sees τ = 6.34 d
+    # and a 4000 km wave τ = 101 d (2.2× and 8.7× SLOWER than that Laplacian) —
+    # i.e. more grid-noise control for less synoptic-eddy damping.  Reuses the
+    # ``div(grad T)`` the ``K_h`` batch already builds when both are on, so the
+    # incremental cost is one gradient + one divergence per RHS evaluation.
+    # 0.0 (default) is an exact no-op — the whole term is behind a Python
+    # ``if`` on this STATIC float.  Last field to preserve positional ABI.
+    nu_del4_T: float = 0.0
 
 
 # ============================================================================
@@ -351,9 +372,15 @@ def mpas_hydrostatic_tendencies(
     # it has 1 + 1 = ``nlev + 1`` slots.  Saves one full
     # ``gradient_edge`` (2D) call per RHS evaluation — same Loop 148/159
     # exploit as the latlon PE (B, ln_ps) batch.
+    #
+    # ``grad T`` is needed by EITHER scalar T diffusion: the ``K_h`` Laplacian
+    # (``K_h·div(grad T)``) or the ``nu_del4_T`` biharmonic (whose INNER
+    # Laplacian is the same ``div(grad T)``).  One static Python flag gates
+    # both, so with both off the batch is bit-identical to the pre-#1354 form.
+    _need_grad_T = config.K_h > 0 or config.nu_del4_T > 0
     n_cells_BT = bernoulli_3d.shape[0]
     nlev_BT = bernoulli_3d.shape[-1]
-    if config.K_h > 0:
+    if _need_grad_T:
         _BT_stack = jnp.stack(
             [bernoulli_3d, T_3d], axis=-1,
         )  # (nCells, nlev, 2)
@@ -364,7 +391,7 @@ def mpas_hydrostatic_tendencies(
         [_BT_flat, ln_ps[:, jnp.newaxis]], axis=-1,
     )  # (nCells, nlev*K + 1)
     _BTln_grad = gradient_edge_3d(_BTln_input, mesh)
-    if config.K_h > 0:
+    if _need_grad_T:
         _grad_BT = _BTln_grad[:, : nlev_BT * 2].reshape(-1, nlev_BT, 2)
         grad_B_3d = _grad_BT[..., 0]
         grad_T_3d_pre = _grad_BT[..., 1]
@@ -505,7 +532,7 @@ def mpas_hydrostatic_tendencies(
     # (dp_edge_3d is dA+dB·p_s at edges when hybrid, p_s_edge·Δσ when σ).
     _div_input_list.append(u_3d * dp_edge_3d)
     _idx_udp = len(_div_input_list) - 1
-    if config.K_h > 0:
+    if _need_grad_T:
         _div_input_list.append(grad_T_3d_pre)
         _idx_gradT = len(_div_input_list) - 1
 
@@ -518,7 +545,7 @@ def mpas_hydrostatic_tendencies(
     div_uT_3d = _div_outputs[..., _idx_uT]
     div_flux_lnps = _div_outputs[..., _idx_ulnps]
     div_dp_3d = _div_outputs[..., _idx_udp]  # flux-form div(u·dp), both branches
-    if config.K_h > 0:
+    if _need_grad_T:
         _div_grad_T = _div_outputs[..., _idx_gradT]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
@@ -526,6 +553,18 @@ def mpas_hydrostatic_tendencies(
     # computed in the batched blocks above; reuse the cached results.
     if config.K_h > 0:
         horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
+
+    # Scalar BIHARMONIC diffusion of T: ``-nu_del4_T · ∇²(∇²T)``.  Sign: for a
+    # mode with ``∇²T = -λT`` (λ > 0 for every non-constant mode of the
+    # discrete Laplacian) this is ``-nu_del4_T·λ²T`` — a damping, matching the
+    # ``nu_del4_ps`` surface-pressure form below and OPPOSITE in sign to the
+    # ``+K_h·∇²T`` Laplacian above (whose operator is already negative).  The
+    # INNER Laplacian is exactly the ``_div_grad_T`` the K_h batch produced, so
+    # only the OUTER grad+div is extra work.
+    if config.nu_del4_T > 0:
+        _del4_T = divergence_cell_3d(
+            gradient_edge_3d(_div_grad_T, mesh), mesh)
+        horiz_adv_T_3d = horiz_adv_T_3d - config.nu_del4_T * _del4_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
