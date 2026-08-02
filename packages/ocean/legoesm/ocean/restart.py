@@ -881,6 +881,33 @@ def load_run_restart(path: str | Path, template_state, *,
     with np.load(in_path, allow_pickle=False) as f:
         loaded = {k: f[k] for k in f.files if k not in _RUN_RESERVED_KEYS}
 
+    # ORPHAN PAYLOAD (codex r4 HIGH): every raw array in the archive must be
+    # referenced by one of the two manifests.  Without this, leaving a `tke`
+    # array in the npz while relabelling the slot `absent` and deleting its
+    # manifest entry passes every inventory/manifest check — and the carry
+    # silently cold-starts.  That is a cheap corruption/tamper case, distinct
+    # from a fully coordinated rewrite (which needs a signature to detect), so
+    # it is worth closing rather than filing under "forgery".
+    def _expected_keys(kinds, prefix):
+        out = set()
+        for name, entry in kinds.items():
+            if entry.get("kind") == _KIND_TUPLE:
+                out.update(f"{prefix}{name}{_TUPLE_SEP}{i}"
+                           for i in range(int(entry["n"])))
+            else:
+                out.add(prefix + name)
+        return out
+
+    _referenced = (_expected_keys(meta["slots"], "")
+                   | _expected_keys(meta["ice_slots"], _ICE_PREFIX))
+    _orphans = sorted(set(loaded) - _referenced)
+    if _orphans:
+        raise ValueError(
+            f"load_run_restart: {in_path} contains array(s) {_orphans} that no "
+            "manifest entry references.  The archive is corrupt or was edited "
+            "to hide a carry (relabelling a slot while leaving its data "
+            "behind); refusing to resume rather than silently ignore them.")
+
     def _rebuild(template, kinds, prefix, inventory, saved_class, what):
         # Diagnostic-persisted check FIRST: it is the most specific diagnosis
         # of a policy-mismatched archive, and the generic inventory

@@ -602,6 +602,43 @@ def test_empty_inventory_cannot_skip_the_layout_checks(tmp_path):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
 
 
+def test_orphan_payload_array_is_a_hard_error(tmp_path):
+    """codex r4 HIGH: relabel a slot 'absent', delete its manifest entry, but
+    LEAVE its array in the npz — every inventory/manifest check passed and the
+    carry silently cold-started.  Unreferenced payload keys now raise.
+
+    This is the cheap tamper/corruption case, distinct from a fully coordinated
+    rewrite (which would need a signature to detect)."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}          # keep the tke ARRAY
+    slots = json.loads(str(payload["_slot_kinds"]))
+    del slots["tke"]                                   # drop the manifest entry
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    inv = json.loads(str(payload["_inventory"]))
+    inv["tke"] = "absent"                              # ...and relabel it
+    payload["_inventory"] = np.asarray(json.dumps(inv))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="no\\s+manifest entry references"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_tuple_carry_elements_are_not_mistaken_for_orphans(tmp_path):
+    """Non-vacuity guard for the orphan check: a tuple carry stores its
+    elements under `name::i` keys, which the reference set must expand — else
+    every bt_hist archive would be rejected."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)          # populates bt_hist (a 6-tuple)
+    assert isinstance(state.bt_hist, tuple) and len(state.bt_hist) == 6
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    got, _, _ = load_run_restart(path, _base_state()[2], grid_type="latlon")
+    _assert_slot_equal("bt_hist", got.bt_hist, state.bt_hist)
+
+
 def test_metadata_rejects_a_non_run_restart(tmp_path):
     from legoesm.ocean.restart import save_restart
 

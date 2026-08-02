@@ -3045,14 +3045,18 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
-    # Free surface: needed to RESTART a run from this snapshot (--restart-from)
-    # without a barotropic-adjustment shock; the scorer ignores it.
+    # Free surface: carried so an OFFLINE tool can re-seed a state from this
+    # snapshot without a barotropic-adjustment shock; the scorer ignores it.
+    # NB --restart-from does NOT read snapshots (codex r4 LOW): the restart
+    # loader rejects an archive with no '_slot_kinds' manifest.  Use
+    # --restart-save / save_run_restart for a resumable checkpoint.
     eta = getattr(state, "eta", None)
     if eta is not None:
         save_kw["eta"] = np.asarray(eta.data)
-    # Prognostic TKE carry (tke closure prognostic=True, any grid): needed to
-    # RESTART without re-spinning the turbulence from the background seed
-    # (the #1310 lesson: an uncheckpointed carry breaks bit-exact restart).
+    # Prognostic TKE carry (tke closure prognostic=True, any grid): recorded so
+    # an offline re-seed does not re-spin the turbulence from the background
+    # value (the #1310 lesson: an uncheckpointed carry breaks bit-exact
+    # restart).  Again NOT the --restart-from path — see the note above.
     # EXTRA key only — scorers and old readers are unaffected.
     tke = getattr(state, "tke", None)
     if tke is not None:
@@ -5478,6 +5482,16 @@ def main() -> int:
         "restart_from", "restart_save", "restart_every_days", "years", "smoke",
         # pure output / cadence knobs
         "output", "snapshot_every_days", "diag_every_days",
+        # read-only diagnostics that never touch the state (codex r4 LOW):
+        # including them would false-abort a leg that merely turned a
+        # diagnostic on or off.
+        "gateway_transports", "diag_momentum_step",
+    })
+    # Path-valued args are normalised before hashing so an equivalent relative
+    # path or symlink cannot false-abort a legitimate chained leg.
+    _RESTART_FP_PATH_KEYS = frozenset({
+        "forcing_path", "mesh", "config", "woa_t", "woa_s", "ice_init",
+        "siconc_file", "tos_monthly_file", "chl_file",
     })
     _restart_cfg_fp = None
     if args.restart_save or args.restart_from:
@@ -5487,9 +5501,7 @@ def main() -> int:
             if _k in _RESTART_FP_EXCLUDE:
                 continue
             _v = getattr(args, _k)
-            if _k == "forcing_path" and _v:
-                # Normalise so an equivalent relative path or symlink does not
-                # false-abort a legitimate chained leg.
+            if _k in _RESTART_FP_PATH_KEYS and isinstance(_v, str) and _v:
                 _v = str(Path(_v).resolve())
             _fp_items.append(f"{_k}={_v!r}")
         # The resolved model + sea-ice configs too: they capture defaults and
@@ -5645,7 +5657,11 @@ def main() -> int:
         _csv_has_rows = False
         if _csv_path.exists():
             with open(_csv_path) as _fh:
-                _csv_has_rows = sum(1 for _ in _fh) > 1
+                # Count NON-BLANK lines past the header: a header plus a stray
+                # blank line is not a parent series (codex r4 LOW).
+                _csv_has_rows = sum(
+                    1 for _i, _ln in enumerate(_fh)
+                    if _i > 0 and _ln.strip()) > 0
         _csv_append = bool(args.restart_from) and _csv_has_rows
         _csv_appended = _csv_append
         _csv = open(_csv_path, "a" if _csv_append else "w")
