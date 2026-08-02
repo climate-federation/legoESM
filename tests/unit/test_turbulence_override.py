@@ -378,3 +378,51 @@ def test_surface_stability_scheme_reaches_hb_flux_consumption():
         "surface_stability_scheme is inert through the HB lane kernel "
         "(the 2026-08 bit-identical A/B bug)")
     assert np.all(np.abs(sh_gr - sh_dyer) > 0.05 * np.abs(sh_dyer))
+
+
+class TestHbKvfMinOverride:
+    """ExperimentConfig.hb_kvf_min -> HoltslagBovilleConfig.kvf_min threading
+    (the polar stable-transport causality-probe knob)."""
+
+    def _cfg(self, **kw):
+        from legoesm.driver.config import ExperimentConfig
+        return ExperimentConfig(turbulence="holtslag_boville", **kw)
+
+    def test_default_none_keeps_scheme_default(self):
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        from legoesm.atmosphere.physics.turbulence.config import (
+            HoltslagBovilleConfig,
+        )
+        tc = turbulence_config_for(self._cfg())
+        assert tc.holtslag_boville.kvf_min == HoltslagBovilleConfig().kvf_min
+
+    def test_override_reaches_nested_config(self):
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        tc = turbulence_config_for(self._cfg(hb_kvf_min=0.2))
+        assert tc.holtslag_boville.kvf_min == 0.2
+
+    def test_non_hb_scheme_unaffected(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        tc = turbulence_config_for(
+            ExperimentConfig(turbulence="louis", hb_kvf_min=0.2))
+        assert "kvf_min" not in tc.louis._fields
+
+    def test_explicit_turbulence_override_stays_authoritative(self):
+        from legoesm.atmosphere.physics.turbulence.config import (
+            HoltslagBovilleConfig, TurbulenceConfig,
+        )
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        ov = TurbulenceConfig(scheme="holtslag_boville",
+                              holtslag_boville=HoltslagBovilleConfig(
+                                  kvf_min=0.05))
+        tc = turbulence_config_for(
+            self._cfg(hb_kvf_min=0.2, turbulence_override=ov))
+        assert tc.holtslag_boville.kvf_min == 0.05
+
+    def test_validate_strict_bounds(self):
+        import math
+        import pytest
+        for bad in (-1.0, 0.0, 11.0, math.nan, "0.2"):
+            with pytest.raises(ValueError):
+                self._cfg(hb_kvf_min=bad).validate_strict()
