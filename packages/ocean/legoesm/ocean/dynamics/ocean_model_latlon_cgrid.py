@@ -147,33 +147,32 @@ def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     )
 
 
-def _is_canonical_mass_flux(field, slot: str, want_shape) -> bool:
+def _is_canonical_mass_flux(field, canonical, want_shape) -> bool:
     """True when ``field`` already matches what the step writes, exactly.
 
-    The exit condition for :func:`seed_mass_flux_carry`'s fast path, and it
-    has to cover EVERYTHING the slow path would have checked, or the fast path
-    becomes a hole:
+    The exit condition for :func:`seed_mass_flux_carry`'s fast path.  It must
+    cover EVERYTHING the slow path would have produced, or the fast path is a
+    hole -- so it compares against a Field BUILT BY ``mass_flux_fields`` from
+    the same donors, using ``Field.tree_flatten``'s own aux tuple rather than
+    a hand-listed subset.
 
-    * the pytree AUX DATA (name / dims / units), not just "is it a Field" -- a
-      Field from a pre-#1442-round-5 state has the right shape and the wrong
-      ``units``, and a state differing only there is still a different treedef,
-      which is the whole failure mode;
-    * the SHAPE -- the slow path raises on a mismatch, so a fast path that
-      skipped it would silently accept a v_lower-shaped slot in a global state
-      (caught by ``test_seed_rejects_a_wrong_shaped_stored_slot``, which went
-      green the moment the shape was left out of this predicate).
+    That indirection is the point (codex round-8 RED 2).  The hand-listed
+    version checked ``name`` and ``units`` and silently ignored ``dims`` (for
+    the u/v pair), ``long_name`` and ``staggering`` -- all of which ARE pytree
+    aux data, all of which the step re-derives from the donor field, and any
+    one of which is enough to make the next ``lax.scan`` reject the carry.
+    Comparing the flattened aux tuple cannot omit a member, and it keeps
+    tracking ``Field`` if that class ever gains one.
 
-    ``staggering`` is inherited from the donor field, so it is not part of the
-    canonical form.
+    SHAPE is compared too: the slow path raises on a mismatch, so a fast path
+    that skipped it would silently accept a ``v_lower``-shaped slot in a
+    global state.
     """
     if field is None:
         return False
     if tuple(jnp.shape(field.data)) != tuple(want_shape):
         return False
-    if slot == "mass_flux_w":
-        return (field.name == slot and field.dims == MASS_FLUX_W_DIMS
-                and field.units == MASS_FLUX_W_UNITS)
-    return field.name == slot and field.units == MASS_FLUX_UNITS
+    return field.tree_flatten()[1] == canonical.tree_flatten()[1]
 
 
 def seed_mass_flux_carry(state, store_mass_flux: bool):
@@ -226,8 +225,14 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
         "mass_flux_v": tuple(jnp.shape(state.v.data)),
         "mass_flux_w": tuple(jnp.shape(state.w.data))[:-1] + (nlev_i,),
     }
-    if all(_is_canonical_mass_flux(getattr(state, _n), _n, _shapes[_n])
-           for _n in MASS_FLUX_SLOTS):
+    # Reference Fields built from the SAME donors the step uses.  Only their
+    # AUX data is read (the donors' own arrays are passed straight through as
+    # placeholders -- no allocation, no device work); shapes are checked
+    # separately against ``_shapes``.
+    _canon = mass_flux_fields(state.u, state.v, state.w,
+                              state.u.data, state.v.data, state.w.data)
+    if all(_is_canonical_mass_flux(getattr(state, _n), _c, _shapes[_n])
+           for _n, _c in zip(MASS_FLUX_SLOTS, _canon)):
         return state
 
     def _data(slot, donor_shape):

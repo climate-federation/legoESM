@@ -345,13 +345,27 @@ def test_the_bolus_increment_the_triple_carries_is_divergence_free():
     column-non-divergent (psi = 0 at surface and floor) and its vertical
     partner is re-diagnosed through the SAME continuity operator.  So the
     through-FCT and centred arms -- which differ ONLY by that increment --
-    must have IDENTICAL divergence:
+    must have IDENTICAL divergence.
 
-        div_h(u_fct, v_fct) + dz(w_fct) == div_h(u_ctr, v_ctr) + dz(w_ctr)
+    TWO NORMALIZERS, because they answer different questions and using only
+    one is wrong in a different way each time:
 
-    That is a real invariant of the stored triple, it is what makes the FCT
-    limiter constancy-preserving, and it is asserted here against the
-    thickness tendency's own scale so the tolerance is not a free parameter.
+    * against the INCREMENT (codex round-8 YELLOW 4): is the cancellation
+      PHYSICALLY real, or is the "non-divergent bolus" claim hiding under a
+      big base signal?  Measured 4.8e-5 of ``|div_h(bolus)|``.
+    * against the BASE: what round-off floor is even ACHIEVABLE?  The
+      increment is a DIFFERENCE OF TWO INDEPENDENTLY-ROUNDED f32 fields whose
+      own divergence is ~1e3 larger, so catastrophic cancellation puts the
+      floor at ``eps * |div_h(base)|`` -- NOT at ``eps * |div_h(bolus)|``.
+      An increment-only bar of 200 eps demands 4e-16 absolute, which f32
+      arithmetic cannot deliver: the first version of this test asked for
+      exactly that and measured 405 eps, i.e. it was failing on precision, not
+      on physics.  The diagnostic's printed precision bounds the claim it can
+      support.
+
+    So: the residual must be at the base's round-off floor AND negligible
+    against the increment it is cancelling.  Both are asserted, with their
+    scales printed, and both scales are asserted non-zero.
     """
     from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
 
@@ -360,31 +374,50 @@ def test_the_bolus_increment_the_triple_carries_is_divergence_free():
     outB = mB.step(_perturbed(sB), _DT)
     outC = mC.step(_perturbed(sC), _DT)
 
-    def _total_div(out):
-        dh = np.asarray(divergence_cgrid(
-            jnp.asarray(out.mass_flux_u.data),
-            jnp.asarray(out.mass_flux_v.data), mB.grid), dtype=np.float64)
-        w = np.asarray(out.mass_flux_w.data, dtype=np.float64)
-        # dz(w) with the SAME interface convention the tracer update uses:
-        # w[k] is the TOP of layer k, w[k+1] the bottom.
-        return dh + (w[..., :-1] - w[..., 1:])
+    def _arr(out, nm):
+        return np.asarray(getattr(out, nm).data, dtype=np.float64)
 
-    dB, dC = _total_div(outB), _total_div(outC)
-    scale = float(np.max(np.abs(dB)))
-    assert scale > 0.0, (
-        "the total divergence is identically zero, so this test cannot tell "
-        "a non-divergent bolus increment from no bolus at all -- and it also "
-        "means the free surface is not stretching, which contradicts the "
-        "retraction above")
-    resid = float(np.max(np.abs(dC - dB)))
+    # The BOLUS INCREMENT itself: the two arms differ by nothing else.
+    d_mfu = _arr(outC, "mass_flux_u") - _arr(outB, "mass_flux_u")
+    d_mfv = _arr(outC, "mass_flux_v") - _arr(outB, "mass_flux_v")
+    d_mfw = _arr(outC, "mass_flux_w") - _arr(outB, "mass_flux_w")
+
+    div_h_bolus = np.asarray(
+        divergence_cgrid(jnp.asarray(d_mfu), jnp.asarray(d_mfv), mB.grid),
+        dtype=np.float64)
+    # dz(w) with the SAME interface convention the tracer update uses:
+    # w[k] is the TOP of layer k, w[k+1] the bottom.
+    dz_w_bolus = d_mfw[..., :-1] - d_mfw[..., 1:]
+
+    # The BASE arm's own horizontal divergence: the magnitude the increment
+    # was differenced out of, hence the round-off floor.
+    div_h_base = np.asarray(
+        divergence_cgrid(jnp.asarray(_arr(outB, "mass_flux_u")),
+                         jnp.asarray(_arr(outB, "mass_flux_v")), mB.grid),
+        dtype=np.float64)
+
+    scale_inc = float(np.max(np.abs(div_h_bolus)))
+    scale_base = float(np.max(np.abs(div_h_base)))
+    assert scale_inc > 0.0, (
+        "the bolus increment's HORIZONTAL divergence is identically zero, so "
+        "there is nothing for the vertical term to cancel and this test "
+        "cannot discriminate -- the GM bolus is not active in this setup")
+    assert scale_base > 0.0
+    resid = float(np.max(np.abs(div_h_bolus + dz_w_bolus)))
     eps = float(np.finfo(np.asarray(outB.mass_flux_u.data).dtype).eps)
-    assert resid < 200.0 * eps * scale, (
+
+    assert resid < 200.0 * eps * scale_base, (
+        f"|div_h(bolus) + dz(w_bolus)| = {resid:.3e} exceeds the f32 "
+        f"round-off floor set by the base field it was differenced from "
+        f"(|div_h(base)| = {scale_base:.3e}, {resid / scale_base / eps:.1f} "
+        "eps).  That is beyond cancellation error: mass_flux_w is not the "
+        "partner re-diagnosed from the bolus-augmented horizontal flux.")
+    assert resid < 1.0e-3 * scale_inc, (
         f"the GM bolus increment carried by the stored triple is NOT "
-        f"divergence-free: |div(fct) - div(ctr)| = {resid:.3e} vs a "
-        f"divergence scale of {scale:.3e} ({resid / scale / eps:.1f} eps).  "
-        "Either mass_flux_w is not the partner re-diagnosed from the "
-        "bolus-augmented horizontal flux, or the bolus is not "
-        "column-non-divergent -- both would break FCT constancy preservation.")
+        f"meaningfully divergence-free: the residual {resid:.3e} is "
+        f"{resid / scale_inc:.2e} of |div_h(bolus)| = {scale_inc:.3e}, i.e. "
+        "the vertical term does not actually cancel the horizontal one -- "
+        "which breaks FCT constancy preservation on the augmented field.")
 
 
 def test_stored_flux_differs_from_the_reconstruction():
@@ -748,6 +781,48 @@ def test_seed_fast_path_is_keyed_on_metadata_not_on_presence():
     out = seed_mass_flux_carry(legacy, True)
     assert out is not legacy, "a legacy-metadata carry took the fast path"
     assert out.mass_flux_v.units == stepped.mass_flux_v.units
+
+
+@pytest.mark.parametrize("slot", ["mass_flux_u", "mass_flux_v",
+                                  "mass_flux_w"])
+@pytest.mark.parametrize("attr,bad", [("name", "wrong"),
+                                      ("dims", ("a", "b", "c")),
+                                      ("units", "furlongs"),
+                                      ("long_name", "not the donor's"),
+                                      ("staggering", "vertex")])
+def test_fast_path_rejects_a_difference_in_ANY_pytree_aux_member(slot, attr,
+                                                                 bad):
+    """Codex round-8 RED 2: the fast path must not ignore a metadata member.
+
+    ``Field.tree_flatten`` puts name, dims, units, long_name AND staggering in
+    the AUX tuple, so ANY of them differing is a different treedef and the
+    next ``lax.scan`` rejects the carry.  The first fast path compared only
+    ``name`` and ``units`` (plus ``dims`` for w), so a Field differing in
+    ``dims`` (u/v), ``long_name`` or ``staggering`` sailed through -- and then
+    ``_step_impl`` emitted the donor-derived metadata and broke the scan.
+
+    Every member is mutated here, on every slot: 15 cases, each of which must
+    force the rebuild.  A predicate that forgets one goes red on that case.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    _g, _z, model, state = _setup(store=True)
+    stepped = model.step(_perturbed(state), _DT)
+    field = getattr(stepped, slot)
+    assert getattr(field, attr) != bad, (
+        f"the mutated {attr} equals the canonical one -- vacuous case")
+
+    tweaked = stepped._replace(**{slot: field.replace(**{attr: bad})})
+    fixed = seed_mass_flux_carry(tweaked, True)
+    assert fixed is not tweaked, (
+        f"a carry whose {slot}.{attr} differs from the canonical form took "
+        "the fast path; the next lax.scan would reject it")
+    assert getattr(getattr(fixed, slot), attr) == getattr(field, attr), (
+        f"{slot}.{attr} was not restored to the canonical value")
+    assert (jax.tree_util.tree_structure(fixed)
+            == jax.tree_util.tree_structure(stepped))
 
 
 def test_seed_rejects_a_wrong_shaped_stored_slot():
@@ -1498,6 +1573,22 @@ def test_scan_drivers_seed_the_carry_before_their_lax_scan():
         seeds = [i for i, ln in enumerate(lines)
                  if seed_tok in ln and not ln.lstrip().startswith("def ")]
         scans = [i for i, ln in enumerate(lines) if scan_tok in ln]
+        # The seed's RESULT must be bound to `state`, and `state` must not be
+        # rebound between the seed and the scan -- otherwise a call whose
+        # return value is discarded, or an intervening `state = ...`, passes
+        # an order check while the real carry stays unseeded (codex round-8
+        # YELLOW 5).
+        for s, c in zip(seeds, scans):
+            assert lines[s].strip().startswith("state = "), (
+                f"{rel}:{s + 1}: the seed call's result is not bound to "
+                f"`state`: {lines[s].strip()!r}")
+            rebinds = [k for k in range(s + 1, c)
+                       if lines[k].strip().startswith("state = ")
+                       or lines[k].strip().startswith("state, ")]
+            assert not rebinds, (
+                f"{rel}: `state` is rebound at line(s) "
+                f"{[k + 1 for k in rebinds]} between the seed ({s + 1}) and "
+                f"the scan ({c + 1}), discarding the seeded carry")
         assert len(seeds) == n_expected, (
             f"{rel}: expected {n_expected} seed call(s) {seed_tok!r}, found "
             f"{len(seeds)} -- a scan boundary lost its pre-seed")
@@ -1561,6 +1652,27 @@ def test_generic_ocean_archive_neither_writes_nor_restores_the_diagnostics(
             f"{nm} was reconstructed from a legacy archive with generic "
             "metadata -- that state's treedef differs from what the step "
             "writes and the next lax.scan would abort")
+
+    # A POPULATED template must have its diagnostic slots CLEARED, not left
+    # alone (codex round-8 RED 3).  Skipping them leaves a STALE diagnostic
+    # beside freshly loaded prognostics -- and this loader rebuilds the loaded
+    # Fields WITHOUT their staggering, so a retained diagnostic (which kept
+    # its donor's) and a reloaded u/v no longer agree, giving the state a
+    # treedef the next step's output does not match.  Verified by driving a
+    # real scan from the restored state.
+    populated = load_restart(path, out)
+    for nm in _NEW_SLOTS:
+        assert getattr(populated, nm) is None, (
+            f"{nm} survived a restart from a POPULATED template; it is a "
+            "stale diagnostic, and its metadata no longer matches the "
+            "reloaded prognostics")
+    seeded = model.seed_scan_carry(populated, _DT)
+
+    def _body(carry, _x):
+        return model.step(carry, _DT), None
+
+    final, _ = jax.lax.scan(_body, seeded, xs=None, length=2)
+    assert final.mass_flux_w is not None
 
 
 def test_run_omip_restart_does_not_persist_the_diagnostic_flux():

@@ -559,27 +559,36 @@ class LatLonCGridOceanState(NamedTuple):
     # the stored horizontal fields with ``state.w`` mixes two different
     # advecting fields.  Pair these three with each other.
     #
-    # WHAT THE TRIPLE IS, EXACTLY: the advecting field the FLUX-FORM TRACER
-    # UPDATE used, i.e. the arrays behind
-    #     h_new*T_new = h_old*T_mid - dt*[ div_h(mass_flux * T_face)
-    #                                      + delta_z(mass_flux_w * T_iface) ]
+    # WHAT THE TRIPLE IS, EXACTLY: the ADVECTIVE transport this step's
+    # flux-form tracer update was evaluated with -- the arrays behind the
+    # ``div_h(mass_flux * T_face) + delta_z(mass_flux_w * T_iface)`` term.
     #
-    # WHAT IT IS NOT (retracted; codex round 7 was right and the first version
-    # of this comment asserted the opposite): it is NOT divergence-free.  Under
-    # the moving z* free surface ``w_baro`` carries the sigma / layer-thickness
-    # tendency, so
-    #     div_h(mass_flux_u, mass_flux_v) + delta_z(mass_flux_w)  ==  -dh/dt
-    # and only vanishes where the column is not stretching.  A CLOSED 3-D
-    # budget therefore needs the layer thicknesses as well; a consumer can
-    # rebuild those from ``eta``/``H_bathy`` with
-    # ``legoesm.ocean.vertical.compute_layer_thickness`` (the same routine the
-    # step uses), which is why they are not stored a fourth time.
+    # SCOPE, deliberately narrow (codex round-8 YELLOW 6): it is the CURRENT,
+    # INSTANTANEOUS advective field, not the whole tracer update.  Under the
+    # inner AB2 (``tracer_time_integrator="ab2"``) the applied flux divergence
+    # is an extrapolation over ``T_flux_div_prev`` as well; RK3, the outer AB2
+    # and leapfrog combine stages / historical increments; and the non-advective
+    # terms (vertical mixing, GM/Redi diffusion, surface forcing, the
+    # conservation fixer) are not represented here at all.  Reconstructing an
+    # applied tendency needs that history too.
     #
-    # What IS exactly zero is the BOLUS INCREMENT's divergence -- the bolus is
+    # NO BUDGET IDENTITY IS CLAIMED, and that is the third and final version of
+    # this note -- both earlier ones asserted one and both were wrong.  It is
+    # NOT divergence-free (``w_baro`` carries the moving-z* layer-thickness
+    # tendency), and it is not ``-dh/dt`` either: thickness also moves through
+    # the freshwater eta forcing, the eta floor, and the volume-drift
+    # projection, none of which are advective and none of which appear in these
+    # arrays.  A closed 3-D budget needs BOTH thickness time levels plus those
+    # source/projection terms; a consumer can rebuild the thicknesses from
+    # ``eta``/``H_bathy`` with ``legoesm.ocean.vertical.compute_layer_thickness``
+    # (the routine the step itself uses).  Do not re-derive a shortcut here.
+    #
+    # The ONE exact invariant, and the one a test pins: the GM BOLUS INCREMENT
+    # carried by the triple is discretely NON-DIVERGENT (the bolus is
     # column-non-divergent by construction and ``w_baro_tr`` is re-diagnosed
-    # through the SAME continuity operator -- so the through-FCT and centred
-    # arms have identical divergence.  That is the invariant a test can pin,
-    # and does.
+    # through the SAME continuity operator), so the through-FCT and centred
+    # arms have IDENTICAL total divergence.  That is what makes the FCT limiter
+    # constancy-preserving on the bolus-augmented field.
     mass_flux_u: object = None
     mass_flux_v: object = None
     # The VERTICAL partner of the pair above [m/s], at layer INTERFACES:

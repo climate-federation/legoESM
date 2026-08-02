@@ -109,13 +109,21 @@ def load_restart(path: str | Path, template_state) -> tuple:
     with np.load(in_path, allow_pickle=False) as f:
         loaded = {k: f[k] for k in f.files}
 
-    replace_kw: dict[str, Field] = {}
+    replace_kw: dict[str, Field | None] = {}
     for name in _iter_state_fields(template_state):
-        if name not in loaded or name in DIAGNOSTIC_SLOTS:
-            # DIAGNOSTIC_SLOTS: skip even if an OLDER archive (written before
-            # the exclusion above) carries them -- reconstructing them from a
-            # None template slot would give them generic metadata and break
-            # the pytree the next scan needs.
+        if name in DIAGNOSTIC_SLOTS:
+            # CLEARED to None, not merely skipped (codex round-8 RED 3).
+            # Skipping leaves a POPULATED template's slot in place, so a
+            # restart would carry a STALE diagnostic next to freshly loaded
+            # prognostics -- and worse, this loader rebuilds the loaded Fields
+            # WITHOUT their staggering, so a retained diagnostic (which kept
+            # its donor's staggering) and a reloaded ``u``/``v`` would no
+            # longer agree, giving the state a treedef the next step's output
+            # does not match.  ``None`` is the unambiguous state: the seeding
+            # helper rebuilds all three canonically before any scan.
+            replace_kw[name] = None
+            continue
+        if name not in loaded:
             continue
         ref_field = getattr(template_state, name)
         if not isinstance(ref_field, Field):
