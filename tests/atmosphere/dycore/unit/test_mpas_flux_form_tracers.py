@@ -552,3 +552,30 @@ def test_kernel_vertical_only_conserves_and_points_downward():
     assert float(out[0, 3, 0]) > 0.0, "downward flux must fill the level BELOW"
     assert float(jnp.max(jnp.abs(out[:, :2, 0]))) == 0.0, (
         "nothing above the source may change under a purely downward flux")
+
+
+def test_grad_flows_through_the_mixed_flux_advective_scatter():
+    """With BOTH per-mass and per-volume tracers present the tendency is
+    assembled by a ``.at[..., idx].set(...)`` scatter of two separately
+    computed groups.  A cotangent must reach BOTH groups — a scatter that
+    dropped one would silently produce a zero gradient for those tracers."""
+    mesh, coord = _mesh(), _sigma()
+    st = _state(mesh, coord, seed=2)
+    qv = st.tracers["q_v"].data
+    names = ("q_v", "N_c")
+    st = st._replace(tracers={
+        "q_v": st.tracers["q_v"],
+        "N_c": st.tracers["q_v"].replace(data=1.0e8 * qv, name="N_c"),
+    })
+    cfg = _cfg(moisture_flux_form=True)
+
+    def loss(qs):
+        s = st._replace(tracers={
+            k: st.tracers[k].replace(data=qs[i]) for i, k in enumerate(names)})
+        t = mpas_hydrostatic_tendencies(s, mesh, coord, cfg).tracer_tendencies
+        return jnp.sum(t["q_v"].data ** 2) + jnp.sum(t["N_c"].data ** 2)
+
+    gs = jax.grad(loss)([st.tracers[k].data for k in names])
+    for k, g in zip(names, gs):
+        assert jnp.all(jnp.isfinite(g)), f"non-finite gradient for {k}"
+        assert float(jnp.max(jnp.abs(g))) > 0.0, f"zero gradient for {k}"
