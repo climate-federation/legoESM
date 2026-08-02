@@ -228,6 +228,15 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     non-None test is exactly the shortcut that lets a legacy ``m/s`` pair
     through, so it must not be the exit condition.  Persistent-SPMD host loops
     call this every step and hit the fast path from step 2 on.
+
+    NON-GOAL (explicit, so a later reviewer does not re-open it): this is not
+    an adversarial boundary.  The checks here exist to catch DRIFT -- a state
+    assembled by an older commit, a v_lower carrier handed to a global path, a
+    restart archive written under a previous convention -- on a shared HPC
+    filesystem where the realistic threats are stale artefacts and my own
+    mistakes.  A hand-forged state that satisfies every check and still lies,
+    or a caller that mutates the slots after seeding, is out of scope; the
+    step overwrites all three unconditionally on the next call anyway.
     """
     if not store_mass_flux:
         return state

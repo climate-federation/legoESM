@@ -24,8 +24,20 @@ These tests pin, in order of strength:
 WHY (2) IS THE LOAD-BEARING TEST.  With GM off, ``mass_flux_u_tr`` IS
 ``mass_flux_u`` -- the same array under two names.  A regression that stored
 the raw pair would pass every other test in this file.  The codex review of the
-first version of this suite found exactly that hole.  ``_gm_configs`` builds
-the ONE configuration that tells them apart.
+first version of this suite found exactly that hole.
+``test_stored_pair_is_the_tr_pair_not_the_raw_pair`` builds the ONE
+configuration that tells them apart: a controlled GM triple (gm_redi=None /
+bolus "centred" / bolus "through_fct"), asserting
+stored(None) == stored(centred) != stored(through_fct).
+
+SCOPE / NON-GOALS, stated so the review loop has an end.  This suite defends
+against DRIFT -- a stale state from an older commit, a wrong-staggered carrier,
+an unwired lane, a silently disabled flag -- on a shared filesystem where the
+realistic failure modes are stale artefacts and author error.  It does NOT
+defend against an adversary: forged restart archives, hostile environment
+variables, or a caller that hand-edits the stored slots between the seed and
+the step are out of scope, because the step overwrites all three
+unconditionally on its next call and nothing reads them in between.
 """
 from __future__ import annotations
 
