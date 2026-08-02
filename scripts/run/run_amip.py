@@ -639,6 +639,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Matches ExperimentConfig.validate_strict — 'most' is "
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
+    parser.add_argument("--surface-stability-scheme", type=str,
+                        dest="surface_stability_scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        help="Stable-branch (zeta>0) Monin-Obukhov similarity "
+                             "functions for the surface layer (bulk_flux psi_m/"
+                             "psi_h). dyer1974 is the short-tail default; "
+                             "beljaars_holtslag1991 keeps exchange alive under "
+                             "strong stability (polar-night surface decoupling).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -1819,6 +1828,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gravity_wave_drag=args.gravity_wave_drag,
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
@@ -2500,7 +2510,8 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     return louis_config._replace(
         surface=louis_config.surface._replace(
             bulk_scheme=prev_surf.bulk_scheme,
-            gustiness_w_zi=prev_surf.gustiness_w_zi))
+            gustiness_w_zi=prev_surf.gustiness_w_zi,
+            stability_scheme=prev_surf.stability_scheme))
 
 
 def _apply_sundqvist_overrides(micro_config, args):
