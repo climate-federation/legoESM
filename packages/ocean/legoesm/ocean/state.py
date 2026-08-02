@@ -546,7 +546,21 @@ class LatLonCGridOceanState(NamedTuple):
     # per zonal section on eORCA1 -- about 100% of the apparent net at 66N.
     # These fields close that gap for BOTH the barotropic and the GM-bolus
     # term.  Shapes match ``u``/``v``: (n_lat, n_lon+1, nlev) and
-    # (n_lat+1, n_lon, nlev).
+    # (n_lat+1, n_lon, nlev); UNITS are ``m^2/s`` (thickness x velocity), NOT
+    # the ``m/s`` of the ``u``/``v`` Fields whose dims/staggering they inherit.
+    #
+    # HORIZONTAL ONLY -- and under through-FCT GM they are NOT a matched triple
+    # with ``state.w`` (codex YELLOW 9).  ``_step_impl`` diagnoses ``w_baro``
+    # from the BASE pair and only afterwards forms the bolus-inclusive ``_tr``
+    # pair (``add_bolus_to_advecting_flux`` returns its own ``w_baro_tr``, which
+    # advects tracers but is NOT what ``state.w`` is built from).  So with
+    # ``gm_redi.gm_bolus_advection="through_fct"``:
+    #     div_h(mass_flux_u, mass_flux_v) + d(state.w)/dz  !=  0
+    # because the two sides come from different advecting fields.  Use these for
+    # HORIZONTAL section transports (their purpose); do NOT pair them with
+    # ``state.w`` in a 3-D volume budget under through-FCT GM.  Pinned by
+    # ``test_mass_flux_store.py::test_stored_pair_is_bolus_inclusive_while_w_is_not``
+    # so the asymmetry cannot be silently "fixed" on one side only.
     mass_flux_u: object = None
     mass_flux_v: object = None
 
@@ -2135,14 +2149,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     used for the runoff-depth-spread channel too.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
-    # Store the TRACER-ADVECTING mass fluxes on the returned state (#1442).
-    # PURE DIAGNOSTIC: it changes nothing the step computes, it only stops
-    # throwing the flux away.  Off by default because it costs two extra
-    # face-shaped arrays of state (~145 MB at eORCA1 L75 in fp64).  Static
-    # Python bool read in a closure, so both branches are NOT traced and
-    # enabling it cannot cause a retrace mid-run.
-    store_mass_flux: bool = False
-
     # --- NEMO dynzdf composition (#1226): drag-in-matrix + baroclinic-only ---
     # Two SEPARATELY toggleable options transcribing NEMO's ``ln_drgimp``
     # implicit-friction composition (dynzdf.F90), each independently
@@ -2258,6 +2264,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     # -> "before" set equal to "now"), so the average degenerates to NOW on
     # step 1 exactly like NEMO. Default False -> BIT-IDENTICAL.
     barotropic_forcing_centred: bool = False
+    # Store the TRACER-ADVECTING mass fluxes on the returned state (#1442).
+    # PURE DIAGNOSTIC: it changes nothing the step computes, it only stops
+    # throwing the flux away.  Off by default because it costs two extra
+    # face-shaped arrays of state (~145 MB at eORCA1 L75 in fp64).  Static
+    # Python bool read in a closure, so both branches are NOT traced and
+    # enabling it cannot cause a retrace mid-run.
+    #
+    # APPENDED AT THE END of the NamedTuple, like every field above it, to
+    # preserve positional construction for legacy call sites (codex RED 1: the
+    # first version inserted it mid-tuple, silently shifting every field from
+    # ``zdf_drag_in_matrix`` onward for any caller that passes positionally).
+    # ANY new field goes HERE, below this one -- never mid-tuple.
+    store_mass_flux: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

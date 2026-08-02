@@ -417,8 +417,15 @@ def accumulate_gateways(acc: GatewayAccumulator, stack: GatewayStack,
     return GatewayAccumulator(acc.names, vol, tr, acc.n + 1)
 
 
+# Selectable provenance for :func:`mass_fluxes_from_state`.  An unknown value
+# RAISES (dispatch hardening) rather than silently falling back -- a typo'd
+# ``source="reconstuct"`` must not quietly return the stored flux.
+MASS_FLUX_SOURCES = ("auto", "stored", "reconstruct")
+
+
 def mass_fluxes_from_state(state, z_coord, grid, *,
-                           min_water_column_m: float | None = None):
+                           min_water_column_m: float | None = None,
+                           source: str = "auto"):
     """Thickness-weighted face transports (mfu, mfv) [m^2/s] from a state.
 
     Built from the model's own operators (``compute_layer_thickness``,
@@ -439,21 +446,57 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
     adaptive implicit vertical advection AFTER the tracer flux is formed;
     neither is exposed on the state.
 
-    PREFER THE STORED FLUX.  If the run set
-    ``LatLonCGridOceanConfig.store_mass_flux=True`` (#1442), the state carries
-    ``mass_flux_u``/``mass_flux_v`` -- the ACTUAL tracer-advecting flux, with
-    the barotropic correction and the GM bolus already in it -- and this
-    function returns those unchanged.  Everything said above about
-    reconstruction then does not apply.  The reconstruction below is the
-    fallback for a state that predates the flag (e.g. an archived snapshot).
+    ``source`` -- WHICH FLUX YOU GET, STATED EXPLICITLY
+    --------------------------------------------------
+    ``"auto"`` (default)
+        Use the STORED ``mass_flux_u``/``mass_flux_v`` when the run set
+        ``LatLonCGridOceanConfig.store_mass_flux=True`` (#1442) and the slots
+        are populated -- the ACTUAL tracer-advecting flux, with the barotropic
+        correction and the GM bolus already in it, so nothing said above about
+        reconstruction applies.  Otherwise reconstruct.
+    ``"stored"``
+        Require the stored flux; ``ValueError`` if the slots are ``None``
+        (rather than silently reconstructing a different quantity under a name
+        the caller believes is exact).
+    ``"reconstruct"``
+        Always reconstruct, even on a state that carries the stored flux.
+
+    WHY ``source`` EXISTS (codex YELLOW 8).  Under ``"auto"`` the stored branch
+    returns BEFORE the reconstruction, so it necessarily IGNORES
+    ``min_water_column_m`` -- and it ignores any post-step edit to ``eta`` /
+    ``u`` / ``v`` / ``H_bathy``, because the stored flux is a snapshot of the
+    step that produced the state, not a function of its current contents.  A
+    caller that MUTATED the state (perturbation study, masked bathymetry,
+    remapped eta) and expected the returned flux to follow was silently handed
+    the pre-edit values.  ``source="reconstruct"`` is the opt-out; the mismatch
+    is now a choice the call site makes, not a hidden precedence rule.
 
     ``min_water_column_m`` is forwarded to ``compute_layer_thickness`` so a
-    caller can match the model config's own floor.
+    caller can match the model config's own floor.  It applies to the
+    RECONSTRUCTION only.
+
+    HORIZONTAL ONLY.  The returned pair is not a matched advecting triple with
+    ``state.w`` under through-FCT GM -- see the ``mass_flux_u`` field comment
+    in ``ocean/state.py`` (codex YELLOW 9).
     """
+    if source not in MASS_FLUX_SOURCES:
+        raise ValueError(
+            f"mass_fluxes_from_state: source must be one of "
+            f"{MASS_FLUX_SOURCES}, got {source!r}.")
     stored_u = getattr(state, "mass_flux_u", None)
     stored_v = getattr(state, "mass_flux_v", None)
-    if stored_u is not None and stored_v is not None:
+    _has_stored = stored_u is not None and stored_v is not None
+    if source == "stored" and not _has_stored:
+        raise ValueError(
+            "mass_fluxes_from_state(source='stored'): the state carries no "
+            "mass_flux_u/mass_flux_v.  Set "
+            "LatLonCGridOceanConfig.store_mass_flux=True on the run (#1442), "
+            "or pass source='auto'/'reconstruct' to accept the h*u "
+            "reconstruction and its barotropic/GM-bolus caveat.")
+    if _has_stored and source != "reconstruct":
         # Exact: what the model advected with. No reconstruction, no caveat.
+        # NOTE: min_water_column_m is deliberately not consulted here -- the
+        # stored flux is a record of the step, not a function of this state.
         return stored_u.data, stored_v.data
 
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -590,8 +633,13 @@ def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
                     f"{_got}, expected {_want} for a C-grid with tracer shape "
                     f"({n_lat}, {n_lon}). The face metrics are mis-staggered; "
                     "pass model.grid or promote_gateway_geometry(grid).")
+    # source="auto": integrate the STORED tracer-advecting flux when the run
+    # enabled store_mass_flux (#1442), else the h*u reconstruction with its
+    # barotropic/GM caveat.  Explicit rather than implied, so the accumulator's
+    # provenance is readable at the call site (codex YELLOW 8).
     mfu, mfv = mass_fluxes_from_state(
-        state, z_coord, geom, min_water_column_m=min_water_column_m)
+        state, z_coord, geom, min_water_column_m=min_water_column_m,
+        source="auto")
     tr_u, tr_v = upwind_face_values(state.S.data, mfu, mfv, geom)
     return accumulate_gateways(acc, stack, mfu, mfv,
                                jnp.asarray(geom.dy_u), jnp.asarray(geom.dx_v),
@@ -615,6 +663,7 @@ __all__ = [
     "arctic_region_mask",
     "GatewayStack",
     "gateway_face_masks",
+    "MASS_FLUX_SOURCES",
     "mass_fluxes_from_state",
     "prepare_gateway_stack",
     "new_gateway_accumulator",

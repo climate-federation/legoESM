@@ -997,7 +997,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
-                  prescribed_flow=None, no_gm_redi=False):
+                  prescribed_flow=None, no_gm_redi=False,
+                  store_mass_flux=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -1076,6 +1077,16 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     # implicit solve is unconditionally stable -> force it on for the OMIP latlon
     # path (20-level happened to stay under the explicit CFL; 75-level does not).
     _ovr["implicit_vertical_mixing"] = True
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.  Threaded here as
+        # well as in build_tripole because --gateway-transports supports BOTH
+        # app grids (SUPPORTED_APP_GRIDS = ("tripole", "latlon")); wiring only
+        # the tripole left every supported latlon run silently reconstructing
+        # (codex RED 6).
+        _ovr["store_mass_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -4774,6 +4785,12 @@ def main() -> int:
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
+            # #1442: same --gateway-transports override the tripole branch
+            # passes.  "latlon" IS in SUPPORTED_APP_GRIDS, so leaving it out
+            # made every supported latlon gateway run fall back to the h*u
+            # reconstruction the flag exists to replace (codex RED 6).
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "latlon"
 

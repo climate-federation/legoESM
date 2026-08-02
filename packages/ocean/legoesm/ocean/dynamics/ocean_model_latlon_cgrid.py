@@ -108,6 +108,78 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
 # ---------------------------------------------------------------------------
+# store_mass_flux carry (#1442)
+# ---------------------------------------------------------------------------
+# Units of the stored tracer-advecting mass flux: thickness x velocity.  NOT
+# the "m/s" of the u/v Fields whose dims/staggering these inherit (codex
+# YELLOW 7 -- a mislabelled Field silently mis-scales any CF/netCDF export).
+MASS_FLUX_UNITS = "m^2/s"
+
+
+def mass_flux_fields(u_field, v_field, mfu_data, mfv_data):
+    """Wrap the tracer-advecting mass fluxes as ``mass_flux_u``/``mass_flux_v``.
+
+    THE SINGLE CONSTRUCTOR for these two Fields (#1442).  Both the hot-path
+    capture in ``_step_impl`` and the ``seed_scan_carry`` / SPMD pre-seed go
+    through here, so the seeded carry's metadata is IDENTICAL to what the step
+    writes.  That identity is load-bearing, not cosmetic: ``Field`` carries its
+    ``name``/``dims``/``units``/``staggering`` as pytree AUX DATA, so a seed
+    that differs in ANY of them is a different treedef and ``lax.scan`` rejects
+    the carry (the same trap the leapfrog ``u_before`` seeding comment records).
+
+    Dims and staggering are inherited from the ``u``/``v`` Fields (identical
+    face layout); only ``name`` and ``units`` are overridden.
+    """
+    return (
+        u_field.replace(data=mfu_data, name="mass_flux_u",
+                        units=MASS_FLUX_UNITS),
+        v_field.replace(data=mfv_data, name="mass_flux_v",
+                        units=MASS_FLUX_UNITS),
+    )
+
+
+def seed_mass_flux_carry(state, store_mass_flux: bool):
+    """Pre-seed ``mass_flux_u``/``mass_flux_v`` to zeros for a constant pytree.
+
+    With ``store_mass_flux`` on, the step turns these slots from ``None`` into
+    ``Field``s, which CHANGES THE STATE TREEDEF.  Unseeded that breaks three
+    things (codex RED 2 / RED 3), all silently until they crash:
+
+    * ``lax.scan`` -- carry-in structure != carry-out structure;
+    * a direct jitted ``step`` loop -- the first step retraces and recompiles;
+    * the SPMD ``shard_map`` -- ``out_specs`` is derived from the INPUT state,
+      so an output leaf with no matching spec is an error.
+
+    Zeros are the correct seed (unlike ``bt_hist``, whose zero reads as a
+    meaningful "continuation" state): nothing in the step READS these slots --
+    they are written unconditionally every step when the flag is on -- so the
+    seed value can never reach the trajectory.
+
+    SHAPE-AGNOSTIC: shapes come from ``state.u``/``state.v``, so this is
+    correct for the full-domain state AND for the SPMD ``v_lower`` carrier
+    (where ``state.v`` already has the n_lat, not n_lat+1, leading dim).
+
+    Idempotent, and a no-op when the flag is off.  Seeds as a PAIR: a partial
+    carry (one Field, one ``None``) would flip None->Field mid-scan on the
+    missing one, so an already-seeded component is preserved and only the
+    missing one is zero-filled.
+    """
+    if not store_mass_flux:
+        return state
+    if state.mass_flux_u is not None and state.mass_flux_v is not None:
+        return state
+    zeros_u, zeros_v = mass_flux_fields(
+        state.u, state.v,
+        jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data))
+    return state._replace(
+        mass_flux_u=(state.mass_flux_u if state.mass_flux_u is not None
+                     else zeros_u),
+        mass_flux_v=(state.mass_flux_v if state.mass_flux_v is not None
+                     else zeros_v),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
@@ -1751,6 +1823,19 @@ class LatLonCGridOceanModel:
             if (_vm is not None and getattr(_vm, "scheme", None) == "tke"
                     and getattr(getattr(_vm, "tke", None), "prognostic", False)):
                 _unsupported.append("prognostic TKE")
+            # store_mass_flux (#1442, codex RED 5): the capture lives in
+            # _step_impl, which _unsplit_ab2_step BYPASSES entirely (it advects
+            # tracers through the advective-form tendency -- there is no shared
+            # mass-flux block to capture).  Silently, the slots would stay None
+            # on step 1 and then hold a STALE value forever once seeded, which a
+            # transport diagnostic would integrate as if it were live.  Reject,
+            # exactly as prescribed_flow is rejected for the same structural
+            # reason (see _validate_config's prescribed_flow guard).
+            if getattr(config, "store_mass_flux", False):
+                _unsupported.append(
+                    "store_mass_flux (the tracer-advecting flux is formed "
+                    "inside the advective-form tendency, not in a shared "
+                    "mass-flux block the step can capture)")
             if _unsupported:
                 raise ValueError(
                     'barotropic_solver="implicit_unsplit" does not yet support: '
@@ -4219,13 +4304,21 @@ class LatLonCGridOceanModel:
         # Static Python bool on a config leaf, so this is a compile-time
         # branch (the CLAUDE.md feature-gating exception): only one side is
         # ever traced and the pytree structure is fixed for the whole run.
+        #
+        # HORIZONTAL ONLY: the bolus-inclusive vertical partner ``w_baro_tr``
+        # is deliberately NOT stored, and ``state.w`` below is built from the
+        # BASE ``w_baro`` -- so under through-FCT GM the stored pair and
+        # ``state.w`` are not a matched advecting triple.  See the
+        # ``mass_flux_u`` field comment in ocean/state.py (codex YELLOW 9).
+        #
+        # Metadata comes from the SHARED ``mass_flux_fields`` constructor that
+        # ``seed_mass_flux_carry`` also uses, so the scan carry's treedef
+        # (Field name/dims/units are pytree AUX data) matches this exactly.
         if self.config.store_mass_flux:
-            state_new = state_new._replace(
-                mass_flux_u=state.u.replace(
-                    data=mass_flux_u_tr, name="mass_flux_u"),
-                mass_flux_v=state.v.replace(
-                    data=mass_flux_v_tr, name="mass_flux_v"),
-            )
+            _mfu_field, _mfv_field = mass_flux_fields(
+                state.u, state.v, mass_flux_u_tr, mass_flux_v_tr)
+            state_new = state_new._replace(mass_flux_u=_mfu_field,
+                                           mass_flux_v=_mfv_field)
 
         # 8. Freshwater forcing (virtual salt flux only)
         #
@@ -7762,6 +7855,15 @@ class LatLonCGridOceanModel:
             state = state._replace(
                 dtke=Field(data=dtke0, name="dtke",
                            dims=("lat", "lon", "level"), units="m^2/s^3"))
+
+        # store_mass_flux carry (#1442): the step turns mass_flux_u/v from
+        # None into Fields, so an unseeded carry is a None -> Field transition
+        # that crashes lax.scan AND retraces a direct jitted step loop.  Seed
+        # to zeros through the SAME constructor the step writes with, so the
+        # treedef (Field name/dims/units are aux data) matches exactly.  The
+        # seed value is unreachable: nothing READS these slots.
+        state = seed_mass_flux_carry(
+            state, getattr(self.config, "store_mass_flux", False))
 
         # Rigid-lid: pre-build the static island/depth data (host-side
         # flood-fill) so the scan captures it as a compile-time constant, and
