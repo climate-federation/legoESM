@@ -27,8 +27,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     SurfaceTileSpec,
@@ -44,6 +42,8 @@ from legoesm.core.land_interface_flux import (
 from legoesm.land.config import LandConfig
 from legoesm.land.surface_scheme.simple_seb import compute_simple_seb_fluxes
 from legoesm.thermo import saturation_mixing_ratio
+
+from legoesm import constants
 
 # Interface geometry shared by both ends (matched by construction below):
 # the AMIP production land roughness/reference height and MOST iteration count.

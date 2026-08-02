@@ -105,7 +105,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.core.bulk_flux import compute_most_fluxes
 
 
