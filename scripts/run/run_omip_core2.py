@@ -5455,25 +5455,50 @@ def main() -> int:
     # The target is ABSOLUTE (--years / --smoke): a resumed leg integrates from
     # the restart step up to n_steps, it does not re-run n_steps more.
     # ------------------------------------------------------------------
-    # RESOLVED-CONFIG fingerprint for the restart (codex r2 HIGH).  Computed
-    # ONCE, HERE, from the setup-time configuration — NOT from model.config at
-    # save time — so a --visc-schedule leg, whose model is deliberately rebuilt
-    # mid-run with a different A_h, still matches its sibling legs.  Covers the
-    # resolved ocean config, the sea-ice config and the forcing archive path.
-    # CAVEAT: repr() of a config holding a large array may elide elements, so
-    # this is a strong-but-not-cryptographic identity; the forcing is pinned by
-    # PATH, not by content hash.
+    # RESOLVED-RUN fingerprint for the restart (codex r2/r3 HIGH).
+    #
+    # EXCLUSION list, not an inclusion list: every CLI setting is hashed unless
+    # it is explicitly a run-control / IO knob that legitimately differs
+    # between chained legs.  That is fail-CLOSED — a new flag added later is
+    # covered automatically, whereas an inclusion list silently omits it.  The
+    # earlier version hashed only repr(model.config) and so missed
+    # --visc-schedule, --forcing-ramp-days, --sss-restore and every other
+    # host-loop forcing knob, all of which change step N+1.
+    #
+    # Computed HERE, at setup, before the --visc-schedule mid-run model
+    # rebuild, so a scheduled leg still matches its siblings.
+    #
+    # LIMITS, stated rather than papered over: values are hashed via repr(),
+    # which ELIDES the interior of a large array (e.g. a runoff-depth map), and
+    # the forcing archive is pinned by RESOLVED PATH, not by a content hash.
+    # So this detects configuration DRIFT, not a deliberately forged archive or
+    # a mutated forcing file at the same path.
+    _RESTART_FP_EXCLUDE = frozenset({
+        # resume plumbing + the absolute target, which grows leg by leg
+        "restart_from", "restart_save", "restart_every_days", "years", "smoke",
+        # pure output / cadence knobs
+        "output", "snapshot_every_days", "diag_every_days",
+    })
     _restart_cfg_fp = None
     if args.restart_save or args.restart_from:
         import hashlib as _hashlib
-        _fp_src = "|".join([
-            repr(model.config),
-            repr(ice_config),
-            str(args.forcing_path or ""),
-            f"nlev={args.nlev}", f"grid={app_grid_type}",
-        ])
+        _fp_items = []
+        for _k in sorted(vars(args)):
+            if _k in _RESTART_FP_EXCLUDE:
+                continue
+            _v = getattr(args, _k)
+            if _k == "forcing_path" and _v:
+                # Normalise so an equivalent relative path or symlink does not
+                # false-abort a legitimate chained leg.
+                _v = str(Path(_v).resolve())
+            _fp_items.append(f"{_k}={_v!r}")
+        # The resolved model + sea-ice configs too: they capture defaults and
+        # preset expansions that never appear as an explicit CLI value.
+        _fp_items.append(f"model_config={model.config!r}")
+        _fp_items.append(f"ice_config={ice_config!r}")
+        _fp_items.append(f"grid_type={app_grid_type}")
         _restart_cfg_fp = _hashlib.sha256(
-            _fp_src.encode("utf-8")).hexdigest()[:32]
+            "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
 
     start_step = 0
     if args.restart_save or args.restart_from:
@@ -5614,7 +5639,14 @@ def main() -> int:
         # Resuming APPENDS to an existing series (a chained leg must not erase
         # the parent leg's record); a fresh run truncates and writes the header.
         _csv_path = out_dir / "diag_timeseries.csv"
-        _csv_append = bool(args.restart_from) and _csv_path.exists()
+        # A header-only or empty file is NOT a parent series: appending to it
+        # and then suppressing the restart row would leave the leg with no
+        # starting point at all (codex r3 LOW).
+        _csv_has_rows = False
+        if _csv_path.exists():
+            with open(_csv_path) as _fh:
+                _csv_has_rows = sum(1 for _ in _fh) > 1
+        _csv_append = bool(args.restart_from) and _csv_has_rows
         _csv_appended = _csv_append
         _csv = open(_csv_path, "a" if _csv_append else "w")
         if not _csv_append:

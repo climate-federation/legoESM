@@ -675,6 +675,14 @@ def save_run_restart(path: str | Path, state, *,
     ice_state : sea-ice state NamedTuple, optional
         Persisted UNMANGLED under ``ice_<field>`` keys — all slots, not the
         land-masked / category-aggregated pair the diagnostic snapshot writes.
+    config_fingerprint : str, optional
+        Digest of the writing run's RESOLVED configuration.  When the loader is
+        given the resuming run's digest, a mismatch is refused: dt / n_rec /
+        x64 alone do not pin the viscosity, EOS, mixing, barotropic, sea-ice or
+        host-loop forcing settings, all of which change step N+1.
+    parent : str, optional
+        Path of the restart this leg was resumed FROM (lineage); empty for a
+        fresh run.
     sha : str, optional
         Source revision, recorded for provenance.
     """
@@ -820,8 +828,17 @@ def load_run_restart(path: str | Path, template_state, *,
     # _idx_t(step, dt, n_rec): a parent at dt=900 resumed at dt=1800 lands on
     # a different record while every other check passes.
     def _require_same(label, saved, current, why):
-        if saved is None or current is None:
-            return
+        if current is None:
+            return                      # caller opted out of this check
+        if saved is None:
+            # The CALLER asked for this check but the archive has no value:
+            # a stripped/older archive must NOT silently bypass it (codex r3).
+            raise ValueError(
+                f"load_run_restart: {in_path} records no {label}, but this run "
+                f"supplied {current!r} to check against.  The archive predates "
+                "the continuation fingerprint or was stripped; refusing to "
+                "resume, because the check that would catch a changed "
+                "configuration cannot run.")
         if saved != current:
             raise ValueError(
                 f"load_run_restart: {in_path} was written with {label}="
@@ -893,54 +910,63 @@ def load_run_restart(path: str | Path, template_state, *,
                 "(e.g. the 3-field slab SeaIceState vs the 12-field "
                 "DynamicSeaIceState); loading one into the other would leave "
                 "the missing fields at their cold-start values.")
-        if inventory:
-            declared = set(_iter_state_fields(template))
-            if set(inventory) != declared:
-                raise ValueError(
-                    f"load_run_restart: {in_path} records {what} slots "
-                    f"{sorted(set(inventory) ^ declared)} that differ from "
-                    f"this build's {cls}; the state layout changed between "
-                    "the writing build and this one.")
-            bad = sorted(f"{n}={lab}" for n, lab in inventory.items()
-                         if lab not in (_INV_PERSISTED, _INV_DIAGNOSTIC,
-                                        _INV_ABSENT))
-            if bad:
-                raise ValueError(
-                    f"load_run_restart: {in_path} has invalid {what} inventory "
-                    f"label(s) {bad}; the archive is corrupt or hand-edited.")
-            # Cross-check BOTH ways: the manifest and the inventory must agree
-            # on exactly which slots were written (codex r2 HIGH).
-            extra = sorted(n for n in kinds
-                           if inventory.get(n) != _INV_PERSISTED)
-            if extra:
-                raise ValueError(
-                    f"load_run_restart: {in_path} carries {what} slot(s) "
-                    f"{extra} in its manifest that the inventory does not "
-                    "label 'persisted'; the two records disagree, so neither "
-                    "can be trusted.")
-            missing = sorted(n for n, lab in inventory.items()
-                             if lab == _INV_PERSISTED and n not in kinds)
-            if missing:
-                raise ValueError(
-                    f"load_run_restart: {in_path} declares {what} slot(s) "
-                    f"{missing} as persisted but the manifest does not carry "
-                    "them.  Refusing to resume with those cold-started.")
-            # LIMITATION, stated plainly: this only fires when the resuming
-            # run PRE-SEEDS the carry before loading.  run_omip_core2 builds a
-            # rest state with every optional slot None and loads before the
-            # first step, so a gate flipped ON between legs is NOT caught here
-            # — closing that needs a resolved-config fingerprint, which is
-            # listed as not-done (a naive config hash false-aborts a
-            # --visc-schedule chain, whose model is rebuilt mid-leg).
-            live = sorted(n for n, lab in inventory.items()
-                          if lab == _INV_ABSENT
-                          and getattr(template, n, None) is not None)
-            if live:
-                raise ValueError(
-                    f"load_run_restart: {what} slot(s) {live} are populated in "
-                    f"this run but were UNSET in {in_path}.  A carry that the "
-                    "parent leg did not have cannot be continued — the gate "
-                    "was turned on between legs, which is a new experiment.")
+        # An EMPTY or non-mapping inventory used to skip every layout check
+        # (codex r3): it is a required key, so anything but a populated mapping
+        # is a corrupt archive.
+        if not isinstance(inventory, dict) or not inventory:
+            raise ValueError(
+                f"load_run_restart: {in_path} has an empty or malformed "
+                f"{what} inventory ({inventory!r}); without it the exact-layout "
+                "checks cannot run and a carry could resume cold-started.")
+        declared = set(_iter_state_fields(template))
+        if set(inventory) != declared:
+            raise ValueError(
+                f"load_run_restart: {in_path} records {what} slots "
+                f"{sorted(set(inventory) ^ declared)} that differ from "
+                f"this build's {cls}; the state layout changed between "
+                "the writing build and this one.")
+        bad = sorted(f"{n}={lab}" for n, lab in inventory.items()
+                     if lab not in (_INV_PERSISTED, _INV_DIAGNOSTIC,
+                                    _INV_ABSENT))
+        if bad:
+            raise ValueError(
+                f"load_run_restart: {in_path} has invalid {what} inventory "
+                f"label(s) {bad}; the archive is corrupt or hand-edited.")
+        # Cross-check BOTH ways: the manifest and the inventory must agree
+        # on exactly which slots were written (codex r2 HIGH).
+        extra = sorted(n for n in kinds
+                       if inventory.get(n) != _INV_PERSISTED)
+        if extra:
+            raise ValueError(
+                f"load_run_restart: {in_path} carries {what} slot(s) "
+                f"{extra} in its manifest that the inventory does not "
+                "label 'persisted'; the two records disagree, so neither "
+                "can be trusted.")
+        missing = sorted(n for n, lab in inventory.items()
+                         if lab == _INV_PERSISTED and n not in kinds)
+        if missing:
+            raise ValueError(
+                f"load_run_restart: {in_path} declares {what} slot(s) "
+                f"{missing} as persisted but the manifest does not carry "
+                "them.  Refusing to resume with those cold-started.")
+        # SCOPE: this only fires when the resuming run PRE-SEEDS the
+        # carry before loading.  run_omip_core2 builds a rest state with
+        # every optional slot None and loads before the first step, so it
+        # is the CONFIG FINGERPRINT — not this check — that catches a gate
+        # flipped ON between legs there (the driver hashes every
+        # non-excluded CLI setting plus the resolved model/ice configs).
+        # What neither catches is a deliberately forged archive whose
+        # inventory and fingerprint were both rewritten coherently; this
+        # format defends against drift and corruption, not forgery.
+        live = sorted(n for n, lab in inventory.items()
+                      if lab == _INV_ABSENT
+                      and getattr(template, n, None) is not None)
+        if live:
+            raise ValueError(
+                f"load_run_restart: {what} slot(s) {live} are populated in "
+                f"this run but were UNSET in {in_path}.  A carry that the "
+                "parent leg did not have cannot be continued — the gate "
+                "was turned on between legs, which is a new experiment.")
         return _rebuild_slots(template, kinds, prefix)
 
     def _rebuild_slots(template, kinds, prefix):

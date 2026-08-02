@@ -569,6 +569,39 @@ def test_parent_lineage_is_recorded(tmp_path):
     assert run_restart_metadata(tmp_path / "fresh.npz")["parent"] == ""
 
 
+def test_a_stripped_fingerprint_cannot_bypass_the_check(tmp_path):
+    """codex r3 HIGH: _require_same silently SKIPPED a missing saved value, so
+    an archive written without a fingerprint bypassed the configuration check
+    that the resuming run explicitly asked for."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    # No config_fingerprint / dt_seconds were written; a caller that supplies
+    # them must NOT be silently let through.
+    with pytest.raises(ValueError, match="records no config_fingerprint"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon",
+                         config_fingerprint="abc")
+    with pytest.raises(ValueError, match="records no dt_seconds"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon",
+                         dt_seconds=900.0)
+    # Opting out (passing nothing) still loads — the checks are caller-driven.
+    load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_empty_inventory_cannot_skip_the_layout_checks(tmp_path):
+    """codex r3 HIGH: `if inventory:` meant an EMPTY or null inventory skipped
+    every exact-layout check instead of failing."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_inventory"] = np.asarray(json.dumps({}))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="empty or malformed"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
 def test_metadata_rejects_a_non_run_restart(tmp_path):
     from legoesm.ocean.restart import save_restart
 
