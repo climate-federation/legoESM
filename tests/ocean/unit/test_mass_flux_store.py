@@ -605,6 +605,12 @@ def test_seed_canonicalizes_legacy_metadata_and_partial_pairs():
 
     Also covers the PARTIAL carry (some slots Field, some ``None``), which was
     the other way to end up with a mixed-provenance pytree.
+
+    BOTH cases are exercised, and the FULLY-POPULATED one is the load-bearing
+    half: an implementation that early-returns when every slot is non-``None``
+    (the natural "already seeded, nothing to do" shortcut) still canonicalizes
+    the partial case, so a partial-only test passes while legacy metadata
+    survives untouched.  That exact shortcut escaped as mutation N6.
     """
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         seed_mass_flux_carry,
@@ -613,28 +619,39 @@ def test_seed_canonicalizes_legacy_metadata_and_partial_pairs():
     _g, _z, model, state = _setup(store=True)
     stepped = model.step(_perturbed(state), _DT)
 
-    # A "legacy" state: right data, WRONG (pre-fix) metadata, and one slot
-    # missing entirely.
-    legacy = stepped._replace(
-        mass_flux_u=stepped.mass_flux_u.replace(units="m/s"),
-        mass_flux_w=None,
-    )
-    assert legacy.mass_flux_u.units == "m/s"
-    fixed = seed_mass_flux_carry(legacy, True)
-    for nm in _NEW_SLOTS:
-        a, b = getattr(fixed, nm), getattr(stepped, nm)
-        assert (a.name, a.dims, a.units, a.staggering) == \
-               (b.name, b.dims, b.units, b.staggering), (
-            f"{nm} kept its legacy metadata; the carry treedef still differs "
-            "from what the step writes")
-    assert (jax.tree_util.tree_structure(fixed)
-            == jax.tree_util.tree_structure(stepped))
-    # DATA is preserved for the slot that had it, zero-filled for the one that
-    # did not -- canonicalizing metadata must not silently discard values.
-    np.testing.assert_array_equal(
-        np.asarray(fixed.mass_flux_u.data),
-        np.asarray(stepped.mass_flux_u.data))
-    assert not np.any(np.asarray(fixed.mass_flux_w.data))
+    legacy_cases = {
+        # Every slot present, all with the pre-fix metadata: the case an
+        # "if all(...) is not None: return state" shortcut would skip.
+        "fully populated": stepped._replace(
+            mass_flux_u=stepped.mass_flux_u.replace(units="m/s"),
+            mass_flux_v=stepped.mass_flux_v.replace(units="m/s"),
+            mass_flux_w=stepped.mass_flux_w.replace(
+                units="m/s", dims=stepped.w.dims)),
+        # Mixed: one legacy Field, one missing slot.
+        "partial": stepped._replace(
+            mass_flux_u=stepped.mass_flux_u.replace(units="m/s"),
+            mass_flux_w=None),
+    }
+    for label, legacy in legacy_cases.items():
+        assert legacy.mass_flux_u.units == "m/s", label
+        fixed = seed_mass_flux_carry(legacy, True)
+        for nm in _NEW_SLOTS:
+            a, b = getattr(fixed, nm), getattr(stepped, nm)
+            assert (a.name, a.dims, a.units, a.staggering) == \
+                   (b.name, b.dims, b.units, b.staggering), (
+                f"[{label}] {nm} kept its legacy metadata; the carry treedef "
+                "still differs from what the step writes")
+        assert (jax.tree_util.tree_structure(fixed)
+                == jax.tree_util.tree_structure(stepped)), label
+        # DATA is preserved wherever it existed -- canonicalizing metadata
+        # must not silently discard values.
+        np.testing.assert_array_equal(
+            np.asarray(fixed.mass_flux_u.data),
+            np.asarray(stepped.mass_flux_u.data), err_msg=label)
+    assert not np.any(
+        np.asarray(seed_mass_flux_carry(
+            legacy_cases["partial"], True).mass_flux_w.data)), (
+        "the missing slot must be zero-filled")
 
 
 def test_seed_rejects_a_wrong_shaped_stored_slot():
@@ -844,11 +861,15 @@ def test_sharded_ocean_step_runs_with_the_flag_on(monkeypatch, fused_halo):
                      f"serial step (fused_halo={fused_halo})"))
 
 
-def test_mpi_band_scatter_slices_both_mass_flux_faces():
+def test_mpi_band_scatter_slices_every_mass_flux_slot():
     """RED 4 (scatter half): a populated global state MUST be sliced.
 
     Omitted, every rank kept the FULL-domain flux while every other field was
     band-local.  Uses two real band layouts; pure slicing, no MPI runtime.
+
+    EVERY slot, not just the pair: an earlier version checked only ``u`` and
+    ``v``, so dropping ``mass_flux_w`` from the scatter went uncaught
+    (mutation N11).
     """
     from legoesm.parallel.latlon_mpi import (
         make_latlon_band_layout, scatter_state_latlon_cgrid_ocean,
@@ -858,12 +879,23 @@ def test_mpi_band_scatter_slices_both_mass_flux_faces():
     out = model.step(_perturbed(state), _DT)
     mfu = np.asarray(out.mass_flux_u.data)
     mfv = np.asarray(out.mass_flux_v.data)
+    mfw = np.asarray(out.mass_flux_w.data)
     n_lat, n_lon = np.asarray(out.T.data).shape[:2]
 
     for rank in (0, 1):
         layout = make_latlon_band_layout(rank, 2, n_lat, n_lon)
         band = scatter_state_latlon_cgrid_ocean(out, layout)
         s, e = layout.lat_start, layout.lat_end
+        for nm in _NEW_SLOTS:
+            assert getattr(band, nm) is not None, (
+                f"{nm} vanished from the scattered band")
+            assert np.asarray(getattr(band, nm).data).shape[0] < n_lat + 1, (
+                f"{nm} kept its FULL-domain leading dim -- it was not sliced")
+        # cell-centred (vertical-only stagger): rows [s, e), like ``w``
+        assert np.asarray(band.mass_flux_w.data).shape[0] == \
+            np.asarray(band.w.data).shape[0]
+        np.testing.assert_allclose(np.asarray(band.mass_flux_w.data),
+                                   mfw[s:e], rtol=0, atol=0)
         # u-face: rows [s, e), exactly like ``u``
         assert np.asarray(band.mass_flux_u.data).shape == \
             np.asarray(band.u.data).shape
@@ -887,17 +919,18 @@ def test_mpi_band_scatter_passes_none_through():
     n_lat, n_lon = np.asarray(out.T.data).shape[:2]
     band = scatter_state_latlon_cgrid_ocean(
         out, make_latlon_band_layout(0, 2, n_lat, n_lon))
-    assert band.mass_flux_u is None and band.mass_flux_v is None
+    for nm in _NEW_SLOTS:
+        assert getattr(band, nm) is None, f"{nm} appeared with the flag off"
 
 
-def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
+def test_mpi_band_gather_collects_every_mass_flux_slot(monkeypatch):
     """RED 4 (gather half): rank 0 must not keep its BAND-LOCAL flux.
 
     ``gather_state_latlon_cgrid_ocean``'s per-field gather needs a live MPI
     communicator, so the collective itself is stubbed: ``gather_field_latlon``
-    is replaced by a recorder.  What is under test is the WIRING -- that both
-    slots go through the gather and that ``mass_flux_v`` is declared a v-face
-    -- which is exactly what was missing.
+    is replaced by a recorder.  What is under test is the WIRING -- that every
+    slot goes through the gather and that ``mass_flux_v`` (and ONLY it) is
+    declared a v-face -- which is exactly what was missing.
 
     IDENTIFYING THE FIELD IS THE WHOLE POINT, and the first version of this
     test got it wrong: it keyed the recorder on the array's LEADING DIM, but
@@ -913,7 +946,8 @@ def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
 
     # Values no other state field can be uniformly equal to (masks are 0/1,
     # eta ~ 0.2 m, T ~ 0-20 C but never CONSTANT, S ~ 35 but not at these).
-    SENTINEL = {"mass_flux_u": -11.5, "mass_flux_v": -13.25}
+    SENTINEL = {"mass_flux_u": -11.5, "mass_flux_v": -13.25,
+                "mass_flux_w": -17.75}
     OUT = 7.0
     calls = []
 
@@ -963,6 +997,10 @@ def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
         "exactly one with is_v_face=True.  Gathered with the CELL convention "
         "its duplicated boundary row is not trimmed, so the assembled global "
         "array gains one row per rank instead of one row total.")
+    assert got.get("mass_flux_w") == [False], (
+        f"mass_flux_w gather calls: {got.get('mass_flux_w')!r}; expected "
+        "exactly one with is_v_face=False (it is cell-centred horizontally; "
+        "its extra dimension is VERTICAL, which the band never splits)")
     assert got.get("mass_flux_u") == [False], (
         f"mass_flux_u gather calls: {got.get('mass_flux_u')!r}; expected "
         "exactly one with is_v_face=False (it is a u-face field, leading dim "
@@ -1190,6 +1228,12 @@ def test_gateway_driver_demands_the_stored_flux_not_auto():
     disabled it.  With ``source="auto"`` the accumulator would quietly
     integrate the ``h*u`` reconstruction instead -- reporting a wrong number
     under a flag that promises the exact flux.  ``"stored"`` makes it raise.
+
+    COMMENTS ARE STRIPPED FIRST, and that is not fussiness: the first version
+    of this test searched the raw call block, which contains a COMMENT
+    explaining why ``source="stored"`` is used -- so it passed with the kwarg
+    mutated to ``"auto"``.  A source test satisfied by its own explanatory
+    prose proves nothing (mutation N3).
     """
     import re
     from pathlib import Path
@@ -1198,9 +1242,14 @@ def test_gateway_driver_demands_the_stored_flux_not_auto():
     src = (root / "scripts/run/run_omip_core2.py").read_text()
     m = re.search(r"_gw_acc = gateway_step\((.*?)\)\n", src, re.S)
     assert m, "the driver's gateway_step call site moved -- update this test"
-    assert 'source="stored"' in m.group(1), (
-        "the driver calls gateway_step without source='stored'; a silently "
-        "disabled store_mass_flux would be masked by the h*u fallback")
+    code = "\n".join(ln.split("#", 1)[0] for ln in m.group(1).splitlines())
+    assert "source=" in code, (
+        "the driver calls gateway_step with no explicit source=; provenance "
+        "must be a choice at the call site, not a default")
+    assert 'source="stored"' in code, (
+        f"the driver calls gateway_step with source != 'stored' (effective "
+        f"arguments: {code.strip()!r}); a silently disabled store_mass_flux "
+        "would then be masked by the h*u fallback")
 
 
 def test_gateway_transports_rejects_a_yaml_that_disables_the_capture():
