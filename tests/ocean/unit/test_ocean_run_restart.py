@@ -661,6 +661,119 @@ def test_underscore_named_payload_cannot_hide_a_carry(tmp_path):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
 
 
+class _KeyAccessSpy:
+    """Wrap an ``NpzFile`` and record every member that is actually READ.
+
+    ``NpzFile.files`` comes from the zip CENTRAL DIRECTORY, so listing names
+    inflates nothing; ``f[key]`` decompresses the member.  Recording
+    ``__getitem__`` is therefore an exact probe of "was the payload
+    materialised", not a proxy for it.
+    """
+
+    def __init__(self, inner, touched):
+        self._inner = inner
+        self._touched = touched
+
+    @property
+    def files(self):
+        return self._inner.files
+
+    def __getitem__(self, key):
+        self._touched.append(key)
+        return self._inner[key]
+
+    def __contains__(self, key):
+        return key in self._inner
+
+    def __enter__(self):
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
+def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
+        tmp_path, monkeypatch):
+    """codex r6 MEDIUM: the single-open fix materialised EVERY payload array
+    before the format / grid / dt / fingerprint / time checks, so a
+    wrong-config resume decompressed the whole state (multi-GB in production)
+    only to reject it on a one-line header mismatch.  The header and the
+    key-name checks now run first, inside the same single open.
+
+    NON-VACUITY is built in: the CONTROL at the end runs a SUCCESSFUL load
+    through the same spy and asserts the payload keys DO appear, so the empty
+    list below cannot come from a probe that never fires.
+    """
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=2, time_days=0.5, grid_type="latlon",
+                     dt_seconds=21600.0, n_forcing_records=8,
+                     config_fingerprint="parent-config")
+
+    touched: list[str] = []
+    real_load = np.load
+
+    def _spy_load(*a, **kw):
+        return _KeyAccessSpy(real_load(*a, **kw), touched)
+
+    monkeypatch.setattr(np, "load", _spy_load)
+
+    # --- REJECTION PATH: not one payload array may be inflated ------------
+    with pytest.raises(ValueError, match="config_fingerprint"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon",
+                         dt_seconds=21600.0, n_forcing_records=8,
+                         config_fingerprint="this-legs-config")
+    early = sorted({k for k in touched if not k.startswith("_")})
+    assert early == [], (
+        f"a mismatched restart decompressed payload array(s) {early} before "
+        "rejecting the header")
+    # It DID read the header (else the assertion above would be trivially
+    # satisfied by a loader that read nothing at all).
+    assert "_config_fingerprint" in touched
+
+    # --- CONTROL: the same spy sees the arrays on the success path --------
+    touched.clear()
+    got, _, _ = load_run_restart(path, _base_state()[2], grid_type="latlon",
+                                 dt_seconds=21600.0, n_forcing_records=8,
+                                 config_fingerprint="parent-config")
+    payload_read = {k for k in touched if not k.startswith("_")}
+    assert {"T", "S", "tke"} <= payload_read, (
+        f"the spy saw only {sorted(payload_read)} on a successful load, so the "
+        "rejection-path assertion proves nothing")
+    _assert_slot_equal("tke", got.tke, state.tke)
+
+
+@pytest.mark.parametrize("key,forged", [
+    ("_step", np.asarray([2])),                 # numeric: .item() accepts (1,)
+    ("_grid_type", np.asarray(["latlon"])),     # string: str() gives "['x']"
+])
+def test_a_size_one_array_cannot_masquerade_as_scalar_metadata(
+        tmp_path, key, forged):
+    """codex r6 LOW: ``ndarray.item()`` accepts ANY size-one array and
+    ``str()`` of one yields ``"['latlon']"``, so a payload array reshaped to
+    ``(1,)`` and renamed to a declared metadata key was read as that header
+    field — while simultaneously escaping the orphan check, which skips the
+    underscore namespace.  Every header field is written as a 0-d scalar, so
+    the parser now demands rank 0."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=2, time_days=0.5, grid_type="latlon",
+                     dt_seconds=21600.0)
+    # CONTROL: the untouched archive loads (so a green test below is the rank
+    # guard firing, not an unrelated rejection).
+    load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    assert payload[key].ndim == 0, "the writer no longer emits a 0-d scalar"
+    payload[key] = forged
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match=r"has shape \(1,\)"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
 def test_writer_metadata_keys_are_all_declared(tmp_path):
     """Drift gate: every '_' key the writer emits must be in
     _RUN_METADATA_KEYS, else the reader would call it an orphan payload.  This

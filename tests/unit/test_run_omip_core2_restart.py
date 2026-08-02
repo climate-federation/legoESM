@@ -21,6 +21,7 @@ with a carry dropped, those tests go red.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -85,6 +86,126 @@ def test_cli_restart_flags_are_documented():
     assert "resumable" in helps["restart_save"].lower()
     assert "resume" in helps["restart_from"].lower()
     assert "cadence" in helps["restart_every_days"].lower()
+
+
+# ============================================================================
+# Source-revision provenance (codex r6 MEDIUM)
+# ============================================================================
+
+def _init_git_repo(root, content="x = 1\n"):
+    """Create a one-commit git repo at ``root``; return a runner for it."""
+    import subprocess
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(root), *a],
+                              capture_output=True, text=True, check=True)
+
+    g("init", "-q")
+    g("config", "user.email", "t@example.invalid")
+    g("config", "user.name", "restart test")
+    g("config", "commit.gpgsign", "false")
+    (root / "src.py").write_text(content)
+    g("add", "src.py")
+    g("commit", "-q", "-m", "init")
+    return g
+
+
+def test_source_revision_scopes_dirty_state_and_explicit_failure(tmp_path):
+    """codex r6 MEDIUM: the old capture was ``git rev-parse HEAD`` with no
+    ``-C``, so it resolved against the CWD — a job launched from ``$HOME`` or
+    from a different worktree recorded ANOTHER repository's HEAD.  It also
+    never detected a dirty working tree (a SHA describes committed content
+    only) and failed SILENTLY to ``None``, which is indistinguishable from
+    "this archive predates the field" — so both sides skipped the comparison
+    and the resume looked checked when nothing had been checked.
+    """
+    from scripts.run.run_omip_core2 import (
+        _SOURCE_REV_UNAVAILABLE, _source_revision,
+    )
+
+    a, b = tmp_path / "repo_a", tmp_path / "repo_b"
+    a.mkdir()
+    b.mkdir()
+    ga = _init_git_repo(a, "x = 1\n")
+    _init_git_repo(b, "x = 2\n")
+    head_a = ga("rev-parse", "HEAD").stdout.strip()
+
+    # SCOPING: each call describes the tree it was POINTED AT, independent of
+    # the process CWD (the two repos have different HEADs by construction).
+    assert _source_revision(a) == head_a
+    assert _source_revision(b) != head_a
+
+    # DIRTY: a modified TRACKED file means the SHA no longer describes the
+    # code being executed.
+    (a / "src.py").write_text("x = 999\n")
+    assert _source_revision(a) == f"{head_a}-dirty"
+
+    # ...but an UNTRACKED file is deliberately NOT dirty (git describe --dirty
+    # semantics).  This repo always carries hundreds of untracked scratch
+    # scripts, so counting them would pin the marker permanently on and make
+    # the warning uninformative.
+    ga("checkout", "--", "src.py")
+    (a / "scratch.sbatch").write_text("#!/bin/bash\n")
+    assert _source_revision(a) == head_a
+
+    # EXPLICIT FAILURE: a path that cannot be resolved records a value, never
+    # None — so the resume can say the check could not RUN.
+    missing = _source_revision(tmp_path / "does_not_exist")
+    assert missing == _SOURCE_REV_UNAVAILABLE
+    assert missing is not None
+
+
+def test_source_revision_of_this_checkout_is_recorded_and_scoped():
+    """The production call takes no argument and must describe THIS driver's
+    checkout — i.e. the tree that supplies ``run_omip_core2.py``."""
+    import subprocess
+
+    from scripts.run import run_omip_core2 as _c2
+
+    here = Path(_c2.__file__).resolve().parent
+    got = _c2._source_revision()
+    probe = subprocess.run(["git", "-C", str(here), "rev-parse", "HEAD"],
+                           capture_output=True, text=True)
+    if probe.returncode != 0:              # not a checkout (e.g. installed)
+        assert got == _c2._SOURCE_REV_UNAVAILABLE
+    else:
+        assert got.startswith(probe.stdout.strip())
+        assert got == probe.stdout.strip() or got.endswith("-dirty")
+
+
+def test_resume_drift_note_distinguishes_unknown_from_a_match():
+    """codex r6 MEDIUM: with the revision stored as ``None`` on failure, "the
+    check could NOT run" was indistinguishable from "the check ran and
+    matched" — both sides were falsy, the comparison was skipped, and the
+    resume looked verified.  The three outcomes must stay distinct.
+
+    Behavioural, not source-inspecting: it calls the function ``main`` calls.
+    """
+    from scripts.run.run_omip_core2 import (
+        _SOURCE_REV_UNAVAILABLE, _source_revision_drift_note as note,
+    )
+
+    sha, other = "a" * 40, "b" * 40
+
+    # Equal + clean: the only case that may be silent.
+    assert note(sha, sha) is None
+
+    # Genuine drift: warns and names BOTH revisions.
+    n = note(other, sha)
+    assert n is not None and other[:20] in n and sha[:20] in n
+
+    # Either side unknown -> must NOT read as "checked and equal".
+    for pair in ((None, sha), ("", sha), (_SOURCE_REV_UNAVAILABLE, sha),
+                 (sha, _SOURCE_REV_UNAVAILABLE),
+                 (_SOURCE_REV_UNAVAILABLE, _SOURCE_REV_UNAVAILABLE)):
+        n = note(*pair)
+        assert n is not None, f"{pair} silently skipped the drift check"
+        assert "SKIPPED" in n, f"{pair} did not say the check could not run"
+
+    # Equal but DIRTY: identical markers do not identify identical code, so
+    # this may not be silent either.
+    n = note(f"{sha}-dirty", f"{sha}-dirty")
+    assert n is not None and "dirty" in n
 
 
 def test_scan_lane_refuses_restarts():

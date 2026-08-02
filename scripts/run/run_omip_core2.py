@@ -2247,6 +2247,94 @@ def _idx_t(step: int, dt: float, n_rec: int) -> int:
     return int(t // _SEC_PER_6H) % n_rec
 
 
+_SOURCE_REV_UNAVAILABLE = "unavailable"
+
+
+def _source_revision(start_dir=None) -> str:
+    """Git revision of the checkout this driver is RUNNING FROM.
+
+    Recorded in every ``--restart-save`` archive and compared on resume, so a
+    scorecard is never attributed to the wrong revision.
+
+    Three things the naive ``git rev-parse HEAD`` got wrong (codex r6 MEDIUM):
+
+    1. **Scope.** A bare ``git rev-parse`` resolves against the CWD, so a job
+       launched from ``$HOME`` or from another worktree recorded a DIFFERENT
+       repository's HEAD.  It is scoped to ``__file__``'s directory here, which
+       is the tree whose code is actually executing (this repo runs pinned
+       worktrees per job precisely because a shared checkout is not
+       reproducible).
+    2. **Dirty state.** A SHA describes committed content only.  Modified
+       tracked files are appended as ``-dirty`` — ``git describe --dirty``
+       semantics, i.e. UNTRACKED files are deliberately not counted: this repo
+       always carries hundreds of untracked scratch scripts, so counting them
+       would pin the marker permanently on and make it uninformative.
+    3. **Silent failure.** ``None`` on error was indistinguishable from "the
+       archive predates this field", and both sides silently skipped the
+       comparison.  A failure is now recorded EXPLICITLY as
+       ``_SOURCE_REV_UNAVAILABLE`` so the resume can say the check could not
+       run rather than implying it passed.
+
+    Returns the revision string; never raises.
+    """
+    import subprocess as _sp
+    here = str(Path(__file__).resolve().parent if start_dir is None
+               else Path(start_dir))
+
+    def _git(*a):
+        # check=False: a non-repo / missing git is an expected outcome here,
+        # not an exception path.
+        return _sp.run(["git", "-C", here, *a], capture_output=True,
+                       text=True, timeout=10, check=False)
+
+    try:
+        rev = _git("rev-parse", "HEAD")
+        if rev.returncode != 0 or not rev.stdout.strip():
+            return _SOURCE_REV_UNAVAILABLE
+        sha = rev.stdout.strip()
+        st = _git("status", "--porcelain", "--untracked-files=no")
+        if st.returncode != 0:
+            # HEAD resolved but the dirty check did not: say so rather than
+            # implying a clean tree.
+            return f"{sha}-dirty-unknown"
+        return f"{sha}-dirty" if st.stdout.strip() else sha
+    except Exception:                       # noqa: BLE001 — provenance only
+        return _SOURCE_REV_UNAVAILABLE
+
+
+def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
+    """Warning text for a resume across a source change, or ``None`` if silent.
+
+    THREE OUTCOMES, KEPT DISTINCT (codex r6 MEDIUM).  The pre-fix code stored
+    ``None`` on failure and skipped the comparison whenever either side was
+    falsy, so "the check could not run" was indistinguishable from "the check
+    ran and matched" — the resume looked verified when nothing had been
+    verified.  A ``-dirty`` marker present on both sides is a third case: it
+    does not identify WHICH uncommitted edits were present, so equality of the
+    markers is not equality of the code.
+
+    Pure function of the two strings so it is directly testable; ``main`` only
+    prints the result.
+    """
+    unknown = {None, "", _SOURCE_REV_UNAVAILABLE}
+    if parent_sha in unknown or this_sha in unknown:
+        return ("[warn] source-revision drift check SKIPPED: parent="
+                f"{parent_sha or 'absent'}, this leg={this_sha}. The archive "
+                "predates the field or the revision could not be resolved — "
+                "this is NOT evidence that the code matches.")
+    if parent_sha != this_sha:
+        return (f"[warn] --restart-from was written at source revision "
+                f"{parent_sha[:20]} but this leg is running {this_sha[:20]}: "
+                "the model code changed between legs.  The state and "
+                "configuration still validated, so the resume proceeds — but "
+                "attribute results to BOTH revisions.")
+    if str(this_sha).endswith(("-dirty", "-dirty-unknown")):
+        return (f"[warn] both legs report {this_sha}: a '-dirty' marker does "
+                "not identify WHICH uncommitted changes were present, so "
+                "matching markers do not prove matching code.")
+    return None
+
+
 def _diag(state, lat2d=None, lon2d=None) -> dict:
     """Cheap scalar diagnostics over ocean cells (one device->host pull).
 
@@ -4002,7 +4090,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "carry, the sea-ice state and the step counter are "
                         "restored, and the loop continues to the ABSOLUTE "
                         "--years target (it does not re-run the completed "
-                        "steps). Grid-type mismatch is a hard error.")
+                        "steps). Grid-type, dt, forcing-record count, x64 and "
+                        "a digest of the RESOLVED configuration must match "
+                        "(hard errors); a source-revision change only WARNS, "
+                        "since chaining across a bug fix is a supported "
+                        "workflow. SCOPE: this is a guarded RECOVERY resume "
+                        "that catches configuration drift, archive corruption "
+                        "and tampering-by-editing — NOT a cryptographically "
+                        "strict or bit-identical continuation (forcing/mesh "
+                        "inputs are pinned by PATH, not by content hash).")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -5521,24 +5617,33 @@ def main() -> int:
         _fp_items.append(f"grid_type={app_grid_type}")
         _restart_cfg_fp = _hashlib.sha256(
             "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
-    # SOURCE REVISION (codex r5 HIGH): a changed model implementation with
-    # identical options otherwise resumes silently.  Recorded always.
+    # SOURCE REVISION (codex r5 HIGH; scoping/dirty/explicit-failure fixed in
+    # r6): a changed model implementation with identical options otherwise
+    # resumes silently.  Recorded always, via _source_revision() — which scopes
+    # the query to THIS script's checkout, marks a dirty tree, and returns
+    # _SOURCE_REV_UNAVAILABLE instead of silently omitting the field.
     # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
     # across a bug fix is a legitimate and expected workflow, and a hard error
     # would make the feature unusable exactly when it matters.  The state
     # itself is still validated by the config fingerprint; this line makes the
     # code drift visible in the log and in the archive so a scorecard is never
-    # attributed to the wrong revision.
+    # attributed to the wrong revision.  It is provenance, NOT a proof of
+    # identical code — see ocean.restart's SCOPE OF THE GUARANTEE.
     _restart_src_sha = None
     if args.restart_save or args.restart_from:
-        import subprocess as _sp
-        try:
-            _r = _sp.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                         text=True, timeout=5)
-            _restart_src_sha = (_r.stdout.strip() if _r.returncode == 0
-                                else None)
-        except Exception:                       # noqa: BLE001 — provenance only
-            _restart_src_sha = None
+        _restart_src_sha = _source_revision()
+        if _restart_src_sha == _SOURCE_REV_UNAVAILABLE:
+            print("[warn] could not determine the source revision of "
+                  f"{Path(__file__).resolve().parent} (not a git checkout, or "
+                  "git unavailable): the restart archive will record "
+                  f"{_SOURCE_REV_UNAVAILABLE!r} and the leg-to-leg code-drift "
+                  "check cannot run.", flush=True)
+        elif _restart_src_sha.endswith(("-dirty", "-dirty-unknown")):
+            print(f"[warn] source revision {_restart_src_sha}: this checkout "
+                  "has uncommitted changes to TRACKED files, so the recorded "
+                  "SHA does NOT describe the code being executed.  Results "
+                  "from this leg are not reproducible from the SHA alone — "
+                  "commit before a production leg.", flush=True)
 
     start_step = 0
     if args.restart_save or args.restart_from:
@@ -5574,15 +5679,13 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec, config_fingerprint=_restart_cfg_fp)
-        _parent_sha = _rs_meta.get("sha")
-        if (_parent_sha and _restart_src_sha
-                and _parent_sha != _restart_src_sha):
-            print(f"[warn] --restart-from was written at source revision "
-                  f"{_parent_sha[:12]} but this leg is running "
-                  f"{_restart_src_sha[:12]}: the model code changed between "
-                  "legs.  The state and configuration still validated, so the "
-                  "resume proceeds — but attribute results to BOTH revisions.",
-                  flush=True)
+        # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
+        # equal-but-dirty), decided by the pure helper so the logic is unit
+        # tested rather than only exercised by a full driver run.
+        _drift_note = _source_revision_drift_note(_rs_meta.get("sha"),
+                                                  _restart_src_sha)
+        if _drift_note:
+            print(_drift_note, flush=True)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target

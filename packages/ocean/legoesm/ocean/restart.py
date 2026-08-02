@@ -2,9 +2,40 @@
 
 Saves the full ocean prognostic state to disk as a numpy ``.npz``
 archive and loads it back into an empty state container of the
-matching grid. Round-trip preserves every prognostic field to
-bit-exact precision (``np.array_equal``) so a model started from a
-restart steps to bit-identical results vs. an uninterrupted run.
+matching grid.
+
+SCOPE OF THE GUARANTEE -- read this before requoting it (codex r6 HIGH)
+=======================================================================
+What the ARCHIVE delivers is exact and tested: every persisted array
+round-trips under ``np.array_equal`` (no dtype coercion, no lossy
+compression), and the RUN pair below additionally persists every
+integrator carry, the unmangled sea-ice state and the ABSOLUTE step
+counter -- and every OMIP forcing index is a pure function of
+``(step, dt, n_records)``, all three of which are recorded and checked.
+
+What this module does NOT deliver is a cryptographically strict or
+bit-identical continuation.  It is a correct, heavily guarded resume
+that detects configuration DRIFT, archive CORRUPTION and
+TAMPERING-BY-EDITING.  It is NOT a proof that the resumed leg reproduces
+an uninterrupted run bit for bit.  Concretely, and by design:
+
+* a SOURCE-REVISION mismatch WARNS and resumes (``run_omip_core2``):
+  chaining a multi-day production run across a bug fix is a legitimate
+  and expected workflow, so the model code may differ between legs;
+* EXTERNAL INPUTS (the CORE-II forcing archive, mesh, WOA, sea-ice IC)
+  are pinned by RESOLVED PATH, not by a content hash -- a file mutated
+  in place at the same path passes every check here;
+* the caller's config fingerprint is a digest of ``repr()``, which
+  ELIDES the interior of a large array-valued setting;
+* the static-geometry check uses ``rtol=1e-9`` -- deliberately, so a
+  host-side mesh rebuild's last-bit jitter cannot false-abort a valid
+  leg -- not exact equality;
+* a COHERENTLY FORGED archive (inventory, manifest and fingerprint all
+  rewritten together) is out of scope: detecting that needs a signature,
+  which this format does not carry;
+* nothing here pins the accelerator, the XLA version or the reduction
+  order, so even a byte-identical state can step to different last bits
+  on different hardware or a different backend.
 
 Currently supports the three production grids:
 
@@ -25,7 +56,7 @@ Usage::
     save_restart(state, "results/ocean/restart_t0.npz",
                  time_s=86400.0 * 30, step=10_000)
     state_loaded = load_restart("results/ocean/restart_t0.npz", state)
-    # state_loaded is bit-identical to state.
+    # every persisted array of state_loaded is np.array_equal to state's.
 
 For RESUMING a driver mid-integration use the run-restart pair instead
 (:func:`save_run_restart` / :func:`load_run_restart`): it persists every
@@ -119,7 +150,10 @@ _KIND_TUPLE = "tuple"
 # same check at driver SETUP so an unclassified new field aborts in seconds
 # rather than at the first mid-run checkpoint.  The point is that a new state
 # field cannot fall into "neither bucket" and be silently dropped — the class of
-# bug that broke bit-exact restart in this repo before.
+# bug that broke the SPECTRAL model's restart in this repo before (#1310, an
+# uncheckpointed mass-fixer anchor).  That is the failure mode this partition
+# closes; it is not a claim that this format yields a bit-identical
+# continuation — see the module docstring's SCOPE OF THE GUARANTEE.
 #
 # PROGNOSTIC: integrator state or a carry the next step reads.  MUST persist.
 # STATIC:     geometry / reference profiles the resuming run rebuilds itself.
@@ -349,8 +383,9 @@ def save_mld_snapshot(state, path: str | Path, *,
                       step: int | None = None) -> Path:
     """Write a compact ocean snapshot for the offline mixed-layer-depth scorers.
 
-    Unlike :func:`save_restart` (every prognostic field, for a bit-exact
-    restart), this writes ONLY what the de Boyer Montegut / Treguier (2023)
+    Unlike :func:`save_restart` (every prognostic field, so the arrays
+    round-trip exactly), this writes ONLY what the de Boyer Montegut /
+    Treguier (2023)
     MLD diagnostic and the OMIP-NEMO comparison consume: ``T``, ``S``,
     ``land_mask`` and ``H_bathy`` from the state, the horizontal grid
     (``lat_T``, ``lon_T`` in DEGREES), and the reference level-centre depths
@@ -808,22 +843,40 @@ def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
             "archive is corrupt or was edited to smuggle a payload array into "
             "the reserved namespace; refusing to resume.")
 
+    # RANK GUARD (codex r6 LOW): every metadata value this writer emits is a
+    # 0-d ``np.asarray(scalar)``.  ``ndarray.item()`` also accepts any SIZE-ONE
+    # array, and ``str()`` of one silently yields ``"['x']"`` — so a payload
+    # array reshaped to (1,) and renamed to a declared metadata key would be
+    # read as that scalar (and simultaneously vanish from the orphan check,
+    # which skips the underscore namespace).  Demanding rank 0 closes it: a
+    # size-one payload can no longer masquerade as a header field.
+    def _scalar(key: str):
+        val = f[key]
+        if val.ndim != 0:
+            raise ValueError(
+                f"{in_path}: metadata key {key!r} has shape {val.shape}, but "
+                "every header field is written as a 0-d scalar.  A size-one "
+                "array here means the archive was edited (a payload array "
+                "renamed into the reserved metadata namespace); refusing to "
+                "resume.")
+        return val
+
     out: dict[str, Any] = {}
     for key in ("_format", "_step", "_time_days", "_grid_type", "_sha",
                 "_dt_seconds", "_n_forcing_records", "_x64",
                 "_state_class", "_ice_class", "_config_fingerprint",
                 "_parent"):
         if key in files:
-            val = f[key]
+            val = _scalar(key)
             out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
                             else val.item())
-    out["inventory"] = json.loads(str(f["_inventory"]))
-    out["ice_inventory"] = json.loads(str(f["_ice_inventory"]))
-    out["slots"] = json.loads(str(f["_slot_kinds"]))
-    out["ice_slots"] = json.loads(str(f["_ice_slot_kinds"]))
+    out["inventory"] = json.loads(str(_scalar("_inventory")))
+    out["ice_inventory"] = json.loads(str(_scalar("_ice_inventory")))
+    out["slots"] = json.loads(str(_scalar("_slot_kinds")))
+    out["ice_slots"] = json.loads(str(_scalar("_ice_slot_kinds")))
     # Slots the writer deliberately did NOT persist (policy DIAGNOSTIC), so a
     # reader can distinguish "absent by design" from "lost".
-    out["excluded"] = json.loads(str(f["_excluded"]))
+    out["excluded"] = json.loads(str(_scalar("_excluded")))
     # A no-ice archive must be consistent across all three ice records
     # (codex r5 LOW): an empty manifest with a populated class, or vice versa,
     # means one of them was edited.
@@ -856,29 +909,34 @@ def run_restart_metadata(path: str | Path) -> dict[str, Any]:
         return _parse_run_metadata(f, in_path)
 
 
-def load_run_restart(path: str | Path, template_state, *,
-                     ice_template=None,
-                     grid_type: str | None = None,
-                     dt_seconds: float | None = None,
-                     n_forcing_records: int | None = None,
-                     config_fingerprint: str | None = None) -> tuple:
-    """Resume from a :func:`save_run_restart` archive.
+# --------------------------------------------------------------------------
+# HEADER-ONLY validation.
+#
+# Split out of ``load_run_restart`` (codex r6 MEDIUM) so every check that can
+# be answered from the archive HEADER or from the payload KEY NAMES runs before
+# a single array is decompressed.  Reading ``NpzFile.files`` costs only the zip
+# central directory; ``f[key]`` inflates the member.  These functions therefore
+# take ``meta`` / key names and NEVER an array.
+# --------------------------------------------------------------------------
 
-    Returns ``(state, ice_state, meta)`` where ``ice_state`` is ``None`` when
-    the archive holds no sea ice, and ``meta`` is
-    :func:`run_restart_metadata`'s dict.
+def _expected_payload_keys(kinds: dict, prefix: str) -> set[str]:
+    """Payload array names a slot manifest implies (tuples expand per element)."""
+    out: set[str] = set()
+    for name, entry in kinds.items():
+        if entry.get("kind") == _KIND_TUPLE:
+            out.update(f"{prefix}{name}{_TUPLE_SEP}{i}"
+                       for i in range(int(entry["n"])))
+        else:
+            out.add(prefix + name)
+    return out
 
-    Every slot recorded in the archive's manifest MUST be restored; a missing
-    array, an unknown kind, a grid-type mismatch, or an ice-state
-    present/absent mismatch is a hard error.  Silence here would mean resuming
-    a 60-day-spun-up ocean under a cold-start carry.
-    """
-    in_path = Path(path)
-    # ONE open for header AND payload (codex r5 HIGH): the writer replaces the
-    # archive atomically at every cadence, so two opens could mix archives.
-    with np.load(in_path, allow_pickle=False) as f:
-        meta = _parse_run_metadata(f, in_path)
-        loaded = {k: f[k] for k in f.files if not k.startswith("_")}
+
+def _validate_run_header(meta: dict, in_path: Path, *,
+                         grid_type: str | None,
+                         dt_seconds: float | None,
+                         n_forcing_records: int | None,
+                         config_fingerprint: str | None) -> None:
+    """Refuse a wrong-format / wrong-grid / wrong-configuration archive."""
     fmt = int(meta.get("format", 0))
     if fmt != _RUN_RESTART_FORMAT:
         raise ValueError(
@@ -947,206 +1005,276 @@ def load_run_restart(path: str | Path, template_state, *,
                 f"time_days={meta['time_days']}; the provenance is "
                 "inconsistent, so neither value can be trusted to resume.")
 
-    # ORPHAN PAYLOAD (codex r4 HIGH): every raw array in the archive must be
-    # referenced by one of the two manifests.  Without this, leaving a `tke`
-    # array in the npz while relabelling the slot `absent` and deleting its
-    # manifest entry passes every inventory/manifest check — and the carry
-    # silently cold-starts.  That is a cheap corruption/tamper case, distinct
-    # from a fully coordinated rewrite (which needs a signature to detect), so
-    # it is worth closing rather than filing under "forgery".
-    def _expected_keys(kinds, prefix):
-        out = set()
-        for name, entry in kinds.items():
-            if entry.get("kind") == _KIND_TUPLE:
-                out.update(f"{prefix}{name}{_TUPLE_SEP}{i}"
-                           for i in range(int(entry["n"])))
-            else:
-                out.add(prefix + name)
-        return out
 
-    _referenced = (_expected_keys(meta["slots"], "")
-                   | _expected_keys(meta["ice_slots"], _ICE_PREFIX))
-    _orphans = sorted(set(loaded) - _referenced)
-    if _orphans:
+def _validate_payload_keys(meta: dict, payload_keys, in_path: Path) -> None:
+    """The manifests and the archive's array NAMES must agree exactly.
+
+    ORPHAN PAYLOAD (codex r4 HIGH): every raw array in the archive must be
+    referenced by one of the two manifests.  Without this, leaving a ``tke``
+    array in the npz while relabelling the slot ``absent`` and deleting its
+    manifest entry passes every inventory/manifest check — and the carry
+    silently cold-starts.  That is a cheap corruption/tamper case, distinct
+    from a fully coordinated rewrite (which needs a signature to detect), so
+    it is worth closing rather than filing under "forgery".
+
+    The MISSING direction (a manifest entry with no array) is checked here too
+    rather than deep inside ``_decode_slot``, so a truncated archive is also
+    refused before the surviving members are decompressed.
+    """
+    referenced = (_expected_payload_keys(meta["slots"], "")
+                  | _expected_payload_keys(meta["ice_slots"], _ICE_PREFIX))
+    present = set(payload_keys)
+    orphans = sorted(present - referenced)
+    if orphans:
         raise ValueError(
-            f"load_run_restart: {in_path} contains array(s) {_orphans} that no "
+            f"load_run_restart: {in_path} contains array(s) {orphans} that no "
             "manifest entry references.  The archive is corrupt or was edited "
             "to hide a carry (relabelling a slot while leaving its data "
             "behind); refusing to resume rather than silently ignore them.")
-
-    def _rebuild(template, kinds, prefix, inventory, saved_class, what):
-        # Diagnostic-persisted check FIRST: it is the most specific diagnosis
-        # of a policy-mismatched archive, and the generic inventory
-        # cross-check below would otherwise mask it with a vaguer message.
-        # An archive that persisted a DIAGNOSTIC slot came from a writer with a
-        # different policy; restoring it resurrects a stale value and can flip
-        # an optional slot None->Field, breaking a scan carry's treedef.  This
-        # is the run_omip asymmetry (write-but-drop) made impossible.
-        diag = sorted(n for n in kinds
-                      if _SLOT_POLICY.get(n) == _SLOT_DIAGNOSTIC)
-        if diag:
-            raise ValueError(
-                f"load_run_restart: {in_path} persists diagnostic slot(s) "
-                f"{diag}, which this build recomputes every step and refuses "
-                "to restore (a stale diagnostic is not a continuation). "
-                "Regenerate the restart with a matching build.")
-        # --- EXACT layout, not a subset (codex r1 HIGH) --------------------
-        # Without this, a manifest that simply OMITS a slot leaves the fresh
-        # template's cold-start value in place and the resume is silently not
-        # a continuation; and a 3-field SeaIceState archive would load into a
-        # 12-field DynamicSeaIceState template with nine fields cold.
-        cls = type(template).__name__
-        if saved_class and saved_class != cls:
-            raise ValueError(
-                f"load_run_restart: {in_path} holds a {saved_class} {what} but "
-                f"this run builds a {cls}.  These are different state layouts "
-                "(e.g. the 3-field slab SeaIceState vs the 12-field "
-                "DynamicSeaIceState); loading one into the other would leave "
-                "the missing fields at their cold-start values.")
-        # An EMPTY or non-mapping inventory used to skip every layout check
-        # (codex r3): it is a required key, so anything but a populated mapping
-        # is a corrupt archive.
-        if not isinstance(inventory, dict) or not inventory:
-            raise ValueError(
-                f"load_run_restart: {in_path} has an empty or malformed "
-                f"{what} inventory ({inventory!r}); without it the exact-layout "
-                "checks cannot run and a carry could resume cold-started.")
-        declared = set(_iter_state_fields(template))
-        if set(inventory) != declared:
-            raise ValueError(
-                f"load_run_restart: {in_path} records {what} slots "
-                f"{sorted(set(inventory) ^ declared)} that differ from "
-                f"this build's {cls}; the state layout changed between "
-                "the writing build and this one.")
-        bad = sorted(f"{n}={lab}" for n, lab in inventory.items()
-                     if lab not in (_INV_PERSISTED, _INV_DIAGNOSTIC,
-                                    _INV_ABSENT))
-        if bad:
-            raise ValueError(
-                f"load_run_restart: {in_path} has invalid {what} inventory "
-                f"label(s) {bad}; the archive is corrupt or hand-edited.")
-        # Cross-check BOTH ways: the manifest and the inventory must agree
-        # on exactly which slots were written (codex r2 HIGH).
-        extra = sorted(n for n in kinds
-                       if inventory.get(n) != _INV_PERSISTED)
-        if extra:
-            raise ValueError(
-                f"load_run_restart: {in_path} carries {what} slot(s) "
-                f"{extra} in its manifest that the inventory does not "
-                "label 'persisted'; the two records disagree, so neither "
-                "can be trusted.")
-        missing = sorted(n for n, lab in inventory.items()
-                         if lab == _INV_PERSISTED and n not in kinds)
-        if missing:
-            raise ValueError(
-                f"load_run_restart: {in_path} declares {what} slot(s) "
-                f"{missing} as persisted but the manifest does not carry "
-                "them.  Refusing to resume with those cold-started.")
-        # SCOPE: this only fires when the resuming run PRE-SEEDS the
-        # carry before loading.  run_omip_core2 builds a rest state with
-        # every optional slot None and loads before the first step, so it
-        # is the CONFIG FINGERPRINT — not this check — that catches a gate
-        # flipped ON between legs there (the driver hashes every
-        # non-excluded CLI setting plus the resolved model/ice configs).
-        # What neither catches is a deliberately forged archive whose
-        # inventory and fingerprint were both rewritten coherently; this
-        # format defends against drift and corruption, not forgery.
-        live = sorted(n for n, lab in inventory.items()
-                      if lab == _INV_ABSENT
-                      and getattr(template, n, None) is not None)
-        if live:
-            raise ValueError(
-                f"load_run_restart: {what} slot(s) {live} are populated in "
-                f"this run but were UNSET in {in_path}.  A carry that the "
-                "parent leg did not have cannot be continued — the gate "
-                "was turned on between legs, which is a new experiment.")
-        return _rebuild_slots(template, kinds, prefix)
-
-    def _rebuild_slots(template, kinds, prefix):
-        known = set(_iter_state_fields(template))
-        unknown = sorted(set(kinds) - known)
-        if unknown:
-            raise ValueError(
-                f"load_run_restart: {in_path} carries slot(s) {unknown} that "
-                f"{type(template).__name__} does not define — the restart was "
-                "written by a build with a different state layout.  Refusing "
-                "to resume with those carries dropped.")
-        replace_kw = {
-            name: _decode_slot(prefix + name, entry, loaded, in_path)
-            for name, entry in kinds.items()
-        }
-        out = template._replace(**replace_kw)
-        # Mechanical non-drop check: every recorded slot is non-None on the
-        # rebuilt state.  Cheap, and it turns any future decode regression
-        # into a loud failure instead of a cold-started carry.
-        dropped = sorted(n for n in kinds if getattr(out, n) is None)
-        if dropped:
-            raise ValueError(
-                f"load_run_restart: slot(s) {dropped} were recorded in "
-                f"{in_path} but are None after the rebuild (decode bug).")
-        # Shape guard: a slot the template ALREADY populates has a known shape
-        # (all prognostics; all 12 sea-ice fields).  A mismatch means the
-        # resuming run was built at a different resolution / vertical levels /
-        # ITD category count — the _replace would succeed and the model would
-        # crash (or, worse, broadcast) many lines later.
-        for name in kinds:
-            ref, new = getattr(template, name), getattr(out, name)
-            ref_d = ref.data if isinstance(ref, Field) else ref
-            new_d = new.data if isinstance(new, Field) else new
-            if not (hasattr(ref_d, "shape") and hasattr(new_d, "shape")):
-                continue
-            if tuple(ref_d.shape) != tuple(new_d.shape):
-                raise ValueError(
-                    f"load_run_restart: slot {name!r} in {in_path} has shape "
-                    f"{tuple(new_d.shape)} but this run's "
-                    f"{type(template).__name__} expects {tuple(ref_d.shape)}. "
-                    "The resume was built at a different resolution / level "
-                    "count / sea-ice category count than the leg that wrote "
-                    "the restart.")
-        # Static-geometry guard (see _STATIC_GEOMETRY_SLOTS): the resuming run
-        # must have rebuilt the SAME mesh/bathymetry, else the archive's masks
-        # would run against a different grid's metrics.
-        for name in _STATIC_GEOMETRY_SLOTS:
-            ref = getattr(template, name, None)
-            new = getattr(out, name, None)
-            if not (isinstance(ref, Field) and isinstance(new, Field)):
-                continue
-            # Relative tolerance, not exact equality: the mesh/bathymetry build
-            # is host-side numpy and can differ in the last bit between nodes,
-            # which must NOT abort a legitimate chained leg.  Any REAL change
-            # (a different --min-levels, smoothing pass count or mask) moves
-            # values by many orders of magnitude more than this, and a 0-vs-1
-            # mask flip is caught because atol is 0.
-            if (ref.data.shape != new.data.shape
-                    or not bool(jnp.allclose(ref.data, new.data,
-                                             rtol=1.0e-9, atol=0.0))):
-                raise ValueError(
-                    f"load_run_restart: static geometry slot {name!r} in "
-                    f"{in_path} differs from the geometry this run built "
-                    "(shape or values).  The resume is NOT a continuation — "
-                    "rebuild with the same mesh / bathymetry / masking "
-                    "arguments as the leg that wrote the restart.")
-        return out
-
-    state = _rebuild(template_state, meta["slots"], "",
-                     meta.get("inventory"), meta.get("state_class"), "ocean")
-
-    ice_kinds = meta["ice_slots"]
-    if ice_kinds and ice_template is None:
+    absent = sorted(referenced - present)
+    if absent:
         raise ValueError(
-            f"load_run_restart: {in_path} holds a sea-ice state "
-            f"({len(ice_kinds)} slots) but no ice_template was supplied — "
-            "resume the run with prognostic sea ice enabled, or the pack "
-            "would silently restart from the cold-start seed.")
-    if ice_template is not None and not ice_kinds:
+            f"load_run_restart: {in_path} is missing array(s) {absent} that "
+            "its manifest declares; the archive is truncated.  Refusing to "
+            "resume with those carries cold-started.")
+
+
+def _validate_run_layout(template, kinds: dict, inventory, saved_class,
+                         what: str, in_path: Path) -> None:
+    """Manifest/inventory/state-class layout checks (no payload array read)."""
+    # Diagnostic-persisted check FIRST: it is the most specific diagnosis
+    # of a policy-mismatched archive, and the generic inventory
+    # cross-check below would otherwise mask it with a vaguer message.
+    # An archive that persisted a DIAGNOSTIC slot came from a writer with a
+    # different policy; restoring it resurrects a stale value and can flip
+    # an optional slot None->Field, breaking a scan carry's treedef.  This
+    # is the run_omip asymmetry (write-but-drop) made impossible.
+    diag = sorted(n for n in kinds
+                  if _SLOT_POLICY.get(n) == _SLOT_DIAGNOSTIC)
+    if diag:
         raise ValueError(
-            f"load_run_restart: prognostic sea ice is enabled for this run but "
-            f"{in_path} holds no ice state; the pack would cold-start at the "
-            "seed temperature/salinity and dump a large spurious surface flux "
-            "on step 1.  Re-run the parent leg with sea ice, or start fresh.")
-    ice_state = (_rebuild(ice_template, ice_kinds, _ICE_PREFIX,
-                          meta.get("ice_inventory"), meta.get("ice_class"),
-                          "sea-ice")
+            f"load_run_restart: {in_path} persists diagnostic slot(s) "
+            f"{diag}, which this build recomputes every step and refuses "
+            "to restore (a stale diagnostic is not a continuation). "
+            "Regenerate the restart with a matching build.")
+    # --- EXACT layout, not a subset (codex r1 HIGH) --------------------
+    # Without this, a manifest that simply OMITS a slot leaves the fresh
+    # template's cold-start value in place and the resume is silently not
+    # a continuation; and a 3-field SeaIceState archive would load into a
+    # 12-field DynamicSeaIceState template with nine fields cold.
+    cls = type(template).__name__
+    if saved_class and saved_class != cls:
+        raise ValueError(
+            f"load_run_restart: {in_path} holds a {saved_class} {what} but "
+            f"this run builds a {cls}.  These are different state layouts "
+            "(e.g. the 3-field slab SeaIceState vs the 12-field "
+            "DynamicSeaIceState); loading one into the other would leave "
+            "the missing fields at their cold-start values.")
+    # An EMPTY or non-mapping inventory used to skip every layout check
+    # (codex r3): it is a required key, so anything but a populated mapping
+    # is a corrupt archive.
+    if not isinstance(inventory, dict) or not inventory:
+        raise ValueError(
+            f"load_run_restart: {in_path} has an empty or malformed "
+            f"{what} inventory ({inventory!r}); without it the exact-layout "
+            "checks cannot run and a carry could resume cold-started.")
+    declared = set(_iter_state_fields(template))
+    if set(inventory) != declared:
+        raise ValueError(
+            f"load_run_restart: {in_path} records {what} slots "
+            f"{sorted(set(inventory) ^ declared)} that differ from "
+            f"this build's {cls}; the state layout changed between "
+            "the writing build and this one.")
+    bad = sorted(f"{n}={lab}" for n, lab in inventory.items()
+                 if lab not in (_INV_PERSISTED, _INV_DIAGNOSTIC,
+                                _INV_ABSENT))
+    if bad:
+        raise ValueError(
+            f"load_run_restart: {in_path} has invalid {what} inventory "
+            f"label(s) {bad}; the archive is corrupt or hand-edited.")
+    # Cross-check BOTH ways: the manifest and the inventory must agree
+    # on exactly which slots were written (codex r2 HIGH).
+    extra = sorted(n for n in kinds
+                   if inventory.get(n) != _INV_PERSISTED)
+    if extra:
+        raise ValueError(
+            f"load_run_restart: {in_path} carries {what} slot(s) "
+            f"{extra} in its manifest that the inventory does not "
+            "label 'persisted'; the two records disagree, so neither "
+            "can be trusted.")
+    missing = sorted(n for n, lab in inventory.items()
+                     if lab == _INV_PERSISTED and n not in kinds)
+    if missing:
+        raise ValueError(
+            f"load_run_restart: {in_path} declares {what} slot(s) "
+            f"{missing} as persisted but the manifest does not carry "
+            "them.  Refusing to resume with those cold-started.")
+    # SCOPE: this only fires when the resuming run PRE-SEEDS the
+    # carry before loading.  run_omip_core2 builds a rest state with
+    # every optional slot None and loads before the first step, so it
+    # is the CONFIG FINGERPRINT — not this check — that catches a gate
+    # flipped ON between legs there (the driver hashes every
+    # non-excluded CLI setting plus the resolved model/ice configs).
+    # What neither catches is a deliberately forged archive whose
+    # inventory and fingerprint were both rewritten coherently; this
+    # format defends against drift and corruption, not forgery.
+    live = sorted(n for n, lab in inventory.items()
+                  if lab == _INV_ABSENT
+                  and getattr(template, n, None) is not None)
+    if live:
+        raise ValueError(
+            f"load_run_restart: {what} slot(s) {live} are populated in "
+            f"this run but were UNSET in {in_path}.  A carry that the "
+            "parent leg did not have cannot be continued — the gate "
+            "was turned on between legs, which is a new experiment.")
+
+
+def _rebuild_slots(template, kinds: dict, prefix: str, loaded: dict,
+                   in_path: Path):
+    """Decode the payload into ``template`` and check shapes / geometry.
+
+    The ONLY stage that touches a payload array; everything that can reject an
+    archive from its header runs before this (see :func:`_validate_run_header`
+    / :func:`_validate_run_layout`).
+    """
+    known = set(_iter_state_fields(template))
+    unknown = sorted(set(kinds) - known)
+    if unknown:
+        raise ValueError(
+            f"load_run_restart: {in_path} carries slot(s) {unknown} that "
+            f"{type(template).__name__} does not define — the restart was "
+            "written by a build with a different state layout.  Refusing "
+            "to resume with those carries dropped.")
+    replace_kw = {
+        name: _decode_slot(prefix + name, entry, loaded, in_path)
+        for name, entry in kinds.items()
+    }
+    out = template._replace(**replace_kw)
+    # Mechanical non-drop check: every recorded slot is non-None on the
+    # rebuilt state.  Cheap, and it turns any future decode regression
+    # into a loud failure instead of a cold-started carry.
+    dropped = sorted(n for n in kinds if getattr(out, n) is None)
+    if dropped:
+        raise ValueError(
+            f"load_run_restart: slot(s) {dropped} were recorded in "
+            f"{in_path} but are None after the rebuild (decode bug).")
+    # Shape guard: a slot the template ALREADY populates has a known shape
+    # (all prognostics; all 12 sea-ice fields).  A mismatch means the
+    # resuming run was built at a different resolution / vertical levels /
+    # ITD category count — the _replace would succeed and the model would
+    # crash (or, worse, broadcast) many lines later.
+    for name in kinds:
+        ref, new = getattr(template, name), getattr(out, name)
+        ref_d = ref.data if isinstance(ref, Field) else ref
+        new_d = new.data if isinstance(new, Field) else new
+        if not (hasattr(ref_d, "shape") and hasattr(new_d, "shape")):
+            continue
+        if tuple(ref_d.shape) != tuple(new_d.shape):
+            raise ValueError(
+                f"load_run_restart: slot {name!r} in {in_path} has shape "
+                f"{tuple(new_d.shape)} but this run's "
+                f"{type(template).__name__} expects {tuple(ref_d.shape)}. "
+                "The resume was built at a different resolution / level "
+                "count / sea-ice category count than the leg that wrote "
+                "the restart.")
+    # Static-geometry guard (see _STATIC_GEOMETRY_SLOTS): the resuming run
+    # must have rebuilt the SAME mesh/bathymetry, else the archive's masks
+    # would run against a different grid's metrics.
+    for name in _STATIC_GEOMETRY_SLOTS:
+        ref = getattr(template, name, None)
+        new = getattr(out, name, None)
+        if not (isinstance(ref, Field) and isinstance(new, Field)):
+            continue
+        # Relative tolerance, not exact equality: the mesh/bathymetry build
+        # is host-side numpy and can differ in the last bit between nodes,
+        # which must NOT abort a legitimate chained leg.  Any REAL change
+        # (a different --min-levels, smoothing pass count or mask) moves
+        # values by many orders of magnitude more than this, and a 0-vs-1
+        # mask flip is caught because atol is 0.
+        if (ref.data.shape != new.data.shape
+                or not bool(jnp.allclose(ref.data, new.data,
+                                         rtol=1.0e-9, atol=0.0))):
+            raise ValueError(
+                f"load_run_restart: static geometry slot {name!r} in "
+                f"{in_path} differs from the geometry this run built "
+                "(shape or values).  The resume is NOT a continuation — "
+                "rebuild with the same mesh / bathymetry / masking "
+                "arguments as the leg that wrote the restart.")
+    return out
+
+
+def load_run_restart(path: str | Path, template_state, *,
+                     ice_template=None,
+                     grid_type: str | None = None,
+                     dt_seconds: float | None = None,
+                     n_forcing_records: int | None = None,
+                     config_fingerprint: str | None = None) -> tuple:
+    """Resume from a :func:`save_run_restart` archive.
+
+    Returns ``(state, ice_state, meta)`` where ``ice_state`` is ``None`` when
+    the archive holds no sea ice, and ``meta`` is
+    :func:`run_restart_metadata`'s dict.
+
+    Every slot recorded in the archive's manifest MUST be restored; a missing
+    array, an unknown kind, a grid-type mismatch, or an ice-state
+    present/absent mismatch is a hard error.  Silence here would mean resuming
+    a 60-day-spun-up ocean under a cold-start carry.
+
+    These guards detect configuration DRIFT, archive CORRUPTION and
+    TAMPERING-BY-EDITING.  They do NOT certify a bit-identical continuation —
+    see the module docstring's SCOPE OF THE GUARANTEE before quoting them as
+    one.
+    """
+    in_path = Path(path)
+    # ONE open for header AND payload (codex r5 HIGH): the writer replaces the
+    # archive atomically at every cadence, so two opens could mix archives —
+    # state from archive B under archive A's step and fingerprint.
+    #
+    # FAIL-FAST ORDERING WITHIN that one open (codex r6 MEDIUM).  ``NpzFile``
+    # decompresses on ACCESS (``f[k]``), so materialising the payload dict up
+    # front inflated the entire multi-GB state off disk only to reject it on a
+    # one-line header mismatch.  Everything that needs the HEADER alone, and
+    # everything that needs only the payload KEY NAMES (``f.files`` is read
+    # from the zip directory, not the members), now runs FIRST; the arrays are
+    # touched on the last line of the block.  The single open is preserved.
+    with np.load(in_path, allow_pickle=False) as f:
+        meta = _parse_run_metadata(f, in_path)
+        payload_keys = [k for k in f.files if not k.startswith("_")]
+        _validate_run_header(
+            meta, in_path, grid_type=grid_type, dt_seconds=dt_seconds,
+            n_forcing_records=n_forcing_records,
+            config_fingerprint=config_fingerprint)
+        _validate_payload_keys(meta, payload_keys, in_path)
+        _validate_run_layout(template_state, meta["slots"],
+                             meta.get("inventory"), meta.get("state_class"),
+                             "ocean", in_path)
+        ice_kinds = meta["ice_slots"]
+        if ice_kinds and ice_template is None:
+            raise ValueError(
+                f"load_run_restart: {in_path} holds a sea-ice state "
+                f"({len(ice_kinds)} slots) but no ice_template was supplied — "
+                "resume the run with prognostic sea ice enabled, or the pack "
+                "would silently restart from the cold-start seed.")
+        if ice_template is not None and not ice_kinds:
+            raise ValueError(
+                f"load_run_restart: prognostic sea ice is enabled for this run "
+                f"but {in_path} holds no ice state; the pack would cold-start "
+                "at the seed temperature/salinity and dump a large spurious "
+                "surface flux on step 1.  Re-run the parent leg with sea ice, "
+                "or start fresh.")
+        if ice_kinds:
+            _validate_run_layout(ice_template, ice_kinds,
+                                 meta.get("ice_inventory"),
+                                 meta.get("ice_class"), "sea-ice", in_path)
+        # LAST LINE OF THE BLOCK: every check above is header / key-name only,
+        # so a wrong-config or corrupt archive is rejected without paying for
+        # the decompression.
+        loaded = {k: f[k] for k in payload_keys}
+
+    # Payload-dependent reconstruction (decode + shape + static geometry).
+    state = _rebuild_slots(template_state, meta["slots"], "", loaded, in_path)
+    ice_state = (_rebuild_slots(ice_template, ice_kinds, _ICE_PREFIX, loaded,
+                                in_path)
                  if ice_kinds else None)
     return state, ice_state, meta
 
