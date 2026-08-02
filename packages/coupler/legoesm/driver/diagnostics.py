@@ -730,9 +730,9 @@ class DiagnosticCollector:
         p_s_col = jnp.reshape(p_s, (ncol,))
         p_full = jnp.asarray(self._p_full(p_s_col))
         dp = jnp.asarray(self._dp(p_s_col))
-        # Cloud fraction takes CLOUD ice q_i only (matching the radiation
-        # call, physics_pipeline ``q_ice=q_i_col``) -- NOT the precipitating
-        # q_i+q_s+q_g used for the clivi ice PATH, which would over-count
+        # Cloud fraction takes CLOUD ice q_i only, matching the radiation
+        # call (physics_pipeline ``q_ice=q_i_col``) and now also the clivi ice
+        # path.  Including the precipitating q_s/q_g would over-count
         # condensate for the condensate-dependent schemes
         # (xu_randall/resolved).
         q_ice_col = None if q_i is None else jnp.reshape(q_i, (ncol, nlev))
@@ -1092,11 +1092,11 @@ class DiagnosticCollector:
 
             # Cloud-ice path (clivi), condensed-water path (clwvi) and total
             # cloud cover (clt).  CMIP convention: clivi = column-integrated
-            # FROZEN condensate (cloud ice + snow + graupel); clwvi = TOTAL
-            # condensed water (liquid + frozen).  Morrison carries prognostic
-            # q_i/q_s/q_g, so sum the frozen species into the ice path and add
-            # them to the condensate path — earlier code hardcoded clivi=0
-            # (a warm-rain-era placeholder) which threw away all model ice.
+            # frozen condensate that is RADIATIVELY ACTIVE (here cloud ice
+            # only — see the q_frozen block below); clwvi = that plus the
+            # liquid path.  Earlier code hardcoded clivi=0 (a warm-rain-era
+            # placeholder) which threw away all model ice; the fix then
+            # over-corrected by summing q_i+q_s+q_g.
             # clt is a random-overlap approximation of a soft layer cloud
             # fraction (sigmoid on total condensate) — useful for spatial
             # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
@@ -1105,12 +1105,33 @@ class DiagnosticCollector:
                     column_water_vapor(q_c, state.p_s.data, self.dsigma,
                                        dp=self._dp(state.p_s.data))
                 )
-                # Frozen condensate path: sum whichever ice species are present
-                # (None for warm-rain microphysics → contributes nothing).
-                q_frozen = None
-                for q_frz in (q_i, q_s, q_g):
-                    if q_frz is not None:
-                        q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
+                # Frozen condensate path: CLOUD ICE ONLY.
+                #
+                # CMIP6 defines ``clivi`` as the column ice mass, "including
+                # precipitating frozen hydrometeors ONLY IF the precipitating
+                # hydrometeor affects the calculation of radiative transfer in
+                # model".  Radiation here takes cloud ice alone --
+                # ``radiation/integration.py`` reads ``tracers["q_i"]`` (:411)
+                # / tracer slot 3 (:1436) and never receives snow (slot 4) or
+                # graupel (slot 5) -- so snow and graupel are radiatively INERT
+                # and must NOT be reported.
+                #
+                # They previously were, and it is not a small correction:
+                # snow+graupel were roughly half the published clivi on
+                # lat-lon and ~70% on MPAS in this campaign's checkpoints.
+                # (Sizes are indicative only -- observational IWP products
+                # differ in whether they include precipitating ice, so this
+                # does NOT by itself establish the sign of a model bias.)
+                #
+                # If precipitating ice is ever made radiatively active, CMIP6
+                # requires it here -- but NOT by re-summing ``q_s``/``q_g``.
+                # That sum is not even dimensionally valid across schemes: P3
+                # aliases the slot-4/5 tracers to rime MASS and rime VOLUME
+                # (``microphysics/p3.py``), so adding them to a mass mixing
+                # ratio is wrong.  Any future treatment must be SCHEME-AWARE
+                # and carry its own PSD/effective radius, exactly as the
+                # optics would need.
+                q_frozen = q_i
                 if q_frozen is not None:
                     iwp_field = np.asarray(
                         column_water_vapor(q_frozen, state.p_s.data, self.dsigma,
