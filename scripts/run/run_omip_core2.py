@@ -5911,13 +5911,16 @@ def main() -> int:
         block_fn = build_omip2_scan_block_fn(model, dt, gshape, ramp_s=ramp_s)
         bsz = int(args.scan_block)
         print(f"[run] lax.scan block-stepping: block<={bsz} steps, split at "
-              f"diag/snapshot/year boundaries so output cadence matches the "
-              f"Python loop (CORE-II forcing fused on-device)", flush=True)
+              f"diag/snapshot/restart/year boundaries so output cadence matches "
+              f"the Python loop (CORE-II forcing fused on-device)", flush=True)
 
         def _block_steps(step):
             # Cap the block so it ENDS on the next diagnostic / snapshot /
-            # year boundary -> the modulo-gated I/O below fires at exactly
-            # the same cadence as the Python loop (codex #354 finding 2).
+            # restart / year boundary -> the modulo-gated I/O below fires at
+            # exactly the same cadence as the Python loop (codex #354 finding
+            # 2).  restart_every MUST be in this list: otherwise a block can
+            # step straight over the restart cadence and `step % restart_every`
+            # never hits 0, silently producing no mid-run checkpoint.
             nb = min(bsz, n_steps - step)
             for period in (diag_every, snap_every, restart_every,
                            steps_per_year):
