@@ -149,6 +149,36 @@ def test_persistence_policy_covers_every_supported_state_class():
             "policy.  Classify each in legoesm.ocean.restart._SLOT_POLICY.")
 
 
+def test_the_partition_enumerates_fields_rather_than_listing_names():
+    """The guard must be keyed off something that ENUMERATES the state's
+    declared fields, so a slot added in future trips it automatically.
+
+    A hand-maintained list of the names known today is the stale-key failure
+    mode: it passes on the day it is written and silently stops covering
+    anything added afterwards.  ``classify_restart_slots`` iterates
+    ``_iter_state_fields(state)`` — proven here by handing it a state class it
+    has never seen, whose EXTRA field it must still notice.
+    """
+    from legoesm.ocean.restart import (
+        _SLOT_DIAGNOSTIC, _SLOT_POLICY, classify_restart_slots,
+    )
+
+    class _FutureState(NamedTuple):
+        T: object = None
+        a_slot_invented_after_this_test_was_written: object = None
+
+    with pytest.raises(KeyError,
+                       match="a_slot_invented_after_this_test_was_written"):
+        classify_restart_slots(
+            _FutureState(T=Field(data=jnp.zeros((2, 2)), name="T")))
+    # ...and the three #1442 mass-flux slots are pre-registered as DIAGNOSTIC,
+    # including the VERTICAL partner, so that PR lands without tripping it.
+    for name in ("mass_flux_u", "mass_flux_v", "mass_flux_w"):
+        assert _SLOT_POLICY[name] == _SLOT_DIAGNOSTIC, (
+            f"{name} must be excluded from the restart contract by policy, not "
+            "by omission")
+
+
 def test_unclassified_slot_raises_at_save_and_at_validate():
     """A slot outside the policy fails LOUD — at setup via
     validate_restart_policy, and again at save."""
@@ -769,7 +799,11 @@ def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
     # edited to match, every other check passed and the driver's int() then
     # truncated it — state at one step, forcing index at another.
     ("_step", np.asarray(2.5), "counts whole steps"),
-    ("_format", np.asarray("2"), "dtype"),        # string where an int is due
+    # String where an int is due.  The expected message is the DTYPE-KIND one
+    # specifically: matching a bare "dtype" passed for the wrong reason once
+    # the format-version error (which also contains the word) started firing
+    # first under mutation — caught by mutation M10, which had gone green.
+    ("_format", np.asarray("2"), "written with a dtype of kind"),
     ("_time_days", np.asarray(float("nan")), "not finite"),
     ("_dt_seconds", np.asarray(0.0), "non-positive timestep"),
 ])

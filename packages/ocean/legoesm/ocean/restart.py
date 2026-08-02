@@ -286,13 +286,18 @@ _SLOT_POLICY: dict[str, str] = {
     # rewritten unconditionally every step from the flux divergence.  MPAS
     # declares the same ("Diagnostic field computed from flux divergence").
     "w": _SLOT_DIAGNOSTIC,
-    # ``mass_flux_u``/``mass_flux_v`` (#1442, opt-in ``store_mass_flux``): the
-    # h*u the step used for tracer advection, captured for the transport
-    # diagnostic and recomputed from the prognostic state on the next step.
-    # Pre-registered here so that change lands without tripping this gate, and
-    # so it cannot repeat the run_omip asymmetry (written on save, silently
-    # dropped on load because the fresh template slot is None).
+    # ``mass_flux_u``/``mass_flux_v``/``mass_flux_w`` (#1442, opt-in
+    # ``store_mass_flux``): the h*u / h*v / w the step used for tracer
+    # advection, captured for the transport diagnostic and recomputed from the
+    # prognostic state on the next step.  The VERTICAL partner ``mass_flux_w``
+    # is what makes the exported flux a coherent 3-D tracer transport rather
+    # than horizontal-only; it is diagnostic for exactly the same reason as the
+    # other two.  All three are pre-registered here so #1440/#1442 lands
+    # without tripping the unclassified-slot gate, and so none of them can
+    # repeat the run_omip asymmetry (written on save, silently dropped on load
+    # because the fresh template slot is None).
     "mass_flux_u": _SLOT_DIAGNOSTIC, "mass_flux_v": _SLOT_DIAGNOSTIC,
+    "mass_flux_w": _SLOT_DIAGNOSTIC,
 }
 
 # Derived from the policy so the two can never drift apart.
