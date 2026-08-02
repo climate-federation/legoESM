@@ -24,6 +24,12 @@ from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     validate_bulk_scheme,
 )
+from legoesm.core.land_interface_flux import (
+    LAND_INTERFACE_FLUX,
+    LandInterfaceFluxConfig,
+    apply_condensation_floor,
+    land_interface_most_fluxes,
+)
 
 
 __physics_contract__ = {
@@ -267,6 +273,7 @@ def _single_tile_flux(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    land_interface: LandInterfaceFluxConfig | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Single-tile surface flux with correct fixed-roughness MOST routing.
 
@@ -277,11 +284,18 @@ def _single_tile_flux(
     ``large_yeager``) and silently treats ``"most"`` as constant, which
     would ignore the land roughness ``z0``.  Reuses the same core bulk
     routines (no re-derived flux numerics).
+
+    ``land_interface`` (static, ``None`` for the ocean/ice tiles) marks this
+    tile as the LAND side of the land<->atmosphere interface: the flux is then
+    computed through
+    :func:`legoesm.core.land_interface_flux.land_interface_most_fluxes`, the
+    SAME entry point the land surface-energy balance uses, so the transfer-
+    coefficient ceiling and the condensation floor are identical at both ends.
+    ``None`` is byte-identical to the pre-interface behaviour.
     """
     validate_bulk_scheme(config.bulk_scheme)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        return compute_most_fluxes(
-            u, v, T, q_v, T_sfc, q_sfc, rho,
+        _most_kwargs = dict(
             z_ref=config.z_ref,
             z0_init=config.z0,
             scheme=config.bulk_scheme,
@@ -293,6 +307,12 @@ def _single_tile_flux(
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
         )
+        if land_interface is not None:
+            return land_interface_most_fluxes(
+                u, v, T, q_v, T_sfc, q_sfc, rho,
+                config=land_interface, **_most_kwargs,
+            )
+        return compute_most_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, **_most_kwargs)
 
     # Constant neutral coefficients.
     wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)  # coeff-ok: wind-speed floor [m^2/s^2]
@@ -301,6 +321,11 @@ def _single_tile_flux(
         u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed,
         config.Cd_neutral, config.Ch_neutral,
     )
+    if land_interface is not None:
+        # Sign convention: lhflx POSITIVE UPWARD, so the (negative)
+        # condensing branch is the one the floor bounds — matching the land
+        # SEB's constant-coefficient branch, which applies the same floor.
+        lhflx = apply_condensation_floor(lhflx, land_interface)
     return tau_x, tau_y, shflx, lhflx, ustar
 
 
@@ -314,6 +339,7 @@ def compute_tiled_surface_fluxes(
     config_ocean: SurfaceLayerConfig,
     config_ice: SurfaceLayerConfig,
     config_land: SurfaceLayerConfig,
+    land_interface: LandInterfaceFluxConfig | None = LAND_INTERFACE_FLUX,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
 
@@ -344,6 +370,14 @@ def compute_tiled_surface_fluxes(
         string is resolved at trace time).  Typically ``coare3`` for the
         ocean, ``constant`` for ice, and ``most`` (with a land roughness
         ``z0``) for land.
+    land_interface : LandInterfaceFluxConfig or None
+        Limits the LAND tile shares with the land surface-energy balance
+        (transfer-coefficient ceiling + condensation floor).  Default = the
+        shared :data:`legoesm.core.land_interface_flux.LAND_INTERFACE_FLUX`, so
+        the two ends of the interface agree by construction.  ``None`` disables
+        them (pre-interface behaviour) and is intended for diagnostics only — a
+        production land tile running without them re-opens the one-sided flux
+        disagreement.  Ocean and ice tiles never see these limits.
 
     Returns
     -------
@@ -358,8 +392,14 @@ def compute_tiled_surface_fluxes(
     f_ice = _single_tile_flux(
         u, v, T, q_v, tiles.T_ice, tiles.q_sfc_ice, rho, config_ice,
     )
+    # LAND tile = the atmospheric end of the land<->atmosphere interface, so it
+    # goes through the shared limit-carrying entry point (identical ceiling +
+    # condensation floor to the land SEB).  Ocean/ice tiles are unaffected:
+    # the limits are land-interface properties and MUST NOT bound air-sea
+    # condensation (sea fog) or the sea-ice surface.
     f_land = _single_tile_flux(
         u, v, T, q_v, tiles.T_land, tiles.q_sfc_land, rho, config_land,
+        land_interface=land_interface,
     )
 
     def _blend(idx: int) -> jax.Array:
