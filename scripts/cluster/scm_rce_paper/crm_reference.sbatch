@@ -41,49 +41,72 @@ OUT=/burg-archive/glab/users/pg2328/legoESM/results/rcemip1_n128_ocean
 # grew monotonically under radiative destabilisation.  The band-noise seed
 # breaks the horizontal symmetry so convection can initiate.
 #
-# 207360 steps @ dt=20 s = 48.0 sim days.  Snapshots (3D volumes) at days
-# 30..48 every 2 days = 10 volumes, so --last-reference-files 5 (days
-# 40,42,44,46,48) has margin, and all are far past spin-up.
+# 345600 steps @ dt=20 s = 80.0 sim days.  3D volumes at days 60..80 every
+# 2 days = 11 volumes; --last-reference-files 5 takes days 72..80.
 #
-# WHY 48 DAYS AND NOT 80 (measured, not assumed).  Attempt 1 (job 9248515) ran
-# this EXACT configuration and went non-finite at day 52.25, writing zero
-# volumes because its first snapshot day was 62.  Its own log shows the run is
-# quasi-stationary for 40 days -- max(theta') 55-80 K and max|w| 0.3-0.9 m/s
-# from day 3 to day 40 -- and then transitions abruptly: theta' jumps 80 -> 400 K
-# between days 39.9 and 43.2, reaching 640 K before NaN.  So the configuration
-# is not inherently unstable; it has a long stable window followed by a
-# late-time tip.  The reference is therefore taken from INSIDE the measured
-# stable window rather than fighting the transition.
+# ROOT CAUSE OF THE EARLIER BLOW-UPS: THE SPONGE WAS TOO SHALLOW.
 #
-# Attempt 2 (job 9260006) tried --si-w-filter-nu 0.35, on the strength of that
-# flag's help ("0.3-0.4 fully damps the structural exponential mode ...
-# Recommended for RCE runs with theta_noise_amp > 0").  It made things far
-# WORSE: NaN at step 360 (2 sim-hours).  The 6-arm pilot matrix (job 9262160,
-# 1 sim-day per arm, one variable per arm) isolated the cause:
+# Attempts 1 (job 9248515) and 3 (job 9276192) both ran quasi-stationary for
+# ~40 days (theta'max 55-81 K, max|w| 0.3-0.9 m/s) and then tipped abruptly:
+# attempt 3 went theta'max 81 -> 141 K (day 41.9) -> 387 K with max|w| 3.13
+# (day 42.7); attempt 1 did the same between days 39.9 and 43.2 and reached
+# NaN at 52.25.
+#
+# Comparing a CLEAN volume (day 40) against a POST-TIP one (day 44) localises
+# it unambiguously to the MODEL TOP:
+#     level      z        mean T clean -> post-tip
+#     k=0     32.5 km      202.0 K  ->  253.9 K      (+52 K)
+#     k=15    15.9 km      228.3 K  ->  228.2 K      (unchanged)
+#     k=21     9.4 km      273.5 K  ->  273.9 K      (unchanged)
+#     k=27     2.7 km      289.9 K  ->  289.6 K      (unchanged)
+# and max|w| migrates to k=1 (31.4 km, 1.30 m/s).  The TROPOSPHERE is
+# untouched to ~0.3 K.  This is gravity waves radiating up from convection,
+# reflecting off the rigid lid, and accumulating with nothing to absorb them.
+#
+# The sponge exists and was ON, but at the driver default --sponge-width 5000
+# = 5 km = 0.15*H, i.e. ~4.5 levels at dz ~ 1100 m.  compressible_euler_plane.py
+# (the sponge implementation) states the intended pairing in its own comment:
+#     "SAM damping.f90 damps the VERTICAL velocity ONLY ... With
+#      sponge_w_only=True legoESM matches that; ... The CRM run-scripts set
+#      True + sponge_width=0.4*H (SAM nub=0.6, top 40%)."
+# The driver hardcodes sponge_w_only=True (run_rcemip_plane.py:1391) but the
+# width default is 0.15*H, NOT the documented 0.4*H.  A w-only sponge relies on
+# a DEEP absorbing layer; at 0.15*H it cannot absorb the upward wave flux, and
+# because it damps only w it never removes the thermal anomaly the reflected
+# waves deposit -- which is exactly the observed failure (a THERMAL runaway at
+# the lid, k=0 warming 52 K, while w is the only damped field).
+#
+# FIX: --sponge-width 13200 = 0.4*33000 = 0.4*H, per that comment and SAM's
+# nub=0.6.  Restores the full 80-day run and the original days 60-80 sampling.
+#
+# Attempt 2 (job 9260006) tried --si-w-filter-nu 0.35 instead, on the strength
+# of that flag's help.  It made things far WORSE -- NaN at step 360 (2 sim-h).
+# A 6-arm pilot matrix (job 9262160, 1 sim-day per arm, ONE variable per arm)
+# isolated the cause:
 #     filter 0.00 / noise 0.5  -> survives      (= this config)
 #     filter 0.35 / noise 0.2  -> NON-FINITE
-#     filter 0.35 / noise 0.0  -> NON-FINITE    <- filter alone, no noise
+#     filter 0.35 / noise 0.0  -> NON-FINITE    <- filter alone, zero noise
 #     filter 0.00 / noise 0.2  -> survives
 #     filter 0.00 / noise 0.1  -> survives
 #     filter 0.15 / noise 0.2  -> survives
-# The w-filter at 0.35 is itself the destabiliser at this resolution (nlev=30,
-# dz ~ 1100 m, 12 acoustic substeps) regardless of the noise amplitude; the
-# documented 0.3-0.4 band evidently was not calibrated for this setup.  The
-# filter stays OFF.  Note also that a 1-day pilot CANNOT see the day-40 tip --
-# arm A survives 1 day and still failed at day 52 in the long run.
+# The w-filter at 0.35 is ITSELF the destabiliser at this resolution; it stays
+# OFF.  Note a 1-day pilot CANNOT see the day-40 tip -- arm A survives 1 day
+# and still tipped in the long run.  Short pilots falsify fast instabilities
+# only.
 # ---------------------------------------------------------------------------
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_rcemip_plane.py \
   --nx 128 --ny 128 --nlev 30 --dx 2000 --dt 20.0 \
-  --steps 207360 \
+  --steps 345600 \
   --semi-implicit --n-acoustic-substeps 12 --off-centering 0.2 \
   --smag-cs 0.2 --hyperdiff 5e6 \
+  --sponge-width 13200 --sponge-coeff 0.05 \
   --radiation rrtmgp --radiation-interval 90 \
   --microphysics kessler \
   --precision float64 \
   --theta-noise-amp 0.5 --seed-kind band_noise --seed-kmax 6 \
   --print-every 360 \
   --snapshot-days 0.5 \
-  --snapshot3d-days "30,32,34,36,38,40,42,44,46,48" \
+  --snapshot3d-days "60,62,64,66,68,70,72,74,76,78,80" \
   --checkpoint-every 21600 \
   --restart "${RESTART:-}" \
   --output $OUT 2>&1
@@ -106,5 +129,24 @@ if [ "$N_VOL" -lt 5 ]; then
   echo ALLDONE
   exit 1
 fi
-echo "CRM_STATUS=OK ($N_VOL volumes)"
+# PHYSICS SANITY, not just file count.  Attempt 3 passed the count+NaN gate
+# with "OK (10 volumes)" while FOUR of its ten volumes were post-tip garbage
+# (theta'max ~390 K vs a 55-81 K stable window) -- and --last-reference-files 5
+# takes the LAST five, so four of the five would have been unusable.  Counting
+# files and grepping for NaN says nothing about whether the fields are
+# physical.  Gate on the diagnostic that actually revealed the tip.
+THETA_TIP_K=150          # stable window is 55-81 K; the tip goes 141 -> 387 K
+LOG="$SLURM_SUBMIT_DIR/logs/scmrce_crm_${SLURM_JOB_ID}.out"
+THETA_MAX=$(grep -E "^ *[0-9]+ +[0-9.]+e?[+-]?[0-9]* " "$LOG" 2>/dev/null \
+            | awk '{if ($5+0 > m) m=$5+0} END {printf "%.1f", m}')
+echo "--- max(theta prime) over the whole run: ${THETA_MAX} K (tip threshold ${THETA_TIP_K}) ---"
+if [ -n "$THETA_MAX" ] && awk -v a="$THETA_MAX" -v b="$THETA_TIP_K" 'BEGIN{exit !(a>b)}'; then
+  echo "CRM_STATUS=TIPPED (max theta'=${THETA_MAX} K > ${THETA_TIP_K} K)"
+  echo "  The run left the stable regime. Volumes written after the tip are"
+  echo "  NOT physical RCE and must not be used as reference. Inspect the"
+  echo "  theta' trajectory and quarantine post-tip volumes before use."
+  echo ALLDONE
+  exit 1
+fi
+echo "CRM_STATUS=OK ($N_VOL volumes, max theta'=${THETA_MAX} K)"
 echo ALLDONE
