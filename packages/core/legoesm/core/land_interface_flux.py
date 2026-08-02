@@ -39,6 +39,28 @@ atmosphere adds ``dq/dt|_BL = g (lhflx / L) / dp_low`` to its bottom level
 negative ``lhflx`` at BOTH ends: it dries the bottom atmospheric layer and
 deposits ``-lhflx`` of latent heat into the soil.
 
+Lane coverage (read before assuming this closes the budget everywhere)
+----------------------------------------------------------------------
+These limits are only well-posed on a SEPARABLE land tile, where the land
+fraction has its own surface state and its own bulk solve:
+
+* TILED lanes (``ExperimentConfig.surface_tiled=True``, the FV/cube path
+  through ``physics_pipeline._tiled_surface_flux`` ->
+  :func:`legoesm.atmosphere.physics.turbulence.surface_layer.compute_tiled_surface_fluxes`)
+  are COVERED: the atmospheric land tile and the land SEB now call the same
+  entry point, so matched inputs give identical fluxes.
+* The MPAS lane runs ``surface_tiled=False`` (see
+  ``config/amip/amip_production.yaml``): its turbulence scheme solves ONE
+  bulk flux on a land/ocean-BLENDED surface temperature and a land-fraction-
+  throttled humidity, so there is no land-tile flux to limit.  A land-only
+  bound on a blended cell has no finite value for ``f_land < 1`` (the ocean
+  share is deliberately unbounded), so this module does NOT patch that path.
+  On that lane the two ends are two structurally different bulk solves
+  (different scheme, roughness, surface humidity, latent-heat phase, plus a
+  one-step lag) and no flux LIMIT can make them agree -- only shared-flux
+  coupling can.  Tracked separately; do not "fix" it by flooring the blended
+  cell, which would silently bound air-sea condensation as well.
+
 Why the condensation floor exists (do NOT drop it without re-testing #730)
 -------------------------------------------------------------------------
 A cold, dry skin under moister advected air produces a large negative (i.e.
