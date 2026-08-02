@@ -26,6 +26,15 @@ resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
 dt: 300.0
+# a_h_scale: the base pins 0.25 for the ~2 deg MPAS SCVT mesh (storm-track
+# recovery, 2026-08-02).  That pin is MESH-SPECIFIC — A_h = a_h_scale *
+# 3e-3 * dx_min^2/dt, and this lane's dx (7.5 deg) and dt (300 s) are both
+# different, while its documented failure modes (pole-cell fast-mode blowup,
+# day-125 fast-wave event, day-179 topographic lid wave) are all cases where
+# damping is load-bearing.  Restore the 1.0 default here rather than inherit
+# a 4x weaker Laplacian untested on this lane.  Revisit only behind a
+# one-variable stability A/B on THIS grid.
+a_h_scale: 1.0
 # Top sponge — EDDY-ONLY DYCORE sponge (zonal-mean-preserving), NOT the #836
 # driver damp-to-rest sponge. The lane needs lid braking (McFarlane GWD
 # deliberately RADIATES stress reaching the top; the 2026-07-13 pilot year ran
