@@ -1121,10 +1121,16 @@ def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
     is lost unless it is dumped before the handle is dropped.
     """
     lines = _driver_lines()
-    disable = next(i for i, ln in enumerate(lines)
-                   if _code(ln).strip() == "_gw_acc = None"
-                   and "DISABLED at step" in "\n".join(lines[max(0, i - 6):i]))
-    window = [_code(ln) for ln in lines[max(0, disable - 8):disable]]
+    # Anchor on the log line (unique) and read FORWARD, rather than anchoring
+    # on `_gw_acc = None` and reading back over a fixed window -- the comment
+    # block between them is longer than any window worth hard-coding, and a
+    # too-small one made this test raise StopIteration instead of asserting.
+    log = [i for i, ln in enumerate(lines) if "[gateway] DISABLED at step" in ln]
+    assert len(log) == 1, f"expected one disable site, found {log}"
+    tail = lines[log[0]:log[0] + 20]
+    drop = next(i for i, ln in enumerate(tail)
+                if _code(ln).strip() == "_gw_acc = None")
+    window = [_code(ln) for ln in tail[:drop]]
     assert any("_gateway_cumulative_row(" in ln for ln in window), (
         "the accumulator is discarded without dumping what it reached")
     assert any("step - 1" in ln for ln in window), (
