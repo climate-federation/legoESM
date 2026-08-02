@@ -651,9 +651,13 @@ def test_differencing_two_dumps_equals_a_fresh_accumulator_over_that_window(
     assert int(ra["n_steps"]) == n_a and int(rb["n_steps"]) == n_a + n_b
 
     ref_mean = np.asarray(ref.volume) / n_b
+    ref_salt_mean = np.asarray(ref.tracer) / n_b
     assert np.any(ref_mean != 0.0), (
         "the seeded flow produced no transport -- every assertion below would "
         "be trivially satisfied")
+    assert np.any(ref_salt_mean != 0.0), (
+        "the seeded flow carried no salt -- the salt columns would be checked "
+        "against zero and a corrupted salt column would pass")
     # Differencing two cumulative sums cancels the shared prefix ANALYTICALLY
     # but not in floating point, so the tolerance has to track the storage
     # precision: new_gateway_accumulator falls back to float32 whenever x64 is
@@ -662,24 +666,35 @@ def test_differencing_two_dumps_equals_a_fresh_accumulator_over_that_window(
     _f64 = np.asarray(acc.volume).dtype == np.float64
     rtol = 1e-9 if _f64 else 1e-4
 
+    n_win = int(rb["n_steps"]) - int(ra["n_steps"])
+    assert n_win == n_b, f"the window spans {n_win} steps, expected {n_b}"
+    checked = 0
     for i, nm in enumerate(acc.names):
-        key = f"{nm}_vol_cumsum_m3s"
-        ca, cb = float(ra[key]), float(rb[key])
-        if ref_mean[i] == 0.0:
-            continue                     # dry gateway on this tiny grid
-        # non-degeneracy 1: the dumps actually moved
-        assert ca != cb, f"{nm}: the two dumps are identical"
-        window = (cb - ca) / (int(rb["n_steps"]) - int(ra["n_steps"]))
-        whole = cb / int(rb["n_steps"])
-        # non-degeneracy 2: the window is not the whole run in disguise
-        assert abs(window - whole) > 0.1 * max(abs(whole), abs(window)), (
-            f"{nm}: window {window:.6e} and whole-run {whole:.6e} means are "
-            "too close for this test to discriminate them")
-        # the property
-        np.testing.assert_allclose(window, ref_mean[i], rtol=rtol, atol=0.0,
-                                   err_msg=f"{nm}: differenced window mean != "
-                                           "a fresh accumulator over the same "
-                                           "window")
+        # BOTH columns (codex round-1 YELLOW 5): a corruption confined to the
+        # salt column would pass a volume-only check, and the salt transport is
+        # the quantity the Arctic budget question actually needs.
+        for key, ref_arr in ((f"{nm}_vol_cumsum_m3s", ref_mean),
+                             (f"{nm}_salt_cumsum_psu_m3s", ref_salt_mean)):
+            if ref_arr[i] == 0.0:
+                continue                 # dry gateway on this tiny grid
+            ca, cb = float(ra[key]), float(rb[key])
+            # non-degeneracy 1: the dumps actually moved
+            assert ca != cb, f"{key}: the two dumps are identical"
+            window = (cb - ca) / n_win
+            whole = cb / int(rb["n_steps"])
+            # non-degeneracy 2: the window is not the whole run in disguise
+            assert abs(window - whole) > 0.1 * max(abs(whole), abs(window)), (
+                f"{key}: window {window:.6e} and whole-run {whole:.6e} means "
+                "are too close for this test to discriminate them")
+            # the property
+            np.testing.assert_allclose(
+                window, ref_arr[i], rtol=rtol, atol=0.0,
+                err_msg=f"{key}: differenced window mean != a fresh "
+                        "accumulator over the same window")
+            checked += 1
+    assert checked >= 2, (
+        f"only {checked} columns were non-zero -- the test did not exercise "
+        "both the volume and the salt path")
 
 
 def test_the_final_row_reproduces_the_transports_txt_whole_run_mean(tmp_path):
@@ -860,6 +875,27 @@ def _driver_lines():
     return (Path(_ROOT) / "scripts/run/run_omip_core2.py").read_text().splitlines()
 
 
+def _code(line: str) -> str:
+    """The CODE part of a source line, with any trailing comment removed.
+
+    A source-scanning test that matches a COMMENTED-OUT call passes while the
+    call does nothing (codex round-1 YELLOW 6).  Splitting on ``#`` is naive --
+    it would also cut a ``#`` inside a string literal -- but none of the lines
+    these tests match contain one, and cutting too much can only make an
+    assertion FAIL, never pass spuriously, which is the safe direction.
+
+    RESIDUAL LIMIT, stated rather than papered over: this still cannot see that
+    a call is REACHABLE.  A call at the right indentation inside a block whose
+    condition is never true would pass.  The live coverage for that is
+    test_differencing_two_dumps_equals_a_fresh_accumulator_over_that_window and
+    test_accumulating_and_dumping_does_not_perturb_the_trajectory, which run
+    the real accumulator and the real writer; these source tests only pin the
+    ORDERING constraints inside a monolithic main() that no in-memory test can
+    reach.
+    """
+    return line.split("#", 1)[0]
+
+
 def test_driver_opens_the_csv_before_the_loop_and_dumps_at_the_snapshot_cadence():
     """Ordering constraints inside a monolithic main(), pinned by symbol name.
 
@@ -870,13 +906,13 @@ def test_driver_opens_the_csv_before_the_loop_and_dumps_at_the_snapshot_cadence(
     loop = next(i for i, ln in enumerate(lines)
                 if ln.strip().startswith("for step in range(1, n_steps"))
     opens = [i for i, ln in enumerate(lines)
-             if "_gw_csv = _gateway_cumulative_open(" in ln]
+             if "_gw_csv = _gateway_cumulative_open(" in _code(ln)]
     assert len(opens) == 1, f"expected one CSV open, found {opens}"
     assert opens[0] < loop, (
         "the CSV must be opened BEFORE the step loop; opening it inside would "
         "truncate the file at every cadence")
     rows = [i for i, ln in enumerate(lines)
-            if "_gateway_cumulative_row(" in ln and "def " not in ln]
+            if "_gateway_cumulative_row(" in _code(ln) and "def " not in ln]
     in_loop = [i for i in rows if i > loop]
     assert len(in_loop) >= 2, (
         "expected a cadence row inside the loop AND a run-end row after it; "
@@ -901,12 +937,12 @@ def test_driver_writes_a_run_end_row_and_closes_after_the_loop():
     write = next(i for i, ln in enumerate(lines)
                  if "_gateway_transport_diag(_gw_acc" in ln)
     final_row = [i for i, ln in enumerate(lines)
-                 if "_gateway_cumulative_row(_gw_csv, _gw_acc, n_steps" in ln]
+                 if "_gateway_cumulative_row(_gw_csv, _gw_acc, n_steps" in _code(ln)]
     assert len(final_row) == 1, (
         "the run-end cumulative row is missing -- the last window (e.g. days "
         "60-90 of a 90-day run) could not be recovered")
     closes = [i for i, ln in enumerate(lines)
-              if "_gateway_cumulative_close(" in ln and "def " not in ln]
+              if "_gateway_cumulative_close(" in _code(ln) and "def " not in ln]
     assert closes, "the CSV is never closed"
     assert final_row[0] < write, (
         "the run-end row must be written before/with the whole-run block")
@@ -932,7 +968,7 @@ def test_driver_dumps_and_closes_on_the_blowup_abort_path():
     assert len(aborts) >= 2, (
         "expected a scan-lane and a host-loop abort; the anchor rotted")
     abort = next(i for i in aborts if i > loop)
-    tail = "\n".join(lines[abort:abort + 14])
+    tail = "\n".join(_code(ln) for ln in lines[abort:abort + 14])
     assert "_gateway_cumulative_row(" in tail, (
         "the blowup path does not dump the accumulator before returning")
     assert "_gateway_cumulative_close(" in tail, (
@@ -946,3 +982,151 @@ def test_the_csv_filename_is_pinned():
     assert R.GATEWAY_CUMULATIVE_CSV == "gateway_transports.csv"
     assert R.GATEWAY_CUMULATIVE_CSV != "transports.txt", (
         "the per-cadence series must NOT share the run-end scalar file")
+
+
+# =====================================================================
+# codex round-1 findings.  Each of these exists because an earlier assertion
+# was shown to be VACUOUS, either by the reviewer or by the mutation battery
+# (scripts/cluster/omip_nemo/_mutation_gw_cumulative.sbatch).
+# =====================================================================
+
+
+def test_n_steps_is_the_accumulator_count_not_the_step_index(tmp_path):
+    """MUTATION M5 STAYED GREEN because every other test had step == acc.n.
+
+    The dumps carry the model step index AND the accumulator's own count, and
+    only the latter may be used as the divisor: the driver disables the
+    diagnostic on a gateway_step failure WITHOUT stopping the run, so the two
+    can diverge, and dividing by the step difference would then report a
+    scaled-down rate.  Every other row test passes step == acc.n, which makes
+    a writer that emitted `step` indistinguishable -- this one does not.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    step, n_acc = 900, 617          # deliberately unequal
+    assert step != n_acc, "the fixture must make the two distinguishable"
+    acc = GatewayAccumulator(("davis_caa",), jnp.asarray([1.5e6]),
+                             jnp.asarray([5.1e7]), n_acc)
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    R._gateway_cumulative_row(csv, acc, step, 6.25)
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(rows) == 1
+    assert int(rows[0]["n_steps"]) == n_acc, (
+        f"n_steps is {rows[0]['n_steps']}, the accumulator counted {n_acc} -- "
+        "a reader dividing by this gets the wrong rate")
+    assert int(rows[0]["step"]) == step, "the step index column is wrong"
+
+
+def test_a_repeated_dump_point_is_not_written_twice(tmp_path):
+    """Two rows with the same n_steps give a reader a ZERO-step window.
+
+    Dump points genuinely coincide: a run ending exactly on a cadence
+    boundary, or a gateway_step failure on the step right after a cadence
+    dump.  Both then call the writer with the same accumulator.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    acc = GatewayAccumulator(("davis_caa",), jnp.asarray([2.0e6]),
+                             jnp.asarray([3.0e6]), 42)
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    R._gateway_cumulative_row(csv, acc, 42, 1.0)
+    R._gateway_cumulative_row(csv, acc, 42, 1.0)      # same n -> suppressed
+    grown = acc._replace(volume=jnp.asarray([3.0e6]), n=43)
+    R._gateway_cumulative_row(csv, grown, 43, 1.1)    # n moved -> written
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    ns = [int(r["n_steps"]) for r in rows]
+    assert ns == [42, 43], f"expected one row per dump point, got {ns}"
+
+
+def test_a_write_failure_disables_the_writer_instead_of_retrying_it(tmp_path):
+    """A broken handle must not be retried at every later cadence.
+
+    Non-vacuity: the SAME accumulator sequence is first shown to produce rows
+    through a healthy writer, so the emptiness below is caused by the failure
+    and not by the fixture.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    def _accs():
+        return [GatewayAccumulator(("davis_caa",), jnp.asarray([float(k)]),
+                                   jnp.asarray([float(k)]), k)
+                for k in (1, 2, 3)]
+
+    healthy = tmp_path / "healthy"
+    healthy.mkdir()
+    csv = R._gateway_cumulative_open(healthy, ("davis_caa",), io_proc=True)
+    for k, a in enumerate(_accs(), start=1):
+        R._gateway_cumulative_row(csv, a, k, float(k))
+    R._gateway_cumulative_close(csv)
+    _h, ok_rows = _read_csv(healthy / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(ok_rows) == 3, "the control did not write -- the test is vacuous"
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    csv = R._gateway_cumulative_open(broken, ("davis_caa",), io_proc=True)
+    csv.fh.close()                    # simulate a dead handle mid-run
+    accs = _accs()
+    R._gateway_cumulative_row(csv, accs[0], 1, 1.0)   # fails -> DISABLE
+    assert csv.fh is None, "the writer was left live after a write failure"
+    R._gateway_cumulative_row(csv, accs[1], 2, 2.0)   # must be a silent no-op
+    R._gateway_cumulative_close(csv)                  # must not raise
+    _h, rows = _read_csv(broken / R.GATEWAY_CUMULATIVE_CSV)
+    assert rows == [], "a row survived a disabled writer"
+
+
+def test_transports_txt_content_is_pinned_exactly(tmp_path):
+    """Pin the WHOLE file, not just 'the two arms agree'.
+
+    The byte-identical test compares two arms through the SAME writer, so a
+    change to that writer moves both and passes (codex round-1 YELLOW 3).
+    This pins the literal bytes a downstream reader parses, so any change to
+    the key names, the ordering, or the number formats is a deliberate,
+    visible edit here.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    acc = GatewayAccumulator(("bering_pacific", "atlantic_nordic"),
+                             jnp.asarray([2.0e6, 6.0e6]),
+                             jnp.asarray([4.0e6, 8.0e6]), 2)
+    R._gateway_transport_diag(acc, tmp_path, io_proc=True)
+    assert (tmp_path / "transports.txt").read_text() == (
+        "gateway_n_steps 2\n"
+        "gateway_bering_pacific_vol_Sv 1.000000\n"
+        "gateway_bering_pacific_salt_psu_m3s 2.000000e+06\n"
+        "gateway_atlantic_nordic_vol_Sv 3.000000\n"
+        "gateway_atlantic_nordic_salt_psu_m3s 4.000000e+06\n"
+    ), "the transports.txt output contract moved"
+
+
+def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
+    """codex round-1 RED: `_gw_acc = None` alone throws away the tail.
+
+    gateway_step is pure, so on a raise `_gw_acc` still holds the last-good
+    accumulator (n = step - 1).  Everything since the previous cadence row --
+    and the whole-run block, since _gateway_transport_diag(None) is a no-op --
+    is lost unless it is dumped before the handle is dropped.
+    """
+    lines = _driver_lines()
+    disable = next(i for i, ln in enumerate(lines)
+                   if _code(ln).strip() == "_gw_acc = None"
+                   and "DISABLED at step" in "\n".join(lines[max(0, i - 6):i]))
+    window = [_code(ln) for ln in lines[max(0, disable - 8):disable]]
+    assert any("_gateway_cumulative_row(" in ln for ln in window), (
+        "the accumulator is discarded without dumping what it reached")
+    assert any("step - 1" in ln for ln in window), (
+        "the salvage row must be labelled with the LAST GOOD step (step - 1); "
+        "gateway_step raised on `step`, so that step never accumulated")

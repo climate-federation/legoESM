@@ -51,13 +51,26 @@ PYEOF
   fi
 }
 
+# ENFORCEMENT (codex round-1 YELLOW 7).  Printing a pytest status is not a
+# result: a mutation that stays GREEN is a VACUOUS test, and a job that exits 0
+# regardless would report that vacuity as success.  Every outcome is recorded
+# and the job FAILS at the end if any mutation survived or the control is red.
+GREEN_MUTATIONS=""
+NRUN=0
+
 run() {      # run <label> <pytest args...>
   local label=$1; shift
   echo "######## MUTATION $label ########"
   $PY -m pytest "$@" -q --no-header -p no:cacheprovider --basetemp="$BT/$label" 2>&1 \
     | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
     | tail -22
-  echo "=== EXIT($label) ${PIPESTATUS[0]}   (expect NON-ZERO) ==="
+  local rc=${PIPESTATUS[0]}
+  NRUN=$((NRUN + 1))
+  echo "=== EXIT($label) $rc   (expect NON-ZERO) ==="
+  if [ "$rc" -eq 0 ]; then
+    GREEN_MUTATIONS="$GREEN_MUTATIONS $label"
+    echo "!!! $label SURVIVED: the test does not detect this defect (VACUOUS)."
+  fi
 }
 
 restore() { git -C "$WT" checkout -- "$1"; }
@@ -92,15 +105,9 @@ swap "$SECT" '    if len(vol) != len(acc.names) or len(tr) != len(acc.names):' \
 run M4 "$SECT_T::test_cumulative_row_rejects_an_accumulator_whose_arrays_do_not_match_names"
 restore packages/ocean/legoesm/ocean/diagnostics_sections.py
 
-echo "#### M5: emit n_steps as the STEP index instead of the accumulator count ####"
-swap "$SECT" '    cells = [str(int(step)), f"{float(day):.6f}", str(int(acc.n))]' \
-             '    cells = [str(int(step)), f"{float(day):.6f}", str(int(step))]   # MUTATION'
-run M5 "$DRV_T::test_the_final_row_reproduces_the_transports_txt_whole_run_mean"
-restore packages/ocean/legoesm/ocean/diagnostics_sections.py
-
 # ================================================================ the writer
 echo "#### M6: drop the header/accumulator name-match guard ####"
-swap "$DRIVER" '        if tuple(acc.names) != names:' \
+swap "$DRIVER" '        if tuple(acc.names) != gw_csv.names:' \
                '        if False:   # MUTATION: mis-assigned columns permitted'
 run M6 "$DRV_T::test_row_refuses_to_write_columns_that_would_be_mis_assigned"
 restore scripts/run/run_omip_core2.py
@@ -125,14 +132,12 @@ run M8 "$DRV_T::test_the_cumulative_dump_leaves_transports_txt_byte_identical" \
 restore scripts/run/run_omip_core2.py
 
 echo "#### M9: swallow a disabled accumulator by writing a zero row ####"
-swap "$DRIVER" '    if gw_csv is None or acc is None:
-        return
-    fh, names = gw_csv' \
-               '    if gw_csv is None:
+swap "$DRIVER" '    if gw_csv is None or acc is None or gw_csv.fh is None:
+        return' \
+               '    if gw_csv is None or gw_csv.fh is None:
         return
     if acc is None:   # MUTATION: fabricate a row for a disabled accumulator
-        gw_csv[0].write("0,0,0\n"); gw_csv[0].flush(); return
-    fh, names = gw_csv'
+        gw_csv.fh.write("0,0,0\n"); gw_csv.fh.flush(); return'
 run M9 "$DRV_T::test_row_is_a_noop_when_the_accumulator_was_disabled_mid_run"
 restore scripts/run/run_omip_core2.py
 
@@ -205,12 +210,88 @@ swap "$WT/$DRV_T" '    return pytree_state_digest(
 run M16 "$DRV_T::test_the_digest_used_below_is_actually_value_sensitive"
 restore "$DRV_T"
 
+# ====================================== codex round-1 fixes (M17 replaces M5)
+echo "#### M17: emit the STEP index as n_steps instead of the acc count ####"
+echo "####      ROUND-1 HISTORY: as M5 this SURVIVED against"
+echo "####      test_the_final_row_reproduces_the_transports_txt_whole_run_mean"
+echo "####      because every row test had step == acc.n.  Both targets run"
+echo "####      now; the first is the one that actually discriminates."
+swap "$SECT" '    cells = [str(int(step)), f"{float(day):.6f}", str(int(acc.n))]' \
+             '    cells = [str(int(step)), f"{float(day):.6f}", str(int(step))]   # MUTATION'
+run M17 "$DRV_T::test_n_steps_is_the_accumulator_count_not_the_step_index" \
+        "$DRV_T::test_the_final_row_reproduces_the_transports_txt_whole_run_mean"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M18: drop the duplicate-endpoint suppression ####"
+swap "$DRIVER" '        if gw_csv.last_n is not None and n == gw_csv.last_n:' \
+               '        if False:   # MUTATION: duplicate dump points permitted'
+run M18 "$DRV_T::test_a_repeated_dump_point_is_not_written_twice"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M19: retry a broken writer instead of disabling it ####"
+swap "$DRIVER" '        try:
+            gw_csv.fh.close()
+        except Exception:  # noqa: BLE001 -- already failing; nothing to add
+            pass
+        gw_csv.fh = None' \
+               '        pass  # MUTATION: keep the broken handle live'
+run M19 "$DRV_T::test_a_write_failure_disables_the_writer_instead_of_retrying_it"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M20: discard the accumulator without salvaging the tail ####"
+swap "$DRIVER" '                _gateway_cumulative_row(_gw_csv, _gw_acc, step - 1,
+                                        (step - 1) * dt / _SEC_PER_DAY)
+                _gw_acc = None' \
+               '                _gw_acc = None  # MUTATION: tail discarded'
+run M20 "$DRV_T::test_driver_salvages_the_accumulated_tail_when_gateway_step_fails"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M21: change the transports.txt key names (output contract) ####"
+swap "$DRIVER" '                fh.write(f"gateway_{nm}_vol_Sv {vol_sv:.6f}\n")' \
+               '                fh.write(f"gw_{nm}_volume_Sv {vol_sv:.6f}\n")   # MUTATION'
+run M21 "$DRV_T::test_transports_txt_content_is_pinned_exactly"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M22: COMMENT OUT the run-end row (source scan must not match) ####"
+swap "$DRIVER" '    _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
+                            n_steps * dt / _SEC_PER_DAY)' \
+               '    # MUTATION _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
+    #                         n_steps * dt / _SEC_PER_DAY)'
+run M22 "$DRV_T::test_driver_writes_a_run_end_row_and_closes_after_the_loop"
+restore scripts/run/run_omip_core2.py
+
 # ==================================================================== control
 echo "=== CONTROL: unmutated worktree must be GREEN ==="
-echo "tree dirty? [$(git -C "$WT" status --porcelain --untracked-files=no | tr '\n' ' ')]"
+DIRTY="$(git -C "$WT" status --porcelain --untracked-files=no | tr '\n' ' ')"
+echo "tree dirty? [$DIRTY]"
 $PY -m pytest "$DRV_T" "$SECT_T" -q --no-header -p no:cacheprovider \
   --basetemp="$BT/control" 2>&1 \
   | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
   | tail -10
-echo "=== EXIT(control) ${PIPESTATUS[0]}   (expect ZERO) ==="
+CONTROL_RC=${PIPESTATUS[0]}
+echo "=== EXIT(control) $CONTROL_RC   (expect ZERO) ==="
+
+# ===================================================== the verdict, enforced
+FAIL=0
+echo "=== MUTATIONS RUN: $NRUN ==="
+if [ -n "$GREEN_MUTATIONS" ]; then
+  echo "!!! SURVIVING MUTATIONS (vacuous tests):$GREEN_MUTATIONS"
+  FAIL=1
+fi
+if [ "$CONTROL_RC" -ne 0 ]; then
+  echo "!!! CONTROL IS RED: the unmutated suite does not pass; every mutation"
+  echo "!!! result above is uninterpretable."
+  FAIL=1
+fi
+if [ -n "$DIRTY" ]; then
+  echo "!!! TREE WAS ALREADY DIRTY at the control: a mutation may not have been"
+  echo "!!! restored, so the control did not test the committed code."
+  FAIL=1
+fi
+if [ "$FAIL" -eq 0 ]; then
+  echo "=== MUTATION SUITE: ALL $NRUN MUTATIONS DETECTED, CONTROL GREEN ==="
+else
+  echo "=== MUTATION SUITE: FAILED ==="
+fi
 echo "=== MUTATION SUITE DONE ==="
+exit $FAIL

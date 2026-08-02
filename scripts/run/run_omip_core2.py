@@ -2999,6 +2999,32 @@ def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
 GATEWAY_CUMULATIVE_CSV = "gateway_transports.csv"
 
 
+class _GatewayCumulativeCsv:
+    """Writer state for ``gateway_transports.csv``.
+
+    Three fields, each load-bearing:
+
+    ``fh``      the open handle, or ``None`` once the writer has been DISABLED.
+                A write failure disables it permanently instead of leaving a
+                broken handle to be retried at every later cadence (codex
+                round-1 YELLOW 2).
+    ``names``   the gateway order the HEADER was built from.  A row whose
+                accumulator names differ is refused, so a gateway's transport
+                can never land under another gateway's column.
+    ``last_n``  the accumulator count of the last row written.  Dump points can
+                coincide -- the run-end row, the abort row and a cadence row
+                can all land on the same step -- and a duplicated endpoint
+                would make a reader's window silently zero-length.
+    """
+
+    __slots__ = ("fh", "names", "last_n")
+
+    def __init__(self, fh, names):
+        self.fh = fh
+        self.names = tuple(names)
+        self.last_n = None
+
+
 def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
     """Open ``gateway_transports.csv`` and write its header.  Returns a handle.
 
@@ -3013,11 +3039,9 @@ def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
     dump (observable mid-run under a pipe-buffered stdout), process-0 only,
     closed at the end.
 
-    Returns ``(file_handle, names)`` -- the names are carried so the row writer
-    can verify the accumulator it is handed still matches the header's column
-    order -- or ``None`` when disabled or on any failure.  ``None`` makes every
-    other function here a no-op, so a writer problem degrades the diagnostic
-    and never the run.
+    Returns a :class:`_GatewayCumulativeCsv`, or ``None`` when disabled or on
+    any failure.  ``None`` makes every other function here a no-op, so a
+    writer problem degrades the diagnostic and never the run.
     """
     if not io_proc:
         return None
@@ -3028,7 +3052,7 @@ def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
         fh = open(Path(out_dir) / GATEWAY_CUMULATIVE_CSV, "w")
         fh.write(",".join(gateway_cumulative_columns(names)) + "\n")
         fh.flush()
-        return (fh, names)
+        return _GatewayCumulativeCsv(fh, names)
     except Exception as e:  # a diagnostic must never crash the run
         print(f"[gateway] cumulative CSV disabled: {type(e).__name__}: {e}")
         return None
@@ -3041,40 +3065,59 @@ def _gateway_cumulative_row(gw_csv, acc, step, day) -> None:
     mean is produced by the very same accumulator and a window is recovered by
     the reader as ``(cumsum_b - cumsum_a) / (n_b - n_a)``.
 
-    ``gw_csv`` is the ``(file_handle, names)`` pair from
-    :func:`_gateway_cumulative_open`, or ``None`` on a non-IO rank / after a
-    writer failure.
+    A row is SKIPPED (not written) in three cases, each of which would corrupt
+    a reader's arithmetic rather than merely lose a row:
+      * the accumulator's names disagree with the header's -> mis-assigned
+        columns;
+      * ``acc.n`` equals the last row's ``n_steps`` -> a duplicated endpoint,
+        whose window has zero steps;
+      * the writer has already been disabled by an earlier failure.
     """
-    if gw_csv is None or acc is None:
+    if gw_csv is None or acc is None or gw_csv.fh is None:
         return
-    fh, names = gw_csv
     try:
         from legoesm.ocean.diagnostics_sections import (
             format_gateway_cumulative_row,
         )
-        if tuple(acc.names) != names:
+        if tuple(acc.names) != gw_csv.names:
             # Skip the row rather than write one whose columns mean something
             # other than what the header says.  Loud, because a mis-assigned
             # gateway column is exactly the kind of defect that survives review.
             print(f"[gateway] cumulative row SKIPPED at step {step}: "
                   f"accumulator names {tuple(acc.names)} != header names "
-                  f"{names}; the columns would be mis-assigned.")
+                  f"{gw_csv.names}; the columns would be mis-assigned.")
             return
-        fh.write(format_gateway_cumulative_row(acc, step, day) + "\n")
-        fh.flush()
+        n = int(acc.n)
+        if gw_csv.last_n is not None and n == gw_csv.last_n:
+            # Dump points coincide when the run ends exactly on a cadence
+            # boundary, or when the abort fires on a step already dumped.  Two
+            # identical rows give a reader a zero-step window and a 0/0 mean.
+            return
+        gw_csv.fh.write(format_gateway_cumulative_row(acc, step, day) + "\n")
+        gw_csv.fh.flush()
+        gw_csv.last_n = n
     except Exception as e:  # a diagnostic must never crash the run
-        print(f"[gateway] cumulative row skipped at step {step}: "
+        # DISABLE, do not merely skip: the handle may be broken (full disk,
+        # closed file, dead NFS mount) and retrying it at every later cadence
+        # would spam the log and write nothing (codex round-1 YELLOW 2).
+        print(f"[gateway] cumulative CSV DISABLED at step {step} after "
               f"{type(e).__name__}: {e}")
+        try:
+            gw_csv.fh.close()
+        except Exception:  # noqa: BLE001 -- already failing; nothing to add
+            pass
+        gw_csv.fh = None
 
 
 def _gateway_cumulative_close(gw_csv) -> None:
-    """Close the cumulative CSV.  No-op when it was never opened."""
-    if gw_csv is None:
+    """Close the cumulative CSV.  No-op when never opened or already disabled."""
+    if gw_csv is None or gw_csv.fh is None:
         return
     try:
-        gw_csv[0].close()
+        gw_csv.fh.close()
     except Exception as e:  # a diagnostic must never crash the run
         print(f"[gateway] cumulative CSV close failed: {type(e).__name__}: {e}")
+    gw_csv.fh = None
 
 
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
@@ -6453,6 +6496,16 @@ def main() -> int:
             except Exception as _gw_e:
                 print(f"[gateway] DISABLED at step {step} after "
                       f"{type(_gw_e).__name__}: {_gw_e}")
+                # SALVAGE THE TAIL before discarding the accumulator (codex
+                # round-1 RED).  gateway_step is pure and the assignment above
+                # never happened, so _gw_acc still holds the LAST GOOD state,
+                # with n = step - 1.  Without this dump everything accumulated
+                # since the previous cadence row is lost -- and so is the
+                # whole-run block, because _gateway_transport_diag(None) is a
+                # no-op.  The writer suppresses a duplicate n, so a failure on
+                # the step right after a cadence dump adds no second row.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step - 1,
+                                        (step - 1) * dt / _SEC_PER_DAY)
                 _gw_acc = None
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
