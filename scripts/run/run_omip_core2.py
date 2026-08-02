@@ -5492,6 +5492,12 @@ def main() -> int:
     _RESTART_FP_PATH_KEYS = frozenset({
         "forcing_path", "mesh", "config", "woa_t", "woa_s", "ice_init",
         "siconc_file", "tos_monthly_file", "chl_file",
+        # codex r5 LOW: these were still hashed as RAW text, so an equivalent
+        # relative or symlinked spelling false-aborted a valid chained leg.
+        "nemo_vertical_file", "isf_forcing_file", "iwm_forcing_file",
+        "sss_restore_file",
+        # nargs=2: ONE dest holding two paths, normalised element-wise below.
+        "nemo_monthly_init",
     })
     _restart_cfg_fp = None
     if args.restart_save or args.restart_from:
@@ -5501,8 +5507,12 @@ def main() -> int:
             if _k in _RESTART_FP_EXCLUDE:
                 continue
             _v = getattr(args, _k)
-            if _k in _RESTART_FP_PATH_KEYS and isinstance(_v, str) and _v:
-                _v = str(Path(_v).resolve())
+            if _k in _RESTART_FP_PATH_KEYS and _v:
+                if isinstance(_v, str):
+                    _v = str(Path(_v).resolve())
+                elif isinstance(_v, (list, tuple)):
+                    _v = [str(Path(_e).resolve()) if isinstance(_e, str) and _e
+                          else _e for _e in _v]
             _fp_items.append(f"{_k}={_v!r}")
         # The resolved model + sea-ice configs too: they capture defaults and
         # preset expansions that never appear as an explicit CLI value.
@@ -5511,6 +5521,24 @@ def main() -> int:
         _fp_items.append(f"grid_type={app_grid_type}")
         _restart_cfg_fp = _hashlib.sha256(
             "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
+    # SOURCE REVISION (codex r5 HIGH): a changed model implementation with
+    # identical options otherwise resumes silently.  Recorded always.
+    # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
+    # across a bug fix is a legitimate and expected workflow, and a hard error
+    # would make the feature unusable exactly when it matters.  The state
+    # itself is still validated by the config fingerprint; this line makes the
+    # code drift visible in the log and in the archive so a scorecard is never
+    # attributed to the wrong revision.
+    _restart_src_sha = None
+    if args.restart_save or args.restart_from:
+        import subprocess as _sp
+        try:
+            _r = _sp.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                         text=True, timeout=5)
+            _restart_src_sha = (_r.stdout.strip() if _r.returncode == 0
+                                else None)
+        except Exception:                       # noqa: BLE001 — provenance only
+            _restart_src_sha = None
 
     start_step = 0
     if args.restart_save or args.restart_from:
@@ -5546,6 +5574,15 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec, config_fingerprint=_restart_cfg_fp)
+        _parent_sha = _rs_meta.get("sha")
+        if (_parent_sha and _restart_src_sha
+                and _parent_sha != _restart_src_sha):
+            print(f"[warn] --restart-from was written at source revision "
+                  f"{_parent_sha[:12]} but this leg is running "
+                  f"{_restart_src_sha[:12]}: the model code changed between "
+                  "legs.  The state and configuration still validated, so the "
+                  "resume proceeds — but attribute results to BOTH revisions.",
+                  flush=True)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target
@@ -5712,7 +5749,8 @@ def main() -> int:
                          grid_type=app_grid_type, dt_seconds=dt,
                          n_forcing_records=n_rec,
                          config_fingerprint=_restart_cfg_fp,
-                         parent=args.restart_from, ice_state=ice_st)
+                         parent=args.restart_from, sha=_restart_src_sha,
+                         ice_state=ice_st)
         print(f"[restart] saved step {step_i} (day {day_f:.2f}) -> "
               f"{args.restart_save}", flush=True)
 

@@ -639,6 +639,60 @@ def test_tuple_carry_elements_are_not_mistaken_for_orphans(tmp_path):
     _assert_slot_equal("bt_hist", got.bt_hist, state.bt_hist)
 
 
+def test_underscore_named_payload_cannot_hide_a_carry(tmp_path):
+    """codex r5 HIGH: the orphan check partitioned on the '_' prefix, so
+    renaming the hidden `tke` array to `_tke` made it vanish from the payload
+    set and the carry cold-started anyway.  Unknown metadata keys now raise."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_tke"] = payload.pop("tke")          # smuggle it into the
+    slots = json.loads(str(payload["_slot_kinds"]))   # reserved namespace
+    del slots["tke"]
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    inv = json.loads(str(payload["_inventory"]))
+    inv["tke"] = "absent"
+    payload["_inventory"] = np.asarray(json.dumps(inv))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="unrecognised metadata key"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_writer_metadata_keys_are_all_declared(tmp_path):
+    """Drift gate: every '_' key the writer emits must be in
+    _RUN_METADATA_KEYS, else the reader would call it an orphan payload.  This
+    is the ratchet that stops the exact regression I shipped once (adding
+    _config_fingerprint/_parent without telling the reader broke every load)."""
+    from legoesm.ocean.restart import _RUN_METADATA_KEYS
+
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon",
+                     dt_seconds=900.0, n_forcing_records=8,
+                     config_fingerprint="abc", parent="p.npz", sha="deadbeef")
+    with np.load(path, allow_pickle=False) as f:
+        emitted = {k for k in f.files if k.startswith("_")}
+    assert emitted <= _RUN_METADATA_KEYS, (
+        f"writer emits undeclared metadata {sorted(emitted - _RUN_METADATA_KEYS)}")
+
+
+def test_inconsistent_sea_ice_records_are_a_hard_error(tmp_path):
+    """codex r5 LOW: an empty ice manifest bypassed validation of
+    _ice_inventory / _ice_class, so the three ice records could disagree."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_ice_class"] = np.asarray("DynamicSeaIceState")   # but no slots
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="inconsistent sea-ice records"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
 def test_metadata_rejects_a_non_run_restart(tmp_path):
     from legoesm.ocean.restart import save_restart
 

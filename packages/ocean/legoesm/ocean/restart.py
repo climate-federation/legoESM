@@ -72,6 +72,29 @@ _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 # it rather than on an explicit list, which would go stale the moment a
 # metadata key is added and would then make that key look like an orphan
 # payload array.  ``run_restart_metadata`` enforces the REQUIRED subset.
+#
+# ONE list, used by BOTH sides: the writer asserts it emits nothing else, and
+# the reader rejects any underscore key that is not in it.  A prefix-only rule
+# was not airtight (codex r5 HIGH) — a payload array renamed to ``_tke`` was
+# silently dropped as "metadata" and its carry cold-started.  A prefix-only
+# rule in the other direction went stale the moment a metadata key was added.
+# Sharing the set makes both failure modes impossible, and the save-time
+# assertion means a future key that is forgotten here fails immediately, in
+# the test suite, rather than at a resume months later.
+_RUN_METADATA_KEYS: frozenset[str] = frozenset({
+    "_format", "_step", "_time_days", "_grid_type", "_sha",
+    "_slot_kinds", "_ice_slot_kinds", "_excluded",
+    "_dt_seconds", "_n_forcing_records", "_x64",
+    "_state_class", "_ice_class", "_inventory", "_ice_inventory",
+    "_config_fingerprint", "_parent",
+})
+# Metadata that EVERY v2 archive must carry (the optional remainder is the
+# caller-supplied fingerprint triple + _sha).
+_RUN_METADATA_REQUIRED: tuple[str, ...] = (
+    "_format", "_step", "_time_days", "_grid_type", "_x64",
+    "_state_class", "_ice_class", "_inventory", "_ice_inventory",
+    "_excluded", "_slot_kinds", "_ice_slot_kinds",
+)
 # Bumped when the on-disk layout changes incompatibly.
 _RUN_RESTART_FORMAT: int = 2
 # Prefix under which the sea-ice state's slots are stored (mirrors the
@@ -685,6 +708,18 @@ def save_run_restart(path: str | Path, state, *,
         Source revision, recorded for provenance.
     """
     out_path = Path(path)
+    # Namespace guard (codex r5 LOW): the sea-ice slots are stored under an
+    # ``ice_`` prefix, so an ocean slot literally named ``ice_<x>`` would alias
+    # the ice payload for ``<x>``.  No such slot exists today; fail loudly if
+    # one is ever added rather than silently corrupting one of the two.
+    _clash = sorted(n for n in _iter_state_fields(state)
+                    if n.startswith(_ICE_PREFIX))
+    if _clash:
+        raise ValueError(
+            f"save_run_restart: ocean slot(s) {_clash} start with "
+            f"{_ICE_PREFIX!r}, which is the sea-ice payload namespace; their "
+            "arrays would alias the ice state's.  Rename the slot or change "
+            "_ICE_PREFIX.")
     payload: dict[str, np.ndarray] = {}
     kinds = _encode_state(state, payload)
     ice_kinds: dict[str, dict] = {}
@@ -727,7 +762,79 @@ def save_run_restart(path: str | Path, state, *,
     payload["_parent"] = np.asarray(str(parent) if parent else "")
     if sha is not None:
         payload["_sha"] = np.asarray(str(sha))
+    # Drift gate: every metadata key this writer emits must be declared in
+    # _RUN_METADATA_KEYS, or the reader would treat it as an orphan payload.
+    _undeclared = sorted(k for k in payload
+                         if k.startswith("_") and k not in _RUN_METADATA_KEYS)
+    if _undeclared:
+        raise ValueError(
+            f"save_run_restart: metadata key(s) {_undeclared} are not declared "
+            "in _RUN_METADATA_KEYS; add them there so the reader does not "
+            "mistake them for orphan payload arrays.")
     return _atomic_savez(out_path, payload)
+
+
+def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:
+    """Extract + validate the header from an ALREADY-OPEN ``NpzFile``.
+
+    Split out so :func:`load_run_restart` can read the header and the payload
+    from ONE open of the archive.  Two opens raced with the atomic
+    checkpoint replacement the writer performs (codex r5 HIGH): a cadence write
+    landing between them yielded state from archive B under archive A's step
+    and fingerprint, which silently breaks the continuation.
+    """
+    files = set(f.files)
+    if "_slot_kinds" not in files:
+        raise ValueError(
+            f"{in_path} is not a run restart (no '_slot_kinds' manifest); "
+            "it is probably a diagnostic snapshot or a legacy save_restart "
+            "archive, which do not carry the full integrator state.")
+    absent = [k for k in _RUN_METADATA_REQUIRED if k not in files]
+    if absent:
+        raise ValueError(
+            f"{in_path} is missing required run-restart metadata {absent}; "
+            "it is truncated, hand-edited, or was written by an older format "
+            "retagged as the current one.  Refusing to resume: without the "
+            "inventory the exact-layout checks that prevent a silently "
+            "cold-started carry cannot run.")
+    # UNKNOWN underscore keys are refused rather than ignored: silently
+    # dropping them is exactly how a payload array renamed to ``_tke`` escaped
+    # the orphan check (codex r5 HIGH).
+    unknown = sorted(k for k in files
+                     if k.startswith("_") and k not in _RUN_METADATA_KEYS)
+    if unknown:
+        raise ValueError(
+            f"{in_path} carries unrecognised metadata key(s) {unknown}.  The "
+            "archive is corrupt or was edited to smuggle a payload array into "
+            "the reserved namespace; refusing to resume.")
+
+    out: dict[str, Any] = {}
+    for key in ("_format", "_step", "_time_days", "_grid_type", "_sha",
+                "_dt_seconds", "_n_forcing_records", "_x64",
+                "_state_class", "_ice_class", "_config_fingerprint",
+                "_parent"):
+        if key in files:
+            val = f[key]
+            out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
+                            else val.item())
+    out["inventory"] = json.loads(str(f["_inventory"]))
+    out["ice_inventory"] = json.loads(str(f["_ice_inventory"]))
+    out["slots"] = json.loads(str(f["_slot_kinds"]))
+    out["ice_slots"] = json.loads(str(f["_ice_slot_kinds"]))
+    # Slots the writer deliberately did NOT persist (policy DIAGNOSTIC), so a
+    # reader can distinguish "absent by design" from "lost".
+    out["excluded"] = json.loads(str(f["_excluded"]))
+    # A no-ice archive must be consistent across all three ice records
+    # (codex r5 LOW): an empty manifest with a populated class, or vice versa,
+    # means one of them was edited.
+    _ice_present = (bool(out["ice_slots"]), bool(out["ice_inventory"]),
+                    bool(out.get("ice_class")))
+    if len(set(_ice_present)) != 1:
+        raise ValueError(
+            f"{in_path} has inconsistent sea-ice records "
+            f"(slots={_ice_present[0]}, inventory={_ice_present[1]}, "
+            f"class={_ice_present[2]}); the archive was edited.")
+    return out
 
 
 def run_restart_metadata(path: str | Path) -> dict[str, Any]:
@@ -740,53 +847,13 @@ def run_restart_metadata(path: str | Path) -> dict[str, Any]:
     ``config_fingerprint``, ``sha``.
 
     Cheap header read (no state template needed) for launchers that need the
-    resume step / day before building the model.
+    resume step / day before building the model.  :func:`load_run_restart`
+    does NOT call this: it parses the header from its own single open so the
+    header and the payload cannot come from two different archives.
     """
     in_path = Path(path)
-    out: dict[str, Any] = {}
     with np.load(in_path, allow_pickle=False) as f:
-        if "_slot_kinds" not in f.files:
-            raise ValueError(
-                f"{in_path} is not a run restart (no '_slot_kinds' manifest); "
-                "it is probably a diagnostic snapshot or a legacy save_restart "
-                "archive, which do not carry the full integrator state.")
-        for key in ("_format", "_step", "_time_days", "_grid_type", "_sha"):
-            if key in f.files:
-                val = f[key]
-                out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
-                                else val.item())
-        # v2 REQUIRES its identity + inventory keys (codex r2 HIGH): treating
-        # them as optional let a hand-edited archive (delete _inventory, or
-        # retag a v1 archive as _format=2) skip the exact-layout validation
-        # entirely and silently cold-start a carry.
-        _required = ("_format", "_step", "_time_days", "_grid_type",
-                     "_x64", "_state_class", "_ice_class",
-                     "_inventory", "_ice_inventory", "_excluded")
-        _absent = [k for k in _required if k not in f.files]
-        if _absent:
-            raise ValueError(
-                f"{in_path} is missing required run-restart metadata "
-                f"{_absent}; it is truncated, hand-edited, or was written by "
-                "an older format retagged as the current one.  Refusing to "
-                "resume: without the inventory the exact-layout checks that "
-                "prevent a silently cold-started carry cannot run.")
-        for key in ("_dt_seconds", "_n_forcing_records", "_x64",
-                    "_state_class", "_ice_class", "_config_fingerprint",
-                    "_parent"):
-            if key in f.files:
-                val = f[key]
-                out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
-                                else val.item())
-        out["inventory"] = json.loads(str(f["_inventory"]))
-        out["ice_inventory"] = json.loads(str(f["_ice_inventory"]))
-        out["slots"] = json.loads(str(f["_slot_kinds"]))
-        out["ice_slots"] = json.loads(str(f["_ice_slot_kinds"])
-                                      ) if "_ice_slot_kinds" in f.files else {}
-        # Slots the writer deliberately did NOT persist (policy DIAGNOSTIC), so
-        # a reader can distinguish "absent by design" from "lost".
-        out["excluded"] = (json.loads(str(f["_excluded"]))
-                           if "_excluded" in f.files else [])
-    return out
+        return _parse_run_metadata(f, in_path)
 
 
 def load_run_restart(path: str | Path, template_state, *,
@@ -807,7 +874,11 @@ def load_run_restart(path: str | Path, template_state, *,
     a 60-day-spun-up ocean under a cold-start carry.
     """
     in_path = Path(path)
-    meta = run_restart_metadata(in_path)
+    # ONE open for header AND payload (codex r5 HIGH): the writer replaces the
+    # archive atomically at every cadence, so two opens could mix archives.
+    with np.load(in_path, allow_pickle=False) as f:
+        meta = _parse_run_metadata(f, in_path)
+        loaded = {k: f[k] for k in f.files if not k.startswith("_")}
     fmt = int(meta.get("format", 0))
     if fmt != _RUN_RESTART_FORMAT:
         raise ValueError(
@@ -875,14 +946,6 @@ def load_run_restart(path: str | Path, template_state, *,
                 f"dt={_saved_dt} s (=> day {_expect_days:.6f}) but "
                 f"time_days={meta['time_days']}; the provenance is "
                 "inconsistent, so neither value can be trusted to resume.")
-
-    with np.load(in_path, allow_pickle=False) as f:
-        # Any leading-underscore key is RESERVED metadata.  Filtering on the
-        # prefix rather than an explicit tuple is future-proof: a NamedTuple
-        # field name can never start with '_' (Python forbids it), so no state
-        # slot can collide, and a metadata key added later cannot be mistaken
-        # for an orphan payload array by the check below.
-        loaded = {k: f[k] for k in f.files if not k.startswith("_")}
 
     # ORPHAN PAYLOAD (codex r4 HIGH): every raw array in the archive must be
     # referenced by one of the two manifests.  Without this, leaving a `tke`
