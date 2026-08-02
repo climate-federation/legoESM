@@ -61,19 +61,17 @@ from legoesm.core.field import Field
 _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 
 # ---------------------------------------------------------------- run restart
-# Reserved (underscore) keys of the RUN restart archive written by
-# ``save_run_restart``.  Kept distinct from ``_RESERVED_KEYS`` (the older
-# ``save_restart`` provenance triple) so the two formats never alias.
-_RUN_RESERVED_KEYS: tuple[str, ...] = (
-    "_format", "_step", "_time_days", "_grid_type", "_sha",
-    "_slot_kinds", "_ice_slot_kinds", "_excluded",
-    # Continuation FINGERPRINT + exact per-slot inventory (codex r1 HIGH):
-    # step alone does not pin the forcing — ``_idx_t(step, dt, n_rec)`` also
-    # depends on dt and the record count — and a manifest that merely omits a
-    # slot would silently leave the fresh template's cold-start value in place.
-    "_dt_seconds", "_n_forcing_records", "_x64",
-    "_state_class", "_ice_class", "_inventory", "_ice_inventory",
-)
+# METADATA NAMESPACE of the RUN restart archive: every key written by
+# ``save_run_restart`` that is NOT a state array carries a leading underscore
+# (``_format``, ``_step``, ``_time_days``, ``_grid_type``, ``_x64``,
+# ``_dt_seconds``, ``_n_forcing_records``, ``_config_fingerprint``, ``_parent``,
+# ``_sha``, ``_state_class``, ``_ice_class``, ``_inventory``,
+# ``_ice_inventory``, ``_slot_kinds``, ``_ice_slot_kinds``, ``_excluded``).
+# A NamedTuple field name can never start with ``_`` (Python forbids it), so
+# the prefix is a collision-free reserved namespace — the reader partitions on
+# it rather than on an explicit list, which would go stale the moment a
+# metadata key is added and would then make that key look like an orphan
+# payload array.  ``run_restart_metadata`` enforces the REQUIRED subset.
 # Bumped when the on-disk layout changes incompatibly.
 _RUN_RESTART_FORMAT: int = 2
 # Prefix under which the sea-ice state's slots are stored (mirrors the
@@ -879,7 +877,12 @@ def load_run_restart(path: str | Path, template_state, *,
                 "inconsistent, so neither value can be trusted to resume.")
 
     with np.load(in_path, allow_pickle=False) as f:
-        loaded = {k: f[k] for k in f.files if k not in _RUN_RESERVED_KEYS}
+        # Any leading-underscore key is RESERVED metadata.  Filtering on the
+        # prefix rather than an explicit tuple is future-proof: a NamedTuple
+        # field name can never start with '_' (Python forbids it), so no state
+        # slot can collide, and a metadata key added later cannot be mistaken
+        # for an orphan payload array by the check below.
+        loaded = {k: f[k] for k in f.files if not k.startswith("_")}
 
     # ORPHAN PAYLOAD (codex r4 HIGH): every raw array in the archive must be
     # referenced by one of the two manifests.  Without this, leaving a `tke`
