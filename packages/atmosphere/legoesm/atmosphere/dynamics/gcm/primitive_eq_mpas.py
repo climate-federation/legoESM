@@ -150,6 +150,18 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ``nu_del4`` "off by default, set in production" convention); the
     # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
     nu_vert4_T: float = 0.0
+    # Shapiro-form (per-STEP) application of the SAME conservative vertical
+    # del4 operator: remove this FRACTION of the 2Δσ mode per step
+    # (T += -(s/16)·∂⁴T/∂σ⁴ applied to the post-step state).  Unlike the
+    # explicit rate form above — whose stability limit ν·dt·16 < 1 caps the
+    # damping below the growth rate of the physics-forced ERA5-IC
+    # checkerboard at production dt — the filter form is dt-independent and
+    # unconditionally stable for s in (0, 1] (2Δσ amplification factor
+    # 1-s ≥ 0; all del4 eigenvalues damp monotonically).  Tradeoff: at s=0.5
+    # a RESOLVED 8Δσ vertical wave is damped ~1 %/step — acceptable for the
+    # AMIP lane, too dissipative to default ON for wave-resolving studies.
+    # 0.0 = off (exact no-op).
+    vert4_T_filter: float = 0.0
 
 
 # ============================================================================
@@ -805,11 +817,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # (UnexpectedTracerError; gh-417, same class as the
             # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
             # pre-step mass instead (telescoping fixer semantics).
-        state_new, phys_out, sfc_diag = self._step_jit(
+        state_new, phys_out, sfc_diag, led_step = self._step_jit(
             state, dt, physics_fn, target_mass, forcing, phys_state)
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
             self._phys_state = phys_out
+        # Per-step per-column budget ledger (#1311), (nCells, N_LEDGER, 2) or
+        # None (ledger off).  Same eager-only side-channel + tracer guard as
+        # _phys_state (gh-417: a stashed tracer leaks into the next trace);
+        # traced callers read the 4th _step_jit return directly.
+        if led_step is None or not isinstance(led_step, jax.core.Tracer):
+            self._step_ledger = led_step
         # Stash the surface net radiative fluxes (sw/lw net [W/m^2, +into
         # surface]) so the coupled MPAS loop can export them to the coupler.
         # Eager-only (same tracer guard as _phys_state — a stashed tracer leaks
@@ -824,11 +842,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # fluxes. Keep the last non-None value per slot (sw, lw, precip).
             _prev = getattr(self, "_sfc_diag", None) or ()
             # Pad the shorter of (prev, new) so a session that grows the
-            # tuple contract (3-slot legacy -> 8-slot with TOA/turb-flux
-            # extras) merges slot-wise instead of truncating.
+            # tuple contract (3-slot legacy -> 10-slot with TOA/turb-flux
+            # extras + land down-fluxes) merges slot-wise instead of
+            # truncating.
             _n = max(len(sfc_diag), len(_prev))
-            _prev = _prev + (None,) * (_n - len(_prev))
-            sfc_diag = sfc_diag + (None,) * (_n - len(sfc_diag))
+            _prev = tuple(_prev) + (None,) * (_n - len(_prev))
+            sfc_diag = tuple(sfc_diag) + (None,) * (_n - len(sfc_diag))
             self._sfc_diag = tuple(
                 new if new is not None else old
                 for new, old in zip(sfc_diag, _prev))
@@ -910,6 +929,31 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             state, dyn_tendency_fn, dt, self.config.time_integrator,
         )
 
+        # TEMPORARY (#929-mpas triage): env-gated per-stage state stats to
+        # localize which split stage corrupts the state on the ERA5-IC lane.
+        # Static Python gate on an env var read at trace time; zero effect
+        # when unset.  Remove after the MPAS ERA5-IC NaN is fixed.
+        import os as _os
+        _mpas_dbg = _os.environ.get("LEGOESM_MPAS_STEP_DEBUG", "") == "1"
+        if _mpas_dbg:
+            # 2-delta-sigma checkerboard amplitude: max over cells of the
+            # |even-level mean - odd-level mean| T split (the #930 mode).
+            _T_dbg = state_new.T.data
+            _cb = jnp.max(jnp.abs(
+                jnp.mean(_T_dbg[:, 0::2], axis=1)
+                - jnp.mean(_T_dbg[:, 1::2], axis=1)))
+            jax.debug.print("[dbg-cb  ] checkerboard_max={cb:.2f} K", cb=_cb)
+            jax.debug.print(
+                "[dbg-dyn ] T=[{tmin:.1f},{tmax:.1f}] ps=[{pmin:.0f},{pmax:.0f}] "
+                "u_max={umax:.1f} nanT={nt} nanu={nu} nanps={np}",
+                tmin=jnp.min(state_new.T.data), tmax=jnp.max(state_new.T.data),
+                pmin=jnp.min(state_new.p_s.data), pmax=jnp.max(state_new.p_s.data),
+                umax=jnp.max(jnp.abs(state_new.u.data)),
+                nt=jnp.sum(~jnp.isfinite(state_new.T.data)),
+                nu=jnp.sum(~jnp.isfinite(state_new.u.data)),
+                np=jnp.sum(~jnp.isfinite(state_new.p_s.data)),
+            )
+
         # --- 2. Operator-split physics: evaluate ONCE on the post-dynamics
         #        state, apply forward over dt.  ``state += dt * tendency``
         #        recovers a scheme's internal dt integration when its tendency
@@ -917,6 +961,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         #        convention). ---
         phys_state_out = phys_state
         sfc_diag = None
+        # Budget-ledger stage references (#1311).  Cheap: these bind names to
+        # existing immutable pytrees; the snapshots themselves are computed at
+        # the end ONLY when the physics carried ledger rows (a trace-time
+        # structural check, so the default path adds nothing to the graph).
+        _state_postdyn = state_new
+        _led_phys_rows = None
         if physics_fn is not None:
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
@@ -924,6 +974,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            if _mpas_dbg:
+                jax.debug.print(
+                    "[dbg-phys] |dT|max={dt_:.3e} |du|max={du_:.3e} "
+                    "|dps|max={dp_:.3e} nan_dT={nt} nan_du={nu} nan_dps={np}",
+                    dt_=jnp.max(jnp.abs(_pt.dT_dt.data)),
+                    du_=jnp.max(jnp.abs(_pt.du_dt.data)),
+                    dp_=jnp.max(jnp.abs(_pt.dp_s_dt.data)),
+                    nt=jnp.sum(~jnp.isfinite(_pt.dT_dt.data)),
+                    nu=jnp.sum(~jnp.isfinite(_pt.du_dt.data)),
+                    np=jnp.sum(~jnp.isfinite(_pt.dp_s_dt.data)),
+                )
             # Export the surface net radiative fluxes the physics computed
             # (sw/lw net [W/m^2, +into surface]); the lean loop has no
             # PhysicsOutput channel, so without this the coupled-voronoi ocean
@@ -980,6 +1041,24 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                         if k in _pt.tracer_tendencies else state_new.tracers[k])
                     for k in state_new.tracers
                 })
+            # Per-process ledger rows from the combined physics (per-column,
+            # (nCells, N_LEDGER, 2)).  Structural (trace-time) check: None
+            # unless the physics was built with budget_ledger=True.
+            _led_phys_rows = getattr(_pt, "ledger_rows", None)
+
+        _state_postphys = state_new       # ledger: after physics application
+
+        # --- 2b. Shapiro-form vertical 2Δσ filter (#930/#976 ERA5-IC lane) ---
+        # Applied to the FINAL post-physics T so the physics-forced
+        # checkerboard cannot accumulate step-over-step.  Same conservative
+        # operator as nu_vert4_T (column-integrated T unchanged); static
+        # Python gate on the config float (0.0 = exact no-op).
+        if self.config.vert4_T_filter > 0.0:
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=state_new.T.data + vertical_del4_T_tendency(
+                        state_new.T.data,
+                        self.config.vert4_T_filter / 16.0)))
 
         # --- 3a. Dry-mass fix BEFORE the floors (codex 2026-07-26 round 2,
         # finding 5).  The fixer touches ONLY p_s and the floors touch ONLY
@@ -990,12 +1069,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # start or large transport error makes c large).  With p_s finalised
         # FIRST, the clamp preserves B against the final p_s and end-of-step
         # column water is conserved exactly, no empirical bound needed.
+        _state_prefix = state_new         # ledger: after filter, before fixer
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(
                 state_new, state, self.mesh,
                 total_area=self._total_area,
                 target_mass=target_mass,
             )
+        _state_postfix = state_new        # ledger: after the dry-mass fixer
 
         # --- 3. Floors ---
         # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
@@ -1079,7 +1160,56 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # there; running it after the tracer clamp shifted diagnosed column
         # water by c*B/g, codex round-2 finding 5.)
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+        # --- 4. Budget-ledger stage rows (#1311 MPAS attribution port) -----
+        # Fill the dynamics/clips rows from stage-boundary column-store
+        # snapshots so the full ledger closes per column:
+        #   sum(rows) == (snapshot(final) − snapshot(pre-step)) / dt.
+        # Row conventions, matching the FV reference where the stage order
+        # allows and DOCUMENTED where it does not:
+        #   dynamics = the dycore delta PLUS the dry-mass fixer's p_s
+        #     adjustment (FV books the fixer under dynamics; on this lane the
+        #     fixer runs post-physics, so its delta is added here explicitly).
+        #   clips = the positivity floors / conserving borrow PLUS the vert4
+        #     2Δσ T filter (the FV "operator-split tail" row).
+        # Gate is the trace-time structural check on _led_phys_rows — the
+        # default (ledger off) path computes NONE of this.
+        _led_step = None
+        if _led_phys_rows is not None:
+            from legoesm.diagnostics.process_ledger import (
+                LEDGER_WATER_SPECIES, ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
+                column_store_snapshot_column,
+            )
+
+            def _snap(s):
+                water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
+                         if s.tracers is not None and k in s.tracers]
+                return column_store_snapshot_column(
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+
+            _s_pre = _snap(state)
+            _s_dyn = _snap(_state_postdyn)
+            _s_phy = _snap(_state_postphys)
+            _s_fix0 = _snap(_state_prefix)
+            _s_fix1 = _snap(_state_postfix)
+            _s_end = _snap(state_new)
+            _led_step = _led_phys_rows.astype(_s_pre.dtype)
+            _led_step = _led_step.at[:, ROW_DYNAMICS, :].add(
+                ((_s_dyn - _s_pre) + (_s_fix1 - _s_fix0)) / dt)
+            _led_step = _led_step.at[:, ROW_CLIPS, :].add(
+                ((_s_fix0 - _s_phy) + (_s_end - _s_fix1)) / dt)
+            # Closure residual -> other_physics (the FV residual philosophy):
+            # the physics rows are tendency integrals at the PRE-application
+            # p_s, while the store snapshots see the applied state — a
+            # physics dp_s_dt and the dt² cross-term (dt·dT_dt vs the p_s
+            # change) land nowhere otherwise.  Booking the discrepancy here
+            # makes sum(rows) == (snap(end) − snap(pre))/dt EXACT by
+            # construction, which is the property the closure test pins.
+            _led_step = _led_step.at[:, ROW_OTHER, :].add(
+                (_s_phy - _s_dyn) / dt
+                - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
+
+        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+                sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

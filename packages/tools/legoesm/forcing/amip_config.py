@@ -202,6 +202,12 @@ class AMIPExperimentConfig(NamedTuple):
     physics_parameterization_layers: int = 3
     physics_parameterization_seed: int = 0
 
+    # Extra truly-diffusive (unanchored) topography smoothing passes after
+    # the anchored ``topo_smoothing`` passes (#1029 lat-lon stability lever;
+    # see driver ExperimentConfig.topo_diffusive_smoothing).  Appended LAST
+    # for NamedTuple positional/serialization compatibility.
+    topo_diffusive_smoothing: int = 0
+
 
 def config_to_dict(config) -> dict:
     """Generic config -> JSON-safe dict codec.

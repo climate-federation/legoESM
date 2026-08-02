@@ -247,6 +247,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["sin2", "sam_rational"],
         help="Top-sponge ramp shape (default 'sin2').",
     )
+    # #1029: lat-lon C-grid PE energy-consistency options.
+    parser.add_argument(
+        "--energy-paired-conversion", default=_DYCORE_DEFAULTS.energy_paired_conversion,
+        action=argparse.BooleanOptionalAction,
+        dest="energy_paired_conversion",
+        help="Compute the κT v·∇ln p adiabatic-conversion term as the "
+             "face-averaged u·pg_corr/c_p product, discretely adjoint to "
+             "the momentum PGF-correction work (lat-lon C-grid PE). The "
+             "legacy product-of-cell-averages is a spurious energy source "
+             "over steep terrain ridges (#1029: DCMIP 2-0-0 rest state "
+             "grows at 2.6 e-folds/day — the latlon Andes lid-wave killer).")
+    parser.add_argument(
+        "--pgf-scheme", type=str, default=_DYCORE_DEFAULTS.pgf_scheme,
+        choices=["two_term", "lin1997"], dest="pgf_scheme",
+        help="Lat-lon C-grid PE pressure-gradient discretisation: "
+             "'two_term' legacy | 'lin1997' FV3-faithful cross-product "
+             "(#1029; experimental).")
     parser.add_argument(
         "--sponge-scale-height-m", type=float,
         default=_DYCORE_DEFAULTS.sponge_scale_height_m,
@@ -314,7 +331,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "explicit path will blow up."
         ),
     )
-    parser.add_argument("--diag-days", type=int, default=5)
+    parser.add_argument(
+        "--diag-days", type=float, default=5,
+        help="Diagnostic cadence in days; fractional = sub-daily (e.g. "
+             "0.125 = 3-hourly, needed for diurnally-unaliased CMOR "
+             "monthly means of rsut/pr/tas).")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
@@ -333,11 +354,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(\'crushing the midlatitude eddy-driven "
                              "jets\'). 0 relies on the scale-selective "
                              "4th-order hyperdiff alone.")
+    parser.add_argument("--mpas-rrtmgp-fp32",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="mpas_rrtmgp_fp32",
+                        help="MPAS-standalone RRTMGP optics precision: fp32 "
+                             "(default, perf) vs fp64 (--no-mpas-rrtmgp-fp32; "
+                             "parity with the coupled cube/latlon pipeline — "
+                             "the ERA5-IC lane's extreme Antarctic columns are "
+                             "a suspected fp32-optics NaN trigger).")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
+    parser.add_argument("--mpas-vert4-t-filter", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_vert4_t_filter,
+                        dest="mpas_vert4_t_filter",
+                        help="Shapiro-form per-step strength of the same "
+                             "vertical del4 T operator: fraction of the 2Δσ "
+                             "mode removed per step, unconditionally stable "
+                             "in (0,1] (the explicit --mpas-nu-vert4-t rate "
+                             "is stability-capped below the ERA5-IC "
+                             "physics-forced checkerboard growth at "
+                             "production dt). ~0.5 for the ERA5-IC MPAS "
+                             "lane; 0 disables (default).")
     parser.add_argument("--mpas-conservative-tracer-clamp",
                         action="store_true", default=False,
                         help="MPAS floors: borrow the clipped negative tracer "
@@ -842,6 +882,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "BL-ventilation lever. --no-bechtold-downdraft-transport "
                              "disables a config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_downdraft_transport}.")
+    parser.add_argument("--bechtold-cape-relaxation-sink",
+                        dest="bechtold_cape_relaxation_sink",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_cape_relaxation_sink,
+                        help="Enable the Bechtold quasi-equilibrium heating "
+                             "ceiling: column-integrated positive convective "
+                             "heating is throttled to "
+                             "cape_sink_heating_ratio*M_b*CAPE by a uniform "
+                             "tendency rescale (budget-preserving). The "
+                             "thermal-runaway / hot-column-detonation lever. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_cape_relaxation_sink}.")
     parser.add_argument("--bechtold-use-ifs-cape-closure",
                         dest="bechtold_use_ifs_cape_closure",
                         action=argparse.BooleanOptionalAction,
@@ -1074,6 +1126,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Topography
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
+    parser.add_argument("--topo-diffusive-smoothing", type=int, default=0,
+                        help="Extra truly-diffusive (unanchored) topography "
+                             "smoothing passes after --topo-smoothing (which "
+                             "saturates beyond ~4 passes). #1029: 4 passes "
+                             "stabilize the coarse lat-lon lane over real "
+                             "terrain. 0 = legacy.")
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
     parser.add_argument("--land-mask-file", type=str, default="",
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
@@ -1266,6 +1324,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "snowfall and melts (degree-day), brightening the "
                              "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
                              "Requires an active land tile (--slab-land-active).")
+    parser.add_argument("--surface-stability-scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        dest="surface_stability_scheme",
+                        help="Stable-regime (zeta>0) Monin-Obukhov similarity "
+                             "functions for the MOST-family surface bulk schemes "
+                             "(coare3/large_yeager/most), applied consistently to "
+                             "the atmosphere surface layer AND the coupler ocean "
+                             "tile (mirrors run_coupled.py). 'dyer1974' (default) "
+                             "= historical linear -5*zeta (byte-identical); "
+                             "'beljaars_holtslag1991' = the new stable-BL form "
+                             "that avoids the stable flux collapse; "
+                             "'grachev2007_sheba'/'gryanik2020' = SHEBA strong-"
+                             "stable forms. Unstable branch stays Businger-Dyer.")
     parser.add_argument("--sponge", default=False,
                         action=argparse.BooleanOptionalAction,
                         dest="sponge_enabled",
@@ -1692,6 +1764,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_vert4_t_filter=args.mpas_vert4_t_filter,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
@@ -1706,6 +1779,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
+        # #1029 energy-consistency options (lat-lon C-grid PE).
+        energy_paired_conversion=args.energy_paired_conversion,
+        pgf_scheme=args.pgf_scheme,
         # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
         sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
@@ -1842,6 +1918,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
+        topo_diffusive_smoothing=args.topo_diffusive_smoothing,
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         use_multilayer_land=args.use_multilayer_land,
@@ -1867,6 +1944,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
+        surface_stability_scheme=args.surface_stability_scheme,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
@@ -1932,6 +2010,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
+        bechtold_cape_relaxation_sink=args.bechtold_cape_relaxation_sink,
+        mpas_rrtmgp_fp32=args.mpas_rrtmgp_fp32,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

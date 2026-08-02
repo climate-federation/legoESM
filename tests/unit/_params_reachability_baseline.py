@@ -16,8 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (12)
-    'atm.conv.BechtoldConfig.M_b_max',
+    # atm: BechtoldConfig — M_b_max wired 2026-07-10 (#869 campaign lever)
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
     # exclusion as the rest of the BechtoldConfig family (CLI/ExperimentConfig

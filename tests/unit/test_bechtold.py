@@ -90,6 +90,212 @@ def test_bechtold_shape_finiteness():
 
 
 # ---------------------------------------------------------------------------
+# Parcel theta cap (#929 polar-night deeper harden)
+# ---------------------------------------------------------------------------
+
+def _profile_column(profile, ncol=2, nlev=16, p_s=1.0e5, p_top=5.0e3,
+                    q_sfc=4e-4):
+    """Column with an arbitrary T(z) profile (z from the 8.5-km scale height)."""
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), inner, jnp.full((ncol, 1), p_s)],
+        axis=1,
+    )
+    z = -8500.0 * jnp.log(p_full / p_s)
+    T = profile(z)
+    q = q_sfc * jnp.exp(-z / 3000.0)
+    return T, q, p_full, p_half
+
+
+def test_bechtold_parcel_theta_cap_quiesces_polar_inversion():
+    """#929 deeper harden: a polar-night surface-inversion column must be
+    QUIESCENT.  Without the cap, the theta-warmer PBL-mean parcel manufactures
+    O(1000 J/kg) CAPE and tens of K/day heating in a column where no BL air
+    can convect (the mid-Feb ~71N latlon24 runaway); with the cap the parcel
+    collapses to the surface parcel (the coldest air) and CAPE is exactly 0."""
+    # T rises 18 K over the lowest 800 m (strong polar inversion), weak
+    # stable lapse aloft; nearly dry.
+    inv = lambda z: (245.0 + 18.0 * jnp.minimum(z, 800.0) / 800.0
+                     - 6.5e-3 * jnp.maximum(z - 800.0, 0.0))
+    T, q, pf, ph = _profile_column(inv, q_sfc=4e-4)
+    zeros = jnp.zeros_like(T)
+    stoch = jnp.zeros((T.shape[0],))
+
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=True),
+    )
+    assert float(out_on.cape.max()) < 1.0
+    assert float(jnp.abs(out_on.dT_dt).max()) * 86400.0 < 1e-3   # K/day
+    assert float(out_on.convective_mask.max()) < 5e-3            # gate floor
+
+    # documents the leak the cap removes (empirical: cape ~1683 J/kg,
+    # heating ~39 K/day, mask 1.0 on this fixture)
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=False),
+    )
+    assert float(out_off.cape.max()) > 100.0
+    assert float(out_off.convective_mask.max()) > 0.9
+
+
+def test_bechtold_parcel_theta_cap_inert_in_well_mixed_bl():
+    """The cap must not disturb genuinely convecting columns: in a well-mixed
+    (dry-adiabatic) BL the PBL-mean theta equals the surface theta, so the cap
+    is inert to within the parcel perturbation (empirical: CAPE differs ~1%,
+    heating within ~0.05 K/day on this fixture)."""
+    wm = lambda z: (300.0 - 9.8e-3 * jnp.minimum(z, 600.0)
+                    - 7.5e-3 * jnp.maximum(z - 600.0, 0.0))
+    T, q, pf, ph = _profile_column(wm, q_sfc=14e-3)
+    zeros = jnp.zeros_like(T)
+    stoch = jnp.zeros((T.shape[0],))
+    out_on, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=True),
+    )
+    out_off, _, _ = bechtold_convection(
+        T, q, pf, ph, zeros, zeros, zeros, stoch, None, dt=600.0,
+        config=BechtoldConfig(parcel_theta_cap=False),
+    )
+    cape_on, cape_off = float(out_on.cape.max()), float(out_off.cape.max())
+    assert cape_off > 1000.0                    # the fixture convects
+    assert abs(cape_on - cape_off) / cape_off < 0.05
+    dheat = float(jnp.abs(out_on.dT_dt - out_off.dT_dt).max()) * 86400.0
+    assert dheat < 0.5                          # K/day
+
+
+def test_bechtold_parcel_theta_cap_noop_for_surface_parcel():
+    """With use_pbl_cape=False the parcel IS the surface parcel, so the cap
+    must be an exact no-op (bit-identical tendencies)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_a, Mu_a, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(use_pbl_cape=False, parcel_theta_cap=True),
+    )
+    out_b, Mu_b, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(use_pbl_cape=False, parcel_theta_cap=False),
+    )
+    assert jnp.array_equal(out_a.dT_dt, out_b.dT_dt)
+    assert jnp.array_equal(out_a.dq_v_dt, out_b.dq_v_dt)
+    assert jnp.array_equal(Mu_a, Mu_b)
+
+
+# ---------------------------------------------------------------------------
+# CAPE quasi-equilibrium heating ceiling (cape_relaxation_sink; C12 runaway)
+# ---------------------------------------------------------------------------
+
+def _lapse_column(T_sfc, lapse_K_km, q_sfc, ncol=1, nlev=16, p_s=1.0e5,
+                  p_top=5.0e3):
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), inner, jnp.full((ncol, 1), p_s)],
+        axis=1,
+    )
+    z = -8500.0 * jnp.log(p_full / p_s)
+    T = (T_sfc - lapse_K_km * 1e-3 * jnp.minimum(z, 11000.0)
+         - 2e-3 * jnp.maximum(z - 11000.0, 0.0))
+    q = q_sfc * jnp.exp(-z / 2500.0)
+    return T, q, p_full, p_half
+
+
+def _column_heating_W_m2(out, p_half):
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    return (constants.c_pd / constants.g) * jnp.sum(
+        jnp.maximum(out.dT_dt, 0.0) * dp, axis=-1)
+
+
+# The sink is the surrogate ceiling for the LEGACY M_b closure (default OFF
+# since the IFS ZMFUB1 closure went default-on); test it in that context so
+# the uniform-rescale contract is exact (the IFS early rain split + subcloud
+# evap re-partition water and would confound the scalar-multiple assertions).
+_SINK_CTX = dict(use_ifs_cape_closure=False, use_ifs_subcloud_evap=False,
+                 use_ifs_inplume_precip=False,
+                 # #1167 flipped these ON by default; the sink tests exercise the
+                 # LEGACY-closure surrogate, so pin the whole IFS family off
+                 # (snow_melt also hard-requires subcloud_evap=True at fn entry).
+                 use_ifs_downdraft=False, use_ifs_capdcycl=False,
+                 use_ifs_land_rhebc=False, use_ifs_snow_melt=False)
+
+
+def test_bechtold_cape_sink_inert_on_vigorous_convection():
+    """A vigorous tower (large CAPE => large ceiling) must be BIT-identical
+    with the sink on: f = clip(big, 0, 1) == 1.0 exactly."""
+    T, q, pf, ph = _lapse_column(300.0, 9.8, 14e-3)  # ~18700 J/kg fixture
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+    on, Mu_on, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=True, **_SINK_CTX))
+    off, Mu_off, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=False, **_SINK_CTX))
+    assert float(off.cape.max()) > 5000.0        # genuinely vigorous
+    assert jnp.array_equal(on.dT_dt, off.dT_dt)
+    assert jnp.array_equal(on.dq_v_dt, off.dq_v_dt)
+    assert jnp.array_equal(Mu_on, Mu_off)
+
+
+def test_bechtold_cape_sink_throttles_runaway_mode():
+    """The C12/RCE runaway mode — large sustained heating over MODEST CAPE
+    (pilot autopsy: 132 columns at 50-3943 W/m2 with CAPE 51-444 J/kg) —
+    must be throttled to the quasi-equilibrium ceiling eff*M_b*CAPE, while
+    the uniform rescale preserves the scheme's water bookkeeping."""
+    T, q, pf, ph = _lapse_column(296.0, 7.0, 8e-3)   # CAPE ~263, H ~59 W/m2
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+    off, _, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=False, **_SINK_CTX))
+    on, _, _ = bechtold_convection(
+        T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+        config=BechtoldConfig(cape_relaxation_sink=True, **_SINK_CTX))
+    H_off = float(_column_heating_W_m2(off, ph)[0])
+    H_on = float(_column_heating_W_m2(on, ph)[0])
+    cape = float(off.cape[0])
+    assert 50.0 < cape < 1000.0                  # the modest-CAPE regime
+    assert H_off > 2.0 * H_on                    # sink bit hard
+    # throttled heating sits AT the ceiling (f<1 => H_on == eff*M_b*CAPE);
+    # M_b is internal, so bound the ceiling by its M_b_max upper limit and
+    # a generous positive floor instead of reconstructing M_b exactly.
+    cfg = BechtoldConfig()
+    assert H_on <= cfg.cape_sink_heating_ratio * cfg.M_b_max * cape * 1.001
+    assert H_on > 0.0                            # throttled, not silenced
+    # uniform rescale: the ON tendencies are an exact scalar multiple of OFF
+    ratio = H_on / H_off
+    assert jnp.allclose(on.dT_dt, off.dT_dt * ratio, rtol=1e-6, atol=1e-12)
+    assert jnp.allclose(on.dq_v_dt, off.dq_v_dt * ratio, rtol=1e-6, atol=1e-15)
+    tot_on = on.dq_c_conv_dt + (0.0 if on.dq_r_conv_dt is None else on.dq_r_conv_dt)
+    tot_off = off.dq_c_conv_dt + (0.0 if off.dq_r_conv_dt is None else off.dq_r_conv_dt)
+    assert jnp.allclose(tot_on, tot_off * ratio, rtol=1e-6, atol=1e-18)
+
+
+def test_bechtold_cape_sink_heating_ratio_gradient_finite():
+    """The ceiling must stay differentiable through the active bound (the
+    sink is a calibration knob for the SCM-RCE loop)."""
+    T, q, pf, ph = _lapse_column(296.0, 7.0, 8e-3)
+    z0 = jnp.zeros_like(T)
+    st = jnp.zeros((T.shape[0],))
+
+    def loss(eff):
+        out, _, _ = bechtold_convection(
+            T, q, pf, ph, z0, z0, z0, st, None, dt=600.0,
+            config=BechtoldConfig(cape_relaxation_sink=True,
+                                  cape_sink_heating_ratio=eff, **_SINK_CTX))
+        return jnp.sum(jnp.abs(out.dT_dt))
+
+    g = jax.grad(loss)(5.0)
+    assert jnp.isfinite(g) and float(g) != 0.0
+
+
+# ---------------------------------------------------------------------------
 # PBL-CAPE closure: switching to surface-parcel CAPE changes M_b
 # ---------------------------------------------------------------------------
 
@@ -180,6 +386,12 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
     dT_diff = out_on.dT_dt - out_off.dT_dt
     dqv_diff = out_on.dq_v_dt - out_off.dq_v_dt
     dqc_diff = out_on.dq_c_conv_dt - out_off.dq_c_conv_dt
+    # With the in-updraft rain split ON by default, the detrained water is
+    # divided between dq_c and dq_r; the water budget books BOTH.
+    _zero = jnp.zeros_like(out_on.dq_c_conv_dt)
+    dqr_on = out_on.dq_r_conv_dt if out_on.dq_r_conv_dt is not None else _zero
+    dqr_off = out_off.dq_r_conv_dt if out_off.dq_r_conv_dt is not None else _zero
+    dqr_diff = dqr_on - dqr_off
 
     assert float(jnp.min(dT_diff)) < 0.0, (
         "Bechtold downdraft did not produce cooling — formulation regressed."
@@ -236,7 +448,7 @@ def test_bechtold_stochastic_changes_with_key():
     different AR1 noise states and different diagnosed mass fluxes.
 
     The fixture uses a high-CAPE sounding that drives diagnosed M_b
-    above the production ``M_b_max=0.05`` cap on both keys; we set
+    above the production ``M_b_max=0.02`` cap on both keys; we set
     ``M_b_max=10.0`` here so the cap does not bind and mask the
     stochastic variation.  In production the cap is intentional — it
     bounds single-step shocks from outlier columns — and a no-cap
@@ -755,6 +967,9 @@ def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
     # heating / vapor tendencies are untouched by the diagnostic split
     assert jnp.allclose(split.dT_dt, base.dT_dt, atol=1e-20)
     assert jnp.allclose(split.dq_v_dt, base.dq_v_dt, atol=1e-20)
+
+
+# ---------------------------------------------------------------------------
 # Trigger sharpness fields (fix 2026-07) — same defect class as Tiedtke:
 # BechtoldConfig.smooth_trigger_sharpness was dead; the downdraft RH trigger
 # and below-LCL membership hardcoded 10.0 / 2.0.
@@ -1351,14 +1566,19 @@ def test_bechtold_f1_turnover_deep_weighted_integration_live_and_bounded():
                                      q_sfc=q_sfc, lapse_rate=lapse_rate)
         ncol, nlev = T.shape
         cpp = jnp.zeros((ncol, nlev)); st = jnp.zeros((ncol,))
+        # cape_relaxation_sink=False isolates the turnover knob: the QE heating
+        # ceiling zeroes this fixture's marginal shallow column (M_u ~ 6e-8) in
+        # BOTH branches, which would make the on/off delta vacuously 0.
         _, mu_on, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=True,
-                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False,
+                                  M_b_max=10.0, cape_relaxation_sink=False))
         _, mu_off, _ = bechtold_convection(
             T, q, pf, ph, u, v, cpp, st, None, dt=600.0,
             config=BechtoldConfig(use_convective_turnover_tau=False,
-                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False, M_b_max=10.0))
+                                  use_ifs_cape_closure=False, use_ifs_capdcycl=False,
+                                  M_b_max=10.0, cape_relaxation_sink=False))
         assert jnp.all(jnp.isfinite(mu_on)) and jnp.all(jnp.isfinite(mu_off))
         denom = float(jnp.maximum(jnp.max(jnp.abs(mu_off)), 1e-12))
         rel = float(jnp.max(jnp.abs(mu_on - mu_off))) / denom
@@ -3166,8 +3386,12 @@ def test_ifs_cape_qadv_leaf_toggle_and_ad():
     stoch = jnp.zeros((ncol,))
     dTd = jnp.full((ncol, nlev), 2e-5)
     dqd = jnp.full((ncol, nlev), 1e-8)     # moistening advection
-    base_cfg = BechtoldConfig()
-    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True)
+    # parcel_theta_cap=False: the cap reshapes this sounding's parcel profile
+    # into the saturated-ZCAPE regime where the qadv correction is (correctly)
+    # invisible — probed 2026-07-18: cap on => delta 0, cap off => delta 4.7e-9.
+    # The knob under test here is qadv; the cap has its own tests.
+    base_cfg = BechtoldConfig(parcel_theta_cap=False)
+    on_cfg = BechtoldConfig(use_ifs_cape_qadv=True, parcel_theta_cap=False)
 
     out_base, Mu_base, _ = bechtold_convection(
         T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0, config=base_cfg)

@@ -13,7 +13,7 @@ output/
 .DS_Store
 Icon?
 .ipynb_checkpoints/
-
+tasks/
 # LaTeX build artifacts
 *.aux
 *.log
@@ -179,3 +179,4 @@ data/*
 !data/les_cases/**/
 !data/les_cases/**
 e3sm-source/
+data/bathymetry/etopo_1deg_clean.nc

@@ -11,8 +11,9 @@ suite covers the remaining registered-but-unfed variables:
   derived ``rsus``/``rlus`` (sign-pinned: up = down - net(+into surface)),
 * ``ts`` (surface skin temperature from the sst/sic/ice blend — never the
   lowest-level air T),
-* water paths ``clwvi``/``clivi`` (shared frozen-species reduction with
-  ``collect``) and the 3-D ``clw``/``cli``,
+* water paths ``clwvi``/``clivi`` (shared radiative-ice-only reduction with
+  ``collect``; snow/graupel are radiatively inert => excluded, #1443) and
+  the 3-D ``clw``/``cli``,
 * ``zg`` (hypsometric, virtual-T; analytic isothermal check) and ``hur``/
   ``hurs`` (shared saturation curve, no silent clamp),
 * daily-table ``rsut``/``rlut``,
@@ -193,10 +194,12 @@ def test_ts_absent_when_not_supplied_never_air_T_fallback(mesh):
 # Water paths clwvi/clivi + 3-D clw/cli
 # =====================================================================
 
-def test_clwvi_clivi_hand_checkable_and_include_snow(mesh):
+def test_clwvi_clivi_hand_checkable_and_exclude_snow(mesh):
     """Vertically uniform tracers on pure sigma pin the integrals exactly:
-    path = q * p_s / g.  The clivi expectation INCLUDES q_s, so an
-    implementation that drops snow from the frozen sum goes red."""
+    path = q * p_s / g.  The clivi expectation EXCLUDES q_s (#1443:
+    radiation reads q_i alone, so snow is radiatively inert and CMIP6
+    excludes it), so an implementation that re-sums snow into the frozen
+    path goes red — and so does one that drops cloud ice."""
     dc, sig = _collector(mesh)
     f = _fields(mesh, sig)
     n = int(mesh.nCells)
@@ -205,8 +208,8 @@ def test_clwvi_clivi_hand_checkable_and_include_snow(mesh):
     q_s = np.full((n, NLEV), 2.0e-5)
     assert _feed(dc, f, q_c=q_c, q_i=q_i, q_s=q_s)
     p_s0 = 1.0e5
-    exp_clivi = (3.0e-5 + 2.0e-5) * p_s0 / constants.g
-    exp_clwvi = (1.0e-4 + 3.0e-5 + 2.0e-5) * p_s0 / constants.g
+    exp_clivi = 3.0e-5 * p_s0 / constants.g
+    exp_clwvi = (1.0e-4 + 3.0e-5) * p_s0 / constants.g
     got_i = _mean2d(dc, "clivi")
     got_w = _mean2d(dc, "clwvi")
     assert got_i is not None, "clivi absent from the MPAS CMOR feed"
@@ -217,16 +220,25 @@ def test_clwvi_clivi_hand_checkable_and_include_snow(mesh):
                                rtol=1e-5)
 
 
-def test_graupel_contributes_to_the_frozen_path(mesh):
+def test_graupel_does_not_contribute_to_the_frozen_path(mesh):
+    """Graupel is radiatively inert (radiation reads q_i only) => CMIP6
+    excludes it from clivi (#1443).  A graupel-only run publishes an
+    ice-free clivi, byte-identical to the same run without graupel."""
     dc, sig = _collector(mesh)
+    dc_ref, _ = _collector(mesh)
     f = _fields(mesh, sig)
     n = int(mesh.nCells)
     q_c = np.full((n, NLEV), 1.0e-4)
     q_g = np.full((n, NLEV), 4.0e-5)
     _feed(dc, f, q_c=q_c, q_g=q_g)
+    _feed(dc_ref, f, q_c=q_c)
     got_i = _mean2d(dc, "clivi")
-    exp = 4.0e-5 * 1.0e5 / constants.g
-    np.testing.assert_allclose(got_i[np.isfinite(got_i)], exp, rtol=1e-5)
+    ref_i = _mean2d(dc_ref, "clivi")
+    m = np.isfinite(got_i)
+    np.testing.assert_allclose(got_i[m], 0.0, atol=1e-12)
+    np.testing.assert_array_equal(got_i, ref_i, err_msg=(
+        "clivi changed when radiatively-inert graupel was added — it is "
+        "being summed into the ice path again (#1443 regression)"))
 
 
 def test_paths_skipped_not_zeroed_without_condensate(mesh):
@@ -252,8 +264,7 @@ def test_both_lanes_share_one_condensate_reduction(mesh):
     latc = np.asarray(mesh.latCell)
     q_c = 1.0e-4 * np.cos(latc)[:, None] ** 2 * np.ones((1, NLEV))
     q_i = 5.0e-5 * np.sin(latc)[:, None] ** 2 * np.ones((1, NLEV))
-    clwvi_native, clivi_native = dc._condensate_paths(
-        f["p_s"], q_c, q_i, None, None)
+    clwvi_native, clivi_native = dc._condensate_paths(f["p_s"], q_c, q_i)
     _feed(dc, f, q_c=q_c, q_i=q_i)
     got_i = _mean2d(dc, "clivi")
     exp_i = dc._regrid_to_latlon_2d(clivi_native)
@@ -270,8 +281,10 @@ def test_both_lanes_share_one_condensate_reduction(mesh):
 
 def test_clw_cli_3d_reach_the_accumulator_with_species_convention(mesh):
     """Vertically uniform mass fractions survive plev interp + regrid as
-    constants, pinning clw = q_c and cli = q_i + q_s (snow INCLUDED,
-    mirroring clivi)."""
+    constants, pinning clw = q_c and cli = q_i ALONE (snow EXCLUDED,
+    mirroring the clivi radiative-ice-only convention — the CMIP6 ``cli``
+    entry carries the same "precipitating hydrometeors ONLY if radiatively
+    active" conditional as ``clivi``, #1443)."""
     dc, sig = _collector(mesh)
     f = _fields(mesh, sig)
     n = int(mesh.nCells)
@@ -284,7 +297,7 @@ def test_clw_cli_3d_reach_the_accumulator_with_species_convention(mesh):
     assert clw is not None, "clw absent from the MPAS CMOR feed"
     assert cli is not None, "cli absent from the MPAS CMOR feed"
     np.testing.assert_allclose(clw[np.isfinite(clw)], 1.0e-4, rtol=1e-10)
-    np.testing.assert_allclose(cli[np.isfinite(cli)], 5.0e-5, rtol=1e-10)
+    np.testing.assert_allclose(cli[np.isfinite(cli)], 3.0e-5, rtol=1e-10)
 
 
 def test_cli_skipped_without_frozen_species(mesh):
@@ -310,9 +323,11 @@ def test_malformed_condensate_tracer_is_transactional(mesh, bad_kwarg):
     assert set(dc._spatial_monthly._data_2d) == before_keys
 
 
-def test_driver_forwards_snow_and_graupel_to_the_frozen_path(mesh):
-    """The driver must extract q_s/q_g from state.tracers — a driver that
-    forwards only q_i under-counts clivi on Morrison/Thompson runs."""
+def test_driver_publishes_radiative_ice_only_clivi_on_morrison_tracers(mesh):
+    """End-to-end through the driver with a full Morrison-style tracer dict:
+    the published clivi must count CLOUD ICE ONLY (#1443) — a driver/feed
+    that sums the forwarded q_s/q_g back into the frozen path goes red, as
+    does one that drops q_i."""
     from legoesm.driver.model_driver import ModelDriver
 
     dc, sig = _collector(mesh)
@@ -328,7 +343,7 @@ def test_driver_forwards_snow_and_graupel_to_the_frozen_path(mesh):
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
     assert "field_2d_clivi" in out
     got = out["field_2d_clivi"]
-    exp = (3.0e-5 + 2.0e-5 + 1.0e-5) * 1.0e5 / constants.g
+    exp = 3.0e-5 * 1.0e5 / constants.g
     np.testing.assert_allclose(got[np.isfinite(got)], exp, rtol=1e-5)
 
 

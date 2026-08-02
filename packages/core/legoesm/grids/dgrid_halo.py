@@ -25,6 +25,22 @@ Public entries:
 - ``pad_halo_dgrid_vector_4d(u_d, v_d)``
   (iter-1078) — full 24/24 staggered vector halo with axis-swap
   component swap (single-device input ``(6, ...)``).
+- ``pad_halo_dgrid_scalar_pair_4d(u_like, v_like, axis_swap_sign=+1)``
+  (2026-07-31) — FV3 SCALAR_PAIR/CGRID_NE staggered METRIC halo:
+  dyc↔dxc and sina_v↔sina_u with a common ``+1``, cosa_v↔cosa_u
+  with ``-1``, plus the C-grid corner fills.
+- ``pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg)``
+  (2026-08-01) — raw four-SLOT cell-metric halo for
+  ``divergence_corner``, which reads MIXED raw slots at panel
+  boundaries.  8 quarter-turn seams permute the slot channel and
+  negate ``cos``; 4 half-turn seams permute without negating; the
+  other 12 are identity copies.  The two outward-facing slots of
+  each diagonal ghost cell stay POISONED at
+  ``SG_TINY_NUMBER``/``SG_BIG_NUMBER``, as FV3 leaves them.
+  PERF: currently emits ~120 source-level ``.at[].set()`` chains
+  (96 side writes + 24 diagonal).  Fine while it is unwired; build
+  a cached batched gather/scatter before putting it in a
+  per-timestep hot path (codex review P3).
 - ``pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology)``
   (iter-1083) — MPI-aware variant via batched-per-peer
   ``mpi4jax.sendrecv``.  Rank-local input ``(n_local, ...)``.

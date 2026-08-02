@@ -160,20 +160,48 @@ class HydrostaticTendencies(NamedTuple):
     # trailing optionals so every existing constructor is unaffected.
     tau_x_sfc: Field | None = None
     tau_y_sfc: Field | None = None
-    # CLEAR-SKY TOA outgoing radiative fluxes [W/m^2, positive UPWARD /
-    # outgoing — the same CMOR sign convention as ``sw_up_toa``/``lw_up_toa``
-    # above], carried on the radiation tendency so the lean MPAS loop can feed
-    # the CMOR ``rsutcs``/``rlutcs`` accumulators (the compiled cube/lat-lon
-    # path carries the equivalent through its ``held_*_toa_clr`` carry).
-    # "Clear-sky" = CLOUDS removed from the radiative transfer, everything else
-    # (gases, ozone, AEROSOL) identical — the CMIP6 definition; the producer
-    # therefore re-solves radiation with ``cloud_scheme='none'`` rather than
-    # stripping aerosol too.  ``None`` on non-radiation tendencies, on
-    # held-radiation sub-steps, and whenever the clear-sky diagnostic is off
-    # (default) — trailing optionals, so every existing constructor (including
-    # positional ones) is unaffected.
+    # PER-COLUMN process ledger, shape (ncol, N_LEDGER, 2) — the last axis is
+    # [water kg/m^2/s, dry-enthalpy W/m^2] and the middle axis indexes
+    # ``diagnostics.process_ledger.LEDGER_PROCESSES``.  Carried on the COMBINED
+    # tendency so the lean MPAS loop can attribute a column's heating/moistening
+    # to a NAMED scheme (#1311: --budget-ledger is an FV compiled-segment
+    # diagnostic and refuses on this lane, so MPAS had no per-process
+    # attribution at all).  Only the PHYSICS rows are filled here; the
+    # dynamics/clips rows are stage deltas the dycore step fills.
+    #
+    # Deliberately a raw array, not a Field: it is not a model variable and has
+    # no grid dims.  It is a per-step DIAGNOSTIC and is never checkpointed —
+    # unlike PhysicsState, whose save loop np.asarray()s every field and whose
+    # restart completeness-validates the overlay, so a new carry field there
+    # would risk rejecting existing checkpoints.
+    # None (default) = ledger off, byte-identical; appended at the end so every
+    # existing (incl. positional) constructor is unaffected.
+    ledger_rows: object | None = None
+    # CLEAR-SKY radiative fluxes for the CMIP6 clear-sky quartet, carried on
+    # the radiation tendency so the lean MPAS loop can feed the CMOR
+    # ``rsutcs``/``rlutcs``/``rsdscs``/``rldscs`` accumulators (the compiled
+    # cube/lat-lon path carries the TOA pair through its ``held_*_toa_clr``
+    # carry).  "Clear-sky" = CLOUDS removed from the radiative transfer,
+    # everything else (gases, ozone, AEROSOL) identical — the CMIP6
+    # definition; the producer therefore re-solves radiation with
+    # ``cloud_scheme='none'`` rather than stripping aerosol too.  All four
+    # come from that ONE cloud-free solve.
+    #
+    # Signs mirror their all-sky partners EXACTLY, so nothing downstream
+    # flips anything:
+    #   ``*_up_toa_clearsky``   [W/m^2, positive UPWARD / outgoing]  (rsutcs,
+    #                            rlutcs) — same as ``sw_up_toa``/``lw_up_toa``
+    #   ``*_down_sfc_clearsky`` [W/m^2, positive DOWN]               (rsdscs,
+    #                            rldscs) — same as ``sw_down_sfc``/
+    #                            ``lw_down_sfc``
+    #
+    # ``None`` on non-radiation tendencies, on held-radiation sub-steps, and
+    # whenever the clear-sky diagnostic is off (default) — trailing optionals,
+    # so every existing constructor (including positional ones) is unaffected.
     sw_up_toa_clearsky: Field | None = None
     lw_up_toa_clearsky: Field | None = None
+    sw_down_sfc_clearsky: Field | None = None
+    lw_down_sfc_clearsky: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

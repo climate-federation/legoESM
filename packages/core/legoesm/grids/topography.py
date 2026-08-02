@@ -238,6 +238,18 @@ class TopographyConfig(NamedTuple):
         Longitude variable name in NetCDF.
     smoothing_passes : int
         Number of Laplacian smoothing passes to apply (removes 2Δx noise).
+        NOTE: these passes re-anchor to the original field and SATURATE —
+        values beyond ~4 barely change the result (see
+        ``_laplacian_smooth_gaussian``).  For genuinely stronger smoothing
+        use ``diffusive_smoothing_passes``.
+    diffusive_smoothing_passes : int
+        Extra truly-diffusive (unanchored) Laplacian passes applied AFTER
+        ``smoothing_passes``.  Unlike the anchored passes these keep
+        removing grid-scale terrain power with every pass (4 passes ≈ 84%
+        peak retention on the 24×48 ETOPO Tibet).  Required for coarse
+        lat-lon stability over steep real terrain (#1029: the episodic
+        mountain-wave breaking blowup at the production L20/2-hPa config
+        is eliminated by 4 passes).  0 (default) = bit-identical legacy.
     edge_blend_strength : float
         Edge blending strength at cubed-sphere face boundaries [0, 1].
     edge_blend_width : int
@@ -266,6 +278,7 @@ class TopographyConfig(NamedTuple):
     clip_negative: bool = True
     land_mask_path: str = ""
     land_mask_var: str = ""
+    diffusive_smoothing_passes: int = 0
 
 
 # ==============================================================================
@@ -403,9 +416,12 @@ def _regrid_to_target(
     interp = _build_latlon_interpolator(lat_src, lon_src, elev_data)
 
     target_shape = target_lat_deg.shape
+    # Wrap target longitudes into the source periodic frame ([0, 360) +
+    # the 1-column pad): a target convention like [-180, 180) would
+    # otherwise fall past the pad and silently read fill_value=0.
     points = np.stack([
         target_lat_deg.ravel(),
-        target_lon_deg.ravel(),
+        target_lon_deg.ravel() % 360.0,
     ], axis=-1)
 
     result = interp(points).reshape(target_shape)
@@ -456,7 +472,17 @@ def _derive_land_fraction(
 
     for dlat in offsets:
         for dlon in offsets:
-            pts = np.stack([flat_lat + dlat, flat_lon + dlon], axis=-1)
+            # Wrap sample longitudes into the source periodic frame: the
+            # ±1-column pad above only covers ~1 source cell beyond the
+            # seam, while sub-samples reach ±grid_spacing/2 (e.g. ±3.75°
+            # for a 7.5° target cell). Unwrapped samples past the pad hit
+            # fill_value=0 and are miscounted as OCEAN — on latlon24 the
+            # lon-0 column of fully-land rows got f_land = 9/15 = 0.6
+            # (phantom 40% ocean over the Antarctic plateau = the
+            # polar-night blowup heat source).
+            pts = np.stack(
+                [flat_lat + dlat, (flat_lon + dlon) % 360.0], axis=-1
+            )
             elev = interp(pts)
             land_frac += (elev > 0.0).astype(np.float64)
 
@@ -560,13 +586,18 @@ def _load_land_fraction_file(
     return np.clip(f_land, 0.0, 1.0)
 
 
-def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarray:
+def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1,
+                                   anchor: bool = True) -> np.ndarray:
     """Laplacian smoothing on a cubed-sphere field (6, n, n).
 
     Each cell becomes ``0.5*original + 0.5*smoothed`` where ``smoothed`` is the
     5-point mean ``(self + 4 neighbours)/5``.  The neighbours at face boundaries
     come from the cross-face HALO (``pad_halo_local``, which handles the axis
     swaps and reversals), so the smoothing is CONTINUOUS across cube edges.
+
+    ``anchor=False`` blends with the CURRENT field instead of the original
+    (truly diffusive; see ``_laplacian_smooth_gaussian`` for why the anchored
+    default saturates and when the diffusive mode is needed).
 
     The previous implementation used one-sided boundary CLAMPING (edge cells
     averaged only their in-face neighbours), which smoothed each face in
@@ -595,14 +626,24 @@ def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarr
             + p[:, 1:-1, :-2] + p[:, 1:-1, 2:]  # j-1, j+1
         )
         smoothed = (field + neighbour_sum) / 5.0   # self + 4 cross-face neighbours
-        field = 0.5 * orig + 0.5 * smoothed
+        base = orig if anchor else field
+        field = 0.5 * base + 0.5 * smoothed
     return np.asarray(field)
 
 
-def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
+def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1,
+                               anchor: bool = True) -> np.ndarray:
     """Simple Laplacian smoothing on a Gaussian grid (n_lat, n_lon).
 
     Uses periodic boundary in longitude, clamped at poles.
+
+    ``anchor=True`` (default) re-blends each pass with the ORIGINAL field
+    (``0.5*arr + 0.5*S(result)``), which converges geometrically to a fixed
+    point retaining most of the original amplitude — extra passes beyond ~4
+    are a no-op, so this mode caps how much 2Δx power can ever be removed.
+    ``anchor=False`` is truly diffusive (``0.5*result + 0.5*S(result)``):
+    every pass keeps damping grid-scale terrain, which is what the #1029
+    latlon24 stability fix requires.
     """
     if passes <= 0:
         return arr
@@ -620,7 +661,8 @@ def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
                 vals.append(result[i, (j - 1) % n_lon])
                 vals.append(result[i, (j + 1) % n_lon])
                 smoothed[i, j] = np.mean(vals)
-        result = 0.5 * arr + 0.5 * smoothed
+        base = arr if anchor else result
+        result = 0.5 * base + 0.5 * smoothed
     return result
 
 
@@ -1250,8 +1292,12 @@ def load_real_topography(
             )
     elif is_gaussian:
         z_s = _laplacian_smooth_gaussian(z_s, passes=config.smoothing_passes)
+        z_s = _laplacian_smooth_gaussian(
+            z_s, passes=config.diffusive_smoothing_passes, anchor=False)
     else:
         z_s = _laplacian_smooth_cubed_sphere(z_s, passes=config.smoothing_passes)
+        z_s = _laplacian_smooth_cubed_sphere(
+            z_s, passes=config.diffusive_smoothing_passes, anchor=False)
 
     # Edge blending for cubed-sphere
     if not is_gaussian and not is_unstructured and config.edge_blend_strength > 0:

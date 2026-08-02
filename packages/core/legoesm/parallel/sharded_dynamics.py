@@ -81,7 +81,11 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
 from legoesm.grids.halo import pad_halo, pad_halo_4d
-from legoesm.parallel.mesh import N_FACES, DeviceConfig
+from legoesm.parallel.mesh import (
+    N_FACES,
+    DeviceConfig,
+    multiprocess_safe_device_put,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +233,13 @@ def shard_state(
     spec = _make_sharding_spec(config)
     mesh = config.mesh
 
+    # multiprocess_safe_device_put (not raw jax.device_put): under multi-
+    # process SPMD, device_put asserts BIT-equality of the value across
+    # processes — XLA autotune divergence in the per-process IC/forcing
+    # precompute makes fully-addressable leaves differ in the last bits, so
+    # every >1-process shard_state died with "passed to device_put is not
+    # the same on each process" (#693, jobs 26030677/26037615). The helper
+    # rebuilds the array from the local host buffer per shard instead.
     def _place(leaf):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
@@ -238,24 +249,28 @@ def shard_state(
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
                     pspec = spec.tiled_3d if leaf.ndim >= 4 else spec.tiled_2d
                     if pspec is not None:
-                        return jax.device_put(
+                        return multiprocess_safe_device_put(
                             leaf, NamedSharding(mesh, pspec)
                         )
                 pspec = spec.face_3d if leaf.ndim >= 4 else spec.face_2d
-                return jax.device_put(leaf, NamedSharding(mesh, pspec))
-            return jax.device_put(
+                return multiprocess_safe_device_put(
+                    leaf, NamedSharding(mesh, pspec)
+                )
+            return multiprocess_safe_device_put(
                 leaf, NamedSharding(mesh, spec.replicated)
             )
 
         elif grid_type == "latlon":
             if leaf.ndim >= 2:
                 pspec = P("lat", *([None] * (leaf.ndim - 1)))
-                return jax.device_put(leaf, NamedSharding(mesh, pspec))
-            return jax.device_put(
+                return multiprocess_safe_device_put(
+                    leaf, NamedSharding(mesh, pspec)
+                )
+            return multiprocess_safe_device_put(
                 leaf, NamedSharding(mesh, spec.replicated)
             )
 
-        return jax.device_put(
+        return multiprocess_safe_device_put(
             leaf, NamedSharding(mesh, spec.replicated)
         )
 

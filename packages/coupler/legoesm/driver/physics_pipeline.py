@@ -2965,10 +2965,20 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
+            # coefficients + the quasi-equilibrium heating-ceiling ratio
+            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
             # Vertical subsidence solve selector (day-65 blowup bisect,
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
+            cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
+            cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
+            cape_sink_heating_ratio=getattr(
+                config, 'bechtold_cape_sink_heating_ratio', 5.0),
+            cape_relaxation_sink=getattr(
+                config, 'bechtold_cape_relaxation_sink', False),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3432,6 +3442,32 @@ def turbulence_config_for(config):
                     and "cloudtop_entrainment_efficiency" in getattr(nested, "_fields", ())):
                 tc = tc._replace(**{scheme: nested._replace(
                     cloudtop_entrainment_efficiency=eff)})
+        # Louis stability-function scalars (the calibration campaign's
+        # inert-params finding, 2026-08-01): ExperimentConfig documents
+        # louis_l_mix_max / louis_Ri_crit / louis_{b,c,d}_louis as targeting
+        # LouisConfig, and the ML tuning path (aimip_params) injects them —
+        # but THIS function, the single source every dycore's production
+        # kernel consumes, silently dropped them: setting --louis-l-mix-max
+        # changed nothing while reporting success.  Thread any NON-DEFAULT
+        # value into the active louis sub-config; an all-defaults config
+        # takes no _replace, preserving the byte-identity contract above.
+        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
+        # LouisConfig field and are NOT threaded here — still inert, see the
+        # upstream note in the calibration repo.)
+        if tc.scheme == "louis" and tc.louis is not None:
+            _louis_updates = {}
+            for exp_name, leaf_name in (
+                    ("louis_l_mix_max", "l_mix_max"),
+                    ("louis_Ri_crit", "Ri_crit"),
+                    ("louis_b_louis", "b_louis"),
+                    ("louis_c_louis", "c_louis"),
+                    ("louis_d_louis", "d_louis")):
+                val = getattr(config, exp_name, None)
+                if val is not None and float(val) != float(
+                        getattr(tc.louis, leaf_name)):
+                    _louis_updates[leaf_name] = float(val)
+            if _louis_updates:
+                tc = tc._replace(louis=tc.louis._replace(**_louis_updates))
         return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the

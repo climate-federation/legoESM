@@ -221,3 +221,74 @@ def test_config_defaults():
     # Production (coupled/AMIP) default: the cure is on.
     from legoesm.driver.config import DycoreConfig
     assert DycoreConfig().mpas_nu_vert4_T > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Shapiro-form per-step filter (vert4_T_filter) — the ERA5-IC lane cure.
+# The explicit rate form is stability-capped (nu*dt*16 < 1) below the
+# physics-forced checkerboard growth at production dt; the filter form is
+# dt-independent and unconditionally stable for s in (0, 1].
+# ---------------------------------------------------------------------------
+
+def _shapiro_apply(T, s):
+    return T + vertical_del4_T_tendency(T, s / 16.0)
+
+
+def test_vert4_filter_kills_2dz_in_one_step_at_full_strength():
+    nlev = 20
+    smooth = 250.0 + 30.0 * jnp.linspace(1.0, 0.0, nlev)[None, :]
+    cb = 5.0 * ((-1.0) ** jnp.arange(nlev))[None, :]
+    T = smooth + cb
+    T1 = _shapiro_apply(T, 1.0)
+    # Project onto the (-1)^k mode over interior levels, REFERENCED to the
+    # smooth profile's own projection (a sloped profile projects to slope/2,
+    # not zero — the raw projection or an even/odd mean both pick that up).
+    sign = ((-1.0) ** jnp.arange(nlev))[None, :]
+    proj_ref = jnp.mean((smooth * sign)[:, 4:-4], axis=1)
+    proj_before = jnp.mean((T * sign)[:, 4:-4], axis=1) - proj_ref
+    proj_after = jnp.mean((T1 * sign)[:, 4:-4], axis=1) - proj_ref
+    assert float(jnp.abs(proj_before).min()) > 4.9      # mode present (5 K)
+    # interior 2Δσ response is -16·(s/16) => full removal at s=1 (the smooth
+    # interior is untouched, so referencing to `smooth` is exact there)
+    assert float(jnp.abs(proj_after).max()) < 1e-6
+    # column-integrated T conserved (flux-form outer Laplacian)
+    assert float(jnp.abs(jnp.sum(T1) - jnp.sum(T))) < 1e-8
+
+
+def test_vert4_filter_monotone_stable_at_any_strength():
+    # amplification factor per mode is 1 - s*lambda/16 with lambda in [0,16]
+    # => |factor| <= 1 for s <= 1: repeated application never grows ANY profile.
+    nlev = 20
+    key = jax.random.PRNGKey(0)
+    T = 250.0 + 25.0 * jax.random.normal(key, (4, nlev))
+    for s in (0.25, 0.5, 1.0):
+        Tk = T
+        prev_var = float(jnp.var(Tk))
+        for _ in range(50):
+            Tk = _shapiro_apply(Tk, s)
+            v = float(jnp.var(Tk))
+            assert v <= prev_var + 1e-10   # monotone variance decay
+            prev_var = v
+        assert bool(jnp.all(jnp.isfinite(Tk)))
+
+
+def test_vert4_filter_preserves_smooth_profile():
+    nlev = 20
+    # smooth tropospheric profile: no grid-scale content
+    T = 300.0 - 60.0 * jnp.sin(
+        jnp.pi * jnp.arange(nlev)[None, :] / (2 * (nlev - 1)))
+    T1 = _shapiro_apply(T, 0.5)
+    # INTERIOR resolved structure essentially untouched (<0.01 K change);
+    # the two BOUNDARY levels see the reflect-pad slope response (the price
+    # of keeping the full 2Δσ response at the boundary, where the #930
+    # checkerboard is worst) — bounded (<0.5 K/application) and column-
+    # conservative, but not zero.  Documented in the config docstring.
+    d = jnp.abs(T1 - T)
+    assert float(jnp.max(d[:, 2:-2])) < 0.01
+    assert float(jnp.max(d)) < 0.5
+
+
+def test_vert4_filter_zero_is_exact_noop_in_config():
+    assert MPASPrimitiveEquationConfig().vert4_T_filter == 0.0
+    from legoesm.driver.config import DycoreConfig
+    assert DycoreConfig().mpas_vert4_t_filter == 0.0
