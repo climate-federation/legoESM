@@ -31,13 +31,26 @@ the surface into the atmosphere.
   loses water, the surface gains it, and the latent heat of that phase change is
   released INTO the surface.
 
-Both consumers already use this convention with the same sign:
-the land SEB closes ``G_soil = SW_net + LW_net - shflx - lhflx`` (positive-up
-turbulent fluxes SUBTRACTED from the into-surface radiative terms), and the
-atmosphere adds ``dq/dt|_BL = g (lhflx / L) / dp_low`` to its bottom level
-(positive ``lhflx`` moistens the air).  A condensation event is therefore a
-negative ``lhflx`` at BOTH ends: it dries the bottom atmospheric layer and
-deposits ``-lhflx`` of latent heat into the soil.
+Both consumers were re-read and use this convention with the same sign:
+
+* land SEB (``simple_seb.compute_simple_seb_fluxes``) closes
+  ``G_soil = SW_net + LW_net - shflx - lhflx`` -- positive-up turbulent fluxes
+  SUBTRACTED from the into-surface radiative terms, so a negative (condensing)
+  ``lhflx`` ADDS ``-lhflx`` of heat to the soil;
+* atmosphere, turbulence path
+  (``turbulence/vertical_diffusion.implicit_vertical_diffusion``, whose
+  ``surface_flux`` argument is documented "Positive upward"):
+  ``rhs[:, -1] += dt * (lhflx / L) / (rho * dz)``;
+* atmosphere, explicit bulk-BL path (``physics_pipeline.physics_step_no_rad``):
+  ``dq/dt|_BL = g (lhflx / L) / dp_low`` added to the bottom level.
+
+Positive ``lhflx`` moistens the air in both atmospheric paths.  A condensation
+event is therefore a negative ``lhflx`` at BOTH ends of the coupling: it dries
+the bottom atmospheric layer and deposits ``-lhflx`` of latent heat into the
+soil.  Raising a too-negative ``lhflx`` toward the floor therefore removes the
+SAME amount of drying from the air and the SAME amount of heating from the
+soil -- which is exactly why the bound has to be applied at both ends or at
+neither.
 
 Lane coverage (read before assuming this closes the budget everywhere)
 ----------------------------------------------------------------------
