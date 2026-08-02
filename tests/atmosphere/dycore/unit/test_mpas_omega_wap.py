@@ -421,3 +421,79 @@ def test_omega_jit_parity_and_grad(mesh, coord):
     assert np.isfinite(np.asarray(g_ps)).all()
     assert np.abs(np.asarray(g_u)).max() > 0.0, "no gradient reaches u"
     assert np.abs(np.asarray(g_ps)).max() > 0.0, "no gradient reaches p_s"
+
+
+def test_omega_is_independent_of_dt(mesh, coord):
+    """``diagnose_omega`` passes ``dt=0.0``.  That is only safe because
+    ``dt`` enters the RHS solely through the APVM PV-flux upwinding (a
+    du_dt term); omega is built from ``div(u dp_e)``, its cumsum and
+    ``v.grad(ln p_s)``, all read off the raw state.  Proven, not argued:
+    with APVM ACTIVE omega must be bit-identical at dt=0 and dt=600, and
+    the control confirms du_dt does respond (otherwise the first
+    assertion would be vacuous).
+    """
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig,
+        mpas_hydrostatic_tendencies,
+    )
+    n, ne = int(mesh.nCells), int(mesh.nEdges)
+    rng = np.random.default_rng(5)
+    lat = np.asarray(mesh.latCell, dtype=np.float64)
+    lon = np.asarray(mesh.lonCell, dtype=np.float64)
+    st = _state(mesh, 6.0 * rng.standard_normal((ne, NLEV)),
+                1.0e5 + 3.0e3 * np.cos(lat) * np.cos(lon))
+    assert n == int(mesh.nCells)
+    cfg = MPASPrimitiveEquationConfig(apvm_scale=0.5)
+
+    o0 = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, cfg, dt=0.0, return_omega=True)[1])
+    o6 = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, cfg, dt=600.0, return_omega=True)[1])
+    np.testing.assert_array_equal(o0, o6)
+
+    d0 = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, cfg, dt=0.0).du_dt.data)
+    d6 = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, cfg, dt=600.0).du_dt.data)
+    assert np.abs(d0 - d6).max() > 0.0, (
+        "APVM is inactive in this fixture — the dt-independence assertion "
+        "above proves nothing")
+
+
+def test_omega_excludes_the_p_s_hyperdiffusion(mesh, coord):
+    """omega is pinned to the CONTINUITY-closure dp_s/dt, i.e. BEFORE the
+    ``nu_del4_ps`` filter: that filter moves p_s with no matching vertical
+    mass flux, so folding it in would leave omega's three terms mutually
+    inconsistent.
+
+    nu_del4_ps = 1e20 is far outside any physical setting — it is chosen
+    so the CONTROL is decisive: it shifts ``dp_s_dt`` by ~35 % of its own
+    magnitude on this mesh while omega must stay BIT-IDENTICAL.  A rougher
+    p_s (grid-scale noise) is needed for del4 to bite at all on a level-2
+    mesh.
+    """
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig,
+        mpas_hydrostatic_tendencies,
+    )
+    n, ne = int(mesh.nCells), int(mesh.nEdges)
+    rng = np.random.default_rng(5)
+    st = _state(mesh, 6.0 * rng.standard_normal((ne, NLEV)),
+                1.0e5 + 500.0 * rng.standard_normal(n))
+    off = MPASPrimitiveEquationConfig(nu_del4_ps=0.0)
+    on = MPASPrimitiveEquationConfig(nu_del4_ps=1.0e20)
+
+    o_off = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, off, return_omega=True)[1])
+    o_on = np.asarray(mpas_hydrostatic_tendencies(
+        st, mesh, coord, on, return_omega=True)[1])
+    np.testing.assert_array_equal(o_off, o_on)
+
+    p_off = np.asarray(
+        mpas_hydrostatic_tendencies(st, mesh, coord, off).dp_s_dt.data)
+    p_on = np.asarray(
+        mpas_hydrostatic_tendencies(st, mesh, coord, on).dp_s_dt.data)
+    moved = np.abs(p_off - p_on).max() / np.abs(p_off).max()
+    assert moved > 0.05, (
+        f"the p_s hyperdiffusion barely moved dp_s_dt ({100 * moved:.2f} %) "
+        "— the exclusion assertion above proves nothing")
