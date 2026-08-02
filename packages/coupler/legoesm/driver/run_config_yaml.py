@@ -221,11 +221,18 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
-    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
-        "cloud_partial_coverage_optics",
-    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
-        "cloud_vertical_overlap_optics",
-    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
+    # NOTE: cloud_partial_coverage_optics / cloud_vertical_overlap_optics /
+    # cloud_n_subcolumns were REMOVED 2026-08-02 for the same reason as
+    # cloud_inhomogeneity_factor above, one step earlier in the chain: they are
+    # str/int SCHEME SELECTORS, so they are not ``:float``-annotated and are
+    # therefore not spec-eligible — no ``__param_spec__`` entry, hence no
+    # registry qualified name.  ``apply_params_to_config`` looks the key up in
+    # the registry BEFORE consulting this map and raises SystemExit on a miss,
+    # so these three keys were unusable through --params while breaking the
+    # map's own drift guards (test_build_atm_scalar_param_map_is_valid_and_
+    # nonempty + the over/under-claim scans, red on this branch since #1398 and
+    # #1411 added them).  The flat ExperimentConfig scalars remain settable via
+    # --config / their CLI flags, which is the correct route for a selector.
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
