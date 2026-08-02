@@ -114,9 +114,21 @@ def hermetic_git(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.invalid")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "restart test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.invalid")
-    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"):
+    # Repository-LOCATION and COMMAND-SCOPE config injection (codex r8 LOW):
+    # `-c`-equivalent env config (GIT_CONFIG_COUNT/KEY_n/VALUE_n and the older
+    # GIT_CONFIG_PARAMETERS) overrides even GIT_CONFIG_GLOBAL, so clearing the
+    # file-scope variables alone is not hermetic.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_CEILING_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+                "GIT_ATTR_NOSYSTEM", "GIT_NAMESPACE"):
         monkeypatch.delenv(var, raising=False)
+    n_cfg = os.environ.get("GIT_CONFIG_COUNT")
+    if n_cfg:
+        for i in range(int(n_cfg)):
+            monkeypatch.delenv(f"GIT_CONFIG_KEY_{i}", raising=False)
+            monkeypatch.delenv(f"GIT_CONFIG_VALUE_{i}", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
     return str(hooks)
 
 
@@ -213,6 +225,77 @@ def test_source_revision_flags_a_mixed_driver_and_package_tree(monkeypatch):
     assert _c2._source_revision() == driver_sha
     assert _c2._revision_ambiguity(driver_sha) is None
     assert _c2._source_revision_drift_note(driver_sha, driver_sha) is None
+
+
+def test_mixed_tree_check_covers_every_legoesm_namespace_portion(monkeypatch):
+    """codex r8 MEDIUM: ``legoesm`` is a PEP-420 NAMESPACE package spread over
+    ``src/legoesm`` plus every ``packages/*/legoesm``.  Sampling one module's
+    directory would miss a PYTHONPATH that pointed, say, legoesm.ice at a
+    different worktree while legoesm.ocean matched."""
+    import subprocess
+
+    import legoesm
+
+    from scripts.run import run_omip_core2 as _c2
+
+    portions = [str(Path(p).resolve()) for p in legoesm.__path__]
+    assert len(portions) > 1, (
+        "legoesm resolved to a single path — this test cannot distinguish "
+        "'checks all portions' from 'checks one'")
+    odd_one = portions[-1]
+    driver_sha, odd_sha = "1" * 40, "9" * 40
+    here = str(Path(_c2.__file__).resolve().parent)
+
+    probed: list[str] = []
+
+    def _fake(cmd, **kw):
+        cwd = cmd[2]
+        probed.append(cwd)
+        odd = cwd == odd_one
+        if "--show-toplevel" in cmd:
+            root = "/tree/odd" if odd else "/tree/main"
+            return subprocess.CompletedProcess(cmd, 0, root + "\n", "")
+        if "status" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(
+            cmd, 0, (odd_sha if odd else driver_sha) + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    got = _c2._source_revision()
+    assert got == f"{driver_sha}+mixedtree:{odd_sha[:12]}", got
+    # It really did probe the driver AND every namespace portion.
+    assert here in probed
+    for p in portions:
+        assert p in probed, f"namespace portion {p} was never probed"
+
+
+def test_source_revision_strips_inherited_git_location_env(monkeypatch):
+    """codex r8 MEDIUM: ``git -C <dir>`` does NOT override ``GIT_DIR`` /
+    ``GIT_WORK_TREE`` / ``GIT_COMMON_DIR``.  Under a hook or wrapper that
+    exports them, both probes would describe an unrelated repository and this
+    function would return a confidently WRONG plain sha."""
+    import subprocess
+
+    from scripts.run.run_omip_core2 import _source_revision
+
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    monkeypatch.setenv("GIT_COMMON_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("KEEP_ME", "yes")
+
+    seen: dict = {}
+
+    def _fake(cmd, **kw):
+        seen.update(kw.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, "f" * 40 + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    _source_revision("/anywhere")
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        assert var not in seen, f"{var} leaked into the git child environment"
+    assert seen.get("KEEP_ME") == "yes", (
+        "the whole environment was dropped; only repository-discovery "
+        "variables should be stripped")
 
 
 def test_source_revision_scopes_dirty_state_and_explicit_failure(
@@ -330,6 +413,33 @@ def test_resume_drift_note_distinguishes_unknown_from_a_match():
                 f"{sha}+mixedtree:0123456789ab"):
         n = note(amb, amb)
         assert n is not None, f"{amb} was silently accepted as a match"
+
+
+def test_restart_fingerprint_covers_the_resolved_forcing_archive():
+    """codex r8 MEDIUM: with --forcing-path unset the CORE-II loader falls back
+    to an environment/home-dependent cache directory, so two legs whose command
+    lines are IDENTICAL (both hashing ``forcing_path=None``) could read
+    different archives and still produce matching fingerprints.
+
+    main() must fold the RESOLVED path in, and it must get it from the loader's
+    own helper — a re-derived copy of the resolution rule would drift.
+    """
+    import inspect
+
+    from scripts.run import run_omip_core2 as _c2
+
+    src = inspect.getsource(_c2.main)
+    assert "core2_nyf_path" in src, (
+        "main() no longer resolves the forcing archive for the fingerprint")
+    assert "forcing_archive=" in src, (
+        "the resolved forcing archive is no longer hashed into the restart "
+        "configuration fingerprint")
+    # It must be inside the fingerprint block, i.e. before the digest is taken.
+    lines = src.splitlines()
+    use = next(i for i, ln in enumerate(lines) if "forcing_archive=" in ln)
+    digest = next(i for i, ln in enumerate(lines)
+                  if "_restart_cfg_fp = " in ln and "None" not in ln)
+    assert use < digest, "the forcing archive is appended after the digest"
 
 
 def test_scan_lane_refuses_restarts():

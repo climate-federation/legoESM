@@ -213,10 +213,16 @@ def test_load_refuses_an_archive_that_persisted_a_diagnostic(tmp_path):
     with np.load(path, allow_pickle=False) as f:
         payload = {k: f[k] for k in f.files}
     slots = json.loads(str(payload["_slot_kinds"]))
-    slots["w"] = {"kind": "field", "meta": ["w", ["lat", "lon", "level"],
-                                            "m/s", "", "cell"]}
+    w_arr = np.asarray(state.w.data)
+    # A WELL-FORMED entry (format 3 records shape+dtype): the point of this
+    # test is the POLICY refusal, so the forged manifest must be exactly what a
+    # writer with a different policy would emit, not a malformed one that the
+    # schema check would reject first for an unrelated reason.
+    slots["w"] = {"kind": "field",
+                  "meta": ["w", ["lat", "lon", "level"], "m/s", "", "cell"],
+                  "shape": list(w_arr.shape), "dtype": str(w_arr.dtype)}
     payload["_slot_kinds"] = np.asarray(json.dumps(slots))
-    payload["w"] = np.asarray(state.w.data)
+    payload["w"] = w_arr
     np.savez(path, **payload)
     with pytest.raises(ValueError, match="diagnostic"):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
@@ -718,7 +724,10 @@ def test_a_mismatched_restart_is_rejected_before_the_payload_is_read(
     real_load = np.load
 
     def _spy_load(*a, **kw):
-        opens.append(str(a[0]) if a else "")
+        # Positional OR keyword: np.load's parameter is named `file`, and a
+        # keyword call would otherwise record "" and fail this test for the
+        # wrong reason (codex r8 LOW).
+        opens.append(str(a[0] if a else kw.get("file", "")))
         return _KeyAccessSpy(real_load(*a, **kw), touched)
 
     monkeypatch.setattr(np, "load", _spy_load)
@@ -788,11 +797,90 @@ def test_header_values_must_satisfy_their_schema(tmp_path, key, forged, msg):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
 
 
+def test_a_retyped_or_resized_payload_array_is_a_hard_error(tmp_path):
+    """codex r8 HIGH: the loader could only compare a restored slot against the
+    TEMPLATE, and ``run_omip_core2`` loads into a rest state whose optional
+    carries are all ``None`` — so their shape check was SKIPPED and a
+    wrong-shaped ``tke`` loaded.  Dtype was weaker still: ``_as_jnp`` only
+    asserts JAX does not demote what the file holds, so an f64 field rewritten
+    as f32 passed.  The manifest now records shape+dtype per slot and the
+    payload is cross-checked against it."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+
+    # (a) SHAPE, on a carry the resuming template leaves None (the case the
+    #     template comparison could never catch).
+    fresh = _base_state()[2]
+    assert fresh.tke is None, "the template must leave tke unseeded here"
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    orig = payload["tke"]
+    payload["tke"] = np.zeros((orig.shape[0], orig.shape[1], orig.shape[2] + 1),
+                              dtype=orig.dtype)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="manifest entry records"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+    # (b) DTYPE, on a prognostic: rewrite T at the OTHER float width.  Which
+    #     width the state is built at is not the point (and is not asserted
+    #     here — it varies with the rest-state builder); the point is that a
+    #     retyped payload no longer matches the manifest.
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    saved_dtype = payload["T"].dtype
+    other = np.float32 if saved_dtype == np.float64 else np.float64
+    payload["T"] = payload["T"].astype(other)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="records .*float"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_the_manifest_records_shape_and_dtype_for_every_persisted_array(
+        tmp_path):
+    """Non-vacuity guard for the cross-check above: if the writer stopped
+    recording specs, the loader's comparison would silently have nothing to
+    compare against."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    meta = run_restart_metadata(path)
+    with np.load(path, allow_pickle=False) as f:
+        arrays = {k: (f[k].shape, str(f[k].dtype))
+                  for k in f.files if not k.startswith("_")}
+    seen = 0
+    for name, entry in meta["slots"].items():
+        if entry["kind"] == "tuple":
+            for i, spec in enumerate(entry["specs"]):
+                got = arrays[f"{name}::{i}"]
+                assert (tuple(spec["shape"]), spec["dtype"]) == got, name
+                seen += 1
+        else:
+            got = arrays[name]
+            assert (tuple(entry["shape"]), entry["dtype"]) == got, name
+            seen += 1
+    assert seen == len(arrays), (
+        f"{len(arrays) - seen} payload array(s) have no shape/dtype record")
+
+
 @pytest.mark.parametrize("entry,msg", [
     ({"kind": "blob"}, "cannot decode"),
-    ({"kind": "tuple", "n": -1}, "non-negative integer"),
-    ({"kind": "tuple"}, "non-negative integer"),
+    ({"kind": "tuple", "n": -1}, r"integer in \[0"),
+    ({"kind": "tuple"}, r"integer in \[0"),
+    ({"kind": "tuple", "n": 10 ** 9}, r"integer in \[0"),
     ({"kind": "tuple", "n": 2, "elems": [None]}, "element-metadata"),
+    ({"kind": "field", "meta": [], "shape": [1], "dtype": "float64"},
+     "5-element"),
+    ({"kind": "field", "meta": ["tke", "notalist", "1", "", "cell"],
+      "shape": [1], "dtype": "float64"}, "list of strings"),
+    ({"kind": "array"}, "records shape None"),
+    ({"kind": "array", "shape": [-1], "dtype": "float64"},
+     "non-negative integers"),
+    ({"kind": "array", "shape": [1], "dtype": ""}, "non-empty dtype"),
+    ({"kind": "tuple", "n": 1, "elems": [None]}, "shape/dtype records"),
     ("not-a-dict", "expected an object"),
 ])
 def test_a_malformed_manifest_entry_is_rejected_before_the_payload_is_read(

@@ -2275,28 +2275,44 @@ def _source_revision(start_dir=None) -> str:
        ``_SOURCE_REV_UNAVAILABLE`` so the resume can say the check could not
        run rather than implying it passed.
 
-    4. **Mixed trees** (codex r7 MEDIUM).  The DRIVER script and the imported
-       ``legoesm`` packages need not come from the same checkout — every
-       sbatch wrapper here sets ``PYTHONPATH`` explicitly, and a wrong value
-       silently runs this script against ANOTHER worktree's model code, which
-       is exactly the shared-checkout hazard the pinned-worktree workflow
-       exists to avoid.  The two roots are compared and a divergence is
-       recorded as ``+mixedtree:<other-sha12>`` (or ``+mixedtree:unknown``),
-       so the archive shows that one SHA does not describe all the running
-       code.  ``start_dir`` skips the cross-check (unit testing of the
-       git-plumbing itself).
+    4. **Mixed trees** (codex r7 MEDIUM, widened at r8).  The DRIVER script and
+       the imported ``legoesm`` packages need not come from the same checkout —
+       every sbatch wrapper here sets ``PYTHONPATH`` explicitly, and a wrong
+       value silently runs this script against ANOTHER worktree's model code,
+       which is exactly the shared-checkout hazard the pinned-worktree workflow
+       exists to avoid.  ``legoesm`` is a PEP-420 namespace package, so it is
+       not one directory but a LIST (``legoesm.__path__``: ``src/legoesm`` plus
+       every ``packages/*/legoesm``); ALL of them are checked, not just the one
+       that happens to define this module.  Any divergence from the driver's
+       root is recorded as ``+mixedtree:<sha12>[,<sha12>...]``.  ``start_dir``
+       skips the cross-check (unit testing of the git plumbing itself).
+
+    5. **Inherited git environment** (codex r8 MEDIUM).  ``git -C <dir>`` does
+       NOT override ``GIT_DIR`` / ``GIT_WORK_TREE`` / ``GIT_COMMON_DIR``: under
+       a hook or a wrapper that exports them, both probes would report an
+       unrelated repository as clean and this function would return a
+       confidently WRONG plain sha.  They are stripped from the child
+       environment.
 
     Returns the revision string; never raises.
     """
+    import os as _os
     import subprocess as _sp
     here = str(Path(__file__).resolve().parent if start_dir is None
                else Path(start_dir))
+    # Repository-DISCOVERY variables only: leaving the rest of the environment
+    # intact keeps git's own PATH/credential setup working.
+    _env = {k: v for k, v in _os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                         "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                         "GIT_CEILING_DIRECTORIES")}
 
     def _git(cwd, *a):
         # check=False: a non-repo / missing git is an expected outcome here,
         # not an exception path.
         return _sp.run(["git", "-C", cwd, *a], capture_output=True,
-                       text=True, timeout=10, check=False)
+                       text=True, timeout=10, check=False, env=_env)
 
     def _describe(cwd):
         """``(toplevel, revision-string)`` for one directory, or ``(None, …)``."""
@@ -2315,17 +2331,33 @@ def _source_revision(start_dir=None) -> str:
 
     try:
         root, rev = _describe(here)
-        if root is None or start_dir is not None:
+        if rev == _SOURCE_REV_UNAVAILABLE or start_dir is not None:
             return rev
-        # Cross-check the tree that actually supplies the model code.
-        import legoesm.ocean.restart as _rs_mod
-        pkg_dir = str(Path(_rs_mod.__file__).resolve().parent)
-        pkg_root, pkg_rev = _describe(pkg_dir)
-        if pkg_root is not None and Path(pkg_root) == Path(root):
+        if root is None:
+            # HEAD resolved but the repository ROOT did not, so the cross-check
+            # below cannot run.  Keep the sha (it is real) but mark it
+            # ambiguous rather than reporting a clean, fully-describing
+            # revision (codex r8).
+            return f"{rev}+mixedtree:unknown"
+        # Cross-check EVERY tree that supplies model code.
+        import legoesm as _lego
+        others = []
+        seen = set()
+        for portion in list(getattr(_lego, "__path__", [])):
+            pkg_dir = str(Path(portion).resolve())
+            if pkg_dir in seen:
+                continue
+            seen.add(pkg_dir)
+            pkg_root, pkg_rev = _describe(pkg_dir)
+            if pkg_root is not None and Path(pkg_root) == Path(root):
+                continue
+            tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
+                   else pkg_rev.split("-")[0][:12])
+            if tag not in others:
+                others.append(tag)
+        if not others:
             return rev
-        tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
-               else pkg_rev.split("-")[0][:12])
-        return f"{rev}+mixedtree:{tag}"
+        return f"{rev}+mixedtree:{','.join(others)}"
     except Exception:                       # noqa: BLE001 — provenance only
         return _SOURCE_REV_UNAVAILABLE
 
@@ -5672,6 +5704,17 @@ def main() -> int:
         _fp_items.append(f"model_config={model.config!r}")
         _fp_items.append(f"ice_config={ice_config!r}")
         _fp_items.append(f"grid_type={app_grid_type}")
+        # RESOLVED forcing archive, not the raw flag (codex r8 MEDIUM): with
+        # --forcing-path unset the loader falls back to an environment/home
+        # dependent cache directory, so two legs whose command lines are
+        # IDENTICAL (both recording forcing_path=None) can read different
+        # CORE-II archives and still produce matching fingerprints.  Resolved
+        # through the loader's own helper so the recorded path cannot drift
+        # from the loaded one.
+        from legoesm.ocean.forcing import core2_nyf_path
+        _fp_forcing = core2_nyf_path(
+            Path(args.forcing_path) if args.forcing_path else None)
+        _fp_items.append(f"forcing_archive={_fp_forcing.resolve()}")
         _restart_cfg_fp = _hashlib.sha256(
             "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
     # SOURCE REVISION (codex r5 HIGH; scoping/dirty/explicit-failure fixed in

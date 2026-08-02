@@ -18,12 +18,21 @@ manifest, inventory and payload key names must agree in both directions,
 unknown metadata keys are refused, and a diagnostic-persisting archive is
 rejected.
 
+EVERY CHECK IS CONDITIONAL ON WHAT THE CALLER SUPPLIES.  ``grid_type``,
+``dt_seconds``, ``n_forcing_records`` and ``config_fingerprint`` are all
+OPTIONAL arguments of :func:`load_run_restart`; each check runs only when
+its argument is given.  ``run_omip_core2`` supplies all four, so its
+resumes are fully checked; a direct caller that omits them gets
+correspondingly less.  (The asymmetric case IS refused: supplying a value
+the archive does not carry raises rather than silently skipping.)
+
 WHAT IS NOT DELIVERED -- a cryptographically strict or bit-identical
 continuation.  This is a guarded RECOVERY resume.  It detects
 configuration DRIFT, archive TRUNCATION/CORRUPTION and STRUCTURAL
-tampering (a slot renamed, relabelled, removed, or smuggled into the
-reserved metadata namespace).  It is NOT a proof that the resumed leg
-reproduces an uninterrupted run bit for bit.  Concretely, and by design:
+tampering (a slot renamed, relabelled, removed, resized, retyped, or
+smuggled into the reserved metadata namespace).  It is NOT a proof that
+the resumed leg reproduces an uninterrupted run bit for bit.  Concretely,
+and by design:
 
 * THERE IS NO PAYLOAD CHECKSUM.  An edit to the VALUES of a persisted
   array that keeps its shape and dtype -- overwriting ``T`` with a
@@ -91,7 +100,8 @@ For RESUMING a driver mid-integration use the run-restart pair instead
 PROGNOSTIC and STATIC state slot — including the non-``Field`` carries
 ``save_restart`` drops silently (rigid-lid ``psi``/``dpsi``/``dpsin``, the
 ``bt_hist`` tuple) — plus the unmangled sea-ice state and the absolute step
-counter that every OMIP forcing index is a pure function of.  Slots labelled
+counter, which together with ``dt`` and the forcing-record count determine
+every OMIP forcing index.  Slots labelled
 DIAGNOSTIC in :data:`_SLOT_POLICY` are deliberately excluded, and a slot in
 neither bucket raises::
 
@@ -155,7 +165,15 @@ _RUN_METADATA_REQUIRED: tuple[str, ...] = (
     "_excluded", "_slot_kinds", "_ice_slot_kinds",
 )
 # Bumped when the on-disk layout changes incompatibly.
-_RUN_RESTART_FORMAT: int = 2
+# 3: every manifest entry carries the payload's shape + dtype, so the loader
+#    can cross-check the array against an independent record instead of relying
+#    on the resuming template (whose optional carries are None) — codex r8.
+_RUN_RESTART_FORMAT: int = 3
+# Upper bound on a tuple-valued carry's element count.  The manifest's `n`
+# drives key-name expansion BEFORE any array is read, so a hand-edited archive
+# with a huge n would otherwise allocate that many strings.  bt_hist (6) is the
+# largest tuple carry in the model; the bound is generous.
+_MAX_TUPLE_CARRY: int = 64
 # Prefix under which the sea-ice state's slots are stored (mirrors the
 # ``ice_<field>`` convention run_omip already writes).
 _ICE_PREFIX: str = "ice_"
@@ -419,8 +437,14 @@ def save_mld_snapshot(state, path: str | Path, *,
     (``lat_T``, ``lon_T`` in DEGREES), and the reference level-centre depths
     (``z_center_ref``, positive-down) the scorers use to build the per-level
     wet mask ``z_center_ref < H_bathy``.  ``u``/``v``/``eta`` are included
-    when present (``v`` is absent on MPAS; ``eta`` lets a run restart from the
-    snapshot without a barotropic-adjustment shock).
+    when present (``v`` is absent on MPAS; ``eta`` lets an OFFLINE tool re-seed
+    a state from this snapshot without a barotropic-adjustment shock).
+
+    THIS IS NOT A RESTART.  ``--restart-from`` REJECTS a snapshot outright — it
+    carries no ``_slot_kinds`` manifest, so :func:`load_run_restart` cannot
+    tell a dropped carry from an absent one.  Re-seeding from a snapshot is an
+    explicit offline workflow that cold-starts every integrator carry; use
+    :func:`save_run_restart` to resume an integration.
 
     Shared writer for the snapshot contract read by
     ``scripts/validate/compare_mld_dbm.py`` and ``compare_omip_nemo.py``; the
@@ -519,8 +543,10 @@ def save_mld_snapshot(state, path: str | Path, *,
 # save time.  So a field added to the state in future cannot be silently
 # dropped (resuming from its cold-start seed) nor silently resurrected (a stale
 # diagnostic restored over a fresh one).  The step counter is recorded because
-# every forcing index in the OMIP drivers is a pure function of it (``_idx_t``,
-# ``_runoff_month_idx``), so persisting it reproduces the forcing exactly.
+# every forcing index in the OMIP drivers is a pure function of ``(step, dt,
+# n_records)`` (``_idx_t``, ``_runoff_month_idx``): persisting the step
+# reproduces the forcing exactly PROVIDED the other two match, which is what
+# the optional ``dt_seconds``/``n_forcing_records`` checks are for.
 
 
 def _field_meta(f: Field) -> list:
@@ -552,21 +578,39 @@ def _encode_slot(name: str, value, payload: dict) -> dict:
     Raises ``TypeError`` for a value the format does not understand — see the
     module note above: a silently dropped carry is the defect being prevented.
     """
+    # SHAPE + DTYPE ARE PART OF THE MANIFEST (format 3, codex r8 HIGH).
+    # Without them the loader could only compare a restored slot against the
+    # TEMPLATE, and the template's optional carries are None in the resuming
+    # run (run_omip_core2 loads into an all-None rest state), so their shape
+    # check was skipped entirely and a wrong-shaped `tke` loaded.  The dtype
+    # check was weaker still: ``_as_jnp`` only asserts JAX does not DEMOTE what
+    # the archive holds, so an f64 ``T`` rewritten as f32 passed.  Recording
+    # both here makes the manifest an independent record to cross-check the
+    # payload against — the same cheap-tamper level as the orphan check, not a
+    # defence against a coordinated rewrite of manifest AND array.
+    def _spec(arr) -> dict:
+        a = np.asarray(arr)
+        return {"shape": list(a.shape), "dtype": str(a.dtype)}
+
     if isinstance(value, Field):
         payload[name] = np.asarray(value.data)
-        return {"kind": _KIND_FIELD, "meta": _field_meta(value)}
+        return {"kind": _KIND_FIELD, "meta": _field_meta(value),
+                **_spec(value.data)}
     # EXACT tuple, not any sequence: a list or a NamedTuple would be restored
     # as a plain tuple, silently changing the pytree treedef (codex r1 LOW).
     if type(value) is tuple:
         metas: list = []
+        specs: list = []
         for i, elem in enumerate(value):
             key = f"{name}{_TUPLE_SEP}{i}"
             if isinstance(elem, Field):
                 payload[key] = np.asarray(elem.data)
                 metas.append(_field_meta(elem))
+                specs.append(_spec(elem.data))
             elif hasattr(elem, "shape") and hasattr(elem, "dtype"):
                 payload[key] = np.asarray(elem)
                 metas.append(None)
+                specs.append(_spec(elem))
             else:
                 raise TypeError(
                     f"save_run_restart: carry slot {name!r} element {i} has "
@@ -574,12 +618,13 @@ def _encode_slot(name: str, value, payload: dict) -> dict:
                     "format serialises Fields, arrays and tuples of them.  "
                     "Extend _encode_slot/_decode_slot rather than letting the "
                     "carry be dropped.")
-        return {"kind": _KIND_TUPLE, "n": len(value), "elems": metas}
+        return {"kind": _KIND_TUPLE, "n": len(value), "elems": metas,
+                "specs": specs}
     # Arrays only — NOT bare Python scalars, which would come back as a JAX
     # 0-D array and change the leaf type (codex r1 LOW).
     if hasattr(value, "shape") and hasattr(value, "dtype"):
         payload[name] = np.asarray(value)
-        return {"kind": _KIND_ARRAY}
+        return {"kind": _KIND_ARRAY, **_spec(value)}
     raise TypeError(
         f"save_run_restart: carry slot {name!r} has unsupported type "
         f"{type(value).__name__}; the restart format serialises Fields, "
@@ -619,19 +664,47 @@ def _decode_slot(name: str, entry: dict, loaded: dict, path: Path):
                 "resuming at a demoted precision is not a continuation.")
         return out
 
+    def _checked(key, spec):
+        """The payload array, cross-checked against the manifest's own record.
+
+        The MANIFEST is the independent witness (codex r8 HIGH): the template
+        cannot supply an expected shape for a carry the resuming run leaves
+        ``None``, and ``_as_jnp`` only proves JAX did not demote what the file
+        holds — neither notices an array swapped for a different shape, or an
+        f64 field rewritten as f32.  Comparing the array to the shape/dtype the
+        writer recorded closes the cheap-edit case.
+        """
+        arr = _need(key)
+        want_shape = tuple(spec["shape"])
+        if tuple(arr.shape) != want_shape:
+            raise ValueError(
+                f"load_run_restart: {path} array {key!r} has shape "
+                f"{tuple(arr.shape)} but its manifest entry records "
+                f"{want_shape}.  The payload and the manifest disagree; the "
+                "archive is corrupt or was edited.")
+        if str(arr.dtype) != spec["dtype"]:
+            raise ValueError(
+                f"load_run_restart: {path} array {key!r} has dtype "
+                f"{arr.dtype} but its manifest entry records "
+                f"{spec['dtype']!r}.  Resuming at a different precision than "
+                "the writing run is not a continuation, and the disagreement "
+                "means one of the two records was edited.")
+        return _as_jnp(arr)
+
     kind = entry.get("kind")
     if kind == _KIND_FIELD:
-        return _field_from_meta(_as_jnp(_need(name)), entry.get("meta"), name)
+        return _field_from_meta(_checked(name, entry), entry.get("meta"), name)
     if kind == _KIND_ARRAY:
         # Raw-array carries (the rigid-lid psi/dpsi/dpsin quintet) have no
         # Field metadata by construction.
-        return _as_jnp(_need(name))
+        return _checked(name, entry)
     if kind == _KIND_TUPLE:
         n = int(entry["n"])
         metas = entry.get("elems") or [None] * n
+        specs = entry["specs"]
         out = []
         for i in range(n):
-            data = _as_jnp(_need(f"{name}{_TUPLE_SEP}{i}"))
+            data = _checked(f"{name}{_TUPLE_SEP}{i}", specs[i])
             out.append(_field_from_meta(data, metas[i], f"{name}_{i}")
                        if metas[i] is not None else data)
         return tuple(out)
@@ -853,6 +926,42 @@ def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
             f"{type(kinds).__name__}, expected an object; the archive is "
             "corrupt or hand-edited.")
     known = (_KIND_FIELD, _KIND_ARRAY, _KIND_TUPLE)
+
+    def _check_spec(where, spec):
+        """A shape/dtype record must be usable BEFORE any array is inflated."""
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"{in_path}: {where} carries no shape/dtype record (got "
+                f"{type(spec).__name__}); this build cannot cross-check the "
+                "payload against the manifest without one.")
+        shape = spec.get("shape")
+        if (not isinstance(shape, list)
+                or any(not isinstance(d, int) or isinstance(d, bool) or d < 0
+                       for d in shape)):
+            raise ValueError(
+                f"{in_path}: {where} records shape {shape!r}; expected a list "
+                "of non-negative integers.")
+        if not isinstance(spec.get("dtype"), str) or not spec["dtype"]:
+            raise ValueError(
+                f"{in_path}: {where} records dtype {spec.get('dtype')!r}; "
+                "expected a non-empty dtype string.")
+
+    def _check_field_meta(where, meta):
+        """``_field_from_meta`` unpacks EXACTLY five entries (codex r8)."""
+        if meta is None:
+            return
+        if not isinstance(meta, list) or len(meta) != 5:
+            raise ValueError(
+                f"{in_path}: {where} carries Field metadata {meta!r}; expected "
+                "a 5-element [name, dims, units, long_name, staggering] list. "
+                "Rebuilding would fail mid-unpack, after the payload had "
+                "already been inflated.")
+        if not isinstance(meta[1], list) or any(not isinstance(d, str)
+                                                for d in meta[1]):
+            raise ValueError(
+                f"{in_path}: {where} declares dims {meta[1]!r}; expected a "
+                "list of strings (they become the Field's pytree aux-data).")
+
     for name, entry in kinds.items():
         if not isinstance(entry, dict):
             raise ValueError(
@@ -866,21 +975,40 @@ def _validate_manifest_schema(kinds: Any, what: str, in_path: Path) -> None:
                 f"{', '.join(known)}).  The archive was written by an "
                 "incompatible writer or hand-edited; refusing to resume "
                 "rather than inflate a payload we cannot rebuild.")
+        where = f"{what} manifest slot {name!r}"
         if kind != _KIND_TUPLE:
+            _check_spec(where, entry)
+            if kind == _KIND_FIELD:
+                _check_field_meta(where, entry.get("meta"))
             continue
         n = entry.get("n")
-        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        # BOUNDED (codex r8): the key expansion below materialises n names, so
+        # an unbounded n is a cheap denial of service on a hand-edited archive.
+        # No state slot is a tuple of more than a handful of arrays (bt_hist,
+        # the largest, is 6).
+        if (not isinstance(n, int) or isinstance(n, bool)
+                or not 0 <= n <= _MAX_TUPLE_CARRY):
             raise ValueError(
-                f"{in_path}: {what} manifest slot {name!r} is a tuple carry "
-                f"with element count {n!r}; expected a non-negative integer.")
+                f"{in_path}: {where} is a tuple carry with element count "
+                f"{n!r}; expected an integer in [0, {_MAX_TUPLE_CARRY}].")
         elems = entry.get("elems")
         if elems is not None and (not isinstance(elems, list)
                                   or len(elems) != n):
             got = len(elems) if isinstance(elems, list) else repr(elems)
             raise ValueError(
-                f"{in_path}: {what} manifest slot {name!r} declares n={n} but "
-                f"carries {got} element-metadata entries; the two records "
-                "disagree, so neither can be trusted.")
+                f"{in_path}: {where} declares n={n} but carries {got} "
+                "element-metadata entries; the two records disagree, so "
+                "neither can be trusted.")
+        for i, m in enumerate(elems or []):
+            _check_field_meta(f"{where} element {i}", m)
+        specs = entry.get("specs")
+        if not isinstance(specs, list) or len(specs) != n:
+            got = len(specs) if isinstance(specs, list) else repr(specs)
+            raise ValueError(
+                f"{in_path}: {where} declares n={n} but carries {got} "
+                "shape/dtype records; refusing to resume without them.")
+        for i, s in enumerate(specs):
+            _check_spec(f"{where} element {i}", s)
 
 
 def _parse_run_metadata(f, in_path: Path) -> dict[str, Any]:

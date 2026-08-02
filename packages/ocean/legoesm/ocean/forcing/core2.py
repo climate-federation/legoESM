@@ -40,6 +40,23 @@ def _cache_dir() -> Path:
     return _jra_cache_dir().parent / "core2_nyf"
 
 
+def core2_nyf_path(cache_dir: Optional[Path] = None) -> Path:
+    """Resolve the ``nyf.zarr`` archive :func:`load_core2_nyf` would read.
+
+    Exposed so a caller can RECORD which archive a run actually used.  With
+    ``cache_dir`` unset the location comes from ``_cache_dir()``, i.e. from the
+    environment / home directory, so two runs launched with identical command
+    lines can read DIFFERENT forcing (codex r8): ``run_omip_core2`` folds this
+    resolved path into its restart configuration fingerprint rather than the
+    raw ``--forcing-path`` argument, which is ``None`` in exactly that case.
+
+    Single source of truth: :func:`load_core2_nyf` resolves through this
+    function, so the recorded path cannot drift from the loaded one.
+    """
+    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
+    return root / "nyf.zarr"
+
+
 def load_core2_nyf(*, cache_dir: Optional[Path] = None,
                    allow_synthetic: bool = True,
                    n_time: int = 365) -> OceanForcing:
@@ -49,8 +66,7 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
     with ``n_time`` daily snapshots (default 365). The seasonal cycle is
     one year long.
     """
-    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
-    zarr_path = root / "nyf.zarr"
+    zarr_path = core2_nyf_path(cache_dir)
     if zarr_path.exists():
         try:
             import xarray as xr
@@ -95,4 +111,4 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
     return synthetic_ocean_forcing(0, n_time=n_time)
 
 
-__all__ = ["load_core2_nyf"]
+__all__ = ["load_core2_nyf", "core2_nyf_path"]
