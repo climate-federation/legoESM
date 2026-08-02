@@ -226,11 +226,18 @@ def test_no_forcing_albedo_is_byte_identical_none(monkeypatch, mesh, sigma):
     assert seen == [None]
 
 
-def test_surface_albedo_changes_the_shortwave(mesh, sigma):
-    """A bright surface must actually reduce the absorbed shortwave.
+def test_surface_albedo_changes_the_reflected_shortwave(mesh, sigma):
+    """A brighter surface must reflect MORE shortwave to space.
 
-    Guards against the override arriving at the backend but being dropped
-    on the floor there (the gray branch ignored ``sfc_albedo_override``).
+    Guards against the override arriving at the backend but being dropped on
+    the floor there (the gray branch used to ignore ``sfc_albedo_override``
+    entirely).
+
+    The assertion is on ``sw_up_toa`` (CMOR ``rsut``), NOT on ``dT_dt``: in the
+    gray two-stream the reflected beam is non-absorbing, so the atmospheric
+    HEATING RATE is genuinely independent of surface albedo while the reflected
+    FLUX scales with it.  ``rsut`` is also the variable the observed defect was
+    detected in, so this is the quantity of interest rather than a proxy.
     """
     state = _state(mesh, sigma)
     n = int(mesh.nCells)
@@ -239,14 +246,19 @@ def test_surface_albedo_changes_the_shortwave(mesh, sigma):
             "seconds_of_day": jnp.asarray(43200.0)}
 
     dark = fn(state, mesh, sigma,
-              forcing=dict(base, sfc_albedo=jnp.full((n,), 0.06)))
+              forcing=dict(base, sfc_albedo=jnp.full((n,), _ALBEDO_OCEAN)))
     bright = fn(state, mesh, sigma,
                 forcing=dict(base, sfc_albedo=jnp.full((n,), 0.60)))
 
-    d_dark = np.asarray(dark.dT_dt.data)
-    d_bright = np.asarray(bright.dT_dt.data)
-    assert np.isfinite(d_dark).all() and np.isfinite(d_bright).all()
-    assert not np.allclose(d_dark, d_bright, atol=1e-12), (
-        "surface albedo had NO effect on the radiative heating — the "
-        "override is being dropped inside the radiation backend."
+    assert dark.sw_up_toa is not None, "rsut not carried on the tendency"
+    r_dark = np.asarray(dark.sw_up_toa.data)
+    r_bright = np.asarray(bright.sw_up_toa.data)
+    assert np.isfinite(r_dark).all() and np.isfinite(r_bright).all()
+
+    # Sign: brighter surface => MORE outgoing shortwave, everywhere sunlit.
+    lit = np.asarray(dark.sw_down_toa.data) > 1.0
+    assert lit.any(), "test state has no sunlit columns"
+    assert (r_bright[lit] > r_dark[lit]).all(), (
+        "a brighter surface did not increase the reflected shortwave — the "
+        "surface albedo is being dropped inside the radiation backend."
     )
