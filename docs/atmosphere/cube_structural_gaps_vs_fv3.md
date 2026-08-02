@@ -81,3 +81,49 @@ The cc↔corner projection ranking **#1 for the jet** is the same object as the
 "persistent-D" arm proposed independently in the earlier ladder — two separate
 analyses converging on the repeated D→C exit / C→D re-entry as the prime suspect.
 That is corroboration, not confirmation: neither has been measured yet.
+
+## MEASURED: the outer projection materially suppresses eddies (2026-08-02)
+
+Frozen check #1 above has been run. **CONFIRMED**: removing the extra outer
+cell-centre↔corner projection roughly doubles both eddy kinetic energy and the
+eddy momentum flux at day 20.
+
+C48 / L30 / dt=300 / 20 days, configuration mirrored to the matrix HS lane
+(`hyperdiff = 1.0e16`, `div_damp = 1.5e7`, `A_h` from the matrix formula), both
+arms identical except where the prognostic state lives between steps:
+
+| arm | banded EKE (J/kg) | signed u′v′ (m²/s²) | max &#124;U&#124; (m/s) |
+|---|---|---|---|
+| A — persistent D | 5.195e-03 | **+4.173e-04** | 6.620 |
+| B — cc round-trip (current) | 1.976e-03 | +2.208e-04 | 4.737 |
+
+**EKE ratio A/B = 2.63**, against the pre-declared **≥ 1.50 = material**
+(≤ 1.10 would have deprioritised it). A C12 smoke gave **3.24** — same direction,
+independently. `u′v′` is poleward — the correct sign for an eddy-driven jet — and
+**1.9× larger** in arm A, so this is not an EKE-only artefact: the flux that
+actually drives the jet responds too. The instantaneous jet is 40% stronger.
+
+Controls passed *before* the arms ran: the physical `U = 30cos φ` vector-lift
+preflight including seams (2/2), and an orthonormality + rotation control
+(`max|cos²+sin²−1| = 7.7e-08`, grid dtype float32, tol 1e-6). Earlier attempts of
+this probe voided themselves three times on mis-set control tolerances and once
+on the wrong configuration entirely — each void was the instrument working.
+
+### What this does and does not establish
+
+**CONFIRMED** — under this configuration and seed, at day 20, the extra outer
+projection costs a factor ~2.6 in banded EKE and ~1.9 in `u′v′`.
+
+**NOT established.** This is a **lower bound** on the projection's total cost:
+`physics_fn` converts to cell-centre on every RK stage in *both* arms, so the
+inner conversions are common-mode and unmeasured. Twenty days is not
+Held-Suarez equilibrium, and arm A's 6.6 m/s is still far from the ~30 m/s
+benchmark — the projection is **a** material suppressor, not demonstrably the
+whole cause. One seed, one configuration.
+
+### Consequence
+
+This promotes the cc↔corner projection from "ranked #1 by inspection" to
+**measured material**, and is the first quantitative attribution for the dead
+jet. Keeping the prognostic state in D staggering between steps is therefore not
+a fidelity nicety — it is worth a factor of ~2 in eddy activity here.
