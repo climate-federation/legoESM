@@ -1359,6 +1359,14 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
+    # Free-atmosphere diffusivity floor override [m^2/s] for schemes carrying a
+    # ``kvf_min`` field (holtslag_boville).  None = scheme default (byte-
+    # identical).  CAUSALITY-PROBE knob for the polar-night stable-transport
+    # runaway (interior K floors at kvf_min under a surface inversion while the
+    # LW deficit is tens of W/m^2); the paper-grade remedy is an interior
+    # stable-tail selector, not this floor.  Appended at the tuple END to
+    # preserve the positional ABI.
+    hb_kvf_min: Any = None
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2171,6 +2179,13 @@ class ExperimentConfig(NamedTuple):
                 f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
+            )
+        # Free-atmosphere diffusivity-floor override: None, or finite in
+        # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
+        if self.hb_kvf_min is not None and not (0.0 < self.hb_kvf_min <= 10.0):
+            errors.append(
+                f"hb_kvf_min (free-atmosphere diffusivity floor [m^2/s]) must "
+                f"be None or finite in (0, 10]; got {self.hb_kvf_min!r}."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
