@@ -371,6 +371,11 @@ def compute_tiled_surface_fluxes(
         ocean, ``constant`` for ice, and ``most`` (with a land roughness
         ``z0``) for land.
     land_interface : LandInterfaceFluxConfig or None
+        STATIC, like the ``config_*`` arguments — ``max_exchange_coeff`` is
+        resolved at trace time and ``compute_most_fluxes`` REJECTS a traced
+        value, so a ``jax.jit`` caller that passes this explicitly must list it
+        in ``static_argnums`` (leaving it at the default keeps it a closure
+        constant, which is what every production caller does).
         Limits the LAND tile shares with the land surface-energy balance
         (transfer-coefficient ceiling + condensation floor).  Default = the
         shared :data:`legoesm.core.land_interface_flux.LAND_INTERFACE_FLUX`, so
