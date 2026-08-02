@@ -689,22 +689,34 @@ def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
 
     ``gather_state_latlon_cgrid_ocean``'s per-field gather needs a live MPI
     communicator, so the collective itself is stubbed: ``gather_field_latlon``
-    is replaced by a recorder that tags each array with the ``is_v_face`` flag
-    it was called with.  What is under test here is the WIRING -- that both
+    is replaced by a recorder.  What is under test is the WIRING -- that both
     slots go through the gather and that ``mass_flux_v`` is declared a v-face
-    -- which is exactly what was missing.  A slot left out of the ``_replace``
-    keeps rank 0's band-local array and this test sees the untagged original.
+    -- which is exactly what was missing.
+
+    IDENTIFYING THE FIELD IS THE WHOLE POINT, and the first version of this
+    test got it wrong: it keyed the recorder on the array's LEADING DIM, but
+    ``mass_flux_v`` and ``v`` have the same leading dim, so an
+    ``is_v_face=True`` call logged by ``v`` satisfied the assertion meant for
+    ``mass_flux_v``.  A deliberate mutation (gather ``mass_flux_v`` with the
+    CELL convention) went UNCAUGHT.  The two slots now carry unique sentinel
+    VALUES before the gather, so each recorded call is attributable to exactly
+    one field, and each sentinel is required to appear exactly once with the
+    right ``is_v_face``.
     """
     from legoesm.parallel import latlon_mpi as lm
 
-    calls = {}
+    # Values no other state field can be uniformly equal to (masks are 0/1,
+    # eta ~ 0.2 m, T ~ 0-20 C but never CONSTANT, S ~ 35 but not at these).
+    SENTINEL = {"mass_flux_u": -11.5, "mass_flux_v": -13.25}
+    OUT = 7.0
+    calls = []
 
     def _fake_gather(data, layout, *, is_v_face=False):
-        key = (int(np.asarray(data).shape[0]), bool(is_v_face))
-        calls.setdefault(key, 0)
-        calls[key] += 1
-        # A distinguishable sentinel: same shape, all ones.
-        return np.ones_like(np.asarray(data)) * 7.0
+        a = np.asarray(data)
+        tag = (float(a.flat[0])
+               if a.size and bool(np.all(a == a.flat[0])) else None)
+        calls.append((tag, bool(is_v_face)))
+        return np.full_like(a, OUT)
 
     monkeypatch.setattr(lm, "gather_field_latlon", _fake_gather)
 
@@ -713,6 +725,12 @@ def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
     n_lat, n_lon = np.asarray(out.T.data).shape[:2]
     layout = lm.make_latlon_band_layout(0, 2, n_lat, n_lon)
     band = lm.scatter_state_latlon_cgrid_ocean(out, layout)
+    # Stamp the two slots with their sentinels (shapes/dtypes untouched).
+    band = band._replace(**{
+        nm: getattr(band, nm).replace(
+            data=jnp.full_like(getattr(band, nm).data, v))
+        for nm, v in SENTINEL.items()})
+
     gathered = lm.gather_state_latlon_cgrid_ocean(band, layout)
 
     assert gathered is not None, "rank 0 must return a state"
@@ -720,18 +738,29 @@ def test_mpi_band_gather_collects_both_mass_flux_faces(monkeypatch):
         f = getattr(gathered, nm)
         assert f is not None, f"{nm} vanished from the gathered state"
         np.testing.assert_allclose(
-            np.asarray(f.data), 7.0, rtol=0, atol=0,
+            np.asarray(f.data), OUT, rtol=0, atol=0,
             err_msg=(f"{nm} was NOT passed through the gather -- rank 0 kept "
                      "its band-local array in an otherwise global state"))
-    # mass_flux_v must have been gathered as a v-face (its band leading dim is
-    # v.shape[0]); mass_flux_u as a cell/u face.
-    v_rows = np.asarray(band.mass_flux_v.data).shape[0]
-    u_rows = np.asarray(band.mass_flux_u.data).shape[0]
-    assert calls.get((v_rows, True), 0) >= 1, (
-        f"no is_v_face=True gather for a {v_rows}-row field; mass_flux_v was "
-        "gathered with the cell convention and its duplicated boundary row "
-        "would be double-counted")
-    assert calls.get((u_rows, False), 0) >= 1
+
+    # Attribution by sentinel VALUE, not by shape: mass_flux_v must be
+    # gathered as a v-face (its duplicated boundary row trimmed on every rank
+    # but the northernmost), mass_flux_u with the cell/u convention.
+    got = {}
+    for tag, is_v in calls:
+        if tag is None:
+            continue
+        for nm, v in SENTINEL.items():
+            if tag == pytest.approx(v, abs=1e-6):
+                got.setdefault(nm, []).append(is_v)
+    assert got.get("mass_flux_v") == [True], (
+        f"mass_flux_v gather calls: {got.get('mass_flux_v')!r}; expected "
+        "exactly one with is_v_face=True.  Gathered with the CELL convention "
+        "its duplicated boundary row is not trimmed, so the assembled global "
+        "array gains one row per rank instead of one row total.")
+    assert got.get("mass_flux_u") == [False], (
+        f"mass_flux_u gather calls: {got.get('mass_flux_u')!r}; expected "
+        "exactly one with is_v_face=False (it is a u-face field, leading dim "
+        "n_lat, with no duplicated boundary row to trim)")
 
 
 # ---------------------------------------------------------------------------
