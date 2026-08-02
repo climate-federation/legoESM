@@ -36,7 +36,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.core.field import Field
 from legoesm.core.operators_voronoi import cell_to_edge_avg, divergence_cell
 from legoesm.core.state import MPASHydrostaticState
@@ -112,7 +111,7 @@ def test_compute_omega_total_hybrid_hand_arithmetic():
         np.asarray(omega)[0], [-6.9, -21.65, -27.35, -22.1], atol=1e-10)
 
 
-def test_compute_omega_total_hybrid_ignores_A():
+def test_compute_omega_total_hybrid_ignores_a_half():
     """A_half must not move omega: ``A*p_ref`` has no space or time
     dependence, so it drops out of every term of Dp/Dt.  Red if a future
     edit reaches for ``A_full`` (or ``p_full``) instead of ``B_full``."""
@@ -181,18 +180,19 @@ def coord():
 
 def _model(mesh, coord, **cfg_kw):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel,
+        MPASPrimitiveEquationConfig,
+        MPASPrimitiveEquationModel,
     )
     return MPASPrimitiveEquationModel(
         mesh, coord, MPASPrimitiveEquationConfig(**cfg_kw))
 
 
-def _state(mesh, u, p_s, T0=260.0):
+def _state(mesh, u, p_s, t_uniform=260.0):
     n, nlev = int(mesh.nCells), u.shape[-1]
     return MPASHydrostaticState(
         u=Field(data=jnp.asarray(u, dtype=jnp.float64), name="u",
                 dims=("nEdges", "nlev"), units="m/s"),
-        T=Field(data=jnp.full((n, nlev), T0, dtype=jnp.float64), name="T",
+        T=Field(data=jnp.full((n, nlev), t_uniform, dtype=jnp.float64), name="T",
                 dims=("nCells", "nlev"), units="K"),
         p_s=Field(data=jnp.asarray(p_s, dtype=jnp.float64), name="p_s",
                   dims=("nCells",), units="Pa"),
@@ -296,7 +296,7 @@ def test_omega_carries_the_horizontal_pressure_advection_term(mesh, coord):
     horizontal pressure-advection term is dropped.
     """
     m = _model(mesh, coord)
-    ne, n = int(mesh.nEdges), int(mesh.nCells)
+    ne = int(mesh.nEdges)
     rng = np.random.default_rng(11)
     u_col = 8.0 * rng.standard_normal(ne)
     u = np.repeat(u_col[:, None], NLEV, axis=1)      # uniform in the vertical
@@ -365,7 +365,8 @@ def test_default_tendency_call_is_unchanged(mesh, coord):
     type -- every existing caller (RK stages, the SPMD sharder, the MPI
     step) keeps its ABI."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASHydrostaticTendencies, MPASPrimitiveEquationConfig,
+        MPASHydrostaticTendencies,
+        MPASPrimitiveEquationConfig,
         mpas_hydrostatic_tendencies,
     )
     n = int(mesh.nCells)
@@ -395,7 +396,8 @@ def test_omega_jit_parity_and_grad(mesh, coord):
     """JIT parity (no tracer-dependent Python branching) and a finite,
     non-zero reverse-mode gradient through the whole omega path."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
+        MPASPrimitiveEquationConfig,
+        mpas_hydrostatic_tendencies,
     )
     n = int(mesh.nCells)
     st = _state(mesh, _top_layer_only_wind(mesh, NLEV), np.full(n, 1.0e5))
