@@ -48,7 +48,8 @@ from scripts.run.run_omip_core2 import (
 N_LAT, N_LON, NLEV = 6, 8, 4
 H_MAX = 1000.0
 # dt=7200 s (2 h) with 8 steps spans 16 h, i.e. THREE of the 6-hourly CORE-II
-# record bins that run_omip_core2._idx_t maps `step` onto (0,0,0,1,1,1,2,2).
+# record bins that run_omip_core2._idx_t maps `step` onto: steps 1..8 give
+# floor(step*7200/21600) = 0,0,1,1,1,2,2,2.
 # A shorter dt or fewer steps would leave the record index pinned at 0 and the
 # "drop the step counter" mutation below would be VACUOUS —
 # test_the_carries_under_test_are_actually_live asserts the index really moves.
@@ -263,10 +264,11 @@ def test_two_leg_resume_matches_continuous(tmp_path, _legs):
     path = tmp_path / "restart.npz"
     save_run_restart(path, _legs["half_state"], step=N_TOTAL // 2,
                      time_days=(N_TOTAL // 2) * DT / 86400.0,
-                     grid_type="latlon", ice_state=_legs["half_ice"])
+                     grid_type="latlon", dt_seconds=DT,
+                     n_forcing_records=N_REC, ice_state=_legs["half_ice"])
     warm_state, warm_ice, meta = load_run_restart(
         path, _legs["template"], ice_template=_legs["ice_template"],
-        grid_type="latlon")
+        grid_type="latlon", dt_seconds=DT, n_forcing_records=N_REC)
     assert meta["step"] == N_TOTAL // 2
 
     got, got_ice = _leg(_legs["model"], warm_state, warm_ice, _legs["ice_cfg"],

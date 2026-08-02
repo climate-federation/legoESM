@@ -3983,7 +3983,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "and integrator-carry slot, the UNMANGLED sea-ice "
                         "state, and the absolute step counter — so a 72 h job "
                         "chain integrates forward instead of re-paying the "
-                        "cold-start spin-up each time.")
+                        "cold-start spin-up each time. Cadence: "
+                        "--restart-every-days (defaults to "
+                        "--snapshot-every-days); always also written at the "
+                        "end of the run.")
     p.add_argument("--restart-every-days", type=float, default=0.0,
                    help="Cadence for --restart-save [sim-days]. 0 (default) "
                         "follows --snapshot-every-days. With BOTH at 0 the "
@@ -5484,7 +5487,8 @@ def main() -> int:
         # ice — no silent cold-start fallback is possible here.
         state, ice_state, _rs_meta = load_run_restart(
             _rs_path, state, ice_template=ice_state,
-            grid_type=app_grid_type)
+            grid_type=app_grid_type, dt_seconds=dt,
+            n_forcing_records=n_rec)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target
@@ -5614,7 +5618,11 @@ def main() -> int:
         if _csv is not None:
             _csv.close()
 
-    _log_diag_csv(start_step, start_day, d0, 0.0, ice=ice_state)
+    # Fresh run: seed the series with the initial state.  RESUME: the parent
+    # leg already logged this exact step as its final row, so re-logging it
+    # would duplicate a row in the appended series (codex r1 LOW).
+    if not args.restart_from:
+        _log_diag_csv(start_step, start_day, d0, 0.0, ice=ice_state)
 
     def _write_run_restart(step_i: int, day_f: float, st, ice_st) -> None:
         """Write the resumable restart (``--restart-save``), process-0 only.
@@ -5629,7 +5637,8 @@ def main() -> int:
             return
         from legoesm.ocean.restart import save_run_restart
         save_run_restart(args.restart_save, st, step=step_i, time_days=day_f,
-                         grid_type=app_grid_type, ice_state=ice_st)
+                         grid_type=app_grid_type, dt_seconds=dt,
+                         n_forcing_records=n_rec, ice_state=ice_st)
         print(f"[restart] saved step {step_i} (day {day_f:.2f}) -> "
               f"{args.restart_save}", flush=True)
 
@@ -5900,6 +5909,31 @@ def main() -> int:
                 "loop (omit --scan-block), or drop "
                 "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal/"
                 "--dm2dc and pass --no-emp for the momentum/heat-only scan path.")
+        if args.restart_save or args.restart_from:
+            # The scan body calls model._step_impl DIRECTLY and never calls
+            # seed_scan_carry (it only primes caches below), so it does not
+            # carry the optional integrator slots.  A restart on this lane is
+            # therefore only a faithful continuation when the state holds
+            # nothing but the base prognostics + static geometry; anything else
+            # would be saved and then not advanced (or would break the carry
+            # treedef).  Refuse rather than write a restart that lies.
+            # NB this does NOT fix the pre-existing gap that the scan lane
+            # accepts such configs at all (codex r1 HIGH) — it only stops the
+            # restart from silently inheriting it.
+            from legoesm.ocean.restart import classify_restart_slots
+            _carried, _ = classify_restart_slots(state)
+            _base_ok = {"u", "v", "T", "S", "eta", "H_bathy", "land_mask",
+                        "u_mask", "v_mask"}
+            _extra = sorted(set(_carried) - _base_ok)
+            if _extra:
+                raise SystemExit(
+                    f"--restart-save/--restart-from with --scan-block is "
+                    f"refused: this config carries integrator slot(s) {_extra}, "
+                    "but the scan body steps model._step_impl directly and "
+                    "never seeds/advances the scan carry, so the restart would "
+                    "record a carry the lane does not integrate.  Run the "
+                    "restartable leg on the host Python loop (omit "
+                    "--scan-block).")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -6675,13 +6709,17 @@ def main() -> int:
         _builder_pulls = (host_pull_ledger()["surface_slice_pulls"]
                           - _ledger0["surface_slice_pulls"])
         _slice_pulls = _pers_res.leaf_slice_pulls + _builder_pulls
+        # Per-step rates use THIS LEG's step count: the counters above were
+        # zeroed at leg start, so dividing by the absolute n_steps would
+        # under-report a resumed leg's cost (codex r1 LOW).
+        _leg_steps = max(1, n_steps - start_step)
         print(f"[spmd-persistent] full-STATE gathers={_pers_res.gathers} "
-              f"shards={_pers_res.shards} over {n_steps} steps "
-              f"({_pers_res.gathers / max(1, n_steps):.4f} gathers/step; "
-              f"wrapper lane would be {n_steps} + {n_steps})", flush=True)
+              f"shards={_pers_res.shards} over {_leg_steps} steps this leg "
+              f"({_pers_res.gathers / _leg_steps:.4f} gathers/step; "
+              f"wrapper lane would be {_leg_steps} + {_leg_steps})", flush=True)
         print(f"[spmd-persistent] LEAF host transfers (NOT in the full-STATE "
               f"count above): 2-D surface-slice pulls={_slice_pulls} "
-              f"({_slice_pulls / max(1, n_steps):.2f}/step; {_builder_pulls} "
+              f"({_slice_pulls / _leg_steps:.2f}/step; {_builder_pulls} "
               f"from the forcing builders), surface-slice "
               f"write-backs={_pers_res.leaf_slice_writes}, FULL-3D leaf "
               f"gathers={_pers_res.leaf_full_gathers} "

@@ -66,7 +66,10 @@ def _base_state():
 
 
 def _ice_state(n_categories=1):
-    shape = (N_LAT, N_LON)
+    # init_dynamic_ice_state requires the trailing CATEGORY axis in `shape`
+    # when n_categories > 1 (it validates shape[-1] == n_categories).
+    shape = ((N_LAT, N_LON) if n_categories == 1
+             else (N_LAT, N_LON, n_categories))
     ice = init_dynamic_ice_state(shape, n_categories=n_categories)
     # Populate EVERY slot with a distinct, non-default pattern so a dropped or
     # aliased field cannot pass by coincidence.
@@ -101,9 +104,12 @@ _SLOT_KIND = {
     "u_before": "field", "v_before": "field", "T_before": "field",
     "S_before": "field", "eta_before": "field",
     "F_slow_u_prev": "field", "F_slow_v_prev": "field",
-    "tau_x_prev": "field", "tau_y_prev": "field",
-    "freshwater_eta_prev": "field",
-    # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently
+    # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently.
+    # The centred-forcing trio mirrors OceanSurfaceForcing.tau_x/tau_y and the
+    # freshwater_eta_tendency output, all of which are bare arrays
+    # (_seed_centred_forcing_carry stores them unwrapped).
+    "tau_x_prev": "array", "tau_y_prev": "array",
+    "freshwater_eta_prev": "array",
     "psi": "array", "dpsi": "array", "dpsi_prev": "array",
     "dpsin": "array", "dpsin_prev": "array",
     "bt_hist": "tuple",
@@ -399,6 +405,105 @@ def test_shape_mismatch_is_a_hard_error(tmp_path):
                          grid_type="latlon")
 
 
+def test_subset_manifest_is_a_hard_error(tmp_path):
+    """codex r1 HIGH: dropping a slot from the manifest AND its payload used to
+    load fine, leaving the fresh template's cold-start value in place.  The
+    recorded inventory now makes that a hard error."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files if k != "tke"}
+    slots = json.loads(str(payload["_slot_kinds"]))
+    del slots["tke"]                     # remove the MANIFEST entry too
+    payload["_slot_kinds"] = np.asarray(json.dumps(slots))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="persisted but the manifest"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_slab_ice_archive_into_a_dynamic_template_is_a_hard_error(tmp_path):
+    """codex r1 HIGH: a 3-field SeaIceState archive restored into a 12-field
+    DynamicSeaIceState template would leave nine fields cold."""
+    from legoesm.core.field import Field as _F
+    from legoesm.ice.state import SeaIceState
+
+    _, _, state = _base_state()
+    z = jnp.zeros((N_LAT, N_LON))
+    slab = SeaIceState(h_ice=_F(data=z, name="h_ice"),
+                       T_ice=_F(data=z, name="T_ice"),
+                       concentration=_F(data=z, name="ice_concentration"))
+    save_run_restart(tmp_path / "slab.npz", state, step=1, time_days=0.0,
+                     grid_type="latlon", ice_state=slab)
+    with pytest.raises(ValueError, match="different state layouts"):
+        load_run_restart(tmp_path / "slab.npz", state,
+                         ice_template=_ice_state(), grid_type="latlon")
+
+
+def test_a_carry_the_parent_lacked_cannot_be_continued(tmp_path):
+    """A gate turned ON between legs is a new experiment, not a continuation:
+    the parent has no tke to hand over, so resuming a TKE-carrying run from it
+    must raise rather than silently seed the carry."""
+    _, _, state = _base_state()
+    save_run_restart(tmp_path / "r.npz", state, step=1, time_days=0.0,
+                     grid_type="latlon")
+    live = _base_state()[2]._replace(
+        tke=Field(data=jnp.ones((N_LAT, N_LON, NLEV - 1)), name="tke"))
+    with pytest.raises(ValueError, match="were UNSET in"):
+        load_run_restart(tmp_path / "r.npz", live, grid_type="latlon")
+
+
+@pytest.mark.parametrize("kw,msg", [
+    (dict(dt_seconds=1800.0), "dt_seconds"),
+    (dict(n_forcing_records=99), "n_forcing_records"),
+])
+def test_continuation_fingerprint_mismatch_is_a_hard_error(tmp_path, kw, msg):
+    """codex r1 HIGH: `step` alone does not pin the forcing — _idx_t(step, dt,
+    n_rec) also depends on dt and the record count, so a parent at dt=900
+    resumed at dt=1800 reads different records while every other check passes.
+    """
+    _, _, state = _base_state()
+    save_run_restart(tmp_path / "r.npz", state, step=4, time_days=4 * 900.0 / 86400.0,
+                     grid_type="latlon", dt_seconds=900.0,
+                     n_forcing_records=8)
+    good = dict(dt_seconds=900.0, n_forcing_records=8)
+    # Control: the matching fingerprint loads.
+    load_run_restart(tmp_path / "r.npz", _base_state()[2],
+                     grid_type="latlon", **good)
+    with pytest.raises(ValueError, match=msg):
+        load_run_restart(tmp_path / "r.npz", _base_state()[2],
+                         grid_type="latlon", **{**good, **kw})
+
+
+def test_inconsistent_step_and_time_is_a_hard_error(tmp_path):
+    """time_days must equal step*dt; if the writer's two provenance fields
+    disagree, neither can be trusted to place the resume in time."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=4, time_days=99.0, grid_type="latlon",
+                     dt_seconds=900.0)
+    with pytest.raises(ValueError, match=r"provenance is\s+inconsistent"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_five_category_ice_round_trips(tmp_path):
+    """codex r1 MEDIUM: a multi-category (--ice-categories 5) pack must survive
+    the round trip, not just be rejected on a shape mismatch."""
+    _, _, state = _base_state()
+    ice5 = _ice_state(n_categories=5)
+    save_run_restart(tmp_path / "r.npz", state, step=1, time_days=0.0,
+                     grid_type="latlon", ice_state=ice5)
+    _, got_ice, _ = load_run_restart(
+        tmp_path / "r.npz", _base_state()[2],
+        ice_template=_ice_state(n_categories=5), grid_type="latlon")
+    for name in DynamicSeaIceState._fields:
+        _assert_slot_equal(f"ice_{name}", getattr(got_ice, name),
+                           getattr(ice5, name))
+    assert (jax.tree_util.tree_structure(got_ice)
+            == jax.tree_util.tree_structure(ice5))
+
+
 def test_metadata_rejects_a_non_run_restart(tmp_path):
     from legoesm.ocean.restart import save_restart
 
@@ -412,6 +517,83 @@ def test_metadata_rejects_a_non_run_restart(tmp_path):
 # The authoritative carry enumeration: seed_scan_carry itself
 # ---------------------------------------------------------------------------
 
+def _add_land(state):
+    """Mask the southernmost row as land (and the matching faces).
+
+    Uses replace_land_mask so land_mask/u_mask/v_mask stay consistent — a bare
+    ``_replace(land_mask=...)`` leaves stale face masks and leaks mass through
+    walls (CLAUDE.md).
+    """
+    from legoesm.ocean.init_latlon_cgrid import replace_land_mask
+    lm = state.land_mask.data.at[0, :].set(0.0)
+    return replace_land_mask(state, lm)
+
+
+def _config_for_gates(gates):
+    """Build a LatLonCGridOceanConfig opening ONE seed_scan_carry gate.
+
+    The underscore-prefixed keys are shorthands for gates that live in nested
+    sub-configs (``physics.vertical_mixing``, ``gm_redi``, ``barotropic``)
+    rather than as top-level fields; everything else is passed through
+    verbatim.  Import paths verified against the production builders in
+    run_omip_core2 (build_tripole_vmix_config / build_tripole).
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanConfig,
+    )
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    from legoesm.ocean.state import BarotropicConfig
+
+    gates = dict(gates)
+    gates.pop("_needs_forcing", None)
+    gates.pop("_needs_land", None)
+    kw = {}
+
+    def _tke_cfg(**tke_kw):
+        # The lat-lon C-grid REJECTS OceanPhysicsConfig's default
+        # lateral_mixing scheme ("harmonic" is cubed-sphere-only), so every
+        # other module must be explicitly off — same shape as the production
+        # tripole builder.
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig,
+        )
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        return dict(
+            physics=OceanPhysicsConfig(
+                vertical_mixing=VerticalMixingConfig(
+                    scheme="tke", tke=TKEConfig(prognostic=True, **tke_kw)),
+                lateral_mixing=LateralMixingConfig(scheme="none"),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                bottom_drag=BottomDragConfig(scheme="none"),
+                shortwave_penetration=None),
+            implicit_vertical_mixing=True,
+        )
+
+    if gates.pop("_tke", False):
+        kw.update(_tke_cfg())
+    if gates.pop("_tke_adv", False):
+        kw.update(_tke_cfg(advection_scheme="superbee"))
+    if gates.pop("_eke", False):
+        kw["gm_redi"] = GMRediConfig(eke=EKEConfig())
+    if gates.pop("_eke3d", False):
+        kw["gm_redi"] = GMRediConfig(eke=EKEConfig(eke_3d=True))
+    if gates.pop("_slow_ab2", False):
+        kw["barotropic"] = BarotropicConfig(barotropic_slow_forcing_ab2=True)
+    if "barotropic" in gates:
+        kw["barotropic"] = BarotropicConfig(
+            barotropic_solver=gates.pop("barotropic"))
+    kw.update(gates)
+    return LatLonCGridOceanConfig(**kw)
+
+
 # Each entry is a MINIMAL valid config that opens a different seed_scan_carry
 # gate.  ab2 outer and ab2 tracer cannot be combined (the model rejects the
 # double-count), and leapfrog requires the explicit-AB2 Coriolis — so these are
@@ -421,6 +603,22 @@ def test_metadata_rejects_a_non_run_restart(tmp_path):
     {"outer_integrator": "ab2"},              # -> {T,S,u,v}_incr_prev
     {"outer_integrator": "leapfrog",          # -> {u,v,T,S,eta}_before
      "coriolis_scheme": "explicit_ab2"},
+    # barotropic_forcing_centred is only valid under the leapfrog integrator
+    # (the ½(before+now) average reads u_before/tau_x_prev), and the AB2 slow
+    # forcing is only valid with the explicit-AB2 Coriolis — the model
+    # validates both, so the companions are part of the case, not decoration.
+    {"barotropic_forcing_centred": True,      # -> tau_{x,y}_prev
+     "outer_integrator": "leapfrog",          #    (seeded FROM the forcing)
+     "coriolis_scheme": "explicit_ab2",
+     "_needs_forcing": True},
+    {"_slow_ab2": True,                       # -> F_slow_{u,v}_prev
+     "coriolis_scheme": "explicit_ab2"},
+    {"_tke": True},                           # -> tke (+ dtke when advected)
+    {"_tke_adv": True},                       # -> tke + dtke
+    {"_eke": True},                           # -> eke
+    {"_eke3d": True},                         # -> eke (3-D) + eke_diss
+    {"barotropic": "rigid_lid",               # -> psi/dpsi/dpsi_prev/dpsin/...
+     "_needs_land": True},                    #    (islands pin the streamfn)
 ])
 def test_seed_scan_carry_slots_round_trip(tmp_path, gates):
     """Enumerate the carries from ``seed_scan_carry`` (the gate list that
@@ -432,9 +630,22 @@ def test_seed_scan_carry_slots_round_trip(tmp_path, gates):
     )
 
     grid, z_coord, state = _base_state()
-    cfg = LatLonCGridOceanConfig(**gates)
+    if gates.get("_needs_land"):
+        # The rigid-lid solver refuses a land-free domain (the streamfunction
+        # has nothing to pin to), so this gate needs a coastline.
+        state = _add_land(state)
+    cfg = _config_for_gates(gates)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
-    seeded = model.seed_scan_carry(state, 600.0)
+    # barotropic_forcing_centred seeds tau_{x,y}_prev FROM the step's forcing
+    # (NEMO's nit000 "before = now" rule), so without a surface_forcing kwarg
+    # it seeds nothing and the case would be vacuous.
+    step_kwargs = {}
+    if gates.get("_needs_forcing"):
+        from legoesm.ocean.state import OceanSurfaceForcing
+        _z2 = jnp.zeros((N_LAT, N_LON))
+        step_kwargs["surface_forcing"] = OceanSurfaceForcing(
+            tau_x=_z2 + 0.05, tau_y=_z2 - 0.02, q_net=_z2, sw_down=_z2)
+    seeded = model.seed_scan_carry(state, 600.0, **step_kwargs)
 
     from legoesm.ocean.restart import _SLOT_DIAGNOSTIC, _SLOT_POLICY
     # Everything seed_scan_carry populated, MINUS the slots the persistence
