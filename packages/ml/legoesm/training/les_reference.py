@@ -101,13 +101,16 @@ def mass_weights_from_pressure(p_half: np.ndarray, mask: np.ndarray) -> np.ndarr
             f"p_half must have one more entry than mask; got dp {dp.shape} "
             f"vs mask {mask.shape}."
         )
-    w = np.where(mask, dp, 0.0)
-    total = w.sum()
-    if not np.isfinite(total) or total <= 0.0:
+    # Normalisation goes through the SHARED helper rather than a local
+    # dp/sum(dp): zeroing the masked levels first and normalising the result
+    # gives masked-and-renormalised weights in one canonical call.
+    from legoesm.training.column_era5_metrics import normalized_mass_weights
+    masked = np.where(mask, dp, 0.0)
+    if not np.isfinite(masked.sum()) or masked.sum() <= 0.0:
         raise ValueError(
             "mass weights sum to zero: the LES-domain mask selects no SCM level."
         )
-    return w / total
+    return np.asarray(normalized_mass_weights(masked), dtype=np.float64)
 
 
 def _frame_time_hours(payload: dict) -> float:

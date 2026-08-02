@@ -517,3 +517,43 @@ def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
                    "--outdir", str(tmp_path / "out"),
                    "--schemes", "louis", "--skip-tuning"])
     assert rc == 1, "a failed arm must produce a nonzero exit code"
+
+
+# --- shared helpers, not re-derived formulas --------------------------------
+
+def test_neutral_drag_matches_the_in_loop_log_law():
+    """The helper must equal the solver's own neutral limit.
+
+    compute_most_fluxes initialises u* = kappa*U/ln(z_ref/z0); the neutral drag
+    is sqrt(Cd)*U. Two spellings of one formula can drift, so pin them.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.bulk_flux import neutral_drag_coefficient
+
+    for z_ref, z0, u in ((20.0, 1e-4, 8.75), (10.0, 0.1, 5.0), (30.0, 1e-3, 12.0)):
+        cd = float(neutral_drag_coefficient(z_ref, z0))
+        in_loop_ustar = constants.kappa_vk * u / max(
+            float(jnp.log(z_ref / z0)), 0.5)
+        assert cd ** 0.5 * u == pytest.approx(in_loop_ustar, rel=1e-12), (
+            z_ref, z0)
+
+
+def test_no_inline_exner_or_virtual_temperature_in_this_stack():
+    """These formulas have canonical homes; a local copy is how the SCM, the
+    global model and the CRM drift apart."""
+    import re
+    from pathlib import Path
+    targets = [
+        "scripts/run/run_scm_les_turbulence_tuning.py",
+        "packages/atmosphere/legoesm/atmosphere/forcing/scm/sam_case_scm.py",
+        "packages/ml/legoesm/training/les_reference.py",
+        "tests/atmosphere/hydrostatic/unit/test_sam_case_scm.py",
+    ]
+    exner = re.compile(r"p_ref\s*\)\s*\*\*\s*constants\.kappa")
+    virt = re.compile(r"1\.0\s*/\s*constants\.epsilon\s*-\s*1\.0")
+    for rel in targets:
+        src = Path(rel).read_text()
+        assert not exner.search(src), f"{rel}: inline Exner; use exner_function"
+        assert not virt.search(src), (
+            f"{rel}: inline virtual-T coefficient; use virtual_temperature")

@@ -60,7 +60,11 @@ from legoesm.atmosphere.forcing.sam_case_forcing import (
 )
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
-from legoesm.atmosphere.physics._shared import exner_function, exner_to_pressure
+from legoesm.atmosphere.physics._shared import (
+    exner_function,
+    exner_to_pressure,
+    virtual_temperature,
+)
 from legoesm.grids.vertical import (
     create_sigma_coordinate,
     create_stretched_height_coordinate,
@@ -237,11 +241,13 @@ def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
     # builds its own reference state from theta_v (make_anelastic_reference).
     # A dry mapping here would place the SCM profiles and forcing at heights
     # ~1% off the LES they are compared against.
-    theta_v_snd = jnp.asarray(
-        np.asarray(snd.theta, dtype=np.float64)
-        * (1.0 + (1.0 / constants.epsilon - 1.0)
-           * np.asarray(snd.q_v, dtype=np.float64))
-    )
+    # theta_v via the SHARED helper the global model and the CRM use, not an
+    # inline (1 + 0.608 q) -- it is a multiplicative factor, so applying it to
+    # theta gives theta_v exactly as applying it to T gives T_v.
+    theta_v_snd = jnp.asarray(virtual_temperature(
+        np.asarray(snd.theta, dtype=np.float64),
+        np.asarray(snd.q_v, dtype=np.float64),
+    ))
 
     def theta_ref_fn(z):
         return jnp.interp(z, z_snd, theta_v_snd)
@@ -475,9 +481,7 @@ def load_sam_scm_case(
     q_v_sfc = float(np.interp(0.0, np.asarray(snd.z, dtype=np.float64),
                               np.asarray(snd.q_v, dtype=np.float64)))
     exner_sfc = float(np.asarray(exner_function(jnp.asarray(p_s))))
-    T_v_sfc = theta_sfc * exner_sfc * (
-        1.0 + (1.0 / constants.epsilon - 1.0) * q_v_sfc
-    )
+    T_v_sfc = float(virtual_temperature(theta_sfc * exner_sfc, q_v_sfc))
     rho_sfc = p_s / (constants.R_d * T_v_sfc)
 
     if spec.surface_mode not in ("fluxes", "T_s"):

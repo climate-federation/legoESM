@@ -59,11 +59,13 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
     load_sam_scm_case,
 )
 from legoesm import constants  # noqa: E402
+from legoesm.atmosphere.physics._shared import exner_function  # noqa: E402
 from legoesm.atmosphere.physics.combined import PhysicsConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.config import (  # noqa: E402
     TurbulenceConfig,
 )
+from legoesm.core.bulk_flux import neutral_drag_coefficient  # noqa: E402
 from legoesm.ml.training import TrainingConfig, create_optimizer  # noqa: E402
 from legoesm.training.les_reference import (  # noqa: E402
     SCORED_VARIABLES,
@@ -156,7 +158,7 @@ def build_surface_config(case, *, bulk_scheme: str = "constant"):
         raise ValueError(
             f"need 0 < z0 ({z0}) < z_ref ({z_ref}) for a log-law drag."
         )
-    cd_neutral = (constants.kappa_vk / math.log(z_ref / z0)) ** 2
+    cd_neutral = float(neutral_drag_coefficient(z_ref, z0))
     prescribed = case.forcing.prescribe == "fluxes"
     if prescribed:
         ch_neutral = 0.0            # heat comes from the prescribed channel
@@ -391,10 +393,12 @@ def _theta_from_T(T_profile, p_full):
 
     p_s carries no tendency in these cases, so Exner is a constant of the run;
     ``_assert_surface_pressure_static`` verifies that rather than assuming it.
+
+    Uses the shared ``exner_function`` rather than an inline
+    ``(p/p_ref)**kappa`` so the SCM, the global model and the CRM cannot drift
+    apart on the Poisson exponent.
     """
-    from legoesm import constants
-    exner = (jnp.asarray(p_full) / constants.p_ref) ** constants.kappa
-    return jnp.asarray(T_profile) / exner
+    return jnp.asarray(T_profile) / exner_function(jnp.asarray(p_full))
 
 
 def _assert_surface_pressure_static(ps_history, p_s: float, tol_pa: float = 1.0):

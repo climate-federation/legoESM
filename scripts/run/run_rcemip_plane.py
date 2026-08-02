@@ -1733,6 +1733,14 @@ def main():
             if bad or badtr:
                 print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
                       f"— aborting.")
+                # Record the abort so the caller sees it in the RETURN CODE,
+                # not just in stdout.  Previously this `break` fell through to
+                # a normal `return 0`, so a run that went non-finite at day
+                # 52 reported success: SLURM logged COMPLETED / ExitCode 0:0
+                # and an `afterok` dependency chain happily consumed a
+                # reference that was never written (job 9248515, 2026-07-31).
+                # A silent-success abort is worse than a crash.
+                globals()["_NONFINITE_ABORT"] = True
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
