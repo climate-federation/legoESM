@@ -442,23 +442,80 @@ def test_restart_fingerprint_covers_the_resolved_forcing_archive():
     assert use < digest, "the forcing archive is appended after the digest"
 
 
-def test_restart_fingerprint_covers_behaviour_changing_env_vars():
-    """codex r9 HIGH: several numerics levers are ENV-gated, not CLI flags
-    (LEGOESM_BAROCLINIC_F32, LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED,
-    LEGOESM_TRACER_PAIR).  Two legs with identical command lines could
-    integrate different numerics and match on every other fingerprint term.
-    Hashed as a sorted LEGOESM_ prefix sweep so a lever added later is covered
-    automatically."""
+def test_env_fingerprint_includes_gates_and_excludes_infrastructure():
+    """BOTH DIRECTIONS, because each failure mode is bad in a different way.
+
+    Including too LITTLE (codex r9 HIGH): several numerics levers are ENV-gated
+    rather than CLI flags, so two legs with identical command lines integrate
+    different numerics and the fingerprint still matches.
+
+    Including too MUCH (codex tail-round RED): ~120 ``LEGOESM_*`` variables
+    exist and many are per-job infrastructure — cache dirs, ports, CPU counts —
+    so a BARE prefix sweep hard-aborts every legitimate chained restart,
+    breaking exactly the feature the fingerprint protects.
+
+    Behavioural, on the helper ``main`` calls — not source inspection.
+    """
+    from scripts.run.run_omip_core2 import _restart_env_items
+
+    env = {
+        # numerics gates — MUST be hashed
+        "LEGOESM_BAROCLINIC_F32": "1",
+        "LEGOESM_VMIX_F32_SOLVE": "1",
+        "LEGOESM_VMIX_BATCHED": "1",
+        "LEGOESM_TRACER_PAIR": "1",
+        "LEGOESM_NO_MASS_FIX": "1",
+        # per-job infrastructure — MUST NOT be hashed
+        "LEGOESM_JIT_CACHE_DIR": "/scratch/job123",
+        "LEGOESM_CACHE_DIR": "/scratch/job123/cache",
+        "LEGOESM_MESH_CACHE_DIR": "/scratch/job123/mesh",
+        "LEGOESM_DATA_DIR": "/burg/data",
+        "LEGOESM_ETOPO_PATH": "/burg/etopo.nc",
+        "LEGOESM_COORD_PORT": "45001",
+        "LEGOESM_NCPUS": "24",
+        "LEGOESM_NGPUS": "2",
+        "LEGOESM_SLURM_ACCOUNT": "glab",
+        "LEGOESM_PYTHON": "/env/bin/python",
+        "LEGOESM_PROFILE_MPI": "1",
+        # not ours at all
+        "PATH": "/usr/bin",
+    }
+    got = dict(_restart_env_items(env))
+    for k in ("LEGOESM_BAROCLINIC_F32", "LEGOESM_VMIX_F32_SOLVE",
+              "LEGOESM_VMIX_BATCHED", "LEGOESM_TRACER_PAIR",
+              "LEGOESM_NO_MASS_FIX"):
+        assert k in got, f"{k} changes the trajectory and must be fingerprinted"
+    for k in ("LEGOESM_JIT_CACHE_DIR", "LEGOESM_CACHE_DIR",
+              "LEGOESM_MESH_CACHE_DIR", "LEGOESM_DATA_DIR",
+              "LEGOESM_ETOPO_PATH", "LEGOESM_COORD_PORT", "LEGOESM_NCPUS",
+              "LEGOESM_NGPUS", "LEGOESM_SLURM_ACCOUNT", "LEGOESM_PYTHON",
+              "LEGOESM_PROFILE_MPI", "PATH"):
+        assert k not in got, (
+            f"{k} differs per job; fingerprinting it false-aborts every "
+            "legitimate chained restart")
+
+    # DETERMINISTIC: sorted, so the digest cannot depend on env iteration order.
+    assert _restart_env_items(env) == sorted(_restart_env_items(env))
+
+    # FAIL-CLOSED: a lever added later, carrying no infrastructure suffix, is
+    # covered without anyone touching this code.
+    assert ("LEGOESM_SOME_FUTURE_NUMERICS_LEVER", "1") in _restart_env_items(
+        {"LEGOESM_SOME_FUTURE_NUMERICS_LEVER": "1"})
+
+
+def test_restart_fingerprint_wires_the_env_sweep_before_the_digest():
+    """The helper above is only useful if ``main`` actually hashes its result,
+    and does so BEFORE taking the digest."""
     import inspect
 
     from scripts.run import run_omip_core2 as _c2
 
     src = inspect.getsource(_c2.main)
-    assert 'startswith("LEGOESM_")' in src, (
+    assert "_restart_env_items()" in src, (
         "main() no longer folds the LEGOESM_* environment into the restart "
         "configuration fingerprint")
     lines = src.splitlines()
-    use = next(i for i, ln in enumerate(lines) if 'startswith("LEGOESM_")' in ln)
+    use = next(i for i, ln in enumerate(lines) if "_restart_env_items()" in ln)
     digest = next(i for i, ln in enumerate(lines)
                   if "_restart_cfg_fp = " in ln and "None" not in ln)
     assert use < digest, "the environment sweep runs after the digest is taken"
@@ -540,7 +597,17 @@ def test_provenance_probe_work_and_output_are_bounded(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _all_different)
     got = _c2._source_revision()
     tags = got.split("+mixedtree:")[1].split(",")
-    assert len(tags) <= 2, f"tag list not truncated: {tags}"
+    # Bounded: at most _MAX_TREE_TAGS real tags, plus ONE explicit marker.
+    assert len(tags) <= 3, f"tag list not truncated: {tags}"
+    if len(tags) > 2:
+        # ...and truncation is ANNOUNCED, not silent — a list that merely
+        # stopped early would look complete (codex tail round).
+        assert tags[-1].endswith("-more"), (
+            f"tags were dropped without saying so: {tags}")
+    # CANONICAL: sorted, so the recorded provenance does not depend on
+    # legoesm.__path__ order.
+    real = [t for t in tags if not t.endswith("-more")]
+    assert real == sorted(real), f"tag order is not canonical: {real}"
 
 
 def test_scan_lane_refuses_restarts():

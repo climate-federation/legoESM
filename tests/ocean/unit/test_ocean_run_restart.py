@@ -159,24 +159,64 @@ def test_the_partition_enumerates_fields_rather_than_listing_names():
     ``_iter_state_fields(state)`` — proven here by handing it a state class it
     has never seen, whose EXTRA field it must still notice.
     """
+    import uuid
+    from collections import namedtuple
+
     from legoesm.ocean.restart import (
-        _SLOT_DIAGNOSTIC, _SLOT_POLICY, classify_restart_slots,
+        _PRE_REGISTERED_UNVERIFIED, _SLOT_DIAGNOSTIC, _SLOT_POLICY,
+        classify_restart_slots,
     )
 
-    class _FutureState(NamedTuple):
-        T: object = None
-        a_slot_invented_after_this_test_was_written: object = None
-
-    with pytest.raises(KeyError,
-                       match="a_slot_invented_after_this_test_was_written"):
-        classify_restart_slots(
-            _FutureState(T=Field(data=jnp.zeros((2, 2)), name="T")))
-    # ...and the three #1442 mass-flux slots are pre-registered as DIAGNOSTIC,
-    # including the VERTICAL partner, so that PR lands without tripping it.
-    for name in ("mass_flux_u", "mass_flux_v", "mass_flux_w"):
+    # RUNTIME-UNIQUE field name (codex tail round): a fixed literal could be
+    # satisfied by a hand-maintained list that happens to contain that literal,
+    # which is the very thing this test exists to rule out.  A name generated
+    # now cannot appear in any list written earlier.
+    novel = f"slot_{uuid.uuid4().hex}"
+    _FutureState = namedtuple("_FutureState", ["T", novel])
+    st = _FutureState(T=Field(data=jnp.zeros((2, 2)), name="T"),
+                      **{novel: jnp.zeros((2, 2))})
+    with pytest.raises(KeyError, match=novel):
+        classify_restart_slots(st)
+    # ...and the three #1440/#1442 mass-flux slots are pre-registered as
+    # DIAGNOSTIC, including the VERTICAL partner, so that PR lands without
+    # tripping the gate.
+    for name in _PRE_REGISTERED_UNVERIFIED:
         assert _SLOT_POLICY[name] == _SLOT_DIAGNOSTIC, (
             f"{name} must be excluded from the restart contract by policy, not "
             "by omission")
+
+
+def test_pre_registered_mass_flux_slots_are_not_yet_state_fields():
+    """TRIPWIRE for a classification made from a DESIGN, not from code.
+
+    ``mass_flux_u``/``_v``/``_w`` are labelled DIAGNOSTIC on the strength of
+    #1440/#1442's description; none of them is a state field in this tree, so
+    there is no producer or reader HERE to check that claim against.  This goes
+    RED the day any of them becomes a real slot — at which point whoever lands
+    that PR must CONFIRM from the step that it is recomputed before any
+    consumer reads it, and reclassify it as ``_SLOT_PROGNOSTIC`` if it is not.
+
+    Do not delete this test to make it pass; that is the failure mode it exists
+    to prevent — a carry silently pre-approved as a diagnostic would resume
+    cold-started AND bypass the unclassified-slot gate entirely.
+    """
+    from legoesm.core.state import MPASOceanState
+    from legoesm.ice.state import SeaIceState
+    from legoesm.ocean.restart import _PRE_REGISTERED_UNVERIFIED
+    from legoesm.ocean.state import OceanState
+
+    live = sorted(
+        f"{cls.__name__}.{n}"
+        for cls in (OceanState, LatLonCGridOceanState, MPASOceanState,
+                    SeaIceState, DynamicSeaIceState)
+        for n in _PRE_REGISTERED_UNVERIFIED if n in cls._fields
+    )
+    assert not live, (
+        f"{live} are now REAL state fields, but their DIAGNOSTIC classification "
+        "was taken from #1442's design and never verified against a producer.  "
+        "Confirm from the step that each is recomputed before any consumer "
+        "reads it (then remove this tripwire, citing that evidence in the "
+        "commit message), or reclassify it as _SLOT_PROGNOSTIC.")
 
 
 def test_unclassified_slot_raises_at_save_and_at_validate():
