@@ -2674,6 +2674,49 @@ def test_convective_precip_split_validate_bounds():
                      autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()
 
 
+def test_autoconversion_split_refused_when_inplume_precip_preempts_it():
+    """On BECHTOLD the IFS in-plume rain formation sets ``_split_done`` before
+    the precip-split dispatch (bechtold.py:2855-2908; line 3198 skips the late
+    block), so an 'autoconversion' split — and with it autoconv_q_c_crit /
+    autoconv_pe_max — can never execute while it is on.  That is why the
+    2026-08-01 calibration sweep measured 0.00 W/m^2 rsut response on both
+    scalars.  validate_strict refuses the combination instead of running
+    different physics than requested."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_use_ifs_inplume_precip"):
+        ExperimentConfig(convection="bechtold",
+                         convective_precip_split="autoconversion"
+                         ).validate_strict()
+    # Turning the in-plume path off makes the split reachable => accepted.
+    ExperimentConfig(convection="bechtold",
+                     convective_precip_split="autoconversion",
+                     bechtold_use_ifs_inplume_precip=False).validate_strict()
+    # Scoped to bechtold: TiedtkeConfig has no in-plume path, so its split runs.
+    ExperimentConfig(convection="tiedtke",
+                     convective_precip_split="autoconversion").validate_strict()
+    # And the default 'constant' split is unaffected on bechtold.
+    ExperimentConfig(convection="bechtold").validate_strict()
+
+
+def test_adiabatic_lwc_rate_refused_under_the_constant_condensate_scheme():
+    """``cloud_adiabatic_lwc_rate`` is read ONLY by
+    ``_adiabatic_incloud_condensate``, which runs only under
+    ``diagnostic_condensate_scheme='adiabatic'``.  Setting the rate under the
+    default 'constant' scheme calibrates a parameter the run never reads (the
+    other half of the 0.00 W/m^2 sweep result), so it is refused."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_adiabatic_lwc_rate"):
+        ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
+                         cloud_adiabatic_lwc_rate=2.0e-6).validate_strict()
+    # Paired with the scheme that reads it => accepted.
+    ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
+                     cloud_diagnostic_condensate_scheme="adiabatic",
+                     cloud_adiabatic_lwc_rate=2.0e-6).validate_strict()
+    # Unset (None) stays valid under either scheme.
+    ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp"
+                     ).validate_strict()
+
+
 def test_bechtold_downdraft_round_trips_and_threads():
     """--bechtold-downdraft-evap/-alpha/-rh-min round-trip into ExperimentConfig
     and thread into the hot-loop BechtoldConfig (the marine humid-BL evaporation

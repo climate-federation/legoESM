@@ -1643,6 +1643,31 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"autoconv_pe_max must be in [0, 1], got {self.autoconv_pe_max}"
             )
+        # Cross-field: on BECHTOLD the IFS in-plume rain formation produces the
+        # rain profile itself and sets ``_split_done`` BEFORE the precip-split
+        # dispatch (bechtold.py:2855-2908 — the ``elif`` at 2911 is the only
+        # branch that runs the split, and line 3198 skips the late block), so a
+        # requested Sundqvist autoconversion split can NEVER execute while the
+        # in-plume path is on.  ``autoconv_q_c_crit`` / ``autoconv_pe_max`` are
+        # then silently inert, which is what the 2026-08-01 calibration sweep
+        # measured (a full-range A/B on both scalars moved rsut by 0.00 W/m^2 on
+        # the production MPAS lane).  Refuse at CONFIG time — the same class the
+        # morrison_* scheme gate above closes, and the resolver never sees the
+        # combination as an error on its own.  Scoped to bechtold: no other
+        # mass-flux scheme has an in-plume path (TiedtkeConfig has no
+        # ``use_ifs_inplume_precip`` field), so their split still runs.
+        if (self.convective_precip_split == "autoconversion"
+                and self.convection == "bechtold"
+                and self.bechtold_use_ifs_inplume_precip):
+            errors.append(
+                "convective_precip_split='autoconversion' is UNREACHABLE while "
+                "bechtold_use_ifs_inplume_precip=True: the IFS in-plume rain "
+                "formation preempts the detrainment split, so autoconv_q_c_crit "
+                "/ autoconv_pe_max would be silently ignored. Pass "
+                "--no-bechtold-use-ifs-inplume-precip to use the split, or keep "
+                "convective_precip_split='constant' and tune the in-plume "
+                "conversion knobs (bechtold_rprcon / bechtold_dnoprc) instead."
+            )
         if self.bechtold_conv_top_pa <= 0.0:
             errors.append(
                 f"bechtold_conv_top_pa must be > 0 Pa (the convective-top gate "
@@ -1865,6 +1890,23 @@ class ExperimentConfig(NamedTuple):
                     f"cloud-path radiation (rrtmgp/rrtmg); radiation="
                     f"{self.radiation!r} ignores cloud paths."
                 )
+        # The RATE is read ONLY by ``_adiabatic_incloud_condensate``
+        # (cloud_fraction.py), which runs only under the 'adiabatic' scheme, so
+        # setting it while the scheme is 'constant' calibrates a parameter the
+        # run never reads.  The 2026-08-01 sweep did exactly that (full-range
+        # A/B moved rsut by 0.00 W/m^2).  Completes the guard family above,
+        # which pins the SCHEME's inert combinations but not the rate's.
+        if (self.cloud_adiabatic_lwc_rate is not None
+                and self.cloud_diagnostic_condensate_scheme != "adiabatic"):
+            errors.append(
+                f"cloud_adiabatic_lwc_rate={self.cloud_adiabatic_lwc_rate!r} is "
+                "read ONLY by the 'adiabatic' diagnostic-condensate scheme, but "
+                "cloud_diagnostic_condensate_scheme="
+                f"{self.cloud_diagnostic_condensate_scheme!r}; the override "
+                "would be silently inert. Set "
+                "cloud_diagnostic_condensate_scheme='adiabatic' to use it, or "
+                "drop the rate."
+            )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
