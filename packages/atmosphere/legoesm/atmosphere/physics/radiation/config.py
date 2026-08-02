@@ -433,3 +433,22 @@ class RadiationConfig(NamedTuple):
     # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
     # fraction (byte-identical).
     use_clubb_cloud_fraction: bool = False
+    # CLEAR-SKY TOA diagnostic (CMIP6 ``rsutcs`` / ``rlutcs``).  When True the
+    # standalone hydrostatic/MPAS radiation physics_fn additionally exports the
+    # TOA outgoing SW/LW computed with CLOUDS REMOVED (gases + ozone + aerosol
+    # unchanged — the CMIP6 clear-sky definition), on
+    # ``HydrostaticTendencies.sw_up_toa_clearsky`` / ``lw_up_toa_clearsky``.
+    #
+    # COST: clear-sky is NOT a by-product of the all-sky solve — RRTMGP's
+    # ``solve_columns`` returns only the fluxes for the optical state it was
+    # given — so this runs a SECOND radiation solve on radiation steps
+    # (≈2x the radiation cost of a radiation step; held-radiation sub-steps are
+    # untouched).  EXCEPTION: when no cloud is radiatively active at all
+    # (``cloud_scheme='none'`` or gray radiation, which ignores clouds) the
+    # all-sky solve IS the clear-sky solve, and the builder aliases the
+    # existing arrays instead of solving twice — exact, and free.
+    #
+    # Static build-time gate (a Python bool read in the factory closure, never
+    # a traced ``jnp.where``): ``False`` (default) compiles no extra radiation
+    # HLO and is byte-identical to the pre-clear-sky model.
+    clear_sky_diag: bool = False

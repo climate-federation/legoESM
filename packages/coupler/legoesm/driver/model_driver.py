@@ -314,8 +314,8 @@ class _MPASSfcFluxAccum:
 
     Covers the flux slots of the ``_sfc_diag`` contract (0 sw_net_sfc,
     1 lw_net_sfc, 2 precip, 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls,
-    8 sw_down_sfc, 9 lw_down_sfc, 10 tau_x_sfc, 11 tau_y_sfc) — the
-    strongly diurnal flux fields.  State-derived fields (tas/ta/ua/...)
+    8 sw_down_sfc, 9 lw_down_sfc, 10 tau_x_sfc, 11 tau_y_sfc,
+    12 rsutcs, 13 rlutcs) — the strongly diurnal flux fields.  State-derived fields (tas/ta/ua/...)
     stay snapshots; the collector labels them honestly via
     ``cmip_snapshot_vars``.
 
@@ -350,7 +350,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -6189,6 +6189,14 @@ class ModelDriver:
             _tau_y = _sfc_slot(11)
             tauu = None if _tau_x is None else -np.asarray(_tau_x)
             tauv = None if _tau_y is None else -np.asarray(_tau_y)
+            # Clear-sky TOA outgoing, slots 12/13 — ALREADY in the CMOR
+            # convention (positive UP / outgoing, same orientation as slots
+            # 3/4 which they pair with), so NO sign flip here.  Both are
+            # None unless ExperimentConfig.output.clear_sky_diag is on (the
+            # radiation factory then runs the cloud-free second pass); the
+            # collector skips an absent field rather than publishing zeros.
+            rsutcs = _sfc_slot(12)
+            rlutcs = _sfc_slot(13)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -6298,6 +6306,8 @@ class ModelDriver:
                 ts=ts,
                 tauu=tauu,
                 tauv=tauv,
+                rsutcs=rsutcs,
+                rlutcs=rlutcs,
                 flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
@@ -6770,6 +6780,13 @@ class ModelDriver:
                 # external CMIP6 ozone FILE arrives per-step via the traced
                 # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
+                # Clear-sky TOA diagnostic -> CMOR rsutcs/rlutcs (sfc_diag
+                # slots 12/13).  OutputConfig owns the switch (the same
+                # ``clear_sky_diag`` the compiled cube/lat-lon lane reads for
+                # its own held_*_toa_clr carry); the radiation factory turns
+                # it into a cloud-free SECOND solve on radiation steps.
+                # Default False => no extra solve, byte-identical.
+                clear_sky_diag=self.config.output.clear_sky_diag,
             ),
             # grid_dx_m: SCVT sqrt(mean cell area) [m] — auto-fills Bechtold's
             # IFS ZTAURES resolution factor (codex 2026-07-23 finding A;

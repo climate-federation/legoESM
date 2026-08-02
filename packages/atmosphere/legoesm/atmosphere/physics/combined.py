@@ -486,7 +486,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # so first-non-None across modules is the correct combine (no
         # summing).
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
-                        "shflx_sfc", "lhflx_sfc", "tau_x_sfc", "tau_y_sfc")
+                        "shflx_sfc", "lhflx_sfc", "tau_x_sfc", "tau_y_sfc",
+                        # Clear-sky TOA outgoing (CMOR rsutcs/rlutcs) — from
+                        # radiation only, and only when RadiationConfig.
+                        # clear_sky_diag is on (None otherwise, so the
+                        # first-non-None combine is a no-op).
+                        "sw_up_toa_clearsky", "lw_up_toa_clearsky")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Accumulate tracer tendencies from all physics modules

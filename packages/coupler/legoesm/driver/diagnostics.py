@@ -1426,6 +1426,8 @@ class DiagnosticCollector:
         ts=None,
         tauu=None,
         tauv=None,
+        rsutcs=None,
+        rlutcs=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1448,7 +1450,9 @@ class DiagnosticCollector:
           when *q_v* given), ``psl`` (hypsometric, when *phis* given), the
           TOA/surface flux block (``rlut``/``rsut``/``rsdt``/``hfss``/
           ``hfls``/``evspsbl``/``rsds``/``rlds`` and the derived
-          ``rsus``/``rlus``), ``ts`` (surface skin temperature when the
+          ``rsus``/``rlus``), the clear-sky TOA pair
+          ``rsutcs``/``rlutcs`` (present only when the clear-sky
+          diagnostic is enabled), ``ts`` (surface skin temperature when the
           driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
           (surface wind stress, CMOR downward-positive).
         * 3-D on plev19 (``add_3d``): ``ta``, ``hus`` (*q_v*), ``ua``
@@ -1558,7 +1562,11 @@ class DiagnosticCollector:
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
-                    "rsds", "rlds", "rsus", "rlus", "tauu", "tauv")
+                    "rsds", "rlds", "rsus", "rlus", "tauu", "tauv",
+                    # Clear-sky TOA outgoing: interval MEANS from the same
+                    # per-step accumulator as their all-sky partners
+                    # rsut/rlut, so they share the midpoint calendar bin.
+                    "rsutcs", "rlutcs")
         _FLUX_DAILY = ("pr", "rsut", "rlut")
         _FLUX_ZONAL = ("precip",)
 
@@ -1613,6 +1621,12 @@ class DiagnosticCollector:
         # the model's opposes-the-wind tau sign at the feed call site.
         tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
         tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
+        # Clear-sky TOA outgoing (CMIP6 rsutcs/rlutcs): SAME positive-UP
+        # orientation as their all-sky partners rsut/rlut — the producer's
+        # ``*_flux_up[:, 0]`` from a CLOUD-FREE radiation solve (gases +
+        # ozone + aerosol retained), so no conversion or sign flip here.
+        rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
+        rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1639,6 +1653,8 @@ class DiagnosticCollector:
             ("ts", ts_np, (_ncol,)),
             ("tauu", tauu_np, (_ncol,)),
             ("tauv", tauv_np, (_ncol,)),
+            ("rsutcs", rsutcs_np, (_ncol,)),
+            ("rlutcs", rlutcs_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1706,6 +1722,12 @@ class DiagnosticCollector:
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
+                # Clear-sky TOA partners of rsut/rlut (cloud-free solve;
+                # SW_CRE = rsut - rsutcs, LW_CRE = rlutcs - rlut).  Absent
+                # unless the clear-sky diagnostic is on -> skipped, never
+                # zeroed (a zero rsutcs would read as a black planet).
+                ('rsutcs', rsutcs_np),
+                ('rlutcs', rlutcs_np),
                 ('rsdt', rsdt_np),
                 ('hfss', hfss_np),
                 ('hfls', hfls_np),

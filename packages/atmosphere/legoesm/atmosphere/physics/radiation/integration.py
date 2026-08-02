@@ -456,7 +456,9 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_net_sfc=None, lw_net_sfc=None,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
-                                 sw_down_sfc=None, lw_down_sfc=None):
+                                 sw_down_sfc=None, lw_down_sfc=None,
+                                 sw_up_toa_clearsky=None,
+                                 lw_up_toa_clearsky=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -535,6 +537,13 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         sw_down_toa=_toa_field(sw_down_toa, "sw_down_toa_rad"),
         sw_down_sfc=swd_field,
         lw_down_sfc=lwd_field,
+        # Clear-sky TOA outgoing (CMOR rsutcs/rlutcs).  SAME positive-UPWARD
+        # orientation as the all-sky pair above — both come from the solver's
+        # ``*_flux_up[:, 0]``, so no sign flip here or downstream.
+        sw_up_toa_clearsky=_toa_field(sw_up_toa_clearsky,
+                                      "sw_up_toa_clearsky_rad"),
+        lw_up_toa_clearsky=_toa_field(lw_up_toa_clearsky,
+                                      "lw_up_toa_clearsky_rad"),
     )
 
 
@@ -1041,6 +1050,35 @@ def _make_hydrostatic_radiation(
                          "convective_cloud", False))
     )
 
+    # --- Clear-sky TOA diagnostic (CMOR rsutcs/rlutcs) build-time gate ---
+    # STATIC Python bools resolved once here, never a traced ``jnp.where``:
+    # ``clear_sky_diag=False`` (the default) compiles no extra radiation HLO
+    # and leaves the tendency's clear-sky slots None -> byte-identical.
+    #
+    # Whether a SECOND solve is needed is decided by whether any cloud is
+    # radiatively active:
+    #   * gray radiation returns before the cloud block in
+    #     ``_call_radiation_backend`` (it ignores clouds entirely), and
+    #   * ``cloud_scheme == "none"`` skips ``compute_cloud_properties``, so no
+    #     cloud path/fraction ever reaches the solver
+    #     (``has_clouds = include_clouds and cloud_path_* is not None`` in
+    #     rrtmgp.solve_columns is then False).
+    # In both cases the all-sky solve IS the clear-sky solve, so the clear-sky
+    # slots ALIAS the all-sky TOA arrays — exact, and with zero extra cost.
+    _clear_sky_diag = bool(radiation_config.clear_sky_diag)
+    _clear_sky_clouds_active = (radiation_config.scheme != "gray"
+                                and radiation_config.cloud_scheme != "none")
+    _clear_sky_second_pass = _clear_sky_diag and _clear_sky_clouds_active
+    # Cloud-free twin of the radiation config, built ONCE (not per step).
+    # ``rrtmgp`` is left UNTOUCHED so the second call reuses the SAME prebuilt
+    # solver / optics cache; dropping the cloud scheme alone already removes
+    # every cloud input from the solve.  ``clear_sky_diag`` is cleared so the
+    # twin can never be mistaken for a recursion trigger.
+    _rad_cfg_clearsky = (
+        radiation_config._replace(cloud_scheme="none", cloud_config=None,
+                                  clear_sky_diag=False)
+        if _clear_sky_second_pass else None)
+
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
         T = state.T.data
@@ -1289,6 +1327,51 @@ def _make_hydrostatic_radiation(
             solar_spectral_fraction=_ssf_ext,
         )
 
+        # --- Clear-sky TOA second pass (CMOR rsutcs/rlutcs) ---
+        # Identical inputs to the all-sky solve above (same columns, same
+        # zenith/insolation, same gases + ozone + AEROSOL — CMIP6 clear-sky
+        # removes CLOUDS only) with every cloud input dropped and the
+        # cloud-free config twin selected.  Python-``if`` on a build-time
+        # static bool: the disabled path emits no HLO at all.
+        _sw_up_toa_clr = None
+        _lw_up_toa_clr = None
+        if _clear_sky_second_pass:
+            _rad_out_clr = _call_radiation_backend(
+                radiation_config=_rad_cfg_clearsky,
+                eccf=eccf,
+                T=T_col,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                sfc_temperature=T_sfc_col,
+                lat=lat_col,
+                q_v=q_v_col,
+                insolation=insol_col,
+                cos_sza=cos_sza_col,
+                q_cloud=None,
+                q_ice=None,
+                n_cloud=None,
+                n_ice=None,
+                f_day=f_day_col,
+                rrtmgp_solver=rrtmgp_solver,
+                lon=lon_col,
+                ml_ozone_coefs=ml_ozone_coefs,
+                o3_vmr_override=_o3_ext,
+                aerosol_od=_aer_ext,
+                aerosol_lw_od=_aer_lw_ext,
+                ghg_vmr_override=_ghg_ext,
+                cloud_fraction_override=None,
+                conv_precip=None,
+                solar_spectral_fraction=_ssf_ext,
+            )
+            _sw_up_toa_clr = _rad_out_clr.sw_flux_up[:, 0]
+            _lw_up_toa_clr = _rad_out_clr.lw_flux_up[:, 0]
+        elif _clear_sky_diag:
+            # No cloud is radiatively active (gray, or cloud_scheme='none'),
+            # so the all-sky solve already IS the clear-sky solve: alias it
+            # rather than paying for a second, provably identical, call.
+            _sw_up_toa_clr = rad_out.sw_flux_up[:, 0]
+            _lw_up_toa_clr = rad_out.lw_flux_up[:, 0]
+
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
         # Surface net radiative fluxes [W/m^2, +into surface], carried so the
         # lean MPAS coupled loop can export them to the coupler. Surface is the
@@ -1316,7 +1399,9 @@ def _make_hydrostatic_radiation(
                          if rad_out.toa_insolation is not None
                          else rad_out.sw_flux_down[:, 0]),
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
-            lw_down_sfc=rad_out.lw_flux_down[:, -1])
+            lw_down_sfc=rad_out.lw_flux_down[:, -1],
+            sw_up_toa_clearsky=_sw_up_toa_clr,
+            lw_up_toa_clearsky=_lw_up_toa_clr)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

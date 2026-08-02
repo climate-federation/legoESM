@@ -160,6 +160,20 @@ class HydrostaticTendencies(NamedTuple):
     # trailing optionals so every existing constructor is unaffected.
     tau_x_sfc: Field | None = None
     tau_y_sfc: Field | None = None
+    # CLEAR-SKY TOA outgoing radiative fluxes [W/m^2, positive UPWARD /
+    # outgoing — the same CMOR sign convention as ``sw_up_toa``/``lw_up_toa``
+    # above], carried on the radiation tendency so the lean MPAS loop can feed
+    # the CMOR ``rsutcs``/``rlutcs`` accumulators (the compiled cube/lat-lon
+    # path carries the equivalent through its ``held_*_toa_clr`` carry).
+    # "Clear-sky" = CLOUDS removed from the radiative transfer, everything else
+    # (gases, ozone, AEROSOL) identical — the CMIP6 definition; the producer
+    # therefore re-solves radiation with ``cloud_scheme='none'`` rather than
+    # stripping aerosol too.  ``None`` on non-radiation tendencies, on
+    # held-radiation sub-steps, and whenever the clear-sky diagnostic is off
+    # (default) — trailing optionals, so every existing constructor (including
+    # positional ones) is unaffected.
+    sw_up_toa_clearsky: Field | None = None
+    lw_up_toa_clearsky: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):
