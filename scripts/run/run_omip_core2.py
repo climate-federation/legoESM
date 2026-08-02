@@ -3975,6 +3975,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "to yearly + final). 0=off. Lets a long run be scored "
                         "mid-flight (e.g. day-30 SST vs NEMO) without waiting "
                         "for the full integration.")
+    p.add_argument("--restart-save", type=str, default=None,
+                   help="Write a RESUMABLE restart to this .npz path (atomic "
+                        "overwrite) at the --snapshot-every-days cadence and "
+                        "at the end of the run. Unlike snapshot_*.npz (a "
+                        "diagnostic artifact) this carries EVERY prognostic "
+                        "and integrator-carry slot, the UNMANGLED sea-ice "
+                        "state, and the absolute step counter — so a 72 h job "
+                        "chain integrates forward instead of re-paying the "
+                        "cold-start spin-up each time.")
+    p.add_argument("--restart-every-days", type=float, default=0.0,
+                   help="Cadence for --restart-save [sim-days]. 0 (default) "
+                        "follows --snapshot-every-days. With BOTH at 0 the "
+                        "restart is written only at the end of the run, so a "
+                        "wallclock kill loses the whole leg — the driver warns "
+                        "when that is the case.")
+    p.add_argument("--restart-from", type=str, default=None,
+                   help="Resume from a --restart-save archive: the ocean "
+                        "carry, the sea-ice state and the step counter are "
+                        "restored, and the loop continues to the ABSOLUTE "
+                        "--years target (it does not re-run the completed "
+                        "steps). Grid-type mismatch is a hard error.")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -5410,12 +5431,87 @@ def main() -> int:
 
     snap_every = (int(args.snapshot_every_days * _SEC_PER_DAY / dt)
                   if args.snapshot_every_days > 0 else 0)
+    # Restart cadence is INDEPENDENT of the diagnostic snapshot cadence (the two
+    # are different contracts), but defaults to it so one flag is usually
+    # enough.  Both zero => end-of-run only, which a wallclock kill destroys —
+    # warn, because silently having no mid-run checkpoint is the exact failure
+    # this feature exists to prevent.
+    restart_every = (int(args.restart_every_days * _SEC_PER_DAY / dt)
+                     if args.restart_every_days > 0 else snap_every)
+    if args.restart_save and restart_every <= 0:
+        print("[warn] --restart-save with no cadence (--restart-every-days / "
+              "--snapshot-every-days both 0): the restart is written ONLY at "
+              "the end of the run, so a wallclock kill loses this leg "
+              "entirely.", flush=True)
+
+    # ------------------------------------------------------------------
+    # --restart-from: resume the integration (full carry + sea ice + step).
+    # Placed AFTER the ocean state, the sea-ice state and the step-derived run
+    # controls exist, and BEFORE the step-0 diagnostic, so the [diag] line and
+    # the CSV report the RESTORED state rather than the cold-start template.
+    # The target is ABSOLUTE (--years / --smoke): a resumed leg integrates from
+    # the restart step up to n_steps, it does not re-run n_steps more.
+    # ------------------------------------------------------------------
+    start_step = 0
+    if args.restart_save or args.restart_from:
+        # FAIL FAST: if this build's state exposes a slot the restart
+        # persistence policy does not classify, abort now (seconds in) rather
+        # than at the first mid-run checkpoint, hours into an integration.
+        from legoesm.ocean.restart import validate_restart_policy
+        try:
+            validate_restart_policy(state, ice_state)
+        except KeyError as _pol_err:
+            # KeyError's str() is repr-quoted; args[0] is the plain message.
+            raise SystemExit(_pol_err.args[0]) from _pol_err
+    if args.restart_save and args.restart_from:
+        # Refuse to overwrite the archive we are resuming FROM: a leg that
+        # blows up after its first cadence write would have destroyed the only
+        # good parent restart, i.e. the spin-up this feature exists to keep.
+        # Checked BEFORE the load so it costs nothing.
+        if Path(args.restart_save).resolve() == Path(
+                args.restart_from).resolve():
+            raise SystemExit(
+                "--restart-save and --restart-from point at the same file "
+                f"({args.restart_save}); write the new leg to a distinct path "
+                "so the parent restart survives a failed leg.")
+    if args.restart_from:
+        from legoesm.ocean.restart import load_run_restart
+        _rs_path = Path(args.restart_from)
+        if not _rs_path.exists():
+            raise SystemExit(f"--restart-from: no such file {_rs_path}")
+        # load_run_restart RAISES on an ice present/absent mismatch, so the
+        # returned ice_state is non-None exactly when this run has prognostic
+        # ice — no silent cold-start fallback is possible here.
+        state, ice_state, _rs_meta = load_run_restart(
+            _rs_path, state, ice_template=ice_state,
+            grid_type=app_grid_type)
+        start_step = int(_rs_meta["step"])
+        if start_step >= n_steps:
+            # Never exit silently "already at target" (CLAUDE.md run-target
+            # rule): a chain launcher must see WHY nothing ran.
+            raise SystemExit(
+                f"--restart-from {_rs_path} is already at step {start_step} "
+                f"(day {_rs_meta['time_days']:.2f}) but this run targets only "
+                f"{n_steps} steps ({total_days:.0f} days).  Raise --years, or "
+                "point at an earlier restart.")
+        print(f"[restart] resumed from {_rs_path}: step {start_step} "
+              f"(day {_rs_meta['time_days']:.2f}), carry slots "
+              f"{sorted(_rs_meta['slots'])}"
+              + (f", ice slots {sorted(_rs_meta['ice_slots'])}"
+                 if _rs_meta["ice_slots"] else ", no sea ice"), flush=True)
+        if getattr(args, "gateway_transports", False):
+            print("[restart] NOTE --gateway-transports accumulates a TIME MEAN "
+                  "from the resume point only; a chained run's per-leg means "
+                  "must be recombined offline (weighted by leg length).",
+                  flush=True)
+    start_day = start_step * dt / _SEC_PER_DAY
 
     print(f"[run] {total_days:.0f} days = {n_steps} steps "
           f"(diag every {diag_every} steps"
-          f"{f', snapshot every {snap_every} steps' if snap_every else ''})")
+          f"{f', snapshot every {snap_every} steps' if snap_every else ''}"
+          f"{f', resuming at step {start_step}' if start_step else ''})")
     d0 = _diag(state, lat2d, lon2d)
-    print(f"[diag] step 0: {d0}", flush=True)
+    print(f"[diag] step {start_step}: {d0}", flush=True)
 
     # Progress time-series CSV, flushed each diag -> observable mid-run even when
     # stdout is pipe-buffered, and a record for post-hoc analysis.  mkdir on EVERY
@@ -5490,8 +5586,13 @@ def main() -> int:
     # and the writer/closer below are no-ops.
     _csv = None
     if _is_io_proc():
-        _csv = open(out_dir / "diag_timeseries.csv", "w")
-        _csv.write(",".join(_csv_cols) + "\n")
+        # Resuming APPENDS to an existing series (a chained leg must not erase
+        # the parent leg's record); a fresh run truncates and writes the header.
+        _csv_path = out_dir / "diag_timeseries.csv"
+        _csv_append = bool(args.restart_from) and _csv_path.exists()
+        _csv = open(_csv_path, "a" if _csv_append else "w")
+        if not _csv_append:
+            _csv.write(",".join(_csv_cols) + "\n")
 
     def _log_diag_csv(step, day, d, rate, ice=None):
         if _csv is None:
@@ -5513,7 +5614,24 @@ def main() -> int:
         if _csv is not None:
             _csv.close()
 
-    _log_diag_csv(0, 0.0, d0, 0.0, ice=ice_state)
+    _log_diag_csv(start_step, start_day, d0, 0.0, ice=ice_state)
+
+    def _write_run_restart(step_i: int, day_f: float, st, ice_st) -> None:
+        """Write the resumable restart (``--restart-save``), process-0 only.
+
+        Overwrites the SAME path atomically each cadence, so a chain launcher
+        always finds one valid, latest checkpoint.  Separate from
+        ``_save_snapshot`` on purpose: snapshots are a diagnostic contract with
+        downstream scorers (ice fields land-masked + category-aggregated),
+        restarts carry every prognostic + integrator-carry slot unmangled.
+        """
+        if not args.restart_save or not _is_io_proc():
+            return
+        from legoesm.ocean.restart import save_run_restart
+        save_run_restart(args.restart_save, st, step=step_i, time_days=day_f,
+                         grid_type=app_grid_type, ice_state=ice_st)
+        print(f"[restart] saved step {step_i} (day {day_f:.2f}) -> "
+              f"{args.restart_save}", flush=True)
 
     # ------------------------------------------------------------------
     # Multi-GPU lat-band SPMD step (--n-gpus N): partition the GLOBAL ocean state
@@ -5801,12 +5919,16 @@ def main() -> int:
             # year boundary -> the modulo-gated I/O below fires at exactly
             # the same cadence as the Python loop (codex #354 finding 2).
             nb = min(bsz, n_steps - step)
-            for period in (diag_every, snap_every, steps_per_year):
+            for period in (diag_every, snap_every, restart_every,
+                           steps_per_year):
                 if period and period > 0:
                     nb = min(nb, period - (step % period))
             return max(1, nb)
 
-        step = 0
+        # Resume at the restart's absolute step (0 for a fresh run): the block
+        # forcing indices below are pure functions of `step`, so continuing the
+        # counter reproduces the forcing exactly.
+        step = start_step
         while step < n_steps:
             nb = _block_steps(step)
             idx_block = jnp.asarray(
@@ -5819,7 +5941,9 @@ def main() -> int:
             if step % diag_every == 0 or step == n_steps:
                 state = jax.block_until_ready(state)
                 d = _diag(state, lat2d, lon2d)
-                rate = step / (time.time() - t_wall)
+                # Throughput of THIS leg: a resumed run has done (step-start_step)
+                # steps in (now - t_wall), not `step` of them.
+                rate = (step - start_step) / (time.time() - t_wall)
                 print(f"[diag] step {step} (day {day:.0f}): {d} | "
                       f"{rate:.2f} steps/s", flush=True)
                 _log_diag_csv(step, day, d, rate)
@@ -5834,6 +5958,9 @@ def main() -> int:
                                state, lat2d, lon2d, z_coord=z_coord,
                                io_proc=_is_io_proc())
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
+            if (restart_every > 0 and step % restart_every == 0
+                    and step != n_steps):
+                _write_run_restart(step, day, state, ice_state)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
                 _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
@@ -5843,14 +5970,21 @@ def main() -> int:
         _io = _is_io_proc()
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                        io_proc=_io)
+        # The scan lane applies no sea-ice/freshwater forcing (it refuses
+        # --ice-thermo / --sss-restore / ... above), so `ice_state` is normally
+        # None here; it is threaded rather than hard-coded to None so a lane
+        # that does hold one can never lose it silently from the restart.
+        _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state,
+                           ice_state)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _record_final_state_digest(manifest_path, state)
         _close_csv()
-        rate = n_steps / (time.time() - t_wall)
-        print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
+        rate = (n_steps - start_step) / (time.time() - t_wall)
+        print(f"[done] {n_steps - start_step} steps this leg "
+              f"(absolute step {n_steps}) @ {rate:.2f} steps/s (scan); "
               f"final: {_diag(state, lat2d, lon2d)}")
         if args.smoke:
             yr_est = steps_per_year / rate / 3600.0
@@ -5958,7 +6092,23 @@ def main() -> int:
                   f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
                   f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); + = INTO Arctic")
 
-    for step in range(1, n_steps + 1):
+    # --restart-from: skip ahead to the LAST viscosity segment already in force
+    # at the resume time, so the first resumed step rebuilds the model at the
+    # correct A_h instead of walking one segment per step (the schedule advances
+    # at most one index per iteration).  No-op for a fresh run (start_step=0).
+    if start_step > 0 and visc_schedule:
+        while (visc_seg_idx + 1 < len(visc_schedule)
+               and visc_schedule[visc_seg_idx + 1][0] * _SEC_PER_DAY
+               <= start_step * dt):
+            visc_seg_idx += 1
+        if visc_seg_idx:
+            print(f"[restart] --visc-schedule fast-forwarded to segment "
+                  f"{visc_seg_idx + 1}/{len(visc_schedule)} "
+                  f"(day {visc_schedule[visc_seg_idx][0]:g})", flush=True)
+
+    # Absolute-target resume: continue from the restart step to n_steps (the
+    # run target is absolute, NOT "n_steps more").  Fresh run => range(1, N+1).
+    for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
@@ -6447,7 +6597,9 @@ def main() -> int:
             _pers_res.count_leaf_full(
                 gathers=1 + int(getattr(state, "v", None) is not None))
             d = _diag(state, lat2d, lon2d)
-            rate = step / (time.time() - t_wall)
+            # Throughput of THIS leg: a resumed run has done (step-start_step)
+            # steps in (now - t_wall), not `step` of them.
+            rate = (step - start_step) / (time.time() - t_wall)
             day = step * dt / _SEC_PER_DAY
             print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
                   flush=True)
@@ -6476,6 +6628,13 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
+        if (restart_every > 0 and step % restart_every == 0
+                and step != n_steps):
+            # Own cadence, own contract: the state may still be sharded on the
+            # persistent SPMD lane, so gather before serialising (idempotent
+            # when the snapshot block above already did).
+            state = _ensure_global_state(state)
+            _write_run_restart(step, step * dt / _SEC_PER_DAY, state, ice_state)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
@@ -6491,6 +6650,7 @@ def main() -> int:
     _io = _is_io_proc()
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state)
+    _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
@@ -6498,7 +6658,7 @@ def main() -> int:
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()
-    rate = n_steps / (time.time() - t_wall)
+    rate = (n_steps - start_step) / (time.time() - t_wall)
     if _spmd_persistent:
         # The honest cost lines (codex batch4 HIGH): (1) FULL-STATE layout
         # flips the persistent lane actually performed (the old wrapper does
@@ -6524,7 +6684,8 @@ def main() -> int:
               f"gathers={_pers_res.leaf_full_gathers} "
               f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
               f"drag while active + diag-cadence u,v).", flush=True)
-    print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
+    print(f"[done] {n_steps - start_step} steps this leg (absolute step "
+          f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0
         print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "
