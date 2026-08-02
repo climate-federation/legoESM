@@ -443,3 +443,506 @@ def test_promote_geometry_honours_metric_convention():
         "neither dy_u nor dx_v responded to metric_convention -- the "
         "convention the driver forwards would be decorative for this "
         "diagnostic, and codex round-3 finding 1 would be moot")
+
+
+# =====================================================================
+# CUMULATIVE per-cadence dump (gateway_transports.csv)
+#
+# The run-end transports.txt block is a WHOLE-RUN mean and cannot separate the
+# cold-start adjustment from the settled window.  The CSV dumps the running
+# TOTALS so any window is (cumsum_b - cumsum_a) / (n_b - n_a).
+#
+# Every test below either (a) asserts its own fixture is non-degenerate before
+# asserting the property, or (b) computes the value the defect it guards would
+# produce and asserts the real value differs.
+# =====================================================================
+
+
+def _read_csv(path):
+    """(header, [row dicts]) with the ragged-row check the parse depends on."""
+    import csv as _csv
+    with open(path, newline="") as fh:
+        rd = _csv.reader(fh)
+        header = next(rd)
+        rows = []
+        for r in rd:
+            assert len(r) == len(header), (
+                f"ragged CSV row: {len(r)} cells for {len(header)} columns")
+            rows.append(dict(zip(header, r)))
+    return header, rows
+
+
+def _seeded_states(model, state, values, dt=600.0):
+    """One post-step state per entry in ``values``, with v pinned to it.
+
+    The rest state has u = v = 0, so EVERY gateway transport would be exactly
+    zero and every assertion below would hold trivially (codex round-3 finding
+    2).  Pinning v per step both makes the transports non-zero and makes the
+    two windows carry DIFFERENT, known signals.
+    """
+    import jax.numpy as jnp
+    out = []
+    s = state
+    for val in values:
+        s = model.step(s, dt)
+        out.append(s._replace(
+            v=s.v.replace(data=jnp.full_like(s.v.data, val))))
+    return out
+
+
+def _gw_setup(lat_min_deg=0.0):
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import (
+        promote_gateway_geometry, setup_gateway_accumulator,
+    )
+    grid, z_coord, model, state = _tiny_latlon()
+    geom = promote_gateway_geometry(getattr(model, "grid", grid))
+    lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
+                        * np.ones((1, grid.n_lon)))
+    lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
+                        * np.ones((grid.n_lat, 1)))
+    acc, stack, faces = setup_gateway_accumulator(
+        lat2d, lon2d, state.land_mask.data, lat_min_deg=lat_min_deg)
+    assert int(jnp.sum(faces.u_sel)) + int(jnp.sum(faces.v_sel)) > 0, (
+        "the test grid produced no boundary faces -- it cannot detect anything")
+    return grid, z_coord, model, state, geom, acc, stack
+
+
+# ---------------------------------------------------------------- open/close
+
+
+def test_open_writes_a_header_naming_every_gateway(tmp_path):
+    from legoesm.ocean.diagnostics_sections import ARCTIC_GATEWAYS
+    from scripts.run import run_omip_core2 as R
+
+    names = tuple(nm for nm, _b in ARCTIC_GATEWAYS)
+    csv = R._gateway_cumulative_open(tmp_path, names, io_proc=True)
+    assert csv is not None
+    R._gateway_cumulative_close(csv)
+    header, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert rows == [], "no dump was requested, so there must be no data rows"
+    assert header[:3] == ["step", "day", "n_steps"]
+    for nm in names:
+        assert f"{nm}_vol_cumsum_m3s" in header
+        assert f"{nm}_salt_cumsum_psu_m3s" in header
+
+
+def test_open_is_a_noop_on_a_non_io_rank(tmp_path):
+    """Mirrors the sibling diags: N processes must not clobber one file."""
+    from scripts.run import run_omip_core2 as R
+    assert R._gateway_cumulative_open(tmp_path, ("davis_caa",),
+                                      io_proc=False) is None
+    assert not (tmp_path / R.GATEWAY_CUMULATIVE_CSV).exists()
+
+
+def test_row_and_close_are_noops_when_the_csv_was_never_opened(tmp_path):
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    acc = GatewayAccumulator(("davis_caa",), jnp.asarray([1.0]),
+                             jnp.asarray([2.0]), 1)
+    R._gateway_cumulative_row(None, acc, 5, 1.0)     # must not raise
+    R._gateway_cumulative_close(None)                # must not raise
+    assert not (tmp_path / R.GATEWAY_CUMULATIVE_CSV).exists()
+
+
+def test_row_is_a_noop_when_the_accumulator_was_disabled_mid_run(tmp_path):
+    """gateway_step failing sets _gw_acc=None; later dumps must be skipped."""
+    from scripts.run import run_omip_core2 as R
+    csv = R._gateway_cumulative_open(tmp_path, ("davis_caa",), io_proc=True)
+    R._gateway_cumulative_row(csv, None, 7, 2.0)
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert rows == [], "a row was written for a disabled accumulator"
+
+
+def test_row_refuses_to_write_columns_that_would_be_mis_assigned(tmp_path):
+    """Header built from names A, accumulator carrying names B => NO row.
+
+    Writing it anyway would put davis_caa's transport under bering_pacific's
+    column -- a defect that reads as a physics result.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    csv = R._gateway_cumulative_open(tmp_path, ("bering_pacific", "davis_caa"),
+                                     io_proc=True)
+    swapped = GatewayAccumulator(("davis_caa", "bering_pacific"),
+                                 jnp.asarray([1.0, 2.0]),
+                                 jnp.asarray([3.0, 4.0]), 1)
+    R._gateway_cumulative_row(csv, swapped, 1, 0.1)   # must not raise
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert rows == [], "a mis-assigned row was written"
+
+
+def test_row_never_raises_on_a_malformed_accumulator(tmp_path):
+    """Like its siblings, the dump must not be able to kill a run."""
+    from scripts.run import run_omip_core2 as R
+
+    class _Broken:
+        names = ("davis_caa",)
+        n = 3
+
+        @property
+        def volume(self):
+            raise RuntimeError("boom")
+
+    csv = R._gateway_cumulative_open(tmp_path, ("davis_caa",), io_proc=True)
+    R._gateway_cumulative_row(csv, _Broken(), 3, 1.0)   # must not raise
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert rows == []
+
+
+# ------------------------------------------------- the windowed-mean recovery
+
+
+def test_differencing_two_dumps_equals_a_fresh_accumulator_over_that_window(
+        tmp_path):
+    """THE load-bearing test: the reason the dump is cumulative.
+
+    Drives the REAL model + the REAL gateway_step over two windows with
+    different flow, dumps a row at the window boundary and at the end, then
+    checks that differencing the two rows reproduces, to round-off, a SECOND
+    accumulator that was started fresh at the boundary and fed the identical
+    states.
+
+    Three non-degeneracy assertions run BEFORE the property assertion:
+      * the seeded flow produces a non-zero transport at all,
+      * the two dumps DIFFER,
+      * the windowed mean differs from the whole-run mean by a wide margin
+        (otherwise a writer that emitted the whole-run mean would pass).
+    """
+    from legoesm.ocean.diagnostics_sections import (
+        gateway_step, new_gateway_accumulator,
+    )
+    from scripts.run import run_omip_core2 as R
+
+    grid, z_coord, model, state, geom, acc, stack = _gw_setup()
+    # Window A: 3 steps of northward (INTO the region) flow.
+    # Window B: 2 steps of weaker SOUTHWARD flow -- a different sign and a
+    # different magnitude, so the two windows are unmistakably distinct.
+    win_a = _seeded_states(model, state, [0.05, 0.05, 0.05])
+    win_b = _seeded_states(model, win_a[-1], [-0.02, -0.02])
+    n_a, n_b = len(win_a), len(win_b)
+
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    for s in win_a:
+        acc = gateway_step(acc, stack, s, z_coord, geom, source="auto")
+    assert acc.n == n_a
+    R._gateway_cumulative_row(csv, acc, n_a, float(n_a))
+    # A fresh accumulator over window B ONLY -- the independent reference.
+    ref = new_gateway_accumulator(acc.names)
+    for s in win_b:
+        acc = gateway_step(acc, stack, s, z_coord, geom, source="auto")
+        ref = gateway_step(ref, stack, s, z_coord, geom, source="auto")
+    R._gateway_cumulative_row(csv, acc, n_a + n_b, float(n_a + n_b))
+    R._gateway_cumulative_close(csv)
+
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(rows) == 2, f"expected two dumps, got {len(rows)}"
+    ra, rb = rows
+    assert int(ra["n_steps"]) == n_a and int(rb["n_steps"]) == n_a + n_b
+
+    ref_mean = np.asarray(ref.volume) / n_b
+    assert np.any(ref_mean != 0.0), (
+        "the seeded flow produced no transport -- every assertion below would "
+        "be trivially satisfied")
+    # Differencing two cumulative sums cancels the shared prefix ANALYTICALLY
+    # but not in floating point, so the tolerance has to track the storage
+    # precision: new_gateway_accumulator falls back to float32 whenever x64 is
+    # off (e.g. an --fp32 run), where eps is 1.2e-7, not 2.2e-16.  Stating it
+    # here beats a magic rtol that silently passes for the wrong reason.
+    _f64 = np.asarray(acc.volume).dtype == np.float64
+    rtol = 1e-9 if _f64 else 1e-4
+
+    for i, nm in enumerate(acc.names):
+        key = f"{nm}_vol_cumsum_m3s"
+        ca, cb = float(ra[key]), float(rb[key])
+        if ref_mean[i] == 0.0:
+            continue                     # dry gateway on this tiny grid
+        # non-degeneracy 1: the dumps actually moved
+        assert ca != cb, f"{nm}: the two dumps are identical"
+        window = (cb - ca) / (int(rb["n_steps"]) - int(ra["n_steps"]))
+        whole = cb / int(rb["n_steps"])
+        # non-degeneracy 2: the window is not the whole run in disguise
+        assert abs(window - whole) > 0.1 * max(abs(whole), abs(window)), (
+            f"{nm}: window {window:.6e} and whole-run {whole:.6e} means are "
+            "too close for this test to discriminate them")
+        # the property
+        np.testing.assert_allclose(window, ref_mean[i], rtol=rtol, atol=0.0,
+                                   err_msg=f"{nm}: differenced window mean != "
+                                           "a fresh accumulator over the same "
+                                           "window")
+
+
+def test_the_final_row_reproduces_the_transports_txt_whole_run_mean(tmp_path):
+    """The CSV and transports.txt must be two views of the SAME numbers.
+
+    cumsum / n_steps / 1e6 is exactly the Sv the run-end block prints, so a
+    reader can cross-check one against the other.  Non-vacuity: the run-end
+    value is asserted non-zero first.
+    """
+    from legoesm.ocean.diagnostics_sections import gateway_step
+    from scripts.run import run_omip_core2 as R
+
+    grid, z_coord, model, state, geom, acc, stack = _gw_setup()
+    for s in _seeded_states(model, state, [0.05, -0.03, 0.04]):
+        acc = gateway_step(acc, stack, s, z_coord, geom, source="auto")
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    R._gateway_cumulative_row(csv, acc, acc.n, float(acc.n))
+    R._gateway_cumulative_close(csv)
+    R._gateway_transport_diag(acc, tmp_path, io_proc=True)
+
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    txt = dict(ln.split() for ln in
+               (tmp_path / "transports.txt").read_text().splitlines())
+    assert int(txt["gateway_n_steps"]) == int(rows[-1]["n_steps"]) == acc.n
+    nonzero = 0
+    for nm in acc.names:
+        sv_txt = float(txt[f"gateway_{nm}_vol_Sv"])
+        sv_csv = float(rows[-1][f"{nm}_vol_cumsum_m3s"]) / acc.n / 1.0e6
+        # transports.txt writes %.6f, so compare at that resolution
+        assert sv_csv == pytest.approx(sv_txt, abs=5e-7), (
+            f"{nm}: CSV {sv_csv} vs transports.txt {sv_txt}")
+        nonzero += int(sv_txt != 0.0)
+    assert nonzero, "every gateway was zero -- the comparison proves nothing"
+
+
+def test_the_cumulative_dump_leaves_transports_txt_byte_identical(tmp_path):
+    """The run-end output contract must not move: same bytes, CSV or no CSV."""
+    from legoesm.ocean.diagnostics_sections import gateway_step
+    from scripts.run import run_omip_core2 as R
+
+    grid, z_coord, model, state, geom, acc, stack = _gw_setup()
+    states = _seeded_states(model, state, [0.05, -0.03])
+
+    control = tmp_path / "control"
+    control.mkdir()
+    a = acc
+    for s in states:
+        a = gateway_step(a, stack, s, z_coord, geom, source="auto")
+    R._gateway_transport_diag(a, control, io_proc=True)
+
+    treated = tmp_path / "treated"
+    treated.mkdir()
+    b = acc
+    csv = R._gateway_cumulative_open(treated, acc.names, io_proc=True)
+    for i, s in enumerate(states, start=1):
+        b = gateway_step(b, stack, s, z_coord, geom, source="auto")
+        R._gateway_cumulative_row(csv, b, i, float(i))
+    R._gateway_cumulative_close(csv)
+    R._gateway_transport_diag(b, treated, io_proc=True)
+
+    ctl = (control / "transports.txt").read_bytes()
+    trt = (treated / "transports.txt").read_bytes()
+    assert ctl, "the control wrote nothing -- the comparison is vacuous"
+    assert ctl == trt, "the cumulative dump changed transports.txt"
+    _h, rows = _read_csv(treated / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(rows) == len(states), "the treated arm did not actually dump"
+
+
+# ---------------------------------------------------- non-perturbation (SHA)
+
+
+_MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+
+
+def _digest(state) -> str:
+    """SHA-256 of the state with the #1442 mass-flux slots blanked.
+
+    --gateway-transports turns ``store_mass_flux`` ON, which populates three
+    slots that are ``None`` with the flag off.  Blanking them makes the two
+    arms structurally identical, so the digest compares the TRAJECTORY -- the
+    question this test asks -- rather than trivially reporting the presence of
+    the new slots.  ``store_mass_flux``'s own non-perturbation is pinned
+    separately by tests/ocean/unit/test_mass_flux_store.py.
+    """
+    from legoesm.io.state_digest import pytree_state_digest
+    return pytree_state_digest(
+        state._replace(**{k: None for k in _MASS_FLUX_SLOTS}))
+
+
+def test_the_digest_used_below_is_actually_value_sensitive():
+    """Without this, the non-perturbation test could pass on a constant hash."""
+    import jax.numpy as jnp
+
+    _g, _z, model, state = _tiny_latlon()
+    s1 = model.step(state, 600.0)
+    s2 = s1._replace(S=s1.S.replace(data=s1.S.data + jnp.asarray(1e-9)))
+    assert _digest(s1) == _digest(s1), "the digest is not deterministic"
+    assert _digest(s1) != _digest(s2), (
+        "a 1e-9 perturbation did not change the digest -- it cannot detect "
+        "a perturbed trajectory either")
+
+
+def test_accumulating_and_dumping_does_not_perturb_the_trajectory(tmp_path):
+    """Feature OFF vs ON: identical SHA-256 state digests after N steps.
+
+    ON exercises the FULL chain the driver runs -- store_mass_flux, the
+    per-step gateway_step, and a cumulative CSV dump after every step -- so a
+    dump that pulled, cast, or wrote back any leaf would show up here.  N > 1
+    so a per-step perturbation compounds instead of cancelling.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.diagnostics_sections import gateway_step
+    from scripts.run import run_omip, run_omip_core2 as R
+
+    n_steps, dt = 3, 600.0
+
+    def _build(store):
+        grid, z_coord, config, model, _kind = run_omip._create_setup(
+            grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+            physics_preset="minimal", water_type="II")
+        if store:
+            config = config._replace(store_mass_flux=True)
+            model = LatLonCGridOceanModel(grid, z_coord, config)
+        state = run_omip._init_rest_state("latlon", grid, z_coord, 1000.0)
+        return grid, z_coord, model, state
+
+    # --- OFF: no flag at all
+    _g0, _z0, m_off, s_off = _build(store=False)
+    # The two arms must be compared from the SAME initial condition, so capture
+    # the INITIAL digest before stepping.  (An earlier draft compared the OFF
+    # arm's FINAL state against the ON arm's INITIAL state and went red for
+    # that reason alone -- a fixture bug that looked exactly like the defect
+    # the test hunts.)
+    d_init_off = _digest(s_off)
+    for _ in range(n_steps):
+        s_off = m_off.step(s_off, dt)
+    assert _digest(s_off) != d_init_off, (
+        "the OFF arm did not move over 3 steps -- an unperturbed trajectory "
+        "would then be trivially reproduced by any ON arm")
+
+    # --- ON: store_mass_flux + gateway_step + a CSV dump every step
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import (
+        promote_gateway_geometry, setup_gateway_accumulator,
+    )
+    g1, z1, m_on, s_on = _build(store=True)
+    geom = promote_gateway_geometry(getattr(m_on, "grid", g1))
+    lat2d = jnp.asarray(np.degrees(np.asarray(g1.lat))[:, None]
+                        * np.ones((1, g1.n_lon)))
+    lon2d = jnp.asarray(np.degrees(np.asarray(g1.lon))[None, :]
+                        * np.ones((g1.n_lat, 1)))
+    acc, stack, _f = setup_gateway_accumulator(
+        lat2d, lon2d, s_on.land_mask.data, lat_min_deg=0.0)
+    assert _digest(s_on) == d_init_off, "the two arms started apart"
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    for k in range(1, n_steps + 1):
+        s_on = m_on.step(s_on, dt)
+        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+        R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)
+    R._gateway_cumulative_close(csv)
+
+    assert acc.n == n_steps, "the ON arm did not actually accumulate"
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(rows) == n_steps, "the ON arm did not actually dump"
+    d_off, d_on = _digest(s_off), _digest(s_on)
+    assert d_off == d_on, (
+        f"the gateway accumulator/dump perturbed the trajectory over "
+        f"{n_steps} steps: {d_off} != {d_on}")
+
+
+# ------------------------------------------------------------- driver wiring
+
+
+def _driver_lines():
+    return (Path(_ROOT) / "scripts/run/run_omip_core2.py").read_text().splitlines()
+
+
+def test_driver_opens_the_csv_before_the_loop_and_dumps_at_the_snapshot_cadence():
+    """Ordering constraints inside a monolithic main(), pinned by symbol name.
+
+    A dump BEFORE the loop or a missing run-end row both leave a window
+    unrecoverable, and neither is visible to any in-memory unit test.
+    """
+    lines = _driver_lines()
+    loop = next(i for i, ln in enumerate(lines)
+                if ln.strip().startswith("for step in range(1, n_steps"))
+    opens = [i for i, ln in enumerate(lines)
+             if "_gw_csv = _gateway_cumulative_open(" in ln]
+    assert len(opens) == 1, f"expected one CSV open, found {opens}"
+    assert opens[0] < loop, (
+        "the CSV must be opened BEFORE the step loop; opening it inside would "
+        "truncate the file at every cadence")
+    rows = [i for i, ln in enumerate(lines)
+            if "_gateway_cumulative_row(" in ln and "def " not in ln]
+    in_loop = [i for i in rows if i > loop]
+    assert len(in_loop) >= 2, (
+        "expected a cadence row inside the loop AND a run-end row after it; "
+        f"found row calls at {rows}")
+    # The cadence row must sit in the SAME block as the snapshot write, so the
+    # dump cadence really is --snapshot-every-days.
+    snap = next(i for i, ln in enumerate(lines)
+                if ln.strip().startswith("if snap_every > 0 and step % snap_every")
+                and i > loop)
+    cadence = next(i for i in in_loop if i > snap)
+    snap_indent = len(lines[snap]) - len(lines[snap].lstrip())
+    assert (len(lines[cadence]) - len(lines[cadence].lstrip())
+            > snap_indent), (
+        f"the cadence dump at line {cadence + 1} is not inside the "
+        f"`if snap_every ...` block at line {snap + 1}")
+
+
+def test_driver_writes_a_run_end_row_and_closes_after_the_loop():
+    """`step != n_steps` excludes the last step, so the final window is only
+    recoverable if the run-end row is written."""
+    lines = _driver_lines()
+    write = next(i for i, ln in enumerate(lines)
+                 if "_gateway_transport_diag(_gw_acc" in ln)
+    final_row = [i for i, ln in enumerate(lines)
+                 if "_gateway_cumulative_row(_gw_csv, _gw_acc, n_steps" in ln]
+    assert len(final_row) == 1, (
+        "the run-end cumulative row is missing -- the last window (e.g. days "
+        "60-90 of a 90-day run) could not be recovered")
+    closes = [i for i, ln in enumerate(lines)
+              if "_gateway_cumulative_close(" in ln and "def " not in ln]
+    assert closes, "the CSV is never closed"
+    assert final_row[0] < write, (
+        "the run-end row must be written before/with the whole-run block")
+    after = [i for i in closes if i > final_row[0]]
+    assert after, "the CSV is not closed after the run-end row is written"
+
+
+def test_driver_dumps_and_closes_on_the_blowup_abort_path():
+    """The abort `return 1` skips the run-end writer; without a dump there the
+    accumulated totals since the last cadence are lost.
+
+    There are TWO `[ABORT] non-finite state` sites -- the --scan-block lane
+    (which the gateway lane guard REFUSES outright) and the host loop.  This
+    must target the host loop's, i.e. the one after `for step in range(...)`;
+    picking the first match would assert against the lane the flag can never
+    reach and would pass no matter what the host loop does.
+    """
+    lines = _driver_lines()
+    loop = next(i for i, ln in enumerate(lines)
+                if ln.strip().startswith("for step in range(1, n_steps"))
+    aborts = [i for i, ln in enumerate(lines)
+              if 'print("[ABORT] non-finite state", flush=True)' in ln]
+    assert len(aborts) >= 2, (
+        "expected a scan-lane and a host-loop abort; the anchor rotted")
+    abort = next(i for i in aborts if i > loop)
+    tail = "\n".join(lines[abort:abort + 14])
+    assert "_gateway_cumulative_row(" in tail, (
+        "the blowup path does not dump the accumulator before returning")
+    assert "_gateway_cumulative_close(" in tail, (
+        "the blowup path leaves the CSV open")
+    assert "return 1" in tail
+
+
+def test_the_csv_filename_is_pinned():
+    """A downstream reader keys off this name; renaming it is a breaking change."""
+    from scripts.run import run_omip_core2 as R
+    assert R.GATEWAY_CUMULATIVE_CSV == "gateway_transports.csv"
+    assert R.GATEWAY_CUMULATIVE_CSV != "transports.txt", (
+        "the per-cadence series must NOT share the run-end scalar file")

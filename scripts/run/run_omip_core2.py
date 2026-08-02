@@ -2996,6 +2996,87 @@ def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
         print(f"[gateway] transport diag skipped: {type(e).__name__}: {e}")
 
 
+GATEWAY_CUMULATIVE_CSV = "gateway_transports.csv"
+
+
+def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
+    """Open ``gateway_transports.csv`` and write its header.  Returns a handle.
+
+    WHY A SECOND FILE, AND WHY A CSV.  ``transports.txt`` is the run's
+    key-value scalar dump: one ``name value`` line per quantity, written ONCE
+    at run end.  Repeating that block per cadence would give duplicate keys
+    that no existing reader of that file expects, so the whole-run block stays
+    exactly as it is (byte-identical) and the per-cadence series goes to its
+    own file -- the same split the driver already makes between the run-end
+    scalars and ``diag_timeseries.csv``.  The CSV follows that sibling's
+    conventions: opened once with a header, one row appended and FLUSHED per
+    dump (observable mid-run under a pipe-buffered stdout), process-0 only,
+    closed at the end.
+
+    Returns ``(file_handle, names)`` -- the names are carried so the row writer
+    can verify the accumulator it is handed still matches the header's column
+    order -- or ``None`` when disabled or on any failure.  ``None`` makes every
+    other function here a no-op, so a writer problem degrades the diagnostic
+    and never the run.
+    """
+    if not io_proc:
+        return None
+    try:
+        from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns
+        names = tuple(names)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        fh = open(Path(out_dir) / GATEWAY_CUMULATIVE_CSV, "w")
+        fh.write(",".join(gateway_cumulative_columns(names)) + "\n")
+        fh.flush()
+        return (fh, names)
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV disabled: {type(e).__name__}: {e}")
+        return None
+
+
+def _gateway_cumulative_row(gw_csv, acc, step, day) -> None:
+    """APPEND one CUMULATIVE-sum row and flush.  No-op when either is ``None``.
+
+    CUMULATIVE, never per-window: nothing is reset, so the run-end whole-run
+    mean is produced by the very same accumulator and a window is recovered by
+    the reader as ``(cumsum_b - cumsum_a) / (n_b - n_a)``.
+
+    ``gw_csv`` is the ``(file_handle, names)`` pair from
+    :func:`_gateway_cumulative_open`, or ``None`` on a non-IO rank / after a
+    writer failure.
+    """
+    if gw_csv is None or acc is None:
+        return
+    fh, names = gw_csv
+    try:
+        from legoesm.ocean.diagnostics_sections import (
+            format_gateway_cumulative_row,
+        )
+        if tuple(acc.names) != names:
+            # Skip the row rather than write one whose columns mean something
+            # other than what the header says.  Loud, because a mis-assigned
+            # gateway column is exactly the kind of defect that survives review.
+            print(f"[gateway] cumulative row SKIPPED at step {step}: "
+                  f"accumulator names {tuple(acc.names)} != header names "
+                  f"{names}; the columns would be mis-assigned.")
+            return
+        fh.write(format_gateway_cumulative_row(acc, step, day) + "\n")
+        fh.flush()
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative row skipped at step {step}: "
+              f"{type(e).__name__}: {e}")
+
+
+def _gateway_cumulative_close(gw_csv) -> None:
+    """Close the cumulative CSV.  No-op when it was never opened."""
+    if gw_csv is None:
+        return
+    try:
+        gw_csv[0].close()
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV close failed: {type(e).__name__}: {e}")
+
+
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
     """Global meridional ocean heat transport (NH peak / SH min) [PW] from the
     LIVE state.  Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h
@@ -4145,7 +4226,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "through the Arctic gateways (Bering/Pacific, "
                         "Davis/CAA, Atlantic/Nordic, Siberian) on the "
                         "lat>=66N region boundary and append them to "
-                        "transports.txt. Pure diagnostic: reads the state "
+                        "transports.txt. ALSO dumps the accumulator's "
+                        "CUMULATIVE sums + step count to "
+                        f"{GATEWAY_CUMULATIVE_CSV} at the "
+                        "--snapshot-every-days cadence (plus one row at run "
+                        "end), so the mean over ANY window is recovered "
+                        "exactly by differencing two rows: "
+                        "(cumsum_b - cumsum_a) / (n_b - n_a). Nothing is "
+                        "reset, so the transports.txt whole-run mean is "
+                        "unchanged. Pure diagnostic: reads the state "
                         "after each step and never writes back, so the "
                         "trajectory is bit-identical with the flag off. "
                         "Sign: POSITIVE = INTO the Arctic. tripole / latlon "
@@ -5983,6 +6072,7 @@ def main() -> int:
     _gw_acc = None
     _gw_gates = None
     _gw_geom = None
+    _gw_csv = None
     if getattr(args, "gateway_transports", False):
         if getattr(state, "v", None) is None:
             print("[gateway] needs C-grid v faces; DISABLED for this run.")
@@ -6018,6 +6108,28 @@ def main() -> int:
                       f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
                       f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); "
                       "+ = INTO Arctic")
+                # Per-cadence CUMULATIVE dump.  The run-end transports.txt
+                # block is a WHOLE-RUN mean, which cannot separate the
+                # cold-start adjustment from the settled window; differencing
+                # two rows of this file gives the mean over ANY window:
+                #   mean(n_a, n_b] = (cumsum_b - cumsum_a) / (n_b - n_a).
+                _gw_csv = _gateway_cumulative_open(
+                    out_dir, _gw_acc.names, io_proc=_is_io_proc())
+                if _gw_csv is not None:
+                    if snap_every > 0:
+                        print(f"[gateway] cumulative dumps -> "
+                              f"{GATEWAY_CUMULATIVE_CSV} every {snap_every} "
+                              f"steps ({args.snapshot_every_days:g} d) plus "
+                              f"one at run end; difference two rows for a "
+                              f"windowed mean", flush=True)
+                    else:
+                        # Honest, not silent: with no snapshot cadence the file
+                        # gets ONE row (run end) and carries no more
+                        # information than transports.txt already does.
+                        print(f"[gateway] --snapshot-every-days is 0, so "
+                              f"{GATEWAY_CUMULATIVE_CSV} will hold only the "
+                              f"run-end row; pass --snapshot-every-days N to "
+                              f"make windowed means recoverable", flush=True)
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
@@ -6545,6 +6657,11 @@ def main() -> int:
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
                                io_proc=_is_io_proc(), ice_state=ice_state)
                 _close_csv()
+                # Dump what the accumulator reached before the abort: the last
+                # cadence row alone would understate the run, and the run-end
+                # writer below is never reached on this path.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
+                _gateway_cumulative_close(_gw_csv)
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
@@ -6556,6 +6673,11 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
+            # Same cadence as the snapshot, and AFTER this step's
+            # gateway_step, so the row's n_steps matches the snapshot's day.
+            # `step != n_steps` above excludes the final step; the run-end row
+            # below covers it, so each dump point appears exactly once.
+            _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
@@ -6575,6 +6697,12 @@ def main() -> int:
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    # Run-end CUMULATIVE row FIRST, then the whole-run mean.  The last window
+    # (e.g. days 60-90 of a 90-day run) is only recoverable if the final totals
+    # are dumped: the cadence block above skips step == n_steps.
+    _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
+                            n_steps * dt / _SEC_PER_DAY)
+    _gateway_cumulative_close(_gw_csv)
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()

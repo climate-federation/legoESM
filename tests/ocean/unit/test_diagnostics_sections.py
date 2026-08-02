@@ -499,3 +499,178 @@ def test_stack_with_mismatched_selector_shape_is_rejected():
         accumulate_gateways(bad, bad, mfu, mfv, dy_u, dx_v, mfu, mfv) \
             if False else accumulate_gateways(acc, bad, mfu, mfv, dy_u, dx_v,
                                               mfu, mfv)
+
+
+# ==========================================================================
+# Cumulative dump — the windowed-mean instrument.
+#
+# The whole point is that ANY window is recovered by differencing two dumps,
+# so the properties that matter are: the row carries the CUMULATIVE sum (not a
+# mean, not a per-window increment), the columns follow the accumulator's own
+# name order, and the decimal representation round-trips EXACTLY.  Each test
+# below computes the value the corresponding defect would produce and asserts
+# it differs, so none of them can pass on a broken writer.
+# ==========================================================================
+
+
+def _acc(names, vols, trs, n):
+    """A GatewayAccumulator with hand-chosen sums (no model needed).
+
+    float64 is ASSERTED, not requested: with x64 off ``jnp.asarray(...,
+    dtype=float64)`` silently returns float32 and the exact-round-trip tests
+    below would be measuring a different question.
+    """
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    v = jnp.asarray(vols, dtype=jnp.float64)
+    t = jnp.asarray(trs, dtype=jnp.float64)
+    assert v.dtype == jnp.float64 and t.dtype == jnp.float64, (
+        f"x64 is off ({v.dtype}); the exactness assertions below would be "
+        "testing float32 round-tripping instead")
+    return GatewayAccumulator(tuple(names), v, t, int(n))
+
+
+# Values chosen so that NOT ONE of them survives a 6-decimal round trip -- that
+# is asserted, not assumed, by test_cumulative_row_round_trips_exactly.  Note
+# the magnitudes deliberately span 1e-4 to 1e8: %.6f is a FIXED ABSOLUTE
+# quantum, so it is the SMALL-magnitude entries it mangles worst.
+_AWKWARD_VOL = [-3.141592653589793e6, 7.777777777777777e-4, 3.0000000000000004e8]
+_AWKWARD_TR = [4.9406564584124654e5, -1.2345678901234567e-2, -1.7976931348623157e3]
+_NAMES3 = ("bering_pacific", "davis_caa", "atlantic_nordic")
+
+
+def test_cumulative_columns_and_row_have_the_same_arity():
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+    )
+    acc = _acc(_NAMES3, _AWKWARD_VOL, _AWKWARD_TR, 17)
+    cols = gateway_cumulative_columns(acc.names)
+    cells = format_gateway_cumulative_row(acc, 17, 0.5).split(",")
+    assert len(cols) == len(cells) == 3 + 2 * len(_NAMES3), (
+        f"header {len(cols)} vs row {len(cells)} cells -- a ragged CSV")
+    assert cols[:3] == ("step", "day", "n_steps")
+
+
+def test_cumulative_row_round_trips_exactly():
+    """Parsing the row must reproduce the sums BIT-EXACTLY.
+
+    Non-vacuity: every value below is first shown to be DESTROYED by the
+    ``%.6f`` formatting the run-end transports.txt block uses, so a writer that
+    reused that format fails here.
+
+    WHY EXACTNESS, stated honestly.  ``%.6f`` is a FIXED ABSOLUTE quantum
+    (5e-7), so what it costs depends entirely on the value's magnitude: a
+    cumulative sum of order 1e10 loses nothing, while a nearly-closed gateway
+    or a salt column of order 1e-3 loses most of its significant digits.  The
+    claim is NOT that a fixed-decimal format would ruin the eORCA1 volume
+    numbers -- at those magnitudes it would not.  It is that a lossless
+    representation costs nothing and removes the need to reason about
+    magnitude at all, per gateway, per grid, per unit, and per precision
+    (``new_gateway_accumulator`` falls back to float32 with x64 off).
+    """
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+    )
+    acc = _acc(_NAMES3, _AWKWARD_VOL, _AWKWARD_TR, 17)
+    for v in _AWKWARD_VOL + _AWKWARD_TR:
+        assert float(f"{v:.6f}") != v, (
+            f"{v!r} survives %.6f -- it cannot discriminate the formats and "
+            "this test would be vacuous")
+    cols = gateway_cumulative_columns(acc.names)
+    cells = format_gateway_cumulative_row(acc, 17, 0.5).split(",")
+    got = dict(zip(cols, cells))
+    for i, nm in enumerate(_NAMES3):
+        assert float(got[f"{nm}_vol_cumsum_m3s"]) == _AWKWARD_VOL[i]
+        assert float(got[f"{nm}_salt_cumsum_psu_m3s"]) == _AWKWARD_TR[i]
+
+
+def test_cumulative_row_writes_the_sum_not_the_mean():
+    """A writer that dumped ``volume / n`` would break exact differencing."""
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+    )
+    n = 17
+    acc = _acc(_NAMES3, _AWKWARD_VOL, _AWKWARD_TR, n)
+    cols = gateway_cumulative_columns(acc.names)
+    got = dict(zip(cols, format_gateway_cumulative_row(acc, n, 1.0).split(",")))
+    assert int(got["n_steps"]) == n
+    for i, nm in enumerate(_NAMES3):
+        mean = _AWKWARD_VOL[i] / n
+        assert mean != _AWKWARD_VOL[i], "n=1 would make this vacuous"
+        assert float(got[f"{nm}_vol_cumsum_m3s"]) == _AWKWARD_VOL[i]
+        assert float(got[f"{nm}_vol_cumsum_m3s"]) != mean
+        # ... and not the Sv-scaled mean the transports.txt block writes
+        assert float(got[f"{nm}_vol_cumsum_m3s"]) != mean / 1.0e6
+
+
+def test_cumulative_row_columns_follow_the_accumulator_name_order():
+    """Permuting the names permutes the values -- a fixed order would not."""
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+    )
+    perm = [2, 0, 1]
+    a = _acc(_NAMES3, _AWKWARD_VOL, _AWKWARD_TR, 5)
+    b = _acc([_NAMES3[i] for i in perm], [_AWKWARD_VOL[i] for i in perm],
+             [_AWKWARD_TR[i] for i in perm], 5)
+    assert tuple(a.names) != tuple(b.names), "the permutation is a no-op"
+    da = dict(zip(gateway_cumulative_columns(a.names),
+                  format_gateway_cumulative_row(a, 5, 1.0).split(",")))
+    db = dict(zip(gateway_cumulative_columns(b.names),
+                  format_gateway_cumulative_row(b, 5, 1.0).split(",")))
+    for nm in _NAMES3:
+        assert da[f"{nm}_vol_cumsum_m3s"] == db[f"{nm}_vol_cumsum_m3s"], (
+            f"{nm} picked up a different value after permuting the names -- "
+            "the row is not keyed to the accumulator's own ordering")
+
+
+def test_cumulative_row_rejects_an_accumulator_whose_arrays_do_not_match_names():
+    """Silently short/long arrays would mis-assign every column after the gap."""
+    from legoesm.ocean.diagnostics_sections import (
+        GatewayAccumulator, format_gateway_cumulative_row,
+    )
+    bad = GatewayAccumulator(_NAMES3, jnp.asarray([1.0, 2.0]),
+                             jnp.asarray([1.0, 2.0, 3.0]), 4)
+    with pytest.raises(ValueError, match="mis-assigned"):
+        format_gateway_cumulative_row(bad, 4, 1.0)
+
+
+def test_cumulative_columns_are_unique_and_name_every_gateway():
+    from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns
+    names = tuple(nm for nm, _b in ARCTIC_GATEWAYS)
+    cols = gateway_cumulative_columns(names)
+    assert len(set(cols)) == len(cols), f"duplicate CSV column: {cols}"
+    for nm in names:
+        assert f"{nm}_vol_cumsum_m3s" in cols
+        assert f"{nm}_salt_cumsum_psu_m3s" in cols
+
+
+def test_differencing_two_cumulative_rows_recovers_a_window_mean():
+    """The arithmetic the whole feature exists for, on known numbers.
+
+    Non-degenerate by construction AND by assertion: the two dumps differ, and
+    the windowed mean differs from the whole-run mean by a wide margin -- if
+    they agreed, a writer that dumped the whole-run mean at every cadence
+    would pass.
+    """
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+    )
+    per_step_a, per_step_b = 3.0e6, -1.0e6      # m^3/s, two distinct regimes
+    n_a, n_b = 30, 60
+    cum_a = [per_step_a * n_a]
+    cum_b = [per_step_a * n_a + per_step_b * n_b]
+    acc_a = _acc(("atlantic_nordic",), cum_a, [0.0], n_a)
+    acc_b = _acc(("atlantic_nordic",), cum_b, [0.0], n_a + n_b)
+    cols = gateway_cumulative_columns(("atlantic_nordic",))
+    ra = dict(zip(cols, format_gateway_cumulative_row(acc_a, n_a, 30.0).split(",")))
+    rb = dict(zip(cols, format_gateway_cumulative_row(acc_b, n_a + n_b, 90.0).split(",")))
+    key = "atlantic_nordic_vol_cumsum_m3s"
+    assert float(ra[key]) != float(rb[key]), "the two dumps are identical"
+    window = ((float(rb[key]) - float(ra[key]))
+              / (int(rb["n_steps"]) - int(ra["n_steps"])))
+    whole = float(rb[key]) / int(rb["n_steps"])
+    assert abs(window - whole) > 0.25 * abs(whole), (
+        f"window {window} and whole-run {whole} means are too close for this "
+        "test to discriminate them")
+    assert window == pytest.approx(per_step_b, rel=1e-12)
+    assert whole == pytest.approx((per_step_a * n_a + per_step_b * n_b)
+                                  / (n_a + n_b), rel=1e-12)

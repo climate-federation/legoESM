@@ -105,6 +105,44 @@ designed for the HOST step loop that the tripole OMIP driver actually runs
 (``--scan-block`` defaults to 0 and the scan path rejects the OMIP forcing
 stack).  To accumulate inside a scan, carry the two float arrays alone and
 re-attach the names on the host.
+
+WINDOWED MEANS: WHY THE DUMP IS CUMULATIVE
+------------------------------------------
+The end-of-run ``transports.txt`` block is a WHOLE-RUN time mean, which is the
+wrong instrument for a spin-up question: a 90-day run's 0-90 mean is dominated
+by the cold-start adjustment (measured net volume transport -2.38 Sv over days
+0-30, against the ~0 a steady state requires) and cannot be separated from the
+days 30-90 signal after the fact.
+
+So the accumulator ALSO dumps its RUNNING TOTALS at a cadence
+(:func:`format_gateway_cumulative_row`), and ANY window is recovered exactly by
+differencing two dumps::
+
+    mean over (n_a, n_b]  =  (cumsum_b - cumsum_a) / (n_b - n_a)
+
+CUMULATIVE, not per-window, for two reasons.  (1) No state is reset mid-run, so
+the accumulator that produces the run-end whole-run mean is bit-identical to
+the one that produces the dumps -- there is no partial-window bookkeeping to
+get wrong, and a MISSED dump costs resolution, never correctness.  (2) A window
+is then a subtraction the reader performs, so windows the run did not
+anticipate (0-45, 30-90, 60-90) are all available from the same file.
+
+The stored quantity is a SUM OF PER-STEP RATES -- there is no ``dt`` factor --
+so the cumulative columns carry the per-step units (m^3/s, psu m^3/s) and the
+mean is ``cumsum / n_steps``.
+
+Values are written at FULL float precision (shortest round-tripping ``repr``),
+so a differenced window is EXACTLY what an in-run per-window accumulator would
+have produced.  Stated precisely rather than dramatically: a fixed-decimal
+format such as the ``%.6f`` the ``transports.txt`` block uses would NOT ruin
+the eORCA1 volume numbers -- at ~1e10 m^3/s its 5e-7 quantum is below the
+float's own resolution.  The objection is that the quantum is ABSOLUTE and
+therefore magnitude-blind: the same format that costs nothing on the Atlantic
+gateway's volume strips most of the significant digits from a nearly-closed
+strait, from a salt column that happens to be small, and from an ``--fp32``
+run (``new_gateway_accumulator`` falls back to float32 with x64 off).  Lossless
+costs nothing and removes the need to re-derive that argument per gateway, per
+grid, per unit and per precision.
 """
 
 from __future__ import annotations
@@ -342,6 +380,67 @@ class GatewayAccumulator(NamedTuple):
         ts = self.tracer_mean
         return {nm: (float(vs[i]), float(ts[i]))
                 for i, nm in enumerate(self.names)}
+
+
+# ---------------------------------------------------------------------------
+# Cumulative dump: the windowed-mean instrument (see the module docstring).
+#
+# Column SUFFIXES, kept next to the writer so the header and the row can never
+# be built from two different conventions.  ``cumsum`` is literal: these are
+# running SUMS of per-step rates, NOT time integrals (no dt) and NOT means.
+# ---------------------------------------------------------------------------
+_CUM_VOL_SUFFIX = "_vol_cumsum_m3s"
+_CUM_SALT_SUFFIX = "_salt_cumsum_psu_m3s"
+
+# Fixed leading columns.  ``n_steps`` is the accumulator's OWN count, not the
+# model step index: the two agree only while every step accumulated, and the
+# driver disables the diagnostic (without stopping the run) on any failure.
+# Differencing MUST divide by the n_steps difference, never by the step
+# difference, or a run that lost steps silently reports a scaled-down rate.
+GATEWAY_CUMULATIVE_LEAD_COLUMNS = ("step", "day", "n_steps")
+
+
+def gateway_cumulative_columns(names) -> tuple[str, ...]:
+    """CSV header for a cumulative dump of ``names``, in row order.
+
+    The row builder derives its ordering from the SAME ``names`` sequence, and
+    :func:`format_gateway_cumulative_row` re-checks the header it is given, so
+    a column cannot be silently mis-assigned to another gateway.
+    """
+    cols = list(GATEWAY_CUMULATIVE_LEAD_COLUMNS)
+    for nm in names:
+        cols.append(f"{nm}{_CUM_VOL_SUFFIX}")
+        cols.append(f"{nm}{_CUM_SALT_SUFFIX}")
+    return tuple(cols)
+
+
+def format_gateway_cumulative_row(acc: GatewayAccumulator, step: int,
+                                  day: float) -> str:
+    """One CSV row of ``acc``'s CUMULATIVE sums (no trailing newline).
+
+    Values are the running totals, NOT means and NOT per-window increments:
+    the mean over the window between two dumps is
+    ``(cumsum_b - cumsum_a) / (n_b - n_a)``, and dividing the volume column by
+    ``_M3_S_PER_SV`` turns it into Sv.
+
+    Floats are written with ``repr`` (shortest round-tripping decimal), so
+    parsing a row and differencing it reproduces the in-memory sums EXACTLY.
+    A fixed-decimal format quantises by a FIXED ABSOLUTE amount regardless of
+    magnitude, which is harmless for a large gateway and destructive for a
+    small one or for a float32 accumulator -- see the module docstring.
+    """
+    vol = [float(v) for v in acc.volume]
+    tr = [float(v) for v in acc.tracer]
+    if len(vol) != len(acc.names) or len(tr) != len(acc.names):
+        raise ValueError(
+            f"gateway accumulator has {len(vol)} volume / {len(tr)} tracer "
+            f"entries for {len(acc.names)} names -- the row would be "
+            f"mis-assigned to the header built from those names.")
+    cells = [str(int(step)), f"{float(day):.6f}", str(int(acc.n))]
+    for i in range(len(acc.names)):
+        cells.append(repr(vol[i]))
+        cells.append(repr(tr[i]))
+    return ",".join(cells)
 
 
 def new_gateway_accumulator(names: tuple[str, ...]) -> GatewayAccumulator:
@@ -685,9 +784,12 @@ __all__ = [
     "ARCTIC_GATEWAYS",
     "ARCTIC_LAT_DEG",
     "BoundaryFaces",
+    "GATEWAY_CUMULATIVE_LEAD_COLUMNS",
     "GatewayAccumulator",
     "SectionTransport",
     "accumulate_gateways",
+    "format_gateway_cumulative_row",
+    "gateway_cumulative_columns",
     "SUPPORTED_APP_GRIDS",
     "arctic_region_mask",
     "GatewayStack",
