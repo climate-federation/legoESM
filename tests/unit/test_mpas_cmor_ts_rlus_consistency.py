@@ -30,11 +30,11 @@ import types
 
 import numpy as np
 import pytest
-
-from legoesm import constants
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.grids.factory import create_grid
+
+from legoesm import constants
 
 NLEV = 6
 
@@ -83,7 +83,7 @@ def _surface_sweep(mesh):
     sst = 290.0 + 12.0 * np.cos(latc)          # 278 K poles .. 302 K equator
     sic = np.zeros(n)
     # Land fraction: a smooth mid-latitude/polar-weighted "continent" so the
-    # ancher offset is a smooth function of position (IDW-friendly).
+    # anchor offset is a smooth function of position (IDW-friendly).
     f_land = 0.5 * (1.0 + np.sin(latc)) ** 2 / 4.0 + 0.25
     # Skin offset: +22 K at the equator (desert), -45 K at the north pole.
     skin_offset = 22.0 * np.cos(latc) - 45.0 * np.sin(latc) ** 2
@@ -100,7 +100,7 @@ def _fake_driver(mesh, dc, sigma_full, sweep, *, anchor=None):
     """
     latc = np.asarray(mesh.latCell)
     n = sweep["n"]
-    T = 250.0 + 40.0 * sigma_full[None, :] + 10.0 * np.cos(latc)[:, None]
+    t_air = 250.0 + 40.0 * sigma_full[None, :] + 10.0 * np.cos(latc)[:, None]
     u_edge = np.zeros((int(mesh.nEdges), NLEV))
     rlds = 0.75 * constants.sigma_sb * sweep["anchor"] ** 4
     rlus = (SFC_EMISSIVITY * constants.sigma_sb * sweep["anchor"] ** 4
@@ -115,7 +115,7 @@ def _fake_driver(mesh, dc, sigma_full, sweep, *, anchor=None):
                                      dycore=types.SimpleNamespace(dt=75.0)),
         get_sst_sic=lambda day: (sweep["sst"], sweep["sic"]),
         state=types.SimpleNamespace(
-            u=_field(u_edge), T=_field(T), p_s=_field(np.full(n, 1.0e5)),
+            u=_field(u_edge), T=_field(t_air), p_s=_field(np.full(n, 1.0e5)),
             phis=_field(np.zeros(n)), tracers=None,
         ),
         model=types.SimpleNamespace(
