@@ -181,11 +181,17 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
-        # the validator + the psi_m/psi_h else-raise twins (grow-only lock so
-        # a silent-Dyer fallback can't be reintroduced).
+        # the validator + the shared stable-branch dispatch twins (grow-only
+        # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
+        # the else-raise moved from psi_m/psi_h into the factored
+        # _stable_psi_m/_stable_psi_h helpers (now ALSO consumed by
+        # psi_m_coare/psi_h_coare for the selectable coare3 stable branch —
+        # the inert surface_stability_scheme fix); psi_m/psi_h keep their
+        # entry-time validate_stability_scheme guard, behaviourally locked by
+        # tests/unit/test_stable_stability_functions.py unknown-scheme raises.
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
-        ("packages/core/legoesm/core/bulk_flux.py", "psi_m"),
-        ("packages/core/legoesm/core/bulk_flux.py", "psi_h"),
+        ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
+        ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),

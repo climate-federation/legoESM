@@ -236,10 +236,26 @@ class DiagnosticCollector:
         start_year: int = 1979,
         cloud_config=None,
         vcoord=None,
+        surface_stability_scheme: str = "dyer1974",
+        surface_bulk_scheme: str = "constant",
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
         self.dsigma = dsigma
+        # MOST selectors for the ``tas`` 2 m profile (``_tas_2m``): the SAME
+        # ``ExperimentConfig.surface_stability_scheme`` /
+        # ``surface_bulk_scheme`` the surface fluxes run with, so a
+        # large_yeager or grachev/gryanik experiment's published ``tas`` uses
+        # the same similarity functions as its fluxes.  The non-MOST
+        # ``"constant"`` bulk scheme (the ExperimentConfig default) has no
+        # similarity profile, so it keeps the historical coare3 profile —
+        # which also keeps the default byte-identical.
+        self.surface_stability_scheme = surface_stability_scheme
+        self.tas_profile_scheme = (
+            surface_bulk_scheme
+            if surface_bulk_scheme in ("most", "coare3", "large_yeager")
+            else "coare3"
+        )
         # Vertical coordinate object (``SigmaCoordinate`` or
         # ``HybridSigmaPressureCoordinate``).  REQUIRED to get level pressures
         # right on a HYBRID grid, which is the driver DEFAULT
@@ -681,11 +697,16 @@ class DiagnosticCollector:
         rho_low = p_low / (constants.R_d * T_low)
         T_sfc = blend_surface_temperature(sst, sic, T_ice)
         q_sfc = saturation_mixing_ratio(T_sfc, p_s)
-        # coare3 similarity profile (the recommended config's scheme); the 2 m
-        # value is set by stability, so gustiness is irrelevant here.
+        # Similarity profile matched to the experiment's surface fluxes:
+        # SAME bulk scheme (constant -> the historical coare3 stand-in, see
+        # __init__) and SAME stable-branch selector (codex 2026-08-02: a
+        # large_yeager or grachev/gryanik run otherwise published a
+        # coare3-native-default tas).  The 2 m value is set by stability, so
+        # gustiness is left scheme-native here (pre-existing choice).
         *_, T_2m = compute_most_fluxes(
             u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-            scheme="coare3", return_2m=True,
+            scheme=self.tas_profile_scheme, return_2m=True,
+            stability_scheme=self.surface_stability_scheme,
         )
         return T_2m
 

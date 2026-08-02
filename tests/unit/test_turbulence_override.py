@@ -254,3 +254,92 @@ def test_per_column_ck_array_runs_real_forward_step():
     t = np.asarray(driver.state.T.data)
     assert t.shape == (8, 16, 5)
     assert np.all(np.isfinite(t))
+
+
+# ---------------------------------------------------------------------------
+# surface_stability_scheme: plumbing AND flux CONSUMPTION on the latlon+HB lane.
+#
+# The plumbing-only coverage above (turbulence_config_for returns the right
+# CONFIG object) did not catch the 2026-08 inert-knob bug: the injected
+# ``SurfaceLayerConfig.stability_scheme`` reached ``compute_most_fluxes`` but
+# the coare3 branch selected ``psi_m_coare``/``psi_h_coare`` unconditionally
+# (bulk_flux.py), so two AMIP runs differing only in
+# ``surface_stability_scheme`` were BIT-IDENTICAL.  This test closes the gap
+# at the CONSUMPTION level: the resolver the driver uses
+# (``turbulence_config_for``) -> the kernel the latlon compiled lane runs
+# (``holtslag_boville_turbulence``, dispatched by ``get_turbulence_fn`` and
+# called with ``config=self.turbulence_config`` in
+# ``PhysicsPipeline.physics_step_no_rad``) -> different surface fluxes.
+# ---------------------------------------------------------------------------
+def _hb_lane_config(stability_scheme):
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray", turbulence="holtslag_boville",
+        surface_bulk_scheme="coare3", surface_gustiness_zi=300.0,
+        surface_stability_scheme=stability_scheme,
+    )
+
+
+def _hb_shflx(stability_scheme):
+    """Sensible flux from the EXACT lane chain: resolver -> dispatched HB
+    kernel -> its internal compute_surface_fluxes, on a strongly stable
+    synthetic column (+80 K surface inversion, 10 m/s wind)."""
+    from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
+        holtslag_boville_turbulence,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        get_turbulence_fn,
+    )
+
+    tc = turbulence_config_for(_hb_lane_config(stability_scheme))
+    name, turb_fn, sub = get_turbulence_fn(tc)
+    # Name the symbol that runs (not a delegating wrapper): the latlon lane's
+    # turbulence kernel IS holtslag_boville_turbulence.
+    assert name == "holtslag_boville"
+    assert turb_fn is holtslag_boville_turbulence
+    # Plumbing (the pre-existing guarantee): the injection reached the
+    # sub-config the kernel will read.
+    assert sub.surface.bulk_scheme == "coare3"
+    assert sub.surface.stability_scheme == stability_scheme
+    assert float(sub.surface.gustiness_w_zi) == 300.0
+
+    ncol, nlev = 2, 4
+    ones = jnp.ones((ncol, nlev))
+    z_full = jnp.broadcast_to(jnp.asarray([3000.0, 2000.0, 1000.0, 100.0]),
+                              (ncol, nlev))
+    z_half = jnp.broadcast_to(
+        jnp.asarray([3500.0, 2500.0, 1500.0, 500.0, 0.0]), (ncol, nlev + 1))
+    T = jnp.broadcast_to(jnp.asarray([270.0, 280.0, 290.0, 300.0]),  # noqa: N806 — canonical temperature symbol
+                         (ncol, nlev))
+    p_full = jnp.broadcast_to(
+        jnp.asarray([70000.0, 80000.0, 90000.0, 99000.0]), (ncol, nlev))
+    p_half = jnp.broadcast_to(
+        jnp.asarray([65000.0, 75000.0, 85000.0, 95000.0, 100000.0]),
+        (ncol, nlev + 1))
+    from legoesm import constants
+    rho = p_full / (constants.R_d * T)
+    out = turb_fn(
+        u=10.0 * ones, v=0.0 * ones, T=T, q_v=0.002 * ones,
+        p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
+        T_sfc=jnp.full((ncol,), 220.0), q_sfc=jnp.full((ncol,), 3e-4),
+        rho=rho, dt=600.0, config=sub,
+    )
+    return np.asarray(out.shflx)
+
+
+def test_surface_stability_scheme_reaches_hb_flux_consumption():
+    """The knob changes the FLUX the lane kernel produces — not just the
+    config object.  grachev2007_sheba (a genuinely different SBL tail on
+    coare3) must move the stable sensible flux by > 5%; BH91 must be a
+    nonzero change (COARE's native stable branch is BH91 with rounded
+    constants, so that pair is rounding-level by physics)."""
+    sh_dyer = _hb_shflx("dyer1974")
+    sh_gr = _hb_shflx("grachev2007_sheba")
+    sh_bh = _hb_shflx("beljaars_holtslag1991")
+    assert np.all(np.isfinite(sh_dyer)) and np.all(np.isfinite(sh_gr))
+    assert np.all(sh_dyer != sh_bh), (
+        "surface_stability_scheme is inert through the HB lane kernel "
+        "(the 2026-08 bit-identical A/B bug)")
+    assert np.all(np.abs(sh_gr - sh_dyer) > 0.05 * np.abs(sh_dyer))

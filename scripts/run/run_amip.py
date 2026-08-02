@@ -645,9 +645,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "grachev2007_sheba", "gryanik2020"],
                         help="Stable-branch (zeta>0) Monin-Obukhov similarity "
                              "functions for the surface layer (bulk_flux psi_m/"
-                             "psi_h). dyer1974 is the short-tail default; "
-                             "beljaars_holtslag1991 keeps exchange alive under "
-                             "strong stability (polar-night surface decoupling).")
+                             "psi_h). dyer1974 (default) is byte-identical: "
+                             "the short-tail -5*zeta on most/large_yeager, but "
+                             "on coare3 (the AMIP surface scheme) the "
+                             "COARE-native stable form, which is already the "
+                             "long-tail BH91 fit — so beljaars_holtslag1991 is "
+                             "a rounding-level change on coare3, and the "
+                             "genuinely different strong-stable tails there "
+                             "are grachev2007_sheba/gryanik2020.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
