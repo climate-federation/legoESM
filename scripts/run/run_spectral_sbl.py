@@ -197,6 +197,7 @@ def main():
         zc_np = np.asarray(g.z_c)
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
         frame = 0
+        _last_rec_h = [None]
 
         def _save(t_hours):
             nonlocal frame
@@ -205,6 +206,7 @@ def main():
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
                 np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0)
             frame += 1
+            _last_rec_h[0] = t_hours
         print(f"  recording {args.record_frames} frames; heights[m]={np.round(h_z,1)}")
 
     # STATIC trace-time CFL dt (reuses split_explicit.select_dt; differentiable /
@@ -236,7 +238,13 @@ def main():
             z, um, vm, thm, spd, ustar, h, jet, jetz = diagnose(st, g)
             print(f"{i:7d} {t/3600:5.2f}h dt={dth:.3f} max|w|={mw:5.2f} u*={ustar:.3f}"
                   f" h_sbl={h:.0f}m jet={jet:.2f}@{jetz:.0f}m")
-    if rec and frame < args.record_frames:
+    # ALWAYS record the terminal state. The initial-state frame consumes one
+    # slot of --record-frames, so the in-loop cadence stops one step short of
+    # t = T and the old `frame < record_frames` guard was already exhausted
+    # here -- every reference silently ended one cadence step early (measured:
+    # --record-frames 3 over 0.25 h gave t = 0, 0.083, 0.167 h, never 0.25).
+    # Guarded on the time, not the count, so it cannot emit a duplicate frame.
+    if rec and (_last_rec_h[0] is None or t / 3600.0 > _last_rec_h[0] + 1.0e-9):
         _save(t / 3600.0)
     print(f"[DONE] wall={time.time()-t0:.1f}s  {i/(time.time()-t0):.1f} steps/s ({i} steps)")
     z, um, vm, thm, spd, ustar, h, jet, jetz = diagnose(st, g)
