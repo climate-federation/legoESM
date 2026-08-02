@@ -439,9 +439,23 @@ def mass_fluxes_from_state(state, z_coord, grid, *,
     adaptive implicit vertical advection AFTER the tracer flux is formed;
     neither is exposed on the state.
 
+    PREFER THE STORED FLUX.  If the run set
+    ``LatLonCGridOceanConfig.store_mass_flux=True`` (#1442), the state carries
+    ``mass_flux_u``/``mass_flux_v`` -- the ACTUAL tracer-advecting flux, with
+    the barotropic correction and the GM bolus already in it -- and this
+    function returns those unchanged.  Everything said above about
+    reconstruction then does not apply.  The reconstruction below is the
+    fallback for a state that predates the flag (e.g. an archived snapshot).
+
     ``min_water_column_m`` is forwarded to ``compute_layer_thickness`` so a
     caller can match the model config's own floor.
     """
+    stored_u = getattr(state, "mass_flux_u", None)
+    stored_v = getattr(state, "mass_flux_v", None)
+    if stored_u is not None and stored_v is not None:
+        # Exact: what the model advected with. No reconstruction, no caveat.
+        return stored_u.data, stored_v.data
+
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         compute_face_masks_3d, min_cell_to_uface, min_cell_to_vface,
     )

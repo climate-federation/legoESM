@@ -610,7 +610,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
-                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT):
+                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
+                  store_mass_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -853,6 +854,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
               f"IWM={'on' if _use_iwm else 'off'} "
               f"DDM={'on' if _use_ddm else 'off'}")
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.
+        _ovr["store_mass_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -4634,6 +4641,8 @@ def main() -> int:
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":

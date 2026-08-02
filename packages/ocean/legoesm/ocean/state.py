@@ -531,6 +531,24 @@ class LatLonCGridOceanState(NamedTuple):
     tau_x_prev: object = None
     tau_y_prev: object = None
     freshwater_eta_prev: object = None
+    # THE TRACER-ADVECTING MASS FLUXES [m^2/s] at u/v faces, exactly as used by
+    # this step's flux-form tracer update (#1442).  Populated ONLY when
+    # ``LatLonCGridOceanConfig.store_mass_flux`` is True; default None => inert,
+    # zero behaviour change (same None-seeding pattern as ``tke``/``bt_hist``).
+    #
+    # WHY THIS EXISTS: ``u``/``v`` are the velocity BEFORE the barotropic
+    # transport correction.  The step forms
+    # ``u_corrected = u + (Hu_avg - Hu_3d)/H_u_old`` and advects tracers with
+    # ``h_u_old * u_corrected`` (plus the GM bolus flux when active), but
+    # ``u_corrected`` is never written back to the state.  So no consumer of a
+    # state or a snapshot could reconstruct the flux the model actually used:
+    # the reconstruction ``h_new * u`` was measured to differ by 0.35-1.28 Sv
+    # per zonal section on eORCA1 -- about 100% of the apparent net at 66N.
+    # These fields close that gap for BOTH the barotropic and the GM-bolus
+    # term.  Shapes match ``u``/``v``: (n_lat, n_lon+1, nlev) and
+    # (n_lat+1, n_lon, nlev).
+    mass_flux_u: object = None
+    mass_flux_v: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -2116,6 +2134,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     Arctic halocline-erosion audit).  Column-constant top-cell S is
     #     used for the runoff-depth-spread channel too.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
+
+    # Store the TRACER-ADVECTING mass fluxes on the returned state (#1442).
+    # PURE DIAGNOSTIC: it changes nothing the step computes, it only stops
+    # throwing the flux away.  Off by default because it costs two extra
+    # face-shaped arrays of state (~145 MB at eORCA1 L75 in fp64).  Static
+    # Python bool read in a closure, so both branches are NOT traced and
+    # enabling it cannot cause a retrace mid-run.
+    store_mass_flux: bool = False
 
     # --- NEMO dynzdf composition (#1226): drag-in-matrix + baroclinic-only ---
     # Two SEPARATELY toggleable options transcribing NEMO's ``ln_drgimp``

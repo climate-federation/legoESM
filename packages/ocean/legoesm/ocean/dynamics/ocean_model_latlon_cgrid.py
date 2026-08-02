@@ -4203,6 +4203,30 @@ class LatLonCGridOceanModel:
             w=w_field,
         )
 
+        # #1442: keep the tracer-advecting mass fluxes instead of discarding
+        # them.  PURE DIAGNOSTIC -- read-only capture of values this step
+        # already computed; nothing above depends on the branch, so the
+        # trajectory is bit-identical with the flag off or on.
+        #
+        # ``mass_flux_u_tr``/``mass_flux_v_tr`` (NOT ``mass_flux_u``/``_v``) are
+        # what lines ~3961/3965 actually advect T and S with: they start as
+        # ``h_u_old * u_corrected`` -- i.e. WITH the barotropic transport
+        # correction ``(Hu_avg - Hu_3d)/H_u_old`` that never reaches
+        # ``state.u`` -- and are REPLACED by the bolus-inclusive flux when GM
+        # ``gm_bolus_advection`` is active.  Storing the ``_tr`` pair therefore
+        # closes BOTH the barotropic and the GM-bolus omission at once.
+        #
+        # Static Python bool on a config leaf, so this is a compile-time
+        # branch (the CLAUDE.md feature-gating exception): only one side is
+        # ever traced and the pytree structure is fixed for the whole run.
+        if self.config.store_mass_flux:
+            state_new = state_new._replace(
+                mass_flux_u=state.u.replace(
+                    data=mass_flux_u_tr, name="mass_flux_u"),
+                mass_flux_v=state.v.replace(
+                    data=mass_flux_v_tr, name="mass_flux_v"),
+            )
+
         # 8. Freshwater forcing (virtual salt flux only)
         #
         # The freshwater eta tendency (F_fw_eta) is now applied inside
