@@ -22,7 +22,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import argparse, time
 import numpy as np
 import jax, jax.numpy as jnp
-from legoesm.driver.config import load_experiment_config
+from legoesm.driver.config import (
+    ExperimentConfig, GridConfig, load_experiment_config,
+)
 from legoesm.driver.component_factory import create_atmosphere_dycore
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import standard_hybrid_levels
@@ -31,8 +33,11 @@ from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init, h
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=str,
-                    default="/scratch/b/b309165/amip_c32l45_orogwd_1979_60d_25800992/experiment_config.json")
+    ap.add_argument("--config", type=str, default=None,
+                    help="ExperimentConfig JSON. Omit to build a self-contained "
+                         "default for this grid. (Until 2026-08-02 this "
+                         "defaulted to a hard-coded Levante scratch path, which "
+                         "made the script unrunnable anywhere else.)")
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--nlev", type=int, default=45)
     ap.add_argument("--days", type=int, default=200)
@@ -50,7 +55,15 @@ def main():
     ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
-    cfg = load_experiment_config(args.config)
+    if args.config is None:
+        # Self-contained default: no site paths, no external files.
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=args.n),
+        )
+    else:
+        # strict=True: a dropped key here would silently run a DIFFERENT
+        # experiment than the file describes.
+        cfg = load_experiment_config(args.config, strict=True)
     # Match the requested resolution (the dycore diffusion is recomputed for the
     # passed grid inside create_atmosphere_dycore).
     if getattr(cfg.grid, "resolution", None) != args.n:
@@ -65,7 +78,7 @@ def main():
     dt = args.dt if args.dt is not None else float(cfg.dycore.dt)
 
     print(f"Dry Held-Suarez (AMIP dycore): C{args.n} / L{args.nlev}, {args.days} d, dt={dt}s")
-    print(f"  config: {args.config}")
+    print(f"  config: {args.config or '<self-contained default>'}")
     print(f"  JAX devices: {jax.devices()}")
 
     grid = create_cubed_sphere(args.n)
