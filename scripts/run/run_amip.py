@@ -400,11 +400,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--moisture-flux-form",
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.moisture_flux_form,
-                        help="#771 (EXPERIMENTAL, cubed_sphere cdgrid + "
-                             "--moisture-advection only): transport moisture "
-                             "with the mass-conserving flux-form post-RK3 "
-                             "substep instead of the advective -(u.grad q). "
-                             "Default off = advective (bit-exact).")
+                        help="EXPERIMENTAL (needs --moisture-advection): "
+                             "transport moisture with a mass-conserving "
+                             "flux-form operator instead of the advective "
+                             "-(u.grad q). Implemented on cubed_sphere cdgrid "
+                             "(#771, post-RK3 substep) and MPAS hydrostatic "
+                             "(#1354, in-RK tendency on the per-mass tracers "
+                             "only; N_c/N_r stay advective). Other lanes RAISE "
+                             "rather than ignore it. Default off = advective "
+                             "(bit-exact).")
 
     # Output
     parser.add_argument("--output", type=str, default=None)

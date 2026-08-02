@@ -220,11 +220,16 @@ class DycoreConfig(NamedTuple):
     # #771: transport the (attached) moisture tracers horizontally with the
     # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
     # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.
-    # Only takes effect on the cubed_sphere cdgrid PE dycore AND with moisture
-    # attached (``ExperimentConfig.moisture_advection=True``).  EXPERIMENTAL,
-    # default off (advective path bit-exact); serial-only (fail-closed under MPI
-    # face-scatter until the reductions are allreduce-aware).  Appended last to
-    # preserve positional ABI.
+    # Takes effect on the cubed_sphere cdgrid PE dycore (post-RK3 substep) and
+    # — since #1354 — on the MPAS hydrostatic PE dycore, where it is an IN-RK
+    # tendency built on the dycore's own flux-form continuity closure and
+    # applies to the per-MASS tracers only (the per-volume numbers N_c/N_r keep
+    # the advective operator).  Both need moisture attached
+    # (``ExperimentConfig.moisture_advection=True``).  Lanes that do NOT wire it
+    # (MPAS non-hydrostatic) RAISE rather than ignore it
+    # (``component_factory.refuse_unwired_moisture_flux_form``).  EXPERIMENTAL,
+    # default off (advective path bit-exact).  Appended last to preserve
+    # positional ABI.
     moisture_flux_form: bool = False
     # #930: vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion coefficient [1/s] for T
     # on the MPAS hydrostatic dycore — scale-selective damping of the grid-scale

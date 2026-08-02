@@ -39,7 +39,12 @@ def test_pe_configs_expose_p_ceil_default():
             "sponge_coeff", "sponge_width_m", "sponge_shape",
             "sponge_scale_height_m",
         ),
-        # MPAS: nothing appended -> p_ceil is still last (allowed default ()).
+        # MPAS append-only tail: #930 vertical del4 knobs, then #1354's
+        # mass-consistent flux-form tracer transport flag.  All default-valued,
+        # so positional callers that stop at ``p_ceil`` are unaffected.
+        "MPASPrimitiveEquationConfig": (
+            "nu_vert4_T", "vert4_T_filter", "moisture_flux_form",
+        ),
     }
     for cfg_cls in (
         CDGridPrimitiveEquationConfig,

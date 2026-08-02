@@ -1092,3 +1092,81 @@ class TestLatLonSWPolarFilterForwarding:
         assert model.config.use_polar_filter is False
         assert model._polar_mask is None
         assert model._polar_mask_v is None
+
+
+# =========================================================================
+# 9. moisture_flux_form must never be SILENTLY inert (#1354)
+# =========================================================================
+
+class TestMoistureFluxFormNotSilentlyInert:
+    """``DycoreConfig.moisture_flux_form`` is a user-facing field (and a
+    ``run_amip`` CLI flag).  A lane that does not wire it must RAISE at factory
+    time — accepting the flag and then running the advective ``-(u.grad q)``
+    transport is the "silently inert config field" defect this repo hardens
+    against (CLAUDE.md *Dispatch*).
+    """
+
+    def test_helper_raises_on_true(self):
+        from legoesm.driver.component_factory import (
+            refuse_unwired_moisture_flux_form,
+        )
+        dc = DycoreConfig(moisture_flux_form=True)
+        with pytest.raises(ValueError, match="moisture_flux_form"):
+            refuse_unwired_moisture_flux_form(dc, "SOME LANE")
+
+    def test_helper_names_the_lane(self):
+        from legoesm.driver.component_factory import (
+            refuse_unwired_moisture_flux_form,
+        )
+        dc = DycoreConfig(moisture_flux_form=True)
+        with pytest.raises(ValueError, match="MPAS non-hydrostatic"):
+            refuse_unwired_moisture_flux_form(
+                dc, "MPAS non-hydrostatic (compressible Euler)")
+
+    def test_helper_is_a_noop_when_false(self):
+        from legoesm.driver.component_factory import (
+            refuse_unwired_moisture_flux_form,
+        )
+        # Default (False) must not raise — otherwise every existing run breaks.
+        refuse_unwired_moisture_flux_form(DycoreConfig(), "SOME LANE")
+        refuse_unwired_moisture_flux_form(
+            DycoreConfig(moisture_flux_form=False), "SOME LANE")
+
+    @pytest.mark.parametrize("model_type", ["nonhydrostatic"])
+    def test_mpas_factory_refuses_unwired_lane(self, model_type):
+        """End-to-end through the factory: the MPAS lane(s) that do NOT
+        implement flux-form transport refuse the flag instead of ignoring it.
+
+        (The MPAS *hydrostatic* PE lane implements it since #1354 — see
+        ``test_mpas_hydrostatic_forwards_flux_form`` below.)
+        """
+        from legoesm.grids.factory import create_grid
+
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type=model_type, discretization="mpas", dt=300.0,
+                moisture_flux_form=True,
+            ),
+        )
+        with pytest.raises(ValueError, match="moisture_flux_form"):
+            create_atmosphere_dycore(config, grid, _make_sigma(2))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_mpas_hydrostatic_forwards_flux_form(self, flag):
+        """#1354: the driver-level flag reaches MPASPrimitiveEquationConfig —
+        it must be honoured, not dropped (which is the same silent-inertness
+        defect the refusal above guards)."""
+        from legoesm.grids.factory import create_grid
+
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="mpas", dt=300.0,
+                moisture_flux_form=flag,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.moisture_flux_form is flag

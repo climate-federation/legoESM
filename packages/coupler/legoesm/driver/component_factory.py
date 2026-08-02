@@ -246,6 +246,45 @@ def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
 # Atmosphere factory
 # =========================================================================
 
+def refuse_unwired_moisture_flux_form(dc: DycoreConfig, lane: str) -> None:
+    """Fail LOUDLY when ``DycoreConfig.moisture_flux_form`` selects a tracer
+    transport the requested dycore lane does not implement.
+
+    ``moisture_flux_form`` is a user-facing ``DycoreConfig`` field (and a
+    ``run_amip`` CLI flag) but only some factory branches forward it into a
+    dycore config.  On every other lane the flag was previously accepted and
+    then SILENTLY IGNORED — the run advected moisture with the advective
+    ``-(u·∇q)`` operator while the log/YAML claimed flux form.  That is the
+    "no silently inert config field" defect class this repo hardens against
+    (CLAUDE.md *Dispatch*): a misspelled/unsupported selection must raise, not
+    quietly run different numerics.
+
+    Static Python check on the concrete config value at factory time, so the
+    refusal is a hard construction-time error rather than a trace-time one.
+
+    Parameters
+    ----------
+    dc : DycoreConfig
+        The driver-level dycore config carrying ``moisture_flux_form``.
+    lane : str
+        Human-readable name of the refusing dycore lane, quoted in the error.
+
+    Raises
+    ------
+    ValueError
+        If ``dc.moisture_flux_form`` is truthy.
+    """
+    if bool(getattr(dc, "moisture_flux_form", False)):
+        raise ValueError(
+            f"moisture_flux_form=True is unsupported by the {lane} dycore: "
+            "the mass-conserving flux-form tracer advection is not wired into "
+            "this lane, so the setting would be SILENTLY IGNORED and the run "
+            "would use the advective -(u.grad q) transport instead. Available "
+            "options: select a dycore that implements it, or set "
+            "moisture_flux_form=False."
+        )
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
@@ -555,10 +594,16 @@ def create_atmosphere_dycore(
             vert4_T_filter=getattr(dc, "mpas_vert4_t_filter", 0.0),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
+            # #1354: mass-CONSISTENT flux-form transport of the per-mass
+            # tracers (the driver-level field, previously silently inert on
+            # this lane).  Default off = advective path bit-identical.
+            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
+        refuse_unwired_moisture_flux_form(
+            dc, "MPAS non-hydrostatic (compressible Euler)")
         _reject_unselectable_time_integrator("MPAS non-hydrostatic (compressible Euler)")
         from legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig,

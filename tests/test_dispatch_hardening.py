@@ -216,6 +216,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # 'voronoi' was special-cased and mpas/icosahedral fell through to the
         # cubed_sphere ladder returning an unsafe dt, and an unknown grid_type
         # silently used the ladder).
+        # #1354: a user-facing DycoreConfig field that a dycore lane does not
+        # wire must RAISE, not be silently inert (the MPAS lanes accepted
+        # moisture_flux_form=True and then advected moisture advectively).
+        ("packages/coupler/legoesm/driver/component_factory.py",
+         "refuse_unwired_moisture_flux_form"),
         ("packages/coupler/legoesm/driver/rce_dt.py", "auto_dt_rce"),
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
