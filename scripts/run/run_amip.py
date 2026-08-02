@@ -660,6 +660,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "liquid cloud (the AMIP albedo bias) WITHOUT a "
                              "surface-evaporation trade.  0 = off (default); "
                              "warm-start/ramp only (cold-start caveat).")
+    # Louis stability-function / mixing-length scalars.  These ExperimentConfig
+    # fields existed and were documented as targeting LouisConfig, but until
+    # d8268e6fa nothing threaded them into the kernel, so there was no point
+    # exposing them.  ``turbulence_config_for`` now threads any NON-DEFAULT
+    # value into the active louis sub-config on every lane (FV / MPAS /
+    # spectral), so give them CLI flags.  Defaults equal the LouisConfig
+    # defaults => no _replace => byte-identical.
+    # (No --louis-ck / --louis-z0 / --louis-ch-neutral / --louis-cd-neutral:
+    #  louis_Ck has no LouisConfig field at all, and z0 / Ch_neutral /
+    #  Cd_neutral target SurfaceLayerConfig, which is trained through the AIMIP
+    #  classical bundle rather than this scalar route.  All four are rejected by
+    #  validate_strict when set away from their default rather than accepted and
+    #  ignored.)
+    parser.add_argument("--louis-l-mix-max", dest="louis_l_mix_max",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_l_mix_max,
+                        help="Louis asymptotic (free-troposphere) mixing length "
+                             "[m] (LouisConfig.l_mix_max, default 100). HIGHER "
+                             "=> stronger free-tropospheric vertical mixing. "
+                             "Bounds 20..400.")
+    parser.add_argument("--louis-ri-crit", dest="louis_Ri_crit",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_Ri_crit,
+                        help="Louis critical Richardson number "
+                             "(LouisConfig.Ri_crit, default 0.25) above which "
+                             "stable-regime mixing is shut off. Bounds 0.1..0.6.")
+    parser.add_argument("--louis-b-louis", dest="louis_b_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_b_louis,
+                        help="Louis stability-function coefficient b "
+                             "(LouisConfig.b_louis, default 5.0). Bounds 2..10.")
+    parser.add_argument("--louis-c-louis", dest="louis_c_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_c_louis,
+                        help="Louis unstable-regime coefficient c "
+                             "(LouisConfig.c_louis, default 16.6). Bounds 5..30.")
+    parser.add_argument("--louis-d-louis", dest="louis_d_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_d_louis,
+                        help="Louis stable-regime coefficient d "
+                             "(LouisConfig.d_louis, default 5.0). Bounds 2..15.")
     # Shared validator: composites keep working and a typo is now rejected at
     # the CLI (this flag previously had `type=str` with no validation at all).
     parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
@@ -1924,6 +1960,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
+        louis_l_mix_max=args.louis_l_mix_max,
+        louis_Ri_crit=args.louis_Ri_crit,
+        louis_b_louis=args.louis_b_louis,
+        louis_c_louis=args.louis_c_louis,
+        louis_d_louis=args.louis_d_louis,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,

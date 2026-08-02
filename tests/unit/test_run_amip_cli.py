@@ -2862,6 +2862,118 @@ def test_louis_cloudtop_entrainment_efficiency_validate_strict():
         ExperimentConfig(louis_cloudtop_entrainment_efficiency=ok).validate_strict()
 
 
+# --- Louis stability-function scalars: live vs inert -------------------------
+# d8268e6fa made turbulence_config_for thread the flat louis_* scalars into the
+# active louis sub-config.  Before it they were documented as targeting
+# LouisConfig and silently dropped.  These tests pin BOTH halves: the five that
+# genuinely reach the kernel are exposed end-to-end, and the four that reach
+# nothing are REFUSED rather than accepted and ignored.
+
+_LIVE_LOUIS_SCALARS = (
+    ("--louis-l-mix-max", "louis_l_mix_max", "l_mix_max", 250.0),
+    ("--louis-ri-crit", "louis_Ri_crit", "Ri_crit", 0.4),
+    ("--louis-b-louis", "louis_b_louis", "b_louis", 4.0),
+    ("--louis-c-louis", "louis_c_louis", "c_louis", 12.0),
+    ("--louis-d-louis", "louis_d_louis", "d_louis", 6.0),
+)
+
+
+@pytest.mark.parametrize("flag,ec_field,leaf_field,value", _LIVE_LOUIS_SCALARS)
+def test_live_louis_scalar_flag_reaches_the_kernel_config(flag, ec_field,
+                                                          leaf_field, value):
+    """Each --louis-* flag round-trips into ExperimentConfig AND reaches the
+    LouisConfig leaf via ``turbulence_config_for`` — the single source every
+    dycore's kernel is built from.  A flag that stopped at ExperimentConfig
+    would be the exact dead-knob the 2026-08-01 calibration audit found."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis", flag, str(value),
+    ]), parser))
+    assert getattr(cfg, ec_field) == pytest.approx(value)
+    assert cfg.validate_strict() is None
+    assert getattr(turbulence_config_for(cfg).louis,
+                   leaf_field) == pytest.approx(value)
+
+
+def test_live_louis_scalar_defaults_are_byte_identical():
+    """Unset --louis-* flags must leave the LouisConfig leaf at its defaults
+    (turbulence_config_for takes no _replace), so the flags cannot perturb an
+    existing run just by existing."""
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+    ]), parser))
+    louis = turbulence_config_for(cfg).louis
+    for _, ec_field, leaf_field, _ in _LIVE_LOUIS_SCALARS:
+        assert getattr(cfg, ec_field) == LouisConfig._field_defaults[leaf_field]
+        assert getattr(louis, leaf_field) == LouisConfig._field_defaults[leaf_field]
+
+
+def test_live_louis_scalars_are_params_reachable():
+    """The five threaded scalars must ALSO be in the atm scalar param map, or a
+    calibration member still cannot vary them (the reachability gap the sister
+    project reported after the threading fix landed)."""
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    amap = build_atm_scalar_param_map()
+    for _, ec_field, leaf_field, _ in _LIVE_LOUIS_SCALARS:
+        assert amap.get(f"atm.turb.LouisConfig.{leaf_field}") == ec_field
+    # b_heat_ratio has no flat scalar and must NOT be claimed.
+    assert "atm.turb.LouisConfig.b_heat_ratio" not in amap
+
+
+@pytest.mark.parametrize("ec_field,value", [
+    ("louis_Ck", 0.5),
+    ("louis_z0", 1.0e-3),
+    ("louis_Ch_neutral", 3.0e-3),
+    ("louis_Cd_neutral", 3.0e-3),
+])
+def test_inert_louis_scalar_is_refused_not_ignored(ec_field, value):
+    """``louis_Ck`` has no LouisConfig field at all, and louis_z0 /
+    louis_Ch_neutral / louis_Cd_neutral name SurfaceLayerConfig fields that
+    ``apply_surface_flux_config`` never writes.  Setting any of them changed
+    NOTHING while reporting success — exposed-but-ignored.  validate_strict now
+    refuses a non-default value rather than lying about it."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match=ec_field):
+        ExperimentConfig(**{ec_field: value}).validate_strict()
+    # The default is harmless (it equals the scheme default) and must pass.
+    ExperimentConfig().validate_strict()
+
+
+def test_inert_louis_scalars_have_no_cli_flag_and_no_map_entry():
+    """The inert scalars must not be reachable from a member either — exposing
+    a knob that raises would be worse than not exposing it."""
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    help_text = build_arg_parser().format_help()
+    for flag in ("--louis-ck", "--louis-z0", "--louis-ch-neutral",
+                 "--louis-cd-neutral"):
+        assert flag not in help_text
+    amap = build_atm_scalar_param_map()
+    assert not any(k.endswith(".Ck") for k in amap)
+    # z0 / Cd_neutral / Ch_neutral live on SurfaceLayerConfig, calibrated via
+    # the AIMIP classical bundle, not this scalar route.
+    for leaf in ("z0", "Cd_neutral", "Ch_neutral"):
+        assert f"atm.turb.SurfaceLayerConfig.{leaf}" not in amap
+
+
+@pytest.mark.parametrize("ec_field,bad", [
+    ("louis_l_mix_max", 5.0), ("louis_l_mix_max", 1000.0),
+    ("louis_Ri_crit", 0.05), ("louis_Ri_crit", 0.9),
+    ("louis_b_louis", 1.0), ("louis_b_louis", 20.0),
+    ("louis_c_louis", 1.0), ("louis_c_louis", 50.0),
+    ("louis_d_louis", 1.0), ("louis_d_louis", 30.0),
+])
+def test_live_louis_scalar_out_of_bounds_rejected(ec_field, bad):
+    """Out-of-range Louis coefficients fail early rather than deep inside the
+    stability functions (bounds mirror aimip_params.PARAM_CONSTRAINTS)."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match=ec_field):
+        ExperimentConfig(**{ec_field: bad}).validate_strict()
+
+
 def test_diagnostic_condensate_scheme_flows_to_config():
     """--diagnostic-condensate-scheme + --adiabatic-lwc-rate round-trip into
     ExperimentConfig (default 'constant' == byte-identical legacy floor)."""

@@ -267,6 +267,21 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    # Louis stability-function / mixing-length scalars -> turbulence_config_for
+    # (physics_pipeline), the single source every lane's kernel is built from.
+    # These were deliberately ABSENT before 2026-08-01: ExperimentConfig
+    # documented them as targeting LouisConfig but the resolver dropped them, so
+    # a map entry would have claimed a dead override.  d8268e6fa threads any
+    # NON-DEFAULT value into the active louis sub-config, so the --params route
+    # is now honest.  (LouisConfig.b_heat_ratio has no flat scalar and stays
+    # unreachable; louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral
+    # have no LouisConfig field and are REJECTED by validate_strict rather than
+    # mapped — see the guard in driver/config.py.)
+    "atm.turb.LouisConfig.l_mix_max": "louis_l_mix_max",
+    "atm.turb.LouisConfig.Ri_crit": "louis_Ri_crit",
+    "atm.turb.LouisConfig.b_louis": "louis_b_louis",
+    "atm.turb.LouisConfig.c_louis": "louis_c_louis",
+    "atm.turb.LouisConfig.d_louis": "louis_d_louis",
     # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
     # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
     # upstream excluded it from the __param_spec__ registry (default 0.0 = off

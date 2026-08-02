@@ -2262,6 +2262,63 @@ class ExperimentConfig(NamedTuple):
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
             )
+        # Louis stability-function scalars that ARE threaded into the kernel by
+        # turbulence_config_for: bounds mirror LouisConfig.__param_spec__ /
+        # aimip_params.PARAM_CONSTRAINTS so an out-of-range knob fails here
+        # rather than deep in the stability functions.  (The not(lo<=x<=hi)
+        # form also rejects NaN/Inf.)
+        for _f, _lo, _hi in (
+            ("louis_l_mix_max", 20.0, 400.0),
+            ("louis_Ri_crit", 0.1, 0.6),
+            ("louis_b_louis", 2.0, 10.0),
+            ("louis_c_louis", 5.0, 30.0),
+            ("louis_d_louis", 2.0, 15.0),
+        ):
+            _v = getattr(self, _f)
+            if not (_lo <= _v <= _hi):
+                errors.append(
+                    f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
+        # Louis scalars that are NOT threaded anywhere: REFUSE a non-default
+        # value instead of accepting it and running different physics than the
+        # user asked for (the exposed-but-ignored class this repo raises on).
+        #   louis_Ck            — LouisConfig has NO Ck field at all; the Louis
+        #                         stability functions take b/c/d, not a Ck.
+        #   louis_z0 / louis_Ch_neutral / louis_Cd_neutral
+        #                       — these name SurfaceLayerConfig fields, but
+        #                         apply_surface_flux_config threads only
+        #                         bulk_scheme / gustiness_w_zi /
+        #                         thermo_convention / stability_scheme, so the
+        #                         values never reach the surface layer.  The
+        #                         SurfaceLayerConfig params are calibrated
+        #                         through the AIMIP classical bundle
+        #                         (aimip_params.surface_*), which is the
+        #                         supported route; see the conscious exclusion
+        #                         note in _params_reachability_baseline.py.
+        # Left at their defaults they are harmless (they equal the scheme
+        # defaults), so only a CHANGED value is an error.
+        # The default comes from ``_field_defaults`` so the guard cannot drift
+        # from the declaration above it.
+        for _f, _why in (
+            ("louis_Ck",
+             "LouisConfig has no 'Ck' field (the Louis stability functions are "
+             "parameterised by b_louis/c_louis/d_louis)"),
+            ("louis_z0",
+             "nothing threads it into SurfaceLayerConfig.z0"),
+            ("louis_Ch_neutral",
+             "nothing threads it into SurfaceLayerConfig.Ch_neutral"),
+            ("louis_Cd_neutral",
+             "nothing threads it into SurfaceLayerConfig.Cd_neutral"),
+        ):
+            if getattr(self, _f) != self._field_defaults[_f]:
+                errors.append(
+                    f"{_f}={getattr(self, _f)!r} would be SILENTLY IGNORED: "
+                    f"{_why}. Setting it changes nothing in the run, so it is "
+                    "refused rather than accepted. Calibrate the surface layer "
+                    "through the AIMIP classical parameter bundle "
+                    "(aimip_params), or use the threaded Louis scalars "
+                    "louis_l_mix_max / louis_Ri_crit / louis_{b,c,d}_louis."
+                )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
