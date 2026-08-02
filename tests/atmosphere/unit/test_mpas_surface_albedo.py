@@ -262,3 +262,53 @@ def test_surface_albedo_changes_the_reflected_shortwave(mesh, sigma):
         "a brighter surface did not increase the reflected shortwave — the "
         "surface albedo is being dropped inside the radiation backend."
     )
+
+
+# ----------------------------------------------------------------------
+# The driver actually supplies it
+# ----------------------------------------------------------------------
+# A full ``_run_mpas`` end-to-end needs SST/ozone/aerosol forcing assets and a
+# real mesh, so it is not a unit test.  These assert against the source of
+# ``ModelDriver._run_mpas`` — the method the production chain calls directly,
+# NOT a delegating wrapper — and are demonstrated to fail when the feature is
+# removed (same pattern as tests/unit/test_mpas_driver_ledger_wiring.py).
+
+def _run_mpas_source():
+    import inspect
+    from legoesm.driver.model_driver import ModelDriver
+    return inspect.getsource(ModelDriver._run_mpas)
+
+
+def test_run_mpas_publishes_the_surface_albedo_forcing():
+    """_run_mpas must put the tile-blended albedo on the traced forcing."""
+    src = _run_mpas_source()
+    assert 'blended_surface_albedo(' in src, (
+        "_run_mpas does not build a tile-blended surface albedo — radiation "
+        "falls back to the scalar config albedo (0.06, ocean) for every "
+        "column, land included.")
+    assert '"sfc_albedo"' in src, (
+        "_run_mpas never publishes forcing['sfc_albedo'], so the blend it "
+        "computes cannot reach the radiation solve.")
+
+
+def test_run_mpas_refuses_land_without_a_land_albedo():
+    """The missing-albedo case must FAIL LOUDLY, never fall back to ocean."""
+    src = _run_mpas_source()
+    assert 'Refusing to apply the OCEAN' in src, (
+        "_run_mpas has no loud guard for a land fraction with no land "
+        "albedo — a missing albedo map would silently reflect like seawater.")
+
+
+def test_run_mpas_threads_the_land_tile_albedo():
+    """The multilayer land tile's own (snow-brightened) albedo is used."""
+    src = _run_mpas_source()
+    assert 'resp.albedo' in src, (
+        "_land_step_fn discards the land tile's albedo, so the snow-albedo "
+        "feedback never reaches radiation on the MPAS lane.")
+    assert '_land_albedo_cells' in src
+
+
+def test_land_tile_response_exposes_an_albedo():
+    """Contract guard for the field the driver now threads."""
+    from legoesm.core.coupling_fields import TileResponse
+    assert 'albedo' in TileResponse._fields
