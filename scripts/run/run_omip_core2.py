@@ -5455,6 +5455,26 @@ def main() -> int:
     # The target is ABSOLUTE (--years / --smoke): a resumed leg integrates from
     # the restart step up to n_steps, it does not re-run n_steps more.
     # ------------------------------------------------------------------
+    # RESOLVED-CONFIG fingerprint for the restart (codex r2 HIGH).  Computed
+    # ONCE, HERE, from the setup-time configuration — NOT from model.config at
+    # save time — so a --visc-schedule leg, whose model is deliberately rebuilt
+    # mid-run with a different A_h, still matches its sibling legs.  Covers the
+    # resolved ocean config, the sea-ice config and the forcing archive path.
+    # CAVEAT: repr() of a config holding a large array may elide elements, so
+    # this is a strong-but-not-cryptographic identity; the forcing is pinned by
+    # PATH, not by content hash.
+    _restart_cfg_fp = None
+    if args.restart_save or args.restart_from:
+        import hashlib as _hashlib
+        _fp_src = "|".join([
+            repr(model.config),
+            repr(ice_config),
+            str(args.forcing_path or ""),
+            f"nlev={args.nlev}", f"grid={app_grid_type}",
+        ])
+        _restart_cfg_fp = _hashlib.sha256(
+            _fp_src.encode("utf-8")).hexdigest()[:32]
+
     start_step = 0
     if args.restart_save or args.restart_from:
         # FAIL FAST: if this build's state exposes a slot the restart
@@ -5488,7 +5508,7 @@ def main() -> int:
         state, ice_state, _rs_meta = load_run_restart(
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
-            n_forcing_records=n_rec)
+            n_forcing_records=n_rec, config_fingerprint=_restart_cfg_fp)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target
@@ -5589,11 +5609,13 @@ def main() -> int:
     # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
     # and the writer/closer below are no-ops.
     _csv = None
+    _csv_appended = False
     if _is_io_proc():
         # Resuming APPENDS to an existing series (a chained leg must not erase
         # the parent leg's record); a fresh run truncates and writes the header.
         _csv_path = out_dir / "diag_timeseries.csv"
         _csv_append = bool(args.restart_from) and _csv_path.exists()
+        _csv_appended = _csv_append
         _csv = open(_csv_path, "a" if _csv_append else "w")
         if not _csv_append:
             _csv.write(",".join(_csv_cols) + "\n")
@@ -5618,10 +5640,12 @@ def main() -> int:
         if _csv is not None:
             _csv.close()
 
-    # Fresh run: seed the series with the initial state.  RESUME: the parent
-    # leg already logged this exact step as its final row, so re-logging it
-    # would duplicate a row in the appended series (codex r1 LOW).
-    if not args.restart_from:
+    # Seed the series with the initial state — UNLESS we are appending to a
+    # parent leg's CSV, which already logged this exact step as its final row.
+    # Keyed off whether we actually appended, not off --restart-from: a resume
+    # into a FRESH output dir writes a new CSV that would otherwise have no
+    # starting row at all (codex r2 LOW).
+    if not (_is_io_proc() and _csv_appended):
         _log_diag_csv(start_step, start_day, d0, 0.0, ice=ice_state)
 
     def _write_run_restart(step_i: int, day_f: float, st, ice_st) -> None:
@@ -5638,7 +5662,9 @@ def main() -> int:
         from legoesm.ocean.restart import save_run_restart
         save_run_restart(args.restart_save, st, step=step_i, time_days=day_f,
                          grid_type=app_grid_type, dt_seconds=dt,
-                         n_forcing_records=n_rec, ice_state=ice_st)
+                         n_forcing_records=n_rec,
+                         config_fingerprint=_restart_cfg_fp,
+                         parent=args.restart_from, ice_state=ice_st)
         print(f"[restart] saved step {step_i} (day {day_f:.2f}) -> "
               f"{args.restart_save}", flush=True)
 
@@ -5910,30 +5936,23 @@ def main() -> int:
                 "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal/"
                 "--dm2dc and pass --no-emp for the momentum/heat-only scan path.")
         if args.restart_save or args.restart_from:
-            # The scan body calls model._step_impl DIRECTLY and never calls
-            # seed_scan_carry (it only primes caches below), so it does not
-            # carry the optional integrator slots.  A restart on this lane is
-            # therefore only a faithful continuation when the state holds
-            # nothing but the base prognostics + static geometry; anything else
-            # would be saved and then not advanced (or would break the carry
-            # treedef).  Refuse rather than write a restart that lies.
-            # NB this does NOT fix the pre-existing gap that the scan lane
-            # accepts such configs at all (codex r1 HIGH) — it only stops the
-            # restart from silently inheriting it.
-            from legoesm.ocean.restart import classify_restart_slots
-            _carried, _ = classify_restart_slots(state)
-            _base_ok = {"u", "v", "T", "S", "eta", "H_bathy", "land_mask",
-                        "u_mask", "v_mask"}
-            _extra = sorted(set(_carried) - _base_ok)
-            if _extra:
-                raise SystemExit(
-                    f"--restart-save/--restart-from with --scan-block is "
-                    f"refused: this config carries integrator slot(s) {_extra}, "
-                    "but the scan body steps model._step_impl directly and "
-                    "never seeds/advances the scan carry, so the restart would "
-                    "record a carry the lane does not integrate.  Run the "
-                    "restartable leg on the host Python loop (omit "
-                    "--scan-block).")
+            # UNCONDITIONAL refusal (codex r2 HIGH).  The scan body calls
+            # model._step_impl DIRECTLY and never calls seed_scan_carry, so it
+            # PROMOTES optional slots None -> Field on the first block step
+            # (prognostic TKE documents exactly that).  My earlier guard tested
+            # the CURRENT state's populated slots, which are all None at setup
+            # for a fresh TKE/EKE/leapfrog config — so it passed and the lane
+            # then created a carry the restart neither saved nor advanced.
+            # There is no cheap value-based test that closes that hole, and the
+            # lane's own eligibility gap is pre-existing and out of scope here,
+            # so restarts on this lane are refused outright.
+            raise SystemExit(
+                "--restart-save/--restart-from is not supported with "
+                "--scan-block: the scan body steps model._step_impl directly "
+                "and never seeds or advances the scan carry, so it can promote "
+                "an integrator slot mid-block that the restart neither records "
+                "nor continues.  Run the restartable leg on the host Python "
+                "loop (omit --scan-block).")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -5945,19 +5964,16 @@ def main() -> int:
         block_fn = build_omip2_scan_block_fn(model, dt, gshape, ramp_s=ramp_s)
         bsz = int(args.scan_block)
         print(f"[run] lax.scan block-stepping: block<={bsz} steps, split at "
-              f"diag/snapshot/restart/year boundaries so output cadence matches "
-              f"the Python loop (CORE-II forcing fused on-device)", flush=True)
+              f"diag/snapshot/year boundaries so output cadence matches the "
+              f"Python loop (CORE-II forcing fused on-device)", flush=True)
 
         def _block_steps(step):
             # Cap the block so it ENDS on the next diagnostic / snapshot /
-            # restart / year boundary -> the modulo-gated I/O below fires at
-            # exactly the same cadence as the Python loop (codex #354 finding
-            # 2).  restart_every MUST be in this list: otherwise a block can
-            # step straight over the restart cadence and `step % restart_every`
-            # never hits 0, silently producing no mid-run checkpoint.
+            # year boundary -> the modulo-gated I/O below fires at exactly
+            # the same cadence as the Python loop (codex #354 finding 2).
             nb = min(bsz, n_steps - step)
-            for period in (diag_every, snap_every, restart_every,
-                           steps_per_year):
+            # No restart_every here: this lane REFUSES restarts (above).
+            for period in (diag_every, snap_every, steps_per_year):
                 if period and period > 0:
                     nb = min(nb, period - (step % period))
             return max(1, nb)
@@ -5995,9 +6011,6 @@ def main() -> int:
                                state, lat2d, lon2d, z_coord=z_coord,
                                io_proc=_is_io_proc())
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
-            if (restart_every > 0 and step % restart_every == 0
-                    and step != n_steps):
-                _write_run_restart(step, day, state, ice_state)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
                 _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
@@ -6007,12 +6020,6 @@ def main() -> int:
         _io = _is_io_proc()
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                        io_proc=_io)
-        # The scan lane applies no sea-ice/freshwater forcing (it refuses
-        # --ice-thermo / --sss-restore / ... above), so `ice_state` is normally
-        # None here; it is threaded rather than hard-coded to None so a lane
-        # that does hold one can never lose it silently from the restart.
-        _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state,
-                           ice_state)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

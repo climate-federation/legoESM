@@ -642,6 +642,8 @@ def save_run_restart(path: str | Path, state, *,
                      grid_type: str,
                      dt_seconds: float | None = None,
                      n_forcing_records: int | None = None,
+                     config_fingerprint: str | None = None,
+                     parent: str | None = None,
                      ice_state=None,
                      sha: str | None = None) -> Path:
     """Write a RESUMABLE checkpoint: full ocean carry + sea ice + step counter.
@@ -713,14 +715,23 @@ def save_run_restart(path: str | Path, state, *,
         payload["_dt_seconds"] = np.asarray(float(dt_seconds))
     if n_forcing_records is not None:
         payload["_n_forcing_records"] = np.asarray(int(n_forcing_records))
+    if config_fingerprint is not None:
+        payload["_config_fingerprint"] = np.asarray(str(config_fingerprint))
+    # Lineage: which restart this leg was resumed FROM (codex r2 LOW).
+    payload["_parent"] = np.asarray(str(parent) if parent else "")
     if sha is not None:
         payload["_sha"] = np.asarray(str(sha))
     return _atomic_savez(out_path, payload)
 
 
 def run_restart_metadata(path: str | Path) -> dict[str, Any]:
-    """Return ``{format, step, time_days, grid_type, sha, slots, ice_slots,
-    excluded}``.
+    """Return the archive header.
+
+    Keys: ``format``, ``step``, ``time_days``, ``grid_type``, ``x64``,
+    ``state_class``, ``ice_class``, ``inventory``, ``ice_inventory``,
+    ``slots``, ``ice_slots``, ``excluded``, ``parent``, and — when the writer
+    supplied them — ``dt_seconds``, ``n_forcing_records``,
+    ``config_fingerprint``, ``sha``.
 
     Cheap header read (no state template needed) for launchers that need the
     resume step / day before building the model.
@@ -738,16 +749,30 @@ def run_restart_metadata(path: str | Path) -> dict[str, Any]:
                 val = f[key]
                 out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
                                 else val.item())
+        # v2 REQUIRES its identity + inventory keys (codex r2 HIGH): treating
+        # them as optional let a hand-edited archive (delete _inventory, or
+        # retag a v1 archive as _format=2) skip the exact-layout validation
+        # entirely and silently cold-start a carry.
+        _required = ("_format", "_step", "_time_days", "_grid_type",
+                     "_x64", "_state_class", "_ice_class",
+                     "_inventory", "_ice_inventory", "_excluded")
+        _absent = [k for k in _required if k not in f.files]
+        if _absent:
+            raise ValueError(
+                f"{in_path} is missing required run-restart metadata "
+                f"{_absent}; it is truncated, hand-edited, or was written by "
+                "an older format retagged as the current one.  Refusing to "
+                "resume: without the inventory the exact-layout checks that "
+                "prevent a silently cold-started carry cannot run.")
         for key in ("_dt_seconds", "_n_forcing_records", "_x64",
-                    "_state_class", "_ice_class"):
+                    "_state_class", "_ice_class", "_config_fingerprint",
+                    "_parent"):
             if key in f.files:
                 val = f[key]
                 out[key[1:]] = (str(val) if val.dtype.kind in ("U", "S")
                                 else val.item())
-        out["inventory"] = (json.loads(str(f["_inventory"]))
-                            if "_inventory" in f.files else {})
-        out["ice_inventory"] = (json.loads(str(f["_ice_inventory"]))
-                                if "_ice_inventory" in f.files else {})
+        out["inventory"] = json.loads(str(f["_inventory"]))
+        out["ice_inventory"] = json.loads(str(f["_ice_inventory"]))
         out["slots"] = json.loads(str(f["_slot_kinds"]))
         out["ice_slots"] = json.loads(str(f["_ice_slot_kinds"])
                                       ) if "_ice_slot_kinds" in f.files else {}
@@ -762,7 +787,8 @@ def load_run_restart(path: str | Path, template_state, *,
                      ice_template=None,
                      grid_type: str | None = None,
                      dt_seconds: float | None = None,
-                     n_forcing_records: int | None = None) -> tuple:
+                     n_forcing_records: int | None = None,
+                     config_fingerprint: str | None = None) -> tuple:
     """Resume from a :func:`save_run_restart` archive.
 
     Returns ``(state, ice_state, meta)`` where ``ice_state`` is ``None`` when
@@ -813,6 +839,16 @@ def load_run_restart(path: str | Path, template_state, *,
                   "The forcing index wraps modulo the record count.")
     _require_same("x64", meta.get("x64"), bool(jax.config.jax_enable_x64),
                   "The archive was integrated at a different float precision.")
+    # RESOLVED-CONFIG identity (codex r2 HIGH): dt/n_rec/x64 do not pin the
+    # viscosity, EOS, mixing, barotropic or sea-ice settings, nor which forcing
+    # archive is mounted — all of which change step N+1.  The caller supplies a
+    # digest of its RESOLVED configuration; run_omip_core2 computes it ONCE at
+    # setup so a --visc-schedule leg (whose model is rebuilt mid-run with a
+    # different A_h) still matches its sibling legs.
+    _require_same("config_fingerprint", meta.get("config_fingerprint"),
+                  config_fingerprint,
+                  "The resolved model / sea-ice / forcing configuration "
+                  "differs from the leg that wrote the restart.")
     # Internal consistency: time_days must be step*dt (a mismatch means the
     # writer's two provenance fields disagree, i.e. one of them is untrusted).
     _saved_dt = meta.get("dt_seconds")
@@ -850,6 +886,23 @@ def load_run_restart(path: str | Path, template_state, *,
                     f"{sorted(set(inventory) ^ declared)} that differ from "
                     f"this build's {cls}; the state layout changed between "
                     "the writing build and this one.")
+            bad = sorted(f"{n}={lab}" for n, lab in inventory.items()
+                         if lab not in (_INV_PERSISTED, _INV_DIAGNOSTIC,
+                                        _INV_ABSENT))
+            if bad:
+                raise ValueError(
+                    f"load_run_restart: {in_path} has invalid {what} inventory "
+                    f"label(s) {bad}; the archive is corrupt or hand-edited.")
+            # Cross-check BOTH ways: the manifest and the inventory must agree
+            # on exactly which slots were written (codex r2 HIGH).
+            extra = sorted(n for n in kinds
+                           if inventory.get(n) != _INV_PERSISTED)
+            if extra:
+                raise ValueError(
+                    f"load_run_restart: {in_path} carries {what} slot(s) "
+                    f"{extra} in its manifest that the inventory does not "
+                    "label 'persisted'; the two records disagree, so neither "
+                    "can be trusted.")
             missing = sorted(n for n, lab in inventory.items()
                              if lab == _INV_PERSISTED and n not in kinds)
             if missing:

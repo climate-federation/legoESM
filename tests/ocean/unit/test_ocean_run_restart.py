@@ -510,6 +510,65 @@ def test_five_category_ice_round_trips(tmp_path):
             == jax.tree_util.tree_structure(ice5))
 
 
+def test_stripped_v2_metadata_is_a_hard_error(tmp_path):
+    """codex r2 HIGH: the v2 identity/inventory keys were OPTIONAL, so deleting
+    _inventory (or retagging a v1 archive as _format=2) skipped the exact-layout
+    checks entirely.  Every required key must now be present."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files if k != "_inventory"}
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="missing required run-restart"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_inventory_and_manifest_must_agree(tmp_path):
+    """codex r2 HIGH: relabelling a persisted slot 'absent' while leaving its
+    payload used to let the loader skip it.  The two records are cross-checked
+    in BOTH directions now."""
+    _, _, state = _base_state()
+    state = _fill_all_slots(state)
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    inv = json.loads(str(payload["_inventory"]))
+    inv["tke"] = "absent"                       # lie about a persisted slot
+    payload["_inventory"] = np.asarray(json.dumps(inv))
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="inventory does not"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_config_fingerprint_mismatch_is_a_hard_error(tmp_path):
+    """codex r2 HIGH: dt/n_rec/x64 do not pin the viscosity, EOS, mixing,
+    barotropic or sea-ice settings — all of which change step N+1."""
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon",
+                     config_fingerprint="abc123")
+    # Control: the matching fingerprint loads.
+    load_run_restart(path, _base_state()[2], grid_type="latlon",
+                     config_fingerprint="abc123")
+    with pytest.raises(ValueError, match="config_fingerprint"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon",
+                         config_fingerprint="different")
+
+
+def test_parent_lineage_is_recorded(tmp_path):
+    """codex r2 LOW: a child leg records which restart it resumed FROM."""
+    _, _, state = _base_state()
+    save_run_restart(tmp_path / "child.npz", state, step=2, time_days=0.0,
+                     grid_type="latlon", parent="/runs/leg1/restart.npz")
+    assert (run_restart_metadata(tmp_path / "child.npz")["parent"]
+            == "/runs/leg1/restart.npz")
+    save_run_restart(tmp_path / "fresh.npz", state, step=0, time_days=0.0,
+                     grid_type="latlon")
+    assert run_restart_metadata(tmp_path / "fresh.npz")["parent"] == ""
+
+
 def test_metadata_rejects_a_non_run_restart(tmp_path):
     from legoesm.ocean.restart import save_restart
 
@@ -649,10 +708,15 @@ def test_seed_scan_carry_slots_round_trip(tmp_path, gates):
     # it seeds nothing and the case would be vacuous.
     step_kwargs = {}
     if gates.get("_needs_forcing"):
+        from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm.ocean.state import OceanSurfaceForcing
         _z2 = jnp.zeros((N_LAT, N_LON))
         step_kwargs["surface_forcing"] = OceanSurfaceForcing(
             tau_x=_z2 + 0.05, tau_y=_z2 - 0.02, q_net=_z2, sw_down=_z2)
+        # freshwater too: without it the case seeds only the tau pair and
+        # freshwater_eta_prev is never exercised (codex r2 MEDIUM).
+        step_kwargs["freshwater"] = FreshwaterForcing(
+            precip=_z2 + 1.0e-5, evap=_z2, runoff=_z2, ice_fw=_z2)
     seeded = model.seed_scan_carry(state, 600.0, **step_kwargs)
 
     from legoesm.ocean.restart import _SLOT_DIAGNOSTIC, _SLOT_POLICY
@@ -665,6 +729,10 @@ def test_seed_scan_carry_slots_round_trip(tmp_path, gates):
     # otherwise this test would be vacuous for the ab2 / leapfrog cases.
     base = [n for n in LatLonCGridOceanState._fields
             if getattr(state, n) is not None]
+    if gates.get("_needs_forcing"):
+        assert {"tau_x_prev", "tau_y_prev", "freshwater_eta_prev"} <= set(slots), (
+            "barotropic_forcing_centred must seed the tau pair AND "
+            f"freshwater_eta_prev; got {sorted(set(slots) - set(base))}")
     if gates:
         assert set(slots) - set(base), (
             f"config {gates} seeded no extra carry — the gate list moved and "

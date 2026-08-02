@@ -87,6 +87,29 @@ def test_cli_restart_flags_are_documented():
     assert "cadence" in helps["restart_every_days"].lower()
 
 
+def test_scan_lane_refuses_restarts():
+    """codex r2 HIGH: the --scan-block body steps model._step_impl directly and
+    never seeds the scan carry, so it can PROMOTE an optional slot None->Field
+    mid-block that the restart neither records nor advances.  Restarts on that
+    lane are refused outright; the guard text must name the flag and the fix."""
+    import inspect
+
+    from scripts.run import run_omip_core2 as _c2
+
+    src = inspect.getsource(_c2.main)
+    assert "--restart-save/--restart-from is not supported with" in src, (
+        "the scan-lane restart refusal is gone from main()")
+    # And it must sit INSIDE the use_scan branch, before the block builder.
+    lines = src.splitlines()
+    scan = next(i for i, ln in enumerate(lines) if ln.strip() == "if use_scan:")
+    guard = next(i for i, ln in enumerate(lines)
+                 if "is not supported with" in ln)
+    build = next(i for i, ln in enumerate(lines)
+                 if "build_omip2_scan_block_fn(" in ln and "import" not in ln)
+    assert scan < guard < build, (
+        "the refusal must execute inside the scan branch before the lane runs")
+
+
 # ============================================================================
 # Two-leg warm-vs-fresh equivalence
 # ============================================================================
