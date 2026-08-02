@@ -6333,14 +6333,10 @@ def main() -> int:
                     _gw_acc, _gw_gates, state, z_coord, _gw_geom,
                     min_water_column_m=getattr(model.config,
                                                "min_water_column_m", None),
-                    # source="stored", not "auto" (#1442, codex round-6 RED 3):
-                    # BOTH supported grid branches turn store_mass_flux ON for
-                    # this flag, so a state without the capture means a config
-                    # path silently disabled it.  "auto" would hide that by
-                    # falling back to the h*u reconstruction -- the very thing
-                    # #1442 exists to stop the diagnostic from integrating.
-                    # The non-fatal boundary below still keeps the run alive;
-                    # it just prints WHY instead of reporting a wrong number.
+                    # "stored", not "auto": both supported grid branches turn
+                    # store_mass_flux ON for this flag, so a state without the
+                    # capture means some config path disabled it -- raise
+                    # rather than silently integrate h*u (#1442, codex r6 RED3).
                     source="stored")
             except Exception as _gw_e:
                 print(f"[gateway] DISABLED at step {step} after "

@@ -396,10 +396,25 @@ def test_driver_calls_the_accumulator_inside_the_step_loop():
         "promotion must forward the model's metric_convention")
     # The per-step call must sit inside a non-fatal boundary: a DIAGNOSTIC
     # must never abort a production run (codex round-4 RED).
-    guarded = "".join(lines[call - 3:call + 12])
-    assert "try:" in "".join(lines[call - 3:call]) and "except" in guarded, (
+    #
+    # Located by SEARCHING for the enclosing try/except rather than by a fixed
+    # +/-N line window: the window version broke the moment the call gained one
+    # more keyword argument (#1442's `source="stored"`), reporting a missing
+    # non-fatal boundary that was still right there.  A structural assertion
+    # must not be sensitive to the LENGTH of the call it brackets.
+    opens = [i for i in range(call, -1, -1) if lines[i].strip() == "try:"]
+    assert opens, "gateway_step is not inside any try: block"
+    try_at = opens[0]
+    indent = len(lines[try_at]) - len(lines[try_at].lstrip())
+    closes = [i for i in range(call, len(lines))
+              if lines[i].strip().startswith("except")
+              and len(lines[i]) - len(lines[i].lstrip()) == indent]
+    assert closes, (
         "gateway_step must be wrapped in a non-fatal try/except; it raises on "
         "a bad geometry and that raise sits inside the step loop")
+    assert try_at < call < closes[0], (
+        f"gateway_step (line {call + 1}) is not between its try: "
+        f"(line {try_at + 1}) and its except (line {closes[0] + 1})")
 
 
 def test_promote_geometry_honours_metric_convention():

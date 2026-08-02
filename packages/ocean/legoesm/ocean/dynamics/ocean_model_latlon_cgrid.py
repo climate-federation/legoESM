@@ -147,6 +147,35 @@ def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     )
 
 
+def _is_canonical_mass_flux(field, slot: str, want_shape) -> bool:
+    """True when ``field`` already matches what the step writes, exactly.
+
+    The exit condition for :func:`seed_mass_flux_carry`'s fast path, and it
+    has to cover EVERYTHING the slow path would have checked, or the fast path
+    becomes a hole:
+
+    * the pytree AUX DATA (name / dims / units), not just "is it a Field" -- a
+      Field from a pre-#1442-round-5 state has the right shape and the wrong
+      ``units``, and a state differing only there is still a different treedef,
+      which is the whole failure mode;
+    * the SHAPE -- the slow path raises on a mismatch, so a fast path that
+      skipped it would silently accept a v_lower-shaped slot in a global state
+      (caught by ``test_seed_rejects_a_wrong_shaped_stored_slot``, which went
+      green the moment the shape was left out of this predicate).
+
+    ``staggering`` is inherited from the donor field, so it is not part of the
+    canonical form.
+    """
+    if field is None:
+        return False
+    if tuple(jnp.shape(field.data)) != tuple(want_shape):
+        return False
+    if slot == "mass_flux_w":
+        return (field.name == slot and field.dims == MASS_FLUX_W_DIMS
+                and field.units == MASS_FLUX_W_UNITS)
+    return field.name == slot and field.units == MASS_FLUX_UNITS
+
+
 def seed_mass_flux_carry(state, store_mass_flux: bool):
     """Pre-seed the ``mass_flux_*`` slots to zeros for a constant pytree.
 
@@ -182,11 +211,24 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
     whose SHAPE disagrees with its donor field is a hard error, not something
     to normalize around.
 
-    Idempotent, and a no-op when the flag is off.
+    Idempotent, and a no-op when the flag is off.  The already-canonical fast
+    path below is keyed on the METADATA, not merely on "every slot is
+    non-None" (codex round-6 YELLOW 4 / round-7 YELLOW 5): the cheap
+    non-None test is exactly the shortcut that lets a legacy ``m/s`` pair
+    through, so it must not be the exit condition.  Persistent-SPMD host loops
+    call this every step and hit the fast path from step 2 on.
     """
     if not store_mass_flux:
         return state
     nlev_i = state.w.data.shape[-1] + 1          # interfaces = nlev + 1
+    _shapes = {
+        "mass_flux_u": tuple(jnp.shape(state.u.data)),
+        "mass_flux_v": tuple(jnp.shape(state.v.data)),
+        "mass_flux_w": tuple(jnp.shape(state.w.data))[:-1] + (nlev_i,),
+    }
+    if all(_is_canonical_mass_flux(getattr(state, _n), _n, _shapes[_n])
+           for _n in MASS_FLUX_SLOTS):
+        return state
 
     def _data(slot, donor_shape):
         cur = getattr(state, slot)
@@ -202,14 +244,11 @@ def seed_mass_flux_carry(state, store_mass_flux: bool):
                 "staggering carrier.")
         return cur.data
 
-    u_shape = tuple(jnp.shape(state.u.data))
-    v_shape = tuple(jnp.shape(state.v.data))
-    w_shape = tuple(jnp.shape(state.w.data))[:-1] + (nlev_i,)
     mfu, mfv, mfw = mass_flux_fields(
         state.u, state.v, state.w,
-        _data("mass_flux_u", u_shape),
-        _data("mass_flux_v", v_shape),
-        _data("mass_flux_w", w_shape))
+        _data("mass_flux_u", _shapes["mass_flux_u"]),
+        _data("mass_flux_v", _shapes["mass_flux_v"]),
+        _data("mass_flux_w", _shapes["mass_flux_w"]))
     return state._replace(mass_flux_u=mfu, mass_flux_v=mfv, mass_flux_w=mfw)
 
 

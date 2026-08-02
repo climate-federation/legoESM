@@ -43,6 +43,23 @@ from legoesm.core.field import Field
 
 _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 
+# State slots this archive format deliberately neither writes nor restores:
+# pure DIAGNOSTICS the next step rewrites unconditionally from the prognostic
+# state.  Currently the #1442 ``store_mass_flux`` capture.
+#
+# Two reasons, and the second is a correctness one (codex round-7 YELLOW 2):
+#  * a fresh template leaves these slots ``None``, and the loader's
+#    ``ref_field is None`` branch then rebuilds them as bare
+#    ``Field(data, name)`` -- WITHOUT dims/units.  Field metadata is pytree
+#    AUX data, so such a state has a different treedef from what the step
+#    writes and would abort the next ``lax.scan``;
+#  * they are large (three face/interface-shaped arrays) and carry nothing a
+#    restart needs.
+# Not writing them makes save and load agree by construction.  Mirrors
+# ``run_omip._RESTART_DIAGNOSTIC_SLOTS`` for the other npz lane.
+DIAGNOSTIC_SLOTS: tuple[str, ...] = (
+    "mass_flux_u", "mass_flux_v", "mass_flux_w")
+
 
 def _iter_state_fields(state) -> list[str]:
     """Return the prognostic field names of the state NamedTuple."""
@@ -65,6 +82,8 @@ def save_restart(state, path: str | Path, *,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {}
     for name in _iter_state_fields(state):
+        if name in DIAGNOSTIC_SLOTS:
+            continue
         attr = getattr(state, name)
         if attr is None:
             continue
@@ -92,7 +111,11 @@ def load_restart(path: str | Path, template_state) -> tuple:
 
     replace_kw: dict[str, Field] = {}
     for name in _iter_state_fields(template_state):
-        if name not in loaded:
+        if name not in loaded or name in DIAGNOSTIC_SLOTS:
+            # DIAGNOSTIC_SLOTS: skip even if an OLDER archive (written before
+            # the exclusion above) carries them -- reconstructing them from a
+            # None template slot would give them generic metadata and break
+            # the pytree the next scan needs.
             continue
         ref_field = getattr(template_state, name)
         if not isinstance(ref_field, Field):

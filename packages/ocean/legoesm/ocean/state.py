@@ -550,19 +550,36 @@ class LatLonCGridOceanState(NamedTuple):
     # the ``m/s`` of the ``u``/``v`` Fields whose dims/staggering they inherit.
     #
     # A MATCHED ADVECTING TRIPLE with ``mass_flux_w`` below -- NOT with
-    # ``state.w`` (codex YELLOW 9).  ``_step_impl`` diagnoses ``w_baro`` from
-    # the BASE horizontal pair and only afterwards forms the bolus-inclusive
-    # ``_tr`` pair, whose own re-diagnosed vertical partner is
+    # ``state.w``.  ``_step_impl`` diagnoses ``w_baro`` from the BASE
+    # horizontal pair and only afterwards forms the bolus-inclusive ``_tr``
+    # pair, whose own re-diagnosed vertical partner is
     # ``add_bolus_to_advecting_flux``'s ``w_baro_tr``.  ``state.w`` stays the
     # BASE ``w_baro`` (it is the momentum/continuity/eta vertical velocity and
-    # must not change), so under
-    # ``gm_redi.gm_bolus_advection="through_fct"``:
-    #     div_h(mass_flux_u, mass_flux_v) + d(state.w)/dz     != 0   (WRONG)
-    #     div_h(mass_flux_u, mass_flux_v) + d(mass_flux_w)/dz == 0   (RIGHT)
-    # The FIRST version of #1442 stored only the horizontal pair and documented
-    # the mismatch; a documented hole is still a hole, so the vertical partner
-    # is stored too and the triple is self-consistent.  Pair these three with
-    # each other; never mix one of them with ``state.w``.
+    # must not change), so under ``gm_bolus_advection="through_fct"`` pairing
+    # the stored horizontal fields with ``state.w`` mixes two different
+    # advecting fields.  Pair these three with each other.
+    #
+    # WHAT THE TRIPLE IS, EXACTLY: the advecting field the FLUX-FORM TRACER
+    # UPDATE used, i.e. the arrays behind
+    #     h_new*T_new = h_old*T_mid - dt*[ div_h(mass_flux * T_face)
+    #                                      + delta_z(mass_flux_w * T_iface) ]
+    #
+    # WHAT IT IS NOT (retracted; codex round 7 was right and the first version
+    # of this comment asserted the opposite): it is NOT divergence-free.  Under
+    # the moving z* free surface ``w_baro`` carries the sigma / layer-thickness
+    # tendency, so
+    #     div_h(mass_flux_u, mass_flux_v) + delta_z(mass_flux_w)  ==  -dh/dt
+    # and only vanishes where the column is not stretching.  A CLOSED 3-D
+    # budget therefore needs the layer thicknesses as well; a consumer can
+    # rebuild those from ``eta``/``H_bathy`` with
+    # ``legoesm.ocean.vertical.compute_layer_thickness`` (the same routine the
+    # step uses), which is why they are not stored a fourth time.
+    #
+    # What IS exactly zero is the BOLUS INCREMENT's divergence -- the bolus is
+    # column-non-divergent by construction and ``w_baro_tr`` is re-diagnosed
+    # through the SAME continuity operator -- so the through-FCT and centred
+    # arms have identical divergence.  That is the invariant a test can pin,
+    # and does.
     mass_flux_u: object = None
     mass_flux_v: object = None
     # The VERTICAL partner of the pair above [m/s], at layer INTERFACES:

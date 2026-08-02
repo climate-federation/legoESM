@@ -93,6 +93,16 @@ def _perturbed(state):
 
     Non-vacuity of the temperature front is not assumed: the GM test asserts
     the resulting bolus is non-zero and fails loudly if it is not.
+
+    Every perturbed leaf is written back at the SOURCE FIELD'S dtype, i.e. the
+    run's storage precision.  Without that, ``jnp.asarray`` of a numpy float64
+    array silently promotes the state to f64 under ``JAX_ENABLE_X64=1`` while
+    ``_step_impl``'s closing ``cast_pytree(..., "storage")`` still returns f32
+    -- carry-in dtype != carry-out dtype, which no production driver ever sees
+    (their states come from ``_init_rest_state`` at storage precision) but
+    which aborts any ``lax.scan`` driven straight from this helper.  The
+    float64 arm of the precision-scaling test gets f64 from its POLICY, so it
+    is unaffected: the source fields are f64 there too.
     """
     u = np.asarray(state.u.data)
     eta = np.asarray(state.eta.data)
@@ -114,9 +124,10 @@ def _perturbed(state):
            + 4.0 * lat_ramp[:, :, None]                      # +/- 4 C in lat
            + 1.0 * lon_wave[:, :, None])                     # +/- 1 C in lon
     return state._replace(
-        eta=state.eta.replace(data=jnp.asarray(eta_p)),
-        u=state.u.replace(data=jnp.asarray(u_p)),
-        T=state.T.replace(data=jnp.asarray(T_p)))
+        eta=state.eta.replace(
+            data=jnp.asarray(eta_p, dtype=state.eta.data.dtype)),
+        u=state.u.replace(data=jnp.asarray(u_p, dtype=state.u.data.dtype)),
+        T=state.T.replace(data=jnp.asarray(T_p, dtype=state.T.data.dtype)))
 
 
 _NEW_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
@@ -315,6 +326,65 @@ def test_stored_triple_is_matched_and_state_w_is_not_part_of_it():
         "mass_flux_w is IDENTICAL across the centred/through-FCT arms, so it "
         "is the BASE w_baro and not the _tr vertical partner -- the stored "
         "triple is then no more consistent than pairing with state.w was")
+
+
+def test_the_bolus_increment_the_triple_carries_is_divergence_free():
+    """The invariant the stored triple ACTUALLY satisfies.
+
+    RETRACTED CLAIM (codex round 7, and it was right): an earlier version of
+    the ``mass_flux_u`` field comment asserted
+    ``div_h(mass_flux_u, mass_flux_v) + dz(mass_flux_w) == 0``.  FALSE under
+    the moving z* free surface -- ``w_baro`` carries the layer-thickness
+    (sigma) tendency, so that sum equals ``-dh/dt`` and vanishes only where
+    the column is not stretching.  The tracer update is a MOVING-CELL budget
+    (``h_new*T_new = h_old*T_mid - dt*[...]``), not a divergence-free one.
+    Do not reinstate the zero claim.
+
+    What IS exactly true, and what ``add_bolus_to_advecting_flux`` guarantees:
+    the BOLUS INCREMENT is discretely non-divergent, because the bolus is
+    column-non-divergent (psi = 0 at surface and floor) and its vertical
+    partner is re-diagnosed through the SAME continuity operator.  So the
+    through-FCT and centred arms -- which differ ONLY by that increment --
+    must have IDENTICAL divergence:
+
+        div_h(u_fct, v_fct) + dz(w_fct) == div_h(u_ctr, v_ctr) + dz(w_ctr)
+
+    That is a real invariant of the stored triple, it is what makes the FCT
+    limiter constancy-preserving, and it is asserted here against the
+    thickness tendency's own scale so the tolerance is not a free parameter.
+    """
+    from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+
+    _gB, _zB, mB, sB = _setup(store=True, gm_bolus="centred")
+    _gC, _zC, mC, sC = _setup(store=True, gm_bolus="through_fct")
+    outB = mB.step(_perturbed(sB), _DT)
+    outC = mC.step(_perturbed(sC), _DT)
+
+    def _total_div(out):
+        dh = np.asarray(divergence_cgrid(
+            jnp.asarray(out.mass_flux_u.data),
+            jnp.asarray(out.mass_flux_v.data), mB.grid), dtype=np.float64)
+        w = np.asarray(out.mass_flux_w.data, dtype=np.float64)
+        # dz(w) with the SAME interface convention the tracer update uses:
+        # w[k] is the TOP of layer k, w[k+1] the bottom.
+        return dh + (w[..., :-1] - w[..., 1:])
+
+    dB, dC = _total_div(outB), _total_div(outC)
+    scale = float(np.max(np.abs(dB)))
+    assert scale > 0.0, (
+        "the total divergence is identically zero, so this test cannot tell "
+        "a non-divergent bolus increment from no bolus at all -- and it also "
+        "means the free surface is not stretching, which contradicts the "
+        "retraction above")
+    resid = float(np.max(np.abs(dC - dB)))
+    eps = float(np.finfo(np.asarray(outB.mass_flux_u.data).dtype).eps)
+    assert resid < 200.0 * eps * scale, (
+        f"the GM bolus increment carried by the stored triple is NOT "
+        f"divergence-free: |div(fct) - div(ctr)| = {resid:.3e} vs a "
+        f"divergence scale of {scale:.3e} ({resid / scale / eps:.1f} eps).  "
+        "Either mass_flux_w is not the partner re-diagnosed from the "
+        "bolus-augmented horizontal flux, or the bolus is not "
+        "column-non-divergent -- both would break FCT constancy preservation.")
 
 
 def test_stored_flux_differs_from_the_reconstruction():
@@ -654,6 +724,32 @@ def test_seed_canonicalizes_legacy_metadata_and_partial_pairs():
         "the missing slot must be zero-filled")
 
 
+def test_seed_fast_path_is_keyed_on_metadata_not_on_presence():
+    """Codex round-7 YELLOW 5: an already-canonical carry must be cheap...
+
+    ...but the exit condition must be the METADATA, never "every slot is
+    non-None".  The cheap presence test is exactly the shortcut that lets a
+    legacy ``m/s`` pair through untouched (mutation N6).  Both halves are
+    asserted: a canonical carry is returned IDENTICALLY (same object -- no
+    rebuild, which is what makes the persistent-SPMD host loop cheap), and a
+    non-canonical one is rebuilt even though every slot is present.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    _g, _z, model, state = _setup(store=True)
+    stepped = model.step(_perturbed(state), _DT)
+    assert seed_mass_flux_carry(stepped, True) is stepped, (
+        "an already-canonical carry was rebuilt; the fast path is not firing")
+
+    legacy = stepped._replace(
+        mass_flux_v=stepped.mass_flux_v.replace(units="m/s"))
+    out = seed_mass_flux_carry(legacy, True)
+    assert out is not legacy, "a legacy-metadata carry took the fast path"
+    assert out.mass_flux_v.units == stepped.mass_flux_v.units
+
+
 def test_seed_rejects_a_wrong_shaped_stored_slot():
     """Canonicalizing must not paper over a genuinely wrong layout."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -734,6 +830,102 @@ def test_direct_jit_step_loop_does_not_retrace():
     assert len(traces) == 1, (
         f"the jitted step traced {len(traces)} times over 3 iterations -- the "
         "state pytree is not constant across the loop")
+
+
+def test_core2_scan_block_seeds_its_own_carry(monkeypatch):
+    """Codex round-7 YELLOW 4, BEHAVIOURAL half of R6-2.
+
+    The source-order test below pins WHERE the seed call sits; this runs the
+    real ``build_omip2_scan_block_fn`` block with ``store_mass_flux=True`` and
+    a RAW (unseeded) state, which is what the ``--scan-block`` driver does.
+    Without the seed inside ``block_fn`` this raises a ``lax.scan`` carry
+    structure mismatch.
+
+    The CORE-II forcing sampler is stubbed to a zero ``OceanSurfaceForcing``:
+    the forcing is not what is under test, and building a real device stack
+    needs the multi-GB CORE-II files.  The scan, the step, and the carry are
+    all real.
+    """
+    from legoesm.ocean.coupler import omip2_applicator as oa
+
+    _g, _z, model, state = _setup(store=True)
+    p = _perturbed(state)
+    assert p.mass_flux_u is None, "the block must seed an unseeded state"
+
+    zeros2d = jnp.zeros_like(state.eta.data)
+
+    def _fake_forcing(st, **_kw):
+        from legoesm.ocean.state import OceanSurfaceForcing
+        return OceanSurfaceForcing(
+            tau_x=zeros2d, tau_y=zeros2d, q_net=zeros2d, sw_down=zeros2d)
+
+    monkeypatch.setattr(oa, "compute_omip2_surface_forcing_jax", _fake_forcing)
+
+    block = oa.build_omip2_scan_block_fn(
+        model, _DT, np.asarray(state.eta.data).shape)
+    dummy = jnp.zeros((1,))
+    out = block(p, dummy, dummy, dummy,
+                jnp.arange(2, dtype=jnp.int32), jnp.int32(0))
+    for nm in _NEW_SLOTS:
+        f = getattr(out, nm)
+        assert f is not None, (
+            f"{nm} is None after the scan block -- it did not seed its carry")
+        assert np.all(np.isfinite(np.asarray(f.data)))
+
+
+def test_seeded_carry_survives_a_scan_with_a_tuple_carry():
+    """Codex round-7 YELLOW 4: the JRA55 scans carry ``(state, ice_state)``.
+
+    Seeding ``state`` BEFORE ``init = (state, ice_state)`` has to be enough --
+    ``lax.scan`` matches the WHOLE carry structure, so a seed applied to the
+    wrong member, or after the tuple is built, would not help.  Driving the
+    real JRA55 block needs the multi-GB forcing cache, so this reproduces its
+    carry SHAPE (a tuple whose first member is the ocean state) around the
+    real model step.
+    """
+    _g, _z, model, state = _setup(store=True)
+    seeded = model.seed_scan_carry(_perturbed(state), _DT)
+    ice = jnp.zeros_like(state.eta.data)          # stand-in ice carry
+
+    def _body(carry, _x):
+        st, ic = carry
+        return (model.step(st, _DT), ic), None
+
+    (final, _ic), _ = jax.lax.scan(_body, (seeded, ice), xs=None, length=2)
+    for nm in _NEW_SLOTS:
+        assert getattr(final, nm) is not None
+    assert (jax.tree_util.tree_structure((final, ice))
+            == jax.tree_util.tree_structure((seeded, ice)))
+
+
+def test_run_omip_scan_seeder_is_grid_agnostic_and_inert_when_off():
+    """``_seed_mass_flux_for_scan`` must not touch a non-latlon model.
+
+    It runs unconditionally at the JRA55 scan boundaries, which the MPAS and
+    cubed-sphere lanes also reach.  Those configs have no ``store_mass_flux``
+    field and those states have no such slots, so the helper must return the
+    state UNCHANGED rather than raise.
+    """
+    from scripts.run.run_omip import _seed_mass_flux_for_scan
+
+    class _NoFieldConfig:
+        pass
+
+    class _Model:
+        config = _NoFieldConfig()
+
+    sentinel = object()
+    assert _seed_mass_flux_for_scan(_Model(), sentinel) is sentinel
+
+    _g, _z, model_off, state = _setup(store=False)
+    p = _perturbed(state)
+    assert _seed_mass_flux_for_scan(model_off, p) is p
+
+    _g2, _z2, model_on, state2 = _setup(store=True)
+    p2 = _perturbed(state2)
+    seeded = _seed_mass_flux_for_scan(model_on, p2)
+    for nm in _NEW_SLOTS:
+        assert getattr(seeded, nm) is not None
 
 
 def test_mass_flux_v_is_registered_as_a_v_staggered_spmd_field():
@@ -1314,6 +1506,61 @@ def test_scan_drivers_seed_the_carry_before_their_lax_scan():
             assert s < c, (
                 f"{rel}: the seed at line {s + 1} comes AFTER the scan at "
                 f"line {c + 1}")
+
+
+def test_generic_ocean_archive_neither_writes_nor_restores_the_diagnostics(
+        tmp_path):
+    """Codex round-7 YELLOW 2: the OTHER restart lane had the same hole.
+
+    ``legoesm.ocean.restart.load_restart`` rebuilds a slot the template left
+    ``None`` as a bare ``Field(data, name)`` -- WITHOUT dims or units.  For
+    ``mass_flux_w`` (interface dims, m/s) that produces a Field whose pytree
+    AUX DATA differs from what the step writes, so a run resumed from such an
+    archive would abort its next ``lax.scan``.  Excluded from BOTH sides.
+
+    The reject-an-old-archive half matters too: an npz written before the
+    exclusion still carries the arrays, and the loader must skip them rather
+    than reconstruct them with generic metadata.
+    """
+    from legoesm.ocean.restart import (
+        DIAGNOSTIC_SLOTS, load_restart, save_restart,
+    )
+
+    assert set(DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS)
+
+    _g, _z, model, state = _setup(store=True)
+    out = model.step(_perturbed(state), _DT)
+    path = save_restart(out, tmp_path / "r.npz", time_s=0.0, step=1)
+    with np.load(path) as npz:
+        written = set(npz.files)
+    assert not (written & set(_NEW_SLOTS)), (
+        f"save_restart persisted {sorted(written & set(_NEW_SLOTS))}")
+    assert "T" in written and "eta" in written, "nothing was written at all"
+
+    template = out._replace(**{nm: None for nm in _NEW_SLOTS})
+    # load_restart returns the STATE itself (a NamedTuple -- so an
+    # `isinstance(x, tuple)` unwrap silently hands back its first FIELD).
+    loaded = load_restart(path, template)
+    for nm in _NEW_SLOTS:
+        assert getattr(loaded, nm) is None, (
+            f"{nm} came back from the archive; it is a diagnostic")
+    np.testing.assert_allclose(np.asarray(loaded.T.data),
+                               np.asarray(out.T.data), rtol=0, atol=0)
+
+    # An OLD archive (written before the exclusion) must also be skipped, not
+    # reconstructed with generic metadata.
+    legacy_path = tmp_path / "legacy.npz"
+    with np.load(path) as npz:
+        payload = {k: npz[k] for k in npz.files}
+    for nm in _NEW_SLOTS:
+        payload[nm] = np.asarray(getattr(out, nm).data)
+    np.savez(legacy_path, **payload)
+    legacy_loaded = load_restart(legacy_path, template)
+    for nm in _NEW_SLOTS:
+        assert getattr(legacy_loaded, nm) is None, (
+            f"{nm} was reconstructed from a legacy archive with generic "
+            "metadata -- that state's treedef differs from what the step "
+            "writes and the next lax.scan would abort")
 
 
 def test_run_omip_restart_does_not_persist_the_diagnostic_flux():
