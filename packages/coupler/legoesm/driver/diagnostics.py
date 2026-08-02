@@ -1434,6 +1434,7 @@ class DiagnosticCollector:
         q_g=None,
         u_east=None,
         v_north=None,
+        omega=None,
         precip=None,
         phis=None,
         tas=None,
@@ -1482,7 +1483,7 @@ class DiagnosticCollector:
           driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
           (surface wind stress, CMOR downward-positive).
         * 3-D on plev19 (``add_3d``): ``ta``, ``hus`` (*q_v*), ``ua``
-          (*u_east*), ``va`` (*v_north*).
+          (*u_east*), ``va`` (*v_north*), ``wap`` (*omega*).
         * Daily (``SpatialDailyAccumulator``): ``tas``/``pr``/``psl`` plus
           ``ua850``/``va850`` sliced from the regridded 3-D winds.
         * Zonal (``MonthlyAccumulator``): ``T_low``/``precip``/``psl`` 2-D
@@ -1625,6 +1626,13 @@ class DiagnosticCollector:
         q_g_np = None if q_g is None else np.asarray(q_g, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
+        # omega arrives ALREADY in the CMIP6 ``wap`` convention: pressure
+        # velocity Dp/Dt [Pa/s], POSITIVE DOWNWARD (ascent is negative), on
+        # cell centres and model full levels, TOA-first.  The dycore
+        # assembles it that way (grids.vertical.compute_omega_total; sign
+        # walk there and at the MPAS call site), so NO flip or rescale here —
+        # only the plev19 interpolation the other 3-D fields get.
+        omega_np = None if omega is None else np.asarray(omega, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
         phis_np = None if phis is None else np.asarray(phis, dtype=_f64)
         # TOA / surface-flux CMOR fields (already in CMOR sign conventions:
@@ -1696,6 +1704,7 @@ class DiagnosticCollector:
             ("q_g", q_g_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
+            ("omega", omega_np, (_ncol, _nlev)),
         ]
         for _nm, _arr, _shp in _shape_checks:
             if _arr is not None and _arr.shape != _shp:
@@ -1886,6 +1895,13 @@ class DiagnosticCollector:
                 ('cli', _q_frozen_np),
                 ('hur', hur_native),
                 ('zg', zg_native),
+                # wap = omega = Dp/Dt [Pa/s], POSITIVE DOWNWARD (CMIP6).
+                # Interpolated to plev19 exactly like ta/ua/va — omega is a
+                # smooth field of pressure, so interpolating it in log-p is
+                # the same operation the winds get.  Absent (dry-run / a lane
+                # that exports no omega) => SKIPPED, never zeroed: a zero wap
+                # would read downstream as a globally motionless atmosphere.
+                ('wap', omega_np),
             ):
                 if _src is None:
                     continue

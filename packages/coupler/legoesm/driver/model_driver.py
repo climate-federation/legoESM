@@ -6113,6 +6113,38 @@ class ModelDriver:
             # Geographic cell-centre winds from the edge-normal velocity.
             u_east, v_north = reconstruct_cell_velocity(
                 state.u.data, self.grid)
+            # CMIP6 ``wap``: the pressure velocity omega = Dp/Dt [Pa/s],
+            # POSITIVE DOWNWARD, DIAGNOSED from the dycore's own RHS
+            # (``MPASPrimitiveEquationModel.diagnose_omega``) — omega is not a
+            # prognostic, and rebuilding it here would duplicate the
+            # continuity closure.  One extra RHS evaluation per DIAGNOSTIC
+            # interval (not per step); an instantaneous end-of-interval
+            # sample, like the other state-derived 3-D fields.  Skipped
+            # (never zeroed) on any dynamics object without the method — the
+            # non-hydrostatic MPAS model and the MPI-sharded lane both lack
+            # it, and a zero wap would read as a motionless atmosphere.
+            omega = None
+            _omega_fn = getattr(self.model, "diagnose_omega", None)
+            if _omega_fn is not None:
+                try:
+                    omega = _omega_fn(state)
+                    # Local shape gate: the model's mesh and ``self.grid``
+                    # are the same object on the serial lane, but a
+                    # 1-rank Voronoi layout could in principle hand the
+                    # feed a different cell count.  A mismatch raises
+                    # inside the feed's PHASE-1 contract and would cost the
+                    # WHOLE interval's CMOR means; drop wap alone instead.
+                    if tuple(omega.shape) != tuple(state.T.data.shape):
+                        raise ValueError(
+                            f"omega shape {tuple(omega.shape)} != state.T "
+                            f"{tuple(state.T.data.shape)}")
+                except Exception as exc:
+                    if not getattr(self, "_logged_omega_fallback", False):
+                        logger.warning(
+                            "  CMOR wap: omega diagnosis failed (%s); the "
+                            "field is SKIPPED for this run.", exc)
+                        self._logged_omega_fallback = True
+                    omega = None
             # Water vapour + cloud condensate (moist runs only).  q_c/q_i
             # feed the CMOR ``clt`` total-cloud-cover reduction; both are
             # absent on a dry run and on warm-rain microphysics (no q_i),
@@ -6300,6 +6332,7 @@ class ModelDriver:
                 q_g=q_g,
                 u_east=u_east,
                 v_north=v_north,
+                omega=omega,
                 precip=precip,
                 phis=state.phis.data,
                 tas=tas,
@@ -6577,7 +6610,11 @@ class ModelDriver:
             # snapshot here; it predates this set but was omitted from it).
             _diag.cmip_snapshot_vars = {
                 "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts",
-                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs"}
+                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs",
+                # ``wap`` is DIAGNOSED from the end-of-interval state (one
+                # extra dycore RHS at the feed), so it is a snapshot on
+                # exactly the same footing as ta/ua/va — not a time mean.
+                "wap"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
