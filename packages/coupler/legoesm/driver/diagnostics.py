@@ -595,6 +595,24 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         return jnp.asarray(p_s)[..., None] * jnp.asarray(self.dsigma)
 
+    def _p_half(self, p_s):
+        """Half-level pressure [Pa] (TOA-first, ``nlev+1``), the companion of
+        :meth:`_p_full` / :meth:`_dp` for hypsometric column integrations.
+
+        ``vcoord.pressure_at_half`` when the coordinate object is present
+        (REQUIRED for correctness on the default hybrid grid, same caveat as
+        ``_p_full``).  The pure-sigma fallback reconstructs ``sigma_half``
+        from the layer thicknesses with the standard surface anchor
+        ``sigma_half[-1] = 1`` (``sigma_half[k] = 1 - sum(dsigma[k:])``),
+        which is CONSISTENT with ``_dp = p_s * dsigma`` by construction.
+        """
+        if self.vcoord is not None:
+            return self.vcoord.pressure_at_half(p_s)
+        dsig = np.asarray(self.dsigma, dtype=np.float64)
+        sigma_half = np.concatenate(
+            [1.0 - np.cumsum(dsig[::-1])[::-1], [1.0]])
+        return np.asarray(p_s)[..., None] * sigma_half
+
     def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
 
@@ -688,6 +706,45 @@ class DiagnosticCollector:
             scheme="coare3", return_2m=True,
         )
         return T_2m
+
+    def _condensate_paths(self, p_s, q_c, q_i=None):
+        """Column condensate paths — CMOR ``clwvi``/``clivi`` [kg/m2].
+
+        SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
+        :meth:`feed_cmip_accumulators_native` path (same single-reduction
+        doctrine as :meth:`_clt_percent`): a drift between per-lane copies
+        would report different water paths for the SAME state depending only
+        on which dycore ran.
+
+        CMIP6 convention (#1443): ``clivi`` = column-integrated frozen
+        condensate that is RADIATIVELY ACTIVE — here cloud ice ``q_i``
+        ALONE.  CMIP6 includes precipitating frozen hydrometeors "ONLY IF
+        the precipitating hydrometeor affects the calculation of radiative
+        transfer in model", and this model's radiation reads
+        ``tracers["q_i"]`` only (``radiation/integration.py``), never snow
+        (slot 4) or graupel (slot 5).  Do NOT re-add a ``q_s``/``q_g`` sum
+        here: it is not even dimensionally valid across schemes (P3 aliases
+        slots 4/5 to rime MASS and rime VOLUME) — see the #1443 rationale
+        in :meth:`collect`.  ``clwvi`` = liquid ``q_c`` + the same
+        radiatively-used ice term (the CMIP6 conditional applies to it
+        identically).  Rain ``q_r`` is in neither (falling liquid precip,
+        not suspended condensate).
+
+        Returns ``(clwvi, clivi)`` numpy arrays, or ``(None, None)`` when
+        ``q_c`` is absent (dry run / no condensate tracer) so callers SKIP
+        the fields rather than publish a zero that reads as condensate-free.
+        """
+        if q_c is None:
+            return None, None
+        dp = self._dp(p_s)
+        lwp = np.asarray(
+            column_water_vapor(q_c, p_s, self.dsigma, dp=dp))
+        if q_i is not None:
+            iwp = np.asarray(
+                column_water_vapor(q_i, p_s, self.dsigma, dp=dp))
+        else:
+            iwp = np.zeros_like(lwp)
+        return lwp + iwp, iwp
 
     def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
         """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.
@@ -1101,10 +1158,6 @@ class DiagnosticCollector:
             # fraction (sigmoid on total condensate) — useful for spatial
             # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
             if q_c is not None:
-                lwp_field = np.asarray(
-                    column_water_vapor(q_c, state.p_s.data, self.dsigma,
-                                       dp=self._dp(state.p_s.data))
-                )
                 # Frozen condensate path: CLOUD ICE ONLY.
                 #
                 # CMIP6 defines ``clivi`` as the column ice mass, "including
@@ -1132,18 +1185,17 @@ class DiagnosticCollector:
                 # and carry its own PSD/effective radius, exactly as the
                 # optics would need.
                 q_frozen = q_i
-                if q_frozen is not None:
-                    iwp_field = np.asarray(
-                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma,
-                                           dp=self._dp(state.p_s.data))
-                    )
-                else:
-                    iwp_field = np.zeros_like(lwp_field)
-                r_lwp = self._regrid_to_latlon_2d(lwp_field)
-                r_iwp = self._regrid_to_latlon_2d(iwp_field)
+                # Column reduction SHARED with the MPAS feed
+                # (``_condensate_paths``); the regrid is linear, so
+                # regridding (clwvi, clivi) equals the former per-path
+                # regrid-then-sum bit-for-bit up to float association.
+                clwvi_native, clivi_native = self._condensate_paths(
+                    state.p_s.data, q_c, q_frozen)
+                r_lwp = self._regrid_to_latlon_2d(clwvi_native)
+                r_iwp = self._regrid_to_latlon_2d(clivi_native)
                 if r_lwp is not None and r_iwp is not None:
                     fields_2d['clivi'] = r_iwp
-                    fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
+                    fields_2d['clwvi'] = r_lwp
 
                 # Total cloud cover (clt, CMIP %) from the MODEL's fractional
                 # layer cloud fraction — the SAME sundqvist/xu_randall/resolved
@@ -1236,7 +1288,10 @@ class DiagnosticCollector:
             # out of the already-regridded 3-D ua/va arrays.
             if self._spatial_daily is not None:
                 daily_2d: dict[str, np.ndarray] = {}
-                for _name in ("tas", "pr", "psl"):
+                # rsut/rlut: registered in the ``day`` table — feed them on
+                # this (cube/lat-lon collect) lane too, for lane parity with
+                # the MPAS feed.
+                for _name in ("tas", "pr", "psl", "rsut", "rlut"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 # 850 hPa is index 16 in the ascending-sorted PLEV19 axis
@@ -1375,6 +1430,8 @@ class DiagnosticCollector:
         q_v=None,
         q_c=None,
         q_i=None,
+        q_s=None,
+        q_g=None,
         u_east=None,
         v_north=None,
         precip=None,
@@ -1385,6 +1442,13 @@ class DiagnosticCollector:
         rsdt=None,
         hfss=None,
         hfls=None,
+        rsds=None,
+        rlds=None,
+        sw_net_sfc=None,
+        lw_net_sfc=None,
+        ts=None,
+        tauu=None,
+        tauv=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1404,7 +1468,12 @@ class DiagnosticCollector:
         * 2-D (``add_2d``): ``tas`` (2 m air temperature — MOST similarity when
           the caller supplies *tas*, else the lowest-model-level fallback),
           ``ps``, ``pr`` (when *precip* given), ``prw`` (column water vapour,
-          when *q_v* given), ``psl`` (hypsometric, when *phis* given).
+          when *q_v* given), ``psl`` (hypsometric, when *phis* given), the
+          TOA/surface flux block (``rlut``/``rsut``/``rsdt``/``hfss``/
+          ``hfls``/``evspsbl``/``rsds``/``rlds`` and the derived
+          ``rsus``/``rlus``), ``ts`` (surface skin temperature when the
+          driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
+          (surface wind stress, CMOR downward-positive).
         * 3-D on plev19 (``add_3d``): ``ta``, ``hus`` (*q_v*), ``ua``
           (*u_east*), ``va`` (*v_north*).
         * Daily (``SpatialDailyAccumulator``): ``tas``/``pr``/``psl`` plus
@@ -1511,8 +1580,9 @@ class DiagnosticCollector:
             flux_doy, flux_year = doy, year
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
-        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl")
-        _FLUX_DAILY = ("pr",)
+        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
+                    "rsds", "rlds", "rsus", "rlus", "tauu", "tauv")
+        _FLUX_DAILY = ("pr", "rsut", "rlut")
         _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
@@ -1540,6 +1610,8 @@ class DiagnosticCollector:
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
+        q_s_np = None if q_s is None else np.asarray(q_s, dtype=_f64)
+        q_g_np = None if q_g is None else np.asarray(q_g, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
         v_north_np = None if v_north is None else np.asarray(v_north, dtype=_f64)
         precip_np = None if precip is None else np.asarray(precip, dtype=_f64)
@@ -1552,6 +1624,18 @@ class DiagnosticCollector:
         rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
+        rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
+        rlds_np = None if rlds is None else np.asarray(rlds, dtype=_f64)
+        swnet_np = (None if sw_net_sfc is None
+                    else np.asarray(sw_net_sfc, dtype=_f64))
+        lwnet_np = (None if lw_net_sfc is None
+                    else np.asarray(lw_net_sfc, dtype=_f64))
+        ts_np = None if ts is None else np.asarray(ts, dtype=_f64)
+        # tauu/tauv arrive ALREADY in the CMOR convention (surface DOWNWARD
+        # eastward/northward stress, positive with the wind): the driver flips
+        # the model's opposes-the-wind tau sign at the feed call site.
+        tauu_np = None if tauu is None else np.asarray(tauu, dtype=_f64)
+        tauv_np = None if tauv is None else np.asarray(tauv, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1571,9 +1655,18 @@ class DiagnosticCollector:
             ("rsdt", rsdt_np, (_ncol,)),
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
+            ("rsds", rsds_np, (_ncol,)),
+            ("rlds", rlds_np, (_ncol,)),
+            ("sw_net_sfc", swnet_np, (_ncol,)),
+            ("lw_net_sfc", lwnet_np, (_ncol,)),
+            ("ts", ts_np, (_ncol,)),
+            ("tauu", tauu_np, (_ncol,)),
+            ("tauv", tauv_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
+            ("q_s", q_s_np, (_ncol, _nlev)),
+            ("q_g", q_g_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
             ("v_north", v_north_np, (_ncol, _nlev)),
         ]
@@ -1586,6 +1679,24 @@ class DiagnosticCollector:
         # tas is the 2 m MOST temperature when supplied, else the lowest level.
         if tas_field is None:
             tas_field = T_low
+
+        # Surface UPWELLING fluxes derived from the exported net + downwelling
+        # pair.  Sign convention at the term (stated once, walked per term):
+        #   sw_net_sfc / lw_net_sfc  [W/m^2, positive INTO the surface]
+        #     (the radiation packer's convention, radiation/integration.py)
+        #   rsds / rlds  (CMOR)      [W/m^2, positive DOWN]
+        #   rsus / rlus  (CMOR)      [W/m^2, positive UP]
+        # net(+into surface) = down(+down) - up(+up)  =>  up = down - net.
+        # Budget closes by construction: rsds - rsus - sw_net_sfc == 0 and
+        # rlds - rlus - lw_net_sfc == 0 exactly (lw_net_sfc is typically
+        # NEGATIVE — the surface loses longwave — so rlus > rlds).
+        # Derived only when BOTH terms are present; otherwise SKIPPED, never
+        # zeroed (a zero rsus under real insolation would read as a black
+        # surface downstream).
+        rsus_np = (None if (rsds_np is None or swnet_np is None)
+                   else rsds_np - swnet_np)
+        rlus_np = (None if (rlds_np is None or lwnet_np is None)
+                   else rlds_np - lwnet_np)
 
         # Sea-level pressure (hypsometric) — shared by the spatial ``psl`` and
         # the zonal ``psl`` band; compute once when phis is available (shape
@@ -1622,6 +1733,20 @@ class DiagnosticCollector:
                 ('hfss', hfss_np),
                 ('hfls', hfls_np),
                 ('evspsbl', evspsbl_np),
+                # Surface radiation budget (sign conventions documented at
+                # the rsus/rlus derivation above).
+                ('rsds', rsds_np),
+                ('rlds', rlds_np),
+                ('rsus', rsus_np),
+                ('rlus', rlus_np),
+                # ts: surface SKIN temperature (blended sst/sic/ice-skin,
+                # supplied by the driver) — a STATE snapshot, not a flux,
+                # so it stays under the endpoint calendar bin.
+                ('ts', ts_np),
+                # Surface wind stress (CMOR downward-positive; sign flipped
+                # by the driver at the feed call site).
+                ('tauu', tauu_np),
+                ('tauv', tauv_np),
             ):
                 if _src is None:
                     continue
@@ -1645,6 +1770,72 @@ class DiagnosticCollector:
                 if r is not None:
                     fields_2d['clt'] = r
 
+            # Condensed-water / ice-water paths (clwvi/clivi): the SHARED
+            # radiative-ice-only reduction with collect() (``_condensate_
+            # paths``) so the two lanes cannot disagree on the SAME state.
+            # Snow/graupel (``q_s``/``q_g``) are deliberately NOT passed:
+            # radiation never sees them, so CMIP6 excludes them (#1443 —
+            # rationale at the collect() clivi block).  Skipped (not zeroed)
+            # when no condensate tracer is supplied.
+            clwvi_native, clivi_native = self._condensate_paths(
+                p_s_np, q_c_np, q_i_np)
+            if clwvi_native is not None:
+                r_lwp = self._regrid_to_latlon_2d(clwvi_native)
+                r_iwp = self._regrid_to_latlon_2d(clivi_native)
+                if r_lwp is not None and r_iwp is not None:
+                    fields_2d['clwvi'] = r_lwp
+                    fields_2d['clivi'] = r_iwp
+
+            # 3-D condensate mass fractions on plev19: clw = suspended cloud
+            # LIQUID (q_c; rain q_r excluded — falling precip); cli = cloud
+            # ice ``q_i`` ALONE, MIRRORING the clivi radiative-ice-only
+            # convention above (the CMIP6 ``cli`` entry carries the same
+            # "precipitating hydrometeors ONLY if radiatively active"
+            # conditional as ``clivi``) so the 3-D field vertically
+            # integrates to the published path.  Absent => skipped, never
+            # zeroed.
+            _q_frozen_np = q_i_np
+
+            # Relative humidity — hur (3-D, %) and hurs (near-surface, %) —
+            # via the SHARED WMO saturation-ratio helper
+            # ``legoesm.thermo.relative_humidity`` (e/e_sat over the model's
+            # own Tetens curve; never a re-derived saturation formula).
+            # CMIP-typical choice: RH is computed on MODEL levels and RH
+            # ITSELF is interpolated to plev19 (not q then re-saturated).
+            # NOT clamped: supersaturation > 100 % is reported as such — the
+            # Amon table does not mandate a cap and a silent clamp would
+            # hide model supersaturation.  hurs is the LOWEST-MODEL-LEVEL
+            # value, not a 2 m MOST extrapolation (the MOST helper returns
+            # T_2m only) — a documented deviation from the table's 2 m
+            # ``height`` attribute.
+            hur_native = None
+            if q_v_np is not None:
+                from legoesm.thermo import relative_humidity
+                _p_full_np = np.asarray(self._p_full(p_s_np))
+                hur_native = 100.0 * np.asarray(
+                    relative_humidity(T_np, _p_full_np, q_v_np))
+                r = self._regrid_to_latlon_2d(hur_native[..., -1])
+                if r is not None:
+                    fields_2d['hurs'] = r
+
+            # zg: geopotential height [m] on plev19 — hypsometric column with
+            # VIRTUAL temperature via the SHARED physics helper
+            # ``atmosphere.physics._shared.compute_heights_from_sigma`` (the
+            # same column geometry turbulence/GWD/microphysics integrate),
+            # anchored at the surface: zg = z_above_surface + phis/g (z is
+            # positive UP; phis/g is the surface altitude, so zg is height
+            # above the geoid).  Needs *phis* — skipped without it.
+            zg_native = None
+            if phis_np is not None:
+                from legoesm.atmosphere.physics._shared import (
+                    compute_heights_from_sigma,
+                )
+                _p_half_np = np.asarray(self._p_half(p_s_np))
+                _z_full, _ = compute_heights_from_sigma(
+                    T_np, _p_half_np, q_v=q_v_np)
+                zg_native = (np.asarray(_z_full)
+                             + (phis_np / _c.g)[..., None])
+
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
@@ -1653,6 +1844,10 @@ class DiagnosticCollector:
                 ('hus', q_v_np),
                 ('ua', u_east_np),
                 ('va', v_north_np),
+                ('clw', q_c_np),
+                ('cli', _q_frozen_np),
+                ('hur', hur_native),
+                ('zg', zg_native),
             ):
                 if _src is None:
                     continue
@@ -1664,9 +1859,11 @@ class DiagnosticCollector:
                     fields_3d[_name] = r
 
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
-            # the 3-D arrays (same index convention as collect()).
+            # the 3-D arrays (same index convention as collect()).  rsut/rlut
+            # are registered in the ``day`` table too — flux fields, so they
+            # ride the _FLUX_DAILY midpoint binning like pr.
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl"):
+                for _name in ("tas", "pr", "psl", "rsut", "rlut"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)

@@ -148,30 +148,67 @@ def _tend_with_extras():
         precip=_f("precip", 3.0),
         lw_up_toa=_f("lw_up_toa", 4.0), sw_up_toa=_f("sw_up_toa", 5.0),
         sw_down_toa=_f("sw_down_toa", 6.0),
-        shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0))
+        shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0),
+        sw_down_sfc=_f("sw_down_sfc", 9.0), lw_down_sfc=_f("lw_down_sfc", 10.0),
+        tau_x_sfc=_f("tau_x", 11.0), tau_y_sfc=_f("tau_y", 12.0))
 
 
 # Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
 # voronoi_mpi._step; a drift here silently swaps rlut/rsut/rsdt or drops a field.
-_EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa", "shflx_sfc", "lhflx_sfc")
+_EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc",
+                "tau_x_sfc", "tau_y_sfc")
 
 
 class TestSfcDiagContract:
-    """Lock the 8-slot sfc_diag tuple contract shared by BOTH producers
-    (serial + MPI-voronoi) and the driver consumer's slot 3-7 mapping."""
+    """Lock the 12-slot sfc_diag tuple contract shared by BOTH producers
+    (serial + MPI-voronoi) and the driver consumer's slot mapping."""
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 8
-        # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
-        # 5->rsdt, 6->hfss, 7->hfls.
-        assert sfc_diag[3].name == "lw_up_toa"    # rlut
-        assert sfc_diag[4].name == "sw_up_toa"    # rsut
-        assert sfc_diag[5].name == "sw_down_toa"  # rsdt
-        assert sfc_diag[6].name == "shflx"        # hfss
-        assert sfc_diag[7].name == "lhflx"        # hfls
+        assert len(sfc_diag) == 12
+        # Consumer (_feed_mpas_cmip_accumulators): slot 0->sw_net (rsus
+        # derivation), 1->lw_net (rlus), 3->rlut, 4->rsut, 5->rsdt,
+        # 6->hfss, 7->hfls, 8->rsds, 9->rlds (+ _marshal_land_forcing),
+        # 10->tauu (sign-flipped), 11->tauv (sign-flipped).
+        assert sfc_diag[0].name == "sw_net"
+        assert sfc_diag[1].name == "lw_net"
+        assert sfc_diag[3].name == "lw_up_toa"      # rlut
+        assert sfc_diag[4].name == "sw_up_toa"      # rsut
+        assert sfc_diag[5].name == "sw_down_toa"    # rsdt
+        assert sfc_diag[6].name == "shflx"          # hfss
+        assert sfc_diag[7].name == "lhflx"          # hfls
+        assert sfc_diag[8].name == "sw_down_sfc"    # rsds
+        assert sfc_diag[9].name == "lw_down_sfc"    # rlds
+        assert sfc_diag[10].name == "tau_x"         # tauu = -slot10
+        assert sfc_diag[11].name == "tau_y"         # tauv = -slot11
+
+    def test_both_producers_extract_the_same_extra_order(self):
+        """The serial and MPI producers must list the SAME extras keys in
+        the SAME order — a drift silently remaps CMOR fields on one lane."""
+        import inspect
+        from legoesm.atmosphere.dynamics.gcm import primitive_eq_mpas
+        from legoesm.parallel import voronoi_mpi
+
+        def _keys_in(src):
+            found = []
+            for k in _EXTRA_ORDER:
+                pos = src.find(f'"{k}"')
+                assert pos >= 0, f"{k} missing from a producer's extras"
+                found.append((pos, k))
+            return [k for _, k in sorted(found)]
+
+        # _step_jit is the symbol that BUILDS the tuple on the serial lane
+        # (step() only merges it) — asserting against step() would pass
+        # while proving nothing (attribution-gate rule).
+        src_serial = inspect.getsource(
+            primitive_eq_mpas.MPASPrimitiveEquationModel._step_jit)
+        src_mpi = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
+        assert _keys_in(src_serial) == list(_EXTRA_ORDER)
+        assert _keys_in(src_mpi) == list(_EXTRA_ORDER)
 
     def test_replace_preserves_cmor_diagnostics(self):
         """The HS wrapper repacks via ``_replace`` of the 4 dynamics fields

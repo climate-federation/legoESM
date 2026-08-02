@@ -373,4 +373,8 @@ def louis_turbulence(
         lhflx=lhflx,
         ustar=ustar,
         h_pbl=h_pbl,
+        # Surface stress export for the CMOR tauu/tauv feed — model
+        # convention (opposes the wind), see TurbulenceOutput docstring.
+        tau_x=tau_x,
+        tau_y=tau_y,
     )

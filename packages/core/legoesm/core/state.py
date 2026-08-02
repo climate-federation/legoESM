@@ -149,6 +149,17 @@ class HydrostaticTendencies(NamedTuple):
     # existing (incl. positional) constructor is unaffected.
     sw_down_sfc: Field | None = None
     lw_down_sfc: Field | None = None
+    # Surface wind stress [Pa], carried on the turbulence tendency for the
+    # CMOR tauu/tauv feed.  MODEL sign convention: tau = -rho C_d |V| u,
+    # i.e. OPPOSES the wind (the stress felt BY the atmosphere; the
+    # schemes' own tau_x/tau_y sign, core/bulk_flux.simple_bulk_fluxes).
+    # CMOR tauu/tauv (surface DOWNWARD eastward/northward momentum flux,
+    # positive with the wind) are the NEGATIVE — flipped at the CMOR feed,
+    # never here.  Cell-centred GEOGRAPHIC east/north components.  None when
+    # turbulence is off or the scheme does not export its surface stress;
+    # trailing optionals so every existing constructor is unaffected.
+    tau_x_sfc: Field | None = None
+    tau_y_sfc: Field | None = None
     # PER-COLUMN process ledger, shape (ncol, N_LEDGER, 2) — the last axis is
     # [water kg/m^2/s, dry-enthalpy W/m^2] and the middle axis indexes
     # ``diagnostics.process_ledger.LEDGER_PROCESSES``.  Carried on the COMBINED
