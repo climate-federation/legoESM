@@ -68,10 +68,22 @@ Why the condensation floor exists (do NOT drop it without re-testing #730)
 A cold, dry skin under moister advected air produces a large negative (i.e.
 condensing) latent flux; the released latent heat enters ``G_soil`` with a PLUS
 sign (``-lhflx > 0``) and the surface energy balance answers with an
-unphysically hot skin temperature, which the thin top soil layer at the
-radiation timestep turns into a runaway (issue #730: land skin 224 K -> 1156 K
--> NaN in coupled AMIP).  The floor bounds only the CONDENSING branch;
-evaporation stays unbounded so the SEB keeps its self-limiting feedback.
+unphysically hot skin temperature, which the thin (~2 cm) top soil layer at the
+radiation timestep turns into a runaway.  The floor bounds only the CONDENSING
+branch; evaporation stays unbounded so the SEB keeps its self-limiting feedback.
+
+Provenance, verified in the history (commit 217ea5a42, "fix(land): floor
+cold-start condensation flux — multilayer land now runs coupled", issue #730),
+not just from a code comment: a spurious ~-3000 W/m^2 condensation flux drove
+the coupled cold start to land skin 224 K -> 1156 K -> NaN.  The alternatives
+were tried and REFUTED there: a ``T_land`` rate-limiter was ineffective, the
+soil moisture was already bounded by #729, and **an iterated implicit SEB was
+inert** -- so ``simple_seb``'s semi-implicit surface-conductance (Robin BC)
+linearisation does NOT substitute for this floor.  "It is the flux MAGNITUDE."
+That commit also made the floored flux feed BOTH the SEB and the Richards
+evaporation sink so the LAND budget stays internally consistent; what it did
+not do -- and what this module adds -- is make the ATMOSPHERE honour the same
+bound, so the INTERFACE budget closes too.
 """
 
 from __future__ import annotations
