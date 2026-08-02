@@ -6368,7 +6368,9 @@ class ModelDriver:
         # combined physics on HydrostaticTendencies.ledger_rows; the dycore
         # stage rows (dynamics/clips + the closure residual) are filled in
         # ``_step_jit``; the eager loop below accumulates the per-step ledger
-        # and writes ``budget_ledger.npz`` at the diagnostic cadence.  The
+        # and writes ``budget_ledger_columns.npz`` (per-column schema — a
+        # deliberately DIFFERENT filename from the FV lane's global-row
+        # ``budget_ledger.npz``) at the diagnostic cadence.  The
         # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
         # working path) is retained below only for MPI, where the per-rank
         # ledger gather is not yet wired.
@@ -8116,7 +8118,8 @@ class ModelDriver:
                 )
 
                 # Budget-ledger emission (#1311): interval-mean per-column
-                # rates -> budget_ledger.npz (overwritten each interval; the
+                # rates -> budget_ledger_columns.npz (overwritten each
+                # interval; the
                 # per-interval history is in the log lines).  The log line
                 # reports the column with the LARGEST dry-enthalpy total —
                 # exactly the detonating-column question — attributed to its
