@@ -46,7 +46,10 @@ print("  [mutation applied]")
 PYEOF
   local rc=$?
   if [ $rc -ne 0 ]; then
-    echo "!!! MUTATION HARNESS ABORT: the anchor above did not apply."
+    echo "!!! MUTATION HARNESS ABORT after $NRUN of $EXPECTED_MUTATIONS"
+    echo "!!! mutations: the anchor above did not apply.  The source moved"
+    echo "!!! under the harness; fix the anchor and re-run the WHOLE suite --"
+    echo "!!! the results printed so far are a PARTIAL run, not a verdict."
     exit 1
   fi
 }
@@ -57,6 +60,10 @@ PYEOF
 # and the job FAILS at the end if any mutation survived or the control is red.
 GREEN_MUTATIONS=""
 NRUN=0
+# Guards against a SHORT run being read as a clean one.  A stale anchor aborts
+# (below), and a deleted mutation block would otherwise just shrink the suite
+# silently; both are caught by comparing the count at the verdict.
+EXPECTED_MUTATIONS=25
 
 run() {      # run <label> <pytest args...>
   local label=$1; shift
@@ -115,12 +122,10 @@ restore scripts/run/run_omip_core2.py
 echo "#### M7: ignore io_proc (every rank clobbers the same file) ####"
 swap "$DRIVER" '    if not io_proc:
         return None
-    try:
-        from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns' \
+    # Bound OUTSIDE the try so the except can close a handle that was opened' \
                '    if False:   # MUTATION: io_proc ignored
         return None
-    try:
-        from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns'
+    # Bound OUTSIDE the try so the except can close a handle that was opened'
 run M7 "$DRV_T::test_open_is_a_noop_on_a_non_io_rank"
 restore scripts/run/run_omip_core2.py
 
@@ -308,7 +313,12 @@ echo "=== EXIT(control) $CONTROL_RC   (expect ZERO) ==="
 
 # ===================================================== the verdict, enforced
 FAIL=0
-echo "=== MUTATIONS RUN: $NRUN ==="
+echo "=== MUTATIONS RUN: $NRUN (expected $EXPECTED_MUTATIONS) ==="
+if [ "$NRUN" -ne "$EXPECTED_MUTATIONS" ]; then
+  echo "!!! SHORT SUITE: $NRUN of $EXPECTED_MUTATIONS mutations ran.  A"
+  echo "!!! partial suite is not a clean one."
+  FAIL=1
+fi
 if [ -n "$GREEN_MUTATIONS" ]; then
   echo "!!! SURVIVING MUTATIONS (vacuous tests):$GREEN_MUTATIONS"
   FAIL=1
