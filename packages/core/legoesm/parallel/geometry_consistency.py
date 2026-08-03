@@ -44,6 +44,11 @@ import jax
 import numpy as np
 
 __all__ = [
+    "addressable_shard_put",
+    "assert_pytree_bytes_equal",
+    "band_fingerprint",
+    "band_fingerprints_agree",
+    "checked_shard_put",
     "content_hash48",
     "name_digest48",
     "schema_fingerprint",
@@ -630,9 +635,10 @@ def band_fingerprint(host, n_bands):
     fixed per-band count, pass the float gate.
     """
     host = np.asarray(host)
-    if host.shape[0] != n_bands:
+    if host.ndim == 0 or host.shape[0] != n_bands:
         raise ValueError(
-            f"band_fingerprint: leading axis {host.shape[0]} != n_bands "
+            f"band_fingerprint: leading axis "
+            f"{host.shape[0] if host.ndim else '<0-d>'} != n_bands "
             f"{n_bands}")
     is_exact = host.dtype.kind in "biu"
     struct = [float(host.ndim), *map(float, host.shape),
@@ -707,8 +713,11 @@ def assert_pytree_bytes_equal(tree, what):
         return
     from jax.experimental import multihost_utils
 
+    # Numeric python scalars included (codex r20 item 1): the scatter
+    # paths jnp.asarray + put them, so a rank-divergent scalar must not
+    # bypass the gate. Non-numeric leaves (None, strings) stay excluded.
     leaves = [x for x in jax.tree_util.tree_leaves(tree)
-              if hasattr(x, "ndim")]
+              if hasattr(x, "ndim") or isinstance(x, (int, float, complex))]
     vals = np.array([content_hash48(np.asarray(x)) for x in leaves],
                     dtype=np.float64)
     g = multihost_utils.process_allgather(vals)

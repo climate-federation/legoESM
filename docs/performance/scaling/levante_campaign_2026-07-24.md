@@ -2086,3 +2086,23 @@ fixed lane (l50081+l50100 excluded; l50081 exclusion harmless-superset):
   **eff 0.84** — a healthy-tile strong leg on the ocean lane.
 * This closes the user directive's ocean-hundreds gap: both lat-lon
   lanes (atm + ocean) now hold receipts at 96-128 GPUs, MPAS at 128.
+
+### Merge-port of #1362 (geometry_consistency) — shared-module fixes + one tracked follow-up
+
+The three multicontroller fixes now live in
+`legoesm.parallel.geometry_consistency` (checked_shard_put /
+addressable_shard_put / assert_pytree_bytes_equal / band_fingerprint —
+the ONE implementation, #1362 doctrine); the ocean lane calls them, and
+#1362's entry gates gained aux coverage + numeric-scalar leaves in the
+digest gate (codex r20). 167 gate/parity tests + the 2-proc repro
+(15.11 ms) green post-fix.
+
+**TRACKED FOLLOW-UP (codex r20 item 3): the ATMOSPHERE lat-lon lane
+still routes its band/tile geometry stacks through `broadcast_checked`
+-> `broadcast_one_to_all` (sharded_atm_latlon_step.py:492/1586) — wall
+1 preserved there** (an [n_processes, stack] psum program). The atm
+128-GPU receipts predate #1362, so the current main atm lane at >=96
+processes is UNVERIFIED and plausibly walled exactly as ocean was.
+Port = same checked_shard_put swap + aux threading; needs its own
+parity run + a 2-proc repro before any atm hundreds rerun on merged
+main.

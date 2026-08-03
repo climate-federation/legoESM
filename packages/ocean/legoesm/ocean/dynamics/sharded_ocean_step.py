@@ -608,10 +608,12 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
 _OCEAN_CALL_ENTRY_FLAGS = (
     "has_mesh", "n_dev", "axis_names", "axis_sizes",
     "state_schema", "has_forcing", "forcing_schema",
+    "has_aux", "aux_schema",
 )
 
 
-def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
+def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str,
+                           aux=None) -> None:
     """Agree a returned ocean SPMD callable's per-CALL inputs, FIRST statement.
 
     #1362 round 4, blocker 7.  ``sharded_step`` runs ``_validate_forcing_layout``
@@ -636,6 +638,10 @@ def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
         float(forcing is not None),
         (tree_schema_digest48(forcing) if forcing is not None
          else FLAG_ABSENT),
+        # aux (codex r20 item 2): a rank-local None-vs-provided or schema
+        # mismatch must fail HERE, not desynchronize the jit call below.
+        float(aux is not None),
+        (tree_schema_digest48(aux) if aux is not None else FLAG_ABSENT),
     ), context=where)
 
 
@@ -883,7 +889,7 @@ def make_sharded_ocean_step(model, mesh):
         # structure key below distinguishes every None<->array combination.
         _agree_ocean_spmd_call(
             mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
-            where="make_sharded_ocean_step.step")
+            where="make_sharded_ocean_step.step", aux=aux)
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
