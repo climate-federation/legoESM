@@ -21,8 +21,13 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.core.bulk_flux import simple_bulk_fluxes
 from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.core.land_interface_flux import (
+    LAND_INTERFACE_FLUX,
+    apply_condensation_floor,
+    land_interface_most_fluxes,
+)
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.stomata_utils import compute_effective_beta
@@ -30,24 +35,16 @@ from legoesm.land.surface_scheme.base import SurfaceFluxOutput
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
-# --- SimpleSEB cold-start numerics safety guards (peers; NOT climate-tuning knobs) ---
-# Public so the slab-land inline flux path (slab_land.step_land) applies the SAME
-# two guards instead of carrying its own copy (single source of truth).
-# Ceiling on the neutral-equivalent bulk transfer coefficient for the MOST land
-# fluxes: the default floor lets C_e reach ~0.64 at extreme cold-start instability,
-# turning a ~0.6 g/kg humidity gradient into a spurious ~4900 W/m2 latent shock that
-# NaNs the thin top soil layer.  0.02 is a generous strong-instability bound (>> the
-# ~3.4e-3 neutral value), so it binds ONLY on pathological cold-start columns and is
-# climatologically inert (byte-identical) once the surface has spun up.
-LAND_MAX_EXCHANGE_COEFF = 0.02
-# Floor on the CONDENSATION (negative) latent flux [W/m2] (issue #730): a cold/dry
-# surface under moister advected air can produce a spurious ~-3000 W/m2 condensation
-# flux (vs real frost/dew ~O(10-100)) which the SEB balances at an unphysical hot skin
-# T -> thin top-layer runaway (land skin 224 -> 1156 K -> NaN in coupled AMIP without
-# it).  -150 W/m2 is safely ABOVE any real frost/dew, so near-inert; only CONDENSATION
-# is floored (evaporation stays free so the SEB keeps its self-limiting feedback).
-# None disables it.
-LAND_CONDENSATION_FLOOR_W = -150.0
+# --- Land<->atmosphere interface limits (NOT owned here; NOT climate-tuning knobs) ---
+# Both the transfer-coefficient ceiling and the condensation floor are properties
+# of the land<->atmosphere INTERFACE, so they live in
+# ``legoesm.core.land_interface_flux.LandInterfaceFluxConfig`` and are applied by
+# the shared ``land_interface_most_fluxes`` entry point that the ATMOSPHERIC land
+# tile calls too.  Previously they were applied here only, so whatever this end
+# refused the atmosphere was still free to emit.  The names below are re-exported
+# for readers/tests of this module; edit the values in the core config, never here.
+LAND_MAX_EXCHANGE_COEFF = LAND_INTERFACE_FLUX.max_exchange_coeff
+LAND_CONDENSATION_FLOOR_W = LAND_INTERFACE_FLUX.condensation_floor_w
 # Perturbation [K] for the one-sided finite-difference linearisation of the turbulent
 # fluxes when building the semi-implicit surface conductance (Robin BC).  Small enough
 # for an accurate slope, large enough to stay above bulk-flux round-off.
@@ -163,7 +160,12 @@ def compute_simple_seb_fluxes(
         )
     rho = forcing.rho_lowest
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+        # Shared land<->atmosphere interface entry point: it injects the
+        # interface transfer-coefficient ceiling AND applies the condensation
+        # floor, so this end and the atmospheric land tile impose the SAME
+        # limits by construction.  Sign convention: shflx/lhflx POSITIVE UPWARD
+        # (surface -> atmosphere); lhflx < 0 is condensation onto the surface.
+        tau_x, tau_y, shflx, lhflx, _ = land_interface_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
             T_surface, q_sfc, rho,
@@ -172,7 +174,6 @@ def compute_simple_seb_fluxes(
             scheme=land_config.bulk_scheme,
             n_iter=land_config.bulk_n_iter,
             L_latent=L_eff,
-            max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -183,11 +184,12 @@ def compute_simple_seb_fluxes(
             L_latent=L_eff,
         )
 
-    # Cold-start condensation floor (issue #730): bound the spurious (negative)
-    # condensation shock BEFORE it enters G_soil / the returned demand; evaporation
-    # (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
-    if LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx = jnp.maximum(lhflx, LAND_CONDENSATION_FLOOR_W)
+    # Interface condensation floor (issue #730): bound the spurious (negative,
+    # positive-up) condensation shock BEFORE it enters G_soil / the returned
+    # demand; evaporation (positive lhflx) stays free.  Idempotent on the MOST
+    # branch above (which already applied it inside the shared interface entry
+    # point) and load-bearing on the constant-coefficient branch.
+    lhflx = apply_condensation_floor(lhflx)
 
     # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
     # Use the SAME effective snow mass as the iter-68 bulk-flux phase
@@ -235,13 +237,15 @@ def compute_simple_seb_fluxes(
         saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
     )
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
+        # Same shared interface entry point as the primary solve above, so the
+        # linearisation sees the SAME limits the flux itself obeys.
+        _, _, shflx_lin, lhflx_lin, _ = land_interface_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
             T_sfc_lin, q_sfc_lin, rho,
             z_ref=land_config.z_ref, z0_init=z0,
             scheme=land_config.bulk_scheme, n_iter=land_config.bulk_n_iter,
-            L_latent=L_eff, max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
+            L_latent=L_eff,
         )
     else:
         _, _, shflx_lin, lhflx_lin = simple_bulk_fluxes(
@@ -250,8 +254,7 @@ def compute_simple_seb_fluxes(
             T_sfc_lin, q_sfc_lin, rho, wind_speed,
             land_config.Cd_land, land_config.Ch_land, L_latent=L_eff,
         )
-    if LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx_lin = jnp.maximum(lhflx_lin, LAND_CONDENSATION_FLOOR_W)
+    lhflx_lin = apply_condensation_floor(lhflx_lin)
     _emis_b = jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape)
     lambda_lw = 4.0 * _emis_b * constants.sigma_sb * T_surface ** 3
     lambda_sh = jnp.maximum((shflx_lin - shflx) / _SURFACE_LIN_DT_K, 0.0)
