@@ -666,8 +666,12 @@ def _format_drs_time_range(
     )
 
 
-def _realm_for_table(table_id: str) -> str:
-    """Return CMIP6 realm CV value for a CMOR table."""
+def table_realm(table_id: str) -> str:
+    """Return the CMIP6 ``realm`` CV value for a CMOR table.
+
+    Public accessor for ``_TABLE_REALM`` so callers (and tests) do not
+    import the private mapping across modules.
+    """
     return _TABLE_REALM.get(table_id, "atmos")
 
 
@@ -969,7 +973,7 @@ class CFWriter:
             table_id=table_id,
             grid=self.grid,
         )
-        attrs["realm"] = _realm_for_table(table_id)
+        attrs["realm"] = table_realm(table_id)
         # ``frequency`` comes from the TABLE ENTRY, not from the writer's
         # own ``freq``.  One CFWriter serves several tables (the AMIP
         # driver constructs it with freq="mon" and then writes the ``day``

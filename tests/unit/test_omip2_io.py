@@ -356,8 +356,8 @@ class TestCMORTablesOMIP2:
         assert not missing, f"SImon missing vars: {missing}"
 
     def test_simon_realm_is_seaice(self):
-        from legoesm.io.cmor_output import _TABLE_REALM
-        assert _TABLE_REALM["SImon"] == "seaIce"
+        from legoesm.io.cmor_output import table_realm
+        assert table_realm("SImon") == "seaIce"
 
     def test_lookup_cmor_entry_finds_thetao(self):
         from legoesm.io.cmor_output import lookup_cmor_entry

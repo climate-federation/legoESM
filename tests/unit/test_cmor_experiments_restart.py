@@ -1152,12 +1152,12 @@ class TestCMIP6Compliance(unittest.TestCase):
         self.assertGreaterEqual(float(da.values.min()), -90.0)
         self.assertLessEqual(float(da.values.max()), 90.0)
 
-    def test_realm_for_table(self):
-        from legoesm.io.cmor_output import _realm_for_table
-        self.assertEqual(_realm_for_table("Amon"), "atmos")
-        self.assertEqual(_realm_for_table("Lmon"), "land")
-        self.assertEqual(_realm_for_table("Omon"), "ocean")
-        self.assertEqual(_realm_for_table("Aday"), "atmos")
+    def test_table_realm(self):
+        from legoesm.io.cmor_output import table_realm
+        self.assertEqual(table_realm("Amon"), "atmos")
+        self.assertEqual(table_realm("Lmon"), "land")
+        self.assertEqual(table_realm("Omon"), "ocean")
+        self.assertEqual(table_realm("Aday"), "atmos")
 
     def test_written_file_has_cmip6_required_globals(self):
         try:
