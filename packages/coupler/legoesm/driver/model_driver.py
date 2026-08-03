@@ -6577,7 +6577,11 @@ class ModelDriver:
             # snapshot here; it predates this set but was omitted from it).
             _diag.cmip_snapshot_vars = {
                 "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts",
-                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs"}
+                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs",
+                # Near-surface state snapshots (lowest model level) — same
+                # instantaneous end-of-interval sampling as their 3-D
+                # parents hus/ua/va, so they carry the same disclosure.
+                "huss", "uas", "vas", "sfcWind"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming

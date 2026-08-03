@@ -1287,3 +1287,217 @@ class TestDriftingCadenceHonesty:
         dc.cmip_snapshot_phase_frac = self._phase_frac(
             0.0, 2.5, 10, 8, 21600.0)
         assert "12:00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]
+
+
+# ===========================================================================
+# CMIP6 Amon gap closure: rtmt + the near-surface set (huss/uas/vas/sfcWind)
+# ===========================================================================
+
+class TestRtmt:
+    """``rtmt`` = net DOWNWARD radiative flux at the top of the model.
+
+    The CMIP6 table declares ``positive="down"``, so with rsdt positive
+    down and rsut/rlut positive up the only correct combination is
+    ``rsdt - rsut - rlut``.  A sign slip here is invisible in a
+    presence-only check: with the FLUXES values it would still produce a
+    plausible-looking O(1-100) W/m^2 number.
+    """
+
+    def test_rtmt_is_rsdt_minus_rsut_minus_rlut(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rtmt" in out
+        expect = FLUXES["rsdt"] - FLUXES["rsut"] - FLUXES["rlut"]
+        assert expect == pytest.approx(3.0)          # 340 - 99 - 238
+        np.testing.assert_allclose(
+            out["field_2d_rtmt"], expect, rtol=1e-9)
+
+    def test_positive_attribute_is_down(self):
+        """The table's ``positive`` is the contract the sign walk must
+        match — assert it rather than trusting the comment."""
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("rtmt")
+        assert table == "Amon"
+        assert entry["positive"] == "down"
+        assert entry["units"] == "W m-2"
+
+    def test_sign_responds_to_each_term(self, mesh):
+        """Perturb ONE term at a time and check rtmt moves by exactly the
+        signed amount — catches a swapped rsut/rlut or a dropped minus."""
+        base = FLUXES["rsdt"] - FLUXES["rsut"] - FLUXES["rlut"]
+        for term, sign in (("rsdt", +1.0), ("rsut", -1.0), ("rlut", -1.0)):
+            dc, sigma_full = _make_collector(mesh)
+            f = _base_fields(mesh, sigma_full)
+            n = f["p_s"].shape[0]
+            fluxes = dict(FLUXES)
+            fluxes[term] = fluxes[term] + 10.0
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f,
+                **{k: np.full(n, v) for k, v in fluxes.items()})
+            out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+            got = float(np.mean(out["field_2d_rtmt"]))
+            assert got == pytest.approx(base + sign * 10.0, rel=1e-9), term
+
+    @pytest.mark.parametrize("missing", ["rsdt", "rsut", "rlut"])
+    def test_absent_term_skips_rtmt_never_zeroes_it(self, mesh, missing):
+        """A zero rtmt would read as exact radiative equilibrium."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        fluxes = {k: np.full(n, v) for k, v in FLUXES.items()
+                  if k != missing}
+        dc.feed_cmip_accumulators_native(day=15.0, **f, **fluxes)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rtmt" not in out
+
+    def test_rtmt_is_an_interval_mean(self):
+        """It is a linear combination of the interval-mean rsdt/rsut/rlut,
+        so it must ride the _FLUX_2D midpoint bin with them."""
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"rtmt"' in flux_block
+
+
+# Near-surface probe values: a wind that REVERSES between the two samples,
+# so the monthly mean of uas is 0 while the mean SPEED is 12 m/s.  That is
+# the discriminating case for sfcWind.
+NEAR_SFC_Q = 0.012          # kg/kg at the lowest model level
+
+
+class TestNearSurfaceSet:
+    def _feed(self, dc, mesh, sigma_full, day, u, v, q=NEAR_SFC_Q):
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        nlev = f["T"].shape[1]
+        # Lowest model level is index -1; put a DIFFERENT value aloft so a
+        # wrong level index is caught rather than silently passing.
+        def _col(surface_value, aloft):
+            col = np.full((n, nlev), aloft, dtype=np.float64)
+            col[:, -1] = surface_value
+            return col
+        return dc.feed_cmip_accumulators_native(
+            day=day, **f,
+            q_v=_col(q, 0.5 * q),
+            u_east=_col(u, 3.0 * u if u else 7.0),
+            v_north=_col(v, 3.0 * v if v else 7.0))
+
+    def test_fields_reach_monthly_accumulator_from_lowest_level(
+            self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0, u=12.0, v=0.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f"field_2d_{name}" in out, name
+        # Uniform field -> IDW (partition of unity) regrid is EXACT.
+        np.testing.assert_allclose(
+            out["field_2d_huss"], NEAR_SFC_Q, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_uas"], 12.0, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_vas"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(out["field_2d_sfcWind"], 12.0, rtol=1e-9)
+
+    def test_sfcwind_is_the_mean_speed_not_the_speed_of_the_mean(
+            self, mesh):
+        """THE classic error on this variable.  Two samples with opposite
+        zonal wind: mean(uas) = 0 but mean(|V|) = 12 m/s.  A writer that
+        formed sqrt(mean(uas)^2 + mean(vas)^2) would publish 0."""
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 10.0, u=+12.0, v=0.0)
+        self._feed(dc, mesh, sigma_full, 20.0, u=-12.0, v=0.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        uas = float(np.mean(out["field_2d_uas"]))
+        wind = float(np.mean(out["field_2d_sfcWind"]))
+        assert uas == pytest.approx(0.0, abs=1e-9)
+        assert wind == pytest.approx(12.0, rel=1e-9), (
+            "sfcWind collapsed toward the speed of the MEAN wind")
+
+    def test_speed_uses_both_components(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0, u=3.0, v=4.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(
+            out["field_2d_sfcWind"], 5.0, rtol=1e-9)
+
+    def test_absent_inputs_are_skipped_never_zeroed(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        dc.feed_cmip_accumulators_native(day=15.0, **f)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f"field_2d_{name}" not in out, name
+
+    def test_variables_are_in_the_amon_table_with_reference_heights(self):
+        from legoesm.io.cmor_output import (
+            _VAR_REFERENCE_HEIGHT, lookup_cmor_entry,
+        )
+        expect = {"huss": ("1", 2.0), "uas": ("m s-1", 10.0),
+                  "vas": ("m s-1", 10.0), "sfcWind": ("m s-1", 10.0)}
+        for name, (units, height) in expect.items():
+            table, entry = lookup_cmor_entry(name)
+            assert table == "Amon", name
+            assert entry["units"] == units, name
+            assert _VAR_REFERENCE_HEIGHT[name] == height, name
+
+    def test_driver_marks_them_as_snapshots(self):
+        """They are instantaneous end-of-interval samples like hus/ua/va,
+        so the lean MPAS driver must disclose that on the written file."""
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._run_mpas)
+        block = src.split("cmip_snapshot_vars = {")[1].split("}")[0]
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f'"{name}"' in block, name
+
+
+class TestNewAmonVarsReachTheWriter:
+    """End-to-end through the REAL writer: feed -> accumulator -> NetCDF.
+    Presence alone is not enough — units and magnitudes are asserted."""
+
+    def test_files_carry_table_units_and_plausible_values(
+            self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        nlev = f["T"].shape[1]
+        q = np.full((n, nlev), 0.004)
+        q[:, -1] = 0.012
+        u = np.full((n, nlev), 20.0)
+        u[:, -1] = 6.0
+        v = np.full((n, nlev), 0.0)
+        v[:, -1] = 8.0
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=q, u_east=u, v_north=v,
+            **{k: np.full(n, val) for k, val in FLUXES.items()})
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        expect = {
+            "rtmt": ("W m-2", 3.0),                    # 340 - 99 - 238
+            "huss": ("1", 0.012),
+            "uas": ("m s-1", 6.0),
+            "vas": ("m s-1", 8.0),
+            "sfcWind": ("m s-1", 10.0),                # hypot(6, 8)
+        }
+        for name, (units, value) in expect.items():
+            paths = sorted(tmp_path.rglob(f"{name}_Amon_*.nc"))
+            assert paths, f"{name} was never written by the CMOR writer"
+            with xr.open_dataset(paths[0]) as ds:
+                assert ds[name].attrs["units"] == units, name
+                got = float(np.nanmean(ds[name].values))
+                assert got == pytest.approx(value, rel=1e-5), name
+        # ``positive`` is a real physical claim on rtmt — check the file.
+        with xr.open_dataset(
+                sorted(tmp_path.rglob("rtmt_Amon_*.nc"))[0]) as ds:
+            assert ds["rtmt"].attrs["positive"] == "down"
