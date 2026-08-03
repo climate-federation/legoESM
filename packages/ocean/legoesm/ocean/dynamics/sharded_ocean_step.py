@@ -11,12 +11,13 @@ cubed-sphere ``parallel.sharded_dynamics.make_sharded_step``.
 
 Architecture (the two non-trivial pieces — see ``omip-multinode-spmd-scope``):
 
-* GRID = **replicated-stacked, indexed** (Structure A). The ``N`` band
-  geometries are built host-side (``build_band_grids``), their ARRAY fields are
-  ``jnp.stack``-ed into a replicated pytree, and the in-``shard_map`` body picks
-  its own band by ``jax.lax.axis_index("lat")``. The grid is 2-D/small so
-  replication is cheap, and this AVOIDS staggered-sharding the grid (the v-row
-  is ``n_lat+1``, coprime with ``n_lat`` for ``N>1``). The
+* GRID = **band-stacked, P("lat")-SHARDED** (Structure A, sharded since
+  #1370-iii). The ``N`` band geometries are built host-side
+  (``build_band_grids``), their ARRAY fields are ``jnp.stack``-ed over a
+  leading band axis, sharded ``P("lat")`` so each device holds ONLY its own
+  band's slab, and the in-``shard_map`` body reads its local slab at
+  ``[0]``. This AVOIDS staggered-sharding the grid itself (the v-row is
+  ``n_lat+1``, coprime with ``n_lat`` for ``N>1``). The
   ``LatLonCGridGeometry`` SCALAR fields (``n_lat``, ``n_lon``, ``radius``,
   ``dlon``, ``dlat``, ``fold``) stay STATIC python values — they gate trace-time
   ``if``\ s and ``jnp.zeros((n_lat, ...))`` shape builds, so a traced ``n_lat``
@@ -217,6 +218,71 @@ def _content_hash48(arr) -> float:
     a = np.ascontiguousarray(arr)
     h = hashlib.blake2b(a.tobytes(), digest_size=6)
     return float(int.from_bytes(h.digest(), "big"))
+
+def geom_band_fingerprint(host, n_bands):
+    """Low-memory cross-process fingerprint of a band-STACKED geometry field.
+
+    ``host`` has leading axis ``n_bands`` (the per-device band stack). The
+    fingerprint is PER BAND (codex 2026-08-03 r14: whole-array moments let a
+    band-local drift hide in the global sum once each process's own bytes
+    become live computation inputs):
+
+    * exact dtypes (int/bool/uint — masks, index tables): one positional
+      48-bit byte digest per band (a permutation or two-cell flip within a
+      band cannot cancel);
+    * float dtypes: per-band ``[sum, sum_of_squares, absmax]`` of the finite
+      entries in float64, plus per-band non-finite counts in ``struct``.
+      DOCUMENTED RESIDUALS: a within-band float change preserving all
+      three moments to rtol is not detected, and non-finite entries that
+      change POSITION or kind (nan vs inf) with an unchanged per-band
+      count also pass; band grids are analytic in lat/lon, so any real
+      inconsistency moves the moments.
+
+    Returns ``(struct, vals, is_exact)`` as float64 arrays safe for
+    ``process_allgather``.
+    """
+    import numpy as _np
+
+    host = _np.asarray(host)
+    assert host.shape[0] == n_bands, (host.shape, n_bands)
+    is_exact = host.dtype.kind in "biu"
+    struct = [float(host.ndim), *map(float, host.shape),
+              float(_np.dtype(host.dtype).num)]
+    if is_exact:
+        vals = _np.array([_content_hash48(host[b]) for b in range(n_bands)],
+                         dtype=_np.float64)
+    else:
+        per_band = []
+        for b in range(n_bands):
+            flat = host[b].ravel()
+            finite = flat[_np.isfinite(flat)]
+            f64 = finite.astype(_np.float64)
+            struct.append(float(flat.size - finite.size))
+            per_band.extend([
+                float(f64.sum()) if f64.size else 0.0,
+                float((f64 * f64).sum()) if f64.size else 0.0,
+                float(_np.abs(f64).max()) if f64.size else 0.0,
+            ])
+        vals = _np.array(per_band, dtype=_np.float64)
+    return _np.array(struct, dtype=_np.float64), vals, is_exact
+
+
+def band_fingerprints_agree(g_struct, g_vals, is_exact, rtol=1e-5):
+    """True iff every process's fingerprint matches process 0's.
+
+    ``g_struct``/``g_vals`` are the ``process_allgather``-ed outputs of
+    :func:`geom_band_fingerprint` (leading axis = process). Structure and
+    exact-dtype digests compare EXACTLY; float moments to ``rtol``.
+    """
+    import numpy as _np
+
+    struct_ok = bool(_np.all(g_struct == g_struct[0]))
+    if is_exact:
+        vals_ok = bool(_np.all(g_vals == g_vals[0]))
+    else:
+        vals_ok = bool(_np.allclose(g_vals, g_vals[0], rtol=rtol, atol=0.0))
+    return struct_ok and vals_ok
+
 
 
 def _schema_fingerprint(names, n_dev) -> np.ndarray:
@@ -501,9 +567,9 @@ def make_sharded_ocean_step(model, mesh):
     Notes
     -----
     Build the ``N`` band geometries + band vertex masks host-side, stack their
-    ARRAY fields into a replicated pytree, and index by
-    ``jax.lax.axis_index("lat")`` in the ``shard_map`` body (the geometry SCALAR
-    fields stay static — see the module docstring).  ``dt`` is a TRACED,
+    ARRAY fields over a leading band axis SHARDED ``P("lat")`` (each device
+    holds only its own slab; the ``shard_map`` body reads it at ``[0]``; the
+    geometry SCALAR fields stay static — see the module docstring).  ``dt`` is a TRACED,
     replicated operand and the jitted ``shard_map`` is built once and cached
     (a per-call rebuild re-traced the whole ocean step every call — see the
     ``_cache`` note below).  ``check_vma=False`` (the JAX >= 0.8
@@ -538,7 +604,7 @@ def make_sharded_ocean_step(model, mesh):
     # (unmasked) seam v-row refuses loudly there instead of silently
     # reconstructing zeros here.
 
-    # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
+    # --- host-side band geometries + vertex masks (band-stacked, P("lat")-sharded) ---
     band_grids = build_band_grids(model.grid, n_dev)
     band_vmasks = _build_band_vertex_masks(model, n_dev)
     template = band_grids[0]           # static-scalar source (uniform bands)
@@ -551,18 +617,20 @@ def make_sharded_ocean_step(model, mesh):
     # per-device residency left after the host-side-build fix (probe
     # 26524423). The leading axis has length n_dev, so P("lat") divides it
     # exactly; the body indexes its local slab at [0]. Values are unchanged
-    # — same stack, different placement; the process-0 broadcast +
-    # divergence guard below runs on HOST values and is placement-blind.
+    # — same stack, different placement; the cross-process divergence
+    # guard below runs on HOST values and is placement-blind.
     rep = NamedSharding(mesh, P("lat"))
 
     def _replicated_put(arr, name):
-        # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
-        # value is bit-identical on every process. The band-geometry arrays
-        # are (re)computed per process and can differ in their last ULPs
-        # (per-process XLA autotuning on device-derived grid fields), which
-        # trips that assert at larger sizes (job 26450848: LL576 np=4,
-        # area-scale fields differing at 1e-7 relative). Broadcast process
-        # 0's bytes so every controller puts the SAME replicated value.
+        # (Name kept for history; since 2026-08-03 this is a SHARDED stack
+        # put.) The band-geometry arrays are (re)computed per process and
+        # can differ in their last ULPs (per-process XLA autotuning on
+        # device-derived grid fields) — the fully-replicated-put era
+        # broadcast process 0's bytes to sidestep the P() bit-identity
+        # assert (job 26450848). With the #1370-iii P("lat") sharding each
+        # process's devices consume ONLY its own band rows, so the
+        # broadcast became both unnecessary and, at nd>=96, fatal (its
+        # psum program is nd x the stack — see the note at the put below).
         # GUARD (codex round-3): process 0 must not silently mask REAL
         # cross-process divergence. Compare an allgathered fingerprint:
         # structural entries exactly; value entries EXACTLY for integer/bool
@@ -581,49 +649,41 @@ def make_sharded_ocean_step(model, mesh):
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
 
-            flat = host.ravel()
-            # Integer/bool arrays (masks, index tables) are exact data, not
-            # autotuned arithmetic: fingerprint their BYTES so a positional
-            # difference is caught. Moment-only compares are blind to a
-            # permutation — a bool mask's (sum, sumsq, absmax) is identical
-            # for every arrangement with the same true-count (codex round-5).
-            # A mask that genuinely differs across processes means different
-            # wet domains = different physics: refusing is the correct
-            # outcome, not a false alarm.
-            is_exact = host.dtype.kind in "biu"
-            struct = np.array(
-                [float(host.ndim), *map(float, host.shape),
-                 float(np.dtype(host.dtype).num)], dtype=np.float64)
-            if is_exact:
-                vals = np.array([_content_hash48(host)], dtype=np.float64)
-            else:
-                finite = flat[np.isfinite(flat)]
-                f64 = finite.astype(np.float64)
-                struct = np.concatenate(
-                    [struct, [float(flat.size - finite.size)]])
-                vals = np.array(
-                    [float(f64.sum()) if f64.size else 0.0,
-                     float((f64 * f64).sum()) if f64.size else 0.0,
-                     float(np.abs(f64).max()) if f64.size else 0.0],
-                    dtype=np.float64)
+            # PER-BAND fingerprints (module-level, unit-tested): exact
+            # dtypes hash positionally per band; floats compare per-band
+            # moments to rtol 1e-5 — bounds each band's drift instead of
+            # letting it hide in a whole-array sum, since each process's
+            # own bytes are now the live inputs for the bands it owns
+            # (codex r14). A mask that genuinely differs across processes
+            # means different wet domains = different physics: refusing is
+            # correct, not a false alarm.
+            struct, vals, is_exact = geom_band_fingerprint(
+                host, host.shape[0])
             g_struct = multihost_utils.process_allgather(struct)
             g_vals = multihost_utils.process_allgather(vals)
-            struct_ok = bool(np.all(g_struct == g_struct[0]))
-            if is_exact:
-                vals_ok = bool(np.all(g_vals == g_vals[0]))
-            else:
-                vals_ok = bool(np.allclose(g_vals, g_vals[0],
-                                           rtol=1e-5, atol=0.0))
-            if not (struct_ok and vals_ok):
+            if not band_fingerprints_agree(g_struct, g_vals, is_exact):
                 raise RuntimeError(
                     f"make_sharded_ocean_step: band-geometry field {name!r} "
-                    f"DIVERGES across processes (struct_ok={struct_ok}, "
-                    f"vals_ok={vals_ok}, exact_dtype={is_exact}, "
+                    f"DIVERGES across processes (exact_dtype={is_exact}, "
                     f"gathered={g_vals.tolist()}) — a real config/grid "
                     f"inconsistency, not autotune noise; refusing to "
-                    f"broadcast process 0 over it.")
-            host = multihost_utils.broadcast_one_to_all(host)
-        return jax.device_put(jnp.asarray(host), rep)
+                    f"shard it.")
+            # NO broadcast_one_to_all here (removed 2026-08-03): its psum
+            # program is [n_processes, stack] in / P() fully-replicated out,
+            # so its logical arg bytes are nd x the global stack — 82.4 GB
+            # at nd=96 and 109.6 GB at nd=128 for one 3-D field, the
+            # near-linear-in-nd wall that killed oc @96/@128 (jobs
+            # 26642771/26636762) while @64 sat just under XLA's 63.8 GB
+            # limit.  The target sharding is P("lat"): each process's
+            # devices consume ONLY its own band rows, so cross-process
+            # byte-identity of non-owned rows is irrelevant, and REAL
+            # divergence is already refused by the fingerprint gate above.
+            # make_array_from_callback hands each process exactly its
+            # addressable slabs — the same #1100 pattern as the state
+            # build — with no global-sized collective program at all.
+        host_np = np.asarray(host)
+        return jax.make_array_from_callback(
+            host_np.shape, rep, lambda idx: host_np[idx])
 
     if jax.process_count() > 1:
         # Schema gate FIRST (one fixed-shape collective every process
