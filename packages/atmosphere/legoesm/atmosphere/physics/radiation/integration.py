@@ -460,7 +460,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa_clearsky=None,
                                  lw_up_toa_clearsky=None,
                                  sw_down_sfc_clearsky=None,
-                                 lw_down_sfc_clearsky=None):
+                                 lw_down_sfc_clearsky=None,
+                                 sw_up_sfc_clearsky=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -556,6 +557,14 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                         "sw_down_sfc_clearsky_rad"),
         lw_down_sfc_clearsky=_toa_field(lw_down_sfc_clearsky,
                                         "lw_down_sfc_clearsky_rad"),
+        # Clear-sky SURFACE UPWELLING shortwave (CMOR rsuscs, which the
+        # table declares positive="up").  Orientation matches the all-sky
+        # rsus the collector derives (down - net): both are radiation
+        # LEAVING the surface, and this one comes straight from the
+        # solver's ``sw_flux_up[:, -1]``, so no sign flip here or
+        # downstream.
+        sw_up_sfc_clearsky=_toa_field(sw_up_sfc_clearsky,
+                                      "sw_up_sfc_clearsky_rad"),
     )
 
 
@@ -1349,6 +1358,7 @@ def _make_hydrostatic_radiation(
         _lw_up_toa_clr = None
         _sw_down_sfc_clr = None
         _lw_down_sfc_clr = None
+        _sw_up_sfc_clr = None
         if _clear_sky_second_pass:
             _rad_out_clr = _call_radiation_backend(
                 radiation_config=_rad_cfg_clearsky,
@@ -1384,6 +1394,11 @@ def _make_hydrostatic_radiation(
             _lw_up_toa_clr = _rad_out_clr.lw_flux_up[:, 0]
             _sw_down_sfc_clr = _rad_out_clr.sw_flux_down[:, -1]
             _lw_down_sfc_clr = _rad_out_clr.lw_flux_down[:, -1]
+            # Surface UPWELLING SW from the SAME cloud-free solve (CMOR
+            # rsuscs, positive UP): the solver's own ``sw_flux_up`` at the
+            # LAST half level, i.e. the albedo-reflected clear-sky
+            # downwelling.  Free -- the second pass is already paid for.
+            _sw_up_sfc_clr = _rad_out_clr.sw_flux_up[:, -1]
         elif _clear_sky_diag:
             # No cloud is radiatively active (gray, or cloud_scheme='none'),
             # so the all-sky solve already IS the clear-sky solve: alias it
@@ -1392,6 +1407,7 @@ def _make_hydrostatic_radiation(
             _lw_up_toa_clr = rad_out.lw_flux_up[:, 0]
             _sw_down_sfc_clr = rad_out.sw_flux_down[:, -1]
             _lw_down_sfc_clr = rad_out.lw_flux_down[:, -1]
+            _sw_up_sfc_clr = rad_out.sw_flux_up[:, -1]
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
         # Surface net radiative fluxes [W/m^2, +into surface], carried so the
@@ -1424,7 +1440,8 @@ def _make_hydrostatic_radiation(
             sw_up_toa_clearsky=_sw_up_toa_clr,
             lw_up_toa_clearsky=_lw_up_toa_clr,
             sw_down_sfc_clearsky=_sw_down_sfc_clr,
-            lw_down_sfc_clearsky=_lw_down_sfc_clr)
+            lw_down_sfc_clearsky=_lw_down_sfc_clr,
+            sw_up_sfc_clearsky=_sw_up_sfc_clr)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

@@ -202,6 +202,16 @@ class HydrostaticTendencies(NamedTuple):
     lw_up_toa_clearsky: Field | None = None
     sw_down_sfc_clearsky: Field | None = None
     lw_down_sfc_clearsky: Field | None = None
+    # Clear-sky SURFACE UPWELLING shortwave [W/m^2, positive UP] for CMOR
+    # ``rsuscs`` (the table declares positive="up") — the SAME cloud-free
+    # solve as the four above, read at the LAST half level, i.e. the
+    # albedo-reflected clear-sky downwelling.  Same UPWARD orientation as
+    # ``sw_up_toa``/``sw_up_toa_clearsky``, opposite to the +DOWN
+    # ``sw_down_sfc_clearsky`` it pairs with; nothing flips it downstream.
+    # ``None`` under the same conditions as the quartet (clear-sky
+    # diagnostic off, non-radiation tendency, held-radiation sub-step);
+    # trailing optional, so every existing constructor is unaffected.
+    sw_up_sfc_clearsky: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

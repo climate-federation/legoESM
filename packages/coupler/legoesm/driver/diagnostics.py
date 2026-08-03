@@ -1459,6 +1459,7 @@ class DiagnosticCollector:
         rlutcs=None,
         rsdscs=None,
         rldscs=None,
+        rsuscs=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1482,9 +1483,9 @@ class DiagnosticCollector:
           TOA/surface flux block (``rlut``/``rsut``/``rsdt``/``hfss``/
           ``hfls``/``evspsbl``/``rsds``/``rlds`` and the derived
           ``rsus``/``rlus``), the clear-sky quartet
-          ``rsutcs``/``rlutcs`` (TOA outgoing) and
-          ``rsdscs``/``rldscs`` (surface downwelling) — present only when
-          the clear-sky diagnostic is enabled, ``ts`` (surface skin temperature when the
+          ``rsutcs``/``rlutcs`` (TOA outgoing), ``rsdscs``/``rldscs``
+          (surface downwelling) and ``rsuscs`` (surface UPwelling SW) —
+          present only when the clear-sky diagnostic is enabled, ``ts`` (surface skin temperature when the
           driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
           (surface wind stress, CMOR downward-positive).  Also the derived
           ``rtmt`` (= ``rsdt - rsut - rlut``, CMOR positive DOWN) and the
@@ -1604,7 +1605,7 @@ class DiagnosticCollector:
                     # Clear-sky TOA outgoing: interval MEANS from the same
                     # per-step accumulator as their all-sky partners
                     # rsut/rlut, so they share the midpoint calendar bin.
-                    "rsutcs", "rlutcs", "rsdscs", "rldscs",
+                    "rsutcs", "rlutcs", "rsdscs", "rldscs", "rsuscs",
                     # rtmt is an exact linear combination of the interval-mean
                     # rsdt/rsut/rlut, so it IS an interval mean and must share
                     # their midpoint bin (an endpoint bin would shift it one
@@ -1676,6 +1677,14 @@ class DiagnosticCollector:
         # solve as the TOA pair.  No conversion or sign flip here.
         rsdscs_np = None if rsdscs is None else np.asarray(rsdscs, dtype=_f64)
         rldscs_np = None if rldscs is None else np.asarray(rldscs, dtype=_f64)
+        # Clear-sky SURFACE UPWELLING shortwave (CMIP6 rsuscs): positive UP
+        # -- the table's own ``positive="up"``, and the OPPOSITE orientation
+        # to the rsdscs it pairs with.  The producer hands over the same
+        # cloud-free solve's ``sw_flux_up[:, -1]`` (the albedo-reflected
+        # clear-sky downwelling), already positive up, so no conversion or
+        # sign flip here.  Consistency check the pair satisfies by
+        # construction: 0 <= rsuscs <= rsdscs (surface albedo in [0, 1]).
+        rsuscs_np = None if rsuscs is None else np.asarray(rsuscs, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1706,6 +1715,7 @@ class DiagnosticCollector:
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsdscs", rsdscs_np, (_ncol,)),
             ("rldscs", rldscs_np, (_ncol,)),
+            ("rsuscs", rsuscs_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1835,6 +1845,10 @@ class DiagnosticCollector:
                 # zeroed.
                 ('rsdscs', rsdscs_np),
                 ('rldscs', rldscs_np),
+                # Clear-sky SURFACE UPWELLING SW (positive UP, see the
+                # coercion block above) -- the clear-sky partner of the
+                # derived all-sky rsus.  Skipped when absent, never zeroed.
+                ('rsuscs', rsuscs_np),
                 ('rsdt', rsdt_np),
                 # Net downward radiative flux at the top of the model
                 # (rsdt - rsut - rlut; sign walk at the derivation above).

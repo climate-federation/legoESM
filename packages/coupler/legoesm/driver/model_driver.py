@@ -315,8 +315,8 @@ class _MPASSfcFluxAccum:
     Covers the flux slots of the ``_sfc_diag`` contract (0 sw_net_sfc,
     1 lw_net_sfc, 2 precip, 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls,
     8 sw_down_sfc, 9 lw_down_sfc, 10 tau_x_sfc, 11 tau_y_sfc,
-    12 rsutcs, 13 rlutcs, 14 rsdscs, 15 rldscs) — the strongly diurnal
-    flux fields.  State-derived fields (tas/ta/ua/...)
+    12 rsutcs, 13 rlutcs, 14 rsdscs, 15 rldscs, 16 rsuscs) — the strongly
+    diurnal flux fields.  State-derived fields (tas/ta/ua/...)
     stay snapshots; the collector labels them honestly via
     ``cmip_snapshot_vars``.
 
@@ -351,7 +351,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -6206,6 +6206,14 @@ class ModelDriver:
             rlutcs = _sfc_slot(13)
             rsdscs = _sfc_slot(14)
             rldscs = _sfc_slot(15)
+            # Slot 16: clear-sky SURFACE UPWELLING SW (CMOR rsuscs).  The
+            # table declares positive="up" and the producer hands over the
+            # cloud-free solve's ``sw_flux_up[:, -1]``, already positive
+            # UP -- so, like slots 12-15, NO sign flip here.  Note this is
+            # the OPPOSITE orientation to its slot-14 partner rsdscs
+            # (+DOWN); the pair is a down/up pair, not two same-signed
+            # fluxes.  None unless the clear-sky diagnostic is on.
+            rsuscs = _sfc_slot(16)
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -6319,6 +6327,7 @@ class ModelDriver:
                 rlutcs=rlutcs,
                 rsdscs=rsdscs,
                 rldscs=rldscs,
+                rsuscs=rsuscs,
                 flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard

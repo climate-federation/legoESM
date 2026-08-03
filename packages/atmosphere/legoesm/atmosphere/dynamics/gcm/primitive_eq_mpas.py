@@ -1103,13 +1103,20 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # rsdscs/rldscs.  No flip anywhere downstream.  All four are None
             # unless RadiationConfig.clear_sky_diag is on, and None on
             # held-radiation sub-steps (held slot-wise like slots 3/4/5).
+            # ...appended (slot 16): clear-sky SURFACE UPWELLING SW
+            # [W/m^2, positive UP] for CMOR rsuscs — the OPPOSITE
+            # orientation to its slot-14 partner rsdscs (+DOWN), read off
+            # the same cloud-free solve's ``sw_flux_up[:, -1]``.  No flip
+            # anywhere downstream.  None under the same conditions as
+            # slots 12-15.
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
                 "sw_down_sfc", "lw_down_sfc",
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky"))
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                "sw_up_sfc_clearsky"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

@@ -283,7 +283,8 @@ def _tend_with_extras():
         sw_up_toa_clearsky=_f("sw_up_toa_clr", 13.0),
         lw_up_toa_clearsky=_f("lw_up_toa_clr", 14.0),
         sw_down_sfc_clearsky=_f("sw_down_sfc_clr", 15.0),
-        lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0))
+        lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0),
+        sw_up_sfc_clearsky=_f("sw_up_sfc_clr", 17.0))
 
 
 # Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
@@ -293,18 +294,19 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "sw_down_sfc", "lw_down_sfc",
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                "sw_up_sfc_clearsky")
 
 
 class TestSfcDiagContract:
-    """Lock the 16-slot sfc_diag tuple contract shared by BOTH producers
+    """Lock the 17-slot sfc_diag tuple contract shared by BOTH producers
     (serial + MPI-voronoi) and the driver consumer's slot mapping."""
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 16
+        assert len(sfc_diag) == 17
         # Consumer (_feed_mpas_cmip_accumulators): slot 0->sw_net (rsus
         # derivation), 1->lw_net (rlus), 3->rlut, 4->rsut, 5->rsdt,
         # 6->hfss, 7->hfls, 8->rsds, 9->rlds (+ _marshal_land_forcing),
@@ -327,6 +329,9 @@ class TestSfcDiagContract:
         assert sfc_diag[13].name == "lw_up_toa_clr"    # rlutcs
         assert sfc_diag[14].name == "sw_down_sfc_clr"  # rsdscs
         assert sfc_diag[15].name == "lw_down_sfc_clr"  # rldscs
+        # Slot 16 is surface UPWELLING (+up) — the opposite orientation to
+        # its slot-14 partner rsdscs (+down).  Still no sign flip.
+        assert sfc_diag[16].name == "sw_up_sfc_clr"     # rsuscs
 
     def test_both_producers_extract_the_same_extra_order(self):
         """The serial and MPI producers must list the SAME extras keys in
@@ -1679,3 +1684,161 @@ class TestAmonDailyExtremes:
                 assert ds[name].attrs["units"] == "K"
                 got = float(np.nanmean(ds[name].values))
                 assert got == pytest.approx(value, rel=1e-6), name
+
+
+# ===========================================================================
+# Amon rsuscs — clear-sky SURFACE UPWELLING shortwave (sfc_diag slot 16)
+# ===========================================================================
+
+class TestRsuscs:
+    """The clear-sky quartet's missing fifth member.
+
+    Sign convention, walked once here and asserted below:
+      rsdscs [W/m^2, +DOWN]  surface downwelling, clear sky   (slot 14)
+      rsuscs [W/m^2, +UP]    surface upwelling,   clear sky   (slot 16)
+    They are a DOWN/UP pair, not two same-signed fluxes, and the table
+    declares ``positive="up"`` on rsuscs alone.
+    """
+
+    VALUE = 37.5        # ~0.15 albedo against the CLEARSKY rsdscs of 250
+
+    def test_reaches_the_monthly_accumulator_unflipped(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()},
+            rsuscs=np.full(n, self.VALUE))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rsuscs" in out
+        np.testing.assert_allclose(
+            out["field_2d_rsuscs"], self.VALUE, rtol=1e-9)
+        # Physical ordering the pair must satisfy: 0 <= rsuscs <= rsdscs
+        # (surface albedo in [0, 1]).  A sign flip breaks the left bound.
+        got = float(np.mean(out["field_2d_rsuscs"]))
+        assert 0.0 <= got <= float(np.mean(out["field_2d_rsdscs"]))
+
+    def test_table_declares_positive_up(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("rsuscs")
+        assert table == "Amon"
+        assert entry["positive"] == "up"
+        assert entry["units"] == "W m-2"
+        assert entry["standard_name"] == (
+            "surface_upwelling_shortwave_flux_in_air_assuming_clear_sky")
+
+    def test_is_an_interval_mean(self):
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"rsuscs"' in flux_block
+
+    def test_malformed_input_raises_and_commits_nothing(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="rsuscs"):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, rsuscs=np.zeros(n - 1))
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_absent_is_skipped_never_zeroed(self, mesh):
+        """A zero rsuscs would read as a perfectly black surface."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rsuscs" not in out
+
+    def test_accumulator_covers_slot_16(self):
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        assert 16 in _MPASSfcFluxAccum.SLOTS
+        acc = _MPASSfcFluxAccum()
+        for v in (10.0, 20.0, 60.0):
+            row = [None] * 17
+            row[16] = types.SimpleNamespace(data=np.full(4, v))
+            acc.add(tuple(row))
+        np.testing.assert_allclose(acc.mean(16), 30.0)
+
+    def test_driver_reads_slot_16_and_forwards_it(self):
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        assert "rsuscs = _sfc_slot(16)" in src
+        assert "rsuscs=rsuscs," in src
+
+    def test_radiation_packer_carries_it_with_none_default(self, mesh):
+        """The packer must default it to None (byte-identical when the
+        clear-sky diagnostic is off) and pass a supplied array through
+        unchanged."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _pack_hydrostatic_tendencies,
+        )
+        from legoesm.core.field import Field as _F
+        from legoesm.core.state import MPASHydrostaticState
+
+        n, nlev = int(mesh.nCells), NLEV
+        state = MPASHydrostaticState(
+            u=_F(data=np.zeros((int(mesh.nEdges), nlev)), name="u",
+                 dims=("edge", "lev"), units="m/s"),
+            T=_F(data=np.full((n, nlev), 250.0), name="T",
+                 dims=("cell", "lev"), units="K"),
+            p_s=_F(data=np.full(n, 1.0e5), name="p_s",
+                   dims=("cell",), units="Pa"),
+            phis=_F(data=np.zeros(n), name="phis",
+                    dims=("cell",), units="m2/s2"))
+        dT = np.zeros((n, nlev))
+        bare = _pack_hydrostatic_tendencies(dT, state, (n, nlev), (n,))
+        assert bare.sw_up_sfc_clearsky is None
+        packed = _pack_hydrostatic_tendencies(
+            dT, state, (n, nlev), (n,),
+            sw_up_sfc_clearsky=np.full(n, 42.0))
+        np.testing.assert_allclose(
+            np.asarray(packed.sw_up_sfc_clearsky.data), 42.0)
+
+    def test_producer_reads_the_surface_half_level_not_toa(self):
+        """rsuscs is ``sw_flux_up[:, -1]`` (SURFACE) — reading ``[:, 0]``
+        would silently publish rsutcs a second time under a surface name.
+
+        ``_make_hydrostatic_radiation`` is the factory that BUILDS the
+        physics_fn running on the MPAS lane, so its source is where the
+        clear-sky block actually lives; asserting against
+        ``make_radiation_physics`` (a dispatcher that only selects it)
+        would pass while proving nothing."""
+        import inspect
+        from legoesm.atmosphere.physics.radiation import integration
+        src = inspect.getsource(integration._make_hydrostatic_radiation)
+        assert "_sw_up_sfc_clr = _rad_out_clr.sw_flux_up[:, -1]" in src
+        assert "sw_up_sfc_clearsky=_sw_up_sfc_clr" in src
+
+    def test_end_to_end_through_the_real_writer(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()},
+            rsuscs=np.full(n, self.VALUE))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        paths = sorted(tmp_path.rglob("rsuscs_Amon_*.nc"))
+        assert paths, "rsuscs was never written by the CMOR writer"
+        with xr.open_dataset(paths[0]) as ds:
+            assert ds["rsuscs"].attrs["units"] == "W m-2"
+            assert ds["rsuscs"].attrs["positive"] == "up"
+            got = float(np.nanmean(ds["rsuscs"].values))
+            assert got == pytest.approx(self.VALUE, rel=1e-5)

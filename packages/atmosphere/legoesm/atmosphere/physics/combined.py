@@ -560,7 +560,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         # (None otherwise, so the first-non-None combine is
                         # a no-op).
                         "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                        "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+                        "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                        # Clear-sky SURFACE upwelling SW (CMOR rsuscs) —
+                        # same producer, same gate as the quartet above.
+                        "sw_up_sfc_clearsky")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete

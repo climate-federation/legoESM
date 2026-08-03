@@ -134,8 +134,14 @@ def test_tendency_carries_the_clear_sky_slots_last():
     """Trailing optionals only: an existing positional constructor must be
     unaffected."""
     from legoesm.core.state import HydrostaticTendencies
-    assert HydrostaticTendencies._fields[-4:] == CLEARSKY_FIELDS
-    for _k in CLEARSKY_FIELDS:
+    # The quartet, then the later-added clear-sky SURFACE upwelling SW
+    # (CMOR rsuscs, _sfc_diag slot 16).  It is kept OUT of
+    # ``CLEARSKY_FIELDS`` because that tuple drives the all-sky-partner
+    # assertions and rsuscs's partner (rsus) is DERIVED by the collector,
+    # not carried on the tendency.
+    assert HydrostaticTendencies._fields[-5:] == (
+        CLEARSKY_FIELDS + ("sw_up_sfc_clearsky",))
+    for _k in CLEARSKY_FIELDS + ("sw_up_sfc_clearsky",):
         assert HydrostaticTendencies._field_defaults[_k] is None, _k
 
 
