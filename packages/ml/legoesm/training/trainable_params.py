@@ -238,7 +238,8 @@ class TrainablePhysicsParams(eqx.Module):
         Emits ``{legacy_flat_name: value}``. A spec-collected parameter that has
         no flat ``build_segment_fn`` alias (``scheme_key`` set, no legacy name)
         cannot be injected this way — use :meth:`to_overrides` +
-        ``param_collector.apply_param_overrides`` instead. Such a parameter raises
+        ``legoesm.core.param_overrides.apply_param_overrides`` instead. Such a
+        parameter raises
         ``ValueError`` here rather than being silently dropped."""
         values = self.as_dict()
         scheme_qualified = [c.name for c in self.constraints if c.scheme_key]
@@ -246,7 +247,8 @@ class TrainablePhysicsParams(eqx.Module):
             raise ValueError(
                 "to_segment_kwargs() cannot inject scheme-qualified parameters "
                 f"{scheme_qualified}; use to_overrides() with "
-                "param_collector.apply_param_overrides(). Only legacy flat "
+                "legoesm.core.param_overrides.apply_param_overrides(). Only legacy "
+                "flat "
                 "parameters (no scheme_key) are routable as segment kwargs."
             )
         return values
@@ -254,7 +256,8 @@ class TrainablePhysicsParams(eqx.Module):
     def to_overrides(self) -> dict[str, dict[str, jax.Array]]:
         """Return ``{scheme_key: {config_field: constrained_value}}`` for the
         spec-collected parameters, ready for
-        ``param_collector.apply_param_overrides(physics_config, overrides)`` to
+        ``legoesm.core.param_overrides.apply_param_overrides(physics_config,
+        overrides)`` to
         splice into the owning ``*Config`` NamedTuples inside the loss. Legacy
         flat parameters (no ``scheme_key``) are skipped (they use
         :meth:`to_segment_kwargs`)."""

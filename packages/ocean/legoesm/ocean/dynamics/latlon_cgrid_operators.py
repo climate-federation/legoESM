@@ -3173,6 +3173,18 @@ def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
     return _ddz_centre(inv * bx, h_k), _ddz_centre(inv * by, h_k)
 
 
+def _roll_core_periodic(a: jnp.ndarray, shift: int) -> jnp.ndarray:
+    """Zonal periodic roll of a WRAPPED ``(..., n_lon+1)`` array.
+
+    The last column duplicates the first, so a plain ``jnp.roll`` over the
+    full array shifts the duplicate into the seam and gives column 0 itself
+    as its neighbour (#1418).  Roll the core columns ``0..n_lon-1``, then
+    re-attach the wrap column from the rolled core.
+    """
+    core = jnp.roll(a[:, :-1], shift, axis=1)
+    return jnp.concatenate([core, core[:, :1]], axis=1)
+
+
 def neumann_fill_vertex(
     f: jnp.ndarray,
     vtx_mask: jnp.ndarray,
@@ -3279,14 +3291,20 @@ def neumann_fill_vertex(
                 f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
                 m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
-        # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
-        # Column n_lon duplicates column 0, so rolling the full array
-        # along axis 1 is correct for the core columns and the wrap
-        # column picks up the right neighbour automatically.
-        f_w = jnp.roll(filled, 1, axis=1)
-        m_w = jnp.roll(m, 1, axis=1)
-        f_e = jnp.roll(filled, -1, axis=1)
-        m_e = jnp.roll(m, -1, axis=1)
+        # E/W neighbours: periodic over the CORE columns 0..n_lon-1 only,
+        # then the wrap column is re-attached.  Rolling the FULL wrapped
+        # (n_lat+1, n_lon+1) array is wrong (#1418, the same index reasoning
+        # #1382 fixed elsewhere): for A = [a_0 ... a_{n-1}, a_0],
+        # roll(A, 1)[:, 0] is the DUPLICATE a_0, i.e. column 0 receives
+        # ITSELF as its west neighbour instead of a_{n-1}.  Every other
+        # column is correct, which is why it survived.  The paired mask roll
+        # then zeroed the true west neighbour out of the fill average at a
+        # land vertex, and the closing wrap re-sync overwrote column n_lon
+        # (which HAD the right neighbour) with the one-sided column-0 value.
+        f_w = _roll_core_periodic(filled, 1)
+        m_w = _roll_core_periodic(m, 1)
+        f_e = _roll_core_periodic(filled, -1)
+        m_e = _roll_core_periodic(m, -1)
 
         is_land = m < 0.5
 

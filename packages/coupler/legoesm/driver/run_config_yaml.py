@@ -184,7 +184,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
-    # morrison ice-process scalars -> _thread_morrison_scalars
+    # morrison ice-process scalars -> thread_morrison_scalars
     # (physics_pipeline; shared with the MPAS lane) — wired 2026-07-26 after
     # the flag-reachability audit found all five dangling.
     "atm.micro.MorrisonConfig.bergeron_rate": "morrison_bergeron_rate",
@@ -212,6 +212,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
+    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
+        "cloud_partial_coverage_optics",
+    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
+        "cloud_vertical_overlap_optics",
+    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -310,7 +315,7 @@ def _route_overrides_by_class(node, by_key: dict, *, applied: set):
             )
         applied.add(key)
         # apply_param_overrides validates every field is on the NamedTuple.
-        from legoesm.training.param_collector import apply_param_overrides
+        from legoesm.core.param_overrides import apply_param_overrides
         node = apply_param_overrides(node, by_key[key])
     return node
 

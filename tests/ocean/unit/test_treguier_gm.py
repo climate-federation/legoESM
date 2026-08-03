@@ -18,10 +18,10 @@ import pytest
 
 from legoesm import constants
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-    _TREGUIER_RO_FACTOR,
-    _TREGUIER_RO_MAX_M,
-    _TREGUIER_RO_MIN_M,
-    _TREGUIER_ZHW_OFFSET_M,
+    TREGUIER_RO_FACTOR,
+    TREGUIER_RO_MAX_M,
+    TREGUIER_RO_MIN_M,
+    TREGUIER_ZHW_OFFSET_M,
     compute_treguier_kappa_gm,
 )
 from legoesm.ocean.physics.lateral_mixing.config import (
@@ -57,10 +57,10 @@ def _expected_kappa(rho, S_x, S_y, z, jacobian, f, aei0):
     N = np.sqrt(np.maximum(N2, 1e-30))
     S = np.sqrt(np.asarray(S_x) ** 2 + np.asarray(S_y) ** 2 + 1e-30)
     int_N_dz = np.sum(N * dz_half, axis=-1)
-    ro = np.clip(_TREGUIER_RO_FACTOR * int_N_dz / np.maximum(np.abs(f), 1e-10),
-                 _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M)
+    ro = np.clip(TREGUIER_RO_FACTOR * int_N_dz / np.maximum(np.abs(f), 1e-10),
+                 TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
     zah = np.sum((N * S) ** 2 * dz_half, axis=-1)
-    zhw = _TREGUIER_ZHW_OFFSET_M + np.sum(dz_half, axis=-1)
+    zhw = TREGUIER_ZHW_OFFSET_M + np.sum(dz_half, axis=-1)
     t_inv = np.sqrt(zah / zhw)
     f20 = 2.0 * constants.Omega * np.sin(np.deg2rad(20.0))
     taper = np.minimum(1.0, np.abs(f) / f20)
@@ -103,8 +103,8 @@ class TestTreguierKappa:
             rho, z.dz_ref, jac, rho_ref=constants.rho_ocean,
             g=constants.g)), 1e-30))
         int_N = np.sum(N * dzh, axis=-1)
-        assert (_TREGUIER_RO_FACTOR * int_N / 1.0e-9 > _TREGUIER_RO_MAX_M).all()
-        assert (_TREGUIER_RO_FACTOR * int_N / 1.0 < _TREGUIER_RO_MIN_M).all()
+        assert (TREGUIER_RO_FACTOR * int_N / 1.0e-9 > TREGUIER_RO_MAX_M).all()
+        assert (TREGUIER_RO_FACTOR * int_N / 1.0 < TREGUIER_RO_MIN_M).all()
 
     def test_tropical_taper(self):
         """At |f| = ½f₂₀ the taper halves κ relative to the untapered value
@@ -460,10 +460,10 @@ class TestTreguierKappaNemoNative:
         wi = np.asarray(wslpi)
         wj = np.asarray(wslpj)
         zah = np.sum(zn2 * (wi ** 2 + wj ** 2) * ze3w, axis=-1)
-        zhw = _TREGUIER_ZHW_OFFSET_M + np.sum(ze3w, axis=-1)
+        zhw = TREGUIER_ZHW_OFFSET_M + np.sum(ze3w, axis=-1)
         f_abs = np.maximum(np.abs(np.asarray(f)), 1e-10)
-        ro = np.clip(_TREGUIER_RO_FACTOR * zn / f_abs,
-                     _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M)
+        ro = np.clip(TREGUIER_RO_FACTOR * zn / f_abs,
+                     TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
         t_inv = np.sqrt(zah / np.maximum(zhw, 1e-10))
         f20 = 2.0 * constants.Omega * np.sin(np.deg2rad(20.0))
         taper = np.minimum(1.0, np.abs(np.asarray(f)) / f20)

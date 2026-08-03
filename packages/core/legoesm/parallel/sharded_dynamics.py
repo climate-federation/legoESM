@@ -651,6 +651,14 @@ class _SingleDeviceStep:
 # Sharded step construction
 # ======================================================================
 
+# Sub-face tile factors whose tiled step is bit-identity-validated against the
+# global op. kt=2 (24 devices) and kt=3 (54) were validated standalone AND in a
+# 2-node multi-controller run (rel=0.0). Anything else replicates the global
+# state instead of sharding it, so it is REFUSED rather than silently run
+# (#1360). Grow this set only together with the validation evidence.
+VALIDATED_TILE_FACTORS = frozenset({2, 3})
+
+
 def make_sharded_step(
     model,
     config: DeviceConfig,
@@ -761,11 +769,32 @@ def make_sharded_step(
     # ``docs/performance/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
     # (np>6 anti-scales on Gloo-TCP/PCIe) — future-HW capability.
     import os as _os
-    _tiled_ok = (
+    _tiled_requested = (
         _os.environ.get("LEGOESM_TILED_SPMD", "0") == "1"
         and _tiling[0] == _tiling[1] and _tiling[0] >= 2
         and _n == 6 * _tiling[0] * _tiling[1]
     )
+    # #1360: an UNVALIDATED kt used to fall through this branch silently, which
+    # left the step replicating the GLOBAL state on every device. The user then
+    # saw an opaque XLA argument-size error --
+    #   "The byte size of input/output arguments (83247045120) exceeds the base
+    #    limit (63820333056)"  (job 26495955, C768/L60 f32 at kt=4/96 devices)
+    # -- which reads as an OOM, not as "this tiling is not supported". That is
+    # the silent-fallback pattern the dispatch-hardening rule exists to kill:
+    # refuse loudly instead, naming what IS validated.
+    if _tiled_requested and _tiling[0] not in VALIDATED_TILE_FACTORS:
+        raise ValueError(
+            f"tiled cube SPMD is bit-identity-validated only at kt in "
+            f"{sorted(VALIDATED_TILE_FACTORS)} (6*kt^2 = "
+            f"{[6 * k * k for k in sorted(VALIDATED_TILE_FACTORS)]} devices); "
+            f"got kt={_tiling[0]} ({_n} devices). Running it would NOT shard: "
+            f"the step falls back to replicating the global state on every "
+            f"device and dies with an XLA argument-size error that looks like "
+            f"an OOM (#1360). Validate that kt the way kt=2/3 were "
+            f"(tiled-vs-global bit identity + a multi-controller run, "
+            f"scripts/validate/validate_tiled_fv3_sw_multinode.py) and add it "
+            f"to VALIDATED_TILE_FACTORS, or use a validated device count.")
+    _tiled_ok = _tiled_requested
     if ((_face_ok or _tiled_ok)
             and config.mesh is not None
             and "face" in getattr(config.mesh, 'axis_names', ())):
@@ -1139,6 +1168,11 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
         edgeSignOnCell=pad2_col(mesh.edgeSignOnCell, pad_c, fill=0.0),
         edgeSignOnVertex=pad2_col(mesh.edgeSignOnVertex, pad_v, fill=0.0),
         meshDensity=pad1(mesh.meshDensity, pad_c, fill=0.0),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else pad1(mesh.subgrid_topo_stddev,
+                                       pad_c, fill=0.0)),
+        land_frac=(None if mesh.land_frac is None
+                   else pad1(mesh.land_frac, pad_c, fill=0.0)),
     )
 
 

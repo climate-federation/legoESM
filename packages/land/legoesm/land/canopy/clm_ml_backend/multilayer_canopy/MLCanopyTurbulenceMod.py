@@ -81,8 +81,9 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import ( 
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLMathToolsMod import hybrid, hybrid_scalar  # noqa: F401
 
 # Python-float aliases for aH12 elements — used inside _ObuFuncPure which is called
-# on every solver iteration; accessing aH12[i] (a JAX array) would force an XLA sync
-# each time, adding ~100–200 syncs per _GetObu call.
+# on every solver iteration; indexing the aH12 table each time would force an XLA
+# sync, adding ~100–200 syncs per _GetObu call.  (aH12 itself is a module-top
+# NUMPY table since #1389 — no eager JAX allocation at import.)
 _aH12_0: float = 0.89
 _aH12_1: float = -0.07
 _aH12_2: float = 2.19
@@ -909,11 +910,17 @@ def _ObuFunc(
     # Stability-corrected beta (HF + no-RSL blend) — Fortran lines 208-215
     beta_HF = _GetBeta(beta_neutral, LcL)
     beta_norsl = _GetBeta(vkc / 2.0, LcL)
-    if LcL > aH12[1]:  # Fortran: aH12(2) → 0-based index 1
+    # aH12 is a numpy float64 table (#1389); read it through the same
+    # float32-rounded values the JAX path used, so this branch and the blend
+    # keep bit-for-bit the arithmetic they had when aH12 was a jnp array
+    # (codex P2: a float64 threshold can select the OTHER branch).
+    a0, a1, a2 = (jnp.asarray(aH12[0]), jnp.asarray(aH12[1]),
+                  jnp.asarray(aH12[2]))
+    if LcL > a1:  # Fortran: aH12(2) → 0-based index 1
         beta_val = beta_HF
     else:
         beta_val = beta_norsl + (beta_HF - beta_norsl) / (
-            1.0 + aH12[0] * abs(LcL - aH12[1]) ** aH12[2]
+            1.0 + a0 * abs(LcL - a1) ** a2
         )
 
     # Displacement height — Fortran lines 217-224

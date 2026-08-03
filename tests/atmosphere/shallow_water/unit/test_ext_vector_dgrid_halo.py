@@ -37,7 +37,7 @@ from legoesm.grids.duogrid import (
 )
 from legoesm.core.fv3_sw_core import (
     _pad_halo_dgrid_for_ppm,
-    _sina_u_v_from_sin_sg,
+    sina_u_v_from_sin_sg,
     fb_v_d_to_covariant,
     fb_v_d_to_orthogonal,
     fv3_fb_sw_step,
@@ -142,7 +142,7 @@ class TestFBCovariantConversion:
         ue = u0 * jnp.cos(cdgrid.lat_edge_y)
         u_o = ue * jnp.cos(cdgrid.angle_edge_y)
         v_o = -ue * jnp.sin(cdgrid.angle_edge_y)
-        sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
         v_cov_ref = cdgrid.cosa_u * u_o + sina_u * v_o
         v_cov = fb_v_d_to_covariant(u_d, v_d, cdgrid)
         err = float(jnp.max(jnp.abs(v_cov - v_cov_ref)))

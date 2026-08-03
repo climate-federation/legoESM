@@ -10,7 +10,7 @@ computed DURING the step that advanced 5760->5761, i.e. evaluated on the
 already relies on.
 
 Buckets:
-  ADVECTION = ttrd_xad + ttrd_yad + ttrd_zad   (lego: explicit _compute_advection_flux_div_pair)
+  ADVECTION = ttrd_xad + ttrd_yad + ttrd_zad   (lego: explicit compute_advection_flux_div_pair)
   ISO/REDI  = ttrd_ldf                          (lego: GM/Redi tendency, incl. implicit K33 fold; K_h=0 on this card)
   VERTMIX   = ttrd_zdf + ttrd_evd               (lego: implicit_vertical_diffusion_ocean using NEMO's own avt_k,
                                                         isolating the SOLVER/discretization from the TKE-closure Kv)
@@ -44,7 +44,7 @@ bucket (gm_redi_tracer_tendency_latlon with gm_bolus_advection="through_fct")
 correctly excludes it (nemo_iso_lap_tracer_tendency_latlon_cgrid: `pass` on
 the through_fct branch, see gm_redi_latlon_cgrid.py:1622-1626 -- no
 double-count regardless of return_bolus_transport). ADVECTION below adds the
-SAME before-level bolus transport (_add_bolus_to_advecting_flux, exactly the
+SAME before-level bolus transport (add_bolus_to_advecting_flux, exactly the
 production ocean_model_latlon_cgrid.py:3732-3741 helper) to its mass flux so
 the comparison is apples-to-apples with NEMO's bolus-augmented ttrd_*ad.
 """
@@ -81,9 +81,9 @@ from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig, shortwave_penetration_tendency,
 )
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _compute_advection_flux_div_pair,
-    _add_bolus_to_advecting_flux,
-    _static_kappa_redi_override,
+    compute_advection_flux_div_pair,
+    add_bolus_to_advecting_flux,
+    static_kappa_redi_override,
 )
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
@@ -175,9 +175,9 @@ mass_flux_v = h_v * state.v.data * v_mask_3d_tr
 # BEFORE tra_adv_fct), built from the SAME before-level slopes as ldf_slp.
 # Reproduce production's exact call (ocean_model_latlon_cgrid.py:3718-3741):
 # gm_redi_tracer_tendency_latlon(..., return_bolus_transport=True) on the
-# BEFORE tracer, then _add_bolus_to_advecting_flux onto the mass flux --
+# BEFORE tracer, then add_bolus_to_advecting_flux onto the mass flux --
 # so ADVECTION below is apples-to-apples with NEMO's bolus-augmented trend.
-_kappa_redi_ov, _kappa_redi_v_ov = _static_kappa_redi_override(mc.gm_redi, grid)
+_kappa_redi_ov, _kappa_redi_v_ov = static_kappa_redi_override(mc.gm_redi, grid)
 _, _, _bolus = gm_redi_tracer_tendency_latlon(
     state0.T_before.data, state0.S_before.data, state.eta.data, state.H_bathy.data,
     grid, z_coord, mc.gm_redi,
@@ -190,12 +190,12 @@ _, _, _bolus = gm_redi_tracer_tendency_latlon(
     return_bolus_transport=True,
     dt=DT,
 )
-mass_flux_u, mass_flux_v, w_baro = _add_bolus_to_advecting_flux(
+mass_flux_u, mass_flux_v, w_baro = add_bolus_to_advecting_flux(
     _bolus, mass_flux_u, mass_flux_v, u_mask_3d_tr, v_mask_3d_tr, grid, z_coord,
 )
 
 _wall_fill_mask = active_3d if getattr(mc, "tracer_wall_neumann_fill", True) else None
-(dh_T, dv_T), (dh_S, dv_S) = _compute_advection_flux_div_pair(
+(dh_T, dv_T), (dh_S, dv_S) = compute_advection_flux_div_pair(
     state.T.data, state.S.data, mc.tracer_advection,
     mass_flux_u, mass_flux_v, w_baro, h_k, h_u, h_v, grid, DT,
     recon_fill_mask=_wall_fill_mask,

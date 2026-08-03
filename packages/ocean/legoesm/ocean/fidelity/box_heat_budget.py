@@ -175,9 +175,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _add_bolus_to_advecting_flux,
-    _compute_advection_flux_div_pair,
-    _static_kappa_redi_override,
+    add_bolus_to_advecting_flux,
+    compute_advection_flux_div_pair,
+    static_kappa_redi_override,
 )
 from legoesm.ocean.experiments.dino import (
     dino_Q_sr_seasonal,
@@ -219,8 +219,8 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
                               dt_model: float, t_seconds: float):
     """Per-cell dT/dt [degC/s] for ADV_H, ADV_V, ISO_REDI, FORCING, K33.
 
-    Reuses the exact production functions (``_compute_advection_flux_div_pair``,
-    ``_add_bolus_to_advecting_flux``, ``gm_redi_tracer_tendency_latlon``,
+    Reuses the exact production functions (``compute_advection_flux_div_pair``,
+    ``add_bolus_to_advecting_flux``, ``gm_redi_tracer_tendency_latlon``,
     ``compute_isoneutral_K33_latlon``, ``restoring_surface_forcing``,
     ``shortwave_penetration_tendency``) — same call pattern as
     ``tracer_tendency_compare.py``/``tendency_probe.py`` but on the state's
@@ -233,7 +233,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     ``restoring_surface_forcing(implicit=True)`` uses ``eff_tau = tau + dt``
     (a 32x-too-large ``dt`` biases the restoring rate low by
     ``dt_step/(tau+dt_step)``, ~8% at daily sampling with DINO's
-    ``tau_T``); ``_compute_advection_flux_div_pair``'s FCT limiter clips the
+    ``tau_T``); ``compute_advection_flux_div_pair``'s FCT limiter clips the
     antidiffusive flux against a low-order provisional update scaled by
     ``dt`` (wrong ``dt`` -> wrong limiter bound -> wrong flux, NOT just a
     scaling error); ``gm_redi_tracer_tendency_latlon``'s MSC
@@ -310,7 +310,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     w_baro = diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     if getattr(config, "gm_redi", None) is not None:
-        kappa_redi_ov, kappa_redi_v_ov = _static_kappa_redi_override(config.gm_redi, grid)
+        kappa_redi_ov, kappa_redi_v_ov = static_kappa_redi_override(config.gm_redi, grid)
         # GM-bolus-through-FCT fold (tracer_tendency_compare.py): ONLY
         # exported/folded into the advecting flux when the recipe sets
         # gm_bolus_advection="through_fct" (nemo_dino_kamm_mlf). The other
@@ -341,7 +341,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
         )
         if through_fct:
             dT_gm, dS_gm, bolus = gm_out
-            mass_flux_u, mass_flux_v, w_baro = _add_bolus_to_advecting_flux(
+            mass_flux_u, mass_flux_v, w_baro = add_bolus_to_advecting_flux(
                 bolus, mass_flux_u, mass_flux_v, u_mask_3d, v_mask_3d, grid, z_coord,
             )
         else:
@@ -396,7 +396,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
         dT_k33 = jnp.zeros_like(state.T.data)
 
     wall_fill_mask = active_3d if getattr(config, "tracer_wall_neumann_fill", True) else None
-    (dh_T, dv_T), _ = _compute_advection_flux_div_pair(
+    (dh_T, dv_T), _ = compute_advection_flux_div_pair(
         state.T.data, state.S.data, config.tracer_advection,
         mass_flux_u, mass_flux_v, w_baro, h_k, h_u, h_v, grid, dt_model,
         recon_fill_mask=wall_fill_mask,

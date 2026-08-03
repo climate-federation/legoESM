@@ -115,7 +115,13 @@ def _weighted_crps_series(ensemble: jnp.ndarray, target: jnp.ndarray, weights: j
         obs_term = jnp.mean(jnp.abs(member_slice - target_slice[None, ...]), axis=0)
         pairwise = jnp.abs(member_slice[:, None, ...] - member_slice[None, :, ...])
         crps_field = obs_term - 0.5 * jnp.mean(pairwise, axis=(0, 1))
-        return jnp.mean(crps_field * weights[:, None])
+        # Same n_lat/sum(w) resolution-independence correction the losses in
+        # ml/loss.py apply (#1413). Without it this rollout metric sits on a
+        # different scale from the AFCRPS reported by validate_s2s_step, so the
+        # two could not be compared — and the gap grows with resolution.
+        n_lat = weights.shape[0]
+        return (jnp.mean(crps_field * weights[:, None])
+                * n_lat / jnp.sum(weights))
 
     return jax.vmap(per_lead, in_axes=(1, 0))(ensemble, target)
 

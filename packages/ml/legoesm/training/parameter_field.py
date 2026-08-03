@@ -20,7 +20,7 @@ differentiable so the field is a clean pytree leaf flowing through
 
 The *application* of the field to a scheme ``*Config`` (extending a target field
 with a ``shape`` key + ``__param_spec__`` and routing through
-``param_collector.apply_param_overrides``) is the companion piece — the
+``legoesm.core.param_overrides.apply_param_overrides``) is the companion piece — the
 ``shape_key`` infra already exists in ``param_collector``.
 """
 

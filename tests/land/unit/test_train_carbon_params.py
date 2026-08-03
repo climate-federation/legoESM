@@ -70,7 +70,7 @@ def test_overrides_roundtrip_into_carbon_config():
     and the warm start equals the production defaults (sub-clamp precision)."""
     import jax.numpy as jnp
     from legoesm.land.carbon.config import CarbonConfig
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     params = tcp.build_carbon_trainables(som_only=True)
     names = {c.field for c in params.constraints}
@@ -716,7 +716,7 @@ def test_make_live_pool_forward_matches_module_forward():
     import jax.numpy as jnp
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.live_pool_forward import compute_biomass_lai
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     fai, _real = _stub_precompute_result(n_arch=3)
     live_fwd = tcp._make_live_pool_forward(fai)

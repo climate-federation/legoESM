@@ -13,6 +13,40 @@ of the scientific-stack imports that the script's ``main()`` triggers.
 from __future__ import annotations
 
 import sys
+
+
+def subprocess_python_env(**extra):
+    """Environment for a test that re-invokes the repo through a subprocess.
+
+    Two things must be right or the child cannot even import legoesm:
+
+    * The INTERPRETER is ``sys.executable``, not a hardcoded ``.venv/bin/python``.
+      That path exists in neither of the environments this suite actually runs
+      in -- the Ginsburg conda env, nor CI (which uses ``actions/setup-python``
+      plus ``pip install -e``). Hardcoding it made six tests fail by
+      construction EVERYWHERE, which is why they were red on main.
+    * ``PYTHONPATH`` must be INHERITED. legoesm is a PEP-420 namespace spread
+      over ``packages/*/``; a non-editable checkout resolves it purely through
+      PYTHONPATH, so dropping it yields ModuleNotFoundError. The env was
+      previously rebuilt from scratch with only PATH + JAX_ENABLE_X64.
+
+    PATH is inherited rather than pinned to ``/usr/bin:/bin`` because a conda
+    interpreter may need its own bin directory on PATH to resolve shared
+    libraries; the interpreter itself is already unambiguous (absolute path).
+    """
+    import os
+    import sys
+
+    env = {"JAX_ENABLE_X64": "1"}
+    for key in ("PATH", "PYTHONPATH", "JAX_PLATFORMS", "HOME", "USER",
+                "CONDA_PREFIX", "LD_LIBRARY_PATH", "TMPDIR",
+                "XLA_FLAGS", "XLA_PYTHON_CLIENT_PREALLOCATE"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.setdefault("PATH", "/usr/bin:/bin")
+    env.update(extra)
+    return env
+
 from pathlib import Path
 
 import numpy as np
@@ -3736,10 +3770,41 @@ class TestRunAmipFiniteCheck:
                 )
                 self.output_dir = "/tmp/amip_test_unused"
                 self._mpi_rank = None
+                # `main()` reads `driver.physics` UNCONDITIONALLY on the way to
+                # the finite-check (run_amip.py, the Sundqvist precip-tunable
+                # override block): `getattr(driver.physics, "micro_config",
+                # None)`. That guards the ATTRIBUTE but not `physics` itself,
+                # so a stub without it dies with AttributeError before the NaN
+                # path under test is ever reached.
+                #
+                # Fixed on the stub, not by making production defensive: a real
+                # driver always has `.physics`, and a `getattr(driver,
+                # "physics", None)` fallback in run_amip.py would silently skip
+                # the trained-config injection if the attribute ever went
+                # missing for real — converting a loud failure into wrong
+                # physics. The test double is what drifted; it is what should
+                # track the real surface.
+                #
+                # An empty namespace is the minimal honest stand-in: every
+                # `getattr(self.physics, ..., None)` resolves to None, so each
+                # override block correctly no-ops for a driver that has no
+                # configured schemes.
+                self.physics = SimpleNamespace()
             def setup(self):
                 pass
             def run(self, **kwargs):
-                pass
+                # MUST return "COMPLETED" — the documented ModelDriver.run()
+                # contract (driver/run_status.py: "COMPLETED" => exit 0,
+                # anything else => exit 1, so unexpected statuses cannot slip
+                # through). Returning None made main() take the
+                # "run did not complete cleanly (status=None)" branch and exit
+                # BEFORE the finite check, so this test could never observe the
+                # NaN-field message it exists to assert.
+                #
+                # That is exactly the scenario under test: a run that COMPLETES
+                # normally but leaves NaN in the final state. A stub that
+                # reports failure tests the wrong branch entirely.
+                return "COMPLETED"
             def load_checkpoint(self, p):
                 return 0, 0.0
 
@@ -3997,13 +4062,13 @@ class TestCliResolutionValidation:
         from pathlib import Path
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [".venv/bin/python",
+            [sys.executable,
              "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
             capture_output=True, text=True,
-            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            env=subprocess_python_env(),
             timeout=60,
         )
         assert result.returncode == 2, (
@@ -4023,13 +4088,13 @@ class TestCliResolutionValidation:
         from pathlib import Path
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [".venv/bin/python",
+            [sys.executable,
              "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-16",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
             capture_output=True, text=True,
-            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            env=subprocess_python_env(),
             timeout=60,
         )
         assert result.returncode == 2, (
@@ -4049,13 +4114,13 @@ class TestCliResolutionValidation:
         from pathlib import Path
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [".venv/bin/python",
+            [sys.executable,
              "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
             capture_output=True, text=True,
-            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            env=subprocess_python_env(),
             timeout=60,
         )
         assert result.returncode == 2, (
@@ -4080,13 +4145,13 @@ class TestCliResolutionValidation:
         from pathlib import Path
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [".venv/bin/python",
+            [sys.executable,
              "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
             capture_output=True, text=True,
-            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            env=subprocess_python_env(),
             timeout=60,
         )
         assert result.returncode == 2
@@ -4101,13 +4166,13 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         for bad in (".5", "1.", "1e3", "inf", "nan"):
             result = subprocess.run(
-                [".venv/bin/python",
+                [sys.executable,
                  "scripts/matrix/run_atmosphere_test_matrix.py",
                  "--only", "sw", "--quick", "--resolution", bad,
                  "--no-cross-grid-plots"],
                 cwd=str(repo_root),
                 capture_output=True, text=True,
-                env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+                env=subprocess_python_env(),
                 timeout=60,
             )
             assert result.returncode == 2, (
@@ -4611,7 +4676,7 @@ class TestSpectralW2L2Norm:
         from pathlib import Path
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [".venv/bin/python",
+            [sys.executable,
              "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--test", "williamson2",
              "--grid", "spectral",
@@ -4619,7 +4684,7 @@ class TestSpectralW2L2Norm:
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
             capture_output=True, text=True,
-            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            env=subprocess_python_env(),
             timeout=120,
         )
         assert result.returncode == 0, (

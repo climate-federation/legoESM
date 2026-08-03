@@ -154,7 +154,7 @@ z0mg: float = 0.01  # Roughness length of ground (m)
 # a1–a3 parameters for Harman (2012, eq. 13) — Fortran lines 119-120
 # Fortran: real(r8) :: aH12(3); data aH12 / 0.89, -0.07, 2.19 /
 # Array is 1-based in Fortran; preserved as a 1-D JAX array of length 3.
-aH12: Array = jnp.array([0.89, -0.07, 2.19], dtype=jnp.float64)
+aH12: np.ndarray = np.array([0.89, -0.07, 2.19], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------

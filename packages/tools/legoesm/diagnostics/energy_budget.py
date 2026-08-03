@@ -104,6 +104,8 @@ def column_moist_static_energy(
     p_s: jax.Array,
     dsigma: jax.Array,
     sigma_full: jax.Array,
+    dp: jax.Array | None = None,
+    p_full: jax.Array | None = None,
 ) -> jax.Array:
     """Compute column-integrated moist static energy.
 
@@ -162,8 +164,15 @@ def column_moist_static_energy(
     # For sigma coords: dln(p) = dσ/σ at each level
     # Simpler approach: integrate from bottom
     nlev = T.shape[-1]
-    dp = p_s[..., None] * dsigma  # (..., nlev)
-    p_full = p_s[..., None] * sigma_full  # (..., nlev)
+    # HYBRID-aware layer mass and level pressure. ``p_s*dsigma`` and
+    # ``p_s*sigma_full`` are correct ONLY for a pure-sigma column; on the
+    # (default) hybrid coordinate the truth is ``dA*p_ref + dB*p_s`` and
+    # ``A*p_ref + B*p_s``. Callers pass the coordinate's own values; the
+    # fallbacks keep the pure-sigma path byte-identical.
+    if dp is None:
+        dp = p_s[..., None] * dsigma  # (..., nlev)
+    if p_full is None:
+        p_full = p_s[..., None] * sigma_full  # (..., nlev)
 
     # Geopotential via hydrostatic integration (bottom to top)
     # Φ(k) = phis + R_d * sum_{j=nlev-1..k+1} T_j * dp_j / p_j + R_d * T_k * dp_k / (2*p_k)
@@ -176,7 +185,10 @@ def column_moist_static_energy(
     # Build geopotential at full levels, bottom to top
     # Start with bottom level: Φ_bottom = phis + R_d * T_bottom * ln(σ_sfc / σ_bottom)
     # Approximate: phis + R_d * T_bottom * dσ_bottom / (2 * σ_bottom)
-    Phi_bottom = phis + R_d * T[..., -1] * dsigma[-1] / (2.0 * sigma_full[-1])
+    # dp/p at the bottom level: identical to dsigma[-1]/sigma_full[-1] for
+    # pure sigma, and correct on hybrid where that ratio is not.
+    Phi_bottom = phis + R_d * T[..., -1] * (
+        dp[..., -1] / (2.0 * p_full[..., -1]))
 
     def _scan_fn(Phi_below, k_from_bot):
         # k_from_bot: 0 = second-from-bottom, 1 = third-from-bottom, etc.
@@ -184,7 +196,19 @@ def column_moist_static_energy(
         j_below = j + 1  # the level below (already computed)
         # Phi_j = Phi_{j+1} + R_d * (T_j + T_{j+1}) / 2 * ln(σ_{j+1}/σ_j)
         T_mean = 0.5 * (T[..., j] + T[..., j_below])
-        Phi_here = Phi_below + R_d * T_mean * jnp.log(sigma_full[j_below] / sigma_full[j])
+        # p_full is COLUMN-DEPENDENT on hybrid (it was a 1-D sigma before) and
+        # ``j`` is traced inside the scan, so index with take() along the last
+        # axis. The result carries the spatial shape and broadcasts against the
+        # spatial-shaped carry exactly as the scalar ratio did. For pure sigma
+        # log(p_k/p_{k-1}) == log(sigma_k/sigma_{k-1}), so this is unchanged.
+        # mode="clip" is LOAD-BEARING: at the first scan step j = nlev-1 so
+        # j_below = nlev is OUT OF BOUNDS, and the original ``sigma_full[j_below]``
+        # relied on JAX's __getitem__ CLAMPING to make that step a no-op
+        # (log(1) = 0).  jnp.take defaults to mode="fill", which returns NaN and
+        # poisons the whole column.
+        Phi_here = Phi_below + R_d * T_mean * jnp.log(
+            jnp.take(p_full, j_below, axis=-1, mode="clip")
+            / jnp.take(p_full, j, axis=-1, mode="clip"))
         return Phi_here, Phi_here
 
     # Scan over levels from bottom-1 upward
@@ -222,6 +246,8 @@ def column_dry_static_energy(
     p_s: jax.Array,
     dsigma: jax.Array,
     sigma_full: jax.Array,
+    dp: jax.Array | None = None,
+    p_full: jax.Array | None = None,
 ) -> jax.Array:
     """Compute column-integrated dry static energy (c_p·T + Φ) dp/g.
 
@@ -239,16 +265,34 @@ def column_dry_static_energy(
     c_p = jnp.asarray(constants.c_pd, dtype=_acc_d)
     R_d = jnp.asarray(constants.R_d, dtype=_acc_d)
 
-    dp = p_s[..., None] * dsigma
+    if dp is None:
+        dp = p_s[..., None] * dsigma
+    if p_full is None:
+        p_full = p_s[..., None] * sigma_full
     nlev = T.shape[-1]
 
-    Phi_bottom = phis + R_d * T[..., -1] * dsigma[-1] / (2.0 * sigma_full[-1])
+    # dp/p at the bottom level: identical to dsigma[-1]/sigma_full[-1] for
+    # pure sigma, and correct on hybrid where that ratio is not.
+    Phi_bottom = phis + R_d * T[..., -1] * (
+        dp[..., -1] / (2.0 * p_full[..., -1]))
 
     def _scan_fn(Phi_below, k_from_bot):
         j = nlev - 1 - k_from_bot
         j_below = j + 1
         T_mean = 0.5 * (T[..., j] + T[..., j_below])
-        Phi_here = Phi_below + R_d * T_mean * jnp.log(sigma_full[j_below] / sigma_full[j])
+        # p_full is COLUMN-DEPENDENT on hybrid (it was a 1-D sigma before) and
+        # ``j`` is traced inside the scan, so index with take() along the last
+        # axis. The result carries the spatial shape and broadcasts against the
+        # spatial-shaped carry exactly as the scalar ratio did. For pure sigma
+        # log(p_k/p_{k-1}) == log(sigma_k/sigma_{k-1}), so this is unchanged.
+        # mode="clip" is LOAD-BEARING: at the first scan step j = nlev-1 so
+        # j_below = nlev is OUT OF BOUNDS, and the original ``sigma_full[j_below]``
+        # relied on JAX's __getitem__ CLAMPING to make that step a no-op
+        # (log(1) = 0).  jnp.take defaults to mode="fill", which returns NaN and
+        # poisons the whole column.
+        Phi_here = Phi_below + R_d * T_mean * jnp.log(
+            jnp.take(p_full, j_below, axis=-1, mode="clip")
+            / jnp.take(p_full, j, axis=-1, mode="clip"))
         return Phi_here, Phi_here
 
     if nlev > 1:
@@ -385,6 +429,8 @@ class EnergyBudgetTracker:
         lw_net_sfc: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
+        dp: jax.Array | None = None,
+        p_full: jax.Array | None = None,
     ) -> EnergyBudget:
         """Compute and record energy budget at current time.
 
@@ -422,6 +468,7 @@ class EnergyBudgetTracker:
         # check.
         E = column_moist_static_energy(
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            dp=dp, p_full=p_full,
         )
         _h = np.asarray(jnp.stack([
             area_weighted_mean(E, area_weights),
@@ -596,6 +643,7 @@ class MoistureBudgetTracker:
         lhflx: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
+        dp: jax.Array | None = None,
     ) -> MoistureBudget:
         """Compute and record moisture budget at current time.
 
@@ -606,7 +654,9 @@ class MoistureBudgetTracker:
         p_s : array, shape (...)
             Surface pressure [Pa].
         dsigma : array, shape (nlev,)
-            Sigma layer thicknesses.
+            Sigma layer thicknesses.  Used only when *dp* is None, where the
+            layer mass is ``p_s * dsigma`` — correct ONLY for a pure-sigma
+            column.
         precip : array, shape (...)
             Precipitation rate [kg/m²/s], positive = column sink.
         lhflx : array, shape (...)
@@ -616,12 +666,21 @@ class MoistureBudgetTracker:
             the output diagnostics share one flux definition.
         elapsed_seconds : float
             Time since simulation start [s].
+        dp : array, shape (..., nlev), optional
+            Layer pressure thickness [Pa].  REQUIRED for a correct budget on a
+            HYBRID grid, where ``dp = dA*p_ref + dB*p_s`` and the ``p_s*dsigma``
+            form is wrong by ``dA*(p_s - p_ref)``.  The error is a vertical
+            REDISTRIBUTION (the column total is ``p_s - p_top`` either way), so
+            it cancels for a uniform tracer and is exactly zero at
+            ``p_s = p_ref`` — but q_v is BOTTOM-HEAVY, giving a real column-water
+            error over terrain.  ``VerticalCoordProtocol.layer_thickness_dp``
+            supplies it for either coordinate.
 
         Returns
         -------
         MoistureBudget
         """
-        W = column_water_vapor(q_v, p_s, dsigma)
+        W = column_water_vapor(q_v, p_s, dsigma, dp=dp)
         # Fuse the column-water-vapor + precip + evap means into one
         # host transfer.
         _h = np.asarray(jnp.stack([

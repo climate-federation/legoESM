@@ -11,8 +11,8 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
-def column_mass_integral(field, p_s, dsigma):
-    """Column mass-weighted integral ``(1/g) * sum_k(field_k * p_s * dsigma_k)``.
+def column_mass_integral(field, p_s, dsigma, dp=None):
+    """Column mass-weighted integral ``(1/g) * sum_k(field_k * dp_k)``.
 
     The generic ∫ field dp/g on the sigma column: for a mixing-ratio-like
     ``field`` [X/kg] this is the column burden [X/m²]; for a tendency
@@ -27,7 +27,15 @@ def column_mass_integral(field, p_s, dsigma):
     p_s : jax.Array
         Surface pressure [...] (same leading dims, without level axis).
     dsigma : array-like
-        Layer thickness in sigma coordinates (nlev,).
+        Layer thickness in sigma coordinates (nlev,).  Used only when ``dp`` is
+        None, where the layer mass is taken as ``p_s * dsigma`` — correct ONLY
+        for a PURE-sigma column.
+    dp : jax.Array, optional
+        Layer pressure thickness [Pa], shape broadcastable to ``field``.  Pass
+        this on a HYBRID grid, where ``dp = dA*p_ref + dB*p_s`` and the
+        ``p_s * dsigma`` form is wrong by ``dA*(p_s - p_ref)`` — tens of hPa per
+        layer over high terrain.  ``VerticalCoordProtocol.layer_thickness_dp``
+        supplies it for either coordinate.
     """
     # iter-48: promote to fp64 budget accumulator before the
     # column product+sum.  Same fp32-field convention as iter-42..47:
@@ -38,18 +46,19 @@ def column_mass_integral(field, p_s, dsigma):
     # column total; fp32 quantum at that magnitude is ~10⁻⁴.
     from legoesm.core.conservation import conservation_accumulator
     _acc = conservation_accumulator()
+    if dp is None:
+        _dp = p_s.astype(_acc)[..., None] * jnp.asarray(dsigma).astype(_acc)
+    else:
+        _dp = jnp.asarray(dp).astype(_acc)
     return jnp.sum(
-        field.astype(_acc)
-        * p_s.astype(_acc)[..., None]
-        * jnp.asarray(dsigma).astype(_acc),
-        axis=-1,
+        field.astype(_acc) * _dp, axis=-1,
     ) / jnp.asarray(constants.g, dtype=_acc)
 
 
-def column_water_vapor(q_v, p_s, dsigma):
+def column_water_vapor(q_v, p_s, dsigma, dp=None):
     """Column-integrated water vapor [kg/m^2].
 
-    CWV = (1/g) * sum_k(q_v_k * p_s * dsigma_k)
+    CWV = (1/g) * sum_k(q_v_k * dp_k)
 
     Parameters
     ----------
@@ -58,14 +67,18 @@ def column_water_vapor(q_v, p_s, dsigma):
     p_s : jax.Array
         Surface pressure [...] (same leading dims as q_v, without level axis).
     dsigma : array-like
-        Layer thickness in sigma coordinates (nlev,).
+        Layer thickness in sigma coordinates (nlev,); used only when ``dp`` is
+        None (pure-sigma layer mass ``p_s * dsigma``).
+    dp : jax.Array, optional
+        Layer pressure thickness [Pa]; REQUIRED for a correct answer on a
+        hybrid grid.  See :func:`column_mass_integral`.
 
     Returns
     -------
     jax.Array
         Column water vapor [...], same leading shape as p_s.
     """
-    return column_mass_integral(q_v, p_s, dsigma)
+    return column_mass_integral(q_v, p_s, dsigma, dp=dp)
 
 
 def column_mass_weighted_mean(field, mass_per_cell, axis: int = -1):

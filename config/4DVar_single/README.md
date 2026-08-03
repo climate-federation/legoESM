@@ -19,9 +19,11 @@ and a 60-second time step.
 
 The static background-error covariance is fitted with GEN_BE from 80 MPAS
 48-hour-minus-24-hour forecast differences valid at common times. The selected
-balance configuration retains the fitted temperature balance and removes the
-surface-pressure balance regression. The assimilation multiplies the fitted
-horizontal length scales and background-error standard deviations by three.
+balance configuration uses 20 streamfunction predictor modes in a 20-degree
+midlatitude band. The fit applies the documented NMC and final standard-
+deviation tuning, horizontal-scale tuning, and MPAS diffusion diagonal
+normalization. The assimilation preserves the fitted horizontal length scales
+and multiplies background-error standard deviations by three.
 
 ## Configuration
 

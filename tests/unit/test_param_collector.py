@@ -15,10 +15,10 @@ from legoesm.training.param_collector import (
     SPEC_MODULES,
     _resolve_shape,
     _seed_raw,
-    apply_param_overrides,
     build_registry,
     build_trainable_params,
 )
+from legoesm.core.param_overrides import apply_param_overrides
 from legoesm.training.trainable_params import sigmoid_to_range
 
 

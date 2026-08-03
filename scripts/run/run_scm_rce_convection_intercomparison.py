@@ -27,11 +27,23 @@ reject tuning trials, so every scheme is tuned toward the best CRM match the
 user asked for; unphysical equilibria are flagged in the ``realism`` column
 rather than silently hidden.
 
-Example (GPU)::
+The schemes do not share a compensating-subsidence kernel by default, so an
+as-shipped ranking partly measures the KERNEL rather than the scheme.
+``--subsidence-solve`` selects the arm (via the campaign's shared
+``apply_subsidence_solve_override`` selector); run it twice into distinct
+``--outdir`` and read the PRIMARY arm for scheme physics.
+
+Example (GPU) — the two arms::
 
     JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
         .venv/bin/python scripts/run/run_scm_rce_convection_intercomparison.py \
-        --tune-evals 48
+        --tune-evals 48 --subsidence-solve implicit_flux \
+        --outdir results/scm_rce_convection_intercomparison_matched   # PRIMARY
+
+    JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+        .venv/bin/python scripts/run/run_scm_rce_convection_intercomparison.py \
+        --tune-evals 48 --subsidence-solve as_shipped \
+        --outdir results/scm_rce_convection_intercomparison_shipped   # SECONDARY
 """
 from __future__ import annotations
 
@@ -74,6 +86,13 @@ class SchemeResult:
     prior: "camp.RunDiagnostics"
     tuned: "camp.RunDiagnostics"
     records: list  # list[camp.TuneRecord]
+    # Which vertical-transport kernel ARM produced these numbers, and what the
+    # shared selector actually did for THIS scheme.  Carried on every result and
+    # written into the JSON / CSV / summary so a score can never be read without
+    # knowing whether the schemes were kernel-matched (a cross-arm comparison is
+    # a confound, not a result).
+    subsidence_solve: str = "as_shipped"
+    subsidence_solve_status: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -93,11 +112,19 @@ def _scheme_json_path(outdir: Path, scheme: str) -> Path:
 # under one signature must not be silently reused under another — the classic
 # footgun is a ``--quick`` smoke checkpoint (0.05 day, 2 tune evals) reused in a
 # full-length run and merged as if it were a real result.  Guards skip + merge.
+#
+# ``subsidence_solve`` is in here for the same reason and is the sharpest case:
+# the PRIMARY (matched-kernel) and SECONDARY (as-shipped) arms are two different
+# experiments, so reusing one arm's per-scheme checkpoint in the other would
+# silently FABRICATE that arm's number.  Removing it from this tuple is a
+# correctness regression, gated by
+# tests/unit/test_scm_rce_convection_intercomparison_cli.py.
 _SIGNATURE_FIELDS = (
     "days", "dt", "analysis_days", "tune_evals", "tune_seed", "radiation",
     "radiation_update_interval_steps", "large_scale_forcing",
     "surface_wind_m_s", "coriolis_s_inv",
     "scm_microphysics_substeps", "scm_convection_substeps",
+    "subsidence_solve",
     "reference_dir", "last_reference_files",
 )
 
@@ -129,6 +156,8 @@ def save_scheme_result(outdir: Path, res: SchemeResult, signature: dict | None =
     payload = {
         "scheme": res.scheme,
         "signature": signature or {},
+        "subsidence_solve": res.subsidence_solve,
+        "subsidence_solve_status": res.subsidence_solve_status,
         "prior": asdict(res.prior),
         "tuned": asdict(res.tuned),
         "records": [asdict(r) for r in res.records],
@@ -146,6 +175,11 @@ def load_scheme_result(path: Path) -> SchemeResult:
         prior=camp.RunDiagnostics(**payload["prior"]),
         tuned=camp.RunDiagnostics(**payload["tuned"]),
         records=[camp.TuneRecord(**r) for r in payload["records"]],
+        # Pre-arm checkpoints predate the flag; they were necessarily run with
+        # the shipped defaults, so that is the honest label for them.  The empty
+        # status distinguishes "never stamped" from a stamped "as_shipped".
+        subsidence_solve=payload.get("subsidence_solve", "as_shipped"),
+        subsidence_solve_status=payload.get("subsidence_solve_status", ""),
     )
 
 
@@ -177,12 +211,19 @@ def evaluate_scheme(
     large_scale_forcing: str,
     radiation: str,
     radiation_update_interval_steps: int,
+    subsidence_solve: str = "as_shipped",
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
     The realism/equilibrium gate is disabled (``require_*=False``) so the tuner
     minimizes the CRM profile score freely; realism diagnostics are still
     computed and reported.
+
+    ``subsidence_solve`` selects the vertical-transport kernel arm via the shared
+    ``camp.apply_subsidence_solve_override`` selector (never re-implemented
+    here).  It is applied to ``base_cfg`` IMMEDIATELY, before the a-priori run
+    and before tuning, so BOTH see the same kernel — applying it later would
+    tune under one kernel and report under another.
     """
     cache: dict[str, "camp.RunDiagnostics"] = {}
     base_cfg = camp.make_physics_config(
@@ -190,6 +231,8 @@ def evaluate_scheme(
         radiation_update_interval_steps=radiation_update_interval_steps,
         convection=scheme,
     )
+    base_cfg, solve_status = camp.apply_subsidence_solve_override(
+        base_cfg, subsidence_solve, category="convection")
     common = dict(
         days=days,
         dt=dt,
@@ -215,7 +258,10 @@ def evaluate_scheme(
         seed=seed,
         **common,
     )
-    return SchemeResult(scheme=scheme, prior=prior, tuned=tuned, records=records)
+    return SchemeResult(
+        scheme=scheme, prior=prior, tuned=tuned, records=records,
+        subsidence_solve=subsidence_solve, subsidence_solve_status=solve_status,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -266,6 +312,9 @@ def _physical_verdict(run) -> str:
 
 CSV_FIELDS = (
     "scheme",
+    # Kernel arm, immediately after the scheme name: every downstream reader of
+    # this CSV sees which arm produced the row before it sees any metric.
+    "subsidence_solve", "subsidence_solve_status",
     "prior_score", "prior_T_rmse", "prior_qv_rmse", "prior_cloud_rmse",
     "prior_precip_rmse", "prior_precip_mm_day", "prior_verdict",
     "tuned_score", "tuned_T_rmse", "tuned_qv_rmse", "tuned_cloud_rmse",
@@ -285,6 +334,8 @@ def _row(res: SchemeResult) -> dict:
     )
     return {
         "scheme": res.scheme,
+        "subsidence_solve": res.subsidence_solve,
+        "subsidence_solve_status": res.subsidence_solve_status,
         "prior_score": p.score, "prior_T_rmse": p.T_rmse,
         "prior_qv_rmse": p.qv_rmse, "prior_cloud_rmse": p.cloud_rmse,
         "prior_precip_rmse": p.precip_rmse, "prior_precip_mm_day": p.precip_mm_day,
@@ -335,6 +386,37 @@ def write_tuned_parameters(path: Path, results: list[SchemeResult]) -> None:
     path.write_text(json.dumps(payload, indent=2, allow_nan=False))
 
 
+# One blurb per kernel arm, stated at the TOP of the summary so no table in this
+# file can be read without knowing which arm produced it.
+_ARM_BLURB = {
+    "implicit_flux": (
+        "**PRIMARY (matched-kernel) arm.** Every convection scheme that owns a "
+        "compensating-subsidence mass-flux kernel is forced onto the "
+        "conservative `implicit_flux` solve, so a score gap between two such "
+        "schemes measures the SCHEME, not the transport kernel."
+    ),
+    "as_shipped": (
+        "**SECONDARY (as-shipped) arm.** Every scheme keeps its own shipped "
+        "`subsidence_solve` default — this is what users get today. Because "
+        "Bechtold/EDMF/Kain-Fritsch ship `implicit_flux` while "
+        "Tiedtke/Zhang-McFarlane/mass_flux ship the leaky `advective` solve, "
+        "part of any score gap here measures the KERNEL rather than the scheme; "
+        "read the PRIMARY arm for scheme physics."
+    ),
+    "advective": (
+        "**Symmetric control arm.** Every kernel-capable scheme is forced onto "
+        "the leaky `advective` solve, bounding the kernel's contribution from "
+        "the other direction."
+    ),
+}
+_MIXED_ARM_BLURB = (
+    "**WARNING — CONFOUNDED TABLE.** These rows were NOT produced under one "
+    "common kernel arm, so the ranking mixes scheme physics with transport-"
+    "kernel differences and must NOT be read as a scheme intercomparison. "
+    "Re-run each arm into its own `--outdir`."
+)
+
+
 def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> None:
     ordered = sorted(results, key=lambda r: r.tuned.score)
     lines: list[str] = []
@@ -356,6 +438,22 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         f"`{meta['large_scale_forcing']}`. CRM equilibrium surface precip "
         f"{ref.precip_ref_mm_day:.3g} mm/day.\n"
     )
+    # Kernel arm, stated before any number. Derived from the RESULTS (not from
+    # meta) so a merged outdir that accidentally mixes arms is reported as mixed
+    # rather than mislabelled with the current invocation's flag.
+    arms = sorted({r.subsidence_solve for r in results})
+    single_arm = len(arms) == 1
+    arm_label = arms[0] if single_arm else "MIXED(" + ",".join(arms) + ")"
+    lines.append(
+        f"Kernel arm: `--subsidence-solve {arm_label}`. "
+        + (_ARM_BLURB[arm_label] if single_arm and arm_label in _ARM_BLURB
+           else _MIXED_ARM_BLURB)
+        + " The per-scheme `kernel` column below reports what the shared "
+        "override actually did: `forced:<scheme>=<solve>` was kernel-matched, "
+        "while `not_applicable:<scheme>` has no such knob (sbm/dca/kuo have no "
+        "mass-flux kernel; emanuel's shipped buoyancy-sorting path never calls "
+        "it) and so was **not** kernel-matched in either arm.\n"
+    )
     lines.append(
         "> The realism/equilibrium gate is **reported** (`verdict` column, derived "
         "from the campaign's own moist-adiabat / cold-point / equilibrium-drift "
@@ -364,16 +462,17 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     )
     lines.append("## A priori vs tuned RMSE\n")
     lines.append(
-        "| rank | scheme | score (prior→tuned) | T RMSE (p→t) | qv RMSE (p→t) | "
-        "cloud RMSE (p→t) | precip mm/d (p→t) | Δscore % | verdict (p→t) | "
-        "cold-pt T,z (tuned) | #params |"
+        "| rank | scheme | kernel | score (prior→tuned) | T RMSE (p→t) | "
+        "qv RMSE (p→t) | cloud RMSE (p→t) | precip mm/d (p→t) | Δscore % | "
+        "verdict (p→t) | cold-pt T,z (tuned) | #params |"
     )
-    lines.append("|---:|---|---|---|---|---|---|---:|---|---|---:|")
+    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|")
     for i, res in enumerate(ordered, 1):
         p, t = res.prior, res.tuned
         row = _row(res)
         lines.append(
             f"| {i} | {res.scheme} "
+            f"| {res.subsidence_solve_status or res.subsidence_solve} "
             f"| {_fmt(p.score)}→{_fmt(t.score)} "
             f"| {_fmt(p.T_rmse)}→{_fmt(t.T_rmse)} "
             f"| {_fmt(p.qv_rmse)}→{_fmt(t.qv_rmse)} "
@@ -508,7 +607,9 @@ def plot_all(path: Path, ref, results: list[SchemeResult]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, exposed so tests exercise the REAL parser (a hand-rolled
+    namespace would keep passing after a flag is renamed or dropped)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-dir", type=Path, default=camp.DEFAULT_REFERENCE_DIR)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
@@ -552,7 +653,32 @@ def main(argv: list[str] | None = None) -> int:
                              "aggregate summary/CSV/combined plot (for parallel workers)")
     parser.add_argument("--force", action="store_true",
                         help="re-run schemes even if a scheme_*.json checkpoint exists")
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--subsidence-solve", default="as_shipped",
+        choices=list(camp.SUBSIDENCE_SOLVE_MODES),
+        help=(
+            "Vertical-transport kernel ARM. Convection schemes do not share a "
+            "compensating-subsidence kernel by default — Bechtold/EDMF/"
+            "Kain-Fritsch ship the conservative `implicit_flux` solve while "
+            "Tiedtke/Zhang-McFarlane/mass_flux ship the leaky `advective` one — "
+            "so an as-shipped ranking partly measures the KERNEL, not the "
+            "scheme. Run the campaign TWICE into distinct --outdir: "
+            "`implicit_flux` = PRIMARY arm, every kernel-capable scheme forced "
+            "onto the conservative solve (isolates scheme physics); "
+            "`as_shipped` (default) = SECONDARY arm, every scheme keeps its own "
+            "shipped default (what users get today); `advective` = symmetric "
+            "control. Schemes with no such knob (sbm/dca/kuo, and emanuel whose "
+            "shipped path bypasses the kernel) are reported "
+            "`not_applicable:<scheme>`, never silently skipped. The arm is part "
+            "of the checkpoint signature, so one arm's result can never be "
+            "reused for another."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.radiation_update_interval_steps is None:
         args.radiation_update_interval_steps = (
@@ -600,6 +726,7 @@ def main(argv: list[str] | None = None) -> int:
         large_scale_forcing=args.large_scale_forcing,
         last_reference_files=args.last_reference_files,
         reference_dir=str(args.reference_dir),
+        subsidence_solve=args.subsidence_solve,
     )
     if args.merge_only and saved_meta:
         meta = {**meta, **saved_meta}
@@ -626,12 +753,14 @@ def main(argv: list[str] | None = None) -> int:
                 large_scale_forcing=args.large_scale_forcing,
                 radiation=args.radiation,
                 radiation_update_interval_steps=args.radiation_update_interval_steps,
+                subsidence_solve=args.subsidence_solve,
             )
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
             plot_scheme(args.outdir / f"profiles_{scheme}.png", ref, res)
             print(f"    prior score={_fmt(res.prior.score)} "
                   f"-> tuned score={_fmt(res.tuned.score)} "
-                  f"({len(res.records)} params)", flush=True)
+                  f"({len(res.records)} params) "
+                  f"[kernel {res.subsidence_solve_status}]", flush=True)
         meta_path.write_text(json.dumps(meta, indent=2))
 
     if args.no_merge:

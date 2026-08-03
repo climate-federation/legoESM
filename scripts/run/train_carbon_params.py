@@ -13,7 +13,7 @@ target is the surfdata organic-carbon column, cover-weighted per archetype
 
 Doctrine (mirrors ``scripts/run/train_scm_rce_params.py`` / the SCM-RCE pattern):
 the trained leaves are spliced into each group's ``CarbonConfig`` via
-``param_collector.apply_param_overrides`` **inside** the loss (so the leaves are
+``legoesm.core.param_overrides.apply_param_overrides`` **inside** the loss (so the leaves are
 traced -- the SegmentForcing override doctrine), the optimizer is MUON
 (``legoesm.ml.training.create_optimizer``, warmup+cosine+clip), and the run writes
 a RECOMMENDED ``tuned_carbon_parameters.json`` under ``results/`` -- it NEVER
@@ -556,7 +556,7 @@ def _make_sif_forward(table):
     applies the differentiable ``leaf_sif`` kernel -- a single-step graph, no spin-up."""
     from legoesm.land.canopy.sif import SIFConfig
     from legoesm.land.carbon.sif_forward import build_sif_forward
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     sif_fn = build_sif_forward(table)
 
@@ -590,7 +590,7 @@ def _make_d13c_forward(table):
     from legoesm.land.carbon.config import D13CConfig
     from legoesm.land.carbon.d13c_forward import build_d13c_forward
     from legoesm.land.stomata import StomataConfig
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     d13c_fn = build_d13c_forward(table)
 
@@ -616,7 +616,7 @@ def _make_live_pool_forward(precomputed):
     LCMA leaves), mirroring :func:`_make_sif_forward` (which uses the disjoint SIF slice)."""
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.live_pool_forward import build_live_pool_forward
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     live_fn = build_live_pool_forward(precomputed)
 
@@ -826,7 +826,7 @@ def make_fast_analytic_forward(precomputed) -> Callable[[TrainablePhysicsParams]
     """
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.fast_analytic import analytic_som_soc
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     def model_soc(params: TrainablePhysicsParams) -> jax.Array:
         # Fresh CarbonConfig per call, overrides spliced in via _replace (traced,
@@ -1569,7 +1569,7 @@ def _live_pool_match(precomputed, initial_params, cover_weight) -> dict[str, Any
     run log."""
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.live_pool_forward import build_live_pool_forward
-    from legoesm.training.param_collector import apply_param_overrides
+    from legoesm.core.param_overrides import apply_param_overrides
 
     live_fwd = build_live_pool_forward(precomputed)
     cfg_def = apply_param_overrides(

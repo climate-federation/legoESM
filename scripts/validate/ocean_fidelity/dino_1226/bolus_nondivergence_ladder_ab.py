@@ -7,7 +7,7 @@ of a streamfunction psi = kappa_GM * slope (``nemo_eiv_bolus_transport``,
 gm_redi_latlon_cgrid.py:1655-1729) and is therefore non-divergent BY
 CONSTRUCTION only if the metrics used to build psi are consistent with the
 divergence operator that later consumes it
-(``_add_bolus_to_advecting_flux``, ocean_model_latlon_cgrid.py:114-176, which
+(``add_bolus_to_advecting_flux``, ocean_model_latlon_cgrid.py:114-176, which
 calls ``divergence_cgrid`` at :166 and re-diagnoses w via
 ``diagnose_w_from_flux_div`` at :175). On NEMO's true 3-D e3t ladder,
 thicknesses vary 9-13% between adjacent abyssal levels and (the hypothesis
@@ -17,7 +17,7 @@ component that explains the restart-start instability (addenda 33/35/36).
 PRODUCTION DIVERGENCE OPERATOR USED (traced, not re-derived -- Rule 0):
 ``divergence_cgrid`` at
 packages/core/legoesm/grids/operators_latlon_cgrid.py:846-975. Confirmed as
-the SAME function object ``_add_bolus_to_advecting_flux`` calls at
+the SAME function object ``add_bolus_to_advecting_flux`` calls at
 ocean_model_latlon_cgrid.py:166 (`from legoesm.ocean.dynamics.
 latlon_cgrid_operators import divergence_cgrid` at :64-67 there, itself a
 bare re-export of the core function -- `grep -n "divergence_cgrid" ...
@@ -88,7 +88,7 @@ def build_bolus_and_div(st, *, live_ladder: bool):
     ``jacobian`` argument passed to the two production slope/kappa builders
     (same one-variable toggle as eiv_transport_walk.py:161-190, reused
     verbatim) -- then run the bolus faces through the PRODUCTION
-    ``divergence_cgrid`` (the same call ``_add_bolus_to_advecting_flux``
+    ``divergence_cgrid`` (the same call ``add_bolus_to_advecting_flux``
     makes at ocean_model_latlon_cgrid.py:166).
 
     Returns (u_eiv, v_eiv, div_bolus, wslpi, wslpj, kappa_t) with div_bolus
@@ -137,7 +137,7 @@ def build_bolus_and_div(st, *, live_ladder: bool):
     )
 
     # --- exact production wiring: cell-indexed E/N faces -> staggered face
-    # arrays -- reproduced verbatim from _add_bolus_to_advecting_flux
+    # arrays -- reproduced verbatim from add_bolus_to_advecting_flux
     # (ocean_model_latlon_cgrid.py:150-163), the ONLY reshaping this probe
     # performs before calling the production divergence_cgrid. No mass_flux
     # term is added (linearity - see module docstring), and u_mask_3d_tracer/

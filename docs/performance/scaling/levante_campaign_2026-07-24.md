@@ -1074,6 +1074,51 @@ LL1152@16 number elsewhere in this report (19.83 ms) used
 NO fold-cost claim. The only licensed fold cost remains the earlier
 same-job matched contrast (+1.2-3.7 %, job 26493837).
 
+## The MPAS mesh cap — lifted (subdiv-9 unblocked for 128 GPUs)
+
+The generator's hard subdiv-8 cap was the CPU-side resolution blocker
+and made 128-GPU MPAS floor-starved by construction (subdiv-8 at np128 =
+5.1k cells/GPU). Chain shipped 2026-07-30 (codex round-19 design,
+commit 70f3ce636):
+
+* **Cache-or-prewarm policy** for subdiv 9-10: a cache hit always loads;
+  a miss RAISES with prewarm instructions unless the process is the
+  designated single builder (opt-in env + per-key O_EXCL lockfile with
+  stale takeover — the opt-in alone would be a thundering herd across an
+  MPI launch). >10 stays hard-refused. Six policy tests + prewarm CLI
+  (`scripts/data/prewarm_voronoi_mesh.py`) with its direct test.
+* **lloyd=0 admitted as a LABELLED synthetic scaling mesh** after the
+  quality gate codex specified: identical topology to the production
+  SCVT, area CV 0.084 vs 0.061, 128-part imbalance 1.148 vs 1.095 (~5 %)
+  at subdiv-6. Scaling receipts only, never physics. This turns the
+  subdiv-9 prewarm from ~5 h (lloyd=50, measured 87 s/iteration at
+  subdiv-8) into ~1 h.
+* **subdiv-9 prewarmed** (job 26549180): 2,621,442 cells in 67 min,
+  1.8 GB npz in project space — ranks load in seconds forever after.
+* **subdiv-8 control arm at 64/128 GPUs (job 26538474)**: f32
+  5.27 -> 6.47 ms and f64 8.96 -> 11.41 across np64 -> np128 —
+  ANTI-scales exactly as the tile law predicts at 10.2k -> 5.1k
+  cells/GPU. MPAS *runs* at 128 GPUs; subdiv-8 just has nothing left to
+  parallelise there. Full f32 ladder np2->128 (np32 from job 26549646):
+  19.90 / 14.12 / 6.92 / 7.10 / **8.13** / 5.27 / 6.47 — NON-MONOTONE:
+  np32 is WORSE than np16 while np64 is the minimum, and f64 shows the
+  same pattern (np32 14.26 vs np64 8.96). This is the np4-dip signature
+  at another count — count-specific codegen/fusion behaviour layered on
+  the tile floor (the fusion pathology on this lane is already proven
+  shape-dependent). Recorded as observed; not chased further at subdiv-8
+  since the mesh is below the floor at all these counts anyway.
+* Payoff ladder submitted (job 26549775): subdiv-9 at 32/64/128 GPUs =
+  81.9k/41.0k/20.5k cells/GPU — the first MPAS many-GPU ladder whose
+  lower rungs sit ABOVE the ~30k floor.
+
+OPERATIONAL NOTE: a Lustre incident mid-implementation left the module
+with an undefined constant on disk for ~12 h; two queued jobs (mpas32
+26534061, and possibly mpas128's first attempt) died on that NameError
+window and were resubmitted post-fix. The git index inode went stale on
+the login node's client (kernel-hung D-state git processes); recovery =
+rebuild the index on a fresh inode and route git through a compute
+node's healthy Lustre client.
+
 ## Ocean GPU scale-out to 64 devices — and a CROSS-LANE memory defect (#1370)
 
 | arm | devices | tile | ms/step |
@@ -1538,3 +1583,331 @@ DONE during the campaign (were open at the start): C768 same-path ladder
 production tile; ocean weak at a production tile; the ico CPU-MPI ladder;
 the CPU spread ladder; and the diagnosis tool's halo + overlap phases,
 which were found broken and fixed with a contract test.
+
+## Phase-3 receipts recovered after the 2026-07-31 session drop (2026-08-02)
+
+Both jobs the dropped session left behind COMPLETED; neither had been
+analysed. First read-out below, CORRECTED per codex round-20
+(`.physics-validator/scaling_campaign/codex_recovery_review_2026-08-02.md`,
+VERDICT FIX-FIRST, 12 items — the round that caught a Lloyd-mesh confound
+in the first draft's weak-scaling claim).
+
+### 1. METIS / placement A-B (ocean MPAS CPU, job 26600094)
+
+Matrix at a NOMINAL MEAN target of 5,120 cells/rank (the JSONL's
+`cells_per_rank_achieved` is global floor division —
+`int(mesh.nCells) // n_ranks`, bench_ocean_mpas_scaling.py:751 — NOT a
+balance statement; method pinned per arm, never `auto`, which flipped
+meaning when pymetis appeared in `.venv-mpi` on 2026-07-31), f64,
+nlev 20, 32 ranks/node. Actual per-rank OWNED ranges
+(`metadata.partition_metrics.cells_per_rank_min/max`): geometric
+5,120–5,121 at BOTH scales; metis 5,100–5,145 @32 and 5,093–5,144 @128
+(±0.5 %). WET load is looser still under metis — per-rank wet
+cell-levels min/max: geometric@32 100,740–102,420; metis@32
+96,800–102,720; metis@128 **78,000–102,880** (one rank 24 % under the
+mean) — METIS balances owned cells (approximately), not wet cells, on
+this bathymetry.
+
+| arm | config | ms/step |
+|---|---|---|
+| A | s7 np32 geometric, block:cyclic | 189.82 |
+| B | s8 np128 geometric, block:cyclic | 308.96 |
+| C | s7 np32 metis, block:cyclic | 191.99 |
+| D | s8 np128 metis, block:cyclic | 333.39 |
+| E | s8 np128 metis, block:block | 537.91 |
+
+* **This METIS configuration LOSES to geometric at s8/np128** (D/B =
+  +7.9 %), despite the better offline cut (partq s8@np128: edge_cut
+  1.89 % vs 2.01 %, halo mean 592 vs 629). Scale-out term (s7@32 ->
+  s8@128, which crosses 1 -> 4 nodes as well as 4x ranks — NOT a pure
+  rank-count isolate): geometric 1.628, metis 1.736. The offline-quality
+  -> step-time inference FAILS on this lane; part of metis's loss is
+  PLAUSIBLY its own wet-load imbalance (above). Scope: closes the
+  "swap in METIS as-is" lever on the CPU-MPI ocean lane; does NOT rule
+  out partition/mapping improvements generally (e.g. wet-cell-weighted
+  METIS was NOT tested).
+* **`block:cyclic` stays mandatory on packed CPU lanes** (E/D = 1.61x at
+  a byte-identical partition). NOTE the second `--distribution` field is
+  the INTRA-NODE (socket) distribution — both arms place ranks on nodes
+  identically; the swing is socket-level. Mechanism (per-socket
+  memory-bandwidth balance) PLAUSIBLE, consistent with the np16 Milan
+  2.13x receipt; never instrumented with bandwidth counters.
+* Caveats: timing-only receipt — no parity/conservation gate ran in
+  these arms, and the CPU nodes emit `UCX WARN transports
+  'cuda_copy','cuda_ipc','gdr_copy' are not available` (the _env.sh GPU
+  UCX_TLS list on a CPU node; UCX falls back to rc/sm — cosmetic for
+  timing, but a "production config" claim would need a gated arm).
+
+### 2. subdiv-9 payoff ladder (atm MPAS ico GPU, job 26600095)
+
+f32, sfc partition (padded-128 reorder), lloyd=0 LABELLED SYNTHETIC
+scaling mesh, executed padded n_cells = 2,621,568 (natural 2,621,442),
+L26; steps 12 / warmup 3; physics=none dynamics-only bench. Provenance:
+np64 and np128 rows record `git_sha: 7151d12a1`; the np32 row's field
+reads `unknown` — same allocation, same submitted script, so the same
+binary is PLAUSIBLE but that row stays non-reproduction-grade on its
+own (codex r20/r21):
+
+| GPUs | cells/GPU | ms/step | GC/s (cell-levels) |
+|---|---|---|---|
+| 32 | 81.9k | 12.47 | 5.47 |
+| 64 | 41.0k | 9.60 | 7.10 |
+| 128 | 20.5k | 11.48 | 5.94 |
+
+* **np64 = 7.10 GC/s is the best MPAS-atmosphere number on this
+  synthetic dynamics-only bench** (2.19x the subdiv-8 best, 3.23 GC/s at
+  its np64: 655,362 natural cells x 26 lev / 5.27 ms).
+* Strong 32->64 speedup 1.299 (eff 0.65); 64->128 speedup 0.836 —
+  ANTI-scales at 20.5k cells/GPU. CONSISTENT WITH the ~30k floor seen on
+  the other lanes (single unreplicated point on a lane with known
+  count-specific codegen variation — not by itself proof).
+* **RETRACTED (codex round-20): the first draft's s8->s9 "weak
+  efficiency 0.55–0.74" pairs and the "~1.4x per 4x ranks GPU rank-count
+  term".** Confounds: (a) every existing s8 receipt is the generator's
+  default PRODUCTION Lloyd mesh, while s9 is lloyd=0 — different mesh
+  family, not the same protocol; (b) two comparator points came from the
+  np2-16 ladder (jobs 26454476/26454618), not the np32-128 extension
+  rows; (c) the three ratios are 1.80/1.35/1.41 — not "consistent
+  ~1.4x". A matched s8 lloyd=0 np8/16/32 rerun is submitted (see below);
+  no weak-scaling direction is claimed until it lands.
+
+### Next receipts submitted 2026-08-02
+
+1. **Ensemble receipt** (`scripts/cluster/scaling_levante/mpas_s9_ensemble.sbatch`)
+   — codex lever #1: 4 concurrent 32-GPU s9 replicas on disjoint 8-node
+   sets vs SAME-JOB solo controls bracketing phase B (solo before AND
+   after — BRACKETED, not fully counterbalanced; a penalty's attribution
+   to fabric vs placement/drift needs the per-step nodelist table +
+   follow-up). steps=5000 so the stepping window
+   (~60 s) dwarfs launch skew; per-arm `SLURM_STEP_NODELIST` +
+   wall-clock brackets logged as overlap evidence. CONFIRM bar:
+   max(replica) <= 1.10x mean(solo) => guaranteed aggregate >= 3.64x the
+   32-GPU solo rate (>= 19.9 GC/s if solo reproduces 5.47) = ~3.3x the
+   observed 128-GPU single-trajectory rate. REFUTE: replica slowdown
+   >10 % = a CO-EXECUTION penalty, quantified per replica — its
+   attribution (fabric contention vs placement/topology vs drift) is a
+   follow-up, not a conclusion of this job.
+2. **s8 lloyd=0 matched rerun** — de-confounds the weak pair: np8/16/32
+   (81.9k/41.0k/20.5k cells/GPU) on the SAME lloyd=0 family, same sfc +
+   `--reorder-for 128`, same steps/warmup as the s9 ladder. Weak pairs
+   recomputed only from these.
+
+### 3. Recovered phase-2 receipt: lat-lon atmosphere at 128 GPUs (job 26534060, ran 2026-07-30, unanalysed until now)
+
+LL2048x4096 L26, same bench + protocol (steps 12 / warmup 3) as the
+@64 row (job 26502539, f32 6.73 ms):
+
+| arm | ms/step | GC/s (col-levels) |
+|---|---|---|
+| f32 @128 (65,536 cols/GPU) | 5.5767 | **39.11** |
+| f64 @128 | 9.6015 | 22.72 |
+
+f32 strong 64->128: 1.207x for 2x devices (eff 0.60) with the tile at
+**65.5k cols/GPU — comfortably ABOVE the ~30k floor** (codex round-21
+caught the first draft halving this), so the loss is NOT
+floor-attributable. Mechanism OPEN — candidates (uninstrumented): 1-D
+band thinning to 16 rows/rank raising halo/compute ratio, and the
+16 -> 32-node NCCL topology step. 39.11 GC/s (from 5.5767 ms) is the
+highest measured throughput of ANY lane in the campaign. The companion
+oc128 (26534067) FAILED pre-#1370-fix with the 109.5 GB resident-args
+signature; retry submitted post-fix (below).
+
+## Hundreds-of-devices push (user directive 2026-08-02)
+
+"Push the scaling to hundreds of CPUs and GPUs for lat-lon and MPAS on
+GPUs." Machine ceiling: 56 nodes x 4 = 224 a100_80 GPUs; compute
+partition effectively unbounded for our rank counts. Submitted set:
+
+| job | what | devices | why |
+|---|---|---|---|
+| 26628196 | s9 ensemble contention (v3; 26628021/26627810 superseded pre-start) | 128 GPU (4x32) | lever #1 receipt |
+| 26628071 | oc LL2304 retry post-#1370 | 128 GPU | pre-fix failure was resident-args; predicted PASS at ~0.10 GB/dev residency |
+| 26628072 | atm LL2304 @96/@192 + LL2880 @192 | 96-192 GPU | LL2048 does not divide 192; LL2880@192 = 86.4k cols/GPU ABOVE floor |
+| 26628073 | atm lat-lon 2-D pencil r512 np64-512 | 512 CPU ranks | hundreds-of-CPUs lat-lon (wall-pole lane, labelled) |
+| 26628074 | subdiv-10 lloyd0 prewarm | 1 CPU | unlocks MPAS 128-224 GPUs ABOVE floor (81.9k-46.8k cells/GPU) |
+| 26628076 | s8 lloyd0 np8/16/32 | 32 GPU | weak-pair de-confound (codex r20 item 5) |
+
+s10 ladder (128/192/224 GPUs) submits once 26628074's cache lands.
+
+### First hundreds receipt in: lat-lon CPU 2-D pencil to 512 ranks (job 26628073)
+
+r512 (512x1024 = 524k cols) L26 f64 moist, 32 rpn block:cyclic,
+wall-pole 2-D pencil lane (labelled; NOT the pole fold):
+
+| ranks | cols/rank | ms/step | speedup vs np64 | eff |
+|---|---|---|---|---|
+| 64 | 8,192 | 297.57 | 1.00 | 1.00 |
+| 128 | 4,096 | 161.03 | 1.848 | 0.92 |
+| 256 | 2,048 | 72.06 | 4.129 | 1.03 |
+| 512 | 1,024 | 44.78 | 6.645 | **0.83** |
+
+Distribution verified against the masquerade trap: result rows carry
+`n_ranks: 512` (the JSON's `metadata.process_count: 1` is the jax-LOCAL
+count on this mpi4jax lane, not the world size). 128->256 is
+SUPERLINEAR (2.23x for 2x) — classic per-rank working-set cache
+transition on Milan (mechanism PLAUSIBLE, uninstrumented). End-to-end
+64->512 eff 0.83 at 1k cols/rank: TIMING-ONLY evidence that the lat-lon
+CPU lane scales into the hundreds. QUALIFIER (codex r22): the run logs
+an out-of-tested-range mpi4jax==0.9.0 pairing ("may fail or produce
+incorrect results", parallel/reductions.py runtime check) and UCX
+VM_UNMAP warnings — no parity/conservation gate ran, so this ladder is
+unvalidated timing evidence until a supported-stack rerun. (Exact pencil factorisations are not recorded in the
+result JSON — only `decomposition: 2d`; a follow-up could add them to
+the bench metadata.)
+
+### s8 lloyd=0 de-confound ladder landed (job 26628076): the near-matched-tile scale-out cost persists without the Lloyd confound
+
+s8 np8/16/32, lloyd=0, f32, sfc + `--reorder-for 128`, steps 12 /
+warmup 3 — configuration-matched to the s9 ladder (26600095); NOT fully
+reproduction-grade: the s9 np32 row's git_sha reads `unknown`, and this
+run's `7151d12a1-dirty` has no archived dirty-file manifest (the live
+diff touched only doc+plot, which supports but cannot retrospectively
+prove the bench path was untouched): **6.58 / 6.43 / 7.29 ms**.
+
+Weak pairs (~4x cells with 4x GPUs — global ratio 3.9994 after both
+meshes pad +126 cells; tiles NEAR-matched to 0.015 %:
+81,936/81,924, 40,968/40,962, 20,484/20,481), SAME lloyd-0 family:
+
+| cells/GPU | s8 rung | s9 rung | ratio | weak eff |
+|---|---|---|---|---|
+| 81.9k | np8 6.58 | np32 12.47 | 1.895 | **0.53** |
+| 41.0k | np16 6.43 | np64 9.60 | 1.493 | 0.67 |
+| 20.5k | np32 7.29 | np128 11.48 | 1.575 | 0.64 |
+
+* The falsifiability block's CONFIRM branch fires: ratios stay well
+  above 1 with the known Lloyd-family mismatch REMOVED. (This does not
+  prove the old confound "only" biased the size — these are
+  unreplicated single runs from separate allocations, one comparator
+  without row-level provenance; the confounded draft read
+  1.80/1.35/1.41 vs 1.90/1.49/1.57 here, and the production-mesh s8
+  np8 was 6.92 vs lloyd-0 6.58, -4.9 %, so the mesh family does shift
+  absolutes.)
+* Restated: at NEAR-matched per-GPU tile, ~quadrupling devices+problem
+  costs 1.5-1.9x on this lane — the GPU-side analogue of the ocean CPU
+  scale-out term. Weak efficiency 0.53-0.67 at 4x. Mechanism still
+  UNATTRIBUTED (PLAUSIBLE candidates unchanged: inter-node neighbour
+  fraction growth, collective latency vs count, sfc partition-quality
+  decay with parts; the metis receipt argues against pure
+  partition-cut explanations, on the CPU lane at least).
+* The non-monotone tile dependence of the ratio (largest at the
+  LARGEST tile, 1.90 at 81.9k) is unexplained; recorded, not theorised.
+
+## Distance-to-modeled-limit: atm lat-lon GPU (2026-08-02, "near theoretical limit" directive)
+
+Closed the bench's own honest-null bound gap (audit item 4) for the
+lat-lon lane, using only repo instruments:
+
+* **Halo census** (new probe `scripts/tmp/_probe_latlon_halo_census.py`,
+  virtual-CPU forced-host-platform lowering of the REAL
+  `make_sharded_atm_latlon_step`): **41 collective-permutes + 1
+  all-reduce per step**, nd-INDEPENDENT (identical at nd=8 and nd=16 —
+  the 1-D band structure check). Exact CP payload from compiled-HLO
+  result shapes: 4,635,408 B/dev/step at n_lon=1024 L26 f32 = 1.06x the
+  single-row slab model; linear in n_lon (checked 1024 vs 2048, 0.07 %
+  residual) -> **18.5 MB/dev/step at n_lon=4096 f32**. CAVEAT: CPU
+  lowering; GPU-side collective combining could change the executed
+  count (metadata.py:214) — the bound is a MODEL.
+* **Same-tile nd=1 compute baselines** (job 26630370, roofline recipe):
+  16x4096 f32 1.659 ms, 32x4096 f32 2.837, 16x4096 f64 2.973.
+  Approximation, recorded: nd=1 includes pole tiles; the bias
+  DIRECTION on the compute term is PLAUSIBLE-high, not proven
+  (matters most for the compute-dominated f64 row).
+* **Calibrated bound** (`metadata.calibrated_bound`, measured fabric
+  constants: IB 26.3 us / 23.5 GB/s, NVLink 17.8 / 64.2):
+
+| row | measured | t_bound (IB) | measured/bound |
+|---|---|---|---|
+| LL2048@64 f32 | 6.732 | 2.863 | **2.35** |
+| LL2048@128 f32 | 5.577 | 1.894 | **2.94** |
+| LL2048@128 f64 | 9.602 | 2.999 | **3.20** |
+
+(Codex r7 corrected the @128 f32 row: the first draft fed the slab-byte
+lower bound into a table labelled exact-bytes — 1.848/3.02 was the
+mixed-input artefact; with the exact 18,541,632 B payload the bound is
+1.894 ms. r7 also independently RERAN the census at nd=128 — 41 CP + 1
+AR confirmed at the target device count, not just extrapolated from
+8/16 — and measured the f64 census directly: 9,270,800 B at n_lon=1024,
+four 4-byte scalar CPs staying f32, so the x2 extrapolation was 16 B
+high.)
+
+* **The lat-lon GPU panel sits ~2.4-3.2x ABOVE this MODEL** (2.35-3.20)
+  — the eff-0.60 strong leg is not close to the fabric+compute MODEL
+  (a heuristic, not a proven floor). The 2-node/8-process IB
+  calibration is extrapolated to a 32-node/128-process communicator. Leading
+  PLAUSIBLE mechanism (uninstrumented): effective per-CP cost
+  (launch + schedule + stream sync) well above the raw 26 us fabric
+  latency across 41 dependency-chained exchanges — the arXiv:2607.16100
+  small-collective regime. The model itself notes the serialized-latency
+  vs overlap biases pull opposite ways; treat measured/bound as a
+  consistency diagnostic, not proven headroom.
+* **Lever test submitted (job 26630576)**: 4-run CP-combining A/B at
+  LL2048@128 (A default / B combine-8MB / C combine+pipelined-p2p /
+  A2 default repeat),
+  same-job control + trailing A2 drift bracket. Interpretation limit:
+  without a GPU post-pass CP census per arm, a null refutes THIS
+  threshold/implementation, not combinable-CP count in general. The
+  ocean-lane null for these flags came from a different
+  implicit-PCG/dependency mix — not predictive for the atm lane either
+  way.
+
+## Distance-to-modeled-limit: MPAS GPU (2026-08-02 late)
+
+Codex r9 caught the first census at the WRONG topology
+(`reorder_target=nd` vs the rows' `--reorder-for 128`); numbers below
+are from the topology-correct recensus (job 26636684, cells/dev
+40,968/40,962 exactly matching the timed rows). The CP payloads are
+edge-coloured max-round-padded STATIC buffers — byte sums are payload
+shapes, not measured wire bytes. Wrong-topology values (33 CP/24.0 MB
+@s8, 39 CP/30.6 MB @s9) are retained in the r9 transcript only.
+
+Same treatment as the lat-lon lane (probe twin
+`scripts/tmp/_probe_mpas_halo_census.py`; virtual-CPU lowering of the
+REAL `make_voronoi_sharded_step`, one compile, count-asserted):
+
+* **The MPAS CP count is nd- AND reorder-target-DEPENDENT** — 9 / 21 /
+  30 at nd=4(s7) / 8(s6) / 16(s6) with reorder_target=nd (early
+  wrong-topology probes, historical), and 24 / 33 at nd=16(s8) /
+  64(s9) with the rows' actual reorder-for-128 — Voronoi
+  neighbour-round schedules grow with parts, unlike the 1-D band's
+  fixed 41. Each MPAS bound must census ITS OWN row topology.
+* **s8@nd16, reorder-for 128 (the real s8-lloyd0 np16 row topology)**:
+  24 CP + 1 AR per step, 23,860,920 B static payload at 40,968
+  cells/dev L26 f32.
+* **Same-tile nd=1 anchor (job 26635847)**: subdiv-6 lloyd0 GLOBAL
+  mesh (40,962 natural cells ~= the 41k tile) on one A100: **2.010 ms**
+  — the SERIAL same-size compute PROXY used by the model (codex r9: it
+  is un-reordered, lacks the sharded halo-local max_lc/max_le rows and
+  pack/scatter path, and runs the bench's serial-leg dt — model-grade,
+  not "the compute term").
+* **Bound for s8-lloyd0@np16 (measured 6.43 ms, job 26628076)**, IB
+  constants 26.3 us / 23.5 GB/s, serialized-latency comm model:
+  comm = 24 x 26.3 us + 23.86 MB / 23.5 GB/s = 0.631 + 1.015 = 1.647 ms;
+  t_bound = max(2.010, 1.647) + 0.026 = **2.036 ms** (compute-limited);
+  **measured/bound = 3.16** — the SAME ~3x regime as the lat-lon panel
+  (2.35-3.20). Both directive lanes sit ~3x above their fabric+compute
+  MODEL at healthy tiles.
+* **s9@nd64, reorder-for 128**: 33 CP + 1 AR per step, 29,489,064 B
+  static payload at 40,962 cells/dev — payload GROWS +24 % at matched
+  tile vs s8@nd16 (more neighbour rounds with parts; PLAUSIBLE
+  partition-quality decay; recorded).
+* **Bound for s9@np64 (measured 9.60 ms, job 26600095)**:
+  comm = 33 x 26.3 us + 29.49 MB / 23.5 GB/s = 0.868 + 1.255 = 2.123;
+  t_bound = max(2.010, 2.123) + 0.026 = **2.149 ms**;
+  **measured/bound = 4.47**.
+* **Matched-tile gap decomposition (topology-correct census)**: the
+  s8@16 -> s9@64 measured gap is +3.17 ms; the MODELED comm growth
+  (CP 24->33 = +0.237 ms latency, payload +5.63 MB = +0.240 ms BW; net
+  bound growth +0.113 ms at the max() edge) covers <= 0.48 ms =
+  **~15 %**. The
+  UNDER THE FIXED-IB MODEL, direct count/payload growth accounts for
+  at most ~15 % of the gap; its ACHIEVED-runtime contribution is
+  unresolved (the unmeasured per-CP effective overhead could itself
+  scale with count — codex r9). PLAUSIBLE residual mechanisms
+  (uninstrumented): per-CP effective overhead growing with rank count
+  (4 -> 16 nodes), and jitter/straggler amplification across the
+  dependency-chained CP syncs per step (33 + 1 AR at nd64); "more neighbours +
+  partition-quality decay" for the byte growth is likewise PLAUSIBLE.
+  The 26630576 CP-combining A/B tests the LAT-LON lane only; the MPAS
+  exchange is a hand-rolled edge-coloured ppermute schedule, so an
+  MPAS combining test would need its own arm (and may not be
+  XLA-combinable at all).

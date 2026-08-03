@@ -89,8 +89,8 @@ def _no_correction_reference_nord0(u_d, v_d, ua, va, cdgrid):
     """
     cosa_u = cdgrid.cosa_u
     cosa_v = cdgrid.cosa_v
-    from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
-    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+    from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
+    sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
     dxc = cdgrid.dxc
     dyc = cdgrid.dyc
     rarea_c = cdgrid.rarea_c
