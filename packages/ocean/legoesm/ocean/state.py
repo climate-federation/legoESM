@@ -1722,6 +1722,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     vector operators). The ACC recipe opts in. Literal default -> safe after
     #     `constants`.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # #1455: e3 (layer-thickness) weighting of the "nemo_div_curl" div/curl,
+    # ONLY meaningful when lateral_viscosity_operator="nemo_div_curl" (raises
+    # otherwise). "off" (default, bit-identical) keeps the documented
+    # simplification (divergence_cgrid/curl_vertex_cgrid weight only the
+    # horizontal e1/e2 metrics, never e3); "nemo_e3" restores NEMO's e3u/e3v/e3f
+    # weighting inside the div/curl (dynldf_lev_rot_scheme.h90:22-29,41,51),
+    # closing the topographic-step residual on the dyn_ldf gate rows. See
+    # nemo_ldf_lap_viscosity_e3_cgrid.
+    lateral_viscosity_e3_weighting: str = "off"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag

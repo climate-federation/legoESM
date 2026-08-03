@@ -1588,6 +1588,7 @@ class LatLonCGridOceanModel:
             VALID_MOMENTUM_FLUX_SCHEME,
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
+            VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -1645,6 +1646,21 @@ class LatLonCGridOceanModel:
                 f"lateral_viscosity_operator must be one of "
                 f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
                 f"got {config.lateral_viscosity_operator!r}",
+            )
+        # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
+        _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
+        if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
+            raise ValueError(
+                f"lateral_viscosity_e3_weighting must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_E3_WEIGHTING)}, "
+                f"got {_e3w!r}",
+            )
+        if _e3w != "off" and config.lateral_viscosity_operator != "nemo_div_curl":
+            raise ValueError(
+                "lateral_viscosity_e3_weighting != 'off' requires "
+                "lateral_viscosity_operator='nemo_div_curl' (it selects the "
+                f"e3-weighting of THAT operator's div/curl); got "
+                f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
             )
         _vert_mom_scheme = getattr(
             config, "vertical_momentum_scheme", "upwind_perturbation")
