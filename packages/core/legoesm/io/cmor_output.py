@@ -1,7 +1,10 @@
 """CF/CMOR-compliant NetCDF output pipeline for legoESM.
 
-Writes model output as CF-1.8 / CMOR 3.x compliant NetCDF4 files,
-suitable for submission to CMIP6-class model intercomparisons.  Each
+Writes model output as CF-1.7 / CMIP-6.2 / CMOR 3.x compliant NetCDF4
+files, suitable for submission to CMIP6-class model intercomparisons.
+The ``Conventions`` value is READ from the vendored table Header, not
+hard-coded -- the "CF-1.8" this module used to advertise is rejected by
+the CMIP6 CV regex ``^CF-1.7 CMIP-6.[0-2]( UGRID-1.0){0,}$``.  Each
 variable is stored in its own file following the CMIP6 DRS:
 
     <var>_<table>_<model>_<experiment>_<variant>_<grid>_<time-range>.nc
