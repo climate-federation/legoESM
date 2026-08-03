@@ -166,6 +166,19 @@ def build_surface_config(case, *, bulk_scheme: str = "constant"):
         ch_neutral = float(case.spec.bulk_ch)
     else:
         ch_neutral = cd_neutral
+    # SurfaceLayerConfig has ONE Ch_neutral and its consumer applies it to both
+    # the sensible and the latent flux, so a case whose LES uses separate C_H
+    # and C_Q cannot be reproduced exactly. Say so rather than carrying
+    # bulk_ce as metadata that merely LOOKS applied.
+    if (not prescribed and case.spec.bulk_ce is not None
+            and case.spec.bulk_ch is not None
+            and abs(case.spec.bulk_ce - case.spec.bulk_ch) > 1.0e-12):
+        pct = 100.0 * (case.spec.bulk_ce - case.spec.bulk_ch) / case.spec.bulk_ch
+        print(f"  WARNING: {case.name} LES uses separate C_H="
+              f"{case.spec.bulk_ch:.6f} and C_Q={case.spec.bulk_ce:.6f}, but "
+              f"SurfaceLayerConfig has a single Ch_neutral applied to BOTH "
+              f"fluxes. The latent flux therefore runs {pct:+.1f}% off the "
+              "LES; moisture tuning will absorb part of that.")
     if bulk_scheme not in ("constant", "most"):
         raise ValueError(
             f"surface bulk_scheme={bulk_scheme!r} not supported here; "
@@ -569,6 +582,11 @@ def _assert_strict_bounds(params: TrainablePhysicsParams) -> None:
 @dataclass
 class SchemeResult:
     scheme: str
+    # ok / tuned            -> rankable, score reflects a real optimisation
+    # no_reducing_step      -> line search never accepted; score IS the default
+    # no_active_gradient    -> every parameter disconnected from the loss
+    # no_tunable_params     -> nothing spec'd to tune
+    # failed / tune_failed  -> raised
     status: str
     score_default: float | None = None
     score_tuned: float | None = None
@@ -703,6 +721,10 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
               f"{'accepted' if accepted else 'no reducing step -> stop'}",
               flush=True)
         if not accepted:
+            if step == 1:
+                # Nothing was ever accepted: the reported score is the default,
+                # so calling this arm "tuned" would overstate it.
+                result.status = "no_reducing_step"
             break
 
     result.loss_history = loss_history
@@ -818,6 +840,11 @@ def main(argv=None) -> int:
     if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("JAX_ENABLE_X64=1 is required for this driver.")
 
+    args.radiation_confound = (
+        _RADIATION_MISMATCH[args.case]
+        if (args.case in _RADIATION_MISMATCH and args.allow_radiation_mismatch)
+        else None
+    )
     if args.case in _RADIATION_MISMATCH and not args.allow_radiation_mismatch:
         raise SystemExit(
             f"refusing to tune {args.case!r}: {_RADIATION_MISMATCH[args.case]}\n"
@@ -892,6 +919,15 @@ def main(argv=None) -> int:
               "average the LES's actual window so both sides match.")
     if actual_analysis_h <= 0.0:
         raise SystemExit("LES analysis window has zero span.")
+    n_analysis = int(round(actual_analysis_h * 3600.0 / args.dt))
+    if abs(n_analysis * args.dt / 3600.0 - actual_analysis_h) > 1.0e-9:
+        raise SystemExit(
+            f"--dt {args.dt} s does not divide the LES analysis window "
+            f"({actual_analysis_h:.6f} h = {actual_analysis_h * 3600.0:.1f} s): "
+            f"{n_analysis} steps cover {n_analysis * args.dt / 3600.0:.6f} h, so "
+            "the two sides would average different spans while the report "
+            "claimed one window. Pick a dt that divides it."
+        )
     args.analysis_hours = actual_analysis_h
 
     print(f"case={args.case} nlev={args.nlev} dt={args.dt}s hours={hours} "
@@ -1043,7 +1079,11 @@ def _half_pressures(case) -> np.ndarray:
 def _write_outputs(outdir: Path, args, case, reference, results) -> None:
     # A failed or gradient-dead arm must NOT be ranked: one that fails after a
     # single favourable update would otherwise be reported as the winner.
-    _RANKABLE = {"ok", "tuned", "no_tunable_params", "no_active_gradient"}
+    # An arm is RANKED only if its score reflects a genuine optimisation.
+    # "no_active_gradient" was previously included, which let a closure whose
+    # parameters are disconnected from the loss be ranked -- possibly FIRST --
+    # on its untouched default score against genuinely tuned arms.
+    _RANKABLE = {"ok", "tuned"}
 
     def _score_of(r):
         if r.score_tuned is not None:
@@ -1070,6 +1110,10 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
 
     payload = {
         "case": args.case,
+        # Present and non-null ONLY when --allow-radiation-mismatch was used.
+        # Without this the JSON claimed a controlled comparison while ranking a
+        # case whose LES radiation the SCM cannot reproduce.
+        "RADIATION_CONFOUND": args.radiation_confound,
         "protocol": {
             "nlev": args.nlev, "dt_s": args.dt, "hours": args.hours,
             "analysis_hours": args.analysis_hours,
@@ -1089,6 +1133,19 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             # Stated, not buried. Each of these is identical across arms, so
             # the ranking stays controlled, but each degrades the absolute
             # LES-match and could be absorbed into a tuned parameter.
+            "single_surface_exchange_coefficient": (
+                None if case.spec.bulk_ce is None
+                or case.spec.bulk_ch is None
+                or case.forcing.prescribe == "fluxes"
+                else {
+                    "les_C_H": case.spec.bulk_ch,
+                    "les_C_Q": case.spec.bulk_ce,
+                    "scm_Ch_neutral_applied_to_both": case.spec.bulk_ch,
+                    "latent_flux_error_pct": 100.0
+                    * (case.spec.bulk_ce - case.spec.bulk_ch)
+                    / case.spec.bulk_ch,
+                }
+            ),
             "known_scm_les_differences": [
                 "Surface momentum: the SCM uses a constant-Cd bulk drag while "
                 "the LES uses a z0 log-law wall model. This is why u and v are "
@@ -1128,6 +1185,14 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
 
     lines = [
         f"# SCM turbulence closures vs LES — {args.case}", "",
+    ]
+    if args.radiation_confound:
+        lines += [
+            "> **THIS IS NOT A TURBULENCE RANKING.** "
+            "`--allow-radiation-mismatch` was used: "
+            + args.radiation_confound, "",
+        ]
+    lines += [
         f"LES reference: `{reference.source_dir}`, window "
         f"{reference.window_label}, {int(reference.mask.sum())} of "
         f"{case.nlev} SCM levels inside the LES domain.", "",

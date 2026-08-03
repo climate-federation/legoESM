@@ -135,9 +135,20 @@ def _read_frames(prof_dir: Path, *, expect_case: str | None = None):
         # The frames record which case wrote them. Without this check,
         # `--case rico --les-dir results/les_ref/bomex` loads BOMEX profiles,
         # maps them with RICO geometry and forcing, and labels the result RICO.
-        if expect_case is not None and "case" in data:
+        if expect_case is not None:
+            # REQUIRED, not optional: a frame with no label, or an empty one,
+            # previously sailed through, so a stale frame from another case
+            # that happened to lack its label was mapped onto this column and
+            # scored as if it belonged here.
+            if "case" not in data or not str(data["case"]).strip():
+                raise ValueError(
+                    f"{path.name} carries no 'case' label, so it cannot be "
+                    f"confirmed to belong to {expect_case!r}. Rerun the LES "
+                    "(every driver writes the label) rather than scoring "
+                    "against an unidentified reference."
+                )
             wrote = str(data["case"])
-            if wrote and not _case_matches(wrote, expect_case):
+            if not _case_matches(wrote, expect_case):
                 raise ValueError(
                     f"{path.name} was written by LES case {wrote!r} but this "
                     f"reference is being built for {expect_case!r}. Pointing "
@@ -165,15 +176,22 @@ def _read_frames(prof_dir: Path, *, expect_case: str | None = None):
     return frames
 
 
-def _case_matches(wrote: str, expect: str) -> bool:
-    """Frame ``case`` labels are driver ``--case-label`` values.
+# Deck-directory spellings that legitimately identify a case. An explicit
+# table, NOT a prefix test: `startswith` accepted "b" and "bomex_experiment"
+# for "bomex", which is exactly how a mislabelled or unrelated frame gets in.
+_CASE_ALIASES: dict[str, frozenset[str]] = {
+    "bomex": frozenset({"bomex"}),
+    "rico": frozenset({"rico"}),
+    "dycoms": frozenset({"dycoms", "dycoms_rf01", "dycoms_rf02", "dycomsii"}),
+    "gabls1": frozenset({"gabls1"}),
+    "wangara": frozenset({"wangara"}),
+}
 
-    They are compared case-insensitively and allow the deck-directory spelling
-    (``DYCOMS_RF01`` for case ``dycoms``) so a legitimate reference is not
-    rejected on a naming cosmetic.
-    """
+
+def _case_matches(wrote: str, expect: str) -> bool:
+    """Exact match against the case name or one of its registered aliases."""
     a, b = wrote.strip().lower(), expect.strip().lower()
-    return a == b or a.startswith(b) or b.startswith(a)
+    return a == b or a in _CASE_ALIASES.get(b, frozenset())
 
 
 def _time_mean(frames, name: str) -> np.ndarray:
@@ -258,6 +276,20 @@ def load_les_reference(
                 "frames."
             )
 
+    # Every frame in the window must be on the SAME vertical grid. Averaging
+    # by index otherwise silently mixes runs with different Lz or nz that
+    # happen to share a level COUNT -- the mean would be over two grids.
+    z_ref_frame = np.asarray(window[0][2]["z"], dtype=np.float64)
+    for _t, path, payload in window[1:]:
+        z_i = np.asarray(payload["z"], dtype=np.float64)
+        if z_i.shape != z_ref_frame.shape or not np.allclose(
+            z_i, z_ref_frame, rtol=0.0, atol=1.0e-6
+        ):
+            raise ValueError(
+                f"LES frame {path.name} is on a different vertical grid than "
+                f"{window[0][1].name} (z differs). The directory mixes runs; "
+                "delete it and rerun the LES rather than averaging two grids."
+            )
     z_les = _time_mean(window, "z")
     if np.any(np.diff(z_les) <= 0.0):
         raise ValueError("LES z must be strictly ascending.")
