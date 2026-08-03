@@ -28,6 +28,8 @@ def _cfg(**over):
         cloud_q_c_diagnostic=1.0e-4,
         cloud_conv_cloud_max=None,
         cloud_conv_cloud_condensate=None,
+        cloud_conv_cloud_coeff=0.12,              # non-default (0.04)
+        cloud_Nc_default=4.0e7,                   # non-default (1.0e8)
         cloud_inhomogeneity_factor=0.7,          # non-default (default 1.0)
         cloud_optics_inhomogeneity="two_region",  # non-default ("constant")
         cloud_fsd=0.5,                            # non-default (0.75)
@@ -56,6 +58,18 @@ def test_inhomogeneity_and_condensate_selectors_reach_the_cloud_config():
     assert cc.q_c_diagnostic == pytest.approx(1.0e-4)
 
 
+def test_droplet_number_and_slingo_slope_reach_the_cloud_config():
+    """``Nc_default`` is the specified droplet number the M2005 liquid-r_eff PSD
+    reads in EVERY column of a specified-Nc (morrison predict_Nc=False) run, and
+    the MPAS lane is where the calibration campaign runs — dropping it here
+    would make the strongest liquid-cloud SW lever inert on the production lane.
+    ``conv_cloud_coeff`` is the Slingo cloud-amount SLOPE (its already-forwarded
+    neighbour conv_cloud_max is only the cap)."""
+    cc = _standalone_cloud_config(_cfg(), "sundqvist")
+    assert cc.Nc_default == pytest.approx(4.0e7)
+    assert cc.conv_cloud_coeff == pytest.approx(0.12)
+
+
 def test_matches_a_direct_build_cloud_config_call():
     """The MPAS helper and a direct build must agree field-for-field, which is
     what "mirrors the FV pipeline's call" is supposed to mean."""
@@ -71,6 +85,8 @@ def test_matches_a_direct_build_cloud_config_call():
         cloud_fsd=cfg.cloud_fsd,
         diagnostic_condensate_scheme=cfg.cloud_diagnostic_condensate_scheme,
         adiabatic_lwc_rate=cfg.cloud_adiabatic_lwc_rate,
+        conv_cloud_coeff=cfg.cloud_conv_cloud_coeff,
+        Nc_default=cfg.cloud_Nc_default,
     )
     assert got == want
 

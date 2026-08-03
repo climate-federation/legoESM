@@ -1747,6 +1747,115 @@ def test_conv_cloud_condensate_out_of_bounds_rejected():
         cfg.validate_strict()
 
 
+def test_cloud_nc_default_flag_resolves_to_cloudconfig():
+    """--cloud-nc-default round-trips into ExperimentConfig and resolves onto
+    the hot-loop ``CloudConfig.Nc_default`` (the specified droplet number the
+    M2005 liquid-r_eff PSD reads in every column of a specified-Nc run).  Before
+    2026-08-02 the parameter had a ``__param_spec__`` entry but NO flat scalar,
+    so a calibration member could not vary the strongest liquid-cloud SW lever
+    at all.  Unset => None => CloudConfig default 1e8 (byte-identical)."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-nc-default", "4e7",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_Nc_default == pytest.approx(4e7)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(cfg.cloud_scheme,
+                                  Nc_default=cfg.cloud_Nc_default)
+    assert resolved.Nc_default == pytest.approx(4e7)
+    # Unset => scheme default (the continental 1e8 applied globally).
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_Nc_default is None
+    assert build_cloud_config(
+        cfg_def.cloud_scheme,
+        Nc_default=cfg_def.cloud_Nc_default).Nc_default == pytest.approx(
+            CloudConfig._field_defaults["Nc_default"])
+
+
+def test_cloud_nc_default_out_of_bounds_rejected():
+    """An Nc_default outside the __param_spec__ range (1e7, 1e9) must fail
+    strict validation rather than reach the PSD."""
+    parser = build_arg_parser()
+    for bad in ("1e6", "1e10"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--cloud-nc-default", bad,
+        ]), parser))
+        with pytest.raises((ValueError, AssertionError)):
+            cfg.validate_strict()
+
+
+def test_cloud_conv_cloud_coeff_flag_resolves_to_cloudconfig():
+    """--cloud-conv-cloud-coeff round-trips and resolves onto the hot-loop
+    ``CloudConfig.conv_cloud_coeff``.  It is the Slingo cloud-amount SLOPE; the
+    already-exposed ``conv_cloud_max`` is only the CAP, which with the
+    production defaults (0.04 / 0.15) does not bind until ~43x the P0 reference
+    precip -- so the cap alone is an inert lever over most of the tropics."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-conv-cloud-coeff", "0.12",
+    ]), parser))
+    assert cfg.cloud_conv_cloud_coeff == pytest.approx(0.12)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(cfg.cloud_scheme,
+                                  conv_cloud_coeff=cfg.cloud_conv_cloud_coeff)
+    assert resolved.conv_cloud_coeff == pytest.approx(0.12)
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_conv_cloud_coeff is None
+    assert build_cloud_config(
+        cfg_def.cloud_scheme,
+        conv_cloud_coeff=cfg_def.cloud_conv_cloud_coeff
+    ).conv_cloud_coeff == pytest.approx(
+        CloudConfig._field_defaults["conv_cloud_coeff"])
+
+
+def test_cloud_conv_cloud_coeff_out_of_bounds_rejected():
+    """A conv_cloud_coeff outside (0.0, 0.5) must fail strict validation."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-conv-cloud-coeff", "0.9",
+    ]), parser))
+    with pytest.raises((ValueError, AssertionError)):
+        cfg.validate_strict()
+
+
+def test_cloud_nc_default_and_conv_coeff_reach_the_fv_pipeline():
+    """End-to-end on the FV lane: the flat scalars must be threaded by
+    ``build_physics_pipeline`` into the attributes the pipeline's own
+    ``build_cloud_config`` call reads.  A flag that stops at ExperimentConfig
+    is the exact dead-knob class this wiring exists to close."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+    )
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import make_hybrid_levels
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=10),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        cloud_scheme="sundqvist",
+        cloud_Nc_default=4.0e7,
+        cloud_conv_cloud_coeff=0.12,
+    )
+    pipe = build_physics_pipeline(create_cubed_sphere(4),
+                                  make_hybrid_levels(10), cfg)
+    assert pipe._cloud_Nc_default == pytest.approx(4.0e7)
+    assert pipe._cloud_conv_cloud_coeff == pytest.approx(0.12)
+
+
 def test_subgrid_autoconv_flag_threads_to_config():
     """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
     parser = build_arg_parser()
@@ -2602,6 +2711,49 @@ def test_convective_precip_split_validate_bounds():
                      autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()
 
 
+def test_autoconversion_split_refused_when_inplume_precip_preempts_it():
+    """On BECHTOLD the IFS in-plume rain formation sets ``_split_done`` before
+    the precip-split dispatch (bechtold.py:2855-2908; line 3198 skips the late
+    block), so an 'autoconversion' split — and with it autoconv_q_c_crit /
+    autoconv_pe_max — can never execute while it is on.  That is why the
+    2026-08-01 calibration sweep measured 0.00 W/m^2 rsut response on both
+    scalars.  validate_strict refuses the combination instead of running
+    different physics than requested."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_use_ifs_inplume_precip"):
+        ExperimentConfig(convection="bechtold",
+                         convective_precip_split="autoconversion"
+                         ).validate_strict()
+    # Turning the in-plume path off makes the split reachable => accepted.
+    ExperimentConfig(convection="bechtold",
+                     convective_precip_split="autoconversion",
+                     bechtold_use_ifs_inplume_precip=False).validate_strict()
+    # Scoped to bechtold: TiedtkeConfig has no in-plume path, so its split runs.
+    ExperimentConfig(convection="tiedtke",
+                     convective_precip_split="autoconversion").validate_strict()
+    # And the default 'constant' split is unaffected on bechtold.
+    ExperimentConfig(convection="bechtold").validate_strict()
+
+
+def test_adiabatic_lwc_rate_refused_under_the_constant_condensate_scheme():
+    """``cloud_adiabatic_lwc_rate`` is read ONLY by
+    ``_adiabatic_incloud_condensate``, which runs only under
+    ``diagnostic_condensate_scheme='adiabatic'``.  Setting the rate under the
+    default 'constant' scheme calibrates a parameter the run never reads (the
+    other half of the 0.00 W/m^2 sweep result), so it is refused."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_adiabatic_lwc_rate"):
+        ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
+                         cloud_adiabatic_lwc_rate=2.0e-6).validate_strict()
+    # Paired with the scheme that reads it => accepted.
+    ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
+                     cloud_diagnostic_condensate_scheme="adiabatic",
+                     cloud_adiabatic_lwc_rate=2.0e-6).validate_strict()
+    # Unset (None) stays valid under either scheme.
+    ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp"
+                     ).validate_strict()
+
+
 def test_bechtold_downdraft_round_trips_and_threads():
     """--bechtold-downdraft-evap/-alpha/-rh-min round-trip into ExperimentConfig
     and thread into the hot-loop BechtoldConfig (the marine humid-BL evaporation
@@ -2788,6 +2940,118 @@ def test_louis_cloudtop_entrainment_efficiency_validate_strict():
                 louis_cloudtop_entrainment_efficiency=bad).validate_strict()
     for ok in (0.0, 0.2, 1.0):
         ExperimentConfig(louis_cloudtop_entrainment_efficiency=ok).validate_strict()
+
+
+# --- Louis stability-function scalars: live vs inert -------------------------
+# d8268e6fa made turbulence_config_for thread the flat louis_* scalars into the
+# active louis sub-config.  Before it they were documented as targeting
+# LouisConfig and silently dropped.  These tests pin BOTH halves: the five that
+# genuinely reach the kernel are exposed end-to-end, and the four that reach
+# nothing are REFUSED rather than accepted and ignored.
+
+_LIVE_LOUIS_SCALARS = (
+    ("--louis-l-mix-max", "louis_l_mix_max", "l_mix_max", 250.0),
+    ("--louis-ri-crit", "louis_Ri_crit", "Ri_crit", 0.4),
+    ("--louis-b-louis", "louis_b_louis", "b_louis", 4.0),
+    ("--louis-c-louis", "louis_c_louis", "c_louis", 12.0),
+    ("--louis-d-louis", "louis_d_louis", "d_louis", 6.0),
+)
+
+
+@pytest.mark.parametrize("flag,ec_field,leaf_field,value", _LIVE_LOUIS_SCALARS)
+def test_live_louis_scalar_flag_reaches_the_kernel_config(flag, ec_field,
+                                                          leaf_field, value):
+    """Each --louis-* flag round-trips into ExperimentConfig AND reaches the
+    LouisConfig leaf via ``turbulence_config_for`` — the single source every
+    dycore's kernel is built from.  A flag that stopped at ExperimentConfig
+    would be the exact dead-knob the 2026-08-01 calibration audit found."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis", flag, str(value),
+    ]), parser))
+    assert getattr(cfg, ec_field) == pytest.approx(value)
+    assert cfg.validate_strict() is None
+    assert getattr(turbulence_config_for(cfg).louis,
+                   leaf_field) == pytest.approx(value)
+
+
+def test_live_louis_scalar_defaults_are_byte_identical():
+    """Unset --louis-* flags must leave the LouisConfig leaf at its defaults
+    (turbulence_config_for takes no _replace), so the flags cannot perturb an
+    existing run just by existing."""
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+    ]), parser))
+    louis = turbulence_config_for(cfg).louis
+    for _, ec_field, leaf_field, _ in _LIVE_LOUIS_SCALARS:
+        assert getattr(cfg, ec_field) == LouisConfig._field_defaults[leaf_field]
+        assert getattr(louis, leaf_field) == LouisConfig._field_defaults[leaf_field]
+
+
+def test_live_louis_scalars_are_params_reachable():
+    """The five threaded scalars must ALSO be in the atm scalar param map, or a
+    calibration member still cannot vary them (the reachability gap the sister
+    project reported after the threading fix landed)."""
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    amap = build_atm_scalar_param_map()
+    for _, ec_field, leaf_field, _ in _LIVE_LOUIS_SCALARS:
+        assert amap.get(f"atm.turb.LouisConfig.{leaf_field}") == ec_field
+    # b_heat_ratio has no flat scalar and must NOT be claimed.
+    assert "atm.turb.LouisConfig.b_heat_ratio" not in amap
+
+
+@pytest.mark.parametrize("ec_field,value", [
+    ("louis_Ck", 0.5),
+    ("louis_z0", 1.0e-3),
+    ("louis_Ch_neutral", 3.0e-3),
+    ("louis_Cd_neutral", 3.0e-3),
+])
+def test_inert_louis_scalar_is_refused_not_ignored(ec_field, value):
+    """``louis_Ck`` has no LouisConfig field at all, and louis_z0 /
+    louis_Ch_neutral / louis_Cd_neutral name SurfaceLayerConfig fields that
+    ``apply_surface_flux_config`` never writes.  Setting any of them changed
+    NOTHING while reporting success — exposed-but-ignored.  validate_strict now
+    refuses a non-default value rather than lying about it."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match=ec_field):
+        ExperimentConfig(**{ec_field: value}).validate_strict()
+    # The default is harmless (it equals the scheme default) and must pass.
+    ExperimentConfig().validate_strict()
+
+
+def test_inert_louis_scalars_have_no_cli_flag_and_no_map_entry():
+    """The inert scalars must not be reachable from a member either — exposing
+    a knob that raises would be worse than not exposing it."""
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    help_text = build_arg_parser().format_help()
+    for flag in ("--louis-ck", "--louis-z0", "--louis-ch-neutral",
+                 "--louis-cd-neutral"):
+        assert flag not in help_text
+    amap = build_atm_scalar_param_map()
+    assert not any(k.endswith(".Ck") for k in amap)
+    # z0 / Cd_neutral / Ch_neutral live on SurfaceLayerConfig, calibrated via
+    # the AIMIP classical bundle, not this scalar route.
+    for leaf in ("z0", "Cd_neutral", "Ch_neutral"):
+        assert f"atm.turb.SurfaceLayerConfig.{leaf}" not in amap
+
+
+@pytest.mark.parametrize("ec_field,bad", [
+    ("louis_l_mix_max", 5.0), ("louis_l_mix_max", 1000.0),
+    ("louis_Ri_crit", 0.05), ("louis_Ri_crit", 0.9),
+    ("louis_b_louis", 1.0), ("louis_b_louis", 20.0),
+    ("louis_c_louis", 1.0), ("louis_c_louis", 50.0),
+    ("louis_d_louis", 1.0), ("louis_d_louis", 30.0),
+])
+def test_live_louis_scalar_out_of_bounds_rejected(ec_field, bad):
+    """Out-of-range Louis coefficients fail early rather than deep inside the
+    stability functions (bounds mirror aimip_params.PARAM_CONSTRAINTS)."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match=ec_field):
+        ExperimentConfig(**{ec_field: bad}).validate_strict()
 
 
 def test_diagnostic_condensate_scheme_flows_to_config():

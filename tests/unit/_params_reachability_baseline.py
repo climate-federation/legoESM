@@ -100,10 +100,11 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBParams.nu8',
     'atm.turb.CLUBBParams.nu9',
     'atm.turb.CLUBBParams.slope_coef_spread_DG_means_w',
-    # atm: CloudConfig (8)
-    'atm.clouds.CloudConfig.Nc_default',
+    # atm: CloudConfig (6)
+    # (Nc_default + conv_cloud_coeff wired 2026-08-02: flat ExperimentConfig
+    #  scalars cloud_Nc_default / cloud_conv_cloud_coeff, threaded by
+    #  build_cloud_config on both the FV pipeline and the MPAS standalone lane.)
     'atm.clouds.CloudConfig.T_ice_only',
-    'atm.clouds.CloudConfig.conv_cloud_coeff',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
@@ -225,13 +226,12 @@ UNREACHABLE_PARAMS = frozenset({
     # atm: LindzenConfig (2)
     'atm.gwd.LindzenConfig.fcrit2',
     'atm.gwd.LindzenConfig.h_topo',
-    # atm: LouisConfig (6)
-    'atm.turb.LouisConfig.Ri_crit',
+    # atm: LouisConfig (1) — l_mix_max / Ri_crit / b_louis / c_louis / d_louis
+    # became reachable 2026-08-02: d8268e6fa made turbulence_config_for thread
+    # the flat louis_* scalars into the active louis sub-config, and they now
+    # carry --louis-* CLI flags plus _ATM_SCALAR_PARAM_MAP entries.
+    # b_heat_ratio stays unreachable: it has no flat ExperimentConfig scalar.
     'atm.turb.LouisConfig.b_heat_ratio',
-    'atm.turb.LouisConfig.b_louis',
-    'atm.turb.LouisConfig.c_louis',
-    'atm.turb.LouisConfig.d_louis',
-    'atm.turb.LouisConfig.l_mix_max',
     # atm: MYNN25Config (9)
     'atm.turb.MYNN25Config.A1',
     'atm.turb.MYNN25Config.A2',

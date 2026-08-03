@@ -179,8 +179,18 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
+    # conv_cloud_coeff is the Slingo cloud-amount SLOPE; its neighbour
+    # conv_cloud_max is only the CAP, which with the production defaults
+    # (0.04 / 0.15) does not bind below ~43x the P0 reference precip — so a
+    # member that could only move the cap had no lever on tropical anvil cover.
+    "atm.clouds.CloudConfig.conv_cloud_coeff": "cloud_conv_cloud_coeff",
     "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
     "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
+    # Specified droplet number for the M2005 liquid effective-radius PSD — the
+    # SW/albedo lever a specified-Nc (morrison predict_Nc=False) run reads in
+    # EVERY column.  Wired 2026-08-02: it had a __param_spec__ entry but no flat
+    # ExperimentConfig scalar, so a calibration member could not vary it at all.
+    "atm.clouds.CloudConfig.Nc_default": "cloud_Nc_default",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
@@ -221,11 +231,18 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
-    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
-        "cloud_partial_coverage_optics",
-    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
-        "cloud_vertical_overlap_optics",
-    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
+    # NOTE: cloud_partial_coverage_optics / cloud_vertical_overlap_optics /
+    # cloud_n_subcolumns were REMOVED 2026-08-02 for the same reason as
+    # cloud_inhomogeneity_factor above, one step earlier in the chain: they are
+    # str/int SCHEME SELECTORS, so they are not ``:float``-annotated and are
+    # therefore not spec-eligible — no ``__param_spec__`` entry, hence no
+    # registry qualified name.  ``apply_params_to_config`` looks the key up in
+    # the registry BEFORE consulting this map and raises SystemExit on a miss,
+    # so these three keys were unusable through --params while breaking the
+    # map's own drift guards (test_build_atm_scalar_param_map_is_valid_and_
+    # nonempty + the over/under-claim scans, red on this branch since #1398 and
+    # #1411 added them).  The flat ExperimentConfig scalars remain settable via
+    # --config / their CLI flags, which is the correct route for a selector.
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -250,6 +267,21 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    # Louis stability-function / mixing-length scalars -> turbulence_config_for
+    # (physics_pipeline), the single source every lane's kernel is built from.
+    # These were deliberately ABSENT before 2026-08-01: ExperimentConfig
+    # documented them as targeting LouisConfig but the resolver dropped them, so
+    # a map entry would have claimed a dead override.  d8268e6fa threads any
+    # NON-DEFAULT value into the active louis sub-config, so the --params route
+    # is now honest.  (LouisConfig.b_heat_ratio has no flat scalar and stays
+    # unreachable; louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral
+    # have no LouisConfig field and are REJECTED by validate_strict rather than
+    # mapped — see the guard in driver/config.py.)
+    "atm.turb.LouisConfig.l_mix_max": "louis_l_mix_max",
+    "atm.turb.LouisConfig.Ri_crit": "louis_Ri_crit",
+    "atm.turb.LouisConfig.b_louis": "louis_b_louis",
+    "atm.turb.LouisConfig.c_louis": "louis_c_louis",
+    "atm.turb.LouisConfig.d_louis": "louis_d_louis",
     # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
     # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
     # upstream excluded it from the __param_spec__ registry (default 0.0 = off

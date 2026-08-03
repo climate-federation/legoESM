@@ -744,6 +744,26 @@ def build_parser():
                         help="In-cloud LWC growth per metre of cloudy depth "
                              "[kg/kg/m] for --diagnostic-condensate-scheme="
                              "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
+    parser.add_argument("--cloud-nc-default", dest="cloud_Nc_default",
+                        type=float, default=None,
+                        help="Specified cloud-droplet number concentration "
+                             "[1/m^3] for the M2005 gamma-PSD liquid effective "
+                             "radius (CloudConfig.Nc_default). Read in EVERY "
+                             "column of a specified-Nc double-moment run "
+                             "(morrison with predict_Nc=False); the default 1e8 "
+                             "is a CONTINENTAL value applied globally (marine "
+                             "air ~1e7-5e7). LOWER => larger droplets => less "
+                             "reflective liquid cloud. Range [1e7, 1e9]. "
+                             "Default: CloudConfig default.")
+    parser.add_argument("--cloud-conv-cloud-coeff",
+                        dest="cloud_conv_cloud_coeff",
+                        type=float, default=None,
+                        help="Override the Slingo (1987) convective cloud "
+                             "amount per e-fold of convective precip "
+                             "(CloudConfig.conv_cloud_coeff). With the defaults "
+                             "the --conv-cloud-max cap rarely binds, so this is "
+                             "the lever that moves anvil cover. Range "
+                             "[0.0, 0.5]. Default: CloudConfig default.")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
                         help="Override convective (Slingo) cloud-cover cap "
@@ -1356,8 +1376,10 @@ def main():
         convective_cloud=args.convective_cloud,
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
+        cloud_conv_cloud_coeff=args.cloud_conv_cloud_coeff,
         cloud_conv_cloud_max=args.cloud_conv_cloud_max,
         cloud_conv_cloud_condensate=args.cloud_conv_cloud_condensate,
+        cloud_Nc_default=args.cloud_Nc_default,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         microphysics=args.microphysics,

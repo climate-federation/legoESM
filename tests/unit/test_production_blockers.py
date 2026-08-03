@@ -185,14 +185,27 @@ class TestPhysicsSchemeConfig:
     def test_bechtold_autoconversion_threads_to_config(self):
         """--convective-precip-split autoconversion must reach BechtoldConfig via
         the DEDICATED bechtold branch (codex HIGH regression: bechtold does not
-        pass through the shared _split block used by the other schemes)."""
+        pass through the shared _split block used by the other schemes).
+
+        Exercised with ``bechtold_use_ifs_inplume_precip=False`` — the ONLY
+        configuration in which the split actually executes.  With the default
+        (True) the IFS in-plume rain formation sets ``_split_done`` before the
+        split dispatch (bechtold.py:2855-2908), so the threaded value reaches
+        the config and is then ignored by the kernel; asserting the config alone
+        under that default proved nothing, and ``validate_strict`` now refuses
+        the combination outright.
+        """
         from legoesm.driver.physics_pipeline import _resolve_convection
-        _fn, cfg = _resolve_convection(ExperimentConfig(
+        exp = ExperimentConfig(
             convection="bechtold", convective_precip_split="autoconversion",
-            autoconv_q_c_crit=8.0e-4, autoconv_pe_max=0.8))
+            bechtold_use_ifs_inplume_precip=False,
+            autoconv_q_c_crit=8.0e-4, autoconv_pe_max=0.8)
+        exp.validate_strict()      # the reachable combination is accepted
+        _fn, cfg = _resolve_convection(exp)
         assert cfg.precip_split_scheme == "autoconversion"
         assert cfg.autoconv_q_c_crit == 8.0e-4
         assert cfg.autoconv_pe_max == 0.8
+        assert cfg.use_ifs_inplume_precip is False
 
     def test_tiedtke_autoconversion_threads_to_config(self):
         from legoesm.driver.physics_pipeline import _resolve_convection
