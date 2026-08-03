@@ -1721,7 +1721,7 @@ partition effectively unbounded for our rank counts. Submitted set:
 | job | what | devices | why |
 |---|---|---|---|
 | 26628196 | s9 ensemble contention (v3; 26628021/26627810 superseded pre-start) | 128 GPU (4x32) | lever #1 receipt |
-| 26628071 | oc LL2304 retry post-#1370 | 128 GPU | pre-fix failure was resident-args; predicted PASS at ~0.10 GB/dev residency |
+| 26628071->26636762 | oc LL2304 retry post-#1370 | 128 GPU | PREDICTION REFUTED: 26636762 failed with the byte-identical 109.5 GB args signature despite the fix being an ancestor and no fallback warning; @64 acceptance passed; see arg-linearity finding below |
 | 26628072 | atm LL2304 @96/@192 + LL2880 @192 | 96-192 GPU | LL2048 does not divide 192; LL2880@192 = 86.4k cols/GPU ABOVE floor |
 | 26628073 | atm lat-lon 2-D pencil r512 np64-512 | 512 CPU ranks | hundreds-of-CPUs lat-lon (wall-pole lane, labelled) |
 | 26628074 | subdiv-10 lloyd0 prewarm | 1 CPU | unlocks MPAS 128-224 GPUs ABOVE floor (81.9k-46.8k cells/GPU) |
@@ -1911,3 +1911,130 @@ REAL `make_voronoi_sharded_step`, one compile, count-asserted):
   exchange is a hand-rolled edge-coloured ppermute schedule, so an
   MPAS combining test would need its own arm (and may not be
   XLA-combinable at all).
+
+### Transport discriminator (job 26638578): NCCL runs NET/IB + GDRDMA — the gap is real
+
+The early_init "no NCCL net plugin visible -> likely TCP sockets"
+warning fired on every multi-node lane; NCCL_DEBUG=INFO on the real
+bench (atm latlon @8 over 2 nodes) shows **258 NET/IB channel lines,
+including NET/IB/…/GDRDMA, and zero NET/Socket** — NCCL's BUILT-IN IB
+verbs transport is active (no plugin needed; the warning is a
+plugin-visibility heuristic written for Derecho and is a FALSE ALARM on
+Levante at this scale — softening it is a follow-up). SCOPE (codex
+r11): this proves the 2-node/8-GPU case; it makes socket fallback on
+the 32-node/128-GPU runs UNLIKELY (same env, same stack) but does not
+directly measure them, nor rule out topology-scale transport effects
+there. The mechanism hunt (per-CP effective overhead / scheduling)
+continues. Bonus receipt: LL512x1024 @8 over 2 nodes =
+3.60 ms (probe row, steps 12).
+
+### s10@128 blocked by the #1100 remainder (job 26630207)
+
+FAILED with `byte size of input/output arguments (162,319,564,800)
+exceeds the base limit` — the MPAS MESH is still global per process
+(state is partition-local since #1100; the mesh's SFC-partition-local
+construction is the documented open remainder, quoted in the bench
+source). At subdiv-10 the global geometry stacks alone exceed XLA's
+arg limit at 128 GPUs (OBSERVED); 192/224 are EXPECTED to remain
+blocked pending partition-local mesh construction — engineering
+follow-up, not an env bug. The hundreds-of-GPUs MPAS
+receipt therefore stands at subdiv-9/128 GPUs.
+
+### CP-combining A/B: three deadlocks on one node block; pivoted to @64 with exclusion
+
+Jobs 26630576 / 26638830 / 26640037 (LL2048@128 A/B) all hung in arm A
+on the SAME 32-node block (l50000...l50187) and timed out with zero
+receipts. Evidence collected in place: all 64 IB ports ACTIVE; NCCL
+per-rank debug (v4) shows ALL 128 ranks reach "Connected all rings"
+then every python idles at ~1 % CPU with memory preallocated — a TRUE
+DEADLOCK after NCCL init (plausibly the pre-loop global barrier);
+/dev/shm on l50000 clean (stale-segment hypothesis REFUTED); no stray
+processes. The SAME code path ran LL2048@128 fine on 2026-07-30 (job
+26534060, different nodes) and MPAS s9@128 on 2026-08-01 — so
+block-correlation is PLAUSIBLE (cause unknown; candidate: switch-level
+path issue invisible to port state). Excluding all 32 leaves only 24
+a100_80 nodes, below a 32-node ask — so the lever test moved to
+**LL2048@64 (16 nodes, block excluded), job 26641073**: the gap is
+2.35x there, and a >=10 % combine win at @64 confirms the lever without
+the sick block. If a later job hangs on the block again -> DKRZ ticket
+with this section as the evidence.
+
+## ENSEMBLE RECEIPT (job 26628196): lever #1 CONFIRMED — co-execution penalty <= 0.6 %
+
+steps=5000 protocol (window ~70 s; absolute ms NOT comparable to the
+steps-12 ladder rows by design). Same-job arms, disjoint 8-node sets,
+per-step nodelists logged:
+
+| arm | nodes | ms/step | GC/s |
+|---|---|---|---|
+| solo_pre | l50042-l50072 set | 13.86 | 4.92 |
+| rep1 (concurrent) | l50042-l50072 set | 13.92 | 4.90 |
+| rep2 (concurrent) | l50000-l50039 set | 13.86 | 4.92 |
+| rep3 (concurrent) | l50115-l50187 set | 13.97 | 4.88 |
+| solo_post | l50042-l50072 set | 13.92 | 4.89 |
+
+* **max(replica)/mean(solo) = 13.97/13.89 = 1.006** (0.58 % max
+  observed slowdown; the 1.10 bar is cleared 17x over): NO DETECTED
+  co-execution penalty WITHIN THIS THREE-REPLICA EXPERIMENT. Aggregate
+  ~2.994x solo for K=3. Caveats (codex r11): only rep1 shares the solo
+  brackets' node set (rep2/rep3 comparisons include placement
+  differences), and K=4+ linearity is untested (rep0's set failed).
+* Consequence (lever #1, scoped): at K=3 the measured aggregate is
+  ~14.7 GC/s from 96 GPUs vs 5.9 single-trajectory at 128 — replicas
+  deliver ~3x more science throughput in this experiment. Extrapolation
+  to K=4 (~19.6 GC/s) is PLAUSIBLE, not measured (the 4th set failed
+  for unrelated node reasons).
+* rep0 (4th replica) ABORTED at 7:05 on nodes l[50075,50078,50081,
+  50100,50103,50106,50109,50112] with a Shutdown-barrier
+  DEADLINE_EXCEEDED. Probe 26641282 REPRODUCED failure on rep0's
+  exact 8 nodes while rep2's 8 passed — this identifies a FAILING
+  8-node ALLOCATION vs a passing comparator; it does not by itself
+  name a single node, nor prove the same cause as the LL2048@128
+  hangs (a shutdown-barrier deadline is a different observable than
+  the all-idle hang). Single-sick-node attribution = PLAUSIBLE
+  hypothesis under bisection (halves queued); DKRZ ticket once
+  narrowed.
+
+### CP-combining A/B verdict (job 26641073, LL2048@64, sick block excluded): threshold null — no >=10 % benefit detected
+
+A 6.740 / B combine-8MB 6.682 (-0.86 %) / C combine+pipelined 6.689
+(-0.76 %) / A2 6.648 (-1.37 %) ms. B and C sit inside the single
+A<->A2 control bracket: **no >=10 % benefit detected at @64 for these
+flags**. Per the pre-registered interpretation limit this is a
+threshold/implementation null (one control bracket, no GPU post-pass
+CP census per arm) — not a general refutation of CP combinability. Reproduction note:
+arm A matches the 26502539 receipt (6.732) at 6.740 across
+days/node-sets — the lane is highly repeatable.
+
+**Standing bottleneck picture for the ~2.4-4.5x-above-model gaps at
+healthy tiles**: transport fallback UNLIKELY (NET/IB+GDRDMA proven at
+2-node scale), no detected win from CP-combining at this threshold,
+bytes censused, partition quality / placement / NCCL protocol
+receipted null.
+Remaining candidates are structural (per-CP effective launch/sync
+overhead chains, jitter amplification across dependency-chained
+collectives) — the arXiv:2607.16100 device-side collective API class,
+NOT reachable from today's XLA/NCCL stack. Together with the ensemble
+receipt (co-execution penalty 0.6 %), the campaign's operational
+conclusion: single-trajectory strong scaling at small-to-mid tiles is
+at the practical limit of the current stack; throughput past the floor
+comes from replicas, resolution, or upstream/runtime work.
+
+
+### Ocean @96 bracket (job 26642771): compiler-reported args total is NEAR-LINEAR in device count
+
+@96 failed with args = 82,386,616,320 B; @128 showed 109,565,706,240.
+Ratio 1.3299 vs nd ratio 128/96 = 1.3333 (0.3 %). The per-device-
+STACKED-arguments interpretation (~858 MB per device entry at LL2304
+L20) is PLAUSIBLE — the observed fact is the near-linear
+compiler-reported total; the bufdump will confirm or refute the
+stacking. Under that interpretation the earlier "@64 acceptance PASS" is
+REINTERPRETED: 64 x ~858 MB ~= 54.9 GB simply sits UNDER the 63.8 GB
+XLA arg limit — the #1370 fix reduced device RESIDENCY but did not
+remove the per-device-stacked args from the program signature.
+PLAUSIBLE candidates for the stacked list (uninspected): the per-band
+vertex-mask cache or a per-device geometry stack. Next instrument: the
+existing arg/buffer dump probe (scripts/tmp/_bufdump_compileonly.py +
+oc128_bufdump.sbatch — both currently hard-coded to 128 virtual
+devices, to be ADAPTED to @96) to NAME the arguments — then a targeted fix (shard-local slices as args, or
+donate/rematerialise) unblocks oc at 96-224 GPUs.
