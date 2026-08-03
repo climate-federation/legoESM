@@ -41,11 +41,12 @@ run_arm () { # nlat nlon np tag
       --steps 12 --warmup 3 \
       --out "$OUTDIR/$4.jsonl" || { echo "$4 FAILED"; rc=1; }
 }
-run_arm 2304 4608  96 LL2304_f32_np96
+# @96 receipt banked in job 26628072 (7.872 ms); rerunning only the
+# @192 arms, sick-8 nodes excluded at submit (see deadlock section).
 run_arm 2304 4608 192 LL2304_f32_np192
 run_arm 2880 5760 192 LL2880_f32_np192
 echo "=== RESULTS ==="
-for T in LL2304_f32_np96 LL2304_f32_np192 LL2880_f32_np192; do
+for T in LL2304_f32_np192 LL2880_f32_np192; do
   F="$OUTDIR/$T.jsonl"
   "$PY" -c "
 import json,math,sys

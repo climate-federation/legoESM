@@ -1,15 +1,15 @@
 #!/bin/bash -l
-#SBATCH --job-name=ll128_comb
+#SBATCH --job-name=ll64_comb
 #SBATCH --account=bb1596_gpu
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
-#SBATCH --nodes=32
+#SBATCH --nodes=16
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=01:30:00
-#SBATCH --output=ll128_comb.%j.log
-# CP-COMBINING A/B at LL2048@128 (the measured/bound ~2.9 gap).
+#SBATCH --output=ll64_comb.%j.log
+# CP-COMBINING A/B at LL2048@64 (the measured/bound ~2.9 gap).
 # The calibrated bound (census 41 CP + 1 AR/step, exact bytes 18.5 MB/dev,
 # IB 26.3us/23.5GB/s, nd=1 same-tile compute 1.659 ms) models 1.85-1.89 ms;
 # measured is 5.58 (job 26534060). Leading PLAUSIBLE mechanism: effective
@@ -33,7 +33,7 @@ export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
 export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ll128_comb_j${SLURM_JOB_ID}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ll64_comb_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 # Hang observability (jobs 26630576/26638830 hung in first-collective
 # NCCL bootstrap on the same node block, all IB ports ACTIVE): per-rank
@@ -43,11 +43,11 @@ export NCCL_DEBUG=INFO
 export NCCL_DEBUG_FILE="$OUTDIR/nccl.%h.%p.log"
 rc=0
 run_arm () { # tag extra_xla_flags
-  echo "=== LL2048@128 f32 arm=$1 XLA_EXTRA='$2' ==="
-  XLA_FLAGS="${2}" JAX_ENABLE_X64=0 srun --ntasks=128 --ntasks-per-node=4 \
+  echo "=== LL2048@64 f32 arm=$1 XLA_EXTRA='$2' ==="
+  XLA_FLAGS="${2}" JAX_ENABLE_X64=0 srun --ntasks=64 --ntasks-per-node=4 \
       --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-      --multicontroller --n-devices 128 --mode strong \
+      --multicontroller --n-devices 64 --mode strong \
       --n-lat 2048 --n-lon 4096 --nlev 26 --steps 12 --warmup 3 \
       --out "$OUTDIR/$1.jsonl" || { echo "$1 FAILED"; rc=1; }
 }
