@@ -239,6 +239,88 @@ def test_n2_integral_live_e3w_gated_on_partial_cell_coordinate():
             or int(mb_partial[0, 0]) != int(mb_none[0, 0]))
 
 
+def test_n2_integral_hml_live_depth_stretch_on_partial_cell_coordinate():
+    """#1226/#1455 hmlp DEBT fix: NEMO's hmlp = gdepw(nmln,Kmm) carries the
+    live (1+r3t) stretch (domqco.F90:160 r3t=ssh/ht_0;
+    domzgr_substitute.h90:131,140 gdepw=gdepw_0*(1+r3t) under DINO's
+    key_qco+key_vco_3d).  ``jacobian`` on an ``OceanPartialCellCoordinate``
+    IS that exact (1+r3t) factor (vertical.py ``compute_ocean_jacobian``:
+    J=(eta+H_bathy)/H_bathy=1+eta/H_bathy, and ht_0==H_bathy at rest), so the
+    DEPTH readout ``hml`` (not just the N^2 integral's e3w) must be
+    multiplied by it.
+
+    Synthetic-violation, both directions:
+      * nonzero jacobian != 1 on OceanPartialCellCoordinate MUST scale hml by
+        exactly that jacobian (the predicted direction -- a pre-fix version
+        that dropped the scaling would fail this).
+      * jacobian=None, or jacobian on a plain OceanZStarCoordinate (a
+        DIFFERENT quantity, (eta+H_bathy)/H_max), must be BIT-IDENTICAL to
+        before this fix -- proves the gate does not misfire and matches the
+        sibling live-e3w gate exactly.
+    """
+    from legoesm.ocean.vertical import (
+        OceanPartialCellCoordinate, OceanZStarCoordinate,
+    )
+
+    z_iface = jnp.cumsum(jnp.full((NLEV,), D))
+    z_full_ref = -(z_iface - 0.5 * D)
+    z_half_ref = jnp.concatenate([jnp.zeros((1,)), -z_iface])
+
+    z_star = OceanZStarCoordinate(
+        n_levels=NLEV, H_max=float(z_iface[-1]),
+        z_full_ref=z_full_ref, z_half_ref=z_half_ref,
+        dz_ref=jnp.full((NLEV,), D), dz_half_ref=jnp.full((NLEV - 1,), D),
+    )
+    partial = OceanPartialCellCoordinate(
+        n_levels=NLEV, H_max=z_star.H_max,
+        z_full_ref=z_full_ref, z_half_ref=z_half_ref,
+        dz_ref=z_star.dz_ref, dz_half_ref=z_star.dz_half_ref,
+        h_partial=jnp.broadcast_to(z_star.dz_ref, (1, 1, NLEV)),
+        bottom_level=jnp.full((1, 1), NLEV - 1, dtype=jnp.int32),
+        is_active=jnp.ones((1, 1, NLEV), dtype=bool),
+    )
+
+    T = np.linspace(18.0, 2.0, NLEV)
+    T_j, S_j, mask = _column(T)
+    jac_val = 1.037   # far from 1.0, no t_depth_ref (isolates the DEPTH gate
+                       # from the N^2 live-e3w gate exercised by the sibling
+                       # test above -- this jacobian must ONLY move hml here).
+
+    hml_none, mb_none = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, partial, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=None)
+
+    jac = jnp.full((1, 1), jac_val)
+    hml_partial, mb_partial = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, partial, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=jac)
+
+    # Same m_base (the LEVEL selection is untouched -- this fix only scales
+    # the DEPTH readout), but hml scaled by exactly the jacobian.
+    assert int(mb_partial[0, 0]) == int(mb_none[0, 0])
+    assert float(hml_partial[0, 0]) == pytest.approx(
+        float(hml_none[0, 0]) * jac_val)
+    assert float(hml_partial[0, 0]) != float(hml_none[0, 0])
+
+    # zero-stretch (jacobian=None) must be BIT-IDENTICAL to the pre-fix
+    # behaviour -- re-derive independently rather than trusting a stored
+    # constant, so a future refactor of the "no jacobian" path is caught too.
+    hml_indep, mb_indep = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, partial, _lin_eos, 0.01, constants.g, RHO0)
+    assert float(hml_indep[0, 0]) == float(hml_none[0, 0])
+    assert int(mb_indep[0, 0]) == int(mb_none[0, 0])
+
+    # Plain z*-coordinate: the SAME jacobian value must NOT scale hml (a
+    # z*-coordinate's jacobian is (eta+H_bathy)/H_max, not (1+r3t) --
+    # applying it here would be the mistranscription this gate guards
+    # against, matching the sibling live-e3w gate's own z*-coordinate check).
+    hml_zstar, mb_zstar = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, z_star, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=jac)
+    assert float(hml_zstar[0, 0]) == float(hml_none[0, 0])
+    assert int(mb_zstar[0, 0]) == int(mb_none[0, 0])
+
+
 def test_dispatch_raises_on_unknown_criterion():
     T_j, S_j, mask = _column(np.linspace(18.0, 2.0, NLEV))
     z_coord = _uniform_zcoord()
