@@ -442,6 +442,22 @@ GM lane the 2026-08-02 twin-budget work re-ranked as leading (see below).
 
 ---
 
+## STALE-TUPLE SWEEP 2026-08-03 — dyn_vor staleness was ISOLATED
+
+All 24 pre-Jul-30 non-AT-BAR rows with provenance scripts batch-rerun at HEAD vs the
+post-regen RUN_GDB dumps (fp64, e3t=both, registry): **18 CONFIRMED-stable to displayed
+precision, zero tuple moves, zero classification flips**. The dyn_vor EEN u/v case (tuples
+~10x stale) is an isolated instance, not systemic. Tally holds 18/30/4/1.
+
+Provenance breakages found instead (queued, not numerics findings):
+- `zdftke pdlr` + `composite avt/avm`: cited scripts drifted format — no longer print the
+  corr/ratio the rows cite. Restore the print or re-derive the metric before re-measuring.
+- `dom_qco_r3c r3t`: `harness_dom_qco_r3c.exe` aborts (MPI_ABORT 123) — rebuild needed.
+- 4 rows' cited probes absent from disk (already in the provenance-missing count);
+  `STABILITY e3t_0` + `mlf_baro_corr` carry no MEASURED_AT at all.
+- `puu_b`/`un_adv` MEASURED_AT stamps lagged their own reconfirmations — refreshed to
+  a69fcbfd9. RULE: bump the stamp on every reconfirmation, not just tuple changes.
+
 # DINO/NEMO fidelity campaign (#1226) — current state digest
 
 **Purpose.** One short file agent briefs can point at instead of re-typing context.

@@ -2774,8 +2774,10 @@ MEASURED_AT: dict[str, str] = {
     "zdftke pdlr": "e0fac585e",
     "zdftke composite avt/avm": "e0fac585e",
     "dyn_spg_ts pssh": "c8e5d305b",
-    "dyn_spg_ts puu_b": "c8e5d305b",
-    "dyn_spg_ts un_adv": "c8e5d305b",
+    # stamp-refresh 2026-08-03: tuples reconfirmed at HEAD twice (a69fcbfd9 hair
+    # lane + the stale-sweep batch rerun); stamp had lagged the reconfirmations.
+    "dyn_spg_ts puu_b": "a69fcbfd9",
+    "dyn_spg_ts un_adv": "a69fcbfd9",
     "ATF filter u": "a8942794a",
     "ATF filter v": "a8942794a",
     "dyn_ldf (dynldf_lev_lap) u": "c8e5d305b",
