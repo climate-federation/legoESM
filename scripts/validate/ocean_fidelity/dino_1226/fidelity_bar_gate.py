@@ -444,6 +444,17 @@ PER_ELEMENT: dict[str, float] = {
     # not triggered (no production edit -- this paragraph is comment-only).
     "tra_qsr (shortwave penetration)": 1.324e-05,  # OLD (probe blind to live ladder): 6.653e-05
     # sign-changing plain-Asselin term; conditioning-robust err_norm used.
+    # RECONCILED 2026-08-03 (#1455 queue item, final easy-queue row): the
+    # zu_frc wind-sign fix (218939441, bridge_before_state_topo tau_x_prev/
+    # tau_y_prev negation) does NOT touch this row -- traced the full path:
+    # measure_ssh_atf (coverage_rows_measure.py:542-598) never calls
+    # bridge_before_state_topo and never reads tau_x/tau_y; it reads NEMO's
+    # raw ssh dumps (atf_dump_ssh_before/after.bin) + read_nemo_restart_
+    # before's sshb + the OTHER row's own sshnxt_dump_ssh_after.bin, and
+    # applies legoESM's _asselin formula by hand. Rerun at HEAD 218939441
+    # (fp64, LEGOESM_NEMO_E3T=both) reproduces corr=1.00000000/
+    # |x|ratio=0.99999995/err_norm median=7.076e-07 EXACTLY (bit-identical
+    # to 4 sig figs) -- value UNCHANGED, confirmed by direct re-measurement.
     "ssh_atf": 7.076e-07,
     # RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309,
     # measure_tra_sbc re-run UNMODIFIED -- this row's probe already read
@@ -2354,7 +2365,40 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "unchanged at HEAD reproduces corr=1.00000000/|ratio|=0.99999995/ "
         "err_norm median 7.076e-07 EXACTLY (identical to 4 sig figs in the "
         "err_norm). UNCHANGED, confirmed by direct re-measurement, not "
-        "assumed from the (independently-retracted) emp-term reasoning."),
+        "assumed from the (independently-retracted) emp-term reasoning.\n"
+        "RECONCILED AGAIN 2026-08-03 (#1455 final easy-queue item, HEAD "
+        "218939441 -- the zu_frc wind tau_x_prev/tau_y_prev sign fix): "
+        "PROVED (not assumed) this row is untouched by tracing the enclosing "
+        "function -- measure_ssh_atf (coverage_rows_measure.py:542-598) "
+        "never calls bridge_before_state_topo (the function the fix edits) "
+        "and never reads tau_x/tau_y at all; it is a direct ssh-only "
+        "calculation from raw dumps. Rerun reproduces corr=1.00000000/"
+        "|x|ratio=0.99999995/err_norm median=7.076e-07 bit-identical to the "
+        "recorded tuple -- no movement, confirmed not assumed.\n"
+        "LOCALISATION + CAUSE, same task (scratch probe, not committed; "
+        "ww-substitution precedent from the dyn_adv ZAD row): substituted "
+        "the EXACT-inverted Naa (the ssh value that, by construction of the "
+        "linear Asselin equation, reproduces NEMO's dumped 'after' exactly) "
+        "in place of the production Naa read from 'ssh_nxt / div_hor''s own "
+        "sshnxt_dump_ssh_after.bin dump, holding the forward _asselin "
+        "formula fixed. Result: err_norm COLLAPSES 7.076e-07 -> 0.000e+00 "
+        "exactly (pointwise, p99, max all 0.0) -- proving legoESM's "
+        "_asselin coefficient/sign/thickness-weighting transcription is "
+        "EXACT and carries zero defect of its own. The residual "
+        "|production Naa - exact Naa| median (3.869e-6) times gamma=0.1 "
+        "gives 3.869e-7, matching the row's actual |eta_f_lego-ssh_f_nemo| "
+        "absolute-error median (3.869e-7) to the last digit -- CONFIRMED "
+        "the entire ssh_atf residual is a LINEAR, 1:1 amplification "
+        "(factor gamma) of the upstream 'ssh_nxt / div_hor' row's own "
+        "recorded DEBT (ratio 1.000004, |ratio-1|~4e-6, itself outside its "
+        "1e-6 bar) -- the same ww->ZAD inheritance pattern already "
+        "established elsewhere in this file, now confirmed for ssh_atf too. "
+        "Per THE RULE: this is CONDITIONING/INHERITANCE with QUANTITATIVE "
+        "PROOF, not a transcription defect -- no production code changed. "
+        "Closing this row routes entirely through closing 'ssh_nxt / "
+        "div_hor' (already tracked DEBT, own root cause = the metric_"
+        "convention band, see that row's own note); ssh_atf is NOT an "
+        "independent thing to fix and should not be chased separately."),
     "tra_sbc":                       (1.00000000, 1.00000000,
         "RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309, "
         "coverage_rows_measure.py's measure_tra_sbc re-run UNMODIFIED at the "
@@ -2508,6 +2552,12 @@ MEASURED_AT: dict[str, str] = {
     # quantity; ssh_atf's own emp-forcing-removal term was separately
     # confirmed algebraically zero for DINO, see coverage_rows_measure.py's
     # RETRACTED note) -- kept at its original 2026-07-30 measurement commit.
+    # RE-VERIFIED AGAIN at HEAD 218939441 (#1455 final easy-queue item,
+    # zu_frc wind tau_x_prev/tau_y_prev sign fix): reproduces bit-identical
+    # to 4 sig figs (corr/ratio/err_norm unchanged) -- the fix never touches
+    # this row's code path (traced: measure_ssh_atf calls neither
+    # bridge_before_state_topo nor reads tau_x/tau_y). Number kept at its
+    # original measurement commit since nothing moved.
     "ssh_atf": "b7872175b",
     # tra_sbc RE-MEASURED at 22a0b93cd (this probe-fix task; the divisor fix
     # itself landed at 5e9b0eb87, and the c_p truncation fix that ALSO moves
