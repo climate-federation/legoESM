@@ -1,3 +1,36 @@
+# PARKED 2026-08-03 — resume here (token budget; user call)
+
+**Where the grind stands** (issue #1455 = the living checklist; PR #1460 = the working PR):
+Tally `AT BAR 18 | DEBT 30 | UNMEASURED 4 | WAIVED 1` (was 15/32/5/1 at grind start).
+Full easy queue executed; measurement base verified fresh (stale-sweep: dyn_vor isolated).
+
+**Landed this grind**: hmlp fix (wslpi/wslpj AT BAR), zu_frc wind sign bug (pssh AT BAR,
+puu_b/un_adv 35-56x), bn2 coverage, ceiling-proofs (aeiu 15%, ldf_slp exact-1.000 both
+regimes), inheritance proofs (ssh_atf→ssh_nxt exact; ZAD→wzv 119x; eiv-u deep 833x),
+tra_qsr nk0 refuted, traadv 4/5 LOCAL, 2 probes rebuilt, r3t harness un-broken (cwd),
+puu_b zu_trd-absence claim retracted, dyn_vor stale tuple superseded.
+
+**OPEN ESCALATION (needs Dhruv)**: dyn_ldf e3-weighting — the NEMO-faithful transcription
+WORSENS the rows (u 1.9e-6→6.1e-6). Option landed default-off. Next hypothesis: our min-rule
+face/vertex thicknesses vs NEMO's own e3u/e3f at step cells.
+
+**PENDING DECISIONS (Dhruv)**: (1) formal CEILING gate category (~8 rows carry complete
+proofs, would make DEBT mean "actionable"); (2) unpark sh2 (last 2-row lever: zdftke
+pdlr+composite); (3) the dyn_ldf escalation above.
+
+**READY LANES when resumed (no decisions needed)**: eiv-v dump (one NEMO WRITE + rebuild +
+bit-identity control); zdftke provenance repair (scripts drifted format — restore corr/ratio
+prints); eiv-u surface residual bisect; traadv local-family bisects; ZAD/wzv joins the
+architectural-gap class (wzv qco closure needs Kaa eta — STOPPED EARLY, documented in gate,
+do not re-attempt as an option).
+
+**Attractor program (the physics frontier, separate from the grind)**: deep warm bias =
+trajectory-statistics difference; all operators near-clean at identical state (seeds ~0.1
+W/m2-class vs +1.72 accumulated). Next: circulation-statistics comparison on the existing
+twin outputs (EKE, overturning placement, eddy heat flux in the southern rows).
+
+---
+
 ## #1455 queue follow-up — reconcile `puu_b`/`un_adv` DEBT rows + seam localization (2026-08-03)
 
 Reconciliation task for the two rows still just outside the gate bar after the
