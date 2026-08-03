@@ -531,12 +531,16 @@ class TestSnapshotCellMethods:
         tas_files = sorted(tmp_path.rglob("tas_*.nc"))
         pr_files = sorted(tmp_path.rglob("pr_*.nc"))
         assert tas_files and pr_files
+        # The producer supplies the TIME clause; the writer keeps the
+        # table's AREA clause (Amon tas/pr are "area: time: mean"), so the
+        # honesty override must not silently drop "area:".
         with xr.open_dataset(tas_files[0]) as ds:
             assert (ds["tas"].attrs["cell_methods"]
-                    == "time: point within days time: mean over days")
+                    == "area: mean time: point within days "
+                       "time: mean over days")
             assert "aliased" in ds["tas"].attrs["comment"]
         with xr.open_dataset(pr_files[0]) as ds:
-            assert ds["pr"].attrs["cell_methods"] == "time: mean"
+            assert ds["pr"].attrs["cell_methods"] == "area: time: mean"
             assert "comment" not in ds["pr"].attrs
 
     def test_default_none_keeps_table_cell_methods(self, mesh, tmp_path):
@@ -560,7 +564,8 @@ class TestSnapshotCellMethods:
         tas_files = sorted(tmp_path.rglob("tas_*.nc"))
         assert tas_files
         with xr.open_dataset(tas_files[0]) as ds:
-            assert ds["tas"].attrs["cell_methods"] == "time: mean"
+            # The official Amon entry, untouched: "area: time: mean".
+            assert ds["tas"].attrs["cell_methods"] == "area: time: mean"
 
 
 class TestHeldRadiationContract:

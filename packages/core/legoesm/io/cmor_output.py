@@ -264,6 +264,42 @@ def _variable_attrs(entry: Dict[str, Any]) -> Dict[str, str]:
     return attrs
 
 
+def merged_variable_attrs(
+    entry: Dict[str, Any],
+    extra_attrs: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Table attributes with a producer's overrides merged in.
+
+    Producers legitimately override ``cell_methods`` to be HONEST about
+    sampling -- a monthly value built from once-daily instantaneous samples
+    is not a continuous time mean, so the MPAS lean path relabels it (see
+    ``DiagnosticsCollector.cmip_snapshot_vars``).  What a producer knows is
+    the TIME clause; the AREA clause belongs to the variable and must keep
+    matching the table.
+
+    CMIP6 spells an area-aggregated field ``"area: mean time: <op>"``
+    (with ``"area: time: mean"`` as the shorthand when both are means),
+    while plev fields such as ``ua``/``va`` carry a bare ``"time: <op>"``
+    and must NOT gain an ``area:`` clause.  So a producer cannot hard-code
+    one string for a mixed set of variables, and every one that tried wrote
+    a bare ``"time: point"`` onto ``tas``/``psl`` -- reintroducing, on
+    exactly the snapshot-fed files, the missing-``area:`` defect the
+    table-driven metadata otherwise fixed.
+
+    This is the one place that knows both the override and the table entry,
+    so the area clause is restored here rather than in each producer.
+    """
+    attrs = _variable_attrs(entry)
+    if not extra_attrs:
+        return attrs
+    attrs.update(extra_attrs)
+    override = extra_attrs.get("cell_methods")
+    if override and str(entry["cell_methods"]).startswith("area:"):
+        if not str(override).startswith("area:"):
+            attrs["cell_methods"] = f"area: mean {override}"
+    return attrs
+
+
 # =========================================================================
 # CMOR Variable Tables
 # =========================================================================
@@ -1360,9 +1396,7 @@ class CFWriter:
         data_np = np.expand_dims(data_np, axis=0)  # (1, ...)
 
         # --- Build DataArray ---
-        var_attrs = _variable_attrs(entry)
-        if extra_attrs:
-            var_attrs.update(extra_attrs)
+        var_attrs = merged_variable_attrs(entry, extra_attrs)
 
         da = xr.DataArray(
             data_np,
@@ -1933,9 +1967,7 @@ class CFWriter:
                 f"{lon_np.shape[0]}), got {data_np.shape}"
             )
 
-        var_attrs = _variable_attrs(entry)
-        if extra_attrs:
-            var_attrs.update(extra_attrs)
+        var_attrs = merged_variable_attrs(entry, extra_attrs)
 
         da = xr.DataArray(
             data_np,
