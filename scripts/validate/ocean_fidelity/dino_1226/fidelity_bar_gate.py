@@ -335,6 +335,64 @@ PER_ELEMENT: dict[str, float] = {
     # median one-signed (Q_sr >= 0); recorded as the WORSE of {k=0-only
     # 1.324e-05, all-35-levels 5.223e-07} per this dict's convention.
     # OLD (static-ladder, probe-blind) value 6.653e-05 preserved for history.
+    #
+    # #1455 queue item (2026-08-03) -- nk0/nkV band-split HYPOTHESIS
+    # REFUTED, no fix warranted (THE RULE: exact-match check failed to
+    # confirm, so nothing was changed). Task brief hypothesized that
+    # traqsr.F90's per-band extinction-level truncation (qsr_ext_lev,
+    # traqsr.F90:1145-1211: nk0 = the level below which the IR band alone
+    # is <1e-15 relative to Qmax=1000 W/m2, a GLOBAL SCALAR via mpp_max --
+    # not per-column) vs legoESM's uniform full-column exponential
+    # (shortwave_penetration_tendency, no nk0-style truncation at all)
+    # was the row's transcription gap. Read qsr_2BD (traqsr.F90:627-712,
+    # DINO's active scheme: namelist_cfg ln_qsr_2bd=.true., confirmed nqsr
+    # dispatch traqsr.F90:1276) end-to-end: nk0 (~12 m for rn_si0=0.35m)
+    # and nkV (~840 m for rn_si1=23m, qsr_ext_lev applied to the VISIBLE
+    # band) are BOTH pure loop-truncation optimizations, not physics
+    # branches -- verified numerically: at nk0's depth the IR band's own
+    # fractional contribution to I(z) is ~7.5e-16 (computed from
+    # R=0.58/zeta1=0.35 at z=12m), and at nkV's depth the total I(z) is
+    # ~5.8e-17 (R/zeta1/zeta2 as above at z=840m) -- both already at fp64
+    # underflow relative to 1.0, so a uniform-exponential formula that
+    # keeps evaluating past those depths converges to the SAME answer
+    # NEMO gets by stopping the band's loop early. wmask(jk+1) (used at
+    # every band-close in qsr_2BD) matches legoESM's own bottom no-flux
+    # convention (frac_absorbed.at[...,-1].add(I_half[...,-1]),
+    # shortwave_penetration.py:572) exactly, and cfg.jerlov_water_type="I"
+    # already matches DINO's rn_abs=0.58/rn_si0=0.35/rn_si1=23.0 verbatim
+    # (namelist_ref:429-436) -- so there is no parameter OR band-structure
+    # transcription gap to port.
+    #
+    # DIRECT MEASUREMENT (coverage_rows_measure.py, fp64, e3t=both, RUN_GDB
+    # kt=57601, reproduces the recorded tuple exactly: corr 1.00000000,
+    # |x|ratio=1.00000625, k=0 pointwise|rel| median=1.324e-05): per-LEVEL
+    # relative error is FLAT at ~1.395e-05 from k=0 through k=21 (every
+    # dumped nonzero level), decaying nowhere at nk0's or nkV's transition
+    # depths -- a uniform multiplicative bias, not a level-dependent
+    # structural difference (which is what a band-split transcription bug
+    # would produce). The residual is instead LATITUDE-structured: k=0
+    # ratio is ~1.0 near the equator (row 1-75) and diverges monotonically
+    # poleward, reaching 1.0037 at row 189 (lat=66.5 deg, the domain's
+    # northernmost wet row). This tracks the polar-night boundary of
+    # dino_Q_sr_seasonal's own max(Q0*cos(arg), 0) clip (dino.py:1773-1788)
+    # -- NEMO's own k=0 tendency magnitude at row 189 is ~0.0048x its
+    # mid-latitude value (2.79e-6 at row 1 vs 1.95e-8 at row 189, both
+    # W/m2-equivalent K/s), i.e. a near-zero surface forcing signal whose
+    # RELATIVE error is trivially amplified by any small forcing
+    # phase/argument difference near the clip -- the same near-zero-
+    # crossing conditioning class as the ldf_slp regime-1/regime-2 rows
+    # above, not a vertical-penetration-scheme defect.
+    #
+    # CONCLUSION: the nk0/wmask split is CONFIRMED faithful (band-close
+    # truncation is a no-op at fp64 on this grid); the row's residual is a
+    # SEPARATE, already-known-class conditioning artifact in the surface
+    # Q_sr forcing near the polar-night boundary, not a traqsr.F90
+    # transcription gap. Per THE RULE (exact-match failure -> stop, no
+    # invented fix): NO production code changed. Row DEBT unchanged (median
+    # pointwise|rel| 1.324e-05 > BAR_RATIO_EPS); gate re-run confirms
+    # `AT BAR 15 | DEBT 32 | UNMEASURED 5 | WAIVED 1 | total 53` unchanged
+    # (a reconciliation, not a fix). physics-validator adversarial review
+    # not triggered (no production edit -- this paragraph is comment-only).
     "tra_qsr (shortwave penetration)": 1.324e-05,  # OLD (probe blind to live ladder): 6.653e-05
     # sign-changing plain-Asselin term; conditioning-robust err_norm used.
     "ssh_atf": 7.076e-07,
@@ -1977,17 +2035,42 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "for the real sharp-peak evidence. STILL DEBT under BAR_PER_ELEM_EPS "
         "(1.324e-05 / 5.223e-07, both far above 1e-9) despite corr/ratio "
         "both clearing the aggregate bar -- exactly the mechanism "
-        "PER_ELEMENT exists to catch. PLAUSIBLE (not measured) lead for the "
-        "remaining tail (all-levels p99 5.220e-04, worse than the median by "
-        "~1000x, concentrated at 68.4% near-zero cells per the printed "
-        "near0_frac): legoESM's shortwave_penetration_tendency applies ONE "
-        "two-band exponential profile uniformly over all levels, while "
-        "NEMO's qsr_2BD splits the profile at a shallow-water level index "
-        "nk0 (dz_o2 threshold from Jerlov absorption coefficients) with "
-        "per-level wmask gating (traqsr.F90:~670-690) -- a discretization "
-        "difference pre-existing and UNCHANGED by this fix (it only "
-        "corrected the depth LADDER, not the per-level profile-splitting "
-        "logic), and the natural next target if this row stays DEBT. Prior "
+        "PER_ELEMENT exists to catch. "
+        "#1455 (2026-08-03) UNTESTED LEAD ABOVE REFUTED, no fix warranted: "
+        "read qsr_ext_lev (traqsr.F90:1145-1211) -- nk0/nkV are a GLOBAL "
+        "SCALAR (mpp_max reduction), computed once at init as the level "
+        "below which a band's contribution is <1e-15 relative to Qmax=1000 "
+        "W/m2, i.e. a pure loop-truncation optimization, not a physics "
+        "branch. Verified numerically: at nk0's depth (~12 m, rn_si0=0.35) "
+        "the IR band's own fraction of I(z) is ~7.5e-16; at nkV's depth "
+        "(~840 m, rn_si1=23) total I(z) is ~5.8e-17 -- both already at fp64 "
+        "underflow, so legoESM's uniform full-column exponential (no nk0-"
+        "style truncation) converges to the SAME answer NEMO gets by "
+        "stopping early. wmask(jk+1) (used at every band-close in qsr_2BD, "
+        "traqsr.F90:394 etc.) already matches legoESM's own bottom no-flux "
+        "convention (frac_absorbed.at[...,-1].add(I_half[...,-1]), "
+        "shortwave_penetration.py:572); cfg.jerlov_water_type='I' already "
+        "matches DINO's rn_abs=0.58/rn_si0=0.35/rn_si1=23.0 verbatim "
+        "(namelist_ref:429-436). DIRECT MEASUREMENT (coverage_rows_"
+        "measure.py, fp64, e3t=both, reproduces this row's tuple exactly): "
+        "per-LEVEL relative error is FLAT at ~1.395e-05 from k=0 through "
+        "k=21 (every dumped nonzero level) -- a uniform multiplicative "
+        "bias, NOT decaying/growing at nk0's or nkV's transition depths as "
+        "a band-split bug would produce. The residual is instead LATITUDE-"
+        "structured: k=0 ratio ~1.0 near the equator (row 1-75), "
+        "diverging monotonically poleward to 1.0037 at row 189 (lat=66.5, "
+        "the domain's northernmost wet row) -- tracking the polar-night "
+        "clip boundary of dino_Q_sr_seasonal's max(Q0*cos(arg),0) "
+        "(dino.py:1773-1788): NEMO's own k=0 tendency magnitude at row 189 "
+        "is ~0.0048x its mid-latitude value (2.79e-6 vs 1.95e-8), a near-"
+        "zero forcing signal whose RELATIVE error is trivially amplified "
+        "by any small forcing phase difference near the clip -- the same "
+        "near-zero-crossing conditioning class as the ldf_slp regime-1/"
+        "regime-2 rows, not a vertical-penetration-scheme defect. Per THE "
+        "RULE (exact-match failure -> stop, no invented correction): NO "
+        "production code changed; row stays DEBT (median pointwise|rel| "
+        "1.324e-05 unchanged). The superseded PLAUSIBLE lead this "
+        "paragraph replaces (kept below for history, NOT a live target): "
         "(static-ladder, probe-blind) tuple: corr=0.99999996/"
         "ratio=0.99996836 (k=0), corr=0.99999999/ratio=0.99996218 "
         "(all-levels); median|rel| 6.653e-05 (k=0) / 2.022e-05 (all-"
