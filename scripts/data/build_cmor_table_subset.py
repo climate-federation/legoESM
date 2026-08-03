@@ -55,11 +55,19 @@ DEFAULT_REF = "087fe45d21c082e28723e0f930e4266abe91b853"  # 2025-09-04
 # variable means adding it here and re-running this script -- NEVER
 # hand-typing an entry into the vendored JSON.
 WANTED: Dict[str, tuple] = {
+    # The DECK ``amip`` priority-1 ``Amon`` set legoESM emits.  ``huss``,
+    # ``prc``, ``prsn``, ``rsuscs``, ``rtmt``, ``sfcWind``, ``tasmax``,
+    # ``tasmin``, ``uas`` and ``vas`` are vendored ahead of the diagnostics
+    # that produce them: ``lookup_cmor_entry`` raises ``KeyError`` for a
+    # variable absent from the vendored subset, so the table side must land
+    # first or the accumulator that adds the variable cannot write it.
     "Amon": (
         "cli", "clivi", "clt", "clw", "clwvi", "evspsbl", "hfls", "hfss",
-        "hur", "hurs", "hus", "pr", "prw", "ps", "psl", "rlds", "rldscs",
-        "rlus", "rlut", "rlutcs", "rsds", "rsdscs", "rsdt", "rsus", "rsut",
-        "rsutcs", "ta", "tas", "tauu", "tauv", "ts", "ua", "va", "wap", "zg",
+        "hur", "hurs", "hus", "huss", "pr", "prc", "prsn", "prw", "ps",
+        "psl", "rlds", "rldscs", "rlus", "rlut", "rlutcs", "rsds", "rsdscs",
+        "rsdt", "rsus", "rsuscs", "rsut", "rsutcs", "rtmt", "sfcWind", "ta",
+        "tas", "tasmax", "tasmin", "tauu", "tauv", "ts", "ua", "uas", "va",
+        "vas", "wap", "zg",
     ),
     # ``rsut`` is NOT a CMIP6 ``day`` variable -- it lives in ``CFday``.
     # ``ua850``/``va850`` do not exist in ANY CMIP6 table; the 850 hPa winds

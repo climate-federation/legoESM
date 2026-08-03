@@ -173,6 +173,20 @@
    "type": "real",
    "positive": ""
   },
+  "huss": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "specific_humidity",
+   "units": "1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Near-Surface Specific Humidity",
+   "comment": "Near-surface (usually, 2 meter) specific humidity.",
+   "dimensions": "longitude latitude time height2m",
+   "out_name": "huss",
+   "type": "real",
+   "positive": ""
+  },
   "pr": {
    "frequency": "mon",
    "modeling_realm": "atmos",
@@ -184,6 +198,34 @@
    "comment": "includes both liquid and solid phases",
    "dimensions": "longitude latitude time",
    "out_name": "pr",
+   "type": "real",
+   "positive": ""
+  },
+  "prc": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "convective_precipitation_flux",
+   "units": "kg m-2 s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Convective Precipitation",
+   "comment": "Convective precipitation at surface; includes both liquid and solid phases.",
+   "dimensions": "longitude latitude time",
+   "out_name": "prc",
+   "type": "real",
+   "positive": ""
+  },
+  "prsn": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "snowfall_flux",
+   "units": "kg m-2 s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Snowfall Flux",
+   "comment": "At surface; includes precipitation of all forms of water in the solid phase",
+   "dimensions": "longitude latitude time",
+   "out_name": "prsn",
    "type": "real",
    "positive": ""
   },
@@ -355,6 +397,20 @@
    "type": "real",
    "positive": "up"
   },
+  "rsuscs": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_upwelling_shortwave_flux_in_air_assuming_clear_sky",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Upwelling Clear-Sky Shortwave Radiation",
+   "comment": "Surface Upwelling Clear-sky Shortwave Radiation",
+   "dimensions": "longitude latitude time",
+   "out_name": "rsuscs",
+   "type": "real",
+   "positive": "up"
+  },
   "rsut": {
    "frequency": "mon",
    "modeling_realm": "atmos",
@@ -383,6 +439,34 @@
    "type": "real",
    "positive": "up"
   },
+  "rtmt": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "net_downward_radiative_flux_at_top_of_atmosphere_model",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Net Downward Radiative Flux at Top of Model",
+   "comment": "Net Downward Radiative Flux at Top of Model : I.e., at the top of that portion of the atmosphere where dynamics are explicitly treated by the model. This is reported only if it differs from the net downward radiative flux at the top of the atmosphere.",
+   "dimensions": "longitude latitude time",
+   "out_name": "rtmt",
+   "type": "real",
+   "positive": "down"
+  },
+  "sfcWind": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "wind_speed",
+   "units": "m s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Near-Surface Wind Speed",
+   "comment": "near-surface (usually, 10 meters) wind speed.",
+   "dimensions": "longitude latitude time height10m",
+   "out_name": "sfcWind",
+   "type": "real",
+   "positive": ""
+  },
   "ta": {
    "frequency": "mon",
    "modeling_realm": "atmos",
@@ -408,6 +492,34 @@
    "comment": "near-surface (usually, 2 meter) air temperature",
    "dimensions": "longitude latitude time height2m",
    "out_name": "tas",
+   "type": "real",
+   "positive": ""
+  },
+  "tasmax": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "air_temperature",
+   "units": "K",
+   "cell_methods": "area: mean time: maximum within days time: mean over days",
+   "cell_measures": "area: areacella",
+   "long_name": "Daily Maximum Near-Surface Air Temperature",
+   "comment": "maximum near-surface (usually, 2 meter) air temperature (add cell_method attribute 'time: max')",
+   "dimensions": "longitude latitude time height2m",
+   "out_name": "tasmax",
+   "type": "real",
+   "positive": ""
+  },
+  "tasmin": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "air_temperature",
+   "units": "K",
+   "cell_methods": "area: mean time: minimum within days time: mean over days",
+   "cell_measures": "area: areacella",
+   "long_name": "Daily Minimum Near-Surface Air Temperature",
+   "comment": "minimum near-surface (usually, 2 meter) air temperature (add cell_method attribute 'time: min')",
+   "dimensions": "longitude latitude time height2m",
+   "out_name": "tasmin",
    "type": "real",
    "positive": ""
   },
@@ -467,6 +579,20 @@
    "type": "real",
    "positive": ""
   },
+  "uas": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "eastward_wind",
+   "units": "m s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Eastward Near-Surface Wind",
+   "comment": "Eastward component of the near-surface (usually, 10 meters)  wind",
+   "dimensions": "longitude latitude time height10m",
+   "out_name": "uas",
+   "type": "real",
+   "positive": ""
+  },
   "va": {
    "frequency": "mon",
    "modeling_realm": "atmos",
@@ -478,6 +604,20 @@
    "comment": "Meridional wind (positive in a northward direction).",
    "dimensions": "longitude latitude plev19 time",
    "out_name": "va",
+   "type": "real",
+   "positive": ""
+  },
+  "vas": {
+   "frequency": "mon",
+   "modeling_realm": "atmos",
+   "standard_name": "northward_wind",
+   "units": "m s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Northward Near-Surface Wind",
+   "comment": "Northward component of the near surface wind",
+   "dimensions": "longitude latitude time height10m",
+   "out_name": "vas",
    "type": "real",
    "positive": ""
   },
