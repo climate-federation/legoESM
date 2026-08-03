@@ -246,11 +246,21 @@ def test_flux_variables_have_positive(amip_files):
 
 
 def test_plev_variables_keep_bare_time_mean(amip_files):
-    """The 6 plev Amon variables are CORRECT with bare ``time: mean``.
+    """The plev Amon variables are CORRECT with bare ``time: mean``.
 
-    Guards against an over-eager "add ``area:`` everywhere" fix.
+    Guards against an over-eager "add ``area:`` everywhere" fix.  The set
+    is DERIVED from the table so it cannot drift out of date: it was 6
+    variables until ``wap`` was vendored, which makes 7.  Note ``cli``/
+    ``clw`` are NOT in it -- they are ``alevel`` variables in CMIP6 and
+    legitimately carry ``area: time: mean`` even though legoESM emits
+    them on a pressure axis (see ALEVEL_EMITTED_ON_PLEV).
     """
-    for var in ("ta", "ua", "va", "hus", "hur", "zg"):
+    entries = tables.load_table("Amon")
+    bare = sorted(
+        v for v, e in entries.items() if e["cell_methods"] == "time: mean"
+    )
+    assert bare == ["hur", "hus", "ta", "ua", "va", "wap", "zg"], bare
+    for var in bare:
         with _open(amip_files[("Amon", var)]) as ds:
             assert ds.variables[var].getncattr("cell_methods") == "time: mean", var
 
