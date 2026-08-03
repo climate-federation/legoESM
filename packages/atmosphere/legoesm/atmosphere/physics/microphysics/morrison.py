@@ -1426,6 +1426,44 @@ def morrison_microphysics(
     dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
 
+    # SAM-style N_r consistency CEILING (the LAMMAXR side of module_mp_graupel
+    # .f90's in-place "adjust var check" — the rain analog of the N_i/N_s/N_g
+    # limiters below; rain was the ONE two-moment species missing a prognostic
+    # number repair): cap the POST-STEP rain number so LAMR cannot exceed
+    # lamr_max w.r.t. the POST-STEP mass, and CLEAR orphan number below
+    # QSMALL.  N_r is per-VOLUME [1/m^3] (HydrometeorState conventions), so
+    # the PSD bound carries the rho*q_r factor of the LAMR slope used by the
+    # fall-speed/evaporation/Bigg kernels above
+    # (lamr = (pi*rho_w*N_r/(rho*q_r))^(1/3)):
+    #   N_r_hi = lamr_max^3 * rho * q_r_new / (pi*rho_w).
+    # Forensics (2026-08-04, cldF_fsd cell 9576, diagnosis_cell9576.md):
+    # without this ceiling the transport-side naive positivity clip inflated
+    # N_r to 1e15-1e25 /m^3 (2000+ cells above 1e8 by day 465), pinning LAMR
+    # at lamr_max => sub-drizzle V_t_r (~0.4 m/s) => rain could not
+    # precipitate; ~55 kg/m^2 of water pooled in one lowest-layer cell and
+    # locked into a period-2 graupel<->rain melt/freeze flip-flop
+    # (+-115 K/step) whose Bigg freeze removes mass 4.2e6x faster
+    # (fractionally) than number (the orphan-number ratchet), ending in the
+    # day-540 NaN.
+    # DELIBERATELY CEILING-ONLY: the SAM check also RAISES N_r to the
+    # lamr_min (big-drop) floor, but on the failing campaign state 66% of
+    # cell-levels sit BELOW the window (measured, _probe_cell9576_i_healthy),
+    # so the floor would broadly perturb warm-rain number dynamics
+    # (self-collection, NSUBR) far outside this defect — it needs its own
+    # validated change.  The ceiling alone removes the death mechanism.
+    # The jnp.where keeps the ORIGINAL dN_r_dt BITWISE wherever the ceiling
+    # and the orphan clearing are no-ops, so every cell at-or-below the
+    # window with q_r above QSMALL is exactly unchanged.
+    q_r_new = jnp.maximum(jnp.clip(q_r, 0.0) + dq_r_dt * dt, 0.0)
+    _cr_psd = jnp.pi * constants.rho_water
+    n_r_hi = config.lamr_max ** 3 * rho * q_r_new / _cr_psd
+    n_r_post = jnp.clip(N_r, 0.0) + dN_r_dt * dt
+    n_r_new = jnp.minimum(n_r_post, n_r_hi)
+    n_r_new = jnp.where(q_r_new > 1.0e-14, n_r_new, 0.0)
+    dN_r_dt = jnp.where(
+        n_r_new == n_r_post, dN_r_dt,
+        (n_r_new - jnp.clip(N_r, 0.0)) / jnp.maximum(dt, 1.0e-10))
+
     # SAM N_i consistency limiter (mirrors the N_s pattern below): bound the
     # POST-STEP number so LAMI stays in [lami_min, lami_max] w.r.t. the
     # POST-STEP mass, and CLEAR the number entirely below QSMALL — orphan
