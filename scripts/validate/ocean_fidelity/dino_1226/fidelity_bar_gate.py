@@ -228,6 +228,48 @@ PER_ELEMENT: dict[str, float] = {
     # BAR_PER_ELEM_EPS=1e-9, so DEBT on per-element even though the aggregate
     # corr/ratio are near-roundoff (same pattern as bn2's earlier lesson: a
     # clean mean can hide a real per-element residual).
+    # RETRACTION (#1455 queue item, re-localisation this task): the
+    # own-seafloor straddling-bottom mechanism cited above (zad_bottom_face_
+    # mask='nemo_faithful', dino.py:1122's comment "explained ~100% of the
+    # active-only ZAD row error at levels 29-34") does NOT explain this
+    # median/p99/max tuple. Reproduced the tuple exactly (zad_gate_corr_
+    # ratio_1226.py: corr/ratio/n bit-for-bit; SELF-CHECK 1 in zad_level29_
+    # onset_walk.py PASSED), then measured directly (one-off scratch probe,
+    # not committed) where the top-0.1%-by-|err| cells actually sit: k-levels
+    # 6-19 (mid-water-column), and only 0.30% of them are at their OWN
+    # column's bottom_level -- i.e. NOT the seafloor-straddling population at
+    # all. zad_level29_onset_walk.py's own STEP 5 (rerun this task) computes
+    # this precisely: the own-seafloor-u-face mechanism owns only 0.13% of
+    # the row's total sum-of-squared-error (9.95e-24 of 7.57e-21) -- real but
+    # negligible, not "~100%". CONDITIONING CHECKED AND REJECTED: the
+    # mid-column tail is NOT near-zero-relative-to-own-level (only 2.1% of
+    # top-0.1% cells have |nemo|<10% of their own level's RMS(nemo), far
+    # below the near-zero-tail signature seen in ldf_slp/aeiu). Per-level
+    # RMS(err)/RMS(nemo) is instead roughly FLAT (~1-3e-4) across k=6-19 while
+    # RMS(nemo) itself falls ~6x with depth -- a genuine small relative
+    # residual at every mid-column level, NOT roundoff (an absolute floor of
+    # ~2e-13 vs local signal ~1e-9 is ~1e-4 relative, ~1e9x fp64 eps for a
+    # 1e-9-scale quantity). INHERITED-FROM-ww CONFIRMED BY DIRECT
+    # SUBSTITUTION (#1455 follow-up, same session, scratch probe not
+    # committed -- ldf_slp r1_hmlw-substitution standard): substituting
+    # NEMO's own ww (wzv_dump_ww_call1.bin -- the ww dyn_zad consumes,
+    # stpmlf.F90:244 wzv call 1 -> :265 dyn_adv, BEFORE the :315 call 2;
+    # sshwzv.F90:289 writer) for lego's w in the IDENTICAL tendency call
+    # (direct-call self-check vs production diag: max|diff|=0.0 exactly)
+    # collapses the per-element tuple median 6.06e-8 -> 5.11e-10 (119x, BELOW
+    # the 1e-9 bar), p99 3.28e-5 -> 1.84e-6 (18x), max 3.51e-3 -> 7.20e-4,
+    # aggregate err_norm 2.854e-5 -> 3.348e-6, 1-corr 4.06e-10 -> 5e-12.
+    # LOCATION PREDICTED AND MATCHED: per-level rel RMS of (lego w - nemo ww)
+    # peaks at ifaces 8-14 (~8.4-8.9e-5), exactly the k=7-11 band owning the
+    # production tail's top-0.1% cells; post-substitution the hot band MOVES
+    # to k=2-5 -- a SECOND, ~18x smaller contributor (p99 1.84e-6, not
+    # chased, candidates: upstream u/h_u/e3u chain). So the ZAD row's
+    # per-element DEBT is ~95% (by median) inherited from the upstream
+    # w/ssh/hdiv chain (wzv), NOT a ZAD-local defect -- consistent with the
+    # verbatim transcription (dynzad.F90:86-119 vs vertical.py:1171-1316, see
+    # the row's tuple note). Per-element figure below UNCHANGED (it is the
+    # production-lego measurement; the substitution is causal documentation);
+    # DEBT stands until the upstream w chain closes.
     "dyn_adv ZAD": 3.278e-05,
     # T and S pointwise |rel| median 0.0 (max <= 2.2e-16), one-signed.
     # CAVEAT the probe itself raised: the ssh leg is TAUTOLOGICAL -- one unknown
@@ -1031,7 +1073,22 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "tuple per Rule 1e -- both classified DEBT regardless, so "
                                                               "that disagreement never changed this row's verdict and "
                                                               "is superseded by this task's real-restart, root-cause-"
-                                                              "matched measurement."),
+                                                              "matched measurement. RE-VERIFIED #1455 (this task): "
+                                                              "reran zad_gate_corr_ratio_1226.py fresh, CONFIRMED "
+                                                              "n=336338, corr/ratio/err_norm all reproduce (printed "
+                                                              "1.000000/1.000001/2.8542e-05 to displayed precision). "
+                                                              "Localised the PER_ELEMENT tail (median/p99/max) this "
+                                                              "task and found the recorded mechanism (own-seafloor "
+                                                              "straddling-bottom, dino.py:1122) does NOT own it -- "
+                                                              "see the PER_ELEMENT[\"dyn_adv ZAD\"] note's RETRACTION "
+                                                              "for the corrected localisation (mid-column k=6-19). "
+                                                              "CAUSE CONFIRMED same session by direct ww "
+                                                              "substitution (see PER_ELEMENT note): the tail is "
+                                                              "INHERITED from the upstream w (wzv) chain -- NEMO's "
+                                                              "own ww collapses the per-element median 119x to below "
+                                                              "the bar and 1-corr to 5e-12. This row's own "
+                                                              "corr/ratio/n tuple is UNCHANGED and still DEBT "
+                                                              "(ratio just outside BAR_RATIO_EPS)."),
     "zdftke pdlr":                   (0.997960,   0.996970,   "post-e0fac585e re-measure: probe_zdftke_prandtl_"
                                                               "e3tboth.py (+ _scan_pdlr.py offset scan, both per this "
                                                               "row's own provenance) re-run at HEAD e0fac585e (fp64 "
