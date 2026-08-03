@@ -3173,6 +3173,18 @@ def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
     return _ddz_centre(inv * bx, h_k), _ddz_centre(inv * by, h_k)
 
 
+def _roll_core_periodic(a: jnp.ndarray, shift: int) -> jnp.ndarray:
+    """Zonal periodic roll of a WRAPPED ``(..., n_lon+1)`` array.
+
+    The last column duplicates the first, so a plain ``jnp.roll`` over the
+    full array shifts the duplicate into the seam and gives column 0 itself
+    as its neighbour (#1418).  Roll the core columns ``0..n_lon-1``, then
+    re-attach the wrap column from the rolled core.
+    """
+    core = jnp.roll(a[:, :-1], shift, axis=1)
+    return jnp.concatenate([core, core[:, :1]], axis=1)
+
+
 def neumann_fill_vertex(
     f: jnp.ndarray,
     vtx_mask: jnp.ndarray,
@@ -3279,14 +3291,20 @@ def neumann_fill_vertex(
                 f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
                 m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
-        # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
-        # Column n_lon duplicates column 0, so rolling the full array
-        # along axis 1 is correct for the core columns and the wrap
-        # column picks up the right neighbour automatically.
-        f_w = jnp.roll(filled, 1, axis=1)
-        m_w = jnp.roll(m, 1, axis=1)
-        f_e = jnp.roll(filled, -1, axis=1)
-        m_e = jnp.roll(m, -1, axis=1)
+        # E/W neighbours: periodic over the CORE columns 0..n_lon-1 only,
+        # then the wrap column is re-attached.  Rolling the FULL wrapped
+        # (n_lat+1, n_lon+1) array is wrong (#1418, the same index reasoning
+        # #1382 fixed elsewhere): for A = [a_0 ... a_{n-1}, a_0],
+        # roll(A, 1)[:, 0] is the DUPLICATE a_0, i.e. column 0 receives
+        # ITSELF as its west neighbour instead of a_{n-1}.  Every other
+        # column is correct, which is why it survived.  The paired mask roll
+        # then zeroed the true west neighbour out of the fill average at a
+        # land vertex, and the closing wrap re-sync overwrote column n_lon
+        # (which HAD the right neighbour) with the one-sided column-0 value.
+        f_w = _roll_core_periodic(filled, 1)
+        m_w = _roll_core_periodic(m, 1)
+        f_e = _roll_core_periodic(filled, -1)
+        m_e = _roll_core_periodic(m, -1)
 
         is_land = m < 0.5
 
@@ -3838,8 +3856,23 @@ def pv_flux_ene(
     F_v_north = F_v[1:, :, :]
     F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
     F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
-    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
-    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+    # ROLL THE (n_lon) ARRAY FIRST, THEN WRAP -- the ordering the t_* triads in
+    # pv_flux_al81_partial_cell already use.  Rolling the ALREADY-WRAPPED
+    # (n_lon+1) array is a DIFFERENT operation: for A = [a_0 ... a_{n-1}, a_0],
+    # roll(A,1) = [a_0, a_0, a_1, ... a_{n-1}], so u-face 0 receives a_0 where
+    # its west neighbour is cell n-1.  Column 0 was wrong while column n was
+    # right, so the two disagreed and the PERIODIC SEAM OPENED.
+    # Measured consequence (#1226): diag_u came out with a 21% relative seam
+    # from seam-EXACT inputs; divergence_cgrid telescopes a row to
+    # (u[n_lon] - u[0])*dy, so the open seam is a FABRICATED VOLUME SOURCE, and
+    # legoESM's barotropic solver gained 1.86e10 m^3 (+2.78e-4 m of mean eta)
+    # per 68-substep window in a CLOSED domain.  NEMO's residual on the same
+    # invariant is 2e-7..1e-6 relative and flat.  Closing the seam also drops
+    # the spurious channel transport by 42x.
+    _F_v_S_W = jnp.roll(F_v_south, 1, axis=1)     # (n_lat, n_lon, nlev)
+    _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
+    F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
+    F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
     diag_vortcor_u = 0.25 * (
         q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
     )
@@ -4156,8 +4189,23 @@ def pv_flux_al81_partial_cell(
     # West/east neighbour in i, periodic, plus wrap to (n_lat, n_lon+1, nlev).
     F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
     F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
-    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
-    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+    # ROLL THE (n_lon) ARRAY FIRST, THEN WRAP -- the ordering the t_* triads in
+    # pv_flux_al81_partial_cell already use.  Rolling the ALREADY-WRAPPED
+    # (n_lon+1) array is a DIFFERENT operation: for A = [a_0 ... a_{n-1}, a_0],
+    # roll(A,1) = [a_0, a_0, a_1, ... a_{n-1}], so u-face 0 receives a_0 where
+    # its west neighbour is cell n-1.  Column 0 was wrong while column n was
+    # right, so the two disagreed and the PERIODIC SEAM OPENED.
+    # Measured consequence (#1226): diag_u came out with a 21% relative seam
+    # from seam-EXACT inputs; divergence_cgrid telescopes a row to
+    # (u[n_lon] - u[0])*dy, so the open seam is a FABRICATED VOLUME SOURCE, and
+    # legoESM's barotropic solver gained 1.86e10 m^3 (+2.78e-4 m of mean eta)
+    # per 68-substep window in a CLOSED domain.  NEMO's residual on the same
+    # invariant is 2e-7..1e-6 relative and flat.  Closing the seam also drops
+    # the spurious channel transport by 42x.
+    _F_v_S_W = jnp.roll(F_v_south, 1, axis=1)     # (n_lat, n_lon, nlev)
+    _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
+    F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
+    F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
 
     # AL81 contribution at u-faces.
     diag_vortcor_u = (

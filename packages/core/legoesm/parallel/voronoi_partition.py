@@ -865,6 +865,13 @@ def build_local_mesh(
         edgeSignOnCell=mesh.edgeSignOnCell[:, lc],
         edgeSignOnVertex=mesh.edgeSignOnVertex[:, lv],
         meshDensity=mesh.meshDensity[lc],
+        # Optional per-cell surface fields: slice like any cell field so
+        # the LOCAL mesh keeps the SSO/land-fraction the global mesh
+        # carries (None stays None — legacy meshes unchanged).
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else mesh.subgrid_topo_stddev[lc]),
+        land_frac=(None if mesh.land_frac is None
+                   else mesh.land_frac[lc]),
     )
 
 
@@ -991,6 +998,11 @@ def _pad_voronoi_for_sharding(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
         edgeSignOnCell=pad_2d_col(mesh.edgeSignOnCell, pad_cells, fill=0.0),
         edgeSignOnVertex=mesh.edgeSignOnVertex,  # vertex-indexed
         meshDensity=pad_1d(mesh.meshDensity, pad_cells, fill=0.0),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else pad_1d(mesh.subgrid_topo_stddev,
+                                         pad_cells, fill=0.0)),
+        land_frac=(None if mesh.land_frac is None
+                   else pad_1d(mesh.land_frac, pad_cells, fill=0.0)),
     )
 
 
@@ -1148,6 +1160,11 @@ def reorder_voronoi_for_sharding(
         edgeSignOnCell=reorder_col(mesh.edgeSignOnCell, cell_perm),
         edgeSignOnVertex=reorder_col(mesh.edgeSignOnVertex, vert_perm),
         meshDensity=reorder_1d(mesh.meshDensity, cell_perm),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else reorder_1d(mesh.subgrid_topo_stddev,
+                                             cell_perm)),
+        land_frac=(None if mesh.land_frac is None
+                   else reorder_1d(mesh.land_frac, cell_perm)),
     )
 
     # --- Pad so that nCells and nEdges are divisible by n_devices ---

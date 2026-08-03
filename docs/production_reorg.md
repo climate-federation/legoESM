@@ -3,18 +3,23 @@
 **Status:** EXECUTED 2026-07-13 — all three PRs done on separate gated branches
 (unpushed; open as PRs in order, run the full suite + import-lint per PR):
 
-| PR | Branch | Commit | Codemod |
-|----|--------|--------|---------|
-| A (dynamics buckets) | `reorg/dynamics-buckets` | `1f3e7b69a` | `scripts/reorg/reorg_dynamics.py` |
-| B (atmosphere forcing) | `reorg/atmosphere-forcing` | `d5b7fada3` | `scripts/reorg/reorg_forcing.py` |
-| C (forcing_amip data) | `reorg/forcing-amip-data` | `5316d3b51` | (path-constant edits) |
+| PR | Merged as | Commit | Codemod |
+|----|-----------|--------|---------|
+| A (dynamics buckets) | #997 | `a16e1493a` | `reorg_dynamics.py` (in that commit) |
+| B (atmosphere forcing) | #1000 | `72845d6f2` | `reorg_forcing.py` (in that commit) |
+| C (forcing_amip data) | #998 | `6260cab02` | (path-constant edits) |
+
+The three SHAs originally recorded here (`1f3e7b69a`, `d5b7fada3`, `5316d3b51`)
+were pre-merge commits on unpushed local branches and no longer resolve; the
+merged equivalents above do. The two one-off codemods were deleted after
+execution — recover them from the commits named in the table if ever needed.
 
 Each verified: codemod `--verify` reports 0 stragglers, repo-wide
 `pytest --collect-only` green (0 import errors), moved-module tests pass. PR-A
 had codex review (APPROVE); PR-B self-verified (codex infra stalled). The two
-`scripts/reorg/*.py` codemods are hardened (skip all `.venv*`/`.claude`, rewrite
-slash-path string literals + budget-dict keys, verify-gate reports grouped/
-module-form imports the single-line rewriter can't split). Deferred item below
+codemods were hardened (skip all `.venv*`/`.claude`, rewrite slash-path string
+literals + budget-dict keys, verify-gate reports grouped/module-form imports the
+single-line rewriter can't split). Deferred item below
 (`tools/forcing/` AMIP → `atmosphere/forcing/amip/`) intentionally NOT done.
 
 Original rationale (kept for the record): reorg is pure churn with real

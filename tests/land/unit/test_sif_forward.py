@@ -119,8 +119,8 @@ def test_sif_forward_differentiable_in_sif_params():
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.canopy.sif import SIFConfig
     from legoesm.land.carbon.sif_forward import simulate_archetype_sif
+    from legoesm.core.param_overrides import apply_param_overrides
     from legoesm.training.param_collector import (
-        apply_param_overrides,
         build_trainable_params,
     )
 

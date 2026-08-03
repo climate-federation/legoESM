@@ -11,13 +11,12 @@ cubed-sphere ``parallel.sharded_dynamics.make_sharded_step``.
 
 Architecture (the two non-trivial pieces — see ``omip-multinode-spmd-scope``):
 
-* GRID = **band-stacked, P("lat")-SHARDED** (Structure A, sharded since
-  #1370-iii). The ``N`` band geometries are built host-side
-  (``build_band_grids``), their ARRAY fields are ``jnp.stack``-ed over a
-  leading band axis, sharded ``P("lat")`` so each device holds ONLY its own
-  band's slab, and the in-``shard_map`` body reads its local slab at
-  ``[0]``. This AVOIDS staggered-sharding the grid itself (the v-row is
-  ``n_lat+1``, coprime with ``n_lat`` for ``N>1``). The
+* GRID = **replicated-stacked, indexed** (Structure A). The ``N`` band
+  geometries are built host-side (``build_band_grids``), their ARRAY fields are
+  ``jnp.stack``-ed into a replicated pytree, and the in-``shard_map`` body picks
+  its own band by ``jax.lax.axis_index("lat")``. The grid is 2-D/small so
+  replication is cheap, and this AVOIDS staggered-sharding the grid (the v-row
+  is ``n_lat+1``, coprime with ``n_lat`` for ``N>1``). The
   ``LatLonCGridGeometry`` SCALAR fields (``n_lat``, ``n_lon``, ``radius``,
   ``dlon``, ``dlat``, ``fold``) stay STATIC python values — they gate trace-time
   ``if``\ s and ``jnp.zeros((n_lat, ...))`` shape builds, so a traced ``n_lat``
@@ -46,6 +45,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.parallel.geometry_consistency import (
+    FLAG_ABSENT, addressable_shard_put, assert_flags_agree,
+    assert_pytree_bytes_equal, assert_schema_agrees, checked_shard_put,
+    coerce_bool, coerce_count, config_digest48, name_digest48,
+    tree_schema_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 try:                                   # JAX >= 0.8 exposes shard_map at top level
@@ -203,105 +207,6 @@ def build_band_grids(grid, n_devices: int):
     ]
 
 
-def _content_hash48(arr) -> float:
-    """48-bit content digest of ``arr``'s bytes, exactly representable in f64.
-
-    Used to compare EXACT-dtype arrays (masks, index tables) across
-    processes: unlike moment fingerprints, a byte digest is positional, so a
-    permutation or a two-cell flip cannot cancel. 48 bits keeps the value
-    under 2**53 so it survives the float64 ``process_allgather`` payload
-    exactly. Not cryptographic — collision-resistance at 2**-48 is far
-    beyond the ~10 setup-time comparisons this guard makes.
-    """
-    import hashlib
-
-    a = np.ascontiguousarray(arr)
-    h = hashlib.blake2b(a.tobytes(), digest_size=6)
-    return float(int.from_bytes(h.digest(), "big"))
-
-def geom_band_fingerprint(host, n_bands):
-    """Low-memory cross-process fingerprint of a band-STACKED geometry field.
-
-    ``host`` has leading axis ``n_bands`` (the per-device band stack). The
-    fingerprint is PER BAND (codex 2026-08-03 r14: whole-array moments let a
-    band-local drift hide in the global sum once each process's own bytes
-    become live computation inputs):
-
-    * exact dtypes (int/bool/uint — masks, index tables): one positional
-      48-bit byte digest per band (a permutation or two-cell flip within a
-      band cannot cancel);
-    * float dtypes: per-band ``[sum, sum_of_squares, absmax]`` of the finite
-      entries in float64, plus per-band non-finite counts in ``struct``.
-      DOCUMENTED RESIDUALS: a within-band float change preserving all
-      three moments to rtol is not detected, and non-finite entries that
-      change POSITION or kind (nan vs inf) with an unchanged per-band
-      count also pass; band grids are analytic in lat/lon, so any real
-      inconsistency moves the moments.
-
-    Returns ``(struct, vals, is_exact)`` as float64 arrays safe for
-    ``process_allgather``.
-    """
-    import numpy as _np
-
-    host = _np.asarray(host)
-    assert host.shape[0] == n_bands, (host.shape, n_bands)
-    is_exact = host.dtype.kind in "biu"
-    struct = [float(host.ndim), *map(float, host.shape),
-              float(_np.dtype(host.dtype).num)]
-    if is_exact:
-        vals = _np.array([_content_hash48(host[b]) for b in range(n_bands)],
-                         dtype=_np.float64)
-    else:
-        per_band = []
-        for b in range(n_bands):
-            flat = host[b].ravel()
-            finite = flat[_np.isfinite(flat)]
-            f64 = finite.astype(_np.float64)
-            struct.append(float(flat.size - finite.size))
-            per_band.extend([
-                float(f64.sum()) if f64.size else 0.0,
-                float((f64 * f64).sum()) if f64.size else 0.0,
-                float(_np.abs(f64).max()) if f64.size else 0.0,
-            ])
-        vals = _np.array(per_band, dtype=_np.float64)
-    return _np.array(struct, dtype=_np.float64), vals, is_exact
-
-
-def band_fingerprints_agree(g_struct, g_vals, is_exact, rtol=1e-5):
-    """True iff every process's fingerprint matches process 0's.
-
-    ``g_struct``/``g_vals`` are the ``process_allgather``-ed outputs of
-    :func:`geom_band_fingerprint` (leading axis = process). Structure and
-    exact-dtype digests compare EXACTLY; float moments to ``rtol``.
-    """
-    import numpy as _np
-
-    struct_ok = bool(_np.all(g_struct == g_struct[0]))
-    if is_exact:
-        vals_ok = bool(_np.all(g_vals == g_vals[0]))
-    else:
-        vals_ok = bool(_np.allclose(g_vals, g_vals[0], rtol=rtol, atol=0.0))
-    return struct_ok and vals_ok
-
-
-
-def _schema_fingerprint(names, n_dev) -> np.ndarray:
-    """Fixed-shape schema digest: field-name list, count, x64 flag, n_dev.
-
-    Gathered ONCE before the per-field loop so a process-dependent field
-    selection is caught by a collective every process reaches, instead of
-    desynchronizing the per-field gathers (codex round-5 findings 3/4).
-    """
-    import hashlib
-
-    joined = ",".join(names).encode()
-    digest = float(int.from_bytes(
-        hashlib.blake2b(joined, digest_size=6).digest(), "big"))
-    return np.array(
-        [float(len(names)), digest, float(bool(jax.config.jax_enable_x64)),
-         float(n_dev)], dtype=np.float64)
-
-
 def _build_band_vertex_masks(model, n_dev):
     """Per-band vertex masks (n_lat/N+1, n_lon+1): SLICE the model's primed GLOBAL
     vertex mask ``[s : e+1]`` per band (the v/q-row stagger ``slice_cgrid_geometry_
@@ -335,65 +240,52 @@ def _build_band_vertex_masks(model, n_dev):
     return [jnp.asarray(vmask[r * nl: r * nl + nl + 1]) for r in range(n_dev)]
 
 
-def _addressable_shard_put(arr, sharding):
-    """Put an array onto a (possibly multi-process) sharding WITHOUT jax's
-    whole-array cross-process ``assert_equal``.
+# Ordered flag names for the ocean MESH+TREE gate used by the scatter/gather
+# bridges and by the returned SPMD callable. STATIC tuple: fixed width.
+_OCEAN_MESH_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "has_tree", "tree_schema",
+)
 
-    Under multicontroller, ``jax.device_put(numpy_array, sharding)`` calls
-    ``multihost_utils.assert_equal`` on the FULL array
-    (jax _src/dispatch.py::_device_put_sharding_impl) — a
-    ``process_allgather`` whose output is ``[n_processes, *shape]`` on one
-    device: at LL2304 L20 one 3-D field is 849 MB, so 96 processes fetch
-    81.5 GB > an 80 GB A100 (the wall that killed oc @96/@128, jobs
-    26644681/26644682, AFTER the geometry-broadcast fix; @64 = 54.3 GB
-    just fit, which is why smaller ladders never saw it).
 
-    Single-process: the historical ``jax.device_put``, byte-unchanged and
-    with no host round-trip (codex r17 — the input may already be a jax
-    device array). Multicontroller: ``jax.make_array_from_callback``
-    supplies each process's addressable shards directly — no consistency
-    collective. The ``device_put`` bit-identity CONTRACT is preserved by
-    the callers' cheap exact-hash gate (:func:`assert_pytree_bytes_equal`)
-    instead of jax's full-array allgather.
+def _ocean_mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists; never raises."""
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
+
+
+def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
+    """Agree the mesh AND a pytree LEAF SCHEMA before a scatter/gather.
+
+    #1362 round 4, blockers 5-6.  Both directions are collective here: the
+    gather's ``replicate_leaf`` compiles a jit identity with replicated
+    ``out_shardings``, and the scatter's DIRECT ``device_put`` of a full
+    global array onto a cross-process ``NamedSharding`` falls back to an
+    all-gather (documented on ``latlon_spmd.shard_leaf``) -- so the earlier
+    "SCATTER, therefore no collective" exemption was FALSE for this lane.
+    One collective runs PER LEAF, so the leaf schedule (optional fields,
+    dtypes, shapes) is rank-local data and is folded into one digest.
     """
-    if jax.process_count() <= 1:
-        return jax.device_put(arr, sharding)
-    host = np.asarray(arr)
-    return jax.make_array_from_callback(
-        host.shape, sharding, lambda idx: host[idx])
-
-
-def assert_pytree_bytes_equal(tree, what):
-    """Cheap multi-process replacement for the per-leaf ``assert_equal``
-    that :func:`_addressable_shard_put` bypasses (codex r17 HIGH-1).
-
-    Hashes every array leaf's BYTES (48-bit positional digest — the same
-    exactness as ``device_put``'s contract) into one small vector,
-    allgathers it, and refuses on any cross-process mismatch. Cost is one
-    tiny collective + a host-side hash pass, independent of process count
-    — vs jax's [n_processes, full_array] allgather.
-
-    No-op single-process. Symmetric: every process hashes the same leaves
-    in the same order, so all raise or none.
-    """
-    if jax.process_count() <= 1:
-        return
-    from jax.experimental import multihost_utils
-
-    leaves = [x for x in jax.tree_util.tree_leaves(tree)
-              if hasattr(x, "ndim")]
-    vals = np.array([_content_hash48(np.asarray(x)) for x in leaves],
-                    dtype=np.float64)
-    g = multihost_utils.process_allgather(vals)
-    if not bool(np.all(g == g[0])):
-        bad = [i for i in range(len(leaves))
-               if not bool(np.all(g[:, i] == g[0, i]))]
-        raise RuntimeError(
-            f"{what}: array leaves {bad} differ across processes (48-bit "
-            f"byte digests disagree) — the inputs each process built are "
-            f"NOT identical, which the removed jax device_put assert "
-            f"would have refused. Fix the per-process build before "
-            f"sharding.")
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    assert_flags_agree(_OCEAN_MESH_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        float(tree is not None),
+        tree_schema_digest48(tree) if tree is not None else FLAG_ABSENT,
+    ), context=where)
 
 
 def shard_state_latlon(state, mesh):
@@ -410,6 +302,11 @@ def shard_state_latlon(state, mesh):
     expects; the test uses it instead of a uniform ``tree.map(P("lat"))`` (which
     fails on ``v`` because ``n_lat+1`` is not divisible by ``N``).
     """
+    # FIRST statement: a DIRECT ``device_put`` of full global arrays onto a
+    # cross-process ``NamedSharding`` is serviced by an ALL-GATHER, and one
+    # runs per leaf -- so both the mesh and the leaf SCHEDULE are rank-local
+    # inputs to a collective (#1362 round 4, blockers 5-6).
+    _agree_ocean_mesh_entry(mesh, state, where="shard_state_latlon")
     # v-carrier contract (see make_sharded_ocean_step's fold note): the TOP
     # v-face row (regular pole wall OR tripole seam/cap row) must be
     # wall-masked — the carrier drops it and reconstructs it as zero, which
@@ -433,7 +330,7 @@ def shard_state_latlon(state, mesh):
         if field is None:
             return None
         sh = NamedSharding(mesh, _lat_spec(field.data))
-        return field.replace(data=_addressable_shard_put(field.data, sh))
+        return field.replace(data=addressable_shard_put(field.data, sh))
 
     def _shard_v(field):
         if field is None:
@@ -451,7 +348,7 @@ def shard_state_latlon(state, mesh):
         nlat1 = field.data.shape[0]
         v_lower = field.data[:nlat1 - 1]           # drop the top pole-wall row
         sh = NamedSharding(mesh, _lat_spec(v_lower))
-        return field.replace(data=_addressable_shard_put(v_lower, sh))
+        return field.replace(data=addressable_shard_put(v_lower, sh))
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
@@ -468,12 +365,12 @@ def shard_state_latlon(state, mesh):
             updates[name] = _shard_cell(val)
         else:
             # Non-Field, non-None leaf (e.g. a raw array carry like psi).
-            # ndim>=1 lat-shards via _lat_spec (1-D included); only true
-            # scalars replicate (codex r17: the old "replicate lower-rank"
-            # wording did not match _lat_spec's behaviour).
+            # Shard 2-D+ on lat, replicate lower-rank — matches shard_pytree.
             arr = jnp.asarray(val)
             spec = _lat_spec(arr) if arr.ndim >= 1 else P()
-            updates[name] = _addressable_shard_put(arr, NamedSharding(mesh, spec))
+            # ndim>=1 lat-shards via _lat_spec (1-D included); only true
+            # scalars replicate.
+            updates[name] = addressable_shard_put(arr, NamedSharding(mesh, spec))
     return state._replace(**updates)
 
 
@@ -488,6 +385,10 @@ def shard_forcing_latlon(forcing, mesh):
     untouched (they vanish from the pytree structure, matching the specs the
     step derives).  ``forcing=None`` returns ``None``.
     """
+    # FIRST statement: the `forcing is None or mesh is None` return below
+    # SKIPS every per-leaf put, so a rank with no forcing would leave a peer
+    # blocked in one (#1362 round 4, blocker 6).
+    _agree_ocean_mesh_entry(mesh, forcing, where="shard_forcing_latlon")
     if forcing is None or mesh is None:
         return forcing
     assert_pytree_bytes_equal(forcing, "shard_forcing_latlon")
@@ -496,7 +397,7 @@ def shard_forcing_latlon(forcing, mesh):
         if leaf is None:
             return None
         arr = jnp.asarray(leaf)
-        return _addressable_shard_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+        return addressable_shard_put(arr, NamedSharding(mesh, _lat_spec(arr)))
 
     return jax.tree.map(_put, forcing)
 
@@ -526,6 +427,10 @@ def shard_forcing_stack_latlon(stack, mesh):
     stack must be laid out consistently with the state the sharded step
     carries, and a second copy would drift.
     """
+    # FIRST statement: same rank-local early-return + per-leaf put as
+    # shard_forcing_latlon (#1362 round 4, blocker 6).
+    _agree_ocean_mesh_entry(mesh, stack,
+                            where="shard_forcing_stack_latlon")
     if mesh is None:
         return stack
 
@@ -541,7 +446,7 @@ def shard_forcing_stack_latlon(stack, mesh):
             spec = P("lat", None)
         else:
             spec = P()
-        return _addressable_shard_put(arr, NamedSharding(mesh, spec))
+        return addressable_shard_put(arr, NamedSharding(mesh, spec))
 
     return jax.tree.map(_put, stack)
 
@@ -579,6 +484,15 @@ def gather_state_latlon(state, mesh):
     the primitive shared with the atm gather); the single-process path is
     byte-unchanged.
     """
+    # FIRST statement (#1362 round 4). Two rank-local hazards live below:
+    # ``replicate_leaf`` runs a real cross-process collective (a jit identity
+    # with replicated out_shardings; XLA inserts the all-gather), and the
+    # ``if ... is None: continue`` skips mean a state whose OPTIONAL fields
+    # differ across processes performs a DIFFERENT NUMBER of those
+    # collectives -- one rank finishing while a peer still waits. So agree the
+    # mesh AND the ordered list of fields that will actually be gathered,
+    # before the first one runs.
+    _agree_ocean_mesh_entry(mesh, state, where="gather_state_latlon")
     from legoesm.parallel.latlon_spmd import replicate_leaf
 
     rep = NamedSharding(mesh, P())
@@ -609,6 +523,122 @@ def gather_state_latlon(state, mesh):
     return state._replace(**updates)
 
 
+# Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
+# width is fixed by this literal, never by rank-local data.
+_OCEAN_SPMD_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "grid_n_lat", "grid_n_lon", "geom_schema", "fold_active",
+    "config_digest", "has_vertex_mask",
+)
+
+
+def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
+    """Agree every rank-local input, as the FIRST statement of a public factory.
+
+    #1362 / codex round 2, ocean twin of the atmosphere's
+    ``_agree_spmd_entry``.  This lane has the same shape of hazard: the
+    ``mesh is None`` early return, ``build_band_grids``' divisibility
+    validation, and ``_build_band_vertex_masks`` (which throws if only THIS
+    rank lacks a primed vertex-mask cache) all execute BEFORE the schema
+    collective.  Any of them lets one process raise or return while a peer
+    blocks in ``process_allgather`` -- a HANG rather than an error.
+
+    Agreeing the mesh shape, grid dimensions and fold state up front makes
+    every downstream rank-local check symmetric by construction.
+
+    ``axis_names`` carries the ORDERED axis-name digest, not just the axis
+    COUNT: the band body indexes ``mesh.axis_names[0]``, so two processes
+    whose meshes name that axis differently would psum/ppermute over
+    different axes while every count-based flag agreed (the ocean instance of
+    codex round-3 blocker 2, which was found on the atmosphere twin --
+    fixing only the lane where a defect was reported is what left five
+    unguarded paths after round 1).
+
+    Grid dimensions go through :func:`coerce_count`, which NEVER raises, and
+    the refusal is deferred until AFTER the collective; building a collective
+    payload must not be able to kill one rank while its peers block in the
+    gather (codex round-3 blocker 3, same rationale as the atm twin).
+    """
+    # Defensive attribute reads: nothing in the payload build may raise before
+    # the collective (see the atm twin for the full rule).
+    grid = getattr(model, "grid", None)
+    fold = getattr(grid, "fold", None)
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    problems = []
+
+    def _count(value, label, absent=FLAG_ABSENT):
+        payload, problem = coerce_count(value, absent=absent)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    flags = (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        _count(getattr(grid, "n_lat", None), "grid.n_lat", absent=0.0),
+        _count(getattr(grid, "n_lon", None), "grid.n_lon", absent=0.0),
+        # The geometry array fields that `build_band_grids` slices and
+        # `_replicated_put` broadcasts, by dtype + shape.
+        tree_schema_digest48(grid),
+        float(bool(fold is not None and getattr(fold, "is_active", False))),
+        # ONE digest over EVERY static scalar of the ocean config instead of a
+        # hand-picked few: the step body branches on `outer_integrator`, the
+        # tracer integrator, the polar filter, the freeze floor and the EW
+        # overlap, and NONE of them were agreed (codex round-4, blocker 3).
+        # A valid/invalid or euler/ab2 split makes one rank raise during
+        # tracing while its peer compiles a different program.
+        config_digest48(getattr(model, "config", None)),
+        # `_build_band_vertex_masks` RAISES when this cache is unprimed, and
+        # it runs before the schema collective -- so its presence must be
+        # agreed first or an unprimed rank dies while its peer blocks
+        # (codex round-4, blocker 4).
+        float(getattr(model, "_vertex_mask", None) is not None),
+    )
+    assert_flags_agree(_OCEAN_SPMD_ENTRY_FLAGS, flags, context=where)
+    # AFTER the collective only: symmetric on every rank (see atm twin).
+    for label, problem in problems:
+        raise ValueError(f"{where}: {label} {problem}")
+
+
+# Ordered flag names for the PER-INVOCATION gate on the returned ocean SPMD
+# callable. STATIC tuple: fixed width, never rank-local.
+_OCEAN_CALL_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "axis_names", "axis_sizes",
+    "state_schema", "has_forcing", "forcing_schema",
+)
+
+
+def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
+    """Agree a returned ocean SPMD callable's per-CALL inputs, FIRST statement.
+
+    #1362 round 4, blocker 7.  ``sharded_step`` runs ``_validate_forcing_layout``
+    and builds a rank-local cache key BEFORE entering its ``shard_map``: a
+    forcing layout that is invalid on one rank only makes that rank raise while
+    its peers enter the collective program -- a hang.  The state + forcing leaf
+    SCHEMA is agreed too, because ``in_specs``/``out_specs`` are derived from
+    it, so two processes with different optional fields compile different
+    programs.
+
+    Cost: one small allgather per CALL, and an exact no-op under a single
+    process.  See the atmosphere twin ``_agree_spmd_call`` for why gating only
+    on cache misses is NOT a valid optimisation.
+    """
+    names, sizes = _ocean_mesh_axis_terms(mesh)
+    assert_flags_agree(_OCEAN_CALL_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        name_digest48(names),
+        name_digest48(sizes),
+        tree_schema_digest48(state),
+        float(forcing is not None),
+        (tree_schema_digest48(forcing) if forcing is not None
+         else FLAG_ABSENT),
+    ), context=where)
+
+
 def make_sharded_ocean_step(model, mesh):
     """Return ``step(state, dt, freshwater=None, surface_forcing=None,
     sponge=None, t_seconds=None) -> state`` running ``model.step``
@@ -634,9 +664,9 @@ def make_sharded_ocean_step(model, mesh):
     Notes
     -----
     Build the ``N`` band geometries + band vertex masks host-side, stack their
-    ARRAY fields over a leading band axis SHARDED ``P("lat")`` (each device
-    holds only its own slab; the ``shard_map`` body reads it at ``[0]``; the
-    geometry SCALAR fields stay static — see the module docstring).  ``dt`` is a TRACED,
+    ARRAY fields into a replicated pytree, and index by
+    ``jax.lax.axis_index("lat")`` in the ``shard_map`` body (the geometry SCALAR
+    fields stay static — see the module docstring).  ``dt`` is a TRACED,
     replicated operand and the jitted ``shard_map`` is built once and cached
     (a per-call rebuild re-traced the whole ocean step every call — see the
     ``_cache`` note below).  ``check_vma=False`` (the JAX >= 0.8
@@ -648,6 +678,9 @@ def make_sharded_ocean_step(model, mesh):
     each band's ``nl+1`` v-faces, runs the step on the band geometry, and
     converts the result back to the ``v_lower`` representation.
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2).
+    _agree_ocean_spmd_entry(model, mesh, where="make_sharded_ocean_step")
     if mesh is None:                   # single-device: plain step
         return lambda state, dt, **forcing_kwargs: model.step(
             state, dt, **forcing_kwargs)
@@ -671,7 +704,7 @@ def make_sharded_ocean_step(model, mesh):
     # (unmasked) seam v-row refuses loudly there instead of silently
     # reconstructing zeros here.
 
-    # --- host-side band geometries + vertex masks (band-stacked, P("lat")-sharded) ---
+    # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
     band_grids = build_band_grids(model.grid, n_dev)
     band_vmasks = _build_band_vertex_masks(model, n_dev)
     template = band_grids[0]           # static-scalar source (uniform bands)
@@ -684,100 +717,45 @@ def make_sharded_ocean_step(model, mesh):
     # per-device residency left after the host-side-build fix (probe
     # 26524423). The leading axis has length n_dev, so P("lat") divides it
     # exactly; the body indexes its local slab at [0]. Values are unchanged
-    # — same stack, different placement; the cross-process divergence
-    # guard below runs on HOST values and is placement-blind.
+    # — same stack, different placement; the process-0 broadcast +
+    # divergence guard below runs on HOST values and is placement-blind.
     rep = NamedSharding(mesh, P("lat"))
 
     def _replicated_put(arr, name):
-        # (Name kept for history; since 2026-08-03 this is a SHARDED stack
-        # put.) The band-geometry arrays are (re)computed per process and
-        # can differ in their last ULPs (per-process XLA autotuning on
-        # device-derived grid fields) — the fully-replicated-put era
-        # broadcast process 0's bytes to sidestep the P() bit-identity
-        # assert (job 26450848). With the #1370-iii P("lat") sharding each
-        # process's devices consume ONLY its own band rows, so the
-        # broadcast became both unnecessary and, at nd>=96, fatal (its
-        # psum program is nd x the stack — see the note at the put below).
-        # GUARD (codex round-3): process 0 must not silently mask REAL
-        # cross-process divergence. Compare an allgathered fingerprint:
-        # structural entries exactly; value entries EXACTLY for integer/bool
-        # arrays (masks are comparison results — bit-reproducible, and an
-        # exact compare is the only way to catch a two-cell flip that cancels
-        # in the sum, codex round-4) and to rtol 1e-5 for float arrays (only
-        # ULP autotune drift is expected there; quantize-then-assert-equal
-        # false-positived on a rounding boundary, job 26453240).
-        # NO DEADLOCK RISK: every process fingerprints the same fields in the
-        # same order and derives the verdict from the SAME gathered array, so
-        # the refusal is symmetric — all raise or none.
-        # Residual (documented): a float-geometry divergence preserving sum,
-        # sum-of-squares AND absmax to 1e-5 is not detected; band grids are
-        # analytic in lat/lon, so any real inconsistency moves those moments.
-        host = np.asarray(arr)
-        if jax.process_count() > 1:
-            from jax.experimental import multihost_utils
+        # (Name kept for history; this is a SHARDED P("lat") stack put.)
+        # checked_shard_put replaces the broadcast_checked+device_put pair:
+        # the broadcast's psum program is [n_processes, stack] (nd x 849 MB
+        # at LL2304 — the @96/@128 wall), and a numpy device_put onto an
+        # all-process sharding pays jax's whole-array assert_equal on top.
+        # The per-band gate keeps the divergence contract (n_bands is
+        # schema-gated just below, so payload widths agree). ONE shared
+        # implementation: legoesm.parallel.geometry_consistency.
+        return checked_shard_put(
+            arr, name, rep, context="make_sharded_ocean_step",
+            n_bands=n_dev)
 
-            # PER-BAND fingerprints (module-level, unit-tested): exact
-            # dtypes hash positionally per band; floats compare per-band
-            # moments to rtol 1e-5 — bounds each band's drift instead of
-            # letting it hide in a whole-array sum, since each process's
-            # own bytes are now the live inputs for the bands it owns
-            # (codex r14). A mask that genuinely differs across processes
-            # means different wet domains = different physics: refusing is
-            # correct, not a false alarm.
-            struct, vals, is_exact = geom_band_fingerprint(
-                host, host.shape[0])
-            g_struct = multihost_utils.process_allgather(struct)
-            g_vals = multihost_utils.process_allgather(vals)
-            if not band_fingerprints_agree(g_struct, g_vals, is_exact):
-                raise RuntimeError(
-                    f"make_sharded_ocean_step: band-geometry field {name!r} "
-                    f"DIVERGES across processes (exact_dtype={is_exact}, "
-                    f"gathered={g_vals.tolist()}) — a real config/grid "
-                    f"inconsistency, not autotune noise; refusing to "
-                    f"shard it.")
-            # NO broadcast_one_to_all here (removed 2026-08-03): its psum
-            # program is [n_processes, stack] in / P() fully-replicated out,
-            # so its logical arg bytes are nd x the global stack — 82.4 GB
-            # at nd=96 and 109.6 GB at nd=128 for one 3-D field, the
-            # near-linear-in-nd wall that killed oc @96/@128 (jobs
-            # 26642771/26636762) while @64 sat just under XLA's 63.8 GB
-            # limit.  The target sharding is P("lat"): each process's
-            # devices consume ONLY its own band rows, so cross-process
-            # byte-identity of non-owned rows is irrelevant, and REAL
-            # divergence is already refused by the fingerprint gate above.
-            # make_array_from_callback hands each process exactly its
-            # addressable slabs — the same #1100 pattern as the state
-            # build — with no global-sized collective program at all.
-        host_np = np.asarray(host)
-        return jax.make_array_from_callback(
-            host_np.shape, rep, lambda idx: host_np[idx])
-
-    if jax.process_count() > 1:
-        # Schema gate FIRST (one fixed-shape collective every process
-        # reaches): a process-dependent field list or a mixed
-        # jax_enable_x64 setting would otherwise desynchronize the
-        # per-field gathers below instead of failing with a clear message.
-        from jax.experimental import multihost_utils as _mhu
-
-        _g = _mhu.process_allgather(
-            _schema_fingerprint(list(array_field_names), n_dev))
-        if not bool(np.all(_g == _g[0])):
-            raise RuntimeError(
-                "make_sharded_ocean_step: the band-geometry SCHEMA differs "
-                "across processes (field list / x64 setting / device count "
-                f"— gathered {_g.tolist()}). Fix the per-process config "
-                "before sharding; the per-field checks below assume one "
-                "schema.")
-
-    geom_stacks = {
-        name: _replicated_put(
-            jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
-                      axis=0), name)
+    # Schema gate FIRST (one fixed-shape collective every process reaches):
+    # a process-dependent field list or a mixed jax_enable_x64 setting would
+    # otherwise desynchronize the per-field gathers below instead of failing
+    # with a clear message.
+    # Build the raw stacks FIRST so the schema gate can also cover each
+    # field's dtype class and ndim -- those decide the per-field payload
+    # shape below, so a bool-vs-float disagreement must fail HERE rather than
+    # deadlock in the per-field gather.
+    _raw_geom = {
+        name: jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids],
+                        axis=0)
         for name in array_field_names
     }
-    vmask_stack = _replicated_put(
-        jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0),
-        "vertex_mask")
+    _raw_vmask = jnp.stack([jnp.asarray(m) for m in band_vmasks], axis=0)
+    _gate_names = [*array_field_names, "vertex_mask"]
+    assert_schema_agrees(
+        _gate_names, n_dev, context="make_sharded_ocean_step",
+        arrays=[*(_raw_geom[n] for n in array_field_names), _raw_vmask])
+
+    geom_stacks = {name: _replicated_put(_raw_geom[name], name)
+                   for name in array_field_names}
+    vmask_stack = _replicated_put(_raw_vmask, "vertex_mask")
 
     # Static perms for the v north-boundary-row ppermute (band r receives band
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
@@ -893,20 +871,19 @@ def make_sharded_ocean_step(model, mesh):
 
     def sharded_step(state, dt, freshwater=None, surface_forcing=None,
                      sponge=None, t_seconds=None, aux=None):
-        # ``aux`` (codex/2-proc repro 2026-08-03): the geometry + vmask
-        # stacks are SHARDED global arrays; when this wrapper runs INSIDE
-        # an outer trace (a bench/driver ``jit``/``scan`` over the step —
-        # jit-of-jit inlines the inner call), concrete closure arrays
-        # become OUTER-TRACE CONSTANTS and jax's MLIR constant handler
-        # tries to fetch their value — impossible for non-addressable
-        # arrays (RuntimeError: 'Fetching value ... non-addressable'; the
-        # multicontroller lane has been broken this way since the
-        # #1370-iii stack sharding). Callers that wrap the step in their
-        # own jit MUST thread ``step.aux`` through their jit boundary as
-        # an ARGUMENT and pass it back here.
+        # ``aux``: the sharded geometry+vmask stacks. When this wrapper runs
+        # INSIDE an outer trace (a bench/driver jit/scan — jit-of-jit
+        # inlines the inner call), concrete closure arrays become
+        # OUTER-trace constants whose value the MLIR handler cannot fetch
+        # for non-addressable arrays (broken since #1370-iii sharded the
+        # stacks). Outer-jit callers MUST thread ``step.aux`` through their
+        # jit boundary as an ARGUMENT and pass it back here.
         # ONE forcing operand: None fields drop out of the pytree structure,
         # so specs derived by tree.map skip them automatically and the
         # structure key below distinguishes every None<->array combination.
+        _agree_ocean_spmd_call(
+            mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
+            where="make_sharded_ocean_step.step")
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
@@ -1002,6 +979,9 @@ def make_sharded_ocean_step_global(model, mesh):
 
     ``mesh is None`` ⇒ the plain single-device ``model.step`` (no scatter/gather).
     """
+    # FIRST statement: agree every rank-local input before ANY
+    # rank-local check can raise or return (codex round-2).
+    _agree_ocean_spmd_entry(model, mesh, where="make_sharded_ocean_step_global")
     if mesh is None:                   # single-device: plain step
         return lambda state, dt, surface_forcing=None, freshwater=None: (
             model.step(state, dt, freshwater=freshwater,
@@ -1010,11 +990,13 @@ def make_sharded_ocean_step_global(model, mesh):
     inner = make_sharded_ocean_step(model, mesh)
 
     def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
-        # Scatter the global state AND forcing to the band layout explicitly
-        # (codex r17 item 3: the old comment claimed inner sharded the
-        # forcing; it forwarded it global and relied on implicit JIT input
-        # placement — which under multicontroller pays jax's whole-array
-        # device_put assert, the nd-linear wall this module removes).
+        _agree_ocean_spmd_call(mesh, state, (surface_forcing, freshwater),
+                               where="make_sharded_ocean_step_global.step")
+        # Scatter the global state AND forcing to the band layout
+        # explicitly (the old comment claimed inner sharded the forcing;
+        # it forwarded it global and relied on implicit JIT input
+        # placement — jax's whole-array device_put assert under
+        # multicontroller, the nd-linear wall this module removes).
         ss = shard_state_latlon(state, mesh)
         ss = inner(ss, dt,
                    surface_forcing=shard_forcing_latlon(surface_forcing, mesh),

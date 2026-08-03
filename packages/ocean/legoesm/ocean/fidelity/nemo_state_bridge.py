@@ -281,6 +281,72 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     return out_e3t, out_td, "e3t_0"
 
 
+_FP32_BRIDGE_WARNED = False
+
+
+def _warn_if_not_fp64() -> None:
+    """One-shot loud warning when an oracle bridge is built in single precision.
+
+    NEMO/MITgcm/Veros are fp64.  RUNNING legoESM in fp32 is a legitimate
+    performance choice, so this is NOT an error -- but COMPARING against an
+    oracle in fp32 measures our own rounding (f32 eps = 1.19e-7), and that is
+    how the f32 depth ladder silently corrupted every #1226 measurement for
+    weeks (it rounded NEMO's f64 gdept_1d to ~7 digits; median |rel| 2.555e-8 =
+    0.21 x f32 eps).  ``JAX_ENABLE_X64=1`` does NOT change the policy.
+
+    Comparison probes should use the HARD gate
+    :func:`legoesm.ocean.fidelity.precision_gate.require_fp64` instead of
+    relying on this warning.
+    """
+    global _FP32_BRIDGE_WARNED
+    if _FP32_BRIDGE_WARNED:
+        return
+    from legoesm.core.precision import get_policy
+    import jax.numpy as _jnp
+    if _jnp.dtype(get_policy().control) == _jnp.float64:
+        return
+    _FP32_BRIDGE_WARNED = True
+    import warnings
+    warnings.warn(
+        "NEMO oracle bridge built under a NON-fp64 precision policy "
+        f"(control={_jnp.dtype(get_policy().control).name}). Model RUNS in "
+        "fp32 are fine, but any COMPARISON against the oracle is then "
+        "measuring float32 rounding, not physics (f32 eps = 1.19e-7). "
+        "JAX_ENABLE_X64=1 does NOT change this -- set "
+        "PrecisionPolicy.fp64() via legoesm.core.precision.set_policy, and "
+        "use ocean.fidelity.precision_gate.require_fp64 for a hard gate.",
+        RuntimeWarning, stacklevel=3,
+    )
+
+
+def detect_metric_convention(grid, rtol: float = 1e-12) -> str:
+    """Read the oracle's OWN grid to decide its horizontal metric convention.
+
+    NEMO's ``mesh_mask`` carries both ``e1t`` and ``e2t``, so the convention is
+    OBSERVABLE rather than something to assume:
+
+    * DINO's ``usr_def_hgr.F90:111-119`` sets ``pe2t = pe1t =
+      ra*rad*COS(phi)*rn_e1_deg`` — Mercator conformality imposed analytically
+      — so ``e1t == e2t`` EXACTLY  → ``"nemo_isotropic"``.
+    * A config carrying a genuine finite-difference meridional metric has
+      ``e1t != e2t``  → ``"exact"``.
+
+    Detecting beats a hard default because this bridge also serves
+    non-isotropic NEMO configs (GYRE), where forcing ``"nemo_isotropic"`` would
+    be wrong.  It also beats trusting a recipe card, which can drift out of
+    step with the mesh_mask actually being read.
+
+    Getting this wrong is not subtle in its consequences: the shipped
+    ``"exact"`` default mismatched NEMO's ``e2v`` by median 2.798e-05, which
+    ``ldf_slp``'s ``vslp`` divides by — worth 4 orders of magnitude on that row
+    (#1226).
+    """
+    e1t = np.asarray(grid.e1t, dtype=np.float64)
+    e2t = np.asarray(grid.e2t, dtype=np.float64)
+    rel = np.abs(e1t - e2t) / np.maximum(np.abs(e2t), 1e-30)
+    return "nemo_isotropic" if float(rel.max()) <= rtol else "exact"
+
+
 def bridge_nemo_to_legoesm_topo(
     grid: NemoGrid,
     state: NemoState,
@@ -290,6 +356,7 @@ def bridge_nemo_to_legoesm_topo(
     radius: float = constants.R_earth,
     f_rtol: float = 1e-3,
     full_step: bool = False,
+    metric_convention: str = "auto",
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -335,6 +402,18 @@ def bridge_nemo_to_legoesm_topo(
         the west/east boundaries with walls.
     f_rtol : float
         Max relative error tolerance between the built ``f_T`` and NEMO ``ff_t``.
+    metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
+        Forwarded to :func:`create_latlon_geometry`. Default ``"exact"``
+        (the true finite-difference T/u-face metric legoESM has always
+        built here — BIT-IDENTICAL for every existing caller of this
+        bridge). ``"nemo_isotropic"`` reproduces NEMO's own
+        ``usr_def_hgr.F90`` DINO closed-form T/u-face metric
+        (``pe1t = pe2t``) instead of the exact one this bridge computes
+        from ``gphiv`` -- lets a fidelity probe compare against NEMO on
+        NEMO's OWN metric convention rather than legoESM's (geometrically
+        more exact but less NEMO-faithful) reconstruction. Does not touch
+        the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
+        which reads ``geom.f_T`` (unaffected by this flag).
 
     Raises
     ------
@@ -342,6 +421,17 @@ def bridge_nemo_to_legoesm_topo(
         If ``gphiv`` is missing, the bathymetry is not full-step, or the built
         Coriolis does not match NEMO ``ff_t`` to ``f_rtol``.
     """
+    # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
+    # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
+    # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
+    # analytically), giving e1t == e2t EXACTLY, whereas a config with a genuine
+    # finite-difference meridional metric has e1t != e2t.  Detecting beats a
+    # hard default because this bridge also serves non-isotropic NEMO configs
+    # (GYRE), where forcing "nemo_isotropic" would be wrong.
+    if metric_convention == "auto":
+        metric_convention = detect_metric_convention(grid)
+
+    _warn_if_not_fp64()
     if grid.gphiv is None:
         raise ValueError(
             "bridge_nemo_to_legoesm_topo requires grid.gphiv (V-point latitudes) "
@@ -363,6 +453,7 @@ def bridge_nemo_to_legoesm_topo(
         n_lat, n_lon, radius=radius, omega=omega,
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
+        metric_convention=metric_convention,
     )
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried

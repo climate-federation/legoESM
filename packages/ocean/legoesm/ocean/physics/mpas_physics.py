@@ -441,10 +441,12 @@ def make_mpas_ocean_physics(
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     p_cell=p_cell, eos_fn=eos_fn,
+                    eta=state.eta.data, H_bathy=state.H_bathy.data,
                 )
             else:
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                    eta=state.eta.data, H_bathy=state.H_bathy.data,
                 )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]

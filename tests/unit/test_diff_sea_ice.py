@@ -100,6 +100,34 @@ class TestSlabIceGrad:
         grad = jax.grad(loss)(self.ocean_sst)
         assert_gradient_ok(grad, "Slab ice h_ice w.r.t. ocean_sst")
 
+    def test_grad_wrt_sw_down(self):
+        """Spec 5a: incident shortwave must reach the ice state by AD.
+
+        d(T_ice)/d(sw_down) is the entry point for every surface-energy
+        parameter-estimation problem (albedo, conductivity); a zero here
+        would mean the SW term never touches the prognostic ice
+        temperature.
+        """
+        state = self.state
+        forcing = self.forcing
+
+        def loss(sw_down):
+            f = forcing._replace(sw_down=sw_down)
+            out, _ = self.step_fn(
+                state, f, self.ocean_sst, self.ocean_u, self.ocean_v,
+                self.config, U_min=1.0, dt=self.dt,
+            )
+            return jnp.sum(out.T_ice.data ** 2)
+
+        grad = jax.grad(loss)(forcing.sw_down)
+        assert_gradient_ok(grad, "Slab ice T_ice w.r.t. sw_down")
+        # Sign: more incident SW warms the ice, and the loss is
+        # sum(T_ice**2) with T_ice > 0 K, so the loss must increase.
+        assert jnp.all(grad > 0), (
+            f"d(sum T_ice^2)/d(sw_down) must be positive (more SW -> warmer "
+            f"ice); got min={float(jnp.min(grad)):.3e}"
+        )
+
     def test_partial_cover_lead_freezing_grows_concentration(self):
         """A partially-covered cell (h > 0, A < 1) with destabilizing
         surface flux must refreeze the open-water lead and INCREASE
@@ -282,6 +310,35 @@ class TestRheologyGrad:
         dP_dh = jax.grad(lambda h: jnp.sum(ice_strength(h, A)))(h)
         assert jnp.all(jnp.isfinite(dP_dh)), "dP/dh not finite"
         assert jnp.all(dP_dh > 0), "dP/dh should be positive (thicker = stronger)"
+
+    def test_vp_stress_grad(self):
+        """Spec 5c: the VP constitutive law itself (Hibler 1979).
+
+        ``vp_stress`` is the kernel both ``evp_stress_update`` and
+        ``mevp_stress_update`` build on, so an AD defect here (the
+        ``zeta = P/(2 Delta)`` division, the ``1/e^2`` shear split)
+        poisons every rheology.  Checked w.r.t. BOTH the strain rate and
+        the ice strength P.
+        """
+        from legoesm.ice.rheology import vp_stress, delta_deformation
+
+        shape = (6, 4, 4)
+        eps_11 = 1e-6 * jnp.ones(shape)
+        eps_22 = -0.5e-6 * jnp.ones(shape)
+        eps_12 = 0.3e-6 * jnp.ones(shape)
+        P = 1e4 * jnp.ones(shape)
+        Delta = delta_deformation(eps_11, eps_22, eps_12)
+
+        def loss_eps(e11):
+            s11, s22, s12 = vp_stress(e11, eps_22, eps_12, P, Delta)
+            return jnp.sum(s11 ** 2 + s22 ** 2 + s12 ** 2)
+
+        def loss_P(p):
+            s11, s22, s12 = vp_stress(eps_11, eps_22, eps_12, p, Delta)
+            return jnp.sum(s11 ** 2 + s22 ** 2 + s12 ** 2)
+
+        assert_gradient_ok(jax.grad(loss_eps)(eps_11), "VP stress w.r.t. eps_11")
+        assert_gradient_ok(jax.grad(loss_P)(P), "VP stress w.r.t. P")
 
     def test_evp_stress_update_grad(self):
         from legoesm.ice.rheology import evp_stress_update

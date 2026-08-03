@@ -235,6 +235,28 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
+        # Sub-grid cloud-optics inhomogeneity + the diagnostic-condensate
+        # selectors.  These were MISSING here while the FV pipeline forwarded
+        # them (physics_pipeline.py:2067-2077), so on the MPAS lane
+        # --cloud-optics-inhomogeneity / --cloud-inhomogeneity-factor /
+        # --cloud-fsd / --cloud-diagnostic-condensate-scheme /
+        # --cloud-adiabatic-lwc-rate were accepted by the CLI and then
+        # SILENTLY DROPPED — the run used the scheme defaults regardless of
+        # the flag (codex review, 2026-07-30).  The docstring above claims
+        # this function mirrors the FV call; it now actually does.
+        cloud_inhomogeneity_factor=getattr(
+            cfg, "cloud_inhomogeneity_factor", None),
+        cloud_optics_inhomogeneity=getattr(
+            cfg, "cloud_optics_inhomogeneity", None),
+        cloud_fsd=getattr(cfg, "cloud_fsd", None),
+        cloud_partial_coverage_optics=getattr(
+            cfg, "cloud_partial_coverage_optics", None),
+        cloud_vertical_overlap_optics=getattr(
+            cfg, "cloud_vertical_overlap_optics", None),
+        cloud_n_subcolumns=getattr(cfg, "cloud_n_subcolumns", None),
+        diagnostic_condensate_scheme=getattr(
+            cfg, "cloud_diagnostic_condensate_scheme", None),
+        adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
         p_xr=getattr(cfg, "cloud_p_xr", None),
         alpha_xr=getattr(cfg, "cloud_alpha_xr", None),
         clubb_cf_override_strength=getattr(
@@ -1324,13 +1346,26 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
+        # Per-cell land fraction on the grid pytree (canonical name
+        # ``land_frac``) so the GWD integration's ``_extract_land_frac``
+        # finds it (e3sm_cam's driver-level oro landfrac scaling).  Reuses
+        # the ``self._f_land`` computed above — no new loader.  Attached
+        # only where the grid type carries the field (VoronoiMesh since
+        # 2026-07-30); other grids keep legacy behaviour.
+        if (getattr(self.grid, "land_frac", "no-field") is None
+                and self._f_land is not None):
+            self.grid = self.grid._replace(
+                land_frac=jnp.asarray(self._f_land, dtype=_sd).reshape(-1))
+
         # Per-column subgrid orographic stddev for the orographic GWD launch
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
         # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
         # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
         # uniform 500 m mountain over ocean columns too. Only loaded when the
-        # active GWD has an orographic member; otherwise the file is unused
-        # (and non-cube/Gaussian grids could not even carry the field).
+        # active GWD has an orographic member; otherwise the file is unused.
+        # ``load_subgrid_orography``'s regrid target handles cube (rank-3),
+        # structured lat-lon (rank-2) AND unstructured Voronoi (rank-1 cell
+        # centres) grids — see ``_target_grid_degrees``.
         sso_path = getattr(self.config, "subgrid_orography_path", "")
         if sso_path:
             _oro_members = ("mcfarlane", "lindzen", "e3sm_cam")
@@ -1346,11 +1381,16 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-                except (ValueError, AttributeError) as e:
+                # NamedTuple._replace raises TypeError ("Got unexpected field
+                # names"), NOT ValueError/AttributeError -- so this guard never
+                # fired and a raw collections traceback escaped instead of the
+                # message below. Found by a lat-lon run dying at setup.
+                except (TypeError, ValueError, AttributeError) as e:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                        f"field (supported: CubedSphereGrid, GaussianGrid)"
+                        f"field (supported: CubedSphereGrid, GaussianGrid, "
+                        f"VoronoiMesh)"
                     ) from e
                 logger.info(
                     f"  Subgrid orography: {sso_path} "
@@ -2931,6 +2971,7 @@ class ModelDriver:
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
+            vcoord=self.sigma,
             dsigma=self.sigma.dsigma,
             experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,
@@ -6060,10 +6101,17 @@ class ModelDriver:
             # Geographic cell-centre winds from the edge-normal velocity.
             u_east, v_north = reconstruct_cell_velocity(
                 state.u.data, self.grid)
-            # Water vapour (moist runs only).
-            q_v = None
-            if (state.tracers is not None and "q_v" in state.tracers):
-                q_v = state.tracers["q_v"].data
+            # Water vapour + cloud condensate (moist runs only).  q_c/q_i
+            # feed the CMOR ``clt`` total-cloud-cover reduction; both are
+            # absent on a dry run and on warm-rain microphysics (no q_i),
+            # which the collector skips rather than publishing a zero.
+            def _tracer(name):
+                if state.tracers is None or name not in state.tracers:
+                    return None
+                return state.tracers[name].data
+            q_v = _tracer("q_v")
+            q_c = _tracer("q_c")
+            q_i = _tracer("q_i")
             # Flux fields (slots of the sfc_diag contract: 2 precip
             # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
             # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
@@ -6179,6 +6227,8 @@ class ModelDriver:
                 p_s=state.p_s.data,
                 lat_deg=lat_deg,
                 q_v=q_v,
+                q_c=q_c,
+                q_i=q_i,
                 u_east=u_east,
                 v_north=v_north,
                 precip=precip,
@@ -6564,10 +6614,10 @@ class ModelDriver:
             # the FV lane (codex 2026-07-26: this lane previously ignored all
             # five, so a morrison_* override affected FV but not MPAS).
             from legoesm.driver.physics_pipeline import (
-                _thread_morrison_scalars,
+                thread_morrison_scalars,
             )
             _micro_cfg = _micro_cfg._replace(**{
-                cfg.microphysics: _thread_morrison_scalars(
+                cfg.microphysics: thread_morrison_scalars(
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })

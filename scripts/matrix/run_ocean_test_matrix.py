@@ -6866,21 +6866,21 @@ def _create_comparison_summary(test_case_dir: Path, grid_results: dict) -> None:
                 try:
                     eta_drift_str = notes.split('eta drift=')[1].split(',')[0].split()[0]
                     eta_drifts.append((grid_name, float(eta_drift_str)))
-                except:
+                except (IndexError, ValueError):
                     pass
             
             if 'T drift=' in notes:
                 try:
                     T_drift_str = notes.split('T drift=')[1].split(',')[0].split()[0]
                     T_drifts.append((grid_name, float(T_drift_str)))
-                except:
+                except (IndexError, ValueError):
                     pass
             
             if wall_time != 'N/A':
                 try:
                     wall_time_val = float(wall_time.replace('s', ''))
                     wall_times.append((grid_name, wall_time_val))
-                except:
+                except (IndexError, ValueError):
                     pass
         
         f.write("-" * 80 + "\n")

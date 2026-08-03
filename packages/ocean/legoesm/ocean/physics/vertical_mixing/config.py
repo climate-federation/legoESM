@@ -243,7 +243,11 @@ class TKEConfig(NamedTuple):
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
     tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
-                                     # sweeps + the ln_mxl0 stress anchor)
+                                     # sweeps + the ln_mxl0 stress anchor);
+                                     # 4 = NEMO nn_mxl=2 (same sweeps, but a
+                                     # SINGLE length: l_eps = l_k = min(lup,ldn)).
+                                     # NOTE the numbering is Veros-derived and
+                                     # does NOT match NEMO's nn_mxl values.
     mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
@@ -480,7 +484,32 @@ class TKEConfig(NamedTuple):
     #   before-velocities do not exist under forward_euler/ab2); the FE/AB2
     #   kamm cards keep "squared_centered" (a documented FE-frame fidelity
     #   ceiling, the same class as the existing FE-frame notes on those
-    #   cards).
+    #   cards). Still COLLAPSES u/v to the T-point BEFORE differencing —
+    #   only the TIME discretization is transcribed, not the face-native
+    #   geometry below.
+    # ``"nemo_face_native"`` (#1226 ``sh2_walk.py`` Candidate E/F —
+    #   :func:`_shared.vertical_shear_face_native`): the DOMINANT gap the
+    #   walk isolated, on top of "nemo_burchard"'s time-level fix — NEMO
+    #   differences the RAW u-/v-FACE velocities first (one vertical
+    #   difference PER FACE) and combines the two faces bracketing each
+    #   T-point (with the wet-only coast-doubling weight) ONLY AFTER
+    #   squaring/cross-multiplying (zdfsh2.F90:78-94), instead of collapsing
+    #   u/v to the T-point BEFORE differencing. Walk evidence: corr
+    #   0.982/ratio 0.975 unrestricted (0.912 restricted-to-signal) vs the
+    #   T-collapse-first form's corr 0.963/ratio 0.556 — roughly halves the
+    #   undershoot. ALWAYS built from the now×before cross term (real NEMO
+    #   has no "face-native but now-squared-only" branch), so this
+    #   SUPERSEDES "nemo_burchard" when selected — requires the SAME
+    #   leap-frog before-velocities (``outer_integrator="leapfrog"``,
+    #   construction raises otherwise) PLUS the raw (uncollapsed) C-grid
+    #   face state, threaded by the caller. Two scope limits carried over
+    #   from "nemo_burchard"/``nemo_ri`` (see :func:`_shared.
+    #   vertical_shear_face_native` docstring): the viscosity stays the
+    #   caller's single per-interface ``K_M`` (NEMO face-averages ``avm``
+    #   before combining; not transcribed) and the vertical metric stays the
+    #   static reference ``dz_half`` (NEMO's live QCO-stretched
+    #   ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO by the walk's
+    #   Candidate B, corr 1.000/ratio 0.9999).
     tke_shear_production: str = "squared_centered"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
@@ -494,21 +523,30 @@ class TKEConfig(NamedTuple):
     #   K_M / Prandtl). In the stratified interior Pr -> 10 (small abyssal
     #   K_H); in a convecting column Ri < 0 -> Pr -> 1 (K_H tracks the large
     #   convective K_M). This is the Veros ACC default.
-    # ``"nemo_ri"`` (Phase-2 #1317 T8): NEMO's EXACT nn_pdl=1 Richardson
-    #   number (zdftke.F90:381-401) — zri = rn2b*p_avm / (p_sh2 + rn_bshear),
-    #   pdlr = max(0.1, ri_cri/max(ri_cri, zri)), Pr = 1/pdlr. Differs from
-    #   "richardson" (Veros's own formula) by an EXTRA p_avm=K_M numerator
-    #   factor and the rn_bshear denominator floor — NOT the same formula
+    # ``"nemo_ri"`` (Phase-2 #1317 T8; formula fixed #1226 item 11): NEMO's
+    #   EXACT nn_pdl=1 Richardson number (zdftke.F90:381-401) —
+    #   zri = rn2b*p_avm / (p_sh2 + rn_bshear), pdlr = max(0.1,
+    #   ri_cri/max(ri_cri, zri)), Pr = 1/pdlr. ``p_sh2`` is the AVM-WEIGHTED
+    #   shear-production term [m^2/s^3] (zdfsh2.F90:80-94: face-averaged OLD
+    #   avm times the Burchard velocity-gradient product) — NOT the plain
+    #   gradient-shear ``shear_sq`` [1/s^2] "richardson" divides by. Differs
+    #   from "richardson" (Veros's own formula, Ri = N2/shear_sq) in BOTH
+    #   the numerator (extra p_avm=K_M_old factor) AND the denominator units
+    #   (avm-weighted p_sh2, not bare shear_sq) — NOT the same formula
     #   despite both being "Richardson-number Prandtl"; NEMO's zri is
     #   PHYSICALLY a bulk/flux Richardson-like ratio K_M*N^2/S^2 (an eddy-
     #   viscosity-weighted stability measure), not the plain gradient Ri.
     #   The prior nemo_dino_kamm card used "richardson" with
     #   prandtl_ri_coeff=1/ri_cri, which reproduces NEMO's pdlr TRANSFORM
-    #   (the clamp/scaling) but NOT NEMO's zri INPUT (missing avm, missing
-    #   bshear) — this mode is the fix. ``prandtl_ri_coeff`` still supplies
-    #   ``1/ri_cri`` (unchanged meaning: Pr = clamp(coeff*zri, 1, 10)).
+    #   (the clamp/scaling) but NOT NEMO's zri INPUT (missing avm in BOTH
+    #   the numerator and the denominator weighting) — this mode is the fix.
+    #   ``prandtl_ri_coeff`` still supplies ``1/ri_cri`` (unchanged meaning:
+    #   Pr = clamp(coeff*zri, 1, 10)).
     prandtl_mode: str = "unit"
-    bshear_floor: float = 1.0e-20        # NEMO rn_bshear [s^-2] (namelist_ref)
+    # NEMO rn_bshear (namelist_ref) [m^2/s^3] — a floor on the AVM-WEIGHTED
+    # p_sh2 denominator (matching p_sh2's units), not on bare shear_sq
+    # [1/s^2] (#1226 item 11 fix).
+    bshear_floor: float = 1.0e-20
     Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
     # ----- NEMO zdftke surface terms (Langmuir + sub-ML TKE penetration) -----
     # Faithful ports of NEMO 5.0.1 ``zdftke.F90``. BOTH are ON in NEMO's

@@ -9,9 +9,9 @@ multicontroller allgather wiring is exercised by the distributed suite).
 import numpy as np
 import pytest
 
-from legoesm.ocean.dynamics.sharded_ocean_step import (
+from legoesm.parallel.geometry_consistency import (
+    band_fingerprint as geom_band_fingerprint,
     band_fingerprints_agree,
-    geom_band_fingerprint,
 )
 
 N_BANDS = 4
@@ -99,6 +99,6 @@ def test_shape_mismatch_refused():
     assert fa[0].shape != fb[0].shape or not np.array_equal(fa[0], fb[0])
 
 
-def test_wrong_leading_axis_asserts():
-    with pytest.raises(AssertionError):
+def test_wrong_leading_axis_raises():
+    with pytest.raises(ValueError):
         geom_band_fingerprint(np.ones((3, 2)), N_BANDS)

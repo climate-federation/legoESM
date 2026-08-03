@@ -232,10 +232,20 @@ def area_weighted_afcrps(
     *,
     alpha: float = 0.95,
 ) -> jnp.ndarray:
-    """Area-weighted almost-fair CRPS averaged over all non-ensemble dimensions."""
+    """Area-weighted almost-fair CRPS averaged over all non-ensemble dimensions.
+
+    Carries the SAME resolution-independence correction as its siblings
+    ``area_weighted_mse`` / ``per_variable_mse`` / ``weighted_mae``: a bare
+    ``jnp.mean(crps * w)`` divides by the full array size rather than by the
+    weight sum, so the result is low by ``n_lat / Σw`` — exactly 5x at T5, ~32x
+    at T42, i.e. resolution-DEPENDENT (#1413). This is the S2S training
+    objective, so an uncorrected value put the CRPS term on a different scale
+    from the MSE/MAE terms it is mixed and compared with.
+    """
     crps = almost_fair_crps(ensemble, target, alpha=alpha)
+    n_lat = weights.shape[0]
     w = weights[:, None, None]
-    return jnp.mean(crps * w)
+    return jnp.mean(crps * w) * n_lat / jnp.sum(weights)
 
 
 def spectral_loss(

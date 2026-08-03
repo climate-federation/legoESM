@@ -268,6 +268,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # In-substep C-grid face-depth scheme (barotropic_face_depth:
+        # min_rule | nemo_ssh_avg, #1226 zero-deviation item 2). A typo must
+        # raise, not silently run the wrong flux/drag face-thickness rule.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_run_substep_loop"),
+        # Barotropic substep loop-ENTRY seed face-depth scheme
+        # (barotropic_seed_face_depth: min_rule | nemo_ssh_avg, #1226 round 2
+        # item 1). A typo must raise, not silently reweight the seeded
+        # U_bar/V_bar by the wrong face-thickness convention (adversarial
+        # review of 7da6d7989 found this option is NOT inert where
+        # min_water_column_m binds asymmetrically — see the
+        # BarotropicConfig.barotropic_seed_face_depth docstring).
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_depth_average_to_faces"),
         # AL81/EEN q-boundary convention (q_boundary: neumann_fill | nemo_live).
         # A typo must raise, not silently pick the coast-vorticity behaviour
         # (nemo_live keeps wall shear vorticity live; neumann_fill erases it).
@@ -315,6 +327,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # typo would silently run the Veros flux BC, a ~60x different surface
         # TKE under wind).
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_surface_tke_dirichlet"),
+        # TKE shear-production discretization dispatch (tke_shear_production:
+        # squared_centered | nemo_burchard | nemo_face_native; #1226
+        # sh2_walk.py Candidate E/F face-native zdfsh2.F90 transcription
+        # added 2026-07-30) — a typo would silently keep the T-collapsed
+        # squared form instead of the face-native shear NEMO actually
+        # computes.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "tke_vertical_mixing"),
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_validate_post_mixing_cfg"),
         ("packages/ocean/legoesm/ocean/scm.py", "__init__"),
         ("packages/tools/legoesm/forcing/amip.py", "get_amip_preset"),
         ("packages/tools/legoesm/forcing/experiments.py", "create_experiment_config"),

@@ -135,6 +135,11 @@ def _depth_average_to_faces(
     u_mask: jnp.ndarray,
     v_mask: jnp.ndarray,
     grid=None,
+    *,
+    seed_face_depth: str = "min_rule",
+    eta_dyn: jnp.ndarray | None = None,
+    H_bathy: jnp.ndarray | None = None,
+    area: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute depth-averaged velocities at C-grid face points.
 
@@ -147,12 +152,45 @@ def _depth_average_to_faces(
     mask : (n_lat, n_lon)
     u_mask : (n_lat, n_lon+1)
     v_mask : (n_lat+1, n_lon)
+    seed_face_depth : ``BarotropicConfig.barotropic_seed_face_depth`` value
+        (#1226 round 2 item 1).  ``"min_rule"`` (DEFAULT, bit-identical
+        legacy): the 3-D min-rule face thickness (unchanged below).
+        ``"nemo_ssh_avg"``: rescale that min-rule 3-D face thickness by the
+        ratio of the NEMO ssh-averaged TOTAL column face depth
+        (:func:`nemo_ssh_avg_face_depth`, reused verbatim — see its
+        docstring for the NEMO ``dynspg_ts.F90`` ``un_e = puu_b(Kbb)`` /
+        ``puu_b`` finalization this matches) to the min-rule TOTAL column
+        face depth, both at ``eta_dyn``.  Exact for z-star (the ratio is a
+        single per-column scalar, identical at every level, so it commutes
+        with the vertical sum used by ``depth_average_to_faces`` below);
+        for partial cells this is the same scalar-column-factor
+        approximation the rest of the split-explicit solver already makes.
+        NB the per-column ratio cancels in the weighted MEAN (measured
+        2026-07-27, DINO Y5 twin: bit-identical seeds) ONLY away from the
+        ``min_water_column_m`` floor — the option is INERT there, but NOT
+        inert where ``max(sum_k h_face, min_water_column_m)`` binds
+        asymmetrically between the two face-depth rules (thin/shelf
+        columns): an 11% loop-entry velocity difference was reproduced at
+        the production default ``min_water_column_m=0.5`` (see the
+        ``BarotropicConfig.barotropic_seed_face_depth`` docstring and
+        ``TestBarotropicSeedFaceDepth::
+        test_shelf_column_floor_breaks_inertness_at_production_default``).
+        It selects the face-depth bookkeeping convention, not the
+        velocity, EXCEPT at the floor. Requires ``eta_dyn``/``H_bathy``/
+        ``area`` when selected. Unknown value raises (dispatch hardening).
+    eta_dyn, H_bathy, area : required only when ``seed_face_depth ==
+        "nemo_ssh_avg"``.
 
     Returns
     -------
     U_bar : (n_lat, n_lon+1)
     V_bar : (n_lat+1, n_lon)
     """
+    if seed_face_depth not in ("min_rule", "nemo_ssh_avg"):
+        raise ValueError(
+            "unknown barotropic_seed_face_depth scheme "
+            f"{seed_face_depth!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
+
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
     # Must match the PE tendency and slow-forcing depth-average which
     # both use min_cell_to_uface/min_cell_to_vface.  Arithmetic mean
@@ -161,6 +199,34 @@ def _depth_average_to_faces(
     h_u = min_cell_to_uface(h_k)
     h_v = min_cell_to_vface(h_k, grid)
 
+    if seed_face_depth == "nemo_ssh_avg":
+        # Rescale the min-rule 3-D face thickness by the NEMO/min-rule TOTAL
+        # column face-depth ratio (see docstring above) — the loop-entry
+        # analogue of NEMO's puu_b finalization, matching the SAME formula
+        # `barotropic_face_depth="nemo_ssh_avg"` already uses in-substep
+        # (reused verbatim, not re-derived).
+        dtype = h_k.dtype
+        H_total_2d = jnp.sum(h_k, axis=-1)
+        H_u_minrule = min_cell_to_uface(H_total_2d)
+        H_v_minrule = min_cell_to_vface(H_total_2d, grid)
+        H_u_nemo, H_v_nemo = nemo_ssh_avg_face_depth(
+            eta_dyn, H_bathy, mask, u_mask, v_mask, grid, area, dtype)
+        # `_eps` is a bare numerical divide-by-zero guard for THIS ratio's
+        # own denominator (`H_u_minrule`) — deliberately NOT
+        # `min_water_col`/`config.min_water_column_m` (the caller's
+        # physical wet-cell floor applied later, to `h_u`/`h_v`, by
+        # `depth_average_to_faces` below). The ratio only needs to avoid
+        # 0/0 on masked-out (land) faces where `H_u_minrule` is exactly 0;
+        # using the ~0.5 m physical floor here would itself perturb the
+        # ratio on legitimate thin-but-wet columns instead of just guarding
+        # division. Matches the existing divergent-floor convention
+        # documented in `ocean_tendency_common.column_depth`.
+        _eps = jnp.asarray(1.0e-10, dtype=dtype)
+        ratio_u = jnp.where(u_mask > 0.5, H_u_nemo / jnp.maximum(H_u_minrule, _eps), 1.0)
+        ratio_v = jnp.where(v_mask > 0.5, H_v_nemo / jnp.maximum(H_v_minrule, _eps), 1.0)
+        h_u = h_u * ratio_u[..., jnp.newaxis]
+        h_v = h_v * ratio_v[..., jnp.newaxis]
+
     # Barotropic-mean face velocities: thickness-weighted depth average
     # masked by the face mask (#517 item 1: shared depth_average_to_faces;
     # floor = min_water_col, passed verbatim → bit-identical).
@@ -168,6 +234,119 @@ def _depth_average_to_faces(
     V_bar = depth_average_to_faces(v_3d, h_v, v_mask, min_water_col)
 
     return U_bar, V_bar
+
+
+def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
+    """Loop-invariant prep for :func:`_nemo_ssh_avg_apply` (geometry-only —
+    matches NEMO's frozen ``hu_0``/``hv_0``/``r1_e1e2u``).  Hoisted OUTSIDE
+    any per-substep/per-call loop so the reference depth + metric build run
+    ONCE, not once per ``eta`` snapshot.  See :func:`nemo_ssh_avg_face_depth`
+    for the full formula docstring.
+    """
+    from legoesm.grids.latlon import ensure_geometry
+
+    if _nfold_mask is None:
+        _nfold_mask = north_fold_mask(grid)
+    H_u_ref, H_v_ref = _min_rule_face_depths(H_bathy * mask, mask, grid,
+                                             _nfold_mask)
+    _geom = ensure_geometry(grid)
+    _r1_e1e2u = (1.0 / (_geom.dx_u * _geom.dy_u)).astype(dtype)
+    _r1_e1e2v = (1.0 / (_geom.dx_v * _geom.dy_v)).astype(dtype)
+    return H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask
+
+
+def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep):
+    """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
+    given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
+    :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
+    H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask = prep
+
+    area_w = jnp.roll(area, 1, axis=1)
+    eta_w = jnp.roll(eta_dyn, 1, axis=1)
+    ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
+    ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
+    H_u = (H_u_ref + ssh_avg_u) * u_mask
+
+    area_pad = pad_ns_zero(area)
+    eta_pad = pad_ns_zero(eta_dyn)
+    ssh_avg_v = 0.5 * _r1_e1e2v * (
+        area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
+    )
+    ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
+    if fold_is_local(grid) or _nfold_mask is not None:
+        area_fold = fold_vface_row(area, grid)
+        eta_fold = fold_vface_row(eta_dyn, grid)
+        ssh_avg_north = 0.5 * _r1_e1e2v[-1:] * (
+            area[-1:] * eta_dyn[-1:] + area_fold * eta_fold)
+        ssh_avg_v = apply_north_fold(
+            ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
+    H_v = (H_v_ref + ssh_avg_v) * v_mask
+    return H_u, H_v
+
+
+def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
+                            area, dtype):
+    """NEMO zhup2_e/zhvp2_e-style C-grid face depth (dynspg_ts.F90:568-592
+    flux depth; :658-666,771-778 drag/update depth; :963-966,978-979 the
+    ``puu_b``-finalizing ssh-average — same formula, evaluated on whichever
+    ssh time-level the caller supplies):
+
+        H_u = hu_0 + 0.5 * r1_e1e2u * (area[j]*eta[j] + area[j+1]*eta[j+1])
+
+    ``hu_0``/``hv_0`` (the fixed still-water reference depth) is the
+    min-rule applied to ``H_bathy`` alone — the lego equivalent of NEMO's
+    frozen ``domain.F90:139-147`` reference thickness.  ``r1_e1e2u ==
+    1/(e1u*e2u)`` is the face's OWN metric area (domhgr.F90:146-160), not a
+    sum of the two adjacent T-cell areas.  Standalone extraction (#1226
+    round 2 item 1) of the closure previously private to
+    ``_run_substep_loop`` — reused verbatim (not re-derived) so the
+    in-substep face-thickness rule and the barotropic loop-entry SEED
+    (``barotropic_substeps_latlon_cgrid``) apply the identical NEMO
+    formula.  One-shot convenience wrapper around
+    :func:`_nemo_ssh_avg_prep` + :func:`_nemo_ssh_avg_apply` — callers that
+    evaluate the formula more than once per fixed ``(H_bathy, grid)``
+    (e.g. the per-substep loop) should call ``_nemo_ssh_avg_prep`` ONCE and
+    reuse its ``prep`` tuple, to avoid rebuilding the geometry every call.
+
+    Parameters
+    ----------
+    eta_dyn : (n_lat, n_lon) dynamic ssh snapshot the average is taken at.
+    H_bathy, mask : (n_lat, n_lon) raw bathymetry / land mask.
+    u_mask, v_mask : C-grid face masks.
+    grid : LatLonGrid (fold/geometry lookups).
+    area : (n_lat, n_lon) T-cell area (``grid.area``, already cast to
+        ``dtype`` by the caller).
+    dtype : output dtype.
+
+    Returns
+    -------
+    (H_u, H_v) : NEMO-rule face depths, same shapes as ``min_cell_to_uface``/
+        ``min_cell_to_vface`` would return.
+    """
+    prep = _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype)
+    return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep)
+
+
+def _min_rule_face_depths(H_total, mask, grid, _nfold_mask):
+    """Min-rule C-grid face depths of a total column depth field.
+
+    Standalone extraction of the ``_face_depths`` closure body (unchanged;
+    see ``_run_substep_loop`` for the original docstring) — the ``mask``
+    argument is unused inside the body (kept for call-site symmetry with
+    ``nemo_ssh_avg_face_depth``, whose reference-depth branch masks
+    ``H_bathy`` before calling this) but is accepted, not applied twice.
+    """
+    H_u = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
+    H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
+    H_total_pad = pad_ns_zero(H_total)
+    H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
+    H_v = _zero_polar_lat_ends(H_v)
+    if fold_is_local(grid) or _nfold_mask is not None:
+        north = jnp.minimum(
+            H_total[-1:], fold_vface_row(H_total, grid),
+        )
+        H_v = apply_north_fold(H_v, north, grid, north_mask=_nfold_mask)
+    return H_u, H_v
 
 
 def _substep_stencil_reach(config: LatLonCGridOceanConfig) -> int:
@@ -511,123 +690,29 @@ def _run_substep_loop(
     _face_depth_mode = config.barotropic.barotropic_face_depth
     if _face_depth_mode not in ("min_rule", "nemo_ssh_avg"):
         raise ValueError(
-            "unknown barotropic_face_depth "
+            "unknown barotropic_face_depth scheme "
             f"{_face_depth_mode!r}: must be one of ('min_rule', 'nemo_ssh_avg').")
 
     def _face_depths(H_total):
-        """Min-rule C-grid face depths of a total column depth field.
+        """Min-rule C-grid face depths (module-level ``_min_rule_face_depths``,
+        reused verbatim — see that function's docstring)."""
+        return _min_rule_face_depths(H_total, mask, grid, _nfold_mask)
 
-        Min-rule (consistent with implicit solver and PE tendency).
-        Arithmetic mean overestimates face depth at topographic steps,
-        creating a transport mismatch.  Pole rows are zero (wall BC) on
-        regular lat-lon; fold min-rule on tripolar.
-        Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
-        so the v-face min at a partition cut uses the neighbour rank's
-        adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
-        (consistent MPI call count — the previous direct-concat fold branch
-        skipped it and deadlocked against the else branch); the fold seam is
-        overwritten only on the rank that owns it.
-        """
-        H_u = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
-        H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
-        H_total_pad = pad_ns_zero(H_total)
-        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
-        H_v = _zero_polar_lat_ends(H_v)
-        if fold_is_local(grid) or _nfold_mask is not None:
-            north = jnp.minimum(
-                H_total[-1:], fold_vface_row(H_total, grid),
-            )
-            H_v = apply_north_fold(H_v, north, grid, north_mask=_nfold_mask)
-        return H_u, H_v
-
-    # --- "nemo_ssh_avg" reference depth + metric prep (built ONCE, outside the
-    # substep loop — geometry-only, matches NEMO's frozen hu_0/hv_0/r1_e1e2u).
-    # Reference depth = the min-rule applied to H_bathy ALONE (time-invariant,
-    # still-water) — the lego equivalent of NEMO's hu_0/hv_0 (domain.F90:139-
-    # 147: a masked vertical sum of the u-/v-point's own reference thickness,
-    # NOT a T-point average).  This is a documented assumption for the
-    # reference term only; the rule under test is the ssh-averaging term below.
-    if _face_depth_mode == "nemo_ssh_avg":
-        # Mask H_bathy FIRST (matches the min-rule's own H_total_c convention,
-        # ``jnp.maximum(eta_c + H_bathy, ...) * mask`` — H_bathy itself is raw
-        # bathymetry, not zero over land) so the reference depth is zero at a
-        # land T-cell exactly like the min-rule path, rather than picking up
-        # a nonzero land-bathymetry value later masked out inconsistently.
-        H_u_ref, H_v_ref = _face_depths(H_bathy * mask)
-        # u-/v-point metric areas e1u*e2u / e1v*e2v (NEMO r1_e1e2u ==
-        # 1/(e1u*e2u), verified against domhgr.F90:146-160 — the face's OWN
-        # area, NOT the sum of the two adjacent T-cell areas).  dx_u/dy_u/
-        # dx_v/dy_v already exist on the grid (ensure_geometry) — reused
-        # verbatim, no new grid fields added.  NOTE: ``area`` (the T-cell
-        # weight in the numerator) is the EXACT spherical-cap cell area
-        # (``_exact_uniform_cell_area_lat``), while ``dx_u*dy_u``/``dx_v*dy_v``
-        # (the normalizer) are the midpoint-rule metric — R·dλ·cos(φ)·R·dφ.
-        # These two area conventions differ by O(dφ²/24) (the same small-angle
-        # discrepancy documented on ``_exact_uniform_cell_area_lat``: ~0.6% at
-        # n_lat=8, ~80 ppm at n_lat=72) — so even on a u-face (same latitude
-        # row, where the T-cell areas either side are IDENTICAL) the ratio
-        # ``area/(dx_u*dy_u)`` is not exactly 1, and the u-face average is only
-        # the plain 2-point mean up to that resolution-dependent factor, not
-        # bit-exactly.  v-face normalizer differs for the same reason PLUS the
-        # genuinely distinct cos(lat_v) metric — must use the real e1v*e2v.
-        from legoesm.grids.latlon import ensure_geometry
-        _geom = ensure_geometry(grid)
-        _r1_e1e2u = (1.0 / (_geom.dx_u * _geom.dy_u)).astype(dtype)  # (nlat, nlon+1)
-        _r1_e1e2v = (1.0 / (_geom.dx_v * _geom.dy_v)).astype(dtype)  # (nlat+1, nlon)
+    # --- "nemo_ssh_avg" reference depth + metric prep (built ONCE, outside
+    # the substep loop — geometry-only, matches NEMO's frozen
+    # hu_0/hv_0/r1_e1e2u; module-level ``_nemo_ssh_avg_prep``, reused
+    # verbatim — see ``nemo_ssh_avg_face_depth``'s docstring for the formula).
+    _ssh_avg_prep = (
+        _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask)
+        if _face_depth_mode == "nemo_ssh_avg" else None)
 
     def _ssh_avg_face_depths(eta_dyn):
-        """NEMO zhup2_e/zhvp2_e-style face depth (dynspg_ts.F90:568-592 flux
-        depth; :658-666,771-778 drag/update depth — same formula, evaluated
-        on a different ssh time-level by each caller):
-
-            H_u = hu_0 + 0.5 * r1_e1e2u * (area[j]*eta[j] + area[j+1]*eta[j+1])
-
-        Masked by u_mask/v_mask (the lego equivalent of NEMO's ssumask/
-        ssvmask — a column-wet mask built from umask/vmask, i.e. 1 only where
-        BOTH T-neighbours are wet, dommsk.F90:150,187-190).  A dry T-neighbour
-        therefore never contributes at an interior wet u-/v-face on this
-        grid: every face where u_mask/v_mask == 1 has, by C-grid mask
-        construction, both T-neighbours wet — so eta there is never a
-        masked-to-land value, and no special renormalization for a dry
-        neighbour is needed (matching NEMO: ssumask masks the WHOLE face, it
-        does not renormalize the average over the wet neighbour alone).
-        Periodic in longitude (DINO's zonal BC) for the u-face pairing,
-        matching the existing min-rule wrap convention.  Pole/fold v-face
-        rows: forced to the reference-only value (no ssh-average term) —
-        `_zero_polar_lat_ends` unconditionally overwrites the v-face wall
-        rows to 0 downstream in every caller (`_face_depths`), so an
-        add-on term at those rows would be masked away regardless; here we
-        avoid even computing a leaking pad-adjacent average by using the
-        SAME pad_ns_zero + zero_polar_lat_ends + north-fold handling as the
-        min-rule (an average with a zero pad is NOT zero like a min with a
-        zero pad — it would leak half the edge value — so it must be forced
-        to zero explicitly, not left to a stray pad).
-        """
-        # West-neighbour pairing at each u-face (mirrors min_cell_to_uface's
-        # roll+concat wrap convention exactly): face i pairs cell (i-1) [west]
-        # with cell i [east] — periodic in longitude, then the column-0 value
-        # is appended as the wrap face at index n_lon (n_lon+1 faces total).
-        area_w = jnp.roll(area, 1, axis=1)
-        eta_w = jnp.roll(eta_dyn, 1, axis=1)
-        ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
-        ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
-        H_u = (H_u_ref + ssh_avg_u) * u_mask
-
-        area_pad = pad_ns_zero(area)
-        eta_pad = pad_ns_zero(eta_dyn)
-        ssh_avg_v = 0.5 * _r1_e1e2v * (
-            area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
-        )
-        ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
-        if fold_is_local(grid) or _nfold_mask is not None:
-            area_fold = fold_vface_row(area, grid)
-            eta_fold = fold_vface_row(eta_dyn, grid)
-            ssh_avg_north = 0.5 * _r1_e1e2v[-1:] * (
-                area[-1:] * eta_dyn[-1:] + area_fold * eta_fold)
-            ssh_avg_v = apply_north_fold(
-                ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
-        H_v = (H_v_ref + ssh_avg_v) * v_mask
-        return H_u, H_v
+        """NEMO zhup2_e/zhvp2_e-style face depth (module-level
+        ``_nemo_ssh_avg_apply`` against the hoisted ``_ssh_avg_prep``,
+        reused verbatim — see ``nemo_ssh_avg_face_depth``'s docstring);
+        byte-identical to the prior inline closure."""
+        return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
+                                   _ssh_avg_prep)
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -1145,8 +1230,13 @@ def barotropic_substeps_latlon_cgrid(
     h_k = compute_layer_thickness(
         _h_eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     ).astype(_dt)
+    # Loop-ENTRY seed face-depth convention (#1226 round 2 item 1; see
+    # BarotropicConfig.barotropic_seed_face_depth docstring).  Validated at
+    # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
+    _seed_fd = config.barotropic.barotropic_seed_face_depth
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
+        seed_face_depth=_seed_fd, eta_dyn=eta, H_bathy=H_bathy, area=_area,
     )
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the
@@ -1497,8 +1587,15 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     ).astype(_dt)
+    # Loop-ENTRY seed face-depth convention (#1226 round 2 item 1; see
+    # BarotropicConfig.barotropic_seed_face_depth docstring) — same option,
+    # same dispatch, as the standard-halo entry point above.
+    _seed_fd = config.barotropic.barotropic_seed_face_depth
+    _area_seed = grid.area.astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
+        seed_face_depth=_seed_fd, eta_dyn=eta, H_bathy=H_bathy,
+        area=_area_seed,
     )
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(

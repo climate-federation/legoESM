@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from legoesm.core.conservation import (
     conservative_positive_clip,
     conservative_positive_clip_global,
+    is_borrow_eligible_tracer,
 )
 from legoesm.core.precision import cast_pytree
 
@@ -1072,20 +1073,6 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-#: Tracers eligible for the column-conserving borrow: PER-MASS fields whose
-#: dsigma-weighted column integral is what mass-weighted transport conserves —
-#: the water mixing ratios [kg/kg] and the per-mass numbers [#/kg]
-#: (``N_i``/``N_s``/``N_g``).  ``N_c``/``N_r`` are per-VOLUME [#/m^3]
-#: (HydrometeorState), so this weight has no conservation meaning for them:
-#: they keep the plain clip pending a density-aware repair (codex 2026-07-28;
-#: their invention rate is ~e15 slower than N_i's was).
-BORROW_ELIGIBLE_TRACERS = frozenset(
-    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i", "N_s", "N_g"})
-
-
-def is_borrow_eligible_tracer(name: str) -> bool:
-    """True for a per-mass tracer, tolerating a ``trc_`` prefix."""
-    return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
 
 
 

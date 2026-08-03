@@ -75,3 +75,55 @@ def test_regular_grid_fold_inactive_on_all_bands():
         fold = getattr(b, "fold", None)
         if fold is not None:
             assert not bool(getattr(fold, "is_active", False))
+
+
+def _lead_dims(geom):
+    """{field: leading dim} for every array field, with n_lat resolved."""
+    import jax.numpy as jnp
+    out = {}
+    for name in geom._fields:
+        v = getattr(geom, name)
+        if isinstance(v, (jnp.ndarray, np.ndarray)) and np.ndim(v) >= 1:
+            out[name] = int(np.shape(v)[0])
+    return out
+
+
+def test_every_geometry_field_keeps_its_stagger_through_slice_and_widen():
+    """Generic stagger audit: EVERY array field is n_lat or n_lat+1 rows.
+
+    Regression for the ``cos_lat_v`` addition, which the band slicer and the
+    wide-halo widener both silently passed through at GLOBAL length (they
+    enumerate field names by hand, so a new v-face field is missed).  Written
+    generically so the NEXT added field cannot slip through either.
+    """
+    from legoesm.grids.halo_latlon import widen_cgrid_geometry_band
+    from legoesm.parallel.latlon_mpi import (
+        make_latlon_band_layout, slice_cgrid_geometry_to_band,
+    )
+    n_lat, n_lon = 48, 96
+    g = _geom(n_lat, n_lon)
+    ref = _lead_dims(g)
+    # every field is one of the two staggers on the global geometry
+    assert set(ref.values()) <= {n_lat, n_lat + 1, n_lon}, ref
+
+    layout = make_latlon_band_layout(1, 4, n_lat, n_lon)
+    band = slice_cgrid_geometry_to_band(g, layout)
+    nb = layout.n_lat_local
+    for name, lead in _lead_dims(band).items():
+        if ref[name] == n_lon:
+            continue                       # lon-axis field (lon), untouched
+        want = nb if ref[name] == n_lat else nb + 1
+        assert lead == want, (
+            f"{name}: band leading dim {lead}, expected {want} "
+            f"(global {ref[name]}, n_lat={n_lat}) — slicer missed this field")
+
+    halo = 3
+    wide = widen_cgrid_geometry_band(band, halo)
+    nw = nb + 2 * halo
+    for name, lead in _lead_dims(wide).items():
+        if ref[name] == n_lon:
+            continue
+        want = nw if ref[name] == n_lat else nw + 1
+        assert lead == want, (
+            f"{name}: widened leading dim {lead}, expected {want} "
+            f"— widen_cgrid_geometry_band missed this field")

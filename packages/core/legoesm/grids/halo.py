@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.util
 
 import jax
 import jax.numpy as jnp
@@ -2853,7 +2854,10 @@ def _swap_module_attr(target: str, new_value):
     swapped on enter and restored on exit.  Raises the same exceptions
     the callers already guard: ``ModuleNotFoundError`` when no module
     prefix imports and ``AttributeError`` when an intermediate or final
-    attribute is absent.
+    attribute is absent.  Deciding which of those means "optional
+    component not installed" (skip) versus "patch target drifted"
+    (fail loudly) is the CALLER's policy — see
+    ``monotone_halo_clip_context``.
     """
     parent_path, _, attr = target.rpartition(".")
     parts = parent_path.split(".")
@@ -2880,7 +2884,7 @@ def _swap_module_attr(target: str, new_value):
 
 
 def monotone_halo_clip_context(slack: float = 0.5):
-    """FV3_3D iter 505: context manager that monkey-patches 15
+    """FV3_3D iter 505: context manager that monkey-patches 13
     known halo import aliases in NH/PE/SW dycore + operator
     modules to use ``monotone_clip=True`` with the given ``slack``.
 
@@ -2922,14 +2926,24 @@ def monotone_halo_clip_context(slack: float = 0.5):
 
     Notes
     -----
-    Implementation: ``_swap_module_attr`` rebinds these targets:
-    * scalar halo: 3 sites (compressible_euler_cdgrid,
-      operators_3d, operators_cdgrid).
-    * vector halo: 2 sites (operators_cdgrid, operators_3d).
+    Implementation: ``_swap_module_attr`` rebinds 13 targets:
+    * scalar 4D halo: 4 (compressible_euler_cdgrid, operators_3d,
+      operators_cdgrid, primitive_eq_cdgrid).
+    * vector 4D halo: 3 (operators_cdgrid, operators_3d,
+      primitive_eq_cdgrid).
+    * scalar 3D ``pad_halo``: 3 (operators_cdgrid, fv_tp_2d, fv3_sw_core).
+    * ``pad_halo_pair_h2``: 1 (fv_tp_2d).
+    * vector 3D ``pad_halo_vector``: 2 (fv3_sw_core, primitive_eq_cdgrid).
 
     May not catch every halo call site in the dycore (e.g.,
-    SPMD ``packed_pad_halo_4d`` is not patched); the 6 sites
-    cover the dominant single-rank paths.
+    SPMD ``packed_pad_halo_4d`` is not patched); these cover the
+    dominant single-rank paths.
+
+    A target whose MODULE is absent is skipped (partial federation install —
+    e.g. legoesm-core without legoesm-atmosphere).  A target whose module
+    imports but whose ATTRIBUTE is gone raises: that is patch-target drift
+    (a rename/move), and swallowing it would silently leave a halo call
+    unclamped while the callers still believe the clip is active.
     """
     import functools
 
@@ -2938,9 +2952,11 @@ def monotone_halo_clip_context(slack: float = 0.5):
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
-        # FV3_3D iter 527: PE-side import aliases.
-        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
-        "_pad_halo_4d",
+        # FV3_3D iter 527: PE-side import alias.  Only the module-level
+        # ``_pad_halo_4d_module`` is patchable — ``_pad_halo_4d`` is a
+        # function-LOCAL alias bound inside ``fv3_hydrostatic_tendencies``
+        # (primitive_eq_cdgrid.py:875) from this same module global, so
+        # patching the global already reaches it.
         "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d_module",
     ]
@@ -2997,32 +3013,50 @@ def monotone_halo_clip_context(slack: float = 0.5):
         monotone_clip_slack=slack,
     )
 
+    def _optional_component_absent(target: str) -> bool:
+        """True only when *target*'s top-level component is not installed.
+
+        The substrate (``legoesm.core``/``legoesm.grids``) always ships with
+        this module, so a resolution failure there is drift, never a partial
+        install.  Everything else (``legoesm.atmosphere``, ...) is an optional
+        federation member: absent => legitimately skip the patch.
+        """
+        root = ".".join(target.split(".")[:2])
+        if root in ("legoesm.core", "legoesm.grids"):
+            return False
+        try:
+            return importlib.util.find_spec(root) is None
+        except (ImportError, ValueError):
+            return True
+
     stack = contextlib.ExitStack()
-    for tgt in scalar_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_scalar))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in vector_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_vector))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pad_halo_3d_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_3d))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pair_h2_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pair_h2))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pad_halo_vector_3d_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_vector_3d))
-        except (AttributeError, ModuleNotFoundError):
-            pass
+    patch_groups = (
+        (scalar_targets, clipped_scalar),
+        (vector_targets, clipped_vector),
+        (pad_halo_3d_targets, clipped_pad_halo_3d),
+        (pair_h2_targets, clipped_pair_h2),
+        (pad_halo_vector_3d_targets, clipped_pad_halo_vector_3d),
+    )
+    try:
+        for targets, replacement in patch_groups:
+            for tgt in targets:
+                try:
+                    stack.enter_context(_swap_module_attr(tgt, replacement))
+                except (ModuleNotFoundError, AttributeError):
+                    # Skip ONLY when the optional component is not installed.
+                    # Anything else (renamed symbol, missing class in a
+                    # ``module.Class.attr`` target, a broken transitive import)
+                    # is patch-target drift and must be loud — swallowing it
+                    # leaves a halo call site silently unclipped while callers
+                    # believe the clip is active.
+                    if not _optional_component_absent(tgt):
+                        raise
+    except BaseException:
+        # Patch-target drift (AttributeError) or anything else: undo the swaps
+        # already applied before propagating, so a partial failure cannot leave
+        # the process with half the halo call sites permanently clipped.
+        stack.close()
+        raise
     return stack
 
 

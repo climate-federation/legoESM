@@ -326,7 +326,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     carbon_overrides : dict[str, jax.Array] | None
         Optional ``{CarbonConfig field name -> traced scalar}`` map applied to
         EACH group's ``CarbonConfig`` via
-        :func:`legoesm.training.param_collector.apply_param_overrides` BEFORE the
+        :func:`legoesm.core.param_overrides.apply_param_overrides` BEFORE the
         step / spin-up is built.  ``None`` (default) is the static Stage-A/-B
         path -- the config keeps Python-float leaves and no ``legoesm.training``
         import happens.  A dict makes the named SOM fields (``tor_som_active`` /
@@ -423,13 +423,14 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
             C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
             C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED)
         if carbon_overrides:
-            # Deferred (function-scope) import: only the differentiable
-            # calibration path pulls in ``legoesm.training``; the static path
-            # stays land-only (no land->training top-level dependency).  Splice
-            # the TRACED SOM leaves into this group's config so they flow through
-            # the coupled spin-up (SegmentForcing/SCM-RCE override doctrine);
-            # apply_param_overrides raises on any unknown CarbonConfig field.
-            from legoesm.training.param_collector import apply_param_overrides
+            # Splice the TRACED SOM leaves into this group's config so they flow
+            # through the coupled spin-up (SegmentForcing/SCM-RCE override
+            # doctrine); apply_param_overrides raises on any unknown
+            # CarbonConfig field.  The helper lives in legoesm.core, NOT
+            # legoesm.training: importing it from the training layer dragged
+            # land -> training -> tuning -> driver.config -> atmosphere and
+            # broke the component-independence contract.
+            from legoesm.core.param_overrides import apply_param_overrides
             carbon_cfg = apply_param_overrides(carbon_cfg, carbon_overrides)
         config = MultiLayerLandConfig(
             bulk_scheme="most",

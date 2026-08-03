@@ -297,10 +297,12 @@ def test_unknown_literal_raises():
             vertical_momentum_scheme="centred"))   # typo
 
 
-def test_centered_full_with_adaptive_implicit_rejected():
-    """centered_full + adaptive_implicit_vertadv=True is incompatible (the
-    adaptive-implicit path replaces the explicit stage entirely) and must
-    fail fast at config validation rather than silently no-op."""
+@pytest.mark.parametrize("scheme", ["centered_full", "nemo_advective"])
+def test_explicit_scheme_with_adaptive_implicit_rejected(scheme):
+    """centered_full / nemo_advective + adaptive_implicit_vertadv=True is
+    incompatible (the adaptive-implicit path replaces the explicit stage
+    entirely) and must fail fast at config validation rather than silently
+    no-op."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -309,8 +311,203 @@ def test_centered_full_with_adaptive_implicit_rejected():
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
     with pytest.raises(ValueError, match="incompatible with adaptive_implicit_vertadv"):
         LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
-            vertical_momentum_scheme="centered_full",
+            vertical_momentum_scheme=scheme,
             adaptive_implicit_vertadv=True))
+
+
+# ===========================================================================
+# 7. #1226 NEMO dynzad.F90 LITERAL LOOP-PORT (independent ground truth)
+# ===========================================================================
+def _dynzad_reference(u, Wf, e3u):
+    """Literal Python transcription of NEMO dynzad.F90:83-118 on a SINGLE
+    column (Fortran 1-indexed jk in the source; this port is 0-indexed and
+    mirrors every line, NOT the vectorized implementation under test).
+
+    ``u`` : full velocity at t/u/v-levels, shape (nlev,) (NEMO ``uu``/``vv``).
+    ``Wf``: e1e2t-area-weighted w ALREADY interpolated to the momentum-point
+        face at each w-level interface, shape (nlev+1,) (NEMO
+        ``e1e2t*ww`` averaged to the u/v-point — i.e. this port receives
+        the interpolated field directly and reproduces only dynzad's OWN
+        arithmetic: the ``zWfi+zWf`` sum, the ``0.25`` prefactor, and the
+        carried top/bottom interface bookkeeping).  Index k here = NEMO's
+        w-point index jk (1-indexed) minus 1, so ``Wf[0]`` is NEMO's
+        ``ww(1)`` (surface, must be 0) and ``Wf[nlev]`` is ``ww(nlev+1)``
+        (bottom, architecturally 0, never read below).
+    ``e3u``: layer thickness at the momentum point, shape (nlev,).
+
+    Returns the per-level tendency EXCLUDING the ``r1_e1e2u`` (face-area)
+    factor (dynzad.F90's own arithmetic is expressed as ``0.25/e3u`` times
+    the bracket; the caller applies ``r1_e1e2u`` separately, matching how
+    this test isolates the u*dw/dz identity from the face-area weighting).
+    """
+    nlev = len(u)
+    tend = np.zeros(nlev)
+    zWdzU = 0.0                       # dynzad.F90:83, "surface (jk=1) = 0"
+    for jk in range(0, nlev - 1):      # Fortran jk=1..jpk-2 -> Python 0..nlev-2
+        zzWfu = 2.0 * Wf[jk + 1]       # zWfi+zWf = 2x the simple average
+        zzWdzU = zzWfu * (u[jk] - u[jk + 1])
+        tend[jk] = -0.25 / e3u[jk] * (zWdzU + zzWdzU)
+        zWdzU = zzWdzU                 # dynzad.F90:109, carried to next jk
+    jk = nlev - 1                      # Fortran jk = jpkm1
+    tend[jk] = -0.25 / e3u[jk] * zWdzU  # dynzad.F90:113-118, bottom special case
+    return tend
+
+
+def _manufactured_column(nlev=10, seed=0):
+    rng = np.random.default_rng(seed)
+    ddz = rng.uniform(40.0, 300.0, nlev)
+    z_half = np.concatenate([[0.0], -np.cumsum(ddz)])
+    H = float(np.sum(ddz))
+    u = rng.normal(0.0, 0.25, nlev)
+    # w on half-levels: 0 at surface and bottom, smooth in between.
+    Wf = -2.0e-5 * np.sin(np.pi * (-z_half) / H)
+    Wf[0] = 0.0
+    Wf[-1] = 0.0
+    return u, Wf, ddz
+
+
+def test_nemo_advective_matches_literal_dynzad_port():
+    """The new 'nemo_advective' scheme must match the independent literal
+    dynzad.F90 loop-port to machine precision (face_area=1 isolates the
+    dynzad arithmetic from the separate e1e2u/e1e2t area-weighting)."""
+    from legoesm.ocean.vertical import nemo_advective_vertical_momentum_advection
+    u, Wf, ddz = _manufactured_column(nlev=12, seed=1)
+    ref = _dynzad_reference(u, Wf, ddz)
+
+    u3 = jnp.asarray(u)[None, None, :]
+    Wf3 = jnp.asarray(Wf)[None, None, :]
+    h3 = jnp.asarray(ddz)[None, None, :]
+    face_area = jnp.ones((1, 1, 1))
+    got = np.asarray(
+        nemo_advective_vertical_momentum_advection(u3, Wf3, h3, face_area))[0, 0]
+    np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-18)
+
+
+def test_nemo_advective_face_area_scales_inversely():
+    """face_area enters as a pure 1/area_u prefactor (NEMO's r1_e1e2u), so
+    doubling it must exactly halve the tendency."""
+    from legoesm.ocean.vertical import nemo_advective_vertical_momentum_advection
+    u, Wf, ddz = _manufactured_column(nlev=9, seed=2)
+    u3 = jnp.asarray(u)[None, None, :]
+    Wf3 = jnp.asarray(Wf)[None, None, :]
+    h3 = jnp.asarray(ddz)[None, None, :]
+    got_1 = nemo_advective_vertical_momentum_advection(
+        u3, Wf3, h3, jnp.full((1, 1, 1), 3.0e8))
+    got_2 = nemo_advective_vertical_momentum_advection(
+        u3, Wf3, h3, jnp.full((1, 1, 1), 6.0e8))
+    np.testing.assert_allclose(np.asarray(got_1), 2.0 * np.asarray(got_2), rtol=1e-13)
+
+
+def test_old_flux_form_schemes_do_not_match_dynzad(monkeypatch=None):
+    """Non-vacuous check: the OLD flux-form options ('upwind_perturbation',
+    'centered_full') must NOT match the literal dynzad.F90 port on a column
+    where w has interior vertical structure (dw/dz != 0) — confirming the
+    #1226 diagnosis (they compute d(w*u)/dz, not w*du/dz, and differ by
+    u*dw/dz at every interior level)."""
+    from legoesm.ocean.vertical import (
+        flux_form_vertical_momentum_advection,
+        flux_form_vertical_momentum_advection_centered,
+    )
+    u, Wf, ddz = _manufactured_column(nlev=12, seed=1)
+    ref = _dynzad_reference(u, Wf, ddz)
+
+    # The flux-form helpers take w_half directly (not area-weighted); on
+    # this synthetic column area weighting is identity (face_area=1 above),
+    # so w_half == Wf here (isolates the FORM difference, not area effects).
+    u3 = jnp.asarray(u)[None, None, :]
+    w3 = jnp.asarray(Wf)[None, None, :]
+    h3 = jnp.asarray(ddz)[None, None, :]
+
+    for fn in (flux_form_vertical_momentum_advection,
+               flux_form_vertical_momentum_advection_centered):
+        got = np.asarray(fn(u3, w3, h3))[0, 0]
+        # Interior levels (exclude the top/bottom levels, where both forms
+        # degenerate toward the same boundary zeros) must show a REAL
+        # mismatch, not just round-off.
+        interior = slice(1, len(u) - 1)
+        resid = got[interior] - ref[interior]
+        scale = np.max(np.abs(ref[interior])) + 1e-30
+        assert np.max(np.abs(resid)) / scale > 1e-3, (
+            f"{fn.__name__} unexpectedly matches the advective dynzad form "
+            "(non-vacuous check failed)")
+
+
+def test_flux_vs_advective_difference_is_u_times_dwdz():
+    """The #1226 diagnosis identity: FLUX form d(w*u)/dz minus ADVECTIVE
+    form w*du/dz equals -u*dw/dz at every interior level (product rule:
+    d(w*u)/dz = w*du/dz + u*dw/dz, so flux_form - advective_form ==
+    -(u*dw/dz)). Verified via the dynzad-vs-centered_full residual against
+    a centered-difference dw/dz estimate, to the discretization's own
+    truncation error."""
+    from legoesm.ocean.vertical import flux_form_vertical_momentum_advection_centered
+    u, Wf, ddz = _manufactured_column(nlev=14, seed=3)
+    ref_advective = _dynzad_reference(u, Wf, ddz)
+
+    u3 = jnp.asarray(u)[None, None, :]
+    w3 = jnp.asarray(Wf)[None, None, :]
+    h3 = jnp.asarray(ddz)[None, None, :]
+    flux_form = np.asarray(
+        flux_form_vertical_momentum_advection_centered(u3, w3, h3))[0, 0]
+
+    residual = flux_form - ref_advective   # should be ~= -(u * dw/dz)
+
+    # Discrete dw/dz at level k: (w_half[k] - w_half[k+1]) / dz[k]
+    dwdz = (Wf[:-1] - Wf[1:]) / ddz
+    predicted = -(u * dwdz)
+
+    interior = slice(1, len(u) - 1)
+    corr = np.corrcoef(residual[interior], predicted[interior])[0, 1]
+    assert corr > 0.9, f"residual vs -(u*dw/dz) correlation too low: {corr:.4f}"
+    ratio = (np.sum(residual[interior] * predicted[interior])
+             / np.sum(predicted[interior] ** 2))
+    assert 0.5 < ratio < 1.5, f"residual/predicted amplitude ratio off: {ratio:.4f}"
+
+
+# ===========================================================================
+# 8. DINO CARD SELECTION (#1226): nemo_dino_kamm(+_mlf) select nemo_advective
+# ===========================================================================
+@pytest.mark.parametrize("recipe", ["nemo_dino_kamm", "nemo_dino_kamm_mlf"])
+def test_dino_kamm_cards_select_nemo_advective(recipe):
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+    cfg = dino_config_for_recipe(recipe)
+    assert cfg.vertical_momentum_scheme == "nemo_advective"
+
+
+def test_dino_default_card_unchanged():
+    """Non-kamm recipes keep the legacy default (bit-identical guarantee)."""
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe, DINOConfig
+    assert DINOConfig().vertical_momentum_scheme == "upwind_perturbation"
+    assert (dino_config_for_recipe("legoesm_default").vertical_momentum_scheme
+            == "upwind_perturbation")
+
+
+# ===========================================================================
+# 9. nemo_advective WIRING: changes trajectory, differentiable, dispatch OK
+# ===========================================================================
+def test_nemo_advective_changes_trajectory():
+    s_up, m_up = _basin("upwind_perturbation")
+    s_na, m_na = _basin("nemo_advective")
+    f_up, _ = m_up.integrate_scan(s_up, n_steps=8, dt=_DT)
+    f_na, _ = m_na.integrate_scan(s_na, n_steps=8, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(f_na.u.data)))
+    du = float(np.max(np.abs(np.asarray(f_na.u.data) - np.asarray(f_up.u.data))))
+    umax = float(np.max(np.abs(np.asarray(f_up.u.data))))
+    assert du > 1e-6 * max(umax, 1e-12), (
+        f"nemo_advective did not change the trajectory (max|du|={du:.3e})")
+
+
+def test_nemo_advective_differentiable():
+    state, model = _basin("nemo_advective")
+    T0 = state.T.data
+
+    def loss(scale):
+        st = state._replace(T=state.T.replace(data=T0 * scale))
+        f, _ = model.integrate_scan(st, n_steps=2, dt=_DT)
+        return jnp.sum(f.u.data ** 2) + jnp.sum(f.T.data ** 2)
+
+    g = jax.grad(loss)(1.0)
+    assert np.isfinite(float(g))
+    assert abs(float(g)) > 0.0
 
 
 # ===========================================================================

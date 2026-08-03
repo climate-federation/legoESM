@@ -18,6 +18,7 @@ Translated from: shr_orb_mod.F90, lines 1-467
 from typing import NamedTuple, Tuple
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array, jit, lax
 
 # =============================================================================
@@ -57,7 +58,7 @@ class OrbitalParams(NamedTuple):
 
 # Obliquity series parameters (47 terms)
 # Amplitudes in arc seconds
-OBAMP = jnp.array(
+OBAMP = np.array(
     [
         -2462.2214466,
         -857.3232075,
@@ -107,11 +108,11 @@ OBAMP = jnp.array(
         -0.5905702,
         0.5817298,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Rates in arc seconds per year
-OBRATE = jnp.array(
+OBRATE = np.array(
     [
         31.609974,
         32.620504,
@@ -161,11 +162,11 @@ OBRATE = jnp.array(
         0.636717,
         12.844549,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Phases in degrees
-OBPHAS = jnp.array(
+OBPHAS = np.array(
     [
         251.9025,
         280.8325,
@@ -215,12 +216,12 @@ OBPHAS = jnp.array(
         348.1074,
         82.6496,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Eccentricity series parameters (19 terms)
 # Amplitudes (dimensionless)
-ECAMP = jnp.array(
+ECAMP = np.array(
     [
         0.01860798,
         0.01627522,
@@ -242,11 +243,11 @@ ECAMP = jnp.array(
         -0.00012400,
         0.00001250,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Rates in arc seconds per year
-ECRATE = jnp.array(
+ECRATE = np.array(
     [
         4.2072050,
         7.3460910,
@@ -268,11 +269,11 @@ ECRATE = jnp.array(
         18.4174410,
         0.6678630,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Phases in degrees
-ECPHAS = jnp.array(
+ECPHAS = np.array(
     [
         28.620089,
         193.788772,
@@ -294,12 +295,12 @@ ECPHAS = jnp.array(
         210.667199,
         72.108838,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Moving vernal equinox series parameters (78 terms)
 # Amplitudes in arc seconds
-MVAMP = jnp.array(
+MVAMP = np.array(
     [
         7391.0225890,
         2555.1526947,
@@ -380,11 +381,11 @@ MVAMP = jnp.array(
         10.0289441,
         -10.0034259,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Rates in arc seconds per year
-MVRATE = jnp.array(
+MVRATE = np.array(
     [
         31.609974,
         32.620504,
@@ -465,11 +466,11 @@ MVRATE = jnp.array(
         2.133898,
         0.173168,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Phases in degrees
-MVPHAS = jnp.array(
+MVPHAS = np.array(
     [
         251.9025,
         280.8325,
@@ -550,7 +551,7 @@ MVPHAS = jnp.array(
         332.3345,
         27.3039,
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Conversion factors
@@ -686,6 +687,15 @@ def shr_orb_params(iyear_AD: int) -> OrbitalParams:
     # Convert input to array for consistency
     iyear_AD = jnp.array(iyear_AD, dtype=jnp.float64)
 
+    # The Berger (1978) series tables are module-top NUMPY constants (no eager
+    # JAX allocation at import — tests/unit/test_no_module_top_jax_alloc.py).
+    # The fori_loop bodies below index them with a TRACED index, which numpy
+    # cannot do, so convert once here; inside this jitted function these are
+    # constant-folded, not per-call device work.
+    obamp, obrate, obphas = jnp.asarray(OBAMP), jnp.asarray(OBRATE), jnp.asarray(OBPHAS)
+    ecamp, ecrate, ecphas = jnp.asarray(ECAMP), jnp.asarray(ECRATE), jnp.asarray(ECPHAS)
+    mvamp, mvrate, mvphas = jnp.asarray(MVAMP), jnp.asarray(MVRATE), jnp.asarray(MVPHAS)
+
     # Degree to radian conversion
     degrad = PI / 180.0
 
@@ -700,11 +710,11 @@ def shr_orb_params(iyear_AD: int) -> OrbitalParams:
     # Summation of cosine series for obliquity
     def obliq_body(i: int, acc: jnp.ndarray) -> jnp.ndarray:
         """Accumulate obliquity series term."""
-        arg = (OBRATE[i] * PSECDEG * years + OBPHAS[i]) * degrad
-        term = OBAMP[i] * PSECDEG * jnp.cos(arg)
+        arg = (obrate[i] * PSECDEG * years + obphas[i]) * degrad
+        term = obamp[i] * PSECDEG * jnp.cos(arg)
         return acc + term
 
-    obsum = lax.fori_loop(0, OBAMP.shape[0], obliq_body, jnp.array(0.0))
+    obsum = lax.fori_loop(0, obamp.shape[0], obliq_body, jnp.array(0.0))
 
     # Obliquity = epsilon star + series summation
     obliq = 23.320556 + obsum
@@ -716,20 +726,20 @@ def shr_orb_params(iyear_AD: int) -> OrbitalParams:
     # Cosine summation for eccentricity
     def eccen_cossum_body(i: int, acc: jnp.ndarray) -> jnp.ndarray:
         """Accumulate eccentricity cosine series term."""
-        arg = (ECRATE[i] * PSECDEG * years + ECPHAS[i]) * degrad
-        term = ECAMP[i] * jnp.cos(arg)
+        arg = (ecrate[i] * PSECDEG * years + ecphas[i]) * degrad
+        term = ecamp[i] * jnp.cos(arg)
         return acc + term
 
-    cossum = lax.fori_loop(0, ECAMP.shape[0], eccen_cossum_body, jnp.array(0.0))
+    cossum = lax.fori_loop(0, ecamp.shape[0], eccen_cossum_body, jnp.array(0.0))
 
     # Sine summation for eccentricity
     def eccen_sinsum_body(i: int, acc: jnp.ndarray) -> jnp.ndarray:
         """Accumulate eccentricity sine series term."""
-        arg = (ECRATE[i] * PSECDEG * years + ECPHAS[i]) * degrad
-        term = ECAMP[i] * jnp.sin(arg)
+        arg = (ecrate[i] * PSECDEG * years + ecphas[i]) * degrad
+        term = ecamp[i] * jnp.sin(arg)
         return acc + term
 
-    sinsum = lax.fori_loop(0, ECAMP.shape[0], eccen_sinsum_body, jnp.array(0.0))
+    sinsum = lax.fori_loop(0, ecamp.shape[0], eccen_sinsum_body, jnp.array(0.0))
 
     # Compute eccentricity
     eccen2 = cossum * cossum + sinsum * sinsum
@@ -772,11 +782,11 @@ def shr_orb_params(iyear_AD: int) -> OrbitalParams:
     # Summation for moving vernal equinox
     def mvsum_body(i: int, acc: jnp.ndarray) -> jnp.ndarray:
         """Accumulate moving vernal equinox series term."""
-        arg = (MVRATE[i] * PSECDEG * years + MVPHAS[i]) * degrad
-        term = MVAMP[i] * PSECDEG * jnp.sin(arg)
+        arg = (mvrate[i] * PSECDEG * years + mvphas[i]) * degrad
+        term = mvamp[i] * PSECDEG * jnp.sin(arg)
         return acc + term
 
-    mvsum = lax.fori_loop(0, MVAMP.shape[0], mvsum_body, jnp.array(0.0))
+    mvsum = lax.fori_loop(0, mvamp.shape[0], mvsum_body, jnp.array(0.0))
 
     # Compute mvelp
     mvelp = fvelp / degrad + 50.439273 * PSECDEG * years + 3.392506 + mvsum

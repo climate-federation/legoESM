@@ -2266,6 +2266,8 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         cos_alpha_u=t(geom.cos_alpha_u), sin_alpha_u=t(geom.sin_alpha_u),
         cos_alpha_v=vface(geom.cos_alpha_v), sin_alpha_v=vface(geom.sin_alpha_v),
         cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
+        # cos_lat_v is a v-FACE (n_lat+1,) field -> vface(), not t().
+        cos_lat_v=vface(geom.cos_lat_v),
         lat=t(geom.lat),
         fold=band_fold,
         # Partial-periodic seam wall is a per-lat-row (n_lat,) profile —
