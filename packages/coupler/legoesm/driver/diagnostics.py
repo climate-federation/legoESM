@@ -354,6 +354,12 @@ class DiagnosticCollector:
             _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
             self._spatial_monthly = SpatialMonthlyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
+                # CMIP6 ``Amon`` tasmin/tasmax are "time: minimum/maximum
+                # WITHIN DAYS, time: mean OVER DAYS" — the monthly mean of
+                # the DAILY extrema, not the monthly extremum.  Reuses the
+                # same ``tas`` field the ``day`` table's extremes track, so
+                # the two tables cannot disagree on a day's extreme.
+                daily_extreme_fields={"tas": ("tasmin", "tasmax")},
             )
             # Daily accumulator (CMIP6 ``day`` table) — tracks running
             # min/max for tas so tasmin/tasmax can be emitted.

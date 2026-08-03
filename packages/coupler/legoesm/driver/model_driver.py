@@ -6581,7 +6581,15 @@ class ModelDriver:
                 # Near-surface state snapshots (lowest model level) — same
                 # instantaneous end-of-interval sampling as their 3-D
                 # parents hus/ua/va, so they carry the same disclosure.
-                "huss", "uas", "vas", "sfcWind"}
+                "huss", "uas", "vas", "sfcWind",
+                # Amon tasmin/tasmax are the monthly mean of the WITHIN-DAY
+                # extrema of ``tas``.  This branch only runs at a cadence of
+                # >= 1 day, where a day holds ONE tas sample, so the
+                # "extremum" IS that sample — disclose it exactly as tas is
+                # disclosed instead of letting the file claim a resolved
+                # diurnal maximum.  A sub-daily cadence never reaches here
+                # and keeps the table's own cell_methods.
+                "tasmin", "tasmax"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming

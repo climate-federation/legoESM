@@ -1501,3 +1501,181 @@ class TestNewAmonVarsReachTheWriter:
         with xr.open_dataset(
                 sorted(tmp_path.rglob("rtmt_Amon_*.nc"))[0]) as ds:
             assert ds["rtmt"].attrs["positive"] == "down"
+
+
+# ===========================================================================
+# Amon tasmin / tasmax — monthly MEAN of the WITHIN-DAY extrema
+# ===========================================================================
+
+class TestAmonDailyExtremes:
+    """CMIP6 ``Amon`` declares
+
+        tasmax  "area: mean time: maximum within days time: mean over days"
+
+    i.e. the mean over days of each day's maximum.  A monthly MAXIMUM (the
+    easy mistake) is a different, much larger statistic.
+    """
+
+    def _acc(self):
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        return SpatialMonthlyAccumulator(
+            nlat=2, nlon=3,
+            daily_extreme_fields={"tas": ("tasmin", "tasmax")})
+
+    @staticmethod
+    def _f(value, nlat=2, nlon=3):
+        return {"tas": np.full((nlat, nlon), float(value))}
+
+    def test_table_cell_methods_is_mean_over_days_of_daily_extrema(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        for name, word in (("tasmax", "maximum"), ("tasmin", "minimum")):
+            table, entry = lookup_cmor_entry(name)
+            assert table == "Amon", name
+            assert entry["cell_methods"] == (
+                f"area: mean time: {word} within days time: mean over days")
+
+    def test_monthly_mean_of_daily_extrema_not_monthly_extremum(self):
+        """Day 1 spans 280..300 (max 300), day 2 spans 270..290 (max 290).
+        Mean of daily maxima = 295.  The monthly MAXIMUM would be 300 and
+        the monthly MEAN of all samples 285 — both wrong."""
+        acc = self._acc()
+        for v in (280.0, 300.0, 290.0):
+            acc.add_2d(1.0, 0, self._f(v))
+        for v in (270.0, 290.0, 275.0):
+            acc.add_2d(2.0, 0, self._f(v))
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 295.0)
+        np.testing.assert_allclose(out["field_2d_tasmin"][0], 275.0)
+        # Sanity: the plain monthly mean of tas is a different number.
+        np.testing.assert_allclose(
+            out["field_2d_tas"][0], np.mean(
+                [280.0, 300.0, 290.0, 270.0, 290.0, 275.0]))
+
+    def test_days_are_weighted_equally_regardless_of_sample_count(self):
+        """"mean OVER DAYS" — a day sampled 4x must not outweigh a day
+        sampled once."""
+        acc = self._acc()
+        for _ in range(4):
+            acc.add_2d(1.0, 0, self._f(300.0))
+        acc.add_2d(2.0, 0, self._f(280.0))
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 290.0)
+
+    def test_last_partial_day_is_committed_at_finalize(self):
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        assert "tas" in acc._day_ext            # still pending
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 300.0)
+        assert not acc._day_ext                 # flushed
+
+    def test_extrema_land_in_their_own_month_across_a_boundary(self):
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))     # 31 Jan
+        acc.add_2d(32.0, 0, self._f(250.0))     # 1 Feb
+        out = acc.finalize(min_sample_fraction=0)
+        assert out["months"] == [(0, 1), (0, 2)]
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 300.0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][1], 250.0)
+
+    def test_pop_completed_months_does_not_lose_the_boundary_day(self):
+        """The pending 31-Jan day belongs to a month about to be popped —
+        it must be committed, not freed with the bucket."""
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))
+        popped = acc.pop_completed_months(0, 2)
+        assert popped["months"] == [(0, 1)]
+        np.testing.assert_allclose(popped["field_2d_tasmax"][0], 300.0)
+
+    def test_pop_leaves_the_in_progress_day_open(self):
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))     # January, completed below
+        acc.add_2d(32.0, 0, self._f(250.0))     # February, in progress
+        acc.pop_completed_months(0, 2)
+        assert "tas" in acc._day_ext            # Feb 1 still open
+        acc.add_2d(32.0, 0, self._f(260.0))     # same day, warmer
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 260.0)
+
+    def test_call_counts_untouched_by_the_extreme_commits(self):
+        """The daily commits must not inflate the per-bucket call count —
+        that count drives the partial-month guard for EVERY variable."""
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        acc = self._acc()
+        ref = SpatialMonthlyAccumulator(nlat=2, nlon=3)
+        for day, v in ((1.0, 300.0), (2.0, 280.0), (3.0, 290.0)):
+            acc.add_2d(day, 0, self._f(v))
+            ref.add_2d(day, 0, self._f(v))
+        assert acc._call_counts == ref._call_counts
+        assert acc._max_count_ever == ref._max_count_ever
+
+    def test_disabled_by_default_is_byte_identical(self):
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        acc = SpatialMonthlyAccumulator(nlat=2, nlon=3)
+        acc.add_2d(1.0, 0, self._f(300.0))
+        out = acc.finalize(min_sample_fraction=0)
+        assert "field_2d_tasmax" not in out
+        assert "field_2d_tasmin" not in out
+
+    def test_state_roundtrip_carries_the_pending_day(self):
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        acc.add_2d(1.0, 0, self._f(270.0))      # same day, still pending
+        b = self._acc()
+        b.set_state(acc.get_state())
+        # The restored accumulator continues the SAME day.
+        b.add_2d(1.0, 0, self._f(310.0))
+        out = b.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 310.0)
+        np.testing.assert_allclose(out["field_2d_tasmin"][0], 270.0)
+
+    def test_pre_feature_checkpoint_restores_without_a_pending_day(self):
+        """``day_ext`` is optional on read, so schema version 1 checkpoints
+        written before this feature still load."""
+        import json
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        state = dict(acc.get_state())
+        manifest = json.loads(str(state["__manifest__"].item()))
+        del manifest["day_ext"]
+        state["__manifest__"] = np.asarray(json.dumps(manifest))
+        b = self._acc()
+        b.set_state(state)                       # must not raise
+        assert b._day_ext == {}
+
+    def test_collector_configures_tas_extremes(self, mesh):
+        dc, _ = _make_collector(mesh)
+        assert dc._spatial_monthly.daily_extreme_fields == {
+            "tas": ("tasmin", "tasmax")}
+
+    def test_reaches_the_real_writer_with_amon_units(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        # Two samples on day 10 (288 / 300 K) and one on day 11 (280 K):
+        # daily maxima 300 and 280 -> Amon tasmax = 290 K.
+        for day, tas in ((10.0, 288.0), (10.0, 300.0), (11.0, 280.0)):
+            dc.feed_cmip_accumulators_native(
+                day=day, **f, tas=np.full(n, tas))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        for name, value in (("tasmax", 290.0), ("tasmin", 284.0)):
+            paths = sorted(tmp_path.rglob(f"{name}_Amon_*.nc"))
+            assert paths, f"{name} was never written"
+            with xr.open_dataset(paths[0]) as ds:
+                assert ds[name].attrs["units"] == "K"
+                got = float(np.nanmean(ds[name].values))
+                assert got == pytest.approx(value, rel=1e-6), name
