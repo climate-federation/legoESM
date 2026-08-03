@@ -67,15 +67,16 @@ def test_no_generic_waiver_mechanism():
 
 
 def test_nine_uncovered_routines_are_unmeasured_rows():
-    """4 of the original 8 coverage rows are STILL genuinely unmeasured
+    """3 of the original 8 coverage rows are STILL genuinely unmeasured
     (bracketable dumps exist but the oracle-matching numerics they'd need are
-    out of scope for a bracket-and-diff -- see each row's own note); the
-    other 4 were measured 2026-07-30 (coverage_rows_measure.py) using ONLY
-    existing dumps + production entry points, so they must NOT regress back
-    to (None, None) silently."""
+    out of scope for a bracket-and-diff -- see each row's own note); 4 were
+    measured 2026-07-30 (coverage_rows_measure.py); "wzv (vertical velocity)"
+    was measured 2026-08-03 (#1455 queue item, wzv_row_measure.py) once its
+    "never dumped" note was found STALE (direct wzv_dump_ww_call1/2.bin dumps
+    exist in RUN_GDB) -- so these rows must NOT regress back to (None, None)
+    silently."""
     mod = _load_module()
     still_unmeasured = {
-        "wzv (vertical velocity)",
         "tra_zdf (tracer implicit vertical solve)",
         "dyn_zdf (momentum implicit vertical solve)",
         "traldf_iso_lap tendency",
@@ -98,6 +99,11 @@ def test_nine_uncovered_routines_are_unmeasured_rows():
         assert corr is not None and ratio is not None
         assert mod.classify(corr, ratio, name=term) in ("AT BAR", "DEBT")
         assert "coverage_rows_measure.py" in note
+
+    corr, ratio, note = mod.MEASUREMENTS["wzv (vertical velocity)"]
+    assert corr is not None and ratio is not None
+    assert mod.classify(corr, ratio, name="wzv (vertical velocity)") in ("AT BAR", "DEBT")
+    assert "wzv_row_measure.py" in note
 
 
 def test_main_reports_waived_count_and_does_not_gate_exit_on_waiver_alone(capsys):

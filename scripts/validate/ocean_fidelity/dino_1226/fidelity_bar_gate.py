@@ -278,6 +278,13 @@ PER_ELEMENT: dict[str, float] = {
     # that weakness.
     "ATF filter T/S/ssh": 0.0,
 
+    # wzv (vertical velocity) MEASURED 2026-08-03 (#1455 queue item,
+    # wzv_row_measure.py): err_norm=|lego_w-nemo_ww_call1|/RMS(nemo), median
+    # over the active-only 3-D tmask population (n=342134). See the
+    # MEASUREMENTS["wzv (vertical velocity)"] note for the full report
+    # (call1 vs call2, per-level profile, transcription-vs-conditioning check).
+    "wzv (vertical velocity)": 1.980e-06,
+
     # ldf_slp RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py, the
     # first probe for these rows with BOTH mechanical preconditions wired
     # (require_fp64 + time_level_for_dump) AND a consistent run directory.
@@ -1913,7 +1920,62 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # ever measured them, and no one had thought to add them to this
     # checklist. Adding a row here does NOT mean they are measured: every
     # tuple below is (None, None, ...) on purpose. Do not invent a number.
-    "wzv (vertical velocity)":       (None, None,
+    "wzv (vertical velocity)":       (0.999999998, 1.000008122,
+        "*** MEASURED 2026-08-03 (#1455 queue item, wzv_row_measure.py) -- "
+        "STALE-NOTE CORRECTION, RETRACTS the 'never measured/REQUIRES "
+        "INSTRUMENTATION' text below. That claim (also in coverage_rows_"
+        "measure.py, ww_inheritance_walk.py) predates the FACE10/GDB-era "
+        "instrumentation: direct ww dumps DO exist in RUN_GDB (the run this "
+        "whole campaign uses) -- wzv_dump_ww_call1.bin/call2.bin, writer "
+        "sshwzv.F90:289-295 (verified directly), ALREADY REGISTERED in "
+        "time_levels.py ('now', both). Two call sites, ONE row per the "
+        "original enumeration; stpmlf.F90 call order read directly: :244 "
+        "CALL wzv (BEFORE dyn_adv :265) = call1 = the ww dyn_adv/dyn_zad "
+        "CONSUMES; :302 2nd div_hor, :315 CALL wzv (AFTER dyn_zdf) = call2 "
+        "= the ww tra_adv (:417) CONSUMES. lego's diagnosed w (PRODUCTION "
+        "path: ocean_pe_latlon_cgrid.py:1328 _bc_vertical_and_depthmean_"
+        "velocity -> :1356 diagnose_w_from_flux_div, called :3953 inside "
+        "LatLonCGridOceanModel.tendencies_with_diagnostics -- PROVEN to "
+        "execute via a call-site spy that asserts it fired, not inferred) "
+        "is STRUCTURALLY call1 (the pre-dyn_adv one); this tuple is call1. "
+        "RUN_GDB restart kt=57601, fp64, LEGOESM_NEMO_E3T=both, active-only "
+        "3-D tmask population (n=342134), cancelling_rows_per_element.py's "
+        "per_element_stats convention (this campaign's canonical corr/"
+        "|x|ratio/err_norm=|d|/RMS(nemo) convention): corr=0.999999998 "
+        "|x|ratio=1.000008122, err_norm median=1.980e-06 p99=2.416e-04 "
+        "max=2.773e-03 (PER_ELEMENT[\"wzv (vertical velocity)\"], median, "
+        "sign_changing=True). Per-level err_norm profile PEAKS at w-levels "
+        "8-14 (~8.4-8.9e-5 relative RMS), matching the SAME band already "
+        "identified in the 'dyn_adv ZAD' row's ww-substitution finding "
+        "(that note's 'peaks at ifaces 8-14' text) -- CONFIRMS (not merely "
+        "repeats) the existing localisation: this row's own DEBT IS the "
+        "already-diagnosed ZAD-inheritance source, not a new defect. "
+        "call2 (non-structural for lego's w) measured too, per task "
+        "instruction: corr=0.999999973 |x|ratio=1.000005161, err_norm "
+        "median=2.044e-06 -- same order, not meaningfully different (the "
+        "two NEMO calls agree with each other far better than either "
+        "agrees with lego, so call1-vs-call2 choice is not the dominant "
+        "term here). CONDITIONING/TRANSCRIPTION CHECK (task instruction 2): "
+        "lego's diagnose_w_from_flux_div (vertical.py:886-960+) applies a "
+        "z-star SIGMA-REDISTRIBUTION of surface deta_dt through the water "
+        "column (Adcroft/Campin-style, sigma computed from each column's "
+        "own h_partial for partial cells) -- STRUCTURALLY DIFFERENT from "
+        "NEMO's key_qco formula (sshwzv.F90:216-222), which instead adds an "
+        "explicit LEAPFROG time-derivative term r1_Dt*e3t_0*(r3t(Kaa)-r3t"
+        "(Kbb)) to the hdiv integrand at every level. Both are legitimate, "
+        "differently-derived closures of the SAME z-star continuity "
+        "constraint (both give w=0 at surface and bottom by construction); "
+        "this is NOT a verbatim-transcription target (no single Fortran "
+        "line to port) and the residual is 4-5 orders below the signal "
+        "(err_norm median 2e-6, corr 1-diff 2e-9) -- a genuine but tiny "
+        "formulation difference, not a bug. Per THE RULE: DEBT, not AT BAR "
+        "(median err_norm 1.98e-6 >> BAR_PER_ELEM_EPS=1e-9); cause "
+        "ATTRIBUTED (inherited/shared with dyn_adv ZAD's already-documented "
+        "upstream chain) rather than fixed -- no production code changed "
+        "this task. CONFIRMED (not PLAUSIBLE): PATH-EXECUTES assertion "
+        "passed (spy fired), fp64 dtypes verified, LEGOESM_NEMO_E3T=both "
+        "explicit, registry time levels checked both dumps 'now'.\n"
+        "*** ORIGINAL 2026-07-30 NOTE (STALE, PRESERVED FOR THE RECORD) *** "
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. Two call sites in "
         "stpmlf.F90 (line 244 Nnn, line 315 Naa post-dyn_zdf recomputation) "
@@ -1924,7 +1986,8 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "sshnxt_dump_hdiv.bin, e3t/r3t via r3c_dump_r3t.bin) are. "
         "REQUIRES INSTRUMENTATION: a dump of ww itself at stpmlf.F90:244 "
         "(or :315), same pattern as every other stp_dump_* in this file, "
-        "at the next NEMO rebuild."),
+        "at the next NEMO rebuild. RETRACTED 2026-08-03: FALSE for RUN_GDB "
+        "-- see the measurement above."),
     "tra_zdf (tracer implicit vertical solve)": (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
@@ -2302,6 +2365,9 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
 # "regression" alarm.  A number without a measured-at commit is not evidence.
 MEASURED_AT: dict[str, str] = {
     # term -> git commit the number was measured at (short sha), or "" if unknown
+    # wzv (vertical velocity): first real measurement, #1455 queue item,
+    # wzv_row_measure.py (this task) -- HEAD at measurement time.
+    "wzv (vertical velocity)": "3232af85f",
     "bn2 (rn2b)": "825d22ee4",
     "eos_rab alpha": "825d22ee4",
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
@@ -2494,7 +2560,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_drg_init RHS increment": "probe_bottom_drag.py",
     "dyn_cor_2d (69x/step)": "probe_dyn_cor_2d.py",   # cited, never committed
     "traadv_fct (SALINITY)": "traadv_fct_probe.py",
-    "wzv (vertical velocity)": "coverage_rows_measure.py",
+    "wzv (vertical velocity)": "wzv_row_measure.py",  # RE-MEASURED #1455: coverage_rows_measure.py's own claim ("ww never dumped") was stale; supersedes it
     "tra_zdf (tracer implicit vertical solve)": "coverage_rows_measure.py",
     "dyn_zdf (momentum implicit vertical solve)": "coverage_rows_measure.py",
     "traldf_iso_lap tendency": "coverage_rows_measure.py",
