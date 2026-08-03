@@ -206,7 +206,8 @@ def test_inconsistent_frame_variable_sets_are_refused(tmp_path):
     z = np.linspace(25.0, DOMAIN_TOP, NZ_LES)
     np.savez(prof / "prof_006.npz", t_hours=np.asarray(3.5), z=z,
              theta=300.0 + 0.003 * z, qv=np.ones(NZ_LES) * 1e-2,
-             u=np.zeros(NZ_LES), v=np.zeros(NZ_LES), wth=np.zeros(NZ_LES))
+             u=np.zeros(NZ_LES), v=np.zeros(NZ_LES), wth=np.zeros(NZ_LES),
+             case=np.asarray("synthetic"))
     with pytest.raises(ValueError, match="different variable set"):
         _load(tmp_path, analysis_hours=1.0)
 
@@ -247,7 +248,7 @@ def test_duplicate_timestamps_are_refused(tmp_path):
              theta=300.0 + 0.003 * z, qv=1.0e-2 - 2.0e-6 * z,
              u=-8.0 + 0.001 * z, v=np.zeros(NZ_LES),
              wth=np.zeros(NZ_LES), wqv=np.zeros(NZ_LES),
-             tke=0.5 * np.ones(NZ_LES))
+             tke=0.5 * np.ones(NZ_LES), case=np.asarray("synthetic"))
     with pytest.raises(ValueError, match="share t_hours"):
         _load(tmp_path)
 
