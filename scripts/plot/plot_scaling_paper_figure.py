@@ -90,8 +90,7 @@ PANELS = [
                 ("float64", [(1, 64.81), (2, 41.63), (4, 22.09)]),
                 ("mixed (f64 store)", [(1, 52.80), (4, 19.13)]),
                 ("f32 (LL2304)", [(96, 18.25), (128, 16.33)])],
-        note="LL2304@128 = 13.0 GC/s
-(post-fix hundreds receipts)",
+        note="LL2304@128 = 13.0 GC/s\n(post-fix hundreds receipts)",
     ),
     dict(
         key="oc_tripole", title="tripole (ORCA fold)", sub="576×1152 L20 · A100 NCCL",
