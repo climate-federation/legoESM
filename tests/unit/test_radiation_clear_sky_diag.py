@@ -139,9 +139,13 @@ def test_tendency_carries_the_clear_sky_slots_last():
     # ``CLEARSKY_FIELDS`` because that tuple drives the all-sky-partner
     # assertions and rsuscs's partner (rsus) is DERIVED by the collector,
     # not carried on the tendency.
-    assert HydrostaticTendencies._fields[-5:] == (
+    # ``precip_solid`` (CMOR prsn) is a later trailing optional again; the
+    # invariant this test protects is "the clear-sky fields are trailing
+    # optionals with None defaults", not that they are physically last.
+    assert HydrostaticTendencies._fields[-6:-1] == (
         CLEARSKY_FIELDS + ("sw_up_sfc_clearsky",))
-    for _k in CLEARSKY_FIELDS + ("sw_up_sfc_clearsky",):
+    assert HydrostaticTendencies._fields[-1] == "precip_solid"
+    for _k in CLEARSKY_FIELDS + ("sw_up_sfc_clearsky", "precip_solid"):
         assert HydrostaticTendencies._field_defaults[_k] is None, _k
 
 

@@ -212,6 +212,16 @@ class HydrostaticTendencies(NamedTuple):
     # diagnostic off, non-radiation tendency, held-radiation sub-step);
     # trailing optional, so every existing constructor is unaffected.
     sw_up_sfc_clearsky: Field | None = None
+    # SOLID-PHASE surface precipitation [kg/m^2/s, SAME +into-surface sense
+    # as ``precip``] for CMOR ``prsn`` -- ice + snow + graupel sedimentation.
+    # A SUBSET of ``precip`` (both are sums of the same per-species
+    # dt-limited surface fluxes), so 0 <= precip_solid <= precip.
+    # ``None`` when microphysics is inactive or the active scheme does not
+    # resolve frozen precipitation separately (warm-rain / bulk schemes) --
+    # left None rather than zeroed, since a zero is the claim "it never
+    # snows", not an absence.  Trailing optional; every existing
+    # constructor is unaffected.
+    precip_solid: Field | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

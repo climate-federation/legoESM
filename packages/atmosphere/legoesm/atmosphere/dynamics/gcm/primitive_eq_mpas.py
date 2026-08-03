@@ -1109,6 +1109,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # the same cloud-free solve's ``sw_flux_up[:, -1]``.  No flip
             # anywhere downstream.  None under the same conditions as
             # slots 12-15.
+            # ...appended (slot 17): SOLID-phase surface precipitation
+            # [kg/m^2/s, SAME +into-surface sense as slot 2's total precip,
+            # of which it is a SUBSET] for CMOR prsn.  Refreshed every step
+            # with slot 2 (microphysics runs on held-radiation sub-steps
+            # too).  None when the active microphysics does not resolve the
+            # frozen split.
             _extras = tuple(getattr(_pt, _k, None) for _k in (
                 "lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "shflx_sfc", "lhflx_sfc",
@@ -1116,7 +1122,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
                 "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
-                "sw_up_sfc_clearsky"))
+                "sw_up_sfc_clearsky", "precip_solid"))
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

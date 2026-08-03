@@ -415,6 +415,15 @@ def _make_hydrostatic_microphysics(
             precip=Field(
                 data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
                 name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
+            # SOLID-phase subset of the SAME surface flux (CMOR prsn).
+            # None for a scheme that does not resolve it -> the field stays
+            # unset and the CMOR variable is simply absent.
+            precip_solid=(
+                None if micro_out.precipitation_solid is None else Field(
+                    data=micro_out.precipitation_solid.reshape(
+                        shape_2d).astype(p_s.dtype),
+                    name="precip_solid_micro", dims=dims_2d,
+                    units="kg/m^2/s")),
         )
 
     def reset_state():

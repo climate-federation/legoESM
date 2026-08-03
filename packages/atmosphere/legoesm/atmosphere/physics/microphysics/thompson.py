@@ -610,6 +610,8 @@ def thompson_microphysics(
     # ``sedimentation_tendency`` so column water conservation holds
     # exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
+    # CMIP6 ``prsn``: the SOLID-phase subset (ice + snow + graupel).
+    precipitation_solid = precip_i + precip_s + precip_g
 
     return MicrophysicsOutput(
         dT_dt=dT_dt,
@@ -623,4 +625,5 @@ def thompson_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precipitation_solid=precipitation_solid,
     )

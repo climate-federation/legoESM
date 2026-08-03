@@ -284,7 +284,8 @@ def _tend_with_extras():
         lw_up_toa_clearsky=_f("lw_up_toa_clr", 14.0),
         sw_down_sfc_clearsky=_f("sw_down_sfc_clr", 15.0),
         lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0),
-        sw_up_sfc_clearsky=_f("sw_up_sfc_clr", 17.0))
+        sw_up_sfc_clearsky=_f("sw_up_sfc_clr", 17.0),
+        precip_solid=_f("precip_solid", 18.0))
 
 
 # Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
@@ -295,18 +296,18 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
                 "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
-                "sw_up_sfc_clearsky")
+                "sw_up_sfc_clearsky", "precip_solid")
 
 
 class TestSfcDiagContract:
-    """Lock the 17-slot sfc_diag tuple contract shared by BOTH producers
+    """Lock the 18-slot sfc_diag tuple contract shared by BOTH producers
     (serial + MPI-voronoi) and the driver consumer's slot mapping."""
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 17
+        assert len(sfc_diag) == 18
         # Consumer (_feed_mpas_cmip_accumulators): slot 0->sw_net (rsus
         # derivation), 1->lw_net (rlus), 3->rlut, 4->rsut, 5->rsdt,
         # 6->hfss, 7->hfls, 8->rsds, 9->rlds (+ _marshal_land_forcing),
@@ -332,6 +333,8 @@ class TestSfcDiagContract:
         # Slot 16 is surface UPWELLING (+up) — the opposite orientation to
         # its slot-14 partner rsdscs (+down).  Still no sign flip.
         assert sfc_diag[16].name == "sw_up_sfc_clr"     # rsuscs
+        # Slot 17 is the frozen SUBSET of slot 2's total precip, same sense.
+        assert sfc_diag[17].name == "precip_solid"      # prsn
 
     def test_both_producers_extract_the_same_extra_order(self):
         """The serial and MPI producers must list the SAME extras keys in
@@ -1842,3 +1845,149 @@ class TestRsuscs:
             assert ds["rsuscs"].attrs["positive"] == "up"
             got = float(np.nanmean(ds["rsuscs"].values))
             assert got == pytest.approx(self.VALUE, rel=1e-5)
+
+
+# ===========================================================================
+# Amon prsn — snowfall flux (sfc_diag slot 17)
+# ===========================================================================
+
+class TestPrsn:
+    """``prsn`` is the SOLID-phase part of the surface sedimentation flux —
+    a SUBSET of ``pr``, in the SAME positive-into-the-surface sense, and in
+    the same kg/m2/s units.  Both are sums of the SAME per-species
+    dt-limited surface fluxes, so 0 <= prsn <= pr holds by construction.
+    """
+
+    PR = 9.0e-5         # kg/m2/s  ~ 7.8 mm/day
+    PRSN = 2.0e-5       # kg/m2/s  ~ 1.7 mm/day of snow water equivalent
+
+    def test_reaches_the_monthly_accumulator_as_a_subset_of_pr(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            precip=np.full(n, self.PR), prsn=np.full(n, self.PRSN))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_prsn" in out
+        np.testing.assert_allclose(
+            out["field_2d_prsn"], self.PRSN, rtol=1e-9)
+        got_pr = float(np.mean(out["field_2d_pr"]))
+        got_sn = float(np.mean(out["field_2d_prsn"]))
+        assert 0.0 <= got_sn <= got_pr
+
+    def test_table_entry(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("prsn")
+        assert table == "Amon"
+        assert entry["units"] == "kg m-2 s-1"
+        assert entry["standard_name"] == "snowfall_flux"
+        # A flux with no declared sign convention — like pr.
+        assert entry.get("positive", "") == ""
+
+    def test_is_an_interval_mean_like_pr(self):
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"prsn"' in flux_block
+
+    def test_malformed_input_raises_and_commits_nothing(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="prsn"):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, prsn=np.zeros(n - 1))
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_absent_is_skipped_never_zeroed(self, mesh):
+        """A zero prsn is the CLAIM "it never snows", not an absence."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, precip=np.full(n, self.PR))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_pr" in out
+        assert "field_2d_prsn" not in out
+
+    def test_accumulator_covers_slot_17(self):
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        assert 17 in _MPASSfcFluxAccum.SLOTS
+        acc = _MPASSfcFluxAccum()
+        for v in (1.0e-5, 2.0e-5, 6.0e-5):
+            row = [None] * 18
+            row[17] = types.SimpleNamespace(data=np.full(4, v))
+            acc.add(tuple(row))
+        np.testing.assert_allclose(acc.mean(17), 3.0e-5)
+
+    def test_driver_reads_slot_17_and_forwards_it(self):
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        assert "prsn = _sfc_slot(17)" in src
+        assert "prsn=prsn," in src
+
+    def test_morrison_reports_the_frozen_subset(self):
+        """The production scheme.  ``precipitation_solid`` must be exactly
+        ice+snow+graupel — using the total (or including rain) would
+        publish pr twice under two names."""
+        import inspect
+        from legoesm.atmosphere.physics.microphysics import morrison
+        src = inspect.getsource(morrison)
+        assert ("precipitation_solid = precip_i + precip_s + precip_g"
+                in src)
+        assert "precipitation = precip_r + precip_i + precip_s + precip_g" \
+            in src
+
+    def test_microphysics_output_default_is_none(self):
+        """Schemes that do not resolve the split must leave it unset."""
+        from legoesm.atmosphere.physics.microphysics.output import (
+            MicrophysicsOutput, make_zero_output,
+        )
+        assert "precipitation_solid" in MicrophysicsOutput._fields
+        assert (MicrophysicsOutput._field_defaults["precipitation_solid"]
+                is None)
+        assert make_zero_output(2, 3).precipitation_solid is None
+
+    def test_tendency_carrier_default_is_none(self):
+        from legoesm.core.state import HydrostaticTendencies
+        assert "precip_solid" in HydrostaticTendencies._fields
+        assert (HydrostaticTendencies._field_defaults["precip_solid"]
+                is None)
+
+    def test_combined_physics_sums_it_alongside_precip(self):
+        """The pair must come from the SAME module set — a module counted
+        for pr but not prsn would break the subset relation."""
+        import inspect
+        from legoesm.atmosphere.physics import combined
+        src = inspect.getsource(combined._make_hydrostatic_combined)
+        assert 'if getattr(t, "precip_solid", None) is not None:' in src
+        assert "precip_solid_accum + t.precip_solid.data" in src
+
+    def test_end_to_end_through_the_real_writer(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            precip=np.full(n, self.PR), prsn=np.full(n, self.PRSN))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        paths = sorted(tmp_path.rglob("prsn_Amon_*.nc"))
+        assert paths, "prsn was never written by the CMOR writer"
+        with xr.open_dataset(paths[0]) as ds:
+            assert ds["prsn"].attrs["units"] == "kg m-2 s-1"
+            got = float(np.nanmean(ds["prsn"].values))
+            assert got == pytest.approx(self.PRSN, rel=1e-5)
+            # Plausibility: a snowfall rate in mm/day, not a mislabelled
+            # accumulated depth or a per-hour rate.
+            assert 0.0 < got * 86400.0 < 100.0

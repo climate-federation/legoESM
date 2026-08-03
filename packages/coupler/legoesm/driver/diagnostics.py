@@ -1460,6 +1460,7 @@ class DiagnosticCollector:
         rsdscs=None,
         rldscs=None,
         rsuscs=None,
+        prsn=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1606,6 +1607,9 @@ class DiagnosticCollector:
                     # per-step accumulator as their all-sky partners
                     # rsut/rlut, so they share the midpoint calendar bin.
                     "rsutcs", "rlutcs", "rsdscs", "rldscs", "rsuscs",
+                    # prsn is the frozen SUBSET of pr, produced by the same
+                    # per-step accumulator, so it shares pr's midpoint bin.
+                    "prsn",
                     # rtmt is an exact linear combination of the interval-mean
                     # rsdt/rsut/rlut, so it IS an interval mean and must share
                     # their midpoint bin (an endpoint bin would shift it one
@@ -1685,6 +1689,13 @@ class DiagnosticCollector:
         # sign flip here.  Consistency check the pair satisfies by
         # construction: 0 <= rsuscs <= rsdscs (surface albedo in [0, 1]).
         rsuscs_np = None if rsuscs is None else np.asarray(rsuscs, dtype=_f64)
+        # Snowfall flux (CMIP6 prsn) [kg/m^2/s]: the SOLID-phase (ice +
+        # snow + graupel) part of the surface sedimentation flux, in the
+        # SAME positive-into-the-surface sense as ``precip`` (CMOR ``pr``)
+        # and a SUBSET of it -- 0 <= prsn <= pr by construction, since both
+        # are sums of the same per-species dt-limited fluxes.  No sign flip
+        # or unit conversion: the microphysics already reports kg/m^2/s.
+        prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1716,6 +1727,7 @@ class DiagnosticCollector:
             ("rsdscs", rsdscs_np, (_ncol,)),
             ("rldscs", rldscs_np, (_ncol,)),
             ("rsuscs", rsuscs_np, (_ncol,)),
+            ("prsn", prsn_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1831,6 +1843,11 @@ class DiagnosticCollector:
                 ('tas', tas_field),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
+                # Snowfall flux: the frozen subset of pr (see the coercion
+                # block above).  Skipped when the active microphysics does
+                # not resolve the split -- never zeroed, since a zero prsn
+                # is the claim "it never snows".
+                ('prsn', prsn_np),
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
